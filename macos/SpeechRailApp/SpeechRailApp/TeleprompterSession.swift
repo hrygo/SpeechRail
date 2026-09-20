@@ -156,6 +156,43 @@ public final class TeleprompterSession {
         lastFailure = nil
     }
 
+    public func deleteDocument(documentID: String) throws {
+        guard phase != .following, phase != .paused, phase != .uncertain else { return }
+        try store.deleteDocument(documentID: documentID)
+        if document?.id == documentID {
+            let remaining = try store.listDocuments()
+            if let first = remaining.first {
+                try load(documentID: first.id)
+            } else {
+                document = nil
+                versions = []
+                pendingVersion = nil
+                currentSegmentIndex = 0
+                phase = .draft
+                blocked = nil
+            }
+        }
+    }
+
+    public func duplicateDocument(documentID: String) throws -> TeleprompterDocument {
+        guard phase != .following, phase != .paused, phase != .uncertain else {
+            throw TeleprompterTextError.emptySource
+        }
+        let newBundle = try store.duplicateDocument(documentID: documentID)
+        try load(documentID: newBundle.document.id)
+        return newBundle.document
+    }
+
+    public func exportMarkdown() -> String? {
+        guard let document else { return nil }
+        let bundle = TeleprompterDocumentBundle(
+            document: document,
+            versions: versions,
+            runState: nil
+        )
+        return store.exportMarkdown(bundle)
+    }
+
     public func updateTitle(_ title: String) {
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.title = title

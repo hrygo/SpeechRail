@@ -55,6 +55,26 @@ final class TeleprompterStoreTests: XCTestCase {
         )
     }
 
+    func testDeleteAndDuplicateDocument() throws {
+        let bundle = makeBundle()
+        try store.saveBundle(bundle)
+        XCTAssertEqual(try store.listDocuments().count, 1)
+
+        let duplicate = try store.duplicateDocument(documentID: bundle.document.id)
+        XCTAssertEqual(try store.listDocuments().count, 2)
+        XCTAssertTrue(duplicate.document.title.contains("副本"))
+        XCTAssertEqual(duplicate.document.sourceText, bundle.document.sourceText)
+
+        try store.deleteDocument(documentID: bundle.document.id)
+        XCTAssertEqual(try store.listDocuments().count, 1)
+        XCTAssertThrowsError(try store.loadBundle(documentID: bundle.document.id)) { error in
+            XCTAssertEqual(error as? TeleprompterStoreError, .notFound)
+        }
+
+        try store.deleteDocument(documentID: duplicate.document.id)
+        XCTAssertEqual(try store.listDocuments().count, 0)
+    }
+
     func testExportContainsUserFacingTextButNoInternalRunState() throws {
         let markdown = store.exportMarkdown(makeBundle())
 

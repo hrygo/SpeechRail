@@ -10,6 +10,8 @@ public struct TeleprompterView: View {
     @State private var isImporterPresented = false
     @State private var isAIDataFlowDisclosurePresented = false
     @State private var operationMessage: String?
+    @State private var documentToDelete: TeleprompterDocument?
+    @State private var isDeleteAlertPresented = false
 
     public init() {}
 
@@ -20,8 +22,7 @@ public struct TeleprompterView: View {
             growsWithContent: true
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                safetyNotice
-                aiDataFlowNotice
+                headerNotices
                 if let operationMessage {
                     Label(operationMessage, systemImage: "exclamationmark.triangle")
                         .font(SpeechRailDesignTokens.Typography.callout)
@@ -75,6 +76,24 @@ public struct TeleprompterView: View {
                 }
             }
         }
+        .alert(
+            "确定删除提词稿？",
+            isPresented: $isDeleteAlertPresented,
+            presenting: documentToDelete
+        ) { doc in
+            Button("删除", role: .destructive) {
+                do {
+                    try session.deleteDocument(documentID: doc.id)
+                    operationMessage = nil
+                    reloadDocuments()
+                } catch {
+                    operationMessage = error.localizedDescription
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { doc in
+            Text("删除「\(doc.title)」后将无法恢复。")
+        }
     }
 
     private var recentDocuments: some View {
@@ -95,34 +114,127 @@ public struct TeleprompterView: View {
                 }
                 SessionHairline()
                 if documents.isEmpty {
-                    Text("还没有保存的稿件。")
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .padding(SpeechRailDesignTokens.Spacing.md)
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 24))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text("还没有保存的稿件")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Text("点击右上角「新建」或导入 TXT / Markdown 即可开始。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(SpeechRailDesignTokens.Spacing.lg)
                 } else {
-                    ForEach(documents) { document in
-                        Button {
-                            do {
-                                try session.load(documentID: document.id)
-                                operationMessage = nil
-                            } catch {
-                                operationMessage = error.localizedDescription
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                            ForEach(documents) { document in
+                                let isSelected = document.id == session.document?.id
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                    Button {
+                                        do {
+                                            try session.load(documentID: document.id)
+                                            operationMessage = nil
+                                        } catch {
+                                            operationMessage = error.localizedDescription
+                                        }
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                            HStack {
+                                                Text(document.title)
+                                                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                                    .lineLimit(1)
+                                                Spacer(minLength: 0)
+                                                if isSelected {
+                                                    StatusPill(tone: .healthy, label: "当前")
+                                                }
+                                            }
+                                            Text(document.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .speechRailPointerCursor()
+
+                                    Menu {
+                                        Button("创建副本", systemImage: "plus.square.on.square") {
+                                            do {
+                                                _ = try session.duplicateDocument(documentID: document.id)
+                                                reloadDocuments()
+                                            } catch {
+                                                operationMessage = error.localizedDescription
+                                            }
+                                        }
+                                        Button("复制 Markdown", systemImage: "doc.on.doc") {
+                                            if let markdown = session.exportMarkdown() {
+                                                NSPasteboard.general.clearContents()
+                                                NSPasteboard.general.setString(markdown, forType: .string)
+                                                operationMessage = "已复制 Markdown 格式稿件"
+                                            }
+                                        }
+                                        Divider()
+                                        Button("删除…", systemImage: "trash", role: .destructive) {
+                                            documentToDelete = document
+                                            isDeleteAlertPresented = true
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                            .frame(width: 18, height: 18)
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                }
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                                .background(
+                                    isSelected
+                                        ? SpeechRailDesignTokens.Surface.selectionTint
+                                        : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                )
+                                .contentShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous))
+                                .contextMenu {
+                                    Button {
+                                        do {
+                                            _ = try session.duplicateDocument(documentID: document.id)
+                                            reloadDocuments()
+                                        } catch {
+                                            operationMessage = error.localizedDescription
+                                        }
+                                    } label: {
+                                        Label("创建副本", systemImage: "plus.square.on.square")
+                                    }
+
+                                    Button {
+                                        if let markdown = session.exportMarkdown() {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(markdown, forType: .string)
+                                            operationMessage = "已复制 Markdown 格式稿件"
+                                        }
+                                    } label: {
+                                        Label("复制 Markdown", systemImage: "doc.on.doc")
+                                    }
+
+                                    Divider()
+
+                                    Button(role: .destructive) {
+                                        documentToDelete = document
+                                        isDeleteAlertPresented = true
+                                    } label: {
+                                        Label("删除稿件…", systemImage: "trash")
+                                    }
+                                }
                             }
-                        } label: {
-                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                                Text(document.title)
-                                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                    .lineLimit(1)
-                                Text(document.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                     }
                 }
             }
@@ -166,10 +278,44 @@ public struct TeleprompterView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 CardHead(title: "原稿", detail: "活动版本不会在跟读中被静默修改") {
-                    if session.activeVersion != nil {
-                        Text("活动版本 \(session.document?.activeVersionID?.prefix(8) ?? "")")
-                            .font(SpeechRailDesignTokens.Typography.caption)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("\(sourceBinding.wrappedValue.count) 字")
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        if session.activeVersion != nil {
+                            StatusPill(tone: .neutral, label: "版本 \(session.document?.activeVersionID?.prefix(8) ?? "")")
+                        }
+                        Menu {
+                            Button("创建副本", systemImage: "plus.square.on.square") {
+                                if let doc = session.document {
+                                    do {
+                                        _ = try session.duplicateDocument(documentID: doc.id)
+                                        reloadDocuments()
+                                    } catch {
+                                        operationMessage = error.localizedDescription
+                                    }
+                                }
+                            }
+                            Button("复制 Markdown 全文", systemImage: "doc.on.doc") {
+                                if let markdown = session.exportMarkdown() {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(markdown, forType: .string)
+                                    operationMessage = "已复制 Markdown 格式稿件"
+                                }
+                            }
+                            Divider()
+                            Button("删除此稿件…", systemImage: "trash", role: .destructive) {
+                                if let doc = session.document {
+                                    documentToDelete = doc
+                                    isDeleteAlertPresented = true
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(SpeechRailDesignTokens.Typography.body)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                        .menuStyle(.borderlessButton)
                     }
                 }
                 SessionHairline()
@@ -182,12 +328,18 @@ public struct TeleprompterView: View {
                     .frame(minHeight: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight)
                     .speechRailField()
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("AI 整理稿件", systemImage: "sparkles") {
+                    Button {
                         requestAIAnalysis()
+                    } label: {
+                        Label(
+                            session.phase == .analyzing ? "AI 整理中…" : "AI 整理稿件",
+                            systemImage: "sparkles"
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
+                    .speechRailButton(.primary)
                     .disabled(sourceIsEmpty || session.phase == .analyzing)
-                     Button("使用纯文本分段") {
+
+                    Button("使用纯文本分段") {
                         do {
                             try session.useDeterministicFallback()
                             operationMessage = nil
@@ -195,8 +347,9 @@ public struct TeleprompterView: View {
                             operationMessage = error.localizedDescription
                         }
                     }
-                    .buttonStyle(.bordered)
+                    .speechRailButton(.secondary)
                     .disabled(sourceIsEmpty)
+
                     Spacer(minLength: 0)
                     if let blocked = session.blocked {
                         Label(blocked.title, systemImage: "exclamationmark.triangle")
@@ -214,31 +367,48 @@ public struct TeleprompterView: View {
         if let pending = session.pendingVersion {
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    CardHead(title: "AI 建议（待确认）", detail: "建议不会覆盖原稿") {
+                    CardHead(title: "AI 建议（待确认）", detail: "建议不会覆盖原稿，确认后生成活动版本") {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button("撤销") { session.discardPendingVersion() }
-                             Button("接受并生成活动版本") {
-                                 do {
-                                     try session.acceptPendingVersion()
-                                     operationMessage = nil
-                                     reloadDocuments()
-                                 } catch {
-                                     operationMessage = error.localizedDescription
-                                 }
+                                .speechRailButton(.secondary)
+
+                            Button("接受并生成活动版本") {
+                                do {
+                                    try session.acceptPendingVersion()
+                                    operationMessage = nil
+                                    reloadDocuments()
+                                } catch {
+                                    operationMessage = error.localizedDescription
+                                }
                             }
-                            .buttonStyle(.borderedProminent)
+                            .speechRailButton(.primary)
                         }
                     }
                     SessionHairline()
-                    ForEach(pending.segments) { segment in
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text("第 \(segment.ordinal + 1) 段 · \(segment.pauseHint.rawValue)")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            TextField("可编辑的段落", text: pendingSegmentBinding(segment.id))
-                                .textFieldStyle(.plain)
-                                .font(SpeechRailDesignTokens.Typography.body)
-                                .speechRailField()
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        ForEach(pending.segments) { segment in
+                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                HStack {
+                                    Text("第 \(segment.ordinal + 1) 段")
+                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                    Spacer()
+                                    StatusPill(tone: .neutral, label: pauseHintLabel(segment.pauseHint))
+                                }
+                                TextField("可编辑的段落", text: pendingSegmentBinding(segment.id))
+                                    .textFieldStyle(.plain)
+                                    .font(SpeechRailDesignTokens.Typography.body)
+                                    .speechRailField()
+                            }
+                            .padding(SpeechRailDesignTokens.Spacing.sm)
+                            .background(
+                                SpeechRailDesignTokens.Color.field,
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                            )
                         }
                     }
                 }
@@ -247,31 +417,55 @@ public struct TeleprompterView: View {
         }
     }
 
+    private func pauseHintLabel(_ hint: TeleprompterPauseHint) -> String {
+        switch hint {
+        case .short: "短停顿 · 0.5s"
+        case .medium: "中停顿 · 1.0s"
+        case .long: "长停顿 · 2.0s"
+        }
+    }
+
     private var stageSettings: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "舞台与跟读", detail: "直播软件请使用摄像头或目标窗口采集") {
+                CardHead(title: "舞台与跟读", detail: "独立浮层 · 直播软件请使用摄像头或目标窗口采集") {
                     Button("打开舞台", systemImage: "macwindow") {
                         stage.show()
                     }
-                    .buttonStyle(.bordered)
+                    .speechRailButton(.secondary)
                     .disabled(session.activeVersion == nil)
                 }
                 SessionHairline()
                 HStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                    LabeledContent("字号") {
-                        Slider(
-                            value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
-                            in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
-                        )
+                    LabeledContent {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Slider(
+                                value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
+                                in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
+                            )
                             .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
+                            Text("\(Int(settings.scriptPointSize)) pt")
+                                .font(SpeechRailDesignTokens.Typography.technicalValue)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .frame(width: 44, alignment: .trailing)
+                        }
+                    } label: {
+                        Text("字号")
                     }
-                    LabeledContent("透明度") {
-                        Slider(
-                            value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
-                            in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
-                        )
+                    LabeledContent {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Slider(
+                                value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
+                                in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
+                            )
                             .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
+                            Text("\(Int(settings.opacity * 100))%")
+                                .font(SpeechRailDesignTokens.Typography.technicalValue)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .frame(width: 36, alignment: .trailing)
+                        }
+                    } label: {
+                        Text("透明度")
                     }
                     Stepper(
                         "显示 \(settings.visibleSegmentCount) 段",
@@ -287,52 +481,73 @@ public struct TeleprompterView: View {
                         stage.show()
                         Task { await session.beginFollowing() }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .speechRailButton(.primary)
                     .disabled(session.activeVersion == nil)
+
                     if session.phase == .following || session.phase == .paused || session.phase == .uncertain {
                         Button("结束提词", systemImage: "stop.fill") {
                             Task { await session.endFollowing() }
                         }
-                        .buttonStyle(.bordered)
+                        .speechRailButton(.secondary)
                     }
                     Spacer(minLength: 0)
-                    Text(session.phase.rawValue)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    StatusPill(
+                        tone: session.phase == .following ? .healthy : (session.phase == .uncertain ? .attention : .neutral),
+                        label: phaseLabel(session.phase)
+                    )
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
     }
 
-    private var safetyNotice: some View {
-        Label {
-            Text("请在直播软件中选择摄像头或目标直播窗口，不要使用包含提词器的整屏采集。SpeechRail 不负责直播推流，也不会把提词器内容写入直播画面。")
-                .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-        } icon: {
-            Image(systemName: "rectangle.on.rectangle")
-                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+    private func phaseLabel(_ phase: TeleprompterSession.Phase) -> String {
+        switch phase {
+        case .draft: "草稿"
+        case .analyzing: "正在整理…"
+        case .review: "待确认"
+        case .ready: "已就绪"
+        case .preparing: "连接中…"
+        case .following: "跟读中"
+        case .paused: "已暂停"
+        case .uncertain: "请确认位置"
+        case .manual: "手动模式"
+        case .ended: "已结束"
         }
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailSurface(.control)
-        .clipShape(SpeechRailDesignTokens.Corner.containerShape)
-        .accessibilityElement(children: .combine)
     }
 
-    private var aiDataFlowNotice: some View {
-        Label {
-            Text(TeleprompterAIDataFlowDisclosure.inlineMessage)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-        } icon: {
-            Image(systemName: "lock.shield")
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+    private var headerNotices: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Label {
+                Text("请在直播软件中选择摄像头或目标直播窗口，避免整屏采集。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            } icon: {
+                Image(systemName: "rectangle.on.rectangle")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            Label {
+                Text(TeleprompterAIDataFlowDisclosure.inlineMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            } icon: {
+                Image(systemName: "lock.shield")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-        .speechRailSurface(.control)
-        .clipShape(SpeechRailDesignTokens.Corner.containerShape)
+        .background(
+            SpeechRailDesignTokens.Color.field,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+        )
         .accessibilityElement(children: .combine)
     }
 

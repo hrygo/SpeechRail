@@ -19,12 +19,12 @@ date: 2026-09-13
 ## 2. 当前事实与约束
 
 - 仓库当前 `main` 已有一个用户提交的 Antigravity 文档提交；本任务从独立短期分支继续，不重写历史。
-- 仓库已有 `native/diarization` SwiftPM 包，`Package.swift` 使用 Swift tools 6.0、最低 macOS 14，并固定 FluidAudio revision；它是服务的 native worker，不是 GUI App target。
+- 仓库已有 `native/diarization` SwiftPM 包，`Package.swift` 使用 Swift tools 6.2、最低 macOS 26，并固定 FluidAudio revision；它是服务的 native worker，与 GUI App 使用同一 Native 系统基线。
 - 当前受管服务由 `com.speechrail` 用户级 LaunchAgent 托管，实际 Python executable 位于 managed app home 的 `runtime/current/.venv/bin/python`；服务、profile apply/rollback 和事务 journal 已在 Python 侧有回归测试。
 - `create_launch_agent_manager`、`LaunchAgentServiceController` 和 `apply_prepared_profile` 是现有生命周期与 profile 切换的事实入口。App 不直接调用 `launchctl`，helper 也不重写这些规则。
 - 2026-09-12 本机实测为 `arm64`、macOS 26.6.2、Swift 6.3.3、Xcode 26.6；active developer directory 为 `/Applications/Xcode.app/Contents/Developer`，可用 macOS SDK 为 26.5。当前没有有效的 code-signing identity，因此本阶段按无 Apple Developer ID 的本地开发模式验收。
 - 项目现有边界要求默认 loopback、单一 SpeechRail 服务和单一 ASGI worker；模型、音频、私有配置和日志不进入仓库或 App bundle。
-- 后续产品决策：`SpeechRailApp` GUI target 以 macOS 26.0 为最低版本，直接使用 macOS 26 SwiftUI 设计能力；ControlKit、ControlAgent 与服务侧 SwiftPM worker 是独立边界，不得为了它们的最低版本给 App UI 增加兼容 fallback。
+- 后续产品决策：`SpeechRailApp`、ControlKit、ControlAgent 与服务侧 SwiftPM worker 全部以 macOS 26.0 为最低版本，直接使用 macOS 26 SwiftUI/系统能力；Native targets 不增加旧系统兼容 fallback。
 
 ## 3. 方案比较与决策
 
@@ -61,7 +61,7 @@ SpeechRail
 - 使用 SwiftUI `MenuBarExtra` 提供常驻状态、启动/停止、重启、profile 入口和打开设置窗口的入口；复杂状态放在普通设置窗口中。
 - 使用 Observation 管理 UI state；服务状态、profile 状态和控制 operation 都是可观察模型，View 不直接持有进程或文件句柄。
 - 使用 `URLSession` 查询现有安全诊断端点。App 只接收脱敏能力状态，不读取 `.env`、model path、原始日志、音频或转写文本。
-- App 只提供 `arm64` 首期制品，最低 macOS 26.0；服务侧 SwiftPM worker 和 ControlKit/Agent 可以继续按自身职责维持独立最低版本。
+- App 与 Native worker 只提供 `arm64` 首期制品，最低 macOS 26.0；ControlKit/Agent 与 App 使用同一 Native 系统基线。
 
 ### 4.2 ControlAgent
 
