@@ -43,7 +43,9 @@ public struct LLMConfiguration: Sendable, Equatable {
             let url = URL(string: normalizedBaseURL),
             let scheme = url.scheme?.lowercased(),
             ["http", "https"].contains(scheme),
-            url.host != nil
+            url.host != nil,
+            url.query == nil,
+            url.fragment == nil
         else { return false }
         return true
     }
@@ -232,10 +234,19 @@ public enum LLMConnectionResult: Sendable, Equatable {
 }
 
 /// 设置页密钥草稿的提交规则：先用草稿测试，只有连接成功后才持久化。
+public enum LLMKeyDraftAction: Equatable, Sendable {
+    case check
+    case checkAndSave
+}
+
 public enum LLMKeyDraftPolicy {
     public static func normalizedDraft(_ draft: String) -> String? {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public static func action(for draft: String) -> LLMKeyDraftAction {
+        normalizedDraft(draft) == nil ? .check : .checkAndSave
     }
 
     public static func candidateKey(draft: String, storedKey: String?) -> String? {
@@ -244,9 +255,10 @@ public enum LLMKeyDraftPolicy {
 
     public static func shouldPersist(
         draft: String,
-        connection: LLMConnectionResult
+        connection: LLMConnectionResult,
+        saveRequested: Bool
     ) -> Bool {
-        normalizedDraft(draft) != nil && connection.isReady
+        saveRequested && normalizedDraft(draft) != nil && connection.isReady
     }
 }
 
@@ -413,6 +425,8 @@ public actor LLMProvider {
         interval: TimeInterval = 3
     ) async throws -> String {
         guard
+            configuration.isBaseURLValid,
+            !configuration.embedsCredential,
             let url = URL(string: "\(configuration.normalizedBaseURL)/responses/\(responseID)")
         else { throw LLMError.badBaseURL }
         let deadline = Date().addingTimeInterval(timeout)
@@ -534,7 +548,8 @@ public actor LLMProvider {
         suppressThinking: Bool = true
     ) throws -> URLRequest {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
-        guard !configuration.embedsCredential,
+        guard configuration.isBaseURLValid,
+              !configuration.embedsCredential,
               let url = URL(string: "\(configuration.normalizedBaseURL)/responses")
         else { throw LLMError.badBaseURL }
 
@@ -719,7 +734,7 @@ public actor LLMProvider {
         apiKey: String?
     ) async -> LLMConnectionResult {
         guard configuration.isConfigured else { return .notConfigured }
-        guard !configuration.embedsCredential else { return .badBaseURL }
+        guard configuration.isBaseURLValid, !configuration.embedsCredential else { return .badBaseURL }
 
         // ① `GET /models`：连不上与"模型没加载"都在这一步分开。
         guard let modelsURL = URL(string: "\(configuration.normalizedBaseURL)/models") else {

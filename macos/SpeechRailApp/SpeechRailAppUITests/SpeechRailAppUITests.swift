@@ -138,8 +138,12 @@ final class SpeechRailAppUITests: XCTestCase {
 
         // 菜单项与 REDESIGN-SPEC §7.9 一致：`打开 SpeechRail`（⌘O）。
         XCTAssertTrue(app.menuItems["打开 SpeechRail"].waitForExistence(timeout: 5))
-        // 设置窗口在重设计后是「通用 / 创作 / 服务」三个页签，不再有「关于 SpeechRail」。
+        // 设置窗口现在是面向普通用户的「通用 / 创作 / 助手 / 服务」四个页签。
         XCTAssertTrue(app.staticTexts["通用"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["创作"].exists)
+        XCTAssertTrue(app.staticTexts["助手"].exists)
+        XCTAssertTrue(app.staticTexts["服务"].exists)
+        XCTAssertFalse(app.staticTexts["会话"].exists)
         // 默认页签是「通用」，它只放 App 自己的偏好（「启动与窗口」「开发者」两节）；
         // 「产品定位 / 最低系统 / 版本」已经搬进未选中的「服务」页签（§7.10），
         // 所以这里断言通用页签自己的小节，而不是那一页的内容。
