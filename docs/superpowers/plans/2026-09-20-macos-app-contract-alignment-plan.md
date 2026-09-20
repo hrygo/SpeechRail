@@ -1,5 +1,8 @@
 # SpeechRail macOS App Contract Alignment Implementation Plan
 
+> 状态：`superseded`（2026-09-20）。本计划原本包含 legacy fallback 与旧 Realtime wire；当前实现不保留
+> 任何旧版本兼容。请改用 [Stateless Speech Plane and Caller-Orchestrated Assistant Implementation Plan](2026-09-20-stateless-speech-plane-caller-orchestration.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** 将 SpeechRail macOS App 的 REST 与 Realtime 控制面适配完整迁移到当前公共契约，同时保留 legacy 入口、现有 UI 行为和 control-plane 边界。

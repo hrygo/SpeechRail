@@ -2,11 +2,19 @@
 title: "SpeechRail 会话层技术方案（终态）· 语音助手 / 会议助手 / 实时字幕"
 status: active
 audience: "SpeechRail macOS App 实现者、服务维护者、设计评审"
-version: "2.7.0"
-date: 2026-09-19
+version: "3.0.0"
+date: 2026-09-20
 ---
 
 # 会话层技术方案（终态）
+
+> **当前公共契约覆盖（2026-09-20）**：本文继续约束 Native 的会话、采集、播放、记录和应用所有权，
+> 但所有 Realtime wire、TTS 入口、取消语义和责任边界以
+> [无状态 Speech Plane 与调用方编排设计](../../superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)
+> 与 [`contracts/realtime-openai.md`](../../../contracts/realtime-openai.md) 为准。本文旧示例中的
+> `session.update`、`conversation.item.create`、`response.create/cancel`、`response.audio.*`、
+> 服务端自动 barge-in 和“普通 SDK 无需迁移”均为历史设计，不得实现或恢复；当前 Native 在本地
+> 持有 LLM、history、memory、tool calling、播放队列和 barge-in 决策。
 
 ## 0. 发布说明
 
@@ -242,9 +250,9 @@ playerNode( TTS 24k PCM ) ───────────┘
 | 能力 | 契约入口 | 本方案用到的事实 |
 |---|---|---|
 | 流式转写 | `input_audio_buffer.append` / `commit` · `…completed` / `failed` · `…delta` / `…segment` | PCM16、16k 或 24k、首个 PCM 后不得改格式；`server_vad` 可配 `threshold` / `prefix_padding_ms` / `silence_duration_ms` |
-| TTS | `conversation.item.create`（`role=user` 的 `input_text`）+ `response.create` · `response.audio.delta`/`done` | 24 kHz PCM16；`response.voice` 与 `session.update.voice` 同规则校验，**失败保持 session 可用** |
-| 打断 | `input_audio_buffer.speech_started` → 原子 `response.cancel` → 250 ms 冷却（`realtime_vad_bargein_cooldown_ms`，本机配置默认 250、区间 0–5000） | 契约「全双工打断」 |
-| 分人 | `session.speechrail.diarization.enabled`（首个 PCM 前 opt-in）→ `…updated` / `…status` / `…finish` / `…done` | 归属修订事件带 `stable_through_sample`；`done` 带 `through_sample`、`status: complete \| degraded`、`last_update_sequence` |
+| TTS | 调用方生成文本后发送 `speechrail.tts.create` · `response.output_audio.delta`/`done` | 24 kHz PCM16；voice/revision 在 render request 上校验，失败返回稳定错误，不隐式换音色 |
+| 打断 | `input_audio_buffer.speech_started` 事实 → 调用方显式 `speechrail.tts.cancel` | SpeechRail 不拥有播放队列，也不自动取消 TTS |
+| 分人 | `transcription_session.update.session.speechrail.diarization.enabled`（首个 PCM 前 opt-in）→ `…updated` / `…status` / `…finish` / `…done` | 归属修订事件带 `stable_through_sample`；`done` 带 `through_sample`、`status: complete \| degraded`、`last_update_sequence` |
 | 准入 | 最多 `SPEECHRAIL_REALTIME_MAX_SESSIONS`（源码默认 3，区间 1–8）个 backend 会话；超限 `backend_busy`，session 保持可用 | 契约「连接与认证」 |
 | 观测 | `/metrics` 已有 `speechrail_realtime_active_sessions`、`speechrail_realtime_sessions_total`、`speechrail_realtime_turn_commits_total`、`speechrail_realtime_bargein_events_total`、`speechrail_governor_queue_rejections_total`、`speechrail_worker_evictions_total` | 本机源码实测（`observability/rollup.py`） |
 
@@ -314,10 +322,10 @@ idle → preparing → recording → processing → archived
 - `URLSessionWebSocketTask`；只走 loopback；认证用现有配置的 Bearer（若已配置 key）。
 - 会话配置一次成型：`input_audio_format=pcm16`、`16000`、`turn_detection=server_vad`，
   静音窗口按模式取值（**字幕 400 ms / 会议 900 ms**，与既有服务侧策略一致）；分人按开关在同一次
-  `session.update` 里 opt-in（**首个 PCM 之前**）。
+   `transcription_session.update` 里 opt-in（**首个 PCM 之前**）。
 - 事件处理：partial 只进内存（供字幕带与"正在识别"行）；`completed` 才落库；
   分人的 `updated` 只改归属列（`speaker_label`），**从不改写正文**。
-- 取消与关闭：`response.cancel` 用于打断；结束走 `speechrail.diarization.finish` 等 `done`（EOF 屏障）。
+- 取消与关闭：调用方用 `speechrail.tts.cancel` 打断 TTS；结束走 `speechrail.diarization.finish` 等 `done`（EOF 屏障）。
 - 重连：新 epoch；不重放；写中断区间（§5.6）。
 
 ### 5.4 `AudioSourceCoordinator`
@@ -338,8 +346,8 @@ idle → preparing → recording → processing → archived
 ```
 用户说话 → 服务端 VAD → completed 转写
    → AssistantSession 调 Responses（流式）
-   → 句子切分 → conversation.item.create + response.create（TTS）
-   → 播放；若用户插话：服务端 speech_started 取消 TTS，line.interrupted=1
+   → 句子切分 → speechrail.tts.create（TTS）
+   → 播放；若用户插话：调用方根据 speech_started 发送 speechrail.tts.cancel，line.interrupted=1
 ```
 
 **prompt 结构（前缀稳定性是硬约束）**：
@@ -370,9 +378,9 @@ GPT-5.5 与更早的模型不支持**，只有隐式断点 + `prompt_cache_key`�
 ——它保证前缀稳定、不白花算力；**不是"一定有缓存收益"的保证**。设置页的「检查连接」不承诺缓存命中，
 只在诊断里显示 `cached_tokens`。
 
-其余规则：打字提问进同一条编排（`role='user'`，来源记为打字）但**不朗读**回复；换音色走
-`session.update.voice`，**下一句生效**并落一条 `session_change(kind='voice', at_ordinal)`；
-被拒时这一句仍用旧音色说，并给可读原因与可用内置声音列表。
+其余规则：打字提问进同一条编排（`role='user'`，来源记为打字）但**不朗读**回复；换音色走下一次
+`speechrail.tts.create.voice`，**下一句生效**并落一条 `session_change(kind='voice', at_ordinal)`；
+被拒时返回可读原因与可用内置声音列表，不隐式使用旧音色重试。
 
 #### 5.5.1 系统上下文分层：语音契约在前，人设风格在后
 
@@ -382,7 +390,7 @@ GPT-5.5 与更早的模型不支持**，只有隐式断点 + `prompt_cache_key`�
 |---|---|---|---|
 | **语音对话契约** | Responses 顶层 `instructions` | 说什么、说多长（朗读优先） | 会话内逐字节不变，**每轮重发** |
 | **人设 / 记忆** | developer 消息的 `input_text` + 显式断点 | 性格、语气、称呼、默认长度偏好 | 会话开始时定，中途只读（规格 §14.4） |
-| TTS 的 `instructions` | Realtime `session.update`（服务侧提供） | 怎么发声：音色与语气 | 换音色下一句生效 |
+| TTS 的 voice/revision | `speechrail.tts.create`（调用方提供） | 怎么发声：音色与版本 | 下一条 render 生效 |
 
 三条落地规则：
 
@@ -644,13 +652,13 @@ Sona 是这套能力的**经验来源**，不是代码来源：借它的判断�
   → AudioSourceCoordinator：麦克风授权 → AudioEngineSession 建图
       对讲模式：输入与输出同引擎，同时开 voice processing（§3.3）
       问答模式：播放期闭麦（本地门闩）
-  → RealtimeASRClient：一次 session.update（pcm16 / 16000 / server_vad / 可选分人）
+  → RealtimeASRClient：一次 transcription_session.update（pcm16 / 16000 / server_vad / 可选分人）
   → 说话 → input_audio_buffer.committed … completed
   → appendLine(role='user', source='microphone') 落库       ← 落库发生在「说」这一侧
   → AssistantSession 调 Responses（流式）
       前缀：developer(persona) → developer(memory) → 历史 → 本轮输入
-  → 句子切分 → conversation.item.create + response.create → 24k PCM → playerNode
-  → 插话：服务端 speech_started → response.cancel → 丢弃未播缓冲 → line.interrupted = 1
+  → 句子切分 → speechrail.tts.create → 24k PCM → playerNode
+  → 插话：服务端 speech_started → 调用方 speechrail.tts.cancel → 丢弃未播缓冲 → line.interrupted = 1
   → 结束：EOF 屏障 → finalizeSession(endReason='user') → 无纪要
 
 打字提问：同一编排；role='user'、source='keyboard'，**不朗读回复**，回复仍可点「重播」
@@ -666,7 +674,7 @@ Sona 是这套能力的**经验来源**，不是代码来源：借它的判断�
   → 按来源申请权限（系统录音**只在选「本机音频」时**才申请）
   → 麦克风：AudioEngineSession 输入；本机音频：CaptureHelper 建 tap + aggregate device
   → 两路各带 host time → 混音/归一 → 16k mono PCM16（缺口补静音并标记）
-  → session.update（pcm16 / 16000 / server_vad 900 ms / 分人按开关）
+  → transcription_session.update（pcm16 / 16000 / server_vad 900 ms / 分人按开关）
   → completed → appendLine(source='microphone'|'system'|'mixed')，带 speaker_label
   → 分人 updated → attachSpeakerLabel（**只改归属列**）
   → 内心 OS：用户提问 → 只喂本场已确认转录 → 答案进 inner_os_exchange（默认 in_minutes = 0）

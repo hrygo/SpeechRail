@@ -90,17 +90,24 @@ async def run_session(
     await ws.send(
         json.dumps(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
-                    "model": "whisper-1",
-                    "language": language,
                     "input_audio_format": "pcm16",
+                    "input_audio_transcription": {
+                        "model": "whisper-1",
+                        "language": language,
+                    },
                     "turn_detection": {"type": "manual"},
                 },
             }
         )
     )
-    await recv_until_type(ws, "session.updated", 10, f"{session_name}:session.updated")
+    await recv_until_type(
+        ws,
+        "transcription_session.updated",
+        10,
+        f"{session_name}:transcription_session.updated",
+    )
 
     for offset in range(0, len(pcm), CHUNK_BYTES):
         chunk = pcm[offset : offset + CHUNK_BYTES]

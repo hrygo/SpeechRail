@@ -1495,7 +1495,7 @@ public final class AppModel {
         _ value: JSONValue?
     ) -> String? {
         guard let object = operationObject(value),
-              case let .string(status)? = object["status"]
+              case let .string(status) = object["status"]?.storage
         else { return nil }
         return status
     }

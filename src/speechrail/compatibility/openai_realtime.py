@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
-from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, resolve_voice
 from speechrail.runtime.busy import busy_retry_policy
 
 _PROTOCOL_VERSION = "realtime=v1"
 _DIARIZATION_EVENT_VERSION = 1
-RealtimeWireProfile = Literal["legacy", "current"]
 _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
     "gpt-4o-transcribe": "speechrail/qwen3-asr-1.7b",
@@ -44,10 +43,20 @@ _PCM16_FORMAT: dict[str, object] = {
 }
 
 _SUPPORTED_TURN_DETECTION: frozenset[str | None] = frozenset({None, "manual", "server_vad"})
-_SUPPORTED_MODALITIES: frozenset[str] = frozenset({"text", "audio"})
 
 _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
-    {"conversation.item.delete", "conversation.item.truncate"}
+    {
+        "session.update",
+        "conversation.item.create",
+        "conversation.item.delete",
+        "conversation.item.truncate",
+        "response.create",
+        "response.cancel",
+        "response.audio.delta",
+        "response.audio.done",
+        "response.audio_transcript.delta",
+        "response.audio_transcript.done",
+    }
 )
 
 
@@ -67,6 +76,131 @@ class RealtimeAdapterError(ValueError):
         self.message = message
         self.event_id = event_id
         self.busy_reason = busy_reason
+
+
+EventKind = Literal[
+    "transcription_session_update",
+    "append",
+    "commit",
+    "clear",
+    "diarization_finish",
+    "tts_create",
+    "tts_cancel",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedClientEvent:
+    kind: EventKind
+
+
+@dataclass(frozen=True, slots=True)
+class TTSCreateRequest:
+    request_id: str
+    text: str
+    voice: str | None
+    speed: float
+    expected_voice_revision: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TTSCancelRequest:
+    request_id: str
+    response_id: str | None
+
+
+def parse_client_event(event: dict[str, Any]) -> ParsedClientEvent:
+    """Classify the one current-only client event vocabulary.
+
+    This is deliberately strict: a removed event is not translated into the
+    new caller-owned TTS command and an unknown event is not silently ignored.
+    """
+    event_type = event.get("type")
+    if not isinstance(event_type, str) or not event_type:
+        raise RealtimeAdapterError("invalid_event", "event.type must be a non-empty string")
+    kinds: dict[str, EventKind] = {
+        "transcription_session.update": "transcription_session_update",
+        "input_audio_buffer.append": "append",
+        "input_audio_buffer.commit": "commit",
+        "input_audio_buffer.clear": "clear",
+        "speechrail.diarization.finish": "diarization_finish",
+        "speechrail.tts.create": "tts_create",
+        "speechrail.tts.cancel": "tts_cancel",
+    }
+    if event_type in kinds:
+        return ParsedClientEvent(kinds[event_type])
+    if event_type in _UNSUPPORTED_CLIENT_EVENTS or event_type.startswith(
+        ("conversation.", "response.")
+    ):
+        raise RealtimeAdapterError(
+            "unsupported_operation", f"{event_type} is not supported by SpeechRail"
+        )
+    raise RealtimeAdapterError(
+        "unsupported_operation", f"unsupported event type: {event_type}"
+    )
+
+
+def _bounded_string(
+    value: object,
+    *,
+    field: str,
+    max_length: int,
+    allow_blank: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise RealtimeAdapterError("tts_request_invalid", f"{field} must be a string")
+    if not allow_blank and not value.strip():
+        raise RealtimeAdapterError("tts_request_invalid", f"{field} must not be blank")
+    if len(value) > max_length:
+        raise RealtimeAdapterError(
+            "tts_request_invalid", f"{field} exceeds {max_length} characters"
+        )
+    return value
+
+
+def parse_tts_create(event: dict[str, Any]) -> TTSCreateRequest:
+    """Validate a caller-owned, stateless TTS render request."""
+    request_id = _bounded_string(
+        event.get("request_id"), field="request_id", max_length=128
+    )
+    text = _bounded_string(event.get("text"), field="text", max_length=4096)
+    voice_value = event.get("voice")
+    voice = None if voice_value is None else _bounded_string(
+        voice_value, field="voice", max_length=128
+    )
+    speed_value = event.get("speed", 1.0)
+    if (
+        isinstance(speed_value, bool)
+        or not isinstance(speed_value, (int, float))
+        or not math.isfinite(float(speed_value))
+        or not 0.25 <= float(speed_value) <= 4.0
+    ):
+        raise RealtimeAdapterError(
+            "tts_request_invalid", "speed must be between 0.25 and 4.0"
+        )
+    revision_value = event.get("expected_voice_revision")
+    revision = None if revision_value is None else _bounded_string(
+        revision_value, field="expected_voice_revision", max_length=128
+    )
+    return TTSCreateRequest(
+        request_id=request_id,
+        text=text,
+        voice=voice,
+        speed=float(speed_value),
+        expected_voice_revision=revision,
+    )
+
+
+def parse_tts_cancel(event: dict[str, Any]) -> TTSCancelRequest:
+    """Validate an explicit caller-owned TTS cancellation."""
+    request_id = _bounded_string(
+        event.get("request_id"), field="request_id", max_length=128
+    )
+    response_value = event.get("response_id")
+    response_id = None if response_value is None else _bounded_string(
+        response_value, field="response_id", max_length=128
+    )
+    return TTSCancelRequest(request_id=request_id, response_id=response_id)
 
 
 def canonical_asr_model(model: str, *, registered: frozenset[str]) -> str | None:
@@ -105,24 +239,19 @@ def session_created(
     tts_ready: bool,
     tts_loudness_profile: str | None = None,
 ) -> dict[str, object]:
-    """The OpenAI ``session.created`` payload scoped to SpeechRail capabilities."""
+    """The current transcription-session payload scoped to SpeechRail capabilities."""
     capabilities: list[str] = ["transcription"]
     if tts_ready:
         capabilities.append("speech")
     session: dict[str, object] = {
         "id": session_id,
         "model": model,
-        "modalities": ["text", "audio"],
-        "instructions": "",
-        "voice": DEFAULT_VOICE_ID if tts_ready else None,
+        "type": "transcription",
         "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
+        "input_audio_transcription": {"model": model},
         "turn_detection": None,
-        "tools": [],
-        "tool_choice": "none",
-        "temperature": 0.8,
-        "max_response_output_tokens": "inf",
         "capabilities": capabilities,
+        "speechrail": {"tts": {"enabled": False}},
     }
     if tts_loudness_profile is not None:
         session["speech_capabilities"] = {
@@ -137,34 +266,29 @@ def session_updated(
     model: str,
     turn_detection: dict[str, object] | None = None,
     speechrail_diarization: dict[str, object] | None = None,
+    speechrail_tts_enabled: bool = False,
     tts_loudness_profile: str | None = None,
 ) -> dict[str, object]:
     session: dict[str, object] = {
         "id": session_id,
         "model": model,
-        "modalities": ["text", "audio"],
+        "type": "transcription",
         "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
+        "input_audio_transcription": {"model": model},
         "turn_detection": turn_detection,
-        "tools": [],
-        "tool_choice": "none",
+        "speechrail": {"tts": {"enabled": speechrail_tts_enabled}},
     }
     if speechrail_diarization is not None:
-        session["speechrail"] = {"diarization": speechrail_diarization}
+        speechrail = session["speechrail"]
+        assert isinstance(speechrail, dict)
+        speechrail["diarization"] = speechrail_diarization
     if tts_loudness_profile is not None:
         session["speech_capabilities"] = {
             "audio_loudness_profile": tts_loudness_profile,
         }
     return {
-        "type": "session.updated",
+        "type": "transcription_session.updated",
         "session": session,
-    }
-
-
-def conversation_created(*, session_id: str) -> dict[str, object]:
-    return {
-        "type": "conversation.created",
-        "conversation": {"id": f"conv_{session_id}"},
     }
 
 
@@ -202,22 +326,6 @@ def conversation_item_created(
                     "audio": None,
                 }
             ],
-        },
-    }
-
-
-def conversation_text_item_created(
-    *, session_id: str, item_id: str, text: str
-) -> dict[str, object]:
-    return {
-        "type": "conversation.item.created",
-        "previous_item_id": None,
-        "item": {
-            "id": item_id,
-            "object": "realtime.item",
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}],
         },
     }
 
@@ -493,10 +601,9 @@ def response_audio_delta(
     response_id: str,
     item_id: str,
     delta: str,
-    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": _audio_event_type("delta", wire_profile),
+        "type": "response.output_audio.delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -510,28 +617,20 @@ def response_audio_done(
     session_id: str,
     response_id: str,
     item_id: str,
-    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": _audio_event_type("done", wire_profile),
+        "type": "response.output_audio.done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
         "content_index": 0,
     }
 
-
-def _audio_event_type(kind: Literal["delta", "done"], wire_profile: RealtimeWireProfile) -> str:
-    if wire_profile == "current":
-        return f"response.output_audio.{kind}"
-    return f"response.audio.{kind}"
-
-
 def response_audio_transcript_delta(
     *, session_id: str, response_id: str, item_id: str, delta: str
 ) -> dict[str, object]:
     return {
-        "type": "response.audio_transcript.delta",
+        "type": "response.output_audio_transcript.delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -544,7 +643,7 @@ def response_audio_transcript_done(
     *, session_id: str, response_id: str, item_id: str, transcript: str
 ) -> dict[str, object]:
     return {
-        "type": "response.audio_transcript.done",
+        "type": "response.output_audio_transcript.done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -554,19 +653,45 @@ def response_audio_transcript_done(
 
 
 def response_done(
-    *, session_id: str, response_id: str, status: str = "completed"
+    *,
+    session_id: str,
+    response_id: str,
+    status: str = "completed",
+    item_id: str | None = None,
+    transcript: str | None = None,
+    speechrail: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    output: list[dict[str, object]] = []
+    if item_id is not None:
+        output.append(
+            {
+                "id": item_id,
+                "object": "realtime.item",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "audio",
+                        "transcript": transcript,
+                        "audio": None,
+                    }
+                ],
+            }
+        )
+    event: dict[str, object] = {
         "type": "response.done",
         "response": {
             "id": response_id,
             "object": "realtime.response",
             "status": status,
             "status_details": None,
-            "output": [],
+            "output": output,
             "usage": None,
         },
     }
+    if speechrail is not None:
+        event["speechrail"] = speechrail
+    return event
 
 
 def error_event(
@@ -635,22 +760,41 @@ def apply_session_update(
     tts_voice_ids: frozenset[str],
     current_config: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, object], dict[str, Any]]:
-    """Validate an OpenAI ``session.update`` and return (session.updated, config).
+    """Validate the current transcription session update and return its config.
 
     The returned config is a SpeechRail-internal dict consumed by the route.
     """
+    if event.get("type") != "transcription_session.update":
+        raise RealtimeAdapterError(
+            "unsupported_operation",
+            "only transcription_session.update is supported",
+        )
     session = _require_object(event, "session")
-    audio_input: dict[str, Any] | None = None
-    audio_output: dict[str, Any] | None = None
-    if "audio" in session:
-        audio = _require_object(session, "audio")
-        if "input" in audio:
-            audio_input = _require_object(audio, "input")
-        if "output" in audio:
-            audio_output = _require_object(audio, "output")
+    allowed_session_fields = {
+        "type",
+        "input_audio_format",
+        "input_audio_transcription",
+        "turn_detection",
+        "speechrail",
+    }
+    if set(session) - allowed_session_fields:
+        raise RealtimeAdapterError(
+            "unsupported_operation",
+            "unsupported transcription session field",
+        )
+    if "type" in session and session["type"] not in (None, "transcription"):
+        raise RealtimeAdapterError("invalid_event", "session.type must be transcription")
+    if "speechrail" in session:
+        speechrail = session["speechrail"]
+        if not isinstance(speechrail, dict):
+            raise RealtimeAdapterError(
+                "invalid_event", "session.speechrail must be an object"
+            )
+        if set(speechrail) - {"tts", "diarization", "render_receipts", "model_revision"}:
+            raise RealtimeAdapterError(
+                "unsupported_operation", "unsupported session.speechrail field"
+            )
     transcription = session.get("input_audio_transcription")
-    if transcription is None and audio_input is not None:
-        transcription = audio_input.get("transcription")
     transcription_obj: dict[str, Any] | None = None
     if transcription is not None:
         if not isinstance(transcription, dict):
@@ -658,6 +802,26 @@ def apply_session_update(
                 "invalid_event", "input_audio_transcription must be an object"
             )
         transcription_obj = transcription
+        allowed_transcription_fields = {
+            "model",
+            "language",
+            "languages",
+            "prompt",
+            "keywords",
+            "timestamp_granularities",
+            "known_speaker_names",
+            "known_speaker_references",
+        }
+        if set(transcription_obj) - allowed_transcription_fields:
+            if "diarization" in transcription_obj:
+                raise RealtimeAdapterError(
+                    "invalid_diarization",
+                    "use session.speechrail.diarization.enabled for realtime diarization",
+                )
+            raise RealtimeAdapterError(
+                "unsupported_operation",
+                "unsupported input_audio_transcription field",
+            )
     if "diarization" in session or (
         transcription_obj is not None and "diarization" in transcription_obj
     ):
@@ -667,27 +831,15 @@ def apply_session_update(
         )
     base_config = dict(current_config or {})
     model = str(
-        session.get("model")
-        or (transcription_obj or {}).get("model")
+        (transcription_obj or {}).get("model")
         or base_config.get("model")
         or asr_model
     )
     resolved_asr = canonical_asr_model(model, registered=registered_asr)
-    if resolved_asr is None and canonical_tts_model(model, registered=registered_tts) is None:
+    if resolved_asr is None:
         raise RealtimeAdapterError("model_not_found", f"unknown model: {model[:200]}")
 
-    modalities = session.get("modalities")
-    if modalities is not None and (
-        not isinstance(modalities, list)
-        or any(m not in _SUPPORTED_MODALITIES for m in modalities)
-    ):
-        raise RealtimeAdapterError(
-            "unsupported_modalities", "only text/audio modalities are supported"
-        )
-
     turn_detection = session.get("turn_detection")
-    if "turn_detection" not in session and audio_input is not None:
-        turn_detection = audio_input.get("turn_detection")
     if isinstance(turn_detection, dict):
         mode = turn_detection.get("type")
         if mode not in _SUPPORTED_TURN_DETECTION:
@@ -723,52 +875,11 @@ def apply_session_update(
             "only manual or server_vad turn detection is supported",
         )
 
-    tools = session.get("tools")
-    if tools:
-        raise RealtimeAdapterError("unsupported_tools", "tools are not supported")
-
-    # Accept both OpenAI-standard audio format fields and the legacy nested
-    # "audio" object; anything else fails closed.
     input_format = session.get("input_audio_format")
     if input_format not in (None, "pcm16"):
         raise RealtimeAdapterError(
             "unsupported_audio_format", "only pcm16 audio input is supported"
         )
-    output_format = session.get("output_audio_format")
-    if output_format not in (None, "pcm16"):
-        raise RealtimeAdapterError(
-            "unsupported_audio_format", "only pcm16 audio output is supported"
-        )
-    input_sample_rate = 16_000
-    if audio_input is not None and "format" in audio_input:
-        nested_format = audio_input["format"]
-        if nested_format == "pcm16":
-            input_sample_rate = 16_000
-        elif isinstance(nested_format, dict):
-            if nested_format.get("type") != "audio/pcm" or nested_format.get("rate") not in {
-                16_000,
-                24_000,
-            }:
-                raise RealtimeAdapterError(
-                    "unsupported_audio_format",
-                    "only PCM16 audio at 16000 or 24000 Hz is supported",
-                )
-            input_sample_rate = int(nested_format["rate"])
-        else:
-            raise RealtimeAdapterError(
-                "unsupported_audio_format", "only pcm16 audio input is supported"
-            )
-    if audio_output is not None and "format" in audio_output:
-        nested_output_format = audio_output["format"]
-        valid_output = nested_output_format == "pcm16" or (
-            isinstance(nested_output_format, dict)
-            and nested_output_format.get("type") == "audio/pcm"
-            and nested_output_format.get("rate") == 24_000
-        )
-        if not valid_output:
-            raise RealtimeAdapterError(
-                "unsupported_audio_format", "only PCM16 audio output at 24000 Hz is supported"
-            )
 
     language: str | None = None
     languages: list[str] | None = None
@@ -800,27 +911,7 @@ def apply_session_update(
             )
         if language is None and languages:
             language = languages[0]
-    voice = session.get("voice")
-    if voice is not None:
-        if not isinstance(voice, str) or not voice.strip():
-            raise RealtimeAdapterError("invalid_voice", "voice must be a non-blank string")
-        preset_voice = resolve_voice(voice.strip())
-        from speechrail.domain.tts import get_voice_profile
-        try:
-            profile = get_voice_profile(preset_voice)
-            if profile.is_system and preset_voice not in tts_voice_ids:
-                raise ValueError(f"voice {preset_voice} not configured")
-        except VoiceStoreUnavailableError:
-            raise RealtimeAdapterError(
-                "voice_store_unavailable", "custom voice storage is unavailable"
-            ) from None
-        except ValueError:
-            raise RealtimeAdapterError(
-                "voice_not_found", f"unknown voice: {preset_voice[:200]}"
-            ) from None
-        voice = preset_voice
-
-    # ``session.update`` is a patch: absence preserves the effective session,
+    # ``transcription_session.update`` is a patch: absence preserves the effective session,
     # while a present ``null`` clears the respective option.  Build the whole
     # candidate before returning it so callers can validate and commit atomically.
     config: dict[str, Any] = dict(base_config)
@@ -835,23 +926,13 @@ def apply_session_update(
         config["prompt"] = prompt or ""
     else:
         config.setdefault("prompt", "")
-    if "voice" in session:
-        config["voice"] = voice
-    else:
-        config.setdefault("voice", None)
+    config.setdefault("voice", None)
 
     turn_detection_val = config.get("turn_detection")
-    if "turn_detection" in session or (audio_input is not None and "turn_detection" in audio_input):
+    if "turn_detection" in session:
         turn_detection_val = turn_detection
         config["turn_detection"] = turn_detection_val
-    if audio_input is not None and "format" in audio_input:
-        config["input_sample_rate"] = input_sample_rate
-    else:
-        config.setdefault("input_sample_rate", 16_000)
-    if audio_input is not None or audio_output is not None:
-        config["wire_profile"] = "current"
-    else:
-        config.setdefault("wire_profile", "legacy")
+    config.setdefault("input_sample_rate", 16_000)
 
     for key, value in (
         ("languages", languages),
@@ -863,7 +944,10 @@ def apply_session_update(
         if (transcription_obj is not None and key in transcription_obj) or value is not None:
             config[key] = value
     response = session_updated(
-        session_id=session_id, model=model, turn_detection=turn_detection_val
+        session_id=session_id,
+        model=resolved_asr,
+        turn_detection=turn_detection_val,
+        speechrail_tts_enabled=bool(base_config.get("tts_enabled", False)),
     )
     return response, config
 
@@ -879,67 +963,6 @@ def _string_list(session: dict[str, Any], field: str) -> list[str] | None:
     if len(value) > 128 or any(len(item) > 1_000 for item in value):
         raise RealtimeAdapterError("invalid_session", f"{field} exceeds its size limit")
     return list(value)
-
-
-def parse_text_item(event: dict[str, Any]) -> str:
-    """Extract a single short user text item used as TTS input."""
-    item = _require_object(event, "item")
-    if item.get("type") not in (None, "message"):
-        raise RealtimeAdapterError("unsupported_item", "only message items are supported")
-    role = item.get("role")
-    if role not in (None, "user"):
-        raise RealtimeAdapterError("invalid_item_role", "only user items are supported")
-    content = item.get("content")
-    if not isinstance(content, list) or len(content) != 1:
-        raise RealtimeAdapterError("invalid_item_content", "exactly one content part is required")
-    part = content[0]
-    if not isinstance(part, dict) or part.get("type") != "input_text":
-        raise RealtimeAdapterError("invalid_item_content", "only input_text content is supported")
-    text = str(part.get("text") or "")
-    if not text.strip():
-        raise RealtimeAdapterError("invalid_item_content", "text must not be blank")
-    if len(text) > 100_000:
-        raise RealtimeAdapterError("text_too_long", "text exceeds the 100k character limit")
-    return text
-
-
-def parse_tts_response_speed(response: object) -> float:
-    """Read the optional namespaced TTS speed from ``response.create``.
-
-    OpenAI's realtime response object has no portable speed field.  SpeechRail
-    therefore accepts one narrowly scoped extension while keeping the standard
-    top-level envelope unchanged.
-    """
-
-    if response is None:
-        return 1.0
-    if not isinstance(response, dict):
-        raise RealtimeAdapterError("invalid_tts", "response must be an object")
-    extension = response.get("speechrail")
-    if extension is None:
-        return 1.0
-    if (
-        not isinstance(extension, dict)
-        or set(extension) != {"tts"}
-        or not isinstance(extension["tts"], dict)
-        or set(extension["tts"]) != {"speed"}
-    ):
-        raise RealtimeAdapterError(
-            "invalid_tts",
-            "response.speechrail.tts requires numeric speed only",
-        )
-    speed = extension["tts"]["speed"]
-    if (
-        isinstance(speed, bool)
-        or not isinstance(speed, (int, float))
-        or not math.isfinite(float(speed))
-        or not 0.25 <= float(speed) <= 4.0
-    ):
-        raise RealtimeAdapterError(
-            "invalid_tts",
-            "response.speechrail.tts.speed must be between 0.25 and 4.0",
-        )
-    return float(speed)
 
 
 def validate_append(
@@ -970,10 +993,6 @@ def validate_append(
 
 def reject_unsupported(event_type: str) -> None:
     """Fail closed on client events outside the supported ASR/TTS subset."""
-    if event_type in _UNSUPPORTED_CLIENT_EVENTS:
-        raise RealtimeAdapterError(
-            "unsupported_operation", f"{event_type} is not supported by SpeechRail"
-        )
-
-
-EventKind = Literal["session", "append", "commit", "clear", "text_item", "tts", "cancel"]
+    raise RealtimeAdapterError(
+        "unsupported_operation", f"{event_type or 'empty event'} is not supported by SpeechRail"
+    )

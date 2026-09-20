@@ -76,4 +76,45 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(metadata.sessionID, "sess-1")
         XCTAssertEqual(metadata.sequence, 7)
     }
+
+    func testCallerTTSCreateUsesSpeechRailNamespace() {
+        let event = SpeechRailTTSCreate(
+            requestID: "tts_req_001",
+            text: "你好",
+            voice: "serena",
+            speed: 1.0,
+            expectedVoiceRevision: "vr_abc"
+        )
+
+        XCTAssertEqual(event.type, "speechrail.tts.create")
+        XCTAssertEqual(event.requestID, "tts_req_001")
+        XCTAssertEqual(event.jsonObject["type"] as? String, "speechrail.tts.create")
+        XCTAssertNil(SpeechRailTTSCreate(requestID: "r", text: "hi").jsonObject["voice"])
+    }
+
+    func testCallerTTSCancelUsesExplicitRequestAndOptionalResponseID() {
+        let event = SpeechRailTTSCancel(requestID: "tts_req_001", responseID: "resp_001")
+
+        XCTAssertEqual(event.type, "speechrail.tts.cancel")
+        XCTAssertEqual(event.jsonObject["request_id"] as? String, "tts_req_001")
+        XCTAssertEqual(event.jsonObject["response_id"] as? String, "resp_001")
+    }
+
+    func testTranscriptionSessionUpdateUsesCurrentOnlyFields() {
+        let event = TranscriptionSessionUpdate(
+            model: RealtimeASRClientModelFixture.canonical,
+            callerTTSEnabled: true
+        )
+
+        XCTAssertEqual(event.type, "transcription_session.update")
+        XCTAssertEqual(
+            (event.jsonObject["session"] as? [String: Any])?["input_audio_format"] as? String,
+            "pcm16"
+        )
+        XCTAssertNil((event.jsonObject["session"] as? [String: Any])?["modalities"])
+    }
+}
+
+private enum RealtimeASRClientModelFixture {
+    static let canonical = "speechrail/qwen3-asr-1.7b"
 }

@@ -12,7 +12,7 @@ from speechrail.app import create_app
 from speechrail.config import Settings
 
 
-def test_v2_snapshot_is_stable_and_legacy_discovery_still_works(
+def test_capability_snapshot_is_stable_and_discovery_remains_available(
     tmp_path: Path, monkeypatch
 ) -> None:
     registry = voices.VoiceRegistry(tmp_path / "voices.json")
@@ -33,11 +33,18 @@ def test_v2_snapshot_is_stable_and_legacy_discovery_still_works(
     restart = TestClient(create_app(settings)).get("/v1/speechrail/capabilities").json()
     assert first.json()["catalog_revision"] == restart["catalog_revision"]
     assert first.json()["service_instance_epoch"] != restart["service_instance_epoch"]
+    assert first.json()["realtime"] == {
+        "orchestration": "caller",
+        "server_llm": False,
+        "conversation_state": False,
+        "websocket_path": "/v1/realtime",
+        "mcp_realtime": False,
+    }
     assert client.get("/v1/voices").status_code == 200
     assert client.get("/v1/models").status_code == 200
 
 
-def test_v2_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) -> None:
+def test_capability_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", voices.VoiceRegistry(tmp_path / "v.json"))
     client = TestClient(
         create_app(Settings(api_key="test-key", qwen3_model_dir=None, qwen3_python=None))

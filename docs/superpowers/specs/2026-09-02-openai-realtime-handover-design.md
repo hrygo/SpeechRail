@@ -1,7 +1,15 @@
+---
+title: "SpeechRail OpenAI 标准实时协议交割实施设计"
+status: superseded
+date: 2026-09-02
+superseded_by: docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md
+---
+
 # SpeechRail OpenAI 标准实时协议交割实施设计
 
-> 状态：已实施（2026-09-02）。实施结果统一为 `/v1/realtime`；下方原始设计中的 v2 保留
-> 条款已由 ADR-0009 supersede，历史差距记录仅供追溯。
+> 状态：历史设计（2026-09-02）。本文保留旧交割的设计与证据，不再定义当前事件、字段、TTS
+> 编排或兼容边界。当前唯一依据是 [无状态 Speech Plane 与调用方编排设计](../specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)
+> 与 [`contracts/realtime-openai.md`](../../../contracts/realtime-openai.md)。
 
 ## 背景
 

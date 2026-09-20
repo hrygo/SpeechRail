@@ -145,10 +145,9 @@ def test_realtime_session_silero_preflight_failure_fails_explicitly() -> None:
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.receive_json()
         socket.send_json(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
                     "turn_detection": {
                         "type": "server_vad",
@@ -177,10 +176,9 @@ def test_realtime_session_reports_missing_onnxruntime_without_fallback(
         )
         with client.websocket_connect("/v1/realtime") as socket:
             socket.receive_json()
-            socket.receive_json()
             socket.send_json(
                 {
-                    "type": "session.update",
+                    "type": "transcription_session.update",
                     "session": {"turn_detection": {"type": "server_vad"}},
                 }
             )
@@ -278,7 +276,7 @@ def test_silero_commit_with_subframe_remainder_does_not_error(tmp_path: Path) ->
             session = OpenAIRealtimeSession(services, session_id="s", send=send)
             await session._update_session(
                 {
-                    "type": "session.update",
+                    "type": "transcription_session.update",
                     "session": {
                         "turn_detection": {"type": "server_vad", "threshold": 0.5}
                     },
@@ -405,7 +403,7 @@ def test_shadow_vad_records_agreement_metrics(tmp_path: Path) -> None:
             session = OpenAIRealtimeSession(services, session_id="s", send=send)
             await session._update_session(
                 {
-                    "type": "session.update",
+                    "type": "transcription_session.update",
                     "session": {
                         "turn_detection": {"type": "server_vad", "threshold": 0.5}
                     },

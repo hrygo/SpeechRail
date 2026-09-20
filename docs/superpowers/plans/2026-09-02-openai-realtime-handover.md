@@ -1,7 +1,7 @@
 # OpenAI Realtime 交割实现计划
 
-> 状态：已完成（2026-09-02）。`/v2/realtime` 保留条款已由 ADR-0009 supersede；当前唯一
-> 实时入口为 `/v1/realtime`。
+> 状态：`superseded`（2026-09-20）。本文是历史实施记录，不再作为当前事件、字段、TTS 编排或
+> 兼容策略依据。当前实施依据是 [无状态 Speech Plane 与调用方编排实施计划](2026-09-20-stateless-speech-plane-caller-orchestration.md)。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use inline execution with this plan task-by-task. Each step is tracked with checkbox syntax and must complete its own test cycle.
 

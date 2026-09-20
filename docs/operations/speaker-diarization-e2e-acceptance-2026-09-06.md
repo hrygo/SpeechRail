@@ -9,6 +9,9 @@ owners: [speechrail-core, sona-core]
 tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 ---
 
+> 本报告是历史分人验收证据，不定义当前 Realtime wire 或迁移策略。当前 `3.0.0` 使用
+> current-only `transcription_session.update` 与 `speechrail.*` 扩展，不保留旧事件兼容层。
+
 # SpeechRail × Sona 讲话人分离端到端验收与发布就绪报告 (SPK-E2E-1)
 
 > 验收日期：2026-09-06<br>

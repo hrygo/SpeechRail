@@ -32,7 +32,7 @@ OUTBOUND_SEND_TIMEOUT_CLOSE_CODE = 1011
 # 512 events ≈ 16.4s of 32ms audio chunks, accommodating commit/diarization spikes.
 CLIENT_EVENT_QUEUE_LIMIT = 512
 CONTROL_EVENT_QUEUE_LIMIT = 16
-_CONTROL_EVENT_TYPES = frozenset({"response.cancel"})
+_CONTROL_EVENT_TYPES = frozenset({"speechrail.tts.cancel"})
 
 
 async def _send_json_with_deadline(

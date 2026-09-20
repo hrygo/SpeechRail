@@ -1,5 +1,9 @@
 # SpeechRail · 会话闭环稿（语音助手 / 会议助手 / 实时字幕）
 
+> **公共协议覆盖（2026-09-20）**：本目录保留会话体验与 UI 闭环证据；其中出现的旧 Realtime
+> `response.cancel`、`response.create` 或 `session.update` 仅是历史稿件，不是当前实现入口。
+> 当前 Native 以 current-only 无状态 Speech Plane 为准，调用方拥有 LLM、历史、播放队列和 barge-in。
+
 > 版本：v1.10.0 · 2026-09-18
 > 状态：**已落地第十一轮（全 App 统一）**。规范见 [`../UX-UI-SPEC.md`](../UX-UI-SPEC.md)：版式数值单点声明（`LAYOUT`）、
 > 记录库列抽成一个组件、空态与控制圆角统一、会议来源口径统一、`audit.js` 新增「版式单点声明」门禁；

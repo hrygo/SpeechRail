@@ -1,11 +1,16 @@
 ---
 title: "SpeechRail ASR / TTS 专业级最佳实践与深度优化实施规范"
-status: active
+status: superseded
+superseded_by: contracts/realtime-openai.md and docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md
 version: "1.4.0-draft"
 date: 2026-09-02
 ---
 
 # SpeechRail ASR / TTS 专业级最佳实践与深度优化实施规范
+
+> 本文是历史优化规范，Realtime 事件与服务端 TTS 编排部分已由 2026-09-20 的 current-only
+> Speech Plane 契约取代；不要按本文的旧文本 item / response orchestration 实施。当前承诺以
+> [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md) 为准。
 
 > **设计定位**：在保持**单人本机优先**（Local-First, Single-Node）与**全面 OpenAI 兼容**（Full OpenAI Parity on ASR/TTS subset）的前提下，系统性解决端到端语音交互延迟、流式断句、服务端 VAD 与待机冷启动毛刺问题。
 

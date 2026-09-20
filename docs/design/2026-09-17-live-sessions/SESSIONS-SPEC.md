@@ -1,9 +1,10 @@
 ---
 title: "SpeechRail macOS App · 实时会话模块设计规格"
-status: proposed
+status: superseded
 audience: "SpeechRail macOS App 设计、开发与测试人员"
 version: "1.20.0"
 date: 2026-09-19
+superseded_by: docs/design/2026-09-18-session-layer/TECHNICAL-DESIGN.md
 ---
 
 # SpeechRail macOS App · 实时会话模块设计规格
@@ -11,6 +12,11 @@ date: 2026-09-19
 > 目标形态，不是当前实现。视觉语言不在此重复：颜色、间距、圆角、字体、组件契约以
 > [`../2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](../2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md) §5
 > 与 [`../../developers/macos-app-design-system.md`](../../developers/macos-app-design-system.md) 为准。
+>
+> **公共协议覆盖（2026-09-20）**：本文的会话体验目标可以继续参考，但其中旧 Realtime 的
+> `session.update`、`conversation.item.create`、`response.create/cancel`、`response.audio.*`
+> 和服务端自动 barge-in 示例均已 superseded。实现必须遵循 current-only 无状态 Speech Plane；
+> LLM、历史、播放队列和打断策略由调用方/Native 持有。
 
 ## 1. 文档定位与证据口径
 

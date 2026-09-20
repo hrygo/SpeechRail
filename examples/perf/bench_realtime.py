@@ -155,13 +155,12 @@ def _run_connected_session(
     ).start()
 
     t0 = time.monotonic()
-    recv_until(events, errors, "conversation.created", timeout=15, event_log=event_log)
+    recv_until(events, errors, "session.created", timeout=15, event_log=event_log)
     setup_ms = (time.monotonic() - t0) * 1000
 
     session: dict[str, object] = {
-        "model": "whisper-1",
-        "language": "zh",
         "input_audio_format": "pcm16",
+        "input_audio_transcription": {"model": "whisper-1", "language": "zh"},
         "turn_detection": (
             {"type": "manual"}
             if turn_detection == "manual"
@@ -176,10 +175,12 @@ def _run_connected_session(
     if diarization:
         session["speechrail"] = {"diarization": {"enabled": True}}
     conn.send({
-        "type": "session.update",
+        "type": "transcription_session.update",
         "session": session,
     })
-    recv_until(events, errors, "session.updated", timeout=15, event_log=event_log)
+    recv_until(
+        events, errors, "transcription_session.updated", timeout=15, event_log=event_log
+    )
 
     input_pcm = (
         pcm + b"\x00" * _SERVER_VAD_SILENCE_TAIL_BYTES
@@ -238,27 +239,18 @@ def _run_connected_session(
         )
         diarization_done = True
 
-    conn.send({
-        "type": "conversation.item.create",
-        "item": {
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": tts_text}],
-        },
-    })
-    recv_until(
-        events,
-        errors,
-        "conversation.item.created",
-        timeout=15,
-        event_log=event_log,
-    )
     t0 = time.monotonic()
-    conn.send({"type": "response.create"})
+    conn.send(
+        {
+            "type": "speechrail.tts.create",
+            "request_id": f"benchmark-{session_no}-{time.monotonic_ns()}",
+            "text": tts_text,
+        }
+    )
     recv_until(
         events,
         errors,
-        "response.audio.delta",
+        "response.output_audio.delta",
         timeout=60,
         event_log=event_log,
     )
@@ -278,7 +270,7 @@ def _run_connected_session(
         k = str(get("type", ev))
         kinds.append(k)
         event_log.append(k)
-        if k == "response.audio.delta":
+        if k == "response.output_audio.delta":
             total_bytes += len(get("delta", ev) or b"")
         if k == "response.done":
             response_done = True

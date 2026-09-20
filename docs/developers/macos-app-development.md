@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.5"
+version: "0.5.6"
 date: 2026-09-20
 ---
 
@@ -37,6 +37,19 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 `/v1/speechrail/voices*` 安全发现投影；跨模型、音色和操作参数需要同代一致性时使用前者，
 不要把多次读取 `/v1/models`、`/v1/voices` 拼成原子结果。音色列表（`/v1/voices`）是用户数据，
 可以为空，「还没有克隆音色」不能推出「服务没有克隆能力」；用列表反推能力会报出假的「未就绪」。
+
+### Native Realtime 编排边界（current-only）
+
+`SpeechRailApp` 的 `RealtimeASRClient` 只发当前契约：先发
+`transcription_session.update`，再发 `input_audio_buffer.append/commit/clear`。语音助手会在本地
+Responses 流中完成 LLM、历史、记忆、人设和工具编排，把句子放入本地 `pendingTTS` 队列，逐条发送
+`speechrail.tts.create`；同一 WebSocket 同时只允许一个服务端 TTS render，收到 `response.done` 后才
+提交下一句。
+
+服务端的 `input_audio_buffer.speech_started` 只是 VAD 事实。实时对讲模式由 `AssistantSession` 根据
+播放状态清空本地播放队列并显式发送 `speechrail.tts.cancel`；服务端不自动替 App 做 barge-in。旧
+`session.update`、`conversation.item.create`、`response.create/cancel` 和 `response.audio.*` 不会被
+Native 或服务端翻译。
 
 ## 当前控制面 surface
 

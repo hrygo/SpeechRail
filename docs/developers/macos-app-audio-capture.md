@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 录音通道与音频采集最佳实践"
 status: active
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "0.2.1"
+version: "0.2.2"
 date: 2026-09-20
 ---
 
@@ -195,7 +195,7 @@ date: 2026-09-20
 | 模式 | 原生配置 | 上行口径 |
 |---|---|---|
 | 一问一答（外放） | 同一 engine 播放与采集；不强制 voice processing | 播放开始时清空旧输入，播放期间由会话门闩不上行，播放结束再清空残留 |
-| 实时对讲（耳机） | engine 启动前同时对 `inputNode` / `outputNode` 调用 `setVoiceProcessingEnabled(true)` | 全程上行；系统 voice processing 获得同 engine 的 far-end 播放参考，服务端 `speech_started` 负责取消 TTS |
+| 实时对讲（耳机） | engine 启动前同时对 `inputNode` / `outputNode` 调用 `setVoiceProcessingEnabled(true)` | 全程上行；系统 voice processing 获得同 engine 的 far-end 播放参考，App 收到服务端 `speech_started` 后按自身策略发送 `speechrail.tts.cancel` |
 
 输入 tap 仍归一为 16 kHz / 单声道 / PCM16；TTS 以 24 kHz / 单声道 PCM16 进入同一 engine 的
 `AVAudioPlayerNode`。插话或用户点停止只停播放器并使旧缓冲失效，不拆输入引擎，所以下一块 TTS

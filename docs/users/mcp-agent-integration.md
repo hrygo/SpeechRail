@@ -2,8 +2,8 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "1.3.0"
-date: 2026-09-13
+version: "2.0.0"
+date: 2026-09-20
 ---
 
 # 🔌 SpeechRail MCP 主流 Agent 集成指南
@@ -14,6 +14,12 @@ date: 2026-09-13
 >
 > **v1.3.0 变更**（2026-09-13）：补充 Codex 当前 `codex mcp add` / `config.toml` 指引，以及 ChatGPT Web 自定义 MCP App 的远程连接边界。ChatGPT Web 不能直接启动本机 `stdio` 或访问 `127.0.0.1`；本机 SpeechRail 必须通过 `streamable-http` 和受信任的 HTTPS 隧道/网关连接。
 > ChatGPT 的套餐、界面和权限会持续变化，请同时参考 [OpenAI 官方 Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461)。
+
+> **当前边界（2026-09-20）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
+> `describe/transcribe/synthesize/voice/job` 工具；它不创建 Realtime WebSocket handle。
+> Native、Sona 或其他调用方直连 `/v1/realtime`，并自行拥有 LLM、历史、memory、persona、
+> tools、播放队列和 barge-in；Realtime TTS 只能由调用方显式发送 `speechrail.tts.create`/
+> `speechrail.tts.cancel` 驱动。旧 Realtime 事件不会被 MCP 或服务端翻译。
 
 ---
 
@@ -34,7 +40,9 @@ flowchart LR
 
 - **不内建进主服务**：proxy 崩溃不影响推理服务；主服务升级/回滚不受 MCP 影响。
 - **不接收 base64**：音频一律用本地路径或 `file://` URI（避免音频进入模型 context）。
-- **不做 Realtime 全双工**：`/v1/realtime` WebSocket 仍由客户端直连，不在 MCP 工具集内。
+- **不做 Realtime 全双工**：`/v1/realtime` WebSocket 仍由客户端直连，不在 MCP 工具集内；
+  `describe()` 的 `realtime` 字段会明确报告 `orchestration=caller`、`server_llm=false`、
+  `conversation_state=false`。
 
 ### 1.1 工具集（9 个）
 

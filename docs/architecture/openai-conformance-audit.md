@@ -1,11 +1,17 @@
 ---
 title: "SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查"
-status: active
+status: superseded
+superseded_by: contracts/realtime-openai.md and docs/decisions/0019-stateless-speech-plane-caller-orchestration.md
 version: "1.4.2"
 date: 2026-09-08
 ---
 
 # SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查
+
+> 本报告是 2026-09-08 的历史审查快照。2026-09-20 已进行一次 breaking contract reset：
+> current-only Realtime、调用方编排和无旧版本兼容的当前承诺请阅读
+> [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)，不要将本报告的旧事件
+> 矩阵视为当前实现。
 
 本报告对 SpeechRail v1.2.0 的对外语音接口（HTTP REST + WebSocket Realtime）与
 OpenAI 标准语音 API 做逐项对标，区分"高度兼容"、"有意裁剪/扩展"和"真实兼容性风险"，

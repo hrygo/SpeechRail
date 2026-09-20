@@ -382,15 +382,14 @@ def _pcm16(samples: int) -> str:
 def _open(socket) -> dict[str, Any]:
     created = socket.receive_json()
     assert created["type"] == "session.created"
-    socket.receive_json()  # conversation.created
     return created
 
 
 def _update_session(socket, session: dict[str, Any]) -> dict[str, Any]:
-    socket.send_json({"type": "session.update", "session": session})
+    socket.send_json({"type": "transcription_session.update", "session": session})
     while True:
         event = socket.receive_json()
-        if event["type"] in {"session.updated", "error"}:
+        if event["type"] in {"transcription_session.updated", "error"}:
             return event
 
 
@@ -428,7 +427,7 @@ def test_realtime_diarization_uses_one_namespaced_opt_in_switch() -> None:
             {"speechrail": {"diarization": {"enabled": True}}},
         )
 
-    assert updated["type"] == "session.updated"
+    assert updated["type"] == "transcription_session.updated"
     assert updated["session"]["speechrail"]["diarization"] == {
         "enabled": True,
         "version": 1,
@@ -444,13 +443,13 @@ def test_second_realtime_diarization_session_fails_busy_without_affecting_the_fi
     ):
         _open(first)
         _open(second)
-        assert _negotiate(first)["type"] == "session.updated"
+        assert _negotiate(first)["type"] == "transcription_session.updated"
         rejected = _negotiate(second)
 
         assert rejected["type"] == "error"
         assert rejected["error"]["code"] == "backend_busy"
-        first.send_json({"type": "session.update", "session": {}})
-        assert first.receive_json()["type"] == "session.updated"
+        first.send_json({"type": "transcription_session.update", "session": {}})
+        assert first.receive_json()["type"] == "transcription_session.updated"
 
 
 def test_realtime_rejects_retired_diarization_request_shapes() -> None:
@@ -479,10 +478,10 @@ def test_client_without_opt_in_never_receives_extension_types() -> None:
         updated = _update_session(
             socket,
             {
-                "model": "whisper-1",
+                "input_audio_transcription": {"model": "whisper-1"},
             },
         )
-        assert updated["type"] == "session.updated"
+        assert updated["type"] == "transcription_session.updated"
         assert "diarization_contract" not in updated["session"]
 
         events = _append_and_commit(socket, 8000)
@@ -525,7 +524,7 @@ def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None
         assert EXTENSION not in created["session"]["capabilities"]
 
         updated = _negotiate(socket)
-        assert updated["type"] == "session.updated"
+        assert updated["type"] == "transcription_session.updated"
         assert updated["session"]["speechrail"]["diarization"] == {
             "enabled": True,
             "version": 1,
@@ -593,15 +592,15 @@ def test_negotiated_extensions_renegotiate_idempotently() -> None:
     client, _ = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
-        assert _negotiate(socket)["type"] == "session.updated"
+        assert _negotiate(socket)["type"] == "transcription_session.updated"
         _append_and_commit(socket, 8000)
         # Re-sending the identical negotiated payload is not a modification.
-        assert _negotiate(socket)["type"] == "session.updated"
+        assert _negotiate(socket)["type"] == "transcription_session.updated"
 
 
 def test_apply_session_update_rejects_unknown_extension_values() -> None:
     event = {
-        "type": "session.update",
+        "type": "transcription_session.update",
         "session": {
             "input_audio_transcription": {
                 "diarization": {"enabled": True, "extensions": ["speechrail.diarization.v2"]}

@@ -10,6 +10,12 @@ date: 2026-09-08
 
 这是已确定实现方向、尚未实施或发布的目标设计。配套为[实施方案](../plans/2026-09-08-diarization-openai-implementation.md)、[D1 决策记录](../plans/2026-09-08-diarization-validation-cards.md)与[隔离 runtime smoke 报告](../../archive/performance/2026-09-08-d1-diarization-runtime-smoke.md)。真实中文质量验收尚未完成。
 
+> 当前契约覆盖说明（2026-09-20）：本文仍是分人领域与 CoreML worker 的设计依据，但其中旧的
+> Realtime 输入/握手示例不再是公共 wire。当前 Realtime 统一使用
+> `transcription_session.update` / `transcription_session.updated`，旧事件、旧字段和 alias
+> 明确拒绝；调用方编排与 TTS 以[无状态 Speech Plane 设计](2026-09-20-stateless-speech-plane-caller-orchestration-design.md)
+> 和 [`contracts/realtime-openai.md`](../../../contracts/realtime-openai.md) 为准。
+
 本版替代同日 0.1.0 方案：撤回独立 `/v2/transcription-sessions`、移除 OpenAI 模型别名及自定义公共音频协议的建议；撤回 V0–V5 六张验证卡。内部去除旧路径，对外遵循 OpenAI，二者可以同时成立。
 
 ## 1. 总体决定
@@ -18,7 +24,8 @@ date: 2026-09-08
 
 - 文件分人使用原生 `POST /v1/audio/transcriptions`、`model="gpt-4o-transcribe-diarize"`、`response_format="diarized_json"`，实现原生 SSE。
 - 实时分人在现有 `/v1/realtime` 上通过一个可选配置启用，只向启用者发送命名空间内的扩展事件。
-- 普通 ASR/TTS 客户端继续使用原 OpenAI SDK、模型参数和事件处理，不强制换 SDK、探测能力或处理分人事件。
+- REST ASR/TTS 客户端继续使用文档声明的 OpenAI REST 子集；Realtime 调用方必须使用当前转写 session wire，
+  并由调用方实现 LLM、历史、播放和 barge-in 编排。
 - ASR 保留当前 Qwen3/MLX；对齐复用 Qwen3 ForcedAligner，对已经确定的正文直接对齐，禁止为分人再次识别并替换正文。
 - 声学链路固定为 Streaming Sortformer v2.1 的 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`；一个私有 Swift worker 持有持续 speaker cache/FIFO，显式 `computeUnits=.all`。
 - 文件与 Realtime 都使用同一个流式分人引擎。文件以背压允许的速度送入，不按真实时钟 sleep，不换离线聚类模型。
@@ -122,7 +129,7 @@ for segment in meeting.segments:
 
 ```json
 {
-  "type": "session.update",
+  "type": "transcription_session.update",
   "session": {
     "speechrail": {
       "diarization": {"enabled": true}
@@ -131,9 +138,9 @@ for segment in meeting.segments:
 }
 ```
 
-不需要 `enabled` 加 `extensions` 两次开关，也不要求客户端选择 provider、frame size、worker、revision policy。只允许首次音频前启用，session 生命周期内不可切换；重复相同配置幂等。服务器在 `session.updated` 的同一扩展对象回显 `enabled/version/max_speakers`，未启用会话不出现这组字段或事件。模型仍沿用该 Realtime 会话的 ASR 模型，不把仅支持文件转写的云端分人模型称为原生 Realtime 模型。
+不需要 `enabled` 加 `extensions` 两次开关，也不要求客户端选择 provider、frame size、worker、revision policy。只允许首次音频前启用，session 生命周期内不可切换；重复相同配置幂等。服务器在 `transcription_session.updated` 的同一扩展对象回显 `enabled/version/max_speakers`，未启用会话不出现这组字段或事件。模型仍沿用该 Realtime 会话的 ASR 模型，不把仅支持文件转写的云端分人模型称为原生 Realtime 模型。
 
-扩展开发者继续用 OpenAI SDK 的通用事件发送能力发送字典，扩展 payload 通过一个薄类型定义文件处理；可使用 SDK 底层连接的 JSON 收发。薄类型只定义扩展事件，不替换 SDK、不接管鉴权/重试/连接，也不暴露私有 IPC。各语言 SDK 对未知事件的解析不同，Python/TypeScript 的实际连接回归是实施门，不以“能发送 JSON”代替验证。
+扩展开发者使用当前 WebSocket wire 发送字典，扩展 payload 通过一个薄类型定义文件处理；可使用客户端底层连接的 JSON 收发。薄类型只定义扩展事件，不替换鉴权/重试/连接，也不暴露私有 IPC。各语言客户端对未知事件的解析不同，Python/TypeScript 的实际连接回归是实施门，不以“能发送 JSON”代替验证。
 
 仅增加以下三个服务端事件和一个可选客户端结束事件：
 
@@ -302,11 +309,11 @@ PCM、embedding 和模型原始输出不落盘。Realtime 音频只保留在有�
 
 实施时完成定向调用审计后移除：legacy 按 item 分人 session、旧 native 单 speaker port、`supports_stream` 伪能力分支、双开关 extensions 路径、旧 remap/质心接线、未接入的 evidence index、group_id/跨 session link 契约、按 hint 截断输出、二次 ASR 对齐、旧分人 serializer 和冗余配置。
 
-保留：OpenAI 路由与模型能力别名、普通 ASR/TTS/Realtime 消费方式、既有错误 envelope/调度/worker 框架。解析 SDK 不同合法 multipart 编码属于协议 adapter 的职责，不是两条业务兼容路径。
+保留：OpenAI REST 路由与模型能力选择、当前 ASR/TTS/Realtime 消费方式、既有错误 envelope/调度/worker 框架。解析 SDK 不同合法 multipart 编码属于协议 adapter 的职责，不是两条业务兼容路径。
 
-按当前用户明确要求，不并存旧分人扩展、不新增 `/v2` 服务端入口；这项要求优先于项目默认“破坏变更进入 /v2”。旧扩展调用者在一次发布中迁移到 `session.speechrail.diarization`。产品版本使用 major 变更，迁移文档精确列出受影响分人字段；普通 SDK 消费者不迁移。
+按当前用户明确要求，不并存旧分人扩展、不新增 `/v2` 服务端入口；这项要求优先于项目默认“破坏变更进入 /v2”。所有 Realtime 调用方在一次 `3.0.0` 发布中切换到 current-only `transcription_session.update` 与 `speechrail.*` 语义，不提供双 wire、alias 或隐式降级。
 
-回退方式是部署层回到上一套 release，并在需要时回退使用旧分人扩展的客户端。它不意味着新实现保留旧模型分支。当前没有执行切换；活动配置、模型、README 和并行文档保持原状。
+部署层回到上一套 release 只是运维回滚，不意味着新实现保留旧模型、旧 wire 或兼容分支；当前版本不在运行时同时支持两套公共契约。
 
 ## 9. 实施验收与唯一未决事项
 

@@ -1,16 +1,17 @@
 # Superpowers 过程目录
 
-本目录保存近期活跃的设计规格与实施计划，状态为 `accepted`、`ready` 或候选 `draft`，供实施参考。
+本目录保存近期设计规格与实施计划。当前实施依据是 2026-09-20 的无状态 Speech Plane 方案；标记为
+`superseded` 的旧方案只用于历史追溯，不得作为当前契约、兼容策略或实施入口。
 
 ## 设计规格
 
 - [macOS 26 App 最佳实践整改](specs/2026-09-13-macos26-app-best-practices-remediation-design.md)（`approved`）
-- [OpenAI Realtime 交接设计](specs/2026-09-02-openai-realtime-handover-design.md)
+- [OpenAI Realtime 交接设计](specs/2026-09-02-openai-realtime-handover-design.md)（`superseded`）
 - [资源优化设计](specs/2026-09-02-resource-optimization-design.md)
 - [TTS 分段边界稳定性设计](specs/2026-09-05-tts-segment-boundary-stability-design.md)
 - [GitHub Actions 现代化设计](specs/2026-09-06-github-actions-modernization-design.md)
 - [服务运维效率设计](specs/2026-09-07-service-operator-efficiency-design.md)
-- [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`）
+- [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`；Realtime wire 以 current-only 契约为准）
 - [讲话人分离 D1 选择证据](specs/2026-09-08-diarization-d1-selection-evidence.md)
 - [Clone frozen-gain 边界修复候选](specs/2026-09-12-clone-loudness-boundaries.md)（`draft`）
 - [无状态 Speech Plane 与调用方编排设计](specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)（`approved`）
@@ -18,7 +19,7 @@
 ## 实施计划
 
 - [Wheel 本地安装器计划](plans/2026-09-01-wheel-local-installer.md)
-- [OpenAI Realtime 交接计划](plans/2026-09-02-openai-realtime-handover.md)
+- [OpenAI Realtime 交接计划](plans/2026-09-02-openai-realtime-handover.md)（`superseded`）
 - [资源优化计划](plans/2026-09-02-resource-optimization.md)
 - [说话人分离 E2E 计划](plans/2026-09-05-speaker-diarization-e2e.md)
 - [TTS 分段边界稳定性计划](plans/2026-09-05-tts-segment-boundary-stability.md)
@@ -29,13 +30,14 @@
 - [Clone TTS 响度稳定性计划](plans/2026-09-08-clone-tts-loudness-stability.md)
 - [Clone TTS 审查修复计划](plans/2026-09-08-clone-tts-review-fixes.md)
 - [讲话人分离验收矩阵](plans/2026-09-08-diarization-acceptance-matrix.md)
-- [讲话人分离 OpenAI 实施方案](plans/2026-09-08-diarization-openai-implementation.md)（`ready`）
+- [讲话人分离 OpenAI 实施方案](plans/2026-09-08-diarization-openai-implementation.md)（`superseded`；领域历史）
 - [讲话人分离验证卡](plans/2026-09-08-diarization-validation-cards.md)
 - [单机语音基座计划](plans/2026-09-08-single-machine-speech-foundation.md)
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-09-full-stack-memory-evidence.md)
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-08-v1.13.0-high-roi-optimization.md)
 - [三档用户定位重排与按档位精度策略](plans/2026-09-11-tier-user-repositioning-and-precision-policy.md)
 - [无状态 Speech Plane 与调用方编排实施计划](plans/2026-09-20-stateless-speech-plane-caller-orchestration.md)（`ready`）
+- [macOS App 契约对齐旧计划](plans/2026-09-20-macos-app-contract-alignment-plan.md)（`superseded`；已被 current-only 方案取代）
 
 ## 当前正式架构文档
 

@@ -61,10 +61,9 @@ def test_realtime_server_vad_session_update_accepted() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.receive_json()
         socket.send_json(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
                     "turn_detection": {
                         "type": "server_vad",
@@ -76,49 +75,44 @@ def test_realtime_server_vad_session_update_accepted() -> None:
             }
         )
         updated = socket.receive_json()
-        assert updated["type"] == "session.updated"
+        assert updated["type"] == "transcription_session.updated"
         assert updated["session"]["turn_detection"]["type"] == "server_vad"
 
 
-def test_realtime_bargein_cancels_active_tts_response() -> None:
+def test_realtime_vad_fact_does_not_cancel_tts_without_caller_command() -> None:
     client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.receive_json()
 
-        # Enable server_vad
+        # Negotiate server VAD and caller-owned TTS.
         socket.send_json(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": 0.3,
                         "prefix_padding_ms": 100,
                         "silence_duration_ms": 200,
-                    }
+                    },
+                    "speechrail": {"tts": {"enabled": True}},
                 },
             }
         )
-        assert socket.receive_json()["type"] == "session.updated"
+        assert socket.receive_json()["type"] == "transcription_session.updated"
 
-        # Create a text item and trigger TTS response
+        # The caller submits text directly; there is no conversation item.
         socket.send_json(
             {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "你好"}],
-                },
+                "type": "speechrail.tts.create",
+                "request_id": "vad_cancel_001",
+                "text": "你好",
             }
         )
-        assert socket.receive_json()["type"] == "conversation.item.created"
-        socket.send_json({"type": "response.create"})
 
         # Wait for TTS audio to start streaming
         response_events = [socket.receive_json() for _ in range(4)]
-        assert response_events[-1]["type"] == "response.audio.delta"
+        assert response_events[-1]["type"] == "response.output_audio.delta"
 
         # Now simulate user speaking (Barge-in!) -> Send 4 frames of active speech
         active_speech = _sine_pcm(440, 32, 10000.0)
@@ -134,8 +128,18 @@ def test_realtime_bargein_cancels_active_tts_response() -> None:
             if e["type"] == "input_audio_buffer.speech_started":
                 break
 
-        assert "response.done" in events_received
         assert "input_audio_buffer.speech_started" in events_received
+        assert "response.done" not in events_received
+
+        # Barge-in policy belongs to the caller, so cancellation is explicit.
+        socket.send_json(
+            {"type": "speechrail.tts.cancel", "request_id": "vad_cancel_001"}
+        )
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "response.done":
+                assert event["response"]["status"] == "cancelled"
+                break
 
 
 def test_bargein_session_isolation() -> None:
@@ -146,14 +150,12 @@ def test_bargein_session_isolation() -> None:
         client.websocket_connect("/v1/realtime") as socket_b,
     ):
         socket_a.receive_json()
-        socket_a.receive_json()
-        socket_b.receive_json()
         socket_b.receive_json()
 
         # Enable server_vad on Session A
         socket_a.send_json(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
                     "turn_detection": {
                         "type": "server_vad",
@@ -164,24 +166,26 @@ def test_bargein_session_isolation() -> None:
                 },
             }
         )
-        assert socket_a.receive_json()["type"] == "session.updated"
+        assert socket_a.receive_json()["type"] == "transcription_session.updated"
 
-        # Start TTS on Session B
+        # Start caller-owned TTS on Session B.
         socket_b.send_json(
             {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "保持播放"}],
-                },
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"tts": {"enabled": True}}},
             }
         )
-        assert socket_b.receive_json()["type"] == "conversation.item.created"
-        socket_b.send_json({"type": "response.create"})
+        assert socket_b.receive_json()["type"] == "transcription_session.updated"
+        socket_b.send_json(
+            {
+                "type": "speechrail.tts.create",
+                "request_id": "isolation_001",
+                "text": "保持播放",
+            }
+        )
 
         b_events = [socket_b.receive_json() for _ in range(4)]
-        assert b_events[-1]["type"] == "response.audio.delta"
+        assert b_events[-1]["type"] == "response.output_audio.delta"
 
         # Speak into Session A -> Barge-in on Session A
         active_speech = _sine_pcm(440, 32, 10000.0)
@@ -193,8 +197,12 @@ def test_bargein_session_isolation() -> None:
         a_event = socket_a.receive_json()
         assert a_event["type"] == "input_audio_buffer.speech_started"
 
-        # Verify Session B is still intact and not cancelled!
-        # Session B did not receive any unexpected cancellation
+        # Verify Session B is still active; the caller may cancel it explicitly.
+        socket_b.send_json(
+            {"type": "speechrail.tts.cancel", "request_id": "isolation_001"}
+        )
+        while socket_b.receive_json()["type"] != "response.done":
+            pass
 
 
 def test_vad_hysteresis_mid_band_frames_stay_in_speech() -> None:

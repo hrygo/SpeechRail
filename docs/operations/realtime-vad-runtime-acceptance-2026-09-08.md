@@ -6,6 +6,9 @@ version: "1.0.0"
 date: 2026-09-08
 ---
 
+> 本报告是 2026-09-08 的历史运行证据，不定义当前 Realtime wire。当前 `3.0.0` 契约使用
+> `transcription_session.update` 与调用方显式 `speechrail.tts.cancel`；旧事件/旧字段不在运行时兼容。
+
 # Realtime VAD 运行时修复验收
 
 ## 结论

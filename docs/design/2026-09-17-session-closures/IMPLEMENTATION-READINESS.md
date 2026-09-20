@@ -1,12 +1,16 @@
 ---
 title: "SpeechRail · 会话三闭环稿 · 实现就绪度核查"
-status: proposed
+status: superseded
 audience: "SpeechRail macOS App 实现者与设计评审"
 version: "1.4.1"
 date: 2026-09-18
+superseded_by: docs/design/2026-09-18-session-layer/TECHNICAL-DESIGN.md
 ---
 
 # 实现就绪度核查（编码前）
+
+> 本核查稿已被 current-only 无状态 Speech Plane 与当前 Native 会话方案取代。保留它用于 UI/会话
+> 设计历史追溯；旧 Realtime TTS、自动 barge-in 和 voice session update 语义不得据此实现。
 
 > 用户 2026-09-17：「先不导出，进一步核查设计稿与文档，确保后续编码工作可以顺利开展。」
 > 这份文档就是那次核查的结论。**它不是新设计**，是「稿 → 代码」之间还差什么的一份对账。

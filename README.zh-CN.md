@@ -43,9 +43,9 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 |---|---|---|
 | `POST /v1/audio/transcriptions` | 文件 ASR | OpenAI 兼容 multipart 输入；支持 `json`、`verbose_json`、`text`、`srt`、`vtt`，以及可选的 `diarized_json`。 |
 | `POST /v1/audio/speech` | TTS | 流式输出 `mp3`、`opus`、`aac`、`flac`、`wav` 或原始 `pcm`；请从 `/v1/voices` 选择 `available=true` 的音色。 |
-| `GET /v1/models`、`GET /v1/voices` | 兼容能力发现 | 当前 profile 与可用音色的历史投影。 |
+| `GET /v1/models`、`GET /v1/voices` | 能力发现 | 当前 profile 与可用音色的发现投影。 |
 | `GET /v1/speechrail/capabilities`、`/v1/speechrail/voices*` | 安全能力发现 | `effective_capabilities_v1` 返回同一代有效能力快照；命名空间音色发现不返回来源正文，也不启动 worker。 |
-| `WS /v1/realtime` | 实时 ASR/TTS | OpenAI Realtime 事件子集、服务端语音准入，以及可选的命名空间分人扩展。 |
+| `WS /v1/realtime` | 实时 ASR/TTS | current-only 无状态 Speech Plane：转写 session wire、服务端语音事实、显式 `speechrail.tts.*`，以及可选的命名空间分人扩展。 |
 | `/v1/jobs` | 异步任务元数据 | 可选的 owner-scoped 持久任务记录；调用方提供不透明引用，不传原始音频或转写文本。 |
 | `speechrail-mcp` | Agent 接入 | 支持 `stdio` 或 `streamable-http` 的无状态 MCP 代理；它调用本地 REST 服务，不托管模型。 |
 
@@ -68,7 +68,8 @@ SpeechRail 是语音运行时，不是完整的语音 Agent 应用。它不负�
 - 实名讲话人识别、声纹库或跨会话归属；
 - 云端推理、多租户隔离、高可用或分布式队列。
 
-Realtime 是唯一的公共 WebSocket 入口，仅实现 ASR/TTS 事件。依赖未列出的
+Realtime 是唯一的公共 WebSocket 入口，仅实现 ASR/TTS 事件。调用方拥有 LLM、历史、工具、
+播放队列和 barge-in 策略；SpeechRail 不翻译旧 Realtime 事件，也不提供 legacy wire。依赖未列出的
 OpenAI 能力前，请先阅读对应契约。
 
 ## 环境要求
@@ -141,8 +142,8 @@ uv run speechrail diagnose
 
 ## OpenAI 兼容调用示例
 
-标准 OpenAI Python 客户端只需修改 `base_url` 即可访问本地服务。默认 loopback
-模式使用占位 key 即可。
+标准 OpenAI Python 客户端只需修改 `base_url` 即可访问文档声明的 REST 语音子集；默认
+loopback 模式使用占位 key 即可。Realtime 是 current-only 协议，完整语音助手由调用方编排。
 
 ```python
 from openai import OpenAI

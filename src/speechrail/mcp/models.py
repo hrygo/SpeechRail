@@ -117,6 +117,11 @@ class RealtimeStatus(BaseModel):
     streaming_state: str | None = None
     asr_state: str | None = None
     tts_state: str | None = None
+    orchestration: str = "caller"
+    server_llm: bool = False
+    conversation_state: bool = False
+    websocket_path: str = "/v1/realtime"
+    mcp_realtime: bool = False
 
 
 class DescribeResult(BaseModel):

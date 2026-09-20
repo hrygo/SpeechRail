@@ -35,19 +35,17 @@ async def run(options: argparse.Namespace) -> None:
                 {
                     "type": "transcription_session.update",
                     "session": {
-                        "model": options.model,
-                        "language": options.language,
-                        "audio_format": {
-                            "type": "audio/pcm",
-                            "rate": 16000,
-                            "channels": 1,
-                            "sample_width": 2,
+                        "input_audio_format": "pcm16",
+                        "input_audio_transcription": {
+                            "model": options.model,
+                            "language": options.language,
                         },
+                        "turn_detection": {"type": "manual"},
                     },
                 }
             )
         )
-        print(await websocket.recv())
+        print(await websocket.recv())  # transcription_session.updated
 
         with options.pcm_file.open("rb") as pcm_file:
             while chunk := pcm_file.read(6400):

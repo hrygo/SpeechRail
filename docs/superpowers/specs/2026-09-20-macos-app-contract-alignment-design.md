@@ -1,12 +1,18 @@
 ---
 title: "SpeechRail macOS App 最新公共契约对齐"
-status: draft
+status: superseded
 audience: "SpeechRail macOS App 开发者与维护者"
 version: "0.1.0"
 date: 2026-09-20
+superseded_by: docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md
 ---
 
 # SpeechRail macOS App 最新公共契约对齐
+
+> 本草案已被 2026-09-20 的 current-only 无状态 Speech Plane 方案取代。文中 legacy fallback、旧
+> Realtime wire 和“保留旧入口”的内容仅供历史追溯；当前 Native、服务端和 MCP 均以
+> [无状态 Speech Plane 与调用方编排设计](2026-09-20-stateless-speech-plane-caller-orchestration-design.md)
+> 为唯一依据。
 
 ## 1. 目标
 

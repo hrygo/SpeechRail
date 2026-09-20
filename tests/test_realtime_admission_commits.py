@@ -23,7 +23,7 @@ from speechrail.config import Settings
 from test_realtime_openai import FakeSpeechSynthesizer, FakeStreamingFactory, FakeTranscriber
 
 _VAD_UPDATE: dict[str, Any] = {
-    "type": "session.update",
+    "type": "transcription_session.update",
     "session": {
         "turn_detection": {
             "type": "server_vad",

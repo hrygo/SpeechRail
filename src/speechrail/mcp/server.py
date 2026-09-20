@@ -76,8 +76,12 @@ _INSTRUCTIONS = (
     "transcribe/synthesize tools; when a call reports audio_too_long or "
     "times out, use create_job with the same input_ref and poll get_job. If "
     "SpeechRail is busy (backend_busy or queue_full) retry with backoff and "
-    "do not loop. Real-time full-duplex audio is outside this toolset: it "
-    "uses the /v1/realtime WebSocket directly."
+    "do not loop. Real-time full-duplex audio is outside this toolset and "
+    "uses the /v1/realtime WebSocket directly. SpeechRail is a stateless "
+    "Speech Plane: it performs ASR, VAD, diarization facts and explicit TTS "
+    "rendering only. The caller owns the LLM, conversation history, memory, "
+    "persona, tools, playback and barge-in policy; MCP never creates a "
+    "Realtime WebSocket handle or a server-side conversation."
 )
 
 
@@ -211,12 +215,10 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
     async def describe() -> DescribeResult:
         """Return current capability observations and an optional atomic snapshot.
 
-        Legacy tier/profile, readiness, model and voice fields come from
-        independent reads for compatibility.  When the daemon supports the
-        namespaced route, ``effective_capabilities`` contains the single
-        consistent ``effective_capabilities_v1`` response.  Every voice entry
-        carries mode, available and capability discriminators; only choose
-        voices with available=true.
+        Realtime metadata explicitly reports caller-owned orchestration and
+        the absence of server-side LLM or conversation state. Every voice
+        entry carries mode, available and capability discriminators; only
+        choose voices with available=true.
         """
         return DescribeResult.model_validate(await _map_errors(tools.describe(client)))
 

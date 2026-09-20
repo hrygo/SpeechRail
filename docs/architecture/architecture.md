@@ -2,8 +2,8 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.17.0"
-date: 2026-09-13
+version: "1.18.0"
+date: 2026-09-20
 ---
 
 # 🏛️ SpeechRail 系统总体架构
@@ -101,10 +101,9 @@ sequenceDiagram
     participant TTS as TTS Worker
 
     Client->>Host: WebSocket handshake（可选 Bearer）
-    Host-->>Client: session.created
-    Host-->>Client: conversation.created
-    Client->>Host: session.update（语种、voice、manual 或 server_vad）
-    Host-->>Client: session.updated
+    Host-->>Client: session.created（唯一握手事件）
+    Client->>Host: transcription_session.update（ASR、VAD、SpeechRail extensions）
+    Host-->>Client: transcription_session.updated
 
     loop 已接纳的输入音频
         Client->>Host: input_audio_buffer.append（base64 PCM16）
@@ -119,24 +118,22 @@ sequenceDiagram
     ASR-->>Host: partial 或 final transcript
     Host-->>Client: committed → item.created → transcription.delta* → completed/failed
 
-    Client->>Host: conversation.item.create（input_text）
-    Host-->>Client: conversation.item.created
-    Client->>Host: response.create
+    Client->>Host: speechrail.tts.create（caller 已决定的句子）
     Host->>TTS: streaming synthesis（private IPC）
     loop 输出音频
         TTS-->>Host: 24 kHz PCM16 chunks
-        Host-->>Client: response.output_audio.delta（current）或 response.audio.delta（legacy）
+        Host-->>Client: response.output_audio.delta
     end
-    Host-->>Client: response.output_audio.done / response.audio.done → response.done
+    Host-->>Client: response.output_audio.done → response.done
 
     opt 取消正在输出的 TTS
-        Client->>Host: response.cancel
+        Client->>Host: speechrail.tts.cancel（caller barge-in 决策）
         Host->>TTS: cancel task
         Host-->>Client: response.done（status=cancelled）
     end
 ```
 
-`server_vad` 的判定、SpeechAdmission 与 Barge-in 位于主进程会话层；它们决定何时把音频推进 ASR，而不是由 ASR worker 直接向客户端发送 VAD 事件。当前 nested `audio` session profile 使用 `response.output_audio.*`；legacy profile 保持 `response.audio.*`，同一 response 不会混用两组事件。
+`server_vad` 的判定与 SpeechAdmission 位于主进程会话层，决定何时把音频推进 ASR，并向调用方发送 speech start/stop 事实。Barge-in 属于调用方：SpeechRail 不拥有播放队列，不因 VAD 自动取消 TTS；调用方如需打断，显式发送 `speechrail.tts.cancel`。客户端可在收到最终 transcript 后调用自己的 LLM、工具和历史系统，再把待播句子逐条提交给 SpeechRail。
 
 ## 4. Diarization 边界
 
@@ -152,7 +149,7 @@ sequenceDiagram
 | `src/speechrail/backends/` | Qwen3 ASR/TTS、VAD、唯一 CoreML Sortformer adapter |
 | `src/speechrail/runtime/` | queue、ResourceGovernor、worker lifecycle、IPC、jobs |
 | `src/speechrail/http/` | REST/WebSocket 传输、鉴权、错误与 metrics middleware |
-| `src/speechrail/compatibility/` | OpenAI model alias、Realtime event mapping 与稳定 envelope |
+| `src/speechrail/compatibility/` | OpenAI model selection、current-only Realtime event mapping 与稳定 envelope |
 | `src/speechrail/mcp/` | 独立 `speechrail-mcp` 进程的 REST client 与工具组合根 |
 
 ## 6. 不变边界
@@ -162,3 +159,4 @@ sequenceDiagram
 - 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐（ASR∥TTS 重计算重叠是既有单 worker 进程内的准入策略，不复制进程）。
 - 三档只替换权重与量化组合（含按档位精度策略与是否供给分人制品）；公共 API 契约形状、调度和 worker 协议保持一致，但对外声明能力随档位不同，必须如实声明。
 - 客户端拥有麦克风、播放、会议、数据库和 LLM 编排；SpeechRail 提供本地推理、协议与资源边界。
+- Realtime 是 current-only：不保留旧事件翻译、双 wire profile、服务端 LLM 或服务端 conversation state。MCP 只代理无状态 REST 工具，Realtime 必须由调用方直连 WebSocket。

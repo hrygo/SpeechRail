@@ -1,12 +1,16 @@
 ---
 title: "单机语音基座优化交付审计"
-status: active
+status: superseded
+superseded_by: docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md
 audience: "项目维护者、评审者、发布负责人"
 version: "1.0.0"
 date: 2026-09-08
 ---
 
 # 单机语音基座优化交付审计
+
+> 本文保留为 2026-09-08 的历史交付审计。当前 Realtime 契约已切换为无状态 Speech Plane，
+> 旧 current/legacy wire 与服务端编排描述不再是实施依据。
 
 本审计对应[优化方案](2026-09-08-single-machine-speech-foundation-optimization.md)，以代码、契约、确定性测试和本机只读探针为依据。它说明计划项是否已有可审查实现；不将未取得的真实模型质量与性能测量写成通过。
 

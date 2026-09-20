@@ -1,12 +1,16 @@
 ---
 title: "Speaker Diarization OpenAI 实施方案"
-status: ready
+status: superseded
 audience: "SpeechRail 实施与评审人员"
 version: "0.2.0"
 date: 2026-09-08
 ---
 
 # Speaker Diarization OpenAI Implementation Plan
+
+> 本计划已完成其分人领域目标，但其“普通 Realtime 消费者无需迁移”的旧交割口径已被
+> `3.0.0` current-only Speech Plane 取代。本文只保留分人领域实施历史；当前 Realtime wire、
+> 调用方编排和无兼容方向以[无状态 Speech Plane 实施计划](2026-09-20-stateless-speech-plane-caller-orchestration.md)为准。
 
 > 执行者按任务逐项使用 `executing-plans` 工作流；本文件只编写方案，不自动派发开发工作。下列复选框是实施步骤，不是交给用户安排人员验证的任务卡。
 

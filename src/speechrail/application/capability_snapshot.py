@@ -297,6 +297,13 @@ def build_capability_snapshot(
             "enabled": sorted(enabled_voices),
             "rate": sample_rate,
             "tts_text_planner": planner_policy,
+            "realtime": {
+                "orchestration": "caller",
+                "server_llm": False,
+                "conversation_state": False,
+                "websocket_path": "/v1/realtime",
+                "mcp_realtime": False,
+            },
         }
     )
     result: dict[str, Any] = {
@@ -305,6 +312,13 @@ def build_capability_snapshot(
         "catalog_revision": catalog_revision,
         "profile": active.profile,
         "models": models,
+        "realtime": {
+            "orchestration": "caller",
+            "server_llm": False,
+            "conversation_state": False,
+            "websocket_path": "/v1/realtime",
+            "mcp_realtime": False,
+        },
         "voices": [
             _voice_entry(
                 profile, active, ready=ready, enabled_voices=enabled_voices, sample_rate=sample_rate

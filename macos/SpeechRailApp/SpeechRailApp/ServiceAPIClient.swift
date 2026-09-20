@@ -1,7 +1,7 @@
 import Foundation
 import SpeechRailControlKit
 
-extension ServiceAPIClientError: LocalizedError {
+extension ServiceAPIClientError: @retroactive LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidURL:
@@ -831,8 +831,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
             ("language", request.language),
             ("prompt", request.prompt),
             ("response_format", request.responseFormat),
-            ("temperature", request.temperature.map(String.init)),
-            ("stream", request.stream.map(String.init)),
+            ("temperature", request.temperature.map { String($0) }),
+            ("stream", request.stream.map { String($0) }),
             ("chunking_strategy", request.chunkingStrategy),
             ("timestamp_granularities", request.timestamps),
         ]

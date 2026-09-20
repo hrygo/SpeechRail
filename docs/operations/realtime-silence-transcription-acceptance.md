@@ -6,6 +6,9 @@
 - **配套客户端契约**: Sona [Sona #8](https://github.com/hrygo/sona/issues/8)
 - **状态**: accepted (自动化单测、回归门禁与契约一致性 100% 通过)
 
+> 本报告只证明 2026-09-06 的静音准入历史行为，不定义当前 Realtime wire。当前契约以
+> `contracts/realtime-openai.md` 为准，旧事件和旧字段明确拒绝。
+
 ---
 
 ## 1. 治理背景与目标

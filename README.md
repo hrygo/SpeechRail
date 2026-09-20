@@ -66,9 +66,9 @@ It is a good fit when you need:
 | `GET /health`, `/readyz`, `/metrics` | Service diagnostics | Inspect process, subsystem, readiness, and metrics state. |
 | `POST /v1/audio/transcriptions` | File ASR | OpenAI-compatible multipart input; `json`, `verbose_json`, `text`, `srt`, `vtt`, and optional `diarized_json` responses. |
 | `POST /v1/audio/speech` | TTS | Streaming `mp3`, `opus`, `aac`, `flac`, `wav`, or raw `pcm`; select an `available=true` voice from `/v1/voices`. |
-| `GET /v1/models`, `GET /v1/voices` | Compatibility discovery | Legacy projections for the active profile and available voices. |
+| `GET /v1/models`, `GET /v1/voices` | Compatibility discovery | Profile and available-voice discovery projections. |
 | `GET /v1/speechrail/capabilities`, `/v1/speechrail/voices*` | Safe discovery | `effective_capabilities_v1` provides one effective capability generation; namespaced voice discovery omits source text and does not start workers. |
-| `WS /v1/realtime` | Realtime ASR/TTS | OpenAI Realtime event subset, server-side speech admission, and an opt-in namespaced diarization extension. |
+| `WS /v1/realtime` | Realtime ASR/TTS | Current-only stateless Speech Plane: transcription session wire, server-side speech facts, explicit `speechrail.tts.*`, and an opt-in namespaced diarization extension. |
 | `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
 | `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it calls the local REST service and does not host models. |
 
@@ -99,8 +99,10 @@ application. It does not provide:
 - cloud inference, multi-tenant isolation, high availability, or a distributed queue.
 
 Realtime is the sole public WebSocket entry point and implements ASR/TTS
-events only. Read the contract before relying on an OpenAI feature that is not
-listed above.
+events only. The caller owns LLM, history, tools, playback queue, and barge-in
+policy; SpeechRail does not translate old Realtime events or provide a legacy
+wire. Read the contract before relying on an OpenAI feature that is not listed
+above.
 
 ## Requirements
 

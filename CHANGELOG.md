@@ -6,6 +6,18 @@
 
 - 修复 Release 页 DMG 里那个 App「控制通道不可用」：Release workflow 用 `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO` 构建，App 只剩 linker 写进二进制的 ad-hoc 签名（签名标识为 `PRODUCT_NAME`、没有 `Contents/_CodeSignature/CodeResources`），而内嵌 `com.speechrail.desktop.local-control.xpc` 的 peer 策略要求 `identifier "com.speechrail.desktop"`，于是 XPC 校验以 `errSecCSReqFailed`（`xpc_support_check_token ... status: -67050`）拒绝每个控制请求：App 显示「控制通道不可用」、诊断页报「操作未完成」，而 REST 只读信息仍正常。workflow 现在沿用 `Release.xcconfig` 的 ad hoc 签名（`CODE_SIGN_IDENTITY=-`，不需要证书），并新增打包门禁 `scripts/macos_app_verify_local_xpc.sh`：签名标识必须等于 bundle identifier、签名必须在盘上有效、local XPC helper 必须存在且带 `SPEECHRAIL_ALLOW_UNSIGNED_XPC=1`，任一项不满足就在构建后立刻失败、不再生成 DMG。
 
+## [3.0.0] - 2026-09-20
+
+### Breaking
+
+- Realtime 重置为 current-only、无状态 Speech Plane：客户端只发送 `transcription_session.update`、音频 buffer 事件和 `speechrail.tts.create/cancel`；旧 `session.update`、conversation text item、`response.create/cancel`、`response.audio.*` 与双 wire profile 均明确拒绝，不提供 alias 或 `/v2` 迁移层。
+- SpeechRail 不再承担服务端 LLM、conversation history、memory、persona、tool calling、播放或 barge-in 策略；调用方/Native 负责完整助手编排，MCP 仍只代理无状态 REST，不持有 Realtime handle。
+
+### Changed
+
+- Native `AssistantSession` 以本地 LLM/history/memory 为编排根，按本地句子队列逐条提交 caller-owned TTS；VAD speech facts 不再由服务端自动取消 TTS。
+- MCP `describe()` 显式发布 `orchestration=caller`、`server_llm=false`、`conversation_state=false`、`websocket_path=/v1/realtime` 与 `mcp_realtime=false`。
+
 ## [2.7.0] - 2026-09-17
 
 ### Added

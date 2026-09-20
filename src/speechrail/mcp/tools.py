@@ -156,11 +156,7 @@ def _find_voice(voices: list[dict[str, Any]], voice: str) -> dict[str, Any] | No
 
 
 async def describe(client: SpeechRailClient) -> dict[str, Any]:
-    """Return legacy observations plus an atomic effective-capabilities snapshot.
-
-    Legacy fields come from independent reads for compatibility; when present,
-    ``effective_capabilities`` is the single consistent discovery response.
-    """
+    """Return current observations plus an atomic capability snapshot."""
     models = await client.fetch_models()
     voices = await client.fetch_voices()
     health = await client.fetch_health()
@@ -194,6 +190,11 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "streaming_state": _text(health.get("streaming_state")),
             "asr_state": _text(health.get("asr_state")),
             "tts_state": _text(health.get("tts_state")),
+            "orchestration": "caller",
+            "server_llm": False,
+            "conversation_state": False,
+            "websocket_path": "/v1/realtime",
+            "mcp_realtime": False,
         },
         "clone_supported": _bool_flag(capabilities.get("supports_clone")),
         "preview_supported": _bool_flag(capabilities.get("supports_preview")),

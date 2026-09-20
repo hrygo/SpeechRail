@@ -2,8 +2,8 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "1.0.5"
-date: 2026-09-11
+version: "3.0.0"
+date: 2026-09-20
 ---
 
 # 能力诊断与质量验收
@@ -31,7 +31,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 | clone TTS | deterministic seed、clone-only sampling、request-local loudness freeze、peak ceiling、reference signal validation |
 | clone speed | 非 `1.0` 明确返回 `clone_speed_unsupported` |
 
-上述 subtitle/meeting policy 是调用方通过 Realtime `session.update` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
+上述 subtitle/meeting policy 是调用方通过 Realtime `transcription_session.update.session.turn_detection` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
 
 先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`。恢复顺序固定为：`uv run speechrail service status --app-home "$APP_HOME"` → `uv run speechrail service preflight --app-home "$APP_HOME"` → `curl http://127.0.0.1:8201/health`。带 `--app-home` 的 service CLI 会自动使用 active managed runtime；不需要手工从源码 `.venv` 运行 preflight。若 `realtime_vad.code=vad_runtime_missing`，应修复当前 managed release 并重新发布，再重复 preflight；不要在客户端单独安装 SDK，也不要把已配置的 Silero 模型静默降级成 legacy。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status --app-home "$APP_HOME"` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
 

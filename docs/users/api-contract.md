@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.1.3"
+version: "3.0.0"
 date: 2026-09-20
 ---
 
@@ -52,7 +52,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 >   与 aligner 无关。aligner 是分人专用制品，不是词级时间戳的依赖。
 > - **分人只在支持分人的档位声明**：`gpt-4o-transcribe-diarize` 与 `diarized_json` 仅在
 >   `balanced`、`quality` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
->   文件分人与 Realtime 分人扩展（`session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
+>   文件分人与 Realtime 分人扩展（`transcription_session.update.session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
 > - **音色创造仅 `quality`**：prompt design / preview 由 VoiceDesign 承担；reference clone 由独立 Base capability 承担。`balanced`、`light` 上 `supports_instruction`、`supports_preview`、`supports_clone` 均为 `false`。
 > - **双 capability lane**：Quality 的 VoiceDesign 与 Base clone 由两个独立 worker 提供；不同 capability 可同时常驻并发，同一 capability lane 内串行。开启懒加载时按首次请求加载，连续请求不会因 capability 切换反复换模；空闲冷却后仍会由生命周期组件按 Quality group 驱逐，下一次请求惰性恢复所需 worker。
 
@@ -194,9 +194,9 @@ model revision 必须等于当前有效 TTS artifact 的 catalog revision，未�
 `409 model_revision_conflict`，不会启动该次合成。未携带这些扩展 Header 的旧请求保持原有
 alias/模型选择行为。
 
-Realtime 客户端可在 `session.update.session.speechrail` 中使用
+Realtime 客户端可在 `transcription_session.update.session.speechrail` 中使用
 `model_revision: {"expected": "<40-char-hex>"}` 绑定同一 catalog artifact；服务端在
-`session.updated` 回显匹配 revision，并在首个 PCM 前以 `model_revision_conflict` 拒绝未知或
+`transcription_session.updated` 回显匹配 revision，并在首个 PCM 前以 `model_revision_conflict` 拒绝未知或
 不匹配的 revision。该扩展只证明配置 catalog 身份，不等同于权重内容 hash 或 worker 重启后
 身份证明。
 
@@ -389,7 +389,7 @@ Authorization: Bearer <TOKEN>
 ### 5.5 在语音合成中使用自定义音色
 创建成功后，自建音色的 `id` 可直接传入任何合成接口：
 - **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
-- **Realtime 流式会话**：`WS /v1/realtime` 中通过 `session.update` 配置 `{"session": {"voice": "custom_xxx"}}`。
+- **Realtime 流式会话**：`WS /v1/realtime` 中通过 `speechrail.tts.create` 的 `voice` 字段传入 `custom_xxx`；会话更新不保存 voice 状态。
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
@@ -483,22 +483,23 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 
 ## 6. 全双工 Realtime WebSocket (`WS /v1/realtime`)
 
-连接端点：`ws://127.0.0.1:8201/v1/realtime`
+连接端点：`ws://127.0.0.1:8201/v1/realtime`。本节是 current-only 语义；没有旧事件翻译、双 wire profile 或 `/v2` 迁移层。SpeechRail 是无状态 Speech Plane，调用方拥有 LLM、历史、工具、播放和 barge-in。
 
 ### 核心支持事件列表
 | 事件名称 (Type) | 方向 | 说明 |
 |---|---|---|
-| `session.update` | 客户端 → 服务端 | 配置 VAD 模式、音色、转写语种等 |
+| `transcription_session.update` | 客户端 → 服务端 | 在 `session` 中配置 ASR、`pcm16`、manual/server_vad 与 `speechrail` extensions |
 | `input_audio_buffer.append` | 客户端 → 服务端 | 追加 16kHz PCM16 音频块 (Base64 编码) |
-| `input_audio_buffer.commit` | 客户端 → 服务端 | 手动提交当前音频缓冲区并触发识别 |
-| `input_audio_buffer.speech_started` | 服务端 → 客户端 | Server VAD 触发检测到人声开始 |
-| `input_audio_buffer.speech_stopped` | 服务端 → 客户端 | Server VAD 触发检测到人声结束 |
-| `response.create` | 客户端 → 服务端 | 触发语音合成 (Stream-In TTS) |
-| `response.output_audio.delta` / `response.audio.delta` | 服务端 → 客户端 | 流式返回 24kHz PCM16 音频增量块；每个协商 wire profile 只发送其中一种事件 |
-| `response.cancel` | 客户端 → 服务端 | 立即打断并取消正在进行的语音合成 |
+| `input_audio_buffer.commit` | 客户端 → 服务端 | 提交当前音频缓冲并触发识别 |
+| `input_audio_buffer.clear` | 客户端 → 服务端 | 清空未提交缓冲 |
+| `input_audio_buffer.speech_started/stopped` | 服务端 → 客户端 | VAD 事实；不会自动取消 TTS |
+| `speechrail.tts.create` | 客户端 → 服务端 | 提交调用方已决定播放的文本，开始无状态 TTS |
+| `speechrail.tts.cancel` | 客户端 → 服务端 | 按 `request_id` 显式取消当前 TTS |
+| `response.output_audio.delta` / `done` | 服务端 → 客户端 | 当前唯一的流式 PCM16 音频事件 |
+| `response.done` | 服务端 → 客户端 | TTS `completed` / `failed` / `cancelled` 终态 |
 
 ### 6.1 多人会议讲话人分离扩展
-Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 只增加一个 opt-in 字段：`session.speechrail.diarization.enabled=true`。必须在首个 PCM 前设置，session.updated 回显 `enabled/version/max_speakers`。旧的根级或 `input_audio_transcription.diarization` 形状固定返回 `invalid_diarization`。未开启的普通 OpenAI Realtime 会话不接收任何 `speechrail.*` 事件，也不会创建分人会话。开启后，已完成正文通过本地固定文本对齐获得时间边界，绝不为分人再次识别或替换正文。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
+Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 只增加一个 opt-in 字段：`transcription_session.update.session.speechrail.diarization.enabled=true`。必须在首个 PCM 前设置，`transcription_session.updated` 回显 `enabled/version/max_speakers`。旧的根级或 `input_audio_transcription.diarization` 形状固定返回 `invalid_diarization`。未开启的会话不接收分人事件，也不会创建分人会话。开启后，已完成正文通过本地固定文本对齐获得时间边界，绝不为分人再次识别或替换正文。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
 
 | 扩展事件名称 (Type) | 方向 | 说明 |
 |---|---|---|

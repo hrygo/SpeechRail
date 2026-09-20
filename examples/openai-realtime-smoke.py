@@ -82,7 +82,7 @@ def run(options: argparse.Namespace) -> None:
         t_start = time.monotonic()
         deadline = t_start + options.timeout
 
-        # session.created / conversation.created arrive on connect.
+        # The current contract sends only session.created on connect.
         session_created = recv(deadline - time.monotonic())
         print(f"[openai-smoke] recv {_get(session_created, 'type')}")
         if _get(session_created, "type") != "session.created":
@@ -90,15 +90,20 @@ def run(options: argparse.Namespace) -> None:
 
         connection.send(
             {
-                "type": "session.update",
+                "type": "transcription_session.update",
                 "session": {
-                    "model": options.model,
-                    "language": options.language,
-                    "input_audio_format": PCM16,
+                    "input_audio_format": "pcm16",
+                    "input_audio_transcription": {
+                        "model": options.model,
+                        "language": options.language,
+                    },
                     "turn_detection": {"type": "manual"},
                 },
             }
         )
+        updated = recv(deadline - time.monotonic())
+        if _get(updated, "type") != "transcription_session.updated":
+            raise SystemExit(f"expected transcription_session.updated, got {updated}")
 
         audio = options.pcm_file.read_bytes()
         for i in range(0, len(audio), 32000):

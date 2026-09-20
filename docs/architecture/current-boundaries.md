@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-09-12
+date: 2026-09-20
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -16,19 +16,21 @@ date: 2026-09-12
    `light` 不供给 aligner 与 CoreML 路径。
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
-6. 仓库/源码当前 release 版本为 `2.7.0`（以 `pyproject.toml` 与版本一致性门禁为准）。2026-09-12 曾观测到的受管质量档 `2.3.0` 仅保留为**历史部署证据**：当时 health 验证了 `auto → silero`、`speech_admission_enabled=true`、CoreML Sortformer FP16 ready；不能据此推断当前受管安装仍是该版本。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
+6. 仓库/源码当前 release 版本为 `3.0.0`（以 `pyproject.toml` 与版本一致性门禁为准）。`2.7.0` 与更早的受管运行时记录仅保留为**历史部署证据**，不能据此推断当前受管安装状态。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
 7. `server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/400ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. reference clone 仅由 `quality` 的 Qwen3-TTS Base capability 承担，并经 vendor public `generate(ref_audio, ref_text, ...)` 路径执行；VoiceDesign 不再作为 clone fallback。现有请求级 seed、低温度采样、首次有效片段后冻结响度增益、peak ceiling 与非 `1.0` speed 拒绝仍保留，但这些只覆盖确定性/电平边界，不等价于跨文本 speaker identity 已通过。
 10. 词级时间戳由 ASR 原生输出提供（`timestamp_granularities`），不依赖 aligner；aligner 仅为分人路径服务，不是通用 ASR 依赖。分人（含 aligner）只在 `balanced`/`quality` 档位供给。
 11. ASR∥TTS 重计算重叠是可配置策略（ADR-0016）：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）按声明常驻字节与 `max(4 GiB, host_memory // 2)` 预算 fail-closed 判定——任一启用组件未声明非零峰或总量超预算即串行；`true`/`false` 为运维强制。Quality 的 VD∥Base 是额外允许的两条独立 TTS lane：不同 lane 可并发，同一 lane 串行；`balanced/light` 与未声明 lane 的 TTS 仍为单 worker 串行。ASR∥ASR 仍返回 `backend_busy`，不复制进程。Quality 的 heavy-overlap 预算按两个可能常驻的 TTS worker 计入；本机 128 GiB 预算 64 GiB、声明总量 6.66 GiB 的历史 A/B 仅覆盖单 TTS，不能直接作为双 TTS 峰值证据。
 12. Realtime 并发会话的源码默认值由 `Settings.realtime_max_sessions` 唯一定义，当前为 **3**（环境变量 `SPEECHRAIL_REALTIME_MAX_SESSIONS` 可覆盖，校验范围 1–8）。历史文档中的默认值 2 已废弃；能力/运行时判断不得再复制第二套默认常量。
+13. Realtime 已切换为 current-only 无状态 Speech Plane：客户端只使用 `transcription_session.update`、音频 buffer 事件、`speechrail.tts.create/cancel` 和 diarization barrier。服务端只交付 ASR/VAD/匿名分人事实与显式 TTS 音频，不拥有 LLM、conversation history、memory、tools、播放或 barge-in 策略；`speech_started` 不自动取消 TTS。旧事件和旧字段明确拒绝，不做 alias、双 wire profile 或 `/v2` 迁移层。
 
 ## 明确限制
 
-- `/v1/realtime` 只承载 OpenAI Realtime 协议的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、
-  历史或持续会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件
-  匿名分人使用 `gpt-4o-transcribe-diarize` / `diarized_json`。
+- `/v1/realtime` 是 current-only 的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、历史或持续
+  会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件匿名分人使用
+  `gpt-4o-transcribe-diarize` / `diarized_json`。调用方必须自己实现 LLM、历史、工具、播放
+  和 barge-in 编排，TTS 由 `speechrail.tts.create` 显式驱动。
 - `/health` 分别反映 ASR/TTS worker readiness，并以 `realtime_vad.ready/code/message` 单独报告 `server_vad` 子能力；`/readyz` 在至少一个 ASR/TTS 能力可接受请求时返回 200，同时返回 VAD 诊断；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
 - VAD 使用 512 samples/16kHz 的 32ms 帧；因此 Sona 的 `400ms/900ms` 停止配置实际量化为约 `416ms/928ms`。该量化属于帧时钟行为，不应被误读为两个 VAD 同时运行。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
@@ -68,13 +70,13 @@ date: 2026-09-12
 - `sona` 的真实 ASR/TTS worker 端到端音频、播放与回滚验收（当前已完成短语音/协议级 smoke，长时与主观播放仍需独立门）；
 - 多语言/长文件（>60s）的质量、失败恢复与长时间运行基准；
 - diarization 的真实 CoreML smoke、DER/JER、稳定延迟、活跃与驱逐后 `phys_footprint`；
-- 非 loopback 的 TLS、CORS、网段控制、速率限制和 legacy auth 实现；
+- 非 loopback 的 TLS、CORS、网段控制与速率限制实现；
 - 日志收集策略与集中化导出实现；
 - FastAPI startup/shutdown event 迁移到 lifespan 的未来兼容性处理。
 
 ## 发布与端口切换门
 
-REST 自动化门禁、真实 Qwen3 ASR/TTS smoke、目标客户端真实 smoke、实时/legacy
+REST 自动化门禁、真实 Qwen3 ASR/TTS smoke、目标客户端真实 smoke、current-only Realtime
 所需契约实现、回滚演练和安全审计全部通过后，SpeechRail 才作为生产默认。当前 `8201` 是
 独立服务端口；sona 的旧 TTS bridge 已退役，若需回滚只能恢复已验证版本目录与配置，
 不能依赖一个仍在运行的旧 bridge 进程。

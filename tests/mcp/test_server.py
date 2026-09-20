@@ -376,6 +376,11 @@ def test_describe_result_tolerates_unknown_and_partial_nested_payloads() -> None
 
     assert result.tier == "quality"
     assert result.readiness.asr is True
+    assert result.realtime.orchestration == "caller"
+    assert result.realtime.server_llm is False
+    assert result.realtime.conversation_state is False
+    assert result.realtime.websocket_path == "/v1/realtime"
+    assert result.realtime.mcp_realtime is False
     assert result.models[0].id == "speechrail/qwen3-asr"
     dumped = result.model_dump()
     assert dumped["top_level_extra"] == "kept"

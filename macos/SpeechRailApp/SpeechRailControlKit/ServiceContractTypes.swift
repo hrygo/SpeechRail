@@ -353,7 +353,8 @@ public enum ModelIdentityAssurance: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
-        try encoder.singleValueContainer().encode(rawValue)
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -433,7 +434,8 @@ public enum SafeVoiceAvailabilityReason: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
-        try encoder.singleValueContainer().encode(rawValue)
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -505,7 +507,8 @@ public enum VoiceIdentityAssurance: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
-        try encoder.singleValueContainer().encode(rawValue)
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -541,7 +544,8 @@ public enum VoiceQualityStatus: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
-        try encoder.singleValueContainer().encode(rawValue)
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -752,6 +756,15 @@ public struct VoiceRevision: Codable, Equatable, Sendable, Identifiable {
             self.active = try container.decodeIfPresent(Bool.self, forKey: .current)
         }
         self.revoked = try container.decodeIfPresent(Bool.self, forKey: .revoked)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(revision, forKey: .revision)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(active, forKey: .active)
+        try container.encodeIfPresent(revoked, forKey: .revoked)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -1001,11 +1014,12 @@ public enum SpeechVoice: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
         switch self {
         case let .name(value):
-            try encoder.singleValueContainer().encode(value)
+            try container.encode(value)
         case let .id(value):
-            try encoder.singleValueContainer().encode(["id": value])
+            try container.encode(["id": value])
         }
     }
 }
@@ -1157,7 +1171,8 @@ public enum RenderReceiptStatus: Codable, Equatable, Sendable {
         case .error: "error"
         case let .unknown(raw): raw
         }
-        try encoder.singleValueContainer().encode(value)
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
     }
 }
 
@@ -1252,7 +1267,8 @@ public enum TimingStatus: Codable, Equatable, Sendable {
         case .error: "error"
         case let .unknown(raw): raw
         }
-        try encoder.singleValueContainer().encode(value)
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
     }
 }
 

@@ -2,13 +2,13 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "1.6.0"
-date: 2026-09-13
+version: "3.0.0"
+date: 2026-09-20
 ---
 
 # 🌟 SpeechRail 产品全景白皮书
 
-> **产品定位**：面向 macOS (Apple Silicon) 本机应用的高性能、隐私优先、OpenAI 契约全兼容的独立语音识别 (ASR) 与合成 (TTS) 运行时服务。
+> **产品定位**：面向 macOS (Apple Silicon) 本机应用的高性能、隐私优先、OpenAI REST/Realtime 语音子集运行时服务；Realtime 采用 current-only 无状态 Speech Plane。
 > **中文名称**：声轨 (SpeechRail) &nbsp;|&nbsp; **技术标识**：`speechrail`
 
 ---
@@ -17,7 +17,7 @@ date: 2026-09-13
 
 对于需要高质量语音识别与合成能力的**端侧 AI 应用**（如会议助理、桌面智能体、配音工具、无障碍辅助等），**SpeechRail** 是一个**轻量、高效、本地优先的共享语音引擎**。
 
-与传统的“调用云端闭源语音 API”（产生昂贵账单且存在隐私泄露隐患）以及“各自应用内嵌臃肿模型运行时”（造成显存与内存重复争抢崩溃）不同，SpeechRail 提供了**统一的单机多应用共享运行时**，具备**零外网依赖的绝对隐私安全**、**针对 Apple Silicon 统一内存的硬件级极速推理**，以及**与 OpenAI Audio / Realtime 100% 兼容的标准接口**。
+与传统的“调用云端闭源语音 API”（产生昂贵账单且存在隐私泄露隐患）以及“各自应用内嵌臃肿模型运行时”（造成显存与内存重复争抢崩溃）不同，SpeechRail 提供了**统一的单机多应用共享运行时**，具备**零外网依赖的绝对隐私安全**、**针对 Apple Silicon 统一内存的硬件级极速推理**，以及**与 OpenAI Audio / Realtime 选定语音子集对齐的标准接口**。Realtime 不承载服务端 LLM、对话历史或播放控制，完整助手由调用方编排。
 
 ---
 
@@ -34,10 +34,10 @@ mindmap
       Apple Silicon 统一内存优化
       WAV 零拷贝 Fast-Path
       低显存占用与动态 Token 预算
-    🔌 零成本生态迁移
-      OpenAI REST 契约兼容
-      OpenAI Realtime 双向流式
-      主流客户端无需修改代码
+    🔌 清晰的语音契约边界
+      OpenAI REST 语音子集
+      current-only Realtime Speech Plane
+      调用方拥有助手编排
     🛡️ 稳健的资源调度
       进程级物理隔离
       Resource Governor 配额管控
@@ -54,9 +54,10 @@ mindmap
 - **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
 - **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，同时由独立 Base（1.7B）capability worker 承担参考音频克隆；🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
 
-### 🔌 3. 标准兼容与无缝接入 (Zero-Migration Cost)
-- **Drop-in 替换**：全面兼容 OpenAI `/v1/audio/transcriptions`、`/v1/audio/speech` 及 `/v1/realtime`。
-- **开箱即用**：标准 `openai` Python/Node SDK、QwenPaw、Sona、Dify、Open-WebUI 仅需配置 `base_url` 即可接入。
+### 🔌 3. 标准语音契约与清晰编排边界
+- **REST 子集**：`/v1/audio/transcriptions` 与 `/v1/audio/speech` 提供文档声明的 OpenAI 兼容语音接口。
+- **Realtime Speech Plane**：`/v1/realtime` 只接收 current-only transcription session、音频 buffer 和 `speechrail.tts.*`；调用方持有 LLM、历史、工具、播放队列与 barge-in 策略。
+- **无旧版本兼容**：`3.0.0` 不提供旧 Realtime 事件、字段、alias、双 wire 或 `/v2` 迁移层；新集成直接按当前契约实现。
 
 ### 🛡️ 4. 稳健的单机多应用调度 (Multi-App Resource Governor)
 - **物理进程隔离**：主 HTTP 服务与推理 Worker 物理分离，模型崩溃不波及服务 API。

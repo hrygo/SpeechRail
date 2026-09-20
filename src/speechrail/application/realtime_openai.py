@@ -12,7 +12,7 @@ import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
@@ -41,9 +41,7 @@ from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
-    conversation_created,
     conversation_item_created,
-    conversation_text_item_created,
     diarization_done_event,
     diarization_status_event,
     diarization_update_event,
@@ -51,10 +49,10 @@ from speechrail.compatibility.openai_realtime import (
     error_event,
     input_audio_buffer_cleared,
     input_audio_buffer_committed,
+    parse_client_event,
     parse_finish_request,
-    parse_text_item,
-    parse_tts_response_speed,
-    reject_unsupported,
+    parse_tts_cancel,
+    parse_tts_create,
     response_audio_delta,
     response_audio_done,
     response_audio_transcript_delta,
@@ -200,7 +198,14 @@ class OpenAIRealtimeSession:
         # putting a session/request identifier into metrics labels.
         self._asr_commit_started_at: float | None = None
         self._tts_task: asyncio.Task[None] | None = None
+        # Request ids are connection-scoped idempotency keys. Retain only a
+        # bounded ledger of opaque ids; text/audio never enters this ledger.
+        self._tts_request_ids: deque[str] = deque(maxlen=256)
+        self._tts_request_id: str | None = None
         self._tts_response_id: str | None = None
+        self._tts_item_id: str | None = None
+        self._tts_text: str | None = None
+        self._tts_voice_revision: str | None = None
         self._tts_receipt_id: str | None = None
         self._render_receipts_enabled = False
         self._diarization: DiarizationSession | None = None
@@ -212,7 +217,6 @@ class OpenAIRealtimeSession:
         # 30 seconds, independently of generic WebSocket buffering.
         self._alignment_pcm = bytearray()
         self._alignment_overflow = False
-        self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
@@ -265,6 +269,7 @@ class OpenAIRealtimeSession:
             "prompt": "",
             "input_sample_rate": 16_000,
             "expected_model_revision": None,
+            "tts_enabled": False,
         }
 
     @staticmethod
@@ -284,31 +289,26 @@ class OpenAIRealtimeSession:
             )
         )
 
-        await self._send(conversation_created(session_id=self._session_id))
-
     async def handle(self, event: dict[str, Any]) -> None:
-        event_type = str(event.get("type") or "")
-        if event_type == "session.update":
+        parsed = parse_client_event(event)
+        if parsed.kind == "transcription_session_update":
             await self._update_session(event)
-        elif event_type == "input_audio_buffer.append":
+        elif parsed.kind == "append":
             await self._append_audio(event)
-        elif event_type == "input_audio_buffer.commit":
+        elif parsed.kind == "commit":
             await self._commit_audio()
-        elif event_type == "speechrail.diarization.finish":
+        elif parsed.kind == "diarization_finish":
             await self._handle_finish(event)
-        elif event_type == "input_audio_buffer.clear":
+        elif parsed.kind == "clear":
             await self._clear_audio()
-        elif event_type == "conversation.item.create":
-            await self._create_text_item(event)
-        elif event_type == "response.create":
-            await self._create_response(event)
-        elif event_type == "response.cancel":
-            await self._cancel_response()
-        elif event_type == "input_audio_buffer.cleared":
-            return
+        elif parsed.kind == "tts_create":
+            await self._create_tts(event)
+        elif parsed.kind == "tts_cancel":
+            await self._cancel_response(event)
         else:
-            reject_unsupported(event_type)
-            raise RealtimeAdapterError("unknown_event", f"unsupported event type: {event_type}")
+            raise RealtimeAdapterError(
+                "unsupported_operation", "unsupported SpeechRail event"
+            )
 
     async def close(self) -> None:
         await self._stop_asr_reader()
@@ -335,11 +335,11 @@ class OpenAIRealtimeSession:
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
 
-        # The public extension is intentionally one small, namespaced switch.
-        # Internally it activates the existing continuous-session machinery;
-        # its legacy wire shape never reaches a client.
+        # The public extension is intentionally namespaced. The caller opts in
+        # to stateless TTS rendering; SpeechRail never infers an assistant mode.
         adapted_event = dict(event)
         requested_enabled: bool | None = None
+        requested_tts_enabled: bool | None = None
         requested_receipts: bool | None = None
         requested_model_revision: str | None = None
         model_revision_present = False
@@ -361,7 +361,12 @@ class OpenAIRealtimeSession:
                     "invalid_speechrail_extension",
                     "session.speechrail must be an object",
                 )
-            unknown = set(raw_extension) - {"diarization", "render_receipts", "model_revision"}
+            unknown = set(raw_extension) - {
+                "tts",
+                "diarization",
+                "render_receipts",
+                "model_revision",
+            }
             if unknown:
                 raise RealtimeAdapterError(
                     "invalid_speechrail_extension",
@@ -379,6 +384,18 @@ class OpenAIRealtimeSession:
                         "session.speechrail.diarization requires boolean enabled only",
                     )
                 requested_enabled = raw_diarization["enabled"]
+            if "tts" in raw_extension:
+                raw_tts = raw_extension["tts"]
+                if (
+                    not isinstance(raw_tts, dict)
+                    or set(raw_tts) != {"enabled"}
+                    or not isinstance(raw_tts.get("enabled"), bool)
+                ):
+                    raise RealtimeAdapterError(
+                        "tts_request_invalid",
+                        "session.speechrail.tts requires boolean enabled only",
+                    )
+                requested_tts_enabled = raw_tts["enabled"]
             if "render_receipts" in raw_extension:
                 raw_receipts = raw_extension["render_receipts"]
                 if (
@@ -427,6 +444,22 @@ class OpenAIRealtimeSession:
             config["expected_model_revision"] = requested_model_revision
         else:
             config.setdefault("expected_model_revision", None)
+        if requested_tts_enabled is not None:
+            if requested_tts_enabled and not self._services.tts_ready:
+                raise RealtimeAdapterError(
+                    "backend_not_ready", "TTS backend is not ready"
+                )
+            if (
+                not requested_tts_enabled
+                and self._tts_task is not None
+                and not self._tts_task.done()
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_state", "cannot disable TTS while a response is active"
+                )
+            config["tts_enabled"] = requested_tts_enabled
+        else:
+            config.setdefault("tts_enabled", False)
         input_sample_rate = int(config.get("input_sample_rate", 16_000))
         if self._timeline.accepted_samples > 0 and input_sample_rate != self._input_sample_rate:
             raise RealtimeAdapterError(
@@ -561,7 +594,9 @@ class OpenAIRealtimeSession:
             self._render_receipts_enabled = requested_receipts
         session_payload = updated.get("session")
         if isinstance(session_payload, dict):
-            extension: dict[str, object] = {}
+            extension: dict[str, object] = {
+                "tts": {"enabled": bool(self._config.get("tts_enabled", False))}
+            }
             if self._diarization_enabled:
                 extension["diarization"] = {
                     "enabled": True,
@@ -669,14 +704,6 @@ class OpenAIRealtimeSession:
             self._unflushed_bytes = 0
 
             self._services.metrics.record_vad("started")
-            if (
-                self._tts_task is not None
-                and not self._tts_task.done()
-                and self._bargein_allowed()
-            ):
-                self._services.metrics.record_bargein()
-                await self._cancel_response()
-                self._mark_bargein_cooldown()
 
             audio_start_ms = int((dec.start_sample / 16_000) * 1000)
             await self._send(
@@ -811,14 +838,6 @@ class OpenAIRealtimeSession:
             for v_event in vad_events:
                 if v_event.speech_started:
                     self._services.metrics.record_vad("started")
-                    if (
-                        self._tts_task is not None
-                        and not self._tts_task.done()
-                        and self._bargein_allowed()
-                    ):
-                        self._services.metrics.record_bargein()
-                        await self._cancel_response()
-                        self._mark_bargein_cooldown()
                     await self._send(
                         input_audio_buffer_speech_started(
                             session_id=self._session_id,
@@ -1060,48 +1079,27 @@ class OpenAIRealtimeSession:
         self._current_item_id = self._new_item_id()
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
-    async def _create_text_item(self, event: dict[str, Any]) -> None:
-        text = parse_text_item(event)
+    async def _create_tts(self, event: dict[str, Any]) -> None:
+        request = parse_tts_create(event)
+        if not bool(self._config.get("tts_enabled", False)):
+            raise RealtimeAdapterError(
+                "tts_not_enabled",
+                "caller TTS must be enabled in the transcription session",
+            )
         if not self._services.tts_ready or self._tts is None:
             raise RealtimeAdapterError("backend_not_ready", "TTS backend is not ready")
-        item_id = f"item_{uuid4().hex[:12]}"
-        self._pending_text = text
-        await self._send(
-            conversation_text_item_created(session_id=self._session_id, item_id=item_id, text=text)
-        )
-
-    async def _create_response(self, event: dict[str, Any]) -> None:
-        if self._pending_text is None:
-            raise RealtimeAdapterError(
-                "invalid_state",
-                "response.create requires a preceding conversation.item.create text input",
-            )
         if self._tts_task is not None and not self._tts_task.done():
-            raise RealtimeAdapterError("invalid_state", "a TTS response is already in progress")
-        response_body = event.get("response")
-        response_voice: str | None = None
-        response_speed = parse_tts_response_speed(response_body)
-        if isinstance(response_body, dict) and response_body.get("voice") is not None:
-            raw_voice = response_body["voice"]
-            if not isinstance(raw_voice, str) or not raw_voice.strip():
-                raise RealtimeAdapterError(
-                    "invalid_voice", "response.voice must be a non-blank string"
-                )
-            response_voice = resolve_voice(raw_voice.strip())
-            from speechrail.domain.tts import get_voice_profile
-            try:
-                get_voice_profile(response_voice)
-            except VoiceStoreUnavailableError:
-                raise RealtimeAdapterError(
-                    "voice_store_unavailable", "custom voice storage is unavailable"
-                ) from None
-            except ValueError:
-                raise RealtimeAdapterError(
-                    "voice_not_found", f"unknown voice: {response_voice[:200]}"
-                ) from None
-            self._require_voice_available(response_voice)
-        selected_voice = response_voice or str(
-            self._config.get("voice") or DEFAULT_VOICE_ID
+            raise RealtimeAdapterError(
+                "tts_in_progress", "a TTS response is already in progress"
+            )
+        if request.request_id in self._tts_request_ids:
+            raise RealtimeAdapterError(
+                "tts_request_invalid",
+                "request_id must be unique within this WebSocket connection",
+            )
+
+        selected_voice = resolve_voice(
+            request.voice or str(self._config.get("voice") or DEFAULT_VOICE_ID)
         )
         from speechrail.domain.tts import get_voice_profile
 
@@ -1109,18 +1107,24 @@ class OpenAIRealtimeSession:
             selected_profile = get_voice_profile(selected_voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
-                "voice_store_unavailable",
-                "custom voice storage is unavailable",
+                "voice_store_unavailable", "custom voice storage is unavailable"
             ) from None
         except ValueError:
             raise RealtimeAdapterError(
-                "voice_not_found",
-                f"unknown voice: {selected_voice[:200]}",
+                "voice_not_found", f"unknown voice: {selected_voice[:200]}"
             ) from None
         if selected_profile.revoked:
             raise RealtimeAdapterError(
-                "voice_revoked",
-                f"voice {selected_voice[:200]} is revoked",
+                "voice_revoked", f"voice {selected_voice[:200]} is revoked"
+            )
+        self._require_voice_available(selected_voice)
+        if (
+            request.expected_voice_revision is not None
+            and request.expected_voice_revision != selected_profile.revision
+        ):
+            raise RealtimeAdapterError(
+                "voice_revision_conflict",
+                "Requested voice revision is not active",
             )
         expected_model_revision = self._config.get("expected_model_revision")
         if isinstance(expected_model_revision, str):
@@ -1133,21 +1137,26 @@ class OpenAIRealtimeSession:
 
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
+        self._tts_request_id = request.request_id
         self._tts_response_id = response_id
+        self._tts_item_id = item_id
+        self._tts_text = request.text
+        self._tts_voice_revision = selected_profile.revision
+        self._tts_receipt_id = None
+        self._tts_request_ids.append(request.request_id)
         self._tts_task = asyncio.create_task(
-            self._synthesize_tts(
-                self._pending_text,
+            self._run_tts(
+                request.text,
                 voice=selected_voice,
                 voice_revision=selected_profile.revision,
                 voice_mode=selected_profile.mode,
                 expected_model_revision=expected_model_revision,
                 language=str(self._config.get("language") or "auto"),
-                speed=response_speed,
+                speed=request.speed,
                 response_id=response_id,
                 item_id=item_id,
             )
         )
-        self._pending_text = None
 
     def _tts_artifact_for_mode(self, voice_mode: str) -> ModelArtifact | None:
         if voice_mode == "clone" and self._tts_clone_artifact is not None:
@@ -1215,14 +1224,27 @@ class OpenAIRealtimeSession:
     def _mark_bargein_cooldown(self) -> None:
         self._bargein_cooldown_until = time.monotonic() + self._bargein_cooldown_s
 
-    async def _cancel_response(self) -> None:
-        if self._tts_task is None or self._tts_task.done() or self._tts_response_id is None:
-            raise RealtimeAdapterError("invalid_state", "no active TTS response to cancel")
+    async def _cancel_response(self, event: dict[str, Any]) -> None:
+        request = parse_tts_cancel(event)
+        if (
+            self._tts_task is None
+            or self._tts_task.done()
+            or self._tts_response_id is None
+            or self._tts_request_id != request.request_id
+            or (request.response_id is not None and request.response_id != self._tts_response_id)
+        ):
+            raise RealtimeAdapterError(
+                "tts_not_active", "the requested TTS response is not active"
+            )
         response_id = self._tts_response_id
+        request_id = self._tts_request_id
+        item_id = self._tts_item_id
+        text = self._tts_text
+        voice_revision = self._tts_voice_revision
+        receipt_id = self._tts_receipt_id
         self._tts_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._tts_task
-        receipt_id = self._tts_receipt_id
         if receipt_id is not None:
             self._services.render_receipts.cancel(receipt_id)
         await self._send(
@@ -1230,11 +1252,26 @@ class OpenAIRealtimeSession:
                 response_id=response_id,
                 status="cancelled",
                 receipt_id=receipt_id,
+                request_id=request_id,
+                item_id=item_id,
+                text=text,
+                voice_revision=voice_revision,
             )
         )
-        self._tts_task = None
-        self._tts_response_id = None
-        self._tts_receipt_id = None
+
+    async def _run_tts(self, text: str, **kwargs: Any) -> None:
+        response_id = str(kwargs["response_id"])
+        try:
+            await self._synthesize_tts(text, **kwargs)
+        finally:
+            if self._tts_response_id == response_id:
+                self._tts_task = None
+                self._tts_request_id = None
+                self._tts_response_id = None
+                self._tts_item_id = None
+                self._tts_text = None
+                self._tts_voice_revision = None
+                self._tts_receipt_id = None
 
     def _completed_event(self, *, transcript: str) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""
@@ -1639,9 +1676,6 @@ class OpenAIRealtimeSession:
                 error_event(code="backend_not_ready", message="TTS backend is not ready")
             )
             return
-        wire_profile: Literal["legacy", "current"] = (
-            "current" if self._config.get("wire_profile") == "current" else "legacy"
-        )
         receipt_id: str | None = None
         if self._render_receipts_enabled:
             artifact = (
@@ -1651,7 +1685,7 @@ class OpenAIRealtimeSession:
             )
             try:
                 receipt_id = self._services.render_receipts.begin(
-                    request_id=response_id,
+                    request_id=self._tts_request_id or response_id,
                     response_id=response_id,
                     voice_id=voice,
                     voice_revision=voice_revision,
@@ -1724,7 +1758,6 @@ class OpenAIRealtimeSession:
                                     response_id=response_id,
                                     item_id=item_id,
                                     delta=base64.b64encode(chunk.audio).decode("ascii"),
-                                    wire_profile=wire_profile,
                                 )
                             )
                             emitted_samples += len(chunk.audio) // 2
@@ -1806,7 +1839,6 @@ class OpenAIRealtimeSession:
                     session_id=self._session_id,
                     response_id=response_id,
                     item_id=item_id,
-                    wire_profile=wire_profile,
                 )
             )
             await self._send(
@@ -1899,11 +1931,24 @@ class OpenAIRealtimeSession:
         response_id: str,
         status: str,
         receipt_id: str | None,
+        request_id: str | None = None,
+        item_id: str | None = None,
+        text: str | None = None,
+        voice_revision: str | None = None,
     ) -> dict[str, object]:
+        speechrail: dict[str, object] = {
+            "kind": "tts",
+            "orchestration": "caller",
+            "request_id": request_id or self._tts_request_id or response_id,
+            "voice_revision": voice_revision or self._tts_voice_revision,
+        }
         event = response_done(
             session_id=self._session_id,
             response_id=response_id,
             status=status,
+            item_id=item_id or self._tts_item_id,
+            transcript=text if text is not None else self._tts_text,
+            speechrail=speechrail,
         )
         if not self._render_receipts_enabled or receipt_id is None:
             return event
@@ -1911,7 +1956,9 @@ class OpenAIRealtimeSession:
             receipt = self._services.render_receipts.get(receipt_id)
         except KeyError:
             return event
-        event["speechrail"] = {"render_receipt": receipt}
+        event_speechrail = event.get("speechrail")
+        if isinstance(event_speechrail, dict):
+            event_speechrail["render_receipt"] = receipt
         return event
 
     async def _reserve_asr(self) -> None:

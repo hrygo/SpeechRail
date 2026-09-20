@@ -1,7 +1,8 @@
 ---
 title: "SpeechRail 迁移 Runbook"
 status: active
-date: 2026-09-11
+version: "3.0.0"
+date: 2026-09-20
 ---
 
 # SpeechRail 迁移 Runbook
@@ -40,9 +41,8 @@ QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:82
 
 ## `sona`：已切换并核验
 
-主路线已由 ADR-0009 固定为 `/v1/realtime` OpenAI Realtime 兼容协议。当前 SpeechRail legacy `/asr` 已禁用，
-没有为 SpeechRail 配置 WLK sidecar，也没有活动的 ASR fallback。legacy `/asr` 与
-`/v1/realtime/legacy` 端点在 v1.0.0 已移除。
+主路线已由 ADR-0019 固定为 `/v1/realtime` current-only 无状态 Speech Plane。当前 SpeechRail legacy `/asr` 已禁用，
+没有为 SpeechRail 配置 WLK sidecar，也没有活动的 ASR fallback；旧 Realtime wire 不在运行时保留。
 
 `sona` 使用以下已实现的边界：
 
@@ -65,20 +65,20 @@ VR_INTERACTION_TTS_VOICE=default
 VR_INTERACTION_TTS_LANGUAGE=auto
 ```
 
-已使用真实本地 PCM 验证 Realtime `session.update → append → commit → transcription.completed`，
-并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为 SpeechRail Realtime/REST：
+已使用真实本地 PCM 验证历史 Realtime `session.update → append → commit → transcription.completed`，
+该记录只作为历史证据；当前契约使用 `transcription_session.update`，并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为调用方驱动的 SpeechRail Realtime/REST：
 `sona` 保留 Pipecat、播放、回声、persona、会议、PostgreSQL 与 UI，仅消费
 SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM、会议、PostgreSQL 或 UI。
 
 多人会议的文件分人使用 OpenAI 原生 `model="gpt-4o-transcribe-diarize"` 与
 `response_format="diarized_json"`，消费匿名 A–D `speaker`。Realtime 分人只需在首个 PCM 前发送
-`session.speechrail.diarization.enabled=true`，随后处理 `speechrail.diarization.updated`、
-`speechrail.diarization.status` 与 `speechrail.diarization.done`。普通 OpenAI SDK 消费者无需迁移。
+`transcription_session.update` 中的 `session.speechrail.diarization.enabled=true`，随后处理
+`speechrail.diarization.updated`、`speechrail.diarization.status` 与 `speechrail.diarization.done`。所有 Realtime 调用方按 `3.0.0` current-only 契约接入，不提供旧事件迁移层。
 缺少固定 CoreML profile 时以 `diarization_not_available` fail closed，不会静默降级为已标注的单
 speaker 会议。姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
 
 此状态是**运行时唯一切换**；旧 `vr-bridge` 的 console entry、TTS 专属依赖、模型缓存模块和
-旧 TTS 源码已退役。ASR 的历史兼容配置仍按各自 deprecation 计划处理。
+旧 TTS 源码已退役。部署回滚可以恢复上一 release，但不等于在当前运行时保留旧公共协议。
 
 ## 三档重排与 aligner 供给升级（catalog v2）
 

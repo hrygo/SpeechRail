@@ -21,7 +21,7 @@ class _FakeRealtimeConnection:
         self._diarization = diarization
         self._vad_emitted = False
         self._closed = False
-        self._events.put({"type": "conversation.created"})
+        self._events.put({"type": "session.created"})
 
     def recv(self) -> object:
         event = self._events.get()
@@ -31,8 +31,8 @@ class _FakeRealtimeConnection:
 
     def send(self, event: dict[str, object]) -> None:
         event_type = event.get("type")
-        if event_type == "session.update":
-            self._events.put({"type": "session.updated"})
+        if event_type == "transcription_session.update":
+            self._events.put({"type": "transcription_session.updated"})
         elif event_type == "input_audio_buffer.append" and self._server_vad:
             if not self._vad_emitted:
                 self._vad_emitted = True
@@ -57,10 +57,8 @@ class _FakeRealtimeConnection:
                 self._events.put({"type": "speechrail.diarization.updated"})
         elif event_type == "speechrail.diarization.finish":
             self._events.put({"type": "speechrail.diarization.done"})
-        elif event_type == "conversation.item.create":
-            self._events.put({"type": "conversation.item.created"})
-        elif event_type == "response.create":
-            self._events.put({"type": "response.audio.delta", "delta": "AA=="})
+        elif event_type == "speechrail.tts.create":
+            self._events.put({"type": "response.output_audio.delta", "delta": "AA=="})
             self._events.put({"type": "response.done"})
 
     def close(self) -> None:

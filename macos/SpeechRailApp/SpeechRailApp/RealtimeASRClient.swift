@@ -21,8 +21,8 @@ public actor RealtimeASRClient {
     /// 但那是给标准 OpenAI 客户端准备的；App 是我们自己的客户端，报 canonical 名。
     public static let canonicalASRModel = "speechrail/qwen3-asr-1.7b"
 
-    /// 流式转写的线上格式。契约只接受 16 kHz 与 24 kHz 两种 PCM16；
-    /// 原生层归一到 16 kHz，把"不得改格式"这条硬约束变成结构上碰不到的情况。
+    /// 流式转写的线上格式。当前 SpeechRail transcription session 固定使用
+    /// 16 kHz / 单声道 / PCM16；原生层归一到这个格式。
     public static let sampleRate: Double = 16_000
 
     public enum Failure: LocalizedError, Equatable, Sendable {
@@ -136,7 +136,7 @@ public actor RealtimeASRClient {
     public enum Event: Sendable {
         /// `session.created`：握手完成，服务端声明了实际能力。
         case ready(model: String)
-        /// `session.updated`：我们那次 `session.update` 生效了，可以开始喂 PCM。
+        /// `transcription_session.updated`：配置生效，可以开始喂 PCM。
         case configured
         case speechStarted
         case speechStopped
@@ -180,6 +180,7 @@ public actor RealtimeASRClient {
     private let diarizationEnabled: Bool
     private let expectedModelRevision: String?
     private let renderReceiptsEnabled: Bool
+    private let callerTTSEnabled: Bool
     private let session: URLSession
 
     private var task: URLSessionWebSocketTask?
@@ -187,8 +188,10 @@ public actor RealtimeASRClient {
     private var didClose = false
     private var continuation: AsyncStream<RealtimeEventEnvelope<Event>>.Continuation?
     private var stream: AsyncStream<RealtimeEventEnvelope<Event>>?
-    /// 最近一次写进 `session.update` 的音色。换音色走同一个字段（下一句生效）。
+    /// 下一次 caller-owned TTS request 使用的音色。
     private var voice: String?
+    private var activeTTSRequestID: String?
+    private var activeTTSResponseID: String?
     /// `finish` 的 event_id。契约要求同一个 id 重试幂等、不同 id 拒绝。
     private var finishEventID: String?
     private var finishSent = false
@@ -218,7 +221,8 @@ public actor RealtimeASRClient {
         apiKey: String? = nil,
         session: URLSession = .shared,
         expectedModelRevision: String? = nil,
-        renderReceiptsEnabled: Bool = false
+        renderReceiptsEnabled: Bool = false,
+        callerTTSEnabled: Bool = false
     ) {
         var components = URLComponents()
         components.scheme = "ws"
@@ -236,6 +240,7 @@ public actor RealtimeASRClient {
         self.diarizationEnabled = diarizationEnabled
         self.expectedModelRevision = expectedModelRevision
         self.renderReceiptsEnabled = renderReceiptsEnabled
+        self.callerTTSEnabled = callerTTSEnabled
         self.voice = voice
         self.session = session
     }
@@ -253,7 +258,7 @@ public actor RealtimeASRClient {
 
     // MARK: - 连接
 
-    /// 建连、声明转写会话、等 `session.updated`。返回即表示可以开始喂 PCM。
+    /// 建连、声明转写会话、发送 current-only 配置。返回即表示可以开始喂 PCM。
     public func connect() async throws {
         guard task == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
@@ -266,7 +271,8 @@ public actor RealtimeASRClient {
         task.resume()
         startReceiveLoop(on: task)
 
-        // `session.update` 要在首个 PCM **之前**落地：契约里格式与分人都只在那一刻协商一次。
+        // `transcription_session.update` 要在首个 PCM **之前**落地：格式、分人和
+        // caller-owned TTS 都在这一刻协商。
         try await send(configurationEvent())
     }
 
@@ -326,37 +332,28 @@ public actor RealtimeASRClient {
         try await waitForClearAcknowledgement(timeout: timeout)
     }
 
-    /// 换音色。**下一句生效**，只影响 TTS，不进 prompt（§14.4）。
-    ///
-    /// 被拒时服务端回 `voice_not_found` / `voice_not_available`，走 `serverError`；
-    /// 调用点的规矩是**这一句仍用旧音色说**，会话继续（§9 第 14 行）。
+    /// 换音色。**下一次 TTS request 生效**，只影响 TTS，不进 prompt。
     public func updateVoice(_ voice: String) async throws {
         self.voice = voice
-        try await send(["type": "session.update", "session": ["voice": voice]])
     }
 
-    /// 让服务端把一段文本念出来（助手用；字幕/会议不调）。
-    ///
-    /// 契约里这是两步：先 `conversation.item.create`（`role=user` 的 `input_text`），
-    /// 再 `response.create`。文本 item 创建需要 TTS ready。
-    public func speak(_ text: String) async throws {
+    /// 让服务端把调用方生成的一段文本念出来（助手用；字幕/会议不调）。
+    /// LLM、历史、句子切分和排队都在调用方；这里仅提交一个无状态 render request。
+    public func sendTTSCreate(text: String) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        try await send([
-            "type": "conversation.item.create",
-            "item": [
-                "type": "message",
-                "role": "user",
-                "content": [["type": "input_text", "text": text]]
-            ]
-        ])
-        var response: [String: Any] = ["type": "response.create"]
-        if let voice { response["response"] = ["voice": voice] }
-        try await send(response)
+        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
+        activeTTSRequestID = requestID
+        try await send(
+            SpeechRailTTSCreate(requestID: requestID, text: text, voice: voice).jsonObject
+        )
     }
 
     /// 取消正在合成的 TTS（用户插话）。未发送的音频由服务端丢弃。
-    public func cancelResponse() async throws {
-        try await send(["type": "response.cancel"])
+    public func cancelTTS() async throws {
+        guard let requestID = activeTTSRequestID else { return }
+        try await send(
+            SpeechRailTTSCancel(requestID: requestID, responseID: activeTTSResponseID).jsonObject
+        )
     }
 
     /// 推流结束时的分人 EOF 屏障：等水位对齐再封存，末段不丢（§14.3）。
@@ -385,48 +382,21 @@ public actor RealtimeASRClient {
         }
     }
 
-    /// 转写会话的配置。形状对着服务端的解析写（`compatibility/openai_realtime.py` 的
-    /// `apply_session_update`）：`audio.input.format` 收 `{type: "audio/pcm", rate: 16000}`，
-    /// `turn_detection` 收 `server_vad` + 静音窗口，`transcription.language` 可省。
+    /// 转写会话的配置。形状对着服务端的 current-only 解析写：
+    /// `input_audio_format` 固定 `pcm16`，转写模型位于 `input_audio_transcription`。
     ///
     /// 分人按 `session.speechrail.diarization.enabled` opt-in，**只能在这里声明一次**：
     /// 首个 PCM 之后再协商，服务端按契约回 `invalid_state`（§14.3 的开关粒度）。
     private func configurationEvent() -> [String: Any] {
-        var session: [String: Any] = [
-            "model": model,
-            "audio": [
-                "input": [
-                    "format": ["type": "audio/pcm", "rate": Int(Self.sampleRate)],
-                    "turn_detection": [
-                        "type": "server_vad",
-                        "threshold": threshold,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": silenceDurationMilliseconds
-                    ],
-                    "transcription": ["model": model]
-                ]
-            ]
-        ]
-        var speechrail: [String: Any] = [:]
-        if diarizationEnabled {
-            speechrail["diarization"] = ["enabled": true]
-        }
-        if let expectedModelRevision {
-            speechrail["model_revision"] = ["expected": expectedModelRevision]
-        }
-        if renderReceiptsEnabled {
-            speechrail["render_receipts"] = ["enabled": true]
-        }
-        if !speechrail.isEmpty {
-            session["speechrail"] = speechrail
-        }
-        if let voice {
-            session["voice"] = voice
-        }
-        return [
-            "type": "session.update",
-            "session": session
-        ]
+        TranscriptionSessionUpdate(
+            model: model,
+            threshold: threshold,
+            silenceDurationMilliseconds: silenceDurationMilliseconds,
+            callerTTSEnabled: callerTTSEnabled,
+            diarizationEnabled: diarizationEnabled,
+            expectedModelRevision: expectedModelRevision,
+            renderReceiptsEnabled: renderReceiptsEnabled
+        ).jsonObject
     }
 
     private func withStageTimeout<T: Sendable>(
@@ -555,7 +525,7 @@ public actor RealtimeASRClient {
         case "session.created":
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
             emit(.ready(model: model))
-        case "session.updated":
+        case "transcription_session.updated":
             emit(.configured)
         case "input_audio_buffer.speech_started":
             emit(.speechStarted)
@@ -623,7 +593,9 @@ public actor RealtimeASRClient {
                     status: object["status"] as? String ?? "complete"
                 )
             )
-        case "response.audio.delta", "response.output_audio.delta":
+        case "response.created":
+            activeTTSResponseID = (object["response"] as? [String: Any])?["id"] as? String
+        case "response.output_audio.delta":
             if let base64 = object["delta"] as? String, let data = Data(base64Encoded: base64) {
                 emit(.responseAudio(data))
             }
@@ -636,6 +608,8 @@ public actor RealtimeASRClient {
                     receipt: Self.renderReceipt(from: object)
                 )
             )
+            activeTTSRequestID = nil
+            activeTTSResponseID = nil
         case "conversation.item.input_audio_transcription.failed":
             let itemID = object["item_id"] as? String ?? ""
             closeBarrier.failed(itemID: itemID)
@@ -711,24 +685,11 @@ public actor RealtimeASRClient {
         return nil
     }
 
-    /// Supports the current top-level `speechrail.render_receipt` shape and
-    /// the older nested response shape used by early Realtime servers.
+    /// Decode the current top-level `speechrail.render_receipt` shape.
     private static func renderReceipt(from object: [String: Any]) -> RenderReceipt? {
         var candidates: [[String: Any]] = []
         if let speechrail = object["speechrail"] as? [String: Any],
            let receipt = speechrail["render_receipt"] as? [String: Any] {
-            candidates.append(receipt)
-        }
-        if let response = object["response"] as? [String: Any] {
-            if let speechrail = response["speechrail"] as? [String: Any],
-               let receipt = speechrail["render_receipt"] as? [String: Any] {
-                candidates.append(receipt)
-            }
-            if let receipt = response["render_receipt"] as? [String: Any] {
-                candidates.append(receipt)
-            }
-        }
-        if let receipt = object["render_receipt"] as? [String: Any] {
             candidates.append(receipt)
         }
 

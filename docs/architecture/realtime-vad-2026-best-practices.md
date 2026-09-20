@@ -44,7 +44,7 @@ date: 2026-09-09
 | **评分器（legacy）** | `src/speechrail/backends/vad.py` | `VoiceActivityDetector`：RMS（噪声底约 -46dBFS，`rms < 120` 即 0）+ 过零率 → sigmoid 打分；16kHz、512 采样帧（32ms）；`VadConfig(threshold=0.5, prefix_padding_ms=300, silence_duration_ms=400, debounce_frames=3)` |
 | **评分器（silero）** | `src/speechrail/backends/neural_vad.py` | `SileroVadDetector`：ONNX；每模型路径共享一个 `InferenceSession`（`InferenceSession.run` 线程安全），每流独立 h/c 或 consolidated state/context；`inter/inter_op_threads=1`；按输入名自动识别 v4 与 v5/v6 schema |
 | **决策状态机** | `src/speechrail/realtime/speech_admission.py` | `SpeechAdmission`：`IDLE→CANDIDATE→ACTIVE→HANGOVER→IDLE`；有界 prefix-ring / candidate；整数 16k 样本时钟；双阈值迟滞（entry `threshold`，exit `threshold-0.15`） |
-| **接线层** | `src/speechrail/application/realtime_openai.py` | 接入 OpenAI Realtime `server_vad`：`input_audio_buffer.speech_started/stopped` 事件、自动 commit（`vad_stop`）、全双工打断（`record_bargein` + `_cancel_response`）；`_bargein_pending_audio` 有界（`_bargein_pending_max_bytes` 默认 9600） |
+| **接线层** | `src/speechrail/application/realtime_openai.py` | 接入 current-only `server_vad`：`input_audio_buffer.speech_started/stopped` 事实、自动 commit（`vad_stop`）；barge-in 由调用方根据事实显式发送 `speechrail.tts.cancel`，服务端不自动取消 TTS |
 | **配置** | `src/speechrail/config/__init__.py` | `realtime_vad_engine: Literal["auto","legacy","silero"] = "auto"`；`realtime_vad_model_path`；`realtime_vad_shadow_enabled`（仅 legacy 可用）；`realtime_speech_admission_enabled=True` |
 | **可观测** | `src/speechrail/observability/metrics.py` | `speechrail_realtime_vad_speech_events_total{event=started|ended}`；`speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}` |
 | **契约** | `contracts/realtime-openai.md` | server_vad 默认 `threshold=0.5 / prefix_padding_ms=300 / silence_duration_ms=400`；`silero` 引擎要求 `realtime_speech_admission_enabled=true` 且配置 `realtime_vad_model_path`；v4/v5/v6 schema 均受支持；受支持 managed wheel 锁定 `onnxruntime==1.29.0`，preflight/health 单独报告 VAD runtime |
@@ -54,7 +54,7 @@ date: 2026-09-09
 
 ### 当前调用方策略：generic contract 与 Sona mode policy 分离
 
-SpeechRail 的 `server_vad` 字段支持通用默认值 `threshold=0.5`、`prefix_padding_ms=300`、`silence_duration_ms=400`；这是缺省协议值，不代表所有客户端业务都使用相同窗口。调用方可以在 `session.update` 显式传递策略，SpeechRail 负责校验、评分和边界状态机。
+SpeechRail 的 `server_vad` 字段支持通用默认值 `threshold=0.5`、`prefix_padding_ms=300`、`silence_duration_ms=400`；这是缺省协议值，不代表所有客户端业务都使用相同窗口。调用方可以在 `transcription_session.update.session.turn_detection` 显式传递策略，SpeechRail 负责校验、评分和边界状态机。
 
 Sona 当前显式传递的策略如下：
 
@@ -215,7 +215,7 @@ return prob
 
 ## 八、风险与边界（Risks & Boundaries）
 
-- **风险：v5/v6 上下文冲刷若与分帧边界脱节会引入概率漂移。** 缓解：`score_frame` 输入永远按 512 采样连续切分（admission 路径已保证连续性）；`reset()`/`session.update` 清空 `state`/`context`。
+- **风险：v5/v6 上下文冲刷若与分帧边界脱节会引入概率漂移。** 缓解：`score_frame` 输入永远按 512 采样连续切分（admission 路径已保证连续性）；`reset()`/`transcription_session.update` 清空 `state`/`context`。
 - **风险：`auto` 三态引入更多测试面。** 缓解：用**确定性 fake runner / stub session** 覆盖三态，不依赖真实模型。
 - **边界：语义 endpointing、服务端 AEC/降噪** 明确**非目标**（本地单用户、低复杂度、客户端拥有音频 I/O）。仅记录知悉。
 - **边界：`threshold` 语义在 legacy 下仍是能量分值**。方案选择保留（避免回归），但文档显式标注；统一语义推迟到有质量数据。

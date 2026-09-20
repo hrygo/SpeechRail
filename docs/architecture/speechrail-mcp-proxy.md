@@ -2,16 +2,21 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.2.3"
+version: "2.0.0"
 date: 2026-09-20
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
 
-# 🎙️ SpeechRail MCP Proxy 工具与契约 (v1.2.2)
+# 🎙️ SpeechRail MCP Proxy 工具与契约 (v2.0.0)
 
-> **状态声明**：本文档描述**已实现**的外置 `speechrail-mcp` 进程（合并于 `feat/speechrail-mcp`，
-> PR #15，2026-09-07）。当前行为以 `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以
-> `contracts/openapi.yaml` 为唯一事实来源。本文档记录 MCP 工具清单与设计取舍。
+> **状态声明**：本文档描述当前已实现的外置 `speechrail-mcp` 进程。当前行为以
+> `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以 `contracts/openapi.yaml` 为唯一事实来源。
+> 2026-09-20 起项目采用直接切换策略，不为旧 MCP/Realtime 语义提供兼容分支。
+
+> **Speech Plane 边界**：MCP 只代理无状态 REST 的 ASR、TTS、音色和 job 工具。Realtime 不在
+> MCP 中创建 handle；Native、Sona 或其他调用方必须直连 `/v1/realtime`，自己拥有 LLM、历史、
+> memory、persona、tools、播放队列和 barge-in。SpeechRail 的 Realtime server 只交付 ASR/VAD/
+> 匿名分人事实，并响应调用方显式的 `speechrail.tts.create/cancel`。
 >
 > **v1.2.2 变更**（2026-09-13）：
 > - 修正附录 B 对工具数量、`delete_voice` 实现状态和破坏性工具标注的陈旧描述；当前工具集为 9 个，`delete_voice` / `cancel_job` 均已实现并标记为 destructive。
@@ -79,8 +84,8 @@ SpeechRail 已是 OpenAI-compatible REST + WS。对 agent 而言它是"能调用
 
 ### 1.3 不做什么（边界，不可越界）
 
-- ❌ **不替换 `/v1/realtime`** 实时全双工 WebSocket（VAD / barge-in / 逐句 TTS / `speechrail.diarization.v1` 分人流）。
-  实时音频仍由 Sona 等客户端经 WS 直连。
+- ❌ **不替换 `/v1/realtime`** 实时全双工 WebSocket。实时音频仍由 Sona、Native 等客户端经 WS
+  直连；MCP 不持有连接句柄，也不替调用方决定 barge-in。
 - ❌ **不引入说话人实名、声纹库、LLM 上下文、会议持久化** —— 调用方职责（`product-scope.md` 红线）。
 - ❌ **不把 MCP 内建进主服务进程** —— 主服务只做协议接入与调度。
 - ❌ **不接收 base64 内联音频、不落盘、不记录** 原始音频/Base64/完整转写。
@@ -126,7 +131,7 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 ```
 
 > `instructions` 是**静态常量**（`server.py` 的 `_INSTRUCTIONS`），不随 profile 动态变化；**动态能力发现
-> 走 `describe()` 工具**：读取旧兼容投影 `GET /v1/models` + `GET /v1/voices` + `GET /health`，并尝试读取
+> 走 `describe()` 工具**：读取当前 `GET /v1/models` + `GET /v1/voices` + `GET /health`，并读取
 > `GET /v1/speechrail/capabilities`。后者按 `effective_capabilities_v1` 返回原子快照；旧 daemon 返回
 > `404/405` 或未知 schema 时，MCP 保留旧字段并将 `effective_capabilities` 置空。上方示例仅示意响应
 > 结构；实际 `discover` 由 MCPServer SDK（MCP Python SDK v2）生成。能力快照内容（`describe()` 的实时查询与
@@ -141,17 +146,17 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 > 全部工具执行时 Proxy 携带 `Authorization: Bearer <key>`（本机 keyless 时任意占位）。
 > 输入音频一律用 **`audio_ref`**，**禁止 base64 内联**（见 §8 传输契约）。
 
-### 4.1 `describe()` —— 能力发现（兼容投影 + 原子快照）
+### 4.1 `describe()` —— 当前能力发现
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `--` | — | — | 无参数 |
 
-- **Proxy 调用**：旧兼容投影读取 `GET /v1/models`（`system.py:170`）+ `GET /v1/voices`
+- **Proxy 调用**：读取 `GET /v1/models`（`system.py:170`）+ `GET /v1/voices`
   （`system.py:226`）+ `GET /health`；另尝试 `GET /v1/speechrail/capabilities`。
 - **返回**：当前档位 + 能力摘要 + 音色清单（含精准判别字段），以及可选的
-  `effective_capabilities` 原子快照。`legacy_discovery_consistency=independent_reads`
-  明确表示旧顶层字段来自不同时间的独立读取。
+  `effective_capabilities` 原子快照。`realtime` 明确声明
+  `orchestration=caller`、`server_llm=false`、`conversation_state=false`。
 
 ```jsonc
 {
@@ -160,6 +165,10 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
   "diarization_ready": false,          // 是否已安装/就绪（决定 diarize 是否可用）
   "clone_supported": true,             // 取自 TTS 模型条目的 capabilities.supports_clone（Base capability 已解析）
   "preview_supported": true,           // 取自同一份 capabilities.supports_preview，不在 proxy 侧重算
+  "realtime": {
+    "orchestration": "caller", "server_llm": false, "conversation_state": false,
+    "websocket_path": "/v1/realtime", "mcp_realtime": false
+  },
   "models": [{ "id": "...", "variant": "voice_design", "capabilities": { "supports_preview": true, "supports_clone": true } }], // supports_clone reflects the separate Base capability
   "voices": [{ "id": "serena", "variant": "voice_design", "mode": "system", "is_default": true, "available": true,
                "capabilities": { "supports_speaker": false, "supports_instruction": true, "supports_clone": false } }]

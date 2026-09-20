@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 2.7.0
+  version: 3.0.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -46,7 +46,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 2.7.0
+                version: 3.0.0
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
@@ -1333,7 +1333,7 @@ components:
             $ref: '#/components/schemas/SafeVoiceEntry'
     EffectiveCapabilitySnapshot:
       type: object
-      required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, voices, operations, guarantees]
+      required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, realtime, voices, operations, guarantees]
       properties:
         schema_version:
           type: string
@@ -1351,6 +1351,25 @@ components:
           type: object
           additionalProperties:
             $ref: '#/components/schemas/ConfiguredModelIdentity'
+        realtime:
+          type: object
+          required: [orchestration, server_llm, conversation_state, websocket_path, mcp_realtime]
+          properties:
+            orchestration:
+              type: string
+              const: caller
+            server_llm:
+              type: boolean
+              const: false
+            conversation_state:
+              type: boolean
+              const: false
+            websocket_path:
+              type: string
+              const: /v1/realtime
+            mcp_realtime:
+              type: boolean
+              const: false
         voices:
           type: array
           items:

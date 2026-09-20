@@ -1,5 +1,128 @@
 import Foundation
 
+/// Canonical current-only transcription session configuration.
+///
+/// The factory intentionally exposes only the fields SpeechRail implements;
+/// it cannot emit the removed `session.update` or conversation/response
+/// orchestration fields.
+public struct TranscriptionSessionUpdate: Sendable {
+    public let type = "transcription_session.update"
+    public let model: String
+    public let threshold: Double
+    public let prefixPaddingMilliseconds: Int
+    public let silenceDurationMilliseconds: Int
+    public let callerTTSEnabled: Bool
+    public let diarizationEnabled: Bool
+    public let expectedModelRevision: String?
+    public let renderReceiptsEnabled: Bool
+
+    public init(
+        model: String,
+        threshold: Double = 0.5,
+        prefixPaddingMilliseconds: Int = 300,
+        silenceDurationMilliseconds: Int = 400,
+        callerTTSEnabled: Bool = false,
+        diarizationEnabled: Bool = false,
+        expectedModelRevision: String? = nil,
+        renderReceiptsEnabled: Bool = false
+    ) {
+        self.model = model
+        self.threshold = threshold
+        self.prefixPaddingMilliseconds = prefixPaddingMilliseconds
+        self.silenceDurationMilliseconds = silenceDurationMilliseconds
+        self.callerTTSEnabled = callerTTSEnabled
+        self.diarizationEnabled = diarizationEnabled
+        self.expectedModelRevision = expectedModelRevision
+        self.renderReceiptsEnabled = renderReceiptsEnabled
+    }
+
+    public var jsonObject: [String: Any] {
+        var speechrail: [String: Any] = [
+            "tts": ["enabled": callerTTSEnabled]
+        ]
+        if diarizationEnabled {
+            speechrail["diarization"] = ["enabled": true]
+        }
+        if let expectedModelRevision {
+            speechrail["model_revision"] = ["expected": expectedModelRevision]
+        }
+        if renderReceiptsEnabled {
+            speechrail["render_receipts"] = ["enabled": true]
+        }
+        return [
+            "type": type,
+            "session": [
+                "input_audio_format": "pcm16",
+                "input_audio_transcription": ["model": model],
+                "turn_detection": [
+                    "type": "server_vad",
+                    "threshold": threshold,
+                    "prefix_padding_ms": prefixPaddingMilliseconds,
+                    "silence_duration_ms": silenceDurationMilliseconds
+                ],
+                "speechrail": speechrail
+            ]
+        ]
+    }
+}
+
+/// Stateless caller-owned TTS render command.
+public struct SpeechRailTTSCreate: Sendable {
+    public let type = "speechrail.tts.create"
+    public let requestID: String
+    public let text: String
+    public let voice: String?
+    public let speed: Double?
+    public let expectedVoiceRevision: String?
+
+    public init(
+        requestID: String,
+        text: String,
+        voice: String? = nil,
+        speed: Double? = nil,
+        expectedVoiceRevision: String? = nil
+    ) {
+        self.requestID = requestID
+        self.text = text
+        self.voice = voice
+        self.speed = speed
+        self.expectedVoiceRevision = expectedVoiceRevision
+    }
+
+    public var jsonObject: [String: Any] {
+        var object: [String: Any] = [
+            "type": type,
+            "request_id": requestID,
+            "text": text
+        ]
+        if let voice { object["voice"] = voice }
+        if let speed { object["speed"] = speed }
+        if let expectedVoiceRevision { object["expected_voice_revision"] = expectedVoiceRevision }
+        return object
+    }
+}
+
+/// Explicit caller-owned TTS cancellation command.
+public struct SpeechRailTTSCancel: Sendable {
+    public let type = "speechrail.tts.cancel"
+    public let requestID: String
+    public let responseID: String?
+
+    public init(requestID: String, responseID: String? = nil) {
+        self.requestID = requestID
+        self.responseID = responseID
+    }
+
+    public var jsonObject: [String: Any] {
+        var object: [String: Any] = [
+            "type": type,
+            "request_id": requestID
+        ]
+        if let responseID { object["response_id"] = responseID }
+        return object
+    }
+}
+
 /// Common metadata carried by every SpeechRail Realtime server event.
 public struct RealtimeEventMetadata: Codable, Equatable, Sendable {
     public let eventID: String?

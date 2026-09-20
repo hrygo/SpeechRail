@@ -9,15 +9,15 @@ import SpeechRailControlKit
 //
 //   1. **人设是锁，不是选择器**（§14.4）。它在开始那一刻写进 developer 消息，会话内只读；
 //      要换就新开一轮（`personaLock` 是可读结论 + 一个出口，不是静默忽略）。
-//   2. **音色只是声音**。换音色走 `session.update`，下一句生效，并落一条
+//   2. **音色只是声音**。换音色写入下一次 caller-owned TTS request，并落一条
 //      `session_change(kind='voice')`——「第 N 句起」这句话必须有数据支撑。
 //   3. **打字提问不朗读回复**（§6.1）：正文落库（`source='keyboard'`），回复仍可点「重播」。
 //   4. **契约在顶层 `instructions`，人设只是风格**：语音对话契约走 Responses 的 `instructions`
 //      （每轮重发，续轮不继承），人设走 developer 消息并让位给契约；送 TTS 前还有一道文本清洗。
 //      三者都收在 `VoicePrompt.swift` 里，单独可测。
 //
-// 打断的口径来自契约与规格：服务端检测到人声时会自己取消 TTS（Barge-in），
-// 客户端要做的只有三件——丢掉还没播的缓冲、留下服务端已经生成的那一句、记 `interrupted`。
+// 打断的口径来自契约与规格：服务端只提供 `speech_started` 事实，
+// AssistantSession 决定是否 cancel、丢掉还没播的缓冲并记 `interrupted`。
 
 @MainActor
 @Observable
@@ -267,6 +267,9 @@ public final class AssistantSession {
     private var currentReplyInterrupted = false
     /// 服务端是否在生成 TTS（用来区分"在思考"与"在说话"）。
     private var isSpeaking = false
+    /// 调用方拥有的句子队列：SpeechRail 同一连接同时只接受一个 active TTS。
+    private var pendingTTS: [String] = []
+    private var ttsRequestInFlight = false
     /// 用户按了「静音麦克风」：不再上行音频，但会话、连接、记录都留着。
     /// 它与「结束对话」是两件事——前者只是暂时不说，后者交出占用（§6.1 的状态带尾部两个动作）。
     public private(set) var isMuted = false
@@ -381,12 +384,12 @@ public final class AssistantSession {
 
     /// 重播某一句话（打字提问的回复也能听——「不朗读」不等于「不能听」）。
     public func replay(turn: Turn) async {
-        guard turn.role == .assistant, let client else { return }
+        guard turn.role == .assistant else { return }
         isSpeaking = true
         phase = .speaking
         // 重播与首次朗读同一条口径：过一遍清洗，否则漏出来的标记会被念第二遍。
         let utterance = VoicePrompt.spokenText(from: turn.text)
-        try? await client.speak(utterance.isEmpty ? turn.text : utterance)
+        await enqueueTTS(utterance.isEmpty ? turn.text : utterance)
     }
 
     /// 静音 / 取消静音。**不结束会话**：麦克风还在会话手里，只是不上行。
@@ -401,13 +404,14 @@ public final class AssistantSession {
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking else { return }
         currentReplyInterrupted = true
+        pendingTTS.removeAll()
         if let audioSession {
             await audioSession.stopPlayback()
         } else {
             await playback?.stop()
         }
         isSpeaking = false
-        if let client { try? await client.cancelResponse() }
+        if let client { try? await client.cancelTTS() }
         streamingReply = nil
         phase = .listening
         isMutedForPlayback = false
@@ -456,15 +460,16 @@ public final class AssistantSession {
             throw Blocked(Self.blockReason(for: error))
         }
 
-        // 一条连接同时承载 ASR 与 TTS（§5.5）：TTS 的句子走 `conversation.item.create`
-        // + `response.create`，所以两者必须在同一个会话里。
+        // 一条连接同时承载 ASR 与 caller-owned TTS（§5.5）；LLM、历史和句子队列
+        // 都留在本地，服务端只接收 `speechrail.tts.create`。
         let client = RealtimeASRClient(
             port: port,
             silenceDurationMilliseconds: 400,
             voice: voiceID,
             apiKey: serviceKey,
             expectedModelRevision: realtimeModelRevision(voiceID),
-            renderReceiptsEnabled: realtimeRenderReceiptsEnabled(voiceID)
+            renderReceiptsEnabled: realtimeRenderReceiptsEnabled(voiceID),
+            callerTTSEnabled: true
         )
         do {
             try await client.connect()
@@ -512,6 +517,8 @@ public final class AssistantSession {
         partialText = nil
         streamingReply = nil
         committedItemIDs = []
+        pendingTTS = []
+        ttsRequestInFlight = false
         currentOrdinal = 0
         isStoppingIntentionally = false
         memories = ((try? await coordinator.memories(activeOnly: true)) ?? []).map(\.body)
@@ -593,6 +600,8 @@ public final class AssistantSession {
         sessionID = nil
         isMutedForPlayback = false
         isSpeaking = false
+        pendingTTS.removeAll()
+        ttsRequestInFlight = false
     }
 
     // MARK: - 采集 → 上行
@@ -655,10 +664,10 @@ public final class AssistantSession {
             partialText = nil
             lastFailure = "\(code)：\(message)"
         case .speechStarted:
-            // 实时对讲：插话就是打断。服务端会原子取消 TTS（契约的 Barge-in），
-            // 客户端把还没播的缓冲丢掉，并把这一句标成"被打断"（不是错误）。
+            // 实时对讲：插话是否打断由客户端决定；服务端只上报 VAD 事实。
             guard mode.allowsBargeIn, isSpeaking else { return }
             currentReplyInterrupted = true
+            pendingTTS.removeAll()
             if let audioSession {
                 await audioSession.stopPlayback()
             } else {
@@ -666,7 +675,7 @@ public final class AssistantSession {
             }
             isSpeaking = false
             phase = .listening
-            if let client { try? await client.cancelResponse() }
+            if let client { try? await client.cancelTTS() }
         case .responseAudio(let pcm):
             isSpeaking = true
             phase = .speaking
@@ -678,7 +687,13 @@ public final class AssistantSession {
                 await playback?.enqueue(pcm)
             }
         case .responseDone(let status, _):
-            if status == "cancelled" { currentReplyInterrupted = true }
+            ttsRequestInFlight = false
+            if status == "cancelled" {
+                currentReplyInterrupted = true
+                pendingTTS.removeAll()
+            } else {
+                await sendNextTTSIfNeeded()
+            }
         case .serverError(let code, let message, _, _, _):
             lastFailure = Self.readableError(code: code, message: message)
         case .cleared:
@@ -742,6 +757,27 @@ public final class AssistantSession {
         await runReply(spoken: true)
     }
 
+    /// Queue caller-generated sentences and submit them one at a time. The
+    /// Speech Plane deliberately has no server-side queue or conversation text.
+    private func enqueueTTS(_ text: String) async {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        pendingTTS.append(normalized)
+        await sendNextTTSIfNeeded()
+    }
+
+    private func sendNextTTSIfNeeded() async {
+        guard !ttsRequestInFlight, !pendingTTS.isEmpty, let client else { return }
+        let text = pendingTTS.removeFirst()
+        ttsRequestInFlight = true
+        do {
+            try await client.sendTTSCreate(text: text)
+        } catch {
+            ttsRequestInFlight = false
+            lastFailure = error.localizedDescription
+        }
+    }
+
     /// 一次回答：Responses 流式 → 句子切分 → TTS。
     ///
     /// 前缀顺序是硬的（§5.5）：人设 → 记忆 → 历史 → 本轮。**只追加，从不重写**。
@@ -784,7 +820,7 @@ public final class AssistantSession {
                 buffer += delta
                 for sentence in Self.takeSentences(&buffer, flush: false) {
                     let utterance = VoicePrompt.spokenText(from: sentence)
-                    if !utterance.isEmpty { try? await client?.speak(utterance) }
+                    if !utterance.isEmpty { await enqueueTTS(utterance) }
                 }
             }
         } catch {
@@ -804,7 +840,7 @@ public final class AssistantSession {
         if spoken {
             for sentence in Self.takeSentences(&buffer, flush: true) {
                 let utterance = VoicePrompt.spokenText(from: sentence)
-                if !utterance.isEmpty { try? await client?.speak(utterance) }
+                if !utterance.isEmpty { await enqueueTTS(utterance) }
             }
         }
         streamingReply = nil

@@ -165,6 +165,11 @@ def test_describe_merges_models_voices_health_for_quality(
     }
     assert snapshot["realtime"]["vad"]["resolved_engine"] == "silero"
     assert snapshot["realtime"]["streaming_state"] == "ready"
+    assert snapshot["realtime"]["orchestration"] == "caller"
+    assert snapshot["realtime"]["server_llm"] is False
+    assert snapshot["realtime"]["conversation_state"] is False
+    assert snapshot["realtime"]["websocket_path"] == "/v1/realtime"
+    assert snapshot["realtime"]["mcp_realtime"] is False
     assert snapshot["clone_supported"] is True
     assert snapshot["preview_supported"] is True
     assert snapshot["models"] == models

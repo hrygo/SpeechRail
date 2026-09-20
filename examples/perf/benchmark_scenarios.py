@@ -506,13 +506,13 @@ def _open_lifecycle_connection(
         daemon=True,
         name=f"speechrail-lifecycle-recv-{session_no}",
     ).start()
-    recv_until(events, errors, "conversation.created", timeout=15, event_log=event_log)
+    recv_until(events, errors, "session.created", timeout=15, event_log=event_log)
     conn.send(
         {
-            "type": "session.update",
+            "type": "transcription_session.update",
             "session": {
-                "model": "whisper-1",
                 "input_audio_format": "pcm16",
+                "input_audio_transcription": {"model": "whisper-1"},
                 "turn_detection": {
                     "type": "server_vad",
                     "silence_duration_ms": 400,
@@ -521,7 +521,9 @@ def _open_lifecycle_connection(
             },
         }
     )
-    recv_until(events, errors, "session.updated", timeout=15, event_log=event_log)
+    recv_until(
+        events, errors, "transcription_session.updated", timeout=15, event_log=event_log
+    )
     return conn, events, errors, event_log
 
 
