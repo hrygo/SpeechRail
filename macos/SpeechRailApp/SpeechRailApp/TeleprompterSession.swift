@@ -2030,7 +2030,7 @@ public final class TeleprompterSession {
         if contentSelection.isAllSelected || !contentSelection.hasExclusions || paragraphRanges.isEmpty {
             selectedParagraphs = sourceText.isEmpty
                 ? []
-                : [.init(start: 0, end: sourceText.utf16.count)]
+                : [TeleprompterSourceRange(start: 0, end: sourceText.utf16.count)]
             excludedParagraphs = []
         } else {
             selectedParagraphs = paragraphRanges.enumerated().compactMap { index, range in

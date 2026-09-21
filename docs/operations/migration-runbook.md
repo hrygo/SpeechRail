@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 迁移 Runbook"
 status: superseded
-version: "3.1.0"
+version: "3.1.1"
 date: 2026-09-21
 ---
 

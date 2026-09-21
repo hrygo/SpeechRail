@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-version: "3.1.0"
+version: "3.1.1"
 date: 2026-09-21
 ---
 

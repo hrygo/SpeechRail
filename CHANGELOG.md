@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-09-21
+
+### Fixed
+
+- 为提词器选区的 `TeleprompterSourceRange` 构造补充显式类型，兼容 Xcode 26.6 / macOS 26.5 的 Swift 类型推断。
+- macOS App 与服务版本统一升级到 3.1.1，App build 升至 23。
+
 ## [3.1.0] - 2026-09-21
 
 ### Added

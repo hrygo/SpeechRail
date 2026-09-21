@@ -2,7 +2,7 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "3.1.0"
+version: "3.1.1"
 date: 2026-09-21
 ---
 
