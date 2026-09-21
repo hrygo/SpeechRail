@@ -535,6 +535,8 @@ public final class MeetingSession {
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
+        case .partialSnapshot(_, _, let text):
+            partialText = text.isEmpty ? nil : text
         case .completed(let itemID, let transcript, let units):
             await commit(itemID: itemID, transcript: transcript, units: units)
         case .failed(_, let code, let message):

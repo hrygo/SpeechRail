@@ -45,10 +45,17 @@ public enum AudioLevel {
 public struct AudioChunk: Sendable {
     public var pcm: Data
     public var level: Double
+    /// Optional source-side evidence. File/tap test sources may omit it.
+    public var capturedAt: ContinuousClock.Instant?
 
-    public init(pcm: Data, level: Double) {
+    public init(
+        pcm: Data,
+        level: Double,
+        capturedAt: ContinuousClock.Instant? = nil
+    ) {
         self.pcm = pcm
         self.level = level
+        self.capturedAt = capturedAt
     }
 }
 
@@ -278,7 +285,13 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
                 guard let chunk = self.ring.drain() else { continue }
-                continuation.yield(chunk)
+                continuation.yield(
+                    AudioChunk(
+                        pcm: chunk.pcm,
+                        level: chunk.level,
+                        capturedAt: ContinuousClock().now
+                    )
+                )
             }
         }
     }

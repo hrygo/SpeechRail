@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization.ports import StreamingActivityPort
+from speechrail.domain.tts_request import ValidationPolicy
 
 
 class TranscriptionRequest(BaseModel):
@@ -40,6 +42,7 @@ class SpeechRequest(BaseModel):
         description="Ephemeral VoiceDesign instruction; never persisted by the TTS port.",
     )
     seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
+    validation_policy: ValidationPolicy = "allow_unverified"
     expected_voice_revision: str | None = Field(
         default=None,
         pattern=r"^vr_[0-9a-f]{32}$",
@@ -107,6 +110,24 @@ class StreamingAsrEvent(BaseModel):
     error_code: str | None = Field(default=None, max_length=200)
 
 
+@dataclass(frozen=True, slots=True)
+class RealtimeTranscriptionOptions:
+    """Per-session streaming options selected by a realtime caller."""
+
+    partial_mode: Literal["delta", "snapshot"] = "delta"
+    chunk_duration_ms: int = 2_000
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.partial_mode, str) or self.partial_mode not in {"delta", "snapshot"}:
+            raise ValueError("partial_mode must be delta or snapshot")
+        if (
+            isinstance(self.chunk_duration_ms, bool)
+            or not isinstance(self.chunk_duration_ms, int)
+            or not 100 <= self.chunk_duration_ms <= 30_000
+        ):
+            raise ValueError("chunk_duration_ms must be between 100 and 30000")
+
+
 class RealtimeAsrSession(Protocol):
     """One non-resumable backend session that consumes PCM while events stream out."""
 
@@ -126,7 +147,13 @@ class RealtimeAsrSession(Protocol):
 class RealtimeAsrFactory(Protocol):
     """Creates a new backend session after the public Realtime session is configured."""
 
-    def create(self, *, language: str | None, prompt: str) -> RealtimeAsrSession: ...
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> RealtimeAsrSession: ...
 
     def release(self, session: RealtimeAsrSession) -> None:
         """Return a created session to the factory when the caller is done.

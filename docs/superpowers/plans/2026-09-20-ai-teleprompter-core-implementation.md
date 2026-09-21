@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在当前 worktree 的独立分支中交付不依赖 SwiftUI 的 AI 提词器核心：无损导入与分片、时长/预算计算、严格 Prompt/JSON 契约、MapReduce 编排和 v2 文档存储。
+**Goal:** 在当前 worktree 的独立分支中交付 AI 提词器终版规格：无损导入与分片、时长/预算计算、严格 Prompt/JSON 契约、MapReduce 编排、v2 文档存储，以及已交接的准备/审阅/舞台接入。
 
-**Architecture:** 新增四组纯核心文件放入 `SpeechRailAppSupport` target，并复用当前 worktree 中另一条并行改动已提供的 `TeleprompterTimingPolicy.swift` 与 Domain review/value types。Domain 文件只负责不可变值类型和确定性算法；Prompt 文件负责 wire payload、固定 instructions、schema 和边界校验；Pipeline 文件以 `@Sendable` completion 注入现有 Responses provider，串行执行 Map/Reduce 并在完整覆盖后产出草稿；V2 Store 文件负责版本化、备份和原子保存。现有 `TeleprompterView.swift`、`SpeechRailDesignTokens.swift`、`TeleprompterSession.swift` 和现有 v1 store 保持不改，待 UI 团队接入。
+**Architecture:** Domain 文件只负责不可变值类型和确定性算法；Prompt 文件负责 wire payload、固定 instructions、schema 和边界校验；Pipeline 文件以 `@Sendable` completion 注入现有 Responses provider，串行执行 Map/Reduce 并在完整覆盖后产出草稿；V2 Store 文件只负责当前 v2 格式的校验、原子保存与损坏稿件隔离；Session/UI 只做协调、审阅、保存和跟读接线。当前产品不做旧格式迁移，旧数据可删除后由用户重新导入重建。
 
-**Tech Stack:** Swift 6.0/6.2、macOS 26、Foundation、Swift Testing、XCTest（仅复用现有测试框架）、现有 `LLMProvider` 的 `/responses` completion 适配。
+**Tech Stack:** Swift 6.4、macOS 26+、Foundation、Swift Testing、XCTest（仅复用现有测试框架）、现有 `LLMProvider` 的 `/responses` completion 适配。
 
 **Spec:** `docs/superpowers/specs/2026-09-20-ai-teleprompter-final-spec.md`
 
 ## Global Constraints
 
-- 只修改 UI 无关核心文件、Package/Xcode source membership、核心测试和本实现计划；不修改 SwiftUI 页面、设计 Token、App UI 接线或真实运行配置。
+- UI 接入已由前端团队完成并在本分支继续接线；本次实现只补齐其所需的 v2-only session/provider 接口、错误隔离和确定性行为，不引入旧格式兼容或迁移。
 - 严格 UTF-8 导入，保留 BOM 元数据；拒绝解码失败与 NUL；文件上限 1,048,576 bytes、20,000 source units、参考容量 7,200 秒。
 - 原文只能由本地程序分片和恢复；`concat(rawText) == sourceText` 按 UTF-8 bytes 验证，LLM 不生成来源偏移、不改写 source ranges。
 - 目标时长为 1–120 个整数分钟；`targetSeconds`、本地 estimate、实际 elapsed 分开保存；无法估时不得填 0 或伪造达标。
@@ -150,7 +150,7 @@
   git commit -m "feat: add teleprompter map reduce pipeline"
   ```
 
-### Task 4: v2 文档模型、迁移、备份和原子存储
+### Task 4: v2 文档模型、原子存储与损坏稿件隔离
 
 **Files:**
 - Create: `macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift`
@@ -160,11 +160,11 @@
 
 **Interfaces:**
 - Consumes Task 1 的 source/selection/timing types 和 Task 3 的 `TeleprompterReadingDraft`。
-- Produces `TeleprompterV2Bundle`, immutable source/draft/version records, `TeleprompterV2Store.save/load/list`, legacy v1 migration and export helpers。
+- Produces `TeleprompterV2Bundle`, immutable source/draft/version records, `TeleprompterV2Store.save/load/list` and export helpers；不读取或迁移旧格式。
 
 - [ ] **Step 1: Write the failing tests**
 
-  验证 formatVersion=2 round-trip、source revision immutable、failed validation does not overwrite existing file、`.bak` is created before replacement、legacy `TeleprompterDocumentBundle` source/segments 逐字迁移为 reading version、unknown future version read-only failure、duplicate regenerates IDs and clears run progress、export separately returns original BOM bytes and approved reading text。
+  验证 formatVersion=2 round-trip、source revision immutable、failed validation does not overwrite existing file、unknown/损坏稿件只影响单项、duplicate regenerates IDs and clears run progress、export separately returns original BOM bytes and approved reading text。
 
 - [ ] **Step 2: Run the focused tests and verify they fail**
 
@@ -174,13 +174,13 @@
 
 - [ ] **Step 3: Implement the v2 store**
 
-  使用 value types 与 `Codable` 固化 source/selection/draft/version/run records；用临时文件写入、校验、备份旧 bundle、原子替换，任何失败都保留旧文件。迁移只做 exact copy，不做二次清洗；复制文档时重新生成 document/version/block/segment IDs；未知更高版本返回明确错误，不写回。
+  使用 value types 与 `Codable` 固化 source/selection/draft/version/run records；用临时文件写入、校验和原子替换，任何失败都保留旧 v2 文件。复制文档时重新生成 document/version/block/segment IDs；旧格式与未知更高版本返回明确错误，不写回。
 
 - [ ] **Step 4: Run the focused tests and verify they pass**
 
   Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterV2StoreTests`
 
-  Expected: PASS with round-trip, migration, backup and failure isolation cases green。
+  Expected: PASS with round-trip, immutable source, deletion/rebuild and failure isolation cases green。
 
 - [ ] **Step 5: Commit the task**
 
@@ -199,7 +199,7 @@
 
 **Interfaces:**
 - Consumes Tasks 1–4 public core types。
-- Produces a UI-independent adapter surface that the UI team can call later; no SwiftUI dependency and no automatic real-model invocation。
+- Produces the runtime adapter and session wiring used by the already-landed UI；真实模型、麦克风和 UI 自动化仍不在本次确定性验证范围。
 
 - [ ] **Step 1: Add only the smallest provider adapter test**
 
@@ -215,13 +215,13 @@
 
   Run: `git diff --check` and `rg -n "TeleprompterView|SpeechRailDesignTokens" <our changed core files>`。
 
-  Expected: no whitespace errors; changed core files contain no SwiftUI imports or UI symbol references。
+  Expected: no whitespace errors; domain/prompt/pipeline/store core files contain no SwiftUI imports or UI symbol references；UI 仅保留已交接页面所需的确定性不可估提示。
 
 - [ ] **Step 4: Review the branch boundary**
 
   Run: `git status --short --branch`, `git diff --stat main...HEAD`, and `git diff --name-only main...HEAD`。
 
-  Expected: branch commits contain only core files, tests, package/project membership, plan/spec documentation; the other team’s uncommitted UI files remain uncommitted and are not staged。
+  Expected: branch commits contain core files, tests, package/project membership, plan/spec documentation，以及已交接页面所需的最小显示修正；其他团队无关的未提交改动保持不动且不入暂存区。
 
 - [ ] **Step 5: Commit the plan/spec or adapter-only changes and prepare the independent PR**
 
@@ -232,9 +232,16 @@
 
   Before creating a PR, run the final reviewer/verification pass and attach only the PR for `feat/teleprompter-core-preparation`. Do not merge or push shared branches without a separate explicit action。
 
+## 2026-09-21 实施状态
+
+- Domain、Prompt/Schema/Decoder、MapReduce、v2 Store、Session/provider wiring 和 UI 接入已实现；v2 是唯一运行格式。
+- 旧格式、未知版本和损坏稿件只在列表中标记为不可打开；用户可删除后重新导入原稿重建。没有迁移、备份或兼容 alias。
+- 已通过 `rtk swift test --package-path macos/SpeechRailApp`：XCTest 129 项、Swift Testing 61 项，均 0 failures；并通过 `rtk xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRailApp -configuration Debug -destination 'platform=macOS' build`（macOS 27 SDK、arm64）。
+- 尚未执行真实模型、真实音频、人工视觉或 UI 自动化验收；因此不把模型质量、真人朗读质量或视觉验收标记为完成。
+
 ## Self-Review Checklist
 
-- Spec sections 5–12 map to Tasks 1–4；UI sections are explicitly deferred to the other team。
+- Spec sections 5–12 map to Tasks 1–4 and the landed Session/UI integration；UI 由前端团队交接后已接线。
 - No task depends on an undefined type or method; later interfaces are named in each task’s Interfaces block。
 - No free-text fallback, hidden summarization, automatic deletion, or real endpoint/model invocation is introduced。
-- No UI file is part of the intended write set；current dirty UI changes are preserved。
+- No UI redesign or handoff overwrite was introduced；`TeleprompterTrialReadingSheet.swift` 仅增加不可估时的明确显示与阻断提示，其他 UI 改动保持不动。

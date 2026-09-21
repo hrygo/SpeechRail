@@ -69,6 +69,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_delta,
     transcription_failed,
     transcription_segment,
+    transcription_snapshot,
     validate_append,
 )
 from speechrail.config.model_catalog import ModelArtifact
@@ -86,7 +87,11 @@ from speechrail.domain.diarization.timeline import (
     Timeline,
 )
 from speechrail.domain.itn import apply_light_itn
-from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
+from speechrail.domain.ports import (
+    RealtimeAsrSession,
+    RealtimeTranscriptionOptions,
+    SpeechRequest,
+)
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     VoiceRevisionConflictError,
@@ -94,6 +99,7 @@ from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     resolve_voice,
 )
+from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
@@ -267,12 +273,25 @@ class OpenAIRealtimeSession:
             "input_sample_rate": 16_000,
             "expected_model_revision": None,
             "tts_enabled": False,
+            "transcription_partial_mode": "delta",
+            "transcription_chunk_duration_ms": round(
+                self._settings.qwen3_streaming_chunk_sec * 1_000
+            ),
         }
 
     @staticmethod
     def _new_item_id() -> str:
         """Return an opaque id for exactly one input-audio transcription turn."""
         return f"item_{uuid4().hex[:12]}"
+
+    def _transcription_chunk_seconds(self) -> float:
+        """Return the effective per-session ASR flush duration."""
+        return int(
+            self._config.get(
+                "transcription_chunk_duration_ms",
+                round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+            )
+        ) / 1_000
 
     async def start(self) -> None:
         await self._send(
@@ -363,6 +382,7 @@ class OpenAIRealtimeSession:
                 "diarization",
                 "render_receipts",
                 "model_revision",
+                "transcription",
             }
             if unknown:
                 raise RealtimeAdapterError(
@@ -425,6 +445,11 @@ class OpenAIRealtimeSession:
                     )
                 else:
                     requested_model_revision = raw_model_revision["expected"]
+            retained_extension: dict[str, object] = {}
+            if "transcription" in raw_extension:
+                retained_extension["transcription"] = raw_extension["transcription"]
+            if retained_extension:
+                session["speechrail"] = retained_extension
             adapted_event["session"] = session
         updated, config = apply_session_update(
             adapted_event,
@@ -458,6 +483,23 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "invalid_state",
                 "audio input format cannot change after the first audio frame",
+            )
+        previous_partial_mode = self._config.get("transcription_partial_mode", "delta")
+        previous_chunk_duration_ms = int(
+            self._config.get(
+                "transcription_chunk_duration_ms",
+                round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+            )
+        )
+        if self._timeline.accepted_samples > 0 and (
+            config.get("transcription_partial_mode", previous_partial_mode)
+            != previous_partial_mode
+            or int(config.get("transcription_chunk_duration_ms", previous_chunk_duration_ms))
+            != previous_chunk_duration_ms
+        ):
+            raise RealtimeAdapterError(
+                "invalid_state",
+                "transcription options cannot change after the first audio frame",
             )
         previous_enabled = self._diarization_enabled
         if requested_enabled is not None and requested_enabled != self._diarization_enabled:
@@ -602,6 +644,13 @@ class OpenAIRealtimeSession:
                     "version": 1,
                     "integrity_boundary": "pcm16_after_websocket_send",
                 }
+            extension["transcription"] = {
+                "partial_mode": self._config.get("transcription_partial_mode", "delta"),
+                "chunk_duration_ms": self._config.get(
+                    "transcription_chunk_duration_ms",
+                    round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                ),
+            }
             expected_model_revision = self._config.get("expected_model_revision")
             if isinstance(expected_model_revision, str):
                 extension["model_revision"] = {
@@ -639,6 +688,15 @@ class OpenAIRealtimeSession:
             asr = self._asr_factory.create(
                 language=self._config.get("language"),
                 prompt=asr_prompt,
+                options=RealtimeTranscriptionOptions(
+                    partial_mode=self._config.get("transcription_partial_mode", "delta"),
+                    chunk_duration_ms=int(
+                        self._config.get(
+                            "transcription_chunk_duration_ms",
+                            round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                        )
+                    ),
+                ),
             )
             await asr.connect()
         except BaseException as exc:
@@ -739,7 +797,7 @@ class OpenAIRealtimeSession:
                 self._buffered_audio_bytes += len(dec.pcm)
                 self._unflushed_bytes += len(dec.pcm)
 
-                chunk_sec = self._settings.qwen3_streaming_chunk_sec
+                chunk_sec = self._transcription_chunk_seconds()
                 flush_threshold = max(1, int(chunk_sec * 32_000))
                 if self._unflushed_bytes >= flush_threshold:
                     self._unflushed_bytes = 0
@@ -893,7 +951,7 @@ class OpenAIRealtimeSession:
             self._buffered_audio_bytes += len(audio)
             self._unflushed_bytes += len(audio)
 
-            chunk_sec = self._settings.qwen3_streaming_chunk_sec
+            chunk_sec = self._transcription_chunk_seconds()
             flush_threshold = max(1, int(chunk_sec * 32_000))
             if self._unflushed_bytes >= flush_threshold:
                 self._unflushed_bytes = 0
@@ -1496,6 +1554,8 @@ class OpenAIRealtimeSession:
         asr = self._asr
         if asr is None:
             return
+        snapshot_text: str | None = None
+        snapshot_revision = 0
 
         try:
             async for event in asr.events():
@@ -1510,23 +1570,42 @@ class OpenAIRealtimeSession:
                     if self._speech_admission is not None and not self._turn_has_admitted_speech:
                         continue
                     current_text = event.text
-                    if not current_text:
-                        continue
-                    if not current_text.startswith(self._last_partial_text):
-                        # This wire event is append-only. Keep a changed suffix
-                        # private until the terminal completed event can replace
-                        # the provisional transcript atomically.
-                        continue
-                    delta = current_text[len(self._last_partial_text):]
-                    self._last_partial_text = current_text
-                    if delta:
+                    if self._config.get("transcription_partial_mode", "delta") == "snapshot":
+                        if snapshot_text == current_text:
+                            self._services.metrics.record_realtime_partial("duplicate_suppressed")
+                            continue
+                        snapshot_revision += 1
+                        snapshot_text = current_text
+                        self._services.metrics.record_realtime_partial("snapshot_sent")
                         await self._send(
-                            transcription_delta(item_id=self._current_item_id, delta=delta)
+                            transcription_snapshot(
+                                item_id=self._current_item_id,
+                                revision=snapshot_revision,
+                                text=current_text,
+                            )
                         )
+                    else:
+                        if not current_text:
+                            continue
+                        if not current_text.startswith(self._last_partial_text):
+                            # This wire event is append-only. Keep a changed suffix
+                            # private until the terminal completed event can replace
+                            # the provisional transcript atomically.
+                            self._services.metrics.record_realtime_partial("rewrite_withheld")
+                            continue
+                        delta = current_text[len(self._last_partial_text):]
+                        self._last_partial_text = current_text
+                        if delta:
+                            self._services.metrics.record_realtime_partial("delta_sent")
+                            await self._send(
+                                transcription_delta(item_id=self._current_item_id, delta=delta)
+                            )
                 elif event.kind == "completed":
                     if self._asr is not asr:
                         break
                     self._last_partial_text = ""
+                    snapshot_text = None
+                    snapshot_revision = 0
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
                     self._services.metrics.record_realtime_turn(
@@ -1884,7 +1963,32 @@ class OpenAIRealtimeSession:
                 self._services.render_receipts.cancel(
                     receipt_id,
                     error_code="client_disconnected",
+            )
+            return
+        except TtsBackendError as exc:
+            if receipt_id is not None:
+                self._services.render_receipts.fail(receipt_id, exc.public_code)
+            logger.error(
+                "realtime TTS synthesis failed: code=%s diagnostic_class=%s",
+                exc.public_code,
+                exc.diagnostic_class,
+            )
+            await self._send(
+                error_event(
+                    code=exc.public_code,
+                    message="TTS response failed",
+                    request_id=request_id,
                 )
+            )
+            await self._finalize_tts(
+                response_id=response_id,
+                status="failed",
+                receipt_id=receipt_id,
+                request_id=request_id,
+                item_id=item_id,
+                text=text,
+                voice_revision=voice_revision,
+            )
             return
         except RuntimeError as exc:
             if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:

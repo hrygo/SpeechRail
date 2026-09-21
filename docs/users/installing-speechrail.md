@@ -2,8 +2,8 @@
 title: "SpeechRail 安装与首次使用"
 status: active
 audience: "本机最终用户、自部署用户"
-version: "1.2.0"
-date: 2026-09-17
+version: "1.3.0"
+date: 2026-09-21
 ---
 
 # 📦 SpeechRail 安装与首次使用
@@ -22,7 +22,7 @@ SpeechRail 的用户，说明每个发布文件是什么、该装哪一个、安
 | 文件 | 内容 | 用途 | 不包含 / 不能做什么 |
 |---|---|---|---|
 | `speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl` | Python 服务包：`speechrail` CLI、FastAPI 应用、内置 CoreML 分人 worker，以及 `speechrail install` 安装入口 | 安装服务与版本升级 | 不含模型 snapshot、vendor runtime 和 `.env`；这些由安装入口按档位准备 |
-| `SpeechRail-<version>-macOS-arm64.dmg` | unsigned 的控制面 App（DMG 内只有 `SpeechRail.app` 和指向 `/Applications` 的链接） | 服务装好后管理模型、档位、运行状态，以及配音/音色创作 | 不加载模型、不启动服务、不监听 8201；只在「音色克隆」按下录制时使用麦克风 |
+| `SpeechRail-<version>-macOS-arm64.dmg` | unsigned 的控制面 App | 服务装好后管理模型、档位、运行状态，以及配音/音色创作 | 不加载模型、不启动服务、不监听 8201；只在「音色克隆」按下录制时使用麦克风 |
 | `SHA256SUMS` | 上述两个制品的 SHA-256 | 下载后校验完整性 | — |
 
 把两个制品和 `SHA256SUMS` 放在同一个目录，然后校验：
@@ -36,10 +36,8 @@ shasum -a 256 -c SHA256SUMS
 ## 2. 先决条件
 
 - Apple Silicon Mac（`arm64`）；Intel Mac 不受支持。
-- 服务运行时基线是 macOS `14.0+`；**App 控制面基线是 macOS `26.0+`**（2.6.6 的 DMG 实测
-  `LSMinimumSystemVersion = 26.0`）。只需要服务、不需要图形控制面时，不受 App 的系统版本要求约束。
-- 已发布的 wheel 平台标签是 `macosx_26_0_arm64`；按 PEP 425 语义，`pip` / `uv` 只在 macOS 26
-  及以上接受它。需要在 macOS 14/15 上部署时，用第 3.2 节的仓库流程在目标机构建 wheel。
+- 服务与 App 的当前交付基线均为 macOS `26.0+`、Apple Silicon `arm64`。
+- 已发布的 wheel 平台标签是 `macosx_26_0_arm64`；`pip` / `uv` 只会在 macOS 26 及以上接受该制品。
 - 磁盘：单次全新安装预留 **≥ 25 GB**（`light` 约 2.99 GB、`balanced` 约 5.96 GB、`quality` 约
   10.73 GB 的模型，外加隔离运行时）。模型与 vendor runtime 按清单复用，升级不会重复占用；每装一个
   **新版本** wheel 会在 `runtime/releases` 新增一个目录（重装同一份 wheel 则复用），而安装器不会
@@ -49,15 +47,11 @@ shasum -a 256 -c SHA256SUMS
   只在显式确认（`--yes`）后发生，请求路径不会下载模型。
 - `uv`：安装命令通过 `uvx` 调用，Python 3.12 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
   直接给出安装地址，不会跑到一半才失败。
-- 不需要预装 `ffmpeg`：安装器把锁定的 `imageio-ffmpeg` 装进隔离 runtime，并让服务指向该副本；
-  只有仓库首装脚本（第 3.2 节）会自行检查并安装系统 `ffmpeg`。
+- 不需要预装 `ffmpeg`：安装器把锁定的 `imageio-ffmpeg` 装进隔离 runtime，并让服务指向该副本。
 
 ## 3. 安装服务
 
-先确认拿到的是哪个版本：`speechrail install` 安装入口从 2.7.0 起随 wheel 发布，所以 2.7.0 及以后
-走 3.1；2.6.6 及更早的 wheel 里没有这个子命令，走 3.2 的仓库流程。
-
-### 3.1 从 release wheel 安装（2.7.0 起）
+### 3.1 从 Release wheel 安装
 
 安装入口随 wheel 发布，所以只需要下载下来的这一个文件，不需要 clone 仓库。把 wheel 和 `SHA256SUMS`
 放在同一个目录（通常是 `~/Downloads`），然后在「终端」执行。通配符会展开成该目录里唯一的
@@ -84,8 +78,7 @@ uvx --python 3.12 --from ./speechrail-*.whl \
 - 安装器每个 app home 只保留一个档位：已装过服务时，省略 `--preset` 会沿用当前档位，避免升级时
   被内存推荐改档；显式传一个不同档位会被拒绝，换档请用已安装 runtime 的
   `speechrail profile apply <tier> --yes`。
-- 安装器只接受版本与自身一致的 wheel：用 2.6.6 的 CLI 装 2.7.0 的 wheel 会被拒绝，避免 installer 与
-  被安装的代码脱节。
+- 安装器只接受与自身版本一致的 wheel，避免 installer 与被安装的代码脱节。
 - 不加 `--enable` 时只安装不启动，命令结尾会打印该 runtime 自己的 `service start` 命令。
 - 命令结尾固定打印三样东西：已安装 runtime 的 `speechrail` CLI 路径、双击即可换档位的
   `SpeechRail 设置.command`、以及服务地址（默认 `http://127.0.0.1:8201`）。
@@ -98,11 +91,10 @@ uvx --python 3.12 --from ./speechrail-*.whl \
 - 公共入口的完整流程与 `install_managed` API 见
   [运行时与部署](../operations/runtime-deployment.md#wheel-与本地安装器)。
 
-### 3.2 2.6.6 及更早版本：仓库首装流程
+### 3.2 源码首装
 
-`speechrail install` 是 2.7.0 引入的，更早的 release 只有 wheel 本体，安装器随仓库发布，所以必须
-clone 仓库（或从同一 Release 页面下载 `Source code (zip)` 并解压），再运行零配置首装流程；它会在目标机
-自行构建 wheel、准备模型、创建隔离 runtime 并注册 LaunchAgent，最后执行公共 API smoke：
+需要从源码准备本机依赖时，运行零配置首装流程；它会构建当前源码 wheel、准备模型、创建隔离 runtime
+并注册 LaunchAgent：
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
@@ -113,13 +105,10 @@ cd SpeechRail
 这条路径也会检查并提示缺失的 Xcode CLT、Homebrew、`ffmpeg`、`uv`。磁盘、模型校验、失败恢复和
 各档位差异见 [SpeechRail 零配置首装 SOP](../../.agents/skills/speechrail-zero-setup/SKILL.md)。
 
-仓库内还可以用 `scripts/verify_release.py --wheel <wheel> --app-home "$HOME/Library/Application Support/SpeechRail"`
-按 wheel 路径核对已安装 runtime。
-
 ## 4. 安装 App（DMG）
 
-DMG 挂载后的卷名是 `SpeechRail <version>`，里面只有 `SpeechRail.app` 和指向 `/Applications` 的
-链接。双击打开 DMG，把 `SpeechRail.app` 拖到 `Applications` 即可：
+DMG 挂载后的卷名是 `SpeechRail <version>`，里面只有 `SpeechRail.app`。将 App 拖到当前用户的
+`Applications` 目录即可：
 
 ```bash
 open ~/Downloads/SpeechRail-<version>-macOS-arm64.dmg
@@ -128,17 +117,17 @@ open ~/Downloads/SpeechRail-<version>-macOS-arm64.dmg
 习惯用终端时也可以走同一条复制路径：
 
 ```bash
-cp -R "/Volumes/SpeechRail <version>/SpeechRail.app" /Applications/
+mkdir -p "$HOME/Applications"
+cp -R "/Volumes/SpeechRail <version>/SpeechRail.app" "$HOME/Applications/"
 hdiutil detach "/Volumes/SpeechRail <version>"
-open /Applications/SpeechRail.app
+open "$HOME/Applications/SpeechRail.app"
 ```
 
-- 建议放在 `/Applications`（只给当前用户使用时 `~/Applications` 也可以），但同一台机器只保留一个
-  长期可执行的 `SpeechRail.app`；上一版本留作 DMG 归档，不要在系统中同时放两个 App 副本。
+- 默认安装到 `~/Applications/SpeechRail.app`；同一台机器只保留一个长期可执行的 App bundle。
 - 该 DMG 是 **unsigned、未公证**的制品。首次从网络下载后打开时，macOS 可能提示“无法验证开发者”或
   “无法检查恶意软件”；确认来源和 `SHA256SUMS` 后，在「系统设置 → 隐私与安全性」中点“仍要打开”。
   受企业策略管理的 Mac 可能不允许此放行。
-- App 需要 macOS 26 及以上，并且需要已经安装服务；服务本身仍是 macOS 14+ 的独立组件。
+- App 需要 macOS 26 及以上，并且需要已经安装服务。
 
 ## 5. 首次验证
 
@@ -194,12 +183,17 @@ uvx --python 3.12 --from ./speechrail-*.whl speechrail install --yes --enable
 ```bash
 SPEECHRAIL_CLI="$HOME/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail"
 "$SPEECHRAIL_CLI" service stop --app-home "$HOME/Library/Application Support/SpeechRail"
-"$SPEECHRAIL_CLI" service disable --app-home "$HOME/Library/Application Support/SpeechRail"
 "$SPEECHRAIL_CLI" service uninstall --app-home "$HOME/Library/Application Support/SpeechRail"
 ```
 
   `uninstall` 只卸载并删除 `~/Library/LaunchAgents/com.speechrail.plist`，不删除模型、私有配置、
   `runtime/releases` 和日志。
+
+当前交付不提供旧版本数据迁移流程。App 的会话记录位于
+`~/Library/Application Support/SpeechRail/sessions.sqlite3`，作品位于同层的 `Works/`。在设置 → 助手 →
+记录库中可以打开数据目录，并使用“备份记录库”导出会话库单文件；该入口不包含 `Works/`、custom voice
+或私有配置。需要完整保留时，用户必须分别备份这些资产。`runtime/`、`state/`、模型和日志等可重建内容可以
+删除后重新准备。删除前应先确认目标路径，不要把删除用户源文件当作卸载步骤。
 
 ## 7. 常见问题
 
@@ -207,16 +201,15 @@ SPEECHRAIL_CLI="$HOME/Library/Application Support/SpeechRail/runtime/current/.ve
 |---|---|---|
 | App 显示「无法连接本机服务」或菜单显示「服务未连接」 | 只装了 App，或服务没启动 | 先按第 3 节安装服务；已安装未启动时执行 `"$HOME/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail" service start --app-home "$HOME/Library/Application Support/SpeechRail"` |
 | 打开 App 提示无法验证开发者 / 无法检查恶意软件 | DMG 为 unsigned、未公证制品 | 确认来源与 `SHA256SUMS` 后走「隐私与安全性 → 仍要打开」；企业托管 Mac 可能禁止 |
-| `pip install` / `uv pip install` wheel 报平台不兼容 | wheel 平台标签为 `macosx_26_0_arm64` | 在 macOS 26 上安装，或在目标机用第 3.2 节流程构建 wheel |
+| `pip install` / `uv pip install` wheel 报平台不兼容 | wheel 平台标签为 `macosx_26_0_arm64` | 在 macOS 26+ Apple Silicon 上安装当前 wheel |
 | `uvx` 报 `no wheels with a matching Python version tag` | 默认用了比 3.12 更新的解释器 | 按第 3.1 节加上 `--python 3.12` |
-| `uvx ... speechrail install` 报 `invalid choice: 'install'` | 用的是 2.6.6 及更早的 wheel，里面的 CLI 还没有安装子命令 | 按第 3.2 节走仓库首装流程，或改用 2.7.0 及以后的 wheel |
 | `install` 报 `uv is not on PATH` | 机器上没有 `uv` | 按提示访问 `https://docs.astral.sh/uv/getting-started/installation/` 安装后重试 |
 | `install` 报 wheel 版本与 installer 不一致 | CLI 与待安装 wheel 不是同一个版本 | 让 `uvx --from` 指向要安装的那个 wheel |
 | `install` 报 `requires the SpeechRail service to be stopped` | 旧实例还在运行，安装器拒绝热替换 | 先执行同一条报错里给出的 `service stop` 命令，再重跑安装（见第 6 节） |
 | `install` 报 `a different managed preset is already configured` | 一个 app home 只保留一个档位，显式传了别的档位 | 省略 `--preset` 沿用当前档位，或用已安装 runtime 的 `profile apply <tier> --yes` 换档 |
 | `--enable` 后提示服务未就绪 | 进程起来了但模型/运行时还没就绪 | 按提示执行 `"$HOME/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail" service preflight --app-home "$HOME/Library/Application Support/SpeechRail"`，再 `curl -s -i http://127.0.0.1:8201/readyz \| head -1` |
 | `/readyz` 返回 503 `backend_not_ready` | 服务已启动但模型或运行时未就绪 | 用 `speechrail service preflight` 与 [运维 Runbook](../operations/operations-runbook.md) 定位 |
-| App 无法在旧系统上打开 | App 基线是 macOS 26.0 | 服务仍可在 macOS 14+ 运行，此时只用 CLI、HTTP 与 WebSocket |
+| App 无法打开 | App 基线是 macOS 26.0 | 在支持的 macOS 26+ Apple Silicon 环境中重新安装当前 DMG |
 
 ## 8. 参考
 

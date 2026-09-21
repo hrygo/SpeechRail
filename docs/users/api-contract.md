@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.1.0"
-date: 2026-09-20
+version: "3.2.0"
+date: 2026-09-21
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -21,7 +21,7 @@ date: 2026-09-20
 
 SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（Alias）：
 
-| 能力类别 | Canonical 模型 ID | 兼容别名 (Aliases) | 说明 |
+| 能力类别 | Canonical 模型 ID | 标准别名 (Aliases) | 说明 |
 |---|---|---|---|
 | **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录） |
 | **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign、CustomVoice 或 Quality Base capability |
@@ -43,7 +43,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 
 | 能力 | 🟢 `light` (Embedded) | 🟡 `balanced` (Pro Workflow) | 🟣 `quality` (Studio) |
 |---|---|---|---|
-| 批量文件转写 / Realtime / `segment`+`word` 时间戳 / translation | ✓ | ✓ | ✓ |
+| 批量文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ |
 | 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ |
 | 自然语言音色设计 / 试听（VoiceDesign） | ✗ | ✗ | ✓ |
 | 参考音频克隆（Base，`/v1/voices/clone`） | ✗ | ✗ | ✓ |
@@ -386,7 +386,7 @@ GET /v1/voices/custom_1788583825_59b3
 Authorization: Bearer <TOKEN>
 ```
 
-自定义音色可以原子更新 metadata。instruction 音色支持更新名称、instruction 和 seed；由 VoiceDesign/clone 生成的 reference 音色只支持更新名称，参考音频、`ref_text`、来源证明和 ID 不可替换。兼容的 `/v1` PATCH 保留历史的无条件更新语义；需要把更新绑定到已知不可变版本时，使用 SpeechRail 专用 `PATCH /v1/speechrail/voices/{voice_id}`，并提供必需的 `expected_revision`，过期版本返回 `409 voice_revision_conflict`：
+自定义音色可以原子更新 metadata。instruction 音色支持更新名称、instruction 和 seed；由 VoiceDesign/clone 生成的 reference 音色只支持更新名称，参考音频、`ref_text`、来源证明和 ID 不可替换。标准 `/v1` PATCH 使用无条件更新语义；需要把更新绑定到已知不可变版本时，使用 SpeechRail 专用 `PATCH /v1/speechrail/voices/{voice_id}`，并提供必需的 `expected_revision`，过期版本返回 `409 voice_revision_conflict`：
 ```http
 PATCH /v1/voices/custom_1788583825_59b3
 Content-Type: application/json
@@ -399,7 +399,7 @@ Authorization: Bearer <TOKEN>
 }
 ```
 
-更新成功返回完整的 `VoiceProfile`。系统预置音色、标准 alias 和不存在的音色不可修改；更新失败时旧 registry 记录保持不变。SpeechRail 专用版本更新、rollback 和 revoke 会保留不可变 revision 历史；legacy profile 缺少 revision 时保持 `null`，不会被推断或补写。
+更新成功返回完整的 `VoiceProfile`。系统预置音色、标准 alias 和不存在的音色不可修改；更新失败时当前 registry 记录保持不变。SpeechRail 专用版本更新、rollback 和 revoke 会保留不可变 revision 历史；未带 revision 的现有条目保持 `null`，不会被推断或补写。
 
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http
@@ -490,7 +490,7 @@ Authorization: Bearer <TOKEN>
 PCM 时填充 `rt_...`；worker 未提供完整身份或仅使用 fake/injected backend 时保持 `null`。
 TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获的 probe 执行身份。
 
-#### 5.7.4 `VoiceQualityReport` 结构与向后兼容
+#### 5.7.4 `VoiceQualityReport` 字段语义与缺省值
 
 报告顶层字段：
 
@@ -504,11 +504,11 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`） |
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
-**向后兼容**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及历史遗留记录不携带 `quality` 字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
+**字段语义**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及未执行质量评估的记录可能不携带该字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
 
 ---
 
-## 6. 全双工 Realtime WebSocket (`WS /v1/realtime`)
+## 6. Realtime current-only WebSocket (`WS /v1/realtime`)
 
 连接端点：`ws://127.0.0.1:8201/v1/realtime`。本节是 current-only 语义；没有旧事件翻译、双 wire profile 或 `/v2` 迁移层。SpeechRail 是无状态 Speech Plane，调用方拥有 LLM、历史、工具、播放和 barge-in。
 

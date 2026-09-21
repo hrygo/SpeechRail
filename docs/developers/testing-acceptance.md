@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # SpeechRail 测试与验收
@@ -32,10 +32,10 @@ npm ci --prefix tests/openai-sdk-node --ignore-scripts --no-audit --no-fund
 npm test --prefix tests/openai-sdk-node
 ```
 
-测试使用 fake backend 和合成/脱敏数据，不加载模型、不访问网络，也不提交真实音频。
+测试使用 fake backend 和合成/脱敏数据，不加载模型、不访问网络，也不提交真实音频。确定性测试通过不等于真实模型质量、性能、长时稳定性或客户端体验通过。
 至少覆盖：模型选择、ASR/TTS 错误 envelope、上传限制、队列、REST 响应格式、voice
 registry、worker frame 协议、snapshot preflight、Realtime current-only 的
-`transcription_session.update`/append/commit/clear 与 `speechrail.tts.*` 顺序、TTS chunk 顺序与背压，
+`transcription_session.update`（含提词器 snapshot/revision 与会话分块）/append/commit/clear 与 `speechrail.tts.*` 顺序、TTS chunk 顺序与背压，
 以及 VAD/EOF 边界行为；旧 Realtime 事件必须由 rejection matrix 明确拒绝。
 
 ## 真实 worker smoke

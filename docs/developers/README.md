@@ -2,13 +2,13 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.1.3"
-date: 2026-09-20
+version: "2.2.0"
+date: 2026-09-21
 ---
 
 # 🛠️ SpeechRail 开发者文档
 
-欢迎查阅 SpeechRail 开发者文档。本目录面向参与代码开发、架构重构、Worker 协议扩展以及测试门禁维护的工程师与贡献者。
+本目录面向参与代码开发、架构演进、Worker 协议扩展和测试门禁维护的工程师。公共行为以代码、测试和 `contracts/` 为准；本目录中的设计说明不自动扩大产品能力。
 
 ---
 

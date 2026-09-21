@@ -8,12 +8,25 @@ struct TeleprompterTimingPolicyTests {
     @Test func metricsSeparateHanAndLatinWords() {
         let text = "你好 World，这是一个 test 123。"
         let metrics = TeleprompterTimingPolicy.countMetrics(in: text)
-        // Han: 你 好 这 是 一 个 (6)
-        // Latin/alphanumeric words: World, test, 123 (3)
+        // Han: 你 好 这 是 一 个 (6); digits are unresolved rather than
+        // pretending that their pronunciation is one known Latin word.
         #expect(metrics.hanCount == 6)
-        #expect(metrics.latinWordCount == 3)
-        #expect(metrics.totalUnits == 9)
+        #expect(metrics.latinWordCount == 2)
+        #expect(metrics.totalUnits == 8)
+        #expect(metrics.hasUnresolvedPronunciation)
         #expect(!metrics.isEmpty)
+    }
+
+    @Test func unknownPronunciationMakesPreflightUncertain() {
+        let metrics = TeleprompterTimingPolicy.countMetrics(in: "版本 2.0，访问 https://example.com")
+        #expect(metrics.hasUnresolvedPronunciation)
+        #expect(metrics.uncertaintyReasons.contains("unresolvedPronunciation"))
+        #expect(metrics.uncertaintyReasons.contains("url"))
+
+        let estimate = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: .natural)
+        #expect(estimate.pointSeconds == nil)
+        #expect(estimate.knownPartSeconds > 0)
+        #expect(estimate.isUncertain)
     }
 
     @Test func estimateDurationCalculatesPaceAndCalibration() {

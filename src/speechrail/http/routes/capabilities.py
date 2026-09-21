@@ -9,8 +9,13 @@ from fastapi.responses import JSONResponse
 
 from speechrail.application.capability_snapshot import build_capability_snapshot, content_revision
 from speechrail.application.services import AppServices
+from speechrail.application.voice_validation_gate import (
+    build_validation_binding,
+    load_validation_evidence,
+)
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.tts import VoiceStoreUnavailableError, get_voice_registry, resolve_voice
+from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
 
@@ -26,7 +31,27 @@ def create_capability_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            profiles = get_voice_registry().snapshot_profiles()
+            registry = get_voice_registry()
+            profiles = registry.snapshot_profiles()
+            validations: dict[str, dict[str, object]] = {}
+            validation_bindings: dict[str, dict[str, object]] = {}
+            for profile in profiles:
+                if profile.mode != "clone":
+                    continue
+                binding = build_validation_binding(
+                    profile,
+                    active.tts_clone,
+                    services.tts_synthesizer,
+                    require_current_binding=True,
+                )
+                validation_bindings[profile.id] = binding.as_mapping()
+                evidence = load_validation_evidence(
+                    registry.validation_store,
+                    binding,
+                    require_current_binding=True,
+                )
+                if evidence is not None:
+                    validations[profile.id] = evidence
             snapshot = build_capability_snapshot(
                 profiles,
                 active,
@@ -34,8 +59,10 @@ def create_capability_router(services: AppServices) -> APIRouter:
                 ready=services.tts_ready,
                 enabled_voices=frozenset(services.settings.tts_voice_ids),
                 sample_rate=services.settings.tts_sample_rate,
+                validation_records=validations,
+                validation_bindings=validation_bindings,
             )
-        except VoiceStoreUnavailableError:
+        except (VoiceStoreUnavailableError, VoiceValidationStoreUnavailableError):
             return error_response(
                 503,
                 request.state.request_id,

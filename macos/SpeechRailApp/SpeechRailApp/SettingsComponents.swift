@@ -125,8 +125,10 @@ enum SettingsConnectionPresentation {
             "对话服务已连接"
         case .serviceReachableModelMissing:
             "服务已连接，但模型不可用"
+        case .notChatAPI:
+            "这个服务不支持 Chat Completions"
         case .notResponsesAPI:
-            "这个服务不支持对话"
+            "这个服务不支持 Responses"
         case .unreachable:
             "连接未通过"
         case .notConfigured:

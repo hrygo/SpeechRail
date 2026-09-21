@@ -2,8 +2,8 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 🌟 SpeechRail 产品全景白皮书
@@ -17,7 +17,7 @@ date: 2026-09-20
 
 对于需要高质量语音识别与合成能力的**端侧 AI 应用**（如会议助理、桌面智能体、配音工具、无障碍辅助等），**SpeechRail** 是一个**轻量、高效、本地优先的共享语音引擎**。
 
-与传统的“调用云端闭源语音 API”（产生昂贵账单且存在隐私泄露隐患）以及“各自应用内嵌臃肿模型运行时”（造成显存与内存重复争抢崩溃）不同，SpeechRail 提供了**统一的单机多应用共享运行时**，具备**零外网依赖的绝对隐私安全**、**针对 Apple Silicon 统一内存的硬件级极速推理**，以及**与 OpenAI Audio / Realtime 选定语音子集对齐的标准接口**。Realtime 不承载服务端 LLM、对话历史或播放控制，完整助手由调用方编排。
+与各应用分别嵌入语音模型运行时的方案相比，SpeechRail 提供**统一的单机多应用共享运行时**，将模型生命周期、资源准入和协议转换集中在一个可观测边界内。请求路径默认本地处理，不静默下载模型或读取远程音频；安装与模型准备由用户显式触发并可能联网。SpeechRail 对齐 OpenAI Audio / Realtime 的已实现语音子集，Realtime 不承载服务端 LLM、对话历史或播放控制，完整助手由调用方编排。
 
 ---
 
@@ -27,9 +27,10 @@ date: 2026-09-20
 mindmap
   root((SpeechRail 核心价值))
     🔒 隐私安全与合规
-      零网络外呼
-      内存瞬态处理
-      无音频与文本留存
+      请求路径不外呼
+      音频与完整转写不入普通日志
+      服务不留存原始音频
+      App 会话可持久化文字
     ⚡ 极致性能与硬件调优
       Apple Silicon 统一内存优化
       WAV 零拷贝 Fast-Path
@@ -45,19 +46,19 @@ mindmap
 ```
 
 ### 🔒 1. 绝对隐私与企业级合规 (Privacy-First & Offline)
-- **零外部网络外呼**：模型快照完全本地加载，服务强制开启离线安全沙箱，杜绝数据出境。
-- **瞬态数据生命周期**：音频仅在内存流水线中处理，推理完成即释放，不留存任何原始音频或中间 PCM。
+- **请求路径本地化**：模型快照从仓库外的本地制品加载；服务请求路径不下载模型、不读取远程音频 URL。安装和模型准备是显式的运维动作，可访问锁定的本地制品源。
+- **敏感数据最小化**：原始音频、PCM、完整转写和完整 prompt 不进入普通日志、fixture 或报告；自定义音色与任务元数据是否持久化以当前接口契约为准。
 - **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
 
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
 - **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS，并按档位执行精度策略——🟢 `light`、🟡 `balanced`、🟣 `quality` 三档均使用 8-bit 权重（`quality` 的 aligner 保持 bf16）。曾评估的 4-bit `light` 方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
-- **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
+- **有界推理链路**：WAV 容器支持 fast-path；Resource Governor、worker 生命周期与有限队列共同控制单机资源。延迟和吞吐不在产品概述中作固定承诺。
 - **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，同时由独立 Base（1.7B）capability worker 承担参考音频克隆；🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
 
 ### 🔌 3. 标准语音契约与清晰编排边界
 - **REST 子集**：`/v1/audio/transcriptions` 与 `/v1/audio/speech` 提供文档声明的 OpenAI 兼容语音接口。
 - **Realtime Speech Plane**：`/v1/realtime` 只接收 current-only transcription session、音频 buffer 和 `speechrail.tts.*`；调用方持有 LLM、历史、工具、播放队列与 barge-in 策略。
-- **无旧版本兼容**：`3.0.0` 不提供旧 Realtime 事件、字段、alias、双 wire 或 `/v2` 迁移层；新集成直接按当前契约实现。
+- **当前 wire**：`3.0.2` 不提供旧 Realtime 事件、字段、双 wire 或 `/v2` 迁移层；新集成直接按当前契约实现。数据迁移不属于当前交付范围，需保留的数据由调用方自行备份。
 
 ### 🛡️ 4. 稳健的单机多应用调度 (Multi-App Resource Governor)
 - **物理进程隔离**：主 HTTP 服务与推理 Worker 物理分离，模型崩溃不波及服务 API。
@@ -115,24 +116,23 @@ SpeechRail 以三个**用户差异化档位**交付同一套 API 契约；档位
 
 ## 📊 4. 业务场景与能力矩阵 (Capability Matrix)
 
-| 业务场景 | 对应核心能力 | 接口入口 | 性能基准指标 | 适配客户端 / 工具 |
+| 业务场景 | 对应核心能力 | 接口入口 | 当前证据口径 | 适配客户端 / 工具 |
 |---|---|---|---|---|
-| **录音速记 / 播客转写** | 批量文件 ASR、分段与时间戳 | `POST /v1/audio/transcriptions` | RTF < 0.15 (10分钟音频约90秒完成) | QwenPaw, OpenAI SDK, cURL |
-| **实时会议字幕与纪要** | 流式 ASR + 匿名声纹分离 | `WS /v1/realtime` (transcription) | 首字延迟 < 200ms，DER < 12% | Sona, Pipecat |
-| **全双工语音助手** | Server VAD + 打断 + 流式 TTS | `WS /v1/realtime` (full-duplex) | 打断响应 < 50ms，TTS 流式平滑输出 | 智能桌面 Assistant, Sona |
-| **高保真文案朗读** | 24kHz 整句/分段语音合成 | `POST /v1/audio/speech` | RTF < 0.35, 输出格式 PCM/WAV/MP3 | 听书工具, 配音工作流 |
-| **长音频异步离线处理** | 任务队列与 Spool 调度 | `POST/GET/DELETE /v1/jobs` | 队列削峰填谷，防 OOM | 后台自动化任务, SRE 批处理 |
+| **录音速记 / 播客转写** | 批量文件 ASR、分段与时间戳 | `POST /v1/audio/transcriptions` | 契约可用；长时质量与性能按对应验收报告核定 | QwenPaw, OpenAI SDK, cURL |
+| **实时会议字幕与纪要** | 流式 ASR + 匿名声纹分离 | `WS /v1/realtime` (transcription) | 契约可用；DER/JER、长时延迟与资源行为需单独验收 | Sona, Pipecat |
+| **全双工语音助手** | Server VAD + 打断 + 流式 TTS | `WS /v1/realtime` (full-duplex) | 服务交付语音事实；播放队列与打断时延由调用方验收 | 智能桌面 Assistant, Sona |
+| **高保真文案朗读** | 24kHz 整句/分段语音合成 | `POST /v1/audio/speech` | 契约可用；音质、RTF 与首音时延按 runtime 单独验收 | 听书工具, 配音工作流 |
+| **长音频异步离线处理** | 任务队列与 Spool 调度 | `POST/GET/DELETE /v1/jobs` | 提供有界队列；吞吐与 OOM 包络需按 profile 验收 | 后台自动化任务, SRE 批处理 |
 
 ### 4.1 三档能力矩阵（API 声明契约）
 
 | 能力 | 🟢 `light` | 🟡 `balanced` | 🟣 `quality` |
 |---|---|---|---|
-| 批量 ASR / Realtime / 分段与词级时间戳 | ✓ | ✓ | ✓ |
+| 批量 ASR（分段与词级时间戳）/ Realtime（分段事实） | ✓ | ✓ | ✓ |
 | 说话人分离 (Diarization) | ✗ | ✓ | ✓ |
-| 翻译 | ✓ | ✓ | ✓ |
 | VoiceDesign / 音色克隆 | ✗ | ✗ | ✓ |
 
-> 说明：词级时间戳由 ASR 原生提供（`timestamp_granularities`），与 aligner 无关，三档均可用。分人仅在 🟡/🟣 供给 aligner 与 CoreML 制品，🟢 不声明 `gpt-4o-transcribe-diarize`；VoiceDesign 与音色克隆仅在 🟣 可用，🟡/🟢 的克隆音色 `available=false` 并按契约稳定拒绝。公共 API 请求/响应形状三档一致。
+> 说明：本表描述契约与能力供给，不构成固定性能 SLA。词级时间戳由 ASR 原生提供（`timestamp_granularities`），与 aligner 无关，三档均可用。分人仅在 🟡/🟣 供给 aligner 与 CoreML 制品，🟢 不声明 `gpt-4o-transcribe-diarize`；VoiceDesign 与音色克隆仅在 🟣 可用，🟡/🟢 的克隆音色 `available=false` 并按契约稳定拒绝。公共 API 请求/响应形状三档一致。
 
 ---
 

@@ -45,6 +45,7 @@ from speechrail.domain.tts import (
     get_voice_registry,
     normalize_tts_text,
 )
+from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
 from speechrail.domain.voice_creation import VoiceCreation
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
@@ -482,6 +483,21 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "backend_timeout",
                 "Voice registration timed out",
                 retryable=True,
+            )
+        except TtsBackendError as exc:
+            if exc.code in TTS_PARAMETER_ERROR_CODES:
+                status_code = 400
+            elif exc.public_code == "tts_initialization_failed":
+                status_code = 503
+            else:
+                status_code = 502
+            return error_response(
+                status_code,
+                request_id,
+                exc.public_code,
+                "TTS backend failed during voice reference generation",
+                retryable=exc.retryable,
+                diagnostic_class=exc.diagnostic_class,
             )
         except (TTSDeliveryError, OverflowError):
             return error_response(

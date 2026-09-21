@@ -18,7 +18,12 @@ from typing import Literal, Protocol
 from speechrail.backends.qwen3_native import validate_forced_aligner_snapshot
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptSegment
-from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
+from speechrail.domain.ports import (
+    RealtimeAsrFactory,
+    RealtimeAsrSession,
+    RealtimeTranscriptionOptions,
+    StreamingAsrEvent,
+)
 from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease, AsrModeScheduler
 from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
@@ -578,7 +583,13 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
 
         return getattr(self._worker, "runtime_revision", None)
 
-    def create(self, *, language: str | None, prompt: str) -> Qwen3StreamingSession:
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> Qwen3StreamingSession:
         resolved = (language or "auto").strip().lower()
         if self._mode == "causal" and resolved not in {"en", "english"}:
             raise _unsupported_language(resolved)
@@ -592,7 +603,7 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             language=resolved,
             prompt=prompt,
             session_id=self._next_session_id(),
-            chunk_sec=getattr(config, "chunk_sec", 2.0),
+            chunk_sec=options.chunk_duration_ms / 1_000,
             left_context_sec=getattr(config, "left_context_sec", 12.0),
             right_context_ms=getattr(config, "right_context_ms", 640),
             max_new_tokens=getattr(config, "max_new_tokens", 256),

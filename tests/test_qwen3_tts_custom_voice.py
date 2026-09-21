@@ -68,6 +68,17 @@ class SingleFinalCustomVoiceModel:
         )
 
 
+class BaseWarmupModel:
+    config = SimpleNamespace(tts_model_type="base")
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(self, **kwargs: object):
+        self.calls.append(kwargs)
+        yield FakeGenerationResult()
+
+
 def _snapshot_identity() -> SnapshotIdentity:
     return SnapshotIdentity(
         family="qwen3_tts",
@@ -133,7 +144,7 @@ def test_custom_voice_engine_uses_shared_streaming_generation_without_instructio
             "text": "你好。",
             "voice": "Serena",
             "speed": 1.25,
-            "lang_code": "zh",
+            "lang_code": "chinese",
             "max_tokens": 39,
             "repetition_penalty": 1.25,
             "temperature": 0.85,
@@ -145,6 +156,47 @@ def test_custom_voice_engine_uses_shared_streaming_generation_without_instructio
     assert len(chunks) == 1
     assert len(chunks[0]) % 2 == 0
     assert np.isfinite(np.frombuffer(chunks[0], dtype="<i2")).all()
+
+
+def test_base_engine_skips_default_voice_warmup_and_starts_with_clone_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = SnapshotIdentity(
+        family="qwen3_tts",
+        variant="base",
+        quantization=QuantizationSpec(bits=4, group_size=64, format="mlx"),
+        weight_fingerprint="shape:" + ("b" * 64),
+    )
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    model = BaseWarmupModel()
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"reference")
+    engine = MlxQwenTtsEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=lambda path, sample_rate, volume_normalize: np.ones(
+            100, dtype=np.float32
+        ),
+        warmup=True,
+    )
+
+    assert model.calls == []
+    chunks = list(
+        engine.synthesize(
+            "合法 clone 请求。",
+            voice="clone_sample",
+            speed=1.0,
+            language="zh",
+            ref_audio=str(reference),
+            ref_text="参考朗读文本",
+        )
+    )
+
+    assert chunks
+    assert len(model.calls) == 1
+    assert model.calls[0]["ref_text"] == "参考朗读文本"
 
 
 def test_custom_voice_fades_first_non_empty_pcm_after_empty_model_result(

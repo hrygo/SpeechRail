@@ -66,7 +66,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
             "voice": None,
             "instruct": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
             "speed": 1.25,
-            "lang_code": "zh",
+            "lang_code": "chinese",
             "max_tokens": 39,
             "repetition_penalty": 1.25,
             "temperature": 0.1,

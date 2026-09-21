@@ -28,13 +28,17 @@ public enum TeleprompterSegmenter {
         for paragraph in paragraphRanges {
             ranges.append(contentsOf: sentenceRanges(in: sourceText, paragraph: paragraph))
         }
+        let sectionEnds = Set(paragraphRanges.map(\.upperBound))
 
         return ranges.enumerated().map { ordinal, range in
             let text = String(sourceText[range])
-            let pauseHint: TeleprompterPauseHint = switch text.count {
-            case 0..<45: .short
-            case 45..<100: .medium
-            default: .long
+            let pauseHint: TeleprompterPauseHint
+            if sectionEnds.contains(range.upperBound) {
+                pauseHint = .long
+            } else if text.last.map({ ".。!?！？;；".contains($0) }) == true {
+                pauseHint = .medium
+            } else {
+                pauseHint = .short
             }
             return TeleprompterSegment(
                 id: "segment-\(ordinal + 1)",
@@ -61,11 +65,12 @@ public enum TeleprompterSegmenter {
 
         while cursor < paragraph.upperBound {
             let next = sourceText.index(after: cursor)
-            if isSentenceBoundary(sourceText[cursor]) {
-                if let trimmed = trimmedRange(in: sourceText, range: start..<next) {
+            if isSentenceBoundary(in: sourceText, at: cursor) {
+                let end = sentenceEnd(in: sourceText, boundary: cursor, upperBound: paragraph.upperBound)
+                if let trimmed = trimmedRange(in: sourceText, range: start..<end) {
                     result.append(contentsOf: boundedRanges(in: sourceText, range: trimmed))
                 }
-                start = next
+                start = end
                 while start < paragraph.upperBound && sourceText[start].isWhitespace {
                     start = sourceText.index(after: start)
                 }
@@ -104,6 +109,16 @@ public enum TeleprompterSegmenter {
                     end = sourceText.index(after: boundary)
                 }
             }
+
+            // Never split a long Latin word or identifier merely because it
+            // crossed the soft 60-grapheme target. The resulting unit may be
+            // longer than the target, but remains pronounceable and traceable.
+            while end < range.upperBound,
+                  let previous = end > start ? sourceText.index(before: end) : nil,
+                  isWordCharacter(sourceText[previous]),
+                  isWordCharacter(sourceText[end]) {
+                end = sourceText.index(after: end)
+            }
             result.append(start..<end)
             start = end
             while start < range.upperBound && sourceText[start].isWhitespace {
@@ -130,7 +145,67 @@ public enum TeleprompterSegmenter {
         return lower < upper ? lower..<upper : nil
     }
 
-    private static func isSentenceBoundary(_ character: Character) -> Bool {
-        ".。!?！？;；".contains(character)
+    private static func isSentenceBoundary(in sourceText: String, at index: String.Index) -> Bool {
+        let character = sourceText[index]
+        guard ".。!?！？;；".contains(character) else { return false }
+        guard character == "." else { return true }
+
+        let previous = index > sourceText.startIndex ? sourceText[sourceText.index(before: index)] : nil
+        let nextIndex = sourceText.index(after: index)
+        let next = nextIndex < sourceText.endIndex ? sourceText[nextIndex] : nil
+
+        // Keep decimals, versions, domain names and abbreviations inside one
+        // reading unit. A period at the end of a sentence remains a boundary.
+        if let previous, let next,
+           isDigit(previous), isDigit(next) {
+            return false
+        }
+        if let previous, let next,
+           isWordCharacter(previous), isWordCharacter(next) {
+            return false
+        }
+        if abbreviationBeforePeriod(in: sourceText, at: index) {
+            return false
+        }
+        return true
+    }
+
+    private static func abbreviationBeforePeriod(in sourceText: String, at index: String.Index) -> Bool {
+        var start = index
+        while start > sourceText.startIndex {
+            let previous = sourceText.index(before: start)
+            guard isWordCharacter(sourceText[previous]) || sourceText[previous] == "." else { break }
+            start = previous
+        }
+        let token = String(sourceText[start..<index]).lowercased()
+        return ["dr", "mr", "mrs", "ms", "prof", "sr", "jr", "e.g", "i.e"].contains(token)
+    }
+
+    private static func sentenceEnd(
+        in sourceText: String,
+        boundary: String.Index,
+        upperBound: String.Index
+    ) -> String.Index {
+        var end = sourceText.index(after: boundary)
+        while end < upperBound && isClosingCharacter(sourceText[end]) {
+            end = sourceText.index(after: end)
+        }
+        return end
+    }
+
+    private static func isClosingCharacter(_ character: Character) -> Bool {
+        ["\"", "'", "”", "’", "》", "」", "』", "）", ")", "]", "}", "〉", "〕", "】"]
+            .contains(character)
+    }
+
+    private static func isDigit(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+                || $0.value == 0x5F || $0.value == 0x23
+        }
     }
 }

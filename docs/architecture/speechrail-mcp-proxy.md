@@ -2,8 +2,8 @@
 title: "SpeechRail MCP Proxy 架构与终态契约"
 status: active
 audience: "系统架构师、协议设计者、Agent 集成方"
-version: "3.1.0"
-date: 2026-09-20
+version: "3.6.0"
+date: 2026-09-21
 ---
 
 # SpeechRail MCP Proxy 架构与终态契约
@@ -14,6 +14,12 @@ SpeechRail REST 能力交给 Agent，以及如何通过 effective capability sna
 
 本版将 `effective_capabilities_v1` 定为 MCP 的必需能力发现契约，移除旧服务的
 `/v1/models` + `/v1/voices` discovery fallback，并从 `describe` 结果删除 legacy 诊断字段。
+
+当前版本（2026-09-21）补充 Realtime caller-owned transcription 扩展的 MCP 边界：
+MCP 不代理该 WebSocket 能力，直连客户端可协商 mutable snapshot partial 与会话级分块。
+同时保留 durable speech job 的共享参数校验，并明确 output validation
+必须绑定当前 runtime、前处理、generation recipe 与 policy；cold/unknown runtime 不得把历史
+pass 投影为 `production_ready`。
 
 事实来源按以下顺序解释冲突：
 
@@ -62,6 +68,15 @@ Realtime 仍由调用方直连唯一的 `/v1/realtime`。MCP 只代理无状态 
 job 工具；需要实时字幕、语音助手或会议能力的客户端自行拥有连接、会话状态、LLM 编排、播放
 与打断策略。SpeechRail Realtime 只交付 ASR/VAD/匿名分人事实，并处理调用方显式发送的
 `speechrail.tts.create` / `speechrail.tts.cancel`。
+
+对于提词器或实时字幕，调用方可在首个 PCM 前协商
+`session.speechrail.transcription.partial_mode`（`delta` 或 `snapshot`）与
+`chunk_duration_ms`（公开值 `500/1000/2000`），等待
+`transcription_session.updated` 回显后再开始采集。snapshot 事件
+`speechrail.transcription.snapshot` 传递同一 ASR item 的最新全文；调用方按严格递增
+`revision` 替换文本，不得把它当作追加 delta。首个 PCM 后不能修改选项，服务返回
+`invalid_state`。这些字段和事件属于 Realtime wire contract，不是 MCP tool、resource 或
+MCP session 状态；详见 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
 
 ## 2. 进程、传输与安全
 
@@ -169,14 +184,26 @@ MCP 只用 namespaced capability 中的安全 voice entries 填充结果中的 `
 契约没有可复制的不可变声学身份。`available=true` 也只表示当前配置允许按需服务，不代表
 worker 已常驻、请求一定立即准入或音质已经验收。
 
+`validation_state` 分开表达 `reference`、`synthesis/output` 和 `identity`；
+`validated_for` 只列出当前独立验证证据覆盖的用途。输出验证记录存放在独立 bounded
+repository，不写回 acoustic voice revision；旧的嵌入式记录只能显示为
+unevaluated/stale，不能自动升级为通过。
+
+正式 output evidence 还绑定到同一组运行时身份：`voice_revision`、model artifact 与
+catalog revision、已观测的 `model_runtime_revision`、由其派生的
+`runtime_fingerprint`、reference preprocessing version、Base generation recipe revision
+和 validation policy version。只要当前 Base worker 处于 cold/unknown、或任一绑定维度变化，
+旧的 pass 就不能被当前请求重用，`production_ready` 必须保持为 `false`。
+
 ### 4.3 revision pin 的执行语义
 
-MCP `synthesize` 支持两个可选参数：
+MCP `synthesize` 支持 revision pins 与显式 validation policy：
 
 | MCP 参数 | REST Header | 格式 |
 |---|---|---|
 | `expected_voice_revision` | `SpeechRail-Expected-Voice-Revision` | `vr_` + 32 位小写 hex |
 | `expected_model_revision` | `SpeechRail-Expected-Model-Revision` | 40 位小写 hex |
+| `validation_policy` | REST JSON body | `allow_unverified` / `require_output_pass` |
 
 当调用方没有显式传入 pin 时，MCP 从本次必需的 effective snapshot 自动选择：
 
@@ -213,8 +240,9 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 
 ## 5. MCP 工具契约
 
-当前工具集固定为 9 个。工具的公开 schema、标题、注解和结构化输出由 `src/speechrail/mcp`
-注册；`ctx`、REST client 等内部参数不会出现在 MCP input schema。
+当前工具集为 15 个：既有的请求级语音/任务工具，加上音色详情、VoiceDesign/Base 注册、
+输出验收和 job 结果恢复。工具的公开 schema、标题、注解和结构化输出由
+`src/speechrail/mcp` 注册；`ctx`、REST client 等内部参数不会出现在 MCP input schema。
 
 | 工具 | 作用 | 关键约束 | 注解 |
 |---|---|---|---|
@@ -223,9 +251,15 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 | `synthesize` | 文本合成临时音频文件 | `text` ≤4096；可选 revision pin | 非 read-only、非 destructive |
 | `preview_voice` | 试听 VoiceDesign 指令 | 仅 quality；不持久化 voice | 非 read-only、非 destructive |
 | `create_voice` | 创建持久 instruction voice | `instruction` ≤10000；可选 seed | 非 read-only、非 destructive |
+| `get_voice` | 读取一个安全音色详情 | 返回验证/production 状态，不返回参考路径 | read-only、idempotent |
+| `design_voice` | VoiceDesign 生成参考并注册 Base clone | 新 ID、参考文本、幂等 key 可选；注册后 output 仍待验收 | 非 read-only |
+| `clone_voice` | 从本地参考音频注册 Base clone | path/file URI；参考门禁通过不等于输出通过 | 非 read-only |
+| `validate_voice` | 对已注册音色执行 synthesis quality-runs | 有计算成本；绑定当前 voice/model revision | 非 read-only |
 | `delete_voice` | 删除持久 custom voice | 系统 voice 受保护 | destructive、idempotent |
 | `create_job` | 创建 owner-scoped 长任务 | `kind` 为 `speech` 或 `transcription` | 非 read-only |
 | `get_job` | 查询 job | 只返回服务状态，不伪造进度 | read-only、idempotent |
+| `list_jobs` | 分页列出 owner-scoped jobs | 只返回元数据，不打印输入正文 | read-only、idempotent |
+| `get_job_result` | 取回完成 job 的文件产物 | 在 MCP 主机落盘，返回路径与 media type | read-only、idempotent |
 | `cancel_job` | 取消 job | 只操作指定 job | destructive、idempotent |
 
 ### 5.1 `transcribe`
@@ -248,6 +282,10 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 - `voice`：可选，默认为 `serena`；必须来自当前发现结果；
 - `output_format`：`mp3`、`wav` 或 `pcm`，默认为 `mp3`；
 - `speed`：`0.25..4.0`；clone voice 仍受服务端 `speed=1.0` 约束；
+- `language`、`instruction`、`seed`：能力快照允许时才使用；Base clone 明确拒绝
+  instruction/seed，服务端以稳定错误码拒绝不支持的组合，不静默忽略；
+- `validation_policy`：`allow_unverified`（试听/诊断默认值）或
+  `require_output_pass`（正式制作）；后者由服务端在当前绑定下再次检查；
 - `expected_voice_revision` / `expected_model_revision`：可选，见 §4.3。
 
 Proxy 将音频写入本地主机临时文件，返回：
@@ -258,6 +296,10 @@ Proxy 将音频写入本地主机临时文件，返回：
   "content_type": "audio/mpeg",
   "output_format": "mp3",
   "bytes": 12345,
+  "host": "mcp_host",
+  "request_id": "req_...",
+  "validation_policy": "require_output_pass",
+  "validation_state": {"reference": {"status": "pass"}, "synthesis": {"status": "pass"}},
   "voice_revision": "vr_...",
   "model_revision": "..."
 }
@@ -281,9 +323,35 @@ quality profile 可用。试听是 ephemeral；它不创建持久 voice。指令
 
 ### 5.4 jobs
 
-`create_job`、`get_job`、`cancel_job` 是 owner-scoped 的显式状态句柄。同步工具仍是默认路径；
-只有请求过长、超时或服务明确建议时才切换 job。Proxy 不把 job 当作 Realtime session，也不在
-客户端侧推断服务端未提供的百分比进度。
+`create_job`、`get_job`、`list_jobs`、`get_job_result`、`cancel_job` 是 owner-scoped 的显式状态
+句柄。同步工具仍是默认路径；只有请求过长、超时或服务明确建议时才切换 job。创建 job 的重试
+应携带同一个 `Idempotency-Key`；相同 owner/key/payload 会重放原 job，不同 payload 返回
+`idempotency_conflict`。Proxy 不把 job 当作 Realtime session，也不在客户端侧推断服务端未提供
+的百分比进度。`input_ref` 必须是 worker allowlist 内的本地绝对路径或 `file://` URI；
+transcription 读取音频，speech 读取 UTF-8 文本，不能把同步 `synthesize` 的正文直接塞进
+`input_ref`，也不能传远程 URL。`get_job_result` 将完成的音频或 JSON 结果写到 MCP 主机临时文件
+并返回路径。
+
+### 5.5 VoiceDesign、Base 与 output gate
+
+`preview_voice` / `create_voice` 是 VoiceDesign instruction voice 流程；它们描述并试听自然语言
+音色，不产生 Base clone。`design_voice` 才是“VoiceDesign 生成参考音频 → 通过 reference gate →
+注册 Base clone”的组合流程；`clone_voice` 则从本地参考音频直接进入同一 Base reference gate。
+
+两条 gate 必须分开判断：
+
+1. `reference` 通过只证明参考音频满足时长、信噪比、转写一致性等注册条件；
+2. `validate_voice` 执行真实 Base synthesis probes，并把结果绑定到当前 `voice_revision`、模型
+   artifact/catalog revision、已观测 runtime identity、reference preprocessing、generation
+   recipe 和 policy；
+3. 普通 `synthesize` 默认允许未验证试听；正式成片必须传
+   `validation_policy=require_output_pass`，并由服务端确认当前 runtime identity 已知、
+   `production_ready=true` 且 synthesis output validation 为 `pass`。worker 被冷淘汰后，
+   应重新执行验证，不应盲目重试旧记录。
+
+Base clone 固定 `speed=1.0`，拒绝 `instruction` 与 `seed`。收到 `clone_speed_unsupported` 是
+能力/参数组合错误，不应通过重试或强行改参数掩盖；应切换为 `speed=1.0` 或使用支持速度控制的
+VoiceDesign/custom voice variant。
 
 ## 6. Resources、结构化输出与进度
 
@@ -307,7 +375,7 @@ resource 内容随 profile、ready 状态和目录变化，不应长期缓存。
 |---|---|---|
 | `describe` | `DescribeResult` | tier、profile、readiness、models、voices、effective capabilities |
 | `transcribe` | `TranscribeResult` | text、segments、words、language、duration |
-| `synthesize` / `preview_voice` | `AudioArtifact` | audio_path、content_type、output_format、bytes；synthesize 另含 revision |
+| `synthesize` / `preview_voice` | `AudioArtifact` | host、audio_path、content_type、output_format、bytes；synthesize 另含 request/validation/revision |
 | `create_voice` / `delete_voice` | `VoiceRecord` | id、name、mode、available、capabilities |
 | job 工具 | `JobRecord` | id、kind、state、result_ref、params |
 

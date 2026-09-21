@@ -73,11 +73,18 @@ public enum TeleprompterTimingPolicy {
         public let hanCount: Int
         public let latinWordCount: Int
         public let hasUnresolvedPronunciation: Bool
+        public let uncertaintyReasons: [String]
 
-        public init(hanCount: Int, latinWordCount: Int, hasUnresolvedPronunciation: Bool = false) {
+        public init(
+            hanCount: Int,
+            latinWordCount: Int,
+            hasUnresolvedPronunciation: Bool = false,
+            uncertaintyReasons: [String] = []
+        ) {
             self.hanCount = hanCount
             self.latinWordCount = latinWordCount
             self.hasUnresolvedPronunciation = hasUnresolvedPronunciation
+            self.uncertaintyReasons = uncertaintyReasons
         }
 
         public var totalUnits: Int {
@@ -99,17 +106,21 @@ public enum TeleprompterTimingPolicy {
         public let isUncertain: Bool
         /// 不确定原因说明
         public let uncertaintyReason: String?
+        /// 可可靠计量的已知部分秒数；不把未知内容当作 0 秒。
+        public let knownPartSeconds: TimeInterval
 
         public init(
             pointSeconds: TimeInterval?,
             rangeSeconds: ClosedRange<TimeInterval>?,
             isUncertain: Bool,
-            uncertaintyReason: String? = nil
+            uncertaintyReason: String? = nil,
+            knownPartSeconds: TimeInterval = 0
         ) {
             self.pointSeconds = pointSeconds
             self.rangeSeconds = rangeSeconds
             self.isUncertain = isUncertain
             self.uncertaintyReason = uncertaintyReason
+            self.knownPartSeconds = knownPartSeconds
         }
 
         public var pointMinutes: Double? {
@@ -178,6 +189,7 @@ public enum TeleprompterTimingPolicy {
         var hanCount = 0
         var latinWordCount = 0
         var inLatinWord = false
+        var reasons = Set<String>()
 
         for scalar in text.unicodeScalars {
             // Han 字符区间判断
@@ -186,20 +198,31 @@ public enum TeleprompterTimingPolicy {
                 (0x20000...0x2A6DF).contains(scalar.value) {
                 hanCount += 1
                 inLatinWord = false
-            } else if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+            } else if scalar.value < 128 && CharacterSet.letters.contains(scalar) {
                 if !inLatinWord {
                     latinWordCount += 1
                     inLatinWord = true
                 }
+            } else if CharacterSet.decimalDigits.contains(scalar) {
+                reasons.insert("unresolvedPronunciation")
+                inLatinWord = false
+            } else if CharacterSet.letters.contains(scalar) {
+                reasons.insert("nonLatinLanguage")
+                inLatinWord = false
             } else {
                 inLatinWord = false
             }
         }
 
+        if text.range(of: #"(?:https?://|www\.)"#, options: .regularExpression) != nil {
+            reasons.insert("url")
+        }
+
         return TextMetrics(
             hanCount: hanCount,
             latinWordCount: latinWordCount,
-            hasUnresolvedPronunciation: false
+            hasUnresolvedPronunciation: !reasons.isEmpty,
+            uncertaintyReasons: reasons.sorted()
         )
     }
 
@@ -213,20 +236,26 @@ public enum TeleprompterTimingPolicy {
             return EstimateResult(
                 pointSeconds: 0,
                 rangeSeconds: 0...0,
-                isUncertain: false
-            )
-        }
-
-        guard !metrics.hasUnresolvedPronunciation else {
-            return EstimateResult(
-                pointSeconds: nil,
-                rangeSeconds: nil,
-                isUncertain: true,
-                uncertaintyReason: "存在未确定读法或非中英文本"
+                isUncertain: false,
+                knownPartSeconds: 0
             )
         }
 
         let k = min(max(calibrationFactor, minimumCalibrationFactor), maximumCalibrationFactor)
+        guard !metrics.hasUnresolvedPronunciation else {
+            let knownPartSeconds = 60.0 * (
+                Double(metrics.hanCount) / pace.cjkUnitsPerMinute +
+                Double(metrics.latinWordCount) / pace.latinWordsPerMinute
+            ) * k
+            return EstimateResult(
+                pointSeconds: nil,
+                rangeSeconds: nil,
+                isUncertain: true,
+                uncertaintyReason: "包含数字、网址或非中英文本，无法可靠预估整稿时长",
+                knownPartSeconds: knownPartSeconds
+            )
+        }
+
         let baseSeconds = 60.0 * (
             Double(metrics.hanCount) / pace.cjkUnitsPerMinute +
             Double(metrics.latinWordCount) / pace.latinWordsPerMinute
@@ -238,7 +267,8 @@ public enum TeleprompterTimingPolicy {
         return EstimateResult(
             pointSeconds: point,
             rangeSeconds: lower...upper,
-            isUncertain: false
+            isUncertain: false,
+            knownPartSeconds: point
         )
     }
 

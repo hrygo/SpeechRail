@@ -693,6 +693,8 @@ public final class AssistantSession {
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
+        case .partialSnapshot(_, _, let text):
+            partialText = text.isEmpty ? nil : text
         case .completed(let itemID, let transcript, _):
             await commitUserTurn(itemID: itemID, transcript: transcript)
         case .failed(_, let code, let message):

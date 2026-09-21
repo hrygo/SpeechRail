@@ -21,6 +21,7 @@ from speechrail.domain.tts_reference_condition import (
     MLX_AUDIO_0_4_8_QWEN3_TTS_SUPPORT,
 )
 from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
+from speechrail.domain.voice_validation import VoiceValidationArtifact
 
 SCHEMA_VERSION = "effective_capabilities_v1"
 Support = Literal["supported", "unsupported", "unknown"]
@@ -95,6 +96,173 @@ def _safe_quality_summary(value: Mapping[str, Any] | None) -> dict[str, object]:
     }
 
 
+def _validation_state(
+    profile: VoiceProfile,
+    artifact: ModelArtifact | VoiceValidationArtifact | None,
+    validation: Mapping[str, Any] | None = None,
+    *,
+    runtime_revision: str | None = None,
+    runtime_identity_status: Literal["not_requested", "unknown", "observed"] = (
+        "not_requested"
+    ),
+    validation_binding: Mapping[str, Any] | None = None,
+    binding_required: bool = False,
+) -> dict[str, object]:
+    """Project reference/output evidence without conflating their meaning."""
+
+    quality = profile.quality if isinstance(profile.quality, Mapping) else {}
+    reference_status = quality.get("status")
+    if not isinstance(reference_status, str) or reference_status not in {
+        "pass", "warn", "reject", "unevaluated"
+    }:
+        reference_status = "unevaluated"
+    reference = {
+        "status": reference_status,
+        "policy_version": (
+            quality.get("policy_version")
+            if quality.get("policy_version") == "voice_quality_v1"
+            else None
+        ),
+        "source": "reference_gate" if profile.mode == "clone" else "not_applicable",
+    }
+
+    if profile.mode != "clone":
+        synthesis: dict[str, object] = {
+            "status": "not_applicable",
+            "reason": "not_a_reference_conditioned_voice",
+        }
+        identity: dict[str, object] = {
+            "status": "not_applicable",
+            "reason": "not_a_reference_conditioned_voice",
+        }
+    else:
+        # Output evidence comes only from the independent validation store.
+        # A legacy value embedded in the acoustic profile is never promoted to
+        # a current pass because doing so would make validation mutate identity.
+        raw = validation
+        if not isinstance(raw, Mapping):
+            synthesis = {
+                "status": "unevaluated",
+                "reason": (
+                    "model_runtime_identity_unknown"
+                    if binding_required and runtime_identity_status != "observed"
+                    else
+                    "legacy_synthesis_validation_not_reused"
+                    if isinstance(quality.get("synthesis_validation"), Mapping)
+                    else "synthesis_validation_not_run"
+                ),
+            }
+            identity = {
+                "status": "unevaluated",
+                "reason": "identity_validation_not_run",
+            }
+        else:
+            status = raw.get("status")
+            status = status if status in {"pass", "warn", "reject"} else "unevaluated"
+            stale_reason: str | None = None
+            if raw.get("voice_revision") != profile.revision:
+                stale_reason = "voice_revision_changed"
+            elif artifact is None:
+                stale_reason = "model_identity_unknown"
+            elif raw.get("model_artifact") != artifact.key:
+                stale_reason = "model_artifact_changed"
+            elif raw.get("model_catalog_revision") != artifact.revision:
+                stale_reason = "model_catalog_revision_changed"
+            elif binding_required and runtime_identity_status != "observed":
+                stale_reason = "model_runtime_identity_unknown"
+            elif binding_required and validation_binding is not None:
+                for key in (
+                    "model_runtime_revision",
+                    "runtime_fingerprint",
+                    "preprocess_version",
+                    "generation_recipe_revision",
+                    "policy_version",
+                ):
+                    if raw.get(key) != validation_binding.get(key):
+                        stale_reason = "validation_binding_changed"
+                        break
+            elif (
+                runtime_revision is not None
+                and raw.get("model_runtime_revision") is not None
+                and raw.get("model_runtime_revision") != runtime_revision
+            ):
+                stale_reason = "model_runtime_revision_changed"
+            if stale_reason is not None:
+                synthesis = {
+                    "status": "unevaluated",
+                    "reason": "stale_synthesis_validation",
+                    "stale_reason": stale_reason,
+                }
+                identity = {
+                    "status": "unevaluated",
+                    "reason": "stale_synthesis_validation",
+                    "stale_reason": stale_reason,
+                }
+            else:
+                synthesis = {
+                    "status": status,
+                    "run_id": (
+                        raw.get("run_id") if isinstance(raw.get("run_id"), str) else None
+                    ),
+                    "tested_at": (
+                        raw.get("tested_at")
+                        if isinstance(raw.get("tested_at"), str)
+                        else None
+                    ),
+                    "failure_codes": [
+                        code for code in raw.get("failure_codes", [])
+                        if isinstance(code, str)
+                    ],
+                    "validated_for": [
+                        item for item in raw.get("validated_for", []) if isinstance(item, str)
+                    ],
+                }
+                identity_status = raw.get("identity_status")
+                identity = {
+                    "status": (
+                        identity_status
+                        if identity_status in {"pass", "warn", "reject", "unevaluated"}
+                        else "unevaluated"
+                    ),
+                    "reason": (
+                        "identity_validation_not_run"
+                        if identity_status not in {"pass", "warn", "reject"}
+                        else None
+                    ),
+                }
+
+    stale = bool(synthesis.get("stale_reason"))
+
+    validated_for = synthesis.get("validated_for")
+    output_validated = isinstance(validated_for, list) and "output" in validated_for
+    production_ready = profile.mode != "clone" or (
+        reference["status"] == "pass"
+        and synthesis["status"] == "pass"
+        and output_validated
+        and not stale
+        and (not binding_required or runtime_identity_status == "observed")
+    )
+    if production_ready:
+        reason = "validated"
+    elif profile.mode != "clone":
+        reason = "not_a_reference_conditioned_voice"
+    elif reference["status"] != "pass":
+        reason = "reference_validation_not_passed"
+    elif synthesis["status"] == "pass" and not output_validated:
+        reason = "output_validation_scope_missing"
+    else:
+        reason = str(synthesis.get("reason") or "synthesis_validation_not_passed")
+    return {
+        "reference": reference,
+        "synthesis": synthesis,
+        "identity": identity,
+        "stale": stale,
+        "validated_for": synthesis.get("validated_for", []),
+        "production_ready": production_ready,
+        "production_ready_reason": reason,
+    }
+
+
 def _voice_entry(
     profile: VoiceProfile,
     active: ActiveModelCatalog,
@@ -102,9 +270,25 @@ def _voice_entry(
     ready: bool,
     enabled_voices: frozenset[str],
     sample_rate: int,
+    validation: Mapping[str, Any] | None = None,
+    runtime_revision: str | None = None,
+    runtime_identity_status: Literal["not_requested", "unknown", "observed"] = (
+        "not_requested"
+    ),
+    validation_binding: Mapping[str, Any] | None = None,
+    binding_required: bool = False,
 ) -> dict[str, Any]:
     artifact = active.tts_clone if profile.mode == "clone" else active.tts
     variant = artifact.variant if artifact is not None else None
+    validation_state = _validation_state(
+        profile,
+        artifact,
+        validation,
+        runtime_revision=runtime_revision,
+        runtime_identity_status=runtime_identity_status,
+        validation_binding=validation_binding,
+        binding_required=binding_required,
+    )
     enabled = not profile.is_system or profile.id in enabled_voices
     compatible = False
     if variant is not None:
@@ -174,6 +358,16 @@ def _voice_entry(
         "model": model_identity(artifact),
         "descriptors": safe_voice_descriptor(profile),
         "quality_summary": _safe_quality_summary(profile.quality),
+        "validation_state": validation_state,
+        "validated_for": validation_state["validated_for"],
+        "production_ready": (
+            reason == "available" and validation_state["production_ready"] is True
+        ),
+        "production_ready_reason": (
+            validation_state["production_ready_reason"]
+            if reason == "available"
+            else reason
+        ),
         "operations": {
             "http_speech": {
                 "parameters": {
@@ -270,6 +464,9 @@ def build_capability_snapshot(
     ready: bool,
     enabled_voices: frozenset[str],
     sample_rate: int,
+    validation_records: Mapping[str, Mapping[str, Any]] | None = None,
+    runtime_revision: str | None = None,
+    validation_bindings: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Pure snapshot assembly; no model imports, registry calls, or network access."""
     ordered = sorted(profiles, key=lambda profile: profile.id)
@@ -321,7 +518,31 @@ def build_capability_snapshot(
         },
         "voices": [
             _voice_entry(
-                profile, active, ready=ready, enabled_voices=enabled_voices, sample_rate=sample_rate
+                profile,
+                active,
+                ready=ready,
+                enabled_voices=enabled_voices,
+                sample_rate=sample_rate,
+                validation=(validation_records or {}).get(profile.id),
+                runtime_revision=(
+                    (validation_bindings or {}).get(profile.id, {}).get(
+                        "model_runtime_revision"
+                    )
+                    if profile.id in (validation_bindings or {})
+                    else runtime_revision
+                ),
+                runtime_identity_status=(
+                    (
+                        (validation_bindings or {}).get(profile.id, {}).get(
+                            "runtime_identity_status"
+                        )
+                        if profile.id in (validation_bindings or {})
+                        else ("observed" if runtime_revision is not None else "not_requested")
+                    )
+                    or "not_requested"
+                ),
+                validation_binding=(validation_bindings or {}).get(profile.id),
+                binding_required=profile.id in (validation_bindings or {}),
             )
             for profile in ordered
         ],

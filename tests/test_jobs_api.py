@@ -35,6 +35,44 @@ def test_jobs_api_creates_reads_and_cancels_owner_scoped_job(tmp_path) -> None:
     assert cancelled.json()["state"] == "cancelled"
 
 
+def test_jobs_api_idempotency_replays_same_job_and_rejects_payload_conflict(tmp_path) -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            job_repository=JobRepository(tmp_path / "speechrail-job-spool"),
+        )
+    )
+    headers = {"Idempotency-Key": "job-key-1"}
+    first = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/input.txt"},
+        headers=headers,
+    )
+    replay = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/input.txt"},
+        headers=headers,
+    )
+    conflict = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/other.txt"},
+        headers=headers,
+    )
+
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["id"] == replay.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+    distinct = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/input.txt"},
+        headers={"Idempotency-Key": "job-key-2"},
+    )
+    assert distinct.status_code == 202
+    assert distinct.json()["id"] != first.json()["id"]
+
+
 def test_jobs_api_requires_bearer_key_when_configured(tmp_path) -> None:
     client = TestClient(
         create_app(

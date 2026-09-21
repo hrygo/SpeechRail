@@ -2,13 +2,13 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 🔌 SpeechRail 用户与集成指南
 
-欢迎查阅 SpeechRail 用户与集成文档。本目录面向将 SpeechRail 接入到自身应用（如桌面智能体、实时会议转写系统、内容配音工具等）的开发者与产品集成方。
+本目录面向将 SpeechRail 接入桌面智能体、实时会议转写系统或本地内容工作流的开发者。所有能力以当前运行时发现结果和公共契约为准；本文档不扩展 OpenAI 未在 SpeechRail 契约中实现的能力。
 
 > [!TIP]
 > 还没在本机装好服务？先看 **[📦 SpeechRail 安装与首次使用](installing-speechrail.md)**：它说明 GitHub Release 上
@@ -76,7 +76,7 @@ HTTP 客户端可读取 `GET /health`；需要跨模型、音色和操作参数�
 契约缺失、未知 schema、鉴权或存储故障都会直接失败，不会被静默降级。
 这些入口都不会返回模型绝对路径、音频或转写内容。
 
-`/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
+`/readyz` 只表示至少一个 ASR/TTS 能力可按需接受推理；成功响应中的 `realtime_vad` 仍是独立诊断。需要某项能力时，先读取对应字段和 `GET /v1/speechrail/capabilities`，再发起推理请求。readiness、`available` 和质量验收不是同一语义。
 
 ## macOS App 控制面
 

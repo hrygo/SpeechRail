@@ -1,7 +1,8 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-18
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # SpeechRail 运行时与部署
@@ -131,16 +132,16 @@ Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不�
 wheel tag 因而与当前 Python/Apple Silicon 平台绑定。ASR/TTS vendor runtime、全部模型 snapshot、
 `ffmpeg` 和 `.env` 仍由本机预先准备，CoreML bundle 也不打进 wheel。
 
-managed 安装器随 wheel 发布（`speechrail.service.managed_install`），对用户暴露为
-`speechrail install`：安装者只需要下载下来的 wheel，不必 clone 仓库，下载目录里执行
+managed 安装器随 wheel 发布，对用户暴露为 `speechrail install`。安装者只需要下载下来的 wheel，
+不必 clone 仓库，下载目录里执行
 
 ```bash
 uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl \
   speechrail install --preset balanced --yes --enable
 ```
 
-即可完成 release staging、模型准备、preflight、LaunchAgent 与原子 `runtime/current` 切换；
-`tools/install_macos.py` 保留为兼容外壳，只重导出同一实现，不再存在第二份安装逻辑。
+即可完成 release staging、模型准备、preflight、LaunchAgent 与原子 `runtime/current` 切换。
+内部安装实现不构成面向用户的第二入口。
 
 ### 源码到 managed runtime 的不变量（2026-09-09）
 
@@ -150,72 +151,36 @@ SpeechRail 的任何修复、协议变更或 worker 变更都必须先落在本�
 
 1. 在 SpeechRail 源码根目录完成测试、类型、lint、契约与 `git diff --check`。
 2. 使用 `uv build --no-sources --wheel` 构建当前源码 wheel。
-3. 按 operator contract 安全停旧服务并确认 lock 释放；再用
-   `speechrail.service.managed_install.install_managed` 做候选 release preflight、LaunchAgent plist
-   安装和原子 `runtime/current` 切换（`tools.install_macos` 是它的兼容入口）。
+3. 按 operator contract 安全停旧服务并确认 lock 释放；再通过 wheel 自带的 `speechrail install`
+   做候选 release preflight、LaunchAgent 安装和原子 `runtime/current` 切换。
 4. 使用 lifecycle controller 启动新 runtime，通过 `/health`、`/readyz`、`/v1/models` 和目标 Realtime smoke 验证；任何失败都恢复旧 current/runtime。
 
 源码构建与安装沿用下方唯一的 managed installer 示例，避免维护两份可能漂移的命令。
 
 验证时应记录当前 release 路径、package version、health readiness 和 smoke 摘要，不记录密钥、完整参考文本、PCM 或模型绝对路径。
 
-在发布目录中构建并通过唯一 managed installer 安装：
+在发布目录中构建，并通过 wheel 自带的唯一 managed installer 安装：
 
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 uv build --no-sources --wheel
-uv run python - <<PY
-import os
-from pathlib import Path
-import httpx
-from speechrail.service.modelscope import ModelScopeDownloader
-from speechrail.service.managed_install import install_managed
-
-app_home = Path(os.environ.get("SPEECHRAIL_APP_HOME", Path.home() / "Library/Application Support/SpeechRail"))
-preset = os.environ.get("SPEECHRAIL_PRESET", "quality")
-wheel = sorted(Path("dist").glob("speechrail-*.whl"))[-1]
-with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
-    install_managed(
-        wheel,
-        app_home=app_home,
-        preset_id=preset,
-        downloader=ModelScopeDownloader(client=client),
-        enable=False,
-    )
-PY
-
-speechrail service start --app-home "$APP_HOME"
+WHEEL="dist/speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl"
+uvx --python 3.12 --from "$WHEEL" speechrail install --preset quality --yes --enable
 ```
 
 managed installer 会准备新 release、执行 preflight、更新 LaunchAgent 并原子切换 `runtime/current`；
-`enable=False` 时只安装候选 plist，不启动服务；随后必须用 controller-backed `speechrail service start` 启动并做公共 smoke。启动或 smoke 失败会停止候选并恢复旧 runtime/current。完整安装要求 ASR/TTS 两组 runtime 和 snapshot
-均通过检查；私有 `.env` 可作为 managed 初始化配置输入，但不会被覆盖或写入 wheel。
-
-验证已安装 wheel，而不是源码工作树：
-
-```bash
-python3 scripts/verify_release.py \
-  --wheel <wheel-file> \
-  --app-home "$HOME/Library/Application Support/SpeechRail"
-```
+`--enable` 会通过 lifecycle controller 启动服务。启动或 smoke 失败会停止候选并恢复旧
+`runtime/current`。完整安装要求当前 profile 所需的 runtime、snapshot 和可选能力全部通过检查；
+私有 `.env` 可作为 managed 初始化配置输入，但不会被覆盖或写入 wheel。
 
 升级先在候选 release 上完成 preflight，再由 installer 原子切换
 `runtime/current`，随后启动并完成真实 ASR/TTS smoke；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
 metadata 仍保留用于升级、回滚和审计的版本信息。
 
 > [!IMPORTANT]
-> **分人档升级的 aligner 前置条件**：对 `balanced`/`quality`，安装步骤的前提是该档 aligner snapshot
-> （`aligner-q8` / `aligner-bf16`）已经存在。若目标 app home 尚无该档 aligner，新 wheel 的 preflight
-> 会在候选 release 启用前 fail closed；此时用于供给 aligner 的 `profile apply <tier>` 也执行不了，形成循环。
-> `install_managed` 正在修复为自行按档位供给 aligner（见 2.3.1）；在具体安装版本具备该行为之前，操作者
-> 必须先确保目标档位资产已存在（例如用一个能够供给的 runtime 先执行 `speechrail setup` /
-> `profile apply <tier>`），再切换新 release。
-
-> [!IMPORTANT]
-> **quality 档升级的 Base clone snapshot 前置条件**：`quality` preset 声明了 `tts_clone` artifact；
-> 若该 Base clone snapshot 缺失或未供给，`resolve_selection` 会在启动前 fail closed，服务不会以
-> `backend_not_ready` 降级形态启动。从仅 VoiceDesign 的旧 quality 部署升级时，操作者必须先供给
-> `tts_clone` 制品（managed profile apply 会执行该供给），再重启或切换 release。
+> **profile 能力前置条件**：`balanced`/`quality` 的分人制品和 `quality` 的 Base clone 制品由当前
+> managed installer 按 catalog 供给并在 preflight 校验；任一制品缺失或校验失败时，候选不会切换为
+> `runtime/current`。服务不会在请求路径静默下载或降级为未声明的能力。
 
 若 private `.env` 设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`，managed installer 会将该
 release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wheel 内
@@ -223,52 +188,38 @@ release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wh
 `light` 无 aligner 时跳过）。切换后还须确认 `/v1/models` 包含 `gpt-4o-transcribe-diarize`；任何一项
 失败都不切换 `runtime/current`，或恢复上一 release。
 
-## app home 目录契约与重装语义（2026-09-18）
+## app home 目录与重建边界（2026-09-21）
 
-划分判据是**能不能重建**，不是"是不是用户数据"（Apple 对 Application Support / Caches 的口径）。
-app home 默认 `~/Library/Application Support/SpeechRail`（可用 `SPEECHRAIL_APP_HOME` 改），分三块：
+服务 app home 默认为 `~/Library/Application Support/SpeechRail`，也可以通过
+`SPEECHRAIL_APP_HOME` 指定。它只描述 managed service 的 runtime、配置、模型和状态目录；macOS App 的会话
+数据是另一条用户资产边界。当前 App 默认使用 `~/Library/Application Support/SpeechRail/sessions.sqlite3`
+与同层的 `Works/`，不因服务的 `SPEECHRAIL_APP_HOME` 设置而自动迁移。
 
-| 区 | 内容 | 重装 / 升级 | 备份 | Time Machine |
-|---|---|---|---|---|
-| **数据区**（丢了没法重建） | `Works/`（作品）、`sessions.sqlite3`（会话记录 / 纪要 / 记忆）、`voices/` + `custom-voices.json`（音色）、`config/.env`（私有配置） | **不动** | **必须备** | 保留 |
-| **可重建区** | `runtime/`、`vendor/`、`state/`、`artifacts/`、`benchmarks/`、`app-archive/`、`app-releases/`、`app-backups/` | 可删 | 不备 | **排除** |
-| **模型区** | `models/` | 可删 | 不备 | 保留 |
+| 目录或文件 | 当前用途 | 是否可重建 | 处理原则 |
+|---|---|---:|---|
+| `runtime/`、`vendor/` | managed release、Python runtime 与 vendor 运行环境 | 是 | 由 wheel installer 重建，不直接编辑 |
+| `models/`、`diarization/` | 模型 snapshot、CoreML bundle 与 aligner 制品 | 是 | 可重新准备；删除后必须重新下载或准备对应制品 |
+| `state/`、`artifacts/`、`benchmarks/`、`app-archive/`、`app-releases/`、`app-backups/` | 运行状态、构建或验收产物（按当前流程可能不存在） | 是 | 不作为服务公共数据契约；清理前确认不再需要证据 |
+| `config/.env`、selection | 私有配置与当前 profile 选择 | 可重新配置，但秘密不可恢复 | 需要保留配置时由用户自行备份；不得写入仓库或日志 |
+| `~/.speechrail/custom_voices.json`、`~/.speechrail/voices/` | 当前 custom voice registry、参考音频与校验状态 | 否（删除即丢失） | 需要保留自定义音色时由用户自行备份；当前没有自动搬迁到 app home 的实现 |
+| `~/Library/Application Support/SpeechRail/sessions.sqlite3` | App 会话、文字记录、纪要与记忆 | 否（删除即丢失） | 设置 → 助手 → 记录库可备份该单文件；当前备份不包含 `Works/`、配置或 custom voice |
+| `~/Library/Application Support/SpeechRail/Works/` | App 作品索引与作品音频 | 否（删除即丢失） | 需要保留时由用户自行复制；当前没有完整数据区备份入口 |
 
-`models/` 单列的理由：它可重建但要重下 25 GB 以上，且没有网络就完全不可用——重下的成本高于备份成本，
-所以默认留在备份里；想省空间由用户手动 `tmutil addexclusion`。
+当前没有正式的旧路径迁移、数据导入、完整数据区备份或 Time Machine 自动排除契约；但 App 已提供会话库单文件
+备份入口。重装、升级和重建均以当前代码与 installer 行为为准；不要把单文件备份误认为完整数据区备份。
 
-目录名保留 `SpeechRail/` 而不改成 bundle identifier：Apple 的约定是子目录用 bundle id，但这是单产品
-独占的本地工具，人类可读的名字对"打开数据目录"更有用，也不存在同名冲突。这是**有意的偏离**，不是遗漏。
+### 重装、卸载与重建
 
-### 重装、卸载与迁移各自动什么
+| 动作 | 当前语义 |
+|---|---|
+| 换服务版本（wheel 替换） | installer 准备候选 release、执行 preflight，再原子切换 `runtime/current`；失败时恢复旧 release。 |
+| `speechrail service uninstall` | 按 operator contract 停止并移除 LaunchAgent；不会自动删除 app home、模型、配置或 custom voice。 |
+| 重装 App | 只替换 `~/Applications/SpeechRail.app`；不改变服务 runtime 和模型。 |
+| 需要干净重建 | 停止服务后，用户可删除明确选定的可重建目录，再按首装流程重新准备；删除会话库、`Works/`、配置或 custom voice 前必须先自行备份。 |
 
-| 动作 | 动什么 | 数据区 |
-|---|---|---|
-| 换服务版本（wheel 替换） | 只换 `runtime/releases/*` 与 `runtime/current`；失败回滚还原旧 current，并删掉本次新建的 config / selection / release | 不动 |
-| `speechrail service uninstall` | 只 `bootout` + 删 plist | 不动 |
-| 重装 App | 只替换 `~/Applications/SpeechRail.app` | 不动 |
-| **想清干净重来** | 删可重建区即可（连 `models/` 一起删就需重下） | **不动** |
-| 换新 Mac | 拷 `~/Library/Application Support/SpeechRail/` 整个目录；不带 `models/` 则重装后重下 | 拷走 |
-
-**用户最可能丢数据的动作不是重装，是删 `~/.speechrail`。** 那个目录在 2026-09-18 之前是音色注册表
-（`custom_voices.json`）与音色参考音频（`voices/`）的落点。终态把两者移进数据区的 `voices/` 与
-`custom-voices.json`；兼容策略是**新路径优先，旧路径存在则自动搬一次并留日志**，旧目录留空壳不删。
-在搬迁代码落地之前，`~/.speechrail` 仍然是活的存储位置，**不要手工删**。
-
-### 备份口径
-
-数据区是**唯一**的备份对象。App 设置里的备份入口产出 `<日期>-speechrail-backup/`，内含
-`sessions.sqlite3`（用 `VACUUM INTO` 取一致快照，不复制 `-wal` / `-shm`）、`Works/`、
-`voices/` + `custom-voices.json`，以及一份说明恢复方式的 README。**不含** `models/` 与可重建区。
-
-Time Machine 排除由创建目录的一方设置（`NSURLIsExcludedFromBackupKey`，macOS 10.8+）：服务在
-`ensure_directories` 之后对可重建区逐个设置；App 的数据目录一个都不设。
-
-> **状态（2026-09-18）**：目录契约已定并作为后续实现的依据。
-> **Time Machine 排除、数据区备份入口、音色路径搬迁三项尚未实现**——它们的设计口径见
-> [会话层技术方案 §6.6](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md) 与
-> [会话模块规格 §15.1](../design/2026-09-17-live-sessions/SESSIONS-SPEC.md)。
-> 在那之前，本节的"重装不动数据"描述的是**已实测的四条路径**（上表前四行），不含尚未存在的命令。
+项目不承诺在旧数据格式、旧路径或旧注册表之间自动迁移。当前用户可以删除并重建运行时、模型和状态；这不等于
+可以恢复已删除的会话库、作品、私有配置、custom voice registry 或参考音频。任何跨机器复制都属于用户自行
+备份与恢复，不是服务提供的迁移流程。
 
 ## 端口与进程策略
 

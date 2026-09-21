@@ -19,6 +19,21 @@ struct TeleprompterPositionTests {
         #expect(result.position?.segmentIndex == 1)
     }
 
+    @Test func uniqueExactContinuationReportsItsStartAndAnchorEvidence() throws {
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "开场。今天我们介绍相机设置。下一段。"
+        )
+        let result = TeleprompterAligner().locate(
+            transcript: "今天我们介绍相机设置",
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(result.position?.segmentIndex == 1)
+        #expect(result.startPosition?.segmentIndex == 1)
+        #expect(result.isUniqueExactContinuation)
+        #expect(result.isUniqueNearAnchor)
+    }
+
     @Test func tracksInsideSentenceAndAcrossSegments() throws {
         let segments = try script()
         let aligner = TeleprompterAligner()

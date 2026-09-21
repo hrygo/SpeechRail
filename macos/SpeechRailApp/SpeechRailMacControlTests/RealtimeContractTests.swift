@@ -113,7 +113,23 @@ final class RealtimeContractTests: XCTestCase {
             (event.jsonObject["session"] as? [String: Any])?["input_audio_format"] as? String,
             "pcm16"
         )
+        let speechrail = (event.jsonObject["session"] as? [String: Any])?["speechrail"] as? [String: Any]
+        let transcription = speechrail?["transcription"] as? [String: Any]
+        XCTAssertEqual(transcription?["partial_mode"] as? String, "delta")
+        XCTAssertEqual(transcription?["chunk_duration_ms"] as? Int, 2_000)
         XCTAssertNil((event.jsonObject["session"] as? [String: Any])?["modalities"])
+    }
+
+    func testTeleprompterTranscriptionUsesSnapshotAndLowLatencyChunk() {
+        let event = TranscriptionSessionUpdate(
+            model: RealtimeASRClientModelFixture.canonical,
+            partialMode: .snapshot,
+            chunkDurationMilliseconds: 500
+        )
+        let speechrail = (event.jsonObject["session"] as? [String: Any])?["speechrail"] as? [String: Any]
+        let transcription = speechrail?["transcription"] as? [String: Any]
+        XCTAssertEqual(transcription?["partial_mode"] as? String, "snapshot")
+        XCTAssertEqual(transcription?["chunk_duration_ms"] as? Int, 500)
     }
 }
 

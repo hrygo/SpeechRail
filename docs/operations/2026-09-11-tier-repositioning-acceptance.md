@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail v2.3.2 三档重定位验收报告 (TIER-REPOS-E)"
-status: active
+status: superseded
 type: acceptance_report
 category: tier-repositioning
 version: "2.0.0"

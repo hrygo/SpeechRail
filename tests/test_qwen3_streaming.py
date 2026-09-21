@@ -17,7 +17,7 @@ from speechrail.backends.qwen3_streaming import (
     RealtimeSessionLimitError,
 )
 from speechrail.config import Settings
-from speechrail.domain.ports import StreamingAsrEvent
+from speechrail.domain.ports import RealtimeTranscriptionOptions, StreamingAsrEvent
 from speechrail.runtime.asr_mode import AsrModeGate, AsrModeScheduler
 from speechrail.runtime.busy import BusyReason
 
@@ -323,7 +323,7 @@ def test_factory_rejects_causal_mode_for_non_english() -> None:
     )
     for language in ("zh", "auto", None):
         with pytest.raises(RuntimeError, match="language_not_supported"):
-            factory.create(language=language, prompt="")
+            factory.create(language=language, prompt="", options=RealtimeTranscriptionOptions())
 
 
 def test_factory_accepts_english_for_causal_mode() -> None:
@@ -332,8 +332,23 @@ def test_factory_accepts_english_for_causal_mode() -> None:
         mode="causal",
         next_session_id=lambda: "sess_test",
     )
-    session = factory.create(language="en", prompt="")
+    session = factory.create(language="en", prompt="", options=RealtimeTranscriptionOptions())
     assert session is not None
+    factory.release(session)
+
+
+def test_factory_applies_per_session_chunk_duration() -> None:
+    factory = NativeRealtimeFactory(
+        worker=FakeStreamingWorker(),  # type: ignore[arg-type]
+        mode="windowed",
+        next_session_id=lambda: "sess_test",
+    )
+    session = factory.create(
+        language="zh",
+        prompt="",
+        options=RealtimeTranscriptionOptions(partial_mode="snapshot", chunk_duration_ms=500),
+    )
+    assert session._chunk_sec == 0.5  # type: ignore[attr-defined]
     factory.release(session)
 
 
@@ -344,7 +359,7 @@ def test_factory_rejects_unknown_language_in_windowed_mode() -> None:
         next_session_id=lambda: "sess_test",
     )
     with pytest.raises(RuntimeError, match="language_not_supported"):
-        factory.create(language="sw", prompt="")
+        factory.create(language="sw", prompt="", options=RealtimeTranscriptionOptions())
 
 
 def test_factory_enforces_max_sessions_cap() -> None:
@@ -355,13 +370,13 @@ def test_factory_enforces_max_sessions_cap() -> None:
         next_session_id=iter(["s1", "s2", "s3"]).__next__,
         max_sessions=2,
     )
-    first = factory.create(language="zh", prompt="")
-    second = factory.create(language="en", prompt="")
+    first = factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
+    second = factory.create(language="en", prompt="", options=RealtimeTranscriptionOptions())
     with pytest.raises(RealtimeSessionLimitError) as caught:
-        factory.create(language="en", prompt="")
+        factory.create(language="en", prompt="", options=RealtimeTranscriptionOptions())
     assert caught.value.busy_reason == BusyReason.REALTIME_SESSION_LIMIT
     factory.release(first)
-    third = factory.create(language="en", prompt="")
+    third = factory.create(language="en", prompt="", options=RealtimeTranscriptionOptions())
     assert third is not first and third is not second
     factory.release(second)
     factory.release(third)
@@ -374,8 +389,8 @@ def test_factory_generates_distinct_sessions_by_session_id() -> None:
         next_session_id=iter(["s1", "s2"]).__next__,
         max_sessions=2,
     )
-    first = factory.create(language="zh", prompt="")
-    second = factory.create(language="zh", prompt="")
+    first = factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
+    second = factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
     assert first.session_id == "s1"
     assert second.session_id == "s2"
     factory.release(first)
@@ -389,9 +404,9 @@ def test_factory_session_limit_has_stable_busy_reason() -> None:
         next_session_id=iter(["s1", "s2"]).__next__,
         max_sessions=1,
     )
-    first = factory.create(language="zh", prompt="")
+    first = factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
     with pytest.raises(RealtimeSessionLimitError) as caught:
-        factory.create(language="zh", prompt="")
+        factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
     assert caught.value.busy_reason == BusyReason.REALTIME_SESSION_LIMIT
     assert caught.value.retryable is True
     factory.release(first)

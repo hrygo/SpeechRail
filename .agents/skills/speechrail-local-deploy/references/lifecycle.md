@@ -1,6 +1,6 @@
 # SpeechRail 生命周期控制器
 
-wheel 替换时使用 `speechrail service stop`；`service disable` 只是兼容别名。controller 会在 `launchctl bootout` 后确认 per-port lock，不能把单独的 `launchctl` 成功返回当成旧进程已退出。
+wheel 替换时使用 `speechrail service stop`。controller 会在 `launchctl bootout` 后确认 per-port lock，不能把单独的 `launchctl` 成功返回当成旧进程已退出。
 
 ## 安全 stop/start
 

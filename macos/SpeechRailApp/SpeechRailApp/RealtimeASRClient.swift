@@ -143,6 +143,8 @@ public actor RealtimeASRClient {
         case committed(itemID: String)
         /// partial（内存态）。它是增量，调用点自己累加。
         case partial(itemID: String, delta: String)
+        /// 可修订 partial 的最新全文。调用点必须替换 item 文本，不得追加。
+        case partialSnapshot(itemID: String, revision: Int, text: String)
         case segment(itemID: String, segment: Segment)
         /// 终态。分人会话额外带归属单元（未启用分人时为空数组）。
         case completed(itemID: String, transcript: String, units: [AttributionUnit])
@@ -184,11 +186,15 @@ public actor RealtimeASRClient {
     private var expectedVoiceRevision: String?
     private let renderReceiptsEnabled: Bool
     private let callerTTSEnabled: Bool
+    private let partialMode: TranscriptionSessionUpdate.PartialMode
+    private let chunkDurationMilliseconds: Int
     private let session: URLSession
 
     private var task: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
     private var didClose = false
+    private var configurationAcknowledged = false
+    private var configurationFailure: Failure?
     private var continuation: AsyncStream<RealtimeEventEnvelope<Event>>.Continuation?
     private var stream: AsyncStream<RealtimeEventEnvelope<Event>>?
     /// 下一次 caller-owned TTS request 使用的音色。
@@ -212,6 +218,7 @@ public actor RealtimeASRClient {
     public private(set) var serverSessionID: String?
     public private(set) var recentEventIDs: [String] = []
     private var currentEventMetadata: RealtimeEventMetadata?
+    private var currentEventReceivedAt: ContinuousClock.Instant?
     private var closeCode: Int?
 
     public init(
@@ -226,7 +233,9 @@ public actor RealtimeASRClient {
         expectedModelRevision: String? = nil,
         expectedVoiceRevision: String? = nil,
         renderReceiptsEnabled: Bool = false,
-        callerTTSEnabled: Bool = false
+        callerTTSEnabled: Bool = false,
+        partialMode: TranscriptionSessionUpdate.PartialMode = .delta,
+        chunkDurationMilliseconds: Int = 2_000
     ) {
         var components = URLComponents()
         components.scheme = "ws"
@@ -246,6 +255,8 @@ public actor RealtimeASRClient {
         self.expectedVoiceRevision = expectedVoiceRevision
         self.renderReceiptsEnabled = renderReceiptsEnabled
         self.callerTTSEnabled = callerTTSEnabled
+        self.partialMode = partialMode
+        self.chunkDurationMilliseconds = chunkDurationMilliseconds
         self.voice = voice
         self.session = session
     }
@@ -267,6 +278,8 @@ public actor RealtimeASRClient {
     public func connect() async throws {
         guard task == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
+        configurationAcknowledged = false
+        configurationFailure = nil
         var request = URLRequest(url: url)
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -278,7 +291,13 @@ public actor RealtimeASRClient {
 
         // `transcription_session.update` 要在首个 PCM **之前**落地：格式、分人和
         // caller-owned TTS 都在这一刻协商。
-        try await send(configurationEvent())
+        do {
+            try await send(configurationEvent())
+            try await waitForConfigurationAcknowledgement()
+        } catch {
+            finish(code: nil)
+            throw error
+        }
     }
 
     /// 关掉连接。调用点负责把它带来的中断写进账本（`service_lost`）。
@@ -415,7 +434,9 @@ public actor RealtimeASRClient {
             callerTTSEnabled: callerTTSEnabled,
             diarizationEnabled: diarizationEnabled,
             expectedModelRevision: expectedModelRevision,
-            renderReceiptsEnabled: renderReceiptsEnabled
+            renderReceiptsEnabled: renderReceiptsEnabled,
+            partialMode: partialMode,
+            chunkDurationMilliseconds: chunkDurationMilliseconds
         ).jsonObject
     }
 
@@ -434,6 +455,29 @@ public actor RealtimeASRClient {
             }
             defer { group.cancelAll() }
             return try await group.next()!
+        }
+    }
+
+    private func waitForConfigurationAcknowledgement(
+        timeout: Duration = .seconds(8)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            if configurationAcknowledged {
+                return
+            }
+            if let configurationFailure {
+                throw configurationFailure
+            }
+            if didClose {
+                throw Failure.closed(closeCode)
+            }
+            guard clock.now < deadline else {
+                throw Failure.transport("语音服务没有在期限内确认转写配置。")
+            }
+            try await Task.sleep(for: .milliseconds(20))
         }
     }
 
@@ -540,12 +584,17 @@ public actor RealtimeASRClient {
         }
         sequenceStatus = sequenceValidator.accept(metadata)
         currentEventMetadata = metadata
-        defer { currentEventMetadata = nil }
+        currentEventReceivedAt = ContinuousClock().now
+        defer {
+            currentEventMetadata = nil
+            currentEventReceivedAt = nil
+        }
         switch type {
         case "session.created":
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
             emit(.ready(model: model))
         case "transcription_session.updated":
+            configurationAcknowledged = true
             emit(.configured)
         case "input_audio_buffer.speech_started":
             emit(.speechStarted)
@@ -566,6 +615,14 @@ public actor RealtimeASRClient {
                     delta: object["delta"] as? String ?? ""
                 )
             )
+        case "speechrail.transcription.snapshot":
+            let itemID = object["item_id"] as? String ?? ""
+            guard let revision = Self.int(object["revision"]), revision > 0,
+                  let text = object["text"] as? String else {
+                emit(.failed(itemID: itemID, code: "invalid_snapshot", message: "流式转写快照格式无效"))
+                return
+            }
+            emit(.partialSnapshot(itemID: itemID, revision: revision, text: text))
         case "conversation.item.input_audio_transcription.segment":
             emit(
                 .segment(
@@ -644,6 +701,10 @@ public actor RealtimeASRClient {
             let error = object["error"] as? [String: Any]
             let speechrail = (error?["speechrail"] as? [String: Any])
                 ?? (object["speechrail"] as? [String: Any])
+            let errorMessage = error?["message"] as? String ?? "语音服务返回了一个错误"
+            if !configurationAcknowledged {
+                configurationFailure = .transport(errorMessage)
+            }
             let requestID = error?["request_id"] as? String
             if requestID == activeTTSRequestID {
                 activeTTSRequestID = nil
@@ -652,7 +713,7 @@ public actor RealtimeASRClient {
             emit(
                 .serverError(
                     code: error?["code"] as? String ?? error?["type"] as? String ?? "unknown",
-                    message: error?["message"] as? String ?? "语音服务返回了一个错误",
+                    message: errorMessage,
                     retryable: speechrail?["retryable"] as? Bool ?? error?["retryable"] as? Bool,
                     busyReason: speechrail?["busy_reason"] as? String ?? error?["busy_reason"] as? String,
                     retryHint: speechrail?["retry_hint"] as? String ?? error?["retry_hint"] as? String,
@@ -733,7 +794,8 @@ public actor RealtimeASRClient {
         continuation?.yield(
             RealtimeEventEnvelope(
                 metadata: currentEventMetadata ?? RealtimeEventMetadata(),
-                payload: event
+                payload: event,
+                receivedAt: currentEventReceivedAt ?? ContinuousClock().now
             )
         )
     }

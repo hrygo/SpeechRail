@@ -1,7 +1,8 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -16,7 +17,7 @@ date: 2026-09-20
    `light` 不供给 aligner 与 CoreML 路径。
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
-6. 仓库/源码当前 release 版本为 `3.0.0`（以 `pyproject.toml` 与版本一致性门禁为准）。`2.7.0` 与更早的受管运行时记录仅保留为**历史部署证据**，不能据此推断当前受管安装状态。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
+6. 仓库/源码当前 release 版本为 `3.1.0`（以 `pyproject.toml` 与版本一致性门禁为准）。历史受管运行时记录仅保留为**历史部署证据**，不能据此推断当前受管安装状态。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
 7. `server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/400ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. reference clone 仅由 `quality` 的 Qwen3-TTS Base capability 承担，并经 vendor public `generate(ref_audio, ref_text, ...)` 路径执行；VoiceDesign 不再作为 clone fallback。现有请求级 seed、低温度采样、首次有效片段后冻结响度增益、peak ceiling 与非 `1.0` speed 拒绝仍保留，但这些只覆盖确定性/电平边界，不等价于跨文本 speaker identity 已通过。
@@ -72,7 +73,7 @@ date: 2026-09-20
 - diarization 的真实 CoreML smoke、DER/JER、稳定延迟、活跃与驱逐后 `phys_footprint`；
 - 非 loopback 的 TLS、CORS、网段控制与速率限制实现；
 - 日志收集策略与集中化导出实现；
-- FastAPI startup/shutdown event 迁移到 lifespan 的未来兼容性处理。
+- 生产默认所需的真实客户端、长时、质量、资源和安全门仍需按上列场景分别验收。
 
 ## 发布与端口切换门
 

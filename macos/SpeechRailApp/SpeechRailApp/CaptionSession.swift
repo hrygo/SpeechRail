@@ -574,6 +574,8 @@ public final class CaptionSession {
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
+        case .partialSnapshot(_, _, let text):
+            partialText = text.isEmpty ? nil : text
         case .segment:
             // 分人扩展**不发** `.segment`（契约：避免双写）。真收到说明这一档没协商扩展，
             // 那就不按它切行：一次 utterance 一行，时间码取上面那份提交边界（与服务端 VAD 同源）。

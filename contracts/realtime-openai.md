@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 生效日期：2026-09-20。当前版本是一次直接切换：SpeechRail 没有外部用户，因此不提供旧事件、旧字段、旧 wire profile、旧 alias 或 `/v2` 兼容层。旧设计只在 `docs/archive/` 与历史审计中保留，不构成当前承诺。
+> 契约版本：`3.0.2`；生效日期：2026-09-20。当前版本是一次直接切换：SpeechRail 没有外部用户，因此不提供旧事件、旧字段、旧 wire profile、旧 alias 或 `/v2` 兼容层。旧设计只在 `docs/archive/` 与历史审计中保留，不构成当前承诺。
 
 ## 1. 定位与责任边界
 
@@ -55,7 +55,8 @@ ws://127.0.0.1:8201/v1/realtime
       "tts": {"enabled": true},
       "diarization": {"enabled": true},
       "render_receipts": {"enabled": true},
-      "model_revision": {"expected": "<40-char-hex>"}
+      "model_revision": {"expected": "<40-char-hex>"},
+      "transcription": {"partial_mode": "snapshot", "chunk_duration_ms": 500}
     }
   }
 }
@@ -77,6 +78,8 @@ ws://127.0.0.1:8201/v1/realtime
 | `speechrail.diarization.enabled` | 首个 PCM 前 opt-in；按档位能力返回 `diarization_not_available` |
 | `speechrail.render_receipts.enabled` | 首个 TTS 前协商；只返回摘要，不返回音频/文本 |
 | `speechrail.model_revision.expected` | 可选 40 位小写 hex；TTS 绑定不匹配返回 `model_revision_conflict` |
+| `speechrail.transcription.partial_mode` | `delta`（默认）或 `snapshot`；`snapshot` 允许提词器接收可修订的最新全文。 |
+| `speechrail.transcription.chunk_duration_ms` | 会话级识别分块，仅允许 `500`、`1000`、`2000`；必须在首个 PCM 前设置，默认 `2000`。 |
 
 不接受 `model`、`language`、`voice`、`modalities`、`tools`、`output_audio_format` 等旧的根级或 LLM 会话字段；服务端没有对应语义，不做 accept-but-no-op。
 
@@ -126,11 +129,12 @@ ws://127.0.0.1:8201/v1/realtime
 | 事件 | 语义 |
 |---|---|
 | `session.created` | 唯一握手事件；声明 `type=transcription`、`input_audio_format=pcm16`、ASR/ speech 能力和当前 `speechrail.tts.enabled=false`。 |
-| `transcription_session.updated` | 确认 current-only session 配置和能力；包含 TTS、diarization、receipt、model revision 的实际状态。 |
+| `transcription_session.updated` | 确认 current-only session 配置和能力；包含 TTS、diarization、receipt、model revision 及 transcription 选项的实际状态。 |
 | `input_audio_buffer.speech_started/stopped` | VAD 事实；不携带播放控制，不触发服务端 barge-in。 |
 | `input_audio_buffer.committed/cleared` | 输入缓冲状态。 |
 | `conversation.item.created` | ASR 输入 item 的临时容器事件；它不是可查询 conversation，也不能作为 TTS 输入。 |
 | `conversation.item.input_audio_transcription.delta` | 只发送可追加的稳定 partial 前缀。 |
+| `speechrail.transcription.snapshot` | 提词器 opt-in 的可修订 partial 最新全文；同一 item 的 `revision` 严格递增，调用方替换 `text`，不得追加。 |
 | `conversation.item.input_audio_transcription.segment` | ASR 已提供且已验证的 segment；分人信息通过 SpeechRail namespace 交付。 |
 | `conversation.item.input_audio_transcription.completed/failed` | ASR turn 终态；completed 的 transcript 是唯一冻结正文。 |
 | `speechrail.diarization.updated/status/done` | session-scoped 匿名分人增量、降级通知和最终屏障。 |

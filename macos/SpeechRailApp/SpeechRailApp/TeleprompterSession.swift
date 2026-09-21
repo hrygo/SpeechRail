@@ -65,6 +65,7 @@ public final class TeleprompterSession {
     public private(set) var blocked: BlockReason?
     public private(set) var document: TeleprompterDocument?
     public private(set) var versions: [TeleprompterVersion] = []
+    public private(set) var unavailableDocuments: [TeleprompterV2DocumentListItem] = []
     public private(set) var pendingVersion: TeleprompterVersion?
     public private(set) var partialText: String?
     public private(set) var currentSegmentIndex = 0
@@ -73,6 +74,8 @@ public final class TeleprompterSession {
     public private(set) var readingOffset = 0
     public private(set) var isResuming = false
     public private(set) var hasHeardSpeech = false
+    /// In-memory timing evidence for diagnosing follow lag; no text or IDs are retained.
+    public private(set) var followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
 
     // MARK: - 终版规格状态与参数
     public var targetMinutes: Int = TeleprompterTimingPolicy.defaultTargetMinutes
@@ -87,8 +90,29 @@ public final class TeleprompterSession {
     public var canEdit: Bool {
         source == nil && client == nil && runningVersion == nil
             && phase != .preparing && !isResuming && !isStoppingIntentionally
+            && !isTightening && !isAnnotating
     }
     public var isCapturing: Bool { client != nil }
+    public var isPreparingDraft: Bool { phase == .analyzing }
+
+    public var hasUncheckedPreparationBoundaries: Bool {
+        preparationResult?.status == .boundaryUnchecked
+    }
+
+    public var sourceValidationError: TeleprompterPreparationError? {
+        guard let sourceText = document?.sourceText,
+              !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        do {
+            _ = try TeleprompterSourceImporter.importData(Data(sourceText.utf8))
+            return nil
+        } catch let error as TeleprompterPreparationError {
+            return error
+        } catch {
+            return .invalidUTF8
+        }
+    }
 
     public var unresolvedReviewItemCount: Int {
         reviewItems.filter { !$0.isResolved }.count
@@ -139,10 +163,17 @@ public final class TeleprompterSession {
 
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
+    /// MapReduce preparation is injected so the session never knows provider,
+    /// endpoint, credential, or response transport details.
+    public var preparationClient: TeleprompterPreparationClient?
     public var aiClient: TeleprompterAIClient?
+    public private(set) var preparationProgress: TeleprompterPreparationProgress?
+    public private(set) var preparationResult: TeleprompterPreparationResult?
+    public private(set) var isTightening = false
+    public private(set) var isAnnotating = false
 
     private let coordinator: SessionCoordinator
-    private let store: TeleprompterStore
+    private let v2Store: TeleprompterV2Store
     private let port: Int
     private let apiKey: String?
     private var source: AudioChunkSource?
@@ -153,18 +184,27 @@ public final class TeleprompterSession {
     private var runningVersion: TeleprompterVersion?
     private var captureGeneration = UUID()
     private var draftGeneration = UUID()
-    private var analysisTask: Task<TeleprompterAnalysis, Error>?
+    private var preparationTask: Task<TeleprompterPreparationResult, Error>?
+    private var tightenTask: Task<TeleprompterPreparationResult, Error>?
+    private var annotationTask: Task<TeleprompterAnalysis, Error>?
+    private var draftSaveTask: Task<Void, Never>?
+    private var clockLastInstant: ContinuousClock.Instant?
+    private var clockAdaptiveFactor = 1.0
+    private var clockSamples: [Double] = []
+    private var clockSampleStartSegment = 0
+    private var clockSampleStartElapsed = 0.0
     private var savedRunState: TeleprompterRunState?
+    private var importedSource: TeleprompterImportedSource?
 
     public init(
         coordinator: SessionCoordinator,
-        store: TeleprompterStore,
+        v2Store: TeleprompterV2Store,
         port: Int = 8201,
         apiKey: String? = nil,
         audioSourceFactory: (@MainActor () -> AudioChunkSource)? = nil
     ) {
         self.coordinator = coordinator
-        self.store = store
+        self.v2Store = v2Store
         self.port = port
         self.apiKey = apiKey
         if let audioSourceFactory {
@@ -173,28 +213,18 @@ public final class TeleprompterSession {
     }
 
     public func listDocuments() throws -> [TeleprompterDocument] {
-        try store.listDocuments()
+        let items = try v2Store.listDocuments()
+        unavailableDocuments = items.filter { !$0.isAvailable }
+        return items.compactMap { item in
+            guard item.isAvailable else { return nil }
+            return try? legacyDocument(from: v2Store.load(documentID: item.id))
+        }
     }
 
     public func load(documentID: String) throws {
         guard canEdit else { return }
         invalidateAnalysis()
-        let bundle = try store.loadBundle(documentID: documentID)
-        savedRunState = bundle.runState
-        document = bundle.document
-        versions = bundle.versions
-        pendingVersion = nil
-        let restoredIndex = bundle.runState.flatMap { state in
-            activeVersion?.segments.firstIndex { $0.id == state.currentSegmentID }
-        } ?? 0
-        currentSegmentIndex = restoredIndex
-        followController = TeleprompterFollowController(
-            currentIndex: restoredIndex,
-            mode: bundle.runState?.mode ?? .manual
-        )
-        phase = activeVersion == nil ? .draft : .ready
-        blocked = nil
-        syncFollowState()
+        applyV2Bundle(try v2Store.load(documentID: documentID))
     }
 
     public func createDocument(title: String, sourceText: String) {
@@ -209,8 +239,45 @@ public final class TeleprompterSession {
             createdAt: now,
             updatedAt: now
         )
+        importedSource = nil
+        contentSelection = TeleprompterContentSelection()
+        versions = []
+        readingBlocks = []
+        reviewItems = []
+        pendingVersion = nil
+        currentSegmentIndex = 0
+        readingOffset = 0
+        phase = .draft
+        blocked = nil
+        lastFailure = nil
+        persistDraft()
+    }
+
+    /// Validates pasted/drop text through the same strict importer as files.
+    /// Blank documents remain available through `createDocument` for the empty editor state.
+    public func createDocumentValidated(title: String, sourceText: String) throws {
+        let imported = try TeleprompterSourceImporter.importData(Data(sourceText.utf8))
+        createDocument(title: title, importedSource: imported)
+    }
+
+    public func createDocument(title: String, importedSource: TeleprompterImportedSource) {
+        guard canEdit else { return }
+        invalidateAnalysis()
+        savedRunState = nil
+        let now = Date()
+        document = TeleprompterDocument(
+            id: UUID().uuidString,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名稿子" : title,
+            sourceText: importedSource.sourceText,
+            createdAt: now,
+            updatedAt: now
+        )
+        self.importedSource = importedSource
+        contentSelection = TeleprompterContentSelection()
         versions = []
         pendingVersion = nil
+        readingBlocks = []
+        reviewItems = []
         currentSegmentIndex = 0
         readingOffset = 0
         phase = .draft
@@ -222,9 +289,9 @@ public final class TeleprompterSession {
     public func deleteDocument(documentID: String) throws {
         guard canEdit else { return }
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
-        try store.deleteDocument(documentID: documentID)
+        try v2Store.delete(documentID: documentID)
         if document?.id == documentID {
-            let remaining = try store.listDocuments()
+            let remaining = try listDocuments()
             if let first = remaining.first {
                 try load(documentID: first.id)
             } else {
@@ -243,19 +310,25 @@ public final class TeleprompterSession {
         guard phase != .following, phase != .paused, phase != .uncertain else {
             throw TeleprompterTextError.emptySource
         }
-        let newBundle = try store.duplicateDocument(documentID: documentID)
+        let newBundle = try v2Store.duplicate(documentID: documentID)
         try load(documentID: newBundle.document.id)
-        return newBundle.document
+        return try legacyDocument(from: newBundle)
     }
 
     public func exportMarkdown() -> String? {
         guard let document else { return nil }
-        let bundle = TeleprompterDocumentBundle(
-            document: document,
-            versions: versions,
-            runState: nil
-        )
-        return store.exportMarkdown(bundle)
+        do {
+            let bundle = try v2Store.load(documentID: document.id)
+            let body = try v2Store.exportReading(bundle)
+            return "# \(document.title)\n\n\(body)"
+        } catch {
+            return nil
+        }
+    }
+
+    public func exportSourceData() -> Data? {
+        guard let document else { return nil }
+        return try? v2Store.exportSource(v2Store.load(documentID: document.id))
     }
 
     public func updateTitle(_ title: String) {
@@ -263,7 +336,7 @@ public final class TeleprompterSession {
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.title = title
         document?.updatedAt = Date()
-        persistDraft()
+        scheduleDraftSave()
     }
 
     public func updateSourceText(_ sourceText: String) {
@@ -272,9 +345,11 @@ public final class TeleprompterSession {
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.sourceText = sourceText
         document?.updatedAt = Date()
+        importedSource = nil
+        contentSelection = TeleprompterContentSelection()
         pendingVersion = nil
         phase = .draft
-        persistDraft()
+        scheduleDraftSave()
     }
 
     public func useDeterministicFallback() throws {
@@ -282,14 +357,24 @@ public final class TeleprompterSession {
         invalidateAnalysis()
         savedRunState = nil
         guard var document else { throw TeleprompterTextError.emptySource }
-        let segments = try TeleprompterSegmenter.segment(sourceText: effectiveSourceText)
+        let imported = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
+        let sourceUnits = try TeleprompterSourceUnitBuilder().build(imported)
+        let selectedUnitIDs = try selectedSourceUnitIDs(
+            sourceUnits: sourceUnits,
+            sourceText: imported.sourceText
+        )
+        let segments = try deterministicSegments(
+            sourceUnits: sourceUnits,
+            selectedUnitIDs: selectedUnitIDs,
+            sourceText: imported.sourceText
+        )
         self.readingBlocks = segments.map { seg in
             TeleprompterReadingBlock(
                 id: seg.id,
                 ordinal: seg.ordinal,
                 sourceRange: seg.sourceRange,
                 text: seg.text,
-                rawSourceText: seg.text,
+                rawSourceText: text(in: seg.sourceRange, source: imported.sourceText) ?? seg.text,
                 disposition: .speak,
                 origin: .deterministic
             )
@@ -315,73 +400,130 @@ public final class TeleprompterSession {
         try saveBundle()
     }
 
-    public func analyzeDraft(language: String? = nil, style: String? = nil) async {
+    public func analyzeDraft() async {
         guard canEdit, phase != .analyzing else { return }
         guard let document else {
             blocked = .aiUnavailable("请先创建一份稿子。")
             return
         }
-        guard let aiClient else {
-            blocked = .aiUnavailable("还没有设置 AI 整理服务；你可以直接按原文分段。")
+        guard let preparationClient else {
+            blocked = .aiUnavailable("AI 整理服务不可用；你可以直接按原文分段。")
             return
         }
+        await prepareDraft(document: document, preparationClient: preparationClient)
+    }
+
+    private func prepareDraft(
+        document: TeleprompterDocument,
+        preparationClient: TeleprompterPreparationClient
+    ) async {
         phase = .analyzing
+        preparationProgress = nil
+        preparationResult = nil
         let generation = draftGeneration
         blocked = nil
+
         do {
-            let request = TeleprompterAnalysisRequest(
-                sourceText: effectiveSourceText,
-                language: language,
-                style: style
-            )
-            let task = Task { try await aiClient.analyze(request) }
-            analysisTask = task
-            let analysis = try await task.value
-            guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
-            analysisTask = nil
-
-            self.readingBlocks = analysis.segments.map { seg in
-                TeleprompterReadingBlock(
-                    id: seg.id,
-                    ordinal: seg.ordinal,
-                    sourceRange: seg.sourceRange,
-                    text: seg.text,
-                    rawSourceText: seg.text,
-                    disposition: .speak,
-                    origin: .ai
-                )
+            let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
+            let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
+            let selectedUnitIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
+            let estimates = sourceUnits.map { unit in
+                TeleprompterDurationEstimator.estimate(
+                    unit.rawText,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
             }
-
-            // 依据口语化分析自动生成待确认事项（如指代或读法选择）
-            var items: [TeleprompterReviewItem] = []
-            for block in self.readingBlocks {
-                if block.text.contains("（") || block.text.contains("(") {
-                    items.append(
-                        TeleprompterReviewItem(
-                            blockID: block.id,
-                            issue: .readingChoice,
-                            suggestedText: block.text.replacingOccurrences(of: "（", with: "，即 ").replacingOccurrences(of: "）", with: "，"),
-                            sourceSnippet: block.text
-                        )
-                    )
+            let timingPlan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: sourceUnits,
+                estimates: estimates,
+                targetMinutes: targetMinutes,
+                selectedUnitIDs: selectedUnitIDs
+            )
+            let input = TeleprompterPreparationInput(
+                source: source,
+                sourceUnits: sourceUnits,
+                timingPlan: timingPlan,
+                pace: pace,
+                calibrationFactor: calibrationFactor,
+                selectedUnitIDs: selectedUnitIDs
+            )
+            let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    guard let self, self.draftGeneration == generation else { return }
+                    self.preparationProgress = progress
                 }
             }
-            self.reviewItems = items
-
-            pendingVersion = TeleprompterVersion(
-                id: UUID().uuidString,
-                documentID: document.id,
-                sourceText: effectiveSourceText,
-                segments: analysis.segments,
-                analysisSource: .ai
-            )
-            phase = .review
+            let task = Task.detached(priority: .userInitiated) {
+                try await preparationClient.prepare(input, onProgress: progressSink)
+            }
+            preparationTask = task
+            let result = try await task.value
+            guard generation == draftGeneration,
+                  self.document?.id == document.id,
+                  canEdit else { return }
+            preparationTask = nil
+            preparationResult = result
+            preparationProgress = .init(phase: .finalizing, completed: 1, total: 1)
+            applyPreparationResult(result, sourceText: effectiveSourceText, document: document)
+            persistDraft()
+        } catch is CancellationError {
+            guard generation == draftGeneration else { return }
+            preparationTask = nil
+            preparationProgress = nil
+            phase = activeVersion == nil ? .draft : .ready
         } catch {
-            guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
-            analysisTask = nil
+            guard generation == draftGeneration,
+                  self.document?.id == document.id,
+                  canEdit else { return }
+            preparationTask = nil
+            preparationProgress = nil
             blocked = .aiUnavailable(Self.aiFailureMessage(for: error))
             phase = .draft
         }
+    }
+
+    private func applyPreparationResult(
+        _ result: TeleprompterPreparationResult,
+        sourceText: String,
+        document: TeleprompterDocument
+    ) {
+        readingBlocks = result.draft.blocks
+        reviewItems = []
+        for block in readingBlocks where block.disposition == .unresolved || !block.reviewIssues.isEmpty {
+            let issue = block.reviewIssues.first ?? .uncertainMeaning
+            reviewItems.append(
+                TeleprompterReviewItem(
+                    blockID: block.id,
+                    issue: issue,
+                    suggestedText: block.text,
+                    sourceSnippet: block.rawSourceText
+                )
+            )
+        }
+        for boundary in result.boundaries where !boundary.reviewBlockIDs.isEmpty {
+            for blockID in boundary.reviewBlockIDs
+                where !reviewItems.contains(where: { $0.blockID == blockID }) {
+                let block = readingBlocks.first { $0.id == blockID }
+                reviewItems.append(
+                    TeleprompterReviewItem(
+                        blockID: blockID,
+                        issue: .uncertainMeaning,
+                        suggestedText: block?.text ?? "",
+                        sourceSnippet: block?.rawSourceText ?? ""
+                    )
+                )
+            }
+        }
+        let segments = localSegments(from: readingBlocks)
+        pendingVersion = TeleprompterVersion(
+            id: UUID().uuidString,
+            documentID: document.id,
+            sourceText: sourceText,
+            segments: segments,
+            analysisSource: .ai
+        )
+        phase = .review
     }
 
     public func acceptPendingVersion() throws {
@@ -403,11 +545,13 @@ public final class TeleprompterSession {
         syncFollowState()
         phase = .ready
         blocked = nil
+        cancelScheduledDraftSave()
         try saveBundle()
     }
 
     public func discardPendingVersion() {
         guard canEdit else { return }
+        invalidateAnalysis()
         pendingVersion = nil
         reviewItems = []
         phase = activeVersion == nil ? .draft : .ready
@@ -416,30 +560,51 @@ public final class TeleprompterSession {
     // MARK: - 目标时长、节奏与校准
 
     public func setTargetMinutes(_ minutes: Int) {
-        targetMinutes = minutes
-        runClock.targetSeconds = Double(minutes * 60)
+        targetMinutes = min(
+            max(minutes, TeleprompterTimingPolicy.minimumTargetMinutes),
+            TeleprompterTimingPolicy.maximumTargetMinutes
+        )
+        runClock.targetSeconds = Double(targetMinutes * 60)
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     /// 根据当前原稿可靠估算得出的建议目标分钟数（预填 max(1, ceil(D/60))）。
     public var suggestedTargetMinutes: Int? {
         guard let text = document?.sourceText, !text.isEmpty else { return nil }
-        let metrics = TeleprompterTimingPolicy.calculateMetrics(text: text)
-        guard metrics.isReliableEstimate, metrics.totalUnits > 0 else { return nil }
-        let duration = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: pace, calibrationFactor: calibrationFactor)
-        guard duration > 0 else { return nil }
+        let metrics = TeleprompterTimingPolicy.countMetrics(in: text)
+        guard metrics.totalUnits > 0 else { return nil }
+        let estimate = TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        )
+        guard let duration = estimate.pointSeconds, duration > 0 else { return nil }
         return max(1, Int(ceil(duration / 60.0)))
     }
 
     public func setPace(_ pace: TeleprompterPace) {
         self.pace = pace
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     public func applyTrialCalibration(k: Double) {
         calibrationFactor = min(max(k, TeleprompterTimingPolicy.minimumCalibrationFactor), TeleprompterTimingPolicy.maximumCalibrationFactor)
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     public func updateContentSelection(_ selection: TeleprompterContentSelection) {
         self.contentSelection = selection
+        if pendingVersion != nil || !readingBlocks.isEmpty {
+            invalidateAnalysis()
+            pendingVersion = nil
+            reviewItems = []
+            readingBlocks = []
+            phase = activeVersion == nil ? .draft : .ready
+        }
+        scheduleDraftSave()
     }
 
     // MARK: - 待确认事项处理
@@ -469,30 +634,160 @@ public final class TeleprompterSession {
             }
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     // MARK: - 再精简表达 (Tighten)
 
     public var canTighten: Bool {
-        readingBlocks.contains { $0.disposition == .speak && $0.origin == .ai }
+        preparationClient != nil
+            && phase == .review
+            && !isTightening
+            && readingBlocks.contains { $0.disposition == .speak && $0.origin == .ai }
     }
 
-    public func tightenReadingBlocks() -> String? {
+    public func tightenReadingBlocks() async -> String? {
         guard canTighten else {
             return "没有符合条件的 AI 整理段落可供自动精简，请手动编辑文本。"
         }
-        for index in readingBlocks.indices where readingBlocks[index].disposition == .speak && readingBlocks[index].origin == .ai {
-            let original = readingBlocks[index].text
-            let trimmed = original
-                .replacingOccurrences(of: "接下来，接下来", with: "接下来")
-                .replacingOccurrences(of: "也就是说，", with: "")
-                .replacingOccurrences(of: "简单来说，", with: "")
-            if trimmed != original {
-                readingBlocks[index].text = trimmed
-            }
+        guard let preparationClient, let document else {
+            return "AI 整理服务不可用，请手动编辑文本。"
         }
-        syncPendingVersionFromBlocks()
-        return nil
+
+        let candidateIndices = readingBlocks.indices.filter {
+            readingBlocks[$0].disposition == .speak && readingBlocks[$0].origin == .ai
+        }
+        guard !candidateIndices.isEmpty else {
+            return "没有符合条件的 AI 整理段落可供自动精简，请手动编辑文本。"
+        }
+
+        isTightening = true
+        let generation = draftGeneration
+        preparationProgress = nil
+        defer {
+            isTightening = false
+            tightenTask = nil
+            preparationProgress = nil
+        }
+
+        do {
+            let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
+            let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
+            let sourceUnitIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
+            let estimates = sourceUnits.map { unit in
+                TeleprompterDurationEstimator.estimate(
+                    unit.rawText,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+            }
+            let timingPlan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: sourceUnits,
+                estimates: estimates,
+                targetMinutes: targetMinutes,
+                selectedUnitIDs: sourceUnitIDs
+            )
+            let candidates = candidateIndices.compactMap { index -> (Int, [Int])? in
+                let block = readingBlocks[index]
+                let ids = sourceUnits.filter { unit in
+                    unit.sourceRange.start < block.sourceRange.end
+                        && block.sourceRange.start < unit.sourceRange.end
+                }.map(\.id).filter(sourceUnitIDs.contains)
+                guard !ids.isEmpty else { return nil }
+                return (index, ids)
+            }
+            let rankedCandidates = candidates.sorted { lhs, rhs in
+                let leftEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[lhs.0].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds ?? 0
+                let rightEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[rhs.0].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds ?? 0
+                let leftExcess = max(0, leftEstimate - readingBlocks[lhs.0].budgetSeconds)
+                let rightExcess = max(0, rightEstimate - readingBlocks[rhs.0].budgetSeconds)
+                if leftExcess != rightExcess { return leftExcess > rightExcess }
+                return readingBlocks[lhs.0].ordinal < readingBlocks[rhs.0].ordinal
+            }
+            let selectedCandidates = Array(rankedCandidates.prefix(3))
+            let selectedIDs = Set(selectedCandidates.flatMap(\.1)).intersection(sourceUnitIDs)
+            guard !selectedIDs.isEmpty else {
+                return "当前 AI 段落没有可用来源坐标，请手动编辑文本。"
+            }
+            let currentBlocks = selectedCandidates.map { index, ids in
+                TeleprompterMapCurrentBlock(
+                    startUnit: ids.first!,
+                    endUnit: ids.last! + 1,
+                    text: readingBlocks[index].text
+                )
+            }
+            let input = TeleprompterPreparationInput(
+                source: source,
+                sourceUnits: sourceUnits,
+                timingPlan: timingPlan,
+                pace: pace,
+                calibrationFactor: calibrationFactor,
+                operation: .tighten,
+                selectedUnitIDs: selectedIDs,
+                currentBlocks: currentBlocks
+            )
+            let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    guard let self, self.draftGeneration == generation else { return }
+                    self.preparationProgress = progress
+                }
+            }
+            let task = Task.detached(priority: .userInitiated) {
+                try await preparationClient.prepare(input, onProgress: progressSink)
+            }
+            tightenTask = task
+            let result = try await task.value
+            guard generation == draftGeneration, self.document?.id == document.id else { return nil }
+
+            var replacements: [Int: [String]] = [:]
+            for resultBlock in result.draft.blocks where resultBlock.disposition == .speak {
+                    let matching = selectedCandidates.filter { _, ids in
+                    let range = sourceUnits.filter { ids.contains($0.id) }
+                        .map(\.sourceRange)
+                    guard let first = range.map(\.start).min(), let last = range.map(\.end).max() else {
+                        return false
+                    }
+                    return first < resultBlock.sourceRange.end && resultBlock.sourceRange.start < last
+                }.map(\.0)
+                // A candidate spanning two existing blocks is ambiguous; do not
+                // apply a model merge across an explicit user-facing boundary.
+                guard matching.count == 1, let index = matching.first else { continue }
+                replacements[index, default: []].append(resultBlock.text)
+            }
+            for (index, texts) in replacements {
+                let candidate = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !candidate.isEmpty else { continue }
+                let oldEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[index].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+                let newEstimate = TeleprompterDurationEstimator.estimate(
+                    candidate,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+                guard let oldEstimate, let newEstimate, newEstimate < oldEstimate else {
+                    continue
+                }
+                readingBlocks[index].text = candidate
+            }
+            syncPendingVersionFromBlocks()
+            scheduleDraftSave()
+            return replacements.isEmpty ? "这次没有找到安全的精简改动。" : nil
+        } catch is CancellationError {
+            return "已取消精简。"
+        } catch {
+            return Self.aiFailureMessage(for: error)
+        }
     }
 
     // MARK: - 来源组/块级编辑操作
@@ -502,6 +797,7 @@ public final class TeleprompterSession {
         readingBlocks[index].text = text
         readingBlocks[index].origin = .user
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func mergeBlock(at index: Int) {
@@ -520,6 +816,7 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func splitBlock(at index: Int, splitPoint: Int? = nil) {
@@ -558,6 +855,7 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func insertBlock(after index: Int) {
@@ -581,20 +879,12 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     private func syncPendingVersionFromBlocks() {
         guard let document else { return }
-        let speakBlocks = readingBlocks.filter { $0.disposition == .speak }
-        let segments = speakBlocks.enumerated().map { (idx, block) in
-            TeleprompterSegment(
-                id: block.id,
-                ordinal: idx,
-                sourceRange: block.sourceRange,
-                text: block.text,
-                pauseHint: .medium
-            )
-        }
+        let segments = localSegments(from: readingBlocks)
         pendingVersion = TeleprompterVersion(
             id: pendingVersion?.id ?? UUID().uuidString,
             documentID: document.id,
@@ -605,26 +895,266 @@ public final class TeleprompterSession {
         )
     }
 
+    private func recalculateCurrentDraftBudget() {
+        guard !readingBlocks.isEmpty, let document else { return }
+        do {
+            let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
+            let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
+            let selectedIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
+            let estimates = sourceUnits.map { unit in
+                TeleprompterDurationEstimator.estimate(
+                    unit.rawText,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+            }
+            let plan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: sourceUnits,
+                estimates: estimates,
+                targetMinutes: targetMinutes,
+                selectedUnitIDs: selectedIDs
+            )
+            for index in readingBlocks.indices {
+                let ids = sourceUnits.filter { unit in
+                    unit.sourceRange.start < readingBlocks[index].sourceRange.end
+                        && readingBlocks[index].sourceRange.start < unit.sourceRange.end
+                }.map(\.id)
+                readingBlocks[index].budgetSeconds = plan.budget(for: ids)
+            }
+        } catch {
+            // Invalid editor text is surfaced by sourceValidationError; keep the
+            // previous in-memory allocation until the user fixes the source.
+        }
+    }
+
+    private func scheduleDraftSave() {
+        guard document != nil else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.persistDraft()
+            self.draftSaveTask = nil
+        }
+    }
+
+    private func cancelScheduledDraftSave() {
+        draftSaveTask?.cancel()
+        draftSaveTask = nil
+    }
+
+    private func localSegments(from blocks: [TeleprompterReadingBlock]) -> [TeleprompterSegment] {
+        var segments: [TeleprompterSegment] = []
+        for block in blocks where block.disposition == .speak {
+            let local = (try? TeleprompterSegmenter.segment(sourceText: block.text)) ?? []
+            if local.isEmpty {
+                segments.append(
+                    TeleprompterSegment(
+                        id: "\(block.id):0",
+                        ordinal: segments.count,
+                        sourceRange: block.sourceRange,
+                        text: block.text,
+                        pauseHint: .medium
+                    )
+                )
+                continue
+            }
+            for (index, segment) in local.enumerated() {
+                segments.append(
+                    TeleprompterSegment(
+                        id: "\(block.id):\(index)",
+                        ordinal: segments.count,
+                        sourceRange: block.sourceRange,
+                        text: segment.text,
+                        keywords: segment.keywords,
+                        matchPhrases: segment.matchPhrases,
+                        pauseHint: segment.pauseHint
+                    )
+                )
+            }
+        }
+        return segments
+    }
+
+    private func deterministicSegments(
+        sourceUnits: [TeleprompterSourceUnit],
+        selectedUnitIDs: Set<Int>,
+        sourceText: String
+    ) throws -> [TeleprompterSegment] {
+        let selectedUnits = sourceUnits.filter { selectedUnitIDs.contains($0.id) }
+        guard !selectedUnits.isEmpty else { throw TeleprompterPreparationError.invalidTimingPlan }
+
+        var runs: [[TeleprompterSourceUnit]] = []
+        for unit in selectedUnits {
+            if let lastIndex = runs.indices.last,
+               runs[lastIndex].last?.id == unit.id - 1 {
+                runs[lastIndex].append(unit)
+            } else {
+                runs.append([unit])
+            }
+        }
+
+        var result: [TeleprompterSegment] = []
+        for run in runs {
+            let runText = run.map(\.rawText).joined()
+            let localSegments = try TeleprompterSegmenter.segment(sourceText: runText)
+            guard let baseOffset = run.first?.sourceRange.start else {
+                throw TeleprompterPreparationError.invalidSourceUnits
+            }
+            for local in localSegments {
+                let globalRange = TeleprompterSourceRange(
+                    start: baseOffset + local.sourceRange.start,
+                    end: baseOffset + local.sourceRange.end
+                )
+                result.append(
+                    TeleprompterSegment(
+                        id: "fallback-\(result.count)",
+                        ordinal: result.count,
+                        sourceRange: globalRange,
+                        text: local.text,
+                        keywords: local.keywords,
+                        matchPhrases: local.matchPhrases,
+                        pauseHint: local.pauseHint
+                    )
+                )
+            }
+        }
+        guard !result.isEmpty,
+              result.allSatisfy({ $0.sourceRange.isValid(in: sourceText) }) else {
+            throw TeleprompterPreparationError.emptySource
+        }
+        return result
+    }
+
+    private func selectedSourceUnitIDs(
+        sourceUnits: [TeleprompterSourceUnit],
+        sourceText: String
+    ) throws -> Set<Int> {
+        let allIDs = Set(sourceUnits.map(\.id))
+        guard contentSelection.hasExclusions else { return allIDs }
+
+        let paragraphRanges = paragraphRanges(in: sourceText)
+        let selectedRanges = paragraphRanges.enumerated().compactMap { index, range in
+            contentSelection.selectedParagraphIndices.contains(index) ? range : nil
+        }
+        guard !selectedRanges.isEmpty else {
+            throw TeleprompterPreparationError.invalidTimingPlan
+        }
+
+        let selectedIDs = Set(sourceUnits.compactMap { unit in
+            unitContainsOnlySelectedContent(unit, sourceText: sourceText, selectedRanges: selectedRanges)
+                ? unit.id
+                : nil
+        })
+        guard !selectedIDs.isEmpty else {
+            throw TeleprompterPreparationError.invalidTimingPlan
+        }
+        return selectedIDs
+    }
+
+    public func annotateActiveVersion() async -> String? {
+        guard !isAnnotating else { return "朗读提示正在生成。" }
+        guard let aiClient, let active = activeVersion, let document else {
+            return "当前没有可添加朗读提示的已确认稿件。"
+        }
+        let readingText = active.segments.map(\.text).joined(separator: "\n\n")
+        guard !readingText.isEmpty else { return "当前稿件没有可标注的正文。" }
+
+        isAnnotating = true
+        let generation = draftGeneration
+        defer {
+            isAnnotating = false
+            annotationTask = nil
+        }
+
+        do {
+            let task = Task {
+                try await aiClient.analyze(
+                    TeleprompterAnalysisRequest(
+                        sourceText: readingText,
+                        language: "跟随原稿",
+                        style: "只添加关键词和停顿提示，不改写正文"
+                    )
+                )
+            }
+            annotationTask = task
+            let analysis = try await task.value
+            guard generation == draftGeneration, self.document?.id == document.id else {
+                return "朗读提示已取消。"
+            }
+
+            var readingRanges: [TeleprompterSourceRange] = []
+            var offset = 0
+            for (index, segment) in active.segments.enumerated() {
+                readingRanges.append(.init(start: offset, end: offset + segment.text.utf16.count))
+                offset += segment.text.utf16.count
+                if index < active.segments.count - 1 { offset += 2 }
+            }
+
+            var updatedSegments = active.segments
+            var matchedCount = 0
+            for index in updatedSegments.indices {
+                let range = readingRanges[index]
+                guard let annotation = analysis.segments.max(by: { left, right in
+                    overlap(left.sourceRange, range) < overlap(right.sourceRange, range)
+                }), overlap(annotation.sourceRange, range) > 0 else { continue }
+                updatedSegments[index].keywords = annotation.keywords
+                updatedSegments[index].matchPhrases = annotation.matchPhrases
+                updatedSegments[index].pauseHint = annotation.pauseHint
+                matchedCount += 1
+            }
+            guard matchedCount > 0 else { return "AI 没有返回可应用的朗读提示。" }
+
+            guard let versionIndex = versions.firstIndex(where: { $0.id == active.id }) else {
+                return "找不到当前朗读版本。"
+            }
+            versions[versionIndex] = TeleprompterVersion(
+                id: active.id,
+                documentID: active.documentID,
+                sourceText: active.sourceText,
+                segments: updatedSegments,
+                analysisSource: active.analysisSource,
+                createdAt: active.createdAt
+            )
+            self.document?.updatedAt = Date()
+            try saveBundle()
+            return nil
+        } catch is CancellationError {
+            return "朗读提示已取消。"
+        } catch {
+            return Self.aiFailureMessage(for: error)
+        }
+    }
+
+    private func overlap(_ lhs: TeleprompterSourceRange, _ rhs: TeleprompterSourceRange) -> Int {
+        max(0, min(lhs.end, rhs.end) - max(lhs.start, rhs.start))
+    }
+
     // MARK: - 舞台单调运行计时器
 
     private func startRunClock() {
         clockTask?.cancel()
         runClock.elapsedSeconds = 0
         runClock.targetSeconds = Double(targetMinutes * 60)
-        runClock.estimatedRemainingSeconds = Double(targetMinutes * 60)
+        runClock.estimatedRemainingSeconds = remainingTextEstimate()
         runClock.isPaused = false
-        clockTask = Task { [weak self] in
+        clockLastInstant = ContinuousClock.now
+        resetAdaptiveClockSamples()
+        clockSampleStartSegment = currentSegmentIndex
+        clockSampleStartElapsed = 0
+        clockTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard let self else { return }
-                if !self.runClock.isPaused {
-                    self.runClock.elapsedSeconds += 1
-                    let count = self.activeVersion?.segments.count ?? 1
-                    let current = self.currentSegmentIndex
-                    let remainingRatio = max(0, Double(count - current - 1)) / Double(max(1, count))
-                    let estTotal = self.runClock.targetSeconds
-                    self.runClock.estimatedRemainingSeconds = estTotal * remainingRatio
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
                 }
+                guard let self else { return }
+                self.advanceRunClock()
             }
         }
     }
@@ -632,15 +1162,71 @@ public final class TeleprompterSession {
     private func stopRunClock() {
         clockTask?.cancel()
         clockTask = nil
+        clockLastInstant = nil
         runClock.isPaused = true
     }
 
     private func pauseRunClock() {
+        advanceRunClock()
         runClock.isPaused = true
+        clockLastInstant = nil
+        resetAdaptiveClockSamples()
     }
 
     private func resumeRunClock() {
         runClock.isPaused = false
+        clockLastInstant = ContinuousClock.now
+        resetAdaptiveClockSamples()
+    }
+
+    private func advanceRunClock() {
+        guard !runClock.isPaused, let last = clockLastInstant else { return }
+        let now = ContinuousClock.now
+        let duration = last.duration(to: now)
+        let components = duration.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        guard seconds.isFinite, seconds >= 0 else {
+            clockLastInstant = now
+            return
+        }
+        runClock.elapsedSeconds += seconds
+        clockLastInstant = now
+        runClock.estimatedRemainingSeconds = remainingTextEstimate()
+    }
+
+    private func resetAdaptiveClockSamples() {
+        clockSamples.removeAll(keepingCapacity: true)
+        clockAdaptiveFactor = 1.0
+        clockSampleStartSegment = currentSegmentIndex
+        clockSampleStartElapsed = runClock.elapsedSeconds
+    }
+
+    private func remainingTextEstimate() -> TimeInterval {
+        guard let version = activeVersion, !version.segments.isEmpty else { return 0 }
+        var remaining = ""
+        for index in version.segments.indices where index >= currentSegmentIndex {
+            var text = version.segments[index].text
+            if index == currentSegmentIndex,
+               readingOffset > 0,
+               let range = Range(
+                NSRange(location: min(readingOffset, text.utf16.count), length: max(0, text.utf16.count - readingOffset)),
+                in: text
+               ) {
+                text = String(text[range])
+            }
+            if !text.isEmpty {
+                if !remaining.isEmpty { remaining += "\n\n" }
+                remaining += text
+            }
+        }
+        guard !remaining.isEmpty else { return 0 }
+        let estimate = TeleprompterDurationEstimator.estimate(
+            remaining,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        )
+        let base = estimate.pointSeconds ?? estimate.knownPartSeconds
+        return max(0, base * clockAdaptiveFactor)
     }
 
     public func updatePendingSegment(id: String, text: String) {
@@ -741,6 +1327,7 @@ public final class TeleprompterSession {
 
     public func moveToPrevious() {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: currentSegmentIndex - 1, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -749,6 +1336,7 @@ public final class TeleprompterSession {
 
     public func moveToSegment(_ index: Int) {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: index, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -757,6 +1345,7 @@ public final class TeleprompterSession {
 
     public func moveToNext() {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: currentSegmentIndex + 1, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -816,32 +1405,33 @@ public final class TeleprompterSession {
 
         guard generation == captureGeneration else { throw CancellationError() }
 
+        let client = RealtimeASRClient(
+            port: port,
+            silenceDurationMilliseconds: 400,
+            diarizationEnabled: false,
+            apiKey: apiKey,
+            partialMode: .snapshot,
+            chunkDurationMilliseconds: 500
+        )
+        do {
+            try await client.connect()
+        } catch {
+            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+        }
+        guard generation == captureGeneration else {
+            await client.close()
+            throw CancellationError()
+        }
+
         let source = audioSourceFactory()
         self.source = source
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
+            await client.close()
             if generation == captureGeneration { self.source = nil }
             throw Blocked(reason: Self.blockReason(for: error))
-        }
-        guard generation == captureGeneration else {
-            source.stop()
-            throw CancellationError()
-        }
-
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: 400,
-            diarizationEnabled: false,
-            apiKey: apiKey
-        )
-        do {
-            try await client.connect()
-        } catch {
-            source.stop()
-            if generation == captureGeneration { self.source = nil }
-            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
         }
         guard generation == captureGeneration else {
             source.stop()
@@ -850,6 +1440,7 @@ public final class TeleprompterSession {
         }
 
         self.client = client
+        followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
         isStoppingIntentionally = false
         partialText = nil
         uncertainty = nil
@@ -890,6 +1481,11 @@ public final class TeleprompterSession {
               !isResuming, followController.mode == .following else { return }
         do {
             try await client.append(chunk.pcm)
+            if let capturedAt = chunk.capturedAt {
+                followLatencyDiagnostics.recordCaptureToSend(
+                    milliseconds: Self.milliseconds(capturedAt.duration(to: ContinuousClock().now))
+                )
+            }
         } catch {
             guard generation == captureGeneration else { return }
             await enterManual(.streamFailed("语音连接中断，可以手动继续或重新开始。"))
@@ -900,6 +1496,20 @@ public final class TeleprompterSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>, generation: UUID
     ) async {
         guard generation == captureGeneration, !isStoppingIntentionally else { return }
+        let handleStartedAt = ContinuousClock().now
+        var didAlign = false
+        defer {
+            if didAlign {
+                followLatencyDiagnostics.recordAlignment(
+                    queueAgeMilliseconds: Self.milliseconds(
+                        envelope.receivedAt.duration(to: handleStartedAt)
+                    ),
+                    matchMilliseconds: Self.milliseconds(
+                        handleStartedAt.duration(to: ContinuousClock().now)
+                    )
+                )
+            }
+        }
         switch envelope.payload {
         case .speechStarted:
             if followController.mode == .following, !isResuming { hasHeardSpeech = true }
@@ -908,6 +1518,18 @@ public final class TeleprompterSession {
             followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments,
                                             eventID: envelope.metadata.eventID)
             syncFollowState()
+            didAlign = true
+        case .partialSnapshot(let itemID, let revision, let text):
+            guard !isResuming, let activeVersion else { return }
+            followController.receiveSnapshot(
+                itemID: itemID,
+                revision: revision,
+                text: text,
+                segments: activeVersion.segments,
+                eventID: envelope.metadata.eventID
+            )
+            syncFollowState()
+            didAlign = true
         case .completed(let itemID, let transcript, _):
             guard !isResuming, let activeVersion else { return }
             followController.receiveCompleted(
@@ -946,6 +1568,10 @@ public final class TeleprompterSession {
         if coordinator.occupancy?.kind == .teleprompter {
             await coordinator.stopCapture(endingWith: .user)
         }
+        // A transport failure freezes the run clock. Manual positioning is a
+        // user-controlled state, but it must not inherit a pre-failure speed
+        // sample or continue counting while disconnected.
+        pauseRunClock()
         followController.enterManual()
         syncFollowState()
         blocked = reason
@@ -955,14 +1581,66 @@ public final class TeleprompterSession {
     }
 
     private func syncFollowState() {
+        let previousIndex = currentSegmentIndex
         currentSegmentIndex = followController.currentIndex
         readingOffset = followController.position.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
+        if uncertainty != nil {
+            resetAdaptiveClockSamples()
+            runClock.estimatedRemainingSeconds = remainingTextEstimate()
+        } else if currentSegmentIndex != previousIndex {
+            observeClockProgress()
+            runClock.estimatedRemainingSeconds = remainingTextEstimate()
+        }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        let value = Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return max(0, value)
+    }
+
+    private func observeClockProgress() {
+        guard currentSegmentIndex > clockSampleStartSegment,
+              let version = activeVersion,
+              clockSampleStartSegment < version.segments.count else {
+            if currentSegmentIndex < clockSampleStartSegment {
+                clockSamples.removeAll()
+                clockAdaptiveFactor = 1.0
+                clockSampleStartSegment = currentSegmentIndex
+                clockSampleStartElapsed = runClock.elapsedSeconds
+            }
+            return
+        }
+        let elapsed = runClock.elapsedSeconds - clockSampleStartElapsed
+        guard elapsed >= TeleprompterTimingPolicy.minimumTrialDurationSeconds else { return }
+        let end = min(currentSegmentIndex, version.segments.count)
+        let text = version.segments[clockSampleStartSegment..<end]
+            .map(\.text)
+            .joined(separator: "\n\n")
+        let estimate = TeleprompterDurationEstimator.estimate(
+            text,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        ).pointSeconds
+        if let estimate, estimate > 0 {
+            let factor = elapsed / estimate
+            if factor.isFinite, (0.5...2.0).contains(factor) {
+                clockSamples.append(factor)
+                if clockSamples.count > 3 { clockSamples.removeFirst() }
+                let sorted = clockSamples.sorted()
+                clockAdaptiveFactor = sorted[sorted.count / 2]
+            }
+        }
+        clockSampleStartSegment = end
+        clockSampleStartElapsed = runClock.elapsedSeconds
     }
 
     private func saveProgress() {
         guard let document, let activeVersion else { return }
+        cancelScheduledDraftSave()
         do {
             let state = TeleprompterRunState(
                     documentID: document.id,
@@ -970,7 +1648,8 @@ public final class TeleprompterSession {
                     currentSegmentID: currentSegment?.id,
                     mode: followController.mode
                 )
-            try store.updateRunState(state)
+            savedRunState = state
+            try saveBundle()
             savedRunState = state
         } catch {
             lastFailure = error.localizedDescription
@@ -978,17 +1657,609 @@ public final class TeleprompterSession {
     }
 
     private func saveBundle() throws {
-        guard var document else { throw TeleprompterStoreError.invalidBundle }
+        guard var document else { throw TeleprompterV2StoreError.invalidBundle }
         if document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             document.title = "未命名稿子"
         }
-        try store.saveBundle(
-            TeleprompterDocumentBundle(
-                document: document,
-                versions: versions,
-                runState: savedRunState
+        try v2Store.save(try makeV2Bundle(document: document))
+    }
+
+    /// 显式保存当前稿件，供工作台的失败恢复动作使用。
+    public func save() throws {
+        try saveBundle()
+    }
+
+    // MARK: - v2 持久化桥接
+
+    private func applyV2Bundle(_ bundle: TeleprompterV2DocumentBundle) {
+        let currentSource = bundle.sourceRevisions.first {
+            $0.id == bundle.document.currentSourceRevisionID
+        }
+        let loadedDocument = TeleprompterDocument(
+            id: bundle.document.id,
+            title: bundle.document.title,
+            sourceText: currentSource?.sourceText ?? "",
+            activeVersionID: bundle.document.activeVersionID,
+            createdAt: bundle.document.createdAt,
+            updatedAt: bundle.document.updatedAt
+        )
+        document = loadedDocument
+        if let currentSource {
+            let body = Data(currentSource.sourceText.utf8)
+            importedSource = TeleprompterImportedSource(
+                sourceRevisionID: currentSource.id,
+                sourceText: currentSource.sourceText,
+                formatHint: currentSource.formatHint,
+                hasBOM: currentSource.hasBOM,
+                originalUTF8Data: currentSource.hasBOM
+                    ? Data([0xEF, 0xBB, 0xBF]) + body
+                    : body,
+                sourceSHA256: currentSource.utf8SHA256,
+                builderVersion: currentSource.builderVersion,
+                referenceSeconds: TeleprompterDurationEstimator.referenceSeconds(for: currentSource.sourceText)
+            )
+        } else {
+            importedSource = nil
+        }
+        versions = bundle.versions.map { legacyVersion(from: $0, sources: bundle.sourceRevisions) }
+        savedRunState = bundle.lastRun.flatMap { run in
+            guard let mode = TeleprompterRunMode(rawValue: run.endedReason) else { return nil }
+            return TeleprompterRunState(
+                documentID: bundle.document.id,
+                versionID: run.versionID,
+                currentSegmentID: run.lastSegmentID,
+                mode: mode
+            )
+        }
+
+        if let draft = bundle.draft {
+            let source = bundle.sourceRevisions.first { $0.id == draft.sourceRevisionID }
+            readingBlocks = legacyBlocks(
+                from: draft.blocks,
+                reviews: draft.reviewIssues,
+                source: source
+            )
+            reviewItems = draft.reviewIssues
+            if let source {
+                contentSelection = contentSelection(
+                    selectedUnitIDs: Set(draft.blocks.flatMap(\.sourceUnitIDs)),
+                    source: source
+                )
+            }
+            let speakBlocks = readingBlocks.filter { $0.disposition == .speak }
+            let segments = speakBlocks.enumerated().map { index, block in
+                TeleprompterSegment(
+                    id: block.id,
+                    ordinal: index,
+                    sourceRange: block.sourceRange,
+                    text: block.text,
+                    pauseHint: .medium
+                )
+            }
+            pendingVersion = TeleprompterVersion(
+                id: draft.id,
+                documentID: bundle.document.id,
+                sourceText: speakBlocks.map(\.text).joined(separator: "\n\n"),
+                segments: segments,
+                analysisSource: .ai
+            )
+            targetMinutes = max(
+                TeleprompterTimingPolicy.minimumTargetMinutes,
+                min(
+                    TeleprompterTimingPolicy.maximumTargetMinutes,
+                    Int((draft.goal.targetSeconds / 60).rounded())
+                )
+            )
+            pace = draft.pace
+            phase = .review
+        } else {
+            readingBlocks = []
+            reviewItems = []
+            pendingVersion = nil
+            phase = activeVersion == nil ? .draft : .ready
+            if let selectionVersion = bundle.versions.first(where: {
+                $0.id == bundle.document.activeVersionID
+            }), let source = currentSource {
+                contentSelection = legacySelection(
+                    from: selectionVersion.selectionSnapshot,
+                    source: source
+                )
+            } else {
+                contentSelection = TeleprompterContentSelection()
+            }
+        }
+
+        let restoredIndex = savedRunState.flatMap { state in
+            versions.first { $0.id == state.versionID }?.segments.firstIndex {
+                $0.id == state.currentSegmentID
+            }
+        } ?? 0
+        currentSegmentIndex = restoredIndex
+        followController = TeleprompterFollowController(
+            currentIndex: restoredIndex,
+            mode: savedRunState?.mode ?? .manual
+        )
+        blocked = nil
+        lastFailure = nil
+        syncFollowState()
+    }
+
+    private func legacyDocument(from bundle: TeleprompterV2DocumentBundle) throws -> TeleprompterDocument {
+        guard let source = bundle.sourceRevisions.first(where: {
+            $0.id == bundle.document.currentSourceRevisionID
+        }) else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        return TeleprompterDocument(
+            id: bundle.document.id,
+            title: bundle.document.title,
+            sourceText: source.sourceText,
+            activeVersionID: bundle.document.activeVersionID,
+            createdAt: bundle.document.createdAt,
+            updatedAt: bundle.document.updatedAt
+        )
+    }
+
+    private func legacyVersion(
+        from version: TeleprompterV2ReadingVersion,
+        sources: [TeleprompterV2SourceRevision]
+    ) -> TeleprompterVersion {
+        let source = sources.first { $0.id == version.sourceRevisionID }
+        let segments = version.segments.enumerated().map { index, segment in
+            let block = version.blocks.first { $0.id == segment.id }
+                ?? (version.blocks.indices.contains(index) ? version.blocks[index] : nil)
+            let sourceRange = block.flatMap {
+                sourceRange(for: $0.sourceUnitIDs, source: source)
+            } ?? .init(start: 0, end: min(segment.text.utf16.count, source?.sourceText.utf16.count ?? 0))
+            return TeleprompterSegment(
+                id: segment.id,
+                ordinal: index,
+                sourceRange: sourceRange,
+                text: segment.text,
+                keywords: segment.keywords,
+                matchPhrases: segment.matchPhrases,
+                pauseHint: segment.pauseHint
+            )
+        }
+        return TeleprompterVersion(
+            id: version.id,
+            documentID: version.documentID,
+            sourceText: source?.sourceText ?? version.readingText,
+            segments: segments,
+            analysisSource: version.analysisSource,
+            createdAt: version.createdAt
+        )
+    }
+
+    private func legacyBlocks(
+        from blocks: [TeleprompterV2ReadingBlock],
+        reviews: [TeleprompterReviewItem],
+        source: TeleprompterV2SourceRevision?
+    ) -> [TeleprompterReadingBlock] {
+        blocks.enumerated().map { index, block in
+            let range = sourceRange(for: block.sourceUnitIDs, source: source)
+            let rawText = text(in: range, source: source?.sourceText) ?? block.text
+            return TeleprompterReadingBlock(
+                id: block.id,
+                ordinal: index,
+                sourceRange: range,
+                text: block.text,
+                rawSourceText: rawText,
+                disposition: block.disposition,
+                origin: block.origin,
+                reviewIssues: reviews.filter { $0.blockID == block.id }.map(\.issue),
+                budgetSeconds: block.budgetShare
+            )
+        }
+    }
+
+    private func legacySelection(
+        from snapshot: TeleprompterV2SelectionRevision,
+        source: TeleprompterV2SourceRevision
+    ) -> TeleprompterContentSelection {
+        let paragraphRanges = paragraphRanges(in: source.sourceText)
+        let selected: Set<Int> = Set(paragraphRanges.enumerated().compactMap { (index, range) -> Int? in
+            snapshot.selectedRanges.contains { selectedRange in
+                selectedRange.start <= range.start && selectedRange.end >= range.end
+            } ? index : nil
+        })
+        guard !paragraphRanges.isEmpty else { return .init() }
+        return TeleprompterContentSelection(
+            totalParagraphCount: paragraphRanges.count,
+            selectedParagraphIndices: selected
+        )
+    }
+
+    private func contentSelection(
+        selectedUnitIDs: Set<Int>,
+        source: TeleprompterV2SourceRevision
+    ) -> TeleprompterContentSelection {
+        let paragraphRanges = paragraphRanges(in: source.sourceText)
+        let selected: Set<Int> = Set(paragraphRanges.enumerated().compactMap { (index, range) -> Int? in
+            let relevantUnits = source.sourceUnits.filter { unit in
+                unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
+            }
+            guard !relevantUnits.isEmpty else { return nil }
+            return relevantUnits.allSatisfy { selectedUnitIDs.contains($0.id) } ? index : nil
+        })
+        guard !paragraphRanges.isEmpty else { return .init() }
+        return TeleprompterContentSelection(
+            totalParagraphCount: paragraphRanges.count,
+            selectedParagraphIndices: selected
+        )
+    }
+
+    private func makeV2Bundle(document: TeleprompterDocument) throws -> TeleprompterV2DocumentBundle {
+        let existing = try? v2Store.load(documentID: document.id)
+        var sources = existing?.sourceRevisions ?? []
+
+        let currentSource = sourceRevision(
+            for: document.sourceText,
+            metadata: importedSource,
+            sources: &sources
+        )
+        let selection = selectionSnapshot(
+            source: currentSource,
+            sourceText: document.sourceText
+        )
+        let v2Versions = try versions.map { version in
+            try v2Version(
+                from: version,
+                source: currentSource,
+                selection: selection,
+                existing: existing?.versions.first { $0.id == version.id }
+            )
+        }
+        let draft: TeleprompterV2ReadingDraft?
+        if pendingVersion != nil && !readingBlocks.isEmpty {
+            draft = try v2Draft(
+                source: currentSource,
+                selection: selection,
+                existing: existing?.draft
+            )
+        } else {
+            draft = nil
+        }
+        let v2Document = TeleprompterV2Document(
+            id: document.id,
+            title: document.title,
+            currentSourceRevisionID: currentSource.id,
+            activeVersionID: document.activeVersionID,
+            createdAt: document.createdAt,
+            updatedAt: Date()
+        )
+        let run = savedRunState.map { state in
+            TeleprompterV2RunSummary(
+                versionID: state.versionID,
+                targetSeconds: runClock.targetSeconds,
+                elapsedSeconds: runClock.elapsedSeconds,
+                lastSegmentID: state.currentSegmentID,
+                endedReason: state.mode.rawValue,
+                completedReading: activeVersion.map {
+                    currentSegmentIndex >= max(0, $0.segments.count - 1)
+                } ?? false
+            )
+        }
+        return TeleprompterV2DocumentBundle(
+            document: v2Document,
+            sourceRevisions: sources,
+            draft: draft,
+            versions: v2Versions,
+            lastRun: run
+        )
+    }
+
+    private func sourceRevision(
+        for text: String,
+        metadata: TeleprompterImportedSource? = nil,
+        sources: inout [TeleprompterV2SourceRevision]
+    ) -> TeleprompterV2SourceRevision {
+        if let existing = sources.first(where: { $0.sourceText == text }) {
+            return existing
+        }
+        let data = Data(text.utf8)
+        let hash = TeleprompterV2Hash.sha256(data)
+        var id = "source-\(hash.prefix(16))"
+        if sources.contains(where: { $0.id == id && $0.sourceText != text }) {
+            id = "source-\(hash.prefix(16))-\(UUID().uuidString.prefix(8))"
+        }
+        let units: [TeleprompterSourceUnit]
+        let imported: TeleprompterImportedSource?
+        if let metadata, metadata.sourceText == text {
+            imported = TeleprompterImportedSource(
+                sourceRevisionID: id,
+                sourceText: text,
+                formatHint: metadata.formatHint,
+                hasBOM: metadata.hasBOM,
+                originalUTF8Data: metadata.originalUTF8Data,
+                sourceSHA256: hash,
+                builderVersion: metadata.builderVersion,
+                referenceSeconds: metadata.referenceSeconds
+            )
+        } else {
+            imported = try? TeleprompterSourceImporter.importData(data)
+        }
+        var formatHint = imported?.formatHint ?? .unknown
+        if let imported, let built = try? TeleprompterSourceUnitBuilder().build(imported) {
+            units = built.map { unit in
+                TeleprompterSourceUnit(
+                    id: unit.id,
+                    ordinal: unit.ordinal,
+                    sourceRevisionID: id,
+                    sourceRange: unit.sourceRange,
+                    rawText: unit.rawText,
+                    continuation: unit.continuation,
+                    budgetUnits: unit.budgetUnits
+                )
+            }
+        } else if text.isEmpty {
+            formatHint = .unknown
+            units = []
+        } else {
+            formatHint = .unknown
+            let range = TeleprompterSourceRange(start: 0, end: text.utf16.count)
+            units = [TeleprompterSourceUnit(
+                id: 0,
+                ordinal: 0,
+                sourceRevisionID: id,
+                sourceRange: range,
+                rawText: text,
+                continuation: false,
+                budgetUnits: max(1, text.utf8.count)
+            )]
+        }
+        let revision = TeleprompterV2SourceRevision(
+            id: id,
+            sourceText: text,
+            utf8SHA256: hash,
+            formatHint: formatHint,
+            sourceUnits: units
+        )
+        sources.append(revision)
+        return revision
+    }
+
+    private func selectionSnapshot(
+        source: TeleprompterV2SourceRevision,
+        sourceText: String
+    ) -> TeleprompterV2SelectionRevision {
+        let allUnits = source.sourceUnits
+        let paragraphRanges = paragraphRanges(in: sourceText)
+        let selectedParagraphs: [TeleprompterSourceRange]
+        let excludedParagraphs: [TeleprompterSourceRange]
+        if contentSelection.isAllSelected || !contentSelection.hasExclusions || paragraphRanges.isEmpty {
+            selectedParagraphs = sourceText.isEmpty
+                ? []
+                : [.init(start: 0, end: sourceText.utf16.count)]
+            excludedParagraphs = []
+        } else {
+            selectedParagraphs = paragraphRanges.enumerated().compactMap { index, range in
+                contentSelection.selectedParagraphIndices.contains(index) ? range : nil
+            }
+            excludedParagraphs = paragraphRanges.enumerated().compactMap { index, range in
+                contentSelection.selectedParagraphIndices.contains(index) ? nil : range
+            }
+        }
+        let selectedIDs = allUnits.compactMap { unit in
+            unitContainsOnlySelectedContent(
+                unit,
+                sourceText: sourceText,
+                selectedRanges: selectedParagraphs
+            ) ? unit.id : nil
+        }
+        return TeleprompterV2SelectionRevision(
+            id: "selection-\(UUID().uuidString)",
+            sourceUnitRevision: source.id,
+            selectedUnitIDs: selectedIDs,
+            selectedRanges: selectedParagraphs,
+            userExcludedRanges: excludedParagraphs
+        )
+    }
+
+    private func unitContainsOnlySelectedContent(
+        _ unit: TeleprompterSourceUnit,
+        sourceText: String,
+        selectedRanges: [TeleprompterSourceRange]
+    ) -> Bool {
+        guard let swiftRange = Range(
+            NSRange(
+                location: unit.sourceRange.start,
+                length: unit.sourceRange.end - unit.sourceRange.start
+            ),
+            in: sourceText
+        ) else { return false }
+
+        var offset = unit.sourceRange.start
+        var containsContent = false
+        for character in sourceText[swiftRange] {
+            let length = String(character).utf16.count
+            let isWhitespace = String(character).rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+            if !isWhitespace {
+                containsContent = true
+                guard selectedRanges.contains(where: {
+                    $0.start <= offset && offset + length <= $0.end
+                }) else {
+                    return false
+                }
+            }
+            offset += length
+        }
+        return containsContent
+    }
+
+    private func v2Version(
+        from version: TeleprompterVersion,
+        source: TeleprompterV2SourceRevision,
+        selection: TeleprompterV2SelectionRevision,
+        existing: TeleprompterV2ReadingVersion?
+    ) throws -> TeleprompterV2ReadingVersion {
+        let blocks = version.segments.map { segment in
+            TeleprompterV2ReadingBlock(
+                id: segment.id,
+                revision: 0,
+                sourceUnitIDs: sourceUnitIDs(for: segment.sourceRange, units: source.sourceUnits),
+                text: segment.text,
+                disposition: .speak,
+                origin: v2Origin(version.analysisSource),
+                budgetShare: TeleprompterDurationEstimator.estimate(segment.text).pointSeconds ?? 0
+            )
+        }
+        let readingText = version.segments.map(\.text).joined(separator: "\n\n")
+        var readingOffset = 0
+        let segments = version.segments.enumerated().map { index, segment in
+            let start = readingOffset
+            readingOffset += segment.text.utf16.count
+            if index < version.segments.count - 1 { readingOffset += 2 }
+            return TeleprompterV2ReadingSegment(
+                id: segment.id,
+                ordinal: index,
+                readingRange: .init(start: start, end: start + segment.text.utf16.count),
+                text: segment.text,
+                keywords: segment.keywords,
+                matchPhrases: segment.matchPhrases,
+                pauseHint: segment.pauseHint
+            )
+        }
+        let estimate = existing?.estimate ?? TeleprompterDurationEstimator.estimate(readingText)
+        let goal = existing?.goalSnapshot ?? .init(
+            targetSeconds: Double(targetMinutes * 60),
+            goalRevision: 0
+        )
+        return TeleprompterV2ReadingVersion(
+            id: version.id,
+            documentID: version.documentID,
+            sourceRevisionID: source.id,
+            selectionSnapshot: .init(
+                id: selection.id,
+                sourceUnitRevision: selection.sourceUnitRevision,
+                selectedUnitIDs: selection.selectedUnitIDs,
+                selectedRanges: selection.selectedRanges,
+                userExcludedRanges: selection.userExcludedRanges
+            ),
+            readingText: readingText,
+            blocks: blocks,
+            segments: segments,
+            goalSnapshot: goal,
+            paceSnapshot: existing?.paceSnapshot ?? pace,
+            estimate: estimate,
+            analysisSource: version.analysisSource,
+            createdAt: existing?.createdAt ?? version.createdAt
+        )
+    }
+
+    private func v2Draft(
+        source: TeleprompterV2SourceRevision,
+        selection: TeleprompterV2SelectionRevision,
+        existing: TeleprompterV2ReadingDraft?
+    ) throws -> TeleprompterV2ReadingDraft {
+        let blocks = readingBlocks.map { block in
+            TeleprompterV2ReadingBlock(
+                id: block.id,
+                revision: 0,
+                sourceUnitIDs: sourceUnitIDs(for: block.sourceRange, units: source.sourceUnits),
+                text: block.text,
+                disposition: block.disposition,
+                origin: v2Origin(block.origin),
+                budgetShare: block.budgetSeconds
+            )
+        }
+        let estimates = source.sourceUnits.map { unit in
+            TeleprompterDurationEstimator.estimate(
+                unit.rawText,
+                pace: pace,
+                calibrationFactor: calibrationFactor
+            ).pointSeconds
+        }
+        let selectedUnitIDs = Set(selection.selectedUnitIDs)
+        let plan: TeleprompterTimingPlan
+        if source.sourceUnits.isEmpty {
+            plan = .init(
+                targetMinutes: targetMinutes,
+                targetSeconds: Double(targetMinutes * 60),
+                budgetSeconds: Double(targetMinutes * 60) * TeleprompterTimingPolicy.budgetRatio,
+                weightMode: .proxyCharacters,
+                allocations: []
+            )
+        } else {
+            plan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: source.sourceUnits,
+                estimates: estimates,
+                targetMinutes: targetMinutes,
+                selectedUnitIDs: selectedUnitIDs
+            )
+        }
+        return TeleprompterV2ReadingDraft(
+            id: pendingVersion?.id ?? existing?.id ?? UUID().uuidString,
+            draftRevision: (existing?.draftRevision ?? 0) + 1,
+            sourceRevisionID: source.id,
+            selectionRevisionID: selection.id,
+            blocks: blocks,
+            reviewIssues: reviewItems,
+            goal: .init(
+                targetSeconds: Double(targetMinutes * 60),
+                goalRevision: existing?.goal.goalRevision ?? 0
+            ),
+            pace: pace,
+            timingAllocation: .init(
+                allocationRevision: (existing?.timingAllocation.allocationRevision ?? 0) + 1,
+                plan: plan
             )
         )
+    }
+
+    private func sourceUnitIDs(
+        for range: TeleprompterSourceRange,
+        units: [TeleprompterSourceUnit]
+    ) -> [Int] {
+        units.filter { unit in
+            unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
+        }.map(\.id)
+    }
+
+    private func sourceRange(
+        for ids: [Int],
+        source: TeleprompterV2SourceRevision?
+    ) -> TeleprompterSourceRange {
+        let ranges = source?.sourceUnits.filter { ids.contains($0.id) }.map(\.sourceRange) ?? []
+        guard let first = ranges.map(\.start).min(), let last = ranges.map(\.end).max() else {
+            return .init(start: 0, end: 0)
+        }
+        return .init(start: first, end: last)
+    }
+
+    private func text(in range: TeleprompterSourceRange, source: String?) -> String? {
+        guard let source,
+              range.start >= 0,
+              range.end >= range.start,
+              let swiftRange = Range(
+                NSRange(location: range.start, length: range.end - range.start),
+                in: source
+              ) else { return nil }
+        return String(source[swiftRange])
+    }
+
+    private func paragraphRanges(in source: String) -> [TeleprompterSourceRange] {
+        let parts = source.components(separatedBy: "\n\n")
+        var offset = 0
+        return parts.enumerated().compactMap { index, part in
+            let start = offset
+            offset += part.utf16.count
+            if index < parts.count - 1 { offset += 2 }
+            guard !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return .init(start: start, end: start + part.utf16.count)
+        }
+    }
+
+    private func v2Origin(_ origin: TeleprompterBlockOrigin) -> TeleprompterBlockOrigin {
+        origin
+    }
+
+    private func v2Origin(_ source: TeleprompterAnalysisSource) -> TeleprompterBlockOrigin {
+        switch source {
+        case .ai: .ai
+        case .deterministic: .deterministic
+        case .user: .user
+        }
     }
 
     private func persistDraft() {
@@ -1000,8 +2271,17 @@ public final class TeleprompterSession {
     }
 
     private func invalidateAnalysis() {
-        analysisTask?.cancel()
-        analysisTask = nil
+        cancelScheduledDraftSave()
+        preparationTask?.cancel()
+        preparationTask = nil
+        tightenTask?.cancel()
+        tightenTask = nil
+        isTightening = false
+        annotationTask?.cancel()
+        annotationTask = nil
+        isAnnotating = false
+        preparationProgress = nil
+        preparationResult = nil
         draftGeneration = UUID()
     }
 

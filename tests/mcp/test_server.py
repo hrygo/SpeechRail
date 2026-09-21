@@ -23,9 +23,15 @@ _TOOL_ANNOTATIONS: dict[str, tuple[str, bool, bool, bool]] = {
     "synthesize": ("Synthesize speech to a file", False, False, False),
     "preview_voice": ("Audition a voice instruction", False, False, False),
     "create_voice": ("Create a persistent voice", False, False, False),
+    "get_voice": ("Get voice details", True, False, True),
+    "design_voice": ("Design and register a Base voice", False, False, False),
+    "clone_voice": ("Clone a voice from local audio", False, False, False),
+    "validate_voice": ("Validate a registered voice", False, False, False),
     "delete_voice": ("Delete a voice", False, True, True),
     "create_job": ("Create a durable job", False, False, False),
     "get_job": ("Get a job record", True, False, True),
+    "list_jobs": ("List durable jobs", True, False, True),
+    "get_job_result": ("Get job result", True, False, True),
     "cancel_job": ("Cancel a job", False, True, True),
 }
 
@@ -48,12 +54,19 @@ _TOOL_OUTPUT_KEYS: dict[str, set[str]] = {
         "bytes",
         "voice_revision",
         "model_revision",
+        "language",
     },
     "preview_voice": {"audio_path", "content_type", "output_format", "bytes"},
     "create_voice": {"id", "name", "mode", "available", "capabilities"},
+    "get_voice": {"id", "name", "mode", "available", "capabilities"},
+    "design_voice": {"id", "name", "mode", "available", "capabilities"},
+    "clone_voice": {"id", "name", "mode", "available", "capabilities"},
+    "validate_voice": {"status", "run_id", "failure_codes", "validation_persisted"},
     "delete_voice": {"id", "name", "mode", "available", "capabilities"},
     "create_job": {"id", "kind", "state", "result_ref", "params"},
     "get_job": {"id", "kind", "state", "result_ref", "params"},
+    "list_jobs": {"data", "next_cursor", "has_more"},
+    "get_job_result": {"result_path", "content_type", "bytes", "job_id"},
     "cancel_job": {"id", "kind", "state", "result_ref", "params"},
 }
 
@@ -66,7 +79,13 @@ _TOOL_REQUIRED: dict[str, list[str]] = {
     "create_voice": ["name", "instruction"],
     "delete_voice": ["voice_id"],
     "create_job": ["kind", "input_ref"],
+    "get_voice": ["voice_id"],
+    "design_voice": ["voice_id", "name", "instruction", "reference_text"],
+    "clone_voice": ["audio_ref", "name", "ref_text"],
+    "validate_voice": ["voice_id"],
     "get_job": ["job_id"],
+    "list_jobs": [],
+    "get_job_result": ["job_id"],
     "cancel_job": ["job_id"],
 }
 
@@ -77,7 +96,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_server_registers_the_nine_planned_tools() -> None:
+def test_server_registers_all_published_tools() -> None:
     app = server.create_server()
     registered = _run(app.list_tools())
     names = {tool.name for tool in registered}
@@ -87,9 +106,15 @@ def test_server_registers_the_nine_planned_tools() -> None:
         "synthesize",
         "preview_voice",
         "create_voice",
+        "get_voice",
+        "design_voice",
+        "clone_voice",
+        "validate_voice",
         "delete_voice",
         "create_job",
         "get_job",
+        "list_jobs",
+        "get_job_result",
         "cancel_job",
     }
 
@@ -110,8 +135,12 @@ def test_tool_schemas_never_leak_client_context() -> None:
         "voice",
         "output_format",
         "speed",
+        "language",
+        "instruction",
+        "seed",
         "expected_voice_revision",
         "expected_model_revision",
+        "validation_policy",
     }
 
     preview_props = set(by_name["preview_voice"].input_schema.get("properties", {}))
@@ -120,11 +149,22 @@ def test_tool_schemas_never_leak_client_context() -> None:
     create_voice_props = set(by_name["create_voice"].input_schema.get("properties", {}))
     assert create_voice_props == {"name", "instruction", "voice_id", "seed"}
 
+    assert set(by_name["get_voice"].input_schema.get("properties", {})) == {"voice_id"}
+    assert set(by_name["design_voice"].input_schema.get("properties", {})) == {
+        "voice_id", "name", "instruction", "reference_text", "seed", "language", "idempotency_key"
+    }
+    assert set(by_name["clone_voice"].input_schema.get("properties", {})) == {
+        "audio_ref", "name", "ref_text", "voice_id", "idempotency_key"
+    }
+    assert set(by_name["validate_voice"].input_schema.get("properties", {})) == {
+        "voice_id", "runs"
+    }
+
     delete_voice_props = set(by_name["delete_voice"].input_schema.get("properties", {}))
     assert delete_voice_props == {"voice_id"}
 
     create_job_props = set(by_name["create_job"].input_schema.get("properties", {}))
-    assert create_job_props == {"kind", "input_ref", "params"}
+    assert create_job_props == {"kind", "input_ref", "params", "idempotency_key"}
 
     for tool in registered:
         schema = tool.input_schema.get("properties", {})
@@ -141,6 +181,14 @@ def test_tool_descriptions_teach_base64_and_describe_first() -> None:
     assert "base64" in descriptions["transcribe"]
     assert "describe()" in descriptions["synthesize"]
     assert "quality" in descriptions["preview_voice"]
+
+
+def test_create_job_description_declares_kind_specific_params_and_policy() -> None:
+    app = server.create_server()
+    tool = next(tool for tool in _run(app.list_tools()) if tool.name == "create_job")
+    description = tool.description or ""
+    assert "validation_policy" in description
+    assert "stored" in description
 
 
 def test_main_rejects_unknown_transport(capsys: pytest.CaptureFixture[str]) -> None:

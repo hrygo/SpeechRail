@@ -11,7 +11,12 @@ public struct TeleprompterContentSelectionSheet: View {
     @Bindable var session: TeleprompterSession
     @Environment(\.dismiss) private var dismiss
 
-    @State private var paragraphs: [String] = []
+    private struct Paragraph: Identifiable, Hashable {
+        let id: Int
+        let text: String
+    }
+
+    @State private var paragraphs: [Paragraph] = []
     @State private var selectedIndices: Set<Int> = []
 
     public init(session: TeleprompterSession) {
@@ -108,7 +113,7 @@ public struct TeleprompterContentSelectionSheet: View {
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(
             SpeechRailDesignTokens.Color.recessedField,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
         )
     }
 
@@ -117,9 +122,10 @@ public struct TeleprompterContentSelectionSheet: View {
     private var paragraphList: some View {
         ScrollView {
             VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                ForEach(paragraphs.indices, id: \.self) { index in
+                ForEach(paragraphs) { paragraph in
+                    let index = paragraph.id
                     let isSelected = selectedIndices.contains(index)
-                    let text = paragraphs[index]
+                    let text = paragraph.text
                     HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                         Toggle(isOn: Binding(
                             get: { isSelected },
@@ -205,7 +211,9 @@ public struct TeleprompterContentSelectionSheet: View {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        paragraphs = parts.isEmpty ? [raw] : parts
+        paragraphs = (parts.isEmpty ? [raw] : parts).enumerated().map { index, text in
+            Paragraph(id: index, text: text)
+        }
 
         if session.contentSelection.totalParagraphCount == paragraphs.count && !session.contentSelection.selectedParagraphIndices.isEmpty {
             selectedIndices = session.contentSelection.selectedParagraphIndices
@@ -217,14 +225,14 @@ public struct TeleprompterContentSelectionSheet: View {
 
     private var selectedUnits: Int {
         let selectedText = selectedIndices.compactMap { index in
-            paragraphs.indices.contains(index) ? paragraphs[index] : nil
+            paragraphs.first(where: { $0.id == index })?.text
         }.joined(separator: "\n\n")
         return TeleprompterTimingPolicy.countMetrics(in: selectedText).totalUnits
     }
 
     private var selectedEstimateMinutes: Double {
         let selectedText = selectedIndices.compactMap { index in
-            paragraphs.indices.contains(index) ? paragraphs[index] : nil
+            paragraphs.first(where: { $0.id == index })?.text
         }.joined(separator: "\n\n")
         let metrics = TeleprompterTimingPolicy.countMetrics(in: selectedText)
         let est = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: session.pace, calibrationFactor: session.calibrationFactor)

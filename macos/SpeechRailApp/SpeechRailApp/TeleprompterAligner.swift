@@ -38,20 +38,46 @@ public struct TeleprompterAligner: Sendable {
 
     public struct Match: Sendable {
         public let position: Position?
+        public let startPosition: Position?
         public let confidence: Double
         public let matchedCount: Int
+        public let isUniqueExactContinuation: Bool
+        public let isUniqueNearAnchor: Bool
+
+        public init(
+            position: Position?,
+            startPosition: Position? = nil,
+            confidence: Double,
+            matchedCount: Int,
+            isUniqueExactContinuation: Bool = false,
+            isUniqueNearAnchor: Bool = false
+        ) {
+            self.position = position
+            self.startPosition = startPosition
+            self.confidence = confidence
+            self.matchedCount = matchedCount
+            self.isUniqueExactContinuation = isUniqueExactContinuation
+            self.isUniqueNearAnchor = isUniqueNearAnchor
+        }
     }
 
     public struct Script: Sendable {
         struct Token: Sendable {
             let value: String
-            let position: Position
+            let start: Position
+            let end: Position
+
+            var position: Position { end }
         }
         let tokens: [Token]
         public init(segments: [TeleprompterSegment]) {
             tokens = segments.enumerated().flatMap { index, segment in
                 TeleprompterNormalizer.indexedTokens(segment.text).map {
-                    Token(value: $0.value, position: .init(segmentIndex: index, utf16Offset: $0.range.end))
+                    Token(
+                        value: $0.value,
+                        start: .init(segmentIndex: index, utf16Offset: $0.range.start),
+                        end: .init(segmentIndex: index, utf16Offset: $0.range.end)
+                    )
                 }
             }
         }
@@ -122,14 +148,29 @@ public struct TeleprompterAligner: Sendable {
         // A long unique exact span crossing the existing anchor is continuity
         // evidence, even in numbered lists whose neighbouring sentences differ
         // by only one token. Equal exact copies remain ambiguous.
-        let continuesAnchor = lower + best.start <= anchorIndex + 4 && lower + best.end >= anchorIndex
+        let continuesAnchor = lower + best.start <= anchorIndex + 4
+            && lower + best.end >= anchorIndex
+        let startsNearAnchor = abs((lower + best.start) - anchorIndex) <= 4
         let uniqueExactContinuation = best.confidence == 1 && best.matches >= 8 && continuesAnchor
             && (competitor?.confidence ?? 0) < 1
+        let uniqueNearAnchor = uniqueExactContinuation && startsNearAnchor
         if let competitor, best.confidence - competitor.confidence < configuration.advanceMargin,
            !uniqueExactContinuation {
-            return Match(position: nil, confidence: best.confidence, matchedCount: best.matches)
+            return Match(
+                position: nil,
+                startPosition: window[best.start].start,
+                confidence: best.confidence,
+                matchedCount: best.matches
+            )
         }
-        return Match(position: window[best.end - 1].position, confidence: best.confidence, matchedCount: best.matches)
+        return Match(
+            position: window[best.end - 1].position,
+            startPosition: window[best.start].start,
+            confidence: best.confidence,
+            matchedCount: best.matches,
+            isUniqueExactContinuation: uniqueExactContinuation,
+            isUniqueNearAnchor: uniqueNearAnchor
+        )
     }
 
     private static let digits = ["零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",

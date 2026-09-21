@@ -140,7 +140,7 @@ uvx --python 3.12 --from ./speechrail-*.whl \
   --enable
 ```
 
-`speechrail install` ships inside the wheel since 2.7.0. It stages the release,
+The wheel ships the `speechrail install` entry point. It stages the release,
 prepares and verifies the tier's model artifacts, runs preflight, switches
 `runtime/current` atomically, and with `--enable` registers and starts
 `com.speechrail`. It refuses a wheel whose version differs from the installer,
@@ -179,8 +179,10 @@ service.
 After installation, inspect the service without starting a second instance:
 
 ```bash
-uv run speechrail service status
-uv run speechrail diagnose --app-home "$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" service status --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" diagnose --app-home "$SPEECHRAIL_APP_HOME"
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 ```
@@ -256,7 +258,11 @@ For Realtime clients, connect to:
 ws://127.0.0.1:8201/v1/realtime
 ```
 
-Then follow [`contracts/realtime-openai.md`](contracts/realtime-openai.md).
+Then follow [`contracts/realtime-openai.md`](contracts/realtime-openai.md). The
+Realtime wire is current-only: `delta` partials are append-only, while the
+optional `snapshot` extension replaces the complete text for an item according
+to its monotonic `revision`. Both `partial_mode` and `chunk_duration_ms` must
+be confirmed by `transcription_session.updated` before the first PCM frame.
 For SDK, cURL, Sona, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
 [`docs/users/integrations.md`](docs/users/integrations.md).
 
@@ -286,10 +292,12 @@ Use the CLI to inspect or change a managed selection. `setup` provides a
 memory-based starting suggestion; it is not a hard hardware guarantee.
 
 ```bash
-uv run speechrail profile list
-uv run speechrail profile status
-uv run speechrail profile apply balanced
-uv run speechrail profile rollback
+SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" profile list --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" profile status --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" profile apply balanced --app-home "$SPEECHRAIL_APP_HOME" --yes
+"$SPEECHRAIL_CLI" profile rollback --app-home "$SPEECHRAIL_APP_HOME" --yes
 ```
 
 Select voices from `/v1/voices` rather than assuming that a registered custom

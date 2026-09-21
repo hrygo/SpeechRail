@@ -194,6 +194,29 @@ def _parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="emit JSONL progress and one result envelope"
     )
 
+    agents = subcommands.add_parser(
+        "agents", help="install and inspect the SpeechRail MCP + skill agent integration"
+    )
+    agent_commands = agents.add_subparsers(dest="agents_command", required=True)
+    for command in ("install", "status", "update", "uninstall"):
+        command_parser = agent_commands.add_parser(command)
+        command_parser.add_argument(
+            "--client", choices=("codex",), default="codex", help="agent client to configure"
+        )
+        command_parser.add_argument(
+            "--skills-dir", type=Path, help="override the user skill directory"
+        )
+        command_parser.add_argument(
+            "--config-path", type=Path, help="override the client MCP config path"
+        )
+        command_parser.add_argument("--json", action="store_true", help="emit JSON")
+        if command in {"install", "update"}:
+            command_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="overwrite only after reviewing managed conflicts",
+            )
+
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
     service_commands = service.add_subparsers(dest="service_command", required=True)
     for command in (
@@ -285,6 +308,8 @@ def _machine_command(args: argparse.Namespace) -> str:
         return f"profile.{args.profile_command}"
     if args.command == "model":
         return f"model.{args.model_command}"
+    if args.command == "agents":
+        return f"agents.{args.agents_command}"
     return str(args.command)
 
 
@@ -310,6 +335,8 @@ def _machine_error_code(exc: BaseException) -> str:
         return "backend_busy"
     if "in progress" in message or "already running" in message:
         return "operation_in_progress"
+    if "conflict" in message:
+        return "integration_conflict"
     if "unsupported" in message or "only on macos" in message:
         return "unsupported"
     if "invalid" in message:
@@ -364,6 +391,37 @@ def _print_apply_result(
         return 1
     print("Profile switch failed and the service is not ready.", file=sys.stderr)
     return 1
+
+
+def _run_agents(args: argparse.Namespace) -> int:
+    from speechrail import agents
+
+    kwargs = {
+        "client": args.client,
+        "skills_dir": getattr(args, "skills_dir", None),
+        "config_path": getattr(args, "config_path", None),
+    }
+    if args.agents_command in {"install", "update"}:
+        result = agents.install(
+            **kwargs,
+            force=bool(getattr(args, "force", False)),
+            operation=args.agents_command,
+        )
+    elif args.agents_command == "status":
+        result = agents.status(**kwargs)
+    else:
+        result = agents.uninstall(**kwargs)
+    result = {"command": f"agents.{args.agents_command}", **result}
+    if getattr(args, "json", False):
+        _print_machine(result)
+        return 0 if result.get("status") not in {"drifted", "retained_due_to_conflict"} else 1
+    status = result.get("status", "unknown")
+    print(f"SpeechRail agent integration: {status}.")
+    if result.get("session_activation") == "requires_restart":
+        print("Restart or reload the agent client to activate the MCP server and skill.")
+    if result.get("retained_files"):
+        print("User-modified skill files were retained: " + ", ".join(result["retained_files"]))
+    return 0 if status not in {"drifted", "retained_due_to_conflict"} else 1
 
 
 def _run_profile(args: argparse.Namespace) -> int:
@@ -1360,6 +1418,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_profile(args)
         if args.command == "model":
             return _run_model(args)
+        if args.command == "agents":
+            return _run_agents(args)
         if args.command == "setup":
             return _run_setup(args)
         if args.command == "install":

@@ -21,6 +21,7 @@ def error(
     request_id: str,
     retryable: bool,
     param: str | None = None,
+    diagnostic_class: str | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "message": message,
@@ -31,6 +32,8 @@ def error(
     }
     if param is not None:
         value["param"] = param
+    if diagnostic_class is not None:
+        value["diagnostic_class"] = diagnostic_class
     return {"error": value}
 
 
@@ -42,6 +45,7 @@ def error_response(
     *,
     retryable: bool = False,
     param: str | None = None,
+    diagnostic_class: str | None = None,
 ) -> JSONResponse:
     error_type = "server_error" if retryable else "invalid_request_error"
     return JSONResponse(
@@ -53,6 +57,7 @@ def error_response(
             request_id=request_id,
             retryable=retryable,
             param=param,
+            diagnostic_class=diagnostic_class,
         ),
         headers={"X-SpeechRail-Error-Code": code},
     )

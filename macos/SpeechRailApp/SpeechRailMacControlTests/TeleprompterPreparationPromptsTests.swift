@@ -5,6 +5,39 @@ import Testing
 #endif
 
 struct TeleprompterPreparationPromptsTests {
+    @Test func mapUsesLocalCoordinatesAndDecoderRestoresGlobalSources() throws {
+        let targets = [24, 25].enumerated().map { index, id in
+            TeleprompterSourceUnit(id: id, ordinal: id, sourceRevisionID: "r",
+                                  sourceRange: .init(start: index * 3, end: index * 3 + 3),
+                                  rawText: "正文。", continuation: false, budgetUnits: 9)
+        }
+        let prompt = try TeleprompterPreparationPromptBuilder.map(
+            targets: targets, formatHint: .plaintext, globalTargetSeconds: 600,
+            localBudgetSeconds: 10, weightMode: .estimatedDuration, pace: .natural,
+            operation: .tighten, currentBlocks: [.init(startUnit: 24, endUnit: 26, text: "正文。正文。")],
+            readOnlyContext: .init(before: [.init(id: 23, rawText: "前文")],
+                                   after: [.init(id: 26, rawText: "后文")])
+        )
+        let input = try JSONDecoder().decode(TeleprompterPreparationMapInput.self, from: Data(prompt.input.utf8))
+        #expect(input.targets.map(\.id) == [0, 1])
+        #expect(input.currentBlocks[0].startUnit == 0)
+        #expect(input.currentBlocks[0].endUnit == 2)
+        #expect(input.readOnlyContext.before[0].id == -1)
+        #expect(input.readOnlyContext.after[0].id == 2)
+        let output = try TeleprompterMapDecoder().decode(
+            #"{"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":2,"mode":"speak","text":"正文。正文。","issues":[]}]}"#,
+            targets: targets, maxGroupUnits: 8
+        )
+        #expect(output.blocks[0].startUnit == 24)
+        #expect(output.blocks[0].endUnit == 26)
+    }
+
+    @Test func escapedDuplicateJSONKeysAreRejected() throws {
+        #expect(throws: (any Error).self) {
+            try TeleprompterStrictJSON.object(from: Data(#"{"name":1,"\u006eame":2}"#.utf8))
+        }
+    }
+
     private func sourceUnits() throws -> [TeleprompterSourceUnit] {
         let source = try TeleprompterSourceImporter.importData(
             Data("## 上线条件\n\n- 测试通过后方可上线\n- 延迟不得超过 200 ms。".utf8),
@@ -25,10 +58,12 @@ struct TeleprompterPreparationPromptsTests {
         )
 
         #expect(!prompt.instructions.contains(units[0].rawText))
-        #expect(prompt.instructions.contains("不摘要"))
+        #expect(prompt.instructions.contains("不得摘要"))
         #expect(prompt.input.contains("protected_literals"))
         #expect(prompt.input.contains("200"))
         #expect(prompt.input.contains("ms"))
+        #expect(prompt.input.contains("calibration_factor"))
+        #expect(prompt.input.contains("cjk_units_per_minute"))
         #expect(prompt.schemaVersion == "teleprompter.preparation.v2")
         #expect((TeleprompterPreparationJSONSchema.map["strict"] as? Bool) == true)
     }
@@ -52,13 +87,18 @@ struct TeleprompterPreparationPromptsTests {
 
     @Test func mapDecoderRejectsUnknownFieldsGapsEmptySpeakAndInvalidIssues() throws {
         let units = try sourceUnits()
+        let sourceText = units.map(\.rawText).joined()
+        let escapedSourceText = sourceText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
         let valid = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"正文","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"\(escapedSourceText)","issues":[]}]}
         """
         let invalids = [
             valid.replacingOccurrences(of: "\"issues\":[]", with: "\"issues\":[],\"extra\":true"),
             valid.replacingOccurrences(of: "\"start_unit\":0", with: "\"start_unit\":1"),
-            valid.replacingOccurrences(of: "\"text\":\"正文\"", with: "\"text\":\" \""),
+            valid.replacingOccurrences(of: "\"text\":\"\(escapedSourceText)\"", with: "\"text\":\" \""),
             valid.replacingOccurrences(of: "\"issues\":[]", with: "\"issues\":[\"missing_context\"]"),
             valid.replacingOccurrences(of: "\"schema_version\":\"teleprompter.preparation.v2\"", with: "\"schema_version\":\"teleprompter.preparation.v1\"")
         ]
@@ -67,6 +107,17 @@ struct TeleprompterPreparationPromptsTests {
             #expect(throws: TeleprompterPreparationError.self) {
                 try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
             }
+        }
+    }
+
+    @Test func mapDecoderRejectsDroppingProtectedNumericLiteral() throws {
+        let units = try sourceUnits()
+        let json = """
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"上线条件。延迟不得超过。","issues":[]}]}
+        """
+
+        #expect(throws: TeleprompterPreparationError.self) {
+            try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
         }
     }
 
@@ -100,6 +151,20 @@ struct TeleprompterPreparationPromptsTests {
                     editableBlocks: [TeleprompterReduceEditableBlock(id: "b2", revision: 3, text: "下一段。")]
                 )
             }
+        }
+    }
+
+    @Test func reduceDecoderRejectsDroppingProtectedLiteral() throws {
+        let valid = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"延迟不得超过。"}],"review_block_ids":[]}"#
+        let editable = TeleprompterReduceEditableBlock(
+            id: "b2",
+            revision: 3,
+            text: "延迟不得超过 200 ms。",
+            protectedLiterals: ["200 ms"]
+        )
+
+        #expect(throws: TeleprompterPreparationError.self) {
+            try TeleprompterReduceDecoder().decode(valid, editableBlocks: [editable])
         }
     }
 }

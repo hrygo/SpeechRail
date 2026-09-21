@@ -114,7 +114,7 @@ public struct TeleprompterStageView: View {
             .padding(.vertical, 3)
             .background(
                 SpeechRailDesignTokens.Color.recessedField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
             )
 
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)

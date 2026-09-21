@@ -37,6 +37,7 @@ from speechrail.domain.diarization import (
 from speechrail.domain.ports import (
     AudioChunk,
     RealtimeAsrSession,
+    RealtimeTranscriptionOptions,
     SpeechRequest,
     StreamingAsrEvent,
     TranscriptionRequest,
@@ -170,6 +171,7 @@ class FakeStreamingSession:
         self.want_segments = False
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._finished = asyncio.Event()
+        self.options: RealtimeTranscriptionOptions | None = None
 
     async def connect(self) -> None:
         return None
@@ -231,11 +233,18 @@ class FakeStreamingFactory:
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
         self.creates = 0
+        self.options: list[RealtimeTranscriptionOptions] = []
 
     def session_class(self) -> type[FakeStreamingSession]:
         return FakeStreamingSession
 
-    def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> FakeStreamingSession:
         self.creates += 1
         session = self.session_class()(
             language=language,
@@ -246,6 +255,8 @@ class FakeStreamingFactory:
             completed_text=self.completed_text,
             emit_text_on_flush=self.emit_text_on_flush,
         )
+        session.options = options
+        self.options.append(options)
         self.sessions.append(session)
         return session
 
@@ -256,11 +267,17 @@ class FakeStreamingFactory:
 class RejectingLanguageStreamingFactory(FakeStreamingFactory):
     """Mirrors the native factory that raises RuntimeError for unsupported languages."""
 
-    def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> FakeStreamingSession:
         resolved = (language or "auto").strip().lower()
         if resolved.startswith("xx"):
             raise RuntimeError(f"language_not_supported: {resolved}")
-        return super().create(language=language, prompt=prompt)
+        return super().create(language=language, prompt=prompt, options=options)
 
 
 class _EarlyCompletionSession(FakeStreamingSession):
@@ -1531,6 +1548,138 @@ def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
     deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
     assert deltas == ["abc"]
     assert events[-1]["transcript"] == "adc"
+
+
+def test_realtime_snapshot_mode_forwards_each_revised_partial_before_final() -> None:
+    client, factory = _client(partials=("abc", "adc", "adce"), completed_text="adce")
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "speechrail": {
+                        "transcription": {
+                            "partial_mode": "snapshot",
+                            "chunk_duration_ms": 500,
+                        }
+                    }
+                },
+            }
+        )
+        updated = socket.receive_json()
+        assert updated["type"] == "transcription_session.updated"
+        assert updated["session"]["speechrail"]["transcription"] == {
+            "partial_mode": "snapshot",
+            "chunk_duration_ms": 500,
+        }
+
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    snapshots = [event for event in events if event["type"] == "speechrail.transcription.snapshot"]
+    assert [(event["revision"], event["text"]) for event in snapshots] == [
+        (1, "abc"),
+        (2, "adc"),
+        (3, "adce"),
+    ]
+    assert len(factory.options) == 1
+    assert factory.options[0].partial_mode == "snapshot"
+    assert factory.options[0].chunk_duration_ms == 500
+
+
+def test_realtime_snapshot_mode_emits_empty_rewrite_once_and_suppresses_duplicates() -> None:
+    client, _ = _client(partials=("abc", "abc", ""), completed_text="")
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "speechrail": {
+                        "transcription": {"partial_mode": "snapshot"}
+                    }
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events: list[dict[str, object]] = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    snapshots = [event for event in events if event["type"] == "speechrail.transcription.snapshot"]
+    assert [(event["revision"], event["text"]) for event in snapshots] == [
+        (1, "abc"),
+        (2, ""),
+    ]
+
+
+def test_realtime_snapshot_mode_rejects_changes_after_audio_started() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "speechrail": {
+                        "transcription": {
+                            "partial_mode": "snapshot",
+                            "chunk_duration_ms": 500,
+                        }
+                    }
+                },
+            }
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_state"
+
+
+def test_realtime_snapshot_chunk_duration_drives_flush_threshold() -> None:
+    client, factory = _client(flush_partials=("今天我们",))
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "turn_detection": "manual",
+                    "speechrail": {
+                        "transcription": {
+                            "partial_mode": "snapshot",
+                            "chunk_duration_ms": 500,
+                        }
+                    },
+                },
+            }
+        )
+        socket.receive_json()  # transcription_session.updated
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
+        )
+        snapshot = socket.receive_json()
+        assert snapshot["type"] == "speechrail.transcription.snapshot"
+        assert snapshot["text"] == "今天我们"
+        assert factory.sessions[0].flushes == 1
 
 
 def test_realtime_consecutive_commits_have_distinct_item_ids() -> None:
@@ -2942,7 +3091,13 @@ class FailingCommitStreamingFactory(FakeStreamingFactory):
         super().__init__(**kwargs)
         self.fail_state = {"failed": False}
 
-    def create(self, *, language: str | None, prompt: str) -> _FailingCommitSession:
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> _FailingCommitSession:
         session = _FailingCommitSession(
             language=language,
             prompt=prompt,
@@ -2951,6 +3106,8 @@ class FailingCommitStreamingFactory(FakeStreamingFactory):
             flush_partials=self.flush_partials,
             fail_state=self.fail_state,
         )
+        session.options = options
+        self.options.append(options)
         self.sessions.append(session)
         return session
 

@@ -77,6 +77,7 @@ class SpeechRailError(RuntimeError):
         error_type: str | None = None,
         request_id: str | None = None,
         param: str | None = None,
+        diagnostic_class: str | None = None,
         hint: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -87,6 +88,7 @@ class SpeechRailError(RuntimeError):
         self.error_type = error_type
         self.request_id = request_id
         self.param = param
+        self.diagnostic_class = diagnostic_class
         self.hint = hint
 
     def to_message(self) -> str:
@@ -97,6 +99,8 @@ class SpeechRailError(RuntimeError):
             parts = f"{parts} [param={self.param}]"
         if self.request_id:
             parts = f"{parts} [request_id={self.request_id}]"
+        if self.diagnostic_class:
+            parts = f"{parts} [diagnostic_class={self.diagnostic_class}]"
         if self.hint:
             parts = f"{parts}\nHint: {self.hint}"
         return parts
@@ -114,6 +118,7 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
     request_id: str | None = None
     retryable = False
     param: str | None = None
+    diagnostic_class: str | None = None
     try:
         body = response.json()
     except ValueError:
@@ -139,6 +144,9 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
             raw_param = error.get("param")
             if isinstance(raw_param, str):
                 param = raw_param
+            raw_diagnostic = error.get("diagnostic_class")
+            if isinstance(raw_diagnostic, str):
+                diagnostic_class = raw_diagnostic
     hint = hint_for_code(code)
     if code == "backend_not_ready" and "SPEECHRAIL_JOB_SPOOL_DIR" in message:
         hint = (
@@ -153,6 +161,7 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
         error_type=error_type,
         request_id=request_id,
         param=param,
+        diagnostic_class=diagnostic_class,
         hint=hint,
     )
 
@@ -302,8 +311,21 @@ class SpeechRailClient:
         data = self._object(response).get("data")
         if not isinstance(data, list):
             return []
-        allowed = {"id", "name", "mode", "available", "variant", "is_default", "is_system",
-                   "aliases", "capabilities"}
+        allowed = {
+            "id",
+            "name",
+            "mode",
+            "available",
+            "availability_reason",
+            "variant",
+            "is_default",
+            "is_system",
+            "aliases",
+            "capabilities",
+            "validation_state",
+            "production_ready",
+            "production_ready_reason",
+        }
         capabilities = {"supports_speaker", "supports_instruction", "supports_clone"}
         result: list[dict[str, Any]] = []
         for entry in data:
@@ -354,10 +376,14 @@ class SpeechRailClient:
         voice: str,
         response_format: str,
         speed: float,
+        language: str = "auto",
+        instruction: str | None = None,
+        seed: int | None = None,
+        validation_policy: str = "allow_unverified",
         expected_voice_revision: str | None = None,
         expected_model_revision: str | None = None,
-    ) -> bytes:
-        """POST /v1/audio/speech and return the raw audio body.
+    ) -> tuple[bytes, str | None]:
+        """POST /v1/audio/speech and return audio plus the request ID.
 
         Revision pins are sent as headers rather than JSON fields so this
         remains compatible with the OpenAI-compatible request body.  A pin is
@@ -372,6 +398,14 @@ class SpeechRailClient:
             "response_format": response_format,
             "speed": speed,
         }
+        if language != "auto":
+            body["language"] = language
+        if instruction is not None:
+            body["instructions"] = instruction
+        if seed is not None:
+            body["seed"] = seed
+        if validation_policy != "allow_unverified":
+            body["validation_policy"] = validation_policy
         headers: dict[str, str] = {}
         if expected_voice_revision is not None:
             headers["SpeechRail-Expected-Voice-Revision"] = expected_voice_revision
@@ -383,7 +417,12 @@ class SpeechRailClient:
             headers=headers or None,
             json=body,
         )
-        return response.content
+        return response.content, response.headers.get("x-request-id")
+
+    async def get_voice(self, *, voice_id: str) -> dict[str, Any]:
+        """GET one safe voice entry by canonical id or alias."""
+        response = await self._request("GET", f"voices/{voice_id}")
+        return self._object(response)
 
     async def voice_preview(
         self,
@@ -420,6 +459,63 @@ class SpeechRailClient:
         response = await self._request("POST", "voices", json=body)
         return self._object(response)
 
+    async def design_voice(
+        self,
+        *,
+        voice_id: str,
+        name: str,
+        instruction: str,
+        reference_text: str,
+        seed: int = 42,
+        language: str = "zh",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """POST the generated-reference VoiceDesign/Base registration request."""
+        body = {
+            "id": voice_id,
+            "name": name,
+            "instruction": instruction,
+            "reference_text": reference_text,
+            "seed": seed,
+            "language": language,
+        }
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        response = await self._request("POST", "voices/designs", headers=headers, json=body)
+        return self._object(response)
+
+    async def clone_voice(
+        self,
+        *,
+        content: bytes,
+        filename: str,
+        name: str,
+        ref_text: str,
+        voice_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """POST a local reference recording to the Base clone registration route."""
+        data: dict[str, str] = {"name": name, "ref_text": ref_text}
+        if voice_id is not None:
+            data["id"] = voice_id
+        files = {"audio": (filename, content, audio_content_type(filename))}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        response = await self._request(
+            "POST", "voices/clone", headers=headers, files=files, data=data
+        )
+        return self._object(response)
+
+    async def validate_voice(
+        self,
+        *,
+        voice_id: str,
+        runs: int = 1,
+    ) -> dict[str, Any]:
+        """Run the persisted output validation probes for one current voice."""
+        response = await self._request(
+            "POST", f"voices/{voice_id}/quality-runs", json={"runs": runs}
+        )
+        return self._object(response)
+
     async def delete_voice(self, *, voice_id: str) -> dict[str, Any]:
         """DELETE /v1/voices/{voice_id} and return the deletion record."""
         response = await self._request("DELETE", f"voices/{voice_id}")
@@ -431,12 +527,27 @@ class SpeechRailClient:
         kind: str,
         input_ref: str,
         params: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """POST /v1/jobs and return the created job record."""
         body: dict[str, Any] = {"kind": kind, "input_ref": input_ref}
         if params is not None:
             body["params"] = params
-        response = await self._request("POST", "jobs", json=body)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        response = await self._request("POST", "jobs", headers=headers, json=body)
+        return self._object(response)
+
+    async def list_jobs(
+        self,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """GET an owner-scoped durable-job page."""
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = await self._request("GET", "jobs", params=params)
         return self._object(response)
 
     async def get_job(self, *, job_id: str) -> dict[str, Any]:
@@ -448,3 +559,10 @@ class SpeechRailClient:
         """DELETE /v1/jobs/{job_id} and return the cancelled job record."""
         response = await self._request("DELETE", f"jobs/{job_id}")
         return self._object(response)
+
+    async def get_job_result(self, *, job_id: str) -> tuple[bytes, str]:
+        """GET a completed job artifact and preserve its media type."""
+        response = await self._request("GET", f"jobs/{job_id}/result")
+        return response.content, response.headers.get(
+            "content-type", "application/octet-stream"
+        ).split(";", 1)[0]

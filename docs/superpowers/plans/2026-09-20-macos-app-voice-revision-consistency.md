@@ -1,8 +1,8 @@
-# macOS App 音色 revision 一致性与文档终态收敛实施计划
+# macOS App 音色 revision 一致性与文档一致性收敛实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 macOS App 的 Realtime 与 REST TTS 请求都能在有效能力快照下携带正确的 voice/model revision，并将项目相关 active 文档收敛到当前终态语言。
+**Goal:** 让 macOS App 的 Realtime 与 REST TTS 请求都能在有效能力快照下携带正确的 voice/model revision，并将项目相关 active 文档收敛到确定、规范的当前语态。
 
 **Architecture:** revision 由调用方从 `effective_capabilities_v1` 读取并显式 pin；SpeechRail 服务端与 MCP 继续保持无状态。revision 不可用时保留 `nil` fallback，不从名称或时间推断。
 

@@ -49,12 +49,22 @@ class JobRepository:
         """Return the external directory that owns this repository and its artifacts."""
         return self._spool_dir
 
-    def create(self, *, kind: JobKind, owner: str, request: dict[str, Any]) -> JobRecord:
+    def create(
+        self,
+        *,
+        kind: JobKind,
+        owner: str,
+        request: dict[str, Any],
+        job_id: str | None = None,
+    ) -> JobRecord:
         if kind not in {"speech", "transcription"}:
             raise ValueError("unsupported job kind")
         if not owner:
             raise ValueError("owner must not be empty")
-        job_id = f"job_{uuid4().hex}"
+        if job_id is None:
+            job_id = f"job_{uuid4().hex}"
+        elif not job_id.startswith("job_") or len(job_id) != 36:
+            raise ValueError("job_id must be a generated job identifier")
         with self._connect() as connection:
             connection.execute(
                 """

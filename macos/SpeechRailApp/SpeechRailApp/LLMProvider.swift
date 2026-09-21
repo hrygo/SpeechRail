@@ -1,30 +1,255 @@
 import CryptoKit
 import Foundation
+import OpenAI
 import Security
+
+private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
+    private static let maxResponseBytes = 256 * 1024
+
+    struct Snapshot: Sendable {
+        let statusCode: Int?
+        let body: String
+        let isOversized: Bool
+        let responseBytes: Int
+        let choiceCount: Int?
+        let finishReason: String?
+        let promptTokens: Int?
+        let completionTokens: Int?
+        let reasoningTokens: Int?
+    }
+
+    private let lock = NSLock()
+    private var statusCode: Int?
+    private var body = ""
+    private var isOversized = false
+    private var responseBytes = 0
+    private var choiceCount: Int?
+    private var finishReason: String?
+    private var promptTokens: Int?
+    private var completionTokens: Int?
+    private var reasoningTokens: Int?
+
+    func record(response: URLResponse?, data: Data?) {
+        lock.lock()
+        defer { lock.unlock() }
+        statusCode = (response as? HTTPURLResponse)?.statusCode
+        responseBytes = data?.count ?? 0
+        isOversized = responseBytes > Self.maxResponseBytes
+        choiceCount = nil
+        finishReason = nil
+        promptTokens = nil
+        completionTokens = nil
+        reasoningTokens = nil
+        if let data {
+            body = String(decoding: data.prefix(4_096), as: UTF8.self)
+            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return
+            }
+            if let choices = object["choices"] as? [[String: Any]] {
+                choiceCount = choices.count
+                finishReason = choices.first?["finish_reason"] as? String
+            }
+            if let usage = object["usage"] as? [String: Any] {
+                record(usage: usage)
+            }
+        } else {
+            body = ""
+        }
+    }
+
+    func recordStreaming(response: URLResponse?, responseBytes: Int, usage: [String: Any]?) {
+        lock.lock()
+        defer { lock.unlock() }
+        statusCode = (response as? HTTPURLResponse)?.statusCode
+        self.responseBytes = max(0, responseBytes)
+        isOversized = self.responseBytes > Self.maxResponseBytes
+        body = ""
+        choiceCount = nil
+        finishReason = nil
+        promptTokens = nil
+        completionTokens = nil
+        reasoningTokens = nil
+        if let usage {
+            record(usage: usage)
+        }
+    }
+
+    private func record(usage: [String: Any]) {
+        promptTokens = usage["prompt_tokens"] as? Int ?? usage["input_tokens"] as? Int
+        completionTokens = usage["completion_tokens"] as? Int ?? usage["output_tokens"] as? Int
+        reasoningTokens = (usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int
+            ?? (usage["output_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int
+            ?? usage["reasoning_tokens"] as? Int
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            statusCode: statusCode,
+            body: body,
+            isOversized: isOversized,
+            responseBytes: responseBytes,
+            choiceCount: choiceCount,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            reasoningTokens: reasoningTokens
+        )
+    }
+}
+
+/// 外部 LLM 的 wire 兼容模式。URL 与 model 本身保持 opaque，不从它们推断 provider。
+public enum LLMCompatibilityMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// 任意标准 OpenAI-compatible endpoint；这是旧配置与新配置的默认模式。
+    case openAICompatible = "openai_compatible"
+    /// OpenCode Go 的 Chat 兼容端点。
+    case openCodeGo = "opencode_go"
+    /// 已验证的本机模板兼容端点，保留关闭 thinking 所需的模板字段。
+    case localTemplateCompatible = "local_template_compatible"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .openAICompatible: "OpenAI-compatible（通用）"
+        case .openCodeGo: "OpenCode Go"
+        case .localTemplateCompatible: "本机模板兼容"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .openAICompatible:
+            "支持任意标准兼容端点和模型 ID；只发送标准字段。"
+        case .openCodeGo:
+            "为 OpenCode Go 添加会话关联字段和原生关闭 thinking 字段。"
+        case .localTemplateCompatible:
+            "为本机兼容服务添加关闭 thinking 所需的模板字段。"
+        }
+    }
+
+}
+
+/// 连接检查和日志使用的实际协议操作。
+public enum LLMOperation: String, Codable, Sendable {
+    case chat
+    case responses
+}
+
+private enum LLMThinkingControl: String, Sendable {
+    case standard
+    case openCodeNative
+    case localTemplate
+}
+
+private extension LLMCompatibilityMode {
+    var chatThinkingControl: LLMThinkingControl {
+        switch self {
+        case .openAICompatible: .standard
+        case .openCodeGo: .openCodeNative
+        case .localTemplateCompatible: .localTemplate
+        }
+    }
+
+    var responsesThinkingControl: LLMThinkingControl {
+        switch self {
+        case .openAICompatible, .openCodeGo: .standard
+        case .localTemplateCompatible: .localTemplate
+        }
+    }
+
+    var usesOpenCodeSessionHeader: Bool { self == .openCodeGo }
+}
+
+private struct SpeechRailOpenAIMiddleware: OpenAIMiddleware {
+    let sessionID: String
+    let compatibilityMode: LLMCompatibilityMode
+    let includeThinkingControl: Bool
+    let responseCapture: SpeechRailOpenAIResponseCapture
+
+    func intercept(request: URLRequest) -> URLRequest {
+        var request = request
+        request.setValue("SpeechRail/teleprompter", forHTTPHeaderField: "User-Agent")
+        if compatibilityMode.usesOpenCodeSessionHeader {
+            request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+        }
+
+        guard request.url?.path.hasSuffix("/chat/completions") == true,
+              let body = request.httpBody,
+              var object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return request }
+
+        if !includeThinkingControl {
+            object.removeValue(forKey: "reasoning_effort")
+            object.removeValue(forKey: "thinking")
+            object.removeValue(forKey: "chat_template_kwargs")
+        } else {
+            switch compatibilityMode.chatThinkingControl {
+            case .standard:
+                // ChatQuery encodes the standard reasoning_effort field itself.
+                break
+            case .openCodeNative:
+                object["thinking"] = ["type": "disabled"]
+            case .localTemplate:
+                object["chat_template_kwargs"] = ["enable_thinking": false]
+            }
+        }
+        if let body = try? JSONSerialization.data(withJSONObject: object) {
+            request.httpBody = body
+        }
+        return request
+    }
+
+    func intercept(response: URLResponse?, request: URLRequest, data: Data?) -> (response: URLResponse?, data: Data?) {
+        responseCapture.record(response: response, data: data)
+        guard request.url?.path.hasSuffix("/chat/completions") == true,
+              let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var usage = object["usage"] as? [String: Any]
+        else { return (response, data) }
+
+        // MacPaw's typed usage details are optional for SpeechRail, but some compatible
+        // providers emit only a subset of those nested fields. Removing the unstable
+        // detail objects lets the SDK retain the required aggregate token counters.
+        usage.removeValue(forKey: "prompt_tokens_details")
+        usage.removeValue(forKey: "completion_tokens_details")
+        var normalized = object
+        normalized["usage"] = usage
+        let normalizedData = try? JSONSerialization.data(withJSONObject: normalized)
+        return (response, normalizedData ?? data)
+    }
+}
 
 // 大模型的唯一通道（`TECHNICAL-DESIGN` §5.12、§8.1）。
 //
-// 三条不能含糊的口径：
+// 四条不能含糊的口径：
 //
-//   1. **只对接 Responses API**（`T4` 已裁决：不做端侧模型兜底）。只实现 Chat Completions
-//      的服务接不上——这不是警告，是设置页上的第四种可判定结论（`notResponsesAPI`），
-//      因为「地址、密钥、模型名都对却连不上」在真机上最可能的原因就是它（§6.5）。
+//   1. **标准对话路径对接 Responses API，提词器整理路径使用 Chat Completions JSON mode**。
+//      Responses 仍是助手、内心 OS 与纪要的协议边界；提词器的 map/reduce 只需要无状态的
+//      Chat Completions 结构化传输。两条链路都不做端侧模型兜底。
 //   2. **密钥只进安全保管库**（§15.4）：库里只留端点与模型名，日志与错误里不出现密钥。
 //   3. **前缀结构是硬的**（§5.5）：人设与记忆进 developer 消息的 `input_text` 块并打显式
 //      断点，动态内容一律排在后面。顶层 `instructions` 不能带断点，所以人设不能写在那里。
-//   4. **语音场景关 thinking，且必须能退化**：顶层 `instructions` 承载语音对话契约（每轮重发，
-//      续轮不继承）；`chat_template_kwargs.enable_thinking=false` 挡住思维链（oMLX 上它会被念出来）；
-//      端点不认识这组参数时只失败一次，之后按不带它的形状发。
+//   4. **SpeechRail 不需要 thinking**：通用 OpenAI-compatible 使用标准的 disabled 语义，
+//      OpenCode Go 与本机模板端点只在显式 mode 下使用各自字段。端点不认识控制字段时只失败一次，
+//      之后按不带任何 thinking 控制字段的形状发。
 
 /// 大模型服务的配置。**值本身不含密钥**：密钥只按需从钥匙串取。
 public struct LLMConfiguration: Sendable, Equatable {
     /// 兼容 OpenAI 的服务地址；**不接受 URL 里带 key**（§6.5）。
     public var baseURL: String
     public var model: String
+    public var compatibilityMode: LLMCompatibilityMode
 
-    public init(baseURL: String = "", model: String = "") {
+    public init(
+        baseURL: String = "",
+        model: String = "",
+        compatibilityMode: LLMCompatibilityMode = .openAICompatible
+    ) {
         self.baseURL = baseURL
         self.model = model
+        self.compatibilityMode = compatibilityMode
     }
 
     public var isConfigured: Bool {
@@ -81,6 +306,13 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
         }
     }
+
+    public var requiredOperation: LLMOperation {
+        switch self {
+        case .teleprompter: .chat
+        case .assistant, .minutes: .responses
+        }
+    }
 }
 
 /// 单个模块的专用配置。Key 不在这里，仍由 `LLMKeychain` 作用域保管。
@@ -88,15 +320,52 @@ public struct LLMModuleOverride: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var baseURL: String
     public var model: String
+    public var compatibilityMode: LLMCompatibilityMode
 
-    public init(enabled: Bool = false, baseURL: String = "", model: String = "") {
+    public init(
+        enabled: Bool = false,
+        baseURL: String = "",
+        model: String = "",
+        compatibilityMode: LLMCompatibilityMode = .openAICompatible
+    ) {
         self.enabled = enabled
         self.baseURL = baseURL
         self.model = model
+        self.compatibilityMode = compatibilityMode
     }
 
     public var configuration: LLMConfiguration {
-        LLMConfiguration(baseURL: baseURL, model: model)
+        LLMConfiguration(
+            baseURL: baseURL,
+            model: model,
+            compatibilityMode: compatibilityMode
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case baseURL
+        case model
+        case compatibilityMode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
+        model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
+        compatibilityMode = try container.decodeIfPresent(
+            LLMCompatibilityMode.self,
+            forKey: .compatibilityMode
+        ) ?? .openAICompatible
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(model, forKey: .model)
+        try container.encode(compatibilityMode, forKey: .compatibilityMode)
     }
 }
 
@@ -190,10 +459,11 @@ public enum LLMConfigurationResolver {
     }
 }
 
-/// 一次「检查连接」的结论。四种都可判定，不出现"测试失败"（§6.5）。
+/// 一次「检查连接」的结论。每种都可判定，不出现"测试失败"（§6.5）。
 public enum LLMConnectionResult: Sendable, Equatable {
     case connected(milliseconds: Int, model: String)
     case serviceReachableModelMissing(String)
+    case notChatAPI
     case notResponsesAPI
     case unreachable(String)
     case notConfigured
@@ -203,6 +473,7 @@ public enum LLMConnectionResult: Sendable, Equatable {
         switch self {
         case .connected(let milliseconds, _): "已连接 · \(milliseconds) ms"
         case .serviceReachableModelMissing: "服务可达，但这个模型没加载"
+        case .notChatAPI: "接口不对：没有 Chat Completions API"
         case .notResponsesAPI: "接口不对：没有 Responses API"
         case .unreachable: "连不上"
         case .notConfigured: "还没配置"
@@ -216,8 +487,10 @@ public enum LLMConnectionResult: Sendable, Equatable {
             "用的是 \(model)。对话与纪要都走这一个服务地址。"
         case .serviceReachableModelMissing(let model):
             "服务在，但它的模型列表里没有 \(model)。先在那边加载/下载这个模型，或者在这里换一个。"
+        case .notChatAPI:
+            "这个地址没有 Chat Completions，AI 提词器需要这项能力。换一个兼容地址，或检查它的 API 路径。"
         case .notResponsesAPI:
-            "这个地址只提供 Chat Completions，助手与纪要需要 Responses API。换一个实现了 Responses 的服务，或者换个地址。"
+            "这个地址没有 Responses，语音助手与会议纪要需要这项能力。换一个兼容地址，或为 AI 提词器单独配置 Chat 服务。"
         case .unreachable(let message):
             message
         case .notConfigured:
@@ -289,8 +562,12 @@ public enum LLMError: LocalizedError, Equatable {
     case http(status: Int, body: String)
     /// 端点没有 Responses API（404/405，或返回里明确说没有）。
     case notResponsesAPI
+    /// 端点没有 Chat Completions API（404/405，或返回里明确说没有）。
+    case notChatAPI
     /// 端点可达，但不支持请求要求的严格结构化输出。
     case unsupportedStructuredOutput
+    case outputTruncated
+    case invalidStructuredResponse
     case refused(String)
     case cancelled
 
@@ -302,23 +579,30 @@ public enum LLMError: LocalizedError, Equatable {
         case .http(let status, let body):
             body.isEmpty ? "服务返回了 \(status)。" : "服务返回了 \(status)：\(body)"
         case .notResponsesAPI: "这个服务没有 Responses API。"
+        case .notChatAPI: "这个服务没有 Chat Completions API。"
         case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"
+        case .outputTruncated: "整理结果可能未完成，请缩小处理范围后重试。"
+        case .invalidStructuredResponse: "模型返回的整理结果无法使用，请重试。"
         case .refused(let reason): "模型没有回答：\(reason)"
         case .cancelled: "已取消。"
         }
     }
 }
 
-/// Responses API 的客户端。`actor`：它被助手、纪要、内心 OS 三处共用，
-/// 而流式读取不该与界面线程争。
+/// LLM 客户端。`actor`：它被助手、纪要、内心 OS 与提词器共用，而流式读取不该与界面线程争。
 public actor LLMProvider {
     private let session: URLSession
-    /// 已经明确拒绝 `chat_template_kwargs` 的端点（键是 `baseURL|model`）。
+    private let observationHandler: TeleprompterAIObservationHandler?
+    /// 已经明确拒绝原生 thinking 控制的端点（键是 `baseURL|model`）。
     /// 只记在内存里：换端点或重启后重新探一次，不做持久化。
     private var thinkingControlRejected: Set<String> = []
 
-    public init(session: URLSession = .shared) {
+    public init(
+        session: URLSession = .shared,
+        observationHandler: TeleprompterAIObservationHandler? = nil
+    ) {
         self.session = session
+        self.observationHandler = observationHandler
     }
 
     // MARK: - 请求
@@ -379,6 +663,246 @@ public actor LLMProvider {
         return try Self.extractText(from: data)
     }
 
+    /// 无状态结构化任务使用 MacPaw/OpenAI 的 Chat JSON mode；业务 decoder 仍是提交边界。
+    /// 完整 schema 从同一份定义加入 system，不假定服务端强制 schema。
+    public func completeJSON(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        instructions: String,
+        input: String,
+        schema: [String: Any],
+        maxOutputTokens: Int,
+        timeout: TimeInterval = 90,
+        observationContext: TeleprompterAICallContext? = nil
+    ) async throws -> String {
+        guard configuration.isConfigured else { throw LLMError.notConfigured }
+        guard configuration.isBaseURLValid, !configuration.embedsCredential,
+              URL(string: configuration.normalizedBaseURL) != nil else {
+            throw LLMError.badBaseURL
+        }
+        guard maxOutputTokens > 0, timeout.isFinite, timeout > 0,
+              let definition = schema["schema"] as? [String: Any] else {
+            throw LLMError.invalidStructuredResponse
+        }
+        let schemaText = String(decoding: try JSONSerialization.data(
+            withJSONObject: definition, options: [.sortedKeys]
+        ), as: UTF8.self)
+        let system = instructions + "\n输出必须是一个 JSON 对象，满足以下完整 JSON Schema。required 字段不可缺失；additionalProperties=false 表示禁止额外字段。schema_version 是应用的结果版本标签，必须使用 schema 中给定的常量。只输出结果对象，不输出 schema 本身。\n" + schemaText
+        let controlKey = thinkingKey(configuration, operation: .chat)
+        // OpenCode Go uses this header for routing and prompt-cache affinity. A preparation
+        // run is one logical conversation, so reuse its run id across map/reduce calls.
+        let sessionID = observationContext?.runID ?? UUID().uuidString
+        for attempt in 0...1 {
+            try Task.checkCancellation()
+            let includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+            let responseCapture = SpeechRailOpenAIResponseCapture()
+            let providerStartedAt = Date()
+            emitProviderObservation(
+                kind: .providerRequestStarted,
+                context: observationContext,
+                configuration: configuration,
+                startedAt: providerStartedAt,
+                snapshot: nil,
+                transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "started",
+                errorCode: nil
+            )
+            let client = try makeChatClient(
+                configuration: configuration,
+                apiKey: apiKey,
+                sessionID: sessionID,
+                includeThinkingControl: includeThinkingControl,
+                timeout: timeout,
+                responseCapture: responseCapture
+            )
+            var query = ChatQuery(
+                messages: [
+                    .system(.init(content: .textContent(system))),
+                    .user(.init(content: .string(input)))
+                ],
+                model: configuration.model,
+                reasoningEffort: includeThinkingControl
+                    && configuration.compatibilityMode.chatThinkingControl == .standard
+                    ? ChatQuery.ReasoningEffort.none
+                    : nil,
+                responseFormat: .jsonObject,
+                store: false,
+                temperature: 0
+            )
+            // MacPaw SDK 的标准 reasoning_effort 由上面的 query 编码；OpenCode 与本机
+            // 模板字段由 middleware 在 Chat 请求边界注入，避免把某个 provider 的字段
+            // 无条件带给其他兼容端点。
+            query.maxTokens = maxOutputTokens
+
+            do {
+                let result = try await client.chats(query: query)
+                try Task.checkCancellation()
+                let snapshot = responseCapture.snapshot()
+                emitProviderObservation(
+                    kind: .providerResponse,
+                    context: observationContext,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: snapshot,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "received",
+                    errorCode: nil
+                )
+                guard !snapshot.isOversized else {
+                    throw LLMError.invalidStructuredResponse
+                }
+                return try Self.extractChatJSON(result, maxOutputTokens: maxOutputTokens)
+            } catch {
+                let snapshot = responseCapture.snapshot()
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: observationContext,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: snapshot,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                )
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw LLMError.cancelled
+                }
+                if let llmError = error as? LLMError {
+                    throw llmError
+                }
+                if attempt == 0, includeThinkingControl,
+                   let statusCode = snapshot.statusCode,
+                   Self.rejectsThinkingControl(status: statusCode, body: snapshot.body) {
+                    thinkingControlRejected.insert(controlKey)
+                    continue
+                }
+                if let statusCode = snapshot.statusCode {
+                    // 上游错误可能回显稿件或凭据，不把原始正文交给 UI/日志。
+                    if (200...299).contains(statusCode) {
+                        throw LLMError.invalidStructuredResponse
+                    }
+                    throw LLMError.http(status: statusCode, body: "")
+                }
+                throw LLMError.transport(error.localizedDescription)
+            }
+        }
+        throw LLMError.invalidStructuredResponse
+    }
+
+    private func emitProviderObservation(
+        kind: TeleprompterAIObservationKind,
+        context: TeleprompterAICallContext?,
+        configuration: LLMConfiguration,
+        startedAt: Date,
+        snapshot: SpeechRailOpenAIResponseCapture.Snapshot?,
+        transportAttempt: Int,
+        includeThinkingControl: Bool,
+        outcome: String,
+        errorCode: String?,
+        operation: LLMOperation = .chat,
+        component: String = "provider",
+        thinkingControlOverride: String? = nil
+    ) {
+        let endpointHost = URL(string: configuration.normalizedBaseURL)?.host
+        let thinkingControl: LLMThinkingControl
+        switch operation {
+        case .chat:
+            thinkingControl = configuration.compatibilityMode.chatThinkingControl
+        case .responses:
+            thinkingControl = configuration.compatibilityMode.responsesThinkingControl
+        }
+        TeleprompterAIObservability.emit(
+            .init(
+                kind: kind,
+                component: component,
+                context: context,
+                elapsedMilliseconds: max(0, Int(Date().timeIntervalSince(startedAt) * 1_000)),
+                httpStatus: snapshot?.statusCode,
+                responseBytes: snapshot?.responseBytes,
+                choiceCount: snapshot?.choiceCount,
+                finishReason: snapshot?.finishReason,
+                promptTokens: snapshot?.promptTokens,
+                completionTokens: snapshot?.completionTokens,
+                reasoningTokens: snapshot?.reasoningTokens,
+                model: configuration.model,
+                endpointHost: endpointHost,
+                transportAttempt: transportAttempt,
+                operation: operation,
+                compatibilityMode: configuration.compatibilityMode,
+                thinkingControl: thinkingControlOverride ?? (includeThinkingControl
+                    ? "\(thinkingControl.rawValue)_disabled"
+                    : "omitted_after_rejection"),
+                outcome: outcome,
+                errorCode: errorCode
+            ),
+            to: observationHandler
+        )
+    }
+
+    private func makeChatClient(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        sessionID: String,
+        includeThinkingControl: Bool,
+        timeout: TimeInterval,
+        responseCapture: SpeechRailOpenAIResponseCapture
+    ) throws -> OpenAI {
+        guard
+            let url = URL(string: configuration.normalizedBaseURL),
+            let scheme = url.scheme?.lowercased(),
+            let host = url.host
+        else { throw LLMError.badBaseURL }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        let basePath = url.path.isEmpty ? "/" : url.path
+        let sdkConfiguration = OpenAI.Configuration(
+            token: apiKey?.isEmpty == false ? apiKey : nil,
+            host: host,
+            port: port,
+            scheme: scheme,
+            basePath: basePath,
+            timeoutInterval: timeout,
+            parsingOptions: .relaxed
+        )
+        return OpenAI(
+            configuration: sdkConfiguration,
+            session: session,
+            middlewares: [SpeechRailOpenAIMiddleware(
+                sessionID: sessionID,
+                compatibilityMode: configuration.compatibilityMode,
+                includeThinkingControl: includeThinkingControl,
+                responseCapture: responseCapture
+            )]
+        )
+    }
+
+    private static func extractChatJSON(_ result: ChatResult, maxOutputTokens: Int) throws -> String {
+        guard result.choices.count == 1,
+              let usage = result.usage,
+              usage.completionTokens >= 0 else {
+            throw LLMError.invalidStructuredResponse
+        }
+        let choice = result.choices[0]
+        // 部分 provider 用 stop 报告预算耗尽，不能单独信任 finish_reason。
+        if choice.finishReason == "length" || usage.completionTokens >= maxOutputTokens {
+            throw LLMError.outputTruncated
+        }
+        guard choice.finishReason == "stop",
+              choice.message.role == "assistant",
+              choice.message.refusal == nil || choice.message.refusal == "",
+              choice.message.toolCalls?.isEmpty != false,
+              let content = choice.message.content else {
+            throw LLMError.invalidStructuredResponse
+        }
+        do { _ = try TeleprompterStrictJSON.object(from: Data(content.utf8)) }
+        catch {
+            throw LLMError.invalidStructuredResponse
+        }
+        return content
+    }
+
     // MARK: - 长任务（Responses 的 background 模式，§5.8）
 
     /// 纪要这一类长任务**不绑在界面上**：先在服务端起一个后台响应，再轮询它。
@@ -436,23 +960,106 @@ public actor LLMProvider {
             if let apiKey, !apiKey.isEmpty {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
-            let (data, response) = try await perform(request, timeout: 60)
-            try Self.validate(response: response, data: data)
-            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw LLMError.transport("轮询回来的不是 JSON。")
+            let providerStartedAt = Date()
+            let responseCapture = SpeechRailOpenAIResponseCapture()
+            emitProviderObservation(
+                kind: .providerRequestStarted,
+                context: nil,
+                configuration: configuration,
+                startedAt: providerStartedAt,
+                snapshot: nil,
+                transportAttempt: 0,
+                includeThinkingControl: false,
+                outcome: "started",
+                errorCode: nil,
+                operation: .responses,
+                component: "provider_poll",
+                thinkingControlOverride: "not_applicable"
+            )
+
+            let result: (Data, URLResponse)
+            do {
+                result = try await perform(request, timeout: 60)
+            } catch {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: 0,
+                    includeThinkingControl: false,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses,
+                    component: "provider_poll",
+                    thinkingControlOverride: "not_applicable"
+                )
+                throw error
             }
-            switch object["status"] as? String {
-            case "completed":
-                let text = try Self.extractText(from: data)
-                if text.isEmpty, let reason = Self.failureReason(from: object) {
-                    throw LLMError.refused(reason)
+            responseCapture.record(response: result.1, data: result.0)
+            do {
+                try Self.validate(response: result.1, data: result.0)
+                guard let object = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any] else {
+                    throw LLMError.transport("轮询回来的不是 JSON。")
                 }
-                return text
-            case "failed", "incomplete", "cancelled":
-                throw LLMError.refused(Self.failureReason(from: object) ?? "生成没有完成")
-            default:
-                // queued / in_progress：等下一轮。
-                try? await Task.sleep(for: .seconds(interval))
+                switch object["status"] as? String {
+                case "completed":
+                    let text = try Self.extractText(from: result.0)
+                    if text.isEmpty, let reason = Self.failureReason(from: object) {
+                        throw LLMError.refused(reason)
+                    }
+                    emitProviderObservation(
+                        kind: .providerResponse,
+                        context: nil,
+                        configuration: configuration,
+                        startedAt: providerStartedAt,
+                        snapshot: responseCapture.snapshot(),
+                        transportAttempt: 0,
+                        includeThinkingControl: false,
+                        outcome: "completed",
+                        errorCode: nil,
+                        operation: .responses,
+                        component: "provider_poll",
+                        thinkingControlOverride: "not_applicable"
+                    )
+                    return text
+                case "failed", "incomplete", "cancelled":
+                    throw LLMError.refused(Self.failureReason(from: object) ?? "生成没有完成")
+                default:
+                    emitProviderObservation(
+                        kind: .providerResponse,
+                        context: nil,
+                        configuration: configuration,
+                        startedAt: providerStartedAt,
+                        snapshot: responseCapture.snapshot(),
+                        transportAttempt: 0,
+                        includeThinkingControl: false,
+                        outcome: "pending",
+                        errorCode: nil,
+                        operation: .responses,
+                        component: "provider_poll",
+                        thinkingControlOverride: "not_applicable"
+                    )
+                    // queued / in_progress：等下一轮。
+                    try? await Task.sleep(for: .seconds(interval))
+                }
+            } catch {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: responseCapture.snapshot(),
+                    transportAttempt: 0,
+                    includeThinkingControl: false,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses,
+                    component: "provider_poll",
+                    thinkingControlOverride: "not_applicable"
+                )
+                throw error
             }
         }
         throw LLMError.transport("等了很久也没整理完（超时）。")
@@ -466,33 +1073,122 @@ public actor LLMProvider {
         instructions: String?,
         onDelta: @Sendable (String) -> Void
     ) async throws {
-        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        let controlKey = thinkingKey(configuration, operation: .responses)
+        var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
         var bytes: URLSession.AsyncBytes?
+        var streamStartedAt: Date?
+        var streamResponseCapture: SpeechRailOpenAIResponseCapture?
+        var streamResponse: URLResponse?
+        var streamResponseBytes = 0
+        var streamUsage: [String: Any]?
+        var streamAttempt = 0
         for attempt in 0...1 {
-            let request = try makeRequest(
+            let providerStartedAt = Date()
+            let responseCapture = SpeechRailOpenAIResponseCapture()
+            emitProviderObservation(
+                kind: .providerRequestStarted,
+                context: nil,
                 configuration: configuration,
-                messages: messages,
-                apiKey: apiKey,
-                stream: true,
-                maxOutputTokens: maxOutputTokens,
-                instructions: instructions,
-                suppressThinking: suppressThinking
+                startedAt: providerStartedAt,
+                snapshot: nil,
+                transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "started",
+                errorCode: nil,
+                operation: .responses
             )
+
+            let request: URLRequest
+            do {
+                request = try makeRequest(
+                    configuration: configuration,
+                    messages: messages,
+                    apiKey: apiKey,
+                    stream: true,
+                    maxOutputTokens: maxOutputTokens,
+                    instructions: instructions,
+                    includeThinkingControl: includeThinkingControl
+                )
+            } catch {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses
+                )
+                throw error
+            }
+
             let result: (URLSession.AsyncBytes, URLResponse)
             do {
                 result = try await session.bytes(for: request)
             } catch {
-                throw LLMError.transport(error.localizedDescription)
+                let failure = LLMError.transport(error.localizedDescription)
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    operation: .responses
+                )
+                throw failure
             }
             guard let response = result.1 as? HTTPURLResponse else {
-                throw LLMError.transport("没有收到 HTTP 响应")
+                let failure = LLMError.transport("没有收到 HTTP 响应")
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    operation: .responses
+                )
+                throw failure
             }
+            responseCapture.record(response: response, data: nil)
             if (200..<300).contains(response.statusCode) {
                 bytes = result.0
+                streamStartedAt = providerStartedAt
+                streamResponseCapture = responseCapture
+                streamResponse = response
+                streamAttempt = attempt
                 break
             }
             var body = ""
-            for try await line in result.0.lines { body += line }
+            do {
+                for try await line in result.0.lines { body += line }
+            } catch {
+                let failure = LLMError.transport(error.localizedDescription)
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: responseCapture.snapshot(),
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    operation: .responses
+                )
+                throw failure
+            }
+            responseCapture.record(response: response, data: Data(body.utf8))
             let failure: LLMError
             do {
                 try Self.validate(response: response, data: Data(body.utf8))
@@ -500,39 +1196,105 @@ public actor LLMProvider {
             } catch let error as LLMError {
                 failure = error
             }
+            emitProviderObservation(
+                kind: .providerFailed,
+                context: nil,
+                configuration: configuration,
+                startedAt: providerStartedAt,
+                snapshot: responseCapture.snapshot(),
+                transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "failed",
+                errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                operation: .responses
+            )
             // 端点不认识关 thinking 的那组参数时只失败一次：记下来，再按不带它的形状重发。
-            guard attempt == 0, suppressThinking, Self.rejectsThinkingControl(failure) else {
+            guard attempt == 0, includeThinkingControl, Self.rejectsThinkingControl(failure) else {
                 throw failure
             }
-            thinkingControlRejected.insert(thinkingKey(configuration))
-            suppressThinking = false
+            thinkingControlRejected.insert(controlKey)
+            includeThinkingControl = false
         }
-        guard let bytes else {
-            throw LLMError.transport("请求没有完成")
+        guard let bytes, let streamStartedAt, let streamResponseCapture else {
+            let failure = LLMError.transport("请求没有完成")
+            emitProviderObservation(
+                kind: .providerFailed,
+                context: nil,
+                configuration: configuration,
+                startedAt: Date(),
+                snapshot: nil,
+                transportAttempt: streamAttempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "failed",
+                errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                operation: .responses
+            )
+            throw failure
         }
-        for try await line in bytes.lines {
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" { break }
-            guard
-                let data = payload.data(using: .utf8),
-                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let type = object["type"] as? String
-            else { continue }
-            switch type {
-            case "response.output_text.delta":
-                if let delta = object["delta"] as? String { onDelta(delta) }
-            case "response.refusal.delta":
-                if let delta = object["delta"] as? String { onDelta(delta) }
-            case "response.failed", "response.incomplete":
-                let reason = Self.failureReason(from: object) ?? "生成中断"
-                throw LLMError.refused(reason)
-            case "error":
-                let message = (object["error"] as? [String: Any])?["message"] as? String ?? "服务返回错误"
-                throw LLMError.transport(message)
-            default:
-                continue
+        do {
+            for try await line in bytes.lines {
+                streamResponseBytes += line.utf8.count + 1
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { break }
+                guard
+                    let data = payload.data(using: .utf8),
+                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let type = object["type"] as? String
+                else { continue }
+                streamUsage = (object["usage"] as? [String: Any])
+                    ?? (object["response"] as? [String: Any])?["usage"] as? [String: Any]
+                switch type {
+                case "response.output_text.delta":
+                    if let delta = object["delta"] as? String { onDelta(delta) }
+                case "response.refusal.delta":
+                    if let delta = object["delta"] as? String { onDelta(delta) }
+                case "response.failed", "response.incomplete":
+                    let reason = Self.failureReason(from: object) ?? "生成中断"
+                    throw LLMError.refused(reason)
+                case "error":
+                    let message = (object["error"] as? [String: Any])?["message"] as? String ?? "服务返回错误"
+                    throw LLMError.transport(message)
+                default:
+                    continue
+                }
             }
+            streamResponseCapture.recordStreaming(
+                response: streamResponse,
+                responseBytes: streamResponseBytes,
+                usage: streamUsage
+            )
+            emitProviderObservation(
+                kind: .providerResponse,
+                context: nil,
+                configuration: configuration,
+                startedAt: streamStartedAt,
+                snapshot: streamResponseCapture.snapshot(),
+                transportAttempt: streamAttempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "received",
+                errorCode: nil,
+                operation: .responses
+            )
+        } catch {
+            streamResponseCapture.recordStreaming(
+                response: streamResponse,
+                responseBytes: streamResponseBytes,
+                usage: streamUsage
+            )
+            emitProviderObservation(
+                kind: .providerFailed,
+                context: nil,
+                configuration: configuration,
+                startedAt: streamStartedAt,
+                snapshot: streamResponseCapture.snapshot(),
+                transportAttempt: streamAttempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "failed",
+                errorCode: TeleprompterAIObservability.errorCode(for: error),
+                operation: .responses
+            )
+            throw error
         }
     }
 
@@ -545,7 +1307,7 @@ public actor LLMProvider {
         textFormat: [String: Any]? = nil,
         background: Bool = false,
         instructions: String? = nil,
-        suppressThinking: Bool = true
+        includeThinkingControl: Bool = true
     ) throws -> URLRequest {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard configuration.isBaseURLValid,
@@ -584,10 +1346,17 @@ public actor LLMProvider {
         if let instructions, !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             body["instructions"] = instructions
         }
-        // 语音场景必须关掉 thinking：oMLX 上思维链会以 `reasoning_summary_text` 大量输出，
-        // 预算被打满时还会混进正文，被 TTS 逐字念出来（2026-09-19 实测）。
-        if suppressThinking {
-            body["chat_template_kwargs"] = ["enable_thinking": false]
+        // SpeechRail 不需要 reasoning/thinking。标准兼容端点使用标准字段；已知本机
+        // 模板端点保留它的专用禁用表达；任一字段被拒绝后，调用方只重试一次并省略控制。
+        if includeThinkingControl {
+            switch configuration.compatibilityMode.responsesThinkingControl {
+            case .standard:
+                body["reasoning"] = ["effort": "none"]
+            case .openCodeNative:
+                body["thinking"] = ["type": "disabled"]
+            case .localTemplate:
+                body["chat_template_kwargs"] = ["enable_thinking": false]
+            }
         }
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
         if let textFormat { body["text"] = ["format": textFormat] }
@@ -607,42 +1376,116 @@ public actor LLMProvider {
         instructions: String?,
         timeout: TimeInterval
     ) async throws -> (Data, URLResponse) {
-        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        let controlKey = thinkingKey(configuration, operation: .responses)
+        var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
         for attempt in 0...1 {
-            let request = try makeRequest(
+            let providerStartedAt = Date()
+            let responseCapture = SpeechRailOpenAIResponseCapture()
+            emitProviderObservation(
+                kind: .providerRequestStarted,
+                context: nil,
                 configuration: configuration,
-                messages: messages,
-                apiKey: apiKey,
-                stream: false,
-                maxOutputTokens: maxOutputTokens,
-                textFormat: textFormat,
-                background: background,
-                instructions: instructions,
-                suppressThinking: suppressThinking
+                startedAt: providerStartedAt,
+                snapshot: nil,
+                transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "started",
+                errorCode: nil,
+                operation: .responses
             )
-            let result = try await perform(request, timeout: timeout)
+            let request: URLRequest
+            do {
+                request = try makeRequest(
+                    configuration: configuration,
+                    messages: messages,
+                    apiKey: apiKey,
+                    stream: false,
+                    maxOutputTokens: maxOutputTokens,
+                    textFormat: textFormat,
+                    background: background,
+                    instructions: instructions,
+                    includeThinkingControl: includeThinkingControl
+                )
+            } catch {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses
+                )
+                throw error
+            }
+            let result: (Data, URLResponse)
+            do {
+                result = try await perform(request, timeout: timeout)
+            } catch {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: nil,
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses
+                )
+                throw error
+            }
+            responseCapture.record(response: result.1, data: result.0)
             do {
                 try Self.validate(response: result.1, data: result.0)
+                emitProviderObservation(
+                    kind: .providerResponse,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: responseCapture.snapshot(),
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "received",
+                    errorCode: nil,
+                    operation: .responses
+                )
                 return result
             } catch let error as LLMError {
+                emitProviderObservation(
+                    kind: .providerFailed,
+                    context: nil,
+                    configuration: configuration,
+                    startedAt: providerStartedAt,
+                    snapshot: responseCapture.snapshot(),
+                    transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl,
+                    outcome: "failed",
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    operation: .responses
+                )
                 if textFormat != nil, Self.rejectsStructuredOutput(error) {
                     throw LLMError.unsupportedStructuredOutput
                 }
-                guard attempt == 0, suppressThinking, Self.rejectsThinkingControl(error) else {
+                guard attempt == 0, includeThinkingControl, Self.rejectsThinkingControl(error) else {
                     throw error
                 }
-                thinkingControlRejected.insert(thinkingKey(configuration))
-                suppressThinking = false
+                thinkingControlRejected.insert(controlKey)
+                includeThinkingControl = false
             }
         }
         throw LLMError.transport("请求没有完成")
     }
 
-    private func thinkingKey(_ configuration: LLMConfiguration) -> String {
-        "\(configuration.normalizedBaseURL)|\(configuration.model)"
+    private func thinkingKey(_ configuration: LLMConfiguration, operation: LLMOperation) -> String {
+        "\(configuration.normalizedBaseURL)|\(configuration.model)|\(configuration.compatibilityMode.rawValue)|\(operation.rawValue)"
     }
 
-    /// 400 且明确指向这组参数——才是"端点不认识它"，不是别的问题。
+    /// 400 且明确指向 thinking 控制参数——才是"端点不认识它"，不是别的问题。
     private static func rejectsThinkingControl(_ error: LLMError) -> Bool {
         guard case let .http(status, body) = error else { return false }
         return rejectsThinkingControl(status: status, body: body)
@@ -674,6 +1517,7 @@ public actor LLMProvider {
         guard status == 400 else { return false }
         let lower = body.lowercased()
         return lower.contains("chat_template_kwargs")
+            || lower.contains("thinking")
             || lower.contains("unrecognized request argument")
             || lower.contains("unknown parameter")
             || lower.contains("extra inputs")
@@ -695,105 +1539,126 @@ public actor LLMProvider {
         }
     }
 
-    // MARK: - 检查连接（§6.5 的四种结论）
+    // MARK: - 检查连接
 
-    /// 「检查连接」用的最小探测请求：`/responses` + 一条 `ping`。
-    ///
-    /// `chat_template_kwargs` 要不要带上由已知结论决定；端点不认识它时这里只白吃一次 400，
-    /// `check()` 会重发一次不带它的形状并把结论记进 `thinkingControlRejected`，
-    /// 真实对话不必再先失败一次。
+    /// 检查用的最小请求。`/models` 不是 OpenAI-compatible 的硬性要求，实际能力探测才是结论。
     private static func probeRequest(
         url: URL,
         configuration: LLMConfiguration,
         apiKey: String?,
-        suppressThinking: Bool
+        operation: LLMOperation,
+        includeThinkingControl: Bool,
+        sessionID: String
     ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("SpeechRail/llm-check", forHTTPHeaderField: "User-Agent")
+        if configuration.compatibilityMode.usesOpenCodeSessionHeader {
+            request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+        }
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
-        var body: [String: Any] = [
-            "model": configuration.model,
-            "input": [["role": "user", "content": [["type": "input_text", "text": "ping"]]]],
-            "store": false,
-            "max_output_tokens": 16
-        ]
-        if suppressThinking {
-            body["chat_template_kwargs"] = ["enable_thinking": false]
+
+        var body: [String: Any]
+        switch operation {
+        case .chat:
+            body = [
+                "model": configuration.model,
+                "messages": [["role": "user", "content": "ping"]],
+                "max_tokens": 16,
+                "stream": false,
+                "temperature": 0
+            ]
+            if includeThinkingControl {
+                switch configuration.compatibilityMode.chatThinkingControl {
+                case .standard:
+                    body["reasoning_effort"] = "none"
+                case .openCodeNative:
+                    body["thinking"] = ["type": "disabled"]
+                case .localTemplate:
+                    body["chat_template_kwargs"] = ["enable_thinking": false]
+                }
+            }
+        case .responses:
+            body = [
+                "model": configuration.model,
+                "input": [["role": "user", "content": [["type": "input_text", "text": "ping"]]]],
+                "store": false,
+                "max_output_tokens": 16
+            ]
+            if includeThinkingControl {
+                switch configuration.compatibilityMode.responsesThinkingControl {
+                case .standard:
+                    body["reasoning"] = ["effort": "none"]
+                case .openCodeNative:
+                    body["thinking"] = ["type": "disabled"]
+                case .localTemplate:
+                    body["chat_template_kwargs"] = ["enable_thinking": false]
+                }
+            }
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return request
     }
 
-    /// 一次点击检查两件事：服务通不通、接口对不对。
+    /// 一次点击检查指定功能实际需要的 wire operation。
     public func check(
         configuration: LLMConfiguration,
-        apiKey: String?
+        apiKey: String?,
+        operation: LLMOperation = .responses
     ) async -> LLMConnectionResult {
         guard configuration.isConfigured else { return .notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential else { return .badBaseURL }
 
-        // ① `GET /models`：连不上与"模型没加载"都在这一步分开。
-        guard let modelsURL = URL(string: "\(configuration.normalizedBaseURL)/models") else {
-            return .badBaseURL
-        }
-        var modelsRequest = URLRequest(url: modelsURL)
-        modelsRequest.timeoutInterval = 10
-        if let apiKey, !apiKey.isEmpty {
-            modelsRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
         let started = Date()
-        let modelsData: Data
-        do {
-            let (data, response) = try await session.data(for: modelsRequest)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                return .unreachable("服务回了 \(status)。地址是否写到了 /v1 这一层？")
+        // `/models` 只是辅助信息源：不支持、返回空列表或没有列出 alias model 时，仍继续真实能力探测。
+        if let modelsURL = URL(string: "\(configuration.normalizedBaseURL)/models") {
+            var modelsRequest = URLRequest(url: modelsURL)
+            modelsRequest.timeoutInterval = 10
+            if let apiKey, !apiKey.isEmpty {
+                modelsRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
-            modelsData = data
-        } catch {
-            return .unreachable(error.localizedDescription)
-        }
-        let models = Self.modelIDs(from: modelsData)
-        if !models.isEmpty, !models.contains(configuration.model) {
-            return .serviceReachableModelMissing(configuration.model)
+            _ = try? await session.data(for: modelsRequest)
         }
 
-        // ② 用最小请求探一次 `/responses`：只实现 Chat Completions 的服务会在这里露出来。
-        guard let responsesURL = URL(string: "\(configuration.normalizedBaseURL)/responses") else {
-            return .badBaseURL
-        }
-        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        guard let operationURL = URL(
+            string: "\(configuration.normalizedBaseURL)/\(operation == .chat ? "chat/completions" : "responses")"
+        ) else { return .badBaseURL }
+        let controlKey = thinkingKey(configuration, operation: operation)
+        let sessionID = "check-\(UUID().uuidString)"
+        var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
         let data: Data
         let response: URLResponse
         do {
             var result = try await session.data(
                 for: Self.probeRequest(
-                    url: responsesURL,
+                    url: operationURL,
                     configuration: configuration,
                     apiKey: apiKey,
-                    suppressThinking: suppressThinking
+                    operation: operation,
+                    includeThinkingControl: includeThinkingControl,
+                    sessionID: sessionID
                 )
             )
-            // 探测阶段就把"端点认不认关 thinking 的那组参数"定下来：
-            // 认识就记着用，不认识就记下来，真实对话不必先白吃一次 400。
-            if suppressThinking,
+            if includeThinkingControl,
                let http = result.1 as? HTTPURLResponse,
                Self.rejectsThinkingControl(
-                   status: http.statusCode,
-                   body: String(decoding: result.0, as: UTF8.self)
+                    status: http.statusCode,
+                    body: String(decoding: result.0, as: UTF8.self)
                ) {
-                thinkingControlRejected.insert(thinkingKey(configuration))
-                suppressThinking = false
+                thinkingControlRejected.insert(controlKey)
+                includeThinkingControl = false
                 result = try await session.data(
                     for: Self.probeRequest(
-                        url: responsesURL,
+                        url: operationURL,
                         configuration: configuration,
                         apiKey: apiKey,
-                        suppressThinking: false
+                        operation: operation,
+                        includeThinkingControl: false,
+                        sessionID: sessionID
                     )
                 )
             }
@@ -802,31 +1667,40 @@ public actor LLMProvider {
         } catch {
             return .unreachable(error.localizedDescription)
         }
-        do {
-            guard let http = response as? HTTPURLResponse else {
-                return .unreachable("没有收到 HTTP 响应")
+
+        guard let http = response as? HTTPURLResponse else {
+            return .unreachable("没有收到 HTTP 响应")
+        }
+        let body = String(decoding: data, as: UTF8.self)
+        if Self.operationUnavailable(operation, status: http.statusCode, body: body) {
+            return operation == .chat ? .notChatAPI : .notResponsesAPI
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            // 只有实际操作明确返回模型错误时，才把模型列表问题暴露给用户。
+            if body.lowercased().contains("model") {
+                return .serviceReachableModelMissing(configuration.model)
             }
-            if http.statusCode == 404 || http.statusCode == 405 {
-                return .notResponsesAPI
-            }
-            if http.statusCode == 400 {
-                let body = String(decoding: data, as: UTF8.self).lowercased()
-                if body.contains("responses") || body.contains("unknown endpoint") {
-                    return .notResponsesAPI
-                }
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                let body = String(decoding: data, as: UTF8.self)
-                // 模型名不被接受时，接口本身是通的——归类到"模型没加载"更好用。
-                if body.lowercased().contains("model") {
-                    return .serviceReachableModelMissing(configuration.model)
-                }
-                return .unreachable("服务回了 \(http.statusCode)：\(Self.shortBody(body))")
-            }
-            let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-            return .connected(milliseconds: milliseconds, model: configuration.model)
-        } catch {
-            return .unreachable(error.localizedDescription)
+            return .unreachable("服务回了 \(http.statusCode)：\(Self.shortBody(body))")
+        }
+        let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
+        return .connected(milliseconds: milliseconds, model: configuration.model)
+    }
+
+    private static func operationUnavailable(
+        _ operation: LLMOperation,
+        status: Int,
+        body: String
+    ) -> Bool {
+        let lower = body.lowercased()
+        if lower.contains("model") && lower.contains("not found") { return false }
+        if status == 404 || status == 405 { return true }
+        guard status == 400 || status == 422 else { return false }
+        if lower.contains("unknown endpoint") || lower.contains("endpoint not found") { return true }
+        switch operation {
+        case .chat:
+            return lower.contains("chat completions") || lower.contains("chat/completions")
+        case .responses:
+            return lower.contains("responses")
         }
     }
 

@@ -14,8 +14,8 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 
 ## 前置条件
 
-- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 与 Python 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
-  首装脚本仍有 macOS 14 检查，不能用其放行证明满足项目 macOS 26 目标；安装前须额外核对。
+- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 26+ 与 Python 3.12 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+  任何脚本中的较低版本检查都不构成当前项目基线的放行条件。
 - 依据目标 profile 的锁定制品、vendor runtime、wheel staging 与回退空间估算磁盘需求；脚本最小空间检查
   只是预检，不是完整容量保证。确认可访问所需锁定下载源。
 - profile 推荐以代码中的 `recommend_profile()` 为内存兜底建议；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。

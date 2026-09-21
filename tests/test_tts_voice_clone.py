@@ -779,7 +779,7 @@ def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
     )
     call = model.generate_calls[0]
     assert call["speed"] == 1.25
-    assert call["lang_code"] == "zh"
+    assert call["lang_code"] == "chinese"
     assert isinstance(call["max_tokens"], int)
     assert "voice" in call
 
@@ -841,7 +841,7 @@ def test_mlx_base_engine_routes_public_clone_generation(
     call = model.icl_calls[0]
     assert call["text"] == "测试克隆语音生成。"
     assert call["ref_text"] == "参考朗读文本"
-    assert call["lang_code"] == "zh"
+    assert call["lang_code"] == "chinese"
     assert call["stream"] is True
     assert call["temperature"] == pytest.approx(0.1)
     assert call["top_p"] == pytest.approx(0.95)
@@ -1283,6 +1283,18 @@ def test_audio_speech_with_cloned_voice_across_tiers(
         },
     )
     assert resp_q.status_code == 200
+
+    resp_formal = client_q.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "正式制作前检查",
+            "voice": "quality_clone_voice",
+            "validation_policy": "require_output_pass",
+        },
+    )
+    assert resp_formal.status_code == 409
+    assert resp_formal.json()["error"]["code"] == "voice_not_production_ready"
 
     resp_instruction = client_q.post(
         "/v1/audio/speech",

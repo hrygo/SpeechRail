@@ -26,10 +26,19 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
+from speechrail.domain.job_request import (
+    JobParamsValidationError,
+    validate_job_params,
+)
+from speechrail.domain.tts_request import (
+    TtsModelVariant,
+    TtsParameterError,
+    validate_tts_parameters,
+)
 from speechrail.mcp.client import SpeechRailClient
 
 _MAX_TTS_TEXT = 4_096
@@ -58,6 +67,12 @@ _TTS_OUTPUT_SUFFIXES = {
     "mp3": ".mp3",
     "wav": ".wav",
     "pcm": ".pcm",
+}
+_JOB_RESULT_SUFFIXES = {
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-pcm": ".pcm",
+    "application/json": ".json",
 }
 
 _TIER_MESSAGES = {
@@ -164,6 +179,10 @@ def _effective_voice_projection(effective: dict[str, Any]) -> list[dict[str, Any
         "model",
         "descriptors",
         "quality_summary",
+        "validation_state",
+        "validated_for",
+        "production_ready",
+        "production_ready_reason",
         "operations",
     }
     result: list[dict[str, Any]] = []
@@ -199,6 +218,41 @@ def _effective_model_revision(
     if not isinstance(model, dict):
         return None
     return _text(model.get("catalog_revision"))
+
+
+def _safe_voice_record(raw: object) -> dict[str, Any]:
+    """Keep private voice recipes and reference text out of MCP output."""
+
+    if not isinstance(raw, dict):
+        raise ToolCallError(
+            code="invalid_response", message="SpeechRail returned no voice record"
+        )
+    source = raw.get("voice")
+    if not isinstance(source, dict):
+        source = raw
+    allowed = {
+        "id",
+        "name",
+        "mode",
+        "available",
+        "availability_reason",
+        "variant",
+        "revision",
+        "voice_revision",
+        "capabilities",
+        "validation_state",
+        "production_ready",
+        "production_ready_reason",
+        "synthesis_validation",
+    }
+    safe = {key: value for key, value in source.items() if key in allowed}
+    if isinstance(raw.get("synthesis_validation"), str):
+        safe["synthesis_validation"] = raw["synthesis_validation"]
+    if not isinstance(safe.get("id"), str):
+        raise ToolCallError(
+            code="invalid_response", message="SpeechRail returned no voice identifier"
+        )
+    return safe
 
 
 def _validate_revision_pin(
@@ -341,6 +395,7 @@ def _enforce_available_voice(
     *,
     variant: str | None,
     profile: str | None,
+    validation_policy: str = "allow_unverified",
 ) -> None:
     """Hard-enforce tier/availability for a requested voice before TTS calls."""
     if entry.get("available") is not True:
@@ -352,6 +407,20 @@ def _enforce_available_voice(
                 "call describe() and pick a voice with available=true"
             ),
             hint="call describe() and choose a voice with available=true",
+        )
+    if (
+        validation_policy == "require_output_pass"
+        and entry.get("mode") == "clone"
+        and entry.get("production_ready") is False
+    ):
+        reason = _text(entry.get("production_ready_reason")) or "synthesis_validation_required"
+        raise ToolCallError(
+            code="voice_not_production_ready",
+            message=(
+                f"voice {voice!r} is available for routing but is not production-ready: "
+                f"{reason}"
+            ),
+            hint="run validate_voice and require a persisted synthesis output pass",
         )
     if variant == "voice_design":
         return
@@ -454,6 +523,10 @@ async def synthesize(
     voice: str = "serena",
     output_format: str = "mp3",
     speed: float = 1.0,
+    language: str = "auto",
+    instruction: str | None = None,
+    seed: int | None = None,
+    validation_policy: str = "allow_unverified",
     expected_voice_revision: str | None = None,
     expected_model_revision: str | None = None,
 ) -> dict[str, Any]:
@@ -484,6 +557,11 @@ async def synthesize(
             code="invalid_speed",
             message=f"speed must be between {_SPEED_RANGE[0]} and {_SPEED_RANGE[1]}",
         )
+    if validation_policy not in {"allow_unverified", "require_output_pass"}:
+        raise ToolCallError(
+            code="invalid_validation_policy",
+            message="validation_policy must be allow_unverified or require_output_pass",
+        )
     _validate_revision_pin(
         expected_voice_revision,
         field="voice_revision",
@@ -511,7 +589,41 @@ async def synthesize(
         )
     profile = _text(effective.get("profile"))
     variant = _effective_tts_variant(effective)
-    _enforce_available_voice(entry, voice, variant=variant, profile=profile)
+    _enforce_available_voice(
+        entry,
+        voice,
+        variant=variant,
+        profile=profile,
+        validation_policy=validation_policy,
+    )
+    variant_value = _text(entry.get("variant")) or variant
+    if variant_value not in {"voice_design", "custom_voice", "base"}:
+        raise ToolCallError(
+            code="tts_variant_unsupported",
+            message="the effective capability snapshot does not publish a supported TTS variant",
+            hint="call describe() and inspect the active TTS model",
+        )
+    voice_variant = cast(TtsModelVariant, variant_value)
+    capabilities = entry.get("capabilities")
+    capability_map = capabilities if isinstance(capabilities, dict) else {}
+    is_clone = _text(entry.get("mode")) == "clone" or _bool_flag(
+        capability_map.get("supports_clone")
+    )
+    try:
+        validated = validate_tts_parameters(
+            model_variant=voice_variant,
+            is_clone=is_clone,
+            speed=speed,
+            language=language,
+            instruction=instruction,
+            seed=seed,
+        )
+    except TtsParameterError as exc:
+        raise ToolCallError(
+            code=exc.public_code,
+            message=exc.message,
+            hint="call describe() and align parameters with the selected voice capabilities",
+        ) from None
     snapshot_voice_revision = _text(entry.get("voice_revision"))
     snapshot_model_revision = _effective_model_revision(effective, entry)
     if expected_voice_revision is None and _VOICE_REVISION_RE.fullmatch(
@@ -523,12 +635,16 @@ async def synthesize(
     ):
         expected_model_revision = snapshot_model_revision
     model = _DEFAULT_TTS_MODEL
-    content = await client.synthesize(
+    content, request_id = await client.synthesize(
         model=model,
         text=stripped_text,
         voice=voice,
         response_format=output_format,
-        speed=speed,
+        speed=validated.speed,
+        language=validated.language,
+        instruction=instruction,
+        seed=seed,
+        validation_policy=validation_policy,
         expected_voice_revision=expected_voice_revision,
         expected_model_revision=expected_model_revision,
     )
@@ -542,11 +658,16 @@ async def synthesize(
     )
     return {
         "audio_path": path,
+        "host": "mcp_host",
         "content_type": _TTS_CONTENT_TYPES[output_format],
         "output_format": output_format,
+        "language": validated.language,
         "bytes": len(content),
+        "request_id": request_id,
         "voice_revision": expected_voice_revision,
         "model_revision": expected_model_revision,
+        "validation_policy": validation_policy,
+        "validation_state": entry.get("validation_state"),
     }
 
 
@@ -672,12 +793,137 @@ async def create_voice(
             code="invalid_seed",
             message=f"seed must be an integer between 0 and {_MAX_VOICE_SEED}",
         )
-    return await client.create_voice(
+    return _safe_voice_record(
+        await client.create_voice(
+            name=stripped_name,
+            instruction=stripped_instruction,
+            voice_id=normalized_id,
+            seed=seed,
+        )
+    )
+
+
+async def get_voice(client: SpeechRailClient, *, voice_id: str) -> dict[str, Any]:
+    """Read one safe voice detail without exposing its reference path."""
+    stripped = voice_id.strip()
+    if not stripped:
+        raise ToolCallError(code="invalid_voice_id", message="voice_id must not be blank")
+    return _safe_voice_record(await client.get_voice(voice_id=stripped))
+
+
+async def design_voice(
+    client: SpeechRailClient,
+    *,
+    voice_id: str,
+    name: str,
+    instruction: str,
+    reference_text: str,
+    seed: int = 42,
+    language: str = "zh",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Generate a reference with VoiceDesign and register it for Base clone use."""
+    normalized_id = voice_id.strip().lower()
+    if not _VOICE_ID_RE.fullmatch(normalized_id):
+        raise ToolCallError(
+            code="invalid_voice_id",
+            message="voice_id must match ^[a-zA-Z0-9_-]{1,64}$",
+        )
+    stripped_name = name.strip()
+    stripped_instruction = instruction.strip()
+    stripped_reference = reference_text.strip()
+    if not stripped_name:
+        raise ToolCallError(code="invalid_name", message="name must not be blank")
+    if not stripped_instruction:
+        raise ToolCallError(
+            code="invalid_instruction", message="instruction must not be blank"
+        )
+    if not 20 <= len(stripped_reference) <= 240:
+        raise ToolCallError(
+            code="invalid_ref_text",
+            message="reference_text must contain 20 to 240 characters",
+        )
+    if type(seed) is not int or not 0 <= seed <= _MAX_VOICE_SEED:
+        raise ToolCallError(
+            code="invalid_seed",
+            message=f"seed must be an integer between 0 and {_MAX_VOICE_SEED}",
+        )
+    if language.strip().lower() != "zh":
+        raise ToolCallError(
+            code="unsupported_language",
+            message="the current generated-reference registration gate accepts language=zh",
+        )
+    raw = await client.design_voice(
+        voice_id=normalized_id,
         name=stripped_name,
         instruction=stripped_instruction,
-        voice_id=normalized_id,
+        reference_text=stripped_reference,
         seed=seed,
+        language="zh",
+        idempotency_key=idempotency_key,
     )
+    return _safe_voice_record(raw)
+
+
+async def clone_voice(
+    client: SpeechRailClient,
+    *,
+    audio_ref: str,
+    name: str,
+    ref_text: str,
+    voice_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Register a local reference recording after the Base reference gate."""
+    _raise_for_inline_base64(audio_ref)
+    path, filename = _resolve_local_audio(audio_ref)
+    stripped_name = name.strip()
+    stripped_ref = ref_text.strip()
+    if not stripped_name:
+        raise ToolCallError(code="invalid_name", message="name must not be blank")
+    if not stripped_ref:
+        raise ToolCallError(code="invalid_ref_text", message="ref_text must not be blank")
+    if voice_id is not None:
+        normalized_id = voice_id.strip().lower()
+        if not _VOICE_ID_RE.fullmatch(normalized_id):
+            raise ToolCallError(
+                code="invalid_voice_id",
+                message="voice_id must match ^[a-zA-Z0-9_-]{1,64}$",
+            )
+    else:
+        normalized_id = None
+    try:
+        content = await asyncio.to_thread(path.read_bytes)
+    except OSError as exc:
+        raise ToolCallError(
+            code="audio_read_failed", message=f"failed to read audio file: {exc}"
+        ) from exc
+    return _safe_voice_record(
+        await client.clone_voice(
+            content=content,
+            filename=filename,
+            name=stripped_name,
+            ref_text=stripped_ref,
+            voice_id=normalized_id,
+            idempotency_key=idempotency_key,
+        )
+    )
+
+
+async def validate_voice(
+    client: SpeechRailClient,
+    *,
+    voice_id: str,
+    runs: int = 1,
+) -> dict[str, Any]:
+    """Run output validation for a registered clone voice and return its report."""
+    stripped = voice_id.strip()
+    if not stripped:
+        raise ToolCallError(code="invalid_voice_id", message="voice_id must not be blank")
+    if type(runs) is not int or not 1 <= runs <= 3:
+        raise ToolCallError(code="invalid_runs", message="runs must be an integer between 1 and 3")
+    result = await client.validate_voice(voice_id=stripped, runs=runs)
+    return {"voice_id": stripped, **result}
 
 
 async def delete_voice(client: SpeechRailClient, *, voice_id: str) -> dict[str, Any]:
@@ -696,12 +942,14 @@ async def create_job(
     kind: str,
     input_ref: str,
     params: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Create a durable job (``transcription`` or ``speech``).
 
     ``input_ref`` reuses the same path/URI convention as ``audio_ref``.
-    ``params`` is an opaque caller-supplied JSON object that the server stores
-    and echoes back on GET; it is reserved for future request options.
+    ``params`` is a kind-specific caller-supplied JSON object that the server
+    stores and echoes back on GET.  Speech jobs support the same validation
+    policy names as synchronous TTS.
     """
     if kind not in _JOB_KINDS:
         raise ToolCallError(
@@ -716,9 +964,21 @@ async def create_job(
             code="invalid_input_ref",
             message=f"input_ref exceeds the {_MAX_JOB_REF} character limit",
         )
-    if params is not None and not isinstance(params, dict):
-        raise ToolCallError(code="invalid_params", message="params must be a JSON object")
-    return await client.create_job(kind=kind, input_ref=stripped_ref, params=params)
+    if params is not None:
+        try:
+            validate_job_params(kind, params)
+        except JobParamsValidationError as exc:
+            raise ToolCallError(code="invalid_params", message=str(exc)) from None
+    if idempotency_key is not None and not idempotency_key.strip():
+        raise ToolCallError(
+            code="invalid_idempotency_key", message="idempotency_key must not be blank"
+        )
+    return await client.create_job(
+        kind=kind,
+        input_ref=stripped_ref,
+        params=params,
+        idempotency_key=idempotency_key,
+    )
 
 
 async def get_job(client: SpeechRailClient, *, job_id: str) -> dict[str, Any]:
@@ -727,6 +987,47 @@ async def get_job(client: SpeechRailClient, *, job_id: str) -> dict[str, Any]:
     if not stripped:
         raise ToolCallError(code="invalid_job_id", message="job_id must not be blank")
     return await client.get_job(job_id=stripped)
+
+
+async def list_jobs(
+    client: SpeechRailClient,
+    *,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """List owner-scoped jobs with bounded pagination."""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ToolCallError(
+            code="invalid_limit", message="limit must be an integer between 1 and 100"
+        )
+    if cursor is not None and len(cursor) > 512:
+        raise ToolCallError(code="invalid_cursor", message="cursor is too long")
+    return await client.list_jobs(limit=limit, cursor=cursor)
+
+
+async def get_job_result(
+    client: SpeechRailClient,
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    """Materialize one completed job result into a local MCP-host file."""
+    stripped = job_id.strip()
+    if not stripped:
+        raise ToolCallError(code="invalid_job_id", message="job_id must not be blank")
+    content, content_type = await client.get_job_result(job_id=stripped)
+    if not content:
+        raise ToolCallError(
+            code="empty_job_result", message="SpeechRail returned an empty job result"
+        )
+    suffix = _JOB_RESULT_SUFFIXES.get(content_type, ".bin")
+    path = await asyncio.to_thread(_write_temp_audio, content, suffix)
+    return {
+        "result_path": path,
+        "host": "mcp_host",
+        "content_type": content_type,
+        "bytes": len(content),
+        "job_id": stripped,
+    }
 
 
 async def cancel_job(client: SpeechRailClient, *, job_id: str) -> dict[str, Any]:

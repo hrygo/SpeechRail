@@ -3,7 +3,7 @@ title: "AI 提词器终版规格"
 status: final
 version: "1.0.0"
 date: 2026-09-20
-implementation_status: not_implemented
+implementation_status: implemented_pending_model_and_ui_acceptance
 supersedes:
   - 2026-09-20-teleprompter-reading-preparation-design.md
   - 2026-09-20-teleprompter-duration-design.md
@@ -170,7 +170,7 @@ flowchart TD
 | TeleprompterAligner / FollowController | ASR 事件 → 暂定/稳定位置与跟读状态 |
 | TeleprompterRunClock | 单调计时、暂停、剩余预测；不拥有音频和 LLM |
 | TeleprompterSession | MainActor 业务协调、可观察状态、快照、采集生命周期 |
-| TeleprompterStore | 原子保存、格式迁移、复制、导出、版本进度 |
+| TeleprompterV2Store | v2 原子保存、复制、导出、版本进度与损坏稿件隔离 |
 | Preparation / Review / Stage Views | 呈现及用户动作，不构造 prompt、不计算来源位置 |
 
 LLMProvider、MicrophoneCapture、RealtimeASRClient 和 SessionCoordinator 复用现有边界。CPU 文本计算与网络工作不得长时间占用 MainActor；界面状态只在 MainActor 提交。每个异步任务持有不可变 request snapshot，按 generation 和 revision 验收结果。
@@ -262,7 +262,7 @@ sourceText 不含编码 BOM；保存 `encoding=utf8,hasBOM`，导入时验证严
 
 ### 7.1 请求打包
 
-能力记录必须包含 `contextWindowTokens,maxOutputTokens,supportsStrictJSON,tokenEstimator`；由已验证的 provider/model 配置提供。缺失或不支持严格输出时，AI 入口解释不可用并保留原稿路径，不猜测端点能力、不降级自由文本协议。
+能力记录必须包含 `contextWindowTokens,maxOutputTokens,supportsJSONMode,tokenEstimator`；由已验证的 provider/model 配置提供。`supportsJSONMode` 只表示 provider 能稳定返回 JSON object，不等同于服务端执行完整 JSON Schema。缺失或不支持 JSON mode 时，AI 入口解释不可用并保留原稿路径，不猜测端点能力、不降级自由文本协议；字段、枚举、来源覆盖和业务语义始终由本地 decoder 负责。
 
 Map 顺序打包同一连续选择范围内的单元，默认目标原文 1,600 tokens、最多 24 单元；前后邻文各最多一单元、合计 400 tokens；原文标题/表头线索与术语附加预算 300 tokens。必要上下文超预算时减小目标窗，不能删掉关键证据后宣称内容完整。
 
@@ -298,9 +298,11 @@ Reduce 返回白名单 block 的完整替换 patch 或 review ID，不能改来�
 
 任务拥有三个独立 wire schema：`teleprompter.preparation.v2`、`teleprompter.reduction.v1`、`teleprompter.analysis.v2`。版本标签没有预训练语义，prompt 和 schema 必须定义字段。静态 prompt 版本分别为 `preparation.prompt.v3`、`reduce.prompt.v2`、`annotation.prompt.v3`。
 
-请求使用 `/responses`：固定模板放 `instructions`；JSONEncoder 编码的任务资料放 user/input_text；schema 包装放 `text.format`；设置 `store=false,stream=false,max_output_tokens`。端点特有 thinking/cache 参数只由支持它们的 provider adapter 发送；不向任意端点无条件发送特有字段。不额外发送工具、对话历史、ASR 转写、身份资料或 RAG 结果。
+提词器的 Map、Reduce 和 Annotation 使用 MacPaw/OpenAI SDK 的 `/chat/completions` 路径：固定规则与完整 JSON Schema 内层定义序列化到 `system` message，JSONEncoder 编码的任务资料只放在后置的 `user` message；请求设置 `response_format={"type":"json_object"}`、`store=false`、`stream=false`、`temperature=0` 与 `max_tokens`。这里使用 `json_object` 而不是假定 provider 支持完整的 `json_schema` 约束，因此本地严格 JSON/业务 decoder 是最终提交边界。任意 OpenAI-compatible endpoint 与 model ID 都可使用通用模式；OpenCode Go 与本机模板兼容端点通过显式 adapter 处理各自差异。助手、纪要等其他路径继续使用现有 Responses 实现，不由提词器协议扩大范围。SpeechRail 不需要 thinking：通用模式使用标准的 disabled reasoning 表达，OpenCode/native 与本机模板字段只由显式 adapter 发送，端点拒绝后只重试一次并省略控制字段。不额外发送工具、对话历史、ASR 转写、身份资料或 RAG 结果。
 
-静态规则与示例固定，动态正文置后；schema 不随窗口 ID 重建。缓存只作性能优化，其边界与命中按 provider 验证，不为命中填充无关文字。低 temperature 不等于确定性；首版不新增 temperature/top_p/reasoning 参数。
+MacPaw adapter 对通用模式只发送标准字段；对显式 OpenCode Go 模式的 Chat 请求附加 `User-Agent` 和稳定的 `x-opencode-session`，并发送原生 `thinking.type=disabled`；对显式本机模板模式发送 `chat_template_kwargs.enable_thinking=false`。端点拒绝 thinking 控制字段时，只在当前 endpoint/model/mode/operation 组合记忆一次并重试为不带控制字段的请求。响应只保留单一 assistant choice 的正文；`usage` 的聚合 token 字段必须存在，provider 返回但 SDK 不稳定支持的嵌套 usage detail 不参与业务判断。
+
+静态规则与示例固定，动态正文置后；schema 不随窗口 ID 重建。缓存只作性能优化，其边界与命中按 provider 验证，不为命中填充无关文字。低 temperature 不等于确定性；首版不开放用户可调的 temperature/top_p/reasoning 参数，adapter 固定表达关闭 thinking。
 
 ### 8.2 Map 完整 instructions
 
@@ -378,7 +380,7 @@ operation=prepare 时 current_blocks 为空；operation=tighten 时它是本次�
 
 protected_literals 包含用户锁定词与明确可识别的数值/单位/标识符，必须确实出现在对应原文；保留程序侧的来源类别，区分用户锁定与启发式候选。词条不是完整事实清单，不默认增加一次实体抽取 LLM。
 
-下面整个对象传入 `text.format`：
+下面是应用侧传给 `completeJSON` 的 schema wrapper。Chat adapter 提取其中的 `schema` 内层定义，序列化到 system message；服务端只负责 JSON mode，完整字段、枚举、required 和 additionalProperties 由本地 decoder 再次执行。
 
 ```json
 {
@@ -441,7 +443,7 @@ Reduce input 示例：
 {"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b11","text":"接下来介绍上线安排。"}],"review_block_ids":[]}
 ```
 
-`text.format`：
+下面是应用侧传给 `completeJSON` 的 schema wrapper，处理方式与 Map 相同：只将 `schema` 内层定义放入 system message，并在本地严格校验。
 
 ```json
 {
@@ -474,7 +476,7 @@ pause_hint：short 表示句内或紧接，medium 表示完整句意结束，lon
 只返回 teleprompter.analysis.v2，这是应用标注结构版本。不返回正文副本、偏移、解释或推理过程。提交前检查连续覆盖和关键词确实存在。
 ```
 
-input 为 `{units:[{id,text,boundary_before,ends_section}]}`，从最终 readingText 在本地生成；不带原稿、时长或历史。完整 schema 包装为：
+input 为 `{units:[{id,text,boundary_before,ends_section}]}`，从最终 readingText 在本地生成；不带原稿、时长或历史。完整 schema wrapper 为：
 
 ```json
 {
@@ -503,7 +505,7 @@ input 为 `{units:[{id,text,boundary_before,ends_section}]}`，从最终 reading
 
 ## 9. 输出校验与来源约束
 
-依次检查 API 完成状态/refusal/incomplete、响应体≤256 KiB、严格 JSON（重复 key 拒绝）、闭合对象字段、枚举、范围和业务语义。schema 正确仅证明形状，不证明事实正确。
+Chat Completions 依次检查 HTTP 2xx、响应体≤256 KiB、恰好一个 choice、`finish_reason=stop`、assistant role、无 refusal/tool_calls、`usage` 聚合 token 存在且非负；`finish_reason=length` 或 `completion_tokens >= max_tokens` 一律判为截断。随后检查严格 JSON（重复 key 拒绝）、闭合对象字段、枚举、范围和业务语义。Responses 路径保留既有的 completed/refusal/incomplete 检查。schema 正确仅证明形状，不证明事实正确。
 
 Map 验证：各区间非空、连续、不越窗、每组≤8 单元、首尾与 targets 相同。speak 必须有非空白正文且 issues 为空；review 必须有非空 issues 且不含 nonspoken_content；omit 正文空且 issues 恰为 nonspoken_content。纯空白 omit 可以本地批准，其余进入待确认。不能删掉未知字段或自动修 JSON 后当成功。
 
@@ -535,9 +537,9 @@ App 自动执行，无用户手工分段步骤。先按已确认块/换行形成
 
 对齐使用有界半全局编辑距离，输入最近 72 tokens，搜索锚点前 80、后 320 tokens。窗口起点可自由选择；插入、删除、替换成本为 1，相等为 0。候选末尾必须与实际观察末 token 匹配，避免把尾部跳过正文当成已读。
 
-候选分数 `max(0,1-cost/inputCount)`；默认接受阈值 0.72，竞争位置差距至少 0.12，分数是启发式匹配值。沿用现有长精确连续匹配的锚点判定；相同重复段仍保持歧义。partial 只有两次增长证据且高分≥0.88时暂定前进；final 不支持暂定位置则回到该 item 起点。
+候选分数 `max(0,1-cost/inputCount)`；默认接受阈值 0.72，竞争位置差距至少 0.12，分数是启发式匹配值。沿用现有长精确连续匹配的锚点判定；相同重复段仍保持歧义。partial 只有两次不同假设的增长证据且高分≥0.88时暂定前进；final 不支持暂定位置则回到该 item 起点。
 
-按 itemID 累积 partial、按 eventID 去重，final 替代对应 partial，退休 item 与旧 sequence 不再推进。短完成片段允许有界积累；脱稿清理无关上下文并等待重新匹配。保持现有输入/历史/退休缓存上限，不能为长稿积累无限 ASR 文本。
+提词器 Realtime 会话协商 `speechrail.transcription.partial_mode=snapshot` 与 `chunk_duration_ms`；snapshot 携带 itemID、严格递增 revision 和该 item 的最新全文，客户端按全文替换，不把修订文本拼接成重复内容。标准调用方继续使用只追加的 delta。按 itemID 与 eventID 去重，revision 不得回退；final 替代对应 partial，退休 item 与旧 connection generation 不再推进。短完成片段允许有界积累；脱稿清理无关上下文并等待重新匹配。保持现有输入/历史/退休缓存上限，不能为长稿积累无限 ASR 文本。
 
 附近重读允许后退；远处跳读由用户选段。手动定位与暂停清理待处理 item，恢复前通过会话 drain/clear 与 connection generation 排除旧连接迟到事件。
 
@@ -578,9 +580,9 @@ App 自动执行，无用户手工分段步骤。先按已确认块/换行形成
 
 任务身份为 source/selection/draft/goal/pace/allocation revision、endpoint/model、prompt/schema/builder/estimator 版本与 generation。完整 canonical 请求材料的 hash 用于同任务内复用；更换任何关联值使旧结果失效。hash 不上传模型、不当匿名化保证。草稿和完整候选正常落盘，未完成请求原文/输出不另建日志或跨任务缓存。
 
-迁移：无 formatVersion 按 legacy 解码。旧版本 sourceText 逐字复制为 readingText，旧 segment sourceRange 迁移为 readingRange，不自动重新清理或口语化；历史稿 formatHint=unknown，goal 缺失，依然可直接跟读。首次写 v2 前保存一次不可覆盖的原始文件字节备份，校验完整新 bundle 后原子替换；备份或保存失败不升级文件。未知更高版本只读报错，不写回。损坏一个稿件不得使整个稿件列表不可用，该项显示不可打开。
+不做旧格式迁移。v2 存储是当前唯一运行格式；没有 `format_version=2` 的稿件、未知更高版本稿件或损坏稿件均只读报错并在列表标记为不可打开，用户可以删除后重新导入原稿重建。v2 保存仍校验完整 bundle 并原子替换，失败时保留现有 v2 文件；损坏一个稿件不得使整个稿件列表不可用。
 
-复制重建文档/版本/块/片段 ID 与引用，进度清空。导出明确区分「原稿」与「朗读稿」；导出原稿恢复 UTF-8 BOM，朗读稿导出已批准正文，不将 cue/skip 混入。返回旧 App 前保留 v2 与导出稿，使用对应备份的副本；旧程序不能覆盖 v2，新建 v2 稿没有旧备份时保留原文件。
+复制重建文档/版本/块/片段 ID 与引用，进度清空。导出明确区分「原稿」与「朗读稿」；导出原稿恢复 UTF-8 BOM，朗读稿导出已批准正文，不将 cue/skip 混入。旧格式不在当前 App 中恢复；需要时由用户重新导入原稿重建。
 
 ## 12. 失败恢复、取消与资源边界
 
@@ -615,7 +617,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 
 实现顺序为：
 
-1. Domain/Store v2、迁移与不可变快照；无损builder、估算器和时间计划纯函数。
+1. Domain/Store v2、不可变快照与损坏稿件隔离；无损 builder、估算器和时间计划纯函数。
 2. 三套prompt/schema/context builder及严格decoder，fake completion覆盖正常/错误响应。
 3. MapReduce调度、预算树、原子装配、局部精简及取消屏障。
 4. 准备/审阅UX、范围选择、目标预检、试读与自动保存。
@@ -639,7 +641,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 | 编辑 | 手改块不被精简覆盖、撤销/合并/拆分的来源与预算、编辑重算、不移动光标、保存失败保留 |
 | 坐标 | emoji/组合字符/CRLF、中英与数字、版本号点不误分句、长单词不截断、segment切片一致 |
 | 运行 | 去重/乱序/partial纠正、重读/跳读、暂停/手动/断连屏障、时钟冻结、实际与预计剩余分离 |
-| 存储 | legacy恒等迁移、备份失败无覆盖、原子保存、未知版本、损坏单稿隔离、复制/导出/跨版本进度 |
+| 存储 | v2 原子保存、未知版本、损坏单稿隔离、删除后重建、复制/导出/跨版本进度 |
 | UX | 主操作及禁用原因明确、键盘编辑不被舞台快捷键抢占、紧凑布局可达、无障碍状态和Reduce Motion |
 
 可运行的聚焦测试使用合成文本、fake provider、临时目录，不调用真实模型或音频。UI表中的行为需人工或获当前用户明确授权的UI自动化验收；不得仅凭编译声称视觉通过。

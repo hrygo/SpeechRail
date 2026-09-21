@@ -1,12 +1,12 @@
 ---
-title: "macOS App 音色 revision 一致性与文档终态收敛"
+title: "macOS App 音色 revision 一致性与文档一致性收敛"
 status: approved
 date: 2026-09-20
 related:
   - docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md
 ---
 
-# macOS App 音色 revision 一致性与文档终态收敛
+# macOS App 音色 revision 一致性与文档一致性收敛
 
 ## 1. 设计结论
 
@@ -103,7 +103,7 @@ model 的 `catalog_revision`，不可用时同样保持 nil。
 
 验证范围限于纯 Swift 测试、非 UI App build、相关 Python 静态检查和文档/link/diff 检查。
 
-## 6. 文档终态收敛
+## 6. 文档一致性收敛
 
 同步以下 active 文档，使它们区分“当前契约”“历史运行证据”“尚未完成的质量/迁移工作”：
 

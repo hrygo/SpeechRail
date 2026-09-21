@@ -3,7 +3,7 @@ title: "生成式音色注册：VoiceDesign 参考到 Base 音色"
 status: active
 audience: "SpeechRail / Sona 维护者与客户端工程师"
 version: "1.1"
-date: 2026-09-20
+date: 2026-09-21
 ---
 
 # 生成式音色注册
@@ -80,7 +80,7 @@ registry 在写入前核对参考音频及文本 hash。旧记录可缺省 creat
 也不替代独立说话人向量或声学质量证据。当前 registry 已持久化有界 VoiceRevision 历史，
 并提供 revision list、CAS update、rollback、revoke 与 delete；`creation` 仍是来源元数据，
 不能单独证明跨文本 speaker similarity。Base 仍按 Quality catalog 路由，后端升级时的旧资产
-迁移与模型兼容策略需要另行显式验收。
+旧资产不提供自动迁移或跨模型兼容；模型或生成路径变化后，必须重新注册或按当前路径显式重新验收。
 
 ## Sona 对接与回退
 

@@ -1,13 +1,14 @@
 ---
 title: "SpeechRail 迁移 Runbook"
-status: active
-version: "3.0.0"
-date: 2026-09-20
+status: superseded
+version: "3.1.0"
+date: 2026-09-21
 ---
 
-# SpeechRail 迁移 Runbook
+# SpeechRail 历史迁移记录
 
-本页记录当前机器已验证的迁移状态与人工恢复步骤。运行配置变更不修改会议、UI、TTS 或模型文件。
+本页仅保留历史迁移证据，不是当前部署、升级或恢复入口。当前项目不提供旧数据、旧路径或旧协议的自动迁移层；
+运行时与客户端按当前 active 文档和契约重新配置，必要时删除并重建可重建数据。
 
 ## QwenPaw：已切换并核验
 

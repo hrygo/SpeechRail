@@ -119,6 +119,21 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
+                    Picker(selection: compatibilityModeBinding) {
+                        ForEach(LLMCompatibilityMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    } label: {
+                        settingsRowLabel(
+                            "兼容协议",
+                            caption: preferences.llmCompatibilityMode.detail
+                                + " SpeechRail 不主动开启 thinking。"
+                        )
+                    }
+                    .pickerStyle(.menu)
+                }
+                settingsRowSeparator
+                settingsRow {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         settingsRowLabel(
                             "密钥",
@@ -150,7 +165,7 @@ struct SettingsAssistantPane: View {
                         .controlSize(.small)
                         .help(globalActionHelp)
                         .disabled(globalCheckDisabled)
-                        Text("服务需要支持 Responses API。")
+                        Text("按功能使用 Chat Completions 或 Responses；SpeechRail 不主动开启 thinking。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -342,6 +357,13 @@ struct SettingsAssistantPane: View {
         )
     }
 
+    private var compatibilityModeBinding: Binding<LLMCompatibilityMode> {
+        Binding(
+            get: { preferences.llmCompatibilityMode },
+            set: { preferences.llmCompatibilityMode = $0 }
+        )
+    }
+
     private var modelBinding: Binding<String> {
         Binding(
             get: { preferences.llmModel },
@@ -420,6 +442,21 @@ struct SettingsAssistantPane: View {
         }
 
         if override.enabled {
+            settingsRowSeparator
+            settingsRow {
+                Picker(selection: moduleCompatibilityModeBinding(for: module)) {
+                    ForEach(LLMCompatibilityMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                } label: {
+                    settingsRowLabel(
+                        "专用兼容协议",
+                        caption: override.compatibilityMode.detail
+                            + " SpeechRail 不主动开启 thinking。"
+                    )
+                }
+                .pickerStyle(.menu)
+            }
             settingsRowSeparator
             settingsRow {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -566,6 +603,17 @@ struct SettingsAssistantPane: View {
             set: { newValue in
                 var override = preferences.llmOverride(for: module)
                 override[keyPath: keyPath] = newValue
+                preferences.updateLLMOverride(override, for: module)
+            }
+        )
+    }
+
+    private func moduleCompatibilityModeBinding(for module: LLMModule) -> Binding<LLMCompatibilityMode> {
+        Binding(
+            get: { preferences.llmOverride(for: module).compatibilityMode },
+            set: { newValue in
+                var override = preferences.llmOverride(for: module)
+                override.compatibilityMode = newValue
                 preferences.updateLLMOverride(override, for: module)
             }
         )

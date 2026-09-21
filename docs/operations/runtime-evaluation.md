@@ -1,11 +1,14 @@
 ---
 title: "SpeechRail 运行时评估：mlx-qwen3-asr 端到端、性能与清理"
-status: active
+status: superseded
 version: "1.3.0"
 date: 2026-09-13
 ---
 
 # SpeechRail 运行时评估
+
+> 本文是历史运行评估与方法参考，不定义当前 release、模型、Realtime wire 或安装状态。当前事实以代码、contracts
+> 和 active 运维文档为准；本文中的实测版本、性能数字和模型路径不得直接外推到当前环境。
 
 本报告记录 SpeechRail 将 Qwen3-ASR 后端迁移到 Apple Silicon 原生 MLX 运行时
 `mlx-qwen3-asr` 之后的端到端、性能与架构清理实测。评估对象为本机

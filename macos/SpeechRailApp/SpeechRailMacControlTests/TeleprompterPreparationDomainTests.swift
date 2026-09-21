@@ -45,6 +45,20 @@ struct TeleprompterPreparationDomainTests {
         #expect(units.map(\.ordinal) == Array(0..<units.count))
     }
 
+    @Test func sourceUnitsPreferParagraphBoundariesInsideBoundedWindows() throws {
+        let paragraphs = (0..<8).map { "第\($0)段内容。" }.joined(separator: "\n\n")
+        let source = try TeleprompterSourceImporter.importData(Data(paragraphs.utf8), fileExtension: "md")
+        let units = try TeleprompterSourceUnitBuilder(maxBudgetUnits: 24).build(source)
+
+        #expect(units.allSatisfy {
+            $0.rawText
+                .components(separatedBy: "\n\n")
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .count <= 1
+        })
+        #expect(units.map(\.rawText).joined().data(using: .utf8) == Data(paragraphs.utf8))
+    }
+
     @Test func durationSeparatesKnownEnglishAndHanFromUncertainDigits() throws {
         let known = TeleprompterDurationEstimator.estimate("你好 hello world。")
         #expect(known.pointSeconds != nil)
@@ -74,6 +88,25 @@ struct TeleprompterPreparationDomainTests {
         #expect(plan.allocations.reduce(0) { $0 + $1.budgetSeconds } == plan.budgetSeconds)
         #expect(plan.budgetSeconds == 1_140)
         #expect(plan.budget(for: units.map(\.id)) == plan.budgetSeconds)
+    }
+
+    @Test func selectedTimingBudgetExcludesUnselectedSourceUnits() throws {
+        let source = try TeleprompterSourceImporter.importData(
+            Data("第一段。\n\n第二段。\n\n第三段。".utf8),
+            fileExtension: "md"
+        )
+        let units = try TeleprompterSourceUnitBuilder().build(source)
+        #expect(units.count == 3)
+        let selected = Set(units.dropFirst().map(\.id))
+        let plan = try TeleprompterTimingPlanner.plan(
+            sourceUnits: units,
+            estimates: Array(repeating: nil, count: units.count),
+            targetMinutes: 5,
+            selectedUnitIDs: selected
+        )
+
+        #expect(plan.budget(for: Array(selected)) == plan.budgetSeconds)
+        #expect(plan.allocations.first?.budgetSeconds == 0)
     }
 
     @Test func unknownEstimateFallsBackToProxyWithoutClaimingDuration() throws {

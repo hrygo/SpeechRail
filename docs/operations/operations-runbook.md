@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.8.0"
-date: 2026-09-16
+version: "1.9.0"
+date: 2026-09-21
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -68,26 +68,27 @@ SpeechRail 内建了专为 macOS 设计的非 root 用户级服务管理工具�
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 
-# 1. 生成并安装 LaunchAgent 配置文件 (~/Library/LaunchAgents/com.speechrail.plist)
-uv run speechrail service install --app-home "$APP_HOME"
+# 1. 使用已安装 runtime 生成并安装 LaunchAgent 配置文件
+SPEECHRAIL_CLI="$APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" service install --app-home "$APP_HOME"
 
 # 2. 校验 Plist 格式
 plutil -lint ~/Library/LaunchAgents/com.speechrail.plist
 
 # 3. 启动并启用常驻服务（controller-backed）
-uv run speechrail service start --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service start --app-home "$APP_HOME"
 
 # 4. 查询服务运行状态与 PID
-uv run speechrail service status --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service status --app-home "$APP_HOME"
 
 # 5. 安全重启服务（重新加载外部模型）
-uv run speechrail service restart --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service restart --app-home "$APP_HOME"
 
 # 6. 安全停用服务（保留配置文件）
-uv run speechrail service stop --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service stop --app-home "$APP_HOME"
 
 # 7. 完全卸载服务（删除 Plist 文件）
-uv run speechrail service uninstall --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service uninstall --app-home "$APP_HOME"
 ```
 
 ---
@@ -155,39 +156,22 @@ sequenceDiagram
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 
 # 1. 先完成运行态快照和外部 realtime 客户端隔离
-speechrail service status --app-home "$APP_HOME"
-speechrail profile status --app-home "$APP_HOME"
-speechrail service preflight --app-home "$APP_HOME"
+SPEECHRAIL_CLI="$APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" service status --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" profile status --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service preflight --app-home "$APP_HOME"
 
 # 2. 安全停用当前旧服务，并确认 8201 lock 已释放
-uv run speechrail service stop --app-home "$APP_HOME"
+"$SPEECHRAIL_CLI" service stop --app-home "$APP_HOME"
 
 # 3. 构建新版本 Wheel
 uv build --no-sources --wheel
 
-# 4. 通过唯一 managed installer 准备 active profile、preflight、plist 和 runtime/current
-uv run python - <<PY
-import os
-from pathlib import Path
-import httpx
-from speechrail.service.modelscope import ModelScopeDownloader
-from tools.install_macos import install_managed
+# 4. 通过 wheel 自带的唯一 managed installer 准备 active profile、preflight、plist 和 runtime/current
+WHEEL="dist/speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl"
+uvx --python 3.12 --from "$WHEEL" speechrail install --yes --enable
 
-app_home = Path(os.environ.get("SPEECHRAIL_APP_HOME", Path.home() / "Library/Application Support/SpeechRail"))
-preset = os.environ.get("SPEECHRAIL_PRESET", "quality")
-wheel = sorted(Path("dist").glob("speechrail-*.whl"))[-1]
-with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
-    install_managed(
-        wheel,
-        app_home=app_home,
-        preset_id=preset,
-        downloader=ModelScopeDownloader(client=client),
-        enable=False,
-    )
-PY
-
-# 5. 由 lifecycle controller 启动，并验证端点与真实 TTS→ASR smoke
-uv run speechrail service start --app-home "$APP_HOME"
+# 5. 安装器已通过 lifecycle controller 启动服务；验证端点与真实 TTS→ASR smoke
 curl --fail http://127.0.0.1:8201/health
 curl --fail http://127.0.0.1:8201/readyz
 curl --fail http://127.0.0.1:8201/v1/models
@@ -195,8 +179,9 @@ curl --fail http://127.0.0.1:8201/v1/voices
 ```
 
 安装入口只有 managed installer。它会在 staging 和切换前复用 per-port lock；服务未完全停下时不会替换
-runtime/current。`enable=False` 只安装候选 plist 和切换已验证的 runtime，不启动服务；随后必须由
-controller-backed `service start` 启动。启动或 smoke 失败时停止候选、清理首次安装的 selection 并恢复旧指针。
+runtime/current。`--enable` 通过 lifecycle controller 注册并启动服务；若只需准备候选 runtime，省略
+`--enable`，再用已安装 runtime 的 `service start` 单独启动。启动或 smoke 失败时停止候选、清理首次安装的
+selection 并恢复旧指针。
 发布完成后仍须核对 `/health`、`/readyz`、models/voices、PID/listener 和真实 TTS→ASR 结果。
 
 ### App 发布与联合发布
