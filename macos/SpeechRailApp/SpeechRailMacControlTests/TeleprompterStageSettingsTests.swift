@@ -56,12 +56,46 @@ struct TeleprompterStageSettingsTests {
         #expect(settings.visibleSegmentCount == SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount)
         settings.visibleSegmentCount = 4
         #expect(settings.visibleSegmentCount == SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount)
-        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 3)
+        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
     }
 
     @Test("source editor keeps a bounded preparation-page height")
     func sourceEditorHeightRangeIsOrdered() {
         #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorMinimumHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight)
         #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorMaximumHeight)
+    }
+
+    @Test("stage preview keeps the current and next semantic segments only")
+    func stagePreviewUsesSemanticSegmentWindow() {
+        #expect(
+            TeleprompterStagePresentation.visibleSegmentIndices(
+                currentIndex: 1,
+                visibleCount: 2,
+                totalCount: 107
+            ) == [1, 2]
+        )
+        #expect(
+            TeleprompterStagePresentation.visibleSegmentIndices(
+                currentIndex: 106,
+                visibleCount: 2,
+                totalCount: 107
+            ) == [106]
+        )
+        #expect(
+            TeleprompterStagePresentation.visibleSegmentIndices(
+                currentIndex: -1,
+                visibleCount: 2,
+                totalCount: 3
+            ) == [0, 1]
+        )
+    }
+
+    @Test("stage defaults favor a compact reading surface")
+    func stageDefaultsFavorCompactReadingSurface() {
+        #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultWidth < 960)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultHeight < 620)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount == 1)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount == 2)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultOpacity < 0.8)
     }
 }

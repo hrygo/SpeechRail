@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.13"
+version: "0.8.14"
 date: 2026-09-21
 ---
 
@@ -23,7 +23,7 @@ date: 2026-09-21
 > [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
 > 本文的 token 与系统控件约束仍适用于这些页面。
 
-提词器阅读舞台使用 `SpeechRailDesignTokens.Teleprompter.stageReadingTokensPerSlice = 12` 作为滚动切片粒度；字词原文坐标不随字号或换行变化。当前切片使用轻量强调底色，已读文字使用系统语义次级色，位置切换尊重 Reduce Motion；详情见 AI 提词器开发说明。
+提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透明度与文字清晰度分离，位置切换尊重 Reduce Motion；详情见 AI 提词器开发说明。
 
 ## 1. 研究基线与 Logo 设计基因
 

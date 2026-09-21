@@ -22,7 +22,7 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。
 2. 点击「打开舞台并开始跟读」即可直接进入舞台；AI 朗读标注是可选准备步骤，不会阻塞开始。
 3. 如使用 AI，先看懂“已经完成什么、原稿有没有被改、下一步要做什么”，再审阅朗读稿；默认路径使用普通用户语言，高级的拆分、合并和来源编辑收进“编辑本段”等渐进式披露入口。确认采用前可查看原文对照、修改、保留原文或跳过；编辑段落时清空对应旧辅助标注。
-4. 调整字号、透明度和预读段数；也可以先点击「只打开提词窗口」检查版式。舞台按原文字词坐标显示已读部分并滚动，排版切片与 AI 分组独立。
+4. 调整字号、背景透明度和显示段数；也可以先点击「只打开提词窗口」检查版式。舞台以完整语义段落自然换行，只显示当前段与有限的下一段；跟读对齐仍在内部保留字词坐标，不把对齐切片直接铺到用户视野。
 5. 短暂脱稿时保持位置，读回附近稿件后继续；可以点击某段、使用方向键选择起讲段，再点击「开始/继续跟读」。
 6. 暂停/手动期间停止上传新音频；继续前完成旧 ASR item 的 drain/clear 屏障。服务断开后释放设备占用，保留手动阅读，并可重新开始。
 7. 直播软件必须选择摄像头或目标内容窗口，不分享包含提词器的屏幕。不能依赖 `NSWindow.sharingType = .none` 隐藏窗口；当前 Apple 文档已将该值标注为系统不再使用的旧常量。
@@ -92,18 +92,19 @@ v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结
 
 控制器按 `itemID` 分别累积 partial，按 `eventID` 抑制重复事件；final 替换本 item 的暂定结果，已终结 item 和晚于新 final 才到达的旧 final 不重复推进。两次具有增长证据的高分 partial 可暂定推进；final 不支持该位置时退回 item 起点。短完成片段可以积累，插话后清理无关上下文并等待重新匹配。缓存有界且仅存在内存中。
 
-舞台在稳定的阅读切片间滚动，切片中的已读文字随 UTF-16 位置变化。近距离重读可以回退；较远跳读需手动选段，当前没有全文语义重定位。暂停/手动操作退休已知 item，恢复时由会话层 drain/clear 排除尚未收到的旧事件；连接 generation 排除已关闭连接的迟到结果。暂停后 final 不得把 UI 改成手动态。
+舞台在完整语义段落间滚动，当前段内的已读文字随 UTF-16 位置变化；字词对齐切片只服务跟读控制器，不作为独立视觉行。近距离重读可以回退；较远跳读需手动选段，当前没有全文语义重定位。暂停/手动操作退休已知 item，恢复时由会话层 drain/clear 排除尚未收到的旧事件；连接 generation 排除已关闭连接的迟到结果。暂停后 final 不得把 UI 改成手动态。
 
 运行中不调用 LLM，不保存音频或转写。稿件和最后段落位置持久化；句内位置仅在本次运行内保留。AI、服务或识别失败均不阻止用户手动看稿。
 
 ## 设计 token 约束
 
-所有提词器新增尺寸、字号、行距、透明度范围、视线吸顶偏移、状态指示灯尺寸、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。阅读切片粒度统一使用 `stageReadingTokensPerSlice = 12`，改变字体不会改变匹配坐标。
+所有提词器新增尺寸、字号、行距、背景透明度范围、内容最大宽度、视线吸顶偏移、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。舞台视觉窗口使用语义段落，不直接展示内部对齐切片；改变字体不会改变匹配坐标。
 - 准备页「原稿」编辑区固定在 `sourceEditorMinimumHeight`–`sourceEditorMaximumHeight`（144–360pt）范围内，默认取 `sourceEditorIdealHeight`（260pt）；超过上限后由原生 `TextEditor` 内部滚动。
 - 首次使用 AI 整理前，用面向普通用户的确认说明解释发送内容、触发时机、不会发送的音视频内容，以及本机/网络服务和保存策略的差异；不要把 `Responses-compatible endpoint`、`store=false` 等实现术语直接暴露给用户。
 - **视线吸顶与视线锚点**：`stageTopInset = 48`，窗口首发吸顶在主屏上沿中央，紧贴摄像头下方，减少主播看词时的眼神偏移；
-- **预读不透明度阶梯**：`segmentOpacityCurrent = 1.0`（当前段朗读中心）、`segmentOpacityNext = 0.60`（下一段预读缓冲区）、`segmentOpacityPrevious = 0.35`（上一段回溯断句），杜绝局部散落透明度字面量；
-- **状态指示灯尺寸**：`stageStatusIndicatorSize = 8`，替换原先的 `Spacing.sm` 占位；
+- **语义段落窗口**：舞台默认只呈现当前段与下一段（`stageMinimumVisibleSegmentCount...stageMaximumVisibleSegmentCount = 1...2`），不把已读段和远处段落留在主视觉中；
+- **透明度分层**：`stageDefaultOpacity` 只作用于窗口背景材质，文字和控件保持完整不透明度；
+- **当前段强调**：当前段只使用 `stageCurrentRailWidth` 与 `stageCurrentBackgroundOpacity` 的细窄强调，不再铺整行高亮卡片；
 - 页面复用现有 `Typography`、`Spacing`、`Color`、`Corner`、`speechRailSurface` 和系统按钮样式，不在视图中新增颜色、圆角或散落视觉常量。窗口以 macOS 26+ 的系统 `NSPanel`、`ultraThinMaterial` 和原生键盘快捷键为基线。
 
 ## 验收与限制

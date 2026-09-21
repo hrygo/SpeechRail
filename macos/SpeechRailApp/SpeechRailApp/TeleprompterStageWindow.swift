@@ -52,10 +52,16 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             defer: false
         )
         panel.title = "SpeechRail · AI 提词器"
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
+        panel.contentMinSize = NSSize(
+            width: SpeechRailDesignTokens.Teleprompter.stageMinimumWidth,
+            height: SpeechRailDesignTokens.Teleprompter.stageMinimumHeight
+        )
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.setFrameAutosaveName(SpeechRailDesignTokens.Teleprompter.stageWindowAutosaveName)
         panel.delegate = self

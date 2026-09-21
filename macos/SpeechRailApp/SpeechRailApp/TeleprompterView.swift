@@ -1816,9 +1816,9 @@ public struct TeleprompterView: View {
                         .frame(width: 36, alignment: .trailing)
                 }
 
-                // 提前提示段数
+                // 舞台默认只看当前段与下一段；高级用户仍可调整预览范围。
                 Stepper(
-                    "提前 \(settings.visibleSegmentCount) 段",
+                    "显示 \(settings.visibleSegmentCount) 段",
                     value: Binding(
                         get: { settings.visibleSegmentCount },
                         set: { settings.visibleSegmentCount = $0 }

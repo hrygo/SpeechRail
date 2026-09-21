@@ -1,6 +1,22 @@
 import Foundation
 import Observation
 
+/// The stage is a reading surface, not a miniature editor. Keep the visible
+/// window semantic (current segment plus a small look-ahead) instead of
+/// exposing the alignment slices used by the follow controller.
+public enum TeleprompterStagePresentation {
+    public static func visibleSegmentIndices(
+        currentIndex: Int,
+        visibleCount: Int,
+        totalCount: Int
+    ) -> [Int] {
+        guard totalCount > 0 else { return [] }
+        let clampedCurrent = min(max(currentIndex, 0), totalCount - 1)
+        let count = min(max(visibleCount, 1), totalCount - clampedCurrent)
+        return Array(clampedCurrent..<(clampedCurrent + count))
+    }
+}
+
 @MainActor
 @Observable
 public final class TeleprompterStageSettings {

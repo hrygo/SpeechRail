@@ -1137,38 +1137,36 @@ public enum SpeechRailDesignTokens {
         public static let sourceEditorMinimumHeight: CGFloat = 144
         public static let sourceEditorIdealHeight: CGFloat = 260
         public static let sourceEditorMaximumHeight: CGFloat = 360
-        public static let stageDefaultWidth: CGFloat = 960
-        public static let stageMinimumWidth: CGFloat = 640
-        public static let stageDefaultHeight: CGFloat = 620
-        public static let stageMinimumHeight: CGFloat = 420
-        public static let stagePadding: CGFloat = Spacing.xl
-        public static let stageSegmentSpacing: CGFloat = Spacing.lg
-        /// 一个滚动阅读单元的匹配 token 数；与字体换行和 AI 分段独立。
-        public static let stageReadingTokensPerSlice = 12
-        public static let stageStatusSpacing: CGFloat = Spacing.sm
-        public static let stageScriptPointSize: CGFloat = 42
+        public static let stageDefaultWidth: CGFloat = 760
+        public static let stageMinimumWidth: CGFloat = 500
+        public static let stageDefaultHeight: CGFloat = 420
+        public static let stageMinimumHeight: CGFloat = 300
+        public static let stagePadding: CGFloat = Spacing.lg
+        public static let stageSegmentSpacing: CGFloat = Spacing.md
+        public static let stageContentMaximumWidth: CGFloat = 720
+        public static let stageScriptPointSize: CGFloat = 38
         public static let stageScriptMinimumPointSize: CGFloat = 28
-        public static let stageScriptMaximumPointSize: CGFloat = 64
-        public static let stageLineSpacing: CGFloat = 8
-        public static let stageDefaultOpacity: Double = 0.94
-        public static let stageMaximumWidth: CGFloat = 1_440
+        public static let stageScriptMaximumPointSize: CGFloat = 60
+        public static let stageLineSpacing: CGFloat = 6
+        /// 只控制舞台背景材质；文字和控件始终保持完整清晰度。
+        public static let stageDefaultOpacity: Double = 0.72
+        public static let stageMaximumWidth: CGFloat = 1_200
         public static let stageMinimumFontScale: Double = 0.67
         public static let stageMaximumFontScale: Double = 1.52
-        public static let stageMinimumOpacity: Double = 0.55
+        public static let stageMinimumOpacity: Double = 0.35
         public static let stageMaximumOpacity: Double = 1
         public static let stageMinimumLineSpacing: Double = 0
         public static let stageMaximumLineSpacing: Double = 24
-        public static let stageMinimumVisibleSegmentCount = 2
-        public static let stageMaximumVisibleSegmentCount = 3
-        public static let stageWindowAutosaveName = "SpeechRail.Teleprompter.Stage"
+        public static let stageMinimumVisibleSegmentCount = 1
+        public static let stageMaximumVisibleSegmentCount = 2
+        public static let stageWindowAutosaveName = "SpeechRail.Teleprompter.Stage.v2"
         /// 舞台窗口首发距屏幕顶端偏移（贴近摄像头，建立自然眼神视线锚点）。
         public static let stageTopInset: CGFloat = 48
-        /// 状态指示灯（圆点）的边长。
-        public static let stageStatusIndicatorSize: CGFloat = 8
-        /// 三段视界不透明度阶梯：当前段 100%、下一段预读 60%、上一段回溯 35%。
-        public static let segmentOpacityCurrent: Double = 1.0
-        public static let segmentOpacityNext: Double = 0.60
-        public static let segmentOpacityPrevious: Double = 0.35
+        /// 当前段只用细窄强调线和极轻底色，不制造整块高亮卡片。
+        public static let stageCurrentRailWidth: CGFloat = 3
+        public static let stageCurrentBackgroundOpacity: Double = 0.08
+        public static let stageNextSegmentOpacity: Double = 0.48
+        public static let stageAttentionBackgroundOpacity: Double = 0.10
         /// 首屏欢迎工作台：范例卡片最小宽度与图标尺寸
         public static let welcomeIconSize: CGFloat = 36
         public static let welcomeTemplateMinimumWidth: CGFloat = 200

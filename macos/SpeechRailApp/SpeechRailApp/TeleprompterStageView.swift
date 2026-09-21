@@ -5,7 +5,6 @@ public struct TeleprompterStageView: View {
     @Bindable private var settings: TeleprompterStageSettings
     private let close: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var slices: [TeleprompterNormalizer.ReadingSlice] = []
     @State private var scrollPosition = ScrollPosition(idType: String.self)
 
     public init(
@@ -20,9 +19,11 @@ public struct TeleprompterStageView: View {
 
     public var body: some View {
         VStack(spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
-            header
+            readingProgress
+            if session.blocked != nil || session.uncertainty != nil {
+                attentionMessage
+            }
             scriptStack
-            statusBar
             controls
         }
         .padding(SpeechRailDesignTokens.Teleprompter.stagePadding)
@@ -31,214 +32,184 @@ public struct TeleprompterStageView: View {
             minHeight: SpeechRailDesignTokens.Teleprompter.stageMinimumHeight,
             alignment: .top
         )
-        .background(.ultraThinMaterial)
-        .speechRailSurface(.panel)
+        // Only the reading surface is translucent. Applying opacity to the
+        // whole root made text and controls fade together while the panel
+        // surface still looked opaque.
+        .background {
+            RoundedRectangle(
+                cornerRadius: SpeechRailDesignTokens.Corner.container,
+                style: .continuous
+            )
+            .fill(.ultraThinMaterial)
+            .opacity(settings.opacity)
+        }
         .clipShape(SpeechRailDesignTokens.Corner.containerShape)
-        .opacity(settings.opacity)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
             value: session.currentSegmentIndex
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("AI 提词器舞台")
+        .accessibilityValue("\(session.progressText)，\(statusText)")
         .onChange(of: session.activeVersion?.id, initial: true) { _, _ in
-            slices = TeleprompterNormalizer.readingSlices(
-                segments: session.activeVersion?.segments ?? [],
-                tokensPerSlice: SpeechRailDesignTokens.Teleprompter.stageReadingTokensPerSlice
-            )
             scrollToReadingPosition()
         }
-        .onChange(of: readingSliceID) { _, _ in scrollToReadingPosition() }
+        .onChange(of: session.currentSegmentIndex) { _, _ in scrollToReadingPosition() }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: AppRoute.teleprompter.systemImage)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                Text("AI 提词器")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            }
+    private var readingProgress: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            ProgressView(value: progressValue)
+                .progressViewStyle(.linear)
+                .tint(SpeechRailDesignTokens.Color.rail)
+                .frame(maxWidth: .infinity)
 
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            Text(session.progressText)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("提词进度")
+        .accessibilityValue("\(session.progressText)，完成约 \(Int(progressValue * 100))%")
+    }
 
-            // 等宽运行计时看板（已用、目标剩余/超时、正文预计剩余）
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                HStack(spacing: 3) {
-                    Text("已用")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Text(formatSeconds(session.runClock.elapsedSeconds))
-                        .font(SpeechRailDesignTokens.Typography.technicalValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                }
-
-                Text("·")
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                if session.runClock.isOverTarget {
-                    HStack(spacing: 3) {
-                        Text("超时")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                        Text(formatSeconds(session.runClock.overTargetSeconds))
-                            .font(SpeechRailDesignTokens.Typography.technicalValue)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    }
-                } else {
-                    HStack(spacing: 3) {
-                        Text("目标剩余")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        Text(formatSeconds(session.runClock.targetRemainingSeconds))
-                            .font(SpeechRailDesignTokens.Typography.technicalValue)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    }
-                }
-
-                Text("·")
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                HStack(spacing: 3) {
-                    Text("预计剩余")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Text(formatSeconds(session.runClock.estimatedRemainingSeconds))
-                        .font(SpeechRailDesignTokens.Typography.technicalValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
-            }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-            .padding(.vertical, 3)
+    private var attentionMessage: some View {
+        Label(statusText, systemImage: "exclamationmark.triangle")
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             .background(
-                SpeechRailDesignTokens.Color.recessedField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-            )
-
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                StatusPill(
-                    tone: session.phase == .following ? .healthy : (session.phase == .uncertain ? .attention : .neutral),
-                    label: stagePhaseBadge(session.phase)
+                SpeechRailDesignTokens.Color.attention.opacity(
+                    SpeechRailDesignTokens.Teleprompter.stageAttentionBackgroundOpacity
+                ),
+                in: RoundedRectangle(
+                    cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                    style: .continuous
                 )
-                VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Text(session.progressText)
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    ProgressView(value: progressValue)
-                        .progressViewStyle(.linear)
-                        .frame(width: 90)
-                        .tint(SpeechRailDesignTokens.Color.rail)
-                }
-            }
-            .accessibilityLabel("提词进度")
-            .accessibilityValue("\(session.progressText)，完成约 \(Int(progressValue * 100))%")
-        }
-    }
-
-    private func stagePhaseBadge(_ phase: TeleprompterSession.Phase) -> String {
-        switch phase {
-        case .following: "跟读中"
-        case .paused: "已暂停"
-        case .uncertain: "待确认"
-        case .manual: "手动"
-        default: "提词"
-        }
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("需要注意")
+            .accessibilityValue(statusText)
     }
 
     private var scriptStack: some View {
         GeometryReader { geometry in
+            let contentWidth = min(
+                geometry.size.width,
+                SpeechRailDesignTokens.Teleprompter.stageContentMaximumWidth
+            )
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
-                    ForEach(slices) { slice in
-                        Button {
-                            session.moveToSegment(slice.segmentIndex)
-                        } label: {
-                            Text(styledText(slice))
-                                .font(.system(size: settings.scriptPointSize))
-                                .lineSpacing(settings.lineSpacing)
-                                .multilineTextAlignment(.leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                        .background(
-                            slice.id == readingSliceID
-                                ? SpeechRailDesignTokens.Color.rail.opacity(0.12)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        )
-                        .accessibilityLabel(slice.text)
-                        .accessibilityHint("选择这段作为起讲位置，再点击开始或继续跟读")
-                        .accessibilityAddTraits(slice.id == readingSliceID ? .isSelected : [])
-                        .opacity(readingSliceOpacity(for: slice))
-                        .id(slice.id)
+                    ForEach(visibleSegmentIndices, id: \.self) { index in
+                        segmentRow(at: index)
+                            .id(segmentID(at: index))
                     }
-                    Color.clear.frame(height: geometry.size.height)
-                        .accessibilityHidden(true)
                 }
-                .scrollTargetLayout()
+                .frame(width: contentWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
             }
             .scrollPosition($scrollPosition)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityLabel("朗读内容")
     }
 
-    private var readingSliceID: String? {
-        slices.first {
-            $0.segmentIndex == session.currentSegmentIndex && session.readingOffset < $0.end
-        }?.id ?? slices.last { $0.segmentIndex == session.currentSegmentIndex }?.id
+    private var visibleSegmentIndices: [Int] {
+        guard let count = session.activeVersion?.segments.count else { return [] }
+        return TeleprompterStagePresentation.visibleSegmentIndices(
+            currentIndex: session.currentSegmentIndex,
+            visibleCount: settings.visibleSegmentCount,
+            totalCount: count
+        )
     }
 
     private func scrollToReadingPosition() {
-        guard let id = readingSliceID else { return }
+        guard let id = currentSegmentID else { return }
         withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
             scrollPosition.scrollTo(id: id, anchor: .top)
         }
     }
 
-    private func styledText(_ slice: TeleprompterNormalizer.ReadingSlice) -> AttributedString {
-        var text = AttributedString(slice.text)
-        text.foregroundColor = slice.segmentIndex < session.currentSegmentIndex
-            ? SpeechRailDesignTokens.Color.inkTertiary : SpeechRailDesignTokens.Color.ink
-        if slice.segmentIndex == session.currentSegmentIndex {
-            let count = min(slice.text.utf16.count, max(0, session.readingOffset - slice.start))
-            if let range = Range(NSRange(location: 0, length: count), in: slice.text),
+    private var currentSegmentID: String? {
+        guard let segments = session.activeVersion?.segments,
+              segments.indices.contains(session.currentSegmentIndex) else { return nil }
+        let segment = segments[session.currentSegmentIndex]
+        return segment.id
+    }
+
+    private func segmentID(at index: Int) -> String {
+        guard let segments = session.activeVersion?.segments, segments.indices.contains(index) else {
+            return "segment-\(index)"
+        }
+        return segments[index].id
+    }
+
+    @ViewBuilder
+    private func segmentRow(at index: Int) -> some View {
+        if let segments = session.activeVersion?.segments, segments.indices.contains(index) {
+            let segment = segments[index]
+            let isCurrent = index == session.currentSegmentIndex
+            Button {
+                session.moveToSegment(index)
+            } label: {
+                Text(styledText(segment, isCurrent: isCurrent))
+                    .font(.system(
+                        size: settings.scriptPointSize,
+                        weight: isCurrent ? .semibold : .regular
+                    ))
+                    .lineSpacing(settings.lineSpacing)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                    .background(
+                        isCurrent
+                            ? SpeechRailDesignTokens.Color.rail.opacity(
+                                SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity
+                            )
+                            : Color.clear,
+                        in: RoundedRectangle(
+                            cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                            style: .continuous
+                        )
+                    )
+                    .overlay(alignment: .leading) {
+                        if isCurrent {
+                            Capsule(style: .continuous)
+                                .fill(SpeechRailDesignTokens.Color.rail)
+                                .frame(width: SpeechRailDesignTokens.Teleprompter.stageCurrentRailWidth)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(isCurrent ? 1 : SpeechRailDesignTokens.Teleprompter.stageNextSegmentOpacity)
+            .accessibilityLabel(segment.text)
+            .accessibilityHint("选择这段作为起讲位置，再点击开始或继续跟读")
+            .accessibilityAddTraits(isCurrent ? .isSelected : [])
+        }
+    }
+
+    private func styledText(_ segment: TeleprompterSegment, isCurrent: Bool) -> AttributedString {
+        var text = AttributedString(segment.text)
+        text.foregroundColor = isCurrent
+            ? SpeechRailDesignTokens.Color.ink
+            : SpeechRailDesignTokens.Color.inkSecondary
+        if isCurrent {
+            let count = min(segment.text.utf16.count, max(0, session.readingOffset))
+            if let range = Range(NSRange(location: 0, length: count), in: segment.text),
                let attributedRange = Range(range, in: text) {
                 text[attributedRange].foregroundColor = SpeechRailDesignTokens.Color.inkTertiary
             }
         }
         return text
-    }
-
-    private var statusBar: some View {
-        HStack(spacing: SpeechRailDesignTokens.Teleprompter.stageStatusSpacing) {
-            Circle()
-                .fill(statusColor)
-                .frame(
-                    width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
-                    height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
-                )
-                .accessibilityHidden(true)
-            Text(statusText)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(2)
-            if let partial = session.partialText, !partial.isEmpty {
-                Text("正在听：\(partial)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("跟读状态")
-        .accessibilityValue(statusText)
     }
 
     private var controls: some View {
@@ -251,9 +222,8 @@ public struct TeleprompterStageView: View {
                 }
             } label: {
                 SpeechRailButtonLabel(
-                    isFollowing ? "暂停跟读" : startLabel,
-                    icon: isFollowing ? .pause : .play,
-                    shortcut: "Space"
+                    isFollowing ? "暂停" : startLabel,
+                    icon: isFollowing ? .pause : .play
                 )
             }
             .keyboardShortcut(.space, modifiers: [])
@@ -261,33 +231,25 @@ public struct TeleprompterStageView: View {
             .disabled(session.isResuming || session.phase == .preparing)
             .speechRailButton(isFollowing ? .secondary : .primary)
 
-            Button {
-                session.moveToPrevious()
-            } label: {
-                SpeechRailButtonLabel("上一段", icon: .previous, shortcut: "←")
-            }
-            .keyboardShortcut(.leftArrow, modifiers: [])
-            .accessibilityLabel("上一段，快捷键左方向键")
-            .speechRailButton(.secondary)
+            PageActionsMenu(title: "更多", icon: .more, helpText: "上一段、下一段和从这里继续") {
+                Button("上一段", systemImage: "chevron.left") {
+                    session.moveToPrevious()
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [])
 
-            Button {
-                session.moveToNext()
-            } label: {
-                SpeechRailButtonLabel("下一段", trailingIcon: .next, shortcut: "→")
-            }
-            .keyboardShortcut(.rightArrow, modifiers: [])
-            .accessibilityLabel("下一段，快捷键右方向键")
-            .speechRailButton(.secondary)
+                Button("下一段", systemImage: "chevron.right") {
+                    session.moveToNext()
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [])
 
-            Button {
-                Task { await session.resetFollow() }
-            } label: {
-                SpeechRailButtonLabel("从这里继续", icon: .reset, shortcut: "R")
+                Divider()
+
+                Button("从这里继续", systemImage: "arrow.counterclockwise") {
+                    Task { await session.resetFollow() }
+                }
+                .keyboardShortcut("r", modifiers: [])
+                .disabled(session.isResuming || session.phase == .preparing)
             }
-            .keyboardShortcut("r", modifiers: [])
-            .accessibilityLabel("从当前位置重置跟读，快捷键 R")
-            .disabled(session.isResuming || session.phase == .preparing)
-            .speechRailButton(.secondary)
 
             Spacer(minLength: 0)
 
@@ -297,7 +259,7 @@ public struct TeleprompterStageView: View {
                     close()
                 }
             } label: {
-                SpeechRailButtonLabel("结束", icon: .close, shortcut: "Esc")
+                SpeechRailButtonLabel("结束", icon: .close)
             }
             .keyboardShortcut(.escape, modifiers: [])
             .accessibilityLabel("结束提词并关闭舞台，快捷键 Esc")
@@ -323,17 +285,6 @@ public struct TeleprompterStageView: View {
         return min(1, Double(session.currentSegmentIndex + 1) / Double(count))
     }
 
-    private func readingSliceOpacity(for slice: TeleprompterNormalizer.ReadingSlice) -> Double {
-        if slice.id == readingSliceID { return SpeechRailDesignTokens.Teleprompter.segmentOpacityCurrent }
-        if slice.segmentIndex < session.currentSegmentIndex {
-            return SpeechRailDesignTokens.Teleprompter.segmentOpacityPrevious
-        }
-        if slice.segmentIndex < session.currentSegmentIndex + settings.visibleSegmentCount {
-            return SpeechRailDesignTokens.Teleprompter.segmentOpacityNext
-        }
-        return SpeechRailDesignTokens.Teleprompter.segmentOpacityPrevious
-    }
-
     private var statusText: String {
         if let blocked = session.blocked { return blocked.title }
         if session.isResuming { return "正在准备继续…" }
@@ -351,19 +302,4 @@ public struct TeleprompterStageView: View {
         }
     }
 
-    private func formatSeconds(_ seconds: TimeInterval) -> String {
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%02d:%02d", mins, secs)
-    }
-
-    private var statusColor: Color {
-        if session.blocked != nil || session.uncertainty != nil {
-            return SpeechRailDesignTokens.Color.attention
-        }
-        if session.phase == .following {
-            return SpeechRailDesignTokens.Color.ready
-        }
-        return SpeechRailDesignTokens.Color.inkTertiary
-    }
 }
