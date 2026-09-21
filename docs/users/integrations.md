@@ -2,7 +2,7 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.1.1"
+version: "3.1.2"
 date: 2026-09-21
 ---
 

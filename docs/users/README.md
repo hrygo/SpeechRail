@@ -2,7 +2,7 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.1.1"
+version: "3.1.2"
 date: 2026-09-21
 ---
 

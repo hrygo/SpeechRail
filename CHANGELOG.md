@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [3.1.2] - 2026-09-21
+
+### Fixed
+
+- 补齐提词器第二处 `TeleprompterSourceRange` 构造的显式类型，避免 Xcode 26.6 在 App 构建与测试目标中触发 Swift 类型推断失败。
+- macOS App 与服务版本统一升级到 3.1.2，App build 升至 24。
+
 ## [3.1.1] - 2026-09-21
 
 ### Fixed

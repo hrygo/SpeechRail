@@ -2,7 +2,7 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "3.1.1"
+version: "3.1.2"
 date: 2026-09-21
 ---
 
