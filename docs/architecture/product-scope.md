@@ -2,7 +2,7 @@
 title: "SpeechRail 产品范围与职责边界"
 status: active
 audience: "产品经理、系统架构师、业务集成方"
-version: "3.1.2"
+version: "3.1.3"
 date: 2026-09-21
 ---
 

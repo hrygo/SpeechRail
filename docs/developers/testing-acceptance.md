@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.1.2"
+version: "3.1.3"
 date: 2026-09-21
 ---
 

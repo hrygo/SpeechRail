@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [3.1.3] - 2026-09-21
+
+### Fixed
+
+- 使用 `self.sourceRange(for:source:)` 消除局部变量遮蔽，兼容 Xcode 26.6 的提词器 App 编译与测试目标。
+- macOS App 与服务版本统一升级到 3.1.3，App build 升至 25。
+
 ## [3.1.2] - 2026-09-21
 
 ### Fixed

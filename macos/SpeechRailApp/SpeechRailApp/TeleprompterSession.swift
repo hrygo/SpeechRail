@@ -1809,7 +1809,7 @@ public final class TeleprompterSession {
             let block = version.blocks.first { $0.id == segment.id }
                 ?? (version.blocks.indices.contains(index) ? version.blocks[index] : nil)
             let sourceRange = block.flatMap {
-                sourceRange(for: $0.sourceUnitIDs, source: source)
+                self.sourceRange(for: $0.sourceUnitIDs, source: source)
             } ?? TeleprompterSourceRange(
                 start: 0,
                 end: min(segment.text.utf16.count, source?.sourceText.utf16.count ?? 0)

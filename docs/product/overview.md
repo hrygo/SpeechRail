@@ -2,7 +2,7 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "3.1.2"
+version: "3.1.3"
 date: 2026-09-21
 ---
 
