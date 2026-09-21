@@ -10,6 +10,9 @@ let package = Package(
         .library(name: "SpeechRailControlAgentCore", targets: ["SpeechRailControlAgentCore"]),
         .executable(name: "SpeechRailControlAgent", targets: ["SpeechRailControlAgent"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/MacPaw/OpenAI.git", exact: "0.5.1"),
+    ],
     targets: [
         .target(
             name: "SpeechRailControlKit",
@@ -27,7 +30,10 @@ let package = Package(
         ),
         .target(
             name: "SpeechRailAppSupport",
-            dependencies: ["SpeechRailControlKit"],
+            dependencies: [
+                "SpeechRailControlKit",
+                .product(name: "OpenAI", package: "OpenAI"),
+            ],
             path: "SpeechRailApp",
             exclude: [
                 "App.swift",

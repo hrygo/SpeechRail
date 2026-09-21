@@ -5,6 +5,219 @@ import Testing
 #endif
 
 struct TeleprompterPreparationPipelineTests {
+    @Test func observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-ai-observability-(UUID().uuidString)", isDirectory: true)
+        let location = ObservabilityLocation(
+            appHome: root,
+            historyDirectory: root.appendingPathComponent("history", isDirectory: true),
+            logDirectory: root.appendingPathComponent("logs", isDirectory: true)
+        )
+        let capturedAt = Date(timeIntervalSince1970: 1_758_000_000)
+        let recorder = TeleprompterAIObservationRecorder(
+            location: location,
+            now: { capturedAt }
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let context = TeleprompterAICallContext(
+            runID: "run-test",
+            requestID: "request-test",
+            stage: .map,
+            itemIndex: 1,
+            itemCount: 3
+        )
+        recorder.record(
+            .init(
+                kind: .providerRequestStarted,
+                context: context,
+                model: "vendor/private-model",
+                endpointHost: "provider.example",
+                transportAttempt: 0,
+                operation: .chat,
+                compatibilityMode: .openAICompatible,
+                thinkingControl: "standard_disabled",
+                outcome: "started"
+            )
+        )
+        recorder.record(
+            .init(
+                kind: .providerResponse,
+                context: context,
+                elapsedMilliseconds: 321,
+                httpStatus: 200,
+                responseBytes: 512,
+                choiceCount: 1,
+                finishReason: "stop",
+                promptTokens: 8,
+                completionTokens: 3,
+                reasoningTokens: 2,
+                model: "vendor/private-model",
+                endpointHost: "provider.example",
+                transportAttempt: 0,
+                operation: .chat,
+                compatibilityMode: .openAICompatible,
+                thinkingControl: "standard_disabled",
+                outcome: "received"
+            )
+        )
+        recorder.record(
+            .init(
+                kind: .providerRequestStarted,
+                context: context,
+                transportAttempt: 1,
+                operation: .chat,
+                compatibilityMode: .openAICompatible,
+                thinkingControl: "omitted_after_rejection",
+                outcome: "started"
+            )
+        )
+        recorder.record(
+            .init(
+                kind: .runFinished,
+                context: .init(runID: "run-test", requestID: "run-test", stage: .preparation),
+                elapsedMilliseconds: 400,
+                outcome: "completed"
+            )
+        )
+        recorder.flush()
+
+        let snapshot = recorder.snapshot()
+        #expect(
+            snapshot.counters[
+                "speechrail_llm_provider_requests_total|stage=map|operation=chat|mode=openai_compatible"
+            ] == 2
+        )
+        #expect(
+            snapshot.counters[
+                "speechrail_llm_thinking_control_retries_total|operation=chat|mode=openai_compatible"
+            ] == 1
+        )
+        #expect(
+            snapshot.counters[
+                "speechrail_llm_reasoning_tokens_total|operation=chat|mode=openai_compatible"
+            ] == 2
+        )
+        #expect(snapshot.counters["speechrail_llm_runs_total|outcome=completed"] == 1)
+
+        let providerHistogram = snapshot.histograms[
+            "speechrail_llm_provider_duration_ms|stage=map|operation=chat|mode=openai_compatible|outcome=received"
+        ]
+        #expect(providerHistogram?.count == 1)
+        #expect(providerHistogram?.sumMilliseconds == 321)
+        #expect(providerHistogram?.buckets["le_500"] == 1)
+
+        let eventText = try String(contentsOf: recorder.eventFileURL(for: capturedAt), encoding: .utf8)
+        #expect(eventText.split(separator: "\n").count == 4)
+        #expect(eventText.contains("private-model"))
+        #expect(!eventText.contains("\"prompt\""))
+
+        let metricLines = try String(
+            contentsOf: recorder.metricsFileURL(for: capturedAt),
+            encoding: .utf8
+        ).split(separator: "\n")
+        #expect(metricLines.count == 1)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let persisted = try decoder.decode(
+            TeleprompterAIMetricsSnapshot.self,
+            from: Data(metricLines[0].utf8)
+        )
+        #expect(persisted == snapshot)
+    }
+
+    @Test func observationRecorderPersistsStandaloneProviderTerminalSnapshot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-ai-observability-standalone-\(UUID().uuidString)", isDirectory: true)
+        let location = ObservabilityLocation(
+            appHome: root,
+            historyDirectory: root.appendingPathComponent("history", isDirectory: true),
+            logDirectory: root.appendingPathComponent("logs", isDirectory: true)
+        )
+        let capturedAt = Date(timeIntervalSince1970: 1_758_000_001)
+        let recorder = TeleprompterAIObservationRecorder(location: location, now: { capturedAt })
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        recorder.record(
+            .init(
+                kind: .providerResponse,
+                elapsedMilliseconds: 42,
+                httpStatus: 200,
+                operation: .responses,
+                compatibilityMode: .openAICompatible,
+                thinkingControl: "standard_disabled",
+                outcome: "received"
+            )
+        )
+        recorder.flush()
+
+        let metricLines = try String(
+            contentsOf: recorder.metricsFileURL(for: capturedAt),
+            encoding: .utf8
+        ).split(separator: "\n")
+        #expect(metricLines.count == 1)
+        #expect(
+            recorder.snapshot().counters[
+                "speechrail_llm_provider_responses_total|stage=unknown|operation=responses|mode=openai_compatible|outcome=received"
+            ] == 1
+        )
+    }
+
+    @Test func runFinishedObservationIncludesTotalPreparationElapsedTime() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let observations = ObservationLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.mapResponse(for: prompt)
+        })
+
+        _ = try await pipeline.prepare(fixture.input, onObservation: observations.append)
+
+        let finished = try #require(observations.values.first { $0.kind == .runFinished })
+        #expect(finished.outcome == "completed")
+        #expect(finished.elapsedMilliseconds != nil)
+        #expect(finished.elapsedMilliseconds ?? -1 >= 0)
+    }
+
+    @Test func observationsCorrelateCallAndRedactedFailure() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let observations = ObservationLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { _ in
+            throw LLMError.http(status: 503, body: "稿件不应进入日志")
+        })
+
+        await #expect(throws: LLMError.self) {
+            try await pipeline.prepare(fixture.input, onObservation: observations.append)
+        }
+
+        let values = observations.values
+        let started = try #require(values.first { $0.kind == .callStarted })
+        let failed = try #require(values.first { $0.kind == .callFailed })
+        let startedContext = try #require(started.context)
+        let failedContext = try #require(failed.context)
+        #expect(startedContext.runID == failedContext.runID)
+        #expect(startedContext.requestID == failedContext.requestID)
+        #expect(startedContext.stage == .map)
+        #expect(failed.errorCode == "http_503")
+        #expect(values.allSatisfy { $0.errorCode != "稿件不应进入日志" })
+    }
+
+    @Test func truncatedMapSplitsWithoutRepeatingOversizedWindow() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let calls = CallLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try await calls.append(prompt)
+            if prompt.schemaVersion == "teleprompter.preparation.v2" {
+                let input = try JSONDecoder().decode(TeleprompterPreparationMapInput.self, from: Data(prompt.input.utf8))
+                if input.targets.count > 2 { throw LLMError.outputTruncated }
+            }
+            return try Self.response(for: prompt)
+        })
+        let result = try await pipeline.prepare(fixture.input)
+        #expect(result.mapWindows.count == 2)
+        #expect(await calls.mapInputs.map { $0.targets.count } == [4, 2, 2])
+        #expect(result.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
     @Test func shortSourceUsesOneMapAndDoesNotReduce() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let calls = CallLog()
@@ -40,7 +253,7 @@ struct TeleprompterPreparationPipelineTests {
         #expect(await attempts.value == 2)
     }
 
-    @Test func repeatedStructuralFailureSplitsWindowOnceBeforeContinuing() async throws {
+    @Test func repeatedStructuralFailureStopsAfterOneRegeneration() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
@@ -51,12 +264,10 @@ struct TeleprompterPreparationPipelineTests {
             return try Self.mapResponse(for: prompt)
         })
 
-        let result = try await pipeline.prepare(fixture.input)
-
-        #expect(result.mapWindows.count == 2)
-        #expect(result.mapRequestCount == 2)
-        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
-        #expect(await attempts.value == 4)
+        await #expect(throws: TeleprompterPreparationError.self) {
+            try await pipeline.prepare(fixture.input)
+        }
+        #expect(await attempts.value == 2)
     }
 
     @Test func transientRateLimitGetsOneBoundedRetry() async throws {
@@ -98,10 +309,11 @@ struct TeleprompterPreparationPipelineTests {
         #expect(result.status == .complete)
         #expect(result.draft.blocks.count == 12)
 
-        let targetIDs = await calls.mapInputs.flatMap { $0.targets.map(\.id) }
+        let mapInputs = await calls.mapInputs
         let reduceCount = await calls.reduceCount
         let reduceStartedOnlyAfterAllMaps = await calls.reduceStartedOnlyAfterAllMaps
-        #expect(targetIDs == fixture.units.map(\.id))
+        #expect(mapInputs.allSatisfy { $0.targets.map(\.id) == Array($0.targets.indices) })
+        #expect(mapInputs.flatMap { $0.targets.map(\.rawText) }.joined() == fixture.source.sourceText)
         #expect(reduceCount == 3)
         #expect(reduceStartedOnlyAfterAllMaps)
         #expect(progress.updates.first?.phase == .mapping)
@@ -218,6 +430,23 @@ struct TeleprompterPreparationPipelineTests {
             lock.lock()
             defer { lock.unlock() }
             return values
+        }
+    }
+
+    private final class ObservationLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [TeleprompterAIObservation] = []
+
+        func append(_ value: TeleprompterAIObservation) {
+            lock.lock()
+            stored.append(value)
+            lock.unlock()
+        }
+
+        var values: [TeleprompterAIObservation] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
         }
     }
 

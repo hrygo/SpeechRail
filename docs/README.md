@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 📚 SpeechRail 文档中心
@@ -12,7 +12,7 @@ date: 2026-09-20
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg" alt="Status" />
+  <img src="https://img.shields.io/badge/Status-Beta-yellow.svg" alt="Status" />
   <img src="https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon-black.svg?logo=apple" alt="macOS" />
   <img src="https://img.shields.io/badge/Protocol-OpenAI%20Compatible-412991.svg?logo=openai" alt="OpenAI" />
   <img src="https://img.shields.io/badge/Architecture-Clean%20%26%20Isolated-blue.svg" alt="Architecture" />
@@ -20,12 +20,12 @@ date: 2026-09-20
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-20）
+## 当前实现基线（2026-09-21）
 
-- 当前源码 release 基线为 SpeechRail `3.0.0`；`2.7.0` 与更早版本只作为历史部署证据，不代表当前 `runtime/current`。受管运行时只能由构建 wheel 后经 `tools.install_macos.install_managed` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
+- 当前源码 release 为 SpeechRail `3.1.0`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
 - Realtime 已切换为 current-only 无状态 Speech Plane；调用方拥有 LLM、历史、memory、tools、播放和 barge-in，服务端只交付 ASR/VAD/匿名分人事实与显式 TTS render。
-- `/health` 当前应报告 `asr_ready=true`、`tts_ready=true`、`diarization_ready=true`；`realtime_vad` 为 `configured_engine=auto`、`resolved_engine=silero`、`speech_admission_enabled=true`、`ready=true`。
-- Realtime `server_vad` 是服务端 endpointing 能力。调用方可传递自己的窗口：Sona 标准字幕使用 `threshold=0.65/prefix=300ms/silence=400ms`，会议使用同 threshold/prefix、`silence=900ms`；这些不是 SpeechRail 公共 API 的全局默认值。
+- `/health`、`/readyz` 和 `/v1/models` 只报告当前 profile、worker 和可选能力的实时状态；不得把某一台机器的一组 readiness 值写成所有安装的固定承诺。
+- Realtime `server_vad` 只交付端点事实。endpointing 窗口、播放队列和 barge-in 决策由调用方负责，不是 SpeechRail 的全局业务默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
 - clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
 - Quality TTS 由 `voice_design` VoiceDesign worker 与 `voice_clone` Base worker 两条独立 capability lane 组成；两者允许双常驻，跨 lane 可并发，同一 lane 由 worker lock 串行，冷却后按 Quality group trim/close 并在下一次请求时惰性恢复。
@@ -67,8 +67,8 @@ flowchart TD
 
     subgraph Workers ["🛡️ 独立 Python 隔离推理 Worker (私有长度前缀 IPC)"]
         direction LR
-        subgraph ASR_Box ["Qwen3-ASR Worker (MLX / MPS)"]
-            ASR["• 批量转写 & 时间戳对齐<br/>• 原生 MLX 流式转写<br/>• Server VAD & 打断"]
+    subgraph ASR_Box ["Qwen3-ASR Worker (MLX / MPS)"]
+            ASR["• 批量转写 & 时间戳对齐<br/>• 原生 MLX 流式转写<br/>• Server VAD 事实"]
         end
         subgraph TTS_Box ["Qwen3-TTS capability workers"]
             direction TB
@@ -97,11 +97,11 @@ flowchart TD
 
 | 功能模块 | 运行状态 | 协议与入口 | 核心能力特征 | 验证证据 |
 |---|---|---|---|---|
-| **批量语音识别 (ASR)** | 🟢 生产就绪 | `POST /v1/audio/transcriptions` | OpenAI 格式全兼容，WAV 零开销 Fast-path 直读，支持 `verbose_json`、`srt`、`vtt`；可选 `diarized_json` | 真实短音频与长音频基准测试通过；分人另见能力验收 |
-| **高保真语音合成 (TTS)** | 🟢 生产就绪 | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 输出，预设音色路由 (`default`, `warm`, `calm` 等) | 真实合成端到端验证通过 |
-| **实时全双工流式 (Realtime)** | 🟢 契约就绪 | `WS /v1/realtime` | current-only 无状态 ASR/TTS 子集；服务端提供 Server VAD 事实，调用方负责 LLM、队列、播放和 barge-in，并显式提交 `speechrail.tts.*`；多会话按 `session_id` 路由共享单个 streaming worker | Python 契约/回归与 Native 纯测试通过；真实模型/音频质量须按授权单独验收 |
-| **说话人分离 (Diarization)** | 🟡 可选、按 profile 就绪 | 原生 `diarized_json`；Realtime `transcription_session.update.session.speechrail.diarization.enabled` | 私有 CoreML Sortformer FP16 worker；仅输出匿名 label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实内存与质量仍需独立实测 |
-| **macOS 常驻运维服务** | 🟢 生产就绪 | `speechrail service` CLI | 用户级 LaunchAgent 管理，支持原子安装、状态感知与一键回滚 | 自动化测试与实机验证通过 |
+| **批量语音识别 (ASR)** | 契约可用，按 runtime readiness | `POST /v1/audio/transcriptions` | 文档声明的 OpenAI multipart 子集，支持 `verbose_json`、`srt`、`vtt`；分人格式按 profile 条件启用 | 确定性契约测试；真实质量需按授权单独验收 |
+| **语音合成 (TTS)** | 契约可用，按 runtime readiness | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 等文档声明格式，按能力快照选择音色 | 确定性契约测试；真实音质与性能需按授权单独验收 |
+| **实时流式 (Realtime)** | 契约可用 | `WS /v1/realtime` | current-only 无状态 ASR/TTS 子集；服务端提供 VAD 事实，调用方负责 LLM、队列、播放和 barge-in，并显式提交 `speechrail.tts.*` | Python 契约/回归与 Native 纯测试；真实模型/音频质量需单独验收 |
+| **说话人分离 (Diarization)** | 可选，按 profile 与资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in | 私有 CoreML Sortformer FP16 worker；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
+| **macOS 常驻运维服务** | 流程可用，按安装态验收 | `speechrail service` CLI | 用户级 LaunchAgent 管理、状态检查和受控回滚 | 确定性测试与安装态证据分开记录 |
 
 ---
 

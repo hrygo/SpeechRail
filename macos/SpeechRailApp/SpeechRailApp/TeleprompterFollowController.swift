@@ -1,5 +1,69 @@
 import Foundation
 
+/// Bounded, in-memory latency evidence for one teleprompter run.
+///
+/// It deliberately stores only timings and counts: no item IDs, transcript text,
+/// audio, or text-derived identifiers are retained.
+public struct TeleprompterLatencyDiagnostics: Sendable, Equatable {
+    public private(set) var alignmentSampleCount = 0
+    public private(set) var captureSampleCount = 0
+
+    private let maxSamples: Int
+    private var queueAgeSamples: [Double] = []
+    private var matchSamples: [Double] = []
+    private var captureToSendSamples: [Double] = []
+
+    public init(maxSamples: Int = 128) {
+        self.maxSamples = max(1, maxSamples)
+    }
+
+    public var queueAgeP95Milliseconds: Double? {
+        percentile(queueAgeSamples)
+    }
+
+    public var matchP95Milliseconds: Double? {
+        percentile(matchSamples)
+    }
+
+    public var captureToSendP95Milliseconds: Double? {
+        percentile(captureToSendSamples)
+    }
+
+    public mutating func recordAlignment(
+        queueAgeMilliseconds: Double,
+        matchMilliseconds: Double
+    ) {
+        guard valid(queueAgeMilliseconds), valid(matchMilliseconds) else { return }
+        append(queueAgeMilliseconds, to: &queueAgeSamples)
+        append(matchMilliseconds, to: &matchSamples)
+        alignmentSampleCount = queueAgeSamples.count
+    }
+
+    public mutating func recordCaptureToSend(milliseconds: Double) {
+        guard valid(milliseconds) else { return }
+        append(milliseconds, to: &captureToSendSamples)
+        captureSampleCount = captureToSendSamples.count
+    }
+
+    private func valid(_ value: Double) -> Bool {
+        value.isFinite && value >= 0
+    }
+
+    private func append(_ value: Double, to samples: inout [Double]) {
+        samples.append(value)
+        if samples.count > maxSamples {
+            samples.removeFirst(samples.count - maxSamples)
+        }
+    }
+
+    private func percentile(_ samples: [Double]) -> Double? {
+        guard !samples.isEmpty else { return nil }
+        let sorted = samples.sorted()
+        let index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
+        return sorted[index]
+    }
+}
+
 /// Pure event reducer. ASR text is bounded, in-memory only, and scoped to item IDs.
 public struct TeleprompterFollowController: Sendable {
     public private(set) var position: TeleprompterAligner.Position
@@ -14,6 +78,8 @@ public struct TeleprompterFollowController: Sendable {
         let anchor: TeleprompterAligner.Position
         let sequence: Int
         var previousEvidence = 0
+        var snapshotRevision = 0
+        var lastSnapshotText: String?
     }
     private var items: [String: Item] = [:]
     private var retired: [String] = []
@@ -48,12 +114,47 @@ public struct TeleprompterFollowController: Sendable {
         if let candidate = match.position, match.confidence >= 0.88,
            match.matchedCount >= 5, item.previousEvidence >= 3,
            !TeleprompterNormalizer.tokens(delta).isEmpty,
-           candidate.segmentIndex >= position.segmentIndex {
+           isForward(candidate, from: position) {
             position = candidate
             provisionalItemID = itemID
             uncertainty = nil
         }
         item.previousEvidence = match.position == nil ? 0 : match.matchedCount
+        items[itemID] = item
+        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key { retire(oldest) }
+    }
+
+    public mutating func receiveSnapshot(
+        itemID: String,
+        revision: Int,
+        text: String,
+        segments: [TeleprompterSegment],
+        eventID: String? = nil
+    ) {
+        guard acceptEvent(eventID) else { return }
+        guard revision > 0, !itemID.isEmpty, !retired.contains(itemID) else { return }
+        guard mode == .following else { retire(itemID); return }
+        prepare(segments)
+        guard let script else { return }
+        var item = item(for: itemID)
+        guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }
+        item.snapshotRevision = revision
+        item.text = String(text.suffix(2048))
+        partialPreview = item.text
+        let tokens = TeleprompterNormalizer.tokens(item.text)
+        let match = locate(tokens, script: script, anchor: position)
+        candidatePosition = match.position
+        let isNewHypothesis = item.lastSnapshotText != item.text
+        if let candidate = match.position, match.confidence >= 0.88,
+           match.matchedCount >= 5,
+           (match.isUniqueNearAnchor || item.previousEvidence >= 3),
+           isNewHypothesis, isForward(candidate, from: position) {
+            position = candidate
+            provisionalItemID = itemID
+            uncertainty = nil
+        }
+        item.previousEvidence = match.position == nil ? 0 : match.matchedCount
+        item.lastSnapshotText = item.text
         items[itemID] = item
         if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key { retire(oldest) }
     }
@@ -107,6 +208,15 @@ public struct TeleprompterFollowController: Sendable {
         if current.position != nil { return current }
         guard tokens.count < 3 || current.confidence > 0 else { return current }
         return aligner.locate(tokens: Array(history.suffix(24)) + tokens, script: script, anchor: anchor)
+    }
+
+    private func isForward(
+        _ candidate: TeleprompterAligner.Position,
+        from current: TeleprompterAligner.Position
+    ) -> Bool {
+        candidate.segmentIndex > current.segmentIndex
+            || (candidate.segmentIndex == current.segmentIndex
+                && candidate.utf16Offset > current.utf16Offset)
     }
 
     private mutating func item(for id: String) -> Item {

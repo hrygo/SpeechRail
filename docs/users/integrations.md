@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -29,7 +29,7 @@ Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能�
 
 | 能力 | 🟢 `light` | 🟡 `balanced` | 🟣 `quality` |
 |---|---|---|---|
-| ASR 文件转写 / Realtime / `segment`+`word` 时间戳 / translation | ✓ | ✓ | ✓ |
+| ASR 文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ |
 | 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ |
 | 自然语言音色设计 / 试听与音色克隆 | ✗ | ✗ | ✓ |
 
@@ -59,7 +59,7 @@ client = OpenAI(
 # 1. 批量文件转写 (支持 segment 与 word 时间戳)
 with open("test.wav", "rb") as f:
     transcript = client.audio.transcriptions.create(
-        model="whisper-1",  # 兼容别名，自动路由至 speechrail/qwen3-asr-1.7b
+        model="whisper-1",  # 标准别名，自动路由至 speechrail/qwen3-asr-1.7b
         file=f,
         language="zh",
         response_format="verbose_json",
@@ -71,7 +71,7 @@ with open("test.wav", "rb") as f:
 
 # 2. 语音合成 (TTS)
 response = client.audio.speech.create(
-    model="tts-1",  # 兼容别名，自动路由至 speechrail/qwen3-tts
+    model="tts-1",  # 标准别名，自动路由至 speechrail/qwen3-tts
     voice="serena",  # 九个 canonical 角色之一；也接受 OpenAI 标准 voice alias
     input="SpeechRail 正在为您提供本地语音服务。",
     response_format="wav",
@@ -218,4 +218,4 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 
 文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送 `transcription_session.update`，然后以 16 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`delta` 只含可追加的稳定前缀。需要播报时由调用方发送 `speechrail.tts.create`；收到 `input_audio_buffer.speech_started` 后是否发送 `speechrail.tts.cancel` 由调用方播放策略决定，服务端不会自动取消。
 
-遇到 `backend_busy`、`queue_full` 或 `backend_timeout` 时，不重放未确认的实时音频。按 `retryable`/`retry_after` 退避，实时连接关闭后建立新会话；文件任务可改用 Jobs 并轮询。服务侧恢复顺序是 `uv run speechrail service status`、`uv run speechrail service preflight`、再读取 `/health`。完整能力与质量证据见[能力诊断与质量验收](../operations/capability-quality-acceptance.md)。
+遇到 `backend_busy`、`queue_full` 或 `backend_timeout` 时，不重放未确认的实时音频。按 `retryable`/`retry_after` 退避，实时连接关闭后建立新会话；文件任务可改用 Jobs 并轮询。服务侧恢复顺序是使用当前 managed runtime 的 `speechrail service status`、`speechrail service preflight`，再读取 `/health`；不要用源码环境推断 managed 安装态。完整能力与质量证据见[能力诊断与质量验收](../operations/capability-quality-acceptance.md)。

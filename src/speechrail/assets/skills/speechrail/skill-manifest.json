@@ -1,7 +1,7 @@
 {
   "schema_version": "speechrail_skill_manifest_v1",
   "skill": "speechrail",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "mcp_contract": "speechrail-mcp",
   "tools": [
     "describe",
@@ -28,6 +28,7 @@
   "references": [
     "references/discovery.md",
     "references/transcription.md",
+    "references/realtime.md",
     "references/synthesis.md",
     "references/voices.md",
     "references/jobs.md",

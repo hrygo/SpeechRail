@@ -63,12 +63,16 @@ public final class SessionPreferences {
     public var llmModel: String {
         didSet { defaults.set(llmModel, forKey: Key.llmModel) }
     }
-    /// 模块覆盖只保存地址与模型；Key 由 `LLMKeychain.Scope.module` 单独保管。
+    /// 兼容模式是 endpoint 的 wire profile；默认使用标准 OpenAI-compatible。
+    public var llmCompatibilityMode: LLMCompatibilityMode {
+        didSet { defaults.set(llmCompatibilityMode.rawValue, forKey: Key.llmCompatibilityMode) }
+    }
+    /// 模块覆盖保存地址、模型与兼容模式；Key 由 `LLMKeychain.Scope.module` 单独保管。
     private var llmModuleOverrides: [LLMModule: LLMModuleOverride] {
         didSet { persistLLMModuleOverrides() }
     }
-    /// 只读事实：`Responses · 必须`（§6.5 的接口行，不提供降级选项）。
-    public let llmInterface = "Responses · 必须"
+    /// 按功能使用 Chat Completions 或 Responses；不绑定某一个 provider。
+    public let llmInterface = "Chat / Responses · 按功能"
 
     // MARK: 助手
     /// 默认人设 id。**只在开始对话时使用一次**。
@@ -123,6 +127,9 @@ public final class SessionPreferences {
         self.defaults = defaults
         self.llmBaseURL = defaults.string(forKey: Key.llmBaseURL) ?? ""
         self.llmModel = defaults.string(forKey: Key.llmModel) ?? ""
+        self.llmCompatibilityMode = LLMCompatibilityMode(
+            rawValue: defaults.string(forKey: Key.llmCompatibilityMode) ?? ""
+        ) ?? .openAICompatible
         self.llmModuleOverrides = Self.decodeLLMModuleOverrides(
             defaults.data(forKey: Key.llmModuleOverrides)
         )
@@ -143,7 +150,11 @@ public final class SessionPreferences {
     // MARK: 派生
 
     public var llmConfiguration: LLMConfiguration {
-        LLMConfiguration(baseURL: llmBaseURL, model: llmModel)
+        LLMConfiguration(
+            baseURL: llmBaseURL,
+            model: llmModel,
+            compatibilityMode: llmCompatibilityMode
+        )
     }
 
     /// 不读取 Key 的配置投影，供状态栏等只展示 endpoint/model 的 UI 使用。
@@ -169,7 +180,12 @@ public final class SessionPreferences {
         guard module == .minutes else { return LLMModuleOverride() }
         let legacyModel = minutesModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !legacyModel.isEmpty else { return LLMModuleOverride() }
-        return LLMModuleOverride(enabled: true, baseURL: llmBaseURL, model: legacyModel)
+        return LLMModuleOverride(
+            enabled: true,
+            baseURL: llmBaseURL,
+            model: legacyModel,
+            compatibilityMode: llmCompatibilityMode
+        )
     }
 
     /// 切换模块专用配置。首次打开时复制全局值，避免用户打开开关后落入空配置。
@@ -177,11 +193,16 @@ public final class SessionPreferences {
         var override = llmOverride(for: module)
         override.enabled = enabled
         if enabled {
+            let inheritsGlobalProfile = override.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || override.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if override.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 override.baseURL = llmBaseURL
             }
             if override.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 override.model = llmModel
+            }
+            if inheritsGlobalProfile {
+                override.compatibilityMode = llmCompatibilityMode
             }
         }
         updateLLMOverride(override, for: module)
@@ -362,6 +383,7 @@ public final class SessionPreferences {
     private enum Key {
         static let llmBaseURL = "speechrail.llm.baseURL"
         static let llmModel = "speechrail.llm.model"
+        static let llmCompatibilityMode = "speechrail.llm.compatibilityMode"
         static let llmModuleOverrides = "speechrail.llm.moduleOverrides.v1"
         static let personaID = "speechrail.session.assistant.persona"
         static let voiceID = "speechrail.session.assistant.voice"

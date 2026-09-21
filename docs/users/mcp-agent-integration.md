@@ -2,7 +2,7 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.5.0"
+version: "2.7.0"
 date: 2026-09-21
 ---
 
@@ -12,35 +12,41 @@ date: 2026-09-21
 > 事实来源：`src/speechrail/mcp/`（proxy 实现）、[SpeechRail MCP Proxy 工具与契约](../architecture/speechrail-mcp-proxy.md)（工具语义）、
 > 以及各客户端官方 MCP 文档（配置格式随客户端版本演进，若与本文不符以客户端官方文档为准）。
 >
-> **v1.3.0 变更**（2026-09-13）：补充 Codex 当前 `codex mcp add` / `config.toml` 指引，以及 ChatGPT Web 自定义 MCP App 的远程连接边界。ChatGPT Web 不能直接启动本机 `stdio` 或访问 `127.0.0.1`；本机 SpeechRail 必须通过 `streamable-http` 和受信任的 HTTPS 隧道/网关连接。
-> ChatGPT 的套餐、界面和权限会持续变化，请同时参考 [OpenAI 官方 Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461)。
+> **客户端连接边界**：本机 Agent 使用 `stdio`；ChatGPT Web 不能直接启动本机 `stdio` 或访问
+> `127.0.0.1`，需要通过 `streamable-http` 与受信任的 HTTPS 隧道或网关连接。ChatGPT 的套餐、界面和权限
+> 会变化，使用时还应核对其官方 MCP 文档。
 
-> **v2.1.0 变更**（2026-09-20）：`synthesize` 使用 effective capability snapshot 自动 pin
-> `voice_revision` 与 model `catalog_revision`；也接受显式 `expected_voice_revision` /
-> `expected_model_revision`，遇到 revision 冲突时重新 `describe()`，不要静默换音色。
+> **能力与音色一致性**：先调用 `describe()` 获取 `effective_capabilities_v1`，再使用其中的
+> `voice_revision` 与 model `catalog_revision`。遇到 revision 冲突时重新发现并由调用方决定是否切换版本。
 
-> **v2.2.0 变更**（2026-09-20）：MCP 只接受当前 `effective_capabilities_v1` 能力契约；
-> 移除 404/405/未知 schema 的 legacy discovery fallback，以及 `describe()` 的 legacy 输出字段。
+> **发现失败即失败**：MCP 只接受当前 `effective_capabilities_v1` 能力契约；不会对 404/405、未知 schema
+> 或其他错误回退到旧 discovery，也不会伪造能力快照。
 
-> **v2.3.0 变更**（2026-09-21）：MCP 补齐 `get_voice`、`design_voice`、`clone_voice`、
-> `validate_voice`、`list_jobs`、`get_job_result`；clone 的 reference gate 与 synthesis
-> output gate 分离，`available=true` 不再等同 `production_ready=true`。可用
-> `speechrail agents install` 安装配套 skill 与 Codex MCP 配置；安装状态仍需重启/重新加载客户端。
+> **工具范围**：当前工具集包含音色查询/设计/克隆/验证和 durable job 查询；`available=true` 不等同
+> `production_ready=true`。正式制作必须使用当前 runtime 绑定下的 output validation。
 
-> **v2.4.0 变更**（2026-09-21）：普通 `synthesize` 默认允许未验证试听；正式制作使用
-> `validation_policy=require_output_pass`，由服务端在当前绑定下再次校验。验证报告与声学
-> voice revision 分开存储，MCP 产物带 host、request/validation 摘要。
+> **试听与正式制作**：普通 `synthesize` 可允许未验证试听；正式制作使用
+> `validation_policy=require_output_pass`，由服务端在当前绑定下再次校验。
 
-> **v2.5.0 变更**（2026-09-21）：正式 output validation 绑定到当前 runtime、前处理、Base
-> generation recipe 和 policy；cold/unknown runtime 不再复用旧 pass。REST 与 MCP durable job
-> 参数统一由同一校验器执行；job 的 `input_ref` 使用 allowlist 内的本地绝对路径或 `file://`
-> URI，speech 输入是 UTF-8 文本文件而不是 `synthesize` 的正文参数。
+> **输入与验证边界**：output validation 绑定当前 runtime、前处理、Base generation recipe 与 policy；
+> cold/unknown runtime 不复用旧 pass。durable job 的 `input_ref` 只接受 allowlist 内的本地绝对路径或 `file://`
+> URI，不读取远程资源。
+>
+> **Realtime 边界**：`partial_mode`、`chunk_duration_ms` 和
+> `speechrail.transcription.snapshot` 由直连 `/v1/realtime` 的客户端使用；它们不新增 MCP tool，
+> 也不改变 MCP `transcribe` 的请求/响应语义。
 
 > **当前边界（2026-09-21）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
 > `describe/transcribe/synthesize/voice/job` 工具；它不创建 Realtime WebSocket handle。
 > Native、Sona 或其他调用方直连 `/v1/realtime`，并自行拥有 LLM、历史、memory、persona、
 > tools、播放队列和 barge-in；Realtime TTS 只能由调用方显式发送 `speechrail.tts.create`/
-> `speechrail.tts.cancel` 驱动。旧 Realtime 事件不会被 MCP 或服务端翻译。
+> `speechrail.tts.cancel` 驱动。需要低延迟可修订 partial 时，客户端可在首个 PCM 前协商
+> `speechrail.transcription.partial_mode=snapshot` 和
+> `chunk_duration_ms=500|1000|2000`，等待 `transcription_session.updated` 后再采集；
+> snapshot 是按 `item_id` + 严格递增 `revision` 替换全文，不是可追加 delta。旧 Realtime
+> 事件不会被 MCP 或服务端翻译。详见
+> [Realtime 契约](../../contracts/realtime-openai.md) 与配套
+> [skill reference](../../src/speechrail/assets/skills/speechrail/references/realtime.md)。
 
 ---
 
@@ -104,6 +110,31 @@ cold/unknown，旧的 output pass 不会被复用，先重新 `validate_voice`�
 effective capability 路径是 MCP 的当前必需契约。返回 `404/405`、未知 schema 或其他错误时，
 MCP 直接失败，不回退到 `/v1/models` + `/v1/voices`，也不伪造能力快照。`voice_revision=null`
 的 voice 只表示可路由，不是质量或声学身份验收。
+
+### 1.3 Realtime 转写扩展（不属于 MCP tool）
+
+MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 Realtime partial。实时字幕或
+提词器应由调用方直接连接 `/v1/realtime`，并在首个 PCM 前发送：
+
+```json
+{
+  "type": "transcription_session.update",
+  "session": {
+    "speechrail": {
+      "transcription": {
+        "partial_mode": "snapshot",
+        "chunk_duration_ms": 500
+      }
+    }
+  }
+}
+```
+
+调用方必须等待 `transcription_session.updated` 的实际回显。公开分块值只有
+`500/1000/2000` ms；首个 PCM 后修改返回 `invalid_state`。在 `snapshot` 模式下，
+`speechrail.transcription.snapshot` 的 `text` 是同一 item 的最新全文，按严格递增
+`revision` 替换而不是追加；completed 仍是终态权威文本。该扩展不让 MCP 代理持有连接、
+创建会话或管理 LLM/播放状态。
 
 ---
 

@@ -2,7 +2,7 @@
 title: "SpeechRail MCP Proxy 架构与终态契约"
 status: active
 audience: "系统架构师、协议设计者、Agent 集成方"
-version: "3.4.0"
+version: "3.6.0"
 date: 2026-09-21
 ---
 
@@ -15,7 +15,9 @@ SpeechRail REST 能力交给 Agent，以及如何通过 effective capability sna
 本版将 `effective_capabilities_v1` 定为 MCP 的必需能力发现契约，移除旧服务的
 `/v1/models` + `/v1/voices` discovery fallback，并从 `describe` 结果删除 legacy 诊断字段。
 
-本版（3.4.0，2026-09-21）补充 durable speech job 的共享参数校验，并明确 output validation
+当前版本（2026-09-21）补充 Realtime caller-owned transcription 扩展的 MCP 边界：
+MCP 不代理该 WebSocket 能力，直连客户端可协商 mutable snapshot partial 与会话级分块。
+同时保留 durable speech job 的共享参数校验，并明确 output validation
 必须绑定当前 runtime、前处理、generation recipe 与 policy；cold/unknown runtime 不得把历史
 pass 投影为 `production_ready`。
 
@@ -66,6 +68,15 @@ Realtime 仍由调用方直连唯一的 `/v1/realtime`。MCP 只代理无状态 
 job 工具；需要实时字幕、语音助手或会议能力的客户端自行拥有连接、会话状态、LLM 编排、播放
 与打断策略。SpeechRail Realtime 只交付 ASR/VAD/匿名分人事实，并处理调用方显式发送的
 `speechrail.tts.create` / `speechrail.tts.cancel`。
+
+对于提词器或实时字幕，调用方可在首个 PCM 前协商
+`session.speechrail.transcription.partial_mode`（`delta` 或 `snapshot`）与
+`chunk_duration_ms`（公开值 `500/1000/2000`），等待
+`transcription_session.updated` 回显后再开始采集。snapshot 事件
+`speechrail.transcription.snapshot` 传递同一 ASR item 的最新全文；调用方按严格递增
+`revision` 替换文本，不得把它当作追加 delta。首个 PCM 后不能修改选项，服务返回
+`invalid_state`。这些字段和事件属于 Realtime wire contract，不是 MCP tool、resource 或
+MCP session 状态；详见 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
 
 ## 2. 进程、传输与安全
 

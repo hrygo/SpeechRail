@@ -29,7 +29,7 @@ date: 2026-09-20
 
 本设计系统以 macOS 26 的设计语义、当前 Xcode 27.0 / macOS 27 SDK 工具链为基线。`SpeechRailApp` GUI target
 明确以 macOS 26.0 为最低版本，不为 Native App、ControlKit、ControlAgent、CaptureHelper
-或服务侧 SwiftPM worker 编写 macOS 14 的兼容 fallback。研究结论是：所有 Native target
+或服务侧 SwiftPM worker 编写旧系统兼容 fallback。研究结论是：所有 Native target
 在 macOS 26 上完整使用系统新设计能力，不把新特性降级为共同最低版本的视觉实现。
 
 - Apple 的 macOS 指南要求充分利用大屏、可调整窗口、菜单栏、键盘快捷键和可定制工具栏，避免把重要内容藏在过多模态层级中。[Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)
@@ -96,7 +96,7 @@ date: 2026-09-20
 | 动效 | 系统 Liquid Glass 和标准控件动效 | 不参与 GUI 渲染 | 尊重 Reduce Motion，不能把动效当信息唯一来源 |
 
 App target 的 `MACOSX_DEPLOYMENT_TARGET` 必须为 `26.0`，只要是 App 页面或 App 专属
-设计组件，就直接依赖 macOS 26 API。不得为了让 App target 继续编译到 macOS 14 而加入
+设计组件，就直接依赖 macOS 26 API。不得为了让 App target 继续编译到旧系统而加入
 条件分支、兼容视觉 fallback 或删除 macOS 26 行为；服务侧独立 target 的最低版本不改变
 App 的 UI 实现。内容层使用标准 macOS 内容表面是信息层级决策，不是为了兼容旧系统而降级。
 

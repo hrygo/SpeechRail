@@ -2,8 +2,8 @@
 title: "SpeechRail 产品范围与职责边界"
 status: active
 audience: "产品经理、系统架构师、业务集成方"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 📋 SpeechRail 产品范围与职责边界
@@ -49,11 +49,11 @@ graph TD
 
 | 客户端应用 | 接入场景与模式 | 当前状态 | 验证证据 |
 |---|---|---|---|
-| **QwenPaw** | 桌面听写：通过 `whisper_api` 发送短音频录音 | 🟢 生产就绪 | 本机真实短音频 Smoke 验证通过 |
+| **QwenPaw** | 桌面听写：通过 `whisper_api` 发送短音频录音 | 契约可用 | 真实客户端质量与长时行为需单独验收 |
 | **OpenAI 官方 SDK** | Python / Node.js SDK 直连文档声明的 REST 语音子集；Realtime 使用 current-only WebSocket wire | 🟡 契约就绪 | Python 契约测试与 Native 纯测试通过；真实模型/音频质量另行验收 |
 | **Sona 会议助理** | 实时全双工会议字幕与语音助手合成；可选分人扩展按服务端 capability 广播启用 | 🟡 契约就绪、能力依赖 | `/v1/realtime` 端点接入与协议回归测试通过；连续 native 分人另需独立 gate |
 | **Hermes Agent** | 桌面智能体：专用 STT 接口接入 | 🟢 文档就绪 | 独立 STT 路由配置完成，待端到端验收 |
-| **通用 WebSocket 客户端** | 自研客户端对接 `/v1/realtime` | 🟢 生产就绪 | 标准 WebSocket 协议测试通过 |
+| **通用 WebSocket 客户端** | 自研客户端对接 `/v1/realtime` current-only wire | 契约可用 | 协议测试通过；真实模型/音频质量需单独验收 |
 
 ---
 

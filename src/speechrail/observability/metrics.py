@@ -54,6 +54,9 @@ _REALTIME_PHASES = frozenset(
         "send",
     }
 )
+_REALTIME_PARTIAL_OUTCOMES = frozenset(
+    {"delta_sent", "snapshot_sent", "rewrite_withheld", "duplicate_suppressed"}
+)
 _ALIGNMENT_EVENTS = frozenset(
     {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
 )
@@ -482,6 +485,12 @@ class Metrics:
                 REALTIME_PHASE_BUCKETS,
                 phase=phase,
             )
+
+    def record_realtime_partial(self, outcome: str) -> None:
+        """Count partial delivery decisions without recording transcript text."""
+        if outcome not in _REALTIME_PARTIAL_OUTCOMES:
+            raise ValueError(f"unsupported realtime partial outcome: {outcome}")
+        self.inc("speechrail_realtime_partial_events_total", outcome=outcome)
 
     def record_bargein(self) -> None:
         self.inc("speechrail_realtime_bargein_events_total")

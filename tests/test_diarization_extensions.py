@@ -37,7 +37,7 @@ from speechrail.domain.diarization import (
     Span,
     TextUnit,
 )
-from speechrail.domain.ports import StreamingAsrEvent
+from speechrail.domain.ports import RealtimeTranscriptionOptions, StreamingAsrEvent
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
 CONTRACT_DIR = Path(__file__).resolve().parents[1] / "contracts" / "diarization" / "v1"
@@ -259,7 +259,14 @@ class _FakeStreamingFactory:
     def __init__(self) -> None:
         self.sessions: list[_FakeStreamingSession] = []
 
-    def create(self, *, language: str | None, prompt: str) -> _FakeStreamingSession:
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> _FakeStreamingSession:
+        del options
         session = _FakeStreamingSession(language=language, prompt=prompt)
         self.sessions.append(session)
         return session
@@ -857,8 +864,14 @@ class _MisalignedStreamingSession(_FakeStreamingSession):
 
 
 class _MisalignedStreamingFactory:
-    def create(self, *, language: str | None, prompt: str) -> _MisalignedStreamingSession:
-        del language, prompt
+    def create(
+        self,
+        *,
+        language: str | None,
+        prompt: str,
+        options: RealtimeTranscriptionOptions,
+    ) -> _MisalignedStreamingSession:
+        del language, prompt, options
         return _MisalignedStreamingSession(language=None, prompt="")
 
     def release(self, session: object) -> None:

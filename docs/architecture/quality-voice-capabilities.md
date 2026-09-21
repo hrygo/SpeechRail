@@ -3,7 +3,7 @@ title: "Quality 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
 version: "1.3"
-date: 2026-09-20
+date: 2026-09-21
 ---
 
 # Quality 档音色创造、克隆与稳定化能力架构
@@ -145,7 +145,7 @@ quality:
   run_id: ...
 ```
 
-对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile.creation` 已为新生成参考记录模型制品/revision、seed、文本/指令/规范音频 hash 和前处理版本，旧记录可缺省该字段。registry 现已持久化有界 VoiceRevision 历史，并提供 CAS update、rollback、revoke 和 delete；这些 revision 记录用于不可变绑定与并发保护，不等价于声纹相似度或长时稳定性证据。旧资产迁移、跨模型兼容策略和声学身份验收仍需单独完成。
+对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile.creation` 已为新生成参考记录模型制品/revision、seed、文本/指令/规范音频 hash 和前处理版本，旧记录可缺省该字段。registry 现已持久化有界 VoiceRevision 历史，并提供 CAS update、rollback、revoke 和 delete；这些 revision 记录用于不可变绑定与并发保护，不等价于声纹相似度或长时稳定性证据。旧资产迁移和跨模型自动兼容不在当前范围；需要继续使用时重新注册或按当前路径显式重新验收。
 
 ## 6. Reference conditioning 最佳实践与 Sona 边界
 
@@ -172,7 +172,7 @@ SpeechRail 应成为 canonical reference 的权威处理边界：
 
 当前服务端已对新注册参考执行一次有界规范化，并关闭 vendor 的 `volume_normalize`：20 ms 窗口以 -45 dBFS 能量阈值筛选，目标 -20 dBFS，增益最多 +9 dB、衰减最多 12 dB，并以 0.95 样本峰值上限优先约束；仅裁剪首尾低能量区并保留约 200 ms 边界，内部停顿不改写。这些是工程初始值，并非目标机实测最优参数。
 
-该能量筛选**不是神经 VAD 或降噪器**，不能保证移除背景噪声，也不能识别多人或修复混响。Sona 的录音端增益仍需协同整改；现有参考不会自动重写或迁移，因此本 PR 不宣称全链路单次归一、专业表达或旧音色迁移已经完成。旧音色必须重新注册或通过显式 revision 迁移验证，禁止用静默更换参考掩盖模型变化。
+该能量筛选**不是神经 VAD 或降噪器**，不能保证移除背景噪声，也不能识别多人或修复混响。Sona 的录音端增益仍需协同整改；现有参考不会自动重写，因此本 PR 不宣称全链路单次归一或专业表达已经完成。旧音色不自动迁移；需要继续使用时必须重新注册或按当前路径重新验收，禁止用静默更换参考掩盖模型变化。
 
 ## 7. “像本人”与“播得专业”必须解耦
 
@@ -223,7 +223,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 
 - 已实现显式 `/v1/voices/designs` 生成/验证 canonical reference，并创建新的 Base-bound clone（不覆盖旧 ID）；
 - VoiceRevision 历史、CAS update、rollback、revoke 与 delete 已由 registry 提供；
-- 已有 legacy 音色的显式迁移与跨模型兼容仍未完成；
+- 已有旧音色不提供自动迁移或跨模型兼容；需要重新注册或显式重新验收；
 - 跨文本 speaker similarity 与 ABX 门仍是独立的声学验收，不由 revision metadata 代替。
 
 ### Phase D — 专业表达

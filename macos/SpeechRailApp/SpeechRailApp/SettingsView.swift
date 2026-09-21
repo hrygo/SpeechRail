@@ -19,6 +19,7 @@ public struct SettingsView: View {
     @State private var connectionResult: LLMConnectionResult?
     /// 新密钥测试通过但写入安全保管库失败时的独立提示；连接结论本身仍然保留。
     @State private var keySaveError: String?
+    @State private var backupErrorMessage: String?
     @State private var isChecking = false
     @State private var checkedModule: LLMModule?
     @State private var isAdvancedLLMConfigurationExpanded = false
@@ -75,6 +76,21 @@ public struct SettingsView: View {
             }.value
             llmKeySaved = await Task.detached { LLMKeychain.hasKey }.value
             moduleKeySaved = Set(savedModules)
+        }
+        .alert(
+            "备份记录库失败",
+            isPresented: Binding(
+                get: { backupErrorMessage != nil },
+                set: { isPresented in
+                    if !isPresented { backupErrorMessage = nil }
+                }
+            )
+        ) {
+            Button("好", role: .cancel) {
+                backupErrorMessage = nil
+            }
+        } message: {
+            Text(backupErrorMessage ?? "无法完成备份。")
         }
     }
 
@@ -339,7 +355,8 @@ public struct SettingsView: View {
         )
         let result = await LLMProvider().check(
             configuration: resolved.configuration,
-            apiKey: candidateKey
+            apiKey: candidateKey,
+            operation: module?.requiredOperation ?? .responses
         )
         connectionResult = result
         guard LLMKeyDraftPolicy.shouldPersist(
@@ -357,13 +374,34 @@ public struct SettingsView: View {
     }
 
     private func backupLibrary() {
-        guard let source = SessionStore.defaultLibraryURL() else { return }
+        guard let source = SessionStore.defaultLibraryURL() else {
+            backupErrorMessage = "无法定位记录库。"
+            return
+        }
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            backupErrorMessage = "当前还没有可备份的记录库。"
+            return
+        }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "sessions-\(Self.backupStamp()).sqlite3"
         panel.title = "备份记录库"
+        panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        try? FileManager.default.removeItem(at: destination)
-        try? FileManager.default.copyItem(at: source, to: destination)
+        Task { @MainActor in
+            let store = SessionStore(directory: source.deletingLastPathComponent())
+            do {
+                try await store.open()
+                do {
+                    try await store.backup(to: destination)
+                    await store.close()
+                } catch {
+                    await store.close()
+                    throw error
+                }
+            } catch {
+                backupErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func openDataDirectory() {

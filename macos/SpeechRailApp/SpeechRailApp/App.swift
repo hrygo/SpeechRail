@@ -167,6 +167,9 @@ struct SpeechRailApp: App {
             fatalError("Unable to initialize teleprompter v2 store")
         }
 #endif
+        TeleprompterAIObservability.install(
+            recorder: TeleprompterAIObservationRecorder(location: .default)
+        )
         let llmProvider = LLMProvider()
         let teleprompterSession = TeleprompterSession(
             coordinator: coordinator,
@@ -199,14 +202,15 @@ struct SpeechRailApp: App {
             default:
                 throw LLMError.unsupportedStructuredOutput
             }
-            return try await llmProvider.complete(
+            return try await llmProvider.completeJSON(
                 configuration: resolved.configuration,
-                messages: [LLMMessage(role: .user, text: prompt.input)],
                 apiKey: resolved.apiKey,
-                maxOutputTokens: maxOutputTokens,
-                textFormat: schema,
                 instructions: prompt.instructions,
-                timeout: timeout
+                input: prompt.input,
+                schema: schema,
+                maxOutputTokens: maxOutputTokens,
+                timeout: timeout,
+                observationContext: prompt.observationContext
             )
         }
         teleprompterSession.aiClient = TeleprompterAIClient { prompt in
@@ -215,13 +219,13 @@ struct SpeechRailApp: App {
                   !resolved.configuration.embedsCredential else {
                 throw LLMError.notConfigured
             }
-            return try await llmProvider.complete(
+            return try await llmProvider.completeJSON(
                 configuration: resolved.configuration,
-                messages: [LLMMessage(role: .user, text: prompt.input)],
                 apiKey: resolved.apiKey,
-                maxOutputTokens: 4000,
-                textFormat: TeleprompterAnalysis.jsonSchema,
                 instructions: prompt.instructions,
+                input: prompt.input,
+                schema: TeleprompterAnalysis.jsonSchema,
+                maxOutputTokens: 4000,
                 timeout: 45
             )
         }

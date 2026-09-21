@@ -6,6 +6,11 @@ import Foundation
 /// it cannot emit the removed `session.update` or conversation/response
 /// orchestration fields.
 public struct TranscriptionSessionUpdate: Sendable {
+    public enum PartialMode: String, Sendable {
+        case delta
+        case snapshot
+    }
+
     public let type = "transcription_session.update"
     public let model: String
     public let threshold: Double
@@ -15,6 +20,8 @@ public struct TranscriptionSessionUpdate: Sendable {
     public let diarizationEnabled: Bool
     public let expectedModelRevision: String?
     public let renderReceiptsEnabled: Bool
+    public let partialMode: PartialMode
+    public let chunkDurationMilliseconds: Int
 
     public init(
         model: String,
@@ -24,7 +31,9 @@ public struct TranscriptionSessionUpdate: Sendable {
         callerTTSEnabled: Bool = false,
         diarizationEnabled: Bool = false,
         expectedModelRevision: String? = nil,
-        renderReceiptsEnabled: Bool = false
+        renderReceiptsEnabled: Bool = false,
+        partialMode: PartialMode = .delta,
+        chunkDurationMilliseconds: Int = 2_000
     ) {
         self.model = model
         self.threshold = threshold
@@ -34,6 +43,8 @@ public struct TranscriptionSessionUpdate: Sendable {
         self.diarizationEnabled = diarizationEnabled
         self.expectedModelRevision = expectedModelRevision
         self.renderReceiptsEnabled = renderReceiptsEnabled
+        self.partialMode = partialMode
+        self.chunkDurationMilliseconds = chunkDurationMilliseconds
     }
 
     public var jsonObject: [String: Any] {
@@ -49,6 +60,10 @@ public struct TranscriptionSessionUpdate: Sendable {
         if renderReceiptsEnabled {
             speechrail["render_receipts"] = ["enabled": true]
         }
+        speechrail["transcription"] = [
+            "partial_mode": partialMode.rawValue,
+            "chunk_duration_ms": chunkDurationMilliseconds
+        ]
         return [
             "type": type,
             "session": [
@@ -151,10 +166,17 @@ public struct RealtimeEventMetadata: Codable, Equatable, Sendable {
 public struct RealtimeEventEnvelope<Payload: Sendable>: Sendable {
     public let metadata: RealtimeEventMetadata
     public let payload: Payload
+    /// Local monotonic receive time; never serialized or sent over the wire.
+    public let receivedAt: ContinuousClock.Instant
 
-    public init(metadata: RealtimeEventMetadata, payload: Payload) {
+    public init(
+        metadata: RealtimeEventMetadata,
+        payload: Payload,
+        receivedAt: ContinuousClock.Instant = ContinuousClock().now
+    ) {
         self.metadata = metadata
         self.payload = payload
+        self.receivedAt = receivedAt
     }
 }
 

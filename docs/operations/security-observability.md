@@ -1,7 +1,8 @@
 ---
 title: "SpeechRail 安全与可观测性"
 status: active
-date: 2026-09-16
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # SpeechRail 安全与可观测性
@@ -47,7 +48,7 @@ HTTP access 记录在响应完成或异常退出时各写一条，字段固定�
 
 `GET /metrics` 提供 Prometheus 文本（默认，`text/plain; version=0.0.4`）与 `Accept:
 application/json` 结构化两种视图。指标全部前缀 `speechrail_`，标签严格局限于低基数字典
-（`endpoint`、`method`、`status`、`class`、`component`、`voice`、`state`、`event`、
+（`endpoint`、`method`、`status`、`class`、`component`、`voice_class`、`state`、`event`、
 `reason`、`le`），绝不携带 request ID、会话 ID、动态文件名或转写正文。上传端点
 `/metrics` 与 `/health` 同属无鉴权系统端点（loopback-first）；非 loopback 暴露前须先完成
 CORS、TLS、网段限制与速率限制。`/metrics` 的 `endpoint` 标签对未匹配路由归一为

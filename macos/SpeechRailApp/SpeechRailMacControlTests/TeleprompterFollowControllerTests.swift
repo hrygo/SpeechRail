@@ -8,6 +8,21 @@ struct TeleprompterFollowControllerTests {
         try TeleprompterSegmenter.segment(sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。")
     }
 
+    @Test func latencyDiagnosticsReportsBoundedPercentiles() {
+        var diagnostics = TeleprompterLatencyDiagnostics(maxSamples: 3)
+        diagnostics.recordAlignment(queueAgeMilliseconds: 1, matchMilliseconds: 4)
+        diagnostics.recordAlignment(queueAgeMilliseconds: 2, matchMilliseconds: 5)
+        diagnostics.recordAlignment(queueAgeMilliseconds: 3, matchMilliseconds: 6)
+        diagnostics.recordAlignment(queueAgeMilliseconds: 40, matchMilliseconds: 60)
+        diagnostics.recordCaptureToSend(milliseconds: 7)
+
+        #expect(diagnostics.alignmentSampleCount == 3)
+        #expect(diagnostics.queueAgeP95Milliseconds == 40)
+        #expect(diagnostics.matchP95Milliseconds == 60)
+        #expect(diagnostics.captureSampleCount == 1)
+        #expect(diagnostics.captureToSendP95Milliseconds == 7)
+    }
+
     @Test func splitFinalsAccumulatePosition() throws {
         let segments = try script()
         var controller = TeleprompterFollowController()
@@ -31,6 +46,86 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.currentIndex == 0)
         controller.receiveCompleted(itemID: "a", transcript: "最后演示照片导出", segments: segments)
         #expect(controller.currentIndex == 0)
+    }
+
+    @Test func snapshotRevisionsReplaceTextAndFollowRevisions() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍",
+            segments: segments,
+            eventID: "s1"
+        )
+        #expect(controller.partialPreview == "今天我们介绍")
+        #expect(controller.currentIndex == 0)
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 2,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            eventID: "s2"
+        )
+        #expect(controller.currentIndex == 1)
+        #expect(controller.partialPreview == "今天我们介绍相机设置")
+    }
+
+    @Test func uniqueNearAnchorSnapshotCanAdvanceImmediately() throws {
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "开场。今天我们介绍相机设置。下一段。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            eventID: "s1"
+        )
+        #expect(controller.currentIndex == 1)
+    }
+
+    @Test func revisedSnapshotCannotMoveBackWithinTheCurrentSegment() throws {
+        let segments = try TeleprompterSegmenter.segment(sourceText: "今天我们介绍相机设置。")
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            eventID: "s1"
+        )
+        let advanced = controller.position
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 2,
+            text: "今天我们介绍相机",
+            segments: segments,
+            eventID: "s2"
+        )
+        #expect(controller.position == advanced)
+    }
+
+    @Test func duplicateSnapshotRevisionCannotAppendOrAdvance() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍",
+            segments: segments,
+            eventID: "s1"
+        )
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            eventID: "s1-duplicate"
+        )
+        #expect(controller.currentIndex == 0)
+        #expect(controller.partialPreview == "今天我们介绍")
     }
 
     @Test func detourHoldsAndFollowingSpeechRecovers() throws {

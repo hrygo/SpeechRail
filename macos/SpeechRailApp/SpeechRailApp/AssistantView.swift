@@ -46,9 +46,10 @@ public struct AssistantView: View {
     /// 记忆库那一栏：主动添加记忆的内联草稿
     @State private var isAddingMemory = false
     @State private var newMemoryDraft = ""
-    /// 就地配置对话模型的那三个字段（2026-09-19 用户反馈「门槛极高」之后加的）。
+    /// 就地配置对话模型的字段（2026-09-19 用户反馈「门槛极高」之后加的）。
     @State private var llmBaseURLDraft = ""
     @State private var llmModelDraft = ""
+    @State private var llmCompatibilityModeDraft: LLMCompatibilityMode = .openAICompatible
     @State private var llmKeyDraft = ""
     @State private var llmSaveNote: String?
     /// 钥匙串里有没有那一份密钥。**不在 body 里读**：那是一次可能被系统弹框拦下的
@@ -191,6 +192,7 @@ public struct AssistantView: View {
             mode = preferences.assistantMode
             llmBaseURLDraft = preferences.llmBaseURL
             llmModelDraft = preferences.llmModel
+            llmCompatibilityModeDraft = preferences.llmCompatibilityMode
             // 钥匙串**只在这里读一次**，而且不在主线程上读。
             //
             // 读钥匙串是一次可能被系统弹框拦下的同步调用（这一条目属于哪个 App 由
@@ -1196,8 +1198,7 @@ public struct AssistantView: View {
     /// 把人送去设置页，等于让他放下正在做的事、在一个有四组的表单里找到「会话」那一组，
     /// 填完再回来按第二次。这里只问三个字段，填完**原地开始**。
     ///
-    /// 接口不在这里选：今天只走 Responses API（兼容 OpenAI 的那一套），给一个选择器
-    /// 只会让"该选哪个"变成新的门槛；要换的地方在设置页，那里是给探索的人准备的。
+    /// 兼容协议在这里一起保存，避免用户第一次配置 OpenCode Go 时还要离开当前页面。
     private var llmSetupCard: some View {
         SessionPanel {
             SessionPanelHead(
@@ -1224,6 +1225,13 @@ public struct AssistantView: View {
                     text: $llmModelDraft,
                     isSecret: false
                 )
+                Picker("兼容协议", selection: $llmCompatibilityModeDraft) {
+                    ForEach(LLMCompatibilityMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .accessibilityHint("选择端点的兼容协议；SpeechRail 不主动开启 thinking。")
                 llmField(
                     label: "密钥",
                     hint: "那台服务不需要密钥就留空（如本地 Ollama）",
@@ -1231,7 +1239,7 @@ public struct AssistantView: View {
                     text: $llmKeyDraft,
                     isSecret: true
                 )
-                Text("接口固定走 Responses API（兼容 OpenAI 的那一套），不需要选。")
+                Text("兼容模式只影响请求字段；SpeechRail 不主动开启 thinking。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 if let llmSaveNote {
@@ -1289,6 +1297,7 @@ public struct AssistantView: View {
     private func saveLLMAndStart() async {
         preferences.llmBaseURL = llmBaseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         preferences.llmModel = llmModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        preferences.llmCompatibilityMode = llmCompatibilityModeDraft
         do {
             try LLMKeychain.save(llmKeyDraft)
         } catch {

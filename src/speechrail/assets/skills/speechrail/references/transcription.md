@@ -11,3 +11,8 @@ an artifact or application value; do not paste long or private transcripts
 into agent context. A speaker label is session-scoped and anonymous, not a
 person identity. For large/slow inputs use a transcription `create_job` whose
 `input_ref` is the allowed local input file.
+
+This tool does not expose live partials. If the caller owns a live WebSocket
+and needs mutable transcription for a teleprompter or live captions, use the
+direct Realtime guidance in `references/realtime.md`; do not try to encode
+audio chunks or a WebSocket handle in an MCP tool argument.

@@ -1,4 +1,491 @@
 import Foundation
+import OSLog
+
+public enum TeleprompterAIStage: String, Codable, Equatable, Sendable {
+    case preparation
+    case map
+    case reduce
+    case analysis
+}
+
+public enum TeleprompterAIObservationKind: String, Codable, Equatable, Sendable {
+    case runStarted = "run_started"
+    case runFinished = "run_finished"
+    case callStarted = "call_started"
+    case callFinished = "call_finished"
+    case callFailed = "call_failed"
+    case providerRequestStarted = "provider_request_started"
+    case providerResponse = "provider_response"
+    case providerFailed = "provider_failed"
+}
+
+public struct TeleprompterAICallContext: Codable, Equatable, Sendable {
+    public let runID: String
+    public let requestID: String
+    public let stage: TeleprompterAIStage
+    public let itemIndex: Int?
+    public let itemCount: Int?
+    public let attempt: Int
+
+    public init(
+        runID: String,
+        requestID: String,
+        stage: TeleprompterAIStage,
+        itemIndex: Int? = nil,
+        itemCount: Int? = nil,
+        attempt: Int = 0
+    ) {
+        self.runID = runID
+        self.requestID = requestID
+        self.stage = stage
+        self.itemIndex = itemIndex
+        self.itemCount = itemCount
+        self.attempt = max(0, attempt)
+    }
+}
+
+public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
+    public let kind: TeleprompterAIObservationKind
+    public let component: String
+    public let context: TeleprompterAICallContext?
+    public let elapsedMilliseconds: Int?
+    public let httpStatus: Int?
+    public let responseBytes: Int?
+    public let choiceCount: Int?
+    public let finishReason: String?
+    public let promptTokens: Int?
+    public let completionTokens: Int?
+    public let reasoningTokens: Int?
+    public let model: String?
+    public let endpointHost: String?
+    public let transportAttempt: Int?
+    public let operation: LLMOperation?
+    public let compatibilityMode: LLMCompatibilityMode?
+    public let thinkingControl: String?
+    public let outcome: String?
+    public let errorCode: String?
+
+    public init(
+        kind: TeleprompterAIObservationKind,
+        component: String = "pipeline",
+        context: TeleprompterAICallContext? = nil,
+        elapsedMilliseconds: Int? = nil,
+        httpStatus: Int? = nil,
+        responseBytes: Int? = nil,
+        choiceCount: Int? = nil,
+        finishReason: String? = nil,
+        promptTokens: Int? = nil,
+        completionTokens: Int? = nil,
+        reasoningTokens: Int? = nil,
+        model: String? = nil,
+        endpointHost: String? = nil,
+        transportAttempt: Int? = nil,
+        operation: LLMOperation? = nil,
+        compatibilityMode: LLMCompatibilityMode? = nil,
+        thinkingControl: String? = nil,
+        outcome: String? = nil,
+        errorCode: String? = nil
+    ) {
+        self.kind = kind
+        self.component = component
+        self.context = context
+        self.elapsedMilliseconds = elapsedMilliseconds
+        self.httpStatus = httpStatus
+        self.responseBytes = responseBytes
+        self.choiceCount = choiceCount
+        self.finishReason = finishReason
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.reasoningTokens = reasoningTokens
+        self.model = model
+        self.endpointHost = endpointHost
+        self.transportAttempt = transportAttempt
+        self.operation = operation
+        self.compatibilityMode = compatibilityMode
+        self.thinkingControl = thinkingControl
+        self.outcome = outcome
+        self.errorCode = errorCode
+    }
+}
+
+public typealias TeleprompterAIObservationHandler = @Sendable (TeleprompterAIObservation) -> Void
+
+public struct TeleprompterAIMetricHistogram: Codable, Equatable, Sendable {
+    public let count: Int
+    public let sumMilliseconds: Int
+    /// Cumulative upper-bound buckets, suitable for local aggregation or Prometheus conversion.
+    public let buckets: [String: Int]
+
+    public init(count: Int, sumMilliseconds: Int, buckets: [String: Int]) {
+        self.count = count
+        self.sumMilliseconds = sumMilliseconds
+        self.buckets = buckets
+    }
+}
+
+public struct TeleprompterAIMetricsSnapshot: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
+    public let recordType: String
+    public let capturedAt: Date
+    /// Keys contain only bounded dimensions: stage, operation, mode and outcome/error code.
+    public let counters: [String: Int]
+    public let histograms: [String: TeleprompterAIMetricHistogram]
+
+    public init(
+        schemaVersion: Int = 1,
+        recordType: String = "teleprompter_ai_metrics",
+        capturedAt: Date,
+        counters: [String: Int],
+        histograms: [String: TeleprompterAIMetricHistogram]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.recordType = recordType
+        self.capturedAt = capturedAt
+        self.counters = counters
+        self.histograms = histograms
+    }
+}
+
+private struct TeleprompterAIEventRecord: Codable {
+    let schemaVersion: Int
+    let recordType: String
+    let capturedAt: Date
+    let observation: TeleprompterAIObservation
+
+    init(capturedAt: Date, observation: TeleprompterAIObservation) {
+        self.schemaVersion = 1
+        self.recordType = "teleprompter_ai_event"
+        self.capturedAt = capturedAt
+        self.observation = observation
+    }
+}
+
+/// App-side LLM observability sink.
+///
+/// Event JSONL is intentionally append-only and contains only the already-redacted
+/// observation metadata. Metric aggregation happens on the same serial queue and
+/// is flushed as a daily cumulative snapshot when a preparation run or standalone
+/// provider request finishes. File I/O is fail-open and never runs on the provider
+/// request task.
+public final class TeleprompterAIObservationRecorder: @unchecked Sendable {
+    private static let durationBuckets: [(name: String, upperBound: Int)] = [
+        ("le_100", 100),
+        ("le_250", 250),
+        ("le_500", 500),
+        ("le_1000", 1_000),
+        ("le_2500", 2_500),
+        ("le_5000", 5_000),
+        ("le_10000", 10_000),
+        ("le_30000", 30_000),
+        ("le_60000", 60_000),
+        ("le_120000", 120_000),
+    ]
+
+    private static let logger = Logger(
+        subsystem: "com.speechrail.desktop",
+        category: "teleprompter.ai.recorder"
+    )
+
+    private let location: ObservabilityLocation
+    private let now: @Sendable () -> Date
+    private let queue = DispatchQueue(label: "com.speechrail.teleprompter-ai-observability")
+    private var counters: [String: Int] = [:]
+    private var histograms: [String: TeleprompterAIMetricHistogram] = [:]
+
+    public init(
+        location: ObservabilityLocation = .default,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.location = location
+        self.now = now
+    }
+
+    public func record(_ observation: TeleprompterAIObservation) {
+        let capturedAt = now()
+        queue.async { [self] in
+            updateMetrics(for: observation)
+            append(
+                TeleprompterAIEventRecord(capturedAt: capturedAt, observation: observation),
+                to: eventFileURL(for: capturedAt)
+            )
+            let isTerminalProviderObservation = observation.context == nil
+                && (observation.kind == .providerResponse || observation.kind == .providerFailed)
+            if observation.kind == .runFinished || isTerminalProviderObservation {
+                append(snapshot(capturedAt: capturedAt), to: metricsFileURL(for: capturedAt))
+            }
+        }
+    }
+
+    public func flush() {
+        queue.sync {}
+    }
+
+    public func snapshot() -> TeleprompterAIMetricsSnapshot {
+        queue.sync { snapshot(capturedAt: now()) }
+    }
+
+    public func eventFileURL(for date: Date) -> URL {
+        location.logDirectory
+            .appendingPathComponent("teleprompter-ai", isDirectory: true)
+            .appendingPathComponent("events-\(Self.dateStamp(for: date)).jsonl")
+    }
+
+    public func metricsFileURL(for date: Date) -> URL {
+        location.historyDirectory
+            .appendingPathComponent("teleprompter-ai", isDirectory: true)
+            .appendingPathComponent("metrics-\(Self.dateStamp(for: date)).jsonl")
+    }
+
+    private func updateMetrics(for observation: TeleprompterAIObservation) {
+        let dimensions = dimensions(for: observation)
+        switch observation.kind {
+        case .providerRequestStarted:
+            increment("speechrail_llm_provider_requests_total|\(dimensions)")
+            if (observation.transportAttempt ?? 0) > 0 {
+                increment(
+                    "speechrail_llm_provider_retries_total|operation=\(label(observation.operation?.rawValue))|mode=\(label(observation.compatibilityMode?.rawValue))"
+                )
+            }
+            if observation.thinkingControl == "omitted_after_rejection" {
+                increment(
+                    "speechrail_llm_thinking_control_retries_total|operation=\(label(observation.operation?.rawValue))|mode=\(label(observation.compatibilityMode?.rawValue))"
+                )
+            }
+        case .providerResponse:
+            increment(
+                "speechrail_llm_provider_responses_total|\(dimensions)|outcome=\(label(observation.outcome))"
+            )
+        case .providerFailed:
+            increment(
+                "speechrail_llm_provider_failures_total|\(dimensions)|error=\(label(observation.errorCode))"
+            )
+        case .callStarted:
+            if (observation.context?.attempt ?? 0) > 0 {
+                increment(
+                    "speechrail_llm_pipeline_retries_total|stage=\(label(observation.context?.stage.rawValue))"
+                )
+            }
+        case .callFinished:
+            increment("speechrail_llm_calls_total|\(dimensions)|outcome=completed")
+        case .callFailed:
+            increment(
+                "speechrail_llm_call_failures_total|\(dimensions)|error=\(label(observation.errorCode))"
+            )
+        case .runStarted:
+            break
+        case .runFinished:
+            increment("speechrail_llm_runs_total|outcome=\(label(observation.outcome))")
+        }
+
+        if let reasoningTokens = observation.reasoningTokens, reasoningTokens > 0 {
+            increment(
+                "speechrail_llm_reasoning_tokens_total|operation=\(label(observation.operation?.rawValue))|mode=\(label(observation.compatibilityMode?.rawValue))",
+                by: reasoningTokens
+            )
+        }
+
+        guard let elapsed = observation.elapsedMilliseconds, elapsed >= 0,
+              let metricName = durationMetricName(for: observation.kind) else {
+            return
+        }
+        let key = "\(metricName)|\(dimensions)|outcome=\(label(observation.outcome))"
+        var histogram = histograms[key] ?? .init(count: 0, sumMilliseconds: 0, buckets: [:])
+        var buckets = histogram.buckets
+        for bucket in Self.durationBuckets where elapsed <= bucket.upperBound {
+            buckets[bucket.name, default: 0] += 1
+        }
+        buckets["le_inf", default: 0] += 1
+        histogram = .init(
+            count: histogram.count + 1,
+            sumMilliseconds: histogram.sumMilliseconds + elapsed,
+            buckets: buckets
+        )
+        histograms[key] = histogram
+    }
+
+    private func increment(_ key: String, by value: Int = 1) {
+        counters[key, default: 0] += value
+    }
+
+    private func snapshot(capturedAt: Date) -> TeleprompterAIMetricsSnapshot {
+        .init(
+            capturedAt: capturedAt,
+            counters: counters,
+            histograms: histograms
+        )
+    }
+
+    private func append<T: Encodable>(_ value: T, to url: URL) {
+        do {
+            let fileManager = FileManager.default
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            var data = try encoder.encode(value)
+            data.append(0x0A)
+            if !fileManager.fileExists(atPath: url.path) {
+                fileManager.createFile(atPath: url.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            // Observability is fail-open: a full or unavailable log directory must
+            // never turn a successful provider response into an application error.
+            Self.logger.error(
+                "append_failed file=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func durationMetricName(for kind: TeleprompterAIObservationKind) -> String? {
+        switch kind {
+        case .providerResponse, .providerFailed:
+            "speechrail_llm_provider_duration_ms"
+        case .callFinished, .callFailed:
+            "speechrail_llm_call_duration_ms"
+        case .runFinished:
+            "speechrail_llm_run_duration_ms"
+        default:
+            nil
+        }
+    }
+
+    private func dimensions(for observation: TeleprompterAIObservation) -> String {
+        [
+            "stage=\(label(observation.context?.stage.rawValue))",
+            "operation=\(label(observation.operation?.rawValue))",
+            "mode=\(label(observation.compatibilityMode?.rawValue))",
+        ].joined(separator: "|")
+    }
+
+    private func label(_ value: String?) -> String {
+        let value = value?.isEmpty == false ? value! : "unknown"
+        let bounded = value.prefix(48)
+        let normalized = bounded.map { character in
+            character.isLetter || character.isNumber || character == "_" || character == "-" || character == "."
+                ? String(character)
+                : "_"
+        }.joined()
+        return normalized.isEmpty ? "unknown" : normalized
+    }
+
+    private static func dateStamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+}
+
+private final class TeleprompterAIRecorderBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorder: TeleprompterAIObservationRecorder?
+
+    func install(_ recorder: TeleprompterAIObservationRecorder?) {
+        lock.lock()
+        self.recorder = recorder
+        lock.unlock()
+    }
+
+    func record(_ observation: TeleprompterAIObservation) {
+        lock.lock()
+        let recorder = self.recorder
+        lock.unlock()
+        recorder?.record(observation)
+    }
+}
+
+public enum TeleprompterAIObservability {
+    private static let recorderBox = TeleprompterAIRecorderBox()
+
+    private static let logger = Logger(
+        subsystem: "com.speechrail.desktop",
+        category: "teleprompter.ai"
+    )
+
+    private static let applicationVersion: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info["CFBundleVersion"] as? String ?? "unknown"
+        return "\(version)(\(build))"
+    }()
+
+    public static func emit(
+        _ observation: TeleprompterAIObservation,
+        to handler: TeleprompterAIObservationHandler? = nil
+    ) {
+        handler?(observation)
+        recorderBox.record(observation)
+
+        let context = observation.context
+        let message = [
+            "app=\(applicationVersion)",
+            "kind=\(observation.kind.rawValue)",
+            "component=\(observation.component)",
+            "run_id=\(context?.runID ?? "-")",
+            "request_id=\(context?.requestID ?? "-")",
+            "stage=\(context?.stage.rawValue ?? "-")",
+            "index=\(context?.itemIndex.map(String.init) ?? "-")",
+            "count=\(context?.itemCount.map(String.init) ?? "-")",
+            "attempt=\(context.map { String($0.attempt) } ?? "-")",
+            "elapsed_ms=\(observation.elapsedMilliseconds.map(String.init) ?? "-")",
+            "http_status=\(observation.httpStatus.map(String.init) ?? "-")",
+            "response_bytes=\(observation.responseBytes.map(String.init) ?? "-")",
+            "choices=\(observation.choiceCount.map(String.init) ?? "-")",
+            "finish=\(observation.finishReason ?? "-")",
+            "prompt_tokens=\(observation.promptTokens.map(String.init) ?? "-")",
+            "completion_tokens=\(observation.completionTokens.map(String.init) ?? "-")",
+            "reasoning_tokens=\(observation.reasoningTokens.map(String.init) ?? "-")",
+            "model=\(observation.model ?? "-")",
+            "endpoint_host=\(observation.endpointHost ?? "-")",
+            "transport_attempt=\(observation.transportAttempt.map(String.init) ?? "-")",
+            "operation=\(observation.operation?.rawValue ?? "-")",
+            "compatibility_mode=\(observation.compatibilityMode?.rawValue ?? "-")",
+            "thinking_control=\(observation.thinkingControl ?? "-")",
+            "outcome=\(observation.outcome ?? "-")",
+            "error_code=\(observation.errorCode ?? "-")"
+        ].joined(separator: " ")
+
+        switch observation.kind {
+        case .callFailed, .providerFailed:
+            logger.error("\(message, privacy: .public)")
+        default:
+            logger.info("\(message, privacy: .public)")
+        }
+    }
+
+    public static func install(recorder: TeleprompterAIObservationRecorder?) {
+        recorderBox.install(recorder)
+    }
+
+    public static func errorCode(for error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if let error = error as? LLMError {
+            switch error {
+            case .notConfigured: return "not_configured"
+            case .badBaseURL: return "bad_base_url"
+            case .transport: return "transport"
+            case .http(let status, _): return "http_\(status)"
+            case .notChatAPI: return "not_chat_api"
+            case .notResponsesAPI: return "not_responses_api"
+            case .unsupportedStructuredOutput: return "unsupported_structured_output"
+            case .outputTruncated: return "output_truncated"
+            case .invalidStructuredResponse: return "invalid_structured_response"
+            case .refused: return "refused"
+            case .cancelled: return "cancelled"
+            }
+        }
+        if error is TeleprompterPreparationError { return "preparation_error" }
+        return "unknown"
+    }
+}
 
 public enum TeleprompterPreparationPhase: String, Codable, Equatable, Sendable {
     case mapping
@@ -201,6 +688,7 @@ public struct TeleprompterPreparationResult: Codable, Equatable, Sendable {
 public struct TeleprompterPreparationPipeline: Sendable {
     public typealias Completion = @Sendable (TeleprompterPreparationPrompt) async throws -> String
     public typealias ProgressHandler = @Sendable (TeleprompterPreparationProgress) -> Void
+    public typealias ObservationHandler = TeleprompterAIObservationHandler
 
     private let completion: Completion
     private let policy: TeleprompterPreparationPolicy
@@ -215,8 +703,37 @@ public struct TeleprompterPreparationPipeline: Sendable {
 
     public func prepare(
         _ input: TeleprompterPreparationInput,
-        onProgress: ProgressHandler? = nil
+        onProgress: ProgressHandler? = nil,
+        onObservation: ObservationHandler? = nil
     ) async throws -> TeleprompterPreparationResult {
+        let runID = UUID().uuidString
+        let runStartedAt = Date()
+        let runContext = TeleprompterAICallContext(
+            runID: runID,
+            requestID: runID,
+            stage: .preparation
+        )
+        var completed = false
+        observe(
+            .init(
+                kind: .runStarted,
+                context: runContext,
+                outcome: "started"
+            ),
+            onObservation: onObservation
+        )
+        defer {
+            observe(
+                .init(
+                    kind: .runFinished,
+                    context: runContext,
+                    elapsedMilliseconds: elapsedMilliseconds(since: runStartedAt),
+                    outcome: completed ? "completed" : "failed"
+                ),
+                onObservation: onObservation
+            )
+        }
+
         let selection = try validate(input)
         var windows = try makeWindows(selection: selection, input: input)
         onProgress?(.init(phase: .mapping, completed: 0, total: windows.count))
@@ -264,11 +781,38 @@ public struct TeleprompterPreparationPipeline: Sendable {
                     targets: targets,
                     window: window,
                     sourceUnits: sourceUnits,
-                    pace: input.pace
+                    pace: input.pace,
+                    context: .init(
+                        runID: runID,
+                        requestID: UUID().uuidString,
+                        stage: .map,
+                        itemIndex: windowIndex,
+                        itemCount: windows.count
+                    ),
+                    onObservation: onObservation
                 )
             } catch is CancellationError {
                 throw CancellationError()
             } catch let initialError {
+                if isTruncatedMapFailure(initialError) {
+                    guard window.sourceUnitIDs.count > 1,
+                          !splitWindowIDs.contains(window.id),
+                          recoveryRequestCount + 2 <= recoveryBudget else {
+                        throw normalizedMapFailure(initialError)
+                    }
+                    let children = try split(window: window, timingPlan: input.timingPlan)
+                    // 两个子请求均是原请求之外的额外工作；预留预算，禁止子窗递归拆分。
+                    recoveryRequestCount += children.count
+                    splitWindowIDs.formUnion(children.map(\.id))
+                    windows.replaceSubrange(windowIndex...windowIndex, with: children)
+                    windows = windows.enumerated().map { index, item in
+                        .init(id: item.id, ordinal: index, sourceUnitIDs: item.sourceUnitIDs,
+                              localBudgetSeconds: item.localBudgetSeconds)
+                    }
+                    onProgress?(.init(phase: .mapping, completed: windowIndex,
+                                      total: windows.count, currentIndex: windowIndex))
+                    continue
+                }
                 var failure: Error = initialError
                 let canRetryTransient = isTransientProviderFailure(initialError)
                 let canRecoverStructure = isStructuralMapFailure(initialError)
@@ -287,7 +831,16 @@ public struct TeleprompterPreparationPipeline: Sendable {
                         targets: targets,
                         window: window,
                         sourceUnits: sourceUnits,
-                        pace: input.pace
+                        pace: input.pace,
+                        context: .init(
+                            runID: runID,
+                            requestID: UUID().uuidString,
+                            stage: .map,
+                            itemIndex: windowIndex,
+                            itemCount: windows.count,
+                            attempt: 1
+                        ),
+                        onObservation: onObservation
                     )
                 } catch is CancellationError {
                     throw CancellationError()
@@ -296,29 +849,6 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 }
 
                 if states == nil {
-                    if isStructuralMapFailure(failure),
-                       window.sourceUnitIDs.count > 1,
-                       !splitWindowIDs.contains(window.id),
-                       recoveryRequestCount < recoveryBudget {
-                        let splitWindows = try split(window: window, timingPlan: input.timingPlan)
-                        splitWindowIDs.insert(window.id)
-                        windows.replaceSubrange(windowIndex...windowIndex, with: splitWindows)
-                        windows = windows.enumerated().map { index, item in
-                            .init(
-                                id: item.id,
-                                ordinal: index,
-                                sourceUnitIDs: item.sourceUnitIDs,
-                                localBudgetSeconds: item.localBudgetSeconds
-                            )
-                        }
-                        onProgress?(.init(
-                            phase: .mapping,
-                            completed: windowIndex,
-                            total: windows.count,
-                            currentIndex: windowIndex
-                        ))
-                        continue
-                    }
                     throw normalizedMapFailure(failure)
                 }
             }
@@ -391,8 +921,19 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 calibrationFactor: input.calibrationFactor
             )
             reduceRequestCount += 1
+            let context = TeleprompterAICallContext(
+                runID: runID,
+                requestID: UUID().uuidString,
+                stage: .reduce,
+                itemIndex: boundaryIndex,
+                itemCount: reduceBoundaries.count
+            )
             do {
-                let response = try await call(prompt)
+                let response = try await call(
+                    prompt,
+                    context: context,
+                    onObservation: onObservation
+                )
                 try Task.checkCancellation()
                 let output = try TeleprompterReduceDecoder().decode(
                     response,
@@ -404,6 +945,15 @@ public struct TeleprompterPreparationPipeline: Sendable {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                observe(
+                    .init(
+                        kind: .callFailed,
+                        component: "reduce_decoder",
+                        context: context,
+                        errorCode: TeleprompterAIObservability.errorCode(for: error)
+                    ),
+                    onObservation: onObservation
+                )
                 boundary.state = .unchecked
                 boundary.failureMessage = "boundary reduction unavailable"
             }
@@ -434,6 +984,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
             status = .complete
         }
         onProgress?(.init(phase: .finalizing, completed: 1, total: 1))
+        completed = true
         return .init(
             draft: draft,
             status: status,
@@ -449,6 +1000,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
 /// scheduling, validation, cancellation, and assembly remain in the pipeline.
 public struct TeleprompterPreparationClient: Sendable {
     public typealias Completion = @Sendable (TeleprompterPreparationPrompt) async throws -> String
+    public typealias ObservationHandler = TeleprompterAIObservationHandler
 
     private let pipeline: TeleprompterPreparationPipeline
 
@@ -461,9 +1013,14 @@ public struct TeleprompterPreparationClient: Sendable {
 
     public func prepare(
         _ input: TeleprompterPreparationInput,
-        onProgress: TeleprompterPreparationPipeline.ProgressHandler? = nil
+        onProgress: TeleprompterPreparationPipeline.ProgressHandler? = nil,
+        onObservation: ObservationHandler? = nil
     ) async throws -> TeleprompterPreparationResult {
-        try await pipeline.prepare(input, onProgress: onProgress)
+        try await pipeline.prepare(
+            input,
+            onProgress: onProgress,
+            onObservation: onObservation
+        )
     }
 }
 
@@ -501,8 +1058,16 @@ private extension TeleprompterPreparationPipeline {
     }
 
     func isStructuralMapFailure(_ error: Error) -> Bool {
+        if let failure = error as? ProviderCallFailure {
+            return (failure.underlying as? LLMError) == .invalidStructuredResponse
+        }
         guard let error = error as? TeleprompterPreparationError else { return false }
         return error == .invalidPromptResponse
+    }
+
+    func isTruncatedMapFailure(_ error: Error) -> Bool {
+        guard let failure = error as? ProviderCallFailure else { return false }
+        return (failure.underlying as? LLMError) == .outputTruncated
     }
 
     func isTransientProviderFailure(_ error: Error) -> Bool {
@@ -540,16 +1105,85 @@ private extension TeleprompterPreparationPipeline {
         }
     }
 
-    func call(_ prompt: TeleprompterPreparationPrompt) async throws -> String {
+    func observe(
+        _ observation: TeleprompterAIObservation,
+        onObservation: TeleprompterAIObservationHandler?
+    ) {
+        TeleprompterAIObservability.emit(observation, to: onObservation)
+    }
+
+    func call(
+        _ prompt: TeleprompterPreparationPrompt,
+        context: TeleprompterAICallContext,
+        onObservation: TeleprompterAIObservationHandler?
+    ) async throws -> String {
+        let prompt = prompt.withObservationContext(context)
+        let startedAt = Date()
+        observe(
+            .init(
+                kind: .callStarted,
+                context: context,
+                outcome: "started"
+            ),
+            onObservation: onObservation
+        )
         do {
-            return try await completion(prompt)
+            let response = try await completion(prompt)
+            observe(
+                .init(
+                    kind: .callFinished,
+                    context: context,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+                    outcome: "completed"
+                ),
+                onObservation: onObservation
+            )
+            return response
         } catch is CancellationError {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    context: context,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+                    outcome: "cancelled",
+                    errorCode: "cancelled"
+                ),
+                onObservation: onObservation
+            )
             throw CancellationError()
         } catch let error as LLMError where error == .cancelled {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    context: context,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+                    outcome: "cancelled",
+                    errorCode: "cancelled"
+                ),
+                onObservation: onObservation
+            )
             throw CancellationError()
         } catch let error as TeleprompterPreparationError {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    context: context,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                ),
+                onObservation: onObservation
+            )
             throw error
         } catch {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    context: context,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                ),
+                onObservation: onObservation
+            )
             throw ProviderCallFailure(underlying: error)
         }
     }
@@ -559,21 +1193,44 @@ private extension TeleprompterPreparationPipeline {
         targets: [TeleprompterSourceUnit],
         window: TeleprompterPreparationMapWindow,
         sourceUnits: [Int: TeleprompterSourceUnit],
-        pace: TeleprompterPace
+        pace: TeleprompterPace,
+        context: TeleprompterAICallContext,
+        onObservation: TeleprompterAIObservationHandler?
     ) async throws -> [BlockState] {
-        let response = try await call(prompt)
+        let response = try await call(
+            prompt,
+            context: context,
+            onObservation: onObservation
+        )
         try Task.checkCancellation()
-        let output = try TeleprompterMapDecoder().decode(
-            response,
-            targets: targets,
-            maxGroupUnits: policy.maxGroupUnits
-        )
-        return try makeBlockStates(
-            output: output,
-            window: window,
-            sourceUnits: sourceUnits,
-            pace: pace
-        )
+        do {
+            let output = try TeleprompterMapDecoder().decode(
+                response,
+                targets: targets,
+                maxGroupUnits: policy.maxGroupUnits
+            )
+            return try makeBlockStates(
+                output: output,
+                window: window,
+                sourceUnits: sourceUnits,
+                pace: pace
+            )
+        } catch {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    component: "map_decoder",
+                    context: context,
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                ),
+                onObservation: onObservation
+            )
+            throw error
+        }
+    }
+
+    func elapsedMilliseconds(since start: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(start) * 1_000))
     }
 
     func validate(_ input: TeleprompterPreparationInput) throws -> Selection {

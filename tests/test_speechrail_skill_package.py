@@ -13,6 +13,9 @@ def test_packaged_speechrail_skill_covers_the_published_mcp_surface() -> None:
     assert "describe" in skill
     assert manifest["skill"] == "speechrail"
     assert len(manifest["tools"]) == 15
+    assert "references/realtime.md" in manifest["references"]
+    realtime = root.joinpath("references", "realtime.md").read_text(encoding="utf-8")
+    assert "speechrail.transcription.snapshot" in realtime
     assert set(manifest["resources"]) == {
         "speechrail://capabilities",
         "speechrail://voices",

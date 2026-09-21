@@ -207,6 +207,30 @@ def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
         metrics.record_realtime_phase("request_id_or_text", 0.01)
 
 
+def test_realtime_partial_metrics_classify_delivery_without_text_labels() -> None:
+    metrics = Metrics()
+    for outcome in (
+        "delta_sent",
+        "snapshot_sent",
+        "rewrite_withheld",
+        "duplicate_suppressed",
+    ):
+        metrics.record_realtime_partial(outcome)
+    text = metrics.render_prometheus()
+
+    assert "speechrail_realtime_partial_events_total" in text
+    for outcome in (
+        "delta_sent",
+        "snapshot_sent",
+        "rewrite_withheld",
+        "duplicate_suppressed",
+    ):
+        assert f'outcome="{outcome}"' in text
+    assert "abc" not in text
+    with pytest.raises(ValueError, match="unsupported realtime partial outcome"):
+        metrics.record_realtime_partial("full_transcript")
+
+
 def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> None:
     metrics = Metrics()
 

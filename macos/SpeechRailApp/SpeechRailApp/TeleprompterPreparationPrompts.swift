@@ -16,17 +16,30 @@ public struct TeleprompterPreparationPrompt: Equatable, Sendable {
     public let input: String
     public let schemaVersion: String
     public let promptVersion: String
+    public let observationContext: TeleprompterAICallContext?
 
     public init(
         instructions: String,
         input: String,
         schemaVersion: String,
-        promptVersion: String = ""
+        promptVersion: String = "",
+        observationContext: TeleprompterAICallContext? = nil
     ) {
         self.instructions = instructions
         self.input = input
         self.schemaVersion = schemaVersion
         self.promptVersion = promptVersion
+        self.observationContext = observationContext
+    }
+
+    public func withObservationContext(_ context: TeleprompterAICallContext) -> Self {
+        .init(
+            instructions: instructions,
+            input: input,
+            schemaVersion: schemaVersion,
+            promptVersion: promptVersion,
+            observationContext: context
+        )
     }
 }
 
@@ -434,6 +447,14 @@ public enum TeleprompterPreparationPromptBuilder {
         guard !targets.isEmpty, maxGroupUnits > 0 else {
             throw TeleprompterPreparationError.invalidPromptResponse
         }
+        let sourceStart = targets[0].id
+        guard sourceStart >= 0, targets.last!.id < Int.max,
+              targets.enumerated().allSatisfy({ $0.element.id >= sourceStart && $0.element.id - sourceStart == $0.offset }) else {
+            throw TeleprompterPreparationError.invalidSourceUnits
+        }
+        func localContext(_ items: [TeleprompterMapContextItem]) -> [TeleprompterMapContextItem] {
+            items.filter { $0.id >= 0 }.map { .init(id: $0.id - sourceStart, rawText: $0.rawText) }
+        }
         let input = TeleprompterPreparationMapInput(
             operation: operation,
             formatHint: formatHint,
@@ -445,22 +466,29 @@ public enum TeleprompterPreparationPromptBuilder {
                 pace: pace,
                 calibrationFactor: calibrationFactor
             ),
-            readOnlyContext: readOnlyContext,
-            targets: targets.map { target in
+            readOnlyContext: .init(hints: localContext(readOnlyContext.hints),
+                                   before: localContext(readOnlyContext.before),
+                                   after: localContext(readOnlyContext.after)),
+            targets: targets.enumerated().map { index, target in
                 .init(
-                    id: target.id,
+                    id: index,
                     rawText: target.rawText,
                     continuation: target.continuation,
                     protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: target.rawText)
                 )
             },
-            currentBlocks: currentBlocks
+            currentBlocks: currentBlocks.compactMap { block in
+                let start = max(sourceStart, block.startUnit)
+                let end = min(targets.last!.id + 1, block.endUnit)
+                guard start < end else { return nil }
+                return .init(startUnit: start - sourceStart, endUnit: end - sourceStart, text: block.text)
+            }
         )
         return .init(
             instructions: mapInstructions,
             input: try encode(input),
             schemaVersion: "teleprompter.preparation.v2",
-            promptVersion: "preparation.prompt.v3"
+            promptVersion: "preparation.prompt.v4"
         )
     }
 
@@ -517,6 +545,7 @@ public enum TeleprompterPreparationPromptBuilder {
         可以拆长句、调整连接词、补足原文唯一明确的主语，把标题、列表和表格自然转成朗读表达；表格必须保持行列对应、值、单位和条件。不得摘要、扩写、翻译、自行纠错、删除代码/公式/复杂内容、把“可能”改成“会”，也不能为了时长加入开场白、总结、互动套话或停顿秒数。代码、公式、复杂图表在“逐字读还是解释”不明确时返回 review；真实歧义或指代不能唯一确定时返回 review。
         targets[].protected_literals 必须在对应正文中原样保留，不能改数字、单位、URL、标识符、负号或技术字符。不要自行转换数字、单位或展开缩写。孤立 Markdown 标记、未闭合围栏和格式混乱不是拒绝输入的理由；按语义处理，不能只因像 Markdown 就删除事实。
         输出 blocks，按原顺序以 [start_unit,end_unit) 连续覆盖 targets 恰好一次，不遗漏、重叠、重排或引用背景编号；每组最多 max_group_units。speak 必须返回完整、非空朗读正文且 issues=[]；review 的 issues 至少一个且不得含 nonspoken_content，text 可以为空；omit 只能 text="" 且 issues=["nonspoken_content"]，它只是建议，最终由用户决定。
+        targets.id 是当前窗口内从 0 开始的连续编号；第一组 start_unit=0，最后一组 end_unit=targets 数量。背景编号可为负数或超过目标范围，禁止作为输出来源；全稿来源编号由应用恢复。
         timing 是应用给出的篇幅计划，不是实际音频时长。优先保真，在 local_budget_seconds 内尽量自然紧凑；无法兼顾时不能删信息、加内容、虚构语速、自报秒数或声称达标，允许提前读完。operation=tighten 只消除冗余措辞和句法冗余，不合并来源块，不改变事实，不覆盖用户编辑。
         提交前检查每个目标只覆盖一次、所有限定条件和 protected_literals 保留、表格对应未变、没有从背景引入新事实。只返回 teleprompter.preparation.v2 的 JSON Schema，不返回解释、推理、Markdown 包装或正文之外的编辑说明。
         """
@@ -630,10 +659,13 @@ public struct TeleprompterMapDecoder: Sendable {
             guard payload.schemaVersion == "teleprompter.preparation.v2" else {
                 throw TeleprompterPreparationError.invalidPromptResponse
             }
-            let expectedIDs = targets.map(\.id)
-            let firstID = expectedIDs[0]
-            let finalID = expectedIDs[expectedIDs.count - 1] + 1
-            var nextID = firstID
+            let firstID = targets[0].id
+            guard firstID >= 0, targets.last!.id < Int.max,
+                  targets.enumerated().allSatisfy({ $0.element.id >= firstID && $0.element.id - firstID == $0.offset }) else {
+                throw TeleprompterPreparationError.invalidSourceUnits
+            }
+            let finalID = targets.count
+            var nextID = 0
             for block in payload.blocks {
                 guard block.startUnit == nextID,
                       block.endUnit > block.startUnit,
@@ -641,8 +673,7 @@ public struct TeleprompterMapDecoder: Sendable {
                       block.endUnit - block.startUnit <= maxGroupUnits else {
                     throw TeleprompterPreparationError.invalidPromptResponse
                 }
-                let protectedLiterals = Set(targets
-                    .filter { $0.id >= block.startUnit && $0.id < block.endUnit }
+                let protectedLiterals = Set(targets[block.startUnit..<block.endUnit]
                     .flatMap { TeleprompterProtectedLiteralExtractor.extract(from: $0.rawText) })
                 switch block.mode {
                 case .speak:
@@ -669,7 +700,12 @@ public struct TeleprompterMapDecoder: Sendable {
             guard nextID == finalID, !payload.blocks.isEmpty else {
                 throw TeleprompterPreparationError.invalidPromptResponse
             }
-            return payload
+            // Wire 坐标只在本窗口有效；业务层和持久化层始终使用全局来源坐标。
+            return .init(blocks: payload.blocks.map { block in
+                .init(startUnit: targets[block.startUnit].id,
+                      endUnit: targets[block.endUnit - 1].id + 1,
+                      mode: block.mode, text: block.text, issues: block.issues)
+            })
         } catch let error as TeleprompterPreparationError {
             throw error
         } catch {
@@ -799,9 +835,9 @@ enum TeleprompterStrictJSON {
             while index < bytes.count {
                 switch bytes[index] {
                 case 0x22:
-                    let string = String(decoding: bytes[start..<index], as: UTF8.self)
                     index += 1
-                    return string
+                    // 按 JSON 转义后的实际字符串比较 key，拒绝 name / \u006eame 等同名键。
+                    return try JSONDecoder().decode(String.self, from: Data(bytes[(start - 1)..<index]))
                 case 0x5C:
                     index += 1
                     guard index < bytes.count else { throw TeleprompterPreparationError.invalidPromptResponse }

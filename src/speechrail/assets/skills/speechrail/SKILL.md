@@ -27,8 +27,10 @@ publish, download models, restart services, or upload user data.
    a cold/unknown runtime makes the evidence unevaluated, so refresh discovery
    and validate again instead of retrying blindly.
 4. Use local paths or `file://` URIs for audio. Never put audio/base64 in the
-   prompt or tool arguments. Realtime full-duplex remains caller-owned at
-   `/v1/realtime`; MCP does not create a conversation or WebSocket session.
+   prompt or tool arguments. The MCP `transcribe` tool is request/response;
+   Realtime full-duplex remains caller-owned at `/v1/realtime`. MCP does not
+   create a conversation or WebSocket session. Read
+   `references/realtime.md` when a caller needs low-latency mutable partials.
 5. Return or open the artifact path produced by the tool. Do not paste audio,
    long transcripts, reference text, or private paths into the conversation.
 6. Retry only when the error says it is retryable. Use bounded exponential
@@ -40,6 +42,7 @@ publish, download models, restart services, or upload user data.
 |---|---|
 | discover tools, capabilities, revisions | `references/discovery.md` |
 | transcribe, diarize, timestamps | `references/transcription.md` |
+| caller-owned Realtime transcription and mutable partials | `references/realtime.md` |
 | render speech and choose a voice | `references/synthesis.md` |
 | preview, design, clone, inspect, validate, delete voices | `references/voices.md` |
 | create, poll, cancel, list, or recover a job | `references/jobs.md` |
@@ -53,5 +56,7 @@ The skill covers all published tools: `describe`, `transcribe`, `synthesize`,
 `cancel_job`, `get_voice`, `design_voice`, `clone_voice`, `validate_voice`,
 `list_jobs`, and `get_job_result`. It also covers the read-only resources
 `speechrail://capabilities`, `speechrail://voices`, and
-`speechrail://models`. Use only tools actually advertised by the connected
-server; the manifest is a coverage contract, not permission to invent tools.
+`speechrail://models`. The Realtime reference documents a direct WebSocket
+extension; it does not add an MCP tool or authorize a private REST route. Use
+only tools actually advertised by the connected server; the manifest is a
+coverage contract, not permission to invent tools.

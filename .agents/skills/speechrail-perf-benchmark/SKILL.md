@@ -48,7 +48,7 @@ description: >-
 |---|---|---|
 | PATCH | 当前部署 profile | 不为基准切档；与同机同口径版本纵向比较 |
 | MINOR | `quality`、`balanced`、`light` | active → 其余档 → active，逐档恢复 |
-| MAJOR | 三档完整套件 | 另加迁移、兼容客户端和回退验证 |
+| MAJOR | 三档完整套件 | 另加当前公共契约、消费者 smoke 与回退验证；不把旧数据迁移视为默认测试项 |
 
 若改动影响未覆盖的 profile、模型、共同 runtime 或 benchmark 工具，说明扩大覆盖的理由；只有授权包含
 对应切档和测量时才执行。三档测量按初始档 → 其余档 → 初始档串行推进。纯文档改动不制造

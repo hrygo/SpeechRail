@@ -2,8 +2,8 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 能力诊断与质量验收
@@ -21,7 +21,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 ### 历史 v2.0.3 运行快照（2026-09-09；证据）
 
 本节保留当时 quality managed release 的运行证据，不代表当前服务状态。源码 release 当前为
-`3.0.0`；managed runtime 的 active release、profile、health 和 readiness 必须在验收时通过
+`3.0.2`；managed runtime 的 active release、profile、health 和 readiness 必须在验收时通过
 本节前述 `service status`、`preflight` 与公开端点重新核实，不能由历史快照或 `/readyz=200`
 推断当前质量通过。
 
@@ -38,7 +38,13 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 上述 subtitle/meeting policy 是调用方通过 Realtime `transcription_session.update.session.turn_detection` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
 
-先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`。恢复顺序固定为：`uv run speechrail service status --app-home "$APP_HOME"` → `uv run speechrail service preflight --app-home "$APP_HOME"` → `curl http://127.0.0.1:8201/health`。带 `--app-home` 的 service CLI 会自动使用 active managed runtime；不需要手工从源码 `.venv` 运行 preflight。若 `realtime_vad.code=vad_runtime_missing`，应修复当前 managed release 并重新发布，再重复 preflight；不要在客户端单独安装 SDK，也不要把已配置的 Silero 模型静默降级成 legacy。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status --app-home "$APP_HOME"` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
+先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`，并使用
+`"$APP_HOME/runtime/current/.venv/bin/speechrail"`。恢复顺序固定为：`service status` →
+`service preflight` → `curl http://127.0.0.1:8201/health`。带 `--app-home` 的 service CLI 会自动使用
+active managed runtime；不要用源码 `.venv` 推断安装态。若 `realtime_vad.code=vad_runtime_missing`，应修复当前
+managed release 并重新发布，再重复 preflight；不要在客户端单独安装 SDK，也不要把已配置的 Silero 模型静默降级成
+legacy。若 profile 未配置或 artifact 不可用，再用同一 managed CLI 的 `profile status --app-home "$APP_HOME"`
+检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史快照或 `readyz=200` 记作当前质量通过。
 
 ## 三档能力门控与按档位精度
 

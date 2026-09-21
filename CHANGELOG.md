@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-09-21
+
+### Added
+
+- 新增 AI 提词稿的有界整理、可恢复重试、跟读延迟观测和脱敏 JSONL 日志/metrics，覆盖 Chat、Responses、流式与后台轮询路径。
+- 新增任意 OpenAI-compatible endpoint/model ID 配置，并支持 OpenCode Go 与本机模板兼容模式。
+
+### Changed
+
+- SpeechRail 所有 LLM 模式不主动开启 thinking；通用模式使用标准关闭字段，provider 拒绝后最多省略控制字段重试一次。
+- macOS App 与服务版本统一升级到 3.1.0，App build 升至 22。
+
 ## [3.0.2] - 2026-09-20
 
 ### Changed

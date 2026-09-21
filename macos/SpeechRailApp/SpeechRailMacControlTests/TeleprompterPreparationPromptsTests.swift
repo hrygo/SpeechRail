@@ -5,6 +5,39 @@ import Testing
 #endif
 
 struct TeleprompterPreparationPromptsTests {
+    @Test func mapUsesLocalCoordinatesAndDecoderRestoresGlobalSources() throws {
+        let targets = [24, 25].enumerated().map { index, id in
+            TeleprompterSourceUnit(id: id, ordinal: id, sourceRevisionID: "r",
+                                  sourceRange: .init(start: index * 3, end: index * 3 + 3),
+                                  rawText: "正文。", continuation: false, budgetUnits: 9)
+        }
+        let prompt = try TeleprompterPreparationPromptBuilder.map(
+            targets: targets, formatHint: .plaintext, globalTargetSeconds: 600,
+            localBudgetSeconds: 10, weightMode: .estimatedDuration, pace: .natural,
+            operation: .tighten, currentBlocks: [.init(startUnit: 24, endUnit: 26, text: "正文。正文。")],
+            readOnlyContext: .init(before: [.init(id: 23, rawText: "前文")],
+                                   after: [.init(id: 26, rawText: "后文")])
+        )
+        let input = try JSONDecoder().decode(TeleprompterPreparationMapInput.self, from: Data(prompt.input.utf8))
+        #expect(input.targets.map(\.id) == [0, 1])
+        #expect(input.currentBlocks[0].startUnit == 0)
+        #expect(input.currentBlocks[0].endUnit == 2)
+        #expect(input.readOnlyContext.before[0].id == -1)
+        #expect(input.readOnlyContext.after[0].id == 2)
+        let output = try TeleprompterMapDecoder().decode(
+            #"{"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":2,"mode":"speak","text":"正文。正文。","issues":[]}]}"#,
+            targets: targets, maxGroupUnits: 8
+        )
+        #expect(output.blocks[0].startUnit == 24)
+        #expect(output.blocks[0].endUnit == 26)
+    }
+
+    @Test func escapedDuplicateJSONKeysAreRejected() throws {
+        #expect(throws: (any Error).self) {
+            try TeleprompterStrictJSON.object(from: Data(#"{"name":1,"\u006eame":2}"#.utf8))
+        }
+    }
+
     private func sourceUnits() throws -> [TeleprompterSourceUnit] {
         let source = try TeleprompterSourceImporter.importData(
             Data("## 上线条件\n\n- 测试通过后方可上线\n- 延迟不得超过 200 ms。".utf8),

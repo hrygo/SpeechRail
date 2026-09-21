@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.1.0"
+date: 2026-09-21
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -30,7 +30,7 @@ graph TD
 
 1. **[📋 产品范围与职责划分 (product-scope.md)](product-scope.md)**：界定系统“拥有什么”与“不拥有什么”，明确应用侧与服务侧的契约划分。
 2. **[🏛️ 总体架构与数据流 (architecture.md)](architecture.md)**：解析主进程与 Worker 拓扑、3-Tier 内存解码器、Resource Governor、WorkerLeaseLock 与私有长度前缀 IPC 协议。
-3. **[🎙️ 无状态 Speech Plane 与调用方编排](../superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)**：当前 `3.0.0` 的唯一 Realtime 方向；服务端只提供语音事实与显式 TTS render，调用方拥有助手编排。
+3. **[🎙️ 无状态 Speech Plane 与调用方编排](../superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)**：当前 `3.0.2` 的 Realtime 责任边界；服务端只提供语音事实与显式 TTS render，调用方拥有助手编排。
 4. **[🛡️ 当前边界与剩余风险 (current-boundaries.md)](current-boundaries.md)**：明确当前已实测能力与发布前必须遵守的安全与容量红线。
 5. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：追溯重大技术选型的历史背景、权衡与替代方案。
 6. **[⚖️ OpenAI 契约对标审查 (openai-conformance-audit.md)](openai-conformance-audit.md)**（`superseded`）：历史审计；不得作为当前 Realtime 事件或兼容策略依据。
@@ -48,11 +48,11 @@ graph TD
 
 ## 生成式注册补充入口
 
-[生成式音色注册](generated-voice-registration.md) 说明 `/v1/voices/designs` 的发布时点、资源边界、来源记录、失败回退，以及 Sona 新旧入口的兼容策略。
+[生成式音色注册](generated-voice-registration.md) 说明 `/v1/voices/designs` 的资源边界、来源记录和失败回退；当前 API 不提供旧数据迁移层。
 
 ## 🔑 核心架构原则
 
 > [!IMPORTANT]
 > 1. **单机共享但有界并行**：专为本机单人多应用设计，通过队列与 Resource Governor 防范资源争抢，严禁引入多租户或分布式复杂性。
 > 2. **分层进程边界**：ASR/TTS 模型运算封装在独立 Python Worker 进程中；VAD 位于 FastAPI 主进程，而分人模型位于专用 Swift/CoreML worker。主服务通过私有二进制 IPC 调度外部 Worker。
-> 3. **瞬态生命周期与零外呼**：请求期间严格离线加载外部 Snapshot，音频与转写文本内存瞬态处理，严禁持久化原始数据。
+> 3. **请求路径本地化**：请求期间不下载模型、不读取远程音频 URL；音频与完整转写不写入普通日志或仓库。显式安装和模型准备命令可以联网供给本机制品。

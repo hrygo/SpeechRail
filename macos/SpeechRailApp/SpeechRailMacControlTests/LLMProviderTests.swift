@@ -4,13 +4,13 @@ import XCTest
 @testable import SpeechRailAppSupport
 #endif
 
-/// `LLMProvider` 的请求形状回归（`TECHNICAL-DESIGN` §5.5 + 2026-09-19 本机 oMLX 实测）。
+/// `LLMProvider` 的请求形状回归（`TECHNICAL-DESIGN` §5.5 + 2026-09-19 本机兼容端点实测）。
 ///
 /// 用假的 `URLProtocol` 当传输层：不连网、不碰钥匙串、不加载模型。钉住两条形状：
 ///   · 语音契约走顶层 `instructions`（不是 SpeechRail TTS 的那个 `instructions`），
 ///     人设与记忆留在 `input` 并带显式断点，顺序不变；
-///   · 关 thinking 的 `chat_template_kwargs` 一定发，但端点明确拒绝时只失败一次，
-///     之后按不带它的形状发——`instructions` 不能跟着一起丢。
+///   · 通用 OpenAI-compatible 请求只发送标准 thinking 关闭字段；OpenCode 与本机模板
+///     只在显式 mode 下发送各自的专有字段，端点明确拒绝时只失败一次。
 final class LLMProviderTests: XCTestCase {
 
     // MARK: - 假传输
@@ -25,6 +25,7 @@ final class LLMProviderTests: XCTestCase {
         nonisolated(unsafe) private static var scripted: [Exchange] = []
         nonisolated(unsafe) private static var captured: [[String: Any]] = []
         nonisolated(unsafe) private static var capturedURLs: [String] = []
+        nonisolated(unsafe) private static var capturedHeaders: [[String: String]] = []
         private static let lock = NSLock()
 
         static func reset(_ exchanges: [Exchange]) {
@@ -33,6 +34,7 @@ final class LLMProviderTests: XCTestCase {
             scripted = exchanges
             captured = []
             capturedURLs = []
+            capturedHeaders = []
         }
 
         static func requestBodies() -> [[String: Any]] {
@@ -47,6 +49,12 @@ final class LLMProviderTests: XCTestCase {
             return capturedURLs
         }
 
+        static func requestHeaders() -> [[String: String]] {
+            lock.lock()
+            defer { lock.unlock() }
+            return capturedHeaders
+        }
+
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -54,6 +62,10 @@ final class LLMProviderTests: XCTestCase {
             Self.lock.lock()
             Self.captured.append(Self.jsonBody(of: request))
             Self.capturedURLs.append(request.url?.absoluteString ?? "")
+            Self.capturedHeaders.append([
+                "User-Agent": request.value(forHTTPHeaderField: "User-Agent") ?? "",
+                "x-opencode-session": request.value(forHTTPHeaderField: "x-opencode-session") ?? ""
+            ])
             let exchange = Self.scripted.isEmpty
                 ? Exchange(status: 500, contentType: "application/json", body: "{}")
                 : Self.scripted.removeFirst()
@@ -97,6 +109,23 @@ final class LLMProviderTests: XCTestCase {
         }
     }
 
+    private final class ObservationLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [TeleprompterAIObservation] = []
+
+        func append(_ observation: TeleprompterAIObservation) {
+            lock.lock()
+            stored.append(observation)
+            lock.unlock()
+        }
+
+        var values: [TeleprompterAIObservation] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
     // MARK: - 夹具
 
     private let configuration = LLMConfiguration(
@@ -104,13 +133,31 @@ final class LLMProviderTests: XCTestCase {
         model: "test-model"
     )
 
+    private let openCodeConfiguration = LLMConfiguration(
+        baseURL: "https://opencode.example/v1",
+        model: "vendor/strange:model",
+        compatibilityMode: .openCodeGo
+    )
+
+    private let localTemplateConfiguration = LLMConfiguration(
+        baseURL: "http://127.0.0.1:8000/v1",
+        model: "test-model",
+        compatibilityMode: .localTemplateCompatible
+    )
+
     private static let okBody = """
     {"id":"resp_test","object":"response","status":"completed","output":[\
     {"type":"message","role":"assistant","content":[{"type":"output_text","text":"好"}]}]}
     """
 
+    private static let responsesBodyWithUsage = """
+    {"id":"resp_test","object":"response","status":"completed","output":[\
+    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"好"}]}],\
+    "usage":{"input_tokens":8,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":2}}}
+    """
+
     private static let rejectedBody = """
-    {"error":{"message":"Unrecognized request argument supplied: chat_template_kwargs",\
+    {"error":{"message":"Unrecognized request argument supplied: thinking",\
     "type":"invalid_request_error"}}
     """
 
@@ -126,20 +173,252 @@ final class LLMProviderTests: XCTestCase {
         LLMMessage(role: .assistant, text: "我在。")
     ]
 
-    private func makeProvider() -> LLMProvider {
+    private func makeProvider(
+        observationHandler: TeleprompterAIObservationHandler? = nil
+    ) -> LLMProvider {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [FakeTransport.self]
-        return LLMProvider(session: URLSession(configuration: sessionConfiguration))
+        return LLMProvider(
+            session: URLSession(configuration: sessionConfiguration),
+            observationHandler: observationHandler
+        )
     }
 
-    private func complete(instructions: String = "语音对话契约") async throws -> String {
+    private func complete(
+        configuration: LLMConfiguration? = nil,
+        instructions: String = "语音对话契约"
+    ) async throws -> String {
         try await makeProvider().complete(
-            configuration: configuration,
+            configuration: configuration ?? self.configuration,
             messages: Self.messages,
             apiKey: nil,
             maxOutputTokens: 128,
             instructions: instructions
         )
+    }
+
+    private func completeJSON(
+        provider: LLMProvider? = nil,
+        configuration: LLMConfiguration? = nil,
+        observationContext: TeleprompterAICallContext? = nil
+    ) async throws -> String {
+        try await (provider ?? makeProvider()).completeJSON(
+            configuration: configuration ?? self.configuration, apiKey: nil,
+            instructions: "保持事实", input: "原稿资料",
+            schema: TeleprompterPreparationJSONSchema.map,
+            maxOutputTokens: 128, timeout: 30,
+            observationContext: observationContext
+        )
+    }
+
+    private func chatBody(finish: String = "stop", tokens: Int? = 12,
+                          content: String = "{}", refusal: String? = nil,
+                          toolCalls: Bool = false,
+                          partialUsageDetails: Bool = false) throws -> String {
+        var message: [String: Any] = ["role": "assistant", "content": content,
+                                      "reasoning_content": "这不是正文"]
+        if let refusal { message["refusal"] = refusal }
+        if toolCalls { message["tool_calls"] = [["id": "unexpected"]] }
+        var object: [String: Any] = ["id": "chat_test", "object": "chat.completion",
+                                     "created": 1, "model": "test-model", "choices": [
+            ["index": 0, "finish_reason": finish, "message": message]
+        ]]
+        if let tokens {
+            var usage: [String: Any] = [
+                "prompt_tokens": 4,
+                "completion_tokens": tokens,
+                "total_tokens": 4 + tokens
+            ]
+            if partialUsageDetails {
+                usage["prompt_tokens_details"] = ["cached_tokens": 0]
+            }
+            object["usage"] = usage
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+
+    func testChatJSONSendsCompleteSchemaAndReturnsOnlyFinalContent() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+        let text = try await completeJSON()
+        XCTAssertEqual(text, "{}")
+        XCTAssertTrue(FakeTransport.requestURLs()[0].hasSuffix("/chat/completions"))
+        let body = FakeTransport.requestBodies()[0]
+        XCTAssertEqual((body["response_format"] as? [String: String])?["type"], "json_object")
+        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual(body["max_tokens"] as? Int, 128)
+        XCTAssertEqual(body["temperature"] as? Double, 0)
+        XCTAssertNil(body["text"])
+        XCTAssertEqual(body["reasoning_effort"] as? String, "none")
+        XCTAssertNil(body["thinking"])
+        XCTAssertNil(body["chat_template_kwargs"])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.map { $0["role"]! }, ["system", "user"])
+        XCTAssertTrue(messages[0]["content"]!.contains("additionalProperties"))
+        XCTAssertTrue(messages[0]["content"]!.contains("teleprompter.preparation.v2"))
+        XCTAssertEqual(messages[1]["content"], "原稿资料")
+        let headers = try XCTUnwrap(FakeTransport.requestHeaders().first)
+        XCTAssertEqual(headers["User-Agent"], "SpeechRail/teleprompter")
+        XCTAssertTrue(headers["x-opencode-session"]?.isEmpty ?? true)
+    }
+
+    func testChatJSONKeepsAggregateUsageWhenProviderDetailsArePartial() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: try chatBody(partialUsageDetails: true))
+        ])
+
+        let text = try await completeJSON()
+        XCTAssertEqual(text, "{}")
+    }
+
+    func testChatJSONRejectsBudgetExhaustionEvenWhenProviderSaysStop() async throws {
+        for body in [try chatBody(tokens: 128), try chatBody(finish: "length", tokens: 20)] {
+            FakeTransport.reset([.init(status: 200, contentType: "application/json", body: body)])
+            do { _ = try await completeJSON(); XCTFail("truncation accepted") }
+            catch { XCTAssertEqual(error as? LLMError, .outputTruncated) }
+        }
+    }
+
+    func testChatJSONRejectsOversizedResponse() async throws {
+        let content = "{\"text\":\"" + String(repeating: "x", count: 270_000) + "\"}"
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody(content: content))])
+        do { _ = try await completeJSON(); XCTFail("oversized response accepted") }
+        catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
+    }
+
+    func testChatJSONRejectsMissingUsageInvalidJSONRefusalAndToolCalls() async throws {
+        for body in [try chatBody(tokens: nil), try chatBody(tokens: -1),
+                     try chatBody(content: "not JSON"), try chatBody(refusal: "no"),
+                     try chatBody(toolCalls: true), try chatBody(finish: "content_filter")] {
+            FakeTransport.reset([.init(status: 200, contentType: "application/json", body: body)])
+            do { _ = try await completeJSON(); XCTFail("invalid response accepted") }
+            catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
+        }
+    }
+
+    func testChatJSONDoesNotRetryOrChangeProtocolOnUnsupportedFormat() async throws {
+        FakeTransport.reset([.init(status: 400, contentType: "application/json",
+                                  body: #"{"error":{"message":"response_format unavailable"}}"#)])
+        do { _ = try await completeJSON(); XCTFail("unsupported response accepted") }
+        catch { guard case .http(status: 400, _) = error as? LLMError else { return XCTFail("wrong error") } }
+        XCTAssertEqual(FakeTransport.requestURLs().count, 1)
+    }
+
+    func testChatJSONRetriesWithoutThinkingControlWhenProviderRejectsIt() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json", body: Self.rejectedBody),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        let text = try await completeJSON(configuration: openCodeConfiguration)
+        XCTAssertEqual(text, "{}")
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual((bodies[0]["thinking"] as? [String: String])?["type"], "disabled")
+        XCTAssertNil(bodies[0]["chat_template_kwargs"])
+        XCTAssertNil(bodies[1]["thinking"])
+        let headers = FakeTransport.requestHeaders()
+        XCTAssertEqual(headers[0]["x-opencode-session"], headers[1]["x-opencode-session"])
+    }
+
+    func testGenericChatRetriesWithoutStandardThinkingControlWhenProviderRejectsIt() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: #"{"error":{"message":"unknown parameter: reasoning_effort"}}"#
+            ),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        let text = try await completeJSON()
+
+        XCTAssertEqual(text, "{}")
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies[0]["reasoning_effort"] as? String, "none")
+        XCTAssertNil(bodies[0]["thinking"])
+        XCTAssertNil(bodies[1]["reasoning_effort"])
+        XCTAssertTrue(FakeTransport.requestHeaders()[0]["x-opencode-session"]?.isEmpty ?? true)
+    }
+
+    func testChatJSONEmitsSafeProviderMetadataOnStructuredFailure() async throws {
+        let observations = ObservationLog()
+        let context = TeleprompterAICallContext(
+            runID: "run-test",
+            requestID: "request-test",
+            stage: .map,
+            itemIndex: 2,
+            itemCount: 4,
+            attempt: 0
+        )
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: try chatBody(finish: "length", tokens: 128))
+        ])
+
+        do {
+            _ = try await completeJSON(
+                provider: makeProvider(observationHandler: observations.append),
+                observationContext: context
+            )
+            XCTFail("截断响应不应成功")
+        } catch let error as LLMError {
+            XCTAssertEqual(error, .outputTruncated)
+        }
+
+        let response = try XCTUnwrap(
+            observations.values.first { $0.kind == .providerResponse }
+        )
+        XCTAssertEqual(response.context, context)
+        XCTAssertEqual(response.httpStatus, 200)
+        XCTAssertEqual(response.finishReason, "length")
+        XCTAssertEqual(response.completionTokens, 128)
+        XCTAssertGreaterThan(response.responseBytes ?? 0, 0)
+        XCTAssertEqual(response.operation, .chat)
+        XCTAssertEqual(response.compatibilityMode, .openAICompatible)
+        XCTAssertEqual(response.thinkingControl, "standard_disabled")
+
+        let failure = try XCTUnwrap(
+            observations.values.first { $0.kind == .providerFailed }
+        )
+        XCTAssertEqual(failure.errorCode, "output_truncated")
+        XCTAssertEqual(failure.context, context)
+    }
+
+    func testChatJSONReusesStableOpenCodeSessionForOnePreparationRun() async throws {
+        let context = TeleprompterAICallContext(
+            runID: "run-stable",
+            requestID: "request-1",
+            stage: .map,
+            itemIndex: 0,
+            itemCount: 2
+        )
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: try chatBody()),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        let provider = makeProvider()
+
+        _ = try await completeJSON(
+            provider: provider,
+            configuration: openCodeConfiguration,
+            observationContext: context
+        )
+        _ = try await completeJSON(
+            provider: provider,
+            configuration: openCodeConfiguration,
+            observationContext: .init(
+                runID: context.runID,
+                requestID: "request-2",
+                stage: .reduce,
+                itemIndex: 0,
+                itemCount: 1
+            )
+        )
+
+        let headers = FakeTransport.requestHeaders()
+        XCTAssertEqual(headers.count, 2)
+        XCTAssertEqual(headers[0]["x-opencode-session"], "run-stable")
+        XCTAssertEqual(headers[1]["x-opencode-session"], "run-stable")
     }
 
     // MARK: - 断言
@@ -163,6 +442,14 @@ final class LLMProviderTests: XCTestCase {
                 model: "test-model"
             ).isBaseURLValid
         )
+        let arbitrary = LLMConfiguration(
+            baseURL: "https://provider.example/custom/v1/",
+            model: "vendor/strange:model@2026",
+            compatibilityMode: .openAICompatible
+        )
+        XCTAssertTrue(arbitrary.isConfigured)
+        XCTAssertEqual(arbitrary.normalizedBaseURL, "https://provider.example/custom/v1")
+        XCTAssertEqual(arbitrary.model, "vendor/strange:model@2026")
     }
 
     func testConnectionRejectsInvalidBaseURLBeforeRequest() async {
@@ -191,10 +478,8 @@ final class LLMProviderTests: XCTestCase {
         let body = try XCTUnwrap(FakeTransport.requestBodies().first)
         XCTAssertEqual(body["instructions"] as? String, "语音对话契约")
         XCTAssertEqual(body["store"] as? Bool, false)
-        XCTAssertEqual(
-            (body["chat_template_kwargs"] as? [String: Any])?["enable_thinking"] as? Bool,
-            false
-        )
+        XCTAssertEqual((body["reasoning"] as? [String: String])?["effort"], "none")
+        XCTAssertNil(body["chat_template_kwargs"])
 
         let input = try XCTUnwrap(body["input"] as? [[String: Any]])
         XCTAssertEqual(input.compactMap { $0["role"] as? String }, ["developer", "developer", "assistant"])
@@ -208,13 +493,113 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertNil(history["prompt_cache_breakpoint"])
     }
 
-    func testRejectedThinkingControlRetriesOnceWithoutIt() async throws {
+    func testResponsesProviderEmitsSafeObservationMetadata() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: Self.responsesBodyWithUsage)])
+        let observations = ObservationLog()
+        let provider = makeProvider(observationHandler: observations.append)
+
+        _ = try await provider.complete(
+            configuration: configuration,
+            messages: Self.messages,
+            apiKey: nil,
+            instructions: "语音对话契约"
+        )
+
+        let started = try XCTUnwrap(observations.values.first { $0.kind == .providerRequestStarted })
+        let response = try XCTUnwrap(observations.values.first { $0.kind == .providerResponse })
+        XCTAssertEqual(started.operation, .responses)
+        XCTAssertEqual(started.compatibilityMode, .openAICompatible)
+        XCTAssertEqual(started.thinkingControl, "standard_disabled")
+        XCTAssertEqual(started.outcome, "started")
+        XCTAssertEqual(response.operation, .responses)
+        XCTAssertEqual(response.httpStatus, 200)
+        XCTAssertEqual(response.promptTokens, 8)
+        XCTAssertEqual(response.completionTokens, 3)
+        XCTAssertEqual(response.reasoningTokens, 2)
+        XCTAssertEqual(response.outcome, "received")
+    }
+
+    @MainActor
+    func testResponsesStreamEmitsProviderObservationMetadata() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\ndata: [DONE]\n\n"
+            )
+        ])
+        let observations = ObservationLog()
+        let provider = makeProvider(observationHandler: observations.append)
+        var text = ""
+
+        let stream = await provider.stream(
+            configuration: configuration,
+            messages: Self.messages,
+            apiKey: nil,
+            instructions: "语音对话契约"
+        )
+        for try await delta in stream {
+            text += delta
+        }
+
+        XCTAssertEqual(text, "好")
+        XCTAssertEqual(observations.values.filter { $0.kind == .providerRequestStarted }.count, 1)
+        let response = try XCTUnwrap(observations.values.first { $0.kind == .providerResponse })
+        XCTAssertEqual(response.operation, .responses)
+        XCTAssertEqual(response.httpStatus, 200)
+        XCTAssertEqual(response.promptTokens, 8)
+        XCTAssertEqual(response.completionTokens, 3)
+        XCTAssertEqual(response.reasoningTokens, 2)
+        XCTAssertEqual(response.outcome, "received")
+    }
+
+    @MainActor
+    func testBackgroundPollEmitsProviderObservationMetadata() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: Self.okBody)])
+        let observations = ObservationLog()
+        let provider = makeProvider(observationHandler: observations.append)
+
+        let text = try await provider.pollBackground(
+            configuration: configuration,
+            apiKey: nil,
+            responseID: "resp_test",
+            timeout: 1,
+            interval: 0
+        )
+
+        XCTAssertEqual(text, "好")
+        let started = try XCTUnwrap(observations.values.first { $0.kind == .providerRequestStarted })
+        let response = try XCTUnwrap(observations.values.first { $0.kind == .providerResponse })
+        XCTAssertEqual(started.component, "provider_poll")
+        XCTAssertEqual(started.thinkingControl, "not_applicable")
+        XCTAssertEqual(response.component, "provider_poll")
+        XCTAssertEqual(response.outcome, "completed")
+    }
+
+    func testGenericResponsesRetriesWithoutStandardThinkingControlWhenProviderRejectsIt() async throws {
         FakeTransport.reset([
             .init(status: 400, contentType: "application/json", body: Self.rejectedBody),
             .init(status: 200, contentType: "application/json", body: Self.okBody)
         ])
 
         let text = try await complete()
+
+        XCTAssertEqual(text, "好")
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual((bodies[0]["reasoning"] as? [String: String])?["effort"], "none")
+        XCTAssertNil(bodies[0]["chat_template_kwargs"])
+        XCTAssertNil(bodies[1]["reasoning"])
+        XCTAssertNil(bodies[1]["chat_template_kwargs"])
+    }
+
+    func testRejectedThinkingControlRetriesOnceWithoutIt() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json", body: Self.rejectedBody),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+
+        let text = try await complete(configuration: localTemplateConfiguration)
 
         XCTAssertEqual(text, "好")
         let bodies = FakeTransport.requestBodies()
@@ -315,7 +700,7 @@ final class LLMProviderTests: XCTestCase {
 
         let body = try XCTUnwrap(FakeTransport.requestBodies().first)
         XCTAssertNil(body["instructions"])
-        XCTAssertNotNil(body["chat_template_kwargs"])
+        XCTAssertEqual((body["reasoning"] as? [String: String])?["effort"], "none")
     }
 
     // MARK: - 检查连接：探测阶段就把「端点认不认关 thinking 的参数」定下来
@@ -336,7 +721,11 @@ final class LLMProviderTests: XCTestCase {
             .init(status: 200, contentType: "application/json", body: Self.okBody)
         ])
 
-        let result = await makeProvider().check(configuration: configuration, apiKey: nil)
+        let result = await makeProvider().check(
+            configuration: localTemplateConfiguration,
+            apiKey: nil,
+            operation: .responses
+        )
 
         XCTAssertTrue(result.isReady, result.title)
         let probes = probeBodies()
@@ -353,10 +742,76 @@ final class LLMProviderTests: XCTestCase {
             .init(status: 400, contentType: "application/json", body: #"{"error":{"message":"bad key"}}"#)
         ])
 
-        let result = await makeProvider().check(configuration: configuration, apiKey: nil)
+        let result = await makeProvider().check(
+            configuration: localTemplateConfiguration,
+            apiKey: nil,
+            operation: .responses
+        )
 
         XCTAssertFalse(result.isReady)
         XCTAssertEqual(probeBodies().count, 1, "与这组参数无关的 400 不该触发重发")
+    }
+
+    func testChatConnectionDoesNotRequireModelsEndpoint() async throws {
+        let arbitraryConfiguration = LLMConfiguration(
+            baseURL: "https://provider.example/custom/v1",
+            model: "vendor/strange:model@2026"
+        )
+        FakeTransport.reset([
+            .init(status: 404, contentType: "application/json", body: #"{"error":"not found"}"#),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        let result = await makeProvider().check(
+            configuration: arbitraryConfiguration,
+            apiKey: nil,
+            operation: .chat
+        )
+
+        guard case let .connected(_, model) = result else {
+            return XCTFail("应按实际 Chat 能力判定连接成功：\(result)")
+        }
+        XCTAssertEqual(model, arbitraryConfiguration.model)
+        XCTAssertTrue(FakeTransport.requestURLs()[1].hasSuffix("/chat/completions"))
+        XCTAssertEqual(FakeTransport.requestBodies()[1]["model"] as? String, arbitraryConfiguration.model)
+        XCTAssertEqual(FakeTransport.requestBodies()[1]["reasoning_effort"] as? String, "none")
+    }
+
+    func testChatConnectionAllowsModelIDMissingFromAdvisoryModelsList() async throws {
+        let arbitraryConfiguration = LLMConfiguration(
+            baseURL: "https://provider.example/custom/v1",
+            model: "vendor/alias-model"
+        )
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: #"{"data":[{"id":"other-model"}]}"#),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        let result = await makeProvider().check(
+            configuration: arbitraryConfiguration,
+            apiKey: nil,
+            operation: .chat
+        )
+
+        guard case let .connected(_, model) = result else {
+            return XCTFail("模型列表不是权威白名单：\(result)")
+        }
+        XCTAssertEqual(model, arbitraryConfiguration.model)
+    }
+
+    func testChatConnectionReportsMissingChatEndpoint() async throws {
+        FakeTransport.reset([
+            .init(status: 404, contentType: "application/json", body: #"{"error":"not found"}"#),
+            .init(status: 404, contentType: "application/json", body: #"{"error":"chat not found"}"#)
+        ])
+
+        let result = await makeProvider().check(
+            configuration: configuration,
+            apiKey: nil,
+            operation: .chat
+        )
+
+        XCTAssertEqual(result, .notChatAPI)
     }
 
     // MARK: - 模块差异化配置解析
@@ -364,8 +819,9 @@ final class LLMProviderTests: XCTestCase {
     private let globalAPIKey = "global-key"
 
     private let moduleConfiguration = LLMConfiguration(
-        baseURL: "http://127.0.0.1:8317/v1",
-        model: "module-model"
+        baseURL: "https://module.example/v1",
+        model: "module-model",
+        compatibilityMode: .openCodeGo
     )
 
     func testModuleOverrideWinsAsAnAtomicProfile() {
@@ -375,7 +831,8 @@ final class LLMProviderTests: XCTestCase {
             moduleOverride: LLMModuleOverride(
                 enabled: true,
                 baseURL: moduleConfiguration.baseURL,
-                model: moduleConfiguration.model
+                model: moduleConfiguration.model,
+                compatibilityMode: moduleConfiguration.compatibilityMode
             ),
             moduleAPIKey: "module-key"
         )
@@ -447,7 +904,8 @@ final class LLMProviderTests: XCTestCase {
             moduleOverride: LLMModuleOverride(
                 enabled: true,
                 baseURL: moduleConfiguration.baseURL,
-                model: moduleConfiguration.model
+                model: moduleConfiguration.model,
+                compatibilityMode: moduleConfiguration.compatibilityMode
             ),
             moduleAPIKey: "   "
         )
@@ -479,7 +937,8 @@ final class LLMProviderTests: XCTestCase {
         let override = LLMModuleOverride(
             enabled: true,
             baseURL: moduleConfiguration.baseURL,
-            model: moduleConfiguration.model
+            model: moduleConfiguration.model,
+            compatibilityMode: moduleConfiguration.compatibilityMode
         )
 
         let encoded = try JSONEncoder().encode([LLMModule.teleprompter: override])
@@ -491,17 +950,27 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(decoded[.teleprompter], override)
     }
 
+    func testModuleOverrideMissingCompatibilityModeMigratesToGeneric() throws {
+        let data = Data(
+            #"{"enabled":true,"baseURL":"https://provider.example/v1","model":"vendor/model"}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(LLMModuleOverride.self, from: data)
+
+        XCTAssertEqual(decoded.compatibilityMode, .openAICompatible)
+        XCTAssertEqual(decoded.configuration.compatibilityMode, .openAICompatible)
+    }
+
     func testTeleprompterDataFlowAcknowledgementIsScopedWithoutEmbeddingEndpoint() {
         let first = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
             for: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-a")
         )
         let second = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
-            for: LLMConfiguration(baseURL: "http://127.0.0.1:8317/v1", model: "model-a")
+            for: LLMConfiguration(baseURL: "https://other.example/v1", model: "model-a")
         )
 
         XCTAssertTrue(first.hasPrefix("speechrail.teleprompter.aiDataFlowAcknowledged.v2."))
         XCTAssertNotEqual(first, second)
-        XCTAssertFalse(first.contains("127.0.0.1"))
+        XCTAssertFalse(first.contains("example.com"))
     }
 
     func testTeleprompterDataFlowDisclosureUsesPlainLanguage() {

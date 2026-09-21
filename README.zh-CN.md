@@ -74,8 +74,8 @@ OpenAI 能力前，请先阅读对应契约。
 
 ## 环境要求
 
-- Apple Silicon Mac，macOS 14 或更高版本；Intel Mac 不是支持目标。
-- 随附的 `SpeechRailApp` 以 macOS 26.0+、`arm64` 为目标；这与受管服务的运行时最低版本是两个边界。
+- Apple Silicon Mac，macOS 26.0 或更高版本；Intel Mac 不是支持目标。
+- 随附的 `SpeechRailApp` 同样以 macOS 26.0+、`arm64` 为目标。
 - 源码开发和 Python 服务 CLI 使用 `>=3.12,<3.13`。
 - 使用 [`uv`](https://docs.astral.sh/uv/) 管理依赖和环境。
 - 模型 snapshot 与 vendor runtime 存放在仓库之外。
@@ -85,14 +85,33 @@ OpenAI 能力前，请先阅读对应契约。
 
 ## 快速开始
 
-### 受管安装
+### 从 Release wheel 安装
 
-全新 Mac 可使用仓库提供的零配置指南和引导入口：
+下载 Release 中的 wheel 与 `SHA256SUMS`，先校验制品，再使用 wheel 自带的 managed installer：
+
+```bash
+cd ~/Downloads
+shasum -a 256 -c SHA256SUMS
+uvx --python 3.12 --from ./speechrail-*.whl \
+  speechrail install \
+  --preset balanced \
+  --yes \
+  --enable
+```
+
+该命令会准备并校验所选 profile 的本地制品，执行 preflight，原子切换
+`runtime/current`，并在 `--enable` 下注册、启动用户级 `com.speechrail` LaunchAgent。
+安装不会把模型、配置或音频写入仓库；服务请求路径不会下载模型。完整安装说明见
+[安装与首次使用](docs/users/installing-speechrail.md)。
+
+### 从仓库首装
+
+全新 Mac 也可使用仓库提供的零配置引导入口：
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh --yes --preset balanced
 ```
 
 受管流程会准备隔离运行时、校验所选本地制品，并注册用户级 `LaunchAgent`。
@@ -102,8 +121,10 @@ cd SpeechRail
 安装后检查服务状态，不要启动第二个实例：
 
 ```bash
-uv run speechrail service status
-uv run speechrail diagnose --app-home "$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" service status --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" diagnose --app-home "$SPEECHRAIL_APP_HOME"
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 ```
@@ -176,7 +197,10 @@ Realtime 客户端连接：
 ws://127.0.0.1:8201/v1/realtime
 ```
 
-具体事件顺序见 [`contracts/realtime-openai.md`](contracts/realtime-openai.md)。
+当前 Realtime 为 current-only 语义：`delta` partial 只能追加；可选的 `snapshot` 扩展按同一 item
+的单调递增 `revision` 替换完整文本。`partial_mode` 与 `chunk_duration_ms` 必须先收到
+`transcription_session.updated` 的实际回显，再发送首个 PCM；首个 PCM 后不能修改。具体事件顺序见
+[`contracts/realtime-openai.md`](contracts/realtime-openai.md)。
 SDK、cURL、Sona、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
 [`docs/users/integrations.md`](docs/users/integrations.md)。
 
@@ -204,10 +228,12 @@ CLI 的 `setup` 会根据物理内存给出起始建议，但这不是硬件保�
 或切换受管 selection：
 
 ```bash
-uv run speechrail profile list
-uv run speechrail profile status
-uv run speechrail profile apply balanced
-uv run speechrail profile rollback
+SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
+SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
+"$SPEECHRAIL_CLI" profile list --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" profile status --app-home "$SPEECHRAIL_APP_HOME"
+"$SPEECHRAIL_CLI" profile apply balanced --app-home "$SPEECHRAIL_APP_HOME" --yes
+"$SPEECHRAIL_CLI" profile rollback --app-home "$SPEECHRAIL_APP_HOME" --yes
 ```
 
 请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有 profile 上都

@@ -42,7 +42,7 @@
 - [`2026-09-17-live-sessions/SESSIONS-SPEC.md`](./2026-09-17-live-sessions/SESSIONS-SPEC.md)：模块规格（边界、逐面规格、状态矩阵、SQLite 数据模型、用户旅程）。
 - [`2026-09-17-session-closures/`](./2026-09-17-session-closures/)：闭环稿的设计包、离线门禁与实现就绪度核查（Figma 里 53 板；生成器已 59 板，见下一行）。
 - [`2026-09-18-figma-handover/FIGMA-HANDOVER.md`](./2026-09-18-figma-handover/FIGMA-HANDOVER.md)：**Figma 稿优化的独立团队交接文档**——权威来源、生成器路线、离线门禁、实跑 SOP、导出、资产清单、未决项与回退。
-- [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md)：**会话层技术方案（终态）**——哪些能力归 macOS 原生、哪些归 Python 服务、边界规矩、数据口径、验收判据与外部最佳实践依据。
+- [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md)：**会话层技术方案**——哪些能力归 macOS 原生、哪些归 Python 服务、边界规矩、数据口径、验收判据与外部最佳实践依据。
 
 macOS 26-only 的 App 设计研究、Liquid Glass 分层、统一颜色/间距/字体/可访问性 token 见：
 

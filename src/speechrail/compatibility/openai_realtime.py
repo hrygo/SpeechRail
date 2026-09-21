@@ -43,6 +43,8 @@ _PCM16_FORMAT: dict[str, object] = {
 }
 
 _SUPPORTED_TURN_DETECTION: frozenset[str | None] = frozenset({None, "manual", "server_vad"})
+_SUPPORTED_PARTIAL_MODES: frozenset[str] = frozenset({"delta", "snapshot"})
+_SUPPORTED_TRANSCRIPTION_CHUNKS_MS: frozenset[int] = frozenset({500, 1_000, 2_000})
 
 _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
     {
@@ -266,6 +268,7 @@ def session_updated(
     model: str,
     turn_detection: dict[str, object] | None = None,
     speechrail_diarization: dict[str, object] | None = None,
+    speechrail_transcription: dict[str, object] | None = None,
     speechrail_tts_enabled: bool = False,
     tts_loudness_profile: str | None = None,
 ) -> dict[str, object]:
@@ -282,6 +285,10 @@ def session_updated(
         speechrail = session["speechrail"]
         assert isinstance(speechrail, dict)
         speechrail["diarization"] = speechrail_diarization
+    if speechrail_transcription is not None:
+        speechrail = session["speechrail"]
+        assert isinstance(speechrail, dict)
+        speechrail["transcription"] = speechrail_transcription
     if tts_loudness_profile is not None:
         session["speech_capabilities"] = {
             "audio_loudness_profile": tts_loudness_profile,
@@ -336,6 +343,19 @@ def transcription_delta(*, item_id: str, delta: str) -> dict[str, object]:
         "item_id": item_id,
         "content_index": 0,
         "delta": delta,
+    }
+
+
+def transcription_snapshot(
+    *, item_id: str, revision: int, text: str
+) -> dict[str, object]:
+    """Render the latest mutable transcript hypothesis for one input item."""
+    return {
+        "type": "speechrail.transcription.snapshot",
+        "item_id": item_id,
+        "content_index": 0,
+        "revision": revision,
+        "text": text,
     }
 
 
@@ -785,7 +805,13 @@ def apply_session_update(
             raise RealtimeAdapterError(
                 "invalid_event", "session.speechrail must be an object"
             )
-        if set(speechrail) - {"tts", "diarization", "render_receipts", "model_revision"}:
+        if set(speechrail) - {
+            "tts",
+            "diarization",
+            "render_receipts",
+            "model_revision",
+            "transcription",
+        }:
             raise RealtimeAdapterError(
                 "unsupported_operation", "unsupported session.speechrail field"
             )
@@ -928,6 +954,45 @@ def apply_session_update(
         config["turn_detection"] = turn_detection_val
     config.setdefault("input_sample_rate", 16_000)
 
+    speechrail = session.get("speechrail")
+    if isinstance(speechrail, dict) and "transcription" in speechrail:
+        transcription_options = speechrail["transcription"]
+        if not isinstance(transcription_options, dict):
+            raise RealtimeAdapterError(
+                "invalid_event",
+                "session.speechrail.transcription must be an object",
+            )
+        allowed_options = {"partial_mode", "chunk_duration_ms"}
+        unknown_options = set(transcription_options) - allowed_options
+        if unknown_options:
+            raise RealtimeAdapterError(
+                "unsupported_operation",
+                "unsupported session.speechrail.transcription field",
+            )
+        if "partial_mode" in transcription_options:
+            partial_mode = transcription_options["partial_mode"]
+            if not isinstance(partial_mode, str) or partial_mode not in _SUPPORTED_PARTIAL_MODES:
+                raise RealtimeAdapterError(
+                    "invalid_event",
+                    "partial_mode must be delta or snapshot",
+                )
+            config["transcription_partial_mode"] = partial_mode
+        if "chunk_duration_ms" in transcription_options:
+            chunk_duration_ms = transcription_options["chunk_duration_ms"]
+            if (
+                isinstance(chunk_duration_ms, bool)
+                or not isinstance(chunk_duration_ms, int)
+                or chunk_duration_ms not in _SUPPORTED_TRANSCRIPTION_CHUNKS_MS
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_event",
+                    "chunk_duration_ms must be one of 500, 1000, or 2000",
+                )
+            config["transcription_chunk_duration_ms"] = chunk_duration_ms
+
+    config.setdefault("transcription_partial_mode", "delta")
+    config.setdefault("transcription_chunk_duration_ms", 2_000)
+
     for key, value in (
         ("languages", languages),
         ("keywords", keywords),
@@ -940,6 +1005,10 @@ def apply_session_update(
         model=resolved_asr,
         turn_detection=turn_detection_val,
         speechrail_tts_enabled=bool(base_config.get("tts_enabled", False)),
+        speechrail_transcription={
+            "partial_mode": config["transcription_partial_mode"],
+            "chunk_duration_ms": config["transcription_chunk_duration_ms"],
+        },
     )
     return response, config
 

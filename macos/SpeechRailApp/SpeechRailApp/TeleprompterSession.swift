@@ -74,6 +74,8 @@ public final class TeleprompterSession {
     public private(set) var readingOffset = 0
     public private(set) var isResuming = false
     public private(set) var hasHeardSpeech = false
+    /// In-memory timing evidence for diagnosing follow lag; no text or IDs are retained.
+    public private(set) var followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
 
     // MARK: - 终版规格状态与参数
     public var targetMinutes: Int = TeleprompterTimingPolicy.defaultTargetMinutes
@@ -1403,32 +1405,33 @@ public final class TeleprompterSession {
 
         guard generation == captureGeneration else { throw CancellationError() }
 
+        let client = RealtimeASRClient(
+            port: port,
+            silenceDurationMilliseconds: 400,
+            diarizationEnabled: false,
+            apiKey: apiKey,
+            partialMode: .snapshot,
+            chunkDurationMilliseconds: 500
+        )
+        do {
+            try await client.connect()
+        } catch {
+            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+        }
+        guard generation == captureGeneration else {
+            await client.close()
+            throw CancellationError()
+        }
+
         let source = audioSourceFactory()
         self.source = source
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
+            await client.close()
             if generation == captureGeneration { self.source = nil }
             throw Blocked(reason: Self.blockReason(for: error))
-        }
-        guard generation == captureGeneration else {
-            source.stop()
-            throw CancellationError()
-        }
-
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: 400,
-            diarizationEnabled: false,
-            apiKey: apiKey
-        )
-        do {
-            try await client.connect()
-        } catch {
-            source.stop()
-            if generation == captureGeneration { self.source = nil }
-            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
         }
         guard generation == captureGeneration else {
             source.stop()
@@ -1437,6 +1440,7 @@ public final class TeleprompterSession {
         }
 
         self.client = client
+        followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
         isStoppingIntentionally = false
         partialText = nil
         uncertainty = nil
@@ -1477,6 +1481,11 @@ public final class TeleprompterSession {
               !isResuming, followController.mode == .following else { return }
         do {
             try await client.append(chunk.pcm)
+            if let capturedAt = chunk.capturedAt {
+                followLatencyDiagnostics.recordCaptureToSend(
+                    milliseconds: Self.milliseconds(capturedAt.duration(to: ContinuousClock().now))
+                )
+            }
         } catch {
             guard generation == captureGeneration else { return }
             await enterManual(.streamFailed("语音连接中断，可以手动继续或重新开始。"))
@@ -1487,6 +1496,20 @@ public final class TeleprompterSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>, generation: UUID
     ) async {
         guard generation == captureGeneration, !isStoppingIntentionally else { return }
+        let handleStartedAt = ContinuousClock().now
+        var didAlign = false
+        defer {
+            if didAlign {
+                followLatencyDiagnostics.recordAlignment(
+                    queueAgeMilliseconds: Self.milliseconds(
+                        envelope.receivedAt.duration(to: handleStartedAt)
+                    ),
+                    matchMilliseconds: Self.milliseconds(
+                        handleStartedAt.duration(to: ContinuousClock().now)
+                    )
+                )
+            }
+        }
         switch envelope.payload {
         case .speechStarted:
             if followController.mode == .following, !isResuming { hasHeardSpeech = true }
@@ -1495,6 +1518,18 @@ public final class TeleprompterSession {
             followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments,
                                             eventID: envelope.metadata.eventID)
             syncFollowState()
+            didAlign = true
+        case .partialSnapshot(let itemID, let revision, let text):
+            guard !isResuming, let activeVersion else { return }
+            followController.receiveSnapshot(
+                itemID: itemID,
+                revision: revision,
+                text: text,
+                segments: activeVersion.segments,
+                eventID: envelope.metadata.eventID
+            )
+            syncFollowState()
+            didAlign = true
         case .completed(let itemID, let transcript, _):
             guard !isResuming, let activeVersion else { return }
             followController.receiveCompleted(
@@ -1558,6 +1593,13 @@ public final class TeleprompterSession {
             observeClockProgress()
             runClock.estimatedRemainingSeconds = remainingTextEstimate()
         }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        let value = Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return max(0, value)
     }
 
     private func observeClockProgress() {
