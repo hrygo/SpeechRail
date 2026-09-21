@@ -3,6 +3,8 @@ import OSLog
 
 public enum TeleprompterAIStage: String, Codable, Equatable, Sendable {
     case preparation
+    case grouping
+    case rewrite
     case map
     case reduce
     case analysis
@@ -62,6 +64,7 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
     public let operation: LLMOperation?
     public let compatibilityMode: LLMCompatibilityMode?
     public let thinkingControl: String?
+    public let structuredOutputMode: LLMStructuredOutputMode?
     public let outcome: String?
     public let errorCode: String?
 
@@ -83,6 +86,7 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
         operation: LLMOperation? = nil,
         compatibilityMode: LLMCompatibilityMode? = nil,
         thinkingControl: String? = nil,
+        structuredOutputMode: LLMStructuredOutputMode? = nil,
         outcome: String? = nil,
         errorCode: String? = nil
     ) {
@@ -103,6 +107,7 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
         self.operation = operation
         self.compatibilityMode = compatibilityMode
         self.thinkingControl = thinkingControl
+        self.structuredOutputMode = structuredOutputMode
         self.outcome = outcome
         self.errorCode = errorCode
     }
@@ -449,6 +454,7 @@ public enum TeleprompterAIObservability {
             "operation=\(observation.operation?.rawValue ?? "-")",
             "compatibility_mode=\(observation.compatibilityMode?.rawValue ?? "-")",
             "thinking_control=\(observation.thinkingControl ?? "-")",
+            "structured_output_mode=\(observation.structuredOutputMode?.rawValue ?? "-")",
             "outcome=\(observation.outcome ?? "-")",
             "error_code=\(observation.errorCode ?? "-")"
         ].joined(separator: " ")
@@ -472,7 +478,7 @@ public enum TeleprompterAIObservability {
             case .notConfigured: return "not_configured"
             case .badBaseURL: return "bad_base_url"
             case .transport: return "transport"
-            case .http(let status, _): return "http_\(status)"
+            case .http(let status, _), .httpWithRetry(let status, _, _): return "http_\(status)"
             case .notChatAPI: return "not_chat_api"
             case .notResponsesAPI: return "not_responses_api"
             case .unsupportedStructuredOutput: return "unsupported_structured_output"
@@ -482,7 +488,9 @@ public enum TeleprompterAIObservability {
             case .cancelled: return "cancelled"
             }
         }
-        if error is TeleprompterPreparationError { return "preparation_error" }
+        if let error = error as? TeleprompterPreparationError {
+            return error.diagnostic?.code.rawValue ?? "preparation_error"
+        }
         return "unknown"
     }
 }
@@ -665,24 +673,31 @@ public struct TeleprompterPreparationResult: Codable, Equatable, Sendable {
     public let status: TeleprompterPreparationStatus
     public let mapWindows: [TeleprompterPreparationMapWindow]
     public let mapRequestCount: Int
+    public let rewriteRequestCount: Int
     public let reduceRequestCount: Int
+    public let fallbackBlockCount: Int
 
     public init(
         draft: TeleprompterReadingDraft,
         status: TeleprompterPreparationStatus,
         mapWindows: [TeleprompterPreparationMapWindow],
         mapRequestCount: Int,
-        reduceRequestCount: Int
+        reduceRequestCount: Int,
+        rewriteRequestCount: Int = 0,
+        fallbackBlockCount: Int = 0
     ) {
         self.draft = draft
         self.status = status
         self.mapWindows = mapWindows
         self.mapRequestCount = mapRequestCount
+        self.rewriteRequestCount = rewriteRequestCount
         self.reduceRequestCount = reduceRequestCount
+        self.fallbackBlockCount = max(0, fallbackBlockCount)
     }
 
     public var blocks: [TeleprompterReadingBlock] { draft.blocks }
     public var boundaries: [TeleprompterPreparationBoundary] { draft.boundaries }
+    public var hasLocalFallback: Bool { fallbackBlockCount > 0 }
 }
 
 public struct TeleprompterPreparationPipeline: Sendable {
@@ -714,6 +729,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
             stage: .preparation
         )
         var completed = false
+        var completedWithFallback = false
         observe(
             .init(
                 kind: .runStarted,
@@ -728,7 +744,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                     kind: .runFinished,
                     context: runContext,
                     elapsedMilliseconds: elapsedMilliseconds(since: runStartedAt),
-                    outcome: completed ? "completed" : "failed"
+                    outcome: completed ? (completedWithFallback ? "completed_with_fallback" : "completed") : "failed"
                 ),
                 onObservation: onObservation
             )
@@ -741,6 +757,8 @@ public struct TeleprompterPreparationPipeline: Sendable {
         var windowStates: [[BlockState]] = []
         windowStates.reserveCapacity(windows.count)
         var mapRequestCount = 0
+        var rewriteRequestCount = 0
+        var fallbackBlockCount = 0
         var recoveryRequestCount = 0
         let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))
         var splitWindowIDs = Set<String>()
@@ -754,109 +772,192 @@ public struct TeleprompterPreparationPipeline: Sendable {
             guard targets.count == window.sourceUnitIDs.count else {
                 throw TeleprompterPreparationError.invalidSourceUnits
             }
-            let prompt = try TeleprompterPreparationPromptBuilder.map(
-                targets: targets,
-                formatHint: input.source.formatHint,
-                globalTargetSeconds: input.timingPlan.targetSeconds,
-                localBudgetSeconds: window.localBudgetSeconds,
-                weightMode: input.timingPlan.weightMode,
-                pace: input.pace,
-                calibrationFactor: input.calibrationFactor,
-                operation: input.operation,
-                currentBlocks: input.currentBlocks.filter {
-                    $0.startUnit < (window.sourceUnitIDs.last ?? -1) + 1
-                        && $0.endUnit > (window.sourceUnitIDs.first ?? 0)
-                },
-                readOnlyContext: makeContext(
-                    for: window,
-                    selection: selection,
-                    maxUnits: policy.maxReadOnlyContextUnits
-                ),
-                maxGroupUnits: policy.maxGroupUnits
+            let readOnlyContext = makeContext(
+                for: window,
+                selection: selection,
+                maxUnits: policy.maxReadOnlyContextUnits
             )
-            var states: [BlockState]?
-            do {
-                states = try await mapStates(
-                    prompt: prompt,
+            let prompt: TeleprompterPreparationPrompt
+            if input.operation == .prepare {
+                prompt = try TeleprompterPreparationPromptBuilder.grouping(
                     targets: targets,
-                    window: window,
-                    sourceUnits: sourceUnits,
+                    formatHint: input.source.formatHint,
+                    globalTargetSeconds: input.timingPlan.targetSeconds,
+                    localBudgetSeconds: window.localBudgetSeconds,
+                    weightMode: input.timingPlan.weightMode,
                     pace: input.pace,
-                    context: .init(
-                        runID: runID,
-                        requestID: UUID().uuidString,
-                        stage: .map,
-                        itemIndex: windowIndex,
-                        itemCount: windows.count
-                    ),
-                    onObservation: onObservation
+                    calibrationFactor: input.calibrationFactor,
+                    operation: input.operation,
+                    readOnlyContext: readOnlyContext,
+                    maxGroupUnits: policy.maxGroupUnits
                 )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let initialError {
-                if isTruncatedMapFailure(initialError) {
-                    guard window.sourceUnitIDs.count > 1,
-                          !splitWindowIDs.contains(window.id),
-                          recoveryRequestCount + 2 <= recoveryBudget else {
-                        throw normalizedMapFailure(initialError)
-                    }
-                    let children = try split(window: window, timingPlan: input.timingPlan)
-                    // 两个子请求均是原请求之外的额外工作；预留预算，禁止子窗递归拆分。
-                    recoveryRequestCount += children.count
-                    splitWindowIDs.formUnion(children.map(\.id))
-                    windows.replaceSubrange(windowIndex...windowIndex, with: children)
-                    windows = windows.enumerated().map { index, item in
-                        .init(id: item.id, ordinal: index, sourceUnitIDs: item.sourceUnitIDs,
-                              localBudgetSeconds: item.localBudgetSeconds)
-                    }
-                    onProgress?(.init(phase: .mapping, completed: windowIndex,
-                                      total: windows.count, currentIndex: windowIndex))
-                    continue
-                }
-                var failure: Error = initialError
-                let canRetryTransient = isTransientProviderFailure(initialError)
-                let canRecoverStructure = isStructuralMapFailure(initialError)
-                guard recoveryRequestCount < recoveryBudget,
-                      canRetryTransient || canRecoverStructure else {
-                    throw normalizedMapFailure(initialError)
-                }
-
-                recoveryRequestCount += 1
-                let retryPrompt = canRecoverStructure
-                    ? recoveryPrompt(from: prompt)
-                    : prompt
-                do {
+            } else {
+                prompt = try TeleprompterPreparationPromptBuilder.map(
+                    targets: targets,
+                    formatHint: input.source.formatHint,
+                    globalTargetSeconds: input.timingPlan.targetSeconds,
+                    localBudgetSeconds: window.localBudgetSeconds,
+                    weightMode: input.timingPlan.weightMode,
+                    pace: input.pace,
+                    calibrationFactor: input.calibrationFactor,
+                    operation: input.operation,
+                    currentBlocks: input.currentBlocks.filter {
+                        $0.startUnit < (window.sourceUnitIDs.last ?? -1) + 1
+                            && $0.endUnit > (window.sourceUnitIDs.first ?? 0)
+                    },
+                    readOnlyContext: readOnlyContext,
+                    maxGroupUnits: policy.maxGroupUnits
+                )
+            }
+            var states: [BlockState]?
+            var usedLocalFallback = false
+            do {
+                let context = TeleprompterAICallContext(
+                    runID: runID,
+                    requestID: UUID().uuidString,
+                    stage: input.operation == .prepare ? .grouping : .map,
+                    itemIndex: windowIndex,
+                    itemCount: windows.count
+                )
+                if input.operation == .prepare {
+                    let outcome = try await mapAndRewriteStates(
+                        prompt: prompt,
+                        targets: targets,
+                        window: window,
+                        sourceUnits: sourceUnits,
+                        input: input,
+                        readOnlyContext: readOnlyContext,
+                        context: context,
+                        recoveryBudget: max(0, recoveryBudget - recoveryRequestCount),
+                        onObservation: onObservation
+                    )
+                    states = outcome.states
+                    recoveryRequestCount += outcome.recoveryRequestsUsed
+                } else {
                     states = try await mapStates(
-                        prompt: retryPrompt,
+                        prompt: prompt,
                         targets: targets,
                         window: window,
                         sourceUnits: sourceUnits,
                         pace: input.pace,
-                        context: .init(
-                            runID: runID,
-                            requestID: UUID().uuidString,
-                            stage: .map,
-                            itemIndex: windowIndex,
-                            itemCount: windows.count,
-                            attempt: 1
-                        ),
+                        context: context,
                         onObservation: onObservation
                     )
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch let retryError {
-                    failure = retryError
                 }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let rawError {
+                let stageFailure = rawError as? WindowStageFailure
+                let initialError = stageFailure?.underlying ?? rawError
+                recoveryRequestCount += stageFailure?.recoveryRequestsUsed ?? 0
+                if isTruncatedMapFailure(initialError) {
+                    let splitCost = input.operation == .prepare ? 2 : 1
+                    let canSplitWindow = window.sourceUnitIDs.count > 1
+                        && !splitWindowIDs.contains(window.id)
+                        && recoveryRequestCount + splitCost <= recoveryBudget
+                    if !canSplitWindow {
+                        let terminal = normalizedMapFailure(initialError)
+                        guard let fallback = makeLocalFallback(
+                            for: window,
+                            sourceUnits: sourceUnits,
+                            pace: input.pace,
+                            error: terminal,
+                            onObservation: onObservation
+                        ) else { throw terminal }
+                        states = fallback
+                        usedLocalFallback = true
+                        completedWithFallback = true
+                        // Continue to final assembly with a complete, source-backed window.
+                    } else {
+                        let children = try split(window: window, timingPlan: input.timingPlan)
+                        // 新协议每个子窗包含 grouping + rewrite，因此两个子窗相对原窗增加两个请求；
+                        // tighten 兼容路径仍只有一个 Map 请求。子窗不递归拆分。
+                        recoveryRequestCount += splitCost
+                        splitWindowIDs.formUnion(children.map(\.id))
+                        windows.replaceSubrange(windowIndex...windowIndex, with: children)
+                        windows = windows.enumerated().map { index, item in
+                            .init(id: item.id, ordinal: index, sourceUnitIDs: item.sourceUnitIDs,
+                                  localBudgetSeconds: item.localBudgetSeconds)
+                        }
+                        onProgress?(.init(phase: .mapping, completed: windowIndex,
+                                          total: windows.count, currentIndex: windowIndex))
+                        continue
+                    }
+                }
+                if states == nil, input.operation == .prepare {
+                    let terminal = normalizedMapFailure(initialError)
+                    guard let fallback = makeLocalFallback(
+                        for: window,
+                        sourceUnits: sourceUnits,
+                        pace: input.pace,
+                        error: terminal,
+                        onObservation: onObservation
+                    ) else { throw terminal }
+                    states = fallback
+                    usedLocalFallback = true
+                    completedWithFallback = true
+                }
+                if states == nil, input.operation != .prepare {
+                    var failure: Error = initialError
+                    let canRetryTransient = isTransientProviderFailure(initialError)
+                    let canRecoverStructure = isStructuralMapFailure(initialError)
+                    if recoveryRequestCount < recoveryBudget,
+                       canRetryTransient || canRecoverStructure {
+                        try await waitBeforeRetryIfNeeded(failure)
+                        recoveryRequestCount += 1
+                        let retryPrompt = canRecoverStructure
+                            ? recoveryPrompt(from: prompt, error: initialError)
+                            : prompt
+                        do {
+                            let retryContext = TeleprompterAICallContext(
+                                runID: runID,
+                                requestID: UUID().uuidString,
+                                stage: .map,
+                                itemIndex: windowIndex,
+                                itemCount: windows.count,
+                                attempt: 1
+                            )
+                            states = try await mapStates(
+                                prompt: retryPrompt,
+                                targets: targets,
+                                window: window,
+                                sourceUnits: sourceUnits,
+                                pace: input.pace,
+                                context: retryContext,
+                                onObservation: onObservation
+                            )
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch let retryError {
+                            failure = retryError
+                        }
+                    }
 
-                if states == nil {
-                    throw normalizedMapFailure(failure)
+                    if states == nil {
+                        let terminal = normalizedMapFailure(failure)
+                        guard let fallback = makeLocalFallback(
+                            for: window,
+                            sourceUnits: sourceUnits,
+                            pace: input.pace,
+                            error: terminal,
+                            onObservation: onObservation
+                        ) else { throw terminal }
+                        states = fallback
+                        usedLocalFallback = true
+                        completedWithFallback = true
+                    }
                 }
             }
             guard let states, !states.isEmpty else {
                 throw TeleprompterPreparationError.invalidPromptResponse
             }
             windowStates.append(states)
-            mapRequestCount += 1
+            if !usedLocalFallback {
+                mapRequestCount += 1
+                if input.operation == .prepare { rewriteRequestCount += 1 }
+            } else {
+                fallbackBlockCount += states.count
+            }
             onProgress?(.init(
                 phase: .mapping,
                 completed: windowIndex + 1,
@@ -990,7 +1091,9 @@ public struct TeleprompterPreparationPipeline: Sendable {
             status: status,
             mapWindows: windows,
             mapRequestCount: mapRequestCount,
-            reduceRequestCount: reduceRequestCount
+            reduceRequestCount: reduceRequestCount,
+            rewriteRequestCount: rewriteRequestCount,
+            fallbackBlockCount: fallbackBlockCount
         )
     }
 }
@@ -1038,6 +1141,14 @@ private extension TeleprompterPreparationPipeline {
         var revision: Int
     }
 
+    struct GroupState {
+        let id: String
+        let sourceUnitIDs: [Int]
+        let sourceUnits: [TeleprompterMapContextItem]
+        let protectedLiterals: [String]
+        let budgetSeconds: TimeInterval
+    }
+
     struct BoundaryPair {
         let id: String
         let leftIndex: Int
@@ -1048,9 +1159,25 @@ private extension TeleprompterPreparationPipeline {
         let underlying: Error
     }
 
-    func recoveryPrompt(from prompt: TeleprompterPreparationPrompt) -> TeleprompterPreparationPrompt {
-        .init(
-            instructions: prompt.instructions + "\n上一轮响应未通过本地结构校验。请丢弃上一轮输出，只根据同一份输入重新输出完整、连续、闭合的 JSON；不要解释失败原因。",
+    struct WindowStageFailure: Error {
+        let underlying: Error
+        let recoveryRequestsUsed: Int
+    }
+
+    struct WindowStatesResult {
+        let states: [BlockState]
+        let recoveryRequestsUsed: Int
+    }
+
+    func recoveryPrompt(
+        from prompt: TeleprompterPreparationPrompt,
+        error: Error
+    ) -> TeleprompterPreparationPrompt {
+        let diagnostic = (error as? TeleprompterPreparationError)?.diagnostic
+        let code = diagnostic?.code.rawValue ?? "invalid_structured_response"
+        let field = diagnostic?.fieldPath ?? "unknown"
+        return .init(
+            instructions: prompt.instructions + "\n上一轮响应未通过本地校验（code=\(code), field=\(field)）。请丢弃上一轮输出，只根据同一份输入重新输出完整、连续、闭合的 JSON；不要复述原始响应、错误正文或解释失败原因。",
             input: prompt.input,
             schemaVersion: prompt.schemaVersion,
             promptVersion: prompt.promptVersion
@@ -1062,7 +1189,12 @@ private extension TeleprompterPreparationPipeline {
             return (failure.underlying as? LLMError) == .invalidStructuredResponse
         }
         guard let error = error as? TeleprompterPreparationError else { return false }
-        return error == .invalidPromptResponse
+        switch error {
+        case .invalidPromptResponse, .invalidPromptResponseDetailed:
+            return true
+        default:
+            return false
+        }
     }
 
     func isTruncatedMapFailure(_ error: Error) -> Bool {
@@ -1073,8 +1205,28 @@ private extension TeleprompterPreparationPipeline {
     func isTransientProviderFailure(_ error: Error) -> Bool {
         guard let failure = error as? ProviderCallFailure,
               let providerError = failure.underlying as? LLMError else { return false }
-        guard case let .http(status, _) = providerError else { return false }
-        return status == 429 || (500...599).contains(status)
+        switch providerError {
+        case let .http(status, _), let .httpWithRetry(status, _, _):
+            return status == 429 || (500...599).contains(status)
+        default:
+            return false
+        }
+    }
+
+    func canRetryStage(_ error: Error) -> Bool {
+        isStructuralMapFailure(error) || isTransientProviderFailure(error)
+    }
+
+    func waitBeforeRetryIfNeeded(_ error: Error) async throws {
+        guard let delay = retryAfterDelay(for: error), delay > 0 else { return }
+        try await Task.sleep(for: .seconds(delay))
+    }
+
+    func retryAfterDelay(for error: Error) -> TimeInterval? {
+        let underlying = (error as? ProviderCallFailure)?.underlying ?? error
+        guard let providerError = underlying as? LLMError else { return nil }
+        guard case let .httpWithRetry(_, _, retryAfter) = providerError else { return nil }
+        return min(max(retryAfter, 0), 60)
     }
 
     func normalizedMapFailure(_ error: Error) -> Error {
@@ -1226,6 +1378,335 @@ private extension TeleprompterPreparationPipeline {
                 onObservation: onObservation
             )
             throw error
+        }
+    }
+
+    func mapAndRewriteStates(
+        prompt: TeleprompterPreparationPrompt,
+        targets: [TeleprompterSourceUnit],
+        window: TeleprompterPreparationMapWindow,
+        sourceUnits: [Int: TeleprompterSourceUnit],
+        input: TeleprompterPreparationInput,
+        readOnlyContext: TeleprompterMapReadOnlyContext,
+        context: TeleprompterAICallContext,
+        recoveryBudget: Int,
+        onObservation: TeleprompterAIObservationHandler?
+    ) async throws -> WindowStatesResult {
+        var recoveryRequestsUsed = 0
+        let groups: [GroupState]
+        do {
+            groups = try await groupingStates(
+                prompt: prompt,
+                targets: targets,
+                window: window,
+                sourceUnits: sourceUnits,
+                context: context,
+                onObservation: onObservation
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error {
+            guard !isTruncatedMapFailure(error),
+                  recoveryRequestsUsed < recoveryBudget,
+                  canRetryStage(error) else {
+                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)
+            }
+            try await waitBeforeRetryIfNeeded(error)
+            recoveryRequestsUsed += 1
+            do {
+                groups = try await groupingStates(
+                    prompt: recoveryPrompt(from: prompt, error: error),
+                    targets: targets,
+                    window: window,
+                    sourceUnits: sourceUnits,
+                    context: stageContext(from: context, stage: .grouping, attempt: 1),
+                    onObservation: onObservation
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let retryError {
+                throw WindowStageFailure(
+                    underlying: retryError,
+                    recoveryRequestsUsed: recoveryRequestsUsed
+                )
+            }
+        }
+
+        let rewriteGroups = groups.map { group in
+            TeleprompterRewriteGroup(
+                id: group.id,
+                sourceUnits: group.sourceUnits,
+                protectedLiterals: group.protectedLiterals,
+                budgetSeconds: group.budgetSeconds
+            )
+        }
+        let rewritePrompt = try TeleprompterPreparationPromptBuilder.rewrite(
+            groups: rewriteGroups,
+            globalTargetSeconds: input.timingPlan.targetSeconds,
+            localBudgetSeconds: window.localBudgetSeconds,
+            weightMode: input.timingPlan.weightMode,
+            pace: input.pace,
+            calibrationFactor: input.calibrationFactor,
+            operation: input.operation,
+            readOnlyContext: readOnlyContext
+        )
+        let rewriteContext = stageContext(from: context, stage: .rewrite, attempt: context.attempt)
+        do {
+            let states = try await rewriteStates(
+                prompt: rewritePrompt,
+                rewriteGroups: rewriteGroups,
+                groups: groups,
+                sourceUnits: sourceUnits,
+                context: rewriteContext,
+                onObservation: onObservation
+            )
+            return .init(states: states, recoveryRequestsUsed: recoveryRequestsUsed)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error {
+            guard !isTruncatedMapFailure(error),
+                  recoveryRequestsUsed < recoveryBudget,
+                  canRetryStage(error) else {
+                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)
+            }
+            try await waitBeforeRetryIfNeeded(error)
+            recoveryRequestsUsed += 1
+            do {
+                let states = try await rewriteStates(
+                    prompt: recoveryPrompt(from: rewritePrompt, error: error),
+                    rewriteGroups: rewriteGroups,
+                    groups: groups,
+                    sourceUnits: sourceUnits,
+                    context: stageContext(from: rewriteContext, stage: .rewrite, attempt: 1),
+                    onObservation: onObservation
+                )
+                return .init(states: states, recoveryRequestsUsed: recoveryRequestsUsed)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let retryError {
+                throw WindowStageFailure(
+                    underlying: retryError,
+                    recoveryRequestsUsed: recoveryRequestsUsed
+                )
+            }
+        }
+    }
+
+    func groupingStates(
+        prompt: TeleprompterPreparationPrompt,
+        targets: [TeleprompterSourceUnit],
+        window: TeleprompterPreparationMapWindow,
+        sourceUnits: [Int: TeleprompterSourceUnit],
+        context: TeleprompterAICallContext,
+        onObservation: TeleprompterAIObservationHandler?
+    ) async throws -> [GroupState] {
+        let response = try await call(prompt, context: context, onObservation: onObservation)
+        try Task.checkCancellation()
+        do {
+            let output = try TeleprompterGroupingDecoder().decode(
+                response,
+                targets: targets,
+                maxGroupUnits: policy.maxGroupUnits
+            )
+            return try makeGroupStates(output: output, window: window, sourceUnits: sourceUnits)
+        } catch {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    component: "grouping_decoder",
+                    context: context,
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                ),
+                onObservation: onObservation
+            )
+            throw error
+        }
+    }
+
+    func rewriteStates(
+        prompt: TeleprompterPreparationPrompt,
+        rewriteGroups: [TeleprompterRewriteGroup],
+        groups: [GroupState],
+        sourceUnits: [Int: TeleprompterSourceUnit],
+        context: TeleprompterAICallContext,
+        onObservation: TeleprompterAIObservationHandler?
+    ) async throws -> [BlockState] {
+        let response = try await call(prompt, context: context, onObservation: onObservation)
+        try Task.checkCancellation()
+        do {
+            let output = try TeleprompterRewriteDecoder().decode(response, groups: rewriteGroups)
+            return try makeBlockStates(output: output, groups: groups, sourceUnits: sourceUnits)
+        } catch {
+            observe(
+                .init(
+                    kind: .callFailed,
+                    component: "rewrite_decoder",
+                    context: context,
+                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                ),
+                onObservation: onObservation
+            )
+            throw error
+        }
+    }
+
+    func stageContext(
+        from context: TeleprompterAICallContext,
+        stage: TeleprompterAIStage,
+        attempt: Int
+    ) -> TeleprompterAICallContext {
+        .init(
+            runID: context.runID,
+            requestID: UUID().uuidString,
+            stage: stage,
+            itemIndex: context.itemIndex,
+            itemCount: context.itemCount,
+            attempt: attempt
+        )
+    }
+
+    func makeGroupStates(
+        output: TeleprompterGroupingOutput,
+        window: TeleprompterPreparationMapWindow,
+        sourceUnits: [Int: TeleprompterSourceUnit]
+    ) throws -> [GroupState] {
+        let totalBudgetUnits = window.sourceUnitIDs.reduce(0) { $0 + (sourceUnits[$1]?.budgetUnits ?? 0) }
+        return try output.groups.map { group in
+            let IDs = window.sourceUnitIDs.filter { $0 >= group.startUnit && $0 < group.endUnit }
+            guard let first = IDs.first,
+                  IDs.last == group.endUnit - 1,
+                  IDs.count == group.endUnit - group.startUnit,
+                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {
+                throw TeleprompterPreparationError.invalidSourceUnits
+            }
+            let units = IDs.compactMap { sourceUnits[$0] }
+            let rawUnits = units.map { TeleprompterMapContextItem(id: $0.id, rawText: $0.rawText) }
+            let protected = units.flatMap { TeleprompterProtectedLiteralExtractor.extract(from: $0.rawText) }
+            let budgetUnits = units.reduce(0) { $0 + $1.budgetUnits }
+            return GroupState(
+                id: "block-\(first)-\(group.endUnit)",
+                sourceUnitIDs: IDs,
+                sourceUnits: rawUnits,
+                protectedLiterals: Array(Set(protected)).sorted(),
+                budgetSeconds: totalBudgetUnits > 0
+                    ? window.localBudgetSeconds * Double(budgetUnits) / Double(totalBudgetUnits)
+                    : 0
+            )
+        }
+    }
+
+    func makeBlockStates(
+        output: TeleprompterRewriteOutput,
+        groups: [GroupState],
+        sourceUnits: [Int: TeleprompterSourceUnit]
+    ) throws -> [BlockState] {
+        let allowed = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0) })
+        return try output.blocks.enumerated().map { offset, block in
+            guard let group = allowed[block.blockID],
+                  let first = group.sourceUnitIDs.first,
+                  let last = group.sourceUnitIDs.last,
+                  let firstUnit = sourceUnits[first],
+                  let lastUnit = sourceUnits[last] else {
+                throw TeleprompterPreparationError.invalidSourceUnits
+            }
+            let rawText = group.sourceUnits.map(\.rawText).joined()
+            let text: String
+            let disposition: TeleprompterBlockDisposition
+            switch block.mode {
+            case .speak:
+                text = block.text
+                disposition = .speak
+            case .review:
+                text = block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? rawText : block.text
+                disposition = .unresolved
+            case .omit:
+                text = ""
+                disposition = .unresolved
+            }
+            return BlockState(
+                block: .init(
+                    id: group.id,
+                    ordinal: offset,
+                    sourceRange: .init(start: firstUnit.sourceRange.start, end: lastUnit.sourceRange.end),
+                    text: text,
+                    rawSourceText: rawText,
+                    disposition: disposition,
+                    origin: .ai,
+                    reviewIssues: block.issues,
+                    budgetSeconds: group.budgetSeconds
+                ),
+                sourceUnitIDs: group.sourceUnitIDs,
+                sourceUnits: group.sourceUnits,
+                revision: 0
+            )
+        }
+    }
+
+    func makeLocalFallback(
+        for window: TeleprompterPreparationMapWindow,
+        sourceUnits: [Int: TeleprompterSourceUnit],
+        pace: TeleprompterPace,
+        error: Error,
+        onObservation: TeleprompterAIObservationHandler?
+    ) -> [BlockState]? {
+        guard isLocallyRecoverable(error) else { return nil }
+        let totalBudgetUnits = window.sourceUnitIDs.reduce(0) { $0 + (sourceUnits[$1]?.budgetUnits ?? 0) }
+        let states = window.sourceUnitIDs.enumerated().compactMap { offset, id -> BlockState? in
+            guard let unit = sourceUnits[id] else { return nil }
+            let sourceItems = [TeleprompterMapContextItem(id: id, rawText: unit.rawText)]
+            let budget = totalBudgetUnits > 0
+                ? window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)
+                : 0
+            return BlockState(
+                block: .init(
+                    id: "block-\(id)-\(id + 1)",
+                    ordinal: offset,
+                    sourceRange: unit.sourceRange,
+                    text: unit.rawText,
+                    rawSourceText: unit.rawText,
+                    disposition: .unresolved,
+                    origin: .deterministic,
+                    reviewIssues: [.uncertainMeaning],
+                    budgetSeconds: budget
+                ),
+                sourceUnitIDs: [id],
+                sourceUnits: sourceItems,
+                revision: 0
+            )
+        }
+        guard states.count == window.sourceUnitIDs.count else { return nil }
+        observe(
+            .init(
+                kind: .callFinished,
+                component: "local_recovery",
+                outcome: "source_fallback",
+                errorCode: TeleprompterAIObservability.errorCode(for: error)
+            ),
+            onObservation: onObservation
+        )
+        _ = pace
+        return states
+    }
+
+    func isLocallyRecoverable(_ error: Error) -> Bool {
+        if let error = error as? TeleprompterPreparationError {
+            switch error {
+            case .invalidPromptResponse, .invalidPromptResponseDetailed:
+                return true
+            default:
+                return false
+            }
+        }
+        guard let error = error as? LLMError else { return false }
+        switch error {
+        case .invalidStructuredResponse, .outputTruncated, .transport:
+            return true
+        case .http(let status, _), .httpWithRetry(let status, _, _):
+            return status == 408 || status == 409 || status == 425 || status == 429
+                || (500...599).contains(status)
+        case .notConfigured, .badBaseURL, .notResponsesAPI, .notChatAPI,
+             .unsupportedStructuredOutput, .refused, .cancelled:
+            return false
         }
     }
 

@@ -320,7 +320,8 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationEnabled,
-            apiKey: apiKey
+            apiKey: apiKey,
+            chunkDurationMilliseconds: TranscriptionSessionUpdate.captionChunkDurationMilliseconds
         )
         do {
             try await client.connect()
@@ -507,7 +508,8 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationActive,
-            apiKey: apiKey
+            apiKey: apiKey,
+            chunkDurationMilliseconds: TranscriptionSessionUpdate.captionChunkDurationMilliseconds
         )
         do {
             try await client.connect()

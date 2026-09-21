@@ -143,7 +143,7 @@ public struct DubbingDeskView: View {
                 Button {
                     dubbingText = ""
                 } label: {
-                    Label("清空", systemImage: "eraser")
+                    SpeechRailButtonLabel("清空", icon: .eraser)
                 }
                 .buttonStyle(.borderless)
                 // 稿的 `editor/meta` 里「清空」是 `Subheadline`(11)：4x 帧上两个字的墨迹
@@ -224,12 +224,11 @@ public struct DubbingDeskView: View {
             isVoicePickerPresented = true
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "waveform")
+                SpeechRailButtonIcon(.waveform)
                     // 稿的胶囊是 `icon(capsule, "audio-waveform", 15, V["accent/voice"])`：
                     // 波形是**琥珀**（4x 帧同样量到琥珀），与 §5.4「琥珀只标记声音/音色类
                     // 对象——音色徽标、波形、候选卡」一致。应用此前不设色，继承成正文色。
                     .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                    .accessibilityHidden(true)
                 Text(voicePickerTitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -238,13 +237,14 @@ public struct DubbingDeskView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                 }
-                Image(systemName: "chevron.down")
-                    .font(.caption2)
+                SpeechRailButtonIcon(
+                    .expandDown,
+                    size: SpeechRailDesignTokens.Icon.compactButtonIconSize
+                )
                     // 稿（脚本 1336）是 `icon(capsule, "chevron-down", 14, V["text/secondary"])`：
                     // 次级色，不是三级色。应用自己的折叠行 chevron 也用 `inkSecondary`，
                     // 只有这里用三级色，属于唯一异类（REDESIGN-SPEC §11.6 第三十九轮）。
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .accessibilityHidden(true)
             }
             .frame(minWidth: SpeechRailDesignTokens.Layout.creatorVoicePickerWidth, alignment: .leading)
         }
@@ -534,9 +534,9 @@ public struct DubbingDeskView: View {
                 Button {
                     model.playWork(work)
                 } label: {
-                    Label(
+                    SpeechRailButtonLabel(
                         isPlaying(work) ? "停止" : "播放",
-                        systemImage: isPlaying(work) ? "stop.fill" : "play.fill"
+                        icon: isPlaying(work) ? .stop : .play
                     )
                 }
                 .accessibilityLabel(isPlaying(work) ? "停止播放" : "播放")
@@ -544,14 +544,14 @@ public struct DubbingDeskView: View {
                 Button {
                     revealInFinder(work)
                 } label: {
-                    Label("在 Finder 中显示", systemImage: "folder")
+                    SpeechRailButtonLabel("在 Finder 中显示", icon: .folder)
                 }
                 .accessibilityLabel("在 Finder 中显示")
 
                 Button {
                     prepareExport(for: work)
                 } label: {
-                    Label("导出…", systemImage: "square.and.arrow.down")
+                    SpeechRailButtonLabel("导出…", icon: .export)
                 }
                 .accessibilityLabel("导出配音")
 
@@ -565,10 +565,11 @@ public struct DubbingDeskView: View {
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                         Text("查看我的作品")
-                        Image(systemName: "chevron.right")
-                            .font(SpeechRailDesignTokens.Typography.caption)
+                        SpeechRailButtonIcon(
+                            .next,
+                            size: SpeechRailDesignTokens.Icon.compactButtonIconSize
+                        )
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .accessibilityHidden(true)
                     }
                 }
                 .buttonStyle(.borderless)
@@ -1554,8 +1555,7 @@ private struct VoiceCandidateCard: View {
                     .accessibilityLabel("重新生成候选 \(candidate.slot)")
             } else {
                 Button(action: onPlayToggle) {
-                    Label(isPlaying ? "停止" : "试听", systemImage: isPlaying ? "stop.fill" : "play.fill")
-                        .font(SpeechRailDesignTokens.Typography.caption)
+                    SpeechRailButtonLabel(isPlaying ? "停止" : "试听", icon: isPlaying ? .stop : .play)
                 }
                 .speechRailButton(.secondary)
                 .disabled(!hasAudio || isLoading)

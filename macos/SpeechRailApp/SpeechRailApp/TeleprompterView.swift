@@ -184,7 +184,7 @@ public struct TeleprompterView: View {
             if documents.isEmpty {
                 PageActionButton(
                     title: "导入文件…",
-                    systemImage: "arrow.down.doc",
+                    icon: .importDocument,
                     helpText: "导入 TXT 或 Markdown 文本文件"
                 ) {
                     isImporterPresented = true
@@ -192,7 +192,7 @@ public struct TeleprompterView: View {
             } else {
                 PageActionsMenu(
                     title: "新建",
-                    systemImage: "plus",
+                    icon: .add,
                     helpText: "创建新的提词稿件"
                 ) {
                     Button("新建空白稿") {
@@ -210,17 +210,17 @@ public struct TeleprompterView: View {
                 if session.document != nil {
                     PageActionsMenu(
                         title: "导出",
-                        systemImage: "square.and.arrow.up",
+                        icon: .export,
                         helpText: "导出原稿或朗读稿"
                     ) {
-                        Button("导出原稿 (Markdown)…", systemImage: "doc.text") {
+                        Button("导出原稿 (Markdown)…", systemImage: SpeechRailDesignTokens.Icon.Symbol.document.systemName) {
                             exportSourceDocument()
                         }
-                        Button("导出朗读稿 (Markdown)…", systemImage: "text.bubble") {
+                        Button("导出朗读稿 (Markdown)…", systemImage: SpeechRailDesignTokens.Icon.Symbol.readingCues.systemName) {
                             exportReadingDocument()
                         }
                         Divider()
-                        Button("复制稿件内容", systemImage: "doc.on.doc") {
+                        Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
                             copyDocumentContent()
                         }
                     }
@@ -229,7 +229,7 @@ public struct TeleprompterView: View {
                 if session.isCapturing {
                     PageActionButton(
                         title: "停止跟读",
-                        systemImage: "stop.fill",
+                        icon: .stop,
                         helpText: "停止当前跟读并释放麦克风"
                     ) {
                         Task { await session.endFollowing() }
@@ -237,7 +237,7 @@ public struct TeleprompterView: View {
                 } else if session.document != nil {
                     PageActionButton(
                         title: "打开舞台",
-                        systemImage: "macwindow",
+                        icon: .stage,
                         helpText: "打开独立悬浮提词窗口"
                     ) {
                         prepareStage()
@@ -522,12 +522,13 @@ public struct TeleprompterView: View {
     // MARK: - 已有稿件时的工作台
 
     private var populatedWorkspace: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             recentDocuments
                 .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
                 .disabled(!session.canEdit || session.isPreparingDraft)
             editor
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var recentDocuments: some View {
@@ -647,7 +648,7 @@ public struct TeleprompterView: View {
                                     .speechRailPointerCursor()
 
                                     Menu {
-                                        Button("创建副本", systemImage: "plus.square.on.square") {
+                                        Button("创建副本", systemImage: SpeechRailDesignTokens.Icon.Symbol.duplicate.systemName) {
                                             do {
                                                 _ = try session.duplicateDocument(documentID: document.id)
                                                 reloadDocuments()
@@ -655,7 +656,7 @@ public struct TeleprompterView: View {
                                                 operationMessage = error.localizedDescription
                                             }
                                         }
-                                        Button("复制稿件内容", systemImage: "doc.on.doc") {
+                                        Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
                                             if let markdown = session.exportMarkdown() {
                                                 NSPasteboard.general.clearContents()
                                                 NSPasteboard.general.setString(markdown, forType: .string)
@@ -663,13 +664,12 @@ public struct TeleprompterView: View {
                                             }
                                         }
                                         Divider()
-                                        Button("删除…", systemImage: "trash", role: .destructive) {
+                                        Button("删除…", systemImage: SpeechRailDesignTokens.Icon.Symbol.delete.systemName, role: .destructive) {
                                             documentToDelete = document
                                             isDeleteAlertPresented = true
                                         }
                                     } label: {
-                                        Image(systemName: "ellipsis")
-                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                        SpeechRailButtonIcon(.more)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                                             .frame(width: 18, height: 18)
                                     }
@@ -689,9 +689,23 @@ public struct TeleprompterView: View {
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                     }
+                    .frame(maxHeight: .infinity)
+                }
+
+                if !documents.isEmpty {
+                    SessionHairline()
+                    HStack {
+                        Text("\(documents.count) 篇稿件")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                 }
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var filteredDocuments: [TeleprompterDocument] {
@@ -728,9 +742,8 @@ public struct TeleprompterView: View {
             .speechRailSurface(.panel)
             .clipShape(SpeechRailDesignTokens.Corner.containerShape)
         } else {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                workspaceHeaderCard
-                preparationControlBar
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                scriptHeaderAndPacingCard
 
                 if let blocked = session.blocked {
                     blockedNoticeCard(blocked)
@@ -752,40 +765,59 @@ public struct TeleprompterView: View {
                     readyWorkspace
                 }
 
-                stageSettings
+                stageSettingsBar
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
-    // MARK: - 稿件信息头部
+    // MARK: - 稿件与朗读控制卡 (Surface A)
 
-    private var workspaceHeaderCard: some View {
+    private var scriptHeaderAndPacingCard: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(
-                    title: session.phase == .review ? "审阅朗读稿" : "稿件编排",
-                    detail: session.phase == .review ? "对比原文核对改动，处理待确认事项后采用" : "原稿内容永远不会被 AI 直接修改或截断"
-                ) {
+                // 第一行：稿件名称与元数据动作条
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Image(systemName: "doc.text")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
+                    TextField("稿件名称", text: titleBinding)
+                        .disabled(!session.canEdit || session.isPreparingDraft)
+                        .textFieldStyle(.plain)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .speechRailRecessedSlot()
+
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("\(sourceBinding.wrappedValue.count) 字")
                             .font(SpeechRailDesignTokens.Typography.technicalValue)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                SpeechRailDesignTokens.Color.recessedField,
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            )
 
                         if case .storeUnavailable = session.blocked {
                             StatusPill(tone: .attention, label: "尚未保存")
+                        } else if session.phase == .review {
+                            StatusPill(tone: .attention, label: "待你确认")
                         } else if session.activeVersion != nil {
-                            StatusPill(tone: .neutral, label: "已确认版本")
+                            StatusPill(tone: .healthy, label: "已就绪")
+                        } else {
+                            StatusPill(tone: .neutral, label: "草稿")
                         }
 
                         Menu {
-                            Button("导出原稿 (Markdown)…", systemImage: "doc.text") {
+                            Button("导出原稿 (Markdown)…", systemImage: SpeechRailDesignTokens.Icon.Symbol.document.systemName) {
                                 exportSourceDocument()
                             }
-                            Button("导出朗读稿 (Markdown)…", systemImage: "text.bubble") {
+                            Button("导出朗读稿 (Markdown)…", systemImage: SpeechRailDesignTokens.Icon.Symbol.readingCues.systemName) {
                                 exportReadingDocument()
                             }
                             Divider()
-                            Button("创建副本", systemImage: "plus.square.on.square") {
+                            Button("创建副本", systemImage: SpeechRailDesignTokens.Icon.Symbol.duplicate.systemName) {
                                 if let doc = session.document {
                                     do {
                                         _ = try session.duplicateDocument(documentID: doc.id)
@@ -795,19 +827,18 @@ public struct TeleprompterView: View {
                                     }
                                 }
                             }
-                            Button("复制稿件内容", systemImage: "doc.on.doc") {
+                            Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
                                 copyDocumentContent()
                             }
                             Divider()
-                            Button("删除这份稿子…", systemImage: "trash", role: .destructive) {
+                            Button("删除这份稿子…", systemImage: SpeechRailDesignTokens.Icon.Symbol.delete.systemName, role: .destructive) {
                                 if let doc = session.document {
                                     documentToDelete = doc
                                     isDeleteAlertPresented = true
                                 }
                             }
                         } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(SpeechRailDesignTokens.Typography.body)
+                            SpeechRailButtonIcon(.more)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                         .menuStyle(.borderlessButton)
@@ -816,34 +847,19 @@ public struct TeleprompterView: View {
 
                 SessionHairline()
 
-                TextField("稿子名称", text: titleBinding)
-                    .disabled(!session.canEdit || session.isPreparingDraft)
-                    .textFieldStyle(.plain)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .speechRailRecessedSlot()
-            }
-            .padding(SpeechRailDesignTokens.Spacing.md)
-        }
-        .disabled(session.isPreparingDraft)
-    }
-
-    // MARK: - 目标时长、节奏与预检控制条
-
-    private var preparationControlBar: some View {
-        CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                    // 目标时长输入与快捷菜单
+                // 第二行：目标时长、节奏、可行性预检及快捷工具
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    // 目标时长
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("目标时长")
+                        Text("目标")
                             .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
                         HStack(spacing: 2) {
-                            TextField("例如 20", text: $targetMinutesInput)
+                            TextField("20", text: $targetMinutesInput)
                                 .textFieldStyle(.plain)
                                 .font(SpeechRailDesignTokens.Typography.technicalValue)
-                                .frame(width: 44)
+                                .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth)
                                 .multilineTextAlignment(.trailing)
                                 .onChange(of: targetMinutesInput) { _, newValue in
                                     if let mins = Int(newValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
@@ -851,19 +867,19 @@ public struct TeleprompterView: View {
                                     }
                                 }
 
-                            Text("分钟")
+                            Text("分")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 3)
                         .background(
                             SpeechRailDesignTokens.Color.inputField,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            in: SpeechRailDesignTokens.Corner.controlShape
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                .stroke(
+                            SpeechRailDesignTokens.Corner.controlShape
+                                .strokeBorder(
                                     !isTargetMinutesValid && !targetMinutesInput.isEmpty
                                         ? SpeechRailDesignTokens.Color.attention
                                         : SpeechRailDesignTokens.Surface.border,
@@ -880,7 +896,7 @@ public struct TeleprompterView: View {
                             }
                         } label: {
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 10))
+                                .font(.system(size: 9))
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                         .menuStyle(.borderlessButton)
@@ -892,11 +908,11 @@ public struct TeleprompterView: View {
                         }
                     }
 
-                    // 朗读节奏选择器
+                    // 朗读节奏
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("节奏")
                             .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
                         Picker("朗读节奏", selection: Binding(
                             get: { session.pace },
@@ -911,11 +927,11 @@ public struct TeleprompterView: View {
 
                         if session.calibrationFactor != 1.0 {
                             Menu {
-                                Button("重新计时试读…", systemImage: "stopwatch") {
+                                Button("重新计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
                                     isTrialReadingPresented = true
                                 }
                                 Divider()
-                                Button("恢复默认语速 (1.0x)", systemImage: "arrow.counterclockwise") {
+                                Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
                                     session.applyTrialCalibration(k: 1.0)
                                     operationMessage = "已恢复为默认自然语速 (1.0x)"
                                 }
@@ -923,10 +939,9 @@ public struct TeleprompterView: View {
                                 HStack(spacing: 2) {
                                     StatusPill(
                                         tone: .healthy,
-                                        label: "已校准 \(String(format: "%.2fx", session.calibrationFactor))"
+                                        label: "\(String(format: "%.2fx", session.calibrationFactor))"
                                     )
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: 8))
+                                    SpeechRailButtonIcon(.expandDown, size: 8, weight: .semibold)
                                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                                 }
                             }
@@ -934,51 +949,42 @@ public struct TeleprompterView: View {
                         }
                     }
 
-                    Spacer()
-
-                    // 工具入口：选择范围与计时试读
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button {
-                            isContentSelectionPresented = true
-                        } label: {
-                            Label(
-                                session.contentSelection.hasExclusions
-                                    ? "已选 \(session.contentSelection.selectedCount) 段"
-                                    : "选择内容范围",
-                                systemImage: "checklist"
-                            )
-                        }
-                        .speechRailButton(.secondary)
-
-                        Button {
-                            isTrialReadingPresented = true
-                        } label: {
-                            Label("计时试读", systemImage: "stopwatch")
-                        }
-                        .speechRailButton(.secondary)
-                    }
-                }
-
-                SessionHairline()
-
-                // 可行性预检反馈行
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    // 预检指示 (Compact)
                     let preflight = session.preflightConclusion
-                    StatusPill(
-                        tone: preflightTone(preflight),
-                        label: preflight.badgeTitle
-                    )
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        StatusPill(
+                            tone: preflightTone(preflight),
+                            label: preflight.badgeTitle
+                        )
 
-                    Text(preflight.userGuidance)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(2)
+                        Text(preflight.userGuidance)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(1)
+                    }
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
-                    Text("包含自然停顿，不含问答演示")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    // 快捷工具
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        SpeechRailButton(
+                            session.contentSelection.hasExclusions
+                                ? "已选 \(session.contentSelection.selectedCount) 段"
+                                : "选择范围",
+                            icon: .checklist,
+                            level: .secondary
+                        ) {
+                            isContentSelectionPresented = true
+                        }
+
+                        SpeechRailButton(
+                            "计时试读",
+                            icon: .timer,
+                            level: .secondary
+                        ) {
+                            isTrialReadingPresented = true
+                        }
+                    }
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
@@ -1148,18 +1154,25 @@ public struct TeleprompterView: View {
 
     private var reviewWorkspace: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            if session.hasLocalPreparationFallback {
+                NoticeBar(
+                    tone: .warning,
+                    message: session.isFullyLocalPreparationFallback
+                        ? "这次未完成 AI 整理，当前候选全部保留原文；请确认后使用。"
+                        : "部分内容保留了原文，请确认后使用；未确认的内容不能直接采用。"
+                )
+            } else {
+                NoticeBar(
+                    tone: .success,
+                    message: "\(TeleprompterReviewCopy.successTitle)。\(TeleprompterReviewCopy.successMessage)"
+                )
+            }
+
             if session.hasUncheckedPreparationBoundaries {
-                CardSurface {
-                    Label {
-                        Text("朗读稿已整理，但部分相邻段落未完成衔接检查；仍可采用，请在原文对照中重点核对这些接缝。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.md)
-                }
+                NoticeBar(
+                    tone: .warning,
+                    message: "朗读稿已整理，但部分相邻段落未完成衔接检查；仍可采用，请在原文对照中重点核对这些接缝。"
+                )
             }
 
             // 待确认事项总览与操作门禁
@@ -1169,13 +1182,13 @@ public struct TeleprompterView: View {
                         HStack {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                            Text("待确认事项（还有 \(session.unresolvedReviewItemCount) 项需要决策）")
+                            Text("有 \(session.unresolvedReviewItemCount) 段内容需要你确认")
                                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                             Spacer()
                         }
 
-                        Text("AI 提出了关于指代、读法或略读的建议。请在下方逐项裁决后，方可采用此稿进行跟读。")
+                        Text("这些内容可能有多种读法或含义。你可以采用建议、保留原文或自己修改。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
@@ -1327,15 +1340,21 @@ public struct TeleprompterView: View {
             // 朗读稿分段与原文对照
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    HStack {
-                        Text("朗读稿来源组 (\(session.readingBlocks.count) 组)")
-                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(TeleprompterReviewCopy.readingTitle)
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+
+                            Text(TeleprompterReviewCopy.readingSubtitle)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
 
                         Spacer()
 
                         Toggle(isOn: $isComparingWithSource) {
-                            Text("查看原文对照")
+                            Text(TeleprompterReviewCopy.compareSourceLabel)
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                         }
                         .toggleStyle(.switch)
@@ -1346,15 +1365,19 @@ public struct TeleprompterView: View {
                     ScrollView {
                         VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                             ForEach(session.readingBlocks) { block in
-                                let blockNumber = block.ordinal + 1
                                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                                     HStack {
-                                        Text("第 \(blockNumber) 组")
+                                        Text(TeleprompterReviewCopy.blockTitle(ordinal: block.ordinal))
                                             .font(SpeechRailDesignTokens.Typography.captionMedium)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
 
                                         if block.disposition != .speak {
-                                            StatusPill(tone: .neutral, label: block.disposition == .cue ? "仅作提示" : "已跳过")
+                                            StatusPill(
+                                                tone: .neutral,
+                                                label: block.origin == .deterministic
+                                                    ? "原文待确认"
+                                                    : (block.disposition == .cue ? "仅作提示" : "已跳过")
+                                            )
                                         }
 
                                         if block.text != block.rawSourceText && !block.rawSourceText.isEmpty {
@@ -1363,23 +1386,27 @@ public struct TeleprompterView: View {
 
                                         Spacer()
 
-                                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                            Button("新增段") {
+                                        Menu {
+                                            Button("在此后新增一段") {
                                                 session.insertBlock(after: block.ordinal)
                                             }
-                                            .speechRailButton(.secondary)
 
-                                            Button("拆分") {
+                                            Button("拆分本段") {
                                                 session.splitBlock(at: block.ordinal)
                                             }
-                                            .speechRailButton(.secondary)
 
-                                            Button("合并下一组") {
+                                            Button("与下一段合并") {
                                                 session.mergeBlock(at: block.ordinal)
                                             }
-                                            .speechRailButton(.secondary)
                                             .disabled(block.ordinal + 1 >= session.readingBlocks.count)
+                                        } label: {
+                                            Label(
+                                                TeleprompterReviewCopy.advancedEditLabel,
+                                                systemImage: "ellipsis.circle"
+                                            )
                                         }
+                                        .menuStyle(.borderlessButton)
+                                        .speechRailButton(.secondary)
                                     }
 
                                     if isComparingWithSource && !block.rawSourceText.isEmpty {
@@ -1428,7 +1455,7 @@ public struct TeleprompterView: View {
                     .frame(maxHeight: 320)
 
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button("使用此稿") {
+                        Button(TeleprompterReviewCopy.acceptAction) {
                             do {
                                 try session.acceptPendingVersion()
                                 operationMessage = nil
@@ -1440,7 +1467,7 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
                         .disabled(!session.canAcceptPendingVersion)
 
-                        Button(session.isTightening ? "正在精简…" : "再精简表达") {
+                        Button(session.isTightening ? "正在精简…" : TeleprompterReviewCopy.tightenAction) {
                             Task {
                                 if let msg = await session.tightenReadingBlocks() {
                                     operationMessage = msg
@@ -1452,12 +1479,12 @@ public struct TeleprompterView: View {
                         .speechRailButton(.secondary)
                         .disabled(!session.canTighten || session.isTightening)
 
-                        Button("计时试读", systemImage: "stopwatch") {
+                        Button(TeleprompterReviewCopy.trialAction, systemImage: "stopwatch") {
                             isTrialReadingPresented = true
                         }
                         .speechRailButton(.secondary)
 
-                        Button("放弃修改") {
+                        Button(TeleprompterReviewCopy.discardAction) {
                             session.discardPendingVersion()
                         }
                         .speechRailButton(.secondary)
@@ -1465,7 +1492,7 @@ public struct TeleprompterView: View {
                         Spacer()
 
                         if session.unresolvedReviewItemCount > 0 {
-                            Text("需处理全部待确认项后方可采用（还有 \(session.unresolvedReviewItemCount) 项）")
+                            Text("还有 \(session.unresolvedReviewItemCount) 段内容需要确认，确认后才能使用。")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                         }
@@ -1504,10 +1531,12 @@ public struct TeleprompterView: View {
                 text: Binding(
                     get: { block.text },
                     set: { session.updateBlockText(id: block.id, text: $0) }
-                )
+                ),
+                axis: .vertical
             )
             .textFieldStyle(.plain)
             .font(SpeechRailDesignTokens.Typography.body)
+            .lineLimit(2...12)
             .speechRailRecessedSlot()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1519,10 +1548,12 @@ public struct TeleprompterView: View {
             text: Binding(
                 get: { block.text },
                 set: { session.updateBlockText(id: block.id, text: $0) }
-            )
+            ),
+            axis: .vertical
         )
         .textFieldStyle(.plain)
         .font(SpeechRailDesignTokens.Typography.body)
+        .lineLimit(2...12)
         .speechRailRecessedSlot()
     }
 
@@ -1645,19 +1676,25 @@ public struct TeleprompterView: View {
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("打开舞台并开始跟读", systemImage: "play.fill") {
+                    Button {
                         beginReading()
+                    } label: {
+                        SpeechRailButtonLabel("打开舞台并开始跟读", icon: .play)
                     }
                     .speechRailButton(.primary)
 
-                    Button("只打开提词窗口", systemImage: "macwindow") {
+                    Button {
                         prepareStage()
                         stage.show()
+                    } label: {
+                        SpeechRailButtonLabel("只打开提词窗口", icon: .stage)
                     }
                     .speechRailButton(.secondary)
 
-                    Button("添加朗读提示", systemImage: "text.quote") {
+                    Button {
                         requestReadingCues()
+                    } label: {
+                        SpeechRailButtonLabel("添加朗读提示", icon: .readingCues)
                     }
                     .speechRailButton(.secondary)
                     .disabled(session.isAnnotating)
@@ -1707,13 +1744,17 @@ public struct TeleprompterView: View {
 
                     Spacer()
 
-                    Button("返回提词舞台", systemImage: "macwindow") {
+                    Button {
                         stage.show()
+                    } label: {
+                        SpeechRailButtonLabel("返回提词舞台", icon: .stage)
                     }
                     .speechRailButton(.primary)
 
-                    Button("停止跟读并解锁编辑", systemImage: "stop.fill") {
+                    Button {
                         Task { await session.endFollowing() }
+                    } label: {
+                        SpeechRailButtonLabel("停止跟读并解锁编辑", icon: .stop)
                     }
                     .speechRailButton(.secondary)
                 }
@@ -1722,62 +1763,86 @@ public struct TeleprompterView: View {
         }
     }
 
-    // MARK: - 舞台设置卡
+    // MARK: - 舞台视效精炼坞 (Surface C)
 
-    private var stageSettings: some View {
+    private var stageSettingsBar: some View {
         CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "直播提词设置", detail: "调整独立舞台窗口的视觉尺寸；直播软件只采集摄像头或目标内容窗口")
-                SessionHairline()
-                HStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                    LabeledContent {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Slider(
-                                value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
-                                in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
-                            )
-                            .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
-                            Text("\(Int(settings.scriptPointSize)) pt")
-                                .font(SpeechRailDesignTokens.Typography.technicalValue)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .frame(width: 44, alignment: .trailing)
-                        }
-                    } label: {
-                        Text("文字大小")
-                    }
-
-                    LabeledContent {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Slider(
-                                value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
-                                in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
-                            )
-                            .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
-                            Text("\(Int(settings.opacity * 100))%")
-                                .font(SpeechRailDesignTokens.Typography.technicalValue)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .frame(width: 36, alignment: .trailing)
-                        }
-                    } label: {
-                        Text("透明度")
-                    }
-
-                    Stepper(
-                        "提前提示 \(settings.visibleSegmentCount) 段",
-                        value: Binding(
-                            get: { settings.visibleSegmentCount },
-                            set: { settings.visibleSegmentCount = $0 }
-                        ),
-                        in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
-                    )
+            HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "macwindow")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    Text("舞台视效")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
 
-                Label("直播贴士：推流软件请只采集摄像头或目标内容窗口，不要采集整个屏幕。", systemImage: "rectangle.on.rectangle")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+                Divider()
+                    .frame(height: 14)
+
+                // 字号调节
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("字号")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                    Slider(
+                        value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
+                        in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
+                    )
+                    .frame(width: 96)
+
+                    Text("\(Int(settings.scriptPointSize)) pt")
+                        .font(SpeechRailDesignTokens.Typography.technicalValue)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(width: 36, alignment: .trailing)
+                }
+
+                // 透明度调节
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("透明度")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                    Slider(
+                        value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
+                        in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
+                    )
+                    .frame(width: 88)
+
+                    Text("\(Int(settings.opacity * 100))%")
+                        .font(SpeechRailDesignTokens.Typography.technicalValue)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(width: 36, alignment: .trailing)
+                }
+
+                // 提前提示段数
+                Stepper(
+                    "提前 \(settings.visibleSegmentCount) 段",
+                    value: Binding(
+                        get: { settings.visibleSegmentCount },
+                        set: { settings.visibleSegmentCount = $0 }
+                    ),
+                    in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+                )
+                .font(SpeechRailDesignTokens.Typography.caption)
+
+                Spacer(minLength: 0)
+
+                // 直播贴士提示 (带无障碍与说明)
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("推流建议：采集目标窗口，勿全屏采集")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .lineLimit(1)
+                }
+                .help("直播贴士：OBS 或直播伴侣请采集「摄像头」或「目标窗口」，避免全屏采集捕获提词悬浮窗。")
             }
-            .padding(SpeechRailDesignTokens.Spacing.md)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         }
     }
 

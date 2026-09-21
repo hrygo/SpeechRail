@@ -250,11 +250,11 @@ public struct TeleprompterStageView: View {
                     Task { await session.resumeFollowing() }
                 }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: isFollowing ? "pause.fill" : "play.fill")
-                    Text(isFollowing ? "暂停跟读" : startLabel)
-                    ButtonShortcutHint("Space")
-                }
+                SpeechRailButtonLabel(
+                    isFollowing ? "暂停跟读" : startLabel,
+                    icon: isFollowing ? .pause : .play,
+                    shortcut: "Space"
+                )
             }
             .keyboardShortcut(.space, modifiers: [])
             .accessibilityLabel(isFollowing ? "暂停跟读，快捷键空格" : "\(startLabel)，快捷键空格")
@@ -264,11 +264,7 @@ public struct TeleprompterStageView: View {
             Button {
                 session.moveToPrevious()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "chevron.left")
-                    Text("上一段")
-                    ButtonShortcutHint("←")
-                }
+                SpeechRailButtonLabel("上一段", icon: .previous, shortcut: "←")
             }
             .keyboardShortcut(.leftArrow, modifiers: [])
             .accessibilityLabel("上一段，快捷键左方向键")
@@ -277,11 +273,7 @@ public struct TeleprompterStageView: View {
             Button {
                 session.moveToNext()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("下一段")
-                    Image(systemName: "chevron.right")
-                    ButtonShortcutHint("→")
-                }
+                SpeechRailButtonLabel("下一段", trailingIcon: .next, shortcut: "→")
             }
             .keyboardShortcut(.rightArrow, modifiers: [])
             .accessibilityLabel("下一段，快捷键右方向键")
@@ -290,11 +282,7 @@ public struct TeleprompterStageView: View {
             Button {
                 Task { await session.resetFollow() }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "arrow.counterclockwise")
-                    Text("从这里继续")
-                    ButtonShortcutHint("R")
-                }
+                SpeechRailButtonLabel("从这里继续", icon: .reset, shortcut: "R")
             }
             .keyboardShortcut("r", modifiers: [])
             .accessibilityLabel("从当前位置重置跟读，快捷键 R")
@@ -309,11 +297,7 @@ public struct TeleprompterStageView: View {
                     close()
                 }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "xmark")
-                    Text("结束")
-                    ButtonShortcutHint("Esc")
-                }
+                SpeechRailButtonLabel("结束", icon: .close, shortcut: "Esc")
             }
             .keyboardShortcut(.escape, modifiers: [])
             .accessibilityLabel("结束提词并关闭舞台，快捷键 Esc")

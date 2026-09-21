@@ -8,6 +8,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
 
     struct Snapshot: Sendable {
         let statusCode: Int?
+        let retryAfter: TimeInterval?
         let body: String
         let isOversized: Bool
         let responseBytes: Int
@@ -20,6 +21,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
 
     private let lock = NSLock()
     private var statusCode: Int?
+    private var retryAfter: TimeInterval?
     private var body = ""
     private var isOversized = false
     private var responseBytes = 0
@@ -33,6 +35,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         statusCode = (response as? HTTPURLResponse)?.statusCode
+        retryAfter = Self.retryAfter(from: response as? HTTPURLResponse)
         responseBytes = data?.count ?? 0
         isOversized = responseBytes > Self.maxResponseBytes
         choiceCount = nil
@@ -61,6 +64,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         statusCode = (response as? HTTPURLResponse)?.statusCode
+        retryAfter = nil
         self.responseBytes = max(0, responseBytes)
         isOversized = self.responseBytes > Self.maxResponseBytes
         body = ""
@@ -87,6 +91,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         defer { lock.unlock() }
         return Snapshot(
             statusCode: statusCode,
+            retryAfter: retryAfter,
             body: body,
             isOversized: isOversized,
             responseBytes: responseBytes,
@@ -96,6 +101,90 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
             completionTokens: completionTokens,
             reasoningTokens: reasoningTokens
         )
+    }
+
+    private static func retryAfter(from response: HTTPURLResponse?) -> TimeInterval? {
+        guard let value = response?.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+
+        if let seconds = TimeInterval(value), seconds.isFinite, seconds >= 0 {
+            return min(seconds, 60)
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        guard let date = formatter.date(from: value) else { return nil }
+        return min(max(0, date.timeIntervalSinceNow), 60)
+    }
+}
+
+private enum LLMJSONValue: Encodable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([LLMJSONValue])
+    case object([String: LLMJSONValue])
+
+    init(_ value: Any) throws {
+        switch value {
+        case is NSNull:
+            self = .null
+        case let value as Bool:
+            self = .bool(value)
+        case let value as Int:
+            self = .number(Double(value))
+        case let value as Double:
+            guard value.isFinite else { throw LLMError.invalidStructuredResponse }
+            self = .number(value)
+        case let value as Float:
+            guard value.isFinite else { throw LLMError.invalidStructuredResponse }
+            self = .number(Double(value))
+        case let value as String:
+            self = .string(value)
+        case let value as [Any]:
+            self = .array(try value.map(LLMJSONValue.init))
+        case let value as [String: Any]:
+            self = .object(try value.mapValues(LLMJSONValue.init))
+        default:
+            throw LLMError.invalidStructuredResponse
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .null:
+            var container = encoder.singleValueContainer()
+            try container.encodeNil()
+        case let .bool(value):
+            var container = encoder.singleValueContainer()
+            try container.encode(value)
+        case let .number(value):
+            var container = encoder.singleValueContainer()
+            try container.encode(value)
+        case let .string(value):
+            var container = encoder.singleValueContainer()
+            try container.encode(value)
+        case let .array(values):
+            var container = encoder.unkeyedContainer()
+            for value in values { try container.encode(value) }
+        case let .object(values):
+            var container = encoder.container(keyedBy: DynamicCodingKey.self)
+            for (key, value) in values {
+                try container.encode(value, forKey: DynamicCodingKey(stringValue: key))
+            }
+        }
+    }
+
+    private struct DynamicCodingKey: CodingKey, Sendable {
+        let stringValue: String
+        let intValue: Int? = nil
+
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
     }
 }
 
@@ -129,6 +218,13 @@ public enum LLMCompatibilityMode: String, Codable, CaseIterable, Identifiable, S
         }
     }
 
+}
+
+/// Server-side format requested for a stateless structured task.
+/// JSON mode remains the compatibility default; strict schema is opt-in per endpoint/model.
+public enum LLMStructuredOutputMode: String, Codable, CaseIterable, Sendable {
+    case jsonObject = "json_object"
+    case jsonSchema = "json_schema"
 }
 
 /// 连接检查和日志使用的实际协议操作。
@@ -560,6 +656,7 @@ public enum LLMError: LocalizedError, Equatable {
     case badBaseURL
     case transport(String)
     case http(status: Int, body: String)
+    case httpWithRetry(status: Int, body: String, retryAfter: TimeInterval)
     /// 端点没有 Responses API（404/405，或返回里明确说没有）。
     case notResponsesAPI
     /// 端点没有 Chat Completions API（404/405，或返回里明确说没有）。
@@ -578,6 +675,8 @@ public enum LLMError: LocalizedError, Equatable {
         case .transport(let message): "连不上这台服务：\(message)"
         case .http(let status, let body):
             body.isEmpty ? "服务返回了 \(status)。" : "服务返回了 \(status)：\(body)"
+        case .httpWithRetry(let status, let body, _):
+            body.isEmpty ? "服务返回了 \(status)，请稍后重试。" : "服务返回了 \(status)：\(body)"
         case .notResponsesAPI: "这个服务没有 Responses API。"
         case .notChatAPI: "这个服务没有 Chat Completions API。"
         case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"
@@ -596,6 +695,9 @@ public actor LLMProvider {
     /// 已经明确拒绝原生 thinking 控制的端点（键是 `baseURL|model`）。
     /// 只记在内存里：换端点或重启后重新探一次，不做持久化。
     private var thinkingControlRejected: Set<String> = []
+    /// 已经明确拒绝 strict JSON Schema 的 endpoint/model/schema 组合。
+    /// 只记在内存里，避免同一整理任务的每个窗口都先失败一次再退回 JSON mode。
+    private var structuredOutputRejected: Set<String> = []
 
     public init(
         session: URLSession = .shared,
@@ -663,8 +765,8 @@ public actor LLMProvider {
         return try Self.extractText(from: data)
     }
 
-    /// 无状态结构化任务使用 MacPaw/OpenAI 的 Chat JSON mode；业务 decoder 仍是提交边界。
-    /// 完整 schema 从同一份定义加入 system，不假定服务端强制 schema。
+    /// 无状态结构化任务使用 Chat JSON mode 或显式 strict JSON Schema；业务 decoder
+    /// 仍是最终提交边界。默认保持 JSON mode 兼容性，strict 仅在调用方明确选择时启用。
     public func completeJSON(
         configuration: LLMConfiguration,
         apiKey: String?,
@@ -673,7 +775,8 @@ public actor LLMProvider {
         schema: [String: Any],
         maxOutputTokens: Int,
         timeout: TimeInterval = 90,
-        observationContext: TeleprompterAICallContext? = nil
+        observationContext: TeleprompterAICallContext? = nil,
+        structuredOutputMode: LLMStructuredOutputMode = .jsonObject
     ) async throws -> String {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential,
@@ -692,7 +795,27 @@ public actor LLMProvider {
         // OpenCode Go uses this header for routing and prompt-cache affinity. A preparation
         // run is one logical conversation, so reuse its run id across map/reduce calls.
         let sessionID = observationContext?.runID ?? UUID().uuidString
-        for attempt in 0...1 {
+        let structuredOutputKey = structuredOutputKey(
+            configuration: configuration,
+            schemaName: schema["name"] as? String,
+            schemaText: schemaText
+        )
+        var requestedMode = structuredOutputMode
+        // OpenCode Go currently routes Chat Completions through a gateway that
+        // rejects OpenAI's response_format=json_schema shape. Keep the local
+        // schema/business decoder as the correctness boundary, but avoid
+        // spending the first request on a known-incompatible wire shape.
+        if requestedMode == .jsonSchema,
+           configuration.compatibilityMode == .openCodeGo {
+            requestedMode = .jsonObject
+        }
+        if requestedMode == .jsonSchema,
+           structuredOutputRejected.contains(structuredOutputKey) {
+            requestedMode = .jsonObject
+        }
+        var structuredOutputFallbackUsed = false
+        var thinkingFallbackUsed = false
+        for attempt in 0...2 {
             try Task.checkCancellation()
             let includeThinkingControl = !thinkingControlRejected.contains(controlKey)
             let responseCapture = SpeechRailOpenAIResponseCapture()
@@ -706,7 +829,8 @@ public actor LLMProvider {
                 transportAttempt: attempt,
                 includeThinkingControl: includeThinkingControl,
                 outcome: "started",
-                errorCode: nil
+                errorCode: nil,
+                structuredOutputMode: requestedMode
             )
             let client = try makeChatClient(
                 configuration: configuration,
@@ -726,7 +850,10 @@ public actor LLMProvider {
                     && configuration.compatibilityMode.chatThinkingControl == .standard
                     ? ChatQuery.ReasoningEffort.none
                     : nil,
-                responseFormat: .jsonObject,
+                responseFormat: try responseFormat(
+                    schema: schema,
+                    mode: requestedMode
+                ),
                 store: false,
                 temperature: 0
             )
@@ -748,7 +875,8 @@ public actor LLMProvider {
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "received",
-                    errorCode: nil
+                    errorCode: nil,
+                    structuredOutputMode: requestedMode
                 )
                 guard !snapshot.isOversized else {
                     throw LLMError.invalidStructuredResponse
@@ -765,31 +893,109 @@ public actor LLMProvider {
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error)
+                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    structuredOutputMode: requestedMode
                 )
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
                     throw LLMError.cancelled
                 }
-                if let llmError = error as? LLMError {
-                    throw llmError
-                }
-                if attempt == 0, includeThinkingControl,
+                if attempt < 2, includeThinkingControl,
                    let statusCode = snapshot.statusCode,
+                   !thinkingFallbackUsed,
                    Self.rejectsThinkingControl(status: statusCode, body: snapshot.body) {
                     thinkingControlRejected.insert(controlKey)
+                    thinkingFallbackUsed = true
                     continue
+                }
+                if attempt < 2,
+                   requestedMode == .jsonSchema,
+                   !structuredOutputFallbackUsed,
+                   let statusCode = snapshot.statusCode,
+                   Self.rejectsStructuredOutput(status: statusCode, body: snapshot.body) {
+                    structuredOutputRejected.insert(structuredOutputKey)
+                    requestedMode = .jsonObject
+                    structuredOutputFallbackUsed = true
+                    continue
+                }
+                if let statusCode = snapshot.statusCode,
+                   let retryAfter = snapshot.retryAfter,
+                   Self.isTransientHTTPStatus(statusCode) {
+                    throw LLMError.httpWithRetry(
+                        status: statusCode,
+                        body: "",
+                        retryAfter: retryAfter
+                    )
+                }
+                if let llmError = error as? LLMError {
+                    throw llmError
                 }
                 if let statusCode = snapshot.statusCode {
                     // 上游错误可能回显稿件或凭据，不把原始正文交给 UI/日志。
                     if (200...299).contains(statusCode) {
                         throw LLMError.invalidStructuredResponse
                     }
-                    throw LLMError.http(status: statusCode, body: "")
+                    throw Self.httpError(status: statusCode, body: "", retryAfter: snapshot.retryAfter)
                 }
                 throw LLMError.transport(error.localizedDescription)
             }
         }
         throw LLMError.invalidStructuredResponse
+    }
+
+    private func responseFormat(
+        schema: [String: Any],
+        mode: LLMStructuredOutputMode
+    ) throws -> ChatQuery.ResponseFormat {
+        switch mode {
+        case .jsonObject:
+            return .jsonObject
+        case .jsonSchema:
+            guard let name = schema["name"] as? String,
+                  let definition = schema["schema"] else {
+                throw LLMError.invalidStructuredResponse
+            }
+            return .jsonSchema(
+                .init(
+                    name: name,
+                    description: nil,
+                    schema: .dynamicJsonSchema(try LLMJSONValue(definition)),
+                    strict: true
+                )
+            )
+        }
+    }
+
+    private func structuredOutputKey(
+        configuration: LLMConfiguration,
+        schemaName: String?,
+        schemaText: String
+    ) -> String {
+        let digest = SHA256.hash(data: Data(schemaText.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return [
+            configuration.normalizedBaseURL,
+            configuration.model,
+            configuration.compatibilityMode.rawValue,
+            LLMOperation.chat.rawValue,
+            schemaName ?? "unknown",
+            digest
+        ].joined(separator: "|")
+    }
+
+    private static func isTransientHTTPStatus(_ status: Int) -> Bool {
+        status == 429 || (500...599).contains(status)
+    }
+
+    private static func httpError(
+        status: Int,
+        body: String,
+        retryAfter: TimeInterval?
+    ) -> LLMError {
+        guard let retryAfter, isTransientHTTPStatus(status) else {
+            return .http(status: status, body: body)
+        }
+        return .httpWithRetry(status: status, body: body, retryAfter: retryAfter)
     }
 
     private func emitProviderObservation(
@@ -804,7 +1010,8 @@ public actor LLMProvider {
         errorCode: String?,
         operation: LLMOperation = .chat,
         component: String = "provider",
-        thinkingControlOverride: String? = nil
+        thinkingControlOverride: String? = nil,
+        structuredOutputMode: LLMStructuredOutputMode? = nil
     ) {
         let endpointHost = URL(string: configuration.normalizedBaseURL)?.host
         let thinkingControl: LLMThinkingControl
@@ -835,6 +1042,7 @@ public actor LLMProvider {
                 thinkingControl: thinkingControlOverride ?? (includeThinkingControl
                     ? "\(thinkingControl.rawValue)_disabled"
                     : "omitted_after_rejection"),
+                structuredOutputMode: structuredOutputMode,
                 outcome: outcome,
                 errorCode: errorCode
             ),
@@ -1491,24 +1699,29 @@ public actor LLMProvider {
         return rejectsThinkingControl(status: status, body: body)
     }
 
-    /// 严格结构化输出是提词器分析的安全边界：端点不支持时必须让调用方明确降级，
-    /// 不能把同一份请求静默改成自由文本或 JSON mode。
+    /// Responses API 的严格结构化输出不做静默协议替换；Chat completeJSON 的
+    /// json_schema 回退是单独受限的能力探测，只允许在端点明确拒绝该格式时退回 json_object。
     private static func rejectsStructuredOutput(_ error: LLMError) -> Bool {
-        guard case let .http(status, body) = error, status == 400 || status == 422 else {
-            return false
-        }
+        guard case let .http(status, body) = error else { return false }
+        return rejectsStructuredOutput(status: status, body: body)
+    }
+
+    private static func rejectsStructuredOutput(status: Int, body: String) -> Bool {
+        guard status == 400 || status == 422 else { return false }
         let lower = body.lowercased()
         let mentionsStructuredOutput = lower.contains("text.format")
             || lower.contains("response_format")
             || lower.contains("json_schema")
             || lower.contains("structured output")
             || lower.contains("structured_outputs")
+        let openCodeUnavailable = lower.contains("response_format type is unavailable")
         let rejectsCapability = lower.contains("not supported")
             || lower.contains("unsupported")
             || lower.contains("unrecognized")
             || lower.contains("unknown parameter")
             || lower.contains("not implemented")
             || lower.contains("does not support")
+            || openCodeUnavailable
         return mentionsStructuredOutput && rejectsCapability
     }
 

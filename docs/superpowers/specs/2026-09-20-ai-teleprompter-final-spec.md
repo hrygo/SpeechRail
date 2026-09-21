@@ -1,9 +1,10 @@
 ---
 title: "AI 提词器终版规格"
 status: final
-version: "1.0.0"
-date: 2026-09-20
+version: "1.1.0"
+date: 2026-09-21
 implementation_status: implemented_pending_model_and_ui_acceptance
+last_implementation_review: 2026-09-21
 supersedes:
   - 2026-09-20-teleprompter-reading-preparation-design.md
   - 2026-09-20-teleprompter-duration-design.md
@@ -44,34 +45,46 @@ supersedes:
 flowchart TD
     A[导入或粘贴原稿] --> B[无损读取、类型与容量检查]
     B --> C{使用方式}
-    C -->|直接使用| J[预览和编辑]
+    C -->|直接使用| D0[预览和编辑]
     C -->|AI 整理| D[设置目标时长与节奏]
     D --> E[可行性预检、确定本次内容范围]
-    E --> F[程序无损分片、分配时间与请求预算]
-    F --> G[Map：分片保真口语化]
-    G --> H[Reduce：组内与组间局部衔接]
-    H --> I[程序装配全文、校验来源、重算时长]
-    I --> J
-    J --> K{内容问题已处理？}
-    K -->|否| L[采用、修改、保留原文、提示或跳过]
-    L --> J
-    K -->|是| M[确认朗读稿；可计时试读]
-    M --> N[App 自动分段并建立跟读坐标]
-    N --> O[可选添加朗读提示]
-    N --> P[开始：冻结版本]
-    O --> P
-    P --> Q[麦克风、实时 ASR、本地位置对齐]
-    Q --> R[高亮、滚动、计时与剩余预测]
-    R --> S{后续动作}
-    S -->|继续| Q
-    S -->|暂停、手动定位| T[停止上传，保留稿件与位置]
-    T -->|恢复| Q
-    S -->|编辑| U[结束本次运行，建立新草稿]
-    U --> J
-    S -->|结束或断线| V[释放设备、保存版本进度]
+    E --> F[程序无损分片、分配时间与恢复预算；strict 优先]
+    F --> G[逐窗 grouping：只建议连续来源区间]
+    G --> H{本地结构与来源校验}
+    H -->|结构/暂态失败且有预算| I[同输入 + 固定诊断码重试 grouping] --> H
+    H -->|成功| K[程序固化 block ID、来源组与预算]
+    H -->|仍失败| L[该窗逐字原文回退 + 待确认]
+    K --> M[逐窗 rewrite：只按固定 block ID 生成正文]
+    M --> N{本地结构、literal 与语义边界校验}
+    N -->|结构/暂态失败且有预算| O[只重试 rewrite，复用同一份 grouping] --> N
+    N -->|成功| P[保留窗口 AI 候选]
+    N -->|仍失败| L
+    L --> P
+    P --> Q{窗口全部完成？}
+    Q -->|截断且可拆分| R[安全拆窗一次、重分配预算] --> G
+    Q -->|是| S[Reduce 相邻接缝；失败保留叶子并标记未检查]
+    S --> T[程序装配全文、校验来源覆盖、重算时长]
+    T --> D0
+    D0 --> U{内容问题已处理？}
+    U -->|否| V[采用、修改、保留原文、提示或跳过]
+    V --> D0
+    U -->|是| W[确认朗读稿；可计时试读]
+    W --> X[App 自动分段并建立跟读坐标]
+    X --> Y[可选添加朗读提示]
+    X --> Z[开始：冻结版本]
+    Y --> Z
+    Z --> AA[麦克风、实时 ASR、本地位置对齐]
+    AA --> AB[高亮、滚动、计时与剩余预测]
+    AB --> AC{后续动作}
+    AC -->|继续| AA
+    AC -->|暂停、手动定位| AD[停止上传，保留稿件与位置]
+    AD -->|恢复| AA
+    AC -->|编辑| AE[结束本次运行，建立新草稿]
+    AE --> D0
+    AC -->|结束或断线| AF[释放设备、保存版本进度]
 ```
 
-普通旅程不展示 Map、Reduce、token、schema、generation 或逐窗重试。内部失败行为由第 12 节统一定义，不形成额外的常驻向导步骤。
+普通旅程不展示 grouping、rewrite、Reduce、token、schema、generation 或逐窗重试。实际请求首选 endpoint/model/schema 组合支持的 strict `json_schema`；明确拒绝时在同一能力边界记忆结果并退回 `json_object`，两者都必须经过本地 decoder。内部失败行为由第 12 节统一定义，不形成额外的常驻向导步骤。
 
 ## 3. App 结构、页面与交互
 
@@ -270,11 +283,13 @@ Map 顺序打包同一连续选择范围内的单元，默认目标原文 1,600 
 
 单窗可覆盖全稿则只发一个 Map。短稿略超 1,600、但不超过 2,400 tokens 且全部预算成立时仍整稿处理；其他情况按默认窗口。计数器没有 tokenizer 时使用 UTF-8 bytes 作为保守代理，统计记录实际估算方法，不声称精确 token 数。token 计量本地进行，不通过另一个网络服务上传原稿。
 
-### 7.2 Map
+### 7.2 Map / grouping and rewrite
 
-每个 Map 使用相同静态 prompt、pace、内容策略和 schema。输入目标的原始编号连续；模型按连续 `[start_unit,end_unit)` 分组，每组最多 8 单元。输出完整正文，允许合并标题/列表与拆成多句，不允许跨窗重排。
+> **2026-09-21 implementation amendment:** 正常 `operation=prepare` 不再让一个响应同时承担来源分组和正文改写。当前实现先调用 `teleprompter.grouping.v1`，只返回连续 `[start_unit,end_unit)`；程序据此生成不可变 `block_id`、来源单元、预算和 protected literals，再调用 `teleprompter.rewrite.v1`，只允许返回这些 ID 的 `mode/text/issues`。下面旧的 `teleprompter.preparation.v2` 正文 Map 形状仅保留给 `operation=tighten` 兼容路径，不能作为正常整理的新协议。
 
-每个窗口成功后先解码并校验，再保存为当前任务内的叶子候选。未通过窗口不进入聚合；Map 状态全部完成后才启动相关 Reduce。原文事实是唯一生成依据，相邻生成稿不作为后一个 Map 的事实 context。
+每个 grouping 使用相同静态 prompt、pace、内容策略和 schema。输入目标的原始编号连续；模型按连续 `[start_unit,end_unit)` 分组，每组最多 8 单元，不输出正文、mode 或 issues。rewrite 使用程序生成的固定组资料，按 block ID 返回完整正文、mode 和 issues，不允许改变来源边界、合并/拆分 block 或返回未知 ID。两阶段都由本地 decoder 做重复键、未知字段、完整 coverage、范围、枚举、protected literal 和 envelope 校验。
+
+每个窗口成功后先解码并校验，再保存为当前任务内的叶子候选。可恢复的窗口错误经过有界恢复仍失败时，程序用确定性来源单元逐字构造 `origin=deterministic`、待确认块；成功窗口继续保留，不能因为一窗失败丢弃整稿，也不能把原文回退计作 AI 成功。所有 Map/rewrite 窗完成后才启动相关 Reduce；原文事实是唯一生成依据，相邻生成稿不作为下一个 grouping 的事实 context。
 
 ### 7.3 Reduce 层级与接缝
 
@@ -290,15 +305,15 @@ Reduce 返回白名单 block 的完整替换 patch 或 review ID，不能改来�
 
 ### 7.4 Finalize
 
-按源顺序连接有效叶子与用户决策，检查来源覆盖、ID 唯一、revision 一致、未决项与时间汇总。输出完整候选 draft。有 Map 缺口时不能将半稿激活；Reduce 的 API 失败可生成带“衔接未检查”提示的完整候选；模型明确指出的内容问题必须在审阅中解决。
+按源顺序连接有效叶子与用户决策，检查来源覆盖、ID 唯一、revision 一致、未决项与时间汇总。输出完整候选 draft。grouping/rewrite 窗口缺陷由程序用原文补齐为完整候选，但所有补齐块都保持待确认，不能激活；Reduce 的 API 失败可生成带“衔接未检查”提示的完整候选；模型明确指出的内容问题必须在审阅中解决。全量回退时 UI 必须明确显示“这次未完成 AI 整理，可直接使用原稿”，不能显示为 AI 全部完成。
 
 ## 8. Prompt 与 Context 工程
 
 ### 8.1 固定材料和请求边界
 
-任务拥有三个独立 wire schema：`teleprompter.preparation.v2`、`teleprompter.reduction.v1`、`teleprompter.analysis.v2`。版本标签没有预训练语义，prompt 和 schema 必须定义字段。静态 prompt 版本分别为 `preparation.prompt.v3`、`reduce.prompt.v2`、`annotation.prompt.v3`。
+任务拥有四个当前 wire schema：正常整理的 `teleprompter.grouping.v1` 与 `teleprompter.rewrite.v1`、`teleprompter.reduction.v1`、以及已确认稿件标注的 `teleprompter.analysis.v2`。`teleprompter.preparation.v2` 只保留给 tighten 兼容路径。版本标签没有预训练语义，prompt 和 schema 必须定义字段；当前静态 prompt 版本分别为 `grouping.prompt.v1`、`rewrite.prompt.v1`、`reduce.prompt.v2`、`annotation.prompt.v3`。
 
-提词器的 Map、Reduce 和 Annotation 使用 MacPaw/OpenAI SDK 的 `/chat/completions` 路径：固定规则与完整 JSON Schema 内层定义序列化到 `system` message，JSONEncoder 编码的任务资料只放在后置的 `user` message；请求设置 `response_format={"type":"json_object"}`、`store=false`、`stream=false`、`temperature=0` 与 `max_tokens`。这里使用 `json_object` 而不是假定 provider 支持完整的 `json_schema` 约束，因此本地严格 JSON/业务 decoder 是最终提交边界。任意 OpenAI-compatible endpoint 与 model ID 都可使用通用模式；OpenCode Go 与本机模板兼容端点通过显式 adapter 处理各自差异。助手、纪要等其他路径继续使用现有 Responses 实现，不由提词器协议扩大范围。SpeechRail 不需要 thinking：通用模式使用标准的 disabled reasoning 表达，OpenCode/native 与本机模板字段只由显式 adapter 发送，端点拒绝后只重试一次并省略控制字段。不额外发送工具、对话历史、ASR 转写、身份资料或 RAG 结果。
+提词器的 grouping、rewrite、Reduce 和 Annotation 使用 MacPaw/OpenAI SDK 的 `/chat/completions` 路径：固定规则与完整 JSON Schema 内层定义序列化到 `system` message，JSONEncoder 编码的任务资料只放在后置的 `user` message。通用 provider 默认请求仍为 `response_format={"type":"json_object"}`、`store=false`、`stream=false`、`temperature=0` 与 `max_tokens`；提词器生产调用显式首选 strict `json_schema`。若端点明确拒绝该格式，adapter 按 endpoint/model/compatibility/operation/schema 摘要记忆能力结果，并只在同一边界退回一次 JSON mode；不把 401、429、超时、refusal 或一般 5xx 误判成能力拒绝。本地严格 JSON/业务 decoder 仍是最终提交边界。任意 OpenAI-compatible endpoint 与 model ID 都可使用通用模式；OpenCode Go 与本机模板兼容端点通过显式 adapter 处理各自差异。助手、纪要等其他路径继续使用现有 Responses 实现，不由提词器协议扩大范围。SpeechRail 不需要 thinking：通用模式使用标准的 disabled reasoning 表达，OpenCode/native 与本机模板字段只由显式 adapter 发送，端点拒绝后只重试一次并省略控制字段。不额外发送工具、对话历史、ASR 转写、身份资料或 RAG 结果。
 
 MacPaw adapter 对通用模式只发送标准字段；对显式 OpenCode Go 模式的 Chat 请求附加 `User-Agent` 和稳定的 `x-opencode-session`，并发送原生 `thinking.type=disabled`；对显式本机模板模式发送 `chat_template_kwargs.enable_thinking=false`。端点拒绝 thinking 控制字段时，只在当前 endpoint/model/mode/operation 组合记忆一次并重试为不带控制字段的请求。响应只保留单一 assistant choice 的正文；`usage` 的聚合 token 字段必须存在，provider 返回但 SDK 不稳定支持的嵌套 usage detail 不参与业务判断。
 
@@ -380,7 +395,7 @@ operation=prepare 时 current_blocks 为空；operation=tighten 时它是本次�
 
 protected_literals 包含用户锁定词与明确可识别的数值/单位/标识符，必须确实出现在对应原文；保留程序侧的来源类别，区分用户锁定与启发式候选。词条不是完整事实清单，不默认增加一次实体抽取 LLM。
 
-下面是应用侧传给 `completeJSON` 的 schema wrapper。Chat adapter 提取其中的 `schema` 内层定义，序列化到 system message；服务端只负责 JSON mode，完整字段、枚举、required 和 additionalProperties 由本地 decoder 再次执行。
+下面是应用侧传给 `completeJSON` 的 schema wrapper。Chat adapter 在 strict 能力可用时把内层定义编码为 `json_schema`；明确不支持时退回 `json_object`，同时仍把完整定义序列化到 system message。无论服务端采用哪种模式，完整字段、枚举、required 和 additionalProperties 都由本地 decoder 再次执行。
 
 ```json
 {
@@ -507,7 +522,7 @@ input 为 `{units:[{id,text,boundary_before,ends_section}]}`，从最终 reading
 
 Chat Completions 依次检查 HTTP 2xx、响应体≤256 KiB、恰好一个 choice、`finish_reason=stop`、assistant role、无 refusal/tool_calls、`usage` 聚合 token 存在且非负；`finish_reason=length` 或 `completion_tokens >= max_tokens` 一律判为截断。随后检查严格 JSON（重复 key 拒绝）、闭合对象字段、枚举、范围和业务语义。Responses 路径保留既有的 completed/refusal/incomplete 检查。schema 正确仅证明形状，不证明事实正确。
 
-Map 验证：各区间非空、连续、不越窗、每组≤8 单元、首尾与 targets 相同。speak 必须有非空白正文且 issues 为空；review 必须有非空 issues 且不含 nonspoken_content；omit 正文空且 issues 恰为 nonspoken_content。纯空白 omit 可以本地批准，其余进入待确认。不能删掉未知字段或自动修 JSON 后当成功。
+Grouping 验证：各区间非空、连续、不越窗、每组≤8 单元、首尾与 targets 相同；不得返回正文、mode、issues 或额外来源字段。Rewrite 验证：block ID 必须来自程序固化的 grouping 结果且恰好覆盖一次；不得改变来源边界或返回未知字段。speak 必须有非空白正文且 issues 为空；review 必须有非空 issues 且不含 nonspoken_content；omit 正文空且 issues 恰为 nonspoken_content。纯空白 omit 可以本地批准，其余进入待确认。不能删掉未知字段或自动修 JSON 后当成功。
 
 Reduce 验证：patch/review ID 只来自 editable 白名单，分别唯一且互斥；patch 正文非空；关联 block revision 必须匹配。任何 patch 不合法则整组 patch 不提交；白名单内用户已修改的块不得被旧响应覆盖。
 
@@ -589,11 +604,11 @@ App 自动执行，无用户手工分段步骤。先按已确认块/换行形成
 | 情况 | 确定行为 |
 |---|---|
 | 模型未配置/能力不足/认证失败/schema不支持 | 不自动切换服务；保留稿件并可直接使用 |
-| Map 429/明确暂态5xx | 全任务最多一次自动暂态重试，遵守Retry-After且可取消 |
+| Grouping/rewrite 429/明确暂态5xx | 只重试失败阶段；按全窗口共享恢复预算遵守 `Retry-After` 且可取消 |
 | 超时且结果未知 | 不假定服务端未执行；展示用户重试入口，不宣称免费或 exactly-once |
-| Map 结构不合法 | 该窗最多一次固定错误码重生成，不携带旧自由文本错误或累积历史 |
-| Map 输出截断 | 原窗最多一次拆成两个安全子窗，重新分配时间；子窗不再递归拆分 |
-| Map 恢复上限 | 初始 N 窗之外最多 max(2,min(N,3)) 次额外请求；结构、暂态、拆窗共享上限 |
+| Grouping/rewrite 结构不合法 | 只对失败阶段最多一次固定错误码重生成；rewrite 重试复用原 grouping，不携带旧自由文本错误或累积历史 |
+| Grouping 输出截断 | 原窗最多一次拆成两个安全子窗，重新分配时间；子窗不再递归拆分 |
+| AI 窗口恢复上限 | 初始 N 窗之外最多 max(2,min(N,3)) 次额外请求；结构、暂态、拆窗共享上限 |
 | Reduce 失败 | 不自动重试，保留叶子稿并标记未检查；用户可对该失败接缝重试一次 |
 | 内容存在歧义/省略建议 | 进入 review，不能以模型重试掩盖用户需要决定的内容 |
 | 标注失败或开始时未完成 | 使用完整本地分段，不激活部分标注 |
@@ -636,7 +651,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 | 输入 | UTF-8/BOM、非法字节/NUL、空/边界容量、混合格式；切片UTF-8拼接恒等 |
 | 选择与来源 | 多段选择、空白、排除后断裂、不跨选择缺口合并、来源恰好覆盖 |
 | 时长 | 中英计数互斥、未知读法不假装达标、proxy权重不混用秒、父子预算守恒、拆片不复制预算 |
-| 协议 | 三个schema闭合、重复key、非法枚举、范围缺口/重叠/越界、mode矛盾、空正文、refusal/incomplete |
+| 协议 | grouping/rewrite/reduction/analysis schema 闭合、兼容 tighten schema、重复key、非法枚举、范围缺口/重叠/越界、未知/重复 block ID、mode矛盾、空正文、refusal/incomplete |
 | Reduce | 白名单、ID互斥、共享块顺序、过期patch、边界恰好一次、证据超预算、失败保留叶子 |
 | 编辑 | 手改块不被精简覆盖、撤销/合并/拆分的来源与预算、编辑重算、不移动光标、保存失败保留 |
 | 坐标 | emoji/组合字符/CRLF、中英与数字、版本号点不误分句、长单词不截断、segment切片一致 |
@@ -663,7 +678,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 | 可直接朗读评分 | ≥90%稿件人工评分≥4/5；4表示仅需少量措辞调整 |
 | 时长估算 | 普通稿真人验证中位相对误差≤15%；复杂/未知稿独立报告，不称95%置信区间 |
 | 时间目标冲突 | 0.5倍目标下保持事实或明确未达标，不以漏事实、套话、假停顿达标 |
-| Reduce | 报告边界错误减少量、新增错误、人工编辑时间及额外tokens/延迟 |
+| Reduce | 报告边界错误减少量、新增错误、人工编辑时间及额外 tokens/延迟；单窗失败另报 AI 块、原文回退块与未决项，不把回退计入 AI 完成分母 |
 | 效率 | 分阶段p50/p95、调用/重试、输入输出tokens、缓存命中及到可开始朗读总耗时 |
 | 跟读 | 报告误跳、位置滞后、脱稿恢复、人工定位频率和滚动观感；回放与真人证据分开 |
 

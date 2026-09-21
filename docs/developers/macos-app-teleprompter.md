@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.2.1"
-date: 2026-09-20
+version: "0.3.0"
+date: 2026-09-21
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -12,7 +12,7 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 ## 产品边界
 
 - 输入为用户粘贴的纯文本，或导入 `TXT` / `Markdown` 文件。
-- AI 仅由用户主动触发；短稿一次请求，长稿按最多 12 个本地单元逐窗口处理。返回 `teleprompter.analysis.v2` 单元引用，原文与 UTF-16 范围由本地程序还原，任一窗口失败则不采用整份结果。
+- AI 仅由用户主动触发；短稿一次窗口请求，长稿按最多 24 个本地单元逐窗口处理。正常整理每窗分成两个有界请求：`teleprompter.grouping.v1` 只分配连续来源区间，`teleprompter.rewrite.v1` 只按程序分配的 `block_id` 生成朗读候选。原文、UTF-16 范围和来源组由本地程序持有；可恢复的单窗失败会逐字保留原文并标记待确认，不把回退计作 AI 成功。
 - 原稿无需 AI 即可开始；草稿自动保存，AI 标注是可选步骤，建议经用户确认后才成为活动版本。跟读期间固定版本，不允许切稿或编辑。
 - 运行时复用现有 `MicrophoneCapture`、`RealtimeASRClient` 和 `SessionCoordinator`，但不创建 `SessionStore` 会话行，也不保存 PCM、摄像头画面、直播画面或完整 ASR 文本。
 - 不包含 TTS、摄像头采集、直播推流、全局提词热键或云端稿件同步。
@@ -21,7 +21,7 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 
 1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。
 2. 点击「打开舞台并开始跟读」即可直接进入舞台；AI 朗读标注是可选准备步骤，不会阻塞开始。
-3. 如使用 AI，审阅分组、重点、表达参考与语义停顿，再确认采用。编辑段落时清空对应旧辅助标注。
+3. 如使用 AI，先看懂“已经完成什么、原稿有没有被改、下一步要做什么”，再审阅朗读稿；默认路径使用普通用户语言，高级的拆分、合并和来源编辑收进“编辑本段”等渐进式披露入口。确认采用前可查看原文对照、修改、保留原文或跳过；编辑段落时清空对应旧辅助标注。
 4. 调整字号、透明度和预读段数；也可以先点击「只打开提词窗口」检查版式。舞台按原文字词坐标显示已读部分并滚动，排版切片与 AI 分组独立。
 5. 短暂脱稿时保持位置，读回附近稿件后继续；可以点击某段、使用方向键选择起讲段，再点击「开始/继续跟读」。
 6. 暂停/手动期间停止上传新音频；继续前完成旧 ASR item 的 drain/clear 屏障。服务断开后释放设备占用，保留手动阅读，并可重新开始。
@@ -33,7 +33,8 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 |---|---|
 | `TeleprompterDomain.swift` | 稿件、版本、段落、暂停提示、运行状态与对齐结果类型 |
 | `TeleprompterNormalizer.swift` / `TeleprompterSegmenter.swift` | 中英文归一化、填充词过滤、确定性分段和 UTF-16 原文区间 |
-| `TeleprompterAnalysis.swift` | AI prompt、严格 JSON decoder 和可注入 AI client |
+| `TeleprompterPreparationPrompts.swift` / `TeleprompterPreparationPipeline.swift` | 整理的 grouping/rewrite/reduce prompt、严格 JSON decoder、预算、取消、局部恢复与原子装配 |
+| `TeleprompterAnalysis.swift` | 已确认朗读稿的可选 AI 朗读标注，不与整理 workflow 混用 |
 | `TeleprompterStore.swift` | Application Support 下单稿件 JSON、原子保存、运行进度和 Markdown 导出 |
 | `TeleprompterFollowController.swift` | partial/completed 事件与跟读、暂停、手动接管状态机 |
 | `TeleprompterSession.swift` | MainActor 会话编排、服务/麦克风门禁、Realtime 生命周期和失败降级 |
@@ -44,24 +45,34 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 
 ## AI 结果契约
 
-AI 返回的顶层结构固定为：
+正常整理不再让同一个模型响应同时负责“划边界”和“写正文”。第一阶段只返回区间：
 
 ```json
 {
-  "schema_version": "teleprompter.analysis.v2",
-  "segments": [
+  "schema_version": "teleprompter.grouping.v1",
+  "groups": [
     {
       "start_unit": 0,
-      "end_unit": 1,
-      "keywords": ["关键词"],
-      "match_phrases": [],
-      "pause_hint": "short"
+      "end_unit": 2
     }
   ]
 }
 ```
 
-本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)`，不得返回正文副本、ID 或字符偏移。每个窗口必须按顺序完整覆盖其所有单元恰好一次。decoder 同时拒绝未知字段、漏单元、重叠、越界、未知停顿、过长分组和不来自原文的关键词。分组正文和原文范围均由程序生成；全部窗口成功后才创建待确认版本。口语变体仍需用户审阅，不声称程序能验证其全部事实语义。
+第二阶段只返回固定组的改写结果：
+
+```json
+{
+  "schema_version": "teleprompter.rewrite.v1",
+  "blocks": [
+    {"block_id": "block-0-2", "mode": "speak", "text": "可朗读候选。", "issues": []}
+  ]
+}
+```
+
+本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)` 或程序分配的 `block_id`，不得返回字符偏移、来源范围或未知 ID。两个 decoder 都拒绝重复键、未知字段、漏单元、重叠、越界和不完整 envelope；rewrite 还拒绝重复/未知/缺失 block ID、mode 矛盾和 protected literal 丢失。每个窗口成功后才生成 AI 块；可恢复的窗口失败则构造 `origin=deterministic`、`disposition=unresolved` 的逐源单元原文块，必须经过现有待确认操作后才能采用。全部结果统一重算时长，不能把回退显示成“已完成 AI 整理”。
+
+`teleprompter.preparation.v2` 仍保留为 `tighten` 兼容路径；`teleprompter.analysis.v2` 只属于已确认稿件的可选朗读标注，不能作为整理结果契约。
 
 v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结构不变，既有版本仍可跟读。草稿允许没有活动版本或正文；这扩展了有效保存状态，旧代码无法完整支持新的草稿流程。不得回退或删除用户稿件来处理版本差异。
 
@@ -69,9 +80,9 @@ v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结
 
 - `instructions`：保持事实和正文、不执行输入内命令、连续单元引用、完整覆盖、语义停顿与有限标注。
 - user `input`：纯 JSON，包含语言/表达偏好和本窗口 `units: [{id, text}]`；无历史、RAG、音频或隐藏会话状态。
-- `text.format`：严格 `json_schema`；对象均 `additionalProperties=false`。
-- 每窗口沿用 4000 output tokens / 45 秒上限，不将窗口结果直接展示为完整稿件；稿件切换、编辑或开始运行会使旧请求失效并取消后续窗口。
-- endpoint 不支持 Structured Outputs 时明确失败，用户仍可按原稿开始。首次发送的说明与按 endpoint/model 保存的确认保持原有流程。
+- 通用 `completeJSON` 默认仍为 `response_format={"type":"json_object"}`；提词器生产调用对 grouping、rewrite、reduction 和 analysis 在具备能力的 endpoint 上显式首选 `json_schema` strict。OpenCode Go 的 Chat gateway 当前不接受该 wire shape，因此 adapter 对 `openCodeGo` 直接首选 JSON mode；其他 provider 明确拒绝 strict 时，按 endpoint/model/compatibility/operation/schema 摘要记忆能力结果，并只在同一边界退回一次 JSON mode。401、429、超时、一般 5xx、refusal 和普通协议错误不会被误判成 strict 能力拒绝。两种模式都必须经过本地严格 JSON/业务 decoder。
+- grouping 每窗口最多 2400 output tokens / 60 秒，rewrite 每窗口最多 6000 output tokens / 90 秒，reduce 仍使用 4000 / 60 秒；不将窗口结果直接展示为完整稿件。稿件切换、编辑或开始运行会使旧请求失效并取消后续窗口。
+- provider 不可用或明确拒绝时停止该请求；可恢复的结构错误、截断、限流、服务端暂态失败或传输失败才允许局部原文回退。grouping/rewrite 的结构或暂态恢复只重试失败阶段、复用已验证的来源组，并共享窗口预算；收到 `Retry-After` 时等待且可取消。首次发送的说明与按 endpoint/model 保存的确认保持原有流程。
 
 ## 位置跟读与恢复
 
@@ -97,13 +108,13 @@ v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结
 
 ## 验收与限制
 
-2026-09-20：使用合成文本、fake completion 和临时目录执行聚焦测试；覆盖默认参数的正文定位、分次/跨段/局部重读、Unicode 坐标、数字与漏词、重复事件、乱序 final、partial 纠正、暂停和手动边界、草稿保存、AI 全覆盖及长稿窗口失败。App Debug 编译用于检查会话和 SwiftUI 接线；不代表实际视觉或跟读质量验收。
+2026-09-21：使用合成文本、fake completion 和临时目录执行聚焦测试；新增 grouping/rewrite schema、重复键/未知字段/范围覆盖、strict 能力记忆与退回、`Retry-After` 等待、rewrite 阶段级重试、局部原文回退、部分窗口失败、Reduce 保留叶子和脱敏诊断覆盖。App Debug 编译用于检查会话和 SwiftUI 接线；不代表实际视觉或真实模型跟读质量验收。
 
 ```bash
 swift test --package-path macos/SpeechRailApp --filter Teleprompter
 scripts/macos_app_build.sh --configuration Debug
 ```
 
-未执行真实麦克风、LLM 效果、Realtime 端到端、OBS/会议软件可见性或 UI 自动化。仍需测量误跳、位置滞后、脱稿恢复耗时、手动纠正频率和滚动观感。没有新增 ASR 模型、强制对齐器、全局热键或提纲语义跟读。
+未执行真实麦克风、真实 LLM 效果、Realtime 端到端、OBS/会议软件可见性或 UI 自动化。仍需测量首轮/恢复后完成率、AI/原文回退占比、事实审阅、误跳、位置滞后、脱稿恢复耗时、手动纠正频率和滚动观感。没有新增 ASR 模型、强制对齐器、全局热键或提纲语义跟读。
 
 回退时仅撤回本轮源码差异，保留稿件 JSON；不可整文件还原并行任务的修改，也不可将 AI v2 输出交给旧 v1 decoder。

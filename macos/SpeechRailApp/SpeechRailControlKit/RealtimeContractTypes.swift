@@ -11,6 +11,13 @@ public struct TranscriptionSessionUpdate: Sendable {
         case snapshot
     }
 
+    /// Supported cadence for live subtitle partial updates.
+    ///
+    /// The service accepts 500 ms as its lowest low-latency transcription chunk;
+    /// callers still choose it explicitly so the general session default remains
+    /// suitable for clients that prefer fewer model refreshes.
+    public static let captionChunkDurationMilliseconds = 500
+
     public let type = "transcription_session.update"
     public let model: String
     public let threshold: Double

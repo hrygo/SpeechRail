@@ -52,6 +52,27 @@ public enum TeleprompterAIDataFlowDisclosure {
     }
 }
 
+/// 提词器复核页的用户语言。
+///
+/// 这里集中维护默认路径上的文案，避免把内部数据模型（例如来源组、block）直接暴露给用户。
+/// 高级编辑动作仍然存在，但通过明确的渐进式披露入口进入。
+public enum TeleprompterReviewCopy {
+    public static let successTitle = "AI 已完成整理"
+    public static let successMessage = "已经生成一份适合跟读的稿件。原稿未被覆盖，确认后才会用于跟读。"
+    public static let readingTitle = "整理后的朗读稿"
+    public static let readingSubtitle = "先浏览并按需修改；确认后，这份稿件才会用于跟读。"
+    public static let compareSourceLabel = "对照原稿"
+    public static let advancedEditLabel = "编辑本段"
+    public static let acceptAction = "确认并使用这份稿件"
+    public static let tightenAction = "让表达更简洁"
+    public static let trialAction = "先试读"
+    public static let discardAction = "放弃这次整理"
+
+    public static func blockTitle(ordinal: Int) -> String {
+        "第 \(max(0, ordinal) + 1) 段"
+    }
+}
+
 public struct TeleprompterSourceRange: Codable, Equatable, Sendable {
     public let start: Int
     public let end: Int

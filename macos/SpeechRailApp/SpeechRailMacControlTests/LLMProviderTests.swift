@@ -20,6 +20,7 @@ final class LLMProviderTests: XCTestCase {
             var status: Int
             var contentType: String
             var body: String
+            var headers: [String: String] = [:]
         }
 
         nonisolated(unsafe) private static var scripted: [Exchange] = []
@@ -75,7 +76,7 @@ final class LLMProviderTests: XCTestCase {
                 url: request.url ?? URL(string: "http://127.0.0.1/v1/responses")!,
                 statusCode: exchange.status,
                 httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": exchange.contentType]
+                headerFields: ["Content-Type": exchange.contentType].merging(exchange.headers) { _, new in new }
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: Data(exchange.body.utf8))
@@ -200,14 +201,16 @@ final class LLMProviderTests: XCTestCase {
     private func completeJSON(
         provider: LLMProvider? = nil,
         configuration: LLMConfiguration? = nil,
-        observationContext: TeleprompterAICallContext? = nil
+        observationContext: TeleprompterAICallContext? = nil,
+        structuredOutputMode: LLMStructuredOutputMode = .jsonObject
     ) async throws -> String {
         try await (provider ?? makeProvider()).completeJSON(
             configuration: configuration ?? self.configuration, apiKey: nil,
             instructions: "保持事实", input: "原稿资料",
             schema: TeleprompterPreparationJSONSchema.map,
             maxOutputTokens: 128, timeout: 30,
-            observationContext: observationContext
+            observationContext: observationContext,
+            structuredOutputMode: structuredOutputMode
         )
     }
 
@@ -259,6 +262,152 @@ final class LLMProviderTests: XCTestCase {
         let headers = try XCTUnwrap(FakeTransport.requestHeaders().first)
         XCTAssertEqual(headers["User-Agent"], "SpeechRail/teleprompter")
         XCTAssertTrue(headers["x-opencode-session"]?.isEmpty ?? true)
+    }
+
+    func testChatJSONCanRequestStrictSchemaAndPreservesSchemaDefinition() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+
+        _ = try await completeJSON(structuredOutputMode: .jsonSchema)
+
+        let body = FakeTransport.requestBodies()[0]
+        let responseFormat = try XCTUnwrap(body["response_format"] as? [String: Any])
+        XCTAssertEqual(responseFormat["type"] as? String, "json_schema")
+        let jsonSchema = try XCTUnwrap(responseFormat["json_schema"] as? [String: Any])
+        XCTAssertEqual(jsonSchema["name"] as? String, "teleprompter_preparation")
+        XCTAssertEqual(jsonSchema["strict"] as? Bool, true)
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        XCTAssertEqual(schema["type"] as? String, "object")
+        XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+    }
+
+    func testOpenCodeGoUsesJSONModeForStrictPreparation() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+
+        _ = try await completeJSON(
+            configuration: openCodeConfiguration,
+            structuredOutputMode: .jsonSchema
+        )
+
+        let body = FakeTransport.requestBodies()[0]
+        let responseFormat = try XCTUnwrap(body["response_format"] as? [String: Any])
+        XCTAssertEqual(responseFormat["type"] as? String, "json_object")
+    }
+
+    func testChatJSONFallsBackForOpenCodeUnavailableStructuredOutput() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: #"{"error":{"message":"Error from provider (Console): Upstream request failed: [invalid_request_error] This response_format type is unavailable now"}}"#
+            ),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        _ = try await completeJSON(structuredOutputMode: .jsonSchema)
+
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual((bodies[0]["response_format"] as? [String: Any])?["type"] as? String, "json_schema")
+        XCTAssertEqual((bodies[1]["response_format"] as? [String: Any])?["type"] as? String, "json_object")
+    }
+
+    func testChatJSONFallsBackToJSONModeOnlyWhenStrictCapabilityIsRejected() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: #"{"error":{"message":"response_format json_schema is not supported by this model"}}"#
+            ),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+
+        _ = try await completeJSON(structuredOutputMode: .jsonSchema)
+
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual((bodies[0]["response_format"] as? [String: Any])?["type"] as? String, "json_schema")
+        XCTAssertEqual((bodies[1]["response_format"] as? [String: Any])?["type"] as? String, "json_object")
+    }
+
+    func testChatJSONRemembersStrictCapabilityRejectionForSameSchemaScope() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: #"{"error":{"message":"response_format json_schema is not supported by this model"}}"#
+            ),
+            .init(status: 200, contentType: "application/json", body: try chatBody()),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        let provider = makeProvider()
+
+        _ = try await provider.completeJSON(
+            configuration: configuration,
+            apiKey: nil,
+            instructions: "整理",
+            input: "原稿资料",
+            schema: TeleprompterPreparationJSONSchema.map,
+            maxOutputTokens: 128,
+            structuredOutputMode: .jsonSchema
+        )
+        _ = try await provider.completeJSON(
+            configuration: configuration,
+            apiKey: nil,
+            instructions: "整理",
+            input: "原稿资料",
+            schema: TeleprompterPreparationJSONSchema.map,
+            maxOutputTokens: 128,
+            structuredOutputMode: .jsonSchema
+        )
+
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 3)
+        XCTAssertEqual((bodies[0]["response_format"] as? [String: Any])?["type"] as? String, "json_schema")
+        XCTAssertEqual((bodies[1]["response_format"] as? [String: Any])?["type"] as? String, "json_object")
+        XCTAssertEqual((bodies[2]["response_format"] as? [String: Any])?["type"] as? String, "json_object")
+    }
+
+    func testChatJSONPreservesRetryAfterForTransientHTTP() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 429,
+                contentType: "application/json",
+                body: #"{"error":{"message":"rate limit"}}"#,
+                headers: ["Retry-After": "1.5"]
+            )
+        ])
+
+        do {
+            _ = try await completeJSON()
+            XCTFail("429 should fail with retry metadata")
+        } catch let error as LLMError {
+            guard case let .httpWithRetry(status, body, retryAfter) = error else {
+                return XCTFail("retry metadata was lost: \(error)")
+            }
+            XCTAssertEqual(status, 429)
+            XCTAssertEqual(body, "")
+            XCTAssertEqual(retryAfter, 1.5, accuracy: 0.001)
+        }
+    }
+
+    func testChatJSONDoesNotTreatRateLimitAsStrictCapabilityRejection() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 429,
+                contentType: "application/json",
+                body: #"{"error":{"message":"rate limit"}}"#
+            )
+        ])
+
+        do {
+            _ = try await completeJSON(structuredOutputMode: .jsonSchema)
+            XCTFail("rate limiting must fail without changing output mode")
+        } catch let error as LLMError {
+            XCTAssertEqual(error, .http(status: 429, body: ""))
+        }
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual((bodies[0]["response_format"] as? [String: Any])?["type"] as? String, "json_schema")
     }
 
     func testChatJSONKeepsAggregateUsageWhenProviderDetailsArePartial() async throws {

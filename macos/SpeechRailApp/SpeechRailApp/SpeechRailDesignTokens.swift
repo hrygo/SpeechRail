@@ -18,9 +18,6 @@ public enum SpeechRailDesignTokens {
         public static let xl: CGFloat = 32
         public static let hero: CGFloat = 48
 
-        // Source-compatibility aliases for compiled legacy surfaces.
-        public static let xxs = micro
-        public static let xxl: CGFloat = 40
     }
 
     public enum Layout {
@@ -32,7 +29,6 @@ public enum SpeechRailDesignTokens {
         public static let modelProfileListWidth: CGFloat = 280
         public static let modelProfileListMinimumWidth: CGFloat = 220
         public static let modelProfileListMaximumWidth: CGFloat = 320
-        public static let inspectorWidth: CGFloat = 360
         /// 详情列（inspector）的**唯一宽度声明**：360pt 定宽，与稿的 Inspector 同口径。
         ///
         /// 2026-09-16 用户复核「两个侧边栏应该保持宽度一致」。此前这里是一个**区间**
@@ -41,7 +37,7 @@ public enum SpeechRailDesignTokens {
         /// 2x 实测 539px = 269.5pt，加两侧 `contentPadding` 16 = 301.5pt ≈ 区间下限），
         /// 我的作品那一列是 360；空态没有声明时还会落回系统默认的 270。定宽之后两块
         /// 目录页（含空态）由同一处声明，宽度必然一致（REDESIGN-SPEC §11.6 第六十一轮）。
-        public static let inspectorColumnWidth: CGFloat = inspectorWidth
+        public static let inspectorColumnWidth: CGFloat = 360
         /// Page content margin. 20pt keeps the workspace readable at 1120–1280pt
         /// window widths instead of squeezing it with the old 32pt (§5.6).
         public static let contentPadding: CGFloat = 20
@@ -150,8 +146,6 @@ public enum SpeechRailDesignTokens {
         public static let monitoringEmptyMinimumHeight: CGFloat = 220
         public static let monitoringChartHeight: CGFloat = 240
         public static let compactDividerHeight: CGFloat = 42
-        public static let controlMenuWidth: CGFloat = 288
-
         // MARK: 会话（语音助手 / 会议助手 / 实时字幕）
         //
         // 这几个数与稿是一一对应的单点声明（`UX-UI-SPEC` §3.3 / §3.4 的对照表）：
@@ -231,8 +225,6 @@ public enum SpeechRailDesignTokens {
         public static let captionBandLevelBarSpacing: CGFloat = 3
         public static let captionBandLevelBarHeight: CGFloat = 13
         public static let captionBandLevelBarCornerRadius: CGFloat = 1.5
-        // Source-compatibility alias for the menu bar popover surface.
-        public static let controlMenuMinimumWidth: CGFloat = controlMenuWidth
         /// 设置窗口尺寸，取自稿 `05 Menu & Settings`：窗口 **640** 宽（行卡 604 = 640 − 2×18，
         /// 应用的 `Form` 内边距 16 时行卡 608，残差 4）。高度按**三页里最高的一页**锁定，
         /// 切页签时窗口不跳——稿也是这样把三个窗口拉平的（`buildMenuAndSettings`）。
@@ -267,7 +259,7 @@ public enum SpeechRailDesignTokens {
     /// Native macOS menus stay compact; custom menu-bar rows use the same
     /// geometry so every action has a predictable target and rhythm.
     public enum Menu {
-        public static let contentWidth: CGFloat = Layout.controlMenuWidth
+        public static let contentWidth: CGFloat = 288
         public static let contentPadding: CGFloat = Spacing.md
         public static let sectionSpacing: CGFloat = Spacing.xs
         /// 菜单行的下限高度。稿（`05 Menu & Settings` 的 `menuRow`）是 **26pt**，
@@ -390,7 +382,6 @@ public enum SpeechRailDesignTokens {
         public static let regularHeight: CGFloat = 34
         public static let prominentHeight: CGFloat = 40
 
-        public static let minimumHitTarget: CGFloat = Interaction.minimumHitTarget
         public static let iconButtonSize: CGFloat = 28
         public static let statusIconSize: CGFloat = 17
         /// 稿的 `conclusion` 面板图标（脚本 `icon(conclusion, "circle-check", 26)`；
@@ -690,15 +681,14 @@ public enum SpeechRailDesignTokens {
             /// （`Icon.rowActionSize` 是**列表行内**动作，两者不共用）。
             public static let glyphSize: CGFloat = 14
             public static let glyphFrame: CGFloat = 18
+            public static let hoverFill: SwiftUI.Color = Surface.interactionHover
+            public static let pressedFill: SwiftUI.Color = Surface.interactionPressed
         }
     }
 
-    /// Component-level button dimensions. The visual glyph may be smaller than the
-    /// hit target; the hit target is never smaller than the macOS control baseline.
+    /// Button-specific semantic values. Geometry belongs to `Control`, and hit
+    /// targets belong to `Interaction`, so button tokens do not duplicate either.
     public enum Button {
-        public static let standardHeight: CGFloat = 34
-        public static let prominentHeight: CGFloat = 40
-        public static let iconHitTarget: CGFloat = Interaction.minimumHitTarget
         /// 主按钮标签里快捷键提示的不透明度：沿用按钮自己的前景色，降一档表示
         /// 「这是提示，不是按钮文案」，不再另画底色与描边（§11.6 第四十八轮）。
         public static let shortcutOpacity: Double = 0.72
@@ -736,6 +726,99 @@ public enum SpeechRailDesignTokens {
         /// （明显偏细）。所以这一族与 `rowStatusSize` 同号 13、同字重 semibold
         /// （REDESIGN-SPEC §11.6 第四十四轮）。
         public static let rowActionSize: CGFloat = 13
+
+        // MARK: 按钮图标 Token (Button Icons)
+        /// 标准伴随文字的按钮图标尺寸（13pt，字重 .medium，与正文/按钮文字高度平整对齐）。
+        public static let buttonIconSize: CGFloat = 13
+        /// 紧凑/徽章（Compact / Chip）辅助图标尺寸（11pt，字重 .medium）。
+        public static let compactButtonIconSize: CGFloat = 11
+
+        /// SpeechRail App 全局统一强类型按钮图标符号枚举
+        public enum Symbol: String, Sendable, CaseIterable {
+            // 播放与声学控制 (Playback & Audio Controls)
+            case play = "play.fill"
+            case pause = "pause.fill"
+            case stop = "stop.fill"
+            case stopCircle = "stop.circle"
+            case playCircle = "play.circle"
+            case mic = "mic"
+            case micFill = "mic.fill"
+            case micMuted = "mic.slash.fill"
+            case speaker = "speaker.wave.2"
+            case speakerFill = "speaker.wave.2.fill"
+            case waveform = "waveform"
+            case waveformBadgePlus = "waveform.badge.plus"
+            case record = "circle.fill"
+
+            // 导航与翻页 (Navigation & Paging)
+            case previous = "chevron.left"
+            case next = "chevron.right"
+            case expandDown = "chevron.down"
+            case collapseUp = "chevron.up"
+            case returnBack = "arrow.uturn.backward"
+            case arrowUturnBackwardCircleFill = "arrow.uturn.backward.circle.fill"
+
+            // 文档与内容操作 (Document & Content Actions)
+            case copy = "doc.on.doc"
+            case clipboard = "doc.on.clipboard"
+            case document = "doc.text"
+            case export = "square.and.arrow.down"
+            case share = "square.and.arrow.up"
+            case importDocument = "arrow.down.doc"
+            case duplicate = "plus.square.on.square"
+            case textFormat = "textformat"
+            case characterBookClosed = "character.book.closed"
+            case musicList = "music.note.list"
+
+            // 生命周期与常规操作 (Lifecycle & Actions)
+            case add = "plus"
+            case edit = "pencil"
+            case delete = "trash"
+            case close = "xmark"
+            case eraser = "eraser"
+            case refresh = "arrow.clockwise"
+            case reset = "arrow.counterclockwise"
+            case check = "checkmark"
+            case checkShield = "checkmark.shield"
+            case checklist = "checklist"
+            case sparkles = "sparkles"
+
+            // 状态与指示 (Status & Feedback)
+            case infoCircle = "info.circle"
+            case infoCircleFill = "info.circle.fill"
+            case warning = "exclamationmark.triangle"
+            case warningFill = "exclamationmark.triangle.fill"
+            case errorCircle = "xmark.circle"
+            case errorCircleFill = "xmark.circle.fill"
+            case successCircle = "checkmark.circle"
+            case successCircleFill = "checkmark.circle.fill"
+
+            // 工具与工作区视图 (Tools & Workspace)
+            case settings = "slider.horizontal.3"
+            case gear = "gearshape"
+            case search = "magnifyingglass"
+            case filter = "line.3.horizontal.decrease.circle"
+            case slider = "slider.horizontal.below.rectangle"
+            case speedometer = "speedometer"
+            case stage = "macwindow"
+            case timer = "stopwatch"
+            case readingCues = "text.quote"
+            case more = "ellipsis"
+            case sidebarRight = "sidebar.right"
+            case pin = "pin"
+            case pinFill = "pin.fill"
+            case hide = "eye.slash"
+            case power = "power"
+            case download = "tray.and.arrow.down"
+            case folder = "folder"
+            case message = "message"
+
+            public var systemName: String { rawValue }
+
+            public var image: SwiftUI.Image {
+                SwiftUI.Image(systemName: rawValue)
+            }
+        }
     }
 
     public enum Stroke {
@@ -810,7 +893,6 @@ public enum SpeechRailDesignTokens {
         /// 卡片 / 面板级标题。稿上与页标题同档（`Title / Page`），所以取值与 `display` 一致。
         public static let windowTitle: Font = .system(.title, weight: .semibold)
         public static let sectionTitle: Font = .system(.headline, weight: .semibold)
-        public static let section = sectionTitle
         public static let body: Font = .body
         /// Figma `Body / Medium`：候选卡槽位名与表格主列等需要中等字重的正文。
         public static let bodyMedium: Font = .body.weight(.medium)
@@ -840,7 +922,6 @@ public enum SpeechRailDesignTokens {
         /// 下载进度里的文件名）仍用 `technical`。
         public static let technicalValue: Font = .system(.callout, weight: .regular).monospacedDigit()
         public static let metricValue: Font = .system(.title3, weight: .semibold).monospacedDigit()
-        public static let metric = metricValue
         /// 行内状态 / 空态标题：稿的 `Empty State` 组件口径是 `Heading / Section`（13pt Semi Bold）。
         /// 状态结论面板（`conclusion`）不用这一档，它和页标题同档，见 `display`。
         public static let statusTitle: Font = .system(.headline, weight: .semibold)
@@ -874,9 +955,6 @@ public enum SpeechRailDesignTokens {
         /// 代码里对齐的缩进和路径不能靠比例字体碰运气（REDESIGN-SPEC §13.3）。
         public static let code: Font = .system(.callout, design: .monospaced)
 
-        // Source-compatibility aliases for compiled legacy surfaces.
-        public static let pageTitle = windowTitle
-        public static let panelTitle = sectionTitle
     }
 
     public enum Color {
@@ -1005,7 +1083,6 @@ public enum SpeechRailDesignTokens {
         )
         /// Figma `Status Pill` 的语义色底色；状态色本身带图标与文字，颜色只是补充。
         public static let statusTintOpacity: Double = 0.14
-        public static let inspectorFill = Color.field
         public static let border = Color.separator
         /// Figma `border/strong`（脚本色板 `#C6C6CB` / `#4A484C`）：**可编辑输入槽的边界**。
         ///
@@ -1105,6 +1182,21 @@ public enum SpeechRailDesignTokens {
         public static let diffColumnMinimumWidth: CGFloat = 320
         /// 待确认事项提示图标尺寸
         public static let reviewBadgeSize: CGFloat = 16
+        /// 工作台控件定宽与对齐尺寸
+        public static let targetMinutesFieldWidth: CGFloat = 36
+        public static let stageFontSliderWidth: CGFloat = 96
+        public static let stageOpacitySliderWidth: CGFloat = 88
+        public static let stageSettingsDividerHeight: CGFloat = 14
+        public static let stageSettingLabelWidth: CGFloat = 48
+    }
+
+    /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert）
+    public enum Notice {
+        public static let iconSize: CGFloat = 16
+        public static let paddingHorizontal: CGFloat = Spacing.md
+        public static let paddingVertical: CGFloat = Spacing.sm
+        public static let cornerRadius: CGFloat = Corner.nested
+        public static let borderWidth: CGFloat = Stroke.standard
     }
 }
 

@@ -85,6 +85,84 @@ struct TeleprompterPreparationPromptsTests {
         #expect(output.blocks.map(\.startUnit) == [first, first + 1, last - 1])
     }
 
+    @Test func groupingAndRewriteKeepSourceOwnershipOutsideTheModel() throws {
+        let units = try sourceUnits()
+        guard units.count >= 4 else { return }
+        let groupingJSON = #"{"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":2},{"start_unit":2,"end_unit":4}]}"#
+        let grouping = try TeleprompterGroupingDecoder().decode(
+            groupingJSON,
+            targets: Array(units.prefix(4)),
+            maxGroupUnits: 8
+        )
+        let groups = grouping.groups.map { range in
+            TeleprompterRewriteGroup(
+                id: "block-\(range.startUnit)-\(range.endUnit)",
+                sourceUnits: units.filter { $0.id >= range.startUnit && $0.id < range.endUnit }
+                    .map { .init(id: $0.id, rawText: $0.rawText) },
+                protectedLiterals: units.filter { $0.id >= range.startUnit && $0.id < range.endUnit }
+                    .flatMap { TeleprompterProtectedLiteralExtractor.extract(from: $0.rawText) },
+                budgetSeconds: 10
+            )
+        }
+        let rewriteJSON = String(decoding: try JSONEncoder().encode(TeleprompterRewriteOutput(blocks: groups.map {
+            .init(blockID: $0.id, mode: .speak, text: $0.sourceUnits.map(\.rawText).joined(), issues: [])
+        })), as: UTF8.self)
+        let output = try TeleprompterRewriteDecoder().decode(
+            rewriteJSON,
+            groups: groups
+        )
+        #expect(output.blocks.map(\.blockID) == groups.map(\.id))
+    }
+
+    @Test func groupingRejectsNonRangeFieldsAndIncompleteCoverage() throws {
+        let units = try sourceUnits()
+        let extraField = #"{"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":1,"text":"不应由分组阶段返回"},{"start_unit":1,"end_unit":3}]}"#
+        do {
+            _ = try TeleprompterGroupingDecoder().decode(extraField, targets: units, maxGroupUnits: 8)
+            Issue.record("grouping must reject rewrite fields")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .schemaKeys)
+        }
+
+        let gap = #"{"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":1},{"start_unit":2,"end_unit":3}]}"#
+        do {
+            _ = try TeleprompterGroupingDecoder().decode(gap, targets: units, maxGroupUnits: 8)
+            Issue.record("grouping must cover every source unit")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .rangeGap)
+        }
+    }
+
+    @Test func rewriteRejectsUnknownAndDuplicateBlockIDs() throws {
+        let groups = [
+            TeleprompterRewriteGroup(
+                id: "block-a",
+                sourceUnits: [.init(id: 0, rawText: "第一段。")],
+                budgetSeconds: 10
+            ),
+            TeleprompterRewriteGroup(
+                id: "block-b",
+                sourceUnits: [.init(id: 1, rawText: "第二段。")],
+                budgetSeconds: 10
+            )
+        ]
+        let unknown = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]},{"block_id":"foreign","mode":"speak","text":"第二段。","issues":[]}]}"#
+        do {
+            _ = try TeleprompterRewriteDecoder().decode(unknown, groups: groups)
+            Issue.record("rewrite must reject unknown IDs")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .unknownBlock)
+        }
+
+        let duplicate = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]},{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]}]}"#
+        do {
+            _ = try TeleprompterRewriteDecoder().decode(duplicate, groups: groups)
+            Issue.record("rewrite must reject duplicate IDs")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .duplicateBlock)
+        }
+    }
+
     @Test func mapDecoderRejectsUnknownFieldsGapsEmptySpeakAndInvalidIssues() throws {
         let units = try sourceUnits()
         let sourceText = units.map(\.rawText).joined()
@@ -126,8 +204,26 @@ struct TeleprompterPreparationPromptsTests {
         let json = """
         {"schema_version":"teleprompter.preparation.v2","schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"正文","issues":[]}]}
         """
-        #expect(throws: TeleprompterPreparationError.self) {
-            try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
+        do {
+            _ = try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
+            Issue.record("duplicate JSON keys must be rejected")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .duplicateKey)
+        }
+    }
+
+    @Test func mapDecoderReportsRangeGapWithoutExposingSourceText() throws {
+        let units = try sourceUnits()
+        let json = """
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":1,"end_unit":\(units.count),"mode":"speak","text":"正文","issues":[]}]}
+        """
+        do {
+            _ = try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
+            Issue.record("a range gap must be rejected")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .rangeGap)
+            #expect(error.diagnostic?.fieldPath == "blocks[0].start_unit")
+            #expect(error.diagnostic?.rawValue == nil)
         }
     }
 
@@ -166,5 +262,15 @@ struct TeleprompterPreparationPromptsTests {
         #expect(throws: TeleprompterPreparationError.self) {
             try TeleprompterReduceDecoder().decode(valid, editableBlocks: [editable])
         }
+    }
+
+    @Test func reviewCopyKeepsTheDefaultPathPlainAndHidesInternalTerms() {
+        #expect(TeleprompterReviewCopy.successTitle == "AI 已完成整理")
+        #expect(TeleprompterReviewCopy.successMessage.contains("原稿未被覆盖"))
+        #expect(TeleprompterReviewCopy.readingTitle == "整理后的朗读稿")
+        #expect(!TeleprompterReviewCopy.readingTitle.contains("来源组"))
+        #expect(TeleprompterReviewCopy.compareSourceLabel == "对照原稿")
+        #expect(TeleprompterReviewCopy.advancedEditLabel == "编辑本段")
+        #expect(TeleprompterReviewCopy.blockTitle(ordinal: 0) == "第 1 段")
     }
 }

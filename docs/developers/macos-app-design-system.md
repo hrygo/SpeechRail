@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.11"
-date: 2026-09-20
+version: "0.8.13"
+date: 2026-09-21
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -144,6 +144,12 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 波形（听觉对象的形状） | `Waveform` | `resultBar`(12 根) / `candidateTile`(18 根) / `libraryPreview`(16 根) 三处只声明**条数与排布**（宽 `barWidth` 2、圆角 `barRadius` 1、间隙、峰值高度），条高一律来自真实音频的幅度包络（`envelopeBuckets` 32 桶、逐窗**峰值**、整段归一化，`AudioEnvelope`）；静音窗下限 `envelopeMinimumHeight`(3)；播放中未播到的部分 `remainingOpacity`(0.35)，进度取播放器真实的 `currentTime / duration`（`progressInterval` 20Hz）。`Pattern.heights` 只在**没有包络**时使用（「这段音频还没算过」，例如还没试听过的音色）。波形脉冲**只在**这种无包络的情形保留（§11.6 第五十七轮） |
 | Inspector 面板 | `SpeechRailInspectorPanel` + `SpeechRailInspectorLabeledContentStyle` | 目录页（音色库 / 我的作品）右侧详情面**唯一的结构声明点**：身份带（`Typography.display` + `Typography.caption`/`inkTertiary` 徽标）→ 整宽 hairline → 试听段（`.speechRailInspectorPreviewPanel()`，段内边距 `previewWrapInsetY`）→ hairline → 取值段（`Inspector.contentPadding`）→ hairline → 固定动作区（`Inspector.actionPadding`，在 `ScrollView` 之外）。取值行用 `SpeechRailInspectorLabeledContentStyle`：标签列固定 `Inspector.labelColumnWidth = 92`，取值右对齐、可选文本，供全 App inspector 复用。其他六页的「开发者详情」是另一套（`DeveloperInspector`） |
 
+**2026-09-21 Token 复审收敛**：`Control` 是控件几何的唯一来源，`Interaction` 是命中区的唯一来源，
+`Menu` 与 `Layout.inspectorColumnWidth` 各自只保留自己的布局声明；`Button` 只保留快捷键提示的不透明度。
+按钮图标使用 `Icon.buttonIconSize` / `Icon.compactButtonIconSize`，图标符号集中在 `Icon.Symbol`；不再向全局
+`Optional` 类型注入 `.compact` 速记，也不保留未被调用的按钮字体、图标框、突出图标尺寸和旧兼容别名。
+这些清理不改变现有高保真数值、系统语义色、圆角层级或可访问性命中策略。
+
 诊断结论区的用户影响说明使用 `Diagnostics.summaryMessageMaximumLines`，默认最多两行；当动态字体或
 错误文案需要更多垂直空间时，结论区只能自然增高，不得用固定最大高度裁切内容。
 
@@ -197,6 +203,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    数据层只保留一个远大于任何窗口宽度的上限（`CreativeWork.titleMaximumLength = 120`）防止异常输入，
 显示层用 `displayTitle` 把历史上按 24 字预截的旧记录还原成整行。反例见「我的作品」：
 名称在写入时就被截断并持久化，于是窗口再宽也只能显示那 24 个字。
+8. **用户认知优先与渐进式披露**：无论内部流程、数据模型或 provider 多么专业复杂，默认界面都只围绕用户当前任务组织：先说完成了什么、原稿/数据是否改变、用户下一步做什么，再展示必要的状态与解释。主标题、主按钮和默认状态不得暴露 `block`、来源区间、协议、模型、worker 等内部术语；高级用户才需要的拆分、合并、调试、模型和诊断动作进入命名明确的菜单、折叠区或开发者详情。高级操作必须保持键盘可达、焦点可达和无障碍可读，但不能与普通用户的主路径争夺视觉权重。
 
 ### 3.3 Settings scene 契约
 
@@ -366,6 +373,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 动态字体 | macOS 上 `.dynamicTypeSize` 对系统文本样式不生效（`body`/`title`/`caption` 五档字号墨迹逐像素相同）；落地口径改为「系统文本样式 + `minHeight`」并在真机改系统文字大小走查 | 2026-09-16（§11.6 第三十七轮） |
 | 桌面视觉矩阵（余项） | 待用户手工走查：本机无 UI 自动化授权，Reduce Motion、VoiceOver、真机深色材质与系统文字大小均未实测 | — |
 | VoiceOver 实测 | 尚未完成 | — |
+| Token 结构复审 | 删除全局类型扩展、重复控件几何与未调用兼容别名；保留现有视觉数值并通过 Debug 构建与 Swift 测试验证 | 2026-09-21 |
 
 > 2026-09-15 22:5x 用户复核轮（REDESIGN-SPEC §11.6 第五轮）：输入区改为自量高且正文装得下时不显示滚动条、
 > 折叠行改为整行命中、运行监控改为 Prometheus/Grafana 的窗口口径并把密集区块收进渐进式披露。

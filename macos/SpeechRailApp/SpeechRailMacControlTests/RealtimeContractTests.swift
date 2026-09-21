@@ -131,6 +131,21 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(transcription?["partial_mode"] as? String, "snapshot")
         XCTAssertEqual(transcription?["chunk_duration_ms"] as? Int, 500)
     }
+
+    func testCaptionTranscriptionUsesTheCaptionChunk() {
+        XCTAssertEqual(TranscriptionSessionUpdate.captionChunkDurationMilliseconds, 500)
+
+        let event = TranscriptionSessionUpdate(
+            model: RealtimeASRClientModelFixture.canonical,
+            chunkDurationMilliseconds: TranscriptionSessionUpdate.captionChunkDurationMilliseconds
+        )
+        let speechrail = (event.jsonObject["session"] as? [String: Any])?["speechrail"] as? [String: Any]
+        let transcription = speechrail?["transcription"] as? [String: Any]
+        XCTAssertEqual(
+            transcription?["chunk_duration_ms"] as? Int,
+            TranscriptionSessionUpdate.captionChunkDurationMilliseconds
+        )
+    }
 }
 
 private enum RealtimeASRClientModelFixture {

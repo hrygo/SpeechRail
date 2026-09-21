@@ -1026,28 +1026,155 @@ public struct ButtonShortcutHint: View {
     }
 }
 
+/// SpeechRail 统一高品质按钮图标组件。
+/// 封装了 SF Symbol 渲染模式 (.monochrome)、统一尺寸、光学字重与基线防漂移逻辑。
+public struct SpeechRailButtonIcon: View {
+    public let symbol: SpeechRailDesignTokens.Icon.Symbol
+    public let size: CGFloat?
+    public let weight: Font.Weight?
+
+    public init(
+        _ symbol: SpeechRailDesignTokens.Icon.Symbol,
+        size: CGFloat? = nil,
+        weight: Font.Weight? = nil
+    ) {
+        self.symbol = symbol
+        self.size = size
+        self.weight = weight
+    }
+
+    public var body: some View {
+        Image(systemName: symbol.systemName)
+            .font(.system(
+                size: size ?? SpeechRailDesignTokens.Icon.buttonIconSize,
+                weight: weight ?? .medium
+            ))
+            .symbolRenderingMode(.monochrome)
+            .accessibilityHidden(true)
+    }
+}
+
+/// 统一的按钮内容标签组件，标准化图标（可选前缀/后缀）与文字之间的间距 (Spacing.xs) 与快捷键提示对齐。
+public struct SpeechRailButtonLabel: View {
+    private let title: String
+    private let icon: SpeechRailDesignTokens.Icon.Symbol?
+    private let trailingIcon: SpeechRailDesignTokens.Icon.Symbol?
+    private let shortcut: String?
+
+    public init(
+        _ title: String,
+        icon: SpeechRailDesignTokens.Icon.Symbol? = nil,
+        trailingIcon: SpeechRailDesignTokens.Icon.Symbol? = nil,
+        shortcut: String? = nil
+    ) {
+        self.title = title
+        self.icon = icon
+        self.trailingIcon = trailingIcon
+        self.shortcut = shortcut
+    }
+
+    public var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if let icon {
+                SpeechRailButtonIcon(icon)
+            }
+            Text(title)
+            if let trailingIcon {
+                SpeechRailButtonIcon(trailingIcon)
+            }
+            if let shortcut {
+                ButtonShortcutHint(shortcut)
+            }
+        }
+    }
+}
+
+/// SpeechRail 现代通用按钮：集成视觉变体、图标、文字与原生 macOS 26 交互反馈
+public struct SpeechRailButton: View {
+    private let title: String
+    private let icon: SpeechRailDesignTokens.Icon.Symbol?
+    private let trailingIcon: SpeechRailDesignTokens.Icon.Symbol?
+    private let shortcut: String?
+    private let level: SpeechRailButtonLevel
+    private let isEnabled: Bool
+    private let action: () -> Void
+
+    public init(
+        _ title: String,
+        icon: SpeechRailDesignTokens.Icon.Symbol? = nil,
+        trailingIcon: SpeechRailDesignTokens.Icon.Symbol? = nil,
+        shortcut: String? = nil,
+        level: SpeechRailButtonLevel = .secondary,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.icon = icon
+        self.trailingIcon = trailingIcon
+        self.shortcut = shortcut
+        self.level = level
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            SpeechRailButtonLabel(
+                title,
+                icon: icon,
+                trailingIcon: trailingIcon,
+                shortcut: shortcut
+            )
+        }
+        .speechRailButton(level)
+        .disabled(!isEnabled)
+    }
+}
+
 /// 稿的行内动作图标按钮字形（`main.js:640` `iconButton(parent, name, 28)`）：
 /// **28 × 28 框、圆角 7、无底色**，字形是 15pt 图标框里的 `text/secondary`。
 /// 应用此前在四处各写一遍 `Typography.statusIcon`（17pt semibold）、播放钮还自造成
 /// 琥珀实心圆；这一个视图让「播放 / 停止 / 导出 / 更多操作」共用同一档字号与墨色，
 /// 量测依据见 `Icon.rowActionSize`（REDESIGN-SPEC §11.6 第四十四轮）。
 public struct RowActionGlyph: View {
-    public let systemImage: String
+    public let symbol: SpeechRailDesignTokens.Icon.Symbol
+
+    public init(_ symbol: SpeechRailDesignTokens.Icon.Symbol) {
+        self.symbol = symbol
+    }
 
     public init(systemImage: String) {
-        self.systemImage = systemImage
+        self.symbol = SpeechRailDesignTokens.Icon.Symbol(rawValue: systemImage) ?? .more
     }
 
     public var body: some View {
-        Image(systemName: systemImage)
-            .font(SpeechRailDesignTokens.Typography.rowActionIcon)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .frame(
-                width: SpeechRailDesignTokens.Control.iconButtonSize,
-                height: SpeechRailDesignTokens.Control.iconButtonSize
-            )
-            .accessibilityHidden(true)
+        SpeechRailButtonIcon(
+            symbol,
+            size: SpeechRailDesignTokens.Icon.rowActionSize,
+            weight: .semibold
+        )
+        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        .frame(
+            width: SpeechRailDesignTokens.Control.iconButtonSize,
+            height: SpeechRailDesignTokens.Control.iconButtonSize
+        )
+        .accessibilityHidden(true)
     }
+}
+
+/// 页面头部动作控件的标签：图标（可选文字）、统一的一档尺寸与墨色。
+///
+/// 头部动作**不用通用文字标签**：`title` 只有在动作本身有具体名字时才给
+/// （「服务」「新建音色」），其余情况是纯图标 + 精确的无障碍标签
+/// （REDESIGN-SPEC §6.2 / §11.6 第四十九轮）。
+/// 动作控件的视觉变体层级
+public enum PageActionVariant: Sendable {
+    /// 默认次级动作（平时无底色，悬停呈现轻柔胶囊高亮，按下压暗）
+    case standard
+    /// 突出主动作（轻度强调色底，强调色文字与图标，悬停加深）
+    case prominent
+    /// 破坏性/危险动作（警示红文字，悬停浅红底）
+    case destructive
 }
 
 /// 页面头部动作控件的标签：图标（可选文字）、统一的一档尺寸与墨色。
@@ -1063,17 +1190,16 @@ struct PageActionLabel: View {
         HStack(spacing: SpeechRailDesignTokens.Toolbar.Action.labelSpacing) {
             Image(systemName: systemImage)
                 .font(SpeechRailDesignTokens.Typography.toolbarActionIcon)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .frame(
                     width: SpeechRailDesignTokens.Toolbar.Action.glyphFrame,
                     height: SpeechRailDesignTokens.Toolbar.Action.glyphFrame
                 )
+                .symbolRenderingMode(.monochrome)
                 .accessibilityHidden(true)
             if let title {
                 // 稿的菜单行标签是 `Callout`（12pt Regular）。
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
             }
         }
@@ -1082,7 +1208,97 @@ struct PageActionLabel: View {
             minWidth: SpeechRailDesignTokens.Toolbar.Action.iconOnlyWidth,
             minHeight: SpeechRailDesignTokens.Toolbar.Action.controlHeight
         )
-        .contentShape(Rectangle())
+        .contentShape(SpeechRailDesignTokens.Corner.controlShape)
+    }
+}
+
+/// 页面动作按钮的高质感 ButtonStyle：接管 macOS 原生悬停高亮胶囊、按压阻尼与焦点环
+public struct PageActionButtonStyle: ButtonStyle {
+    private let variant: PageActionVariant
+
+    public init(variant: PageActionVariant = .standard) {
+        self.variant = variant
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        PageActionButtonBody(configuration: configuration, variant: variant)
+    }
+}
+
+private struct PageActionButtonBody: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    let configuration: ButtonStyle.Configuration
+    let variant: PageActionVariant
+
+    var body: some View {
+        configuration.label
+            .foregroundStyle(foregroundColor)
+            .background(backgroundShape)
+            .speechRailFocusRing(isFocused)
+            .contentShape(SpeechRailDesignTokens.Corner.controlShape)
+            .opacity(isEnabled ? 1 : SpeechRailDesignTokens.Interaction.disabledOpacity)
+            .onHover { hovering in
+                isHovered = isEnabled && hovering
+            }
+            .animation(
+                reduceMotion ? nil : SpeechRailDesignTokens.Motion.hoverFeedback,
+                value: isHovered
+            )
+            .animation(
+                reduceMotion ? nil : SpeechRailDesignTokens.Motion.pressFeedback,
+                value: configuration.isPressed
+            )
+    }
+
+    private var foregroundColor: Color {
+        if !isEnabled {
+            return SpeechRailDesignTokens.Color.disabled
+        }
+        switch variant {
+        case .standard:
+            return SpeechRailDesignTokens.Color.ink
+        case .prominent:
+            return SpeechRailDesignTokens.Color.rail
+        case .destructive:
+            return SpeechRailDesignTokens.Color.critical
+        }
+    }
+
+    @ViewBuilder
+    private var backgroundShape: some View {
+        let shape = SpeechRailDesignTokens.Corner.controlShape
+        if configuration.isPressed {
+            switch variant {
+            case .standard:
+                shape.fill(SpeechRailDesignTokens.Toolbar.Action.pressedFill)
+            case .prominent:
+                shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.24))
+            case .destructive:
+                shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.20))
+            }
+        } else if isHovered {
+            switch variant {
+            case .standard:
+                shape.fill(SpeechRailDesignTokens.Toolbar.Action.hoverFill)
+            case .prominent:
+                shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.14))
+            case .destructive:
+                shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.12))
+            }
+        } else {
+            switch variant {
+            case .standard:
+                Color.clear
+            case .prominent:
+                shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
+            case .destructive:
+                Color.clear
+            }
+        }
     }
 }
 
@@ -1092,10 +1308,25 @@ struct PageActionLabel: View {
 /// 一个动作就直接用 `PageActionButton`。破坏性与生命周期动作按 `Divider`
 /// 分组，与读数据、复制、视图切换分开。
 public struct PageActionsMenu<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
     private let title: String?
     private let systemImage: String
     private let helpText: String
     private let content: Content
+
+    public init(
+        title: String? = nil,
+        icon: SpeechRailDesignTokens.Icon.Symbol = .more,
+        helpText: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.systemImage = icon.systemName
+        self.helpText = helpText
+        self.content = content()
+    }
 
     public init(
         title: String? = nil,
@@ -1114,6 +1345,14 @@ public struct PageActionsMenu<Content: View>: View {
             content
         } label: {
             PageActionLabel(title: title, systemImage: systemImage)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .background {
+                    if isHovered {
+                        SpeechRailDesignTokens.Corner.controlShape
+                            .fill(SpeechRailDesignTokens.Toolbar.Action.hoverFill)
+                    }
+                }
+                .contentShape(SpeechRailDesignTokens.Corner.controlShape)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(title == nil ? .hidden : .automatic)
@@ -1121,6 +1360,13 @@ public struct PageActionsMenu<Content: View>: View {
         .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("page-actions")
         .help(helpText)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .animation(
+            reduceMotion ? nil : SpeechRailDesignTokens.Motion.hoverFeedback,
+            value: isHovered
+        )
         .speechRailPointerCursor()
     }
 
@@ -1132,26 +1378,42 @@ public struct PageActionsMenu<Content: View>: View {
     }
 }
 
-/// 页面头部的**单个具体动作**：图标按钮，或图标 + 文字按钮（页面主动作）。
-///
-/// 主对象级的动作仍然留在正文里紧挨它改变的状态；这里是页面级的低频动作
-/// （复制摘要、复制脱敏报告）与页面级主入口（新建音色）。
+/// 页面头部或工作台卡片的**具体动作按钮**：带悬停微胶囊底色与触感反馈。
 public struct PageActionButton: View {
     private let title: String?
     private let systemImage: String
+    private let variant: PageActionVariant
     private let helpText: String?
     private let isEnabled: Bool
     private let action: () -> Void
 
     public init(
         title: String? = nil,
+        icon: SpeechRailDesignTokens.Icon.Symbol,
+        variant: PageActionVariant = .standard,
+        helpText: String? = nil,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.systemImage = icon.systemName
+        self.variant = variant
+        self.helpText = helpText
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+
+    public init(
+        title: String? = nil,
         systemImage: String,
+        variant: PageActionVariant = .standard,
         helpText: String? = nil,
         isEnabled: Bool = true,
         action: @escaping () -> Void
     ) {
         self.title = title
         self.systemImage = systemImage
+        self.variant = variant
         self.helpText = helpText
         self.isEnabled = isEnabled
         self.action = action
@@ -1161,7 +1423,7 @@ public struct PageActionButton: View {
         Button(action: action) {
             PageActionLabel(title: title, systemImage: systemImage)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(PageActionButtonStyle(variant: variant))
         .controlSize(.regular)
         .disabled(!isEnabled)
         .accessibilityLabel(title ?? helpText ?? systemImage)
@@ -1315,6 +1577,115 @@ public struct StatusBanner: View {
                 .speechRailButton(.primary)
                 .disabled(actionDisabled)
         }
+    }
+}
+
+/// 语义化轻量通知栏（NoticeBar）：规范化工作台/表单内部的轻量提示、预检警告与待确认提醒
+public struct NoticeBar: View {
+    public enum Tone: Sendable {
+        case info
+        case warning
+        case critical
+        case success
+        case neutral
+    }
+
+    private let tone: Tone
+    private let message: String
+    private let actionTitle: String?
+    private let action: (() -> Void)?
+
+    public init(
+        tone: Tone = .info,
+        message: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.tone = tone
+        self.message = message
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    public var body: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            toneIcon
+                .font(.system(size: SpeechRailDesignTokens.Notice.iconSize, weight: .semibold))
+                .foregroundStyle(toneColor)
+                .accessibilityHidden(true)
+
+            Text(message)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderless)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(toneColor)
+                    .speechRailPointerCursor()
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Notice.paddingHorizontal)
+        .padding(.vertical, SpeechRailDesignTokens.Notice.paddingVertical)
+        .background(toneFill, in: SpeechRailDesignTokens.Corner.controlShape)
+        .overlay {
+            SpeechRailDesignTokens.Corner.controlShape
+                .strokeBorder(toneStroke, lineWidth: SpeechRailDesignTokens.Notice.borderWidth)
+        }
+    }
+
+    private var toneColor: Color {
+        switch tone {
+        case .info: SpeechRailDesignTokens.Color.info
+        case .warning: SpeechRailDesignTokens.Color.attention
+        case .critical: SpeechRailDesignTokens.Color.critical
+        case .success: SpeechRailDesignTokens.Color.ready
+        case .neutral: SpeechRailDesignTokens.Color.inkSecondary
+        }
+    }
+
+    private var toneFill: Color {
+        switch tone {
+        case .info: SpeechRailDesignTokens.Color.info.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity)
+        case .warning: SpeechRailDesignTokens.Surface.attentionTint
+        case .critical: SpeechRailDesignTokens.Color.critical.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity)
+        case .success: SpeechRailDesignTokens.Color.ready.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity)
+        case .neutral: SpeechRailDesignTokens.Color.recessedField
+        }
+    }
+
+    private var toneStroke: Color {
+        switch tone {
+        case .info: SpeechRailDesignTokens.Color.info.opacity(0.3)
+        case .warning: SpeechRailDesignTokens.Color.attention.opacity(0.35)
+        case .critical: SpeechRailDesignTokens.Color.critical.opacity(0.3)
+        case .success: SpeechRailDesignTokens.Color.ready.opacity(0.3)
+        case .neutral: SpeechRailDesignTokens.Color.separator
+        }
+    }
+
+    private var toneIcon: Image {
+        switch tone {
+        case .info: Image(systemName: SpeechRailDesignTokens.Icon.Symbol.infoCircleFill.systemName)
+        case .warning: Image(systemName: SpeechRailDesignTokens.Icon.Symbol.warningFill.systemName)
+        case .critical: Image(systemName: SpeechRailDesignTokens.Icon.Symbol.errorCircleFill.systemName)
+        case .success: Image(systemName: SpeechRailDesignTokens.Icon.Symbol.successCircleFill.systemName)
+        case .neutral: Image(systemName: SpeechRailDesignTokens.Icon.Symbol.infoCircle.systemName)
+        }
+    }
+}
+
+public extension View {
+    func speechRailNoticeBar(
+        tone: NoticeBar.Tone = .info,
+        message: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) -> some View {
+        NoticeBar(tone: tone, message: message, actionTitle: actionTitle, action: action)
     }
 }
 
@@ -1987,7 +2358,7 @@ public struct DeveloperInspector<Content: View>: View {
         .scrollIndicators(.automatic)
         .scrollBounceBehavior(.basedOnSize)
         .speechRailInspectorColumn(alignment: .topLeading)
-        .background(SpeechRailDesignTokens.Surface.inspectorFill)
+        .background(SpeechRailDesignTokens.Color.field)
     }
 }
 
@@ -2059,7 +2430,7 @@ public struct SpeechRailInspectorPanel<Preview: View, Body: View, Actions: View>
         // 输入槽」会把它撑宽，而窗口余量不足时又会被压到下限，同一扇窗口里两块目录页
         // 因此可能各是一个宽度（§11.6 第五十七、六十一轮）。
         .speechRailInspectorColumn()
-        .background(SpeechRailDesignTokens.Surface.inspectorFill)
+        .background(SpeechRailDesignTokens.Color.field)
     }
 
     /// 身份带：稿 `sideHead` 是 `Title / Page` 标题 + `Caption`/`text/tertiary` 徽标，
@@ -2117,7 +2488,7 @@ public struct SpeechRailInspectorPreviewPanelModifier: ViewModifier {
                     cornerRadius: SpeechRailDesignTokens.Inspector.previewRadius + 1,
                     style: .continuous
                 )
-                .strokeBorder(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                .strokeBorder(SpeechRailDesignTokens.Color.separator, lineWidth: 1)
                 .padding(-1)
             }
             // 稿 `previewWrap` 的上下留白（`padY 14`）属于**面板**，不属于整段：

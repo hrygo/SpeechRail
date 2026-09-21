@@ -1,6 +1,49 @@
 import CryptoKit
 import Foundation
 
+public enum TeleprompterPreparationDiagnosticCode: String, Codable, CaseIterable, Equatable, Sendable {
+    case jsonSyntax = "json_syntax"
+    case duplicateKey = "duplicate_key"
+    case schemaKeys = "schema_keys"
+    case schemaVersion = "schema_version"
+    case fieldType = "field_type"
+    case invalidEnum = "invalid_enum"
+    case rangeGap = "range_gap"
+    case rangeOverlap = "range_overlap"
+    case rangeBounds = "range_bounds"
+    case groupLimit = "group_limit"
+    case modeMismatch = "mode_mismatch"
+    case protectedLiteral = "protected_literal"
+    case unknownBlock = "unknown_block"
+    case duplicateBlock = "duplicate_block"
+    case revisionMismatch = "revision_mismatch"
+    case outputTruncated = "output_truncated"
+}
+
+/// A bounded, privacy-safe explanation for a rejected model response.
+/// It never stores source text, unknown key values, or provider response bodies.
+public struct TeleprompterPreparationDiagnostic: Codable, Equatable, Sendable {
+    public let code: TeleprompterPreparationDiagnosticCode
+    public let fieldPath: String?
+    public let blockIndex: Int?
+    public let sourceUnit: Int?
+    public let rawValue: String?
+
+    public init(
+        code: TeleprompterPreparationDiagnosticCode,
+        fieldPath: String? = nil,
+        blockIndex: Int? = nil,
+        sourceUnit: Int? = nil,
+        rawValue: String? = nil
+    ) {
+        self.code = code
+        self.fieldPath = fieldPath
+        self.blockIndex = blockIndex
+        self.sourceUnit = sourceUnit
+        self.rawValue = rawValue
+    }
+}
+
 /// Errors raised by the UI-independent preparation pipeline.
 public enum TeleprompterPreparationError: Error, Equatable, LocalizedError, Sendable {
     case emptySource
@@ -14,6 +57,12 @@ public enum TeleprompterPreparationError: Error, Equatable, LocalizedError, Send
     case invalidSourceUnits
     case invalidTimingPlan
     case invalidPromptResponse
+    case invalidPromptResponseDetailed(TeleprompterPreparationDiagnostic)
+
+    public var diagnostic: TeleprompterPreparationDiagnostic? {
+        guard case let .invalidPromptResponseDetailed(diagnostic) = self else { return nil }
+        return diagnostic
+    }
 
     public var errorDescription: String? {
         switch self {
@@ -27,7 +76,7 @@ public enum TeleprompterPreparationError: Error, Equatable, LocalizedError, Send
         case .invalidTargetMinutes: "目标时长必须是 1–120 分钟的整数"
         case .invalidSourceUnits: "稿件分片无法无损恢复"
         case .invalidTimingPlan: "无法为这份稿件建立时间预算"
-        case .invalidPromptResponse: "AI 返回的结构化结果无法使用"
+        case .invalidPromptResponse, .invalidPromptResponseDetailed: "AI 返回的结构化结果无法使用"
         }
     }
 }

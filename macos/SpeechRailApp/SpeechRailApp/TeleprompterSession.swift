@@ -99,6 +99,22 @@ public final class TeleprompterSession {
         preparationResult?.status == .boundaryUnchecked
     }
 
+    public var hasLocalPreparationFallback: Bool {
+        if preparationResult?.hasLocalFallback == true { return true }
+        return phase == .review && readingBlocks.contains {
+            $0.origin == .deterministic && $0.disposition == .unresolved
+        }
+    }
+
+    public var isFullyLocalPreparationFallback: Bool {
+        if let result = preparationResult {
+            return result.fallbackBlockCount == result.draft.blocks.count
+        }
+        return hasLocalPreparationFallback
+            && !readingBlocks.isEmpty
+            && readingBlocks.allSatisfy { $0.origin == .deterministic }
+    }
+
     public var sourceValidationError: TeleprompterPreparationError? {
         guard let sourceText = document?.sourceText,
               !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -521,7 +537,7 @@ public final class TeleprompterSession {
             documentID: document.id,
             sourceText: sourceText,
             segments: segments,
-            analysisSource: .ai
+            analysisSource: result.fallbackBlockCount == result.draft.blocks.count ? .deterministic : .ai
         )
         phase = .review
     }

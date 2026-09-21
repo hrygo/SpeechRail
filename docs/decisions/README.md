@@ -21,5 +21,6 @@
 | [0017](0017-macos26-app-best-practices-remediation.md) | macOS 26 App 最佳实践整改与可恢复控制面 | Accepted |
 | [0018](0018-realtime-current-wire-external-llm.md) | Realtime current wire 与可插拔外部 LLM | Superseded by 0019 |
 | [0019](0019-stateless-speech-plane-caller-orchestration.md) | 无状态 Speech Plane 与调用方助手编排 | Accepted |
+| [0020](0020-teleprompter-workflow-reliability.md) | 提词器 App 内受约束工作流、能力感知输出与局部恢复 | Implemented（待真实模型/UI 验收） |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

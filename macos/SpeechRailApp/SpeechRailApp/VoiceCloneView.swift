@@ -365,9 +365,12 @@ public struct VoiceCloneView: View {
                         .progressViewStyle(.circular)
                         .tint(SpeechRailDesignTokens.Color.onRail)
                 } else {
-                    Image(systemName: model.recording.isRecording ? "stop.fill" : "mic.fill")
-                        .font(.system(size: SpeechRailDesignTokens.VoiceClone.recordGlyphSize, weight: .semibold))
-                        .foregroundStyle(SpeechRailDesignTokens.Color.onRail)
+                    SpeechRailButtonIcon(
+                        model.recording.isRecording ? .stop : .micFill,
+                        size: SpeechRailDesignTokens.VoiceClone.recordGlyphSize,
+                        weight: .semibold
+                    )
+                    .foregroundStyle(SpeechRailDesignTokens.Color.onRail)
                 }
             }
             .frame(
@@ -445,9 +448,9 @@ public struct VoiceCloneView: View {
             Button {
                 toggleTakePlayback()
             } label: {
-                Label(
+                SpeechRailButtonLabel(
                     isPlayingTake ? "停止" : "播放",
-                    systemImage: isPlayingTake ? "stop.fill" : "play.fill"
+                    icon: isPlayingTake ? .stop : .play
                 )
             }
             .speechRailButton(.secondary)
@@ -455,7 +458,7 @@ public struct VoiceCloneView: View {
             Button {
                 startRecording()
             } label: {
-                Label("重录", systemImage: "mic")
+                SpeechRailButtonLabel("重录", icon: .mic)
             }
             .speechRailButton(.secondary)
             .speechRailPointerCursor()
@@ -465,7 +468,7 @@ public struct VoiceCloneView: View {
             Button(role: .destructive) {
                 deleteTake()
             } label: {
-                Label("删除", systemImage: "trash")
+                SpeechRailButtonLabel("删除", icon: .delete)
             }
             // 稿的动作行里同一档的按钮都长一样，删除没有单独的红底；`role` 仍留给无障碍。
             .speechRailButton(.secondary)
@@ -563,7 +566,7 @@ public struct VoiceCloneView: View {
                                 Text("正在检查…")
                             }
                         } else {
-                            Label("先检查参考音频", systemImage: "checkmark.shield")
+                            SpeechRailButtonLabel("先检查参考音频", icon: .checkShield)
                         }
                     }
                     .speechRailButton(.secondary)
@@ -581,7 +584,7 @@ public struct VoiceCloneView: View {
                                 Text("正在注册…")
                             }
                         } else {
-                            Label("注册音色", systemImage: "mic")
+                            SpeechRailButtonLabel("注册音色", icon: .mic)
                         }
                     }
                     .speechRailButton(.primary)

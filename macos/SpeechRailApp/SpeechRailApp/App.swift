@@ -187,6 +187,14 @@ struct SpeechRailApp: App {
             let maxOutputTokens: Int
             let timeout: TimeInterval
             switch prompt.schemaVersion {
+            case "teleprompter.grouping.v1":
+                schema = TeleprompterPreparationJSONSchema.grouping
+                maxOutputTokens = 2400
+                timeout = 60
+            case "teleprompter.rewrite.v1":
+                schema = TeleprompterPreparationJSONSchema.rewrite
+                maxOutputTokens = 6000
+                timeout = 90
             case "teleprompter.preparation.v2":
                 schema = TeleprompterPreparationJSONSchema.map
                 maxOutputTokens = 6000
@@ -210,7 +218,8 @@ struct SpeechRailApp: App {
                 schema: schema,
                 maxOutputTokens: maxOutputTokens,
                 timeout: timeout,
-                observationContext: prompt.observationContext
+                observationContext: prompt.observationContext,
+                structuredOutputMode: .jsonSchema
             )
         }
         teleprompterSession.aiClient = TeleprompterAIClient { prompt in
@@ -226,7 +235,8 @@ struct SpeechRailApp: App {
                 input: prompt.input,
                 schema: TeleprompterAnalysis.jsonSchema,
                 maxOutputTokens: 4000,
-                timeout: 45
+                timeout: 45,
+                structuredOutputMode: .jsonSchema
             )
         }
         let assistantSession = AssistantSession(coordinator: coordinator)

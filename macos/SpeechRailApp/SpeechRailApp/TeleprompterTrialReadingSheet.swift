@@ -66,11 +66,16 @@ public struct TeleprompterTrialReadingSheet: View {
             Button {
                 dismiss()
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                SpeechRailButtonIcon(.close, size: SpeechRailDesignTokens.Icon.buttonIconSize)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Control.iconButtonSize,
+                        height: SpeechRailDesignTokens.Control.iconButtonSize
+                    )
             }
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .accessibilityLabel("关闭")
         }
     }
 

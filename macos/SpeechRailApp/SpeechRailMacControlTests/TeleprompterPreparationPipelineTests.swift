@@ -167,7 +167,7 @@ struct TeleprompterPreparationPipelineTests {
         let fixture = try makeFixture(lineCount: 4)
         let observations = ObservationLog()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
-            try Self.mapResponse(for: prompt)
+            try Self.response(for: prompt)
         })
 
         _ = try await pipeline.prepare(fixture.input, onObservation: observations.append)
@@ -185,9 +185,8 @@ struct TeleprompterPreparationPipelineTests {
             throw LLMError.http(status: 503, body: "稿件不应进入日志")
         })
 
-        await #expect(throws: LLMError.self) {
-            try await pipeline.prepare(fixture.input, onObservation: observations.append)
-        }
+        let result = try await pipeline.prepare(fixture.input, onObservation: observations.append)
+        #expect(result.hasLocalFallback)
 
         let values = observations.values
         let started = try #require(values.first { $0.kind == .callStarted })
@@ -196,9 +195,29 @@ struct TeleprompterPreparationPipelineTests {
         let failedContext = try #require(failed.context)
         #expect(startedContext.runID == failedContext.runID)
         #expect(startedContext.requestID == failedContext.requestID)
-        #expect(startedContext.stage == .map)
+        #expect(startedContext.stage == .grouping)
         #expect(failed.errorCode == "http_503")
         #expect(values.allSatisfy { $0.errorCode != "稿件不应进入日志" })
+    }
+
+    @Test func structuralMapFailureEmitsStableDiagnosticCode() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let observations = ObservationLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                return "{}"
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input, onObservation: observations.append)
+        #expect(result.status == .reviewRequired)
+        #expect(result.fallbackBlockCount == fixture.units.count)
+
+        let decoderFailure = try #require(
+            observations.values.first { $0.component == "grouping_decoder" && $0.kind == .callFailed }
+        )
+        #expect(decoderFailure.errorCode == "schema_keys")
     }
 
     @Test func truncatedMapSplitsWithoutRepeatingOversizedWindow() async throws {
@@ -206,7 +225,7 @@ struct TeleprompterPreparationPipelineTests {
         let calls = CallLog()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
             try await calls.append(prompt)
-            if prompt.schemaVersion == "teleprompter.preparation.v2" {
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
                 let input = try JSONDecoder().decode(TeleprompterPreparationMapInput.self, from: Data(prompt.input.utf8))
                 if input.targets.count > 2 { throw LLMError.outputTruncated }
             }
@@ -221,52 +240,111 @@ struct TeleprompterPreparationPipelineTests {
     @Test func shortSourceUsesOneMapAndDoesNotReduce() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let calls = CallLog()
+        let observations = ObservationLog()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
             try await calls.append(prompt)
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
-        let result = try await pipeline.prepare(fixture.input)
+        let result = try await pipeline.prepare(fixture.input, onObservation: observations.append)
 
+        #expect(result.fallbackBlockCount == 0, "fallback=\(result.fallbackBlockCount), errors=\(observations.values.compactMap { $0.errorCode })")
         #expect(result.mapRequestCount == 1)
+        #expect(result.rewriteRequestCount == 1)
         #expect(result.reduceRequestCount == 0)
         #expect(result.status == .complete)
         #expect(result.draft.blocks.count == 1)
         #expect(result.draft.blocks[0].disposition == .speak)
-        #expect((await calls.schemaVersions) == ["teleprompter.preparation.v2"])
+        #expect((await calls.schemaVersions) == ["teleprompter.grouping.v1", "teleprompter.rewrite.v1"])
     }
 
     @Test func malformedMapResponseUsesOneBoundedRecoveryRequest() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()
+        let prompts = PromptLog()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
-            if prompt.schemaVersion == "teleprompter.preparation.v2",
+            await prompts.append(prompt)
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
                await attempts.next() == 1 {
-                return "{}"
+                return #"{"secret-response-body":"DO_NOT_LEAK"}"#
             }
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
         let result = try await pipeline.prepare(fixture.input)
 
         #expect(result.mapRequestCount == 1)
+        #expect(result.rewriteRequestCount == 1)
         #expect(await attempts.value == 2)
+        let recoveryPrompt = try #require(await prompts.values.first {
+            $0.instructions.contains("schema_keys")
+        })
+        #expect(!recoveryPrompt.instructions.contains("DO_NOT_LEAK"))
+    }
+
+    @Test func rewriteFailureRetriesOnlyRewriteWithTheOriginalGrouping() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let groupingCalls = AttemptCounter()
+        let rewriteCalls = AttemptCounter()
+        let prompts = PromptLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            await prompts.append(prompt)
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                _ = await groupingCalls.next()
+            }
+            if prompt.schemaVersion == "teleprompter.rewrite.v1",
+               await rewriteCalls.next() == 1 {
+                return "{}"
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.status == .complete)
+        #expect(await groupingCalls.value == 1)
+        #expect(await rewriteCalls.value == 2)
+        let rewritePrompts = await prompts.values.filter { $0.schemaVersion == "teleprompter.rewrite.v1" }
+        #expect(rewritePrompts.count == 2)
+        #expect(rewritePrompts[0].input == rewritePrompts[1].input)
+        #expect(rewritePrompts[1].instructions.contains("schema_keys"))
+    }
+
+    @Test func transientRetryWaitsForRetryAfterBeforeTheNextStageRequest() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let timestamps = TimestampLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            await timestamps.append()
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
+               await attempts.next() == 1 {
+                throw LLMError.httpWithRetry(status: 429, body: "", retryAfter: 0.05)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        _ = try await pipeline.prepare(fixture.input)
+
+        let values = await timestamps.values
+        #expect(values.count >= 3)
+        #expect(values[1].timeIntervalSince(values[0]) >= 0.04)
     }
 
     @Test func repeatedStructuralFailureStopsAfterOneRegeneration() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
-            if prompt.schemaVersion == "teleprompter.preparation.v2",
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
                await attempts.next() <= 2 {
                 return "{}"
             }
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
-        await #expect(throws: TeleprompterPreparationError.self) {
-            try await pipeline.prepare(fixture.input)
-        }
+        let result = try await pipeline.prepare(fixture.input)
+        #expect(result.status == .reviewRequired)
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
         #expect(await attempts.value == 2)
     }
 
@@ -274,11 +352,11 @@ struct TeleprompterPreparationPipelineTests {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
-            if prompt.schemaVersion == "teleprompter.preparation.v2",
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
                await attempts.next() == 1 {
                 throw LLMError.http(status: 429, body: "retry later")
             }
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
         let result = try await pipeline.prepare(fixture.input)
@@ -301,6 +379,7 @@ struct TeleprompterPreparationPipelineTests {
         }
 
         #expect(result.mapRequestCount == 4)
+        #expect(result.rewriteRequestCount == 4)
         #expect(result.reduceRequestCount == 3)
         #expect(result.mapWindows.count == 4)
         #expect(result.mapWindows.allSatisfy { $0.sourceUnitIDs.count <= 24 })
@@ -328,7 +407,7 @@ struct TeleprompterPreparationPipelineTests {
             if prompt.schemaVersion == "teleprompter.reduction.v1" {
                 throw TestFailure.reduceUnavailable
             }
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
         let result = try await pipeline.prepare(fixture.input)
@@ -344,22 +423,46 @@ struct TeleprompterPreparationPipelineTests {
     @Test func mapFailureDoesNotProduceAnActivatablePartialDraft() async throws {
         let fixture = try makeFixture(lineCount: 96)
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
-            if prompt.schemaVersion == "teleprompter.preparation.v2" {
-                throw TestFailure.mapUnavailable
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                throw LLMError.http(status: 503, body: "temporarily unavailable")
             }
-            return ""
+            return try Self.response(for: prompt)
         })
 
-        await #expect(throws: TeleprompterPreparationError.self) {
-            try await pipeline.prepare(fixture.input)
-        }
+        let result = try await pipeline.prepare(fixture.input)
+        #expect(result.status == .reviewRequired)
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func oneWindowFailureKeepsOtherWindowsAndFallsBackOnlyLocally() async throws {
+        let fixture = try makeFixture(lineCount: 96)
+        let groupingCalls = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                let call = await groupingCalls.next()
+                if call == 2 || call == 3 {
+                    throw LLMError.http(status: 503, body: "temporarily unavailable")
+                }
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.status == .reviewRequired)
+        #expect(result.fallbackBlockCount > 0)
+        #expect(result.fallbackBlockCount < result.draft.blocks.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+        #expect(result.draft.blocks.contains { $0.origin == .ai && $0.disposition == .speak })
+        #expect(result.draft.blocks.contains { $0.origin == .deterministic && $0.disposition == .unresolved })
     }
 
     @Test func cancellationInvalidatesLateMapResponse() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
             try? await Task.sleep(for: .milliseconds(80))
-            return try Self.mapResponse(for: prompt)
+            return try Self.response(for: prompt)
         })
 
         let task = Task {
@@ -388,21 +491,22 @@ struct TeleprompterPreparationPipelineTests {
         var schemaVersions: [String] = []
         var mapInputs: [TeleprompterPreparationMapInput] = []
         var reduceCount = 0
-        private var mapsCompleted = 0
+        private var windowsCompleted = 0
         private(set) var reduceStartedOnlyAfterAllMaps = true
 
         func append(_ prompt: TeleprompterPreparationPrompt) throws {
             schemaVersions.append(prompt.schemaVersion)
-            if prompt.schemaVersion == "teleprompter.preparation.v2" {
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
                 let input = try JSONDecoder().decode(
                     TeleprompterPreparationMapInput.self,
                     from: Data(prompt.input.utf8)
                 )
                 mapInputs.append(input)
-                mapsCompleted += 1
+            } else if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                windowsCompleted += 1
             } else if prompt.schemaVersion == "teleprompter.reduction.v1" {
                 reduceCount += 1
-                reduceStartedOnlyAfterAllMaps = reduceStartedOnlyAfterAllMaps && mapsCompleted == 4
+                reduceStartedOnlyAfterAllMaps = reduceStartedOnlyAfterAllMaps && windowsCompleted == 4
             }
         }
     }
@@ -413,6 +517,22 @@ struct TeleprompterPreparationPipelineTests {
         func next() -> Int {
             value += 1
             return value
+        }
+    }
+
+    private actor PromptLog {
+        private(set) var values: [TeleprompterPreparationPrompt] = []
+
+        func append(_ prompt: TeleprompterPreparationPrompt) {
+            values.append(prompt)
+        }
+    }
+
+    private actor TimestampLog {
+        private(set) var values: [Date] = []
+
+        func append() {
+            values.append(Date())
         }
     }
 
@@ -475,7 +595,45 @@ struct TeleprompterPreparationPipelineTests {
         if prompt.schemaVersion == "teleprompter.reduction.v1" {
             return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
         }
+        if prompt.schemaVersion == "teleprompter.grouping.v1" {
+            return try groupingResponse(for: prompt)
+        }
+        if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+            return try rewriteResponse(for: prompt)
+        }
         return try mapResponse(for: prompt)
+    }
+
+    private static func groupingResponse(for prompt: TeleprompterPreparationPrompt) throws -> String {
+        let input = try JSONDecoder().decode(
+            TeleprompterPreparationMapInput.self,
+            from: Data(prompt.input.utf8)
+        )
+        guard !input.targets.isEmpty else { throw TestFailure.mapUnavailable }
+        let groups = stride(from: 0, to: input.targets.count, by: 8).map { start in
+            let end = min(start + 8, input.targets.count)
+            return TeleprompterGroupingBlock(startUnit: start, endUnit: end)
+        }
+        return String(decoding: try JSONEncoder().encode(TeleprompterGroupingOutput(groups: groups)), as: UTF8.self)
+    }
+
+    private static func rewriteResponse(for prompt: TeleprompterPreparationPrompt) throws -> String {
+        let input = try JSONDecoder().decode(
+            TeleprompterRewriteInput.self,
+            from: Data(prompt.input.utf8)
+        )
+        guard !input.groups.isEmpty else { throw TestFailure.mapUnavailable }
+        let blocks = input.groups.map { group in
+            TeleprompterRewriteBlock(
+                blockID: group.id,
+                mode: .speak,
+                text: group.sourceUnits.map(\.rawText).joined(),
+                issues: []
+            )
+        }
+        return String(decoding: try JSONEncoder().encode(
+            TeleprompterRewriteOutput(blocks: blocks)
+        ), as: UTF8.self)
     }
 
     private static func mapResponse(for prompt: TeleprompterPreparationPrompt) throws -> String {
