@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.10"
+version: "0.8.11"
 date: 2026-09-20
 ---
 
@@ -195,8 +195,23 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    需要「随 UI 宽度显示更多」的文本，一律**按整段保存、按可用宽度渲染**——单行 `Text` +
    `.lineLimit(1)` + `.truncationMode(...)`，绝不把「前 N 字 + `…`」写进模型或落盘。
    数据层只保留一个远大于任何窗口宽度的上限（`CreativeWork.titleMaximumLength = 120`）防止异常输入，
-   显示层用 `displayTitle` 把历史上按 24 字预截的旧记录还原成整行。反例见「我的作品」：
-   名称在写入时就被截断并持久化，于是窗口再宽也只能显示那 24 个字。
+显示层用 `displayTitle` 把历史上按 24 字预截的旧记录还原成整行。反例见「我的作品」：
+名称在写入时就被截断并持久化，于是窗口再宽也只能显示那 24 个字。
+
+### 3.3 Settings scene 契约
+
+设置窗口保留 macOS 原生 `Settings` scene 与 `Tab` 导航，当前页签顺序为
+「通用 / 创作 / 助手 / 服务」。设置页是普通用户的偏好与连接入口，不是第二个服务控制台：
+
+- 「通用」只承载启动与开发者详情偏好；「创作」承载默认音色和语速；「服务」只展示本机服务事实与诊断报告偏好。
+- 「助手」按「对话服务 → 新助手默认值 → 字幕与会议 → 通知 → 高级：按功能单独设置」排序。
+- 页面结构统一复用 `settingsPane`、`settingsSection`、`settingsRow`、`settingsRowLabel` 和
+  `SettingsConnectionStatus`；这些共享组件位于 `SettingsComponents.swift`，不在页面内复制布局裸值。
+- 密钥草稿只存在于视图状态；无新草稿时动作显示「检查连接」，有新草稿时显示「检查并保存」。
+  只有显式保存动作在连接成功后才写入 `LLMKeychain`，保存失败必须同时保留连接结论与未保存状态。
+- 模块专用配置默认折叠，展开后先表达「跟随全局 / 使用专用配置 / 当前回退到全局」；
+  高级区和连接状态同时使用文字、可访问 label/value 与系统控件反馈，不依赖颜色或 hover。
+- 服务启停、模型下载、profile 切换、worker 监控和预检不属于 Settings scene；它们继续由控制中心承载。
 
 ## 4. 十个页面 UI/UX 优化蓝图
 

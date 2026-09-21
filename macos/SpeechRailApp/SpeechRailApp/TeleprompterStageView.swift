@@ -61,7 +61,64 @@ public struct TeleprompterStageView: View {
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
             }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+            // 等宽运行计时看板（已用、目标剩余/超时、正文预计剩余）
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                HStack(spacing: 3) {
+                    Text("已用")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text(formatSeconds(session.runClock.elapsedSeconds))
+                        .font(SpeechRailDesignTokens.Typography.technicalValue)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                }
+
+                Text("·")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                if session.runClock.isOverTarget {
+                    HStack(spacing: 3) {
+                        Text("超时")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                        Text(formatSeconds(session.runClock.overTargetSeconds))
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    }
+                } else {
+                    HStack(spacing: 3) {
+                        Text("目标剩余")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text(formatSeconds(session.runClock.targetRemainingSeconds))
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                }
+
+                Text("·")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                HStack(spacing: 3) {
+                    Text("预计剩余")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text(formatSeconds(session.runClock.estimatedRemainingSeconds))
+                        .font(SpeechRailDesignTokens.Typography.technicalValue)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+            .padding(.vertical, 3)
+            .background(
+                SpeechRailDesignTokens.Color.recessedField,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+            )
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 StatusPill(
                     tone: session.phase == .following ? .healthy : (session.phase == .uncertain ? .attention : .neutral),
@@ -73,7 +130,7 @@ public struct TeleprompterStageView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     ProgressView(value: progressValue)
                         .progressViewStyle(.linear)
-                        .frame(width: 132)
+                        .frame(width: 90)
                         .tint(SpeechRailDesignTokens.Color.rail)
                 }
             }
@@ -193,50 +250,54 @@ public struct TeleprompterStageView: View {
                     Task { await session.resumeFollowing() }
                 }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: isFollowing ? "pause.fill" : "play.fill")
                     Text(isFollowing ? "暂停跟读" : startLabel)
-                    SessionKeycap("Space")
+                    ButtonShortcutHint("Space")
                 }
             }
             .keyboardShortcut(.space, modifiers: [])
+            .accessibilityLabel(isFollowing ? "暂停跟读，快捷键空格" : "\(startLabel)，快捷键空格")
             .disabled(session.isResuming || session.phase == .preparing)
             .speechRailButton(isFollowing ? .secondary : .primary)
 
             Button {
                 session.moveToPrevious()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "chevron.left")
                     Text("上一段")
-                    SessionKeycap("←")
+                    ButtonShortcutHint("←")
                 }
             }
             .keyboardShortcut(.leftArrow, modifiers: [])
+            .accessibilityLabel("上一段，快捷键左方向键")
             .speechRailButton(.secondary)
 
             Button {
                 session.moveToNext()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text("下一段")
                     Image(systemName: "chevron.right")
-                    SessionKeycap("→")
+                    ButtonShortcutHint("→")
                 }
             }
             .keyboardShortcut(.rightArrow, modifiers: [])
+            .accessibilityLabel("下一段，快捷键右方向键")
             .speechRailButton(.secondary)
 
             Button {
                 Task { await session.resetFollow() }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "arrow.counterclockwise")
                     Text("从这里继续")
-                    SessionKeycap("R")
+                    ButtonShortcutHint("R")
                 }
             }
             .keyboardShortcut("r", modifiers: [])
+            .accessibilityLabel("从当前位置重置跟读，快捷键 R")
             .disabled(session.isResuming || session.phase == .preparing)
             .speechRailButton(.secondary)
 
@@ -248,13 +309,14 @@ public struct TeleprompterStageView: View {
                     close()
                 }
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "xmark")
                     Text("结束")
-                    SessionKeycap("Esc")
+                    ButtonShortcutHint("Esc")
                 }
             }
             .keyboardShortcut(.escape, modifiers: [])
+            .accessibilityLabel("结束提词并关闭舞台，快捷键 Esc")
             .speechRailButton(.destructive)
         }
         .controlSize(.regular)
@@ -291,18 +353,24 @@ public struct TeleprompterStageView: View {
     private var statusText: String {
         if let blocked = session.blocked { return blocked.title }
         if session.isResuming { return "正在准备继续…" }
-        if session.uncertainty != nil { return "位置已保留，读回稿件后会继续跟随" }
+        if session.uncertainty != nil { return "正在确认阅读位置，你可以继续读或手动选段" }
         switch session.phase {
-        case .following: return session.hasHeardSpeech ? "自动跟读中" : "请读一句稿件，系统会跟随你的声音"
-        case .paused: return "已暂停跟读"
+        case .following: return session.hasHeardSpeech ? "正在跟读，请按你的节奏朗读" : "请读一句稿件，系统会跟随你的声音"
+        case .paused: return "已暂停跟读，按空格恢复"
         case .manual: return "手动提词：可用 ← / → 校正位置"
         case .preparing: return "正在连接语音识别…"
         case .analyzing: return "正在整理稿件…"
         case .review: return "请先检查 AI 建议"
         case .ready, .draft: return "准备开始：按空格开始跟读"
         case .ended: return "提词已结束"
-        case .uncertain: return "请确认当前位置"
+        case .uncertain: return "正在确认阅读位置，你可以继续读或手动选段"
         }
+    }
+
+    private func formatSeconds(_ seconds: TimeInterval) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%02d:%02d", mins, secs)
     }
 
     private var statusColor: Color {
