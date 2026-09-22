@@ -2143,7 +2143,7 @@ public struct VoiceLibraryView: View {
                             height: SpeechRailDesignTokens.Control.iconButtonSize
                         )
                 } else {
-                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
+                    RowActionGlyph(isPlaying ? .stop : .play)
                 }
             }
             .speechRailButton(.quiet)
@@ -2339,7 +2339,7 @@ public struct VoiceLibraryView: View {
                         // 稿这里和列表行用的是同一个原语（无底色、15pt 图标框、
                         // `text/secondary`）；应用此前的琥珀实心圆是自造形态，
                         // 见 `Icon.rowActionSize` 的帧量测。
-                        RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
+                        RowActionGlyph(isPlaying ? .stop : .play)
                     }
                 }
                 .speechRailButton(.quiet)
@@ -2986,7 +2986,7 @@ public struct WorksView: View {
             Button {
                 model.playWork(work)
             } label: {
-                RowActionGlyph(systemImage: playing ? "stop" : "play")
+                RowActionGlyph(playing ? .stop : .play)
             }
             .speechRailButton(.quiet)
             .accessibilityLabel(playing ? "停止试听" : "试听")
@@ -3231,7 +3231,7 @@ public struct WorksView: View {
                 Button {
                     model.playWork(work)
                 } label: {
-                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
+                    RowActionGlyph(isPlaying ? .stop : .play)
                 }
                 .speechRailButton(.quiet)
                 .accessibilityLabel("\(work.displayTitle)\(isPlaying ? "停止试听" : "试听")")
@@ -3239,7 +3239,7 @@ public struct WorksView: View {
                 Button {
                     prepareExport(for: work)
                 } label: {
-                    RowActionGlyph(systemImage: "square.and.arrow.down")
+                    RowActionGlyph(.export)
                 }
                 .speechRailButton(.quiet)
                 .accessibilityLabel("导出 \(work.displayTitle)")
@@ -3247,7 +3247,7 @@ public struct WorksView: View {
                 Menu {
                     workContextMenu(work)
                 } label: {
-                    RowActionGlyph(systemImage: "ellipsis")
+                    RowActionGlyph(.more)
                 }
                 .menuStyle(.button)
                 .buttonStyle(.borderless)

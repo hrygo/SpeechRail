@@ -43,6 +43,28 @@ public final class ServiceHTTPTransport: @unchecked Sendable, ServiceTransportin
     }
 }
 
+/// Resolves credentials for the local managed service. The managed config is
+/// authoritative for the App: a GUI process can inherit an old environment
+/// variable from the shell that launched it, while the service reads the
+/// current managed config.
+public enum ServiceCredentialPolicy {
+    public static func preferredKey(
+        environmentKey: String?,
+        managedKey: String?
+    ) -> String? {
+        if let managedKey = normalized(managedKey) {
+            return managedKey
+        }
+        return normalized(environmentKey)
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 public struct ServiceRequestBuilder: Sendable {
     private let baseURL: URL
     private let apiKey: String?

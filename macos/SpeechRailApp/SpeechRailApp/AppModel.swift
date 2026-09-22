@@ -1436,7 +1436,7 @@ public final class AppModel {
         serviceCapabilitiesLoadState = .loading
         defer { isRefreshingServiceCapabilities = false }
 
-        if effectiveCapabilities == nil, discoveryState == .idle {
+        if discoveryState.shouldRetryOnRefresh {
             await refreshDiscovery()
         }
 
@@ -1448,7 +1448,12 @@ public final class AppModel {
 
         guard discoveryState == .notSupported || discoveryState == .invalidContract else {
             serviceCapabilities = nil
-            serviceCapabilitiesLoadState = .unknown
+            serviceCapabilitiesLoadState = switch discoveryState {
+            case .unauthorized, .notReady, .failed:
+                .failed
+            default:
+                .unknown
+            }
             return
         }
 

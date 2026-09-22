@@ -1722,6 +1722,53 @@ public enum CapabilityDiscoveryState: Equatable, Sendable {
     case unauthorized
     case invalidContract
     case failed
+
+    /// A page refresh should retry discovery after a missing or failed result,
+    /// but not while a request is already running or when a legacy route is
+    /// intentionally unsupported.
+    public var shouldRetryOnRefresh: Bool {
+        switch self {
+        case .idle, .notReady, .unauthorized, .invalidContract, .failed:
+            true
+        case .loading, .loaded, .notSupported:
+            false
+        }
+    }
+}
+
+/// Presentation-level distinction for a capability declaration.
+///
+/// Readiness of the ASR/TTS workers and publication of optional TTS
+/// capabilities are separate facts. A missing declaration while discovery is
+/// still running is therefore not the same as a declared-but-unavailable
+/// capability.
+public enum ServiceCapabilityPresentationStatus: Equatable, Sendable {
+    case ready
+    case notReady
+    case unsupported
+    case checking
+    case undeclared
+    case unavailable
+}
+
+public enum ServiceCapabilityPresentation {
+    public static func resolve(
+        declared: Bool?,
+        discoveryState: CapabilityDiscoveryState,
+        supportedByProfile: Bool
+    ) -> ServiceCapabilityPresentationStatus {
+        if declared == true { return .ready }
+        if declared == false { return supportedByProfile ? .notReady : .unsupported }
+
+        switch discoveryState {
+        case .idle, .loading:
+            return .checking
+        case .loaded:
+            return supportedByProfile ? .undeclared : .unsupported
+        case .notSupported, .notReady, .unauthorized, .invalidContract, .failed:
+            return .unavailable
+        }
+    }
 }
 
 public struct CapabilitySnapshotStore: Equatable, Sendable {

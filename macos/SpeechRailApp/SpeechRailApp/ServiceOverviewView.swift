@@ -335,12 +335,18 @@ public struct ServiceOverviewView: View {
         case ready
         case notReady
         case unsupported
+        case checking
+        case undeclared
+        case unavailable
 
         var label: String {
             switch self {
             case .ready: "可用"
             case .notReady: "未就绪"
             case .unsupported: "当前档位不支持"
+            case .checking: "检查中"
+            case .undeclared: "未发布"
+            case .unavailable: "读取失败"
             }
         }
 
@@ -349,6 +355,9 @@ public struct ServiceOverviewView: View {
             case .ready: .healthy
             case .notReady: .critical
             case .unsupported: .neutral
+            case .checking: .neutral
+            case .undeclared: .neutral
+            case .unavailable: .attention
             }
         }
     }
@@ -473,7 +482,7 @@ public struct ServiceOverviewView: View {
     }
 
     /// 能力行的统一口径：服务声明了就是可用；没声明时再区分「当前档位不加载」与
-    /// 「档位该有、服务没有发布」。还没读到能力清单时不下结论，也不把「用户还没有
+    /// 「档位该有、服务没有发布」。读取中或读取失败都不下结论，也不把「用户还没有
     /// 这类音色」当成「服务没有这项能力」。
     private func capabilityVerdict(
         title: String,
@@ -483,27 +492,64 @@ public struct ServiceOverviewView: View {
         missingReason: String,
         unsupportedReason: String
     ) -> ServiceCapability {
-        if declared == true {
+        if declared == nil, model.serviceCapabilitiesLoadState == .loading {
+            return ServiceCapability(
+                title: title,
+                status: .checking,
+                reason: "正在读取服务能力，暂不能确认这一项。"
+            )
+        }
+
+        switch ServiceCapabilityPresentation.resolve(
+            declared: declared,
+            discoveryState: model.discoveryState,
+            supportedByProfile: supportedByProfile
+        ) {
+        case .ready:
             return ServiceCapability(
                 title: title,
                 status: .ready,
                 reason: "服务声明「\(capability)」已经可用。"
             )
-        }
-        if declared == false {
+        case .notReady, .unsupported:
             return ServiceCapability(
                 title: title,
                 status: supportedByProfile ? .notReady : .unsupported,
                 reason: supportedByProfile ? missingReason : unsupportedReason
             )
+        case .undeclared:
+            return ServiceCapability(
+                title: title,
+                status: .undeclared,
+                reason: "服务没有发布「\(capability)」这项能力。"
+            )
+        case .checking:
+            return ServiceCapability(
+                title: title,
+                status: .checking,
+                reason: "正在读取服务能力，暂不能确认这一项。"
+            )
+        case .unavailable:
+            let reason = switch model.discoveryState {
+            case .unauthorized:
+                "无法验证本机服务。按 ⌘R 重新读取；若仍失败，请退出并重新打开 App。"
+            case .notReady:
+                "服务暂时未准备好。稍后按 ⌘R 重新读取。"
+            case .invalidContract:
+                "服务返回的能力信息无法识别。请更新 App 或服务后重试。"
+            case .notSupported:
+                "当前服务版本不支持读取能力信息。请更新服务后重试。"
+            case .failed:
+                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
+            case .idle, .loading, .loaded:
+                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
+            }
+            return ServiceCapability(
+                title: title,
+                status: .unavailable,
+                reason: reason
+            )
         }
-        return ServiceCapability(
-            title: title,
-            status: .notReady,
-            reason: model.serviceCapabilitiesLoadState == .failed
-                ? "能力清单读取失败，无法确认这一项。"
-                : "尚未读取服务能力清单，无法确认这一项。"
-        )
     }
 
     /// Figma `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
