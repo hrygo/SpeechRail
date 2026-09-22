@@ -1158,10 +1158,6 @@ public struct RowActionGlyph: View {
         self.symbol = symbol
     }
 
-    public init(systemImage: String) {
-        self.symbol = SpeechRailDesignTokens.Icon.Symbol(rawValue: systemImage) ?? .more
-    }
-
     public var body: some View {
         SpeechRailButtonIcon(
             symbol,

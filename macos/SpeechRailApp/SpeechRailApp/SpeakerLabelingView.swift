@@ -155,7 +155,7 @@ public struct SpeakerLabelingPanel: View {
                     editingLabel = speaker.label
                     draftName = speaker.displayName ?? ""
                 } label: {
-                    RowActionGlyph(systemImage: "pencil")
+                    RowActionGlyph(.edit)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("改 \(SpeakerLabeling.chipText(label: speaker.label, displayName: speaker.displayName)) 的名字")

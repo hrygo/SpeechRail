@@ -2091,7 +2091,7 @@ public struct AssistantView: View {
                         .controlSize(.mini)
                         .frame(width: 16, height: 16)
                 } else {
-                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
+                    RowActionGlyph(isPlaying ? .stop : .play)
                 }
             }
             .buttonStyle(.borderless)

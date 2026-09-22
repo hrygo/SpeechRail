@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 // 本机服务的凭据。**REST 与 WebSocket 共用这一份解析**：`/v1/realtime` 的握手在配置了
 // key 时必须带 `Authorization: Bearer`，否则以 1008 关闭（`contracts/realtime-openai.md`
@@ -6,7 +7,8 @@ import Foundation
 //
 // 它**只解析、不落盘、不打印**：key 只活在内存里，传到请求头为止。
 
-/// 本机服务的凭据解析：环境变量优先，其次受管 app home 的 `config/.env`。
+/// 本机服务的凭据解析：受管 app home 的 `config/.env` 优先，环境变量只作为
+/// 没有受管配置时的 fallback。这样 GUI 进程不会把启动它的旧环境变量误当成当前服务 key。
 ///
 /// 它不是 REST 客户端私有的：`/v1/realtime` 的 WebSocket 握手用**同一个 key**
 /// （契约：配置 key 时握手必须携带 `Authorization: Bearer`，否则以 1008 关闭），
@@ -18,14 +20,15 @@ enum SpeechRailAPICredentialProvider {
     static func resolve(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
-        if let value = validated(environment[apiKeyName]) {
-            return value
-        }
         let appHome = managedAppHome(environment: environment)
-        return readEnvFile(
+        let managedKey = readEnvFile(
             at: appHome
                 .appendingPathComponent("config", isDirectory: true)
                 .appendingPathComponent(".env")
+        )
+        return ServiceCredentialPolicy.preferredKey(
+            environmentKey: environment[apiKeyName].flatMap(validated),
+            managedKey: managedKey
         )
     }
 

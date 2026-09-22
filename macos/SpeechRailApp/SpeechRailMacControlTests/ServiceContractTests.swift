@@ -1,7 +1,101 @@
 import XCTest
+import SpeechRailAppSupport
 @testable import SpeechRailControlKit
 
 final class ServiceContractTests: XCTestCase {
+    func testCapabilityPresentationSeparatesCheckingFromUnavailable() {
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: nil,
+                discoveryState: .loading,
+                supportedByProfile: true
+            ),
+            .checking
+        )
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: nil,
+                discoveryState: .unauthorized,
+                supportedByProfile: true
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: nil,
+                discoveryState: .failed,
+                supportedByProfile: true
+            ),
+            .unavailable
+        )
+    }
+
+    func testLoadedCapabilitySnapshotDoesNotLookLikeAReadFailureWhenUndeclared() {
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: nil,
+                discoveryState: .loaded,
+                supportedByProfile: true
+            ),
+            .undeclared
+        )
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: nil,
+                discoveryState: .loaded,
+                supportedByProfile: false
+            ),
+            .unsupported
+        )
+    }
+
+    func testCapabilityDiscoveryCanRetryAfterRecoverableStates() {
+        XCTAssertTrue(CapabilityDiscoveryState.idle.shouldRetryOnRefresh)
+        XCTAssertTrue(CapabilityDiscoveryState.unauthorized.shouldRetryOnRefresh)
+        XCTAssertTrue(CapabilityDiscoveryState.notReady.shouldRetryOnRefresh)
+        XCTAssertTrue(CapabilityDiscoveryState.invalidContract.shouldRetryOnRefresh)
+        XCTAssertTrue(CapabilityDiscoveryState.failed.shouldRetryOnRefresh)
+
+        XCTAssertFalse(CapabilityDiscoveryState.loading.shouldRetryOnRefresh)
+        XCTAssertFalse(CapabilityDiscoveryState.loaded.shouldRetryOnRefresh)
+        XCTAssertFalse(CapabilityDiscoveryState.notSupported.shouldRetryOnRefresh)
+    }
+
+    func testRowActionSymbolsUseExplicitPlaybackAndActionNames() {
+        XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.play.rawValue, "play.fill")
+        XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.stop.rawValue, "stop.fill")
+        XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.edit.rawValue, "pencil")
+        XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.export.rawValue, "square.and.arrow.down")
+        XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.more.rawValue, "ellipsis")
+    }
+
+    func testCapabilityPresentationKeepsDeclaredAndProfileVerdicts() {
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: true,
+                discoveryState: .loaded,
+                supportedByProfile: false
+            ),
+            .ready
+        )
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: false,
+                discoveryState: .loaded,
+                supportedByProfile: true
+            ),
+            .notReady
+        )
+        XCTAssertEqual(
+            ServiceCapabilityPresentation.resolve(
+                declared: false,
+                discoveryState: .loaded,
+                supportedByProfile: false
+            ),
+            .unsupported
+        )
+    }
+
     func testEffectiveSnapshotKeepsAtomicIdentityAndUnknownAvailabilityReason() throws {
         let data = Data("""
         {
@@ -364,6 +458,29 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(request.url?.path, "/v1/speechrail/capabilities")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
         XCTAssertEqual(request.value(forHTTPHeaderField: "If-None-Match"), "\"snap-1\"")
+    }
+
+    func testManagedCredentialTakesPrecedenceOverAmbientEnvironment() {
+        XCTAssertEqual(
+            ServiceCredentialPolicy.preferredKey(
+                environmentKey: "stale-environment-key",
+                managedKey: "managed-service-key"
+            ),
+            "managed-service-key"
+        )
+        XCTAssertEqual(
+            ServiceCredentialPolicy.preferredKey(
+                environmentKey: "environment-key",
+                managedKey: nil
+            ),
+            "environment-key"
+        )
+        XCTAssertNil(
+            ServiceCredentialPolicy.preferredKey(
+                environmentKey: "",
+                managedKey: ""
+            )
+        )
     }
 
     func test304WithoutCachedValueThrowsCacheMiss() {
