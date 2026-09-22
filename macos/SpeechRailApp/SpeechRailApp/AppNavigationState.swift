@@ -10,6 +10,10 @@ public final class AppNavigationState {
     public private(set) var layoutTier: WindowLayoutTier = .expanded
     public private(set) var windowWidth: CGFloat = 1355
 
+    public var layoutContract: WindowLayoutContract {
+        WindowLayoutPolicy.contract(for: layoutTier)
+    }
+
     public init() {}
 
     public func request(_ route: AppRoute) {

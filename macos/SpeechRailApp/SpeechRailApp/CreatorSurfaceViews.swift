@@ -55,7 +55,7 @@ public struct DubbingDeskView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .dubbing, scrollable: false) {
+        PageScaffold(route: .dubbing, layout: .content) {
             // 输入卡 / 控制条 / 结果条之间是页面级「块与块」：帧实测 19–20pt
             // （原先用 sm=12，比稿紧 8pt；REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
@@ -238,7 +238,7 @@ public struct DubbingDeskView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                 }
                 SpeechRailButtonIcon(
-                    .expandDown,
+                    SpeechRailDesignTokens.Icon.choiceChevronDown,
                     size: SpeechRailDesignTokens.Icon.compactButtonIconSize
                 )
                     // 稿（脚本 1336）是 `icon(capsule, "chevron-down", 14, V["text/secondary"])`：
@@ -1787,7 +1787,7 @@ struct WaveformBars: View {
         .onChange(of: levels?.count) { _, _ in isPulsing = pulses }
         .onChange(of: reduceMotion) { _, reduced in
             guard reduced else { return }
-            withAnimation(.linear(duration: 0.2)) { isPulsing = false }
+            isPulsing = false
         }
         .animation(pulseAnimation, value: isPulsing)
     }
@@ -1878,7 +1878,7 @@ public struct VoiceLibraryView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .voiceLibrary, scrollable: false) {
+        PageScaffold(route: .voiceLibrary, layout: .content) {
             voiceLibraryBody
         } trailing: {
             voiceInspectorToggle
@@ -2225,7 +2225,7 @@ public struct VoiceLibraryView: View {
     /// List rows are a summary surface. Keep untrusted service descriptions from
     /// becoming an unbounded layout input; the inspector exposes a bounded
     /// description and length-only user-authored fields in its fixed-width,
-    /// scrollable surface.
+    /// independently scrolling panel.
     private func voiceListDescription(for voice: CreatorVoice) -> String {
         let fallback = "服务端已注册，当前档位\(voice.available ? "可用" : "不可用")。"
         let normalized = voice.description.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2779,7 +2779,7 @@ public struct WorksView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .works, scrollable: false) {
+        PageScaffold(route: .works, layout: .content) {
             worksBody
         } trailing: {
             worksInspectorToggle

@@ -85,6 +85,9 @@ public struct SessionPanelToggle: View {
         .buttonStyle(.borderless)
         .help(isCollapsed ? "展开「\(panelName)」" : "收起「\(panelName)」")
         .accessibilityLabel(isCollapsed ? "展开\(panelName)" : "收起\(panelName)")
+        .accessibilityValue(isCollapsed ? "已收起" : "已展开")
+        .accessibilityHint(isCollapsed ? "显示\(panelName)" : "隐藏\(panelName)")
+        .accessibilityIdentifier("session-panel-toggle")
     }
 }
 
@@ -415,6 +418,7 @@ public struct SessionTurnRow: View {
     public let onAction: ((SessionTurnAction) -> Void)?
 
     @State private var isHovered: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(
         who: String,
@@ -540,7 +544,10 @@ public struct SessionTurnRow: View {
                             }
                         }
                         .opacity(isHovered ? 1.0 : 0.0)
-                        .animation(.easeInOut(duration: 0.15), value: isHovered)
+                        .animation(
+                            reduceMotion ? nil : .easeInOut(duration: 0.15),
+                            value: isHovered
+                        )
                     }
 
                     Spacer(minLength: 4)
@@ -587,7 +594,10 @@ public struct SessionTurnRow: View {
                         }
                     }
                     .opacity(isHovered ? 1.0 : 0.0)
-                    .animation(.easeInOut(duration: 0.15), value: isHovered)
+                    .animation(
+                        reduceMotion ? nil : .easeInOut(duration: 0.15),
+                        value: isHovered
+                    )
                 }
 
                 if isPartial {
@@ -811,8 +821,81 @@ public struct SessionConclusionBand: View {
                 .stroke(tone.color, lineWidth: SpeechRailDesignTokens.Stroke.strong)
         }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(tone.accessibilityLabel)。\(message)")
     }
 }
+
+#if DEBUG
+private struct SharedSemanticPreviewSurface: View {
+    @State private var isInspectorCollapsed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            SessionStatusBar(
+                title: "正在记录",
+                tone: .attention,
+                facts: ["麦克风", "本机音频"],
+                elapsed: 92
+            )
+            SessionPanelToggle(
+                panelName: "本次会议",
+                isCollapsed: isInspectorCollapsed
+            ) {
+                isInspectorCollapsed.toggle()
+            }
+            SessionConclusionBand(
+                tone: .critical,
+                title: "麦克风需要授权",
+                message: "允许后才能开始本次记录。",
+                hint: "前往系统设置完成授权。"
+            ) {
+                Button("打开设置") {}
+                    .speechRailButton(.secondary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(width: 620, alignment: .topLeading)
+    }
+}
+
+#Preview("Shared states") {
+    SharedSemanticPreviewSurface()
+}
+
+#Preview("Reduce Motion") {
+    SharedSemanticPreviewSurface()
+}
+
+#Preview("High Contrast") {
+    SharedSemanticPreviewSurface()
+}
+
+#Preview("Lived-in content") {
+    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+        SessionConclusionBand(
+            tone: .attention,
+            title: "这是一条超过一行的长状态标题，用来检查窄窗口下的折行和下一步动作",
+            message: "保留的数据、当前影响和下一步都应该完整可读；长说明不能在构造数据时预截断，也不能只靠颜色表达失败。",
+            hint: "这是部分完成状态：已经保存的内容可以继续查看，失败的部分可以重试。"
+        ) {
+            Button("重试") {}
+                .speechRailButton(.secondary)
+        }
+
+        SessionEmptyState(
+            systemImage: "tray",
+            title: "这里还没有记录",
+            message: "完成一次操作后，结果会留在本机记录库中；现在可以返回主任务或开始新的操作。"
+        ) {
+            Button("开始新的操作") {}
+                .speechRailButton(.primary)
+        }
+    }
+    .padding(SpeechRailDesignTokens.Layout.contentPadding)
+    .frame(width: 620, alignment: .topLeading)
+}
+#endif
 
 
 // MARK: - 记录库列（稿 `recordListColumn`，脚本 2240）
@@ -1124,6 +1207,7 @@ public struct InPlaceDeleteButton: View {
     public let onConfirm: () -> Void
 
     @State private var isConfirming = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(
         style: Style = .compactIcon,
@@ -1146,24 +1230,18 @@ public struct InPlaceDeleteButton: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 if style == .regularButton {
                     Button(confirmText, role: .destructive) {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            isConfirming = false
-                        }
+                        setConfirming(false)
                         onConfirm()
                     }
                     .speechRailButton(.destructive)
 
                     Button(cancelText) {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            isConfirming = false
-                        }
+                        setConfirming(false)
                     }
                     .speechRailButton(.secondary)
                 } else {
                     Button {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            isConfirming = false
-                        }
+                        setConfirming(false)
                         onConfirm()
                     } label: {
                         Text(confirmText)
@@ -1180,9 +1258,7 @@ public struct InPlaceDeleteButton: View {
                     .speechRailPointerCursor()
 
                     Button {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            isConfirming = false
-                        }
+                        setConfirming(false)
                     } label: {
                         Text(cancelText)
                             .font(SpeechRailDesignTokens.Typography.caption)
@@ -1202,13 +1278,15 @@ public struct InPlaceDeleteButton: View {
                     .speechRailPointerCursor()
                 }
             }
-            .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            .transition(
+                reduceMotion
+                    ? .identity
+                    : .opacity.combined(with: .scale(scale: 0.95))
+            )
         } else {
             if style == .regularButton {
                 Button(role: .destructive) {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        isConfirming = true
-                    }
+                    setConfirming(true)
                 } label: {
                     if let systemImage {
                         Label(title, systemImage: systemImage)
@@ -1217,12 +1295,14 @@ public struct InPlaceDeleteButton: View {
                     }
                 }
                 .speechRailButton(.secondary)
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                .transition(
+                    reduceMotion
+                        ? .identity
+                        : .opacity.combined(with: .scale(scale: 0.95))
+                )
             } else {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        isConfirming = true
-                    }
+                    setConfirming(true)
                 } label: {
                     switch style {
                     case .compactIcon:
@@ -1242,6 +1322,15 @@ public struct InPlaceDeleteButton: View {
                 .buttonStyle(.plain)
                 .speechRailPointerCursor()
             }
+        }
+    }
+
+    private func setConfirming(_ confirming: Bool) {
+        let update = { isConfirming = confirming }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.easeInOut(duration: 0.16), update)
         }
     }
 }

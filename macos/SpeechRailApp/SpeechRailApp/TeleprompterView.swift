@@ -53,10 +53,17 @@ public struct TeleprompterView: View {
     public var body: some View {
         PageScaffold(
             route: .teleprompter,
-            minimumContentHeight: SpeechRailDesignTokens.Teleprompter.preparationMinimumHeight,
-            growsWithContent: true
+            layout: .scroll(
+                minimumHeight: SpeechRailDesignTokens.Teleprompter.preparationMinimumHeight
+            )
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                SessionStatusBar(
+            title: pageStatusPresentation.title,
+            tone: pageStatusPresentation.tone,
+            facts: pageStatusPresentation.facts
+                )
+
                 if let operationMessage {
                     Label(operationMessage, systemImage: "exclamationmark.triangle")
                         .font(SpeechRailDesignTokens.Typography.callout)
@@ -173,6 +180,77 @@ public struct TeleprompterView: View {
             Button("取消", role: .cancel) {}
         } message: { item in
             Text("「\(item.id)」的当前格式无法读取。删除后可以重新导入原稿。")
+        }
+    }
+
+    private var pageStatusPresentation: SessionPageStatusPresentation {
+        let facts = [
+            session.document?.title,
+            session.activeVersion.map { "\($0.segments.count) 段" },
+            "目标约 \(session.targetMinutes) 分钟"
+        ].compactMap { $0 }
+
+        return switch session.phase {
+        case .draft:
+            SessionPageStatusPresentation(
+                title: "草稿待整理",
+                tone: .neutral,
+                facts: facts
+            )
+        case .analyzing:
+            SessionPageStatusPresentation(
+                title: "正在整理稿件",
+                tone: .attention,
+                facts: facts
+            )
+        case .review:
+            SessionPageStatusPresentation(
+                title: "候选稿待确认",
+                tone: .attention,
+                facts: facts
+            )
+        case .ready:
+            SessionPageStatusPresentation(
+                title: "提词稿已就绪",
+                tone: .healthy,
+                facts: facts
+            )
+        case .preparing:
+            SessionPageStatusPresentation(
+                title: "正在连接提词舞台",
+                tone: .attention,
+                facts: facts
+            )
+        case .following:
+            SessionPageStatusPresentation(
+                title: "正在跟读",
+                tone: .healthy,
+                facts: facts
+            )
+        case .paused:
+            SessionPageStatusPresentation(
+                title: "跟读已暂停",
+                tone: .attention,
+                facts: facts
+            )
+        case .uncertain:
+            SessionPageStatusPresentation(
+                title: "位置已保留",
+                tone: .attention,
+                facts: facts
+            )
+        case .manual:
+            SessionPageStatusPresentation(
+                title: "手动提词",
+                tone: .healthy,
+                facts: facts
+            )
+        case .ended:
+            SessionPageStatusPresentation(
+                title: "跟读已结束",
+                tone: .neutral,
+                facts: facts
+            )
         }
     }
 

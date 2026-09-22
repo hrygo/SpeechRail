@@ -15,12 +15,16 @@ public struct MeetingView: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(MeetingSession.self) private var meeting
     @Environment(SessionPreferences.self) private var preferences
+    @Environment(AppNavigationState.self) private var navigation
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var usesMicrophone = true
     @State private var systemApps: [SystemAudioApp] = []
     @State private var sourceCandidates: [SystemAudioApp] = []
     @State private var isInspectorCollapsed = false
+    @FocusState private var inspectorToggleFocused: Bool
+    @State private var autoCollapsedDueToWidth = false
     @State private var isCheckingInput = false
     /// 会后：正文区顶部的 `纪要 / 转录` 分段。
     @State private var postTab: PostTab = .minutes
@@ -49,12 +53,11 @@ public struct MeetingView: View {
     public var body: some View {
         // 与语音助手页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
         // 会议页的三张卡（音频来源 / 本机 App / 转录流）都会随运行中的 App 数与
-        // 转录长度变长，`scrollable: false` 会把它们的理想高度直接报给分栏
+        // 转录长度变长时，页面使用外层滚动合同，避免把理想高度直接报给分栏
         // （2026-09-19 实测：分栏被撑到 1355×9736、整窗全白，见 AssistantView.body 注）。
         PageScaffold(
             route: .meeting,
-            minimumContentHeight: 420,
-            growsWithContent: true
+            layout: .scroll(minimumHeight: 420)
         ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 statusBar
@@ -159,8 +162,12 @@ public struct MeetingView: View {
                 panelName: meeting.phase == .idle ? "本次会议" : "会议信息",
                 isCollapsed: isInspectorCollapsed
             ) {
-                isInspectorCollapsed.toggle()
+                setInspectorCollapsed(!isInspectorCollapsed, autoCollapsed: false)
             }
+            .focused($inspectorToggleFocused)
+        }
+        .onChange(of: navigation.layoutTier, initial: true) { _, _ in
+            syncInspectorWithLayoutContract(navigation.layoutContract)
         }
         .task {
             usesMicrophone = preferences.meetingUsesMicrophone
@@ -198,11 +205,52 @@ public struct MeetingView: View {
 
     // MARK: - 状态带
 
+    private var pageStatusPresentation: SessionPageStatusPresentation {
+        return switch meeting.phase {
+        case .idle:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .preparing:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .recording:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .interrupted:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .processing:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .archived:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        }
+    }
+
     private var statusBar: some View {
         SessionStatusBar(
-            title: statusTitle,
-            tone: statusTone,
-            facts: statusFacts,
+            title: pageStatusPresentation.title,
+            tone: pageStatusPresentation.tone,
+            facts: pageStatusPresentation.facts,
             elapsed: meeting.phase.isLive || meeting.phase == .processing ? session.elapsed : nil,
             level: meeting.phase.isLive ? meeting.level : nil
         ) {
@@ -572,7 +620,11 @@ public struct MeetingView: View {
                     }
                     .onChange(of: meeting.lines.count) { _, _ in
                         guard let last = meeting.lines.last else { return }
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        if reduceMotion {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        } else {
+                            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
                     }
                 }
                 .frame(maxHeight: .infinity)
@@ -1235,6 +1287,33 @@ public struct MeetingView: View {
     private static func timecode(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func syncInspectorWithLayoutContract(_ contract: WindowLayoutContract) {
+        guard contract.inspector == .collapsed else {
+            if isInspectorCollapsed && autoCollapsedDueToWidth {
+                setInspectorCollapsed(false, autoCollapsed: false)
+            }
+            return
+        }
+
+        if !isInspectorCollapsed {
+            setInspectorCollapsed(true, autoCollapsed: true)
+        }
+    }
+
+    private func setInspectorCollapsed(_ collapsed: Bool, autoCollapsed: Bool) {
+        let update = {
+            isInspectorCollapsed = collapsed
+            autoCollapsedDueToWidth = autoCollapsed
+            inspectorToggleFocused = true
+        }
+
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+        }
     }
 }
 

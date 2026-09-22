@@ -8,17 +8,17 @@ date: 2026-09-23
 
 # SpeechRail macOS App 设计系统与 Token
 
-> **迁移已完成（2026-09-15）**：[`docs/design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](../design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md)
-> 的 §5（视觉语言 v2）与 §7（逐页规格）已落到 `macos/SpeechRailApp`：阶段 1 外壳、阶段 2 token 收敛、
-> 阶段 3 命令与键盘、阶段 4 逐页重构均已完成，本文 §3 与 §4 已按 v2 语义重写，两份文档不再并行描述两套规范。
+> **迁移已完成（2026-09-15，当前路由契约复核 2026-09-22）**：[`docs/design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](../design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md)
+> 的 §5（视觉语言 v2）与 §7（逐页规格）已落到 `macos/SpeechRailApp`。当前控制台由 14 个路由、
+> `WindowLayoutContract`、`PageScaffoldLayout` 和会话状态合同共同约束；本文 §3 与 §4 描述落地后的唯一规范。
 > 设计决策与阶段状态以 REDESIGN-SPEC §10 为准；本文件只描述落地后的 token 与组件契约。
 
-> **已知未验证项（2026-09-15）**：以下内容只完成代码与构建验证，尚未做桌面人工走查或 UI 自动化：
+> **已知未验证项（2026-09-22）**：以下内容已完成源码/纯函数/Debug 构建验证，但尚未做桌面人工走查或 UI 自动化：
 > Light/Dark、Increase Contrast、Dynamic Type、Reduce Motion 的实际观感；VoiceOver 实读顺序；
 > 列表「空格试听」在真实焦点下的行为；`.searchable` 与页面级 `List` 在窄窗口下的布局。
 
-> **当前范围说明（2026-09-20）**：2026-09-18 起新增的语音助手、会议助手、实时字幕，以及 2026-09-20
-> 新增的 AI 提词器属于独立的 App 会话/舞台能力，不是本 2026-09-15 UI 迁移包的完整页面清单。
+> **当前范围说明（2026-09-22）**：语音助手、会议助手、实时字幕和 AI 提词器现在均纳入当前
+> 14 路由的导航、窗口、状态和辅助功能审查；它们仍保持独立的会话/舞台运行边界。
 > 会话生命周期、音频来源与记录边界以 [`会话层技术方案`](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md)、
 > [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
 > 本文的 token 与系统控件约束仍适用于这些页面。
@@ -168,6 +168,22 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 ### 3.2 全局交互语言与组件契约
 
+### 3.2.1 响应式窗口与页面外壳合同
+
+- `WindowLayoutPolicy.nextTier` 只负责宽度迟滞；`WindowLayoutPolicy.contract(for:)` 负责把
+  `expanded / medium / compact` 映射为侧栏、Inspector 和主内容最小宽度合同。`AppNavigationState.layoutContract`
+  是 SwiftUI 页面读取的唯一入口，页面不得根据宽度再次推断行为。
+- `PageScaffoldLayout` 只有 `content`、`fill(minimumHeight:)`、`scroll(minimumHeight:)` 三档。
+  长列表、转录和稿件使用 `scroll`；需要稳定主工作区的页面使用 `fill`；没有页面级滚动需求的内容使用
+  `content`。不得重新引入 `scrollable`、`minimumContentHeight`、`growsWithContent` 的布尔组合，也不得用
+  `AnyView` 抹掉 Assistant 的条件布局。`PageScaffold` 在 Reduce Motion 下对页面子树关闭动画事务，
+  页面显式的 Inspector、滚动、记忆面板和原位确认动作仍需在动作源处提供即时分支。
+- Inspector 自动收起必须区分用户手动收起和窗口宽度收起；只有后一种允许在进入可恢复 tier 后自动恢复。
+  ControlCenter、Assistant、Meeting、Captions、内心 OS、运行监控和创作波形统一读取
+  `accessibilityReduceMotion`，Reduce Motion 时走即时状态变更或静态波形路径。
+- `SessionPanelToggle` 暴露面板名、展开/收起 value 和下一步 hint；`SessionStatusBar`、`SessionConclusionBand`
+  同时提供状态文字和 accessibility value，颜色不作为唯一状态通道。
+
 1. **页面身份只有一处**：`PageIdentityToolbarItem(route)` 在**窗口组合根**（`ControlCenterView`
    的 detail 工具栏）声明一次——身份是当前路由的纯函数，页面没有要额外携带的标题状态，
    所以声明一次最省、也最不可能漂移。它渲染 `WorkspaceTitleLockup`
@@ -192,7 +208,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    > 不再互相覆盖——模型页的档位卡就是按这条收口的（底色与 `horizontalInset: 0` 一起交给样式，
    > 可见间隔因此回到帧的 12pt）。
 5. **列表交还系统**：音色库、我的作品、诊断检查项和监控表格使用系统 `List`/`Table`，由系统渲染选中态、悬停、交替行和键盘导航；页面不再自绘选中底色与焦点环。**唯一例外**是音色库与我的作品的**列表选中行**（`Surface.selectionTint`，见 §3.2 第 2 条的 2026-09-16 例外）：那是系统那一档同时偏离稿与本 App 时取稿值的裁决，容器、键盘导航与无障碍语义仍由系统 `List` 提供。
-6. **命令与快捷键**：`SpeechRailCommands`（`App.swift`）提供 File/View/Help 菜单与 `⌘N`、`⌘E`、`⌘R`、`⌘1–⌘9`、`⌘0`（十个一级页面各有一个直达键，按 `AppRoute` 顺序）、`⌘⌥I`、`?`；
+6. **命令与快捷键**：`SpeechRailCommands`（`App.swift`）提供 File/View/Help 菜单；14 个页面命令统一消费
+   `AppRoute.shortcutSpec`：创作页 `⌘1–⌘5`，会话页 `⌘6–⌘8` 与 `⌘⇧T`，服务页 `⌘9/⌘0` 与
+   `⌘⇧M/⌘⇧D/⌘⇧H`，并保留 `⌘N`、`⌘E`、`⌘R`、`⌘⌥I`、`⌘?`；
    `⌘E` 通过 `FocusedValues.selectedWorkCommand` 绑定到当前场景选中的作品；`⌘R`（重新读取当前页）
    通过 `FocusedValues.reloadPageCommand` 绑定到**页面自己声明的**重读动作——所以头部不需要十个
    含义各异的「刷新…」菜单项，没有可重读内容的页面（我的作品）该菜单项自然禁用。
@@ -224,7 +242,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
   高级区和连接状态同时使用文字、可访问 label/value 与系统控件反馈，不依赖颜色或 hover。
 - 服务启停、模型下载、profile 切换、worker 监控和预检不属于 Settings scene；它们继续由控制中心承载。
 
-## 4. 十个页面 UI/UX 优化蓝图
+## 4. 当前 14 个路由 UI/UX 优化蓝图
 
 ### 4.1 空间拓扑与双轨导航心智
 - **STUDIO 创作工坊**（配音台、音色创作、音色克隆、音色库、我的作品）：聚焦声音雕琢与文本心流，大留白（`Spacing.hero`），注入 `Color.voice` 陶土暖色，首屏 100% 留给创作任务，不显示冗余服务状态横幅。

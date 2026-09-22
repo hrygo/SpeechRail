@@ -14,6 +14,27 @@ import SwiftUI
 
 // MARK: - 空态
 
+/// Shared status summary rendered by the session surfaces.
+///
+/// Each page renders its real controls in its own view hierarchy; the audit matrix
+/// records the primary, secondary, and recovery actions without duplicating their
+/// labels in this status-only value.
+public struct SessionPageStatusPresentation: Equatable, Sendable {
+    public let title: String
+    public let tone: StatusTone
+    public let facts: [String]
+
+    public init(
+        title: String,
+        tone: StatusTone,
+        facts: [String] = []
+    ) {
+        self.title = title
+        self.tone = tone
+        self.facts = facts
+    }
+}
+
 /// 三页共用的空态。形状与 §12 第 5 项一致：图标 28、标题 `Heading / Section`、
 /// 正文折行宽不超过容器内宽（页面级下限 460），一组动作排在下面。
 public struct SessionEmptyState<Actions: View>: View {
@@ -130,6 +151,18 @@ public struct SessionStatusBar<Trailing: View>: View {
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    private var accessibilitySummary: String {
+        var parts = [tone.accessibilityLabel]
+        parts.append(contentsOf: facts)
+        if let elapsed {
+            parts.append("已进行 \(SessionCoordinator.formatted(elapsed))")
+        }
+        return parts.joined(separator: "，")
     }
 }
 
@@ -238,6 +271,8 @@ public struct SessionLibraryView: View {
     @Environment(CaptionSession.self) private var caption
     @Environment(SessionPreferences.self) private var preferences
     @Environment(\.openSettings) private var openSettings
+    @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var summaries: [SessionSummary] = []
     @State private var selectedID: String?
     @State private var lines: [TranscriptLine] = []
@@ -248,6 +283,8 @@ public struct SessionLibraryView: View {
     @State private var isShowingDataDirectoryHint = false
     /// 前置检查态那一栏「本次字幕」收起了没有（与语音助手、会议页同一套规矩）。
     @State private var isInspectorCollapsed = false
+    @FocusState private var inspectorToggleFocused: Bool
+    @State private var autoCollapsedDueToWidth = false
     /// 字幕空态里「遇到问题怎么办」那一行可选项（2026-09-19 低门槛改造）。
     @State private var showsBlockedHelp = false
 
@@ -258,17 +295,16 @@ public struct SessionLibraryView: View {
     public var body: some View {
         // 与语音助手 / 会议页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
         // 记录库这一屏的清单长度由使用量决定（转录几十段、字幕记录几百条），
-        // `scrollable: false` 会把它的理想高度直接报给分栏（见 AssistantView.body 注）。
+        // 不把记录库的理想高度直接报给分栏（见 AssistantView.body 注）。
         PageScaffold(
             route: kind.route,
-            minimumContentHeight: 420,
-            growsWithContent: true
+            layout: .scroll(minimumHeight: 420)
         ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 SessionStatusBar(
-                    title: session.ownershipText,
-                    tone: session.isIdle ? .neutral : .attention,
-                    facts: statusFacts,
+                    title: pageStatusPresentation.title,
+                    tone: pageStatusPresentation.tone,
+                    facts: pageStatusPresentation.facts,
                     elapsed: session.occupancy == nil ? nil : session.elapsed
                 )
 
@@ -321,10 +357,14 @@ public struct SessionLibraryView: View {
                         panelName: "本次字幕",
                         isCollapsed: isInspectorCollapsed
                     ) {
-                        isInspectorCollapsed.toggle()
+                        setInspectorCollapsed(!isInspectorCollapsed, autoCollapsed: false)
                     }
+                    .focused($inspectorToggleFocused)
                 }
             }
+        }
+        .onChange(of: navigation.layoutTier, initial: true) { _, _ in
+            syncInspectorWithLayoutContract(navigation.layoutContract)
         }
         .task(id: refreshToken) { await reload() }
         .confirmationDialog(
@@ -348,6 +388,77 @@ public struct SessionLibraryView: View {
 
     private var refreshToken: String {
         "\(kind.rawValue)|\(model.health?.ready == true)"
+    }
+
+    private func syncInspectorWithLayoutContract(_ contract: WindowLayoutContract) {
+        guard kind == .captions else { return }
+        guard contract.inspector == .collapsed else {
+            if isInspectorCollapsed && autoCollapsedDueToWidth {
+                setInspectorCollapsed(false, autoCollapsed: false)
+            }
+            return
+        }
+
+        if !isInspectorCollapsed {
+            setInspectorCollapsed(true, autoCollapsed: true)
+        }
+    }
+
+    private func setInspectorCollapsed(_ collapsed: Bool, autoCollapsed: Bool) {
+        let update = {
+            isInspectorCollapsed = collapsed
+            autoCollapsedDueToWidth = autoCollapsed
+            inspectorToggleFocused = true
+        }
+
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+        }
+    }
+
+    private var pageStatusPresentation: SessionPageStatusPresentation {
+        guard kind == .captions else {
+            return SessionPageStatusPresentation(
+                title: session.ownershipText,
+                tone: session.isIdle ? .neutral : .attention,
+                facts: statusFacts
+            )
+        }
+
+        return switch caption.phase {
+        case .idle:
+            SessionPageStatusPresentation(
+                title: caption.blocked?.title ?? "还没有开始字幕",
+                tone: caption.blocked == nil ? .neutral : .attention,
+                facts: statusFacts
+            )
+        case .preparing:
+            SessionPageStatusPresentation(
+                title: "正在准备字幕",
+                tone: .attention,
+                facts: statusFacts
+            )
+        case .running:
+            SessionPageStatusPresentation(
+                title: "正在实时字幕",
+                tone: .healthy,
+                facts: statusFacts
+            )
+        case .paused:
+            SessionPageStatusPresentation(
+                title: "字幕已暂停",
+                tone: .attention,
+                facts: statusFacts
+            )
+        case .ending:
+            SessionPageStatusPresentation(
+                title: "正在保存字幕",
+                tone: .attention,
+                facts: statusFacts
+            )
+        }
     }
 
     private var statusFacts: [String] {

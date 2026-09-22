@@ -1,5 +1,20 @@
 import Foundation
 
+public struct AppRouteShortcutSpec: Hashable, Sendable {
+    public enum Modifiers: String, Hashable, Sendable {
+        case command
+        case commandShift
+    }
+
+    public let key: String
+    public let modifiers: Modifiers
+
+    public init(key: String, modifiers: Modifiers) {
+        self.key = key
+        self.modifiers = modifiers
+    }
+}
+
 public enum AppRouteGroup: String, CaseIterable, Sendable {
     case creator
     case session
@@ -155,6 +170,39 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         }
     }
 
+    public var shortcutSpec: AppRouteShortcutSpec? {
+        switch self {
+        case .dubbing:
+            .init(key: "1", modifiers: .command)
+        case .voiceDesign:
+            .init(key: "2", modifiers: .command)
+        case .voiceClone:
+            .init(key: "3", modifiers: .command)
+        case .voiceLibrary:
+            .init(key: "4", modifiers: .command)
+        case .works:
+            .init(key: "5", modifiers: .command)
+        case .assistant:
+            .init(key: "6", modifiers: .command)
+        case .meeting:
+            .init(key: "7", modifiers: .command)
+        case .captions:
+            .init(key: "8", modifiers: .command)
+        case .teleprompter:
+            .init(key: "t", modifiers: .commandShift)
+        case .overview:
+            .init(key: "9", modifiers: .command)
+        case .monitoring:
+            .init(key: "0", modifiers: .command)
+        case .models:
+            .init(key: "m", modifiers: .commandShift)
+        case .diagnostics:
+            .init(key: "d", modifiers: .commandShift)
+        case .developerDocs:
+            .init(key: "h", modifiers: .commandShift)
+        }
+    }
+
     public var purpose: String {
         switch self {
         case .dubbing:
@@ -188,16 +236,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         }
     }
 
-    public static var creatorRoutes: [AppRoute] {
-        [.dubbing, .voiceDesign, .voiceClone, .voiceLibrary, .works]
-    }
-
-    public static var serviceRoutes: [AppRoute] {
-        [.overview, .monitoring, .models, .diagnostics, .developerDocs]
-    }
-
-    public static var sessionRoutes: [AppRoute] {
-        [.assistant, .meeting, .captions, .teleprompter]
+    public static func routes(in group: AppRouteGroup) -> [AppRoute] {
+        allCases.filter { $0.group == group }
     }
 
     /// 这个路由属于哪条会话能力；不是会话页时为 `nil`。

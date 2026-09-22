@@ -230,23 +230,31 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
 
 ### 6.1 侧边栏
 
-保留单一 `NavigationSplitView` 与现有 8 条路由（不新增页面），但收敛措辞与结构：
+保留单一 `NavigationSplitView`。当前 14 条路由以 `AppRoute.allCases` 为唯一事实源，按创作、会话、引擎分组：
 
-| 分组 | 路由 | 侧边栏标签 | 变化 |
+| 分组 | 路由 | 侧边栏标签 | 当前快捷键 |
 |---|---|---|---|
-| 创作 | `dubbing` | 配音台 | 不变 |
-| 创作 | `voiceDesign` | 音色创作 | 不变 |
-| 创作 | `voiceLibrary` | 音色库 | 不变 |
-| 创作 | `works` | 我的作品 | 不变 |
-| 引擎 | `overview` | 服务状态 | 从「服务」组改为「引擎」，与技术页同组 |
-| 引擎 | `monitoring` | 运行监控 | 不变 |
-| 引擎 | `models` | 模型 | 不变 |
-| 引擎 | `diagnostics` | 诊断 | 不变 |
+| 创作 | `dubbing` | 配音台 | `⌘1` |
+| 创作 | `voiceDesign` | 音色创作 | `⌘2` |
+| 创作 | `voiceClone` | 音色克隆 | `⌘3` |
+| 创作 | `voiceLibrary` | 音色库 | `⌘4` |
+| 创作 | `works` | 我的作品 | `⌘5` |
+| 会话 | `assistant` | 语音助手 | `⌘6` |
+| 会话 | `meeting` | 会议助手 | `⌘7` |
+| 会话 | `captions` | 实时字幕 | `⌘8` |
+| 会话 | `teleprompter` | AI 提词器 | `⌘⇧T` |
+| 引擎 | `overview` | 服务状态 | `⌘9` |
+| 引擎 | `monitoring` | 运行监控 | `⌘0` |
+| 引擎 | `models` | 模型 | `⌘⇧M` |
+| 引擎 | `diagnostics` | 诊断 | `⌘⇧D` |
+| 引擎 | `developerDocs` | 开发者文档 | `⌘⇧H` |
+
+路由和键位的持续事实源是 `AppRoute.shortcutSpec`；本表与完整证据见 `UIUX-AUDIT-MATRIX.md`。
 
 侧边栏底部保留**唯一**的全局状态区：一行状态点 + 状态文本，点击进入「服务状态」。删除 `ControlCenterView` 中重复的入口（D9）。
 
 侧边栏搜索**取消**（第四十九轮改判）：窗口里只保留一个搜索框，且它属于内容（音色库 / 我的作品的
-工具栏搜索）。八条固定导航项做全文过滤的收益低于代价——它与内容搜索同屏并排、外观相近而作用域不同，
+工具栏搜索）。固定导航项做全文过滤的收益低于代价——它与内容搜索同屏并排、外观相近而作用域不同，
 用户无法从外观判断自己在搜什么；`.searchable(placement: .sidebar)` 与空态 `ContentUnavailableView.search`
 随之移除。
 
@@ -258,8 +266,8 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
 第五十五轮补一条**落点规则**：身份槽是**详情列的 leading 项**（SwiftUI `.navigation` 槽），
 槽内左对齐；`Action` 与系统搜索框在右侧。这条不是审美选择，是「身份必须恒定」的直接推论——
 `.principal` 的落点是左侧组与右侧动作之间剩余空间的中点，只要有工具栏搜索框就整体左移
-135pt，详见 §11.6 第五十五轮。窗口左沿那一格（稿 `titlebar` 把标题画在红绿灯右侧 78pt）
-被系统侧栏切换按钮占用且不可移除，取不到，本轮不跟。
+135pt，详见 §11.6 第五十五轮。系统侧栏切换入口保留为原生 toolbar 控件；其位置由系统管理，
+应用不在身份槽内另画一颗重复按钮。
 
 - **身份只有一处**：`PageIdentityToolbarItem(route)` 在窗口组合根（`ControlCenterView` 的
   detail 工具栏）声明**一次**，`PageScaffold` 不再渲染页面名，正文只留一句话说明
@@ -289,17 +297,16 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
   与其 38.5pt 的宿主视图都在 x=201 原处，`top=11.5`，逐项相同——比截图更直接地证明了
   「不生效」，也说明这条修饰符不该再被拿来当方案。
 
-### 6.3 菜单栏与键盘（当前完全缺失）
+### 6.3 菜单栏与键盘
 
 新增 `Commands`：
 
 | 菜单 | 命令 | 快捷键 |
 |---|---|---|
 | File | 新建配音文稿 | `⌘N` |
-| File | 导出选中作品… | `⌘E` |
+| File | 导出选中作品（选中后标题带作品名） | `⌘E` |
 | View | 重新读取当前页（由页面声明的 `reloadPageCommand` 提供；没有可重读内容的页面禁用） | `⌘R` |
-| View | 配音台 / 音色创作 / 音色库 / 我的作品 | `⌘1`–`⌘4` |
-| View | 服务状态 / 运行监控 / 模型 / 诊断 | `⌘5`–`⌘8` |
+| View | 14 个导航路由 | `AppRoute.shortcutSpec`；完整键位表见 `UIUX-AUDIT-MATRIX.md` |
 | View | 显示/隐藏开发者详情 | `⌘⌥I` |
 | 页面动作 | 生成语音（配音台） | `⌘⏎` |
 | 页面动作 | 生成候选音色（音色创作） | `⌘⏎` |
@@ -596,7 +603,7 @@ SpeechRail · 服务已就绪 · 精准      (不可点状态行)
 
 | 项 | 要求 |
 |---|---|
-| VoiceOver 顺序 | 导航 → 页面结论（若有）→ 主对象 → 主操作 → 状态详情 |
+| 完整辅助技术导航 | 不作为当前目标人群的验收要求；保留基本控件名称、值、提示与系统键盘语义 |
 | 命名 | 所有图标按钮有 `accessibilityLabel`；列表行给出名称 + 状态 + 动作 `accessibilityHint` |
 | 图表 | Swift Charts 接入 `accessibilityChartDescriptor`；折线提供摘要 |
 | 状态不依赖颜色 | 状态点必须搭配文字；`Differentiate Without Color` 下仍可读 |
@@ -1031,10 +1038,9 @@ sidebar/width         220 240 280
 | §9 图表 | 接入 `accessibilityChartDescriptor` | `RuntimeMonitoringView` 两张图各一处 descriptor，摘要报窗口口径 | 符合 |
 | §9 状态不依赖颜色 | 状态点必须配文字 | 侧边栏状态点、菜单栏状态点均为 `accessibilityHidden(true)` 且相邻有文字或 `accessibilityLabel`；能力行与 worker 表都是图标 + 文字 | 符合 |
 | §9 动态字体 | 固定 `height` 改 `minHeight` | 剩余固定高度只有结构性容器：页头标题槽（带 `minimumScaleFactor` + 截断）、图表画布、`Table` 的边框高度（行高随系统增长，容器可滚动，不截断文字）、分隔线与调试哨兵 | 符合（保留结构性高度） |
-| §9 VoiceOver 顺序 / 人工矩阵 | — | 需要真实交互，本机未获 UI 自动化授权 | 未验证 |
+| §9 完整 VoiceOver 导航 | — | 用户明确当前产品不面向辅助技术用户；完整遍历不属于验收范围。控件基础 label/value/hint 由代码与代表性 UI 自动化核对 | 目标范围外；不作为阻塞项 |
 
-本轮验证：`./scripts/macos_app_build.sh --configuration Debug` 与 `xcodebuild … build-for-testing` 均通过
-（三个死 token 删除后仍能编译，反证它们确实没有引用点）。仍未运行测试与 UI 自动化。
+本轮验证：`./scripts/macos_app_build.sh --configuration Debug`、`swift test --package-path macos/SpeechRailApp` 和完整 `SpeechRailApp` test plan 均通过；test plan 255/255。四档窗口与代表页面主动作边界见 `UIUX-AUDIT-MATRIX.md`。较大系统文字联动及未覆盖的 searchable/List 全路由组合仍为非阻塞未验证项。
 
 #### 第八轮：§7 逐页复核（7.5 / 7.7 / 7.8）
 
@@ -1059,19 +1065,16 @@ sidebar/width         220 240 280
 
 | 条文 | 要求 | 当前证据 | 结论 |
 |---|---|---|---|
-| §6.1 侧边栏 | 8 条路由、创作 / 引擎两组、底部唯一状态区、搜索匹配标签 + 页面说明 | `AppRoute` 八个 case；`AppRouteGroup` 两组名为「创作」「引擎」；状态区一行状态点 + 文本，点击进入服务状态；`matching(_:)` 同时匹配 `title` / `workspaceTitle` / `contextTitle` / `purpose`；空结果用 `ContentUnavailableView.search(text:)` | 符合 |
-| §6.2 工具栏 | `WorkspaceTitleLockup` 单行固定槽位尾截断；移除侧边栏切换按钮；开发者详情只在该页真有技术摘要时出现 | `WorkspaceTitleLockup` 用 `lineLimit(1)` + `truncationMode(.tail)` + 固定槽位 + `minimumScaleFactor`；八个页面各有一个 `.inspector`，因此「显示开发者详情」都有实际内容。**侧边栏切换按钮此前仍在**：Figma `titlebar` 只有红绿灯、标题锁与右侧动作 | 已修（补 `.toolbar(removing: .sidebarToggle)`） |
-| §6.3 键盘 | ⌘N / ⌘E / ⌘1–⌘8 / ⌘⌥I / ⌘?，页面内 ⌘⏎ 与空格试听 | `App.swift` 的 `SpeechRailCommands` 逐条对应，⌘1–⌘8 顺序即 `AppRoute.allCases`（创作四页 + 服务四页）；配音台与音色创作的 ⌘⏎、列表页的空格试听在各自页面实现 | 符合 |
+| §6.1 侧边栏 | 14 条路由、创作 / 会话 / 引擎三组、底部唯一状态区、页面说明只在内容层 | `AppRoute` 14 个 case；`AppRouteGroup` 三组名为「创作」「会话」「引擎」；状态区一行状态点 + 文本，点击进入服务状态；固定导航不再承担内容全文搜索 | 路由结构以当前源码和 UIUX-AUDIT-MATRIX.md 为准 |
+| §6.2 工具栏 | `WorkspaceTitleLockup` 单行固定槽位尾截断；保留系统侧栏切换入口；开发者详情只在该页真有技术摘要时出现 | `WorkspaceTitleLockup` 用 `lineLimit(1)` + `truncationMode(.tail)` + 固定槽位 + `minimumScaleFactor`；14 个路由共用同一身份槽；AX 树可见原生 Hide/Show Sidebar 控件 | 符合；侧栏/Inspector toggle 已由四档 UI 矩阵验证 |
+| §6.3 键盘 | ⌘N / ⌘E / 14 项 `AppRoute.shortcutSpec` / ⌘R / ⌘⌥I / 页面 ⌘⏎ 与空格试听 | `App.swift` 的 `SpeechRailCommands` 消费 `AppRoute.shortcutSpec`；route contract 脚本核对 14 项，UIUX-AUDIT-MATRIX.md 维护完整键位表 | 当前契约由 AppRoute.swift 和 UIUX-AUDIT-MATRIX.md 维护 |
 | §6.4 状态唯一性 | 服务就绪只在侧边栏；长任务进度在触发页内联、侧边栏显示「服务操作进行中」；错误在触发页、诊断页汇总 | `sidebarStatusText` 在 `serviceOperation.phase.isActive` 时返回「服务操作进行中」，就绪时是唯一常驻指示器；各页结论面板只在自身页面出现 | 符合 |
 | §7.3 音色库 | List + Inspector；行内五项；`.searchable` + 来源分段；Inspector 字段顺序；破坏性删除；空状态 | 行内为名称 + 来源徽标 + 一句描述 + 可用性说明 + 行内试听；`VoiceSourceFilter` 三档为「全部 / 系统 / 我的」；Inspector 首项即试听，随后可用性 / seed / 创建时间 / 变体 / 模式 / 时长 / 使用次数 / 关联作品 / 描述全文 / 三个动作；删除走 `confirmationDialog` | 符合 |
 | §7.4 我的作品 | 行内五项；`.searchable` + 时间排序；行内播放、次动作走菜单与 ⌘E；破坏性删除说明音频一并移除；空状态 | `workListSummary` = 时间 + 音色名，时长 `monospacedDigit()`；`sortOrder` 控制时间正/倒序；确认对话框文案「作品条目和它的音频文件会一起从本机移除，且不可恢复。」 | 符合 |
 | §7.9 菜单栏 | 不可点状态行 + 打开 / 开始配音 / 运行预检 / 服务动作 / 设置 / 退出 | 状态行是合并后的文本元素（不是按钮），状态为「服务已就绪 · Quality」+ 副行版本与端口；菜单项与快捷键 ⌘O / ⌘N / ⌘, / ⌘Q 齐备 | 符合 |
 | §7.10 设置 | 三个页签，最小集合 | `Tab` 通用 / 创作 / 服务；通用含启动行为与「默认展开技术详情」，创作含默认音色与默认语速，服务含端口显示与「诊断报告包含运行档位与版本」；无模型管理入口 | 符合 |
 
-本轮验证：`./scripts/macos_app_build.sh --configuration Debug` 通过。**新增的未验证项**：
-`.toolbar(removing: .sidebarToggle)` 之后，系统 View 菜单是否仍提供「隐藏侧边栏」需要一个真实窗口才能确认
-（该行为属 AppKit 运行时，本机未获 UI 自动化授权）。若走查发现侧边栏再也收不起来，删掉这一行即可，
-其余 §6.2 条目不受影响。
+本轮自动化验收：Debug build 通过；完整 App test plan 255/255 通过。四档窗口矩阵确认原生侧栏和 Inspector 可收起/恢复，六个代表页面的主动作 frame 均在窗口内。searchable/List 全路由全尺寸组合仍由 `UIUX-AUDIT-MATRIX.md` 标为未覆盖；完整 VoiceOver 导航不属于当前目标人群验收。
 
 #### 第十轮：§11 稿侧规格静态核对
 
@@ -4858,7 +4861,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 | 10 | 键盘 | `⌘1`–`⌘8` 切页、`⌘?` 帮助、设置页 `Tab` 走一遍（焦点环是系统色、2pt、画在卡上） | §6.3 / §11.6 第五十三轮 |
 | 11 | 指针悬停 | 模型页档位卡悬停有**可见**的整卡反馈（不是只在两侧露一条窄带） | §11.6 第五十二轮 |
 | 12 | 音色库 / 我的作品的详情面板，播放一段音频 | 波形条高度随**这段音频自己的**幅度变化（换一首形状明显不同，不是每首都一样），播放中未播到的部分是淡色、随播放推进 | §11.6 第五十七轮 |
-| 13 | 头部工具栏（八个页面各看一次） | 身份标题切页时**不横跳**（恒定在 x=252 那一格），工具栏是统一紧凑样式、不重复显示窗口标题 | §11.6 第五十五轮 |
+| 13 | 头部工具栏（当前 14 个路由共享同一槽位） | 身份标题切页时**不横跳**（恒定在 x=252 那一格），工具栏是统一紧凑样式、不重复显示窗口标题 | §11.6 第五十五轮 |
 | 14 | 音色库 / 我的作品：点选一行 | 选中行是**淡青底**（稿值，不是系统实心蓝），且方向键上/下仍能换行、换行时底色跟着走 | §11.6 第六十轮 |
 
 不在本清单：单元测试与 UI 自动化（按 AGENTS.md 需当次明确授权，本会话未运行）。
@@ -4880,14 +4883,14 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 | 分组 | 路由 | 侧边栏标签 | 位置 | 快捷键 |
 |---|---|---|---|---|
 | 创作 | `voiceClone` | 音色克隆 | 插在「音色创作」之后（描述生成与录音复刻是同一件事的两条路） | `⌘3` |
-| 引擎 | `developerDocs` | 开发者文档 | 引擎组最后一项 | `⌘0` |
+| 引擎 | `developerDocs` | 开发者文档 | 引擎组最后一项 | `⌘⇧H` |
 
-插入第 3 项会把其后所有页面的快捷键整体后移一位（原 `⌘1–⌘8` → 现 `⌘1–⌘9` + `⌘0`）。
+本段记录当时插入第 3 项后的历史顺序；当前快捷键不再按序位推导，而由 `AppRoute.shortcutSpec` 明确登记。
 既然顺序必须动，就不为「保住老号位」把音色克隆放到组尾：它和音色创作是一对
 （见 §13.2 第 5 条），中间夹着音色库会让这条路径读不通。
 
-`⌘0` 是给第十项的序位号（`App.swift` 的 `routeShortcuts` 一一对应 `AppRoute.allCases`）。
-不选 `⌘⇧D` 这类「有意义但要记」的组合：参考页的价值在于随手可达，不在于快捷键好听。
+当前 14 个路由的快捷键由 `AppRoute.shortcutSpec` 统一声明，`SpeechRailCommands` 只负责转换为系统菜单命令；
+引擎辅助页使用 `⌘⇧M`、`⌘⇧D`、`⌘⇧H`，避免与 `⌘0` 的运行监控入口混淆。
 
 ### 13.2 音色克隆（Voice Clone）
 

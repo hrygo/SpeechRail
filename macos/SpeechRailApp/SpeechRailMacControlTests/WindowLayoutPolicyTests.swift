@@ -11,6 +11,14 @@ final class WindowLayoutPolicyTests: XCTestCase {
             WindowLayoutPolicy.nextTier(from: .expanded, width: 959),
             .compact
         )
+        XCTAssertEqual(
+            WindowLayoutPolicy.nextTier(from: .expanded, width: 960),
+            .medium
+        )
+        XCTAssertEqual(
+            WindowLayoutPolicy.nextTier(from: .expanded, width: 1_260),
+            .expanded
+        )
     }
 
     func testMediumTierUsesHysteresisWhenRestoringExpanded() {
@@ -21,6 +29,10 @@ final class WindowLayoutPolicyTests: XCTestCase {
         XCTAssertEqual(
             WindowLayoutPolicy.nextTier(from: .medium, width: 1_340),
             .expanded
+        )
+        XCTAssertEqual(
+            WindowLayoutPolicy.nextTier(from: .medium, width: 1_120),
+            .medium
         )
     }
 
@@ -37,6 +49,10 @@ final class WindowLayoutPolicyTests: XCTestCase {
             WindowLayoutPolicy.nextTier(from: .compact, width: 1_340),
             .expanded
         )
+        XCTAssertEqual(
+            WindowLayoutPolicy.nextTier(from: .compact, width: 1_260),
+            .medium
+        )
     }
 
     func testNonPositiveWidthDoesNotChangeTier() {
@@ -48,5 +64,28 @@ final class WindowLayoutPolicyTests: XCTestCase {
             WindowLayoutPolicy.nextTier(from: .compact, width: -1),
             .compact
         )
+    }
+
+    func testMediumContractHidesSidebarButLeavesInspectorToPagePolicy() {
+        let contract = WindowLayoutPolicy.contract(for: .medium)
+
+        XCTAssertEqual(contract.sidebar, .collapsed)
+        XCTAssertEqual(contract.inspector, .pageControlled)
+        XCTAssertEqual(contract.minimumPrimaryContentWidth, 500)
+    }
+
+    func testCompactContractKeepsOnlyPrimaryWorkspace() {
+        let contract = WindowLayoutPolicy.contract(for: .compact)
+
+        XCTAssertEqual(contract.sidebar, .collapsed)
+        XCTAssertEqual(contract.inspector, .collapsed)
+        XCTAssertEqual(contract.minimumPrimaryContentWidth, 500)
+    }
+
+    func testExpandedContractKeepsSidebarAndLetsPagesChooseInspector() {
+        let contract = WindowLayoutPolicy.contract(for: .expanded)
+
+        XCTAssertEqual(contract.sidebar, .visible)
+        XCTAssertEqual(contract.inspector, .pageControlled)
     }
 }

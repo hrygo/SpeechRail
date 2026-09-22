@@ -15,6 +15,7 @@ import SwiftUI
 
 public struct InnerOSDrawer: View {
     @Environment(SessionPreferences.self) private var preferences
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable public var session: InnerOSSession
     public let sessionID: String?
 
@@ -46,7 +47,10 @@ public struct InnerOSDrawer: View {
                 }
             }
         }
-        .animation(.smooth(duration: 0.18), value: session.isExpanded)
+        .animation(
+            reduceMotion ? nil : .smooth(duration: 0.18),
+            value: session.isExpanded
+        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("内心 OS。会议中随时私下问它一句，只有你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
         .onChange(of: session.exchanges.count) { _, _ in

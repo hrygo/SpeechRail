@@ -47,6 +47,7 @@ public struct WorkspaceTitleLockup: View {
         .accessibilityLabel(route.title)
         .accessibilityIdentifier("workspace-title")
         .accessibilityValue(route.contextTitle)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -54,7 +55,7 @@ public struct WorkspaceTitleLockup: View {
 /// （`ControlCenterView` 的 detail 工具栏）。
 ///
 /// 页面身份是当前路由的纯函数，页面自己没有要额外携带的标题状态，所以在组合根声明
-/// 一次最省也最不容易漂移——八个屏幕共用同一个槽位、同一套几何（`Toolbar.Identity`）
+/// 一次最省也最不容易漂移——当前路由共用同一个槽位、同一套几何（`Toolbar.Identity`）
 /// 与同一个无障碍标识（REDESIGN-SPEC §6.2 / §11.6 第四十九轮）。页面只声明自己的动作。
 public struct PageIdentityToolbarItem: ToolbarContent {
     public let route: AppRoute

@@ -18,10 +18,12 @@ public struct AssistantView: View {
     /// 受阻时的「去服务状态」是一条真出口，所以这一页要能发起跳转（与创作页同一套）。
     @Environment(AppNavigationState.self) private var navigation
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var typed = ""
     /// 「本次会话」那一栏收起了没有。稿：收起不是少一个面板，是同一个面板的另一个状态。
     @State private var isInspectorCollapsed = false
+    @FocusState private var inspectorToggleFocused: Bool
     /// 记录是否是因为窗口拉窄而由响应式布局自动收起右栏（拉宽时据此决定是否自动恢复展开）
     @State private var autoCollapsedDueToWidth = false
     @State private var inspectorTab: InspectorTab = .session
@@ -145,22 +147,18 @@ public struct AssistantView: View {
     // MARK: - 页面
 
     public var body: some View {
-        // `scrollable: true` + `minimumContentHeight` + `growsWithContent`：正文**先吃满窗格**
-        // （卡片因此能像稿那样吃满、两列等高），清单比窗格长时页面整页滚动，而不是把
-        // 多出来的部分裁掉。
+        // `.fill(minimumHeight:)`：正文**先吃满窗格**，卡片因此能像稿那样吃满、两列等高。
         //
-        // 为什么必须这么做（2026-09-19 装机件实测）：`scrollable: false` 的封套把正文的
+        // 为什么必须这么做（2026-09-19 装机件实测）：固定高度封套把正文的
         // **理想高度**直接报给 `NavigationSplitView`；只要正文里有一处理想高度超过窗格
         // （音色列表有 18 条、约 790pt 就够），分栏就按理想高度铺开、再在窗口里垂直居中——
         // 侧栏与正文一起被推出可视区，整窗全白（AX 树却完整）。实测：坏版分栏 1355×4317，
         // 好版 1355×781（窗口内容区 741）。这与 `WorkspaceComponents.PageScaffold` 注里
-        // 记的「第三十轮」是同一个失败面，`minimumContentHeight` 那条滚动路径正是为它建的。
+        // 记的「第三十轮」是同一个失败面，`PageScaffoldLayout.scroll(minimumHeight:)` 路径正是为它建的。
         PageScaffold(
             route: .assistant,
-            scrollable: false,
+            layout: .fill(minimumHeight: 420),
             purpose: pagePurpose,
-            minimumContentHeight: 420,
-            growsWithContent: false
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 if state == .live {
@@ -177,11 +175,11 @@ public struct AssistantView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .onChange(of: navigation.layoutTier, initial: true) { _, newTier in
-                syncInspectorWithLayoutTier(newTier)
+            .onChange(of: navigation.layoutTier, initial: true) { _, _ in
+                syncInspectorWithLayoutContract(navigation.layoutContract)
             }
             .onChange(of: state) { _, _ in
-                syncInspectorWithLayoutTier(navigation.layoutTier)
+                syncInspectorWithLayoutContract(navigation.layoutContract)
             }
         } trailing: {
             headerActions
@@ -231,6 +229,35 @@ public struct AssistantView: View {
         case .blocked: "和本机大模型用语音一来一往；识别与回复只留在这台 Mac 上。"
         case .live: "和它一来一往：说也行，打字也行；对话只留在这台 Mac 上。"
         case .review: "和本机大模型用语音一来一往；记录长期留在记录库。"
+        }
+    }
+
+    private var pageStatusPresentation: SessionPageStatusPresentation {
+        return switch state {
+        case .ready:
+            SessionPageStatusPresentation(
+                title: "还没有开始对话",
+                tone: .neutral,
+                facts: [mode.title]
+            )
+        case .blocked:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: .attention,
+                facts: statusFacts
+            )
+        case .live:
+            SessionPageStatusPresentation(
+                title: statusTitle,
+                tone: statusTone,
+                facts: statusFacts
+            )
+        case .review:
+            SessionPageStatusPresentation(
+                title: "这一段对话已经结束",
+                tone: .neutral,
+                facts: statusFacts
+            )
         }
     }
 
@@ -292,11 +319,9 @@ public struct AssistantView: View {
                     panelName: inspectorTogglePanelName,
                     isCollapsed: isInspectorCollapsed
                 ) {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
-                        isInspectorCollapsed.toggle()
-                        autoCollapsedDueToWidth = false
-                    }
+                    setInspectorCollapsed(!isInspectorCollapsed, autoCollapsed: false)
                 }
+                .focused($inspectorToggleFocused)
             }
         }
     }
@@ -314,9 +339,9 @@ public struct AssistantView: View {
 
     private var statusBar: some View {
         SessionStatusBar(
-            title: statusTitle,
-            tone: statusTone,
-            facts: statusFacts,
+            title: pageStatusPresentation.title,
+            tone: pageStatusPresentation.tone,
+            facts: pageStatusPresentation.facts,
             elapsed: isLive ? session.elapsed : nil,
             level: isLive ? assistant.level : nil
         )
@@ -509,11 +534,18 @@ public struct AssistantView: View {
 
             if !isInspectorCollapsed {
                 inspectorColumn
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(
+                        reduceMotion
+                            ? .identity
+                            : .move(edge: .trailing).combined(with: .opacity)
+                    )
             }
         }
         .frame(maxWidth: .infinity, minHeight: 460, maxHeight: .infinity, alignment: .topLeading)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: isInspectorCollapsed)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88),
+            value: isInspectorCollapsed
+        )
     }
 
     // MARK: 人设（未开始）
@@ -875,6 +907,8 @@ public struct AssistantView: View {
     }
 
     private struct AcousticWaveformAura: View {
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
         let isPlaying: Bool
         var isLoading: Bool = false
         let isLive: Bool
@@ -887,7 +921,12 @@ public struct AssistantView: View {
         ]
 
         var body: some View {
-            TimelineView(.animation(minimumInterval: 0.04, paused: !isPlaying && !isLoading && !isLive)) { timeline in
+            TimelineView(
+                .animation(
+                    minimumInterval: 0.04,
+                    paused: reduceMotion || (!isPlaying && !isLoading && !isLive)
+                )
+            ) { timeline in
                 let date = timeline.date.timeIntervalSinceReferenceDate
                 let heights = resolvedHeights
                 HStack(alignment: .center, spacing: 3) {
@@ -1473,7 +1512,11 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: assistant.turns.count) { _, _ in
                     guard let last = assistant.turns.last else { return }
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    if reduceMotion {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    } else {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1944,10 +1987,8 @@ public struct AssistantView: View {
         do {
             try await session.upsertMemory(kind: .preference, body: text, sourceSessionID: id)
             await reloadMemories()
-            withAnimation {
-                isAddingMemory = false
-                newMemoryDraft = ""
-            }
+            setAddingMemory(false)
+            newMemoryDraft = ""
             memoryNote = "已记住新条目，在右栏「记忆」里可停用或移除；下一轮生效。"
         } catch {
             memoryNote = "记忆没能保存成功：\(error.localizedDescription)"
@@ -2499,7 +2540,7 @@ public struct AssistantView: View {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         if state == .ready && !preferences.isLLMConfigured(for: .assistant) {
-            withAnimation { isShowingQuickLLM = true }
+            setShowingQuickLLM(true)
             return
         }
         typed = ""
@@ -2587,7 +2628,12 @@ public struct AssistantView: View {
 
     private var segmentedTabs: some View {
         HStack {
-            Picker("", selection: $inspectorTab.animation(.easeInOut(duration: 0.12))) {
+            Picker(
+                "",
+                selection: $inspectorTab.animation(
+                    reduceMotion ? nil : .easeInOut(duration: 0.12)
+                )
+            ) {
                 ForEach(InspectorTab.allCases) { tab in
                     Text(tab.title).tag(tab)
                 }
@@ -3316,10 +3362,8 @@ public struct AssistantView: View {
                 }
                 Spacer()
                 Button(isAddingMemory ? "取消" : "+ 添加记忆") {
-                    withAnimation {
-                        isAddingMemory.toggle()
-                        newMemoryDraft = ""
-                    }
+                    setAddingMemory(!isAddingMemory)
+                    newMemoryDraft = ""
                 }
                 .speechRailButton(.secondary)
             }
@@ -3349,10 +3393,8 @@ public struct AssistantView: View {
                     HStack {
                         Spacer()
                         Button("取消") {
-                            withAnimation {
-                                isAddingMemory = false
-                                newMemoryDraft = ""
-                            }
+                            setAddingMemory(false)
+                            newMemoryDraft = ""
                         }
                         .speechRailButton(.secondary)
 
@@ -3694,7 +3736,7 @@ public struct AssistantView: View {
     private func start() async {
         guard preferences.isLLMConfigured(for: .assistant) else {
             await MainActor.run {
-                withAnimation { isShowingQuickLLM = true }
+                setShowingQuickLLM(true)
             }
             return
         }
@@ -3786,11 +3828,8 @@ public struct AssistantView: View {
     /// `inspectorTab` 的话，右栏收着的时候按下去屏幕上一个像素都不动——`inspectorTab` 已经
     /// 换到音色页了，只是那一栏没露出来。这正是"点了没反应"（2026-09-19 离屏走查）。
     private func showInspector(tab: InspectorTab) {
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
-            isInspectorCollapsed = false
-            autoCollapsedDueToWidth = false
-            inspectorTab = tab
-        }
+        setInspectorCollapsed(false, autoCollapsed: false)
+        inspectorTab = tab
     }
 
     // MARK: - 记录正文底部的三个动作（稿 `screenClosureAssistantClosed`）
@@ -3973,27 +4012,52 @@ public struct AssistantView: View {
         .frame(width: 520)
     }
 
-    // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutTier 断点总线）
+    // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutContract）
 
-    private func syncInspectorWithLayoutTier(_ tier: WindowLayoutTier) {
+    private func syncInspectorWithLayoutContract(_ contract: WindowLayoutContract) {
         // 历史回看本身就是「记录列表 + 正文」两栏，不参与实时对讲的右栏收起策略。
         guard state != .review else { return }
-        let shouldCollapse = tier == .compact
-
-        if shouldCollapse {
-            if !isInspectorCollapsed {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
-                    isInspectorCollapsed = true
-                    autoCollapsedDueToWidth = true
-                }
-            }
-        } else {
+        guard contract.inspector == .collapsed else {
             if isInspectorCollapsed && autoCollapsedDueToWidth {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
-                    isInspectorCollapsed = false
-                    autoCollapsedDueToWidth = false
-                }
+                setInspectorCollapsed(false, autoCollapsed: false)
             }
+            return
+        }
+
+        if !isInspectorCollapsed {
+            setInspectorCollapsed(true, autoCollapsed: true)
+        }
+    }
+
+    private func setInspectorCollapsed(_ collapsed: Bool, autoCollapsed: Bool) {
+        let update = {
+            isInspectorCollapsed = collapsed
+            autoCollapsedDueToWidth = autoCollapsed
+            inspectorToggleFocused = true
+        }
+
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+        }
+    }
+
+    private func setAddingMemory(_ adding: Bool) {
+        let update = { isAddingMemory = adding }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.easeInOut(duration: 0.16), update)
+        }
+    }
+
+    private func setShowingQuickLLM(_ showing: Bool) {
+        let update = { isShowingQuickLLM = showing }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.easeInOut(duration: 0.16), update)
         }
     }
 }
