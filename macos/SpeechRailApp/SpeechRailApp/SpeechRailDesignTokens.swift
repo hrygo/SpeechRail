@@ -515,6 +515,12 @@ public enum SpeechRailDesignTokens {
     /// Settings keeps the native grouped Form semantics, while these values
     /// align its explanatory copy and control rhythm with the workspaces.
     public enum Settings {
+        public static let paneInset: CGFloat = 13
+        public static let sectionHeadInsetY: CGFloat = 6
+        public static let rowInsetY: CGFloat = 11
+        public static let helpShortcutColumnWidth: CGFloat = 72
+        public static let helpWindowWidth: CGFloat = 460
+        public static let helpWindowHeight: CGFloat = 460
         public static let secondaryTextMaximumLines: Int = 3
         public static let contentSpacing: CGFloat = Spacing.xs
         /// 设置行里标题与副标题之间（稿 `05 Menu & Settings` 的 `controlRow/labels`，`gap: 3`）。
@@ -757,6 +763,7 @@ public enum SpeechRailDesignTokens {
             // 导航与翻页 (Navigation & Paging)
             case previous = "chevron.left"
             case next = "chevron.right"
+            // 其他紧凑菜单/折叠场景的既有符号；选择器触发器使用下方的专用语义。
             case expandDown = "chevron.down"
             case collapseUp = "chevron.up"
             case returnBack = "arrow.uturn.backward"
@@ -823,6 +830,9 @@ public enum SpeechRailDesignTokens {
                 SwiftUI.Image(systemName: rawValue)
             }
         }
+
+        /// 选择器触发器唯一的尾部箭头语义；复用同一个 SF Symbol raw value，避免重复绘制。
+        public static let choiceChevronDown: Symbol = .expandDown
     }
 
     public enum Stroke {

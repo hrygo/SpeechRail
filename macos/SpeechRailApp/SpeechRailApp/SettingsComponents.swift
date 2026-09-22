@@ -6,12 +6,12 @@ import SwiftUI
 /// Settings uses one layout vocabulary across all tabs so the user's focus moves
 /// between pages without learning a new visual grammar.
 enum SettingsMetrics {
-    static let paneInset: CGFloat = 13
+    static let paneInset = SpeechRailDesignTokens.Settings.paneInset
     static let sectionGap = SpeechRailDesignTokens.Spacing.md
     static let sectionHeadInsetX = SpeechRailDesignTokens.Spacing.micro
-    static let sectionHeadInsetY: CGFloat = 6
+    static let sectionHeadInsetY = SpeechRailDesignTokens.Settings.sectionHeadInsetY
     static let rowInsetX = SpeechRailDesignTokens.Spacing.md
-    static let rowInsetY: CGFloat = 11
+    static let rowInsetY = SpeechRailDesignTokens.Settings.rowInsetY
 }
 
 @ViewBuilder

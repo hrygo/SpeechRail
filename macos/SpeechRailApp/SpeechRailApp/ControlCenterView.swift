@@ -7,6 +7,7 @@ public struct ControlCenterView: View {
     @Environment(AppNavigationState.self) private var navigation
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 打开窗口时落在哪一页。
     ///
     /// 2026-09-19（用户：「门槛极高」「面向用户体验」）：原先是「服务状态」——那是**服务
@@ -42,15 +43,15 @@ public struct ControlCenterView: View {
                     List(selection: $selection) {
                         sidebarSection(
                             title: AppRouteGroup.creator.title,
-                            routes: AppRoute.creatorRoutes
+                            routes: AppRoute.routes(in: .creator)
                         )
                         sidebarSection(
                             title: AppRouteGroup.session.title,
-                            routes: AppRoute.sessionRoutes
+                            routes: AppRoute.routes(in: .session)
                         )
                         sidebarSection(
                             title: AppRouteGroup.service.title,
-                            routes: AppRoute.serviceRoutes
+                            routes: AppRoute.routes(in: .service)
                         )
                     }
                     .listStyle(.sidebar)
@@ -69,7 +70,12 @@ public struct ControlCenterView: View {
                 )
             } detail: {
                 detailView(for: selection ?? Self.landingRoute)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(
+                        minWidth: navigation.layoutContract.minimumPrimaryContentWidth,
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
                     // 页面地板：窗口内容区的底色是稿的一级表面（`surface/window`），
                     // 卡片才是它上面更亮的一级；侧栏的材质与工具栏那一行不受影响
                     // （REDESIGN-SPEC §11.6 第五十轮）。
@@ -101,16 +107,18 @@ public struct ControlCenterView: View {
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
             .background {
-                ControlCenterResponsiveBridge { width, window in
-                    handleWindowWidthChange(width, in: window)
-                }
+                ZStack {
+                    ControlCenterResponsiveBridge { width, window in
+                        handleWindowWidthChange(width, in: window)
+                    }
 #if DEBUG
-                if isUITestSession {
-                    ControlCenterWindowActivator()
-                        .frame(width: 1, height: 1)
-                        .allowsHitTesting(false)
-                }
+                    if isUITestSession {
+                        ControlCenterWindowActivator()
+                            .frame(width: 1, height: 1)
+                            .allowsHitTesting(false)
+                    }
 #endif
+                }
             }
             .task {
                 // Settings ▸ 通用 can opt out of the launch-time read
@@ -399,6 +407,14 @@ public struct ControlCenterView: View {
 #endif
     }
 
+    private var usesResponsiveUITestLayout: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--ui-test-responsive-layout")
+#else
+        false
+#endif
+    }
+
     private var controlCenterMinimumWidth: CGFloat {
         if isUITestSession {
             return 1_000
@@ -415,7 +431,7 @@ public struct ControlCenterView: View {
 #if DEBUG
         // UI 契约测试必须通过侧栏切换页面；测试窗口会按屏幕尺寸落在 medium tier，
         // 但这不应让测试依赖响应式折叠行为。生产窗口仍按真实宽度自动收起/恢复侧栏。
-        if isUITestSession {
+        if isUITestSession && !usesResponsiveUITestLayout {
             columnVisibility = .all
             return
         }
@@ -424,23 +440,20 @@ public struct ControlCenterView: View {
         let isColdStart = (lastObservedWindowWidth == 0)
         lastObservedWindowWidth = width
 
-        let tier = navigation.layoutTier
+        let contract = navigation.layoutContract
         let targetWindow = window ?? NSApp.windows.first(where: { $0.identifier?.rawValue == AppNavigationState.controlCenterWindowID }) ?? NSApp.keyWindow
+        let animated = !isColdStart && !reduceMotion
 
-        // 在中屏与窄屏下（Window Width < 1260pt），立即优先强制收起边栏！释放 240pt，全力保障主窗体饱满宽敞
-        if tier == .medium || tier == .compact {
+        if contract.sidebar == .collapsed {
             if !NativeSidebarBridge.isSidebarCollapsed(in: targetWindow) {
-                NativeSidebarBridge.setSidebarCollapsed(true, in: targetWindow, animated: !isColdStart)
+                NativeSidebarBridge.setSidebarCollapsed(true, in: targetWindow, animated: animated)
                 columnVisibility = .detailOnly
                 autoCollapsedSidebarDueToWidth = true
             }
-        } else if tier == .expanded {
-            // 宽屏状态（Window Width ≥ 1340pt）：仅当此前是因为收窄被自动收起时，才自动恢复展开
-            if autoCollapsedSidebarDueToWidth {
-                NativeSidebarBridge.setSidebarCollapsed(false, in: targetWindow, animated: !isColdStart)
-                columnVisibility = .all
-                autoCollapsedSidebarDueToWidth = false
-            }
+        } else if contract.sidebar == .visible, autoCollapsedSidebarDueToWidth {
+            NativeSidebarBridge.setSidebarCollapsed(false, in: targetWindow, animated: animated)
+            columnVisibility = .all
+            autoCollapsedSidebarDueToWidth = false
         }
     }
 }
@@ -611,6 +624,24 @@ private final class ControlCenterWindowActivationView: NSView {
     private func fit(_ window: NSWindow) {
         guard let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
 
+        if let requestedWindowSize = Self.requestedUITestWindowSize {
+            let maximumSize = NSSize(
+                width: max(1, visibleFrame.width - 16),
+                height: max(1, visibleFrame.height - 16)
+            )
+            var frame = window.frame
+            frame.size = NSSize(
+                width: min(requestedWindowSize.width, maximumSize.width),
+                height: min(requestedWindowSize.height, maximumSize.height)
+            )
+            frame.origin = NSPoint(
+                x: visibleFrame.minX + 8,
+                y: visibleFrame.maxY - frame.height - 8
+            )
+            window.setFrame(frame, display: true, animate: false)
+            return
+        }
+
         let maximumSize = NSSize(
             width: max(1, visibleFrame.width - 16),
             height: max(1, visibleFrame.height - 16)
@@ -632,6 +663,29 @@ private final class ControlCenterWindowActivationView: NSView {
             visibleFrame.maxY - frame.height - 8
         )
         window.setFrame(frame, display: true, animate: false)
+    }
+
+    private static var requestedUITestWindowSize: NSSize? {
+        let prefix = "--ui-test-window-size="
+        let arguments = ProcessInfo.processInfo.arguments
+        guard
+            arguments.contains("--ui-test"),
+            let argument = arguments.first(where: { $0.hasPrefix(prefix) })
+        else {
+            return nil
+        }
+
+        let value = argument.dropFirst(prefix.count)
+        guard
+            let separator = value.firstIndex(of: "x"),
+            let width = Double(value[..<separator]),
+            let height = Double(value[value.index(after: separator)...]),
+            width > 0,
+            height > 0
+        else {
+            return nil
+        }
+        return NSSize(width: width, height: height)
     }
 }
 #endif

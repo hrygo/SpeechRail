@@ -38,6 +38,141 @@ final class SpeechRailAppUITests: XCTestCase {
         )
     }
 
+    func testAllNavigationRoutesAreDiscoverable() {
+        let app = launchSpeechRail()
+        openControlCenter(in: app)
+
+        let routeTitles = [
+            "配音台", "音色创作", "音色克隆", "音色库", "我的作品",
+            "语音助手", "会议助手", "实时字幕", "AI 提词器",
+            "服务状态", "运行监控", "模型", "诊断", "开发者文档"
+        ]
+
+        for title in routeTitles {
+            XCTAssertTrue(
+                app.buttons[title].waitForExistence(timeout: 5),
+                "missing route: \(title)"
+            )
+        }
+    }
+
+    func testControlCenterHonorsRequestedWindowSizes() {
+        // The matrix uses nominal outer-window requests. macOS titlebar space
+        // raises the 720pt workspace floor to a 760pt NSWindow frame; the
+        // largest request is capped by the screen's visible frame.
+        let sizes = [
+            (1120, 720, 1120, 760),
+            (1280, 800, 1280, 800),
+            (1440, 900, 1440, 900),
+            (1920, 1080, 0, 0),
+        ]
+        let representativeRoutes = [
+            ("语音助手", "开麦对讲"),
+            ("会议助手", "开始会议"),
+            ("实时字幕", "开始字幕"),
+            ("AI 提词器", "新建空白稿"),
+            ("模型", "下载并校验"),
+            ("诊断", "查看检查明细"),
+        ]
+
+        for (requestedWidth, requestedHeight, expectedWidth, expectedHeight) in sizes {
+            let app = launchSpeechRail(
+                arguments: [
+                    "--ui-test",
+                    "--ui-test-open-control-center",
+                    "--ui-test-responsive-layout",
+                ],
+                windowSize: CGSize(width: requestedWidth, height: requestedHeight)
+            )
+            openControlCenter(in: app)
+
+            let window = app.windows["SpeechRail 管理控制台"]
+            if expectedWidth == 0 {
+                XCTAssertLessThanOrEqual(window.frame.width, CGFloat(requestedWidth))
+                XCTAssertGreaterThan(window.frame.width, CGFloat(requestedWidth - 300))
+            } else {
+                XCTAssertEqual(window.frame.width, CGFloat(expectedWidth), accuracy: 2)
+            }
+            if expectedHeight == 0 {
+                XCTAssertLessThanOrEqual(window.frame.height, CGFloat(requestedHeight))
+                XCTAssertGreaterThanOrEqual(window.frame.height, CGFloat(requestedHeight - 100))
+            } else {
+                XCTAssertEqual(window.frame.height, CGFloat(expectedHeight), accuracy: 2)
+            }
+            let frameAttachment = XCTAttachment(
+                string: "requested=\(requestedWidth)×\(requestedHeight), actual=\(window.frame)"
+            )
+            frameAttachment.name = "Window frame \(requestedWidth)×\(requestedHeight)"
+            XCTContext.runActivity(named: "Measured window frame") { activity in
+                activity.add(frameAttachment)
+            }
+
+            let sidebarToggle = window.buttons.matching(
+                NSPredicate(format: "label CONTAINS %@", "Sidebar")
+            ).firstMatch
+            XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5))
+            let originalSidebarLabel = sidebarToggle.label
+            sidebarToggle.clickWhenReady()
+            let toggledSidebar = window.buttons.matching(
+                NSPredicate(
+                    format: "label CONTAINS %@ AND label != %@",
+                    "Sidebar",
+                    originalSidebarLabel
+                )
+            ).firstMatch
+            XCTAssertTrue(toggledSidebar.waitForExistence(timeout: 5))
+            toggledSidebar.clickWhenReady()
+            XCTAssertTrue(window.buttons[originalSidebarLabel].waitForExistence(timeout: 5))
+
+            // Re-open the sidebar only when the responsive policy collapsed it,
+            // so each representative route is reached through normal navigation.
+            if sidebarToggle.label.localizedCaseInsensitiveContains("show") {
+                sidebarToggle.clickWhenReady()
+            }
+            XCTAssertTrue(app.buttons["语音助手"].waitForExistence(timeout: 5))
+            app.buttons["语音助手"].clickWhenReady()
+
+            let panelToggle = identifierElement("session-panel-toggle", in: app)
+            XCTAssertTrue(panelToggle.waitForExistence(timeout: 5))
+            let originalPanelValue = panelToggle.value as? String
+            XCTAssertTrue(originalPanelValue == "已展开" || originalPanelValue == "已收起")
+            panelToggle.clickWhenReady()
+            let changedPanelValue = originalPanelValue == "已展开" ? "已收起" : "已展开"
+            let panelValueExpectation = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", changedPanelValue),
+                object: panelToggle
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [panelValueExpectation], timeout: 5), .completed)
+            panelToggle.clickWhenReady()
+            let restoredPanelExpectation = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", originalPanelValue ?? ""),
+                object: panelToggle
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [restoredPanelExpectation], timeout: 5), .completed)
+
+            for (routeTitle, primaryAction) in representativeRoutes {
+                let routeButton = app.buttons[routeTitle]
+                XCTAssertTrue(routeButton.waitForExistence(timeout: 10), "missing route: \(routeTitle)")
+                routeButton.clickWhenReady()
+
+                let title = identifierElement("workspace-title", in: app)
+                XCTAssertTrue(title.waitForExistence(timeout: 5))
+                XCTAssertEqual(title.label, routeTitle)
+
+                let action = app.buttons[primaryAction]
+                XCTAssertTrue(
+                    action.waitForExistence(timeout: 10),
+                    "missing primary action on \(routeTitle): \(primaryAction)"
+                )
+                XCTAssertTrue(
+                    window.frame.insetBy(dx: -2, dy: -2).contains(action.frame),
+                    "primary action on \(routeTitle) is outside the window: \(action.frame)"
+                )
+            }
+            app.terminate()
+        }
+    }
+
     func testControlSurfaceShowsServiceAndProfiles() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
@@ -85,7 +220,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testModelDownloadRequiresExplicitConfirmation() throws {
-        let app = launchSpeechRail()
+        let app = launchSpeechRail(windowSize: CGSize(width: 1280, height: 960))
         openControlCenter(in: app)
         app.buttons["模型"].clickWhenReady()
 
@@ -138,21 +273,26 @@ final class SpeechRailAppUITests: XCTestCase {
 
         // 菜单项与 REDESIGN-SPEC §7.9 一致：`打开 SpeechRail`（⌘O）。
         XCTAssertTrue(app.menuItems["打开 SpeechRail"].waitForExistence(timeout: 5))
+        // Dismiss the status-item menu before interacting with the separate
+        // Settings window; the first click outside an open menu only dismisses it.
+        app.typeKey(.escape, modifierFlags: [])
         // 设置窗口现在是面向普通用户的「通用 / 创作 / 助手 / 服务」四个页签。
         XCTAssertTrue(settingsTab("通用", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(settingsTab("创作", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(settingsTab("助手", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(settingsTab("服务", in: app).waitForExistence(timeout: 5))
+        // Settings remembers the last selected tab across launches. Select the
+        // page under test instead of relying on the app's first-run default.
+        settingsTab("通用", in: app).clickWhenReady()
         XCTAssertFalse(app.staticTexts["会话"].exists)
-        // 默认页签是「通用」，它只放 App 自己的偏好（「启动与窗口」「开发者」两节）；
-        // 「产品定位 / 最低系统 / 版本」已经搬进未选中的「服务」页签（§7.10），
-        // 所以这里断言通用页签自己的小节，而不是那一页的内容。
+        // 「通用」只放 App 自己的偏好（「启动与窗口」「开发者」两节）；
+        // 「产品定位 / 最低系统 / 版本」已经搬进「服务」页签（§7.10）。
         XCTAssertTrue(app.staticTexts["启动与窗口"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
 
     func testVoiceDesignAcousticChipsAndCandidateRack() throws {
-        let app = launchSpeechRail()
+        let app = launchSpeechRail(windowSize: CGSize(width: 1280, height: 960))
         openControlCenter(in: app)
         app.buttons["音色创作"].clickWhenReady()
 
@@ -227,7 +367,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testWorksViewExposesSelectionAndExportActions() throws {
-        let app = launchSpeechRail()
+        let app = launchSpeechRail(windowSize: CGSize(width: 1280, height: 960))
         openControlCenter(in: app)
         app.buttons["我的作品"].clickWhenReady()
 
@@ -248,12 +388,16 @@ final class SpeechRailAppUITests: XCTestCase {
         // （行内「⋯」+ 右键菜单），导出另有 ⌘E（REDESIGN-SPEC §6.2 / §6.4）。
         XCTAssertFalse(window.menuButtons["更多操作"].exists)
         let rowActions = window.descendants(matching: .any).matching(
-            NSPredicate(format: "label BEGINSWITH %@", "更多操作：")
+            NSPredicate(format: "title BEGINSWITH %@", "更多操作：")
         ).firstMatch
         XCTAssertTrue(rowActions.waitForExistence(timeout: 10))
-        rowActions.clickWhenReady()
-        XCTAssertTrue(app.menuItems["导出…"].waitForExistence(timeout: 10))
-        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(window.buttons["导出 测试作品"].exists)
+        XCTAssertTrue(window.buttons["导出…"].exists)
+
+        let selectedWorkExportCommand = app.menuItems.matching(
+            NSPredicate(format: "title BEGINSWITH %@", "导出“测试作品”")
+        ).firstMatch
+        XCTAssertTrue(selectedWorkExportCommand.waitForExistence(timeout: 10))
     }
 
     func testHeaderKeepsOneCreateEntryPointOnTheVoiceLibrary() {
@@ -271,15 +415,31 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertFalse(app.menuButtons["更多操作"].exists)
     }
 
-    private func launchSpeechRail(arguments: [String] = ["--ui-test", "--ui-test-open-control-center"]) -> XCUIApplication {
+    private func launchSpeechRail(
+        arguments: [String] = ["--ui-test", "--ui-test-open-control-center"],
+        windowSize: CGSize? = nil
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = arguments
+        if let windowSize {
+            app.launchArguments.append(
+                "--ui-test-window-size=\(Int(windowSize.width))x\(Int(windowSize.height))"
+            )
+        }
         app.launch()
         app.activate()
         return app
     }
 
     private func openControlCenter(in app: XCUIApplication) {
+        // SpeechRail is a menu-bar-first app. Launching/activating it does not
+        // guarantee that SwiftUI restores the single-window scene, so use the
+        // same visible entry point as a user instead of assuming it auto-opens.
+        let statusItem = app.menuBars.statusItems.firstMatch
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        app.menuItems["打开 SpeechRail"].clickWhenReady()
+
         let controlCenter = app.windows["SpeechRail 管理控制台"]
         XCTAssertTrue(controlCenter.waitForExistence(timeout: 10))
         app.activate()

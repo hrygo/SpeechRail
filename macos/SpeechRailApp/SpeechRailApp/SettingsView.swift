@@ -455,8 +455,10 @@ struct SpeechRailHelpView: View {
             "页面",
             [
                 Entry(shortcut: "⌘1–⌘5", title: "配音台 / 音色创作 / 音色克隆 / 音色库 / 我的作品", detail: "创作页之间切换。"),
-                Entry(shortcut: "⌘6–⌘9", title: "服务状态 / 运行监控 / 模型 / 诊断", detail: "引擎页之间切换。"),
-                Entry(shortcut: "⌘0", title: "开发者文档", detail: "查看本机服务的接入方式与示例。"),
+                Entry(shortcut: "⌘6–⌘8", title: "语音助手 / 会议助手 / 实时字幕", detail: "会话页之间切换。"),
+                Entry(shortcut: "⌘⇧T", title: "AI 提词器", detail: "打开稿件准备与提词舞台。"),
+                Entry(shortcut: "⌘9 / ⌘0", title: "服务状态 / 运行监控", detail: "查看服务与运行资源。"),
+                Entry(shortcut: "⌘⇧M / ⌘⇧D / ⌘⇧H", title: "模型 / 诊断 / 开发者文档", detail: "查看模型、问题处理与接入说明。"),
                 Entry(shortcut: "⌘⌥I", title: "显示或隐藏开发者详情", detail: "切换技术摘要的默认展开状态。"),
             ]
         ),
@@ -485,7 +487,10 @@ struct SpeechRailHelpView: View {
                                     Text(entry.shortcut)
                                         .font(SpeechRailDesignTokens.Typography.technical)
                                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                        .frame(width: 72, alignment: .leading)
+                                        .frame(
+                                            width: SpeechRailDesignTokens.Settings.helpShortcutColumnWidth,
+                                            alignment: .leading
+                                        )
                                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                                         Text(entry.title)
                                             .font(SpeechRailDesignTokens.Typography.body)
@@ -509,6 +514,9 @@ struct SpeechRailHelpView: View {
             .padding(SpeechRailDesignTokens.Spacing.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 460, height: 460)
+        .frame(
+            width: SpeechRailDesignTokens.Settings.helpWindowWidth,
+            height: SpeechRailDesignTokens.Settings.helpWindowHeight
+        )
     }
 }

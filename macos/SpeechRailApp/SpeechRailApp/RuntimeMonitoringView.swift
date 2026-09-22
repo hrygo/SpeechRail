@@ -109,7 +109,7 @@ public struct RuntimeMonitoringView: View {
                     Label(reportMessage, systemImage: "checkmark.circle.fill")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                        .transition(.opacity)
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
                 if isHistoryWindow {
                     historyMetricStrip

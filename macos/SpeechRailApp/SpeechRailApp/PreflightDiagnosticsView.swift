@@ -20,7 +20,7 @@ public struct PreflightDiagnosticsView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .diagnostics, scrollable: false) {
+        PageScaffold(route: .diagnostics, layout: .content) {
             diagnosticWorkspace
         } trailing: {
             Button {

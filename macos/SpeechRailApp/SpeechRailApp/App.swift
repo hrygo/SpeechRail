@@ -543,25 +543,6 @@ struct SpeechRailApp: App {
 /// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
 /// let「导出选中作品」follow the page the user is actually looking at.
 struct SpeechRailCommands: Commands {
-    /// 路由 → 快捷键。十三页超出 ⌘1–⌘0 的十个槽位，所以让位规则被显式写在表里
-    /// （SESSIONS-SPEC §5.2，用户 2026-09-18 裁决 D2）：**创作页一个都不动**（它们频率最高，
-    /// 而且已形成肌肉记忆），**会话组拿中间三格** ⌘6–⌘8，**引擎页改用助记组合**。
-    private static let routeShortcuts: [AppRoute: (key: KeyEquivalent, modifiers: EventModifiers)] = [
-        .dubbing: ("1", .command),
-        .voiceDesign: ("2", .command),
-        .voiceClone: ("3", .command),
-        .voiceLibrary: ("4", .command),
-        .works: ("5", .command),
-        .assistant: ("6", .command),
-        .meeting: ("7", .command),
-        .captions: ("8", .command),
-        .overview: ("9", .command),
-        .monitoring: ("0", .command),
-        .models: ("m", [.command, .shift]),
-        .diagnostics: ("d", [.command, .shift]),
-        .developerDocs: ("h", [.command, .shift])
-    ]
-
     let navigation: AppNavigationState
     /// 会话命令要用它判「有没有正在进行的会话」（`⌘⇧.` 会话进行中才可用）。
     let session: SessionCoordinator
@@ -588,7 +569,7 @@ struct SpeechRailCommands: Commands {
 
         CommandGroup(after: .sidebar) {
             // 「重新读取当前页」由当前页面自己声明（`reloadPageCommand`），
-            // 所以八个页面不再各写一条含义不同的「刷新…」菜单项（§6.2 / §6.3）。
+            // 所以每个页面不再各写一条含义不同的「刷新…」菜单项（§6.2 / §6.3）。
             Button(reloadPageCommand?.title ?? "重新读取") {
                 reloadPageCommand?()
             }
@@ -645,15 +626,25 @@ struct SpeechRailCommands: Commands {
         return "导出“\(selectedWorkCommand.title)”…"
     }
 
-    /// 表里必须覆盖每一条路由；缺一条就退回 ⌘1，这会与「配音台」撞键——
-    /// 所以缺项要当成缺陷来修，而不是靠这里的兜底悄悄过去。
+    /// 所有路由的快捷键由 AppRoute 提供；缺一条就当作契约缺陷，
+    /// 不使用会与「配音台」撞键的兜底快捷键。
     private static func shortcut(for route: AppRoute) -> KeyboardShortcut? {
-        if route == .teleprompter { return nil }
-        guard let entry = routeShortcuts[route] else {
+        guard let spec = route.shortcutSpec,
+              spec.key.count == 1,
+              let character = spec.key.first
+        else {
             assertionFailure("路由 \(route.rawValue) 没有登记快捷键")
             return nil
         }
-        return KeyboardShortcut(entry.key, modifiers: entry.modifiers)
+
+        let modifiers: EventModifiers
+        switch spec.modifiers {
+        case .command:
+            modifiers = .command
+        case .commandShift:
+            modifiers = [.command, .shift]
+        }
+        return KeyboardShortcut(KeyEquivalent(character), modifiers: modifiers)
     }
 }
 

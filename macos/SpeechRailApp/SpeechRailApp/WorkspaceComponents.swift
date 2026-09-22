@@ -386,7 +386,7 @@ public struct SpeechRailPointerCursorModifier: ViewModifier {
     }
 }
 
-public enum StatusTone: Sendable {
+public enum StatusTone: Sendable, Equatable {
     case neutral
     case healthy
     case attention
@@ -395,13 +395,13 @@ public enum StatusTone: Sendable {
     var color: Color {
         switch self {
         case .neutral:
-            Color.secondary
+            SpeechRailDesignTokens.Color.inkSecondary
         case .healthy:
-            Color.green
+            SpeechRailDesignTokens.Color.ready
         case .attention:
-            Color.orange
+            SpeechRailDesignTokens.Color.attention
         case .critical:
-            Color.red
+            SpeechRailDesignTokens.Color.critical
         }
     }
 
@@ -415,6 +415,15 @@ public enum StatusTone: Sendable {
             "exclamationmark.triangle.fill"
         case .critical:
             "xmark.circle.fill"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .neutral: "一般状态"
+        case .healthy: "正常"
+        case .attention: "需要注意"
+        case .critical: "受阻"
         }
     }
 }
@@ -580,6 +589,16 @@ enum SpeechRailOperationMessagePresentation {
     }
 }
 
+/// The explicit outer-layout contract for every workspace surface.
+public enum PageScaffoldLayout: Equatable, Sendable {
+    /// Content keeps its intrinsic height while the page shell fills the detail column.
+    case content
+    /// Content receives a deterministic pane-derived height with a lower bound.
+    case fill(minimumHeight: CGFloat)
+    /// Content lives in an outer scroll container and can grow beyond the pane.
+    case scroll(minimumHeight: CGFloat)
+}
+
 /// The shared page geometry for every workspace surface.
 ///
 /// The scaffold owns the content margins and the page's one-line purpose
@@ -590,85 +609,76 @@ enum SpeechRailOperationMessagePresentation {
 /// Full-height workspaces such as diagnostics can opt out of the outer scroll
 /// container while keeping the same geometry.
 public struct PageScaffold<Content: View, Trailing: View>: View {
+    private enum ContentSizing {
+        case fixed
+        case grows
+    }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     public let route: AppRoute
-    public let scrollable: Bool
+    public let layout: PageScaffoldLayout
     private let purpose: String?
-    /// 正文槽位的**最小高度**（`nil` = 正文按内容取高，八个页面里只有「开发者文档」
-    /// 给了值）。
-    ///
-    /// 给了值之后，正文拿到的不是「提案高度」，而是一个**由窗格算出来的确定高度**：
-    /// 窗格减去页内上下边距、页头与页头间距，再与这个下限取大。这样正文里那些会按内容
-    /// 伸缩的东西（`ScrollView`、`List` 在不定高提案下会报出内容高度）就**无法再反过来
-    /// 决定页面高度**——换主题、换文档，卡片高度不变。
-    ///
-    /// 外层仍然是滚动容器：窗口比「页头 + 页内边距 + 这个下限」还矮时，页面自己能滚，
-    /// 页首（一句话说明 + 接入信息带）不会被顶出可视区。这一点是硬要求——
-    /// 2026-09-16 装机件上按稿改成「不滚动 + 卡片吃满窗口」后，页首整块被裁且没有任何
-    /// 滚动能回到顶部（`pagePurpose` 注释里记的第三十轮是同一类失败）。
-    private let minimumContentHeight: CGFloat?
-    /// 正文槽位的**高度口径**。`false`（默认）＝「定高」：正文恰好是 `slot` 高，
-    /// 内容再高也压在槽里（`minimumContentHeight` 注释里那条「换主题、换文档，卡片高度
-    /// 不变」）。`true` ＝「先吃满、再按内容长高」：槽位高度取 `minHeight`，内容比窗格矮
-    /// 时卡片照样吃满窗口，内容比窗格高时整页滚动——这一档是给「清单比窗口长」的页面用的
-    /// （会话三页：音色 18 条、转录几十段），它不是第三种默认值，默认仍是定高。
-    private let growsWithContent: Bool
     private let trailing: Trailing
     private let content: Content
 
     public init(
         route: AppRoute,
-        scrollable: Bool = true,
+        layout: PageScaffoldLayout = .scroll(minimumHeight: 0),
         purpose: String? = nil,
-        minimumContentHeight: CGFloat? = nil,
-        growsWithContent: Bool = false,
         @ViewBuilder content: () -> Content,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.route = route
-        self.scrollable = scrollable
+        self.layout = layout
         self.purpose = purpose
-        self.minimumContentHeight = minimumContentHeight
-        self.growsWithContent = growsWithContent
         self.content = content()
         self.trailing = trailing()
     }
 
     @ViewBuilder
     public var body: some View {
-        if scrollable {
-            if let minimumContentHeight {
-                // 量窗格 → 算出正文的固定高度 → 仍交给滚动容器兜底。
-                GeometryReader { proxy in
-                    ScrollView {
-                        pageContent(
-                            paneHeight: proxy.size.height,
-                            minimumContentHeight: minimumContentHeight,
-                            growsWithContent: growsWithContent
-                        )
-                    }
-                }
-            } else {
-                ScrollView {
-                    pageContent
-                }
-            }
-        } else {
-            if let minimumContentHeight {
+        Group {
+            switch layout {
+            case .content:
+                pageContent
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+            case .fill(let minimumHeight):
                 GeometryReader { proxy in
                     pageContent(
                         paneHeight: proxy.size.height,
-                        minimumContentHeight: minimumContentHeight,
-                        growsWithContent: false
+                        minimumHeight: minimumHeight,
+                        sizing: .fixed
                     )
                 }
-            } else {
-                pageContent
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
+            case .scroll(let minimumHeight):
+                if minimumHeight > 0 {
+                    // 量窗格 → 算出正文的固定高度 → 仍交给滚动容器兜底。
+                    GeometryReader { proxy in
+                        ScrollView {
+                            pageContent(
+                                paneHeight: proxy.size.height,
+                                minimumHeight: minimumHeight,
+                                sizing: .grows
+                            )
+                        }
+                    }
+                } else {
+                    ScrollView {
+                        pageContent
+                    }
+                }
+            }
+        }
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
             }
         }
     }
 
-    /// 页首「一句话说明」：八个页面都以同一句话开场（Figma `pageHead` 的第二行），
+    /// 页首「一句话说明」：当前 14 个页面都以同一句话开场（Figma `pageHead` 的第二行），
     /// 页面名不在这里——它在工具栏的身份槽（§6.2）。
     private var pagePurpose: some View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.lg) {
@@ -708,21 +718,21 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 剩下的全部——于是「正文多高」不再由正文自己决定（不用 `minHeight`：它只能抬高
     /// 下限，内容该撑多高还是多高，等于没改）。
     ///
-    /// 正文槽位不低于 `minimumContentHeight`：矮窗口下正文保持声明的最小高度，多出来的
+    /// 正文槽位不低于 `PageScaffoldLayout.scroll(minimumHeight:)` 的声明：矮窗口下正文保持最小高度，多出来的
     /// 部分交给外层滚动，而不是把正文压扁——压扁目录列就是「点了主题，下面几个菜单
     /// 就没了」。
     ///
-    /// `growsWithContent` 为真时这层框架用 `minHeight` 而不是固定高度：内容比窗格矮时
+    /// `sizing: .grows` 时这层框架用 `minHeight` 而不是固定高度：内容比窗格矮时
     /// 效果与定高完全一样（卡片照样吃满窗口），内容比窗格高时页面**长高并整页滚动**，
     /// 而不是把多出来的部分裁掉。会话三页要的是后者——稿上「音色」卡本来就伸出
     /// 900pt 的画板（4x 帧在画板下沿被裁），清单长度由服务与用户决定，界面不该替它设上限。
     private func pageContent(
         paneHeight: CGFloat,
-        minimumContentHeight: CGFloat,
-        growsWithContent: Bool
+        minimumHeight: CGFloat,
+        sizing: ContentSizing
     ) -> some View {
         let padding = SpeechRailDesignTokens.Layout.contentPadding
-        let slot = max(paneHeight - padding * 2, minimumContentHeight)
+        let slot = max(paneHeight - padding * 2, minimumHeight)
         let padded = VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             pagePurpose
             content
@@ -732,7 +742,8 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
         .padding(.vertical, SpeechRailDesignTokens.Layout.contentPadding)
 
         return Group {
-            if growsWithContent {
+            switch sizing {
+            case .grows:
                 // `+ Spacing.xs` 是**刀口余量**，不是排版偏好：卡片吃满窗口之后，内容真正
                 // 需要的高度比它报出去的多几 pt（亚像素累积），滚动容器于是判「装得下」，
                 // SwiftUI 就从最后一行文字身上挤出那几 pt，卡片再 `clipShape` 就是一道硬切。
@@ -744,7 +755,7 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
                     minHeight: slot + padding * 2 + SpeechRailDesignTokens.Spacing.xs,
                     alignment: .topLeading
                 )
-            } else {
+            case .fixed:
                 padded.frame(height: slot + padding * 2, alignment: .topLeading)
             }
         }
@@ -755,16 +766,14 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
 public extension PageScaffold where Trailing == EmptyView {
     init(
         route: AppRoute,
-        scrollable: Bool = true,
+        layout: PageScaffoldLayout = .scroll(minimumHeight: 0),
         purpose: String? = nil,
-        minimumContentHeight: CGFloat? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.init(
             route: route,
-            scrollable: scrollable,
+            layout: layout,
             purpose: purpose,
-            minimumContentHeight: minimumContentHeight,
             content: content,
             trailing: { EmptyView() }
         )
@@ -1376,8 +1385,8 @@ public struct PageActionsMenu<Content: View>: View {
         .speechRailPointerCursor()
     }
 
-    /// 无障碍标签必须说清「哪一页的哪个动作」：八个页面共用同一个槽位，
-    /// 不能再让八个屏幕读出同一句泛称（§9）。没有具体标题时退到工具提示那句话，
+    /// 无障碍标签必须说清「哪一页的哪个动作」：当前路由共用同一个槽位，
+    /// 不能再让不同屏幕读出同一句泛称（§9）。没有具体标题时退到工具提示那句话，
     /// 而不是退回一个通用词。
     private var accessibilityLabel: String {
         title ?? helpText

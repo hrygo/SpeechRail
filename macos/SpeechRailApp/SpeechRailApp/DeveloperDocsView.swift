@@ -32,12 +32,12 @@ public struct DeveloperDocsView: View {
         //    菜单少了几个」。现在高度来自窗格，主题换来换去卡片都是同一条边。
         //
         // 2）外层必须还能滚。按稿改成「不滚动 + 卡片吃满窗口」时，页首（一句话说明 +
-        //    接入信息带）被顶出可视区且没有任何滚动能回到顶部——工具是 `scrollable: false`
-        //    + `.frame(maxHeight: .infinity)`，宿主按「内容比窗格大」摆放（第三十轮同一类
+        //    接入信息带）被顶出可视区且没有任何滚动能回到顶部——固定填充外壳在
+        //    内容比窗格大时会触发同一类
         //    失败：`.inspector` 与最小高度）。所以现在量窗格、算固定高度，再交给滚动兜底。
         PageScaffold(
             route: .developerDocs,
-            minimumContentHeight: minimumContentHeight
+            layout: .scroll(minimumHeight: minimumPageHeight)
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 accessCard
@@ -105,7 +105,7 @@ public struct DeveloperDocsView: View {
     }
 
     /// 正文槽位的下限 = 接入信息带（实测）+ 块间距 + 文档卡下限。
-    private var minimumContentHeight: CGFloat {
+    private var minimumPageHeight: CGFloat {
         accessCardHeight
             + SpeechRailDesignTokens.Spacing.gutter
             + SpeechRailDesignTokens.DeveloperDocs.cardMinimumHeight

@@ -10,6 +10,30 @@ public enum WindowLayoutTier: String, Sendable, Equatable {
     case compact
 }
 
+/// The shell behavior that a window tier delegates to each panel.
+public enum WindowPanelBehavior: String, Equatable, Sendable {
+    case visible
+    case collapsed
+    case pageControlled
+}
+
+/// The view-free contract shared by the AppKit shell and session pages.
+public struct WindowLayoutContract: Equatable, Sendable {
+    public let sidebar: WindowPanelBehavior
+    public let inspector: WindowPanelBehavior
+    public let minimumPrimaryContentWidth: CGFloat
+
+    public init(
+        sidebar: WindowPanelBehavior,
+        inspector: WindowPanelBehavior,
+        minimumPrimaryContentWidth: CGFloat
+    ) {
+        self.sidebar = sidebar
+        self.inspector = inspector
+        self.minimumPrimaryContentWidth = minimumPrimaryContentWidth
+    }
+}
+
 /// Hysteresis policy for window-resize driven layout changes.
 ///
 /// The policy is pure so threshold behavior can be tested without constructing
@@ -20,6 +44,29 @@ public enum WindowLayoutPolicy {
     public static let mediumToExpandedThreshold: CGFloat = 1_340
     public static let mediumToCompactThreshold: CGFloat = 960
     public static let compactToMediumThreshold: CGFloat = 1_020
+
+    public static func contract(for tier: WindowLayoutTier) -> WindowLayoutContract {
+        switch tier {
+        case .expanded:
+            WindowLayoutContract(
+                sidebar: .visible,
+                inspector: .pageControlled,
+                minimumPrimaryContentWidth: 500
+            )
+        case .medium:
+            WindowLayoutContract(
+                sidebar: .collapsed,
+                inspector: .pageControlled,
+                minimumPrimaryContentWidth: 500
+            )
+        case .compact:
+            WindowLayoutContract(
+                sidebar: .collapsed,
+                inspector: .collapsed,
+                minimumPrimaryContentWidth: 500
+            )
+        }
+    }
 
     public static func nextTier(
         from current: WindowLayoutTier,
