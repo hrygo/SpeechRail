@@ -350,17 +350,29 @@ public struct ModelQuantizationSnapshot: Codable, Equatable, Sendable {
     public let bits: Int?
     public let groupSize: Int?
     public let format: String
+    /// 未量化制品的权重数值格式（`bits` 为 nil 时才有值）。
+    ///
+    /// 目录里 `bits` 与 `dtype` 互斥：量化制品用位数说精度，未量化制品用
+    /// 数值格式说精度，于是每一份权重都能在同一列上读出「多少位」。
+    public let dtype: String?
 
-    public init(bits: Int? = nil, groupSize: Int? = nil, format: String) {
+    public init(
+        bits: Int? = nil,
+        groupSize: Int? = nil,
+        format: String,
+        dtype: String? = nil
+    ) {
         self.bits = bits
         self.groupSize = groupSize
         self.format = format
+        self.dtype = dtype
     }
 
     enum CodingKeys: String, CodingKey {
         case bits
         case groupSize = "group_size"
         case format
+        case dtype
     }
 }
 

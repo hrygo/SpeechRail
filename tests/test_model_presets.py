@@ -60,9 +60,8 @@ def _artifact(
         "bits": bits,
         "group_size": group_size,
         "format": format_name,
+        "dtype": dtype,
     }
-    if dtype is not None:
-        quantization["dtype"] = dtype
     return {
         "key": key,
         "model_id": f"fixture/{key}",
@@ -401,6 +400,39 @@ def test_unknown_catalog_and_artifact_keys_fail_closed() -> None:
         ModelArtifact.model_validate(artifact)
 
 
+def test_artifact_requires_dtype_when_unquantized() -> None:
+    """没有量化的制品必须写明权重本身的数值格式，否则同一列里会有一行说不出精度。"""
+    artifact = _artifact(
+        key="aligner-bf16",
+        family="qwen3_forced_aligner",
+        variant="aligner",
+        bits=None,
+        group_size=None,
+        format_name="none",
+    )
+
+    with pytest.raises(ValidationError, match=r"dtype"):
+        ModelArtifact.model_validate(artifact)
+
+    quantization = artifact["quantization"]
+    assert isinstance(quantization, dict)
+    quantization["dtype"] = "bf16"
+    assert ModelArtifact.model_validate(artifact).quantization.dtype == "bf16"
+
+
+def test_artifact_rejects_bits_and_dtype_together() -> None:
+    """精度只有一个维度：同时写 bits 与 dtype 无法判断该读哪一个。"""
+    artifact = _artifact(
+        key="asr-1.7b-q8",
+        family="qwen3_asr",
+        variant="asr",
+        dtype="bf16",
+    )
+
+    with pytest.raises(ValidationError, match=r"bits or dtype"):
+        ModelArtifact.model_validate(artifact)
+
+
 @pytest.mark.parametrize(
     "path", ["../config.json", "weights/../../model.safetensors", "/tmp/model"]
 )
@@ -550,6 +582,22 @@ def test_catalog_rejects_aligner_policy_mismatch() -> None:
     light["aligner"] = "aligner-q8"
 
     with pytest.raises(ValidationError, match=r"aligner|precision_policy"):
+        ModelCatalog.model_validate(payload)
+
+
+def test_catalog_rejects_aligner_dtype_mismatch() -> None:
+    """档位说 bf16、制品写 fp16：同一件事两种说法，必须报错。"""
+    payload = _catalog_payload()
+    artifacts = payload["artifacts"]
+    assert isinstance(artifacts, list)
+    aligner = next(
+        item for item in artifacts if isinstance(item, dict) and item["key"] == "aligner-bf16"
+    )
+    quantization = aligner["quantization"]
+    assert isinstance(quantization, dict)
+    quantization["dtype"] = "fp16"
+
+    with pytest.raises(ValidationError, match=r"dtype|precision_policy"):
         ModelCatalog.model_validate(payload)
 
 

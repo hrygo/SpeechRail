@@ -85,6 +85,7 @@ SpeechRail 服务是单人 Apple Silicon Mac 上的本地共享语音引擎，�
 | VAD | 实时语音断句 | 服务状态、诊断 |
 | `worker` / `常驻` | 已加载的模型；`voice_design` / `voice_clone` / `tts` → 语音设计 / 音色克隆 / 内置音色 | 服务状态「运行信息」 |
 | 制品 / `asset` | 模型文件 | 模型页、诊断 |
+| `bits` / `dtype`（内部字段）、「量化 / 未量化」 | 精度；取值一律读位数（`8-bit` / `16-bit`） | 列名与取值在模型页的模型文件表；开发者详情按同一维度开头，后面才补 `mlx` / `bf16` / 「未量化」这些内部说法 |
 | `capability` | 服务声明「X」已经可用 | 服务状态 |
 | XPC / 控制 Agent | 可以在（不能）在这里管理服务 | 服务状态控制行 |
 
@@ -531,7 +532,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
    动作行**排在档位卡与制品卡之间**，直接落在页面底色上，右端是磁盘事实；帧实测两张卡之间是一条
    74.25pt 的页面底色带，其中动作 34pt、上下各 20.25pt（= 页面级块间距）。长任务的进度条贴在
    动作行下方，不沉到制品卡后面（第二十六轮）。
-3. **模型文件列表**：每个文件显示 key、来源（脱敏 model ID）、量化、文件数、校验状态。页面上这一节叫「模型文件」，不叫「制品」；行头的机器名（`aligner-bf16` 等）保留，因为它是与诊断输出对照的锚点。
+3. **模型文件列表**：每个文件显示 key、来源（脱敏 model ID）、精度、文件数、校验状态。页面上这一节叫「模型文件」，不叫「制品」；行头的机器名（`aligner-bf16` 等）保留，因为它是与诊断输出对照的锚点。这一节列的是**这一档要用的全部文件**（含不在目录里的锁定分人资产），精度列只有一套说法：一律读位数（`8-bit` / `16-bit`），未量化的制品由权重数值格式换算，读不出来时写「未读取」（§4.2、§11.6 第七十一轮）。
 4. **磁盘**：已用 / 可用，等宽数字。
 5. 中断的 active operation 恢复为解释性提示 + 重试入口，不承诺续传。
 
@@ -4467,6 +4468,47 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
 （`SpeechRailProfilePresentation`、`ControlAgentRegistration.impact`、
 `ModelManagementView.profileSpecs/profilePurpose`、
 `PreflightDiagnosticsView.checkTitle/note(for:)`、`ControlCenterView.landingRoute`）。
+
+#### 第七十一轮：模型文件的精度只有一套说法（2026-09-23）
+
+**① 用户当轮反馈**（原话，五句递进）：「模型信息要清晰」「未量化是不是也有位数？」
+「对拉齐到同一维度展示」「对齐」「采用用户更能清晰的认知的统一文案表达」。
+
+**② 问题有两层，一层是文案一层是数据**。模型文件表的第四列叫「量化」，值却已经在说精度
+（`8-bit` / `bf16`）——同一列里两种说法：「量化」是内部分法，用户要问的是「多少位」。
+更根本的是服务只下发 `quantization.bits`：未量化制品的位数**在载荷里根本不存在**，
+界面只能写「未量化」——一个否定说法，答不了用户的那一问。
+
+**③ 改法（服务 → 契约 → App → 稿，同一维度贯通）**：
+
+- **目录 schema**：`QuantizationSpec` 新增 `dtype`（`bf16` / `fp16` / `fp32`），与 `bits`
+  **互斥**；未量化制品必须声明 `dtype`；档位的 aligner 精度声明必须与制品 `dtype` 说同一件事。
+  于是 `quantization` 这一行形状对**每一份**权重都成立，不再有「这一行读不出位数」。
+- **载荷**：`model_catalog_payload` 把不在目录、但同样按档位供给的锁定分人资产
+  （`diarization-coreml`，上游 FP16 变体）按 catalog 制品的同一行形状下发
+  （`required_by = [balanced, quality]`）。它此前既是分人输入、又被列成「已检测但未纳入
+  当前目录」，而表里没有它——现在「模型文件」这张表就是**这一档要用的全部文件**。
+- **App**：列名与开发者详情标签统一为「精度」；取值统一读位数——量化的读 `8-bit`，
+  未量化的把权重数值格式换算成 `16-bit`（`bf16` / `fp16` → 16、`fp32` → 32），
+  位数读不出来时写「未读取」，不编。`mlx`、`group 64`、`bf16` 这些格式名只解释「怎么做到的」，
+  留在开发者详情（`QuantizationSpec` 的字段名也是内部名，按 §4.2 不上屏）。
+- **稿**：`figma-kit/main.js` 的 `screenModels` 同轮同步——卡头标题「模型制品 → 模型文件」、
+  列头「量化 → 精度」、五条样例行改成位数（`8-bit` ×3、`16-bit` ×2）、卡头说明换成应用的那一句、
+  脚注说明换成应用的说法（「谁在说话在补齐前用不了」）。
+
+**④ 实测（2026-09-23）**：`model_catalog_payload` 实际输出 8 行，每行都有精度值
+（`aligner-bf16 bf16` / `asr-1.7b-q8 8-bit` / `diarization-coreml fp16` …），
+精准档取该档文件得 5 行、列值 `8-bit` ×3 + `16-bit` ×2；`pytest --no-cov` 的
+`test_model_commands` / `test_model_presets` / `test_model_identity` / `test_installer` /
+`test_model_catalog_builder` / `test_app_contract` 全绿（新增 5 条：缺 `dtype`、`bits` 与
+`dtype` 并存、档位与制品 `dtype` 不一致、CoreML 行形状、无分人档位不出该行）；
+`scripts/macos_app_build.sh --configuration Debug` → **BUILD SUCCEEDED**；
+`node --check figma-kit/main.js` 与 `node audit.js` 通过。
+
+**⑤ 未验证**：真机走查（未重装 App；UI 自动化按 AGENTS.md 需当次明确授权，本会话没有）；
+`figma-kit` 的帧**未重新导出**，导出物与本轮文案存在时间差，重导出前不要把旧帧当验收基线。
+回退 = 恢复 `ArtifactQuantizationPresentation`（列值改回 `bf16`）、列名与开发者详情标签改回
+「量化」，以及 catalog 的 `dtype` 字段与那 5 条测试。
 
 ## 12. 风险与未决
 

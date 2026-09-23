@@ -965,9 +965,8 @@ def _b2_artifact(
         "bits": bits,
         "group_size": 64 if bits is not None else None,
         "format": "mlx" if bits is not None else "none",
+        "dtype": dtype,
     }
-    if dtype is not None:
-        quantization["dtype"] = dtype
     return {
         "key": key,
         "model_id": _B2_REPOSITORY,
