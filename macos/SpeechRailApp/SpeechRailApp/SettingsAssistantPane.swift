@@ -151,6 +151,7 @@ struct SettingsAssistantPane: View {
                                 Button("清除密钥", action: onClearGlobalKey)
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
+                                    .speechRailPointerCursor()
                             }
                         }
                     }
@@ -163,6 +164,7 @@ struct SettingsAssistantPane: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .speechRailPointerCursor()
                         .help(globalActionHelp)
                         .disabled(globalCheckDisabled)
                         Text("按功能使用 Chat Completions 或 Responses；SpeechRail 不主动开启 thinking。")
@@ -265,9 +267,11 @@ struct SettingsAssistantPane: View {
                             Button("打开数据目录", action: onOpenDataDirectory)
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                                .speechRailPointerCursor()
                             Button("备份记录库", action: onBackupLibrary)
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                                .speechRailPointerCursor()
                         }
                     }
                 }
@@ -500,6 +504,7 @@ struct SettingsAssistantPane: View {
                             }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                                .speechRailPointerCursor()
                         }
                     }
                 }
@@ -516,6 +521,7 @@ struct SettingsAssistantPane: View {
                         }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
+                            .speechRailPointerCursor()
                             .help(moduleActionHelp(for: module))
                             .disabled(moduleCheckDisabled(for: module))
                         SettingsConnectionStatus(

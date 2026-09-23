@@ -53,7 +53,7 @@ public struct TeleprompterView: View {
     public var body: some View {
         PageScaffold(
             route: .teleprompter,
-            layout: .scroll(
+            layout: .fill(
                 minimumHeight: SpeechRailDesignTokens.Teleprompter.preparationMinimumHeight
             )
         ) {
@@ -649,6 +649,9 @@ public struct TeleprompterView: View {
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("清空稿件搜索")
+                        .help("清空稿件搜索")
+                        .speechRailPointerCursor()
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
@@ -1284,6 +1287,7 @@ public struct TeleprompterView: View {
                             .font(SpeechRailDesignTokens.Typography.captionMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                             .disabled(unresolved.isEmpty)
+                            .speechRailPointerCursor()
 
                             if !selectedReviewItemIDs.isEmpty {
                                 Text("已选 \(selectedReviewItemIDs.count) 项")

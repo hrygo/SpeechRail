@@ -157,7 +157,7 @@ public struct SpeakerLabelingPanel: View {
                 } label: {
                     RowActionGlyph(.edit)
                 }
-                .buttonStyle(.plain)
+                .speechRailButton(.quiet)
                 .accessibilityLabel("改 \(SpeakerLabeling.chipText(label: speaker.label, displayName: speaker.displayName)) 的名字")
             }
 
@@ -169,6 +169,7 @@ public struct SpeakerLabelingPanel: View {
                         Task { await labeling.markAsMe(label: speaker.label) }
                     }
                     .buttonStyle(.link)
+                    .speechRailPointerCursor()
 
                     let others = labeling.speakers.filter { $0.label != speaker.label }
                     if let target = others.first {
@@ -176,6 +177,7 @@ public struct SpeakerLabelingPanel: View {
                             Task { await labeling.merge(label: speaker.label, into: target.label) }
                         }
                         .buttonStyle(.link)
+                        .speechRailPointerCursor()
                         .help("这两个标签的行都保留；合并只改显示名，可回溯")
                     }
                     if let suggestion = speaker.suggestedMergeInto, others.contains(where: { $0.label == suggestion }) {
@@ -200,9 +202,11 @@ public struct SpeakerLabelingPanel: View {
                 Button("保存") { Task { await save(speaker) } }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .speechRailPointerCursor()
                 Button("取消") { editingLabel = nil }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .speechRailPointerCursor()
             }
 
             let existing = Array(Set(labeling.speakers.compactMap(\.displayName))).sorted()
@@ -215,6 +219,7 @@ public struct SpeakerLabelingPanel: View {
                         Button(name) { draftName = name }
                             .buttonStyle(.link)
                             .font(SpeechRailDesignTokens.Typography.caption)
+                            .speechRailPointerCursor()
                     }
                 }
             }

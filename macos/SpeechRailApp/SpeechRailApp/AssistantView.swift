@@ -1087,6 +1087,7 @@ public struct AssistantView: View {
                     }
                     .buttonStyle(.plain)
                     .help("填入「\(item.prompt)」")
+                    .speechRailPointerCursor()
                 }
             }
         }
@@ -1115,6 +1116,7 @@ public struct AssistantView: View {
             .font(SpeechRailDesignTokens.Typography.captionMedium)
             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -1163,7 +1165,10 @@ public struct AssistantView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("选择对话方式：\(option.title)")
+                    .accessibilityValue(option == mode ? "已选中" : "未选中")
                     .help("用这种方式开始下一轮")
+                    .speechRailPointerCursor()
                 }
             }
             Spacer(minLength: 0)
@@ -1195,7 +1200,10 @@ public struct AssistantView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("选择角色：\(persona.title)")
+                    .accessibilityValue(persona.id == selectedPersonaID ? "已选中" : "未选中")
                     .help("用这条角色开始下一轮；开始之后本轮不再变")
+                    .speechRailPointerCursor()
                 }
             }
             Spacer(minLength: 0)
@@ -1368,6 +1376,7 @@ public struct AssistantView: View {
                 }
                 .buttonStyle(.plain)
                 .help("直接调用本地 Apple Silicon TTS 试听当前音色，感受本地声学质量")
+                .speechRailPointerCursor()
             }
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 presetChip(title: "DeepSeek", url: "https://api.deepseek.com", model: "deepseek-chat")
@@ -1402,7 +1411,9 @@ public struct AssistantView: View {
                 .foregroundStyle(isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.ink)
         }
         .buttonStyle(.plain)
+        .accessibilityValue(isSelected ? "已填入" : "未填入")
         .help("一键填入 \(title) 的地址与默认推荐模型")
+        .speechRailPointerCursor()
     }
 
     private var capabilitiesCard: some View {
@@ -1630,6 +1641,7 @@ public struct AssistantView: View {
         .buttonStyle(.plain)
         .fixedSize(horizontal: true, vertical: false)
         .help("当前使用的朗读音色；点击在右栏切换音色，下一句生效")
+        .speechRailPointerCursor()
     }
 
     private var liveChatPhasePill: some View {
@@ -2065,18 +2077,39 @@ public struct AssistantView: View {
     private func voiceRow(_ voice: CreatorVoice) -> some View {
         let isSelected = voice.id == effectiveVoiceID
         return HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight + 1) {
-                Text(voice.name)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                Text(voiceSubtitle(voice))
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .lineLimit(1)
+            Button {
+                selectVoice(voice)
+            } label: {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight + 1) {
+                        Text(voice.name)
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .lineLimit(1)
+                        Text(voiceSubtitle(voice))
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    StatusPill(
+                        tone: voice.available ? .healthy : .attention,
+                        label: voicePillLabel(voice, isSelected: isSelected)
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            StatusPill(tone: voice.available ? .healthy : .attention, label: voicePillLabel(voice, isSelected: isSelected))
+            .speechRailInteractiveButtonStyle(
+                fillsAvailableWidth: true,
+                minimumHeight: SpeechRailDesignTokens.List.tallRowHeight,
+                horizontalInset: 0
+            )
+            .disabled(!voice.available)
+            .accessibilityLabel("选择音色 \(voice.name)")
+            .accessibilityValue(isSelected ? "已选中" : (voice.available ? "未选中" : "不可用"))
+            .help(voice.available ? "选择 \(voice.name)" : "这个音色现在用不了")
+
             let isPlaying = model.isAudioPlaying && model.playingVoiceID == voice.id
             let isLoading = model.isCreatingSpeech && model.previewingVoiceID == voice.id
             Button {
@@ -2096,17 +2129,18 @@ public struct AssistantView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!voice.available)
-            .help(isPlaying ? "停止试听" : (isLoading ? "正在准备试听音频…" : (voice.available ? "试听 \(voice.name)" : "这个音色现在用不了")))
-            .accessibilityLabel(isPlaying ? "停止试听" : "试听 \(voice.name)")
+            .help(
+                isPlaying ? "停止试听 \(voice.name)" :
+                    (isLoading ? "取消准备试听 \(voice.name)" :
+                        (voice.available ? "试听 \(voice.name)" : "这个音色现在用不了"))
+            )
+            .accessibilityLabel(
+                isPlaying ? "停止试听 \(voice.name)" :
+                    (isLoading ? "取消准备试听 \(voice.name)" : "试听 \(voice.name)")
+            )
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, 10)
         .background(isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.08) : Color.clear)
-        .contentShape(Rectangle())
-            .onTapGesture {
-                guard voice.available else { return }
-                selectVoice(voice)
-            }
         .accessibilityElement(children: .contain)
     }
 
@@ -2380,7 +2414,15 @@ public struct AssistantView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help(isPlaying ? "停止试听" : (isLoading ? "正在准备试听音频…" : "随时试听当前音色：\(voice.name)"))
+                .accessibilityLabel(
+                    isPlaying ? "停止试听 \(voice.name)" :
+                        (isLoading ? "取消准备试听 \(voice.name)" : "试听 \(voice.name)")
+                )
+                .help(
+                    isPlaying ? "停止试听 \(voice.name)" :
+                        (isLoading ? "取消准备试听 \(voice.name)" : "试听当前音色：\(voice.name)")
+                )
+                .speechRailPointerCursor()
             }
         }
         .opacity(state == .blocked ? 0.45 : 1)
@@ -2953,6 +2995,7 @@ public struct AssistantView: View {
                 .buttonStyle(.plain)
                 .disabled(voicePageIndex <= 0)
                 .opacity(voicePageIndex <= 0 ? 0.35 : 1.0)
+                .speechRailPointerCursor()
 
                 Button {
                     if voicePageIndex < totalVoicePages - 1 {
@@ -2979,6 +3022,7 @@ public struct AssistantView: View {
                 .buttonStyle(.plain)
                 .disabled(voicePageIndex >= totalVoicePages - 1)
                 .opacity(voicePageIndex >= totalVoicePages - 1 ? 0.35 : 1.0)
+                .speechRailPointerCursor()
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -3006,6 +3050,9 @@ public struct AssistantView: View {
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("清空音色搜索")
+                        .help("清空音色搜索")
+                        .speechRailPointerCursor()
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
@@ -3049,6 +3096,8 @@ public struct AssistantView: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityValue(voiceFilterScope == scope ? "已选中" : "未选中")
+                        .speechRailPointerCursor()
                     }
                     Spacer()
                     if model.isRefreshingCreatorVoices {
@@ -3452,6 +3501,7 @@ public struct AssistantView: View {
                                     .buttonStyle(.plain)
                                     .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                    .speechRailPointerCursor()
 
                                     InPlaceDeleteButton(
                                         style: .compactText,

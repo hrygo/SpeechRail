@@ -51,13 +51,11 @@ public struct MeetingView: View {
     public init() {}
 
     public var body: some View {
-        // 与语音助手页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
-        // 会议页的三张卡（音频来源 / 本机 App / 转录流）都会随运行中的 App 数与
-        // 转录长度变长时，页面使用外层滚动合同，避免把理想高度直接报给分栏
-        // （2026-09-19 实测：分栏被撑到 1355×9736、整窗全白，见 AssistantView.body 注）。
+        // 页面本身固定在窗口视口内；实时转写与会后正文由各自内容面板滚动。
+        // 动态来源列表也在展开后的来源面板内滚动，不能把整页撑高。
         PageScaffold(
             route: .meeting,
-            layout: .scroll(minimumHeight: 420)
+            layout: .fill(minimumHeight: 420)
         ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 statusBar
@@ -68,6 +66,7 @@ public struct MeetingView: View {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                         mainArea
                     }
+                    .frame(maxHeight: .infinity, alignment: .top)
                     if !isInspectorCollapsed {
                         inspector.speechRailInspectorColumn(alignment: .topLeading)
                     }
@@ -380,6 +379,7 @@ public struct MeetingView: View {
             sourceOptions
             libraryCard
         }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// 「按什么来源记」是**可选项**，默认收起成一行。
@@ -389,11 +389,14 @@ public struct MeetingView: View {
     /// 等于让人在按「开始」之前先读完一份设置手册。这里折成一行，展开才有全部选择。
     private var sourceOptions: some View {
         DisclosureGroup(isExpanded: $showsSourceOptions) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                SessionPanel { sourcesCard }
-                SessionPanel { blockedSourcesCard }
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                    SessionPanel { sourcesCard }
+                    SessionPanel { blockedSourcesCard }
+                }
+                .padding(.top, SpeechRailDesignTokens.Spacing.sm)
             }
-            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+            .frame(maxHeight: .infinity)
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text("想连电脑里的声音一起记（可选）")
@@ -1221,6 +1224,9 @@ public struct MeetingView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityValue(
+                        (selectedMinutesVersionID ?? latestVersionID) == version.id ? "正在查看" : "未选中"
+                    )
                     .speechRailPointerCursor()
                 }
             }

@@ -633,6 +633,7 @@ public struct SessionTurnRow: View {
         .buttonStyle(.plain)
         .help(action.help)
         .accessibilityLabel(action.title)
+        .speechRailPointerCursor()
     }
 
     @ViewBuilder
@@ -973,6 +974,9 @@ public struct SessionLibraryColumn: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("清空记录搜索")
+                    .help("清空记录搜索")
+                    .speechRailPointerCursor()
                 }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)

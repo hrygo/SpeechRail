@@ -140,23 +140,23 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     public var systemImage: String {
         switch self {
         case .dubbing:
-            "waveform.and.mic"
+            "waveform"
         case .voiceDesign:
-            "waveform.badge.plus"
+            "sparkles"
         case .voiceClone:
             "mic"
         case .voiceLibrary:
-            "music.note.list"
+            "square.stack"
         case .works:
-            "square.stack.3d.up"
+            "folder"
         case .assistant:
-            "message.circle"
+            "bubble.left"
         case .meeting:
             "person.2"
         case .captions:
             "captions.bubble"
         case .teleprompter:
-            "text.bubble"
+            "text.alignleft"
         case .overview:
             "server.rack"
         case .monitoring:

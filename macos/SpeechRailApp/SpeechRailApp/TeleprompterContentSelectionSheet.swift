@@ -105,6 +105,7 @@ public struct TeleprompterContentSelectionSheet: View {
             .font(SpeechRailDesignTokens.Typography.captionMedium)
             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
             .disabled(selectedIndices.count == paragraphs.count)
+            .speechRailPointerCursor()
 
             Button("全部取消") {
                 selectedIndices.removeAll()
@@ -113,6 +114,7 @@ public struct TeleprompterContentSelectionSheet: View {
             .font(SpeechRailDesignTokens.Typography.captionMedium)
             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             .disabled(selectedIndices.isEmpty)
+            .speechRailPointerCursor()
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
