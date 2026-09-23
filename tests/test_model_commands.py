@@ -56,7 +56,7 @@ def test_model_catalog_payload_lists_the_locked_coreml_asset() -> None:
         "dtype": "fp16",
     }
     assert coreml["file_count"] == 10
-    assert set(coreml["required_by"]) == {"balanced", "quality"}
+    assert set(coreml["required_by"]) == {"balanced", "quality", "extreme"}
     assert "path" not in coreml
     assert "url" not in coreml
 

@@ -324,7 +324,7 @@ def test_quantization_rejects_bits_and_dtype_together() -> None:
         )
 
 
-def test_catalog_rejects_missing_dtype_for_bf16_policy() -> None:
+def test_catalog_rejects_unquantized_artifact_without_dtype() -> None:
     payload = _catalog_payload()
     artifacts = payload["artifacts"]
     assert isinstance(artifacts, list)
@@ -333,7 +333,9 @@ def test_catalog_rejects_missing_dtype_for_bf16_policy() -> None:
     assert isinstance(quantization, dict)
     quantization["dtype"] = None
 
-    with pytest.raises(ValidationError, match="ASR precision"):
+    with pytest.raises(
+        ValidationError, match=r"unquantized artifact must declare quantization\.dtype"
+    ):
         ModelCatalog.model_validate(payload)
 
 
