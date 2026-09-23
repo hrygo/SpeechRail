@@ -147,7 +147,7 @@ public struct TeleprompterContentSelectionSheet: View {
                             EmptyView()
                         }
                         .toggleStyle(.checkbox)
-                        .padding(.top, 2)
+                        .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                             HStack {

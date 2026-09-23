@@ -120,11 +120,11 @@ public struct TeleprompterTrialReadingSheet: View {
             // 等宽大数字计时器
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "stopwatch")
-                    .font(.system(size: 20))
+                    .font(SpeechRailDesignTokens.Typography.title3Regular)
                     .foregroundStyle(isRunning ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkSecondary)
 
                 Text(formatSeconds(elapsedSeconds))
-                    .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                    .font(SpeechRailDesignTokens.Typography.timerDisplay)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)

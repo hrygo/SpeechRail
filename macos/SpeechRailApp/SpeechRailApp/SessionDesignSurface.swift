@@ -461,7 +461,7 @@ public struct SessionTurnRow: View {
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, 6)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
         .frame(maxWidth: .infinity)
         .onHover { hovering in
             isHovered = hovering
@@ -477,12 +477,12 @@ public struct SessionTurnRow: View {
             ZStack {
                 Circle()
                     .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
-                    .frame(width: 26, height: 26)
+                    .frame(width: SpeechRailDesignTokens.Layout.badgeRegularSize, height: SpeechRailDesignTokens.Layout.badgeRegularSize)
                 Image(systemName: "waveform.and.mic")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(SpeechRailDesignTokens.Typography.subheadlineBold)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
             }
-            .padding(.top, 2)
+            .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
             VStack(alignment: .leading, spacing: 4) {
                 // 助手头部标识行
@@ -514,8 +514,8 @@ public struct SessionTurnRow: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.roomy)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.cozy)
                 .background(
                     SpeechRailDesignTokens.Color.field,
                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
@@ -569,8 +569,8 @@ public struct SessionTurnRow: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.roomy)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.cozy)
             .background(
                 SpeechRailDesignTokens.Color.rail.opacity(0.14),
                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
@@ -622,9 +622,9 @@ public struct SessionTurnRow: View {
             onAction?(action)
         } label: {
             Image(systemName: action.systemImage)
-                .font(.system(size: 10, weight: .medium))
+                .font(SpeechRailDesignTokens.Typography.calloutMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .frame(width: 22, height: 20)
+                .frame(width: SpeechRailDesignTokens.Layout.actionIconButtonWidth, height: SpeechRailDesignTokens.Layout.actionIconButtonHeight)
                 .background(
                     SpeechRailDesignTokens.Color.recessedField,
                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
@@ -738,7 +738,7 @@ public struct SessionVoiceCapsule<Content: View>: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .accessibilityHidden(true)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.cozy)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
             .background(
                 SpeechRailDesignTokens.Color.inputField,
@@ -970,7 +970,7 @@ public struct SessionLibraryColumn: View {
                         query = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
+                            .font(SpeechRailDesignTokens.Typography.subheadline)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }
                     .buttonStyle(.plain)
@@ -980,7 +980,7 @@ public struct SessionLibraryColumn: View {
                 }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, 6)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
             .background(
                 SpeechRailDesignTokens.Color.inputField,
                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -1004,7 +1004,7 @@ public struct SessionLibraryColumn: View {
                         VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Spacer()
                             Image(systemName: summaries.isEmpty ? "archivebox" : "line.3.horizontal.decrease.circle")
-                                .font(.system(size: 24))
+                                .font(SpeechRailDesignTokens.Typography.emptyStateIcon)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                             Text(summaries.isEmpty ? "还没有历史会话记录" : "没有匹配的记录")
                                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -1055,9 +1055,9 @@ public struct SessionLibraryColumn: View {
                         ZStack {
                             Circle()
                                 .fill(SpeechRailDesignTokens.Color.rail.opacity(isSelected ? 0.22 : 0.12))
-                                .frame(width: 18, height: 18)
+                                .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
                             Image(systemName: "waveform.and.mic")
-                                .font(.system(size: 9, weight: .bold))
+                                .font(SpeechRailDesignTokens.Typography.captionBold)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                         }
 
@@ -1121,7 +1121,7 @@ public struct SessionLibraryColumn: View {
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.vertical, 8)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             isSelected
@@ -1251,8 +1251,8 @@ public struct InPlaceDeleteButton: View {
                         Text(confirmText)
                             .font(SpeechRailDesignTokens.Typography.captionMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                             .background(
                                 SpeechRailDesignTokens.Color.critical.opacity(0.12),
                                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
@@ -1267,8 +1267,8 @@ public struct InPlaceDeleteButton: View {
                         Text(cancelText)
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                             .background(
                                 SpeechRailDesignTokens.Color.field,
                                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
@@ -1311,9 +1311,9 @@ public struct InPlaceDeleteButton: View {
                     switch style {
                     case .compactIcon:
                         Image(systemName: systemImage ?? "trash")
-                            .font(.system(size: 11, weight: .regular))
+                            .font(SpeechRailDesignTokens.Typography.subheadline)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .padding(4)
+                            .padding(SpeechRailDesignTokens.Spacing.micro)
                             .contentShape(Rectangle())
                     case .compactText:
                         Text(title)
