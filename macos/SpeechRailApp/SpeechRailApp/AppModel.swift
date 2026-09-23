@@ -257,6 +257,15 @@ public final class AppModel {
     /// 每次进入都会递增。取消链在发起时记住自己的代数，等待与刷新期间一旦有更新
     /// 入口 bump，就自认过期、不再落地状态，避免覆盖更新的终态（issue #88）。
     private var operationGeneration: UInt64 = 0
+    /// 模型数据的刷新代际：并发刷新时只有最新一代可以落地，旧读取不得覆盖新结果（issue #87）。
+    private var modelRefreshGeneration: UInt64 = 0
+    /// 预检读取的刷新代际（issue #87）。
+    private var preflightRefreshGeneration: UInt64 = 0
+    /// 服务能力读取的刷新代际（issue #87）。
+    private var serviceCapabilitiesRefreshGeneration: UInt64 = 0
+    /// 共享 `message` 的代际令牌：刷新 / 操作入口开始时 bump，使过期链已写或待写的
+    /// 文案失效，过期链的写入一律丢弃（issue #87）。
+    private var messageGeneration: UInt64 = 0
     private var capabilitySnapshotStore = CapabilitySnapshotStore()
     private var safeVoiceCatalogETag: String?
     private var synthesisTask: Task<Void, Never>?
@@ -1438,13 +1447,19 @@ public final class AppModel {
     /// 只有旧服务返回 404/405 或 snapshot schema 无法识别时，才读取 `/v1/models`。
     /// 鉴权、冲突、未就绪和其他服务错误不会静默降级成成功。
     public func refreshServiceCapabilities() async {
-        guard !isRefreshingServiceCapabilities else { return }
+        serviceCapabilitiesRefreshGeneration &+= 1
+        let refreshGeneration = serviceCapabilitiesRefreshGeneration
         isRefreshingServiceCapabilities = true
         serviceCapabilitiesLoadState = .loading
-        defer { isRefreshingServiceCapabilities = false }
+        defer {
+            if refreshGeneration == serviceCapabilitiesRefreshGeneration {
+                isRefreshingServiceCapabilities = false
+            }
+        }
 
         if discoveryState.shouldRetryOnRefresh {
             await refreshDiscovery()
+            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
         }
 
         if discoveryState == .loaded, let snapshot = effectiveCapabilities {
@@ -1465,12 +1480,16 @@ public final class AppModel {
         }
 
         do {
-            serviceCapabilities = try await capabilityClient.fetchModelCapabilities()
+            let capabilities = try await capabilityClient.fetchModelCapabilities()
+            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
+            serviceCapabilities = capabilities
             serviceCapabilitiesLoadState = .loaded
         } catch is CancellationError {
+            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
             // 取消不是结论：丢掉未完成的读取，回到“还没有读到”。
             serviceCapabilitiesLoadState = .unknown
         } catch {
+            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
             serviceCapabilities = nil
             serviceCapabilitiesLoadState = .failed
         }
@@ -1541,7 +1560,7 @@ public final class AppModel {
         healthRefreshGeneration &+= 1
         let refreshGeneration = healthRefreshGeneration
         refreshControlAgentStatus()
-        message = nil
+        let messageGeneration = beginMessageGeneration()
         do {
             let snapshot = try await apiClient.fetchHealthSnapshot()
             guard refreshGeneration == healthRefreshGeneration else { return }
@@ -1575,13 +1594,13 @@ public final class AppModel {
             let status = try await transport.send(ControlRequest(command: .profileStatus))
             guard refreshGeneration == healthRefreshGeneration else { return }
             profile = status.profile
-            message = nil
+            setMessage(nil, generation: messageGeneration)
         } catch is CancellationError {
             return
         } catch {
             guard refreshGeneration == healthRefreshGeneration else { return }
             controlPlaneMessage = Self.controlErrorMessage(for: error, fallback: "控制 Agent 尚未连接")
-            message = controlPlaneMessage
+            setMessage(controlPlaneMessage, generation: messageGeneration)
         }
     }
 
@@ -1597,42 +1616,60 @@ public final class AppModel {
     }
 
     public func refreshModels() async {
-        guard !isRefreshingModels else { return }
         operationGeneration &+= 1
-        await refreshModels(expectedGeneration: operationGeneration)
+        await refreshModels(
+            expectedGeneration: operationGeneration,
+            messageGeneration: beginMessageGeneration()
+        )
     }
 
-    /// - Parameter expectedGeneration: 发起这次刷新的操作链所持有的代数。等待响应期间
+    /// - Parameter expectedGeneration: 发起这次刷新的操作链所持有的操作代数。等待响应期间
     ///   只要有更新的 execute / cancel / refresh 入口 bump 过代数，这次刷新就不再落地，
     ///   过期的取消链因此无法覆盖新状态（issue #88）。
-    private func refreshModels(expectedGeneration: UInt64) async {
+    /// - Parameter messageGeneration: 写入共享 `message` 时持有的文案代际；被更新的刷新
+    ///   bump 后不得再落地（issue #87）。
+    private func refreshModels(
+        expectedGeneration: UInt64,
+        messageGeneration: UInt64
+    ) async {
         guard expectedGeneration == operationGeneration else { return }
-        guard !isRefreshingModels else { return }
+        modelRefreshGeneration &+= 1
+        let refreshGeneration = modelRefreshGeneration
         isRefreshingModels = true
-        defer { isRefreshingModels = false }
+        defer {
+            if refreshGeneration == modelRefreshGeneration {
+                isRefreshingModels = false
+            }
+        }
         refreshControlAgentStatus()
         do {
             let catalog = try await transport.send(ControlRequest(command: .modelCatalog))
-            guard expectedGeneration == operationGeneration else { return }
-            guard !handleModelResponseFailure(catalog) else {
+            guard expectedGeneration == operationGeneration,
+                  refreshGeneration == modelRefreshGeneration
+            else { return }
+            guard !handleModelResponseFailure(catalog, messageGeneration: messageGeneration) else {
                 return
             }
             guard let catalogSnapshot = catalog.modelCatalog else {
                 markModelUnavailable(
                     state: .failed,
-                    message: "模型目录暂时不可用"
+                    message: "模型目录暂时不可用",
+                    messageGeneration: messageGeneration
                 )
                 return
             }
             let status = try await transport.send(ControlRequest(command: .modelStatus))
-            guard expectedGeneration == operationGeneration else { return }
-            guard !handleModelResponseFailure(status) else {
+            guard expectedGeneration == operationGeneration,
+                  refreshGeneration == modelRefreshGeneration
+            else { return }
+            guard !handleModelResponseFailure(status, messageGeneration: messageGeneration) else {
                 return
             }
             guard let statusSnapshot = status.modelStatus else {
                 markModelUnavailable(
                     state: .notReady,
-                    message: "模型状态暂时不可用"
+                    message: "模型状态暂时不可用",
+                    messageGeneration: messageGeneration
                 )
                 return
             }
@@ -1651,18 +1688,24 @@ public final class AppModel {
                 }
             }
             if let warning = status.message, !warning.isEmpty {
-                message = warning
+                setMessage(warning, generation: messageGeneration)
             } else {
-                message = nil
+                setMessage(nil, generation: messageGeneration)
             }
         } catch is CancellationError {
             return
         } catch {
+            guard expectedGeneration == operationGeneration,
+                  refreshGeneration == modelRefreshGeneration
+            else { return }
             modelCatalog = nil
             modelStatus = nil
             preserveRecoverableModelOperation()
             modelAvailability = .failed
-            message = Self.controlErrorMessage(for: error, fallback: "模型状态暂时不可用")
+            setMessage(
+                Self.controlErrorMessage(for: error, fallback: "模型状态暂时不可用"),
+                generation: messageGeneration
+            )
         }
     }
 
@@ -1675,12 +1718,16 @@ public final class AppModel {
         guard let registration else { return }
         refreshControlAgentStatus()
         guard controlAgentStatus.kind == .notRegistered else { return }
+        let messageGeneration = beginMessageGeneration()
         do {
             try registration.register()
             refreshControlAgentStatus()
-            message = controlAgentStatus.title
+            setMessage(controlAgentStatus.title, generation: messageGeneration)
         } catch {
-            message = "无法启用控制 Agent：\(Self.controlAgentErrorMessage(for: error))"
+            setMessage(
+                "无法启用控制 Agent：\(Self.controlAgentErrorMessage(for: error))",
+                generation: messageGeneration
+            )
         }
     }
 
@@ -1792,14 +1839,20 @@ public final class AppModel {
     }
 
     public func refreshPreflight() async {
-        guard !isRefreshingPreflight else { return }
+        preflightRefreshGeneration &+= 1
+        let refreshGeneration = preflightRefreshGeneration
         isRefreshingPreflight = true
-        defer { isRefreshingPreflight = false }
+        defer {
+            if refreshGeneration == preflightRefreshGeneration {
+                isRefreshingPreflight = false
+            }
+        }
         refreshControlAgentStatus()
         preflightMessage = nil
         preflightRequestID = nil
         do {
             let response = try await transport.send(ControlRequest(command: .preflight))
+            guard refreshGeneration == preflightRefreshGeneration else { return }
             preflightRequestID = response.requestID
             lastPreflightRefresh = Date()
             // A response without checks is still a new observation. Never
@@ -1811,6 +1864,7 @@ public final class AppModel {
         } catch is CancellationError {
             return
         } catch {
+            guard refreshGeneration == preflightRefreshGeneration else { return }
             preflightChecks = []
             preflightMessage = Self.controlErrorMessage(for: error, fallback: "预检暂时不可用")
         }
@@ -1825,7 +1879,8 @@ public final class AppModel {
         guard let operationID = operation?.operationID else { return }
         operationGeneration &+= 1
         let generation = operationGeneration
-        message = "正在停止模型准备…"
+        let messageGeneration = beginMessageGeneration()
+        setMessage("正在停止模型准备…", generation: messageGeneration)
         do {
             let response = try await transport.send(
                 ControlRequest(command: .operationCancel, operationID: operationID)
@@ -1833,23 +1888,37 @@ public final class AppModel {
             guard generation == operationGeneration else { return }
             operation = response.operation ?? operation
             if response.status == .failed {
-                message = response.message ?? "无法取消操作"
+                setMessage(response.message ?? "无法取消操作", generation: messageGeneration)
             } else if response.operation?.phase?.lowercased() == "cancelling" {
-                if case .superseded = await waitForOperation(operationID, generation: generation) {
+                if case .superseded = await waitForOperation(
+                    operationID,
+                    generation: generation,
+                    messageGeneration: messageGeneration
+                ) {
                     return
                 }
-                await refreshModels(expectedGeneration: generation)
+                await refreshModels(
+                    expectedGeneration: generation,
+                    messageGeneration: beginMessageGeneration()
+                )
             } else if response.status == .cancelled {
-                message = "模型准备已取消"
+                setMessage("模型准备已取消", generation: messageGeneration)
             } else {
                 // 确认收到但既无 cancelling 相位也无终态快照（如旧 UI 测试替身）：
                 // 刷新一次，别把「正在停止…」的待定文案永久留在界面上。
-                await refreshModels(expectedGeneration: generation)
+                await refreshModels(
+                    expectedGeneration: generation,
+                    messageGeneration: beginMessageGeneration()
+                )
             }
         } catch is CancellationError {
             return
         } catch {
-            message = Self.controlErrorMessage(for: error, fallback: "无法取消操作")
+            guard generation == operationGeneration else { return }
+            setMessage(
+                Self.controlErrorMessage(for: error, fallback: "无法取消操作"),
+                generation: messageGeneration
+            )
         }
     }
 
@@ -1861,7 +1930,7 @@ public final class AppModel {
         guard canExecuteMutation(for: command) else { return }
         operationGeneration &+= 1
         isBusy = true
-        message = nil
+        let messageGeneration = beginMessageGeneration()
         let serviceMutation = Self.serviceOperationPhase(for: command)
         if let serviceMutation {
             serviceOperation = ServiceOperationStatus(
@@ -1889,7 +1958,7 @@ public final class AppModel {
             {
                 let fallbackMessage = response.status == .cancelled ? "操作已取消" : "操作未完成"
                 let failureMessage = response.message ?? fallbackMessage
-                message = failureMessage
+                setMessage(failureMessage, generation: messageGeneration)
                 if serviceMutation != nil {
                     serviceOperation = ServiceOperationStatus(
                         command: command,
@@ -1900,7 +1969,10 @@ public final class AppModel {
                 return
             }
             if let operationID = response.operation?.operationID {
-                switch await waitForOperation(operationID) {
+                switch await waitForOperation(
+                    operationID,
+                    messageGeneration: messageGeneration
+                ) {
                 case .committed:
                     break
                 case .failed:
@@ -1962,7 +2034,7 @@ public final class AppModel {
             return
         } catch {
             let failureMessage = Self.controlErrorMessage(for: error, fallback: "控制 Agent 不可用")
-            message = failureMessage
+            setMessage(failureMessage, generation: messageGeneration)
             if serviceMutation != nil {
                 serviceOperation = ServiceOperationStatus(
                     command: command,
@@ -1975,7 +2047,8 @@ public final class AppModel {
 
     private func waitForOperation(
         _ operationID: String,
-        generation: UInt64? = nil
+        generation: UInt64? = nil,
+        messageGeneration: UInt64
     ) async -> OperationWaitResult {
         let maxPolls = operation?.command == .modelPrepare ? 43_200 : 120
         for _ in 0..<maxPolls {
@@ -1993,7 +2066,10 @@ public final class AppModel {
                    state == .committed || state == .failed || state == .cancelled || state == .interrupted
                 {
                     if state == .failed || state == .cancelled || state == .interrupted {
-                        message = response.operation?.message ?? response.message ?? "操作失败"
+                        setMessage(
+                            response.operation?.message ?? response.message ?? "操作失败",
+                            generation: messageGeneration
+                        )
                         return .failed
                     }
                     return .committed
@@ -2001,11 +2077,14 @@ public final class AppModel {
             } catch is CancellationError {
                 return .cancelled
             } catch {
-                message = Self.controlErrorMessage(for: error, fallback: "无法读取操作状态")
+                setMessage(
+                    Self.controlErrorMessage(for: error, fallback: "无法读取操作状态"),
+                    generation: messageGeneration
+                )
                 return .failed
             }
         }
-        message = "操作仍在后台运行"
+        setMessage("操作仍在后台运行", generation: messageGeneration)
         return .stillRunning
     }
 
@@ -2185,7 +2264,10 @@ public final class AppModel {
     }
 
     @discardableResult
-    private func handleModelResponseFailure(_ response: ControlResponse) -> Bool {
+    private func handleModelResponseFailure(
+        _ response: ControlResponse,
+        messageGeneration: UInt64
+    ) -> Bool {
         guard response.status == .failed else { return false }
         let state: ModelAvailabilityState = switch response.errorCode {
         case .unsupported:
@@ -2198,19 +2280,24 @@ public final class AppModel {
         let fallback = state == .unsupported
             ? "模型管理暂不可用：服务组件版本不匹配"
             : "模型状态暂时不可用"
-        markModelUnavailable(state: state, message: response.message ?? fallback)
+        markModelUnavailable(
+            state: state,
+            message: response.message ?? fallback,
+            messageGeneration: messageGeneration
+        )
         return true
     }
 
     private func markModelUnavailable(
         state: ModelAvailabilityState,
-        message: String
+        message: String,
+        messageGeneration: UInt64
     ) {
         modelCatalog = nil
         modelStatus = nil
         preserveRecoverableModelOperation()
         modelAvailability = state
-        self.message = message
+        setMessage(message, generation: messageGeneration)
     }
 
     private func preserveRecoverableModelOperation() {
@@ -2224,19 +2311,35 @@ public final class AppModel {
         }
     }
 
+    /// 开启一个新的共享文案代际：使此前写入的文案失效，并返回本次代际供写入方持有。
+    private func beginMessageGeneration() -> UInt64 {
+        messageGeneration &+= 1
+        message = nil
+        return messageGeneration
+    }
+
+    /// 只在调用方仍持有最新文案代际时落地；过期链的写入被静默丢弃（issue #87）。
+    private func setMessage(_ value: String?, generation: UInt64) {
+        guard generation == messageGeneration else { return }
+        message = value
+    }
+
     private func canExecuteMutation(for command: ControlCommand) -> Bool {
         guard command.isMutation else { return true }
         refreshControlAgentStatus()
         if command != .operationCancel && hasActiveMutation {
-            message = "已有操作正在进行，请等待当前操作完成。"
+            setMessage("已有操作正在进行，请等待当前操作完成。", generation: messageGeneration)
             return false
         }
         guard controlAgentStatus.allowsMutation else {
-            message = "\(controlAgentStatus.title)：\(controlAgentStatus.detail)"
+            setMessage(
+                "\(controlAgentStatus.title)：\(controlAgentStatus.detail)",
+                generation: messageGeneration
+            )
             return false
         }
         guard controlPlaneMessage == nil else {
-            message = "控制 Agent 不可用，请重新读取或运行诊断"
+            setMessage("控制 Agent 不可用，请重新读取或运行诊断", generation: messageGeneration)
             return false
         }
         return true
