@@ -334,7 +334,10 @@ public struct TeleprompterView: View {
                 ZStack {
                     Circle()
                         .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
-                        .frame(width: 56, height: 56)
+                        .frame(
+                            width: SpeechRailDesignTokens.Teleprompter.welcomeIconOuterSize,
+                            height: SpeechRailDesignTokens.Teleprompter.welcomeIconOuterSize
+                        )
                     Image(systemName: "text.bubble")
                         .font(.system(size: SpeechRailDesignTokens.Teleprompter.welcomeIconSize, weight: .semibold))
                         .foregroundStyle(SpeechRailDesignTokens.Color.rail)
@@ -349,7 +352,7 @@ public struct TeleprompterView: View {
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 560)
+                        .frame(maxWidth: SpeechRailDesignTokens.Teleprompter.welcomeContentMaxWidth)
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -384,7 +387,6 @@ public struct TeleprompterView: View {
                 .padding(.top, SpeechRailDesignTokens.Spacing.xs)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
 
             // 开箱即用范例卡片
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -400,7 +402,16 @@ public struct TeleprompterView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 }
 
-                HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(
+                            .adaptive(minimum: SpeechRailDesignTokens.Teleprompter.welcomeTemplateMinimumWidth),
+                            spacing: SpeechRailDesignTokens.Spacing.sm
+                        )
+                    ],
+                    alignment: .leading,
+                    spacing: SpeechRailDesignTokens.Spacing.sm
+                ) {
                     ForEach(starterTemplates) { template in
                         Button {
                             session.createDocument(title: template.title, sourceText: template.content)
@@ -461,7 +472,16 @@ public struct TeleprompterView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
 
-                HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(
+                            .adaptive(minimum: SpeechRailDesignTokens.Teleprompter.welcomeTemplateMinimumWidth),
+                            spacing: SpeechRailDesignTokens.Spacing.sm
+                        )
+                    ],
+                    alignment: .leading,
+                    spacing: SpeechRailDesignTokens.Spacing.sm
+                ) {
                     workflowStepCard(
                         step: "1",
                         icon: "square.and.pencil",
@@ -600,13 +620,88 @@ public struct TeleprompterView: View {
     // MARK: - 已有稿件时的工作台
 
     private var populatedWorkspace: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-            recentDocuments
-                .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
-                .disabled(!session.canEdit || session.isPreparingDraft)
-            editor
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                recentDocuments
+                    .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
+                    .disabled(!session.canEdit || session.isPreparingDraft)
+                editor
+            }
+            .frame(minWidth: populatedWorkspaceMinimumWidth, alignment: .top)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                compactDocumentPicker
+                editor
+            }
         }
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 双栏工作台的最小可用宽度：目录列 + 栏间距 + 编辑区最小可读宽度。
+    /// 可用宽度低于它时 `ViewThatFits` 退到「稿件选择器 + 编辑区」的纵向排布，
+    /// 不让定宽目录列把编辑区挤出可视区。
+    private var populatedWorkspaceMinimumWidth: CGFloat {
+        SpeechRailDesignTokens.Layout.sessionListWidth
+            + SpeechRailDesignTokens.Spacing.md
+            + SpeechRailDesignTokens.Teleprompter.diffColumnMinimumWidth
+    }
+
+    /// 窄窗回退：把目录收成一行选择器（键盘可达），编辑区占满整宽。
+    private var compactDocumentPicker: some View {
+        CardSurface {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Image(systemName: "doc.text")
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
+                Menu {
+                    ForEach(documents) { document in
+                        Button {
+                            do {
+                                try session.load(documentID: document.id)
+                                operationMessage = nil
+                            } catch {
+                                operationMessage = error.localizedDescription
+                            }
+                        } label: {
+                            Text(document.title)
+                        }
+                    }
+                    Divider()
+                    Button("新建空白稿") {
+                        session.createDocument(title: "未命名稿子", sourceText: "")
+                    }
+                    Button("从剪贴板创建") {
+                        createFromClipboard()
+                    }
+                    Button("导入文本文件…") {
+                        isImporterPresented = true
+                    }
+                } label: {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text(session.document?.title ?? "选择或新建一份稿件")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .accessibilityLabel("选择稿件")
+                .accessibilityValue(session.document?.title ?? "未选择")
+                .speechRailPointerCursor()
+
+                Spacer(minLength: 0)
+
+                Text("\(documents.count) 篇稿件")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+        }
+        .disabled(!session.canEdit || session.isPreparingDraft)
     }
 
     private var recentDocuments: some View {
@@ -684,7 +779,7 @@ public struct TeleprompterView: View {
                             .multilineTextAlignment(.center)
                         Spacer()
                     }
-                    .frame(maxWidth: .infinity, minHeight: 180)
+                    .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Teleprompter.searchEmptyMinHeight)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 } else {
                     ScrollView(.vertical, showsIndicators: false) {
@@ -928,143 +1023,162 @@ public struct TeleprompterView: View {
 
                 SessionHairline()
 
-                // 第二行：目标时长、节奏、可行性预检及快捷工具
-                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    // 目标时长
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("目标")
-                            .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                // 第二行：目标时长、节奏、可行性预检及快捷工具。
+                // 宽窗排成单行；窄窗把「目标 / 节奏 / 预检」与「快捷工具」拆成两行，
+                // 避免定宽控件组在窄编辑列里互相挤压。
+                let preflight = session.preflightConclusion
 
-                        HStack(spacing: 2) {
-                            TextField("20", text: $targetMinutesInput)
-                                .textFieldStyle(.plain)
-                                .font(SpeechRailDesignTokens.Typography.technicalValue)
-                                .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth)
-                                .multilineTextAlignment(.trailing)
-                                .onChange(of: targetMinutesInput) { _, newValue in
-                                    if let mins = Int(newValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                                        session.setTargetMinutes(mins)
-                                    }
-                                }
+                let targetGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("目标")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
-                            Text("分")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        }
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-                        .background(
-                            SpeechRailDesignTokens.Color.inputField,
-                            in: SpeechRailDesignTokens.Corner.controlShape
-                        )
-                        .overlay(
-                            SpeechRailDesignTokens.Corner.controlShape
-                                .strokeBorder(
-                                    !isTargetMinutesValid && !targetMinutesInput.isEmpty
-                                        ? SpeechRailDesignTokens.Color.attention
-                                        : SpeechRailDesignTokens.Surface.border,
-                                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                                )
-                        )
-
-                        Menu {
-                            ForEach(TeleprompterTimingPolicy.quickTargets, id: \.self) { mins in
-                                Button("\(mins) 分钟") {
-                                    targetMinutesInput = "\(mins)"
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                        TextField("20", text: $targetMinutesInput)
+                            .textFieldStyle(.plain)
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
+                            .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth)
+                            .multilineTextAlignment(.trailing)
+                            .onChange(of: targetMinutesInput) { _, newValue in
+                                if let mins = Int(newValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
                                     session.setTargetMinutes(mins)
                                 }
                             }
+
+                        Text("分")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                    .background(
+                        SpeechRailDesignTokens.Color.inputField,
+                        in: SpeechRailDesignTokens.Corner.controlShape
+                    )
+                    .overlay(
+                        SpeechRailDesignTokens.Corner.controlShape
+                            .strokeBorder(
+                                !isTargetMinutesValid && !targetMinutesInput.isEmpty
+                                    ? SpeechRailDesignTokens.Color.attention
+                                    : SpeechRailDesignTokens.Surface.border,
+                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                            )
+                    )
+
+                    Menu {
+                        ForEach(TeleprompterTimingPolicy.quickTargets, id: \.self) { mins in
+                            Button("\(mins) 分钟") {
+                                targetMinutesInput = "\(mins)"
+                                session.setTargetMinutes(mins)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(SpeechRailDesignTokens.Typography.captionRegular)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                    .menuStyle(.borderlessButton)
+
+                    if !isTargetMinutesValid && !targetMinutesInput.isEmpty {
+                        Text("需 1–120 整数分钟")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    }
+                }
+
+                let paceGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("节奏")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                    Picker("朗读节奏", selection: Binding(
+                        get: { session.pace },
+                        set: { session.setPace($0) }
+                    )) {
+                        ForEach(TeleprompterPace.allCases) { pace in
+                            Text("\(pace.title) (\(pace.subtitle))").tag(pace)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+
+                    if session.calibrationFactor != 1.0 {
+                        Menu {
+                            Button("重新计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
+                                isTrialReadingPresented = true
+                            }
+                            Divider()
+                            Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
+                                session.applyTrialCalibration(k: 1.0)
+                                operationMessage = "已恢复为默认自然语速 (1.0x)"
+                            }
                         } label: {
-                            Image(systemName: "chevron.down")
-                                .font(SpeechRailDesignTokens.Typography.captionRegular)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                StatusPill(
+                                    tone: .healthy,
+                                    label: "\(String(format: "%.2fx", session.calibrationFactor))"
+                                )
+                                SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            }
                         }
                         .menuStyle(.borderlessButton)
+                    }
+                }
 
-                        if !isTargetMinutesValid && !targetMinutesInput.isEmpty {
-                            Text("需 1–120 整数分钟")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                        }
+                let preflightGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    StatusPill(
+                        tone: preflightTone(preflight),
+                        label: preflight.badgeTitle
+                    )
+
+                    Text(preflight.userGuidance)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                }
+
+                let quickToolsGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    SpeechRailButton(
+                        session.contentSelection.hasExclusions
+                            ? "已选 \(session.contentSelection.selectedCount) 段"
+                            : "选择范围",
+                        icon: .checklist,
+                        level: .secondary
+                    ) {
+                        isContentSelectionPresented = true
                     }
 
-                    // 朗读节奏
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("节奏")
-                            .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    SpeechRailButton(
+                        "计时试读",
+                        icon: .timer,
+                        level: .secondary
+                    ) {
+                        isTrialReadingPresented = true
+                    }
+                }
 
-                        Picker("朗读节奏", selection: Binding(
-                            get: { session.pace },
-                            set: { session.setPace($0) }
-                        )) {
-                            ForEach(TeleprompterPace.allCases) { pace in
-                                Text("\(pace.title) (\(pace.subtitle))").tag(pace)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
+                ViewThatFits(in: .horizontal) {
+                    // 宽窗：目标 / 节奏 / 预检 / 快捷工具 单行。
+                    HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                        targetGroup
+                        paceGroup
+                        preflightGroup
 
-                        if session.calibrationFactor != 1.0 {
-                            Menu {
-                                Button("重新计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
-                                    isTrialReadingPresented = true
-                                }
-                                Divider()
-                                Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
-                                    session.applyTrialCalibration(k: 1.0)
-                                    operationMessage = "已恢复为默认自然语速 (1.0x)"
-                                }
-                            } label: {
-                                HStack(spacing: 2) {
-                                    StatusPill(
-                                        tone: .healthy,
-                                        label: "\(String(format: "%.2fx", session.calibrationFactor))"
-                                    )
-                                    SpeechRailButtonIcon(.expandDown, size: 8, weight: .semibold)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                }
-                            }
-                            .menuStyle(.borderlessButton)
-                        }
+                        Spacer(minLength: 0)
+
+                        quickToolsGroup
                     }
 
-                    // 预检指示 (Compact)
-                    let preflight = session.preflightConclusion
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        StatusPill(
-                            tone: preflightTone(preflight),
-                            label: preflight.badgeTitle
-                        )
-
-                        Text(preflight.userGuidance)
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .lineLimit(1)
-                    }
-
-                    Spacer(minLength: 0)
-
-                    // 快捷工具
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        SpeechRailButton(
-                            session.contentSelection.hasExclusions
-                                ? "已选 \(session.contentSelection.selectedCount) 段"
-                                : "选择范围",
-                            icon: .checklist,
-                            level: .secondary
-                        ) {
-                            isContentSelectionPresented = true
+                    // 窄窗：前三组一行，快捷工具另起一行。
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                            targetGroup
+                            paceGroup
+                            preflightGroup
                         }
 
-                        SpeechRailButton(
-                            "计时试读",
-                            icon: .timer,
-                            level: .secondary
-                        ) {
-                            isTrialReadingPresented = true
-                        }
+                        quickToolsGroup
                     }
                 }
             }
@@ -1162,7 +1276,7 @@ public struct TeleprompterView: View {
                         total: Double(progress.total)
                     )
                     .progressViewStyle(.linear)
-                    .frame(maxWidth: 360)
+                    .frame(maxWidth: SpeechRailDesignTokens.Teleprompter.analyzingProgressMaxWidth)
                     .padding(.top, SpeechRailDesignTokens.Spacing.md)
                 } else {
                     ProgressView()
@@ -1339,7 +1453,7 @@ public struct TeleprompterView: View {
 
                                     StatusPill(tone: .attention, label: item.issue.title)
 
-                                    VStack(alignment: .leading, spacing: 2) {
+                                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                                         Text(item.issue.detail)
                                             .font(SpeechRailDesignTokens.Typography.caption)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -1352,38 +1466,71 @@ public struct TeleprompterView: View {
 
                                     Spacer()
 
-                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                        Button("采用建议") {
-                                            session.resolveReviewItem(id: item.id, action: .accept)
-                                        }
-                                        .speechRailButton(.primary)
-
-                                        Button("修改") {
-                                            if editingReviewItemID == item.id {
-                                                editingReviewItemID = nil
-                                            } else {
-                                                editingReviewItemID = item.id
-                                                editingReviewItemText = item.suggestedText.isEmpty
-                                                    ? (session.readingBlocks.first(where: { $0.id == item.blockID })?.rawSourceText ?? "")
-                                                    : item.suggestedText
+                                    ViewThatFits(in: .horizontal) {
+                                        // 宽窗：五个动作内联。
+                                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                            Button("采用建议") {
+                                                session.resolveReviewItem(id: item.id, action: .accept)
                                             }
-                                        }
-                                        .speechRailButton(.secondary)
+                                            .speechRailButton(.primary)
 
-                                        Button("保留原文") {
-                                            session.resolveReviewItem(id: item.id, action: .keepSource)
-                                        }
-                                        .speechRailButton(.secondary)
+                                            Button("修改") {
+                                                if editingReviewItemID == item.id {
+                                                    editingReviewItemID = nil
+                                                } else {
+                                                    editingReviewItemID = item.id
+                                                    editingReviewItemText = item.suggestedText.isEmpty
+                                                        ? (session.readingBlocks.first(where: { $0.id == item.blockID })?.rawSourceText ?? "")
+                                                        : item.suggestedText
+                                                }
+                                            }
+                                            .speechRailButton(.secondary)
 
-                                        Button("仅作提示") {
-                                            session.resolveReviewItem(id: item.id, action: .convertToCue)
-                                        }
-                                        .speechRailButton(.secondary)
+                                            Button("保留原文") {
+                                                session.resolveReviewItem(id: item.id, action: .keepSource)
+                                            }
+                                            .speechRailButton(.secondary)
 
-                                        Button("跳过") {
-                                            session.resolveReviewItem(id: item.id, action: .skip)
+                                            Button("仅作提示") {
+                                                session.resolveReviewItem(id: item.id, action: .convertToCue)
+                                            }
+                                            .speechRailButton(.secondary)
+
+                                            Button("跳过") {
+                                                session.resolveReviewItem(id: item.id, action: .skip)
+                                            }
+                                            .speechRailButton(.secondary)
                                         }
-                                        .speechRailButton(.secondary)
+
+                                        // 窄窗：单个主按钮式菜单承载同一组动作。
+                                        Menu {
+                                            Button("采用建议") {
+                                                session.resolveReviewItem(id: item.id, action: .accept)
+                                            }
+                                            Button("修改") {
+                                                if editingReviewItemID == item.id {
+                                                    editingReviewItemID = nil
+                                                } else {
+                                                    editingReviewItemID = item.id
+                                                    editingReviewItemText = item.suggestedText.isEmpty
+                                                        ? (session.readingBlocks.first(where: { $0.id == item.blockID })?.rawSourceText ?? "")
+                                                        : item.suggestedText
+                                                }
+                                            }
+                                            Button("保留原文") {
+                                                session.resolveReviewItem(id: item.id, action: .keepSource)
+                                            }
+                                            Button("仅作提示") {
+                                                session.resolveReviewItem(id: item.id, action: .convertToCue)
+                                            }
+                                            Button("跳过") {
+                                                session.resolveReviewItem(id: item.id, action: .skip)
+                                            }
+                                        } label: {
+                                            Text("采用建议…")
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                        .speechRailButton(.primary)
                                     }
                                 }
 
@@ -1509,7 +1656,7 @@ public struct TeleprompterView: View {
                                                     }
                                                 }
                                                 .pickerStyle(.segmented)
-                                                .frame(width: 180)
+                                                .frame(width: SpeechRailDesignTokens.Teleprompter.comparisonPickerWidth)
 
                                                 if narrowComparisonTab == .source {
                                                     sourceDiffColumn(block)
@@ -1534,7 +1681,7 @@ public struct TeleprompterView: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 320)
+                    .frame(maxHeight: SpeechRailDesignTokens.Teleprompter.reviewDiffScrollMaxHeight)
 
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Button(TeleprompterReviewCopy.acceptAction) {
@@ -1729,7 +1876,7 @@ public struct TeleprompterView: View {
     private var readyWorkspace: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "提词稿已就绪", detail: "已生成并确认最终跟读版本，随时可在悬浮舞台中开讲") {
+                CardHead(title: "提词稿已就绪", detail: "已生成并确认最终跟读版本，随时可在悬浮舞台提词卡中开讲") {
                     StatusPill(tone: .healthy, label: "已准备完毕")
                 }
 
@@ -1737,19 +1884,73 @@ public struct TeleprompterView: View {
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     if let active = session.activeVersion {
-                        Text("共 \(active.segments.count) 段 · 预计时长约 \(session.targetMinutes) 分钟")
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            Text("共 \(active.segments.count) 段 · 预计时长约 \(session.targetMinutes) 分钟")
+                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+
+                            Spacer(minLength: 0)
+
+                            Text("起讲段：第 \(session.currentSegmentIndex + 1) 段")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
 
                         ScrollView {
-                            Text(active.sourceText)
-                                .font(SpeechRailDesignTokens.Typography.body)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .lineSpacing(4)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(SpeechRailDesignTokens.Spacing.sm)
+                            LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                ForEach(active.segments.indices, id: \.self) { index in
+                                    let segment = active.segments[index]
+                                    let isSelected = index == session.currentSegmentIndex
+                                    Button {
+                                        session.moveToSegment(index)
+                                    } label: {
+                                        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                            Text(String(format: "#%02d", index + 1))
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(
+                                                    isSelected
+                                                        ? SpeechRailDesignTokens.Color.rail
+                                                        : SpeechRailDesignTokens.Color.inkTertiary
+                                                )
+                                                .frame(width: 28, alignment: .leading)
+
+                                            Text(segment.text)
+                                                .font(SpeechRailDesignTokens.Typography.body)
+                                                .foregroundStyle(
+                                                    isSelected
+                                                        ? SpeechRailDesignTokens.Color.ink
+                                                        : SpeechRailDesignTokens.Color.inkSecondary
+                                                )
+                                                .lineSpacing(SpeechRailDesignTokens.Teleprompter.previewLineSpacing)
+                                                .multilineTextAlignment(.leading)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                            if segment.pauseHint == .medium || segment.pauseHint == .long {
+                                                Text(segment.pauseHint == .long ? "长停顿" : "句间停顿")
+                                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 1)
+                                                    .background(SpeechRailDesignTokens.Color.inputField, in: Capsule())
+                                            }
+                                        }
+                                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                                        .background(
+                                            isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.08) : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .speechRailPointerCursor()
+                                }
+                            }
+                            .padding(SpeechRailDesignTokens.Spacing.xs)
                         }
-                        .frame(maxHeight: 180)
+                        .frame(
+                            minHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorMinimumHeight,
+                            maxHeight: .infinity
+                        )
                         .background(
                             SpeechRailDesignTokens.Color.recessedField,
                             in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -1796,7 +1997,7 @@ public struct TeleprompterView: View {
     private var runningWorkspace: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "提词舞台运行中", detail: "稿件正文已锁定保护；你可以在独立悬浮窗口中跟读") {
+                CardHead(title: "提词舞台运行中", detail: "稿件正文已锁定保护；悬浮提词卡已置顶在屏幕前台跟随") {
                     StatusPill(
                         tone: session.phase == .following ? .healthy : .attention,
                         label: phaseLabel(session.phase)
@@ -1816,12 +2017,23 @@ public struct TeleprompterView: View {
                     }
 
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("单调已用时间")
+                        Text("已朗读时间")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         Text(formatClock(session.runClock.elapsedSeconds))
                             .font(SpeechRailDesignTokens.Typography.technicalValue)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    }
+
+                    if session.targetMinutes > 0 {
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Text("预计剩余时间")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            Text(formatClock(session.runClock.estimatedRemainingSeconds))
+                                .font(SpeechRailDesignTokens.Typography.technicalValue)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
                     }
 
                     Spacer()
@@ -1849,79 +2061,103 @@ public struct TeleprompterView: View {
 
     private var stageSettingsBar: some View {
         CardSurface {
-            HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "macwindow")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                    Text("舞台视效")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                }
+            let titleGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "macwindow")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("提词卡视效")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            }
 
-                Divider()
-                    .frame(height: SpeechRailDesignTokens.Teleprompter.stageSettingsDividerHeight)
+            let divider = Divider()
+                .frame(height: SpeechRailDesignTokens.Teleprompter.stageSettingsDividerHeight)
 
-                // 字号调节
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("字号")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            // 字号调节
+            let fontScaleGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("字号")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
-                    Slider(
-                        value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
-                        in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
-                    )
-                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageFontSliderWidth)
-
-                    Text("\(Int(settings.scriptPointSize)) pt")
-                        .font(SpeechRailDesignTokens.Typography.technicalValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
-                }
-
-                // 透明度调节
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("透明度")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-
-                    Slider(
-                        value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
-                        in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
-                    )
-                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageOpacitySliderWidth)
-
-                    Text("\(Int(settings.opacity * 100))%")
-                        .font(SpeechRailDesignTokens.Typography.technicalValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
-                }
-
-                // 舞台默认只看当前段与下一段；高级用户仍可调整预览范围。
-                Stepper(
-                    "显示 \(settings.visibleSegmentCount) 段",
-                    value: Binding(
-                        get: { settings.visibleSegmentCount },
-                        set: { settings.visibleSegmentCount = $0 }
-                    ),
-                    in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+                Slider(
+                    value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
+                    in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
                 )
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .frame(width: SpeechRailDesignTokens.Teleprompter.stageFontSliderWidth)
 
-                Spacer(minLength: 0)
+                Text("\(Int(settings.scriptPointSize)) pt")
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
+            }
 
-                // 直播贴士提示 (带无障碍与说明)
-                HStack(spacing: 4) {
+            // 透明度调节
+            let opacityGroup = HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("透明度")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                Slider(
+                    value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
+                    in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
+                )
+                .frame(width: SpeechRailDesignTokens.Teleprompter.stageOpacitySliderWidth)
+
+                Text("\(Int(settings.opacity * 100))%")
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
+            }
+
+            // 舞台默认只看当前段与下一段；高级用户仍可调整预览范围。
+            let segmentStepper = Stepper(
+                "显示 \(settings.visibleSegmentCount) 段",
+                value: Binding(
+                    get: { settings.visibleSegmentCount },
+                    set: { settings.visibleSegmentCount = $0 }
+                ),
+                in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+            )
+            .font(SpeechRailDesignTokens.Typography.caption)
+
+            ViewThatFits(in: .horizontal) {
+                // 宽窗：完整一行，含推流建议文字。
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    titleGroup
+                    divider
+                    fontScaleGroup
+                    opacityGroup
+                    segmentStepper
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "rectangle.on.rectangle")
+                            .font(SpeechRailDesignTokens.Typography.subheadline)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text("推流建议：采集目标窗口，勿全屏采集")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .lineLimit(1)
+                    }
+                    .help("直播贴士：OBS 或直播伴侣请采集「摄像头」或「目标窗口」，避免全屏采集捕获提词悬浮窗。")
+                }
+
+                // 窄窗：去掉推流建议文字，保留图标与同一句 help 提示。
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    titleGroup
+                    divider
+                    fontScaleGroup
+                    opacityGroup
+                    segmentStepper
+
+                    Spacer(minLength: 0)
+
                     Image(systemName: "rectangle.on.rectangle")
                         .font(SpeechRailDesignTokens.Typography.subheadline)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Text("推流建议：采集目标窗口，勿全屏采集")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .lineLimit(1)
+                        .help("直播贴士：OBS 或直播伴侣请采集「摄像头」或「目标窗口」，避免全屏采集捕获提词悬浮窗。")
                 }
-                .help("直播贴士：OBS 或直播伴侣请采集「摄像头」或「目标窗口」，避免全屏采集捕获提词悬浮窗。")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
