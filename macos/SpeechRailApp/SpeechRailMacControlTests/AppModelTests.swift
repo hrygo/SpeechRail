@@ -106,6 +106,79 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    // MARK: - (iii) 更旧的模型刷新不得覆盖并发更新的刷新（issue #87）
+
+    func testNewerConcurrentModelRefreshWinsOverOlderInFlightRefresh() async {
+        let race = ConcurrentRefreshRace()
+        let transport = ClosureControlTransport { request in
+            switch request.command {
+            case .modelCatalog:
+                return await race.catalog(for: request)
+            case .modelStatus:
+                return await race.status(for: request)
+            default:
+                return ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            }
+        }
+
+        let model = makeModel(transport: transport)
+        // 第一次刷新会在 modelStatus 处被拦下；拦截点内再发起一次更新的刷新，
+        // 并让更新的刷新先返回，从而确定性地制造「旧读取后到」的竞争。
+        await race.install { await model.refreshModels() }
+        await model.refreshModels()
+
+        XCTAssertEqual(
+            model.modelStatus?.disk.modelBytes,
+            ConcurrentRefreshRace.freshMarker,
+            "更旧的并发刷新用过期结果覆盖了更新的刷新（实际 modelBytes=\(String(describing: model.modelStatus?.disk.modelBytes))）。issue #87 要求 generation 守卫让最新一次刷新胜出。"
+        )
+    }
+
+    // MARK: - (iv) 过期取消链写下的旧文案不得挺过更新的刷新（issue #87）
+
+    func testSupersededCancelMessageDoesNotSurviveNewerModelRefresh() async {
+        let statusScript = ModelStatusScript(schedule: .activeThenNil)
+        let supersede = CancelSupersession()
+        let transport = ClosureControlTransport { request in
+            switch request.command {
+            case .modelCatalog:
+                return Self.modelCatalogResponse(for: request)
+            case .modelStatus:
+                return await statusScript.next(for: request)
+            case .operationCancel:
+                // 取消请求还在传输层时，界面又发起并完成了一次更新的模型刷新；
+                // 随后取消请求以失败收场——这条过期链不得再写入旧文案。
+                await supersede.fire()
+                throw CancelTransportFailure()
+            default:
+                return ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            }
+        }
+
+        let model = makeModel(transport: transport)
+        await supersede.install { await model.refreshModels() }
+        await model.refreshModels()
+        XCTAssertTrue(
+            model.hasActiveMutation,
+            "前置条件不成立：模型准备操作应当是活动态（operation=\(String(describing: model.operation))）"
+        )
+
+        await model.cancelCurrentOperation()
+
+        XCTAssertNil(
+            model.message,
+            "过期取消链在更新的刷新之后写下的旧文案仍然存活（实际 message=\(String(describing: model.message))）。issue #87 要求 message 有 generation token：过期链的写入必须被丢弃。"
+        )
+    }
+
     // MARK: - Helpers
 
     private func makeModel(transport: any SpeechRailControlTransport) -> AppModel {
@@ -253,5 +326,53 @@ private actor CancelSupersession {
     func fire() async {
         guard let refresh else { return }
         await refresh()
+    }
+}
+
+/// 取消请求的传输层失败：用于让过期的取消链走进 catch 分支并尝试写入旧文案。
+private struct CancelTransportFailure: Error {}
+
+/// 制造两次并发模型刷新的确定性竞争：第一次 `modelStatus` 被拦下时触发一次更新的
+/// 刷新并等待它完成，再放行旧的（过期的）响应。
+private actor ConcurrentRefreshRace {
+    static let staleMarker: Int64 = 111
+    static let freshMarker: Int64 = 222
+
+    private var statusCalls = 0
+    private var newerRefresh: (@Sendable () async -> Void)?
+
+    func install(_ action: @escaping @Sendable () async -> Void) {
+        newerRefresh = action
+    }
+
+    func catalog(for request: ControlRequest) -> ControlResponse {
+        ControlResponse(
+            requestID: request.requestID,
+            command: .modelCatalog,
+            status: .ok,
+            modelCatalog: ModelCatalogSnapshot(artifacts: [], profiles: [])
+        )
+    }
+
+    func status(for request: ControlRequest) async -> ControlResponse {
+        statusCalls += 1
+        if statusCalls == 1 {
+            if let newerRefresh { await newerRefresh() }
+            return diskResponse(for: request, bytes: Self.staleMarker)
+        }
+        return diskResponse(for: request, bytes: Self.freshMarker)
+    }
+
+    private func diskResponse(for request: ControlRequest, bytes: Int64) -> ControlResponse {
+        ControlResponse(
+            requestID: request.requestID,
+            command: .modelStatus,
+            status: .ok,
+            modelStatus: ModelStatusSnapshot(
+                artifacts: [],
+                disk: ModelDiskSnapshot(modelBytes: bytes, freeBytes: 0),
+                activeOperation: nil
+            )
+        )
     }
 }
