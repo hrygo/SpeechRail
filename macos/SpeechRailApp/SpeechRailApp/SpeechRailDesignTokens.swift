@@ -1294,6 +1294,7 @@ public enum SpeechRailDesignTokens {
         public static let stagePauseHintPaddingVertical: CGFloat = 2
         public static let stagePauseHintPaddingHorizontal: CGFloat = 6
         public static let stageQuickFontScaleStep: Double = 0.08
+        public static let stageQuickOpacityStep: Double = 0.08
         public static let stageKbdBadgePaddingVertical: CGFloat = 1
         public static let stageKbdBadgePaddingHorizontal: CGFloat = 4
         public static let stageStatusIndicatorSize: CGFloat = 6

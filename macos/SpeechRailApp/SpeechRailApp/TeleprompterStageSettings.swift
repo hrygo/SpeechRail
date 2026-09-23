@@ -212,6 +212,14 @@ public final class TeleprompterStageSettings {
         fontScale -= SpeechRailDesignTokens.Teleprompter.stageQuickFontScaleStep
     }
 
+    public func increaseOpacity() {
+        opacity += SpeechRailDesignTokens.Teleprompter.stageQuickOpacityStep
+    }
+
+    public func decreaseOpacity() {
+        opacity -= SpeechRailDesignTokens.Teleprompter.stageQuickOpacityStep
+    }
+
     public var opacity: Double {
         get { opacityStorage }
         set {

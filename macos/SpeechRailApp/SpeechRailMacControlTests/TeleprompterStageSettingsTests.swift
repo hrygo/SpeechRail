@@ -120,6 +120,25 @@ struct TeleprompterStageSettingsTests {
         #expect(settings.fontScale == SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale)
     }
 
+    @Test("stage settings quick opacity methods change opacity within bounds")
+    func quickOpacityMethodsChangeOpacity() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        let initial = settings.opacity
+
+        settings.increaseOpacity()
+        #expect(settings.opacity > initial)
+
+        for _ in 0..<50 { settings.increaseOpacity() }
+        #expect(settings.opacity == SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity)
+
+        for _ in 0..<50 { settings.decreaseOpacity() }
+        #expect(settings.opacity == SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity)
+    }
+
     @Test("stage preview supports browsing all segments when requested")
     func stagePreviewSupportsBrowsingAllSegments() {
         let indices = TeleprompterStagePresentation.visibleSegmentIndices(

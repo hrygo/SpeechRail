@@ -39,6 +39,11 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
         Task { await session.endFollowing() }
     }
 
+    public func windowDidResize(_ notification: Notification) {
+        guard let panel else { return }
+        settings.width = Double(panel.frame.width)
+    }
+
     private func makePanel() -> TeleprompterPanel {
         let panel = TeleprompterPanel(
             contentRect: NSRect(
@@ -64,6 +69,10 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
         panel.contentMinSize = NSSize(
             width: SpeechRailDesignTokens.Teleprompter.stageMinimumWidth,
             height: SpeechRailDesignTokens.Teleprompter.stageMinimumHeight
+        )
+        panel.contentMaxSize = NSSize(
+            width: SpeechRailDesignTokens.Teleprompter.stageMaximumWidth,
+            height: 1_200
         )
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.setFrameAutosaveName(SpeechRailDesignTokens.Teleprompter.stageWindowAutosaveName)
