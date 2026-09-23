@@ -47,11 +47,14 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
                 width: settings.width,
                 height: SpeechRailDesignTokens.Teleprompter.stageDefaultHeight
             ),
-            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.title = "SpeechRail · AI 提词器"
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isMovableByWindowBackground = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating

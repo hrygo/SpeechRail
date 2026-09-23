@@ -98,4 +98,158 @@ struct TeleprompterStageSettingsTests {
         #expect(SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount == 2)
         #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultOpacity < 0.8)
     }
+
+    @Test("stage settings quick zoom methods change font scale within bounds")
+    func quickZoomMethodsChangeFontScale() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        let initialScale = settings.fontScale
+        settings.increaseFontScale()
+        #expect(settings.fontScale > initialScale)
+
+        settings.decreaseFontScale()
+        #expect(abs(settings.fontScale - initialScale) < 0.001)
+
+        for _ in 0..<30 { settings.increaseFontScale() }
+        #expect(settings.fontScale == SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale)
+
+        for _ in 0..<50 { settings.decreaseFontScale() }
+        #expect(settings.fontScale == SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale)
+    }
+
+    @Test("stage preview supports browsing all segments when requested")
+    func stagePreviewSupportsBrowsingAllSegments() {
+        let indices = TeleprompterStagePresentation.visibleSegmentIndices(
+            currentIndex: 2,
+            visibleCount: 2,
+            totalCount: 5,
+            isBrowsingAll: true
+        )
+        #expect(indices == [0, 1, 2, 3, 4])
+
+        let empty = TeleprompterStagePresentation.visibleSegmentIndices(
+            currentIndex: 0,
+            visibleCount: 2,
+            totalCount: 0,
+            isBrowsingAll: true
+        )
+        #expect(empty.isEmpty)
+    }
+
+    @Test("pace status calculates steady, brisk, slow, and establishing states")
+    func paceStatusCalculatesStates() {
+        // Less than 10 seconds: establishing
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 0,
+                totalCount: 10,
+                elapsedSeconds: 5,
+                targetSeconds: 600
+            ) == .establishing
+        )
+
+        // On schedule: progress 50% vs time 50% -> steady
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 4,
+                totalCount: 10,
+                elapsedSeconds: 300,
+                targetSeconds: 600
+            ) == .steady
+        )
+
+        // Ahead of schedule: progress 60% vs time 30% (delta +0.3) -> brisk
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 5,
+                totalCount: 10,
+                elapsedSeconds: 180,
+                targetSeconds: 600
+            ) == .brisk
+        )
+
+        // Behind schedule: progress 20% vs time 50% (delta -0.3) -> slow
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 1,
+                totalCount: 10,
+                elapsedSeconds: 300,
+                targetSeconds: 600
+            ) == .slow
+        )
+
+        // No target seconds -> steady after 10s
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 3,
+                totalCount: 10,
+                elapsedSeconds: 60,
+                targetSeconds: 0
+            ) == .steady
+        )
+    }
+
+    @Test("stage summary computes speech review metrics and calibration")
+    func stageSummaryComputesMetricsAndCalibration() {
+        let segments = [
+            TeleprompterSegment(
+                id: "seg-1",
+                ordinal: 0,
+                sourceRange: TeleprompterSourceRange(start: 0, end: 30),
+                text: "欢迎大家来到今天的发布会现场，非常高兴能够与各位相聚。"
+            ),
+            TeleprompterSegment(
+                id: "seg-2",
+                ordinal: 1,
+                sourceRange: TeleprompterSourceRange(start: 30, end: 60),
+                text: "今天我们将正式带来全新的产品架构与全栈本地化能力演进。"
+            ),
+            TeleprompterSegment(
+                id: "seg-3",
+                ordinal: 2,
+                sourceRange: TeleprompterSourceRange(start: 60, end: 90),
+                text: "在过去的一年里，我们的团队攻克了数十项技术难关，力求完美。"
+            ),
+            TeleprompterSegment(
+                id: "seg-4",
+                ordinal: 3,
+                sourceRange: TeleprompterSourceRange(start: 90, end: 120),
+                text: "接下来让我们深入了解各个核心子系统的突破与实际体验细节。"
+            )
+        ]
+
+        let summary = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 3,
+            elapsedSeconds: 32,
+            targetSeconds: 35,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+
+        #expect(summary.completedSegments == 4)
+        #expect(summary.totalSegments == 4)
+        #expect(summary.elapsedSeconds == 32)
+        #expect(summary.totalSpokenUnits > 100)
+        #expect(summary.actualWPM > 0)
+        #expect(summary.paceStatus == .steady)
+        #expect(summary.canCalibrate == true)
+        #expect(summary.needsCalibration == true)
+        #expect(summary.suggestedCalibrationFactor > 0.5 && summary.suggestedCalibrationFactor < 2.0)
+
+        // Accidental start (under 30s) -> canCalibrate is false
+        let shortSummary = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 0,
+            elapsedSeconds: 8,
+            targetSeconds: 60,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+        #expect(shortSummary.canCalibrate == false)
+        #expect(shortSummary.needsCalibration == false)
+    }
 }

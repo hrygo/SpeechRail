@@ -38,8 +38,12 @@ public struct TeleprompterTrialReadingSheet: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(
-            width: SpeechRailDesignTokens.Teleprompter.trialReadingSheetWidth,
-            height: SpeechRailDesignTokens.Teleprompter.trialReadingSheetHeight
+            minWidth: SpeechRailDesignTokens.Teleprompter.trialReadingSheetMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Teleprompter.trialReadingSheetWidth,
+            maxWidth: SpeechRailDesignTokens.Teleprompter.trialReadingSheetMaximumWidth,
+            minHeight: SpeechRailDesignTokens.Teleprompter.trialReadingSheetMinimumHeight,
+            idealHeight: SpeechRailDesignTokens.Teleprompter.trialReadingSheetHeight,
+            maxHeight: SpeechRailDesignTokens.Teleprompter.trialReadingSheetMaximumHeight
         )
         .onAppear {
             prepareSampleText()
@@ -97,11 +101,11 @@ public struct TeleprompterTrialReadingSheet: View {
                 Text(sampleText)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineSpacing(4)
+                    .lineSpacing(SpeechRailDesignTokens.Teleprompter.previewLineSpacing)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(SpeechRailDesignTokens.Spacing.sm)
             }
-            .frame(height: 140)
+            .frame(height: SpeechRailDesignTokens.Teleprompter.trialSampleScrollHeight)
             .background(
                 SpeechRailDesignTokens.Color.recessedField,
                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -116,37 +120,53 @@ public struct TeleprompterTrialReadingSheet: View {
     // MARK: - 计时与控制
 
     private var timerAndControls: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            // 等宽大数字计时器
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "stopwatch")
-                    .font(SpeechRailDesignTokens.Typography.title3Regular)
-                    .foregroundStyle(isRunning ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkSecondary)
-
-                Text(formatSeconds(elapsedSeconds))
-                    .font(SpeechRailDesignTokens.Typography.timerDisplay)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+                timerDisplay
+                trialControls
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-            .background(
-                SpeechRailDesignTokens.Color.inputField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-            )
 
-            if !isRunning {
-                Button {
-                    startTimer()
-                } label: {
-                    Label(elapsedSeconds == 0 ? "开始试读" : "重新试读", systemImage: "play.fill")
-                }
-                .speechRailButton(.primary)
-                .controlSize(.large)
-            } else {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                timerDisplay
+                trialControls
+            }
+        }
+    }
+
+    private var timerDisplay: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Image(systemName: "stopwatch")
+                .font(SpeechRailDesignTokens.Typography.title3Regular)
+                .foregroundStyle(isRunning ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkSecondary)
+
+            Text(formatSeconds(elapsedSeconds))
+                .font(SpeechRailDesignTokens.Typography.timerDisplay)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background(
+            SpeechRailDesignTokens.Color.inputField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+        )
+    }
+
+    @ViewBuilder
+    private var trialControls: some View {
+        if !isRunning {
+            Button {
+                startTimer()
+            } label: {
+                Label(elapsedSeconds == 0 ? "开始试读" : "重新试读", systemImage: "play.fill")
+            }
+            .speechRailButton(.primary)
+            .controlSize(.large)
+        } else {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Button {
                     finishTrial()
                 } label: {

@@ -28,13 +28,16 @@ public struct TeleprompterContentSelectionSheet: View {
             header
             statsAndBatchBar
             paragraphList
-            Spacer(minLength: 0)
             footerActions
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(
-            width: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetWidth,
-            height: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetHeight
+            minWidth: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetWidth,
+            maxWidth: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetMaximumWidth,
+            minHeight: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetMinimumHeight,
+            idealHeight: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetHeight,
+            maxHeight: SpeechRailDesignTokens.Teleprompter.contentSelectionSheetMaximumHeight
         )
         .onAppear {
             loadParagraphs()
@@ -74,30 +77,51 @@ public struct TeleprompterContentSelectionSheet: View {
     // MARK: - 统计与全选条
 
     private var statsAndBatchBar: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                StatusPill(
-                    tone: selectedIndices.isEmpty ? .attention : .healthy,
-                    label: "已选 \(selectedIndices.count) / \(paragraphs.count) 段"
-                )
-
-                Text("·")
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                Text("\(selectedUnits) 字/词")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-
-                Text("·")
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                Text("预计用时 \(formatMinutes(selectedEstimateMinutes))")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                selectionSummary
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                batchActions
             }
 
-            Spacer()
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                selectionSummary
+                batchActions
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+    }
 
+    private var selectionSummary: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            StatusPill(
+                tone: selectedIndices.isEmpty ? .attention : .healthy,
+                label: "已选 \(selectedIndices.count) / \(paragraphs.count) 段"
+            )
+
+            Text("·")
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+            Text("\(selectedUnits) 字/词")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            Text("·")
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+            Text("预计用时 \(formatMinutes(selectedEstimateMinutes))")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+    }
+
+    private var batchActions: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Button("全选") {
                 selectedIndices = Set(0..<paragraphs.count)
             }
@@ -116,12 +140,6 @@ public struct TeleprompterContentSelectionSheet: View {
             .disabled(selectedIndices.isEmpty)
             .speechRailPointerCursor()
         }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-        .background(
-            SpeechRailDesignTokens.Color.recessedField,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-        )
     }
 
     // MARK: - 段落列表
@@ -183,6 +201,7 @@ public struct TeleprompterContentSelectionSheet: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         }
+        .frame(maxHeight: .infinity)
     }
 
     // MARK: - 底部操作栏

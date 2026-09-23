@@ -4,16 +4,165 @@ import Observation
 /// The stage is a reading surface, not a miniature editor. Keep the visible
 /// window semantic (current segment plus a small look-ahead) instead of
 /// exposing the alignment slices used by the follow controller.
+public enum TeleprompterStagePaceStatus: String, Codable, Equatable, Sendable {
+    case establishing
+    case steady
+    case brisk
+    case slow
+
+    public var title: String {
+        switch self {
+        case .establishing: "测速中"
+        case .steady: "节奏平稳"
+        case .brisk: "节奏偏快"
+        case .slow: "节奏偏缓"
+        }
+    }
+
+    public var advice: String {
+        switch self {
+        case .establishing: "正在分析你的语速节奏…"
+        case .steady: "当前节奏舒适自然，与计划时长非常契合"
+        case .brisk: "当前进度超前，可放慢语速、留白或从容展开"
+        case .slow: "当前用时略超预期，可适当精简表达或微加快语速"
+        }
+    }
+}
+
+public struct TeleprompterStageSummary: Equatable, Sendable {
+    public let completedSegments: Int
+    public let totalSegments: Int
+    public let elapsedSeconds: TimeInterval
+    public let targetSeconds: TimeInterval
+    public let totalSpokenUnits: Int
+    public let actualWPM: Int
+    public let suggestedCalibrationFactor: Double
+    public let canCalibrate: Bool
+    public let needsCalibration: Bool
+    public let paceStatus: TeleprompterStagePaceStatus
+
+    public init(
+        completedSegments: Int,
+        totalSegments: Int,
+        elapsedSeconds: TimeInterval,
+        targetSeconds: TimeInterval,
+        totalSpokenUnits: Int,
+        actualWPM: Int,
+        suggestedCalibrationFactor: Double,
+        canCalibrate: Bool,
+        needsCalibration: Bool,
+        paceStatus: TeleprompterStagePaceStatus
+    ) {
+        self.completedSegments = completedSegments
+        self.totalSegments = totalSegments
+        self.elapsedSeconds = elapsedSeconds
+        self.targetSeconds = targetSeconds
+        self.totalSpokenUnits = totalSpokenUnits
+        self.actualWPM = actualWPM
+        self.suggestedCalibrationFactor = suggestedCalibrationFactor
+        self.canCalibrate = canCalibrate
+        self.needsCalibration = needsCalibration
+        self.paceStatus = paceStatus
+    }
+}
+
+/// The stage is a reading surface, not a miniature editor. Keep the visible
+/// window semantic (current segment plus a small look-ahead) instead of
+/// exposing the alignment slices used by the follow controller.
 public enum TeleprompterStagePresentation {
     public static func visibleSegmentIndices(
         currentIndex: Int,
         visibleCount: Int,
-        totalCount: Int
+        totalCount: Int,
+        isBrowsingAll: Bool = false
     ) -> [Int] {
         guard totalCount > 0 else { return [] }
+        if isBrowsingAll {
+            return Array(0..<totalCount)
+        }
         let clampedCurrent = min(max(currentIndex, 0), totalCount - 1)
         let count = min(max(visibleCount, 1), totalCount - clampedCurrent)
         return Array(clampedCurrent..<(clampedCurrent + count))
+    }
+
+    public static func paceStatus(
+        currentIndex: Int,
+        totalCount: Int,
+        elapsedSeconds: TimeInterval,
+        targetSeconds: TimeInterval
+    ) -> TeleprompterStagePaceStatus {
+        guard totalCount > 0, elapsedSeconds >= 10 else {
+            return .establishing
+        }
+        let progressRatio = Double(currentIndex + 1) / Double(totalCount)
+        guard progressRatio > 0.05 else {
+            return .establishing
+        }
+        if targetSeconds > 0 {
+            let timeRatio = elapsedSeconds / targetSeconds
+            let delta = progressRatio - timeRatio
+            if delta > 0.12 {
+                return .brisk
+            } else if delta < -0.12 {
+                return .slow
+            } else {
+                return .steady
+            }
+        } else {
+            return .steady
+        }
+    }
+
+    public static func computeSummary(
+        segments: [TeleprompterSegment],
+        currentSegmentIndex: Int,
+        elapsedSeconds: TimeInterval,
+        targetSeconds: TimeInterval,
+        pace: TeleprompterPace,
+        currentCalibrationFactor: Double
+    ) -> TeleprompterStageSummary {
+        let totalCount = segments.count
+        let completed = min(max(currentSegmentIndex + 1, 0), totalCount)
+        let spokenText = segments.prefix(completed).map(\.text).joined(separator: "")
+        let metrics = TeleprompterTimingPolicy.countMetrics(in: spokenText)
+        let totalUnits = metrics.totalUnits
+        let minutes = max(0.1, elapsedSeconds / 60.0)
+        let actualWPM = elapsedSeconds > 5 ? Int(round(Double(totalUnits) / minutes)) : 0
+
+        let baseEst = TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics,
+            pace: pace,
+            calibrationFactor: 1.0
+        ).pointSeconds ?? max(1, Double(totalUnits) / (pace.cjkUnitsPerMinute / 60.0))
+
+        let rawK = elapsedSeconds / max(1, baseEst)
+        let clampedK = min(
+            max(rawK, TeleprompterTimingPolicy.minimumCalibrationFactor),
+            TeleprompterTimingPolicy.maximumCalibrationFactor
+        )
+        let canCalibrate = elapsedSeconds >= 30 && totalUnits >= 50
+            && (TeleprompterTimingPolicy.minimumCalibrationFactor...TeleprompterTimingPolicy.maximumCalibrationFactor).contains(rawK)
+        let needsCalibration = canCalibrate && abs(clampedK - currentCalibrationFactor) > 0.02
+
+        let status = paceStatus(
+            currentIndex: currentSegmentIndex,
+            totalCount: totalCount,
+            elapsedSeconds: elapsedSeconds,
+            targetSeconds: targetSeconds
+        )
+
+        return TeleprompterStageSummary(
+            completedSegments: completed,
+            totalSegments: totalCount,
+            elapsedSeconds: elapsedSeconds,
+            targetSeconds: targetSeconds,
+            totalSpokenUnits: totalUnits,
+            actualWPM: actualWPM,
+            suggestedCalibrationFactor: clampedK,
+            canCalibrate: canCalibrate,
+            needsCalibration: needsCalibration,
+            paceStatus: status
+        )
     }
 }
 
@@ -53,6 +202,14 @@ public final class TeleprompterStageSettings {
             }
             defaults.set(clamped, forKey: Key.fontScale)
         }
+    }
+
+    public func increaseFontScale() {
+        fontScale += SpeechRailDesignTokens.Teleprompter.stageQuickFontScaleStep
+    }
+
+    public func decreaseFontScale() {
+        fontScale -= SpeechRailDesignTokens.Teleprompter.stageQuickFontScaleStep
     }
 
     public var opacity: Double {

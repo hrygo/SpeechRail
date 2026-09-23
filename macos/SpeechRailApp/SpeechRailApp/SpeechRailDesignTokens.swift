@@ -1251,12 +1251,20 @@ public enum SpeechRailDesignTokens {
         /// 首屏欢迎工作台：范例卡片最小宽度与图标尺寸
         public static let welcomeIconSize: CGFloat = 36
         public static let welcomeTemplateMinimumWidth: CGFloat = 200
-        /// 计时试读窗口尺寸
+        /// 计时试读窗口尺寸：理想值沿用历史宽高，新增窄窗与大字体的自适应上下限。
+        public static let trialReadingSheetMinimumWidth: CGFloat = 420
         public static let trialReadingSheetWidth: CGFloat = 560
+        public static let trialReadingSheetMaximumWidth: CGFloat = 700
+        public static let trialReadingSheetMinimumHeight: CGFloat = 420
         public static let trialReadingSheetHeight: CGFloat = 480
-        /// 内容范围选择窗口尺寸
+        public static let trialReadingSheetMaximumHeight: CGFloat = 720
+        /// 内容范围选择窗口尺寸：理想值沿用历史宽高，新增窄窗与大字体的自适应上下限。
+        public static let contentSelectionSheetMinimumWidth: CGFloat = 480
         public static let contentSelectionSheetWidth: CGFloat = 620
+        public static let contentSelectionSheetMaximumWidth: CGFloat = 800
+        public static let contentSelectionSheetMinimumHeight: CGFloat = 420
         public static let contentSelectionSheetHeight: CGFloat = 540
+        public static let contentSelectionSheetMaximumHeight: CGFloat = 760
         /// 审阅对照分栏最小宽度
         public static let diffColumnMinimumWidth: CGFloat = 320
         /// 待确认事项提示图标尺寸
@@ -1267,6 +1275,33 @@ public enum SpeechRailDesignTokens {
         public static let stageOpacitySliderWidth: CGFloat = 88
         public static let stageSettingsDividerHeight: CGFloat = 14
         public static let stageSettingLabelWidth: CGFloat = 48
+        /// 首屏欢迎工作台：图标外圈尺寸与正文最大宽度
+        public static let welcomeIconOuterSize: CGFloat = 56
+        public static let welcomeContentMaxWidth: CGFloat = 560
+        /// 欢迎工作台稿件检索无结果占位的最小高度
+        public static let searchEmptyMinHeight: CGFloat = 180
+        /// 准备进度条的稳定最大宽度
+        public static let analyzingProgressMaxWidth: CGFloat = 360
+        /// 计时试读窗口样稿滚动区高度
+        public static let trialSampleScrollHeight: CGFloat = 140
+        /// 审阅对照分栏：选择器宽度与滚动区最大高度
+        public static let comparisonPickerWidth: CGFloat = 180
+        public static let reviewDiffScrollMaxHeight: CGFloat = 320
+        /// 待启动预览滚动区最大高度与稿件行距
+        public static let readyPreviewMaxHeight: CGFloat = 180
+        public static let previewLineSpacing: CGFloat = 4
+        /// 舞台提词卡：呼吸停顿标签内边距与快捷微调步长
+        public static let stagePauseHintPaddingVertical: CGFloat = 2
+        public static let stagePauseHintPaddingHorizontal: CGFloat = 6
+        public static let stageQuickFontScaleStep: Double = 0.08
+        public static let stageKbdBadgePaddingVertical: CGFloat = 1
+        public static let stageKbdBadgePaddingHorizontal: CGFloat = 4
+        public static let stageStatusIndicatorSize: CGFloat = 6
+        /// 舞台提词卡：节奏指示胶囊与演说复盘小结
+        public static let stagePaceIndicatorPaddingVertical: CGFloat = 2
+        public static let stagePaceIndicatorPaddingHorizontal: CGFloat = 6
+        public static let stageSummaryIconSize: CGFloat = 40
+        public static let stageSummaryMetricBoxMinHeight: CGFloat = 60
     }
 
     /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert）

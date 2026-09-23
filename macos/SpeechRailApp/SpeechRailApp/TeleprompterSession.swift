@@ -1355,7 +1355,23 @@ public final class TeleprompterSession {
         resetAdaptiveClockSamples()
         followController.move(to: index, segmentCount: count)
         syncFollowState()
-        phase = .manual
+        if client == nil && (phase == .ready || phase == .draft) {
+            // 候场就绪期间切换起讲段，保持就绪状态，便于一键开讲
+        } else {
+            phase = .manual
+        }
+        saveProgress()
+    }
+
+    public func restartToBeginning() {
+        guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
+        followController.move(to: 0, segmentCount: count)
+        syncFollowState()
+        runClock.elapsedSeconds = 0
+        runClock.estimatedRemainingSeconds = remainingTextEstimate()
+        runClock.isPaused = false
+        phase = .ready
         saveProgress()
     }
 
