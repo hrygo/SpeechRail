@@ -33,7 +33,7 @@ public struct WorkspaceTitleLockup: View {
             width: SpeechRailDesignTokens.Toolbar.Identity.maximumWidth,
             height: SpeechRailDesignTokens.Toolbar.Identity.height,
             // 槽位内**左对齐**（第五十五轮）：槽宽固定 280 是为了让项自己
-            // 不随时长抖动，但内容居中会让短标题（八个页面名都不超过 4 个字、
+            // 不随时长抖动，但内容居中会让短标题（十四个页面名都不超过 4 个字、
             // 整组约 62–80pt）在 280pt 里浮到中间，读起来像一块没有归属的
             // 文字。左对齐后图标固定落在详情列的左沿，与帧「标题贴窗口左沿」
             // 的意图一致（REDESIGN-SPEC §6.2 / §11.6 第五十五轮）。
@@ -72,7 +72,7 @@ public struct PageIdentityToolbarItem: ToolbarContent {
         // 切页时页面身份横跳 135pt；窗口收到最小宽 1120pt 时同样跳 135pt
         // （405.5 / 540.5）。身份槽是全应用唯一一处「我在哪一页」的锚点，
         // 它自己动起来就失去了意义。`.navigation` 是 NavigationSplitView
-        // 页面标题的原生槽位，实测八页恒定在 x=252（w=288，详情列左沿 248 + 系统
+        // 页面标题的原生槽位，实测十四页恒定在 x=252（w=288，详情列左沿 248 + 系统
         // 内缩 4），收侧栏时随之移到 x=148，与系统自己的侧栏按钮同步。
         // 帧的标题在窗口左沿 x=78（红绿灯 + 12pt），那一格被系统侧栏切换按钮
         // 占用且不可移除（同轮实测 `.toolbar(removing: .sidebarToggle)` 不生效），

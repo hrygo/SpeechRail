@@ -5,11 +5,19 @@ public enum SpeechRailDesignTokens {
     public enum Spacing {
         public static let hairline: CGFloat = 1
         public static let tight: CGFloat = 2
+        /// 3pt：徽标 / 标签的极紧凑竖直内边距（issue #90 收敛）。
+        public static let tiny: CGFloat = 3
         public static let micro: CGFloat = 4
+        /// 6pt：搜索字段与紧凑 chip 的内边距（issue #90 收敛）。
+        public static let compact: CGFloat = 6
         public static let xs: CGFloat = 8
+        /// 10pt：气泡 / 卡片内的紧凑内边距（issue #90 收敛）。
+        public static let cozy: CGFloat = 10
         public static let sm: CGFloat = 12
+        /// 14pt：气泡 / 卡片的较宽内边距（issue #90 收敛）。
+        public static let roomy: CGFloat = 14
         public static let md: CGFloat = 16
-        /// 页面级块间距（稿里的页面栈 gap）。2026-09-16 按 4x 帧实测标定：八个页面
+        /// 页面级块间距（稿里的页面栈 gap）。2026-09-16 按 4x 帧实测标定：十四个页面
         /// 上「块与块之间的页面底色带」都是 19–22pt，即 20pt；稿的生成脚本里页面栈
         /// 也是 `gap: 20`。应用原先一会儿用 `lg`（24，偏松 4pt）、一会儿用 `sm`
         /// （12，偏紧 8pt），本轮统一到这里（REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
@@ -659,7 +667,7 @@ public enum SpeechRailDesignTokens {
 
     /// 窗口头部（工具栏）的**唯一几何来源**。
     ///
-    /// 头部是一个系统，不是每页各写一遍的装饰：八个页面共享同一套槽位、同一个
+    /// 头部是一个系统，不是每页各写一遍的装饰：十四个页面共享同一套槽位、同一个
     /// 页面身份锁和同一批动作控件尺寸。页面只声明「我是谁、这一页有哪些动作」，
     /// 几何一律从这里取（REDESIGN-SPEC §6.2 / §11.6 第四十九轮）。
     ///
