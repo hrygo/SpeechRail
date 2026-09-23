@@ -932,7 +932,7 @@ public enum SpeechRailDesignTokens {
 
     public enum Typography {
         /// 稿的标题只有一档 `Title / Page`（20pt Semi Bold），四个取样点实测 ink 18.25–19.0pt：
-        /// 页标题（八页 18.75–19.0）、服务状态结论标题（18.75）、诊断详情标题（18.25）、
+        /// 页标题（18.75–19.0）、服务状态结论标题（18.75）、诊断详情标题（18.25）、
         /// 档位卡标题。系统文本样式里没有 20，取最近的 `.title`（22，+2pt 残差），
         /// 保留文本样式以便随系统「更大文字」缩放（REDESIGN-SPEC §5.5 / §11.6 第十八轮）。
         public static let display: Font = .system(.title, weight: .semibold)

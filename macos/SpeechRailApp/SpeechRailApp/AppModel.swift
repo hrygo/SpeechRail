@@ -1969,6 +1969,9 @@ public final class AppModel {
                 return
             }
             if let operationID = response.operation?.operationID {
+                // 服务变更的等待不传 operation generation：服务启停永远优先于模型刷新，
+                // 日常 refreshModels 的 bump 不得把一次服务变更的终态处理打成 superseded，
+                // 否则 serviceOperation 会卡在进行中（issue #88 评审决议）。
                 switch await waitForOperation(
                     operationID,
                     messageGeneration: messageGeneration
