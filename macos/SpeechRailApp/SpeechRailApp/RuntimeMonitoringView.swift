@@ -116,16 +116,7 @@ public struct RuntimeMonitoringView: View {
                 } else {
                     metricStrip
                 }
-                // The time series is the page, so it gets the full width and the
-                // top slot instead of sharing a row with a capability panel
-                // (REDESIGN-SPEC §7.6).
-                if isHistoryWindow {
-                    historyChartPanel
-                } else {
-                    chartPanel
-                }
-                // Figma 把「运行组件」放在图表卡之后：先看趋势，再看是谁在跑。
-                runtimeComponentsSection
+                monitoringMainColumns
                 // 首屏只留黄金信号与趋势；逐指标表、资源明细和能力状态收进一个
                 // 默认收起的明细区（用户全局指令：不堆密集信息，渐进式披露）。
                 metricsDetailSection
@@ -547,9 +538,46 @@ public struct RuntimeMonitoringView: View {
         window.ttsLatencyByVoiceClass
     }
 
+    /// 趋势与运行组件的双栏：同是首屏主对象，纵向堆叠会把整页撑出最小窗口、
+    /// 在默认高度下直接出现纵向滚动条。宽窗口并排省约一张卡的高度，窄窗口
+    /// 回落到堆叠（外层滚动容器兜底）。两栏宽度只用既有 token。
+    private var monitoringMainColumns: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                monitoringTrendPanel
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.monitoringChartMinimumWidth,
+                        maxWidth: .infinity,
+                        alignment: .topLeading
+                    )
+                runtimeComponentsCard(compact: true)
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
+                        idealWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        alignment: .topLeading
+                    )
+            }
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                monitoringTrendPanel
+                runtimeComponentsCard(compact: false)
+            }
+        }
+    }
+
+    private var monitoringTrendPanel: some View {
+        Group {
+            if isHistoryWindow {
+                historyChartPanel
+            } else {
+                chartPanel
+            }
+        }
+    }
+
     /// Figma `workers`：标题带 + worker 表 + 说明带。「运行组件」在原实现里和
     /// 能力状态共用一张卡，矩阵与表叠在一起，看不出这是两组不同的数据。
-    private var runtimeComponentsSection: some View {
+    private func runtimeComponentsCard(compact: Bool) -> some View {
         CardSurface {
             CardHead(
                 title: "运行组件",
@@ -573,13 +601,21 @@ public struct RuntimeMonitoringView: View {
                 // 表体自己画，不用系统 `Table`：系统那张表的底色、隔行底纹与列分隔线
                 // 都不在 token 里，且它不透明地盖住卡面（§11.6 第六十八轮）。
                 VStack(spacing: 0) {
-                    workerColumnsHeader
+                    if compact {
+                        workerCompactHeader
+                    } else {
+                        workerColumnsHeader
+                    }
                     Divider()
                     ForEach(Array(workerRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 {
                             Divider()
                         }
-                        workerRow(row)
+                        if compact {
+                            workerCompactRow(row)
+                        } else {
+                            workerRow(row)
+                        }
                     }
                 }
                 .accessibilityElement(children: .contain)
@@ -596,6 +632,41 @@ public struct RuntimeMonitoringView: View {
                 .disabled(model.isRefreshingMonitoring)
             }
         }
+    }
+
+    private var workerCompactHeader: some View {
+        Text("组件 · 状态")
+            .font(SpeechRailDesignTokens.Typography.captionMedium)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityHidden(true)
+    }
+
+    private func workerCompactRow(_ row: WorkerStatusRow) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(row.title)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Label(row.state, systemImage: row.tone.systemImage)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(row.tone.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: SpeechRailDesignTokens.List.compactRowHeight,
+            alignment: .leading
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(row.title)
+        .accessibilityValue(row.state)
     }
 
     private var histogramSummarySection: some View {
