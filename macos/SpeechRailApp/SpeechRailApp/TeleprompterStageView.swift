@@ -9,6 +9,7 @@ public struct TeleprompterStageView: View {
     @State private var isBrowsingAll: Bool = false
     @State private var hasAdoptedCalibration: Bool = false
     @State private var hoveredSegmentIndex: Int? = nil
+    @State private var isBreathingGlow: Bool = false
 
     public init(
         session: TeleprompterSession,
@@ -56,6 +57,13 @@ public struct TeleprompterStageView: View {
             .onChange(of: session.currentSegmentIndex) { _, _ in scrollToReadingPosition() }
             .onChange(of: session.phase) { _, newPhase in
                 handlePhaseChange(to: newPhase)
+            }
+            .onAppear {
+                if !reduceMotion {
+                    withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                        isBreathingGlow = true
+                    }
+                }
             }
     }
 
@@ -159,9 +167,9 @@ public struct TeleprompterStageView: View {
         switch session.phase {
         case .ready, .draft:
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "mic.badge.checkmark")
+                Image(systemName: "sparkles")
                     .font(.system(size: 9))
-                Text("候场就绪 · 空格开讲")
+                Text("深呼吸 · 空格从容开讲")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
@@ -172,9 +180,9 @@ public struct TeleprompterStageView: View {
         case .following:
             if session.uncertainty != nil {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "quote.bubble.fill")
+                    Image(systemName: "sparkles")
                         .font(.system(size: 9))
-                    Text("自由发挥中")
+                    Text("✨ 随心发挥中")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                 }
                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
@@ -189,7 +197,8 @@ public struct TeleprompterStageView: View {
                             width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
                             height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
                         )
-                    Text("跟读咬合")
+                        .opacity(isBreathingGlow ? 1.0 : 0.6)
+                    Text("跟读咬合 · 渐入佳境")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ready)
                 }
@@ -200,7 +209,8 @@ public struct TeleprompterStageView: View {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Image(systemName: "mic.fill")
                         .font(.system(size: 9))
-                    Text("等待声音请开讲…")
+                        .opacity(isBreathingGlow ? 1.0 : 0.45)
+                    Text("随时开讲，我在静静聆听…")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                 }
                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
@@ -213,7 +223,7 @@ public struct TeleprompterStageView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "pause.fill")
                     .font(.system(size: 8))
-                Text("已暂停跟读")
+                Text("已暂歇 · 空格随时继续")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
             .foregroundStyle(SpeechRailDesignTokens.Color.attention)
@@ -225,7 +235,7 @@ public struct TeleprompterStageView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "hand.tap.fill")
                     .font(.system(size: 8))
-                Text("手动选段模式")
+                Text("随选段落 · 方向键校正")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -237,7 +247,7 @@ public struct TeleprompterStageView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 ProgressView()
                     .controlSize(.mini)
-                Text("连接中…")
+                Text("正在连接麦克风…")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -349,7 +359,7 @@ public struct TeleprompterStageView: View {
                 ? SpeechRailDesignTokens.Color.rail
                 : SpeechRailDesignTokens.Color.inkSecondary
         )
-        .help(isBrowsingAll ? "切换为跟读聚焦两段模式（快捷键 ⌘A）" : "展开查阅完整讲稿并可选段起讲（快捷键 ⌘A）")
+        .help(isBrowsingAll ? "切换为跟读聚焦两段模式（快捷键 ⌘A）" : "展开查阅完整讲稿，可随时点选段落从容起讲（快捷键 ⌘A）")
     }
 
     private var clockDashboard: some View {
@@ -430,11 +440,11 @@ public struct TeleprompterStageView: View {
             Image(systemName: "quote.bubble.fill")
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-            Text("自由发挥中 · 读回屏幕文字将自动跟随")
+            Text("尽情自由发挥，讲稿在为你静静守候 · 读回屏幕文字即可自然归队")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
             Spacer(minLength: 0)
-            Text("可按 ←/→ 切换段落")
+            Text("轻按 ←/→ 可自选段落")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
@@ -460,8 +470,8 @@ public struct TeleprompterStageView: View {
             )
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("自由发挥中")
-        .accessibilityValue("自由发挥中，读回屏幕文字将自动跟随")
+        .accessibilityLabel("随心自由发挥中")
+        .accessibilityValue("尽情自由发挥，讲稿在为你静静守候，读回屏幕文字即可自然归队")
     }
 
     // MARK: - 舞台段落阅读区
@@ -563,7 +573,7 @@ public struct TeleprompterStageView: View {
                                 HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                                     Image(systemName: "arrow.turn.down.right")
                                         .font(.system(size: 8))
-                                    Text("由此段起讲")
+                                    Text("由此段起讲 ↵")
                                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                                         .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                                 }
@@ -608,6 +618,7 @@ public struct TeleprompterStageView: View {
                         )
                         .fill(currentSegmentAccentColor)
                         .frame(width: SpeechRailDesignTokens.Teleprompter.stageCurrentRailWidth)
+                        .opacity(isFollowing && session.hasHeardSpeech ? (isBreathingGlow ? 1.0 : 0.72) : 1.0)
                         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                     }
                 }
@@ -654,13 +665,13 @@ public struct TeleprompterStageView: View {
 
     private func currentSegmentHeader(at index: Int) -> String {
         if session.uncertainty != nil {
-            return "自由发挥中 · 第 \(index + 1) 段"
+            return "随心发挥 · 第 \(index + 1) 段"
         } else if session.phase == .following {
             return session.hasHeardSpeech ? "跟读咬合 · 第 \(index + 1) 段" : "麦克风待命 · 第 \(index + 1) 段"
         } else if session.phase == .paused {
-            return "已暂停 · 第 \(index + 1) 段"
+            return "已暂歇 · 第 \(index + 1) 段"
         } else if session.phase == .ready || session.phase == .draft {
-            return "当前起讲点 · 第 \(index + 1) 段"
+            return "候场起讲点 · 第 \(index + 1) 段"
         } else {
             return "当前定位 · 第 \(index + 1) 段"
         }
@@ -670,7 +681,7 @@ public struct TeleprompterStageView: View {
         if isFollowing {
             return "空格暂停 · 点击可重设起讲点"
         } else {
-            return "空格开讲 · 当前以此段起讲"
+            return "空格开讲 · 讲稿已在此为你守候"
         }
     }
 
@@ -678,7 +689,7 @@ public struct TeleprompterStageView: View {
         if index < session.currentSegmentIndex {
             return "前文已读 · 第 \(index + 1) 段"
         } else if index == session.currentSegmentIndex + 1 {
-            return "下一段预备 · 第 \(index + 1) 段"
+            return "预备段落 · 第 \(index + 1) 段"
         } else {
             return "后续内容 · 第 \(index + 1) 段"
         }
@@ -688,9 +699,9 @@ public struct TeleprompterStageView: View {
         if index < session.currentSegmentIndex {
             return "点击由此段重新起讲"
         } else if index == session.currentSegmentIndex + 1 {
-            return "点击切换为当前起讲段"
+            return "点击切换为主讲段"
         } else {
-            return "点击跳至此段起讲"
+            return "点击跳转至此段起讲"
         }
     }
 
@@ -710,25 +721,41 @@ public struct TeleprompterStageView: View {
 
     private func pauseHintBadge(_ hint: TeleprompterPauseHint) -> some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Image(systemName: "wind")
+            Image(systemName: pauseHintIcon(hint))
                 .font(.system(size: 8))
             Text(pauseHintLabel(hint))
                 .font(SpeechRailDesignTokens.Typography.caption)
         }
-        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+        .foregroundStyle(pauseHintColor(hint))
         .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
         .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
         .background(
-            SpeechRailDesignTokens.Color.rail.opacity(0.12),
+            pauseHintColor(hint).opacity(0.12),
             in: Capsule()
         )
     }
 
+    private func pauseHintIcon(_ hint: TeleprompterPauseHint) -> String {
+        switch hint {
+        case .short: "wind"
+        case .medium: "sparkles"
+        case .long: "eye.fill"
+        }
+    }
+
     private func pauseHintLabel(_ hint: TeleprompterPauseHint) -> String {
         switch hint {
-        case .short: "换气"
-        case .medium: "句间停顿"
-        case .long: "长停顿"
+        case .short: "微歇换气"
+        case .medium: "留白蓄力"
+        case .long: "眼神互动"
+        }
+    }
+
+    private func pauseHintColor(_ hint: TeleprompterPauseHint) -> Color {
+        switch hint {
+        case .short: SpeechRailDesignTokens.Color.inkSecondary
+        case .medium: SpeechRailDesignTokens.Color.rail
+        case .long: SpeechRailDesignTokens.Color.ready
         }
     }
 
@@ -983,15 +1010,15 @@ public struct TeleprompterStageView: View {
         VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             // 1. 顶部祝贺徽章
             VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "checkmark.seal.fill")
+                Image(systemName: "sparkles")
                     .font(.system(size: SpeechRailDesignTokens.Teleprompter.stageSummaryIconSize))
                     .foregroundStyle(SpeechRailDesignTokens.Color.ready)
 
-                Text("演说圆满完成")
+                Text("✨ 精彩演说！你顺利完成了整篇讲稿")
                     .font(SpeechRailDesignTokens.Typography.windowTitle)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                Text("本次提词已全部结束，以下是你的演说节奏与语速复盘")
+                Text("深呼吸放松一下，看看刚才充满感染力的节奏复盘")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -1010,28 +1037,29 @@ public struct TeleprompterStageView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 summaryMetricCard(
                     icon: "stopwatch",
-                    label: "实际总用时",
+                    label: "专注用时",
                     value: formatClock(summary.elapsedSeconds),
                     subtext: timingSubtext(summary: summary)
                 )
 
+                let benchmarkWPM = Int(round(session.pace.cjkUnitsPerMinute / session.calibrationFactor))
                 summaryMetricCard(
                     icon: "waveform",
-                    label: "实测语速",
+                    label: "实际语速",
                     value: summary.actualWPM > 0 ? "\(summary.actualWPM) 字/分" : "--",
-                    subtext: "基准：约 \(Int(round(session.pace.cjkUnitsPerMinute / session.calibrationFactor))) 字/分"
+                    subtext: "基准目标：约 \(benchmarkWPM) 字/分"
                 )
 
                 summaryMetricCard(
-                    icon: "doc.text",
-                    label: "朗读进度",
+                    icon: "doc.text.fill",
+                    label: "讲稿达成",
                     value: "\(summary.completedSegments) / \(summary.totalSegments) 段",
-                    subtext: "总字数：约 \(summary.totalSpokenUnits) 字"
+                    subtext: "演说字数：共约 \(summary.totalSpokenUnits) 字"
                 )
 
                 summaryMetricCard(
                     icon: "gauge.with.dots.needle.50percent",
-                    label: "节奏评价",
+                    label: "台风节拍",
                     value: summary.paceStatus.title,
                     subtext: summary.paceStatus.advice,
                     valueColor: paceColor
@@ -1048,10 +1076,10 @@ public struct TeleprompterStageView: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.attention)
 
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                            Text("个性化语速校准建议")
+                            Text("💡 语速贴心小记")
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            Text("实测语速为 \(summary.actualWPM) 字/分（建议系数 \(String(format: "%.2fx", summary.suggestedCalibrationFactor))）。采纳后，后续排稿预估将更加精准贴合你的说话节奏。")
+                            Text("你刚才的实际语速为 \(summary.actualWPM) 字/分（建议系数 \(String(format: "%.2fx", summary.suggestedCalibrationFactor))）。每个人的说话节拍都是独特的，一键采纳后，SpeechRail 会记住你的个人节拍，让未来的每一篇讲稿排期都像为你量身定制。")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
@@ -1066,7 +1094,7 @@ public struct TeleprompterStageView: View {
                                 if hasAdoptedCalibration {
                                     Image(systemName: "checkmark")
                                 }
-                                Text(hasAdoptedCalibration ? "已采纳" : "采纳此语速")
+                                Text(hasAdoptedCalibration ? "✓ 已记住你的说话节拍" : "采纳我的个人节拍")
                             }
                         }
                         .disabled(hasAdoptedCalibration)
@@ -1086,13 +1114,18 @@ public struct TeleprompterStageView: View {
                     )
                 } else {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Image(systemName: "checkmark.circle.fill")
+                        Image(systemName: "sparkles")
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ready)
 
-                        Text("实测语速（约 \(summary.actualWPM) 字/分）与当前个人基准高度吻合，状态极佳。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Text("🎯 节拍高度契合")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            Text("你的实际语速（约 \(summary.actualWPM) 字/分）与个人基准高度吻合，台风沉稳自如，状态极佳。")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
 
                         Spacer(minLength: 0)
                     }
@@ -1120,13 +1153,13 @@ public struct TeleprompterStageView: View {
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                         Image(systemName: "arrow.counterclockwise")
-                        Text("重新开讲")
+                        Text("重新演练")
                         kbdBadge("␣")
                     }
                 }
                 .keyboardShortcut(.space, modifiers: [])
                 .speechRailButton(.secondary)
-                .help("重置回第一段，准备重新朗读（快捷键空格）")
+                .help("重置回第一段，准备重新朗读演练（快捷键空格）")
 
                 Spacer()
 
@@ -1134,13 +1167,14 @@ public struct TeleprompterStageView: View {
                     close()
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("关闭舞台")
+                        Image(systemName: "checkmark")
+                        Text("大功告成")
                         kbdBadge("Esc")
                     }
                 }
                 .keyboardShortcut(.escape, modifiers: [])
                 .speechRailButton(.primary)
-                .help("关闭提词舞台卡片")
+                .help("关闭提词舞台卡片（快捷键 Esc）")
             }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
@@ -1191,9 +1225,10 @@ public struct TeleprompterStageView: View {
     private func timingSubtext(summary: TeleprompterStageSummary) -> String {
         if summary.targetSeconds > 0 {
             if summary.elapsedSeconds <= summary.targetSeconds {
-                return "提前 \(formatClock(summary.targetSeconds - summary.elapsedSeconds))"
+                let diff = summary.targetSeconds - summary.elapsedSeconds
+                return diff < 5 ? "分秒不差，完美契合" : "从容留白，提前 \(formatClock(diff))"
             } else {
-                return "超时 \(formatClock(summary.elapsedSeconds - summary.targetSeconds))"
+                return "饱满展开，超时 \(formatClock(summary.elapsedSeconds - summary.targetSeconds))"
             }
         } else {
             return "计划 \(session.targetMinutes) 分钟"
@@ -1227,7 +1262,7 @@ public struct TeleprompterStageView: View {
         switch session.phase {
         case .paused: "继续跟读"
         case .manual: "恢复跟读"
-        default: "开始跟读"
+        default: "从容开讲"
         }
     }
 
@@ -1246,17 +1281,17 @@ public struct TeleprompterStageView: View {
     private var statusText: String {
         if let blocked = session.blocked { return blocked.title }
         if session.isResuming { return "正在准备继续…" }
-        if session.uncertainty != nil { return "自由发挥中 · 读回屏幕文字将自动跟随" }
+        if session.uncertainty != nil { return "随心自由发挥中 · 读回屏幕文字即可自然归队" }
         switch session.phase {
-        case .following: return session.hasHeardSpeech ? "正在跟读，请按你的节奏朗读" : "请读一句稿件，系统会跟随你的声音"
-        case .paused: return "已暂停跟读，按空格恢复"
-        case .manual: return "手动提词：可用 ← / → 校正位置"
+        case .following: return session.hasHeardSpeech ? "正在悉心跟读，请按你最舒适自然的节奏朗读" : "随时开讲，我在静静聆听…"
+        case .paused: return "已暂歇跟读，喝口水放松一下，按空格键随时继续"
+        case .manual: return "手动选段模式：可用 ← / → 校正当前起讲位置"
         case .preparing: return "正在连接语音识别…"
         case .analyzing: return "正在整理稿件…"
         case .review: return "请先检查 AI 建议"
-        case .ready, .draft: return "候场就绪：按空格开始跟读"
-        case .ended: return "提词已圆满结束"
-        case .uncertain: return "自由发挥中 · 读回屏幕文字将自动跟随"
+        case .ready, .draft: return "深呼吸放松：按空格键从容开讲"
+        case .ended: return "提词已圆满结束，演说精彩！"
+        case .uncertain: return "随心自由发挥中 · 读回屏幕文字即可自然归队"
         }
     }
 }

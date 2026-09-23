@@ -12,19 +12,19 @@ public enum TeleprompterStagePaceStatus: String, Codable, Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .establishing: "测速中"
-        case .steady: "节奏平稳"
-        case .brisk: "节奏偏快"
-        case .slow: "节奏偏缓"
+        case .establishing: "感知节奏中"
+        case .steady: "从容稳健"
+        case .brisk: "步调微快"
+        case .slow: "温和舒缓"
         }
     }
 
     public var advice: String {
         switch self {
-        case .establishing: "正在分析你的语速节奏…"
-        case .steady: "当前节奏舒适自然，与计划时长非常契合"
-        case .brisk: "当前进度超前，可放慢语速、留白或从容展开"
-        case .slow: "当前用时略超预期，可适当精简表达或微加快语速"
+        case .establishing: "放轻松，按你最自然的节奏讲，系统正在适应你的节拍…"
+        case .steady: "当前节奏非常舒适自然，听众正沉浸在你的分享中"
+        case .brisk: "时间很充裕，不妨多些停顿留白，让听众有消化思考的空间"
+        case .slow: "无需着急追赶，把核心要点讲透，细节可从容带过"
         }
     }
 }
