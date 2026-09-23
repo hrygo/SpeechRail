@@ -393,6 +393,7 @@ public enum SpeechRailDesignTokens {
         public static let statusBannerIconSize: CGFloat = 26
         public static let sidebarRowHeight: CGFloat = Interaction.minimumHitTarget
         public static let sidebarIconFrame: CGFloat = 20
+        public static let sidebarStatusDotSize: CGFloat = 8
         /// 侧栏底部状态区上方那条 hairline 的左右内缩。稿的 `sidebarStatusWrap`
         /// 画的是 **220 × 1** 的分隔线（`main.js`：`rect(statusWrap, "hairline", 220, 1, …)`），
         /// 而稿的侧栏 `padX` 是 10（`frame("sidebar", { …, padX: 10 })`），所以这条线在

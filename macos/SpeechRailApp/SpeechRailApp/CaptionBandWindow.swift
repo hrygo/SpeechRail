@@ -616,6 +616,7 @@ struct CaptionBandView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("字号 \(fontSize.title)")
+        .speechRailPointerCursor()
     }
 
     private func iconButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
@@ -631,6 +632,7 @@ struct CaptionBandView: View {
         .buttonStyle(.borderless)
         .help(label)
         .accessibilityLabel(label)
+        .speechRailPointerCursor()
     }
 
     // MARK: 页脚与受阻
@@ -659,6 +661,7 @@ struct CaptionBandView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("caption-band-return-latest")
+                .speechRailPointerCursor()
             }
             levelBars
         }

@@ -593,9 +593,9 @@ enum SpeechRailOperationMessagePresentation {
 public enum PageScaffoldLayout: Equatable, Sendable {
     /// Content keeps its intrinsic height while the page shell fills the detail column.
     case content
-    /// Content receives a deterministic pane-derived height with a lower bound.
+    /// The page stays within its window pane; long content must scroll in its own bounded panel.
     case fill(minimumHeight: CGFloat)
-    /// Content lives in an outer scroll container and can grow beyond the pane.
+    /// The whole page is one intentional scrolling surface and can grow beyond the pane.
     case scroll(minimumHeight: CGFloat)
 }
 
@@ -606,8 +606,7 @@ public enum PageScaffoldLayout: Equatable, Sendable {
 /// (`PageIdentityToolbarItem`), so the body never repeats the page name; it opens
 /// with the purpose sentence and then goes straight to the main object
 /// (REDESIGN-SPEC §6.2 / §11.6 第四十九轮).
-/// Full-height workspaces such as diagnostics can opt out of the outer scroll
-/// container while keeping the same geometry.
+/// Full-height workspaces keep a finite viewport; scrolling belongs to bounded content panels.
 public struct PageScaffold<Content: View, Trailing: View>: View {
     private enum ContentSizing {
         case fixed
@@ -718,14 +717,13 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 剩下的全部——于是「正文多高」不再由正文自己决定（不用 `minHeight`：它只能抬高
     /// 下限，内容该撑多高还是多高，等于没改）。
     ///
-    /// 正文槽位不低于 `PageScaffoldLayout.scroll(minimumHeight:)` 的声明：矮窗口下正文保持最小高度，多出来的
-    /// 部分交给外层滚动，而不是把正文压扁——压扁目录列就是「点了主题，下面几个菜单
-    /// 就没了」。
+    /// 正文槽位不低于页面合同声明的最小高度，避免把列表、目录等内部面板压扁到不可用。
+    /// `.fill` 调用方必须让长内容所在的面板拿到有限高度，并由该面板自己滚动。
     ///
     /// `sizing: .grows` 时这层框架用 `minHeight` 而不是固定高度：内容比窗格矮时
-    /// 效果与定高完全一样（卡片照样吃满窗口），内容比窗格高时页面**长高并整页滚动**，
-    /// 而不是把多出来的部分裁掉。会话三页要的是后者——稿上「音色」卡本来就伸出
-    /// 900pt 的画板（4x 帧在画板下沿被裁），清单长度由服务与用户决定，界面不该替它设上限。
+    /// 效果与定高完全一样（卡片照样吃满窗口），内容比窗格高时整个页面长高，交给外层
+    /// `ScrollView` 承载。只有明确采用整页连续阅读的页面才应选择这档；工作台应优先用
+    /// `.fixed`，并将长内容交给各自的有界面板。
     private func pageContent(
         paneHeight: CGFloat,
         minimumHeight: CGFloat,
@@ -1394,7 +1392,7 @@ public struct PageActionButton: View {
     private let title: String?
     private let systemImage: String
     private let variant: PageActionVariant
-    private let helpText: String?
+    private let helpText: String
     private let isEnabled: Bool
     private let action: () -> Void
 
@@ -1402,7 +1400,7 @@ public struct PageActionButton: View {
         title: String? = nil,
         icon: SpeechRailDesignTokens.Icon.Symbol,
         variant: PageActionVariant = .standard,
-        helpText: String? = nil,
+        helpText: String,
         isEnabled: Bool = true,
         action: @escaping () -> Void
     ) {
@@ -1418,7 +1416,7 @@ public struct PageActionButton: View {
         title: String? = nil,
         systemImage: String,
         variant: PageActionVariant = .standard,
-        helpText: String? = nil,
+        helpText: String,
         isEnabled: Bool = true,
         action: @escaping () -> Void
     ) {
@@ -1437,23 +1435,10 @@ public struct PageActionButton: View {
         .buttonStyle(PageActionButtonStyle(variant: variant))
         .controlSize(.regular)
         .disabled(!isEnabled)
-        .accessibilityLabel(title ?? helpText ?? systemImage)
+        .accessibilityLabel(title ?? helpText)
         .accessibilityIdentifier("page-action")
-        .modifier(OptionalHelp(helpText: helpText))
+        .help(helpText)
         .speechRailPointerCursor()
-    }
-}
-
-/// `.help` 只接受非可选字符串；没有说明文字时不挂工具提示。
-private struct OptionalHelp: ViewModifier {
-    let helpText: String?
-
-    func body(content: Content) -> some View {
-        if let helpText {
-            content.help(helpText)
-        } else {
-            content
-        }
     }
 }
 

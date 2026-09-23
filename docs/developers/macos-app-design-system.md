@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.15"
+version: "0.8.19"
 date: 2026-09-23
 ---
 
@@ -174,8 +174,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
   `expanded / medium / compact` 映射为侧栏、Inspector 和主内容最小宽度合同。`AppNavigationState.layoutContract`
   是 SwiftUI 页面读取的唯一入口，页面不得根据宽度再次推断行为。
 - `PageScaffoldLayout` 只有 `content`、`fill(minimumHeight:)`、`scroll(minimumHeight:)` 三档。
-  长列表、转录和稿件使用 `scroll`；需要稳定主工作区的页面使用 `fill`；没有页面级滚动需求的内容使用
-  `content`。不得重新引入 `scrollable`、`minimumContentHeight`、`growsWithContent` 的布尔组合，也不得用
+  会议、字幕记录和提词工作台显式使用 `fill`，页面固定在窗口视口内；长列表、转录和稿件正文由各自
+  有界面板滚动。其他页面按自己的页面合同选择 `scroll` 或 `content`，不得仅因数据可增长就把整页设为滚动。
+  不得重新引入 `scrollable`、`minimumContentHeight`、`growsWithContent` 的布尔组合，也不得用
   `AnyView` 抹掉 Assistant 的条件布局。`PageScaffold` 在 Reduce Motion 下对页面子树关闭动画事务，
   页面显式的 Inspector、滚动、记忆面板和原位确认动作仍需在动作源处提供即时分支。
 - Inspector 自动收起必须区分用户手动收起和窗口宽度收起；只有后一种允许在进入可恢复 tier 后自动恢复。
@@ -227,6 +228,21 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 名称在写入时就被截断并持久化，于是窗口再宽也只能显示那 24 个字。
 8. **用户认知优先与渐进式披露**：无论内部流程、数据模型或 provider 多么专业复杂，默认界面都只围绕用户当前任务组织：先说完成了什么、原稿/数据是否改变、用户下一步做什么，再展示必要的状态与解释。主标题、主按钮和默认状态不得暴露 `block`、来源区间、协议、模型、worker 等内部术语；高级用户才需要的拆分、合并、调试、模型和诊断动作进入命名明确的菜单、折叠区或开发者详情。高级操作必须保持键盘可达、焦点可达和无障碍可读，但不能与普通用户的主路径争夺视觉权重。
 
+### 3.2.2 可交互组件状态与例外
+
+同一类操作只使用一种视觉角色；页面先选择角色，再复用对应共享组件和 token。原生控件的 hover、pressed、focus、disabled 由系统承担，自定义交互面由 `SpeechRailInteractiveButtonStyle` 或 `PageActionButtonStyle` 承担。不要给系统控件叠加第二套按压缩放、焦点环或动态阴影。
+
+| 角色 | 首选实现 | 状态与内容要求 |
+|---|---|---|
+| 主次与危险动作 | `SpeechRailButton` / `.speechRailButton(.primary/.secondary/.quiet/.destructive)` | 一个操作区最多一个主动作；危险动作有明确后果；忙碌时阻止重复触发，并用文字说明进度 |
+| 工具栏图标动作 | `PageActionButton`、`PageActionsMenu` | 纯图标动作在构造时提供具体中文 `helpText`；无障碍名称不得回退为 SF Symbol ID |
+| 列表行内动作 | `RowActionGlyph` + 独立 `Button`/`Menu` | 与行选择分开聚焦；播放/停止等状态更新名称；图标墨色和框尺寸统一用 `Icon` / `Control` token |
+| 可选择行与卡片 | 系统 `List`/`Table`，或 `Button` + `SpeechRailInteractiveButtonStyle` | 整行用系统可操作元素，不用 `.onTapGesture` 代替按钮；选中状态有文字或 `accessibilityValue`，不能只改变底色 |
+| 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；可编辑边界用 `.speechRailRecessedSlot()` 或 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
+| 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
+
+每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文。
+
 ### 3.3 Settings scene 契约
 
 设置窗口保留 macOS 原生 `Settings` scene 与 `Tab` 导航，当前页签顺序为
@@ -247,7 +263,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 ### 4.1 空间拓扑与双轨导航心智
 - **STUDIO 创作工坊**（配音台、音色创作、音色克隆、音色库、我的作品）：聚焦声音雕琢与文本心流，大留白（`Spacing.hero`），注入 `Color.voice` 陶土暖色，首屏 100% 留给创作任务，不显示冗余服务状态横幅。
 - **ENGINE 核心引擎**（服务中枢、模型档位、运行监控、系统诊断、开发者文档）：强调确定性、低时延与高透明度，等宽数字排版，冷钛金与冷青导轨色为主基调。
-- **全局状态唯一性**：侧边栏底部 `[✓ 服务已就绪 · {当前档位}]` 是全 App 唯一的常驻全局服务状态指示器，正文仅在服务专属总览、任务受阻或长任务跃迁时按需显示置顶 `StatusConclusion`。
+- **侧栏导航图标**：14 个路由使用同一组单色 SF Symbols，图标统一为 `Icon.navigationSize` 字号并置于 `Icon.navigationFrame` 方框；优先选择单一、清晰的轮廓，不用多层组合图标占满小尺寸。图标名称集中由 `AppRoute.systemImage` 声明。
+- **底部功能区**：服务与麦克风各占一行，左侧语义图标、中央状态文字、右侧 `Control.sidebarStatusDotSize` 状态点；两行分别进入服务状态和当前会话。分隔线以下并列放「设置」「帮助」，状态与辅助动作分层，整区固定在侧栏底部。
+- **全局状态唯一性**：侧边栏底部的服务状态行是全 App 唯一的常驻全局服务状态指示器，正文仅在服务专属总览、任务受阻或长任务跃迁时按需显示置顶 `StatusConclusion`。
 
 ### 4.2 页面级重点优化规则
 1. **配音台 (Dubbing Desk)**：文稿编辑器为原生 `TextEditor`，高度**跟随正文**——下限 144pt
@@ -300,8 +318,10 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    `modelProfileCardsFourColumnBreakpoint`；不得把未由服务目录发布的档位显示为可执行选择。未知档位只用于事实展示，不能发出应用或准备命令。
    卡片以短标题、用途、服务声明能力、效果验证状态和「该档模型总大小」帮助选择；效果未验证时不得按权重精度推出质量排名。
    `ProfilePickerView` 只用短名作为分段选择项，并在选中后展示完整说明。模型准备/下载采用确定性 `OperationBar`（MB/s 速度、预计时间、SHA256 校验进度、安全回退确认）。
-   制品列表是四列表格（制品 / 量化 / 文件 / 校验），行内只保留一眼要量的字段——来源、目标档位与使用状态在右侧 Inspector；
+   模型文件列表是四列表格（模型文件 / 精度 / 文件 / 校验），行内只保留一眼要量的字段——来源、目标档位与使用状态在右侧 Inspector；
    校验列取值用 `statusPresentation.title` 的原样输出（已验证 / 未下载 / 校验失败 / 下载中 / 状态未知）。
+   表里列的是**这一档要用的全部文件**：catalog 制品，加上不在目录里、但同样按档位供给的锁定 CoreML 分人资产（它按同一行形状下发，状态由分人 lane 回答），所以「谁在说话」那一节只在服务漏发这一行时才会出现；
+   精度列只有一套说法：一律读**位数**——量化的读 `bits`（`8-bit`），没量化的把权重数值格式换算成位数（`bf16` / `fp16` → `16-bit`、`fp32` → `32-bit`），位数读不出来时写「未读取」，不编；`mlx` / `group 64` / `bf16` 这些格式名只解释「怎么做到的」，留在开发者详情（那里同一行也按位数开头）。列名与开发者详情标签都叫「精度」。
 6. **运行监控 (Telemetry)**：时间序列是页面主对象，占满整宽并位于首位，但**先说人话、再说口径**（§11.6 第六十三轮）。
    页首一句话说明这一页看什么（「服务最近在做什么、快不快、占多少内存」），顶部是时间窗分段控件（1 分钟 / 5 分钟 / 本次会话）。
    首屏六个数字只答用户会问出口的问题：正在处理、语音合成（次数 + 音频时长）、语音识别（次数 + 音频时长）、合成耗时、识别耗时、失败请求；
@@ -938,6 +958,20 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > `scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**、
 > `xcodebuild … build-for-testing` 编译通过。**未运行单元测试与 UI 自动化**（需当次明确授权）；
 > **未验证**右轴刻度改成毫秒后的目视观感。
+
+> 2026-09-23 模型文件的精度只有一套说法（REDESIGN-SPEC §11.6 第七十一轮，用户在模型页上
+> 连问四句：「模型信息要清晰」「未量化是不是也有位数？」「对拉齐到同一维度展示」「对齐」，
+> 再补一句「采用用户更能清晰的认知的统一文案表达」）。两层：**文案**上第四列叫「量化」、
+> 值却已在说精度（`8-bit` / `bf16`）；**数据**上服务只下发 `quantization.bits`，未量化制品的
+> 位数在载荷里根本不存在，界面只能写「未量化」这个否定说法。改法：catalog 的
+> `QuantizationSpec` 增 `dtype`（`bf16` / `fp16` / `fp32`，与 `bits` 互斥，未量化制品必填），
+> `model_catalog_payload` 把锁定的 CoreML 分人资产按同一行形状下发；App 侧列名与开发者详情
+> 标签改「精度」，取值统一读位数（`8-bit` / `16-bit`，读不出来写「未读取」），格式名留在
+> 开发者详情。`figma-kit/main.js` 的 `screenModels` 同轮同步（标题「模型制品 → 模型文件」、
+> 列头「量化 → 精度」、5 条样例行、卡头与脚注说明）。
+> `model_catalog_payload` 实测 8 行均有精度值、精准档 5 行；`pytest --no-cov` 六个相关文件
+> 全绿；`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**。
+> **未验证**：真机走查与 UI 自动化（未重装 App，本会话无授权）、`figma-kit` 帧未重新导出。
 
 ## 7. 变更流程
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，

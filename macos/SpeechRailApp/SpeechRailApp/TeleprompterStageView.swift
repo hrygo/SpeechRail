@@ -189,6 +189,7 @@ public struct TeleprompterStageView: View {
                     }
             }
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
             .frame(maxWidth: .infinity, alignment: .leading)
             .opacity(isCurrent ? 1 : SpeechRailDesignTokens.Teleprompter.stageNextSegmentOpacity)
             .accessibilityLabel(segment.text)

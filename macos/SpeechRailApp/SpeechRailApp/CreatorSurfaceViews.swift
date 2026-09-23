@@ -336,7 +336,9 @@ public struct DubbingDeskView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(voice.name)，\(voice.isSystem ? "系统音色" : "我的音色")")
+            .accessibilityValue(isSelected ? "已选中" : "未选中")
             .accessibilityHint("选择并用于配音")
+            .speechRailPointerCursor()
 
             Button {
                 if isPreviewing {

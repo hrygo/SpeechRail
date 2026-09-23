@@ -7,6 +7,8 @@ public struct ControlCenterView: View {
     @Environment(AppNavigationState.self) private var navigation
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 打开窗口时落在哪一页。
     ///
@@ -208,8 +210,18 @@ public struct ControlCenterView: View {
     @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
         NavigationLink(value: route) {
-            Label(route.title, systemImage: route.systemImage)
-                .symbolRenderingMode(.monochrome)
+            Label {
+                Text(route.title)
+            } icon: {
+                Image(systemName: route.systemImage)
+                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.navigationFrame,
+                        height: SpeechRailDesignTokens.Icon.navigationFrame
+                    )
+                    .accessibilityHidden(true)
+            }
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(
@@ -243,44 +255,36 @@ public struct ControlCenterView: View {
         .speechRailPointerCursor()
     }
 
-    /// 侧栏底部状态区 = 稿的 `sidebarStatusWrap`：一条 hairline + 一行状态。
-    ///
-    /// 稿里这条 hairline 不是通栏——是 `sidebarStatusWrap` 里的 220 × 1 矩形，在 240 宽的
-    /// 侧栏里左右各内缩 10（= 稿侧栏的 `padX: 10`），与上方系统侧栏行的内缩对齐；
-    /// 4x 帧实测墨迹 x 10.0–230.0。系统 `Divider()` 只能通栏，所以用 1pt 矩形加内缩
-    /// （REDESIGN-SPEC §11.6 第四十轮）。
+    /// 状态与常用辅助入口固定在侧栏底部，不随导航列表滚动。
     private var sidebarBottom: some View {
         VStack(spacing: 0) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor))
-                .frame(height: SpeechRailDesignTokens.Spacing.hairline)
-                .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
+            sidebarHairline
             sidebarServiceStatus
-            // 第二行：谁在用麦克风（P1 的落点）。第一行答「引擎能不能用」，
-            // 这一行答「此刻是谁在用它」——两件事都常驻，顺序即优先级（§5.1）。
             SessionOwnershipRow()
+            sidebarHairline
+            sidebarUtilities
         }
+    }
+
+    private var sidebarHairline: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(height: SpeechRailDesignTokens.Spacing.hairline)
+            .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
     }
 
     private var sidebarServiceStatus: some View {
         Button {
             selection = .overview
         } label: {
-            // 稿（Figma `Sidebar Status` 的三个 tone 变体；4x 帧侧栏底部实测墨迹
-            // 125.25 × 12.75，点 18–26 / 文本 34.5–143.25）是**一行**：8pt 状态点 +
-            // `Callout`(12) 的文本、颜色是 `text/secondary` 灰，没有标题行、也没有尾部
-            // chevron——「服务已就绪 · 当前档位短名」整句就是这一行的内容（§7 也写着
-            // 「一行状态点 + 状态文本，点击进入「服务状态」」）。应用此前是「服务状态」
-            // 标题行 + 小一号的语义色状态行两行，外加一个 chevron：块高只差 2pt
-            // （`SpeechRailInteractiveButtonStyle` 的 44pt 命中区下限本就主导了行高，
-            // 离屏实测 47 → 45），但多一行标题和一个尾随动作，读起来像「一个可以去的
-            // 页面」而不是「此刻的状态」。可点击性由 hover/pressed 反馈
-            // （`speechRailInteractiveButtonStyle`）、指针与 `.help` 承担
-            // （REDESIGN-SPEC §11.6 第四十轮）。
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Circle()
-                    .fill(sidebarStatusTone.color)
-                    .frame(width: 8, height: 8)
+                Image(systemName: AppRoute.overview.systemImage)
+                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.navigationFrame,
+                        height: SpeechRailDesignTokens.Icon.navigationFrame
+                    )
                     .accessibilityHidden(true)
 
                 Text(sidebarStatusText)
@@ -289,22 +293,65 @@ public struct ControlCenterView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Circle()
+                    .fill(sidebarStatusTone.color)
+                    .frame(
+                        width: SpeechRailDesignTokens.Control.sidebarStatusDotSize,
+                        height: SpeechRailDesignTokens.Control.sidebarStatusDotSize
+                    )
+                    .accessibilityHidden(true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
             .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         }
-        // 稿 `sidebarStatus` 是 **220 × 30**（`padX 8 / padY 7`、8pt 点 + `Callout`）。
-        // 这一行按稿取 30，不再套 44 的命中区下限（第四十轮记下的「块高 45 vs 稿 53」
-        // 残差由此收掉；30 仍在 macOS 指针目标下限之上，第四十三轮）。
         .speechRailInteractiveButtonStyle(
             fillsAvailableWidth: true,
             minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
         )
-        .help("打开服务状态")
+        .help("\(sidebarStatusText)；打开服务状态")
         // 与侧栏的「服务状态」导航项保持唯一标识；当前值通过 accessibilityValue 提供。
         .accessibilityLabel("服务状态摘要")
         .accessibilityValue(sidebarStatusText)
+    }
+
+    private var sidebarUtilities: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            sidebarUtility("设置", systemImage: "gearshape") {
+                openSettings()
+            }
+            sidebarUtility("帮助", systemImage: "questionmark.circle") {
+                openWindow(id: SpeechRailApp.helpWindowID)
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+    }
+
+    private func sidebarUtility(
+        _ title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: systemImage)
+                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.navigationFrame,
+                        height: SpeechRailDesignTokens.Icon.navigationFrame
+                    )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
+        }
+        .speechRailInteractiveButtonStyle(
+            fillsAvailableWidth: true,
+            minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
+        )
+        .help(title)
     }
 
     private var sidebarStatusText: String {

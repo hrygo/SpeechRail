@@ -209,7 +209,7 @@ struct LevelMeterBar: View {
 // MARK: - 侧边栏第二行
 
 /// 侧边栏第二行：谁在用麦克风（P1 的落点，也是与 Sona S1/S2 的分界）。
-/// 与第一行「服务已就绪」同形状：8pt 状态点 + 一行 `Callout`，没有标题行与 chevron。
+/// 与服务状态同行形：语义图标 + 一行状态 + 行尾状态点。
 public struct SessionOwnershipRow: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(AppNavigationState.self) private var navigation
@@ -221,9 +221,13 @@ public struct SessionOwnershipRow: View {
             navigation.request(session.ownershipRoute)
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Circle()
-                    .fill(tone.color)
-                    .frame(width: 8, height: 8)
+                Image(systemName: "mic")
+                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.navigationFrame,
+                        height: SpeechRailDesignTokens.Icon.navigationFrame
+                    )
                     .accessibilityHidden(true)
 
                 Text(session.ownershipText)
@@ -233,6 +237,13 @@ public struct SessionOwnershipRow: View {
                     .truncationMode(.tail)
                     .monospacedDigit()
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Circle()
+                    .fill(tone.color)
+                    .frame(
+                        width: SpeechRailDesignTokens.Control.sidebarStatusDotSize,
+                        height: SpeechRailDesignTokens.Control.sidebarStatusDotSize
+                    )
+                    .accessibilityHidden(true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
@@ -242,7 +253,7 @@ public struct SessionOwnershipRow: View {
             fillsAvailableWidth: true,
             minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
         )
-        .help(session.isIdle ? "麦克风空闲；打开实时字幕" : "打开正在进行的会话")
+        .help(session.isIdle ? "麦克风空闲；打开实时字幕" : "\(session.ownershipText)；打开正在进行的会话")
         .accessibilityLabel("麦克风")
         .accessibilityValue(session.ownershipText)
     }
@@ -293,12 +304,10 @@ public struct SessionLibraryView: View {
     }
 
     public var body: some View {
-        // 与语音助手 / 会议页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
-        // 记录库这一屏的清单长度由使用量决定（转录几十段、字幕记录几百条），
-        // 不把记录库的理想高度直接报给分栏（见 AssistantView.body 注）。
+        // 字幕库固定在窗口视口内；记录清单由 List 自己滚动，选中记录正文由详情面板滚动。
         PageScaffold(
             route: kind.route,
-            layout: .scroll(minimumHeight: 420)
+            layout: .fill(minimumHeight: 420)
         ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 SessionStatusBar(
@@ -755,6 +764,7 @@ public struct SessionLibraryView: View {
     private var library: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             recordList
+                .frame(maxHeight: .infinity, alignment: .top)
             if let selected = selectedSummary {
                 recordDetail(selected)
             } else {
@@ -768,6 +778,7 @@ public struct SessionLibraryView: View {
                 .clipShape(SpeechRailDesignTokens.Corner.containerShape)
             }
         }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var recordList: some View {
