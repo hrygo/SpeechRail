@@ -41,8 +41,10 @@
 
 `ServiceAPIClient` 采用与现有 CLI / MCP 一致的凭据发现顺序：
 
-1. 进程环境变量 `SPEECHRAIL_API_KEY`；
-2. `SPEECHRAIL_APP_HOME/config/.env`；未提供 app home 时使用用户 Application Support 下的受管 SpeechRail 目录。
+1. `SPEECHRAIL_APP_HOME/config/.env`；未提供 app home 时使用用户 Application Support 下的受管 SpeechRail 目录；
+2. 进程环境变量 `SPEECHRAIL_API_KEY`，仅在受管配置不存在时作为 fallback。
+
+受管配置优先是为了避免 GUI 进程继承启动它的旧环境变量，导致 App 使用过期 key 而服务仍使用当前 managed key。
 
 凭据只保存在客户端内存中，禁止写日志、URL、错误文案或 App 持久化状态。所有 REST 请求统一通过 `makeRequest` 添加：
 
