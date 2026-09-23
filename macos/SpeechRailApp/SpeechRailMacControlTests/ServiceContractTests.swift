@@ -1,5 +1,7 @@
 import XCTest
+#if SWIFT_PACKAGE
 import SpeechRailAppSupport
+#endif
 @testable import SpeechRailControlKit
 
 final class ServiceContractTests: XCTestCase {
