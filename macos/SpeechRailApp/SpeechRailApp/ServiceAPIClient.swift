@@ -1,7 +1,14 @@
 import Foundation
 import SpeechRailControlKit
 
-extension ServiceAPIClientError: @retroactive LocalizedError {
+#if SWIFT_PACKAGE
+// 同一 package 内的 conformance 不算 retroactive；Xcode 中是独立 framework，仍需 @retroactive。
+extension ServiceAPIClientError: LocalizedError {}
+#else
+extension ServiceAPIClientError: @retroactive LocalizedError {}
+#endif
+
+extension ServiceAPIClientError {
     public var errorDescription: String? {
         switch self {
         case .invalidURL:
