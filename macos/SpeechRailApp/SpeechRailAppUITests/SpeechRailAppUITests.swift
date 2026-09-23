@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @MainActor
@@ -56,7 +57,22 @@ final class SpeechRailAppUITests: XCTestCase {
         }
     }
 
-    func testControlCenterHonorsRequestedWindowSizes() {
+    func testControlCenterHonorsRequestedWindowSizes() throws {
+        // Hosted macOS runners expose a smaller display than this workspace
+        // matrix needs. Skip the full interaction matrix when the window cannot
+        // reach its first representative width and workspace-pane height.
+        let visibleFrame = try XCTUnwrap(
+            NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame,
+            "UI test host does not expose a screen visible frame"
+        )
+        let maximumWindowWidth = max(1, visibleFrame.width - 16)
+        let maximumWindowHeight = max(1, visibleFrame.height - 16)
+        try XCTSkipUnless(
+            maximumWindowWidth >= 1120 && maximumWindowHeight >= 900,
+            "window-size matrix needs 1120×900pt; visible window bound is "
+                + "\(Int(maximumWindowWidth))×\(Int(maximumWindowHeight))pt"
+        )
+
         // The matrix uses nominal outer-window requests. macOS titlebar space
         // raises the 720pt workspace floor to a 760pt NSWindow frame; the
         // largest request is capped by the screen's visible frame.
