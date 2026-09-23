@@ -23,8 +23,8 @@ from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
 MODEL_REVISION = "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
 FLUIDAUDIO_COMMIT = "5c19d5e12320e22bbfb7a1877b089d2665a69add"
 MODEL_BUNDLE_NAME = "SortformerNvidiaLow_v2.1.mlmodelc"
-# 上游把这个端口发布成 FP16 变体（`v3/fp16/...`，见 `diarization_assets._COREML_PREFIX`）。
-# 这份制品没有做量化，精度就只能由 dtype 表达——与目录里 `aligner-bf16` 的说法同一维度。
+# 上游把这个端口发布成 FP16 变体 (`v3/fp16/...`, 见 `diarization_assets._COREML_PREFIX`)。
+# 这份制品没有做量化。精度就只能由 dtype 表达——与目录里 `aligner-bf16` 的说法同一维度。
 MODEL_DTYPE = "fp16"
 MODEL_FILE_SHA256 = {
     "analytics/coremldata.bin": "70bd26bbe2113b3d3f99ecd7190bac9752f372e42fe2700a2e660f5d8a9cac66",

@@ -403,7 +403,7 @@ def test_unknown_catalog_and_artifact_keys_fail_closed() -> None:
 
 
 def test_artifact_requires_dtype_when_unquantized() -> None:
-    """没有量化的制品必须写明权重本身的数值格式，否则同一列里会有一行说不出精度。"""
+    """没有量化的制品必须写明权重本身的数值格式, 否则同一列里会有一行说不出精度。"""
     artifact = _artifact(
         key="aligner-bf16",
         family="qwen3_forced_aligner",
@@ -423,7 +423,7 @@ def test_artifact_requires_dtype_when_unquantized() -> None:
 
 
 def test_artifact_rejects_bits_and_dtype_together() -> None:
-    """精度只有一个维度：同时写 bits 与 dtype 无法判断该读哪一个。"""
+    """精度只有一个维度: 同时写 bits 与 dtype 无法判断该读哪一个。"""
     artifact = _artifact(
         key="asr-1.7b-q8",
         family="qwen3_asr",
@@ -588,7 +588,7 @@ def test_catalog_rejects_aligner_policy_mismatch() -> None:
 
 
 def test_catalog_rejects_aligner_dtype_mismatch() -> None:
-    """档位说 bf16、制品写 fp16：同一件事两种说法，必须报错。"""
+    """档位说 bf16、制品写 fp16: 同一件事两种说法, 必须报错。"""
     payload = _catalog_payload()
     artifacts = payload["artifacts"]
     assert isinstance(artifacts, list)

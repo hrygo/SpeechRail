@@ -93,10 +93,10 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
         _profile_payload(profile, artifacts_by_key)
         for profile in selected.presets
     ]
-    # 「这一档要用的文件」还包括一份不在目录里的 CoreML 分人资产（它是 CoreML
-    # bundle，有自己的 manifest，不走 prepare_models）。用同样的行形状列出来，
-    # 界面才能把所有文件放在一张表里读，而不会把同一份资产既算作分人输入、
-    # 又列成「已检测但未纳入当前目录」（2026-09-23）。
+    # 「这一档要用的文件」还包括一份不在目录里的 CoreML 分人资产 (它是 CoreML
+    # bundle, 有自己的 manifest, 不走 prepare_models)。用同样的行形状列出来,
+    # 界面才能把所有文件放在一张表里读, 而不会把同一份资产既算作分人输入、
+    # 又列成「已检测但未纳入当前目录」 (2026-09-23)。
     diarization_presets = [preset.id for preset in selected.presets if preset.diarization]
     if diarization_presets:
         from speechrail.service.diarization_assets import coreml_diarization_row
