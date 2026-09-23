@@ -953,19 +953,28 @@ def _b2_files(payloads: dict[str, bytes]) -> list[dict[str, object]]:
 
 
 def _b2_artifact(
-    key: str, family: str, variant: str, bits: int | None, files: list[dict[str, object]]
+    key: str,
+    family: str,
+    variant: str,
+    bits: int | None,
+    files: list[dict[str, object]],
+    *,
+    dtype: str | None = None,
 ) -> dict[str, object]:
+    quantization: dict[str, object] = {
+        "bits": bits,
+        "group_size": 64 if bits is not None else None,
+        "format": "mlx" if bits is not None else "none",
+    }
+    if dtype is not None:
+        quantization["dtype"] = dtype
     return {
         "key": key,
         "model_id": _B2_REPOSITORY,
         "revision": _B2_REVISION,
         "family": family,
         "variant": variant,
-        "quantization": {
-            "bits": bits,
-            "group_size": 64 if bits is not None else None,
-            "format": "mlx" if bits is not None else "none",
-        },
+        "quantization": quantization,
         "files": files,
         "sources": [
             {
@@ -1023,6 +1032,30 @@ def _b2_catalog() -> ModelCatalog:
                     _b2_tts_variant(b"b17"),
                 ),
                 _b2_artifact(
+                    "asr-17b-bf16",
+                    "qwen3_asr",
+                    "asr",
+                    None,
+                    _b2_asr_variant(b"a17bf16"),
+                    dtype="bf16",
+                ),
+                _b2_artifact(
+                    "tts-17b-design-bf16",
+                    "qwen3_tts",
+                    "voice_design",
+                    None,
+                    _b2_tts_variant(b"d17bf16"),
+                    dtype="bf16",
+                ),
+                _b2_artifact(
+                    "tts-17b-base-bf16",
+                    "qwen3_tts",
+                    "base",
+                    None,
+                    _b2_tts_variant(b"b17bf16"),
+                    dtype="bf16",
+                ),
+                _b2_artifact(
                     "tts-06b-custom-q8",
                     "qwen3_tts",
                     "custom_voice",
@@ -1038,7 +1071,12 @@ def _b2_catalog() -> ModelCatalog:
                 ),
                 _b2_artifact("aligner-q8", "qwen3_forced_aligner", "aligner", 8, aligner_files),
                 _b2_artifact(
-                    "aligner-bf16", "qwen3_forced_aligner", "aligner", None, aligner_files
+                    "aligner-bf16",
+                    "qwen3_forced_aligner",
+                    "aligner",
+                    None,
+                    aligner_files,
+                    dtype="bf16",
                 ),
             ],
             "presets": [
@@ -1064,8 +1102,17 @@ def _b2_catalog() -> ModelCatalog:
                     "aligner": "aligner-bf16",
                     "diarization": True,
                 },
+                {
+                    "id": "extreme",
+                    "asr": "asr-17b-bf16",
+                    "tts": "tts-17b-design-bf16",
+                    "tts_clone": "tts-17b-base-bf16",
+                    "aligner": "aligner-bf16",
+                    "diarization": True,
+                },
             ],
             "precision_policy": {
+                "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
                 "light": {"asr": 8, "tts": 8, "aligner": None},
                 "balanced": {"asr": 8, "tts": 8, "aligner": 8},
                 "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},

@@ -261,7 +261,7 @@ public struct ControlCenterView: View {
             // 稿（Figma `Sidebar Status` 的三个 tone 变体；4x 帧侧栏底部实测墨迹
             // 125.25 × 12.75，点 18–26 / 文本 34.5–143.25）是**一行**：8pt 状态点 +
             // `Callout`(12) 的文本、颜色是 `text/secondary` 灰，没有标题行、也没有尾部
-            // chevron——「服务已就绪 · Quality」整句就是这一行的内容（§7 也写着
+            // chevron——「服务已就绪 · 当前档位短名」整句就是这一行的内容（§7 也写着
             // 「一行状态点 + 状态文本，点击进入「服务状态」」）。应用此前是「服务状态」
             // 标题行 + 小一号的语义色状态行两行，外加一个 chevron：块高只差 2pt
             // （`SpeechRailInteractiveButtonStyle` 的 44pt 命中区下限本就主导了行高，

@@ -3,7 +3,7 @@ title: "SpeechRail 运维与 SRE 文档中心"
 status: active
 audience: "运维工程师、SRE、系统管理员"
 version: "2.2.0"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # 📦 SpeechRail 运维与 SRE 文档
@@ -24,7 +24,7 @@ graph TD
 
 1. **[🚀 运行时与环境部署 (runtime-deployment.md)](runtime-deployment.md)**：外部模型 Snapshot 目录规范、隔离 Python 虚拟环境配置、端口规划，以及 app home 的重装、卸载和可重建目录边界。
 2. **[📖 运维操作手册 (operations-runbook.md)](operations-runbook.md)**：macOS `launchd` 用户级服务管理、原子化升级/回滚流程与故障排查决策树。
-3. **[📦 服务版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)**：服务 wheel、managed runtime、LaunchAgent、三档验收、回滚与发布证据；同时规定 service-only/app-only/combined 范围。
+3. **[📦 服务版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)**：服务 wheel、managed runtime、LaunchAgent、四档候选验收、回滚与发布证据；同时规定 service-only/app-only/combined 范围。候选 `extreme` 在质量和资源证据补齐前不能正式启用。
 4. **[🖥️ macOS App 分发与签名](../developers/macos-app-release.md)**：App archive、Developer ID、notarization、唯一安装路径、control-agent smoke、清理与独立回滚。
 5. **[🔒 安全防护与可观测性 (security-observability.md)](security-observability.md)**：网络访问控制、日志脱敏规范、内存配额与健康探针标准。
 6. **[📊 会议分人端到端验收报告 (speaker-diarization-e2e-acceptance-2026-09-06.md)](speaker-diarization-e2e-acceptance-2026-09-06.md)**：SPK-E2E-1 的历史验收快照；不替代当前 runtime 能力状态，也不等同于连续 Realtime 已发布。

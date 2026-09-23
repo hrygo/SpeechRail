@@ -491,7 +491,8 @@ class Qwen3TtsCapabilityRouter:
     """Route TTS capabilities through independent, lifecycle-owned workers.
 
     Normal synthesis uses the preset's primary VoiceDesign/CustomVoice worker.
-    Registered clone voices use the Quality-only Base worker.  Each worker owns
+    Registered clone voices use the active Base worker when that capability is
+    configured.  Each worker owns
     its request lock, so VoiceDesign and Base can remain resident and synthesize
     concurrently without allowing two requests onto the same worker.  The
     router only serializes lifecycle operations such as startup and eviction.

@@ -607,10 +607,8 @@ private enum CLIOutputDecoder {
             throw ManagedCommandError.invalidOutput
         }
 
-        let profiles = try envelope.profiles?.map { profile in
-            guard let id = SpeechRailProfile(rawValue: profile.id) else {
-                throw ManagedCommandError.invalidOutput
-            }
+        let profiles = envelope.profiles?.map { profile in
+            let id = SpeechRailProfile(rawValue: profile.id) ?? .unrecognized(profile.id)
             return ProfileSummary(
                 id: id,
                 asr: profile.asr,
@@ -623,9 +621,8 @@ private enum CLIOutputDecoder {
         }
         let profile: ProfileSnapshot?
         if envelope.preset != nil || envelope.generation != nil || envelope.asr != nil || envelope.tts != nil {
-            let preset = envelope.preset.flatMap(SpeechRailProfile.init(rawValue:))
-            if envelope.preset != nil && preset == nil {
-                throw ManagedCommandError.invalidOutput
+            let preset = envelope.preset.map {
+                SpeechRailProfile(rawValue: $0) ?? .unrecognized($0)
             }
             profile = ProfileSnapshot(
                 preset: preset,

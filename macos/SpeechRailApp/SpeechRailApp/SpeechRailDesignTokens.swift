@@ -133,6 +133,10 @@ public enum SpeechRailDesignTokens {
         public static let modelArtifactEmptyStateMinimumHeight: CGFloat = 130
         public static let modelFactMinimumWidth: CGFloat = 100
         public static let modelVariantWidth: CGFloat = 120
+        /// 档位卡最小可读宽度；四张卡在此宽度及卡间距之上才使用单行布局。
+        public static let modelProfileCardMinimumWidth: CGFloat = 220
+        public static let modelProfileCardsFourColumnBreakpoint: CGFloat =
+            modelProfileCardMinimumWidth * 4 + SpeechRailDesignTokens.Spacing.sm * 3
         /// 档位卡的规格行：标签列固定，取值右对齐（Figma `Profile Card` 的 76pt）。
         public static let modelProfileSpecLabelWidth: CGFloat = 76
         /// 服务状态能力矩阵：名称列与状态胶囊列各占固定宽度，说明列吸收余量

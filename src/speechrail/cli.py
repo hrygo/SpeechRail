@@ -123,10 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     setup = subcommands.add_parser(
-        "setup", help="choose and apply a three-tier model profile"
+        "setup", help="choose and apply a four-tier model profile"
     )
     setup.add_argument(
-        "--preset", choices=("quality", "balanced", "light"), help="override the recommendation"
+        "--preset",
+        choices=("extreme", "quality", "balanced", "light"),
+        help="explicitly override the recommendation",
     )
     setup.add_argument("--app-home", type=Path, help="use this installed app home")
     setup.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
@@ -141,7 +143,9 @@ def _parser() -> argparse.ArgumentParser:
         help="release wheel to install; defaults to the only speechrail-*.whl in this directory",
     )
     install.add_argument(
-        "--preset", choices=("quality", "balanced", "light"), help="override the recommendation"
+        "--preset",
+        choices=("extreme", "quality", "balanced", "light"),
+        help="explicitly override the recommendation",
     )
     install.add_argument("--app-home", type=Path, help="use this installed app home")
     install.add_argument("--yes", action="store_true", help="install without an interactive prompt")
@@ -163,7 +167,7 @@ def _parser() -> argparse.ArgumentParser:
             "--json", action="store_true", help="emit one machine-readable JSON envelope"
         )
     apply = profile_commands.add_parser("apply")
-    apply.add_argument("preset", choices=("quality", "balanced", "light"))
+    apply.add_argument("preset", choices=("extreme", "quality", "balanced", "light"))
     apply.add_argument("--app-home", type=Path, help="use this installed app home")
     apply.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
     apply.add_argument(
@@ -187,7 +191,7 @@ def _parser() -> argparse.ArgumentParser:
             "--json", action="store_true", help="emit one machine-readable JSON envelope"
         )
     prepare = model_commands.add_parser("prepare")
-    prepare.add_argument("preset", choices=("quality", "balanced", "light"))
+    prepare.add_argument("preset", choices=("extreme", "quality", "balanced", "light"))
     prepare.add_argument("--app-home", type=Path, help="use this installed app home")
     prepare.add_argument("--yes", action="store_true", help="prepare without an interactive prompt")
     prepare.add_argument(

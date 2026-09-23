@@ -481,10 +481,10 @@ public struct MeetingView: View {
         )
     }
 
-    /// 运行档位那一行：读完档位才算「本机最强」，没读到就不替服务吹这一句。
+    /// 只显示健康快照实际报告的活动档位，不由当前已加载档位推断质量排名。
     private var profileRowText: String {
         guard let profile = model.health?.profile else { return "未读取" }
-        return "\(SpeechRailProfilePresentation.shortTitle(profile))（本机最强）"
+        return SpeechRailProfilePresentation.shortTitle(profile)
     }
 
     private func openAudioPrivacySettings() {

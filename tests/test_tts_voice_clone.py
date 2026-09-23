@@ -438,7 +438,7 @@ def test_resolve_binding_voice_cloning(tmp_path: Path, monkeypatch: pytest.Monke
     assert binding_qd.capabilities.supports_clone is True
 
     # 2. Balanced tier (custom_voice): does not support cloning.
-    with pytest.raises(ValueError, match="requires base clone capability"):
+    with pytest.raises(ValueError, match="requires an active Base clone capability"):
         resolve_binding("custom_voice", "test_binding_clone")
 
 
@@ -1143,7 +1143,8 @@ def test_api_voices_clone_rejected_in_balanced_tier(tmp_path: Path) -> None:
     assert resp.status_code == 400
     err = resp.json()["error"]
     assert err["code"] == "voice_cloning_unsupported"
-    assert "quality" in err["message"]
+    assert "Base clone capability" in err["message"]
+    assert "quality" not in err["message"].lower()
 
 
 @pytest.mark.anyio

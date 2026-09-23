@@ -85,7 +85,7 @@ def resolve_binding(
     if variant == "voice_design":
         if profile.mode == "clone":
             raise ValueError(
-                f"voice {voice} requires base clone capability (quality tier); "
+                f"voice {voice} requires an active Base clone capability; "
                 "voice_design is reserved for prompt-created voices"
             )
         return VoiceBinding(
@@ -98,7 +98,7 @@ def resolve_binding(
 
     if profile.mode == "clone":
         raise ValueError(
-            f"voice {voice} requires base clone capability (quality tier); "
+            f"voice {voice} requires an active Base clone capability; "
             "custom_voice variant does not support voice cloning"
         )
 

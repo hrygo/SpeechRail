@@ -2048,7 +2048,7 @@ public final class AppModel {
             case "voice_preview_unsupported":
                 return "当前档位不支持音色预览"
             case "voice_cloning_unsupported":
-                return "当前档位不支持参考音色，请切换到 quality 档位"
+                return "当前档位未提供参考音色能力；请到模型管理查看服务公布的可用档位"
             case "voice_quality_reject":
                 return "生成的参考音频未通过质量检查，请调整描述或参考文案后重试"
             case "transcript_mismatch":

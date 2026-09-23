@@ -58,6 +58,7 @@
       "model_id": "mlx-community/Qwen3-ForcedAligner-0.6B-bf16",
       "quantization": {
         "bits": null,
+        "dtype": "bf16",
         "format": "none",
         "group_size": null
       },
@@ -129,6 +130,7 @@
       "model_id": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -200,6 +202,7 @@
       "model_id": "mlx-community/Qwen3-ASR-0.6B-4bit",
       "quantization": {
         "bits": 4,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -271,6 +274,7 @@
       "model_id": "mlx-community/Qwen3-ASR-0.6B-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -280,6 +284,78 @@
           "provider": "modelscope",
           "repository": "mlx-community/Qwen3-ASR-0.6B-8bit",
           "revision": "54e4c7130621e78fd227cf3a49893c670d9057f1"
+        }
+      ],
+      "variant": "asr"
+    },
+    {
+      "family": "qwen3_asr",
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "e8dbd283372fe894c095d08ec505c5bff21803db116622b7eb642a349879a18b",
+          "size": 1008
+        },
+        {
+          "path": "chat_template.json",
+          "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
+          "size": 1161
+        },
+        {
+          "path": "config.json",
+          "sha256": "62fe9a2ba2de536820229e126fdfb35f9910b9a337dc46d3737c3b1ac0a9caa9",
+          "size": 6983
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c",
+          "size": 142
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "size": 1671853
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "2f080a3b769ae469aeaaa2dcb9e13a94141e54c9e6d5a7aa63392e0dc5a51789",
+          "size": 4076186653
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "a3ee6037ec82e95dc8577216ac84cf0b3c92cfefc099cf20b2296571f2fb3fc0",
+          "size": 51384
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d",
+          "size": 330
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c",
+          "size": 12487
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "asr-1.7b-bf16",
+      "model_id": "mlx-community/Qwen3-ASR-1.7B-bf16",
+      "quantization": {
+        "bits": null,
+        "dtype": "bf16",
+        "format": "none",
+        "group_size": null
+      },
+      "revision": "ef12a053e8aa5703de3aab0a9f97ddbdab603776",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-ASR-1.7B-bf16",
+          "revision": "ef12a053e8aa5703de3aab0a9f97ddbdab603776"
         }
       ],
       "variant": "asr"
@@ -342,6 +418,7 @@
       "model_id": "mlx-community/Qwen3-ASR-1.7B-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -428,6 +505,7 @@
       "model_id": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit",
       "quantization": {
         "bits": 4,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -514,6 +592,7 @@
       "model_id": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -526,6 +605,93 @@
         }
       ],
       "variant": "custom_voice"
+    },
+    {
+      "family": "qwen3_tts",
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "63ff68f36197b9f10ad58acc6a24b596e35be43ca64348d1b74e097b1848163a",
+          "size": 1645
+        },
+        {
+          "path": "config.json",
+          "sha256": "39ffdadc03c1a7c7f8116ee8830d6a577ac87039edcbd88759b4fcc4db272070",
+          "size": 5317
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "size": 245
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "size": 1671839
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "81fb76175ff74e69be25fef2cc3e54f016df3034f1514c8e1c89da06a3510cff",
+          "size": 3857414009
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "f5bb337c2f77c5046024c7342ed8d6ade28fdfbab862baf9f13269743b920005",
+          "size": 38742
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "size": 127
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "size": 2336
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "size": 76
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "size": 682293092
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "size": 234
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "size": 7344
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "tts-1.7b-base-bf16",
+      "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+      "quantization": {
+        "bits": null,
+        "dtype": "bf16",
+        "format": "none",
+        "group_size": null
+      },
+      "revision": "072137f02bd36b9ed858e93514705a6a4738618a",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+          "revision": "072137f02bd36b9ed858e93514705a6a4738618a"
+        }
+      ],
+      "variant": "base"
     },
     {
       "family": "qwen3_tts",
@@ -595,6 +761,7 @@
       "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -607,6 +774,93 @@
         }
       ],
       "variant": "base"
+    },
+    {
+      "family": "qwen3_tts",
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "9a7ca18ad574b63bfd39fccb05a6e4f8841eccb1b60d738860f27ef3c74978c6",
+          "size": 1203
+        },
+        {
+          "path": "config.json",
+          "sha256": "8a9be83c045ee9ab9d2e6609655f547b9291a070f5acae3428c3ff07a365de40",
+          "size": 5232
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "size": 245
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "size": 1671839
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "96ae28bec2205ec0b5e0c750bea2b8a5deac4f14d33a8a25a5f753299486b70e",
+          "size": 3833402589
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "abf019e063dcc595d7aef7c9554d2806ffdc58746a7ac6238cb26177af8d431f",
+          "size": 32458
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "size": 127
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "size": 2336
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "size": 76
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "size": 682293092
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "size": 234
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "size": 7344
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "tts-1.7b-design-bf16",
+      "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+      "quantization": {
+        "bits": null,
+        "dtype": "bf16",
+        "format": "none",
+        "group_size": null
+      },
+      "revision": "8f4e5ac0d3ab7e8aae213b74029d0af9394c8080",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+          "revision": "8f4e5ac0d3ab7e8aae213b74029d0af9394c8080"
+        }
+      ],
+      "variant": "voice_design"
     },
     {
       "family": "qwen3_tts",
@@ -681,6 +935,7 @@
       "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
       "quantization": {
         "bits": 8,
+        "dtype": null,
         "format": "mlx",
         "group_size": 64
       },
@@ -701,6 +956,11 @@
       "asr": 8,
       "tts": 8
     },
+    "extreme": {
+      "aligner": "bf16",
+      "asr": "bf16",
+      "tts": "bf16"
+    },
     "light": {
       "aligner": null,
       "asr": 8,
@@ -720,6 +980,14 @@
       "id": "balanced",
       "tts": "tts-0.6b-custom-q8",
       "tts_clone": null
+    },
+    {
+      "aligner": "aligner-bf16",
+      "asr": "asr-1.7b-bf16",
+      "diarization": true,
+      "id": "extreme",
+      "tts": "tts-1.7b-design-bf16",
+      "tts_clone": "tts-1.7b-base-bf16"
     },
     {
       "aligner": null,

@@ -32,7 +32,17 @@ from speechrail.service.model_store import (
 )
 
 _HASH = "b" * 64
-_REVISIONS = {"asr": "a" * 40, "design": "c" * 40, "custom": "d" * 40, "base": "f" * 40}
+_REVISIONS = {
+    "asr": "a" * 40,
+    "design": "c" * 40,
+    "custom": "d" * 40,
+    "base": "f" * 40,
+    "asr-bf16": "1" * 40,
+    "design-bf16": "2" * 40,
+    "custom-bf16": "5" * 40,
+    "base-bf16": "3" * 40,
+    "aligner-bf16": "4" * 40,
+}
 
 
 def _runtime_lock(lock_id: str = "fixture-lock") -> RuntimeLock:
@@ -81,14 +91,19 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
     ModelCatalog, dict[tuple[str, str], bytes]
 ]:
     definitions = (
-        ("asr", "qwen3_asr", "asr"),
-        ("design", "qwen3_tts", "voice_design"),
-        ("custom", "qwen3_tts", "custom_voice"),
-        ("base", "qwen3_tts", "base"),
+        ("asr", "qwen3_asr", "asr", 8, None),
+        ("design", "qwen3_tts", "voice_design", 8, None),
+        ("custom", "qwen3_tts", "custom_voice", 8, None),
+        ("base", "qwen3_tts", "base", 8, None),
+        ("asr-bf16", "qwen3_asr", "asr", None, "bf16"),
+        ("design-bf16", "qwen3_tts", "voice_design", None, "bf16"),
+        ("custom-bf16", "qwen3_tts", "custom_voice", None, "bf16"),
+        ("base-bf16", "qwen3_tts", "base", None, "bf16"),
+        ("aligner-bf16", "qwen3_forced_aligner", "aligner", None, "bf16"),
     )
     artifacts: list[dict[str, object]] = []
     payloads: dict[tuple[str, str], bytes] = {}
-    for key, family, variant in definitions:
+    for key, family, variant, bits, dtype in definitions:
         files, artifact_payloads = _artifact_files(key, family)
         revision = (
             _REVISIONS[key][:-len(revision_suffix)] + revision_suffix
@@ -114,7 +129,12 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                 "revision": revision,
                 "family": family,
                 "variant": variant,
-                "quantization": {"bits": 8, "group_size": 64, "format": "fixture"},
+                "quantization": {
+                    "bits": bits,
+                    "dtype": dtype,
+                    "group_size": 64 if bits is not None else None,
+                    "format": "fixture" if bits is not None else "none",
+                },
                 "files": list(files),
                 "sources": sources,
             }
@@ -152,8 +172,17 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                     "aligner": None,
                     "diarization": False,
                 },
+                {
+                    "id": "extreme",
+                    "asr": "asr-bf16",
+                    "tts": "design-bf16",
+                    "tts_clone": "base-bf16",
+                    "aligner": "aligner-bf16",
+                    "diarization": False,
+                },
             ],
             "precision_policy": {
+                "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
                 "quality": {"asr": 8, "tts": 8, "aligner": None},
                 "balanced": {"asr": 8, "tts": 8, "aligner": None},
                 "light": {"asr": 8, "tts": 8, "aligner": None},
@@ -532,7 +561,40 @@ async def test_metadata_change_gets_new_identity_and_reuses_verified_files(tmp_p
     )
     entry = registry["prepared"][second_id]["artifacts"]["asr"]
     assert entry["model_id"] == "fixture/asr-renamed"
-    assert entry["quantization"] == {"bits": 8, "group_size": 32, "format": "fixture"}
+    assert entry["quantization"] == {
+        "bits": 8,
+        "dtype": None,
+        "group_size": 32,
+        "format": "fixture",
+    }
+
+
+@pytest.mark.anyio
+async def test_registry_without_explicit_null_dtype_reuses_verified_q8_files(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+    registry_path = tmp_path / "state" / "model-preparations.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    entries = registry["prepared"][prepared_id]["artifacts"]
+    for entry in entries.values():
+        if entry["quantization"]["bits"] is not None:
+            entry["quantization"].pop("dtype", None)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    reused = registered_prepared_artifacts(
+        tmp_path, preset_id="quality", catalog=catalog, runtime_lock=lock
+    )
+    downloader = FakeDownloader(payloads)
+    second_id = await _prepare(
+        tmp_path, catalog, lock, downloader, preset="quality"
+    )
+
+    assert set(reused) == {"asr", "design", "base"}
+    assert second_id == prepared_id
+    assert downloader.calls == []
 
 
 @pytest.mark.anyio
@@ -547,6 +609,53 @@ async def test_repeat_prepare_reuses_verified_cache_without_download(tmp_path: P
 
     assert second == first
     assert len(downloader.calls) == calls_after_first
+
+
+@pytest.mark.anyio
+async def test_extreme_prepare_reuses_verified_bf16_artifacts_without_download(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    first_downloader = FakeDownloader(payloads)
+    first = await _prepare(
+        tmp_path, catalog, lock, first_downloader, preset="extreme"
+    )
+    calls_after_first = len(first_downloader.calls)
+
+    second_downloader = FakeDownloader(payloads)
+    second = await _prepare(
+        tmp_path, catalog, lock, second_downloader, preset="extreme"
+    )
+
+    assert second == first
+    assert len(first_downloader.calls) == calls_after_first
+    assert second_downloader.calls == []
+    assert set(registered_prepared_artifacts(
+        tmp_path, preset_id="extreme", catalog=catalog, runtime_lock=lock
+    )) == {"asr-bf16", "design-bf16", "base-bf16"}
+
+
+@pytest.mark.anyio
+async def test_extreme_prepare_rejects_a_corrupt_bf16_file_before_registration(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    payloads[("fixture/asr-bf16", "model.safetensors")] = b"corrupt"
+    downloader = FakeDownloader(payloads)
+
+    with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
+        await _prepare(
+            tmp_path,
+            catalog,
+            _runtime_lock(),
+            downloader,
+            preset="extreme",
+            max_retries=0,
+        )
+
+    assert not (tmp_path / "state" / "model-preparations.json").exists()
+    assert not list((tmp_path / "models" / ".staging").glob("**/*"))
 
 
 @pytest.mark.anyio

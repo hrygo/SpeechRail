@@ -78,6 +78,7 @@ def make_client(
     *,
     tier: str = "quality",
     with_asr: bool = True,
+    with_clone: bool = True,
     api_key: str | None = None,
 ) -> tuple[TestClient, VoiceRegistry, DesignSynth, DesignAsr]:
     preset = load_catalog().preset(tier)
@@ -91,7 +92,11 @@ def make_client(
             qwen3_python=None,
             qwen3_tts_model_dir=tmp_path / preset.tts,
             qwen3_tts_python=None,
-            qwen3_tts_clone_model_dir=tmp_path / preset.tts_clone if preset.tts_clone else None,
+            qwen3_tts_clone_model_dir=(
+                tmp_path / preset.tts_clone
+                if with_clone and preset.tts_clone
+                else None
+            ),
             api_key=api_key,
         ),
         tts_synthesizer=synth,
@@ -110,11 +115,13 @@ def payload() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("tier", ["quality", "extreme"])
 def test_design_registers_base_voice_with_verified_reference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    tier: str,
 ) -> None:
-    client, registry, synth, asr = make_client(tmp_path, monkeypatch)
+    client, registry, synth, asr = make_client(tmp_path, monkeypatch, tier=tier)
     original = registry.create_custom_profile("Original", "原始音色描述", "original")
     before = original.to_dict()
     response = client.post("/v1/voices/designs", json=payload())
@@ -126,6 +133,24 @@ def test_design_registers_base_voice_with_verified_reference(
     assert voice["quality"]["reference"]["transcript_match"] == 1.0
     assert voice["quality"]["synthesis"]["probe_count"] == 0
     assert "audio_path" not in voice
+    health = client.get("/health").json()
+    models = {
+        entry["id"]: entry for entry in client.get("/v1/models").json()["data"]
+    }
+    voices = {
+        entry["id"]: entry for entry in client.get("/v1/voices").json()["data"]
+    }
+    snapshot = client.get("/v1/speechrail/capabilities").json()
+    assert health["profile"] == tier
+    assert models["speechrail/qwen3-tts"]["profile"] == tier
+    assert models["speechrail/qwen3-tts"]["artifact"] == load_catalog().preset(tier).tts
+    assert models["speechrail/qwen3-tts"]["variant"] == "voice_design"
+    assert models["speechrail/qwen3-tts"]["capabilities"]["supports_clone"] is True
+    assert voices["serena"]["variant"] == "voice_design"
+    assert voices["serena"]["capabilities"]["supports_instruction"] is True
+    assert snapshot["profile"] == tier
+    assert snapshot["models"]["tts"]["artifact"] == load_catalog().preset(tier).tts
+    assert snapshot["models"]["tts_clone"]["artifact"] == load_catalog().preset(tier).tts_clone
     assert synth.events == ["tts", "tts.closed", "tts.evicted", "asr"]
     assert synth.requests[0].instruction == payload()["instruction"]
     assert synth.requests[0].seed == 123
@@ -149,7 +174,7 @@ def test_design_registers_base_voice_with_verified_reference(
 
 
 @pytest.mark.parametrize("tier", ["balanced", "light"])
-def test_design_requires_quality_before_any_work(
+def test_design_requires_voice_design_and_base_before_any_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tier: str,
@@ -158,8 +183,25 @@ def test_design_requires_quality_before_any_work(
     response = client.post("/v1/voices/designs", json=payload())
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_design_registration_unsupported"
+    assert "quality" not in response.json()["error"]["message"].lower()
     assert not synth.requests
     assert all(p.is_system for p in registry.list_profiles())
+
+
+def test_design_rejects_missing_base_before_any_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, synth, _ = make_client(
+        tmp_path, monkeypatch, tier="quality", with_clone=False
+    )
+
+    response = client.post("/v1/voices/designs", json=payload())
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_design_registration_unsupported"
+    assert not synth.requests
+    assert all(profile.is_system for profile in registry.list_profiles())
 
 
 def test_design_requires_asr_before_generation(

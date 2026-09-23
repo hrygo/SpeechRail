@@ -73,8 +73,10 @@ _CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 _INSTRUCTIONS = (
     "SpeechRail MCP exposes the complete local SpeechRail ASR/TTS, voice and "
     "durable-job surface. Always start with describe(): it requires the current "
-    "effective_capabilities_v1 contract and reports the active profile, "
-    "readiness, available voices and validation state. `available=true` means "
+    "effective_capabilities_v1 contract and reports the active profile, profile "
+    "consistency, readiness, available voices and validation state. The proxy "
+    "never changes profiles; missing capabilities are reported from the current "
+    "snapshot. `available=true` means "
     "the voice can be routed; for clone voices it does not mean "
     "`production_ready=true`. After design_voice or clone_voice, call "
     "validate_voice and require a persisted synthesis output pass before a "
@@ -363,7 +365,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
 
         text: text to speak (up to 4096 chars).
         voice: a voice id from describe().voices (defaults to serena);
-            clone/instruction voices are rejected outside the quality tier.
+            clone/instruction voices are rejected when the current effective
+            snapshot does not publish their required capability.
         output_format: mp3 (default), wav or pcm.
         speed: speaking rate from 0.25 to 4.0.
         expected_voice_revision / expected_model_revision: optional revision
@@ -414,7 +417,7 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             Field(description="Sample text to speak with the provisional voice."),
         ],
     ) -> AudioArtifact:
-        """Audition a VoiceDesign instruction (quality tier only).
+        """Audition an instruction when VoiceDesign is active.
 
         instruction: natural-language voice description to audition.
             Chinese or English only (30-200 words); describe acoustic traits
@@ -422,8 +425,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         text: sample text to speak with the provisional voice.
         Returns {audio_path, content_type, output_format, bytes}. Ephemeral:
             nothing is persisted; call create_voice to register the chosen
-            instruction. Non-quality profiles are rejected up front; call
-            describe() to confirm support.
+            instruction. The active effective snapshot must publish VoiceDesign;
+            call describe() to inspect current capabilities.
         """
         return AudioArtifact.model_validate(
             await _map_errors(tools.preview_voice(client, instruction=instruction, text=text))
@@ -472,8 +475,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             omitted means server-assigned.
         seed: optional integer 0..4294967295 for reproducible synthesis.
         Returns the created voice entry (id, mode, available, capabilities).
-            The voice synthesizes on the quality tier only; elsewhere it is
-            listed with available=false.
+            Registration requires VoiceDesign in the current effective
+            capability snapshot.
         """
         return VoiceRecord.model_validate(
             await _map_errors(
@@ -574,7 +577,7 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             Field(description="Optional key for safe retry of the same audio/payload."),
         ] = None,
     ) -> VoiceRecord:
-        """Register a local reference recording through the Base quality gate."""
+        """Register a local reference recording when Base is active."""
         return VoiceRecord.model_validate(
             await _map_errors(
                 tools.clone_voice(

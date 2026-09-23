@@ -19,7 +19,7 @@ from typing import Final
 _IMMUTABLE_REVISION: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{40}")
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{64}")
 _SCHEMA_VERSION: Final[int] = 2
-_PRESET_IDS: Final[frozenset[str]] = frozenset({"quality", "balanced", "light"})
+_PRESET_IDS: Final[frozenset[str]] = frozenset({"extreme", "quality", "balanced", "light"})
 _ARTIFACT_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "key",
@@ -35,7 +35,9 @@ _ARTIFACT_FIELDS: Final[frozenset[str]] = frozenset(
 _SOURCE_FIELDS: Final[frozenset[str]] = frozenset({"provider", "repository", "revision"})
 _SOURCE_ALLOWED_FIELDS: Final[frozenset[str]] = _SOURCE_FIELDS | frozenset({"files"})
 _FILE_FIELDS: Final[frozenset[str]] = frozenset({"path", "size", "sha256"})
-_QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset({"bits", "group_size", "format"})
+_QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset(
+    {"bits", "dtype", "group_size", "format"}
+)
 _PRESET_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {"id", "asr", "tts", "aligner", "diarization"}
 )
@@ -149,6 +151,7 @@ def _normalise_quantization(value: object, *, artifact_key: str) -> dict[str, ob
     data = _mapping(value, context=context)
     _check_fields(data, _QUANTIZATION_FIELDS, context=context)
     bits = data["bits"]
+    dtype = data["dtype"]
     group_size = data["group_size"]
     if bits is not None and (not isinstance(bits, int) or isinstance(bits, bool) or bits <= 0):
         raise ValueError(f"{context}.bits must be a positive integer or null")
@@ -157,7 +160,20 @@ def _normalise_quantization(value: object, *, artifact_key: str) -> dict[str, ob
     ):
         raise ValueError(f"{context}.group_size must be a positive integer or null")
     format_name = _required_string(data, "format", context=context)
-    return {"bits": bits, "group_size": group_size, "format": format_name}
+    if dtype is not None and dtype != "bf16":
+        raise ValueError(f"{context}.dtype must be null or 'bf16'")
+    if bits is not None and dtype is not None:
+        raise ValueError(f"{context} must declare either bits or dtype, not both")
+    if bits is None and dtype is None:
+        raise ValueError(f"{context}.dtype is required when bits is null")
+    if dtype == "bf16" and (group_size is not None or format_name != "none"):
+        raise ValueError(f"{context} bf16 encoding requires group_size=null and format='none'")
+    return {
+        "bits": bits,
+        "dtype": dtype,
+        "group_size": group_size,
+        "format": format_name,
+    }
 
 
 def _normalise_source(
@@ -297,7 +313,7 @@ def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> 
         raise ValueError(f"{context} has unsupported field(s): {', '.join(unexpected)}")
     preset_id = _required_string(data, "id", context=context)
     if preset_id not in _PRESET_IDS:
-        raise ValueError(f"{context}.id must be one of quality, balanced, light")
+        raise ValueError(f"{context}.id must be one of extreme, quality, balanced, light")
     asr = _required_string(data, "asr", context=context)
     tts = _required_string(data, "tts", context=context)
     if asr not in artifact_keys:
@@ -338,10 +354,16 @@ def _normalise_precision(
     )
     asr = tier["asr"]
     tts = tier["tts"]
-    if not isinstance(asr, int) or isinstance(asr, bool) or asr <= 0:
-        raise ValueError(f"{context}.{preset_id}.asr must be a positive integer")
-    if not isinstance(tts, int) or isinstance(tts, bool) or tts <= 0:
-        raise ValueError(f"{context}.{preset_id}.tts must be a positive integer")
+    if not (
+        asr == "bf16"
+        or (isinstance(asr, int) and not isinstance(asr, bool) and asr > 0)
+    ):
+        raise ValueError(f"{context}.{preset_id}.asr must be 'bf16' or a positive integer")
+    if not (
+        tts == "bf16"
+        or (isinstance(tts, int) and not isinstance(tts, bool) and tts > 0)
+    ):
+        raise ValueError(f"{context}.{preset_id}.tts must be 'bf16' or a positive integer")
     aligner = tier["aligner"]
     if (
         aligner is not None
@@ -362,6 +384,19 @@ def _normalise_precision_policy(value: object) -> dict[str, dict[str, object]]:
         preset_id: _normalise_precision(data[preset_id], preset_id=preset_id, context=context)
         for preset_id in sorted(data)
     }
+
+
+def _precision_matches(quantization: object, policy: object) -> bool:
+    if not isinstance(quantization, Mapping):
+        return False
+    if policy == "bf16":
+        return quantization.get("bits") is None and quantization.get("dtype") == "bf16"
+    return (
+        isinstance(policy, int)
+        and not isinstance(policy, bool)
+        and quantization.get("bits") == policy
+        and quantization.get("dtype") is None
+    )
 
 
 def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
@@ -404,8 +439,46 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
             raise ValueError(f"catalog has duplicate preset id: {preset_id}")
         seen_preset_ids.add(preset_id)
         presets.append(preset)
+    if seen_preset_ids != _PRESET_IDS:
+        missing = sorted(_PRESET_IDS.difference(seen_preset_ids))
+        extra = sorted(seen_preset_ids.difference(_PRESET_IDS))
+        raise ValueError(
+            "catalog.presets must contain exactly extreme, quality, balanced, and light"
+            f" (missing={missing}, extra={extra})"
+        )
 
     precision_policy = _normalise_precision_policy(entries["precision_policy"])
+    artifacts_by_key = {str(artifact["key"]): artifact for artifact in artifacts}
+    for preset in presets:
+        preset_id = str(preset["id"])
+        policy = precision_policy[preset_id]
+        for field in ("asr", "tts"):
+            artifact = artifacts_by_key[str(preset[field])]
+            if not _precision_matches(artifact["quantization"], policy[field]):
+                raise ValueError(
+                    f"preset {preset_id} {field} precision does not match precision_policy"
+                )
+
+        clone_key = preset["tts_clone"]
+        if clone_key is not None:
+            clone = artifacts_by_key[str(clone_key)]
+            if not _precision_matches(clone["quantization"], policy["tts"]):
+                raise ValueError(
+                    f"preset {preset_id} clone precision does not match precision_policy.tts"
+                )
+
+        aligner_key = preset["aligner"]
+        aligner_precision = policy["aligner"]
+        if (aligner_key is None) != (aligner_precision is None):
+            raise ValueError(
+                f"preset {preset_id} aligner reference does not match precision_policy"
+            )
+        if aligner_key is not None:
+            aligner = artifacts_by_key[str(aligner_key)]
+            if not _precision_matches(aligner["quantization"], aligner_precision):
+                raise ValueError(
+                    f"preset {preset_id} aligner precision does not match precision_policy"
+                )
 
     return {
         "schema_version": _SCHEMA_VERSION,

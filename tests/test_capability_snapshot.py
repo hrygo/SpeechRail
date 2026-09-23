@@ -76,7 +76,7 @@ def _active(tier: str):
     )
 
 
-@pytest.mark.parametrize("tier", ["light", "balanced", "quality"])
+@pytest.mark.parametrize("tier", ["light", "balanced", "quality", "extreme"])
 @pytest.mark.parametrize("mode", ["system", "instruction", "clone"])
 def test_effective_matrix_uses_captured_voice_and_base_lane(
     tier: str, mode: str, monkeypatch
@@ -112,18 +112,18 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     entry = data["voices"][0]
     assert entry["voice_revision"] is None
     assert entry["voice_identity_assurance"] == "legacy"
-    assert entry["available"] is (tier == "quality" or mode == "system")
+    assert entry["available"] is (tier in {"quality", "extreme"} or mode == "system")
     encoded = str(data)
     for secret in ["PRIVATE_INSTRUCTION", "PRIVATE_REFERENCE", "/private/", "PRIVATE_QUALITY"]:
         assert secret not in encoded
     if mode == "clone":
-        assert entry["variant"] == ("base" if tier == "quality" else None)
+        assert entry["variant"] == ("base" if tier in {"quality", "extreme"} else None)
         assert entry["operations"]["http_speech"]["parameters"]["speed"]["values"] == [1.0]
         assert (
             entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
             == "unsupported"
         )
-    elif tier == "quality":
+    elif tier in {"quality", "extreme"}:
         assert (
             entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
             == "supported"
@@ -247,7 +247,7 @@ def test_discovery_handles_untrusted_quality_status_without_disclosure() -> None
     assert "PRIVATE" not in str(data)
 
 
-@pytest.mark.parametrize("tier", ["light", "balanced", "quality"])
+@pytest.mark.parametrize("tier", ["light", "balanced", "quality", "extreme"])
 def test_snapshot_matches_documented_openapi_schema(tier: str) -> None:
     import jsonschema
     import yaml

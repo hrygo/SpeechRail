@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 _catalog_builder = import_module("tools.build_model_catalog")
 build_catalog = _catalog_builder.build_catalog
 require_immutable_revision = _catalog_builder.require_immutable_revision
+_normalise_precision = _catalog_builder._normalise_precision
+_normalise_quantization = _catalog_builder._normalise_quantization
 
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
@@ -41,7 +43,7 @@ def _artifact(
         "revision": REVISION,
         "family": "qwen3",
         "variant": "0.6b",
-        "quantization": {"bits": 8, "group_size": 64, "format": "mlx"},
+        "quantization": {"bits": 8, "dtype": None, "group_size": 64, "format": "mlx"},
         "files": files or [_file("config.json"), _file("model.safetensors")],
         "sources": [
             {
@@ -53,29 +55,27 @@ def _artifact(
     }
 
 
-def _default_precision_policy() -> dict[str, Any]:
-    return {
-        "quality": {"asr": 8, "tts": 8, "aligner": None},
-        "balanced": {"asr": 8, "tts": 8, "aligner": None},
-        "light": {"asr": 8, "tts": 8, "aligner": None},
-    }
-
-
 def _catalog(
     *artifacts: dict[str, Any],
     precision_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact_keys = [artifact["key"] for artifact in artifacts]
     first_key = artifact_keys[0] if artifact_keys else "missing"
+    quantization = artifacts[0]["quantization"] if artifacts else {}
+    precision = quantization.get("dtype") or quantization.get("bits") or 8
     presets = [
         {"id": preset_id, "asr": first_key, "tts": first_key, "aligner": None, "diarization": False}
-        for preset_id in ("quality", "balanced", "light")
+        for preset_id in ("quality", "balanced", "light", "extreme")
     ]
+    matching_precision_policy = {
+        preset_id: {"asr": precision, "tts": precision, "aligner": None}
+        for preset_id in ("quality", "balanced", "light", "extreme")
+    }
     return {
         "schema_version": 2,
         "artifacts": list(artifacts),
         "presets": presets,
-        "precision_policy": precision_policy or _default_precision_policy(),
+        "precision_policy": precision_policy or matching_precision_policy,
     }
 
 
@@ -88,6 +88,7 @@ def _aligner_artifact(*, key: str = "aligner-q8", bits: int | None = 8) -> dict[
         "variant": "aligner",
         "quantization": {
             "bits": bits,
+            "dtype": "bf16" if bits is None else None,
             "group_size": 64 if bits is not None else None,
             "format": "mlx" if bits is not None else "none",
         },
@@ -107,15 +108,58 @@ def _legal_metadata() -> dict[str, Any]:
         key="asr-1.7b-q8",
         files=[_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
     )
+    asr_bf16 = _artifact(
+        key="asr-1.7b-bf16",
+        files=[_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
+    )
+    asr_bf16["quantization"] = {
+        "bits": None,
+        "dtype": "bf16",
+        "group_size": None,
+        "format": "none",
+    }
+    tts_design_bf16 = _artifact(
+        key="tts-1.7b-design-bf16",
+        files=[
+            _file("config.json"),
+            _file("model.safetensors"),
+            _file("tokenizer.json"),
+            _file("speech_tokenizer/configuration.json"),
+            _file("speech_tokenizer/codec.safetensors"),
+        ],
+    )
+    tts_design_bf16["quantization"] = {
+        "bits": None,
+        "dtype": "bf16",
+        "group_size": None,
+        "format": "none",
+    }
+    tts_base_bf16 = dict(tts_design_bf16, key="tts-1.7b-base-bf16")
+    aligner_bf16 = _aligner_artifact(key="aligner-bf16", bits=None)
     return {
         "schema_version": 2,
-        "artifacts": [asr, _aligner_artifact()],
+        "artifacts": [
+            asr,
+            asr_bf16,
+            tts_design_bf16,
+            tts_base_bf16,
+            _aligner_artifact(),
+            aligner_bf16,
+        ],
         "presets": [
             {
                 "id": "quality",
                 "asr": "asr-1.7b-q8",
                 "tts": "asr-1.7b-q8",
                 "aligner": "aligner-q8",
+                "diarization": True,
+            },
+            {
+                "id": "extreme",
+                "asr": "asr-1.7b-bf16",
+                "tts": "tts-1.7b-design-bf16",
+                "tts_clone": "tts-1.7b-base-bf16",
+                "aligner": "aligner-bf16",
                 "diarization": True,
             },
             {
@@ -134,6 +178,7 @@ def _legal_metadata() -> dict[str, Any]:
             },
         ],
         "precision_policy": {
+            "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
             "quality": {"asr": 8, "tts": 8, "aligner": 8},
             "balanced": {"asr": 8, "tts": 8, "aligner": 8},
             "light": {"asr": 8, "tts": 8, "aligner": None},
@@ -309,9 +354,73 @@ def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
     assert catalog["schema_version"] == 2
     policy = catalog["precision_policy"]
     assert isinstance(policy, dict)
-    assert set(policy) == {"quality", "balanced", "light"}
+    assert set(policy) == {"quality", "balanced", "light", "extreme"}
     assert policy["light"]["aligner"] is None
     assert policy["quality"]["aligner"] == 8
+    assert policy["extreme"] == {"asr": "bf16", "tts": "bf16", "aligner": "bf16"}
+    assert {preset["id"] for preset in catalog["presets"]} == {
+        "quality",
+        "balanced",
+        "light",
+        "extreme",
+    }
+    bf16_artifacts = {artifact["key"]: artifact for artifact in catalog["artifacts"]}
+    for key in ("asr-1.7b-bf16", "tts-1.7b-design-bf16", "tts-1.7b-base-bf16"):
+        assert bf16_artifacts[key]["quantization"] == {
+            "bits": None,
+            "dtype": "bf16",
+            "format": "none",
+            "group_size": None,
+        }
+
+
+def test_precision_normalization_accepts_bf16_for_asr_tts_and_aligner() -> None:
+    assert _normalise_precision(
+        {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
+        preset_id="extreme",
+        context="catalog.precision_policy",
+    ) == {"asr": "bf16", "tts": "bf16", "aligner": "bf16"}
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        {"bits": 8, "dtype": "bf16", "group_size": 64, "format": "mlx"},
+        {"bits": None, "dtype": None, "group_size": None, "format": "none"},
+    ],
+    ids=["bits-and-dtype", "unquantized-without-dtype"],
+)
+def test_quantization_rejects_mixed_or_missing_precision(quantization: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"bits|dtype|precision"):
+        _normalise_quantization(quantization, artifact_key="fixture")
+
+
+def test_catalog_builder_requires_all_four_presets() -> None:
+    entries = _legal_metadata()
+    entries["presets"] = entries["presets"][:-1]
+
+    with pytest.raises(ValueError, match="preset"):
+        build_catalog(entries)
+
+
+@pytest.mark.parametrize(
+    ("preset_id", "field", "replacement"),
+    [
+        ("extreme", "asr", "asr-1.7b-q8"),
+        ("extreme", "tts", "asr-1.7b-q8"),
+        ("extreme", "tts_clone", "asr-1.7b-q8"),
+        ("extreme", "aligner", "aligner-q8"),
+    ],
+)
+def test_builder_rejects_preset_artifacts_that_disagree_with_precision_policy(
+    preset_id: str, field: str, replacement: str
+) -> None:
+    entries = _legal_metadata()
+    preset = next(item for item in entries["presets"] if item["id"] == preset_id)
+    preset[field] = replacement
+
+    with pytest.raises(ValueError, match=r"precision|preset"):
+        build_catalog(entries)
 
 
 @pytest.mark.parametrize(

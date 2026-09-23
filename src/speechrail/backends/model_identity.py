@@ -8,7 +8,7 @@ import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from speechrail.config.model_catalog import ModelArtifact, QuantizationSpec
 
@@ -39,7 +39,7 @@ _SHARDED_WEIGHT_FILES: Final = (
     "model-00002-of-00002.safetensors",
 )
 _WEIGHT_INDEX_FILE: Final = "model.safetensors.index.json"
-_QUANTIZATION_KEYS: Final = frozenset({"bits", "group_size", "mode", "format"})
+_QUANTIZATION_KEYS: Final = frozenset({"bits", "dtype", "group_size", "mode", "format"})
 _QUANTIZATION_FORMATS: Final = frozenset({"none", "unquantized", "affine", "mlx"})
 _MAX_INDEXED_WEIGHT_FILES: Final = 2
 
@@ -174,6 +174,12 @@ def _quantization_declaration(raw: object, *, field_name: str) -> QuantizationSp
 
     bits = _strict_bits(raw.get("bits"))
     group_size = _strict_group_size(raw.get("group_size"), bits=bits)
+    raw_dtype = raw.get("dtype")
+    if raw_dtype is not None and (
+        not isinstance(raw_dtype, str) or raw_dtype not in {"bf16", "bfloat16"}
+    ):
+        raise ValueError(f"{field_name}.dtype is unsupported")
+    dtype: Literal["bf16"] | None = "bf16" if raw_dtype is not None else None
     mode = raw.get("mode")
     declared_format = raw.get("format")
     if mode is not None and not isinstance(mode, str):
@@ -188,7 +194,7 @@ def _quantization_declaration(raw: object, *, field_name: str) -> QuantizationSp
         if bits is None:
             if selected not in {"none", "unquantized"}:
                 raise ValueError(f"{field_name}.mode must be none for unquantized models")
-            return QuantizationSpec(bits=None, group_size=None, format="none")
+            return QuantizationSpec(bits=None, dtype=dtype, group_size=None, format="none")
         if selected != "affine":
             raise ValueError(f"{field_name}.mode must be affine")
         return QuantizationSpec(bits=bits, group_size=group_size, format="affine")
@@ -202,7 +208,7 @@ def _quantization_declaration(raw: object, *, field_name: str) -> QuantizationSp
     if bits is None:
         if selected not in {"none", "unquantized"}:
             raise ValueError(f"{field_name}.format must be none for unquantized models")
-        return QuantizationSpec(bits=None, group_size=None, format="none")
+        return QuantizationSpec(bits=None, dtype=dtype, group_size=None, format="none")
     if selected not in {"affine", "mlx"}:
         raise ValueError(f"{field_name}.format must be affine or mlx")
     return QuantizationSpec(bits=bits, group_size=group_size, format=selected)
@@ -568,6 +574,7 @@ def _fingerprint(
         "model_size": model_size,
         "quantization": {
             "bits": quantization.bits,
+            "dtype": quantization.dtype,
             "group_size": quantization.group_size,
             "format": quantization.format,
         },
@@ -600,6 +607,25 @@ def inspect_model(model_dir: Path) -> SnapshotIdentity:
     if quantization.bits is None:
         if u32_weights:
             raise ValueError("unquantized config conflicts with U32 weight tensors")
+        main_weight_dtypes = {
+            tensor.dtype
+            for tensor in tensors
+            if tensor.name.endswith(".weight")
+            and "codec" not in tensor.name.lower()
+            and "speech_tokenizer" not in tensor.name.lower()
+        }
+        observed_dtype: Literal["bf16"] | None = (
+            "bf16" if main_weight_dtypes == {"BF16"} else None
+        )
+        if quantization.dtype is not None and quantization.dtype != observed_dtype:
+            raise ValueError("declared quantization dtype does not match tensor dtypes")
+        if quantization.dtype is None and observed_dtype is not None:
+            quantization = QuantizationSpec(
+                bits=None,
+                dtype=observed_dtype,
+                group_size=None,
+                format="none",
+            )
     else:
         pairs = _quantized_pairs(tensors, group_size=quantization.group_size or 0)
         actual_bits = {bits for _, _, bits in pairs}
@@ -635,13 +661,28 @@ def _actual_quantization(actual: Mapping[str, object]) -> QuantizationSpec:
     if "quantization_bits" in actual or "quantization_group_size" in actual:
         bits = _strict_bits(actual.get("quantization_bits"))
         group_size = _strict_group_size(actual.get("quantization_group_size"), bits=bits)
-        declared.append(QuantizationSpec(bits=bits, group_size=group_size, format="actual"))
+        declared.append(
+            QuantizationSpec(bits=bits, group_size=group_size, format="actual")
+        )
 
     if not declared:
         return QuantizationSpec(bits=None, group_size=None, format="none")
     first = declared[0]
-    if any((item.bits, item.group_size) != (first.bits, first.group_size) for item in declared[1:]):
+    if any(
+        (item.bits, item.group_size) != (first.bits, first.group_size)
+        for item in declared[1:]
+    ):
         raise ValueError("actual quantization declarations are inconsistent")
+    known_dtypes = {item.dtype for item in declared if item.dtype is not None}
+    if len(known_dtypes) > 1:
+        raise ValueError("actual quantization declarations are inconsistent")
+    if first.dtype is None and known_dtypes:
+        return QuantizationSpec(
+            bits=first.bits,
+            dtype=known_dtypes.pop(),
+            group_size=first.group_size,
+            format=first.format,
+        )
     return first
 
 

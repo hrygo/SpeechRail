@@ -16,11 +16,12 @@
 | [0012](0012-openai-native-coreml-diarization.md) | OpenAI 原生分人接口与唯一 CoreML 运行时 | Accepted |
 | [0013](0013-realtime-vad-and-diarization-boundary.md) | Realtime endpointing 与 continuous diarization activity 分离 | Accepted |
 | [0014](0014-source-built-managed-runtime.md) | 所有运行时变更必须从源码构建并经 managed release 部署 | Accepted |
-| [0015](0015-tier-user-positioning-and-precision-policy.md) | 三档按用户定位重排与按档位精度策略 | Accepted |
+| [0015](0015-tier-user-positioning-and-precision-policy.md) | 三档按用户定位重排与按档位精度策略 | Accepted；profile 数量与当前精度策略部分由 0021 取代 |
 | [0016](0016-configurable-heavy-compute-overlap.md) | 可配置的 ASR∥TTS 重计算重叠（声明字节 + 物理内存预算） | Accepted |
 | [0017](0017-macos26-app-best-practices-remediation.md) | macOS 26 App 最佳实践整改与可恢复控制面 | Accepted |
 | [0018](0018-realtime-current-wire-external-llm.md) | Realtime current wire 与可插拔外部 LLM | Superseded by 0019 |
 | [0019](0019-stateless-speech-plane-caller-orchestration.md) | 无状态 Speech Plane 与调用方助手编排 | Accepted |
 | [0020](0020-teleprompter-workflow-reliability.md) | 提词器 App 内受约束工作流、能力感知输出与局部恢复 | Implemented（待真实模型/UI 验收） |
+| [0021](0021-extreme-bf16-profile.md) | Extreme BF16 候选档、当前能力声明与启用门禁 | Accepted（候选代码；质量/资源/启用门未过） |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

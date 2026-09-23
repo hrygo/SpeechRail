@@ -211,8 +211,11 @@ def _preview_client(
     return client, synthesizer, custom_voices
 
 
-def test_voice_preview_returns_audio_without_creating_voice_profile(tmp_path: Path) -> None:
-    client, synthesizer, custom_voices = _preview_client(tmp_path)
+@pytest.mark.parametrize("tier", ["quality", "extreme"])
+def test_voice_preview_returns_audio_without_creating_voice_profile(
+    tmp_path: Path, tier: str
+) -> None:
+    client, synthesizer, custom_voices = _preview_client(tmp_path, tier)
 
     response = client.post(
         "/v1/voices/previews",
@@ -248,6 +251,7 @@ def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_preview_unsupported"
+    assert "quality" not in response.json()["error"]["message"].lower()
 
 
 def test_quality_speech_accepts_instructions_and_passes_them_to_backend(

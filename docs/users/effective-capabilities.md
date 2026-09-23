@@ -3,7 +3,7 @@ title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
 version: "3.1.3"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # 有效能力快照与安全音色目录
@@ -48,7 +48,7 @@ date: 2026-09-21
 
 ## 参数按操作区分
 
-Quality 的默认 VoiceDesign 与 Base clone 是两个不同 capability worker。clone 使用
+`quality` 与候选 `extreme` 的 catalog 配置默认 VoiceDesign 与 Base clone 两种不同 capability worker；实际可用性以当前有效快照为准。clone 使用
 Base，只允许 `speed=1.0`，拒绝调用方 instructions/seed。HTTP VoiceDesign 可以使用
 instructions；标准 Realtime response 不接收同一个参数。preview 的 seed 能力不代表
 普通 HTTP speech 支持 seed。语言完整取值域尚未在固定 vendor 上验证，因此报告 unknown。
@@ -76,7 +76,7 @@ namespaced capability 响应，`voices` 只使用其安全投影，不再输出
 
 ## 证据和剩余验收
 
-矩阵测试覆盖 light/balanced/quality 与 system/instruction/clone、内容变更/重启、
+矩阵测试覆盖 light/balanced/quality/extreme 与 system/instruction/clone、内容变更/重启、
 鉴权、别名、存储损坏和私有字段隔离。测试使用 fake backend；没有启动用户服务，
 不能据此宣称模型语言域、音质、不可变音色或并发推理版本锁已经验收。
 

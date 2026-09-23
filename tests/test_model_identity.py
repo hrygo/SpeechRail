@@ -154,12 +154,20 @@ def test_quantized_does_not_mean_int8() -> None:
 
 
 def test_read_quantization_supports_unquantized_and_eight_bit() -> None:
-    assert read_quantization({}).bits is None
+    unquantized = read_quantization({})
+    assert unquantized.bits is None
+    assert unquantized.dtype is None
     quantization = read_quantization(
         {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}}
     )
     assert quantization.bits == 8
     assert quantization.format == "affine"
+
+
+@pytest.mark.parametrize("dtype", ["float16", [], 7], ids=["unsupported", "list", "number"])
+def test_read_quantization_rejects_unsupported_dtype_shape(dtype: object) -> None:
+    with pytest.raises(ValueError, match="dtype"):
+        read_quantization({"quantization": {"bits": None, "dtype": dtype}})
 
 
 @pytest.mark.parametrize(
@@ -353,7 +361,9 @@ def test_inspect_model_accepts_unquantized_bfloat_weights(tmp_path: Path) -> Non
         [("model.embed_tokens.weight", "BF16", [2, 8])],
     )
 
-    assert inspect_model(tmp_path).quantization.bits is None
+    quantization = inspect_model(tmp_path).quantization
+    assert quantization.bits is None
+    assert quantization.dtype == "bf16"
 
 
 def test_inspect_model_rejects_declared_bits_that_shape_does_not_prove(

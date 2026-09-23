@@ -242,6 +242,7 @@ def _file_manifest(artifact: ModelArtifact) -> list[dict[str, object]]:
 def _quantization_manifest(artifact: ModelArtifact) -> dict[str, object]:
     return {
         "bits": artifact.quantization.bits,
+        "dtype": artifact.quantization.dtype,
         "group_size": artifact.quantization.group_size,
         "format": artifact.quantization.format,
     }
@@ -408,9 +409,17 @@ def _entry_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
         return False
     if not isinstance(entry, dict):
         return False
+    stored_quantization = entry.get("quantization")
+    expected_quantization = _quantization_manifest(artifact)
+    if (
+        isinstance(stored_quantization, dict)
+        and "dtype" not in stored_quantization
+        and expected_quantization["dtype"] is None
+    ):
+        stored_quantization = {**stored_quantization, "dtype": None}
     return (
         entry.get("model_id") == artifact.model_id
-        and entry.get("quantization") == _quantization_manifest(artifact)
+        and stored_quantization == expected_quantization
     )
 
 

@@ -10,10 +10,10 @@ Proxy policy implemented here (per docs/architecture/speechrail-mcp-proxy-draft.
 
 - ``audio_ref`` is path/``file://`` only; inline base64 is rejected with a
   teaching error so audio never enters the agent context.
-- ``synthesize`` hard-enforces the active tier: clone/instruction voices that
-  require the ``quality`` (voice_design) engine are rejected up front on other
-  tiers, mirroring the backend ``resolve_binding`` rejection.
-- ``preview_voice`` is quality-only and rejected up front on other profiles.
+- ``synthesize`` and voice mutations use only the variants and availability
+  published by the current effective capability snapshot.
+- The proxy never changes profiles; missing capabilities are reported from the
+  current snapshot without recommending a tier switch.
 - SpeechRail REST errors are surfaced as typed failures carrying the stable
   ``code``/``retryable`` pair plus a retry/action hint.
 """
@@ -75,16 +75,16 @@ _JOB_RESULT_SUFFIXES = {
     "application/json": ".json",
 }
 
-_TIER_MESSAGES = {
+_CAPABILITY_MESSAGES = {
     "clone": (
-        "voice {voice} is a user clone that only exists on the quality tier "
-        "(voice_design); the active profile is {profile}. Call describe() and "
-        "pick a voice with available=true, or switch tiers."
+        "voice {voice} requires a Base clone capability that is unavailable "
+        "in the active profile {profile}; call describe() to inspect current "
+        "voice availability."
     ),
     "instruction": (
-        "voice {voice} is an instruction-driven voice that only runs on the "
-        "quality tier (voice_design); the active profile is {profile}. Call "
-        "describe() and pick a voice with available=true, or switch tiers."
+        "voice {voice} requires a VoiceDesign capability that is unavailable "
+        "in the active profile {profile}; call describe() to inspect current "
+        "voice availability."
     ),
 }
 
@@ -131,20 +131,7 @@ def _first_tts_model(models: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def _tts_variant(models: list[dict[str, Any]]) -> str | None:
-    entry = _first_tts_model(models)
-    if entry is None:
-        return None
-    return _text(entry.get("variant"))
-
-
-def _derive_tier(*, profile: str | None, variant: str | None) -> str:
-    if profile in {"quality", "balanced", "light"}:
-        return profile
-    if variant == "voice_design":
-        return "quality"
-    if variant == "custom_voice":
-        return "balanced"
+def _derive_tier(*, profile: str | None) -> str:
     return profile or "unknown"
 
 
@@ -158,7 +145,11 @@ def _find_voice(voices: list[dict[str, Any]], voice: str) -> dict[str, Any] | No
     return None
 
 
-def _effective_voice_projection(effective: dict[str, Any]) -> list[dict[str, Any]]:
+def _effective_voice_projection(
+    effective: dict[str, Any],
+    *,
+    suppress_positive: bool = False,
+) -> list[dict[str, Any]]:
     """Project the safe atomic voice snapshot for agent-facing discovery."""
     raw_voices = effective.get("voices")
     if not isinstance(raw_voices, list):
@@ -190,6 +181,13 @@ def _effective_voice_projection(effective: dict[str, Any]) -> list[dict[str, Any
         if not isinstance(raw, dict):
             continue
         safe = {key: value for key, value in raw.items() if key in allowed}
+        if suppress_positive:
+            if safe.get("available") is True:
+                safe["available"] = False
+                safe["availability_reason"] = "profile_consistency_unverified"
+            if safe.get("production_ready") is True:
+                safe["production_ready"] = False
+                safe["production_ready_reason"] = "profile_consistency_unverified"
         result.append(safe)
     return result
 
@@ -200,6 +198,96 @@ def _effective_tts_variant(effective: dict[str, Any]) -> str | None:
         return None
     tts = models.get("tts")
     return _text(tts.get("variant")) if isinstance(tts, dict) else None
+
+
+def _effective_model(effective: dict[str, Any], name: str) -> dict[str, Any] | None:
+    models = effective.get("models")
+    if not isinstance(models, dict):
+        return None
+    model = models.get(name)
+    return model if isinstance(model, dict) else None
+
+
+def _require_model_variant(
+    effective: dict[str, Any],
+    *,
+    model_name: str,
+    expected_variant: str,
+    capability: str,
+) -> None:
+    model = _effective_model(effective, model_name)
+    actual_variant = _text(model.get("variant")) if model is not None else None
+    if actual_variant == expected_variant:
+        return
+    profile = _text(effective.get("profile")) or "unknown"
+    raise ToolCallError(
+        code="capability_not_available",
+        message=(
+            f"{capability} is unavailable in the current effective profile "
+            f"{profile}; {model_name} variant is {actual_variant or 'unknown'}. "
+            "Call describe() to inspect current capabilities."
+        ),
+        hint="call describe() to inspect current capabilities",
+    )
+
+
+def _profile_consistency(
+    models: list[dict[str, Any]],
+    health: dict[str, Any],
+    effective: dict[str, Any],
+    tts_entry: dict[str, Any] | None,
+) -> tuple[str | None, str]:
+    """Return a profile only when available sources do not contradict it."""
+    health_profile = _text(health.get("profile"))
+    effective_profile = _text(effective.get("profile"))
+    tts_profile = _text(tts_entry.get("profile")) if tts_entry is not None else None
+    model_profiles = [
+        _text(entry.get("profile"))
+        for entry in models
+        if entry.get("family") in {"qwen3_asr", "qwen3_tts"}
+    ]
+    profile_values = [
+        value
+        for value in [health_profile, effective_profile, tts_profile, *model_profiles]
+        if value is not None
+    ]
+    unique_profiles = set(profile_values)
+    if len(unique_profiles) > 1:
+        return None, "inconsistent"
+    profile = next(iter(unique_profiles), None)
+
+    effective_tts = _effective_model(effective, "tts")
+    model_variant = _text(tts_entry.get("variant")) if tts_entry is not None else None
+    effective_variant = _text(effective_tts.get("variant")) if effective_tts else None
+    if (
+        model_variant is not None
+        and effective_variant is not None
+        and model_variant != effective_variant
+    ):
+        return None, "inconsistent"
+
+    model_artifact = _text(tts_entry.get("artifact")) if tts_entry is not None else None
+    effective_artifact = _text(effective_tts.get("artifact")) if effective_tts else None
+    if (
+        model_artifact is not None
+        and effective_artifact is not None
+        and model_artifact != effective_artifact
+    ):
+        return None, "inconsistent"
+
+    declared = tts_entry.get("capabilities") if tts_entry is not None else None
+    clone_model = _effective_model(effective, "tts_clone")
+    if isinstance(declared, dict):
+        declared_clone = declared.get("supports_clone")
+        actual_clone = _text(clone_model.get("variant")) == "base" if clone_model else False
+        if isinstance(declared_clone, bool) and declared_clone != actual_clone:
+            return None, "inconsistent"
+
+    if any(value is None for value in (health_profile, effective_profile, tts_profile)):
+        return profile, "unknown"
+    if model_variant is None or effective_variant is None:
+        return profile, "unknown"
+    return profile, "consistent"
 
 
 def _effective_model_revision(
@@ -274,19 +362,32 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
     models = await client.fetch_models()
     health = await client.fetch_health()
     effective = await client.fetch_capabilities()
-    variant = _tts_variant(models)
     entry = _first_tts_model(models)
-    model_profile = _text(entry.get("profile")) if entry is not None else None
-    health_profile = _text(health.get("profile"))
-    profile = model_profile or health_profile
+    profile, profile_consistency = _profile_consistency(
+        models, health, effective, entry
+    )
     # 能力结论只读服务发布的 `capabilities`: `supports_preview` 曾经由这里按
     # `variant == "voice_design"` 重算, 等于把服务端的判定规则抄了第二份; 两份
     # 规则一旦分叉, agent 会拿到与服务不一致的答案。
     declared = entry.get("capabilities") if entry is not None else None
     capabilities = declared if isinstance(declared, dict) else {}
+    capabilities_consistent = profile_consistency == "consistent"
+    safe_models = models
+    if not capabilities_consistent:
+        safe_models = []
+        for model in models:
+            safe_model = dict(model)
+            raw_capabilities = safe_model.get("capabilities")
+            if isinstance(raw_capabilities, dict):
+                safe_model["capabilities"] = {
+                    key: None if key.startswith("supports_") else value
+                    for key, value in raw_capabilities.items()
+                }
+            safe_models.append(safe_model)
     return {
-        "tier": _derive_tier(profile=profile, variant=variant),
+        "tier": _derive_tier(profile=profile),
         "profile": profile,
+        "profile_consistency": profile_consistency,
         "diarization_ready": _bool_flag(health.get("diarization_ready")),
         "readiness": {
             "asr": _bool_flag(health.get("asr_ready")),
@@ -309,14 +410,18 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "websocket_path": "/v1/realtime",
             "mcp_realtime": False,
         },
-        "clone_supported": _bool_flag(capabilities.get("supports_clone")),
-        "preview_supported": _bool_flag(capabilities.get("supports_preview")),
+        "clone_supported": capabilities_consistent
+        and _bool_flag(capabilities.get("supports_clone")),
+        "preview_supported": capabilities_consistent
+        and _bool_flag(capabilities.get("supports_preview")),
         "jobs": {
             "spool_ready": _bool_flag(health.get("job_spool_ready")),
             "runner_active": _bool_flag(health.get("job_runner_active")),
         },
-        "models": models,
-        "voices": _effective_voice_projection(effective),
+        "models": safe_models,
+        "voices": _effective_voice_projection(
+            effective, suppress_positive=not capabilities_consistent
+        ),
         "effective_capabilities": effective,
     }
 
@@ -397,7 +502,7 @@ def _enforce_available_voice(
     profile: str | None,
     validation_policy: str = "allow_unverified",
 ) -> None:
-    """Hard-enforce tier/availability for a requested voice before TTS calls."""
+    """Enforce availability from the active snapshot before TTS calls."""
     if entry.get("available") is not True:
         suffix = f" ({profile!r})" if profile else ""
         raise ToolCallError(
@@ -429,24 +534,22 @@ def _enforce_available_voice(
     supports_clone = _bool_flag(caps.get("supports_clone"))
     supports_instruction = _bool_flag(caps.get("supports_instruction"))
     mode = _text(entry.get("mode"))
-    tier_label = profile or "non-quality"
+    profile_label = profile or "unknown"
     if mode == "clone" or supports_clone:
         raise ToolCallError(
             code="voice_not_available",
-            message=_TIER_MESSAGES["clone"].format(voice=voice, profile=tier_label),
-            hint=(
-                "call describe() to see voices with available=true, "
-                "or switch to the quality profile"
+            message=_CAPABILITY_MESSAGES["clone"].format(
+                voice=voice, profile=profile_label
             ),
+            hint="call describe() to inspect current voice availability",
         )
     if mode == "instruction" or supports_instruction:
         raise ToolCallError(
             code="voice_not_available",
-            message=_TIER_MESSAGES["instruction"].format(voice=voice, profile=tier_label),
-            hint=(
-                "call describe() to see voices with available=true, "
-                "or switch to the quality profile"
+            message=_CAPABILITY_MESSAGES["instruction"].format(
+                voice=voice, profile=profile_label
             ),
+            hint="call describe() to inspect current voice availability",
         )
 
 
@@ -533,7 +636,7 @@ async def synthesize(
     """Synthesize ``text`` with ``voice`` into a local audio file.
 
     ``voice`` must come from ``describe().voices``; clone/instruction voices
-    are rejected unless the active profile is the quality (voice_design) tier.
+    are rejected unless the active snapshot reports their required capability.
     The binary audio is written to a temporary file and returned as
     ``audio_path`` so it never enters the agent context.
     """
@@ -677,7 +780,7 @@ async def preview_voice(
     instruction: str,
     text: str,
 ) -> dict[str, Any]:
-    """Generate an ephemeral VoiceDesign sample (quality tier only).
+    """Generate an ephemeral sample when the active snapshot has VoiceDesign.
 
     Lets an agent audition a natural-language voice instruction before
     committing to it.  The binary audio is written to a temporary file and
@@ -712,15 +815,15 @@ async def preview_voice(
     effective = await client.fetch_capabilities()
     variant = _effective_tts_variant(effective)
     if variant != "voice_design":
-        profile = _text(effective.get("profile")) or "not the quality profile"
+        profile = _text(effective.get("profile")) or "unknown"
         raise ToolCallError(
             code="voice_preview_unsupported",
             message=(
-                "voice previews require the quality (voice_design) tier; the "
-                f"active profile is {profile}. Call describe() to confirm "
-                "current capabilities."
+                "VoiceDesign preview is unavailable in the current effective "
+                f"profile {profile}; active TTS variant is {variant or 'unknown'}. "
+                "Call describe() to inspect current capabilities."
             ),
-            hint="switch to the quality profile before using preview_voice",
+            hint="call describe() to inspect current capabilities",
         )
     content = await client.voice_preview(
         model=_DEFAULT_TTS_MODEL,
@@ -754,9 +857,8 @@ async def create_voice(
 
     Completes the preview → persist → synthesize loop: audition with
     ``preview_voice`` first, then persist the chosen instruction here and
-    synthesize by the returned ``id``. The voice only synthesizes on the
-    quality (voice_design) tier; on other tiers it is listed with
-    ``available=false`` until the profile switches back.
+    synthesize by the returned ``id``. Registration requires VoiceDesign in
+    the current effective capability snapshot.
     """
     stripped_name = name.strip()
     if not stripped_name:
@@ -793,6 +895,13 @@ async def create_voice(
             code="invalid_seed",
             message=f"seed must be an integer between 0 and {_MAX_VOICE_SEED}",
         )
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts",
+        expected_variant="voice_design",
+        capability="Voice creation",
+    )
     return _safe_voice_record(
         await client.create_voice(
             name=stripped_name,
@@ -822,7 +931,7 @@ async def design_voice(
     language: str = "zh",
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a reference with VoiceDesign and register it for Base clone use."""
+    """Generate a reference when VoiceDesign and Base are both active."""
     normalized_id = voice_id.strip().lower()
     if not _VOICE_ID_RE.fullmatch(normalized_id):
         raise ToolCallError(
@@ -853,6 +962,19 @@ async def design_voice(
             code="unsupported_language",
             message="the current generated-reference registration gate accepts language=zh",
         )
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts",
+        expected_variant="voice_design",
+        capability="Generated-reference design",
+    )
+    _require_model_variant(
+        effective,
+        model_name="tts_clone",
+        expected_variant="base",
+        capability="Generated-reference registration",
+    )
     raw = await client.design_voice(
         voice_id=normalized_id,
         name=stripped_name,
@@ -876,7 +998,6 @@ async def clone_voice(
 ) -> dict[str, Any]:
     """Register a local reference recording after the Base reference gate."""
     _raise_for_inline_base64(audio_ref)
-    path, filename = _resolve_local_audio(audio_ref)
     stripped_name = name.strip()
     stripped_ref = ref_text.strip()
     if not stripped_name:
@@ -892,6 +1013,14 @@ async def clone_voice(
             )
     else:
         normalized_id = None
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts_clone",
+        expected_variant="base",
+        capability="Reference voice cloning",
+    )
+    path, filename = _resolve_local_audio(audio_ref)
     try:
         content = await asyncio.to_thread(path.read_bytes)
     except OSError as exc:
@@ -922,6 +1051,13 @@ async def validate_voice(
         raise ToolCallError(code="invalid_voice_id", message="voice_id must not be blank")
     if type(runs) is not int or not 1 <= runs <= 3:
         raise ToolCallError(code="invalid_runs", message="runs must be an integer between 1 and 3")
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts_clone",
+        expected_variant="base",
+        capability="Clone validation",
+    )
     result = await client.validate_voice(voice_id=stripped, runs=runs)
     return {"voice_id": stripped, **result}
 

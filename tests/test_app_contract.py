@@ -120,7 +120,7 @@ def test_health_exposes_safe_tts_lifecycle_counters() -> None:
     }
 
 
-@pytest.mark.parametrize("preset_id", ["quality", "balanced", "light"])
+@pytest.mark.parametrize("preset_id", ["extreme", "quality", "balanced", "light"])
 def test_managed_profile_publishes_active_model_identity(
     tmp_path: Path,
     preset_id: str,

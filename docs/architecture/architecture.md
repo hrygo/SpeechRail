@@ -3,7 +3,7 @@ title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
 version: "3.1.3"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # 🏛️ SpeechRail 系统总体架构
@@ -38,24 +38,24 @@ flowchart TD
     end
 
     ASR["一个共享 Qwen3-ASR MLX Worker<br/>batch 与 native streaming 复用物理模型<br/>模式冲突受限"]
-    TTS["TTS capability router<br/>quality: VoiceDesign + Base clone（双 worker / 可双常驻 / 跨 lane 可并发）<br/>balanced/light: CustomVoice 单 worker"]
+    TTS["TTS capability router<br/>quality/extreme: VoiceDesign + Base clone（双 worker / 可双常驻 / 跨 lane 可并发）<br/>balanced/light: CustomVoice 单 worker"]
 
     SDK -->|OpenAI-compatible HTTP / WS| Ingress
     MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| ASR
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| TTS
     Life -. 尝试释放常驻权重 .-> ASR
-    Life -. Quality group 冷却后释放常驻权重 .-> TTS
+    Life -. capability group 冷却后释放常驻权重 .-> TTS
     Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
 
-![三档模型与 Quality 双 TTS capability 关系图](diagrams/three-tier-model-architecture.svg)
+![四档模型与 TTS capability 关系图](diagrams/four-tier-model-architecture.svg)
 
-该 SVG 是三档模型组合与 Quality 双 TTS worker 关系的 canonical overview；本页 Mermaid 继续用于说明主进程、IPC 与可选分人 worker 的边界。
+该 SVG 是四档模型组合与双 TTS capability 关系的当前概览；旧三档 SVG 保留作为历史基线。本页 Mermaid 继续用于说明主进程、IPC 与可选分人 worker 的边界。
 
 ### 运行时事实
 
-- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsCapabilityRouter`（内部拥有 primary `Qwen3TtsWorker` 与可选 clone worker）、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。Quality 的 primary 是 VoiceDesign，clone capability 是 Base；两者是独立 worker，能力切换只改变路由，不关闭另一 worker。懒加载开启时先按请求加载所需 capability，后续可同时驻留；非懒加载时 router 顺序启动两者。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
+- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsCapabilityRouter`（内部拥有 primary `Qwen3TtsWorker` 与可选 clone worker）、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。`quality` 与候选 `extreme` 的 primary 是 VoiceDesign，clone capability 是 Base；两者是独立 worker，能力切换只改变路由，不关闭另一 worker。懒加载开启时先按请求加载所需 capability，后续可同时驻留；非懒加载时 router 顺序启动两者。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
 - 分人生产制品固定为 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，使用 `computeUnits=.all` 直接加载已编译 bundle；没有 provider 自动选择、精度降级或 NeMo 回退。运行时选择证据见 D1 报告，质量、尾部和长期资源门仍须单独验收。
 - ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
 - `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
@@ -63,21 +63,23 @@ flowchart TD
 - Worker IPC 使用长度前缀、JSON metadata 和可选 raw binary payload。它避免在主进程与 worker 间对 PCM 使用 Base64，但编码、拼接和读取仍会复制字节，不能称为 zero-copy。
 - 分人 worker 在活跃会话结束时由 supervisor 定向取消并回收；IPC 是长度前缀 JSON header 加 PCM16 binary payload。不存在活跃分人会话时，普通 ASR/TTS 不创建或租用该 worker。
 
-### 三档组成、模型目录与精度策略
+### 四档组成、模型目录与精度策略
 
-模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`presets` 描述三档组成，顶层 `precision_policy` 取代旧的“全档 8-bit”约束。档位只选择权重与量化精度，以及是否供给分人制品。
+模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`presets` 描述四档组成，顶层 `precision_policy` 描述权重精度。档位只选择权重与量化精度，以及是否供给分人制品。
 
 | 档位 | 定位 | ASR | TTS | Aligner | 分人 |
 |---|---|---|---|---|---|
 | 🟢 `light` | Embedded（8GB 基础机） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ |
 | 🟡 `balanced` | Pro Workflow（16–24GB） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ |
 | 🟣 `quality` | Studio（32GB+） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + clone `tts-1.7b-base-q8`（两个 8-bit worker，可双常驻/并发） | `aligner-bf16`（bf16） | ✓ |
+| `extreme` | 候选；无固定硬件门槛 | `asr-1.7b-bf16`（bf16） | primary `tts-1.7b-design-bf16` + clone `tts-1.7b-base-bf16`（两个 bf16 worker） | 复用 `aligner-bf16` | ✓ |
 
-- **按档位精度策略**：三档均 8-bit 权重，`quality` 的 aligner 保持 bf16；曾评估的 4-bit `light`（`asr-0.6b-q4` / `tts-0.6b-custom-q4`）因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳，制品保留在 catalog 但不再被任何档位使用。
+- **按档位精度策略**：`light`、`balanced`、`quality` 的 ASR/TTS 权重为 8-bit，`quality` 的 aligner 为 bf16；候选 `extreme` 的 ASR/TTS/aligner 均为 bf16。历史 `light` 4-bit 方案因验收门 E1 实测劣化 1.38pp（>0.5pp 阈值）而未采纳，制品保留在 catalog 但不被档位引用。`extreme` 的权重精度不是质量结论。
 - **aligner 是分人专用制品**：aligner 是 catalog 一等制品，但**不进入 `PreparedModelSet` / `prepare_models`**，而由 `diarization_assets.prepare_diarization_assets` 按档位供给到 `app_home/diarization/<aligner-key>`，因此无 `prepared_id` / registry 迁移。词级时间戳来自 ASR 原生输出，不依赖 aligner。
 - **选择与供给**：`config.selection.resolve_selection` 按档位覆盖 `qwen3_aligner_model_dir`，在 `light` 清空它并同时清空 `diarization_coreml_model_path`；aligner 快照缺失时 fail closed（清晰报错，不半启动）。`profile apply <tier>` 在切换时供给该档分人制品并写入/移除 CoreML 与 aligner 环境键。
-- **TTS capability**：`tts` 是档位默认合成 artifact；可选 `tts_clone` 是独立 capability。只有 `quality` 配置 Base clone artifact。`Qwen3TtsCapabilityRouter` 为 Quality 维护两个独立 worker，分别映射 `voice_design` 与 `voice_clone` lane；不同 lane 可并发，同一 worker 仍由 worker lock 串行。`WorkerIdleEvictor` 以 router 为能力组，在冷却后一起驱逐并按请求懒加载。
-- **契约与声明**：三档的公共 API 契约形状、worker 协议、调度与进程隔离保持一致；**对外声明的能力随档位不同**——`gpt-4o-transcribe-diarize` 仅在分人就绪（`balanced`/`quality`）时出现在 `/v1/models`；`supports_clone` 只有实际 Base capability 可用时才为 true。
+- **TTS capability**：`tts` 是档位默认合成 artifact；可选 `tts_clone` 是独立 capability。`quality` 与候选 `extreme` 配置 Base clone artifact。两档的 `Qwen3TtsCapabilityRouter` 分别维护 VoiceDesign 与 Base worker；不同 lane 可并发，同一 worker 仍由 worker lock 串行。`WorkerIdleEvictor` 以 router 为能力组，在冷却后一起驱逐并按请求懒加载。
+- **契约与声明**：四档的公共 API 形状、worker 协议、调度与进程隔离保持一致；profile 枚举扩展到 `extreme`，payload 结构不变。**对外声明的能力随当前档位与 readiness 不同**——`gpt-4o-transcribe-diarize` 只在分人能力就绪时出现在 `/v1/models`；`supports_clone` 只有实际 Base capability 可用时才为 true。
+- **Extreme 发布门**：质量对比、目标机资源峰值和延迟证据缺失时，`extreme` 仅作为候选源码能力；不宣称质量排名，不把推算 resident 写成配置值，也不据此确认正式启用。
 
 ## 2. 输入、调度与持久化边界
 
@@ -157,6 +159,6 @@ sequenceDiagram
 - 默认 loopback；非 loopback 必须使用 API key 与明确 origin 策略。
 - 请求路径不下载模型、不读取远程音频 URL、不持久化原始音频或完整转写。
 - 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐（ASR∥TTS 重计算重叠是既有单 worker 进程内的准入策略，不复制进程）。
-- 三档只替换权重与量化组合（含按档位精度策略与是否供给分人制品）；公共 API 契约形状、调度和 worker 协议保持一致，但对外声明能力随档位不同，必须如实声明。
+- 四档只替换权重与量化组合（含按档位精度策略与是否供给分人制品）；公共 API payload 结构、调度和 worker 协议保持一致，profile 枚举扩展到 `extreme`，对外声明能力随当前 readiness 不同，必须如实声明。
 - 客户端拥有麦克风、播放、会议、数据库和 LLM 编排；SpeechRail 提供本地推理、协议与资源边界。
 - Realtime 是 current-only：不保留旧事件翻译、双 wire profile、服务端 LLM 或服务端 conversation state。MCP 只代理无状态 REST 工具，Realtime 必须由调用方直连 WebSocket。

@@ -1374,7 +1374,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_preview_unsupported",
-                "Voice previews require an active quality VoiceDesign TTS profile",
+                "Voice previews require an active VoiceDesign TTS capability",
             )
         synthesizer = services.tts_synthesizer
         if synthesizer is None or not services.tts_ready:

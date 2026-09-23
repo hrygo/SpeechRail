@@ -3,7 +3,7 @@ title: "SpeechRail MCP Proxy 架构与终态契约"
 status: active
 audience: "系统架构师、协议设计者、Agent 集成方"
 version: "3.6.0"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # SpeechRail MCP Proxy 架构与终态契约
@@ -138,11 +138,12 @@ sequenceDiagram
 
 1. 先调用 `describe()`，不要从静态 prompt、历史响应或模型 ID 猜测当前能力；
 2. 只选择 `available=true` 的 voice，并根据 `mode`、`variant` 和 `availability_reason` 判断
-   是否需要 `quality`；
+   当前请求是否可用；不从模型 variant 推断 profile；
 3. 跨句、跨请求或长对话需要稳定音色时，使用 effective snapshot 提供的 revision pin；
 4. 收到 revision conflict 后重新 `describe()`，由业务决定继续使用旧 revision、回滚或切换；
 5. 收到 `backend_busy` 或 `queue_full` 时采用有界退避，不进行无上限循环；
-6. 同步请求因长度或超时不适用时，再使用 `create_job` / `get_job` / `cancel_job`。
+6. 同步请求因长度或超时不适用时，再使用 `create_job` / `get_job` / `cancel_job`；
+7. MCP 永不触发或建议自动切换档位；它只读取并报告当前有效能力，缺失或互相矛盾时返回未知/不一致状态。
 
 ## 4. 能力发现与音色一致性
 
@@ -162,6 +163,7 @@ MCP 只用 namespaced capability 中的安全 voice entries 填充结果中的 `
 
 能力路径返回 `404`、`405`、未知 schema 或其他服务错误时，MCP 直接返回稳定错误，不拼接
 `/v1/models`、`/v1/voices` 和 `/health` 来伪造能力快照，也不静默降级。
+活动 profile 在 `/health`、`/v1/models` 与有效快照之间不一致时，`describe()` 报告一致性问题并抑制正向可用性投影；缺 profile 时报告 `unknown`。VoiceDesign variant 不用于猜测 profile。
 
 ### 4.2 effective snapshot 的语义
 
@@ -243,13 +245,14 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 当前工具集为 15 个：既有的请求级语音/任务工具，加上音色详情、VoiceDesign/Base 注册、
 输出验收和 job 结果恢复。工具的公开 schema、标题、注解和结构化输出由
 `src/speechrail/mcp` 注册；`ctx`、REST client 等内部参数不会出现在 MCP input schema。
+工具集不包含 profile apply/setup/prepare 或同义档位变更能力。VoiceDesign/Base 注册是音色资源操作，不改变活动档位；调用前先核对当前有效能力快照，能力缺失时在 REST mutation 前拒绝。
 
 | 工具 | 作用 | 关键约束 | 注解 |
 |---|---|---|---|
 | `describe` | 当前能力发现 | 无参数；应作为第一调用 | read-only、idempotent |
 | `transcribe` | 本地音频转写 | `audio_ref` 只接受本地 path / `file://` | read-only、idempotent |
 | `synthesize` | 文本合成临时音频文件 | `text` ≤4096；可选 revision pin | 非 read-only、非 destructive |
-| `preview_voice` | 试听 VoiceDesign 指令 | 仅 quality；不持久化 voice | 非 read-only、非 destructive |
+| `preview_voice` | 试听 VoiceDesign 指令 | 当前快照声明 VoiceDesign 可用时；不持久化 voice | 非 read-only、非 destructive |
 | `create_voice` | 创建持久 instruction voice | `instruction` ≤10000；可选 seed | 非 read-only、非 destructive |
 | `get_voice` | 读取一个安全音色详情 | 返回验证/production 状态，不返回参考路径 | read-only、idempotent |
 | `design_voice` | VoiceDesign 生成参考并注册 Base clone | 新 ID、参考文本、幂等 key 可选；注册后 output 仍待验收 | 非 read-only |
@@ -310,12 +313,11 @@ structured content，不缓存音频，也不负责播放。
 
 ### 5.3 `preview_voice`、`create_voice` 与 `delete_voice`
 
-`preview_voice` 接受 `instruction` 与 `text`，只在活动 TTS artifact 为 `voice_design` 的
-quality profile 可用。试听是 ephemeral；它不创建持久 voice。指令应使用中英文描述声学特征，
+`preview_voice` 接受 `instruction` 与 `text`，只在活动有效能力快照声明 TTS artifact 的
+variant 为 `voice_design` 时可用。当前 catalog 的 `quality` 与候选 `extreme` 都配置该能力。试听是 ephemeral；它不创建持久 voice。指令应使用中英文描述声学特征，
 不要模仿真实人物，不写互相矛盾或无信息量的形容词。
 
-`create_voice` 通过 `POST /v1/voices` 创建 instruction voice。创建不限当前档位，但在非 quality
-档位可返回 `available=false`；切回适配档位后再恢复。`seed` 只是服务契约允许的创建参数，
+`create_voice` 通过 `POST /v1/voices` 创建 instruction voice。创建不限当前档位，但能力不可用时会在当前快照中报告 `available=false`；档位由 MCP 外部的操作者管理，MCP 不切换或建议自动切换。`seed` 只是服务契约允许的创建参数，
 不应被当作跨模型或跨 revision 的通用声学身份。
 
 `delete_voice` 通过 `DELETE /v1/voices/{voice_id}` 删除 custom voice。系统 preset 受保护；

@@ -4,8 +4,9 @@ description: "定义克隆参考音频校验、生成后固定 probe 质量运�
 status: under_review
 type: technical_spec
 category: tts
-version: "1.0.0"
-date: 2026-09-09
+version: "1.0.1"
+date: 2026-09-23
+last_updated: 2026-09-23
 last_updated: 2026-09-09
 author: "SpeechRail Core Team"
 owners:
@@ -47,7 +48,7 @@ tracking_issues:
 - 哪些指标可以公开给 Sona，哪些信息必须留在服务端内存或受控日志；
 - clone 创建成功是否等价于“可以作为默认助手音色”。
 
-> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波、固定 seed 重复输出确定性，以及分阶段 ASR 回转录可懂度纳入通过条件；跨文本 speaker identity 仍需要独立声纹证据。ASR 阈值目前是待目标机校准的工程初值。
+> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Base public generation。`quality` 使用 q8 Base；候选 `extreme` 也配置 Base，但使用 bf16 权重，尚无该档输出质量证据。现有 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波、固定 seed 重复输出确定性，以及分阶段 ASR 回转录可懂度纳入通过条件；跨文本 speaker identity 仍需要独立声纹证据。ASR 阈值目前是待目标机校准的工程初值。
 
 本方案的关键决策：
 

@@ -65,12 +65,15 @@ public struct ModelManagementView: View {
             if let value { selectedProfile = value }
         }
         .onChange(of: model.operation?.profile) { _, value in
-            if let value { selectedProfile = value }
+            if let value, availableProfiles.contains(value) {
+                selectedProfile = value
+            }
         }
         .onChange(of: selectedProfile) { _, _ in
             selectFirstArtifactIfNeeded()
         }
         .onChange(of: model.modelCatalog) { _, _ in
+            selectAvailableProfileIfNeeded()
             selectFirstArtifactIfNeeded()
         }
     }
@@ -141,54 +144,91 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// Figma `profiles`：三个档位并排一行，每张卡给出「分人 / aligner / TTS lane」
-    /// 三行规格，选择依据是差异而不是档位名（REDESIGN-SPEC §7.7）。
+    /// 只显示服务目录实际发布的档位；宽度允许时单行展示，空间不足时改为两列。
+    @ViewBuilder
     private var profileCards: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
-                ProfileChoiceCard(
-                    profile: profile,
-                    // 「准备大小」读不出是干什么的：这一格说的是"换到这一档要下载多少"。
-                    sizeText: summary(for: profile).map { "要下载 \(formatBytes($0.downloadBytes))" },
-                    specs: profileSpecs(for: profile),
-                    isSelected: selectedProfile == profile,
-                    isRunning: currentServiceProfile == profile
+        let profiles = availableProfiles
+        let cardMinimumWidth = SpeechRailDesignTokens.Layout.modelProfileCardMinimumWidth
+        let rowMinimumWidth = profiles.count == 4
+            ? SpeechRailDesignTokens.Layout.modelProfileCardsFourColumnBreakpoint
+            : cardMinimumWidth * CGFloat(profiles.count)
+                + SpeechRailDesignTokens.Spacing.sm * CGFloat(max(0, profiles.count - 1))
+        let twoColumnGrid = [
+            GridItem(.flexible(minimum: cardMinimumWidth), spacing: SpeechRailDesignTokens.Spacing.sm, alignment: .top),
+            GridItem(.flexible(minimum: cardMinimumWidth), spacing: SpeechRailDesignTokens.Spacing.sm, alignment: .top),
+        ]
+
+        if profiles.isEmpty {
+            ContentUnavailableView(
+                "服务没有返回可管理的档位",
+                systemImage: AppRoute.models.systemImage,
+                description: Text("请重新读取模型目录；服务暂未提供可选择的档位。")
+            )
+            .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    profileChoiceCards(profiles, minimumWidth: cardMinimumWidth)
+                }
+                .frame(minWidth: rowMinimumWidth, alignment: .leading)
+
+                LazyVGrid(
+                    columns: twoColumnGrid,
+                    alignment: .leading,
+                    spacing: SpeechRailDesignTokens.Spacing.sm
                 ) {
-                    selectedProfile = profile
+                    profileChoiceCards(profiles, minimumWidth: cardMinimumWidth)
                 }
             }
         }
     }
 
-    /// 三行规格只列**用户能感知的差异**（用户 2026-09-19：界面里不该出现 `aligner` /
-    /// `TTS lane` 这类内部名）。第一行仍取自已读取的档位摘要——读不到时如实写「未读取」，
-    /// 不写死结论；后两行是目录里的固定事实（`model-catalog.json` 的 `presets`：只有
-    /// `quality` 带语音设计与音色克隆，识别与合成的权重也随档位变），所以直接写结论，
-    /// 不假装成运行时读回来的数。
+    private func profileChoiceCards(
+        _ profiles: [SpeechRailProfile],
+        minimumWidth: CGFloat
+    ) -> some View {
+        ForEach(profiles, id: \.self) { profile in
+            ProfileChoiceCard(
+                profile: profile,
+                sizeText: summary(for: profile).map {
+                    "该档模型总大小 \(formatBytes($0.downloadBytes))"
+                },
+                specs: profileSpecs(for: profile),
+                isSelected: selectedProfile == profile,
+                isRunning: currentServiceProfile == profile
+            ) {
+                selectedProfile = profile
+            }
+            .frame(minWidth: minimumWidth, maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// 三行规格只呈现服务目录声明的能力和本档效果验证状态。
     private func profileSpecs(for profile: SpeechRailProfile) -> [ProfileSpec] {
         let summary = summary(for: profile)
         return [
             ProfileSpec(
                 label: "谁在说话",
-                value: summary.map {
-                    $0.diarization ? (profile == .quality ? "支持（更准）" : "支持") : "不支持"
-                } ?? "未读取"
+                value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"
             ),
-            // 标签格是定宽 76pt（稿 `kvRow`），放不下「音色创作与克隆」——多出来的字会
-            // 折成第二行，把三行规格的行距从 23 撑开。克隆归在取值里说。
-            ProfileSpec(label: "音色创作", value: profile == .quality ? "支持（含克隆）" : "不支持"),
-            ProfileSpec(label: "识别与配音", value: qualityGrade(for: profile)),
+            ProfileSpec(label: "音色创作", value: voiceCreationSupport(for: summary)),
+            ProfileSpec(label: "识别与配音", value: profile == .extreme ? "效果待验证" : "已有档位"),
         ]
     }
 
-    /// 「识别与配音」那一行的取值。事实是目录里的权重：`light` 是 0.6B 识别 + 0.6B
-    /// 合成，`balanced` 换成 1.7B 识别，`quality` 再把合成换成 1.7B 的两套。
-    private func qualityGrade(for profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .quality: "最好"
-        case .balanced: "更好"
-        case .light: "基础"
+    private func voiceCreationSupport(for summary: ProfileSummary?) -> String {
+        guard let summary else { return "未读取" }
+        guard let catalog = model.modelCatalog,
+              catalog.artifacts.contains(where: {
+                  $0.key == summary.tts && $0.variant == "voice_design"
+              })
+        else {
+            return "不支持"
         }
+        let supportsClone = summary.ttsClone.flatMap { cloneKey in
+            model.modelCatalog?.artifacts.first(where: { $0.key == cloneKey && $0.variant == "base" })
+        } != nil
+        return supportsClone ? "支持（含克隆）" : "支持"
     }
 
     private var selectedProfilePanel: some View {
@@ -258,7 +298,10 @@ public struct ModelManagementView: View {
 
     private var profileFacts: some View {
         HStack(spacing: 0) {
-            fact("要下载", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
+            fact(
+                "档位总大小",
+                value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取"
+            )
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -626,6 +669,10 @@ public struct ModelManagementView: View {
         return model.health?.profile
     }
 
+    private var availableProfiles: [SpeechRailProfile] {
+        model.modelCatalog?.selectableProfiles ?? []
+    }
+
     private var configuredProfile: SpeechRailProfile? {
         model.profile?.preset
     }
@@ -652,6 +699,25 @@ public struct ModelManagementView: View {
         model.modelCatalog?.artifacts.filter {
             $0.requiredBy.contains(selectedProfile)
         } ?? []
+    }
+
+    /// The catalog reports total bytes per profile; this is only an upper bound
+    /// because any artifact without a verified status is counted in full.
+    private func remainingDownloadUpperBound(for profile: SpeechRailProfile) -> Int64? {
+        model.modelCatalog?.remainingDownloadUpperBound(
+            for: profile,
+            statuses: model.modelStatus
+        )
+    }
+
+    private func remainingDownloadText(for profile: SpeechRailProfile) -> String {
+        guard let remainingBytes = remainingDownloadUpperBound(for: profile) else {
+            return "需下载量待确认"
+        }
+        if remainingBytes == 0 {
+            return "已全部下载并校验"
+        }
+        return "尚需下载不超过 \(formatBytes(remainingBytes))"
     }
 
     private var unmanagedArtifactStatuses: [ModelArtifactStatusSnapshot] {
@@ -1044,6 +1110,15 @@ public struct ModelManagementView: View {
         }
     }
 
+    private func selectAvailableProfileIfNeeded() {
+        guard !availableProfiles.contains(selectedProfile) else { return }
+        if availableProfiles.contains(.balanced) {
+            selectedProfile = .balanced
+        } else if let first = availableProfiles.first {
+            selectedProfile = first
+        }
+    }
+
     private var isConfirmingAction: Binding<Bool> {
         Binding(
             get: { pendingAction != nil },
@@ -1065,24 +1140,39 @@ public struct ModelManagementView: View {
 
     private var applyConfirmationTitle: String {
         let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
+        var details: [String] = []
+        if let summary = summary(for: selectedProfile) {
+            details.append("该档模型总大小 \(formatBytes(summary.downloadBytes))")
+        }
+        if let freeBytes = model.modelStatus?.disk.freeBytes {
+            details.append("当前可用磁盘空间 \(formatBytes(freeBytes))")
+        }
+        details.append("已校验的模型文件不会重下，首次加载可能更久，其他档位模型不会删除")
+        if selectedProfile == .extreme {
+            details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
+        }
         return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。"
-            + "这会更新服务配置、重新加载语音模型，再重新读一次状态；"
-            + "已经下载并校验过的模型文件不会重下。"
+            + "这会更新服务配置、重新加载语音模型并重新读取状态。"
+            + details.joined(separator: "；")
+            + "。"
     }
 
     private var downloadConfirmationTitle: String {
         let profile = profileTitle(for: selectedProfile)
         let size = summary(for: selectedProfile).map { formatBytes($0.downloadBytes) }
+        let remaining = remainingDownloadText(for: selectedProfile)
         let free = model.modelStatus.map { formatBytes($0.disk.freeBytes) }
-        let boundary = "只下载并校验，不会重启服务、切换档位、删除模型，也不会上传音频或作品。"
-        switch (size, free) {
-        case let (.some(size), .some(free)):
-            return "确认下载并校验 \(profile) 模型？预计占用 \(size)，当前可用空间 \(free)。\(boundary)"
-        case let (.some(size), .none):
-            return "确认下载并校验 \(profile) 模型？预计占用 \(size)。\(boundary)"
-        default:
-            return "确认下载并校验 \(profile) 模型？\(boundary)"
+        var details: [String] = []
+        if let size {
+            details.append("该档模型总大小 \(size)")
         }
+        details.append(remaining)
+        if let free {
+            details.append("当前可用磁盘空间 \(free)")
+        }
+        details.append("已校验文件不会重下，首次加载可能更久，其他档位模型不会删除")
+        details.append("只下载并校验，不会重启服务或切换档位，也不会上传音频或作品")
+        return "确认下载并校验 \(profile) 模型？\(details.joined(separator: "；"))。"
     }
 
     private func actionTitle(for action: ModelAction) -> String {
@@ -1155,7 +1245,7 @@ private struct ProfileChoiceCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text(profileTitle)
+                    Text(SpeechRailProfilePresentation.shortTitle(profile))
                         .font(SpeechRailDesignTokens.Typography.windowTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .lineLimit(1)
