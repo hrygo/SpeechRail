@@ -351,11 +351,26 @@ def test_profile_list_and_status_are_read_only(
 
     assert cli.main(["profile", "list", "--app-home", str(tmp_path)]) == 0
     output = capsys.readouterr().out
-    assert "quality" in output and "balanced" in output and "light" in output
+    assert "extreme" in output
+    assert "quality" in output
+    assert "balanced" in output
+    assert "light" in output
     assert "balanced *" in output
 
     assert cli.main(["profile", "status", "--app-home", str(tmp_path)]) == 0
     assert "balanced" in capsys.readouterr().out
+
+
+def test_parser_accepts_extreme_only_as_an_explicit_preset() -> None:
+    parser = cli._parser()
+    for arguments in (
+        ["setup", "--preset", "extreme"],
+        ["install", "--preset", "extreme"],
+        ["profile", "apply", "extreme"],
+        ["model", "prepare", "extreme"],
+    ):
+        parsed = parser.parse_args(arguments)
+        assert parsed.preset == "extreme"
 
 
 def test_setup_yes_uses_memory_recommendation_without_machine_model_detection(

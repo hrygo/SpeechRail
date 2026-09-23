@@ -1241,7 +1241,7 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 quantization: ModelQuantizationSnapshot(bits: 8, groupSize: 64, format: "fixture"),
                 sizeBytes: 0,
                 fileCount: 1,
-                requiredBy: [.quality, .balanced, .light]
+                requiredBy: [.extreme, .quality, .balanced, .light]
             )
             let profiles = SpeechRailProfile.allCases.map {
                 ProfileSummary(

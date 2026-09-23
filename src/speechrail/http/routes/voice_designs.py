@@ -173,8 +173,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             return auth_error
         design, clone = active.tts, active.tts_clone
         if (
-            active.profile != "quality"
-            or design is None
+            design is None
             or design.variant != "voice_design"
             or clone is None
             or clone.variant != "base"
@@ -183,7 +182,10 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_design_registration_unsupported",
-                "Generated-reference registration requires the quality VoiceDesign/Base profile",
+                (
+                    "Generated-reference registration requires active VoiceDesign and "
+                    "Base capabilities"
+                ),
             )
         synthesizer, transcriber = services.tts_synthesizer, services.batch_transcriber
         if synthesizer is None:

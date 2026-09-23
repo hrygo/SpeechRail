@@ -1,21 +1,22 @@
 ---
-title: "Quality 档音色创造、克隆与稳定化能力架构"
+title: "Quality / Extreme 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "1.3"
-date: 2026-09-21
+version: "1.4"
+date: 2026-09-23
 ---
 
-# Quality 档音色创造、克隆与稳定化能力架构
+# Quality / Extreme 档音色创造、克隆与稳定化能力架构
 
 ## 1. 决策摘要
 
-SpeechRail 将 `quality` 定义为唯一具有**音色创造（voice design）**和**参考音色克隆（voice clone）**能力的 Studio 档。两类任务不再由同一个模型混用：
+`quality` 与候选 `extreme` 的 catalog 都配置**音色创造（voice design）**和**参考音色克隆（voice clone）**能力。两档只在权重精度与其证据状态上不同；能力是否可用仍由当前运行时实际声明决定。两类任务不再由同一个模型混用：
 
 - **提示词设计音色**：Qwen3-TTS VoiceDesign 1.7B，职责是根据自然语言描述创造声线；
 - **参考音频克隆**：Qwen3-TTS Base 1.7B，职责是根据参考音频 + 准确参考文本复现 speaker identity；
-- **常规内置音色**：`quality` 继续由 VoiceDesign 提供，`balanced/light` 继续由 CustomVoice 0.6B 提供；
-- **双 capability worker**：Base 作为 `quality.tts_clone` capability artifact 安装，并与 VoiceDesign 使用独立 worker。两者可以同时常驻、分别处理请求；懒加载只决定首次加载时机，不会在 capability 切换时卸载另一模型。
+- **常规内置音色**：`quality` / 候选 `extreme` 由 VoiceDesign 提供，`balanced/light` 由 CustomVoice 0.6B 提供；
+- **双 capability worker**：Base 作为 `quality.tts_clone` / `extreme.tts_clone` capability artifact 安装，并与 VoiceDesign 使用独立 worker。两者可以同时常驻、分别处理请求；懒加载只决定首次加载时机，不会在 capability 切换时卸载另一模型。
+- **候选精度状态**：`quality` 使用 q8 speech artifacts；`extreme` 使用 bf16 speech artifacts。后者尚无质量、资源或延迟验证，不能推导质量排名或正式发布结论。
 
 该设计修正了旧实现把参考克隆请求送入 VoiceDesign 私有 `_generate_icl()` 的职责混用。clone 现在只允许由 `base` variant 经 MLX-Audio **公开 `generate(...)` 接口**执行。
 
@@ -79,6 +80,12 @@ quality:
   tts_clone: tts-1.7b-base-q8
   aligner: aligner-bf16
   diarization: true
+extreme:
+  asr: asr-1.7b-bf16
+  tts: tts-1.7b-design-bf16
+  tts_clone: tts-1.7b-base-bf16
+  aligner: aligner-bf16
+  diarization: true
 
 balanced:
   tts: tts-0.6b-custom-q8
@@ -95,7 +102,7 @@ Base artifact 使用不可变模型 revision 和逐文件 SHA-256，遵循与其
 
 ## 4. 运行时模型槽：双 capability 并行与冷却驱逐
 
-Quality 的 `Qwen3TtsCapabilityRouter` 维护两个独立的 capability worker，而不是在请求之间交换一个模型槽：
+`quality` 与候选 `extreme` 的 `Qwen3TtsCapabilityRouter` 各自维护两个独立的 capability worker，而不是在请求之间交换一个模型槽：
 
 ```mermaid
 flowchart LR
@@ -123,7 +130,7 @@ flowchart LR
 8. `WorkerIdleEvictor` 把 router 视为一个能力组：warm standby 同时 trim 两个 worker，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求惰性恢复所需 worker，不发生请求级互斥换模；
 9. 合成门通过后，先在同一请求 deadline 内释放两个 TTS worker，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
 
-双常驻会增加 Quality 的活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的 worker。
+双常驻会增加 `quality` / 候选 `extreme` 的活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。Extreme 的峰值尚未验证，不能复用 Quality 的测量值。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的 worker。
 
 ## 5. VoiceProfile / VoiceRevision 收敛方向
 

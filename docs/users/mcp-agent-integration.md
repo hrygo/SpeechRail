@@ -3,7 +3,7 @@ title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
 version: "2.7.0"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # 🔌 SpeechRail MCP 主流 Agent 集成指南
@@ -70,6 +70,7 @@ flowchart LR
 - **不做 Realtime 全双工**：`/v1/realtime` WebSocket 仍由客户端直连，不在 MCP 工具集内；
   `describe()` 的 `realtime` 字段会明确报告 `orchestration=caller`、`server_llm=false`、
   `conversation_state=false`。
+- **不切换档位**：MCP 不注册 profile apply/setup/prepare 工具，不经 REST 或 CLI 隐式更改活动档位，也不会建议 Agent 自动切档。`describe()` 只报告当前档位与当前有效能力；缺失或快照矛盾时明确返回未知/不一致状态。
 
 ### 1.1 工具集（15 个）
 
@@ -78,7 +79,7 @@ flowchart LR
 | `describe()` | 能力快照 | **应先调用**：拿档位、readiness、可用音色 |
 | `transcribe` | 转写本地音频 | 支持 `language` / `diarize` / `timestamps` |
 | `synthesize` | 文本合成到文件 | 返回 `audio_path`；默认允许未验证试听；正式制作使用 `validation_policy=require_output_pass` |
-| `preview_voice` | 试听 VoiceDesign 指令 | **仅 `quality` 档** |
+| `preview_voice` | 试听 VoiceDesign 指令 | 仅当当前快照声明 VoiceDesign 可用时 |
 | `create_voice` / `delete_voice` | 注册/删除持久音色 | `delete_voice` 是破坏性操作 |
 | `get_voice` | 查询安全音色详情 | 包含 reference/output validation 状态 |
 | `design_voice` | VoiceDesign 生成参考并注册 Base clone | 注册后仍需 output validation |
@@ -381,13 +382,14 @@ claude mcp add --scope user speechrail \
 {
   "mcpServers": {
     "speechrail": {
-      "command": "/Users/hrygo/.local/bin/speechrail-mcp",
+      "command": "speechrail-mcp",
       "args": []
     }
   }
 }
 ```
 
+- 确保 `speechrail-mcp` 可执行文件在 Antigravity 启动环境的 `PATH` 中。
 - **架构适配**：Antigravity 支持标准 Stdio 协议与 Lazy MCP 按需加载机制。
 - **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`；客户端刷新后应看到当前 15 个工具与 server instructions。
 - **全局调用准则**：在 `~/.gemini/config/rules/speechrail.md` 中约束统一调用契约（统一使用 `call_mcp_tool(ServerName="speechrail", ...)` 调用；音频一律传本地绝对路径，严禁传 base64）。
@@ -416,11 +418,11 @@ claude mcp add --scope user speechrail \
 1. **先 `describe()`**：确认 `tier`、`readiness`、`available=true` 的音色，再调用其它工具。
 2. **音频用 `audio_ref`**：本地路径或 `file://`。传 `http(s)`/`s3` 等 URL 会被拒（`remote_audio_unsupported`），
    base64 会被拒（`base64_not_supported`）。
-3. **档位能力差异**：`diarize` 需 `diarization_ready=true`（仅 `balanced`/`quality`）；
-   `preview_voice` 与音色克隆仅 `quality`。
+3. **档位能力差异**：`diarize` 需 `diarization_ready=true`（`balanced`、`quality` 与候选 `extreme` 当前配置分人制品）；
+   `preview_voice`、`design_voice` 和 `clone_voice` 只在当前有效能力快照明确声明 VoiceDesign/Base 时可用。
 4. **忙时退避**：遇 `backend_busy` / `queue_full`（`retryable=true`）按 `retry_after` 退避重试，勿死循环。
 5. **长任务**：同步 `transcribe`/`synthesize` 超时或报 `audio_too_long` 时，改用 `create_job` + `get_job`。
-6. **自定义音色跨档**：在非 `quality` 档创建的音色 `available=false`，切回 `quality` 自动恢复。
+6. **自定义音色跨档**：`available` 始终依据当前快照报告。MCP 不切换档位；操作者若在 MCP 外变更运行配置，之后重新调用 `describe()` 获取当前能力。
 7. **ChatGPT 远程模式**：先确认 tunnel/gateway 可访问 `/mcp`，再调用 `describe()`；不要把本地路径当作 ChatGPT 可直接读取的文件或把 `audio_path` 当作对话附件。
 
 ---
@@ -448,7 +450,7 @@ claude mcp add --scope user speechrail \
 - **ChatGPT 连接必须走 HTTPS 隧道或网关**：不要把本机 `8202` 直接端口转发到公网；MCP endpoint 的认证由 tunnel/gateway 负责，SpeechRail API key 只留在本机 proxy 环境。
 - **主服务 LAN 化时**：主服务已要求 `SPEECHRAIL_API_KEY`；proxy 会自动从 `config/.env` 读取并携带 Bearer。
 - **谨慎暴露破坏性工具**：`delete_voice` 标记为 destructive，建议在客户端侧限制其自动执行。
-- **`preview_voice` 有成本**：`quality` 档合成较贵，Agent 侧建议加节流。
+- **`preview_voice` 会消耗当前 TTS 推理资源**：Agent 侧建议加节流；实际成本取决于当前 capability，Extreme 的资源与延迟尚未验证。
 
 ---
 

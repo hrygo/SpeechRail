@@ -25,7 +25,7 @@ from pydantic import (
 
 Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
 Variant = Literal["asr", "voice_design", "custom_voice", "base", "aligner"]
-PresetId = Literal["quality", "balanced", "light"]
+PresetId = Literal["extreme", "quality", "balanced", "light"]
 
 _SCHEMA_VERSION = 2
 _REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
@@ -117,6 +117,7 @@ class QuantizationSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     bits: StrictInt | None
+    dtype: Literal["bf16"] | None = None
     group_size: StrictInt | None
     format: StrictStr = Field(min_length=1)
 
@@ -126,6 +127,14 @@ class QuantizationSpec(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("quantization values must be positive or null")
         return value
+
+    @model_validator(mode="after")
+    def validate_precision_encoding(self) -> Self:
+        if self.bits is not None and self.dtype is not None:
+            raise ValueError("quantization must declare either bits or dtype, not both")
+        if self.dtype == "bf16" and (self.group_size is not None or self.format != "none"):
+            raise ValueError("bf16 quantization requires group_size=null and format='none'")
+        return self
 
 
 class SourceLocation(BaseModel):
@@ -222,16 +231,31 @@ class TierPrecision(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    asr: StrictInt = Field(gt=0)
-    tts: StrictInt = Field(gt=0)
+    asr: StrictInt | Literal["bf16"]
+    tts: StrictInt | Literal["bf16"]
     aligner: StrictInt | Literal["bf16"] | None
+
+    @field_validator("asr", "tts")
+    @classmethod
+    def validate_model_precision(cls, value: int | Literal["bf16"]) -> int | Literal["bf16"]:
+        if isinstance(value, int) and value <= 0:
+            raise ValueError("ASR/TTS precision must be positive or 'bf16'")
+        return value
 
     @field_validator("aligner")
     @classmethod
-    def validate_aligner(cls, value: int | Literal["bf16"] | None) -> int | Literal["bf16"] | None:
+    def validate_aligner(
+        cls, value: int | Literal["bf16"] | None
+    ) -> int | Literal["bf16"] | None:
         if isinstance(value, int) and value <= 0:
             raise ValueError("aligner precision must be positive, 'bf16', or null")
         return value
+
+
+def _precision_matches(quantization: QuantizationSpec, precision: int | Literal["bf16"]) -> bool:
+    if precision == "bf16":
+        return quantization.bits is None and quantization.dtype == "bf16"
+    return quantization.bits == precision and quantization.dtype is None
 
 
 class RuntimeLock(BaseModel):
@@ -269,13 +293,13 @@ class RuntimeLock(BaseModel):
 
 
 class ModelCatalog(BaseModel):
-    """完整不可变的三档模型目录。"""
+    """完整不可变的四档模型目录。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: StrictInt
     artifacts: tuple[ModelArtifact, ...] = Field(min_length=1)
-    presets: tuple[ModelPreset, ...] = Field(min_length=3)
+    presets: tuple[ModelPreset, ...] = Field(min_length=4)
     precision_policy: Mapping[PresetId, TierPrecision]
 
     @field_validator("precision_policy")
@@ -320,12 +344,14 @@ class ModelCatalog(BaseModel):
             if item.id in presets:
                 raise ValueError(f"duplicate preset id: {item.id}")
             presets[item.id] = item
-        expected_ids = {"quality", "balanced", "light"}
+        expected_ids = {"extreme", "quality", "balanced", "light"}
         if set(presets) != expected_ids:
-            raise ValueError("catalog must contain exactly quality, balanced, and light presets")
+            raise ValueError(
+                "catalog must contain exactly extreme, quality, balanced, and light presets"
+            )
         if set(self.precision_policy) != expected_ids:
             raise ValueError(
-                "precision_policy must define exactly quality, balanced, and light"
+                "precision_policy must define exactly extreme, quality, balanced, and light"
             )
 
         for preset_id, item in presets.items():
@@ -341,10 +367,14 @@ class ModelCatalog(BaseModel):
                 raise ValueError(f"preset {preset_id} TTS reference has invalid variant")
 
             policy = self.precision_policy[preset_id]
-            if asr.quantization.bits != policy.asr:
-                raise ValueError(f"preset {preset_id} ASR bits do not match precision_policy")
-            if tts.quantization.bits != policy.tts:
-                raise ValueError(f"preset {preset_id} TTS bits do not match precision_policy")
+            if not _precision_matches(asr.quantization, policy.asr):
+                raise ValueError(
+                    f"preset {preset_id} ASR precision does not match precision_policy"
+                )
+            if not _precision_matches(tts.quantization, policy.tts):
+                raise ValueError(
+                    f"preset {preset_id} TTS precision does not match precision_policy"
+                )
 
             if policy.aligner is None:
                 if item.aligner is not None:
@@ -359,32 +389,37 @@ class ModelCatalog(BaseModel):
                 raise ValueError(f"preset {preset_id} references unknown aligner artifact")
             if aligner.family != "qwen3_forced_aligner" or aligner.variant != "aligner":
                 raise ValueError(f"preset {preset_id} aligner reference has invalid variant")
-            if policy.aligner == "bf16":
-                if aligner.quantization.bits is not None:
-                    raise ValueError(
-                        f"preset {preset_id} aligner bits do not match precision_policy"
-                    )
-            elif aligner.quantization.bits != policy.aligner:
+            if not _precision_matches(aligner.quantization, policy.aligner):
                 raise ValueError(
-                    f"preset {preset_id} aligner bits do not match precision_policy"
+                    f"preset {preset_id} aligner precision does not match precision_policy"
                 )
 
         quality = presets["quality"]
         balanced = presets["balanced"]
         light = presets["light"]
+        extreme = presets["extreme"]
         if quality.asr != balanced.asr:
             raise ValueError("quality and balanced presets must share the ASR artifact")
-        if artifacts[quality.tts].variant != "voice_design":
-            raise ValueError("quality preset must use a voice_design artifact")
-        if quality.tts_clone is None:
-            raise ValueError("quality preset must declare a base clone artifact")
-        clone_artifact = artifacts.get(quality.tts_clone)
-        if (
-            clone_artifact is None
-            or clone_artifact.family != "qwen3_tts"
-            or clone_artifact.variant != "base"
-        ):
-            raise ValueError("quality preset clone artifact must use qwen3_tts variant=base")
+        for preset_id, item in (("quality", quality), ("extreme", extreme)):
+            if artifacts[item.tts].variant != "voice_design":
+                raise ValueError(f"{preset_id} preset must use a voice_design artifact")
+            if item.tts_clone is None:
+                raise ValueError(f"{preset_id} preset must declare a base clone artifact")
+            clone_artifact = artifacts.get(item.tts_clone)
+            if (
+                clone_artifact is None
+                or clone_artifact.family != "qwen3_tts"
+                or clone_artifact.variant != "base"
+            ):
+                raise ValueError(
+                    f"{preset_id} preset clone artifact must use qwen3_tts variant=base"
+                )
+            if not _precision_matches(
+                clone_artifact.quantization, self.precision_policy[preset_id].tts
+            ):
+                raise ValueError(
+                    f"preset {preset_id} clone precision does not match precision_policy.tts"
+                )
         if balanced.tts_clone is not None or light.tts_clone is not None:
             raise ValueError("balanced/light presets must not declare clone artifacts")
         if artifacts[balanced.tts].variant != "custom_voice":

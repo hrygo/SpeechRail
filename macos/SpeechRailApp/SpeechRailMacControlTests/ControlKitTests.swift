@@ -43,7 +43,246 @@ final class ControlKitTests: XCTestCase {
     }
 
     func testEveryProfileIsRepresentedByTheStableEnum() {
-        XCTAssertEqual(SpeechRailProfile.allCases, [.quality, .balanced, .light])
+        XCTAssertEqual(SpeechRailProfile.allCases, [.extreme, .quality, .balanced, .light])
+    }
+
+    func testUnknownProfileDecodesForFactsButCannotBeSelectedOrSent() throws {
+        let health = try JSONDecoder().decode(
+            HealthSnapshot.self,
+            from: Data(#"{"profile":"future_tier"}"#.utf8)
+        )
+        let summary = try JSONDecoder().decode(
+            ProfileSummary.self,
+            from: Data(
+                #"{"id":"future_tier","asr":"asr","tts":"tts","download_bytes":10}"#.utf8
+            )
+        )
+        let unknown = try XCTUnwrap(health.profile)
+
+        XCTAssertEqual(unknown, .unrecognized("future_tier"))
+        XCTAssertEqual(summary.id, unknown)
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                ProfileSummary.self,
+                from: JSONEncoder().encode(summary)
+            ).id,
+            unknown
+        )
+        XCTAssertFalse(unknown.isSelectable)
+
+        for command in [ControlCommand.profileApply, .modelPrepare] {
+            XCTAssertThrowsError(
+                try ControlRequest(
+                    command: command,
+                    profile: unknown,
+                    confirmation: true
+                ).validate()
+            ) { error in
+                XCTAssertEqual(error as? ControlProtocolError, .profileUnsupported)
+                XCTAssertEqual(
+                    (error as? ControlProtocolError)?.errorCode,
+                    .invalidRequest
+                )
+            }
+        }
+    }
+
+    func testSelectableProfilesComeOnlyFromTheConnectedServiceCatalog() {
+        let legacyCatalog = ModelCatalogSnapshot(
+            artifacts: [],
+            profiles: [
+                ProfileSummary(id: .quality, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .balanced, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .light, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(
+                    id: .unrecognized("future_tier"),
+                    asr: "asr",
+                    tts: "tts",
+                    downloadBytes: 10
+                ),
+            ]
+        )
+        let fourTierCatalog = ModelCatalogSnapshot(
+            artifacts: [],
+            profiles: [
+                ProfileSummary(id: .quality, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .balanced, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .extreme, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .light, asr: "asr", tts: "tts", downloadBytes: 10),
+            ]
+        )
+
+        XCTAssertEqual(legacyCatalog.selectableProfiles, [.quality, .balanced, .light])
+        XCTAssertEqual(
+            fourTierCatalog.selectableProfiles,
+            [.extreme, .quality, .balanced, .light]
+        )
+    }
+
+    func testRemainingDownloadUpperBoundRequiresCompleteStatusAndMatchingTotals() {
+        func artifact(_ key: String, sizeBytes: Int64) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen",
+                variant: "base",
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: sizeBytes,
+                fileCount: 1,
+                requiredBy: [.extreme]
+            )
+        }
+
+        func status(
+            _ key: String,
+            state: ModelArtifactState,
+            integrity: ModelIntegrityState
+        ) -> ModelArtifactStatusSnapshot {
+            ModelArtifactStatusSnapshot(
+                key: key,
+                state: state,
+                integrity: integrity,
+                verifiedFileCount: state == .verified ? 1 : 0,
+                totalFileCount: 1
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr", sizeBytes: 100),
+                artifact("design", sizeBytes: 200),
+                artifact("base", sizeBytes: 300),
+            ],
+            profiles: [
+                ProfileSummary(
+                    id: .extreme,
+                    asr: "asr",
+                    tts: "design",
+                    ttsClone: "base",
+                    downloadBytes: 600
+                ),
+            ]
+        )
+        let disk = ModelDiskSnapshot(modelBytes: 100, freeBytes: 1_000)
+        let partialStatuses = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", state: .verified, integrity: .verified),
+                status("design", state: .notDownloaded, integrity: .notChecked),
+            ],
+            disk: disk
+        )
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: partialStatuses))
+
+        let completeStatuses = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", state: .verified, integrity: .verified),
+                status("design", state: .notDownloaded, integrity: .notChecked),
+                status("base", state: .verified, integrity: .mismatch),
+            ],
+            disk: disk
+        )
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .extreme, statuses: completeStatuses),
+            500
+        )
+
+        let verifiedStatuses = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", state: .verified, integrity: .verified),
+                status("design", state: .verified, integrity: .verified),
+                status("base", state: .verified, integrity: .verified),
+            ],
+            disk: disk
+        )
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .extreme, statuses: verifiedStatuses),
+            0
+        )
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: nil))
+    }
+
+    func testRemainingDownloadUpperBoundIncludesCoreMLDiarizationBundle() {
+        func artifact(_ key: String, sizeBytes: Int64) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen",
+                variant: "base",
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: sizeBytes,
+                fileCount: 1,
+                requiredBy: [.extreme]
+            )
+        }
+
+        func status(
+            _ key: String,
+            state: ModelArtifactState,
+            integrity: ModelIntegrityState
+        ) -> ModelArtifactStatusSnapshot {
+            ModelArtifactStatusSnapshot(
+                key: key,
+                state: state,
+                integrity: integrity,
+                verifiedFileCount: state == .verified ? 1 : 0,
+                totalFileCount: 1
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr", sizeBytes: 100),
+                artifact("design", sizeBytes: 200),
+                artifact("base", sizeBytes: 300),
+            ],
+            profiles: [
+                ProfileSummary(
+                    id: .extreme,
+                    asr: "asr",
+                    tts: "design",
+                    ttsClone: "base",
+                    diarization: true,
+                    downloadBytes: 900
+                ),
+            ]
+        )
+        let disk = ModelDiskSnapshot(modelBytes: 0, freeBytes: 1_000)
+        let verifiedModelStatuses = [
+            status("asr", state: .verified, integrity: .verified),
+            status("design", state: .verified, integrity: .verified),
+            status("base", state: .verified, integrity: .verified),
+        ]
+        let missingCoreMLStatus = ModelStatusSnapshot(
+            artifacts: verifiedModelStatuses,
+            disk: disk
+        )
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: missingCoreMLStatus))
+
+        let pendingCoreMLStatus = ModelStatusSnapshot(
+            artifacts: verifiedModelStatuses,
+            diarization: [status("diarization-coreml", state: .notDownloaded, integrity: .notChecked)],
+            disk: disk
+        )
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .extreme, statuses: pendingCoreMLStatus),
+            300
+        )
+
+        let verifiedCoreMLStatus = ModelStatusSnapshot(
+            artifacts: verifiedModelStatuses,
+            diarization: [status("diarization-coreml", state: .verified, integrity: .verified)],
+            disk: disk
+        )
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .extreme, statuses: verifiedCoreMLStatus),
+            0
+        )
     }
 
     func testRequestValidationRejectsMissingConfirmationAndPayload() {

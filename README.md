@@ -70,12 +70,12 @@ It is a good fit when you need:
 | `GET /v1/speechrail/capabilities`, `/v1/speechrail/voices*` | Safe discovery | `effective_capabilities_v1` provides one effective capability generation; namespaced voice discovery omits source text and does not start workers. |
 | `WS /v1/realtime` | Realtime ASR/TTS | Current-only stateless Speech Plane: transcription session wire, server-side speech facts, explicit `speechrail.tts.*`, and an opt-in namespaced diarization extension. |
 | `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
-| `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it calls the local REST service and does not host models. |
+| `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it reports current REST capabilities, does not host models, and never switches profiles. |
 
-Speaker diarization is available only when the active `balanced` or `quality`
-profile has its local CoreML assets ready. It returns session-scoped anonymous
-labels; it does not identify people or maintain a cross-session speaker
-database.
+Speaker diarization is available only when the active `balanced`, `quality`, or
+candidate `extreme` profile has its local CoreML assets ready. It returns
+session-scoped anonymous labels; it does not identify people or maintain a
+cross-session speaker database.
 
 The repository also contains a SwiftUI macOS control plane under
 `macos/SpeechRailApp`. It reports service state and delegates profile/service
@@ -268,25 +268,28 @@ For SDK, cURL, Sona, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
 
 ## Model profiles
 
-The public API shape is shared across profiles, but the advertised capability
-set follows the active catalog selection. All active ASR/TTS profile weights
-are 8-bit; only the `quality` diarization aligner remains bf16.
+The public API payload shape is shared across profiles, but the advertised
+capability set follows the active catalog selection. Profile enums include the
+candidate `extreme`; formal activation is blocked pending quality, resource,
+and latency evidence. BF16 weight dtype does not establish a quality ranking.
 
 | Profile | ASR | TTS | Diarization and voice behavior |
 |---|---|---|---|
 | `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | No aligner and no diarization; fixed CustomVoice roles. |
 | `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8` and optional anonymous diarization; fixed CustomVoice roles. |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`, optional anonymous diarization, VoiceDesign preview/design, and quality-gated Base cloning. The two TTS capability workers may stay resident and different lanes may run concurrently; each lane remains serialized. |
+| `extreme` (candidate) | `asr-1.7b-bf16` | `tts-1.7b-design-bf16` + `tts-1.7b-base-bf16` | Reuses `aligner-bf16`; catalog configures diarization and the two TTS capabilities. Quality, resource, and latency remain unverified. |
 
-Quality keeps VoiceDesign and Base as independent TTS capability lanes. They do
+`quality` and candidate `extreme` keep VoiceDesign and Base as independent TTS capability lanes. They do
 not need to be repeatedly loaded and unloaded when switching voice workflows;
-the Quality capability group can still trim/close both workers after the
+the capability group can still trim/close both workers after the
 configured idle cooldown and restore them lazily for the next request.
 
-![Three-tier model and Quality dual-TTS capability relationship](docs/architecture/diagrams/three-tier-model-architecture.svg)
+![Four-tier model and TTS capability relationship](docs/architecture/diagrams/four-tier-model-architecture.svg)
 
-The diagram is the canonical overview of profile routing, model sharing,
-Quality's two TTS capability lanes, and the shared resource/lifecycle boundary.
+The diagram is the current overview of profile routing, model sharing, TTS
+capabilities, and the shared resource/lifecycle boundary. The older three-tier
+diagram remains as a historical baseline.
 
 Use the CLI to inspect or change a managed selection. `setup` provides a
 memory-based starting suggestion; it is not a hard hardware guarantee.
@@ -301,9 +304,11 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 ```
 
 Select voices from `/v1/voices` rather than assuming that a registered custom
-voice is usable on every profile. The quality-only voice endpoints include
-`POST /v1/voices/previews`, `POST /v1/voices`, `POST /v1/voices/designs`, and the quality-gated clone
-endpoints documented in [`docs/users/api-contract.md`](docs/users/api-contract.md).
+voice is usable on every profile. VoiceDesign preview/design and Base clone
+availability follow the current effective capability; the candidate catalog
+configures these capabilities for `quality` and `extreme`. The quality and
+resource gates for formal Extreme activation remain open. See
+[`docs/users/api-contract.md`](docs/users/api-contract.md).
 
 ## Security and data handling
 

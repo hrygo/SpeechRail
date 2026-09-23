@@ -35,7 +35,7 @@ class SelectionRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: StrictInt
-    preset: Literal["quality", "balanced", "light"]
+    preset: Literal["extreme", "quality", "balanced", "light"]
     generation: StrictInt = Field(gt=0)
     asr: StrictStr
     tts: StrictStr

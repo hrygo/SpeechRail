@@ -2,7 +2,7 @@
 title: "SpeechRail 运行时与部署"
 status: active
 version: "3.1.3"
-date: 2026-09-21
+date: 2026-09-23
 ---
 
 # SpeechRail 运行时与部署
@@ -24,34 +24,37 @@ date: 2026-09-21
                            │      └─ 外部 FluidAudio Sortformer FP16 `.mlmodelc`
                            └─ Qwen3 TTS capability workers（专用 Python，可选）
                                   ├─ 外部 VoiceDesign snapshot
-                                  └─ 外部 Base clone snapshot（Quality）
+                                   └─ 外部 Base clone snapshot（Quality / Extreme）
 ```
 
-![三档模型与 Quality 双 TTS capability 关系图](../architecture/diagrams/three-tier-model-architecture.svg)
+![四档模型与 TTS capability 关系图](../architecture/diagrams/four-tier-model-architecture.svg)
 
 ASR worker 仅在同时设置 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 时
-创建并由 ASGI lifecycle 管理；TTS capability worker 仅在对应 TTS 路径同时设置时创建，Quality
+创建并由 ASGI lifecycle 管理；TTS capability worker 仅在对应 TTS 路径同时设置时创建，`quality` 与候选 `extreme`
 可创建 VoiceDesign 与 Base 两个独立 worker，并允许两者同时常驻。是否在 startup 还是首次请求加载权重由
 `SPEECHRAIL_WORKER_LAZY_LOAD` 决定；加载后 capability 路由不会互相卸载。不同 lane 可并发，同一 lane
-仍由对应 worker 串行；`SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 到期后，Quality 两个 worker 作为一个
+仍由对应 worker 串行；`SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 到期后，双 TTS capability worker 作为一个
 capability group trim/close，下一次请求再惰性恢复所需 worker。
 主进程与 worker 使用长度前缀 JSON 私有协议，ASR worker 接受 16 kHz / 单声道 / PCM16 音频，
 TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权重不在仓库内；请求路径
 不会下载模型。
 
-## 三档组成与按档位精度（catalog v2）
+## 四档组成与按档位精度（catalog v2）
 
-`catalog schema_version=2` 用顶层 `precision_policy` 取代旧的“全档 8-bit”规则，并按用户定位重排三档。
+`catalog schema_version=2` 用顶层 `precision_policy` 明确记录四档的 ASR/TTS/aligner 精度策略。
 其中 `light` 的 4-bit 候选在验收门 E1 未通过（公开真人语料劣化 1.38pp > 0.5pp）后已回退到 8-bit，
-现行精度策略为三档均 8-bit、仅 `quality` aligner 为 bf16。档位仍然只选择权重与量化，公共 API 形状、
-worker 协议、调度与进程隔离保持不变；Quality 的 VD/Base 是新增的两条 capability lane（ADR-0011；
-三档组成重排见 ADR-0015）。
+`light`、`balanced`、`quality` 的语音权重为 8-bit，`quality` aligner 为 bf16；候选 `extreme` 的
+ASR/TTS/aligner 均为 bf16。`extreme` 的质量、资源与延迟尚未验证，正式启用保持阻塞。档位仍只选择权重与量化，
+公共 API payload 结构、worker 协议、调度与进程隔离保持不变；profile 枚举会增加 `extreme`。
 
-| profile | ASR | TTS | Aligner（分人专用） | Diarization | VAD | 安装体积 |
+| profile | ASR | TTS | Aligner（分人专用） | Diarization | VAD | catalog 制品总量 |
 |---|---|---|---|---|---|---|
 | `light`（Embedded） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ | ✓ | **≈2.99 GB** |
 | `balanced`（Pro Workflow） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ | ✓ | **≈5.96 GB** |
 | `quality`（Studio） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + clone `tts-1.7b-base-q8`（两个 8-bit worker，可双常驻/并发） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈10.73 GB** |
+| `extreme`（候选） | `asr-1.7b-bf16`（bf16） | primary `tts-1.7b-design-bf16` + clone `tts-1.7b-base-bf16`（两个 bf16 worker） | 复用 `aligner-bf16` | ✓ | ✓ | **≈14.99 GB** |
+
+以上是锁定 catalog 与分人制品的目录字节合计，不是每次应用的实际下载量或用户磁盘增量；已校验制品不会重下。`extreme` 总量为候选目录计算值，不表示安装或运行态已经验证。
 
 - aligner 是**分人专用制品**，不进入 `PreparedModelSet` / `prepare_models`；它由安装器与 `profile apply` 经
   `diarization_assets.prepare_diarization_assets(app_home, preset_id=..., downloader=...)` 供给到
@@ -60,7 +63,7 @@ worker 协议、调度与进程隔离保持不变；Quality 的 VD/Base 是新�
   `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` / `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。
 - 内置 BF16 `Qwen3-ForcedAligner-0.6B` Hugging Face 常量已移除；aligner revision 与逐文件哈希随 catalog 锁定。
 - 词级时间戳由 ASR 原生提供，与 aligner 无关；aligner 只在分人路径对固定正文做对齐。
-- managed 三档使用 catalog 固定的 tier aligner（`balanced` → `aligner-q8`、`quality` → `aligner-bf16`）；`configs/*.example.*` 里的 `Qwen3-ForcedAligner-0.6B` 只是手工显式环境（manual explicit env）的示例占位，不是 managed 路径实际供给的资产。
+- managed 档位使用 catalog 固定的 tier aligner（`balanced` → `aligner-q8`、`quality`/候选 `extreme` → `aligner-bf16`）；`configs/*.example.*` 里的 `Qwen3-ForcedAligner-0.6B` 只是手工显式环境（manual explicit env）的示例占位，不是 managed 路径实际供给的资产。
 - `speechrail profile apply <tier>` 按上述组成切换，顺序固定为：准备模型 → 准备可选 VAD → 准备分人制品 →
   切换 selection。分人档位写入两条分人路径键；`light` 则移除它们。
 
@@ -71,7 +74,7 @@ worker 协议、调度与进程隔离保持不变；Quality 的 VD/Base 是新�
 | 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` (默认) 或 `int8` (内存优化) | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign + Quality Base clone capability | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8` | `light`/`balanced` 使用 CustomVoice；`quality` 可独立加载 VoiceDesign 与 Base 两个 worker；TTS 未就绪不阻塞 ASR；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
+| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign + Base clone capability | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8`；bf16 snapshot 的模型 dtype 由实际权重头与 catalog identity 校验 | `light`/`balanced` 使用 CustomVoice；`quality` 与候选 `extreme` 可配置 VoiceDesign 与 Base 两个 worker；TTS 未就绪不阻塞 ASR；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
 | diarization profile | 私有 Swift/CoreML Sortformer FP16 worker | 活跃会话时惰性启动；仅一条连续状态链路 | `/v1/audio/transcriptions` 的 `gpt-4o-transcribe-diarize` / `diarized_json`；Realtime 通过 `session.speechrail.diarization.enabled` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。
@@ -86,7 +89,7 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_QWEN3_MODEL_DIR` | 仓库外完整 snapshot 的绝对路径 |
 | `SPEECHRAIL_QWEN3_PYTHON` | 专用 worker Python 可执行文件 |
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的默认 TTS snapshot/runtime |
-| `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | Quality 独立 Base clone worker 的 snapshot；managed profile 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
+| `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | `quality` / `extreme` 独立 Base clone worker 的 snapshot；managed profile 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
 | `SPEECHRAIL_TTS_VOICE_IDS` | 服务器登记的 TTS preset 列表 |
 | `SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；TTS worker 仅使用外部完整 snapshot |
 | `SPEECHRAIL_DEVICE` / `DTYPE` | `mps`（支持 `float16` 默认 / `int8` 优化）或 `cpu`（支持 `float32` / `int8`）；`int8` 仅作用于非预量化快照的 ASR Worker；TTS Worker 不做运行时量化，默认 `float16`（mps）/ `float32`（cpu），预量化 `-8bit` 快照自动解析为 `int8` |
@@ -95,10 +98,10 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | 一个 worker 调用的 deadline |
 | `SPEECHRAIL_JOB_SPOOL_DIR` | 可选、仓库外绝对 SQLite spool；启用 `/v1/jobs` 元数据与启动恢复 |
-| `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 分人档位（`balanced`/`quality`）由 `profile apply` 供给到 `app_home/diarization/` 的 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 绝对路径；`light` 不设置 |
+| `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 分人档位（`balanced`/`quality`/`extreme`）由 `profile apply` 供给到 `app_home/diarization/` 的 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 绝对路径；`light` 不设置 |
 | `SPEECHRAIL_DIARIZATION_WORKER_PATH` | 可选覆盖；未设置时使用 macOS wheel 内置的 `SpeechRailDiarizationWorker` |
 | `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人档位由 `profile apply` 写入 `app_home/diarization/<aligner-key>` 的 tier 专用 aligner snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频；`light` 不设置 |
-| `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；Quality 的 VD/Base 作为一个 TTS 能力组一起驱逐；物理内存回收取决于运行时 |
+| `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；`quality` / `extreme` 的 VD/Base 作为一个 TTS 能力组一起驱逐；物理内存回收取决于运行时 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
 | `SPEECHRAIL_LOG_DIR` | 轮转日志目录，默认 `~/Library/Logs/SpeechRail`；服务在其中写 `speechrail.log`（人读）与 `access.jsonl`（每行一个 JSON 记录），各 8 MiB × 5 份 |
 | `SPEECHRAIL_METRICS_ROLLUP_DIR` | 历史指标目录；受管安装默认 `{app_home}/state/metrics-rollup`，源码检出须显式设置才启用 |
@@ -178,7 +181,7 @@ managed installer 会准备新 release、执行 preflight、更新 LaunchAgent �
 metadata 仍保留用于升级、回滚和审计的版本信息。
 
 > [!IMPORTANT]
-> **profile 能力前置条件**：`balanced`/`quality` 的分人制品和 `quality` 的 Base clone 制品由当前
+> **profile 能力前置条件**：`balanced`/`quality`/`extreme` 的分人制品和 `quality`/`extreme` 的 Base clone 制品由当前
 > managed installer 按 catalog 供给并在 preflight 校验；任一制品缺失或校验失败时，候选不会切换为
 > `runtime/current`。服务不会在请求路径静默下载或降级为未声明的能力。
 
@@ -228,6 +231,6 @@ SpeechRail 进程；每个已配置 profile 按 capability 启动对应 worker�
 多 ASGI worker 或重复服务实例
 会产生多份模型载入和不可控内存压力。
 
-需要常驻运行时使用 macOS `LaunchAgent`，而不是将 MPS 服务作为系统级 `LaunchDaemon`。
+需要常驻运行时使用 macOS `LaunchAgent`，而不是将 MPS 服务作为系统级 `LaunchDaemon`。候选 `extreme` 的静态代码通过不等于正式 release 或受管运行态验收通过；R2 质量与 R3 资源/延迟证据缺失时不得启用。
 通过 `speechrail service install`、`enable`、`status`、`restart`、`disable` 和 `uninstall`
 管理；`install` 不会启动模型。模板、安装步骤和回滚顺序见[运维 Runbook](operations-runbook.md)。

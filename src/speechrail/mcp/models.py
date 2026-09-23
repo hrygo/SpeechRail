@@ -10,7 +10,7 @@ fields keep the advertised schema informative.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -144,6 +144,7 @@ class DescribeResult(BaseModel):
 
     tier: str
     profile: str | None = None
+    profile_consistency: Literal["consistent", "inconsistent", "unknown"] = "unknown"
     diarization_ready: bool = False
     readiness: Readiness
     tts_lifecycle: dict[str, Any] | None = None

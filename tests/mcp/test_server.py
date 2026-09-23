@@ -39,6 +39,7 @@ _TOOL_ANNOTATIONS: dict[str, tuple[str, bool, bool, bool]] = {
 _TOOL_OUTPUT_KEYS: dict[str, set[str]] = {
     "describe": {
         "tier",
+        "profile_consistency",
         "readiness",
         "realtime",
         "jobs",
@@ -180,7 +181,33 @@ def test_tool_descriptions_teach_base64_and_describe_first() -> None:
     descriptions = {tool.name: tool.description for tool in registered}
     assert "base64" in descriptions["transcribe"]
     assert "describe()" in descriptions["synthesize"]
-    assert "quality" in descriptions["preview_voice"]
+    assert "VoiceDesign" in descriptions["preview_voice"]
+    assert "quality" not in descriptions["preview_voice"].lower()
+    assert "switch" not in descriptions["preview_voice"].lower()
+
+
+def test_mcp_surface_and_http_client_have_no_profile_mutation_entry() -> None:
+    import inspect
+
+    registered = _run(server.create_server().list_tools())
+    names = {tool.name for tool in registered}
+    assert not names & {
+        "apply_profile",
+        "profile_apply",
+        "setup",
+        "install",
+        "prepare_models",
+    }
+
+    client_source = inspect.getsource(SpeechRailClient)
+    assert not any(
+        endpoint in client_source
+        for endpoint in (
+            "profiles/apply",
+            "profiles/setup",
+            "models/prepare",
+        )
+    )
 
 
 def test_create_job_description_declares_kind_specific_params_and_policy() -> None:

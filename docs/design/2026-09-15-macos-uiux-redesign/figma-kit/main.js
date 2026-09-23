@@ -1233,7 +1233,7 @@ function buildComponents() {
       },
       build: function (c) {
         add(c, text("name", "均衡 · 日常够用", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "日常够用：识别更准、能区分说话人，配音也正常", "Callout", V["text/secondary"],
+        add(c, text("desc", "支持区分说话人，适合日常识别与配音", "Callout", V["text/secondary"],
           { w: LAYOUT.profileCardInnerW }));
       }
     },
@@ -1246,7 +1246,7 @@ function buildComponents() {
       },
       build: function (c) {
         add(c, text("name", "精准 · 更适合创作", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "识别与配音质量最好，支持音色创作和克隆", "Callout", V["text/secondary"],
+        add(c, text("desc", "支持音色创作和克隆；与「极致」的实际效果差异尚未完成对比验证。", "Callout", V["text/secondary"],
           { w: LAYOUT.profileCardInnerW }));
       }
     }
@@ -2645,7 +2645,7 @@ function screenVoiceClone(d) {
     add(conclusions, k);
   });
   spacer(conclusions);
-  add(conclusions, text("hint", "注册需要 quality 档位；档位不支持时这里给出切换入口。",
+  add(conclusions, text("hint", "仅当服务当前声明 VoiceDesign 与 Base 能力时，才能注册该音色。",
     "Subheadline", V["text/tertiary"]));
   add(register, stretch(conclusions));
 }
@@ -3023,25 +3023,37 @@ function screenMonitoring(d) {
 function screenModels(d) {
   pageHead(d, "模型", "先下载并校验，再应用到运行档位；两者是独立操作。");
 
+  // Wide container: four columns. The App wraps to two columns below its
+  // 916pt card-width breakpoint, so a narrow window never compresses all four.
   const profiles = frame("profiles", { layout: "HORIZONTAL", gap: 12, align: "MIN" });
   add(d, stretch(profiles));
   [
     {
+      // Keep effect claims separate from model weight precision until A/B evidence exists.
+      name: "极致",
+      sub: "使用更高精度的模型，支持音色创作和克隆；识别、配音效果与速度尚未完成对比验证。",
+      size: "该档模型总大小 · 14.0 GiB", sel: false,
+      specs: [["说话人区分", "支持"], ["音色创作", "支持（含克隆）"], ["识别与配音", "效果待验证"]]
+    },
+    {
       // 卡片文案取自应用 ProfileChoiceCard：标题是「档位 · 取向」，副行是它的适用场景
       // 说明（profilePurpose），下面三行规格只列差异。
-      name: "轻量 · 最快最省",
-      sub: "启动最快、占内存最少；识别与配音是基础质量，不区分说话人，也不能创作音色。", sel: false,
-      specs: [["说话人区分", "不支持"], ["音色创作", "不支持"], ["识别与配音", "基础"]]
+      name: "精准",
+      sub: "支持音色创作和克隆；与「极致」的实际效果差异尚未完成对比验证。",
+      size: "该档模型总大小 · 9.8 GiB", sel: true,
+      specs: [["说话人区分", "支持"], ["音色创作", "支持（含克隆）"], ["识别与配音", "已有档位"]]
     },
     {
-      name: "均衡 · 日常够用",
-      sub: "日常够用：识别更准、能区分说话人，配音也正常；内存占用适中。", sel: false,
-      specs: [["说话人区分", "支持"], ["音色创作", "不支持"], ["识别与配音", "更好"]]
+      name: "均衡",
+      sub: "支持区分说话人，适合日常识别与配音。",
+      size: "该档模型总大小 · 5.3 GiB", sel: false,
+      specs: [["说话人区分", "支持"], ["音色创作", "不支持"], ["识别与配音", "已有档位"]]
     },
     {
-      name: "精准 · 更适合创作",
-      sub: "识别与配音质量最好，支持音色创作和克隆；占用最多，换档要等一会儿。", sel: true,
-      specs: [["说话人区分", "支持（更准）"], ["音色创作", "支持（含克隆）"], ["识别与配音", "最好"]]
+      name: "轻量",
+      sub: "使用较小的模型文件；不区分说话人，也不能创作音色。",
+      size: "该档模型总大小 · 2.8 GiB", sel: false,
+      specs: [["说话人区分", "不支持"], ["音色创作", "不支持"], ["识别与配音", "已有档位"]]
     }
   ].forEach(function (p) {
     const c = frame("Profile Card", {
@@ -3066,6 +3078,7 @@ function screenModels(d) {
     const spec = frame("spec", { layout: "VERTICAL", gap: 6 });
     p.specs.forEach(function (s) { kvRow(spec, s[0], s[1], 76); });
     add(c, stretch(spec));
+    add(c, text("size", p.size, "Caption", V["text/tertiary"], { w: 320 }));
     add(profiles, stretch(grow(c)));
   });
 
@@ -4239,7 +4252,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
     hairline(side);
     const sBody = frame("sBody", { layout: "VERTICAL", gap: 10, padX: 16, padY: 16 });
     [
-      ["运行档位", "精准（本机最强）"],
+      ["运行档位", "精准"],
       ["默认字号", "标准"],
       ["字幕带位置", "屏幕底部居中 · 每块屏各记一套"],
       ["采集设备", "MacBook 麦克风"],
@@ -4654,7 +4667,7 @@ function screenClosureMeetingSources(d) {
   hairline(side);
   const sBody = frame("sBody", { layout: "VERTICAL", gap: 10, padX: 16, padY: 16 });
     [
-      ["运行档位", "精准（本机最强）"],
+      ["运行档位", "精准"],
       ["音频来源", "麦克风 + 本机音频"],
       ["说话人标签", "已开 · 最多 4 位"],
       ["采集格式", "24 kHz → 内部 16 kHz"],

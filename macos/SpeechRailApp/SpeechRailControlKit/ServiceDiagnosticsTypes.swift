@@ -473,6 +473,15 @@ public struct ModelCatalogSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public extension ModelCatalogSnapshot {
+    /// Return only known profiles that the connected service actually publishes.
+    /// This keeps newer App choices hidden when paired with an older service.
+    var selectableProfiles: [SpeechRailProfile] {
+        let published = Set(profiles.map(\.id).filter(\.isSelectable))
+        return SpeechRailProfile.allCases.filter(published.contains)
+    }
+}
+
 public struct ModelStatusSnapshot: Codable, Equatable, Sendable {
     public let artifacts: [ModelArtifactStatusSnapshot]
     public let diarization: [ModelArtifactStatusSnapshot]
@@ -508,6 +517,54 @@ public extension ModelStatusSnapshot {
     func status(for key: String) -> ModelArtifactStatusSnapshot? {
         diarization.first(where: { $0.key == key })
             ?? artifacts.first(where: { $0.key == key })
+    }
+}
+
+public extension ModelCatalogSnapshot {
+    /// Estimate the maximum bytes still needed for a profile using verified
+    /// artifact status. The profile total includes the CoreML bundle separately
+    /// from catalog artifacts; its status must exist before that remainder is used.
+    /// Unknown status or mismatched totals stay unknown.
+    func remainingDownloadUpperBound(
+        for profile: SpeechRailProfile,
+        statuses: ModelStatusSnapshot?
+    ) -> Int64? {
+        guard profile.isSelectable,
+              let profileSummary = profiles.first(where: { $0.id == profile }),
+              let statuses
+        else {
+            return nil
+        }
+        let requiredArtifacts = artifacts.filter { $0.requiredBy.contains(profile) }
+        guard !requiredArtifacts.isEmpty else { return nil }
+        let catalogBytes = requiredArtifacts.reduce(Int64.zero) { $0 + $1.sizeBytes }
+        let additionalBytes = profileSummary.downloadBytes - catalogBytes
+        guard additionalBytes >= 0,
+              profileSummary.diarization == (additionalBytes > 0),
+              requiredArtifacts.allSatisfy({ statuses.status(for: $0.key) != nil })
+        else {
+            return nil
+        }
+        let coreMLStatus = profileSummary.diarization
+            ? statuses.status(for: "diarization-coreml")
+            : nil
+        guard !profileSummary.diarization || coreMLStatus != nil else { return nil }
+
+        let modelBytesRemaining = requiredArtifacts.reduce(Int64.zero) { remaining, artifact in
+            guard let status = statuses.status(for: artifact.key),
+                  status.state == .verified,
+                  status.integrity == .verified
+            else {
+                return remaining + artifact.sizeBytes
+            }
+            return remaining
+        }
+        guard let coreMLStatus,
+              coreMLStatus.state != .verified || coreMLStatus.integrity != .verified
+        else {
+            return modelBytesRemaining
+        }
+        return modelBytesRemaining + additionalBytes
     }
 }
 

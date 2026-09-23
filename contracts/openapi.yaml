@@ -300,8 +300,9 @@ paths:
       tags: [speech]
       summary: Generate and validate a reference for a new Base-bound voice
       description: |
-        Quality-only explicit registration. VoiceDesign generates a 2-30 second
-        reference, followed by canonicalization and local Batch ASR validation.
+        Explicit registration when the active runtime provides both VoiceDesign
+        and Base capabilities. VoiceDesign generates a 2-30 second reference,
+        followed by canonicalization and local Batch ASR validation.
         The expected text is never supplied as an ASR prompt. Publication is
         create-only: existing voice IDs and aliases cannot be overwritten.
         Existing /v1/voices prompt metadata registration is unchanged.
@@ -339,8 +340,8 @@ paths:
         '400':
           description: >-
             Invalid request; includes the stable code
-            voice_design_registration_unsupported when the active tier is not
-            the quality VoiceDesign/Base profile
+            voice_design_registration_unsupported when the active runtime does
+            not provide both VoiceDesign and Base capabilities
           content:
             application/json:
               schema:
@@ -468,7 +469,8 @@ paths:
         Generates a short-lived audio preview from a natural-language voice
         instruction. The request does not create or persist a VoiceProfile or
         reference audio. This endpoint is available only when the active TTS
-        artifact has variant=voice_design (the quality profile).
+        artifact has variant=voice_design. Availability follows the active
+        runtime capability and is not tied to a profile name.
       security:
         - BearerAuth: []
         - {}
@@ -1838,7 +1840,7 @@ components:
           example: asr-1.7b-q8
         profile:
           type: [string, 'null']
-          enum: [quality, balanced, light, null]
+          enum: [extreme, quality, balanced, light, null]
           description: Active managed profile; null for an unmanaged runtime.
         asr_ready:
           type: boolean
@@ -2050,7 +2052,7 @@ components:
             only on alias entries; canonical entries omit it.
         profile:
           type: [string, 'null']
-          enum: [quality, balanced, light, null]
+          enum: [extreme, quality, balanced, light, null]
           description: Active managed profile on canonical entries.
         artifact:
           type: string
@@ -2642,7 +2644,7 @@ components:
         instructions:
           type: string
           maxLength: 10000
-          description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
+          description: VoiceDesign instruction when the active TTS capability supports it. CustomVoice and clone voices reject it with a stable 400 error.
         seed:
           type: integer
           minimum: 0

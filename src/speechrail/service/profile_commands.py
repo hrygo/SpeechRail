@@ -1,4 +1,4 @@
-"""Three-tier profile listing, selection, application and rollback."""
+"""Four-tier profile listing, selection, application and rollback."""
 
 from __future__ import annotations
 
@@ -33,13 +33,13 @@ from speechrail.service.profile_switch import (
     apply_prepared_profile,
 )
 
-PresetId = Literal["quality", "balanced", "light"]
+PresetId = Literal["extreme", "quality", "balanced", "light"]
 PrepareProfile = Callable[[str, Path], str]
 SwitchPrepared = Callable[[str, Path], ApplyResult]
 ResolvePrevious = Callable[[Mapping[str, object], Path], str]
 PrepareVadModel = Callable[[Path], None]
 PrepareDiarization = Callable[[str, Path], None]
-_ORDER: tuple[PresetId, ...] = ("quality", "balanced", "light")
+_ORDER: tuple[PresetId, ...] = ("extreme", "quality", "balanced", "light")
 _DIARIZATION_ENV_KEYS = (
     "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH",
     "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR",

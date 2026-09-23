@@ -588,7 +588,12 @@ public struct VoiceCloneView: View {
                         }
                     }
                     .speechRailButton(.primary)
-                    .disabled(!canSubmit || model.isRegisteringCloneVoice || model.isEvaluatingCloneReference)
+                    .disabled(
+                        !canSubmit
+                            || cloneIsGated
+                            || model.isRegisteringCloneVoice
+                            || model.isEvaluatingCloneReference
+                    )
                     .speechRailPointerCursor()
                     .accessibilityLabel(
                         model.isRegisteringCloneVoice ? "正在注册音色" : "注册音色"
@@ -627,7 +632,7 @@ public struct VoiceCloneView: View {
                 .font(SpeechRailDesignTokens.Typography.secondary)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
         } else if cloneIsGated {
-            Text("现在这一档不加载音色克隆；去「模型」页换成「精准」，回来就能继续。")
+            Text(cloneCapabilityMessage)
                 .font(SpeechRailDesignTokens.Typography.secondary)
                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
         }
@@ -639,10 +644,36 @@ public struct VoiceCloneView: View {
         return "填写你实际朗读的文本后可以注册。"
     }
 
-    /// 档位门禁：`/v1/models` 说 `supports_clone == false` 时不给注册，
-    /// 只给一条去模型页的路；能力还没读到（`nil`）时**不**拦——未读取不是不支持。
+    /// Only a positive service declaration enables clone registration.
     private var cloneIsGated: Bool {
-        model.serviceCapabilities?.supportsClone == false
+        !cloneCapabilityConfirmed
+    }
+
+    private var cloneCapabilityConfirmed: Bool {
+        model.serviceCapabilitiesLoadState == .loaded
+            && model.serviceCapabilities?.supportsClone == true
+    }
+
+    private var cloneCapabilityTitle: String {
+        switch model.serviceCapabilitiesLoadState {
+        case .unknown, .loading:
+            "正在确认音色克隆能力"
+        case .failed:
+            "暂时无法读取服务能力"
+        case .loaded:
+            "当前服务没有开放音色克隆"
+        }
+    }
+
+    private var cloneCapabilityMessage: String {
+        switch model.serviceCapabilitiesLoadState {
+        case .unknown, .loading:
+            "正在确认服务是否开放音色克隆；确认前暂不能注册。"
+        case .failed:
+            "暂时无法读取服务能力，音色克隆是否可用尚未确认。"
+        case .loaded:
+            "当前服务没有发布音色克隆能力；可在「模型」页查看当前档位与所需模型。"
+        }
     }
 
     /// 服务端预检结论的语气与标题。写成页面里的两个小函数而不是给快照加扩展，
@@ -727,14 +758,27 @@ public struct VoiceCloneView: View {
                 action: { navigation.request(.voiceLibrary) }
             )
         }
+        cloneCapabilityBanner
+    }
+
+    @ViewBuilder
+    private var cloneCapabilityBanner: some View {
         if cloneIsGated {
-            StatusBanner(
-                tone: .attention,
-                title: "现在这一档不加载音色克隆",
-                message: "音色克隆要用「精准」这一档里的两个合成模型。换档不会自动发生，去「模型」页切好再回来。",
-                actionTitle: "去模型页切档",
-                action: { navigation.request(.models) }
-            )
+            if let actionTitle = cloneCapabilityActionTitle {
+                StatusBanner(
+                    tone: .attention,
+                    title: cloneCapabilityTitle,
+                    message: cloneCapabilityMessage,
+                    actionTitle: actionTitle,
+                    action: { handleCloneCapabilityAction() }
+                )
+            } else {
+                StatusBanner(
+                    tone: .attention,
+                    title: cloneCapabilityTitle,
+                    message: cloneCapabilityMessage
+                )
+            }
         }
     }
 
@@ -873,7 +917,9 @@ public struct VoiceCloneView: View {
 
     private func register() async {
         if cloneIsGated {
-            navigation.request(.models)
+            if model.serviceCapabilitiesLoadState == .loaded {
+                navigation.request(.models)
+            }
             return
         }
         let voice = await model.registerCloneVoice(
@@ -883,6 +929,28 @@ public struct VoiceCloneView: View {
         if voice != nil {
             model.stopAudio()
             isPlayingTake = false
+        }
+    }
+
+    private var cloneCapabilityActionTitle: String? {
+        switch model.serviceCapabilitiesLoadState {
+        case .unknown, .loading:
+            nil
+        case .failed:
+            "重新读取"
+        case .loaded:
+            "查看模型"
+        }
+    }
+
+    private func handleCloneCapabilityAction() {
+        switch model.serviceCapabilitiesLoadState {
+        case .failed:
+            Task { await model.refresh() }
+        case .loaded:
+            navigation.request(.models)
+        case .unknown, .loading:
+            break
         }
     }
 

@@ -2,15 +2,15 @@
 title: "生成式音色注册：VoiceDesign 参考到 Base 音色"
 status: active
 audience: "SpeechRail / Sona 维护者与客户端工程师"
-version: "1.1"
-date: 2026-09-21
+version: "1.2"
+date: 2026-09-23
 ---
 
 # 生成式音色注册
 
 ## 当前范围
 
-`POST /v1/voices/designs` 为 Quality 档提供显式、create-only 的生成参考注册。
+`POST /v1/voices/designs` 在当前 VoiceDesign 与 Base capability 同时可用时提供显式、create-only 的生成参考注册；当前 catalog 在 `quality` 与候选 `extreme` 配置该能力。
 它根据新的描述生成参考，将合格参考保存为 `mode=clone` 的新音色，后续正常 TTS
 经现有 capability router 路由到 Base。注册请求本身不执行 Base 合成，也没有独立声纹
 验收，响应因此固定包含 `synthesis_validation: unevaluated`。
@@ -22,7 +22,7 @@ date: 2026-09-21
 
 ```text
 描述 + reference_text + seed + 未使用的目标 ID
-  → Quality VoiceDesign / Base catalog capability 检查
+→ 当前 VoiceDesign / Base catalog capability 检查（当前 catalog 为 quality 与候选 extreme 配置）
   → 确认本地 TTS 与 Batch ASR 已配置，目标 ID 未占用
   → BATCH_TTS reservation：VoiceDesign 生成有界 PCM
   → 完成并关闭流；校验原始信号，再执行一次参考规范化
@@ -79,8 +79,8 @@ registry 在写入前核对参考音频及文本 hash。旧记录可缺省 creat
 无效的新 metadata 会让 registry fail-closed。hash 用于可追溯性，不是密码学签名，
 也不替代独立说话人向量或声学质量证据。当前 registry 已持久化有界 VoiceRevision 历史，
 并提供 revision list、CAS update、rollback、revoke 与 delete；`creation` 仍是来源元数据，
-不能单独证明跨文本 speaker similarity。Base 仍按 Quality catalog 路由，后端升级时的旧资产
-旧资产不提供自动迁移或跨模型兼容；模型或生成路径变化后，必须重新注册或按当前路径显式重新验收。
+不能单独证明跨文本 speaker similarity。Base 由当前有效能力路由，后端升级时的旧资产
+不提供自动迁移或跨模型兼容；模型或生成路径变化后，必须重新注册或按当前路径显式重新验收。
 
 ## Sona 对接与回退
 

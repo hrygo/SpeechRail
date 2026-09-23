@@ -9,7 +9,7 @@ item IDs, event IDs, audio bytes, or text hashes.
 Usage:
   uv run python tools/probe_teleprompter_latency.py <external.wav> \
     --profile quality --output <external-result.json> \
-    --app-home "/Users/hrygo/Library/Application Support/SpeechRail"
+    --app-home "$SPEECHRAIL_APP_HOME"
 """
 
 from __future__ import annotations
@@ -281,7 +281,11 @@ def run_probe(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wav_file", type=Path)
-    parser.add_argument("--profile", required=True, choices=("quality", "balanced", "light"))
+    parser.add_argument(
+        "--profile",
+        required=True,
+        choices=("extreme", "quality", "balanced", "light"),
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--app-home", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8201/v1")

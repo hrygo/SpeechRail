@@ -2,7 +2,7 @@
 
 Tools are exercised directly (async functions over a recording
 ``httpx.MockTransport``) so the proxy policy — describe merging, audio_ref
-base64 rejection, tier hard-enforcement, quality-only preview, error hints —
+base64 rejection, active-capability enforcement, preview gates, error hints —
 is verified without the MCP transport.
 """
 
@@ -46,7 +46,7 @@ def _model(profile: str, variant: str) -> list[dict[str, Any]]:
             "variant": variant,
             "capabilities": {
                 "supports_preview": variant == "voice_design",
-                "supports_clone": profile == "quality",
+                "supports_clone": profile in {"quality", "extreme"},
                 "supports_instruction": variant == "voice_design",
             },
         },
@@ -91,7 +91,10 @@ def _effective_capabilities(
         "schema_version": "effective_capabilities_v1",
         "snapshot_id": f"{profile}-{variant}",
         "profile": profile,
-        "models": {"tts": {"variant": variant}},
+        "models": {
+            "tts": {"variant": variant},
+            "tts_clone": {"variant": "base"} if profile in {"quality", "extreme"} else {},
+        },
         "voices": voices,
     }
 
@@ -217,6 +220,85 @@ def test_describe_derives_balanced_from_custom_voice_profile(
     assert snapshot["preview_supported"] is False
     assert snapshot["diarization_ready"] is False
     assert snapshot["tts_lifecycle"] is None
+
+
+def test_describe_reports_extreme_profile_without_collapsing_it_to_quality(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("extreme", "voice_design")
+    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    health = {"status": "ok", "profile": "extreme", "diarization_ready": True}
+    client, _requests = make_client(_base_handler(models, voices, health))
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["tier"] == "extreme"
+    assert snapshot["profile"] == "extreme"
+    assert snapshot["profile_consistency"] == "consistent"
+    assert snapshot["clone_supported"] is True
+    assert snapshot["preview_supported"] is True
+
+
+def test_describe_marks_conflicting_profile_sources_and_suppresses_capabilities(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("quality", "voice_design")
+    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    health = {"status": "ok", "profile": "extreme", "diarization_ready": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("extreme", "voice_design", voices))
+        if request.url.path == "/v1/models":
+            return _ok({"object": "list", "data": models})
+        if request.url.path == "/v1/voices":
+            return _ok({"object": "list", "data": voices})
+        if request.url.path == "/health":
+            return _ok(health)
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, _requests = make_client(handler)
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["profile"] is None
+    assert snapshot["tier"] == "unknown"
+    assert snapshot["profile_consistency"] == "inconsistent"
+    assert snapshot["clone_supported"] is False
+    assert snapshot["preview_supported"] is False
+    assert snapshot["voices"][0]["available"] is False
+
+
+def test_describe_does_not_infer_profile_from_voice_design_variant(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("quality", "voice_design")
+    for entry in models:
+        entry.pop("profile", None)
+    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    health = {"status": "ok", "diarization_ready": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/speechrail/capabilities":
+            return _ok(
+                _effective_capabilities("quality", "voice_design", voices)
+                | {"profile": None}
+            )
+        if request.url.path == "/v1/models":
+            return _ok({"object": "list", "data": models})
+        if request.url.path == "/v1/voices":
+            return _ok({"object": "list", "data": voices})
+        if request.url.path == "/health":
+            return _ok(health)
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, _requests = make_client(handler)
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["profile"] is None
+    assert snapshot["tier"] == "unknown"
+    assert snapshot["profile_consistency"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -469,19 +551,24 @@ def test_synthesize_posts_speech_and_returns_audio_path(
     ]
 
 
+@pytest.mark.parametrize("profile", ["quality", "extreme"])
 def test_synthesize_uses_effective_snapshot_to_pin_voice_and_model(
-    make_client: Any, run_async: Any
+    make_client: Any, run_async: Any, profile: str
 ) -> None:
     voice_revision = "vr_" + "a" * 32
     model_revision = "b" * 40
     snapshot = {
         "schema_version": "effective_capabilities_v1",
         "snapshot_id": "snap_1",
-        "profile": "quality",
+        "profile": profile,
         "models": {
             "tts": {
                 "variant": "voice_design",
                 "catalog_revision": "c" * 40,
+            },
+            "tts_clone": {
+                "variant": "base",
+                "artifact": "tts-base-bf16" if profile == "extreme" else "tts-base-q8",
             },
         },
         "voices": [
@@ -610,6 +697,37 @@ def test_synthesize_accepts_instruction_voice_on_quality_tier(
     Path(result["audio_path"]).unlink()
 
 
+def test_synthesize_accepts_instruction_voice_on_extreme_tier(
+    make_client: Any, run_async: Any
+) -> None:
+    voices = [
+        _voice(
+            "my_voice",
+            mode="instruction",
+            available=True,
+            variant="voice_design",
+            capabilities={
+                "supports_speaker": False,
+                "supports_instruction": True,
+                "supports_clone": False,
+            },
+        )
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("extreme", "voice_design", voices))
+        if request.url.path == "/v1/audio/speech":
+            return httpx.Response(status_code=200, content=b"ID3-x")
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, _requests = make_client(handler)
+
+    result = run_async(tools.synthesize(client, text="hi", voice="my_voice"))
+
+    Path(result["audio_path"]).unlink()
+
+
 def test_synthesize_rejects_clone_voice_on_custom_voice_tier(
     make_client: Any, run_async: Any
 ) -> None:
@@ -658,7 +776,7 @@ def test_synthesize_hard_blocks_instruction_voice_when_tier_is_not_quality(
             capabilities={
                 "supports_speaker": False,
                 "supports_instruction": True,
-                "supports_clone": True,
+                "supports_clone": False,
             },
         ),
     ]
@@ -672,7 +790,8 @@ def test_synthesize_hard_blocks_instruction_voice_when_tier_is_not_quality(
     with pytest.raises(ToolCallError) as excinfo:
         run_async(tools.synthesize(client, text="hi", voice="free_form"))
     assert excinfo.value.code == "voice_not_available"
-    assert "quality" in excinfo.value.message
+    assert "VoiceDesign capability" in excinfo.value.message
+    assert "switch" not in excinfo.value.message.lower()
     assert "light" in excinfo.value.message
     assert [request.url.path for request in requests] == [
         "/v1/speechrail/capabilities",
@@ -746,6 +865,30 @@ def test_preview_voice_quality_posts_preview_and_returns_wav_path(
     assert len(requests) == 2
 
 
+def test_preview_voice_works_on_extreme_profile(
+    make_client: Any, run_async: Any
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("extreme", "voice_design", []))
+        if request.url.path == "/v1/voices/previews":
+            return httpx.Response(status_code=200, content=b"RIFF-extreme-preview")
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+    result = run_async(
+        tools.preview_voice(client, instruction="温和的中文女声。", text="试听。")
+    )
+
+    path = Path(result["audio_path"])
+    assert path.read_bytes() == b"RIFF-extreme-preview"
+    path.unlink()
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities",
+        "/v1/voices/previews",
+    ]
+
+
 def test_preview_voice_rejected_on_custom_voice_tier(
     make_client: Any, run_async: Any
 ) -> None:
@@ -758,7 +901,8 @@ def test_preview_voice_rejected_on_custom_voice_tier(
     with pytest.raises(ToolCallError) as excinfo:
         run_async(tools.preview_voice(client, instruction="温柔的女声", text="你好"))
     assert excinfo.value.code == "voice_preview_unsupported"
-    assert "quality" in excinfo.value.message
+    assert "VoiceDesign" in excinfo.value.message
+    assert "switch" not in excinfo.value.message.lower()
     assert [request.url.path for request in requests] == [
         "/v1/speechrail/capabilities"
     ]
@@ -786,6 +930,8 @@ def test_create_voice_posts_exact_body_and_returns_entry(
     entry = {"id": "custom_test", "mode": "instruction", "available": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("extreme", "voice_design", []))
         assert request.method == "POST"
         assert request.url.path == "/v1/voices"
         assert _json_body(request) == {
@@ -807,7 +953,133 @@ def test_create_voice_posts_exact_body_and_returns_entry(
         )
     )
     assert result == entry
-    assert len(requests) == 1
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities",
+        "/v1/voices",
+    ]
+
+
+def test_create_voice_rejects_missing_voice_design_before_rest_mutation(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("balanced", "custom_voice")
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    health = {"status": "ok", "profile": "balanced", "diarization_ready": False}
+    client, requests = make_client(_base_handler(models, voices, health))
+
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.create_voice(client, name="voice", instruction="warm"))
+
+    assert excinfo.value.code == "capability_not_available"
+    assert "switch" not in excinfo.value.message.lower()
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities"
+    ]
+
+
+def test_design_voice_rejects_missing_base_before_rest_mutation(
+    make_client: Any, run_async: Any
+) -> None:
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("custom_voice", "voice_design", voices))
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(
+            tools.design_voice(
+                client,
+                voice_id="design",
+                name="voice",
+                instruction="warm",
+                reference_text="这是一个用于测试生成参考的示例句子，足够长。",
+            )
+        )
+
+    assert excinfo.value.code == "capability_not_available"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities"
+    ]
+
+
+def test_design_voice_uses_extreme_voice_design_and_base_capabilities(
+    make_client: Any, run_async: Any
+) -> None:
+    voice = {"id": "new_design", "mode": "clone", "available": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("extreme", "voice_design", []))
+        if request.method == "POST" and request.url.path == "/v1/voices/designs":
+            body = _json_body(request)
+            assert body["id"] == "new_design"
+            assert body["name"] == "A voice"
+            assert body["reference_text"] == "这是一个用于测试生成参考的完整示例句子。"
+            return _ok({"voice": voice, "synthesis_validation": "unevaluated"}, status=201)
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+
+    result = run_async(
+        tools.design_voice(
+            client,
+            voice_id="new_design",
+            name="A voice",
+            instruction="warm and clear",
+            reference_text="这是一个用于测试生成参考的完整示例句子。",
+        )
+    )
+
+    assert result["id"] == "new_design"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities",
+        "/v1/voices/designs",
+    ]
+
+
+def test_clone_voice_rejects_missing_base_before_audio_read_or_rest_mutation(
+    make_client: Any, run_async: Any, tmp_path: Path
+) -> None:
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    client, requests = make_client(
+        lambda request: _ok(_effective_capabilities("balanced", "custom_voice", voices))
+    )
+
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(
+            tools.clone_voice(
+                client,
+                audio_ref=str(tmp_path / "missing.wav"),
+                name="clone",
+                ref_text="这是一个用于测试音色克隆的示例。",
+            )
+        )
+
+    assert excinfo.value.code == "capability_not_available"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities"
+    ]
+
+
+def test_validate_voice_rejects_missing_base_before_rest_mutation(
+    make_client: Any, run_async: Any
+) -> None:
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    client, requests = make_client(
+        lambda request: _ok(_effective_capabilities("balanced", "custom_voice", voices))
+    )
+
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.validate_voice(client, voice_id="clone"))
+
+    assert excinfo.value.code == "capability_not_available"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities"
+    ]
 
 
 def test_create_voice_rejects_overlong_instruction_before_network(

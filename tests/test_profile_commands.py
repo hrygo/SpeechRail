@@ -39,11 +39,12 @@ def _selection(preset: str, generation: int) -> dict[str, object]:
     }
 
 
-def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() -> None:
+def test_catalog_lists_four_tiers_and_extreme_changes_only_weight_tier() -> None:
     catalog = load_catalog()
     profiles = list_profiles(catalog)
-    assert [profile.id for profile in profiles] == ["quality", "balanced", "light"]
+    assert [profile.id for profile in profiles] == ["extreme", "quality", "balanced", "light"]
     by_id = {profile.id: profile for profile in profiles}
+    extreme = by_id["extreme"]
     balanced = by_id["balanced"]
     light = by_id["light"]
     quality = by_id["quality"]
@@ -52,6 +53,11 @@ def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() 
     assert model_changes(balanced, light) == frozenset({"asr", "aligner"})
     assert balanced.aligner == "aligner-q8"
     assert quality.aligner == "aligner-bf16"
+    assert extreme.asr != quality.asr
+    assert extreme.tts != quality.tts
+    assert extreme.tts_clone != quality.tts_clone
+    assert extreme.aligner == quality.aligner == "aligner-bf16"
+    assert model_changes(quality, extreme) == frozenset({"asr", "tts", "tts_clone"})
     assert light.aligner is None
 
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
@@ -70,6 +76,13 @@ def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() 
         balanced_asr_tts + artifact_bytes("aligner-q8") + sortformer_bytes
     )
     assert quality.download_bytes > balanced_asr_tts
+    assert extreme.download_bytes == (
+        artifact_bytes("asr-1.7b-bf16")
+        + artifact_bytes("tts-1.7b-design-bf16")
+        + artifact_bytes("tts-1.7b-base-bf16")
+        + artifact_bytes("aligner-bf16")
+        + sortformer_bytes
+    )
 
 
 def test_model_changes_accepts_the_public_mapping_shape() -> None:
@@ -80,7 +93,14 @@ def test_model_changes_accepts_the_public_mapping_shape() -> None:
 
 @pytest.mark.parametrize(
     ("memory_gib", "expected"),
-    [(8, "light"), (12, "balanced"), (16, "quality"), (64, "quality")],
+    [
+        (8, "light"),
+        (12, "balanced"),
+        (16, "quality"),
+        (32, "quality"),
+        (64, "quality"),
+        (128, "quality"),
+    ],
 )
 def test_recommendation_uses_memory_only(memory_gib: int, expected: str) -> None:
     assert recommend_profile(memory_gib * 1024**3) == expected
@@ -124,6 +144,66 @@ def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
         f"prepare_diarization:light:{tmp_path.name}",
         f"switch:prepared-light:{tmp_path.name}",
     ]
+
+
+def test_apply_extreme_uses_existing_transaction_order(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    def prepare(preset: str, app_home: Path) -> str:
+        events.append(f"prepare:{preset}:{app_home.name}")
+        return "prepared-extreme"
+
+    def switch(prepared_id: str, app_home: Path) -> ApplyResult:
+        events.append(f"switch:{prepared_id}:{app_home.name}")
+        return ApplyResult("committed", "op_extreme", None)
+
+    result = apply_profile(
+        "extreme",
+        app_home=tmp_path,
+        prepare=prepare,
+        switch=switch,
+        prepare_vad=lambda app_home: events.append("prepare_vad"),
+        prepare_diarization=lambda preset, app_home: events.append(f"prepare_diarization:{preset}"),
+    )
+
+    assert result.status == "committed"
+    assert events == [
+        f"prepare:extreme:{tmp_path.name}",
+        "prepare_vad",
+        "prepare_diarization:extreme",
+        f"switch:prepared-extreme:{tmp_path.name}",
+    ]
+
+
+def test_extreme_prepare_failure_keeps_quality_selection_and_skips_switch(
+    tmp_path: Path,
+) -> None:
+    old_selection = _selection("quality", 1)
+    store = ProfileStore(tmp_path)
+    store.initialize(old_selection)
+    switch_calls: list[str] = []
+
+    def prepare(preset: str, app_home: Path) -> str:
+        assert preset == "extreme"
+        raise ProfileCommandError("bf16 artifact failed verification")
+
+    def switch(prepared_id: str, app_home: Path) -> ApplyResult:
+        switch_calls.append(prepared_id)
+        store.initialize(_selection("extreme", 2))
+        return ApplyResult("committed", "op_extreme", None)
+
+    with pytest.raises(ProfileCommandError, match="failed verification"):
+        apply_profile(
+            "extreme",
+            app_home=tmp_path,
+            prepare=prepare,
+            switch=switch,
+            prepare_vad=lambda app_home: None,
+            prepare_diarization=lambda preset, app_home: None,
+        )
+
+    assert switch_calls == []
+    assert store.recover() == old_selection
 
 
 def test_apply_light_removes_diarization_env(tmp_path: Path, monkeypatch) -> None:

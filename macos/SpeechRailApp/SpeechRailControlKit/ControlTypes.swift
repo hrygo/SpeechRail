@@ -8,10 +8,67 @@ public enum ControlConstants {
     public static let agentPlistName = "com.speechrail.desktop.control.plist"
 }
 
-public enum SpeechRailProfile: String, Codable, CaseIterable, Sendable {
+public enum SpeechRailProfile: Codable, CaseIterable, Hashable, RawRepresentable, Sendable {
+    case extreme
     case quality
     case balanced
     case light
+    case unrecognized(String)
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "extreme":
+            self = .extreme
+        case "quality":
+            self = .quality
+        case "balanced":
+            self = .balanced
+        case "light":
+            self = .light
+        default:
+            return nil
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .extreme:
+            "extreme"
+        case .quality:
+            "quality"
+        case .balanced:
+            "balanced"
+        case .light:
+            "light"
+        case let .unrecognized(value):
+            value
+        }
+    }
+
+    public static let allCases: [SpeechRailProfile] = [
+        .extreme,
+        .quality,
+        .balanced,
+        .light,
+    ]
+
+    public var isSelectable: Bool {
+        if case .unrecognized = self {
+            return false
+        }
+        return true
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        self = Self(rawValue: value) ?? .unrecognized(value)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public enum ControlCommand: String, Codable, CaseIterable, Sendable {
@@ -122,11 +179,13 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         if command.requiresConfirmation && !confirmation {
             throw ControlProtocolError.confirmationRequired
         }
-        if command == .profileApply && profile == nil {
-            throw ControlProtocolError.profileRequired
-        }
-        if command == .modelPrepare && profile == nil {
-            throw ControlProtocolError.profileRequired
+        if command == .profileApply || command == .modelPrepare {
+            guard let profile else {
+                throw ControlProtocolError.profileRequired
+            }
+            guard profile.isSelectable else {
+                throw ControlProtocolError.profileUnsupported
+            }
         }
         if (command == .operationStatus || command == .operationCancel) && operationID == nil {
             throw ControlProtocolError.operationRequired
@@ -339,12 +398,14 @@ public enum ControlProtocolError: Error, Equatable, Sendable {
     case unsupportedSchema
     case confirmationRequired
     case profileRequired
+    case profileUnsupported
     case operationRequired
     case invalidResponse
 
     public var errorCode: ControlErrorCode {
         switch self {
-        case .unsupportedSchema, .confirmationRequired, .profileRequired, .operationRequired:
+        case .unsupportedSchema, .confirmationRequired, .profileRequired, .profileUnsupported,
+             .operationRequired:
             .invalidRequest
         case .invalidResponse:
             .commandFailed

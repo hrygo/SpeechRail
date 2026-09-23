@@ -769,7 +769,6 @@ public struct VoiceDesignView: View {
     private enum VoiceDesignAvailability: Equatable {
         case checking
         case available
-        case requiresQuality
         case serviceUnavailable
         case unsupported
 
@@ -1157,8 +1156,6 @@ public struct VoiceDesignView: View {
             "正在检查"
         case .available:
             "可以"
-        case .requiresQuality:
-            "需要「精准」档位"
         case .serviceUnavailable:
             "语音合成服务未就绪"
         case .unsupported:
@@ -1218,13 +1215,11 @@ public struct VoiceDesignView: View {
         case .checking:
             (.neutral, "正在检查能不能生成新音色", "读取这台 Mac 的服务与档位。", "arrow.clockwise")
         case .available:
-            (.healthy, "现在可以生成新音色", "语音合成与「精准」档位都已就位。", "checkmark.circle")
-        case .requiresQuality:
-            (.attention, "现在这一档不生成新音色", "去「模型」页换成「精准」，再回到本页。", "slider.horizontal.3")
+            (.healthy, "现在可以生成新音色", "服务已声明音色创作能力。", "checkmark.circle")
         case .serviceUnavailable:
             (.attention, "语音合成服务还没就绪", "先在「服务状态」把服务恢复，再生成候选音频。", "exclamationmark.triangle")
         case .unsupported:
-            (.critical, "这台服务没有开放音色生成", "去「模型」页核对「精准」档位需要的模型文件是否已下载并通过校验。", "xmark.circle")
+            (.critical, "当前服务没有开放音色创作", "服务目录没有声明这项能力；可在「模型」页查看当前档位与所需模型。", "xmark.circle")
         }
 
         ViewThatFits(in: .horizontal) {
@@ -1309,9 +1304,6 @@ public struct VoiceDesignView: View {
         guard let health = displayedHealth else {
             return model.healthFailure == nil ? .checking : .serviceUnavailable
         }
-        guard health.profile == .quality else {
-            return .requiresQuality
-        }
         guard health.status == "ok", health.ttsReady == true, health.ready == true else {
             return .serviceUnavailable
         }
@@ -1351,13 +1343,6 @@ public struct VoiceDesignView: View {
         switch voiceDesignAvailability {
         case .checking, .available:
             nil
-        case .requiresQuality:
-            AvailabilityBanner(
-                title: "音色创作需要「精准」这一档",
-                message: "现在这一档不会加载创作新音色需要的模型。换档不会自动发生——去「模型」页确认后自己切。",
-                actionTitle: "去模型页切档",
-                route: .models
-            )
         case .serviceUnavailable:
             AvailabilityBanner(
                 title: "服务尚未就绪",
@@ -1367,9 +1352,9 @@ public struct VoiceDesignView: View {
             )
         case .unsupported:
             AvailabilityBanner(
-                title: "这台服务没开放音色生成",
-                message: "去「模型」页核对「精准」档位需要的模型文件是否已下载并通过校验。",
-                actionTitle: "去模型页切档",
+                title: "当前服务没有开放音色创作",
+                message: "服务目录没有声明这项能力。去「模型」页查看当前档位与所需模型。",
+                actionTitle: "查看模型",
                 route: .models
             )
         }

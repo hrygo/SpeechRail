@@ -21,6 +21,9 @@ def _profile_summaries() -> tuple[object, ...]:
     from speechrail.service import profile_commands
 
     return (
+        profile_commands.ProfileSummary(
+            "extreme", "asr-extreme", "tts-extreme", 4 * 1024**3, "aligner-bf16"
+        ),
         profile_commands.ProfileSummary("quality", "asr-quality", "tts-quality", 3 * 1024**3),
         profile_commands.ProfileSummary("balanced", "asr-balanced", "tts-balanced", 2 * 1024**3),
         profile_commands.ProfileSummary("light", "asr-light", "tts-light", 1 * 1024**3),
@@ -42,6 +45,13 @@ def test_profile_list_json_is_stable_and_path_free(
         "command": "profile.list",
         "current": "balanced",
         "profiles": [
+            {
+                "aligner": "aligner-bf16",
+                "asr": "asr-extreme",
+                "download_bytes": 4 * 1024**3,
+                "id": "extreme",
+                "tts": "tts-extreme",
+            },
             {
                 "aligner": None,
                 "asr": "asr-quality",
@@ -225,6 +235,7 @@ def test_model_catalog_json_is_path_free(capsys: pytest.CaptureFixture[str]) -> 
     assert payload["command"] == "model.catalog"
     assert payload["status"] == "ok"
     assert {item["id"] for item in payload["profiles"]} == {
+        "extreme",
         "quality",
         "balanced",
         "light",

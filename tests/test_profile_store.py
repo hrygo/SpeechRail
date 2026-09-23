@@ -38,6 +38,28 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "config/selection.previous.json").read_text()) == old
 
 
+def test_extreme_selection_recovers_after_commit_and_rollback(tmp_path: Path) -> None:
+    store = ProfileStore(tmp_path)
+    old = selection("quality")
+    candidate = selection("extreme", 2)
+    store.initialize(old)
+    operation = store.begin(old, candidate)
+    for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
+        store.mark(operation, stage)
+        assert store.recover() == old
+    store.stage_candidate(operation)
+    assert claim_startup_selection(tmp_path) == candidate
+    store.mark(operation, "SMOKING")
+    store.commit(operation)
+
+    assert recover_selection(tmp_path) == candidate
+    assert json.loads((tmp_path / "config/selection.previous.json").read_text()) == old
+
+    rollback_operation = store.begin(candidate, selection("quality", 3))
+    store.rollback(rollback_operation)
+    assert recover_selection(tmp_path) == candidate
+
+
 def test_commit_requires_successful_smoke_and_matching_operation(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())

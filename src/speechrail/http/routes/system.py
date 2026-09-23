@@ -1605,7 +1605,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not provide the Base clone capability; switch to quality profile"
+                    "does not provide the Base clone capability"
                 ),
             )
 
@@ -1966,7 +1966,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not provide the Base clone capability; switch to quality profile"
+                    "does not provide the Base clone capability"
                 ),
             )
         if not name or not name.strip():

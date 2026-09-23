@@ -93,3 +93,23 @@ def test_custom_profile_without_vendor_speaker_fails_closed(monkeypatch) -> None
 
     with pytest.raises(ValueError, match="no custom_voice speaker binding"):
         resolve_binding("custom_voice", "user_voice")
+
+
+def test_clone_binding_error_describes_missing_base_capability_without_tier_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import speechrail.backends.qwen3_voice_binding as binding_module
+    from speechrail.domain.tts import VoiceProfile
+
+    monkeypatch.setattr(
+        binding_module,
+        "get_voice_profile",
+        lambda _voice: VoiceProfile(id="user_voice", mode="clone"),
+    )
+
+    with pytest.raises(
+        ValueError, match="requires an active Base clone capability"
+    ) as excinfo:
+        resolve_binding("voice_design", "user_voice")
+
+    assert "quality" not in str(excinfo.value).lower()

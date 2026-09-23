@@ -380,15 +380,14 @@ public struct ServiceOverviewView: View {
         let declaredCapabilities = model.serviceCapabilitiesLoadState == .loaded
             ? model.serviceCapabilities
             : nil
-        let supportsQualityTier = health.profile == .quality
         let voiceDesign = capabilityVerdict(
             // 页面上不摆内部名：`VoiceDesign` / `Base` 是制品名，用户看到的是"两种合成各能做什么"。
             title: "语音合成 · 语音设计",
             capability: "语音设计",
             declared: declaredCapabilities?.supportsInstruction,
-            supportedByProfile: supportsQualityTier,
+            supportedByProfile: false,
             missingReason: "这一档没有发布「语音设计」。",
-            unsupportedReason: "语音设计只在最准的一档（精准）加载。"
+            unsupportedReason: "当前服务没有发布「语音设计」能力。"
         )
         let voiceClone = capabilityVerdict(
             // 名字跟着侧栏那一项走：用户点的、看到的、读到的都是「音色克隆」。
@@ -396,9 +395,9 @@ public struct ServiceOverviewView: View {
             title: "音色克隆",
             capability: "音色克隆",
             declared: declaredCapabilities?.supportsClone,
-            supportedByProfile: supportsQualityTier,
+            supportedByProfile: false,
             missingReason: "这一档没有发布音色克隆（需要的模型还没就位）。",
-            unsupportedReason: "音色克隆只在「精准」这一档加载。"
+            unsupportedReason: "当前服务没有发布音色克隆能力。"
         )
         let diarization = diarizationCapability(for: health)
 

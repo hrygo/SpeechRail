@@ -14,6 +14,7 @@ def test_model_catalog_payload_has_required_by_and_no_local_path() -> None:
     payload = model_catalog_payload(catalog=load_catalog())
 
     assert {item["id"] for item in payload["profiles"]} == {
+        "extreme",
         "quality",
         "balanced",
         "light",
