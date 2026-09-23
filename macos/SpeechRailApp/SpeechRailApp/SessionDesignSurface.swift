@@ -763,7 +763,7 @@ public struct SessionVoiceCapsule<Content: View>: View {
 ///
 /// 它和 `StatusBanner(kind: .conclusion)` 的差别有两处，所以没有合并：稿的结论条带
 /// `hint` 那一行（更小的字，写"怎么配合这件事"），而且**支持多个出口**（「打开设置…」+
-/// 「了解如何配置」是一条结论的两个去向）。`StatusBanner` 服务另外八个页面，只收一颗按钮。
+/// 「了解如何配置」是一条结论的两个去向）。`StatusBanner` 服务另外十四个页面，只收一颗按钮。
 public struct SessionConclusionBand: View {
     public let tone: StatusTone
     public let title: String

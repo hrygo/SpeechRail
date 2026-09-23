@@ -85,7 +85,7 @@ public struct ControlCenterView: View {
                     .toolbar {
                         // 页面身份（`.navigation` 槽，第五十五轮前是 `.principal`）由
                         // **窗口组合根**声明一次：它是当前路由的纯函数，页面自己没有
-                        // 需要额外携带的标题状态，所以八个屏幕不可能漂移成九种头部
+                        // 需要额外携带的标题状态，所以十四个屏幕不可能漂移成十五种头部
                         // （REDESIGN-SPEC §6.2 / §11.6 第四十九、五十五轮）。
                         PageIdentityToolbarItem(selection ?? Self.landingRoute)
                         // 这一枚浮动间隔留着：页面动作由子视图声明、会排在它之前，而系统

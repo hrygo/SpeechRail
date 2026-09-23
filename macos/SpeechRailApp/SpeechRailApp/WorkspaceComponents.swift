@@ -925,7 +925,7 @@ public struct CardHead<Trailing: View>: View {
     public var body: some View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
             // 有右侧事实时标题不贪心（见 `SectionHeading.fillsWidth`）。没有右侧事实时
-            // 维持原样：标题占满剩余宽度，尾巴自然贴到右边缘——八个页面都是这么读的。
+            // 维持原样：标题占满剩余宽度，尾巴自然贴到右边缘——十四个页面都是这么读的。
             SectionHeading(title: title, detail: detail, fillsWidth: accessory == nil)
             trailing
             if let accessory, !accessory.isEmpty {
@@ -2836,7 +2836,7 @@ public extension FocusedValues {
 }
 
 /// 「重新读取当前页」（⌘R）：每个页面声明自己该怎么重新读取，视图菜单只负责
-/// 暴露快捷键。这样「刷新」不必再在八个页面各写一条含义不同的菜单项
+/// 暴露快捷键。这样「刷新」不必再在十四个页面各写一条含义不同的菜单项
 /// （REDESIGN-SPEC §6.2 / §6.3）。
 ///
 /// 页面没有可重新读取的东西时不要挂这个值，菜单项会自然禁用。
