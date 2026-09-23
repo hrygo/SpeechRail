@@ -35,8 +35,13 @@ _ARTIFACT_FIELDS: Final[frozenset[str]] = frozenset(
 _SOURCE_FIELDS: Final[frozenset[str]] = frozenset({"provider", "repository", "revision"})
 _SOURCE_ALLOWED_FIELDS: Final[frozenset[str]] = _SOURCE_FIELDS | frozenset({"files"})
 _FILE_FIELDS: Final[frozenset[str]] = frozenset({"path", "size", "sha256"})
-_QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset(
-    {"bits", "dtype", "group_size", "format"}
+# 与 `speechrail.config.model_catalog.WeightDtype` 同义: 本工具不导入包, 以便
+# 在没有 runtime 的快照上单独运行, 因此这一份取值在这里重复声明一次。
+_WEIGHT_DTYPES: Final[frozenset[str]] = frozenset({"bf16", "fp16", "fp32"})
+_QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset({"bits", "group_size", "format"})
+# `dtype` 只在未量化的制品上出现: 量化制品的精度由 `bits` 表达, 两者互斥。
+_QUANTIZATION_ALLOWED_FIELDS: Final[frozenset[str]] = _QUANTIZATION_FIELDS | frozenset(
+    {"dtype"}
 )
 _PRESET_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {"id", "asr", "tts", "aligner", "diarization"}
@@ -149,9 +154,14 @@ def _normalise_file(value: object, *, index: int, artifact_key: str) -> dict[str
 def _normalise_quantization(value: object, *, artifact_key: str) -> dict[str, object]:
     context = f"artifact {artifact_key!r} quantization"
     data = _mapping(value, context=context)
-    _check_fields(data, _QUANTIZATION_FIELDS, context=context)
+    missing = sorted(_QUANTIZATION_FIELDS.difference(data))
+    if missing:
+        raise ValueError(f"{context} is missing required field(s): {', '.join(missing)}")
+    unexpected = sorted(set(data).difference(_QUANTIZATION_ALLOWED_FIELDS))
+    if unexpected:
+        raise ValueError(f"{context} has unsupported field(s): {', '.join(unexpected)}")
     bits = data["bits"]
-    dtype = data["dtype"]
+    dtype = data.get("dtype")
     group_size = data["group_size"]
     if bits is not None and (not isinstance(bits, int) or isinstance(bits, bool) or bits <= 0):
         raise ValueError(f"{context}.bits must be a positive integer or null")
@@ -160,20 +170,18 @@ def _normalise_quantization(value: object, *, artifact_key: str) -> dict[str, ob
     ):
         raise ValueError(f"{context}.group_size must be a positive integer or null")
     format_name = _required_string(data, "format", context=context)
-    if dtype is not None and dtype != "bf16":
-        raise ValueError(f"{context}.dtype must be null or 'bf16'")
-    if bits is not None and dtype is not None:
-        raise ValueError(f"{context} must declare either bits or dtype, not both")
-    if bits is None and dtype is None:
+    if dtype is not None:
+        if not isinstance(dtype, str) or dtype not in _WEIGHT_DTYPES:
+            allowed = ", ".join(sorted(_WEIGHT_DTYPES))
+            raise ValueError(f"{context}.dtype must be null or one of {allowed}")
+        if bits is not None:
+            raise ValueError(f"{context} must declare either bits or dtype, not both")
+        if group_size is not None or format_name != "none":
+            raise ValueError(f"{context} dtype requires group_size=null and format='none'")
+    elif bits is None:
+        # 未量化的制品必须写明权重本身的数值格式; 否则同一列里会有一行说不出精度。
         raise ValueError(f"{context}.dtype is required when bits is null")
-    if dtype == "bf16" and (group_size is not None or format_name != "none"):
-        raise ValueError(f"{context} bf16 encoding requires group_size=null and format='none'")
-    return {
-        "bits": bits,
-        "dtype": dtype,
-        "group_size": group_size,
-        "format": format_name,
-    }
+    return {"bits": bits, "group_size": group_size, "format": format_name, "dtype": dtype}
 
 
 def _normalise_source(

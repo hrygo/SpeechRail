@@ -3092,14 +3092,15 @@ function screenModels(d) {
 
   const table = card(d, "artifacts", { pad: 0, gap: 0, clip: true });
   const aHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
-  add(aHead, text("title", "模型制品", "Heading / Section", V["text/primary"]));
-  add(aHead, text("detail", "只显示脱敏的制品 key、量化与校验状态，不显示本地路径。", "Callout", V["text/secondary"]));
+  add(aHead, text("title", "模型文件", "Heading / Section", V["text/primary"]));
+  add(aHead, text("detail", "这一档要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。", "Callout", V["text/secondary"]));
   add(table, stretch(aHead));
   hairline(table);
 
   const COLS = [440, 200, 140];
   const header = frame("header", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 9 });
-  ["模型文件", "量化", "文件", "校验"].forEach(function (label, i) {
+  // 列头与应用同名：这一列答的是「这份权重多少位」，所以叫「精度」不叫「量化」（§4.2 / 第七十一轮）。
+  ["模型文件", "精度", "文件", "校验"].forEach(function (label, i) {
     const holder = frame("cell", { layout: "HORIZONTAL", justify: i >= 2 ? "MAX" : "MIN" });
     if (i === 3) grow(holder); else size(holder, COLS[i], null);
     add(holder, text("h", label, "Caption / Medium", V["text/secondary"]));
@@ -3110,11 +3111,13 @@ function screenModels(d) {
   [
     // 校验列逐字取自应用 ArtifactChoiceRow 的 statusPresentation.title：
     // 这一列是运行时事实，稿上的示例串必须能在应用里原样出现。
+    // 精度列同理：应用一律读位数（量化的看 `bits`，未量化的把权重格式换算成位数），
+    // 所以 `bf16` / `fp16` 在这里都要写成 `16-bit`（第七十一轮）。
     ["asr", "8-bit", "12", "已验证", "status/ready"],
     ["tts-1.7b-design", "8-bit", "9", "已验证", "status/ready"],
     ["tts-1.7b-base", "8-bit", "9", "已验证", "status/ready"],
-    ["aligner-bf16", "bf16", "4", "已验证", "status/ready"],
-    ["diarization-coreml", "fp16", "6", "未下载", "status/attention"]
+    ["aligner-bf16", "16-bit", "4", "已验证", "status/ready"],
+    ["diarization-coreml", "16-bit", "6", "未下载", "status/attention"]
   ].forEach(function (r, ri) {
     const row = frame("row", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 11 });
     [r[0], r[1], r[2], r[3]].forEach(function (value, i) {
@@ -3128,7 +3131,7 @@ function screenModels(d) {
   });
   hairline(table);
   const foot = frame("foot", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 18, padY: 12 });
-  add(foot, text("note", "5 个模型文件 · 1 个待校验，说话人区分在补齐前不可用。", "Subheadline", V["text/tertiary"]));
+  add(foot, text("note", "5 个模型文件 · 1 个待校验，谁在说话在补齐前用不了。", "Subheadline", V["text/tertiary"]));
   spacer(foot);
   secondaryButton(foot, "仅校验缺失项", "refresh-cw");
   add(table, stretch(foot));

@@ -26,6 +26,9 @@ from pydantic import (
 Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
 Variant = Literal["asr", "voice_design", "custom_voice", "base", "aligner"]
 PresetId = Literal["extreme", "quality", "balanced", "light"]
+# 未量化制品的权重数值格式。有了它，目录里的每一份权重都能在同一个维度上说清
+# 精度：量化制品用 `bits`，未量化制品用 `dtype`（用户 2026-09-23）。
+WeightDtype = Literal["bf16", "fp16", "fp32"]
 
 _SCHEMA_VERSION = 2
 _REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
@@ -117,9 +120,11 @@ class QuantizationSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     bits: StrictInt | None
-    dtype: Literal["bf16"] | None = None
     group_size: StrictInt | None
     format: StrictStr = Field(min_length=1)
+    # 与 `bits` 互斥：一个制品只用一个维度说精度。「未量化」本身不是精度，
+    # 只有补上 dtype 之后，UI 才不必对同一列里的某一行说另一种话。
+    dtype: WeightDtype | None = None
 
     @field_validator("bits", "group_size")
     @classmethod
@@ -132,8 +137,8 @@ class QuantizationSpec(BaseModel):
     def validate_precision_encoding(self) -> Self:
         if self.bits is not None and self.dtype is not None:
             raise ValueError("quantization must declare either bits or dtype, not both")
-        if self.dtype == "bf16" and (self.group_size is not None or self.format != "none"):
-            raise ValueError("bf16 quantization requires group_size=null and format='none'")
+        if self.dtype is not None and (self.group_size is not None or self.format != "none"):
+            raise ValueError("unquantized dtype requires group_size=null and format='none'")
         return self
 
 
@@ -184,6 +189,10 @@ class ModelArtifact(BaseModel):
             raise ValueError("qwen3_tts artifacts cannot use variant=asr")
         if self.family == "qwen3_forced_aligner" and self.variant != "aligner":
             raise ValueError("qwen3_forced_aligner artifacts must use variant=aligner")
+        # 没有量化的制品也必须能回答「这份权重是多少位」：只写「未量化」会让
+        # 界面在同一列里对某一行说不出精度（用户 2026-09-23）。
+        if self.quantization.bits is None and self.quantization.dtype is None:
+            raise ValueError("unquantized artifact must declare quantization.dtype")
 
         file_paths = tuple(file.path for file in self.files)
         if len(set(file_paths)) != len(file_paths):

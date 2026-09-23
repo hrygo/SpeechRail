@@ -343,7 +343,9 @@ public struct ModelManagementView: View {
                         maxWidth: metrics.artifact,
                         alignment: .leading
                     )
-                Text("量化")
+                // 列名与列里的取值必须是同一件事：这一列答的是「这份权重多少位」，
+                // 所以叫「精度」而不是「量化」——未量化的制品同样有位数（用户 2026-09-23）。
+                Text("精度")
                     .frame(width: metrics.quantization, alignment: .leading)
                 Text("文件")
                     .frame(width: metrics.file, alignment: .trailing)
@@ -365,7 +367,11 @@ public struct ModelManagementView: View {
         CardSurface {
             CardHead(
                 title: "模型文件",
-                detail: "「已下载」看文件是否完整；「在用」看当前这一档有没有把它加载起来。写着「已释放」只是暂时没占用内存，不等于文件缺失。"
+                // 卡头只解释**这张表里真的有的字**：表头是名称 / 精度 / 文件 / 校验，
+                // 「已下载」「在用」「已释放」在这一节里一次都没出现（它们在开发者详情
+                // 与运行监控里）。原来的说明解释的是别处才有的词，读起来像这张表
+                // 少了东西（用户 2026-09-22：模型信息要清晰）。
+                detail: "这一档要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。"
             )
             Divider()
             if model.modelCatalog != nil {
@@ -394,7 +400,6 @@ public struct ModelManagementView: View {
                                 ArtifactChoiceRow(
                                     artifact: artifact,
                                     status: status(for: artifact),
-                                    quantization: quantizationText(for: artifact),
                                     selected: selectedArtifactKey == artifact.key
                                 )
                             }
@@ -444,7 +449,10 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
                 title: "谁在说话要用的模型",
-                detail: "这一档要标出每句话是谁说的，还得再下载几个小模型；它们也列在下面的模型文件里。"
+                // 这一节只在服务没把分人资产列进 catalog payload 时才出现（新服务里
+                // 它们已经在上面的模型文件表里，这里就不再重复）。因此不再说
+                // 「它们也列在……模型文件里」——那在前一种情况下并不成立。
+                detail: "这一档要标出每句话是谁说的，还得再下载几个小模型。"
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
@@ -595,7 +603,7 @@ public struct ModelManagementView: View {
                 LabeledContent("family", value: artifact.family)
                 LabeledContent("来源", value: "\(artifact.provider) · \(artifact.repository)")
                 LabeledContent("revision", value: artifact.revision)
-                LabeledContent("量化", value: quantizationText(for: artifact))
+                LabeledContent("精度", value: quantizationText(for: artifact))
                 LabeledContent("文件", value: "\(artifact.fileCount) 个 · \(formatBytes(artifact.sizeBytes))")
                 LabeledContent(
                     "适用档位",
@@ -1192,10 +1200,22 @@ public struct ModelManagementView: View {
         SpeechRailProfilePresentation.purpose(profile)
     }
 
+    /// 开发者详情里的精度：与表格同一件事、同一句话开头（位数），后面才补上「怎么做到的」——
+    /// 量化制品写格式与分组，未量化制品写权重本身的数值格式。目录里 `bits: null` /
+    /// `format: none` 是「没做量化」，把字段原样念成「未声明位宽 · none」会被读成读取失败
+    /// （用户 2026-09-22 / 2026-09-23：模型信息要清晰、精度拉齐到同一维度）。
     private func quantizationText(for artifact: ModelArtifactSnapshot) -> String {
-        let bits = artifact.quantization.bits.map { "\($0)-bit" } ?? "未声明位宽"
-        let group = artifact.quantization.groupSize.map { " · group \($0)" } ?? ""
-        return "\(bits) · \(artifact.quantization.format)\(group)"
+        let quantization = artifact.quantization
+        let width = ArtifactQuantizationPresentation.columnText(quantization)
+        guard ArtifactQuantizationPresentation.isQuantized(quantization) else {
+            guard let dtype = quantization.dtype else {
+                // 旧服务不送 dtype：只读得到「没做量化」，位数说不出就不编。
+                return "未量化 · 位数未读取"
+            }
+            return "\(width) · \(dtype) · 未量化"
+        }
+        let group = quantization.groupSize.map { " · group \($0)" } ?? ""
+        return "\(width) · \(quantization.format)\(group)"
     }
 
     private func statusText(for status: ModelArtifactStatusSnapshot) -> String {
@@ -1454,10 +1474,42 @@ private struct ArtifactColumnGrid<Content: View>: View {
     }
 }
 
+/// 权重精度在本页只有一套说法：**位数**。量化制品读 `bits`，未量化制品读权重本身的
+/// 数值格式（`bf16` / `fp16` / `fp32` → 16 / 16 / 32 位），两者回答的是同一个问题——
+/// 每份权重是多少位——所以这一列里每一行的读法都一样，用户不必先懂「量化 / 未量化」
+/// 这套内部分法（用户 2026-09-23：未量化是不是也有位数、统一文案）。
+/// 目录里 `bits: null` / `format: none` 说的是**没有做量化**，不是「读不出来」；
+/// 而 `mlx`、`group 64`、`bf16` 这些格式名只解释「怎么做到的」，留在开发者详情里。
+private enum ArtifactQuantizationPresentation {
+    /// 未量化制品的数值格式对应的位数。别按字面猜：`bf16` 与 `fp16` 都是 16 位，
+    /// `fp32` 是 32 位。
+    private static let dtypeBits: [String: Int] = ["bf16": 16, "fp16": 16, "fp32": 32]
+
+    static func isQuantized(_ quantization: ModelQuantizationSnapshot) -> Bool {
+        quantization.bits != nil && quantization.format.lowercased() != "none"
+    }
+
+    /// 表格列里的取值：`8-bit` / `16-bit`。位数读不出来时如实写「未读取」，不编。
+    static func columnText(_ quantization: ModelQuantizationSnapshot) -> String {
+        bitWidth(quantization).map { "\($0)-bit" } ?? "未读取"
+    }
+
+    /// 同一件事朗读出来要成句：`8-bit`、`16-bit` 在朗读里都不成句。
+    static func accessibilityText(_ quantization: ModelQuantizationSnapshot) -> String {
+        bitWidth(quantization).map { "精度 \($0) 位" } ?? "精度未读取"
+    }
+
+    /// 位数只有一个来源：量化制品是 `bits`，未量化制品是 `dtype`（目录里两者互斥）。
+    static func bitWidth(_ quantization: ModelQuantizationSnapshot) -> Int? {
+        if isQuantized(quantization) { return quantization.bits }
+        guard let dtype = quantization.dtype else { return nil }
+        return dtypeBits[dtype.lowercased()]
+    }
+}
+
 private struct ArtifactChoiceRow: View {
     let artifact: ModelArtifactSnapshot
     let status: ModelArtifactStatusSnapshot?
-    let quantization: String
     let selected: Bool
 
     var body: some View {
@@ -1475,7 +1527,7 @@ private struct ArtifactChoiceRow: View {
                         alignment: .leading
                     )
 
-                Text(quantization)
+                Text(quantizationColumnText)
                     // 稿的制品表单元格是 `Callout`(12)（脚本 `cell/v`）
                     .font(SpeechRailDesignTokens.Typography.technicalValue)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -1509,9 +1561,15 @@ private struct ArtifactChoiceRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)
         .accessibilityValue(
-            "\(modelSourceText)，量化 \(quantization)，\(artifact.fileCount) 个文件，\(statusPresentation.summary)"
+            "\(modelSourceText)，\(ArtifactQuantizationPresentation.accessibilityText(artifact.quantization))，\(artifact.fileCount) 个文件，\(statusPresentation.summary)"
         )
         .accessibilityHint("在开发者详情中查看模型来源和校验信息")
+    }
+
+    /// 表格「精度」列按位数读：量化制品看 `bits`，未量化制品把权重格式换算成位数。
+    /// 列里不写 `mlx`、`group 64`、`bf16` 这类格式名（它们在开发者详情里）。
+    private var quantizationColumnText: String {
+        ArtifactQuantizationPresentation.columnText(artifact.quantization)
     }
 
     /// Model IDs can carry a local snapshot path. Keep the logical

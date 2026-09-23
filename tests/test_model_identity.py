@@ -450,6 +450,8 @@ def _aligner_artifact(*, bits: int | None = 8) -> ModelArtifact:
             "bits": bits,
             "group_size": 64 if bits is not None else None,
             "format": "mlx" if bits is not None else "none",
+            # 未量化的制品要写明权重本身的数值格式（与 precision_policy 的 bf16 一致）。
+            "dtype": None if bits is not None else "bf16",
         },
         files=files,
         sources=[{"provider": "fixture", "repository": "fixture/aligner", "revision": REVISION}],
@@ -485,7 +487,10 @@ def test_aligner_artifact_rejects_non_aligner_variant() -> None:
 
 
 def test_aligner_artifact_accepts_unquantized_bits() -> None:
-    assert _aligner_artifact(bits=None).quantization.bits is None
+    unquantized = _aligner_artifact(bits=None).quantization
+
+    assert unquantized.bits is None
+    assert unquantized.dtype == "bf16"
 
 
 def test_verify_loaded_identity_accepts_matching_ready_data() -> None:

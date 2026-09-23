@@ -2,7 +2,7 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "3.1.3"
+version: "3.1.4"
 date: 2026-09-23
 ---
 
@@ -65,7 +65,7 @@ flowchart TD
 
 ### 四档组成、模型目录与精度策略
 
-模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`presets` 描述四档组成，顶层 `precision_policy` 描述权重精度。档位只选择权重与量化精度，以及是否供给分人制品。
+模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`presets` 描述四档组成，顶层 `precision_policy` 描述权重精度。档位只选择权重与量化精度，以及是否供给分人制品。每份制品只用**一个**维度说精度：量化制品写 `quantization.bits`，未量化的制品写 `quantization.dtype`（如 `bf16`），两者互斥——所以界面能对每一份权重给出同一维度的读数。
 
 | 档位 | 定位 | ASR | TTS | Aligner | 分人 |
 |---|---|---|---|---|---|

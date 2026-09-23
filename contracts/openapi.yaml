@@ -2085,7 +2085,7 @@ components:
           description: Whether natural-language voice instructions are supported by the model.
     Quantization:
       type: object
-      required: [bits, group_size, format]
+      required: [bits, group_size, format, dtype]
       properties:
         bits:
           type: [integer, 'null']
@@ -2093,6 +2093,14 @@ components:
           type: [integer, 'null']
         format:
           type: string
+        dtype:
+          type: [string, 'null']
+          enum: [bf16, fp16, fp32, null]
+          description: |
+            Weight numeric format for artifacts that are not quantized
+            (`bits` is null). Mutually exclusive with `bits`: an artifact
+            declares its precision dimension exactly once, so every entry
+            answers "how many bits per weight" the same way.
     ModelList:
       type: object
       required: [object, data]
