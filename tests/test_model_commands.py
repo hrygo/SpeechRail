@@ -25,10 +25,10 @@ def test_model_catalog_payload_has_required_by_and_no_local_path() -> None:
 
 
 def test_model_catalog_payload_lists_the_locked_coreml_asset() -> None:
-    """分人的 CoreML 资产不在目录里，但同样是这一档要用的文件：表里要有一行。
+    """分人的 CoreML 资产不在目录里, 但同样是这一档要用的文件: 表里要有一行。
 
-    这一行按 catalog 制品的字段形状给出（App 的解码要求每个字段都在），精度与
-    `aligner-bf16` 同一个维度——没有量化，写权重本身的 FP16。
+    这一行按 catalog 制品的字段形状给出 (App 的解码要求每个字段都在), 精度与
+    `aligner-bf16` 同一个维度——没有量化, 写权重本身的 FP16。
     """
     payload = model_catalog_payload(catalog=load_catalog())
     rows = {item["key"]: item for item in payload["artifacts"]}

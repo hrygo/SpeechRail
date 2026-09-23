@@ -435,7 +435,7 @@ def coreml_diarization_row(*, required_by: Sequence[str]) -> dict[str, object]:
         "revision": MODEL_REVISION,
         "provider": _COREML_PROVIDER,
         "repository": _COREML_REPOSITORY,
-        # 没有量化，精度由上游发布的 FP16 变体决定——和目录里 `aligner-bf16` 同一形状。
+        # 没有量化, 精度由上游发布的 FP16 变体决定——和目录里 `aligner-bf16` 同一形状。
         "quantization": {
             "bits": None,
             "group_size": None,
