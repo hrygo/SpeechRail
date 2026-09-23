@@ -118,7 +118,16 @@ final class ServiceContractTests: XCTestCase {
               "assurance": "unknown",
               "runtime_revision": null
             },
-            "descriptors": [],
+            "descriptors": {
+              "voice_mode": "instruction",
+              "locales": [],
+              "style_tags": [],
+              "pitch_band": "unknown",
+              "timbre_family": "unknown",
+              "baseline_pace": "unknown",
+              "source_type": "instruction_profile",
+              "metadata_method": "declared_only"
+            },
             "operations": {}
           }],
           "operations": {},
@@ -511,7 +520,7 @@ final class ServiceContractTests: XCTestCase {
                     assurance: .configuredCatalog,
                     catalogRevision: "model-cat-1"
                 ),
-                descriptors: [],
+                descriptors: Self.testDescriptor,
                 operations: [
                     "http_speech": JSONValue(.string("supported")),
                     "realtime_speech": JSONValue(.string("supported")),
@@ -548,7 +557,7 @@ final class ServiceContractTests: XCTestCase {
                 voiceRevision: "vr_unavailable",
                 voiceIdentityAssurance: .contentAddressed,
                 model: ConfiguredModelIdentity(assurance: .configuredCatalog),
-                descriptors: [],
+                descriptors: Self.testDescriptor,
                 operations: ["realtime_speech": JSONValue(.string("supported"))]
             )
         )
@@ -562,7 +571,7 @@ final class ServiceContractTests: XCTestCase {
                 voiceRevision: "vr_unsupported",
                 voiceIdentityAssurance: .contentAddressed,
                 model: ConfiguredModelIdentity(assurance: .configuredCatalog),
-                descriptors: [],
+                descriptors: Self.testDescriptor,
                 operations: [:]
             )
         )
@@ -601,7 +610,7 @@ final class ServiceContractTests: XCTestCase {
                 voiceRevision: "vr_001",
                 voiceIdentityAssurance: .contentAddressed,
                 model: ConfiguredModelIdentity(assurance: .configuredCatalog),
-                descriptors: [],
+                descriptors: Self.testDescriptor,
                 operations: ["http_speech": JSONValue(.string("supported"))]
             )
         )
@@ -624,6 +633,93 @@ final class ServiceContractTests: XCTestCase {
         )
         XCTAssertNil(withoutSnapshot.expectedVoiceRevision)
         XCTAssertNil(withoutSnapshot.expectedModelRevision)
+    }
+
+    /// 真实服务载荷里 `descriptors` 是**单个对象**（`GET /v1/speechrail/voices` 与能力快照
+    /// 的 `voices[]` 都是这个形状）。这条按真实形状解码，防止 App 侧再退回「数组」假设。
+    func testSafeVoiceListDecodesSingleObjectDescriptors() throws {
+        let decoded: ServiceConditionalResponse<SafeVoiceList> = try ServiceResponseDecoder.decode(
+            Data(Self.safeVoiceListJSON(descriptors: Self.objectDescriptorsJSON).utf8),
+            statusCode: 200,
+            headers: ["ETag": "\"snap-1\""]
+        )
+
+        let voice = try XCTUnwrap(decoded.value?.data.first)
+        XCTAssertEqual(voice.descriptors.voiceMode, "instruction")
+        XCTAssertEqual(voice.descriptors.sourceType, "instruction_profile")
+        XCTAssertEqual(voice.descriptors.metadataMethod, "declared_only")
+        XCTAssertEqual(decoded.metadata.etag, "\"snap-1\"")
+    }
+
+    /// 契约不符必须是**契约**问题。数组形状过去被归成 `.invalidResponse`（连接类别），
+    /// 界面上显示的是「读不到服务」，真实原因（服务返回的东西 App 不认识）被掩盖。
+    func testArrayDescriptorsIsClassifiedAsContractNotConnectionError() {
+        let data = Data(Self.safeVoiceListJSON(descriptors: "[]").utf8)
+
+        do {
+            let decoded: ServiceConditionalResponse<SafeVoiceList> = try ServiceResponseDecoder.decode(
+                data,
+                statusCode: 200,
+                headers: [:]
+            )
+            XCTFail("数组形状的 descriptors 必须解码失败，实际解出 \(decoded)")
+        } catch {
+            XCTAssertEqual(Self.category(of: error), .invalidContract)
+            // 诊断只保留编码路径与错误类别，不带载荷内容（隐私约束）。
+            let described = String(describing: error)
+            XCTAssertTrue(described.contains("descriptors"), described)
+            XCTAssertFalse(described.contains("instruction_profile"), described)
+        }
+    }
+
+    /// 契约把 `pitch_band` / `timbre_family` / `baseline_pace` 固定为 `unknown`、
+    /// `metadata_method` 固定为 `declared_only`：这些是声明式元数据，不是实测推断。
+    private static let testDescriptor = SafeVoiceDescriptor(
+        voiceMode: "instruction",
+        locales: [],
+        styleTags: [],
+        pitchBand: "unknown",
+        timbreFamily: "unknown",
+        baselinePace: "unknown",
+        sourceType: "instruction_profile",
+        metadataMethod: "declared_only"
+    )
+
+    private static let objectDescriptorsJSON =
+        #"{"voice_mode":"instruction","locales":[],"style_tags":[],"pitch_band":"unknown","timbre_family":"unknown","baseline_pace":"unknown","source_type":"instruction_profile","metadata_method":"declared_only"}"#
+
+    private static func safeVoiceListJSON(descriptors: String) -> String {
+        """
+        {
+          "object": "list",
+          "snapshot_id": "snap-1",
+          "catalog_revision": "catalog-7",
+          "data": [{
+            "id": "voice_demo",
+            "name": "Demo",
+            "mode": "instruction",
+            "available": true,
+            "availability_reason": "available",
+            "variant": "voice_design",
+            "voice_revision": null,
+            "voice_identity_assurance": "legacy",
+            "model": {"assurance": "configured_catalog", "catalog_revision": "catalog-7"},
+            "descriptors": \(descriptors),
+            "operations": {}
+          }]
+        }
+        """
+    }
+
+    /// 与生产侧 `AppModel.applyDiscoveryFailure` 同一套归类：契约解码错误不能落进连接类别。
+    private static func category(of error: any Error) -> ServiceErrorCategory {
+        if let error = error as? ServiceAPIClientError {
+            return ServiceErrorClassifier.category(for: error)
+        }
+        if error is ServiceContractDecodingError {
+            return .invalidContract
+        }
+        return .connection
     }
 
     private func makeRevisionSnapshot(voice: SafeVoiceEntry) -> EffectiveCapabilitySnapshot {

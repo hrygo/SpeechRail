@@ -237,9 +237,35 @@ public enum ServiceResponseDecoder {
             )
         } catch let error as ServiceContractDecodingError {
             throw error
+        } catch let error as DecodingError {
+            // 形状与契约不符是契约问题，不是连接问题：以前这里一律抛
+            // `.invalidResponse`，用户看到的是「读不到服务」，真实原因被藏起来。
+            throw Self.contractError(for: error)
         } catch {
             throw ServiceAPIClientError.invalidResponse
         }
+    }
+
+    /// 把 `DecodingError` 收敛成契约错误，并且**只**保留编码路径与错误类别：
+    /// 诊断文本不得携带载荷内容（隐私约束）。
+    private static func contractError(for error: DecodingError) -> ServiceContractDecodingError {
+        switch error {
+        case let .keyNotFound(key, context):
+            .missingRequiredField(location(context.codingPath + [key]))
+        case let .typeMismatch(type, context):
+            .invalidValue("type mismatch \(type) at \(location(context.codingPath))")
+        case let .valueNotFound(type, context):
+            .invalidValue("null value \(type) at \(location(context.codingPath))")
+        case let .dataCorrupted(context):
+            .invalidValue("corrupted payload at \(location(context.codingPath))")
+        @unknown default:
+            .invalidValue("unrecognized decoding failure")
+        }
+    }
+
+    private static func location(_ codingPath: [any CodingKey]) -> String {
+        let path = codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? "<root>" : path
     }
 
     public static func decodeAudio(
@@ -570,7 +596,10 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let voiceRevision: String?
     public let voiceIdentityAssurance: VoiceIdentityAssurance
     public let model: ConfiguredModelIdentity
-    public let descriptors: [SafeVoiceDescriptor]
+    /// 契约里 `descriptors` 是**单个对象**（`contracts/openapi.yaml` 的
+    /// `SafeVoiceDescriptor`，服务端由 `capability_snapshot.safe_voice_descriptor()` 生成）。
+    /// 这里曾写成数组，真实载荷因此解码失败，还被归类成「连不上服务」。
+    public let descriptors: SafeVoiceDescriptor
     public let operations: [String: JSONValue]
     public let qualitySummary: SafeVoiceQualitySummary?
     public let snapshotID: String?
@@ -586,7 +615,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         voiceRevision: String? = nil,
         voiceIdentityAssurance: VoiceIdentityAssurance,
         model: ConfiguredModelIdentity,
-        descriptors: [SafeVoiceDescriptor],
+        descriptors: SafeVoiceDescriptor,
         operations: [String: JSONValue],
         qualitySummary: SafeVoiceQualitySummary? = nil,
         snapshotID: String? = nil
@@ -643,7 +672,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
                 forKey: .voiceIdentityAssurance
             ),
             model: try container.decode(ConfiguredModelIdentity.self, forKey: .model),
-            descriptors: try container.decode([SafeVoiceDescriptor].self, forKey: .descriptors),
+            descriptors: try container.decode(SafeVoiceDescriptor.self, forKey: .descriptors),
             operations: try container.decode([String: JSONValue].self, forKey: .operations),
             qualitySummary: try container.decodeIfPresent(
                 SafeVoiceQualitySummary.self,

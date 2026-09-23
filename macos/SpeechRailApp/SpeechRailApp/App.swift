@@ -802,7 +802,7 @@ private struct UITestServiceDiagnosticsClient:
         voiceRevision: nil,
         voiceIdentityAssurance: .legacy,
         model: fixtureTTSModel,
-        descriptors: [fixtureDescriptor],
+        descriptors: fixtureDescriptor,
         operations: [:],
         snapshotID: "fixture-snapshot-1"
     )
