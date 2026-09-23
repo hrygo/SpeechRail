@@ -189,7 +189,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    的 detail 工具栏）声明一次——身份是当前路由的纯函数，页面没有要额外携带的标题状态，
    所以声明一次最省、也最不可能漂移。它渲染 `WorkspaceTitleLockup`
    （icon + 页面名的单行标题，固定槽位 280×32、**槽内左对齐**、尾部截断、最小缩放，永远不换行；
-   放在 `.navigation` 槽——即详情列的 leading 位置，十页恒定同一点，见 §11.6 第五十五轮）；
+   放在 `.navigation` 槽——即详情列的 leading 位置，十四页恒定同一点，见 §11.6 第五十五轮）；
    页面只声明自己的动作。`PageScaffold` 不再渲染页面名，正文只留一句话说明
    （`purpose`，默认取 `AppRoute.pageSubtitle`）。页面名统一取 `AppRoute.title`，不另设别名
    （REDESIGN-SPEC §6.2 / §11.6 第四十九轮）。
