@@ -266,6 +266,29 @@ public enum SpeechRailDesignTokens {
         public static let monitoringStatusColumnWidth: CGFloat = 64
         public static let metricMinimumWidth: CGFloat = 112
         public static let metricColumnCount: Int = 4
+
+        // MARK: 会话视图内散落的固定帧（issue #90 收敛）
+        //
+        // 这些是各会话 / 提词器视图里重复出现的固定帧尺寸；原先写作裸值，现集中声明一次。
+        // 取值与原裸值逐位相同，只做搬家。
+
+        /// 内联图标槽（试听进度 / 预览按钮）：16pt 见方。
+        public static let iconSlotSize: CGFloat = 16
+        /// 小号徽标直径（记录行 / 提词稿行）。
+        public static let badgeSmallSize: CGFloat = 18
+        /// 紧凑徽标直径（实时身份徽标）。
+        public static let badgeCompactSize: CGFloat = 22
+        /// 常规徽标直径（助手 / 思考气泡）。
+        public static let badgeRegularSize: CGFloat = 26
+        /// 中号徽标直径（当前音色 / 舞台控制）。
+        public static let badgeMediumSize: CGFloat = 28
+        /// 行内动作图标按钮的固定帧。
+        public static let actionIconButtonWidth: CGFloat = 22
+        public static let actionIconButtonHeight: CGFloat = 20
+        /// 聆听态脉冲环直径（大 / 中 / 小）。
+        public static let pulseRingLargeSize: CGFloat = 80
+        public static let pulseRingMediumSize: CGFloat = 64
+        public static let pulseRingSmallSize: CGFloat = 48
     }
 
     /// Native macOS menus stay compact; custom menu-bar rows use the same
@@ -977,6 +1000,41 @@ public enum SpeechRailDesignTokens {
         /// 代码块（开发者文档）：稿用 Inter 画示意，生产映射到系统等宽字体——
         /// 代码里对齐的缩进和路径不能靠比例字体碰运气（REDESIGN-SPEC §13.3）。
         public static let code: Font = .system(.callout, design: .monospaced)
+
+        // MARK: 收敛的显式字号（issue #90）
+        //
+        // 这一组原本散落在各页面里，写作 `.font(.system(size: ...))`。它们大多是**图标字形**
+        // （chevron / 波形 / 品牌声学 / 空态 / 计时），系统文本样式给不出对应档位，所以在这里
+        // 各声明一次。每个 token 的取值与原裸值**逐位相同**，本轮只做搬家、不改渲染。
+
+        /// 8pt 粗体：极小的状态字形（停止 / 录音）。
+        public static let tinyBold: Font = .system(size: 8, weight: .bold)
+        /// 9pt 常规：紧凑的展开箭头与品牌小图标。
+        public static let captionRegular: Font = .system(size: 9)
+        /// 9pt 粗体：紧凑动作字形（停止 / 试听）。
+        public static let captionBold: Font = .system(size: 9, weight: .bold)
+        /// 10pt 常规：内联小图标（锁定等）。
+        public static let calloutRegular: Font = .system(size: 10)
+        /// 10pt 中等字重：行内动作图标按钮。
+        public static let calloutMedium: Font = .system(size: 10, weight: .medium)
+        /// 10pt 粗体：品牌声学图标。
+        public static let calloutBold: Font = .system(size: 10, weight: .bold)
+        /// 11pt 常规：说明性小图标（清空 / 声学链路 / 直播贴士）。
+        public static let subheadline: Font = .system(size: 11)
+        /// 11pt 粗体：品牌声学图标（开麦 / 助手徽标 / 当前音色）。
+        public static let subheadlineBold: Font = .system(size: 11, weight: .bold)
+        /// 16pt 常规：中号动作图标（试听 / 停止）。
+        public static let largeCallout: Font = .system(size: 16)
+        /// 20pt 常规：小标题级图标（试读计时秒表）。
+        public static let title3Regular: Font = .system(size: 20)
+        /// 20pt 半粗：就绪空态的大图标。
+        public static let title3: Font = .system(size: 20, weight: .semibold)
+        /// 22pt 常规：筛选态图标。
+        public static let titleStandard: Font = .system(size: 22)
+        /// 24pt 常规：页面空态的大图标。
+        public static let emptyStateIcon: Font = .system(size: 24)
+        /// 28pt 半粗等宽：试读计时器数字。
+        public static let timerDisplay: Font = .system(size: 28, weight: .semibold, design: .monospaced)
 
     }
 

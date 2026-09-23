@@ -525,7 +525,7 @@ public struct TeleprompterView: View {
             ZStack {
                 Circle()
                     .fill(SpeechRailDesignTokens.Color.recessedField)
-                    .frame(width: 28, height: 28)
+                    .frame(width: SpeechRailDesignTokens.Layout.badgeMediumSize, height: SpeechRailDesignTokens.Layout.badgeMediumSize)
                 Text(step)
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
@@ -645,7 +645,7 @@ public struct TeleprompterView: View {
                             searchQuery = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
+                                .font(SpeechRailDesignTokens.Typography.subheadline)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .buttonStyle(.plain)
@@ -655,7 +655,7 @@ public struct TeleprompterView: View {
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, 6)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
                 .background(
                     SpeechRailDesignTokens.Color.inputField,
                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -673,7 +673,7 @@ public struct TeleprompterView: View {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Spacer()
                         Image(systemName: "line.3.horizontal.decrease.circle")
-                            .font(.system(size: 24))
+                            .font(SpeechRailDesignTokens.Typography.emptyStateIcon)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         Text("未找到匹配的稿件")
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -752,7 +752,7 @@ public struct TeleprompterView: View {
                                     } label: {
                                         SpeechRailButtonIcon(.more)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                            .frame(width: 18, height: 18)
+                                            .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
                                     }
                                     .menuStyle(.borderlessButton)
                                 }
@@ -873,8 +873,8 @@ public struct TeleprompterView: View {
                         Text("\(sourceBinding.wrappedValue.count) 字")
                             .font(SpeechRailDesignTokens.Typography.technicalValue)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                             .background(
                                 SpeechRailDesignTokens.Color.recessedField,
                                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -953,7 +953,7 @@ public struct TeleprompterView: View {
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, 3)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                         .background(
                             SpeechRailDesignTokens.Color.inputField,
                             in: SpeechRailDesignTokens.Corner.controlShape
@@ -977,7 +977,7 @@ public struct TeleprompterView: View {
                             }
                         } label: {
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 9))
+                                .font(SpeechRailDesignTokens.Typography.captionRegular)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                         .menuStyle(.borderlessButton)
@@ -1323,7 +1323,7 @@ public struct TeleprompterView: View {
                                 Spacer()
                             }
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
 
                         ForEach(unresolved) { item in
                             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1335,7 +1335,7 @@ public struct TeleprompterView: View {
                                         EmptyView()
                                     }
                                     .toggleStyle(.checkbox)
-                                    .padding(.top, 2)
+                                    .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                                     StatusPill(tone: .attention, label: item.issue.title)
 
@@ -1860,7 +1860,7 @@ public struct TeleprompterView: View {
                 }
 
                 Divider()
-                    .frame(height: 14)
+                    .frame(height: SpeechRailDesignTokens.Teleprompter.stageSettingsDividerHeight)
 
                 // 字号调节
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1872,12 +1872,12 @@ public struct TeleprompterView: View {
                         value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
                         in: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
                     )
-                    .frame(width: 96)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageFontSliderWidth)
 
                     Text("\(Int(settings.scriptPointSize)) pt")
                         .font(SpeechRailDesignTokens.Typography.technicalValue)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(width: 36, alignment: .trailing)
+                        .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
                 }
 
                 // 透明度调节
@@ -1890,12 +1890,12 @@ public struct TeleprompterView: View {
                         value: Binding(get: { settings.opacity }, set: { settings.opacity = $0 }),
                         in: SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity...SpeechRailDesignTokens.Teleprompter.stageMaximumOpacity
                     )
-                    .frame(width: 88)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageOpacitySliderWidth)
 
                     Text("\(Int(settings.opacity * 100))%")
                         .font(SpeechRailDesignTokens.Typography.technicalValue)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(width: 36, alignment: .trailing)
+                        .frame(width: SpeechRailDesignTokens.Teleprompter.targetMinutesFieldWidth, alignment: .trailing)
                 }
 
                 // 舞台默认只看当前段与下一段；高级用户仍可调整预览范围。
@@ -1914,7 +1914,7 @@ public struct TeleprompterView: View {
                 // 直播贴士提示 (带无障碍与说明)
                 HStack(spacing: 4) {
                     Image(systemName: "rectangle.on.rectangle")
-                        .font(.system(size: 11))
+                        .font(SpeechRailDesignTokens.Typography.subheadline)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     Text("推流建议：采集目标窗口，勿全屏采集")
                         .font(SpeechRailDesignTokens.Typography.caption)
