@@ -112,6 +112,9 @@ private enum OperationWaitResult {
     case failed
     case stillRunning
     case cancelled
+    /// 等待期间有更新的 execute / cancel / refresh 入口 bump 了操作代数：
+    /// 这条链已经过期，不得再用自己的结果覆盖新状态（issue #88）。
+    case superseded
 }
 
 /// 提词稿列表的读取状态。`empty` 与 `failed` 必须分开：服务端资产缺失时返回的是空数组
@@ -250,6 +253,10 @@ public final class AppModel {
     private var monitoringHistoryGeneration: UInt64 = 0
     private var creatorVoiceDetailGeneration: UInt64 = 0
     private var discoveryRefreshGeneration: UInt64 = 0
+    /// 模型准备的操作代数：`execute` / `cancelCurrentOperation` / `refreshModels`
+    /// 每次进入都会递增。取消链在发起时记住自己的代数，等待与刷新期间一旦有更新
+    /// 入口 bump，就自认过期、不再落地状态，避免覆盖更新的终态（issue #88）。
+    private var operationGeneration: UInt64 = 0
     private var capabilitySnapshotStore = CapabilitySnapshotStore()
     private var safeVoiceCatalogETag: String?
     private var synthesisTask: Task<Void, Never>?
@@ -1591,11 +1598,22 @@ public final class AppModel {
 
     public func refreshModels() async {
         guard !isRefreshingModels else { return }
+        operationGeneration &+= 1
+        await refreshModels(expectedGeneration: operationGeneration)
+    }
+
+    /// - Parameter expectedGeneration: 发起这次刷新的操作链所持有的代数。等待响应期间
+    ///   只要有更新的 execute / cancel / refresh 入口 bump 过代数，这次刷新就不再落地，
+    ///   过期的取消链因此无法覆盖新状态（issue #88）。
+    private func refreshModels(expectedGeneration: UInt64) async {
+        guard expectedGeneration == operationGeneration else { return }
+        guard !isRefreshingModels else { return }
         isRefreshingModels = true
         defer { isRefreshingModels = false }
         refreshControlAgentStatus()
         do {
             let catalog = try await transport.send(ControlRequest(command: .modelCatalog))
+            guard expectedGeneration == operationGeneration else { return }
             guard !handleModelResponseFailure(catalog) else {
                 return
             }
@@ -1607,6 +1625,7 @@ public final class AppModel {
                 return
             }
             let status = try await transport.send(ControlRequest(command: .modelStatus))
+            guard expectedGeneration == operationGeneration else { return }
             guard !handleModelResponseFailure(status) else {
                 return
             }
@@ -1804,19 +1823,28 @@ public final class AppModel {
     public func cancelCurrentOperation() async {
         guard canExecuteMutation(for: .operationCancel) else { return }
         guard let operationID = operation?.operationID else { return }
+        operationGeneration &+= 1
+        let generation = operationGeneration
         message = "正在停止模型准备…"
         do {
             let response = try await transport.send(
                 ControlRequest(command: .operationCancel, operationID: operationID)
             )
+            guard generation == operationGeneration else { return }
             operation = response.operation ?? operation
             if response.status == .failed {
                 message = response.message ?? "无法取消操作"
             } else if response.operation?.phase?.lowercased() == "cancelling" {
-                _ = await waitForOperation(operationID)
-                await refreshModels()
+                if case .superseded = await waitForOperation(operationID, generation: generation) {
+                    return
+                }
+                await refreshModels(expectedGeneration: generation)
             } else if response.status == .cancelled {
                 message = "模型准备已取消"
+            } else {
+                // 确认收到但既无 cancelling 相位也无终态快照（如旧 UI 测试替身）：
+                // 刷新一次，别把「正在停止…」的待定文案永久留在界面上。
+                await refreshModels(expectedGeneration: generation)
             }
         } catch is CancellationError {
             return
@@ -1831,6 +1859,7 @@ public final class AppModel {
     ) async {
         guard !isBusy else { return }
         guard canExecuteMutation(for: command) else { return }
+        operationGeneration &+= 1
         isBusy = true
         message = nil
         let serviceMutation = Self.serviceOperationPhase(for: command)
@@ -1901,6 +1930,8 @@ public final class AppModel {
                     // Local task cancellation only stops this client's wait;
                     // it does not claim that the remote operation was undone.
                     return
+                case .superseded:
+                    return
                 }
             }
             if serviceMutation != nil {
@@ -1942,15 +1973,21 @@ public final class AppModel {
         }
     }
 
-    private func waitForOperation(_ operationID: String) async -> OperationWaitResult {
+    private func waitForOperation(
+        _ operationID: String,
+        generation: UInt64? = nil
+    ) async -> OperationWaitResult {
         let maxPolls = operation?.command == .modelPrepare ? 43_200 : 120
         for _ in 0..<maxPolls {
+            if let generation, generation != operationGeneration { return .superseded }
             guard !Task.isCancelled else { return .cancelled }
             do {
                 try await Task.sleep(for: .milliseconds(500))
+                if let generation, generation != operationGeneration { return .superseded }
                 let response = try await transport.send(
                     ControlRequest(command: .operationStatus, operationID: operationID)
                 )
+                if let generation, generation != operationGeneration { return .superseded }
                 operation = response.operation
                 if let state = response.operation?.state,
                    state == .committed || state == .failed || state == .cancelled || state == .interrupted

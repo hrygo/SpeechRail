@@ -1346,6 +1346,20 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                     message: "profile preparation failed"
                 )
             )
+        case .operationCancel:
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .running,
+                message: "stopping model preparation",
+                operation: OperationSnapshot(
+                    operationID: request.operationID ?? "ui-test-model-prepare",
+                    command: .modelPrepare,
+                    state: .running,
+                    phase: "cancelling",
+                    message: "stopping model preparation"
+                )
+            )
         default:
             return ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
         }
