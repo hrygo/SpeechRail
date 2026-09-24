@@ -646,7 +646,7 @@ def inspect_prepared_artifacts(
 
     prepared = registry.get("prepared")
     prepared_entries = prepared.values() if isinstance(prepared, dict) else ()
-    models_root = resolved_app_home / "models"
+    models_root = model_store_root(resolved_app_home)
     models_root_is_symlink = models_root.is_symlink()
     statuses: list[PreparedArtifactStatus] = []
     for artifact in selected_catalog.artifacts:
@@ -738,7 +738,7 @@ def registered_prepared_artifacts(
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
         return ()
-    models_root = resolved_app_home / "models"
+    models_root = model_store_root(resolved_app_home)
     covered: list[str] = []
     for key in keys:
         try:
@@ -766,29 +766,44 @@ def registered_prepared_artifacts(
     return tuple(covered)
 
 
-def _cache_path(
-    registry: Mapping[str, object], app_home: Path, models_root: Path, artifact: ModelArtifact
-) -> Path | None:
+def _registered_destination_entries(
+    registry: Mapping[str, object],
+    app_home: Path,
+    artifact_key: str,
+    destination: Path,
+) -> tuple[dict[str, object], ...]:
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
-        return None
-    destination = models_root / artifact.key
-    if destination.is_symlink() or not destination.is_dir():
-        return None
-    has_matching_entry = False
+        return ()
+    entries: list[dict[str, object]] = []
     for candidate in prepared.values():
         if not isinstance(candidate, dict):
             continue
         artifacts = candidate.get("artifacts")
-        if not isinstance(artifacts, dict) or not _entry_content_matches_artifact(
-            artifacts.get(artifact.key), artifact
-        ):
+        if not isinstance(artifacts, dict):
             continue
-        entry_path = _entry_path(artifacts[artifact.key], app_home)
-        if entry_path == destination:
-            has_matching_entry = True
-            break
-    if has_matching_entry and _verify_snapshot(destination, artifact):
+        entry = artifacts.get(artifact_key)
+        if isinstance(entry, dict) and _entry_path(entry, app_home) == destination:
+            entries.append(entry)
+    return tuple(entries)
+
+
+def _cache_path(
+    registry: Mapping[str, object],
+    app_home: Path,
+    models_root: Path,
+    artifact: ModelArtifact,
+) -> Path | None:
+    """Return a complete snapshot with matching ownership or no prior ownership."""
+    destination = models_root / artifact.key
+    if destination.is_symlink() or not destination.is_dir():
+        return None
+    registered = _registered_destination_entries(
+        registry, app_home, artifact.key, destination
+    )
+    if registered and not any(_entry_content_matches_artifact(entry, artifact) for entry in registered):
+        return None
+    if _verify_snapshot(destination, artifact):
         return destination
     return None
 
@@ -1161,6 +1176,12 @@ def _resolve_app_home(app_home: Path) -> Path:
     return resolved_app_home
 
 
+def model_store_root(app_home: Path) -> Path:
+    """Return the single canonical model directory for an app home."""
+    resolved_app_home = _resolve_app_home(app_home)
+    return safe_artifact_path(resolved_app_home, "models")
+
+
 async def _stream_result(result: DownloadResult) -> DownloadStream:
     if inspect.isawaitable(result):
         return await result
@@ -1442,7 +1463,7 @@ async def prepare_models(
     resolved_app_home = _resolve_app_home(app_home)
 
     prepared_id = _prepared_id(preset_id, runtime_lock, artifacts)
-    models_root = resolved_app_home / "models"
+    models_root = model_store_root(resolved_app_home)
     registry_path = _registry_path(resolved_app_home)
     registry = _read_registry(registry_path)
     if _prepared_entry_is_complete(
@@ -1469,6 +1490,10 @@ async def prepare_models(
     _ensure_directory(operation_root)
     stage_artifacts: dict[str, Path] = {}
     selected_sources: dict[str, SourceLocation] = {}
+    published: list[Path] = []
+    backups: list[tuple[Path, Path]] = []
+    moved_paths: dict[str, str] = {}
+    publication_started = False
 
     try:
         for artifact in artifacts:
@@ -1480,6 +1505,20 @@ async def prepare_models(
                     {"phase": "cache_hit", "prepared_id": prepared_id, "artifact": artifact.key},
                 )
                 continue
+            if destination.is_symlink():
+                raise ModelStoreError("refusing symlink model destination")
+            registered_destination = _registered_destination_entries(
+                registry, resolved_app_home, artifact.key, destination
+            )
+            if destination.exists() and registered_destination:
+                backup = _move_existing_to_backup(
+                    destination, models_root, operation_id, artifact.key
+                )
+                backups.append((backup, destination))
+                moved_paths[f"models/{artifact.key}"] = (
+                    f"models/.releases/{operation_id}/{artifact.key}"
+                )
+
             stage_directory = safe_artifact_path(operation_root, artifact.key)
             stage_artifacts[artifact.key] = stage_directory
             source = await _download_artifact(
@@ -1498,13 +1537,11 @@ async def prepare_models(
             progress,
             {"phase": "publishing", "prepared_id": prepared_id, "preset": preset_id},
         )
+        publication_started = True
         next_registry = copy.deepcopy(registry)
         next_prepared = next_registry.get("prepared")
         if not isinstance(next_prepared, dict):
             raise ModelStoreError("model preparation registry schema is invalid")
-        published: list[Path] = []
-        backups: list[tuple[Path, Path]] = []
-        moved_paths: dict[str, str] = {}
         try:
             entries: dict[str, object] = {}
             for artifact in artifacts:
@@ -1554,6 +1591,10 @@ async def prepare_models(
 
         _emit(progress, {"phase": "verified", "prepared_id": prepared_id, "preset": preset_id})
         return prepared_id
+    except BaseException:
+        if not publication_started:
+            _rollback_publication([], backups)
+        raise
     finally:
         _remove_tree(operation_root)
         if staging_root.exists() and not any(staging_root.iterdir()):
@@ -1569,6 +1610,7 @@ __all__ = [
     "PreparedArtifactStatus",
     "PreparedModelSet",
     "inspect_prepared_artifacts",
+    "model_store_root",
     "prepare_models",
     "registered_prepared_artifacts",
     "resolve_prepared_models",

@@ -24,6 +24,7 @@ from speechrail.service.model_store import (
     ModelStoreError,
     PreparedModelSet,
     inspect_prepared_artifacts,
+    model_store_root,
     prepare_models,
     registered_prepared_artifacts,
     resolve_prepared_models,
@@ -320,6 +321,12 @@ async def _prepare(
     )
 
 
+def test_model_store_root_is_resolved_app_home_models(tmp_path: Path) -> None:
+    app_home = tmp_path / "SpeechRail Home"
+
+    assert model_store_root(app_home) == app_home.resolve() / "models"
+
+
 def test_catalog_path_cannot_escape_model_store(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         safe_artifact_path(tmp_path, "../config/.env")
@@ -612,6 +619,25 @@ async def test_repeat_prepare_reuses_verified_cache_without_download(tmp_path: P
 
 
 @pytest.mark.anyio
+async def test_prepare_adopts_verified_snapshot_without_registry(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    downloader = FakeDownloader(payloads)
+    lock = _runtime_lock()
+
+    prepared_id = await _prepare(tmp_path, catalog, lock, downloader)
+    calls_before_adoption = len(downloader.calls)
+    (tmp_path / "state" / "model-preparations.json").unlink()
+
+    adopted_id = await _prepare(tmp_path, catalog, lock, downloader)
+
+    assert adopted_id == prepared_id
+    assert len(downloader.calls) == calls_before_adoption
+    assert resolve_prepared_models(
+        adopted_id, app_home=tmp_path, catalog=catalog, runtime_lock=lock
+    )
+
+
+@pytest.mark.anyio
 async def test_extreme_prepare_reuses_verified_bf16_artifacts_without_download(
     tmp_path: Path,
 ) -> None:
@@ -793,12 +819,28 @@ async def test_hash_mismatch_does_not_register_or_remove_existing_valid_cache(
     original = (tmp_path / "models" / "asr" / "model.safetensors").read_bytes()
 
     changed_catalog, changed_payloads = _catalog(revision_suffix="f")
-    changed_downloader = FakeDownloader(changed_payloads)
+    observed_destinations: list[bool] = []
+
+    class DestinationCheckingDownloader(FakeDownloader):
+        async def download(
+            self, source: SourceLocation, relative_path: str
+        ) -> AsyncIterator[bytes]:
+            if source.repository == "fixture/asr":
+                destination = tmp_path / "models" / "asr"
+                observed_destinations.append(destination.exists())
+                assert not destination.exists()
+                backups = list((tmp_path / "models" / ".releases").glob("*/asr"))
+                assert len(backups) == 1
+                assert (backups[0] / "model.safetensors").read_bytes() == original
+            return await super().download(source, relative_path)
+
+    changed_downloader = DestinationCheckingDownloader(changed_payloads)
     changed_downloader.queue("fixture/asr", "model.safetensors", b"wrong")
 
     with pytest.raises(ModelStoreError, match=r"hash|size|download"):
         await _prepare(tmp_path, changed_catalog, lock, changed_downloader, max_retries=0)
 
+    assert observed_destinations and not any(observed_destinations)
     assert (tmp_path / "models" / "asr" / "model.safetensors").read_bytes() == original
     assert not list((tmp_path / "models" / ".staging").glob("**/*"))
 

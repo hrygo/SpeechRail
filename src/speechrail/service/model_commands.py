@@ -27,6 +27,7 @@ from speechrail.service.model_store import (
     ModelStoreError,
     ProgressCallback,
     inspect_prepared_artifacts,
+    model_store_root,
     prepare_models,
 )
 from speechrail.service.modelscope import ModelScopeDownloader
@@ -201,7 +202,7 @@ def model_status_payload(
             diarization_by_key[item.key] = item
     usage_root = resolved_home if resolved_home.exists() else resolved_home.parent
     free_bytes, model_bytes = _read_disk_usage(
-        usage_root, resolved_home / "models", disk_usage
+        usage_root, model_store_root(resolved_home), disk_usage
     )
     return {
         "schema_version": 1,

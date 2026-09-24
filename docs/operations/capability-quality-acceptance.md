@@ -67,7 +67,7 @@ legacy。若 profile 未配置或 artifact 不可用，再用同一 managed CLI 
 - **E1 结果（2026-09-11，历史三档验收）**：公开真人语料实测 light 的 0.6B 4-bit ASR 相对 8-bit 基线劣化
   **1.38pp**（en WER +1.25pp、zh CER +1.46pp）> 0.5pp 阈值，**E1 FAILED**；依计划「未过即回退
   上一精度」，light 回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`（8-bit）。因此 E2 不再对 light 构成
-  门控；`asr-0.6b-q4` / `tts-0.6b-custom-q4` 制品保留在 catalog 但不被任何档位使用。
+  门控；截至 2026-09-11，`asr-0.6b-q4` / `tts-0.6b-custom-q4` 制品仍保留在当时的 catalog 且不被任何档位使用；2026-09-24 已从当前 catalog 退役。
 
 ## Clone TTS 响度能力
 

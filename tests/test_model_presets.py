@@ -193,7 +193,7 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
 
     assert catalog.schema_version == 2
-    assert len(catalog.artifacts) == 12
+    assert len(catalog.artifacts) == 10
     assert {item.id for item in catalog.presets} == {"quality", "balanced", "light", "extreme"}
     assert catalog.preset("quality") == preset("quality")
 
