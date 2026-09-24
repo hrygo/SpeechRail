@@ -1229,13 +1229,18 @@ public enum SpeechRailDesignTokens {
         public static let stageScriptMinimumPointSize: CGFloat = 28
         public static let stageScriptMaximumPointSize: CGFloat = 60
         public static let stageLineSpacing: CGFloat = 6
-        /// 只控制舞台背景材质；文字和控件始终保持完整清晰度。
+        /// 只调整舞台底色与材质叠层的透光感；不修改正文和控件自身的不透明度。
         public static let stageDefaultOpacity: Double = 0.72
         public static let stageMaximumWidth: CGFloat = 1_200
         public static let stageMinimumFontScale: Double = 0.67
         public static let stageMaximumFontScale: Double = 1.52
         public static let stageMinimumOpacity: Double = 0.35
         public static let stageMaximumOpacity: Double = 1
+        /// User-facing transparency is the inverse of the opacity range used by rendering.
+        public static let stageMinimumTransparency: Double = 1 - stageMaximumOpacity
+        public static let stageMaximumTransparency: Double = 1 - stageMinimumOpacity
+        public static let stageTransparencyValueWidth: CGFloat = 64
+        public static let stageAppearancePopoverWidth: CGFloat = 280
         public static let stageMinimumLineSpacing: Double = 0
         public static let stageMaximumLineSpacing: Double = 24
         public static let stageMinimumVisibleSegmentCount = 1
@@ -1271,6 +1276,8 @@ public enum SpeechRailDesignTokens {
         public static let reviewBadgeSize: CGFloat = 16
         /// 工作台控件定宽与对齐尺寸
         public static let targetMinutesFieldWidth: CGFloat = 36
+        /// 工作台稿件名称输入的最小可读宽度；窄窗时其余元数据换到下一行。
+        public static let workbenchDocumentTitleMinimumWidth: CGFloat = 200
         public static let stageFontSliderWidth: CGFloat = 96
         public static let stageOpacitySliderWidth: CGFloat = 88
         public static let stageSettingsDividerHeight: CGFloat = 14

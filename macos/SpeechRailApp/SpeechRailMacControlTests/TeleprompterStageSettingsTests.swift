@@ -59,6 +59,50 @@ struct TeleprompterStageSettingsTests {
         #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
     }
 
+    @Test("background transparency increases as the stage becomes more see-through")
+    func backgroundTransparencyUsesUserFacingDirection() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        settings.backgroundTransparency = 0.40
+
+        #expect(abs(settings.opacity - 0.60) < 0.001)
+        #expect(abs(settings.backgroundTransparency - 0.40) < 0.001)
+        #expect(abs(defaults.double(forKey: "speechrail.teleprompter.stage.opacity") - 0.60) < 0.001)
+
+        settings.backgroundTransparency = 1
+        #expect(settings.opacity == SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity)
+        #expect(abs(settings.backgroundTransparency - 0.65) < 0.001)
+    }
+
+    @Test("stage appearance values preserve fractional slider movement")
+    func stageAppearanceSettingsAcceptFractionalValues() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        settings.fontScale = 1.013
+        settings.backgroundTransparency = 0.2837
+
+        #expect(abs(settings.fontScale - 1.013) < 0.0001)
+        #expect(abs(settings.backgroundTransparency - 0.2837) < 0.0001)
+    }
+
+    @Test("workbench title field has readable width and prominent control height")
+    func workbenchTitleGeometryIsReadable() {
+        #expect(SpeechRailDesignTokens.Teleprompter.workbenchDocumentTitleMinimumWidth >= 200)
+        #expect(SpeechRailDesignTokens.Control.prominentHeight == 40)
+    }
+
+    @Test("transparency readout distinguishes nearby continuous values")
+    func transparencyReadoutShowsFineMovement() {
+        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.283) == "28.30%")
+        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.284) == "28.40%")
+    }
+
     @Test("source editor keeps a bounded preparation-page height")
     func sourceEditorHeightRangeIsOrdered() {
         #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorMinimumHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight)

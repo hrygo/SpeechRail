@@ -272,6 +272,13 @@ public final class TeleprompterStageSettings {
         }
     }
 
+    /// User-facing direction: a higher value means more see-through background.
+    /// The persisted/rendered value remains opacity so existing settings stay intact.
+    public var backgroundTransparency: Double {
+        get { 1 - opacity }
+        set { opacity = 1 - newValue }
+    }
+
     public var lineSpacing: Double {
         get { lineSpacingStorage }
         set {
@@ -356,5 +363,11 @@ public final class TeleprompterStageSettings {
         static let opacity = "speechrail.teleprompter.stage.opacity"
         static let lineSpacing = "speechrail.teleprompter.stage.lineSpacing"
         static let visibleSegmentCount = "speechrail.teleprompter.stage.visibleSegmentCount"
+    }
+}
+
+enum TeleprompterStageTransparencyPresentation {
+    static func valueLabel(for transparency: Double) -> String {
+        String(format: "%.2f%%", locale: Locale(identifier: "en_US_POSIX"), transparency * 100)
     }
 }

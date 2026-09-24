@@ -962,6 +962,7 @@ public struct TeleprompterView: View {
                         .disabled(!session.canEdit || session.isPreparingDraft)
                         .textFieldStyle(.plain)
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .frame(minHeight: SpeechRailDesignTokens.Control.prominentHeight)
                         .speechRailRecessedSlot()
 
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {

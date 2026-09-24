@@ -11,6 +11,7 @@ public struct TeleprompterStageView: View {
     @State private var hoveredSegmentIndex: Int? = nil
     @State private var isBreathingGlow: Bool = false
     @State private var hasCopiedSummary: Bool = false
+    @State private var isAppearancePopoverPresented = false
 
     public init(
         session: TeleprompterSession,
@@ -887,6 +888,20 @@ public struct TeleprompterStageView: View {
 
     // MARK: - 舞台操控栏
 
+    private var appearanceControl: some View {
+        Button {
+            isAppearancePopoverPresented.toggle()
+        } label: {
+            Label("视效", systemImage: "slider.horizontal.3")
+        }
+        .speechRailButton(.secondary)
+        .accessibilityLabel("调整提词卡字号和背景透明度")
+        .help("连续调节字号与背景透明度")
+        .popover(isPresented: $isAppearancePopoverPresented, arrowEdge: .bottom) {
+            TeleprompterStageAppearancePopover(settings: settings)
+        }
+    }
+
     private var controls: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             // 主动作：开始/暂停跟读
@@ -971,65 +986,7 @@ public struct TeleprompterStageView: View {
 
             Spacer(minLength: 0)
 
-            // 快捷字号即时缩放微调
-            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                Button {
-                    settings.decreaseFontScale()
-                } label: {
-                    Image(systemName: "textformat.size.smaller")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
-                .disabled(settings.fontScale <= SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale)
-                .help("缩小字号（快捷键 ⌘-）")
-
-                Text("\(Int(settings.scriptPointSize)) pt")
-                    .font(SpeechRailDesignTokens.Typography.technicalValue)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(minWidth: 32)
-
-                Button {
-                    settings.increaseFontScale()
-                } label: {
-                    Image(systemName: "textformat.size.larger")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
-                .disabled(settings.fontScale >= SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale)
-                .help("放大字号（快捷键 ⌘+）")
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
-            .background(
-                SpeechRailDesignTokens.Color.inputField,
-                in: SpeechRailDesignTokens.Corner.nestedShape
-            )
-
-            // 快捷透明度即时预设与微调
-            Menu {
-                Text("舞台材质透明度")
-                Divider()
-                Button("通透 (60%)") { settings.opacity = 0.60 }
-                Button("平衡 (75%)") { settings.opacity = 0.75 }
-                Button("清晰 (90%)") { settings.opacity = 0.90 }
-                Button("纯色 (100%)") { settings.opacity = 1.00 }
-            } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "circle.lefthalf.filled")
-                        .font(.system(size: 9))
-                    Text("\(Int(round(settings.opacity * 100)))%")
-                        .font(SpeechRailDesignTokens.Typography.technicalValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
-                .background(
-                    SpeechRailDesignTokens.Color.inputField,
-                    in: SpeechRailDesignTokens.Corner.nestedShape
-                )
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("快速切换舞台背景透明度")
+            appearanceControl
 
             // 结束演说
             Button {
@@ -1443,6 +1400,113 @@ public struct TeleprompterStageView: View {
         case .ready, .draft: return "候场待命：按空格键开始提词"
         case .ended: return "提词已圆满结束"
         case .uncertain: return "脱稿发挥中 · 读回屏幕文字即可自动归队"
+        }
+    }
+}
+
+@MainActor
+private struct TeleprompterStageAppearancePopover: View {
+    let settings: TeleprompterStageSettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("提词卡视效")
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+            TeleprompterStageFontControl(settings: settings)
+            TeleprompterStageTransparencyControl(settings: settings)
+            TeleprompterStageQuickPresetControl(settings: settings)
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(width: SpeechRailDesignTokens.Teleprompter.stageAppearancePopoverWidth)
+    }
+}
+
+@MainActor
+private struct TeleprompterStageFontControl: View {
+    let settings: TeleprompterStageSettings
+
+    var body: some View {
+        TeleprompterStageContinuousSliderRow(
+            title: "字号",
+            valueText: String(format: "%.1f pt", Double(settings.scriptPointSize)),
+            value: Binding(get: { settings.fontScale }, set: { settings.fontScale = $0 }),
+            range: SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale...SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale,
+            accessibilityLabel: "提词卡字号",
+            accessibilityValue: String(format: "%.1f 点", Double(settings.scriptPointSize)),
+            helpText: "连续调节提词卡字号"
+        )
+    }
+}
+
+@MainActor
+private struct TeleprompterStageTransparencyControl: View {
+    let settings: TeleprompterStageSettings
+
+    var body: some View {
+        TeleprompterStageContinuousSliderRow(
+            title: "背景透明度",
+            valueText: TeleprompterStageTransparencyPresentation.valueLabel(
+                for: settings.backgroundTransparency
+            ),
+            value: Binding(
+                get: { settings.backgroundTransparency },
+                set: { settings.backgroundTransparency = $0 }
+            ),
+            range: SpeechRailDesignTokens.Teleprompter.stageMinimumTransparency...SpeechRailDesignTokens.Teleprompter.stageMaximumTransparency,
+            accessibilityLabel: "提词卡背景透明度",
+            accessibilityValue: TeleprompterStageTransparencyPresentation.valueLabel(
+                for: settings.backgroundTransparency
+            ),
+            helpText: "连续调节背景透光程度；读数是控制值，实际观感也受系统材质影响"
+        )
+    }
+}
+
+@MainActor
+private struct TeleprompterStageQuickPresetControl: View {
+    let settings: TeleprompterStageSettings
+
+    var body: some View {
+        HStack {
+            Text("快速预设")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Spacer()
+            Menu("选择") {
+                Button("清晰 · 0% 透明") { settings.backgroundTransparency = 0 }
+                Button("默认 · 28% 透明") { settings.backgroundTransparency = 0.28 }
+                Button("透光 · 45% 透明") { settings.backgroundTransparency = 0.45 }
+                Button("更透光 · 65% 透明") { settings.backgroundTransparency = 0.65 }
+            }
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel("背景透明度快速预设")
+        }
+    }
+}
+
+private struct TeleprompterStageContinuousSliderRow: View {
+    let title: String
+    let valueText: String
+    let value: Binding<Double>
+    let range: ClosedRange<Double>
+    let accessibilityLabel: String
+    let accessibilityValue: String
+    let helpText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                Spacer()
+                Text(valueText)
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            Slider(value: value, in: range)
+                .accessibilityLabel(accessibilityLabel)
+                .accessibilityValue(accessibilityValue)
+                .help(helpText)
         }
     }
 }
