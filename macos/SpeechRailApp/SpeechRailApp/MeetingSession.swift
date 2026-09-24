@@ -525,8 +525,8 @@ public final class MeetingSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .speechStarted, .speechStopped, .segment, .responseAudio,
-             .responseDone(_, _), .cleared:
+        case .ready, .configured, .speechStarted, .speechStopped, .segment,
+             .responseAudio(_, _, _), .responseDone(_, _, _, _), .cleared:
             break
         case .committed:
             let now = Date()

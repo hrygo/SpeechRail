@@ -714,7 +714,8 @@ public final class AssistantSession {
             isSpeaking = false
             phase = .listening
             if let client { try? await client.cancelTTS() }
-        case .responseAudio(let pcm):
+        case .responseAudio(let requestID, _, let pcm):
+            guard requestID == activeTTSRequestID else { return }
             isSpeaking = true
             phase = .speaking
             // 半双工：从这一刻起闭麦（一问一答的口径）。
@@ -724,7 +725,8 @@ public final class AssistantSession {
             } else {
                 await playback?.enqueue(pcm)
             }
-        case .responseDone(let status, _):
+        case .responseDone(let requestID, _, let status, _):
+            guard requestID == activeTTSRequestID else { return }
             activeTTSRequestID = nil
             ttsRequestInFlight = false
             if status == "cancelled" {
