@@ -25,8 +25,9 @@
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="#当前能力">当前能力</a> ·
-  <a href="#开发与验证">开发与验证</a> ·
-  <a href="docs/README.md">文档导航</a> ·
+  <a href="#模型-profile">模型 profile</a> ·
+  <a href="#文档导航">文档导航</a> ·
+  <a href="CONTRIBUTING.md">参与贡献</a> ·
   <a href="https://github.com/hrygo/SpeechRail/discussions">讨论区</a>
 </p>
 
@@ -37,10 +38,27 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 服务负责协议转换、模型适配、Worker 生命周期、资源准入和能力报告；调用方
 负责麦克风采集、音频播放、会议数据、UI 与 LLM 编排。
 
+> [!NOTE]
+> SpeechRail 当前以 **Beta** 版本发布。`/readyz` 和成功的 smoke 请求只能确认服务就绪，
+> 不代表普遍适用的质量、延迟或性能保证。
+
+## 为什么选择 SpeechRail
+
+SpeechRail 面向由多款本地客户端共享的一台 Apple Silicon Mac。它在同一个有界运行时中
+管理模型执行和请求调度，让各应用无需各自加载语音模型，也无需重复实现 OpenAI 兼容适配层。
+
+适合需要以下能力的场景：
+
+- 普通 ASR/TTS 请求在本机处理；
+- 多个桌面应用共用一个 HTTP/WebSocket 服务；
+- 范围明确、可检查的 OpenAI 兼容接口；
+- 可选的 Realtime ASR/TTS、会话级匿名分人或 MCP 接入。
+
 ## 当前能力
 
 | 入口 | 能力 | 说明 |
 |---|---|---|
+| `GET /health`、`/readyz`、`/metrics` | 服务诊断 | 查看进程、子系统、就绪状态和指标。 |
 | `POST /v1/audio/transcriptions` | 文件 ASR | OpenAI 兼容 multipart 输入；支持 `json`、`verbose_json`、`text`、`srt`、`vtt`，以及可选的 `diarized_json`。 |
 | `POST /v1/audio/speech` | TTS | 流式输出 `mp3`、`opus`、`aac`、`flac`、`wav` 或原始 `pcm`；请从 `/v1/voices` 选择 `available=true` 的音色。 |
 | `GET /v1/models`、`GET /v1/voices` | 能力发现 | 当前 profile 与可用音色的发现投影。 |
@@ -49,7 +67,7 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 | `/v1/jobs` | 异步任务元数据 | 可选的 owner-scoped 持久任务记录；调用方提供不透明引用，不传原始音频或转写文本。 |
 | `speechrail-mcp` | Agent 接入 | 支持 `stdio` 或 `streamable-http` 的无状态 MCP 代理；它调用本地 REST 服务，不托管模型。 |
 
-讲话人分离仅在当前 `balanced` 或 `quality` profile 的本地 CoreML 资源就绪时
+讲话人分离仅在当前 `balanced`、`quality` 或候选 `extreme` profile 的本地 CoreML 资源就绪时
 可用。它只返回会话范围内的匿名标签，不识别人名，也不维护跨会话讲话人数据库。
 
 仓库还包含 `macos/SpeechRailApp` SwiftUI macOS 控制面。它读取服务状态，
@@ -74,10 +92,12 @@ OpenAI 能力前，请先阅读对应契约。
 
 ## 环境要求
 
-- Apple Silicon Mac，macOS 26.0 或更高版本；Intel Mac 不是支持目标。
+- 受管运行时仅支持 Apple Silicon Mac 和 macOS 26.0 或更高版本；Intel Mac 与 Ubuntu/Linux 不是支持目标。Linux 可用于平台无关的开发检查。
 - 随附的 `SpeechRailApp` 同样以 macOS 26.0+、`arm64` 为目标。
 - 源码开发和 Python 服务 CLI 使用 `>=3.12,<3.13`。
 - 使用 [`uv`](https://docs.astral.sh/uv/) 管理依赖和环境。
+- 本地安装流程及部分音频格式需要 `ffmpeg` 解码/转码。受管安装器会在隔离运行时中附带固定版本的
+  `imageio-ffmpeg`，因此执行 `speechrail install` 不要求系统预装 `ffmpeg`。
 - 模型 snapshot 与 vendor runtime 存放在仓库之外。
 
 推理请求不会下载模型、读取远程音频 URL 或静默访问云端。显式的安装和运维
@@ -87,7 +107,8 @@ OpenAI 能力前，请先阅读对应契约。
 
 ### 从 Release wheel 安装
 
-下载 Release 中的 wheel 与 `SHA256SUMS`，先校验制品，再使用 wheel 自带的 managed installer：
+从 [Releases](https://github.com/hrygo/SpeechRail/releases) 下载 wheel 与 `SHA256SUMS`，
+先校验制品，再只用 `uv` 和 wheel 自带的 managed installer 安装，无需检出源码：
 
 ```bash
 cd ~/Downloads
@@ -99,14 +120,19 @@ uvx --python 3.12 --from ./speechrail-*.whl \
   --enable
 ```
 
-该命令会准备并校验所选 profile 的本地制品，执行 preflight，原子切换
-`runtime/current`，并在 `--enable` 下注册、启动用户级 `com.speechrail` LaunchAgent。
-安装不会把模型、配置或音频写入仓库；服务请求路径不会下载模型。完整安装说明见
+wheel 提供 `speechrail install` 入口。它会暂存 release、准备并校验所选档位的模型制品、执行
+preflight、原子切换 `runtime/current`，并在 `--enable` 下注册、启动 `com.speechrail`。
+如果 wheel 版本与 installer 版本不一致，安装会拒绝执行，避免 installer 与它安装的代码版本漂移。
+重复运行可升级现有安装；请先停止正在运行的服务，因为当端口 8201 正被占用时，installer 会拒绝替换
+`runtime/current`。已校验的本地模型 snapshot 会复用，不会重新下载；命令会在开始前报告将要获取的内容。
+`--from` glob 在所在目录中必须且只能匹配一个 `speechrail-*.whl`。推理请求不会下载模型。完整安装说明见
 [安装与首次使用](docs/users/installing-speechrail.md)。
 
 ### 从仓库首装
 
-全新 Mac 也可使用仓库提供的零配置引导入口：
+如果全新的 Apple Silicon Mac 还需要安装前置依赖，可使用仓库提供的引导流程；它会安装前置依赖、准备
+所选本地模型制品，并注册 `com.speechrail` LaunchAgent。该流程会执行外部设置操作，因此必须明确传入
+`--yes` 确认：
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
@@ -115,8 +141,11 @@ cd SpeechRail
 ```
 
 受管流程会准备隔离运行时、校验所选本地制品，并注册用户级 `LaunchAgent`。
-前置条件、profile 选择和恢复规则见
-[`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md)。
+使用该入口前请阅读 [`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md)，了解磁盘需求、
+profile 选择、模型校验和恢复行为。
+
+[安装与首次使用指南](docs/users/installing-speechrail.md)说明各 Release 制品的用途、安装顺序和常见失败状态。
+未签名 DMG 仅包含 App 控制面，不安装服务。
 
 安装后检查服务状态，不要启动第二个实例：
 
@@ -163,8 +192,9 @@ uv run speechrail diagnose
 
 ## OpenAI 兼容调用示例
 
-标准 OpenAI Python 客户端只需修改 `base_url` 即可访问文档声明的 REST 语音子集；默认
-loopback 模式使用占位 key 即可。Realtime 是 current-only 协议，完整语音助手由调用方编排。
+标准 OpenAI Python 客户端只需修改 `base_url` 即可访问文档声明的 REST 语音子集。默认
+loopback 访问使用占位 key；只有在有意将服务暴露到 loopback 之外时才使用真实 Bearer key。
+Realtime 是 current-only 协议，完整语音助手由调用方编排。
 
 ```python
 from openai import OpenAI
@@ -207,22 +237,23 @@ SDK、cURL、Sona、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
 ## 模型 profile
 
 不同 profile 共享公共 API 形状，但对外声明的能力取决于当前 catalog selection。
-当前活动的 ASR/TTS profile 权重均为 8-bit；仅 `quality` 的分人 aligner 保持 bf16。
+profile 枚举包含候选 `extreme`；其正式启用仍受质量、资源和延迟证据门槛限制。BF16 权重类型
+本身不代表质量更高。
 
 | Profile | ASR | TTS | 分人与音色能力 |
 |---|---|---|---|
 | `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | 无 aligner、无分人；固定 CustomVoice 角色。 |
 | `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8`，可选匿名分人；固定 CustomVoice 角色。 |
-| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`，可选匿名分人、VoiceDesign 试听/设计和质量门控 Base 克隆。两个 TTS capability worker 可双常驻，不同 lane 可并发；同一 lane 仍串行。 |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`，可选匿名分人、VoiceDesign 试听/设计和质量门控 Base 克隆。 |
+| `extreme`（候选） | `asr-1.7b-bf16` | `tts-1.7b-design-bf16` + `tts-1.7b-base-bf16` | 复用 `aligner-bf16`；候选 catalog 配置了分人与两种 TTS 能力；质量、资源和延迟证据仍待补齐。 |
 
-Quality 将 VoiceDesign 与 Base 保持为两条独立的 TTS capability lane。切换音色
-工作流不需要在两者之间频繁加载和卸载；Quality capability group 仍会在配置的
-空闲冷却后 trim/close 两个 worker，并在下一次请求时惰性恢复。
+当前活动 profile 的 ASR/TTS 权重均为 8-bit；`quality` 使用 `aligner-bf16`，候选 `extreme` 的权重与 aligner 为 bf16。
+`quality` 与候选 `extreme` 将 VoiceDesign 和 Base 作为独立 TTS capability lane，可双 worker 常驻，
+不同 lane 可并发、同一 lane 仍串行；能力组仍会在配置的空闲冷却后关闭 worker，并按需惰性恢复。
 
-![三档模型与 Quality 双 TTS capability 关系图](docs/architecture/diagrams/three-tier-model-architecture.svg)
+![四档模型与 TTS capability 关系图](docs/architecture/diagrams/four-tier-model-architecture.svg)
 
-上图是三档 profile 路由、模型共享、Quality 两条 TTS capability lane，以及
-共享资源与生命周期边界的统一总览。
+上图展示 profile 路由、模型共享、TTS capability 与共享资源/生命周期边界；旧版三档图仅作历史基线。
 
 CLI 的 `setup` 会根据物理内存给出起始建议，但这不是硬件保证。使用 CLI 查看
 或切换受管 selection：
@@ -237,8 +268,9 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 ```
 
 请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有 profile 上都
-可用。质量档专属的音色接口包括 `POST /v1/voices/previews`、`POST /v1/voices`、
-`POST /v1/voices/designs` 和克隆接口，详见
+可用。VoiceDesign 试听/设计和 Base 克隆能力由当前有效能力决定；候选 catalog 为
+`quality` 和 `extreme` 配置了这些能力，但 Extreme 正式启用所需的质量、资源与延迟证据仍待补齐。
+详见
 [`docs/users/api-contract.md`](docs/users/api-contract.md)。
 
 ## 安全与数据处理
@@ -255,6 +287,8 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 
 | 需求 | 推荐入口 |
 |---|---|
+| 安装与首次运行 | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
+| 文档总览 | [`docs/README.md`](docs/README.md) |
 | API 与客户端接入 | [`docs/users/README.md`](docs/users/README.md)、[`docs/users/api-contract.md`](docs/users/api-contract.md)、[`contracts/openapi.yaml`](contracts/openapi.yaml) |
 | Realtime 协议 | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |
 | MCP Agent 接入 | [`docs/users/mcp-agent-integration.md`](docs/users/mcp-agent-integration.md) |
@@ -264,10 +298,31 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 | 架构与边界 | [`docs/architecture/README.md`](docs/architecture/README.md)、[`docs/architecture/current-boundaries.md`](docs/architecture/current-boundaries.md)、[`docs/decisions/README.md`](docs/decisions/README.md) |
 | 版本历史 | [`CHANGELOG.md`](CHANGELOG.md) |
 
-## 贡献与许可证
+## 参与贡献
 
-提交变更前请按 [`docs/developers/testing-acceptance.md`](docs/developers/testing-acceptance.md)
-执行确定性测试和 lint 门禁，并阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md) 与
-[`AGENTS.md`](AGENTS.md) 了解仓库边界和工作约定。
+提交 Pull Request 前，请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)，并运行确定性质量门禁：
+
+```bash
+uv sync --extra dev
+uv run --extra dev pytest
+uv run --extra dev ruff check src tests
+uv run --extra dev mypy src
+npx @redocly/cli lint contracts/openapi.yaml
+git diff --check
+```
+
+CI 还会构建 wheel 并测试 SwiftUI macOS 控制面。Bug 报告和功能请求请使用仓库的 issue 模板；
+问题与集成讨论请前往 [GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions)。
+参与项目时也请遵守 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。
+
+## 支持与安全
+
+使用问题和故障排查请先查看 [`SUPPORT.md`](SUPPORT.md) 或前往
+[GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions)。确认的 bug 请使用
+[issue 模板](https://github.com/hrygo/SpeechRail/issues/new/choose)。
+
+安全漏洞请按 [`SECURITY.md`](SECURITY.md) 中的流程报告，不要公开创建 issue。
+
+## 许可证
 
 SpeechRail 采用 [MIT License](LICENSE) 授权。
