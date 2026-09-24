@@ -609,7 +609,7 @@ public final class CaptionSession {
             }
         case .diarizationDone:
             diarizationDrained = true
-        case .responseAudio, .responseDone(_, _):
+        case .responseAudio(_, _, _), .responseDone(_, _, _, _):
             // TTS 不属于这一层（字幕与会议都不说话）。
             break
         case .serverError(let code, let message, _, _, _, _):

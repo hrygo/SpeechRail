@@ -279,7 +279,8 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W0 工作区基线 | complete | 基线 `25d4416f`；分支 `codex/tiered-streaming-tts-python314`；既有用户改动保留 |
 | W1 Realtime / audioop | complete | 移除不可达转换器；137 项 Realtime/caller-wire 回归、定向 Ruff、mypy通过；该阶段验证时使用3.12.14，后续 W2 已独立验证3.14.7候选环境 |
 | W2 Python/runtime | complete | 3.14.7候选 runtime `--only-binary` 安装47个锁定包；MLX/ASR模块导入通过；`uv lock --check`、runtime-lock `--check`、zero-setup语法检查通过；9个定向测试文件352 passed、Ruff与130-file mypy通过。1个既有 Pydantic `mappingproxy` warning；未加载模型或切换正式服务 |
-| W3–W11 | not started | 按实施指南逐阶段实施；真实模型与逐档性能不得由确定性测试替代 |
+| W3 App 协议基线 | complete | 保持当前完整文本 wire；生产 transport 仍用 `URLSessionWebSocketTask`，新增 fake-transport seam；TTS 事件关联 request/response identity，隔离旧终态/旧音频并抑制取消后迟到音频。按当前服务端序列化结构构造 fixture；`RealtimeContractTests` 12 passed，三处 App session 文件 `swiftc -frontend -parse` 通过，`git diff --check` 通过。SwiftPM 未 typecheck App session 文件、未做 App 构建/真实服务/音频/UI 验收；输出有 23 个非 target 文件未显式声明警告 |
+| W4–W11 | not started | 按实施指南逐阶段实施；真实模型与逐档性能不得由确定性测试替代 |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 

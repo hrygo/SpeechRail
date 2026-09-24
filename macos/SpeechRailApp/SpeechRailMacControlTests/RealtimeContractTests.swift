@@ -1,5 +1,6 @@
 import XCTest
 @testable import SpeechRailControlKit
+@testable import SpeechRailAppSupport
 
 final class RealtimeContractTests: XCTestCase {
     func testSequenceValidatorReportsGapAndRegression() {
@@ -146,8 +147,258 @@ final class RealtimeContractTests: XCTestCase {
             TranscriptionSessionUpdate.captionChunkDurationMilliseconds
         )
     }
+
+    func testCallerTTSIgnoresStaleDoneAndSuppressesAudioAfterCancel() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "", callerTTSEnabled: true)
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next() else {
+            XCTFail("Realtime client did not acknowledge its test configuration")
+            await client.close()
+            return
+        }
+        guard case .configured = configured.payload else {
+            XCTFail("Expected configuration acknowledgement, got \(configured.payload)")
+            await client.close()
+            return
+        }
+
+        try await client.sendTTSCreate(text: "旧请求", requestID: "request-old")
+        await transport.enqueue(.text(jsonText(responseCreated(responseID: "response-old"))))
+        await transport.enqueue(.text(jsonText(responseDone(
+            requestID: "request-old",
+            responseID: "response-old",
+            status: "completed"
+        ))))
+        guard let oldDone = await events.next() else {
+            XCTFail("Expected the old request's terminal event")
+            await client.close()
+            return
+        }
+        guard case .responseDone(let oldRequestID, let oldResponseID, let oldStatus, _) = oldDone.payload
+        else {
+            XCTFail("Expected a TTS terminal event, got \(oldDone.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(oldRequestID, "request-old")
+        XCTAssertEqual(oldResponseID, "response-old")
+        XCTAssertEqual(oldStatus, "completed")
+
+        try await client.sendTTSCreate(text: "新请求", requestID: "request-new")
+        await transport.enqueue(.text(jsonText(responseCreated(responseID: "response-new"))))
+        // A duplicated/late terminal for the old response must not clear the new request.
+        await transport.enqueue(.text(jsonText(responseDone(
+            requestID: "request-old",
+            responseID: "response-old",
+            status: "completed"
+        ))))
+        await transport.enqueue(.text(jsonText(responseDone(
+            requestID: "request-new",
+            responseID: "response-old",
+            status: "completed"
+        ))))
+        await transport.enqueue(
+            .text(jsonText(responseAudioDelta(responseID: "response-old", pcm: Data([4, 5, 6]))))
+        )
+        await transport.enqueue(
+            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([1, 2, 3]))))
+        )
+        await transport.enqueue(.text(jsonText(["type": "input_audio_buffer.speech_started"])))
+
+        guard let audio = await events.next() else {
+            XCTFail("Expected audio from the active request")
+            await client.close()
+            return
+        }
+        guard case .responseAudio(let requestID, let responseID, let pcm) = audio.payload else {
+            XCTFail("Expected active-request audio, got \(audio.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(requestID, "request-new")
+        XCTAssertEqual(responseID, "response-new")
+        XCTAssertEqual(pcm, Data([1, 2, 3]))
+        guard let marker = await events.next() else {
+            XCTFail("Expected the marker after active-request audio")
+            await client.close()
+            return
+        }
+        guard case .speechStarted = marker.payload else {
+            XCTFail("Expected the receive loop to continue after stale terminal, got \(marker.payload)")
+            await client.close()
+            return
+        }
+
+        try await client.cancelTTS()
+        let sentMessages = await transport.sentMessages()
+        let sentObjects = sentMessages
+            .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        let createObjects = sentObjects.filter { $0["type"] as? String == "speechrail.tts.create" }
+        XCTAssertEqual(
+            createObjects.compactMap { $0["request_id"] as? String },
+            ["request-old", "request-new"]
+        )
+        XCTAssertEqual(
+            createObjects.compactMap { $0["text"] as? String },
+            ["旧请求", "新请求"]
+        )
+        let cancelObject = sentObjects.first { $0["type"] as? String == "speechrail.tts.cancel" }
+        XCTAssertEqual(cancelObject?["request_id"] as? String, "request-new")
+        XCTAssertEqual(cancelObject?["response_id"] as? String, "response-new")
+
+        await transport.enqueue(
+            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([9, 8, 7]))))
+        )
+        await transport.enqueue(.text(jsonText(["type": "input_audio_buffer.speech_started"])))
+        guard let afterCancel = await events.next() else {
+            XCTFail("Expected the post-cancel marker")
+            await client.close()
+            return
+        }
+        guard case .speechStarted = afterCancel.payload else {
+            XCTFail("Late audio reached the client after cancellation: \(afterCancel.payload)")
+            await client.close()
+            return
+        }
+
+        await transport.enqueue(.text(jsonText(responseDone(
+            requestID: "request-new",
+            responseID: "response-new",
+            status: "cancelled"
+        ))))
+        guard let newDone = await events.next() else {
+            XCTFail("Expected the active request's cancellation receipt")
+            await client.close()
+            return
+        }
+        guard case .responseDone(let requestID, let responseID, let status, _) = newDone.payload else {
+            XCTFail("Expected the active request's terminal event, got \(newDone.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(requestID, "request-new")
+        XCTAssertEqual(responseID, "response-new")
+        XCTAssertEqual(status, "cancelled")
+        await client.close()
+    }
 }
 
 private enum RealtimeASRClientModelFixture {
     static let canonical = "speechrail/qwen3-asr-1.7b"
+}
+
+private actor TestRealtimeASRTransport: RealtimeASRTransport {
+    private enum TestError: Error {
+        case closed
+    }
+
+    private var frames: [RealtimeASRSocketFrame] = []
+    private var receiver: CheckedContinuation<RealtimeASRSocketFrame, Error>?
+    private var sent: [String] = []
+    private var closed = false
+
+    func resume() async {}
+
+    func send(_ text: String) async throws {
+        sent.append(text)
+        guard
+            let data = text.data(using: .utf8),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            payload["type"] as? String == "transcription_session.update"
+        else {
+            return
+        }
+        enqueue(.text(#"{"type":"transcription_session.updated"}"#))
+    }
+
+    func receive() async throws -> RealtimeASRSocketFrame {
+        if !frames.isEmpty { return frames.removeFirst() }
+        if closed { throw TestError.closed }
+        return try await withCheckedThrowingContinuation { continuation in
+            receiver = continuation
+        }
+    }
+
+    func closeCode() async -> Int? { nil }
+
+    func cancel() async {
+        closed = true
+        receiver?.resume(throwing: TestError.closed)
+        receiver = nil
+    }
+
+    func enqueue(_ frame: RealtimeASRSocketFrame) {
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(returning: frame)
+        } else {
+            frames.append(frame)
+        }
+    }
+
+    func sentMessages() -> [String] { sent }
+}
+
+private func jsonText(_ object: [String: Any]) -> String {
+    guard let data = try? JSONSerialization.data(withJSONObject: object) else { return "{}" }
+    return String(decoding: data, as: UTF8.self)
+}
+
+private func responseDone(requestID: String, responseID: String, status: String) -> [String: Any] {
+    let itemID = "item-\(responseID)"
+    return [
+        "type": "response.done",
+        "response": [
+            "id": responseID,
+            "object": "realtime.response",
+            "status": status,
+            "status_details": NSNull(),
+            "output": [[
+                "id": itemID,
+                "object": "realtime.item",
+                "type": "message",
+                "role": "assistant",
+                "content": [[
+                    "type": "audio",
+                    "transcript": "测试语句",
+                    "audio": NSNull()
+                ]]
+            ]],
+            "usage": NSNull()
+        ],
+        "speechrail": [
+            "kind": "tts",
+            "orchestration": "caller",
+            "request_id": requestID,
+            "voice_revision": NSNull()
+        ]
+    ]
+}
+
+private func responseCreated(responseID: String) -> [String: Any] {
+    [
+        "type": "response.created",
+        "response": [
+            "id": responseID,
+            "object": "realtime.response",
+            "status": "in_progress",
+            "status_details": NSNull(),
+            "output": [Any](),
+            "usage": NSNull()
+        ]
+    ]
+}
+
+private func responseAudioDelta(responseID: String, pcm: Data) -> [String: Any] {
+    [
+        "type": "response.output_audio.delta",
+        "response_id": responseID,
+        "output_index": 0,
+        "item_id": "item-\(responseID)",
+        "content_index": 0,
+        "delta": pcm.base64EncodedString()
+    ]
 }

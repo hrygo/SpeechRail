@@ -1,6 +1,52 @@
 import Foundation
 import SpeechRailControlKit
 
+enum RealtimeASRSocketFrame: Sendable {
+    case text(String)
+    case data(Data)
+    case unsupported
+}
+
+protocol RealtimeASRTransport: Sendable {
+    func resume() async
+    func send(_ text: String) async throws
+    func receive() async throws -> RealtimeASRSocketFrame
+    func closeCode() async -> Int?
+    func cancel() async
+}
+
+private actor URLSessionRealtimeASRTransport: RealtimeASRTransport {
+    private let task: URLSessionWebSocketTask
+
+    init(task: URLSessionWebSocketTask) {
+        self.task = task
+    }
+
+    func resume() async {
+        task.resume()
+    }
+
+    func send(_ text: String) async throws {
+        try await task.send(.string(text))
+    }
+
+    func receive() async throws -> RealtimeASRSocketFrame {
+        switch try await task.receive() {
+        case .string(let text): .text(text)
+        case .data(let data): .data(data)
+        @unknown default: .unsupported
+        }
+    }
+
+    func closeCode() async -> Int? {
+        task.closeCode == .invalid ? nil : task.closeCode.rawValue
+    }
+
+    func cancel() async {
+        task.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
 // `/v1/realtime` 的客户端（契约：`contracts/realtime-openai.md`）。
 //
 // 它只做四件事：**连、配、喂 PCM、收事件**。没有大模型、没有播放、没有业务状态——
@@ -156,9 +202,14 @@ public actor RealtimeASRClient {
         /// `speechrail.diarization.done`：EOF 屏障到位，末段不会丢。
         case diarizationDone(throughSample: Int, status: String)
         /// TTS 音频块（24 kHz PCM16）。助手那一侧才用得上。
-        case responseAudio(Data)
+        case responseAudio(requestID: String, responseID: String, pcm: Data)
         /// TTS 一轮结束：`completed` / `cancelled` / `failed`。
-        case responseDone(status: String, receipt: RenderReceipt?)
+        case responseDone(
+            requestID: String,
+            responseID: String,
+            status: String,
+            receipt: RenderReceipt?
+        )
         case serverError(
             code: String,
             message: String,
@@ -190,7 +241,7 @@ public actor RealtimeASRClient {
     private let chunkDurationMilliseconds: Int
     private let session: URLSession
 
-    private var task: URLSessionWebSocketTask?
+    private var transport: (any RealtimeASRTransport)?
     private var receiveLoop: Task<Void, Never>?
     private var didClose = false
     private var configurationAcknowledged = false
@@ -201,6 +252,7 @@ public actor RealtimeASRClient {
     private var voice: String?
     private var activeTTSRequestID: String?
     private var activeTTSResponseID: String?
+    private var activeTTSAudioSuppressed = false
     /// `finish` 的 event_id。契约要求同一个 id 重试幂等、不同 id 拒绝。
     private var finishEventID: String?
     private var finishSent = false
@@ -276,18 +328,24 @@ public actor RealtimeASRClient {
 
     /// 建连、声明转写会话、发送 current-only 配置。返回即表示可以开始喂 PCM。
     public func connect() async throws {
-        guard task == nil else { return }
+        guard transport == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
-        configurationAcknowledged = false
-        configurationFailure = nil
         var request = URLRequest(url: url)
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         let task = session.webSocketTask(with: request)
-        self.task = task
-        task.resume()
-        startReceiveLoop(on: task)
+        try await connect(using: URLSessionRealtimeASRTransport(task: task))
+    }
+
+    func connect(using transport: any RealtimeASRTransport) async throws {
+        guard self.transport == nil else { return }
+        guard !didClose else { throw Failure.closed(closeCode) }
+        configurationAcknowledged = false
+        configurationFailure = nil
+        self.transport = transport
+        await transport.resume()
+        startReceiveLoop(using: transport)
 
         // `transcription_session.update` 要在首个 PCM **之前**落地：格式、分人和
         // caller-owned TTS 都在这一刻协商。
@@ -295,14 +353,14 @@ public actor RealtimeASRClient {
             try await send(configurationEvent())
             try await waitForConfigurationAcknowledgement()
         } catch {
-            finish(code: nil)
+            await finish(code: nil)
             throw error
         }
     }
 
     /// 关掉连接。调用点负责把它带来的中断写进账本（`service_lost`）。
     public func close() async {
-        finish(code: nil)
+        await finish(code: nil)
     }
 
     // MARK: - 上行
@@ -369,6 +427,8 @@ public actor RealtimeASRClient {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let requestID = requestID ?? "tts_req_\(UUID().uuidString.lowercased())"
         activeTTSRequestID = requestID
+        activeTTSResponseID = nil
+        activeTTSAudioSuppressed = false
         do {
             try await send(
                 SpeechRailTTSCreate(
@@ -382,6 +442,7 @@ public actor RealtimeASRClient {
             if activeTTSRequestID == requestID {
                 activeTTSRequestID = nil
                 activeTTSResponseID = nil
+                activeTTSAudioSuppressed = false
             }
             throw error
         }
@@ -390,6 +451,8 @@ public actor RealtimeASRClient {
     /// 取消正在合成的 TTS（用户插话）。未发送的音频由服务端丢弃。
     public func cancelTTS() async throws {
         guard let requestID = activeTTSRequestID else { return }
+        // 用户侧停止优先：取消确认在途期间即使服务端再发 delta，也不能进入播放层。
+        activeTTSAudioSuppressed = true
         try await send(
             SpeechRailTTSCancel(requestID: requestID, responseID: activeTTSResponseID).jsonObject
         )
@@ -407,7 +470,7 @@ public actor RealtimeASRClient {
     }
 
     private func send(_ payload: [String: Any]) async throws {
-        guard let task else { throw Failure.transport("连接还没建立") }
+        guard let transport else { throw Failure.transport("连接还没建立") }
         guard
             let data = try? JSONSerialization.data(withJSONObject: payload),
             let text = String(data: data, encoding: .utf8)
@@ -415,7 +478,7 @@ public actor RealtimeASRClient {
             throw Failure.transport("事件没能编码成 JSON")
         }
         do {
-            try await task.send(.string(text))
+            try await transport.send(text)
         } catch {
             throw Failure.transport(error.localizedDescription)
         }
@@ -540,27 +603,27 @@ public actor RealtimeASRClient {
 
     // MARK: - 下行
 
-    private func startReceiveLoop(on task: URLSessionWebSocketTask) {
+    private func startReceiveLoop(using transport: any RealtimeASRTransport) {
         receiveLoop?.cancel()
         receiveLoop = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    let message = try await task.receive()
+                    let message = try await transport.receive()
                     await self?.handle(message)
                 } catch {
-                    await self?.finish(code: task.closeCode == .invalid ? nil : task.closeCode.rawValue)
+                    await self?.finish(code: await transport.closeCode())
                     return
                 }
             }
         }
     }
 
-    private func handle(_ message: URLSessionWebSocketTask.Message) async {
+    private func handle(_ message: RealtimeASRSocketFrame) async {
         let data: Data
         switch message {
-        case .string(let text): data = Data(text.utf8)
+        case .text(let text): data = Data(text.utf8)
         case .data(let raw): data = raw
-        @unknown default: return
+        case .unsupported: return
         }
         guard
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -671,22 +734,48 @@ public actor RealtimeASRClient {
                 )
             )
         case "response.created":
-            activeTTSResponseID = (object["response"] as? [String: Any])?["id"] as? String
-        case "response.output_audio.delta":
-            if let base64 = object["delta"] as? String, let data = Data(base64Encoded: base64) {
-                emit(.responseAudio(data))
+            // The current server contract does not put caller request_id on
+            // response.created. Its ordered single-active-TTS flow associates
+            // this response with the locally active request.
+            if activeTTSRequestID != nil, activeTTSResponseID == nil,
+               let responseID = (object["response"] as? [String: Any])?["id"] as? String,
+               !responseID.isEmpty {
+                activeTTSResponseID = responseID
             }
+        case "response.output_audio.delta":
+            guard
+                let requestID = activeTTSRequestID,
+                let responseID = activeTTSResponseID,
+                object["response_id"] as? String == responseID,
+                !activeTTSAudioSuppressed,
+                let base64 = object["delta"] as? String,
+                let data = Data(base64Encoded: base64)
+            else { break }
+            emit(.responseAudio(requestID: requestID, responseID: responseID, pcm: data))
         case "response.done":
             let response = object["response"] as? [String: Any]
+            let responseID = response?["id"] as? String
+            let speechrail = object["speechrail"] as? [String: Any]
+            guard
+                let requestID = speechrail?["request_id"] as? String,
+                speechrail?["kind"] as? String == "tts",
+                speechrail?["orchestration"] as? String == "caller",
+                requestID == activeTTSRequestID,
+                let responseID,
+                responseID == activeTTSResponseID
+            else { break }
             let status = response?["status"] as? String ?? "completed"
             emit(
                 .responseDone(
+                    requestID: requestID,
+                    responseID: responseID,
                     status: status,
                     receipt: Self.renderReceipt(from: object)
                 )
             )
             activeTTSRequestID = nil
             activeTTSResponseID = nil
+            activeTTSAudioSuppressed = false
         case "conversation.item.input_audio_transcription.failed":
             let itemID = object["item_id"] as? String ?? ""
             closeBarrier.failed(itemID: itemID)
@@ -709,6 +798,7 @@ public actor RealtimeASRClient {
             if requestID == activeTTSRequestID {
                 activeTTSRequestID = nil
                 activeTTSResponseID = nil
+                activeTTSAudioSuppressed = false
             }
             emit(
                 .serverError(
@@ -801,14 +891,18 @@ public actor RealtimeASRClient {
     }
 
     /// 只收尾一次：接收循环、显式 `close()`、以及流被取消这三条路都会走到这里。
-    private func finish(code: Int?) {
+    private func finish(code: Int?) async {
         guard !didClose else { return }
         didClose = true
         closeCode = code
         receiveLoop?.cancel()
         receiveLoop = nil
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
+        let transport = self.transport
+        self.transport = nil
+        activeTTSRequestID = nil
+        activeTTSResponseID = nil
+        activeTTSAudioSuppressed = true
+        await transport?.cancel()
         continuation?.yield(
             RealtimeEventEnvelope(
                 metadata: RealtimeEventMetadata(),

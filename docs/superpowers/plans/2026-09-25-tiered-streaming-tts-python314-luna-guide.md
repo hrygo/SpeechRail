@@ -166,6 +166,8 @@ date: 2026-09-24
 
 **完成条件：** 当前协议基线有真实契约fixture；完整文本原行为保留；新纯状态测试能在不启动UI/音频设备的条件下运行。
 
+**执行记录：** 生产 transport 仍为 `URLSessionWebSocketTask`，仅增加内部 fake-transport seam。TTS 音频/终态携带 `request_id` 与 `response_id`；测试 fixture 按当前服务端 serializer 的 `response.created`、`response.output_audio.delta`、`response.done` 结构构造，覆盖旧 request/response 的终态与音频隔离、取消后迟到音频抑制，并核对客户端实际发出的 create/cancel 字段。验证命令 `swift test --package-path macos/SpeechRailApp --filter RealtimeContractTests`：12 passed；`swiftc -frontend -parse` 检查 Assistant/Caption/Meeting session 文件通过；`git diff --check` 通过。SwiftPM 当前只编译显式登记的 Support/Test 源，三处 App session 文件仅做语法解析、未完成 App module typecheck；不运行 App、麦克风、真实服务或 UI 自动化。SwiftPM 仍报告 23 个非 target 文件未显式声明，这是现存 target 布局警告。
+
 ## W4. 模型层真增量证明与固定 vendor 扩展（关键门）
 
 **拟新增：** `tools/probe_tts_incremental.py`、`tests/test_tts_incremental_probe_contract.py`；vendor本地受控checkout不在此仓库冒充已有路径。
