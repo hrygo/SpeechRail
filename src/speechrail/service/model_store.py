@@ -19,6 +19,7 @@ from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from speechrail.config.model_catalog import (
+    ArtifactFile,
     ModelArtifact,
     ModelCatalog,
     RuntimeLock,
@@ -31,6 +32,7 @@ _REGISTRY_SCHEMA_VERSION = 1
 _REGISTRY_FILENAME = "model-preparations.json"
 _CHUNK_SIZE = 1024 * 1024
 _MAX_RETRIES = 3
+_NON_RUNTIME_DOCUMENT_PATHS = frozenset({"README.md"})
 
 DownloadStream = bytes | AsyncIterable[bytes] | Iterable[bytes]
 DownloadResult = DownloadStream | Awaitable[DownloadStream]
@@ -232,6 +234,28 @@ def _remove_tree(path: Path) -> None:
         raise ModelStoreError("could not clean model staging") from exc
 
 
+def _is_non_runtime_document(path: str) -> bool:
+    """Return whether an artifact-relative path is documentation, not runtime data."""
+    return path in _NON_RUNTIME_DOCUMENT_PATHS
+
+
+def _runtime_files(artifact: ModelArtifact) -> tuple[ArtifactFile, ...]:
+    return tuple(
+        item for item in artifact.files if not _is_non_runtime_document(item.path)
+    )
+
+
+def _runtime_file_count(artifact: ModelArtifact) -> int:
+    return len(_runtime_files(artifact))
+
+
+def _runtime_file_manifest(artifact: ModelArtifact) -> list[dict[str, object]]:
+    return [
+        {"path": item.path, "size": item.size, "sha256": item.sha256}
+        for item in _runtime_files(artifact)
+    ]
+
+
 def _file_manifest(artifact: ModelArtifact) -> list[dict[str, object]]:
     return [
         {"path": item.path, "size": item.size, "sha256": item.sha256}
@@ -391,6 +415,22 @@ def _artifact_entry(
     }
 
 
+def _entry_runtime_file_manifest(files: object) -> list[dict[str, object]] | None:
+    if not isinstance(files, list):
+        return None
+    runtime_files: list[dict[str, object]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        item_path = item.get("path")
+        if not isinstance(item_path, str):
+            return None
+        if _is_non_runtime_document(item_path):
+            continue
+        runtime_files.append(cast(dict[str, object], item))
+    return runtime_files
+
+
 def _entry_content_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -398,7 +438,7 @@ def _entry_content_matches_artifact(entry: object, artifact: ModelArtifact) -> b
     return (
         entry.get("revision") == artifact.revision
         and entry.get("sources") == expected_sources
-        and entry.get("files") == _file_manifest(artifact)
+        and _entry_runtime_file_manifest(entry.get("files")) == _runtime_file_manifest(artifact)
         and isinstance(entry.get("source"), dict)
         and entry["source"] in expected_sources
     )
@@ -558,12 +598,15 @@ def _verify_snapshot(
                 relative = path.relative_to(resolved_directory).as_posix()
             except ValueError:
                 return False
+            if _is_non_runtime_document(relative):
+                continue
             actual.add(relative)
 
-    expected = {item.path for item in artifact.files}
+    runtime_files = _runtime_files(artifact)
+    expected = {item.path for item in runtime_files}
     if actual != expected:
         return False
-    for item in artifact.files:
+    for item in runtime_files:
         try:
             path = safe_artifact_path(resolved_directory, item.path)
             if path.is_symlink() or not path.is_file() or path.stat().st_size != item.size:
@@ -600,11 +643,14 @@ def _artifact_integrity(
                 path = current_path / name
                 if path.is_symlink() or not path.is_file():
                     return "mismatch", verified
-                actual.add(path.relative_to(resolved_directory).as_posix())
+                relative = path.relative_to(resolved_directory).as_posix()
+                if not _is_non_runtime_document(relative):
+                    actual.add(relative)
 
-        expected = {item.path for item in artifact.files}
+        runtime_files = _runtime_files(artifact)
+        expected = {item.path for item in runtime_files}
         integrity: ModelIntegrity = "mismatch" if actual != expected else "verified"
-        for item in artifact.files:
+        for item in runtime_files:
             path = safe_artifact_path(resolved_directory, item.path)
             if (
                 path.is_symlink()
@@ -701,7 +747,7 @@ def inspect_prepared_artifacts(
                 state=state,
                 integrity=integrity,
                 verified_file_count=verified_count,
-                total_file_count=len(artifact.files),
+                total_file_count=_runtime_file_count(artifact),
             )
         )
     if len(persistent_cache) != initial_cache_len:

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from speechrail.config.model_catalog import (
+    ArtifactFile,
     ModelCatalog,
     RuntimeLock,
     SourceLocation,
@@ -191,6 +192,34 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
         }
     )
     return catalog, payloads
+
+
+def _catalog_with_document(
+    *,
+    path: str = "README.md",
+    payload: bytes = b"fixture document",
+) -> tuple[ModelCatalog, dict[tuple[str, str], bytes]]:
+    catalog, payloads = _catalog()
+    document = ArtifactFile(
+        path=path,
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    artifacts = tuple(
+        item.model_copy(update={"files": (document, *item.files)})
+        if item.key == "design"
+        else item
+        for item in catalog.artifacts
+    )
+    return (
+        ModelCatalog.model_validate(
+            {
+                **catalog.model_dump(),
+                "artifacts": [item.model_dump() for item in artifacts],
+            }
+        ),
+        {**payloads, ("fixture/design", path): payload},
+    )
 
 
 class FakeDownloader:
@@ -635,6 +664,73 @@ async def test_prepare_adopts_verified_snapshot_without_registry(tmp_path: Path)
     assert resolve_prepared_models(
         adopted_id, app_home=tmp_path, catalog=catalog, runtime_lock=lock
     )
+
+
+@pytest.mark.anyio
+async def test_prepare_adopts_mismatched_top_level_readme_without_download(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog_with_document()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+
+    readme = tmp_path / "models" / "design" / "README.md"
+    readme.write_bytes(b"locally changed documentation")
+    (tmp_path / "state" / "model-preparations.json").unlink()
+
+    downloader = FakeDownloader(payloads)
+    adopted_id = await _prepare(tmp_path, catalog, lock, downloader)
+
+    assert adopted_id == prepared_id
+    assert downloader.calls == []
+    statuses = {
+        item.key: item
+        for item in inspect_prepared_artifacts(
+            tmp_path, catalog=catalog, runtime_lock=lock
+        )
+    }
+    assert statuses["design"].state == "verified"
+    assert statuses["design"].integrity == "verified"
+    assert statuses["design"].verified_file_count == 7
+    assert statuses["design"].total_file_count == 7
+
+
+@pytest.mark.anyio
+async def test_prepare_rejects_mismatched_runtime_file_when_readme_is_exempt(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog_with_document()
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+
+    (tmp_path / "models" / "design" / "config.json").write_bytes(b"corrupt")
+    (tmp_path / "state" / "model-preparations.json").unlink()
+    downloader = FakeDownloader(payloads)
+    downloader.queue("fixture/design", "config.json", b"corrupt download")
+
+    with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
+        await _prepare(tmp_path, catalog, lock, downloader, max_retries=0)
+
+    assert ("fixture", "fixture/design", "config.json") in downloader.calls
+
+
+@pytest.mark.anyio
+async def test_nested_readme_remains_part_of_integrity(tmp_path: Path) -> None:
+    catalog, payloads = _catalog_with_document(path="docs/README.md")
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+
+    (tmp_path / "models" / "design" / "docs" / "README.md").write_bytes(b"corrupt")
+    (tmp_path / "state" / "model-preparations.json").unlink()
+    downloader = FakeDownloader(payloads)
+    downloader.queue(
+        "fixture/design", "docs/README.md", b"corrupt nested documentation"
+    )
+
+    with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
+        await _prepare(tmp_path, catalog, lock, downloader, max_retries=0)
+
+    assert ("fixture", "fixture/design", "docs/README.md") in downloader.calls
 
 
 @pytest.mark.anyio

@@ -4,7 +4,7 @@
 
 **Goal:** Ensure local model status, preparation, verified reuse, and download all resolve one `app_home/models` root, and retire only the unused Q4 artifacts and their exact local directories.
 
-**Architecture:** Add one shared model-root resolver used by preparation, inspection, and disk accounting. Let preparation adopt an existing artifact only after verifying every locked manifest file, then atomically write the current registry entry; otherwise retain the existing staged-download and verified-publication transaction. Remove the two unused Q4 artifacts from the catalog source and generated asset, preserve Q8/BF16 profiles, and move only the exact Q4 data directories to Trash after validation.
+**Architecture:** Add one shared model-root resolver used by preparation, inspection, and disk accounting. Let preparation adopt an existing artifact only after verifying every locked runtime file, excluding only the artifact-root `README.md`, then atomically write the current registry entry; otherwise retain the existing staged-download and verified-publication transaction. Remove the two unused Q4 artifacts from the catalog source and generated asset, preserve Q8/BF16 profiles, and move only the exact Q4 data directories to Trash after validation.
 
 **Tech Stack:** Python 3.12, Pydantic catalog models, `uv`, pytest, JSON catalog generator, Swift/Foundation only if needed for recoverable macOS Trash movement.
 
@@ -22,7 +22,7 @@
 ## Review Focus
 
 1. **App-home paths containing spaces:** storage, integrity checks, and disk totals still resolve the same `<app_home>/models`; pin this in Task 1.
-2. **Verified but unregistered snapshot:** reuse only after the active catalog manifest fully verifies every file, then register it without a downloader call; pin this in Task 2.
+2. **Verified but unregistered snapshot:** reuse only after the active runtime manifest fully verifies every file, excluding only the artifact-root `README.md`, then register it without a downloader call; pin this in Task 2.
 3. **Missing or digest-mismatched files:** fall back to staged download and never mark the partial destination ready; preserve existing rollback behavior in Task 2 tests.
 4. **Path escape or symlinked model root:** retain existing fail-closed path validation and symlink policy; add/retain a regression assertion in Task 1.
 5. **Q4 cleanup boundary:** remove no Q8/BF16 directories or mixed release snapshots; verify exact targets before Trash movement in Task 4.
@@ -76,7 +76,7 @@ Expected: PASS; existing path-escape and model-root-symlink protections continue
 - Test: `tests/test_model_store.py`
 
 **Interfaces:**
-- `_cache_path` may return an unregistered canonical `models/<artifact.key>` directory only when `_verify_snapshot` confirms the complete active artifact manifest; an exact registered path is reusable only when its source revision, source set, and file manifest match the active artifact; metadata-only model_id/quantization changes with identical content reuse verified bytes.
+- `_cache_path` may return an unregistered canonical `models/<artifact.key>` directory only when `_verify_snapshot` confirms the complete active runtime manifest, excluding only the artifact-root `README.md`; an exact registered path is reusable only when its source revision, source set, and file manifest match the active artifact; metadata-only model_id/quantization changes with identical content reuse verified bytes.
 - If the registry identifies the canonical destination as a prior publication for a different source/content identity, `prepare_models` moves it to the existing `.releases/<operation_id>/<artifact.key>` backup before download, restores it on failure/cancellation, and updates historical registry paths only after successful publish. Public payload shapes remain unchanged.
 
 - [x] **Step 1: Add the failing orphan-adoption test**
