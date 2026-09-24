@@ -534,12 +534,19 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - 成功或生成期失败均将脱敏报告落至仓库外 `report.json`，并保存完整/部分 `probe.wav`；报告包含 artifact manifest 摘要哈希、校验文件数、精度结构、分块/terminal/耗时/资源摘要和稳定失败码，不包含模型路径、speaker、reference transcript、输入 schedule 原文或 generation identity 原值。通过只记为 `streaming_contract_passed`，且 `correctness_review=pending_manual_audio_review`，不得当作音色/自然度验收。
 - 验证：探针契约测试 `9 passed`（当前 `.venv` CPython 3.12.14）；定向 Ruff 与 `.venv` mypy（131 个源码文件）通过；CPython 3.14.7 `py_compile` 通过，CLI `--help` 可用。未在3.14.7候选开发环境重跑本轮 pytest/mypy。
 - **Ruling：** 先固定 probe-only SPI，再写模型代码，可让真实门只接受同一generation identity、单次initial prefill、首PCM之后append、append后有新PCM及安全terminal；代价是fork必须实现该SPI，但它不构成生产API或已验证模型能力。
-- **未完成/阻塞门：** 已在仓库外建立固定上游候选 checkout（commit `4ab7e6f7dedd69a136cfaa318c5dc8aed5119446`）；当前仍为 detached HEAD 且 clean，未作修改。未加载任何模型、未产生真实报告，也未验证声学正确性、性能或资源峰值。真实模型验收前需用户明确授权加载已存在的 CustomVoice q8、Base q8、Base bf16；Base 参考音频与对应文本需由用户指定。此授权不包含下载模型、启动/切换服务或UI自动化。
+- **未完成/阻塞门：** 固定上游候选 checkout 的基线为 `4ab7e6f7dedd69a136cfaa318c5dc8aed5119446`；其本地候选分支 `codex/speechrail-incremental-tts-poc` 当前 HEAD 为 `d9a0ade`，仅提交了下方纯文本状态机辅助代码，未修改安装 runtime、wheel、远端仓库或服务。未加载任何模型、未产生真实报告，也未验证声学正确性、性能或资源峰值。真实模型验收前需用户明确授权加载已存在的 CustomVoice q8、Base q8、Base bf16；Base 参考音频与对应文本需由用户指定。此授权不包含下载模型、启动/切换服务或UI自动化。
 
 #### W4 固定上游源码复核（2026-09-24）
 
 - **CustomVoice（静态源码证据）：** 在固定 commit 的 `qwen3_tts.py` 中，`_prepare_generation_inputs` 将 role/codec 条件与第一个目标文本 token 放进初始 prefill，其余目标文本 token 和 `tts_eos` 放入 `trailing_text_hidden`。`_generate_with_instruct` 在逐 codec 帧生成期间复用 talker KV cache；文本尾部耗尽后原实现改用 pad embedding，采样到 `codec_eos_token_id` 就结束。stream 输出会重置 decoder 状态，并通过 `streaming_step` 增量解码。由此推断，真增量扩展必须只替换尚未消费的文本尾部，在未 finish 时于输入暂空处等待而非提交最终 EOS，并验证文本 token 边界和 decoder 最后输出；原有“全文已知”的循环不能直接复用为 append 协议。
 - **Base ICL（静态源码证据）：** `_prepare_icl_generation_inputs` 把完整 reference text 与 target text 一起 token 化，并将 text/EOS 与 reference codec 条件共同放入初始 prompt；`trailing_text_hidden` 初始仅为 pad embedding。因此首 PCM 后追加文本不等价于延长已有目标文本队列；Base 必须独立验证 KV/位置/声学对齐，不能从 CustomVoice 的结果推断支持。
 - **证据边界：** 上述内容是对固定源码的静态审查与结构推断，不是权重运行结果，也不证明任何档位可用。W4 仍须分别通过 CustomVoice q8、Base q8、Base bf16 的真实模型门；fake 测试只证明探针契约。
+
+#### W4 增量文本控制状态候选（2026-09-24）
+
+- 固定上游候选分支新增 `incremental.py` 中的 `StableTextTokenBuffer` 与 `IncrementalTokenFeeder`，分别负责完整累计文本重分词后的已消费前缀保护，以及 `waiting_for_text` / TTS EOS 单次注入 / codec EOS 延迟开放状态；对应候选提交为 `58acd00`、`d18a732`、`d9a0ade`。这些辅助类型尚未接入 Qwen3-TTS 的 talker/cache/vocoder 循环，也不是生产能力。
+- 确定性验收：8 项状态测试通过；Ruff 检查通过；CPython 3.14.7 `py_compile` 通过。pytest 实际用仓库 `.venv` 的 CPython 3.12.14 运行，并出现 2 条 pytest-asyncio 配置项无法识别的 `PytestConfigWarning`；本轮未在 3.14.7 下运行 pytest/mypy。
+- **性能风险 / Ruling：** 为检测 tokenizer 边界变化，buffer 每次 append 都重新编码累计文本；这保证未消费尾部可重算、已消费前缀不被静默改写，但多次短 append 的总工作量可能呈二次增长。因此它是正确性优先的 W4 候选，不满足低延迟验收，也不能直接用于生产；必须接入实际 tokenizer 后测量，并在不破坏前缀保证的前提下优化或据实判门失败。
+- **未完成：** 未编写或运行真实模型 session adapter；未验证 q8 / bf16、增量 PCM、EOS、decoder 尾部、资源峰值、首音延迟或音色/文本正确性。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
