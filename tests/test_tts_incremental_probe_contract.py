@@ -11,6 +11,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.probe_tts_incremental import (
+    BASE_SCHEDULE_ID,
+    SCHEDULE_ID,
     ProbeEvent,
     ProbeInputError,
     ProbeRequest,
@@ -83,7 +85,7 @@ def _request(
         variant=variant,
         precision=precision,
         output_dir=tmp_path / "probe-output",
-        schedule="append-after-first-pcm-v1",
+        schedule=BASE_SCHEDULE_ID if variant == "base" else SCHEDULE_ID,
         speaker=speaker,
         reference_audio=reference_audio,
         reference_text_file=reference_text_file,
@@ -216,6 +218,7 @@ def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None
     class FakeSession:
         generation_identity = "local-generation-secret-id"
         initial_prefill_count = 0
+        prefill_target_tokens = 0
         sample_rate = 24_000
         peak_memory_bytes = 123_456
 
@@ -228,8 +231,9 @@ def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None
                 ProbeEvent("finished", b"", 24_000, self.generation_identity),
             ]
 
-        def append_text(self, text: str) -> None:
+        def append_text(self, text: str) -> tuple[int, ...]:
             self.appended.append(text)
+            return (1, 2, 3) if len(self.appended) == 1 else (4, 5)
 
         def finish_input(self) -> None:
             self.finished = True
@@ -238,6 +242,7 @@ def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None
             assert max_steps > 0
             assert self.appended == ["你好，"] or self.finished
             self.initial_prefill_count = 1
+            self.prefill_target_tokens = 1
             return self.events.pop(0)
 
         def cancel(self) -> None:
@@ -247,12 +252,20 @@ def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None
             pass
 
     session = FakeSession()
-    evidence = run_probe_session(session, artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+    evidence = run_probe_session(
+        session,
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
 
     assert session.appended == ["你好，", "现在继续完成连续语音增量测试。"]
     assert session.finished is True
     assert evidence.report["append_after_first_pcm"] is True
     assert evidence.report["initial_prefill_count"] == 1
+    assert evidence.report["initial_text_token_count"] == 3
+    assert evidence.report["prefill_target_tokens"] == 1
+    assert evidence.report["appended_text_token_count"] == 2
     assert evidence.report["terminal"] is True
     assert evidence.report["sample_count"] == 10
     assert evidence.report["generation_identity_sha256"] == hashlib.sha256(
@@ -268,11 +281,12 @@ def test_probe_writes_sanitized_failure_evidence_when_first_pcm_is_missing(
     class FakeSession:
         generation_identity = "generation-1"
         initial_prefill_count = 0
+        prefill_target_tokens = 0
         sample_rate = 24_000
         peak_memory_bytes = None
 
-        def append_text(self, text: str) -> None:
-            pass
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
 
         def finish_input(self) -> None:
             raise AssertionError("must fail before input is finished")
@@ -287,7 +301,12 @@ def test_probe_writes_sanitized_failure_evidence_when_first_pcm_is_missing(
             pass
 
     with pytest.raises(ProbeSessionError) as failure:
-        run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+        run_probe_session(
+        FakeSession(),
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
 
     assert failure.value.failure_code == "backend_waited_for_text_before_first_pcm"
     assert failure.value.evidence is not None
@@ -308,11 +327,12 @@ def test_probe_rejects_pcm_before_initial_prefill() -> None:
     class FakeSession:
         generation_identity = "generation-1"
         initial_prefill_count = 0
+        prefill_target_tokens = 0
         sample_rate = 24_000
         peak_memory_bytes = None
 
-        def append_text(self, text: str) -> None:
-            pass
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
 
         def finish_input(self) -> None:
             raise AssertionError("must fail before input is finished")
@@ -327,7 +347,12 @@ def test_probe_rejects_pcm_before_initial_prefill() -> None:
             pass
 
     with pytest.raises(ProbeSessionError) as failure:
-        run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+        run_probe_session(
+        FakeSession(),
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
 
     assert failure.value.failure_code == "initial_prefill_count_invalid"
     assert failure.value.evidence is not None
@@ -339,14 +364,15 @@ def test_probe_rejects_a_second_initial_prefill_after_first_pcm() -> None:
     class FakeSession:
         generation_identity = "generation-1"
         initial_prefill_count = 0
+        prefill_target_tokens = 0
         sample_rate = 24_000
         peak_memory_bytes = None
 
         def __init__(self) -> None:
             self.steps = 0
 
-        def append_text(self, text: str) -> None:
-            pass
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
 
         def finish_input(self) -> None:
             pass
@@ -365,7 +391,12 @@ def test_probe_rejects_a_second_initial_prefill_after_first_pcm() -> None:
             pass
 
     with pytest.raises(ProbeSessionError) as failure:
-        run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+        run_probe_session(
+        FakeSession(),
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
 
     assert failure.value.failure_code == "initial_prefill_count_changed"
     assert failure.value.evidence is not None
@@ -376,6 +407,7 @@ def test_invalid_session_metadata_is_closed_before_rejection() -> None:
     class FakeSession:
         generation_identity = "generation-1"
         initial_prefill_count = 2
+        prefill_target_tokens = 1
         sample_rate = 24_000
         peak_memory_bytes = None
 
@@ -400,7 +432,12 @@ def test_invalid_session_metadata_is_closed_before_rejection() -> None:
 
     session = FakeSession()
     with pytest.raises(ProbeSessionError) as failure:
-        run_probe_session(session, artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+        run_probe_session(
+        session,
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
 
     assert failure.value.failure_code == "initial_prefill_count_invalid"
     assert session.cancelled is True
@@ -411,6 +448,7 @@ def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> 
     class FakeSession:
         generation_identity = "sensitive-generation-id"
         initial_prefill_count = 0
+        prefill_target_tokens = 0
         sample_rate = 24_000
         peak_memory_bytes = 10
 
@@ -421,14 +459,15 @@ def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> 
                 ProbeEvent("finished", b"", 24_000, self.generation_identity),
             ]
 
-        def append_text(self, text: str) -> None:
-            pass
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
 
         def finish_input(self) -> None:
             pass
 
         def step(self, *, max_steps: int) -> ProbeEvent:
             self.initial_prefill_count = 1
+            self.prefill_target_tokens = 1
             return self.events.pop(0)
 
         def cancel(self) -> None:
@@ -438,7 +477,12 @@ def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> 
             pass
 
     request = _request(tmp_path)
-    evidence = run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+    evidence = run_probe_session(
+        FakeSession(),
+        artifact=_artifact(),
+        vendor_commit=VENDOR_COMMIT,
+        schedule_id=SCHEDULE_ID,
+    )
     paths = write_probe_output(evidence, request.output_dir)
 
     assert paths.audio.is_file()
@@ -448,3 +492,110 @@ def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> 
     assert "你好" not in payload
     assert str(request.model_dir) not in payload
     assert '"audio_file": "probe.wav"' in payload
+
+
+def test_probe_rejects_a_schedule_that_does_not_match_the_variant(tmp_path: Path) -> None:
+    base = replace(
+        _request(tmp_path, variant="base", precision="q8", speaker=None),
+        schedule=SCHEDULE_ID,
+    )
+    with pytest.raises(ProbeInputError, match="unsupported probe schedule"):
+        base.validate(repository_root=tmp_path / "repo")
+
+    custom = replace(_request(tmp_path, speaker="Vivian"), schedule=BASE_SCHEDULE_ID)
+    with pytest.raises(ProbeInputError, match="unsupported probe schedule"):
+        custom.validate(repository_root=tmp_path / "repo")
+
+
+def test_probe_requires_a_base_schedule_that_crosses_the_prefill_window(
+    tmp_path: Path,
+) -> None:
+    """A prefill that swallowed the whole initial text proves nothing about append."""
+
+    class FakeSession:
+        generation_identity = "generation-1"
+        initial_prefill_count = 0
+        prefill_target_tokens = 0
+        sample_rate = 24_000
+        peak_memory_bytes = None
+
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
+
+        def finish_input(self) -> None:
+            raise AssertionError("must not reach finish for a fully prefilled text")
+
+        def step(self, *, max_steps: int) -> ProbeEvent:
+            self.initial_prefill_count = 1
+            self.prefill_target_tokens = 3
+            return ProbeEvent("pcm", b"\x01\x00", 24_000, self.generation_identity)
+
+        def cancel(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    with pytest.raises(ProbeSessionError) as failure:
+        run_probe_session(
+            FakeSession(),
+            artifact=_artifact(),
+            vendor_commit=VENDOR_COMMIT,
+            schedule_id=BASE_SCHEDULE_ID,
+        )
+
+    assert failure.value.failure_code == "prefill_did_not_enter_trailing_region"
+    assert failure.value.evidence is not None
+    report = failure.value.evidence.report
+    assert report["status"] == "streaming_contract_failed"
+    assert report["initial_text_token_count"] == 3
+    assert report["prefill_target_tokens"] == 3
+    assert report["appended_text_token_count"] == 0
+    assert report["input_schedule_id"] == BASE_SCHEDULE_ID
+
+
+def test_probe_rejects_a_prefill_window_that_changes_after_first_pcm() -> None:
+    class FakeSession:
+        generation_identity = "generation-1"
+        initial_prefill_count = 0
+        prefill_target_tokens = 0
+        sample_rate = 24_000
+        peak_memory_bytes = None
+
+        def __init__(self) -> None:
+            self.steps = 0
+            self.events = [
+                ProbeEvent("pcm", b"\x01\x00" * 2, 24_000, self.generation_identity),
+                ProbeEvent("pcm", b"\x02\x00" * 2, 24_000, self.generation_identity),
+                ProbeEvent("finished", b"", 24_000, self.generation_identity),
+            ]
+
+        def append_text(self, text: str) -> tuple[int, ...]:
+            return (1, 2, 3)
+
+        def finish_input(self) -> None:
+            pass
+
+        def step(self, *, max_steps: int) -> ProbeEvent:
+            self.steps += 1
+            self.initial_prefill_count = 1
+            self.prefill_target_tokens = 1 if self.steps <= 2 else 2
+            return self.events.pop(0)
+
+        def cancel(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    with pytest.raises(ProbeSessionError) as failure:
+        run_probe_session(
+            FakeSession(),
+            artifact=_artifact(),
+            vendor_commit=VENDOR_COMMIT,
+            schedule_id=BASE_SCHEDULE_ID,
+        )
+
+    assert failure.value.failure_code == "prefill_target_tokens_changed"
+    assert failure.value.evidence is not None
+    assert failure.value.evidence.report["prefill_target_tokens"] == 1

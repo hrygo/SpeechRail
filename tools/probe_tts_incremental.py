@@ -28,6 +28,7 @@ Variant = Literal["custom_voice", "base"]
 Precision = Literal["q8", "bf16"]
 EventKind = Literal["pcm", "waiting_for_text", "finished", "error"]
 SCHEDULE_ID = "append-after-first-pcm-v1"
+BASE_SCHEDULE_ID = "base-trailing-after-first-pcm-v1"
 _VENDOR_MODULE = "mlx_audio.tts.models.qwen3_tts.incremental_probe"
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _FAILURE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -67,8 +68,9 @@ class ProbeRequest:
     seed: int = 17
 
     def validate(self, *, repository_root: Path) -> None:
-        if self.schedule != SCHEDULE_ID:
-            raise ProbeInputError("unsupported probe schedule")
+        expected_schedule = BASE_SCHEDULE_ID if self.variant == "base" else SCHEDULE_ID
+        if self.schedule != expected_schedule:
+            raise ProbeInputError("unsupported probe schedule for the selected variant")
         if not self.artifact_key or any(character.isspace() for character in self.artifact_key):
             raise ProbeInputError("artifact key is invalid")
         if self.variant == "custom_voice":
@@ -159,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="new directory outside the repository"
     )
-    parser.add_argument("--schedule", choices=(SCHEDULE_ID,), required=True)
+    parser.add_argument("--schedule", choices=(SCHEDULE_ID, BASE_SCHEDULE_ID), required=True)
     parser.add_argument("--speaker", help="required for CustomVoice; never included in the report")
     parser.add_argument(
         "--reference-audio", type=Path, help="Base reference audio outside the repository"
@@ -264,10 +266,17 @@ class ProbeSession(Protocol):
         """Zero before first text prefill, then exactly one for this generation."""
         ...
 
+    @property
+    def prefill_target_tokens(self) -> int:
+        """Target text tokens already consumed by the single initial prefill."""
+        ...
+
     sample_rate: int
     peak_memory_bytes: int | None
 
-    def append_text(self, text: str) -> None: ...
+    def append_text(self, text: str) -> Sequence[int]:
+        """Commit stable text and report the not-yet-consumed token suffix."""
+        ...
 
     def finish_input(self) -> None: ...
 
@@ -326,7 +335,37 @@ _SCHEDULES: dict[str, _Schedule] = {
         initial_text="你好，",
         appended_text="现在继续完成连续语音增量测试。",
     ),
+    BASE_SCHEDULE_ID: _Schedule(
+        initial_text=(
+            "你好，我现在开始进行连续语音增量测试。"
+            "为了确认后续文本能够继续发声，请保持自然语速和清晰发音。"
+        ),
+        appended_text="追加内容现在继续，保持自然语速并完整结束。",
+    ),
 }
+
+
+def _token_ids(value: object) -> tuple[int, ...]:
+    """Validate the token suffix a session committed for one text append."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ProbeSessionError("vendor_token_ids_invalid")
+    tokens = tuple(value)
+    if not tokens or any(
+        isinstance(token, bool) or not isinstance(token, int) for token in tokens
+    ):
+        raise ProbeSessionError("vendor_token_ids_invalid")
+    return tokens
+
+
+def _prefill_target_tokens(session: ProbeSession) -> int:
+    """Read how many target tokens the single prefill put inside the KV state."""
+    try:
+        value = session.prefill_target_tokens
+    except AttributeError as exc:
+        raise ProbeSessionError("prefill_target_tokens_missing") from exc
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProbeSessionError("prefill_target_tokens_invalid")
+    return value
 
 
 def _event(raw: object) -> ProbeEvent:
@@ -378,7 +417,7 @@ def run_probe_session(
     *,
     artifact: ModelArtifact,
     vendor_commit: str,
-    schedule_id: str = SCHEDULE_ID,
+    schedule_id: str,
     package_version: str = "unknown",
     verified_file_count: int | None = None,
 ) -> ProbeEvidence:
@@ -413,6 +452,9 @@ def run_probe_session(
     append_at: float | None = None
     next_pcm_after_append_at: float | None = None
     appended_text_count = 0
+    initial_token_count: int | None = None
+    appended_token_count = 0
+    prefill_target: int | None = None
     terminal = False
     started = time.monotonic()
     deadline = started + _TOTAL_TIMEOUT_SECONDS
@@ -458,6 +500,9 @@ def run_probe_session(
             "mlx_audio_version": package_version,
             "input_schedule_id": schedule_id,
             "initial_prefill_count": prefill_count,
+            "initial_text_token_count": initial_token_count,
+            "prefill_target_tokens": prefill_target,
+            "appended_text_token_count": appended_token_count,
             "append_after_first_pcm": (
                 first_pcm_at is not None and append_at is not None and append_at > first_pcm_at
             ),
@@ -522,7 +567,7 @@ def run_probe_session(
         raise ProbeSessionError("incremental_generation_timed_out")
 
     try:
-        session.append_text(schedule.initial_text)
+        initial_token_count = len(_token_ids(session.append_text(schedule.initial_text)))
         refresh_prefill_count()
         first_deadline = started + _FIRST_PCM_TIMEOUT_SECONDS
         while first_pcm_at is None:
@@ -536,8 +581,15 @@ def run_probe_session(
             if event.kind == "finished":
                 raise ProbeSessionError("backend_finished_before_first_pcm")
 
+        # The initial text must cross the single prefill window: text already
+        # consumed by prefill never produces a frame-by-frame text input, so a
+        # session that prefilled all of it cannot prove incremental streaming.
+        prefill_target = _prefill_target_tokens(session)
+        if prefill_target >= initial_token_count:
+            raise ProbeSessionError("prefill_did_not_enter_trailing_region")
+
         append_at = time.monotonic()
-        session.append_text(schedule.appended_text)
+        appended_token_count = len(_token_ids(session.append_text(schedule.appended_text)))
         refresh_prefill_count(require_one=True)
         appended_text_count = 1
         session.finish_input()
@@ -558,6 +610,8 @@ def run_probe_session(
         if next_pcm_after_append_at is None:
             raise ProbeSessionError("pcm_after_append_missing")
         refresh_prefill_count(require_one=True)
+        if _prefill_target_tokens(session) != prefill_target:
+            raise ProbeSessionError("prefill_target_tokens_changed")
         if session.generation_identity != generation_identity:
             raise ProbeSessionError("generation_identity_changed")
         pcm16 = b"".join(pcm_chunks)
@@ -681,6 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session,
             artifact=artifact,
             vendor_commit=vendor_commit,
+            schedule_id=request.schedule,
             package_version=package_version,
             verified_file_count=verified_file_count,
         )
