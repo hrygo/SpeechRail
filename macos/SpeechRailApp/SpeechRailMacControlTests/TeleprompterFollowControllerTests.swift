@@ -43,6 +43,35 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.mode == .manual)
     }
 
+    @Test func manualPositionMovementPreservesLineOffsetAndClampsToSegmentLength() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController(currentIndex: 1, mode: .manual)
+
+        controller.manualMove(
+            to: TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 5),
+            segmentCount: segments.count,
+            segmentUTF16Lengths: segments.map { $0.text.utf16.count }
+        )
+        #expect(controller.position == TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 5))
+        #expect(controller.mode == .manual)
+
+        controller.manualMove(
+            to: TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 10_000),
+            segmentCount: segments.count,
+            segmentUTF16Lengths: segments.map { $0.text.utf16.count }
+        )
+        #expect(controller.position.segmentIndex == 0)
+        #expect(controller.position.utf16Offset == segments[0].text.utf16.count)
+
+        controller.manualMove(
+            to: TeleprompterAligner.Position(segmentIndex: -10, utf16Offset: -1),
+            segmentCount: segments.count,
+            segmentUTF16Lengths: segments.map { $0.text.utf16.count }
+        )
+        #expect(controller.position == TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 0))
+
+    }
+
     @Test func differentSegmentManualMoveStartsAtParagraphBeginning() throws {
         let segments = try script()
         var controller = TeleprompterFollowController()

@@ -2285,13 +2285,13 @@ public struct TeleprompterView: View {
                 .frame(width: SpeechRailDesignTokens.Teleprompter.stageTransparencyValueWidth, alignment: .trailing)
         }
 
-        let segmentCountStepper = Stepper(
-            "显示 \(settings.visibleSegmentCount) 段",
+        let visibleLineCountStepper = Stepper(
+            "显示 \(settings.visibleLineCount) 行",
             value: Binding(
-                get: { settings.visibleSegmentCount },
-                set: { settings.visibleSegmentCount = $0 }
+                get: { settings.visibleLineCount },
+                set: { settings.visibleLineCount = $0 }
             ),
-            in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+            in: SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount...SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount
         )
         .font(SpeechRailDesignTokens.Typography.caption)
 
@@ -2308,7 +2308,7 @@ public struct TeleprompterView: View {
                 divider
                 fontScaleGroup
                 opacityGroup
-                segmentCountStepper
+                visibleLineCountStepper
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 streamingTip
@@ -2323,7 +2323,7 @@ public struct TeleprompterView: View {
 
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
                     opacityGroup
-                    segmentCountStepper
+                    visibleLineCountStepper
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                     streamingTip
                 }
@@ -2338,7 +2338,7 @@ public struct TeleprompterView: View {
                 opacityGroup
 
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    segmentCountStepper
+                    visibleLineCountStepper
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                     streamingTip
                 }

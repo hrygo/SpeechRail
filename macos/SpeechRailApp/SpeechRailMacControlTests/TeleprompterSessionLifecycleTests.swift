@@ -254,6 +254,39 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.currentSegmentIndex == 1)
     }
 
+    @Test("manual display-line positioning preserves UTF-16 offsets and takes over voice assist")
+    func manualDisplayLinePositionUsesExistingTakeover() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "UTF-16 行定位",
+            sourceText: "第一段😀内容。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segments = try #require(harness.session.activeVersion?.segments)
+        #expect(segments.count == 3)
+
+        harness.session.moveToReadingPosition(
+            TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 5)
+        )
+        #expect(harness.session.currentSegmentIndex == 0)
+        #expect(harness.session.readingOffset == 5)
+
+        await harness.session.enableVoiceAssist()
+        let client = try #require(harness.clientFactory.clients.first)
+        harness.session.moveToReadingPosition(
+            TeleprompterAligner.Position(segmentIndex: 1, utf16Offset: 3)
+        )
+        await waitFor { await client.currentCounters().closeCount == 1 }
+
+        #expect(harness.session.currentSegmentIndex == 1)
+        #expect(harness.session.readingOffset == 3)
+        #expect(harness.session.voiceAssistState == .pausedByUser)
+        #expect(harness.sourceFactory.sources.first?.stopCount == 1)
+        #expect(harness.coordinator.occupancy == nil)
+        await harness.session.closeStage()
+    }
+
     @Test("manual open rejects while another session operation owns the transition")
     func manualOpenRejectsWhileSessionIsPreparing() async throws {
         let connectGate = TestGate()
