@@ -8,7 +8,6 @@ import contextlib
 import logging
 import re
 import time
-import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
@@ -16,17 +15,6 @@ from typing import Any
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
-
-with warnings.catch_warnings():
-    # SpeechRail supports Python 3.12 only.  ``ratecv`` is a stateful C
-    # implementation that preserves sample continuity across WebSocket frames;
-    # suppress its Python-3.13 removal warning until the supported runtime moves.
-    warnings.filterwarnings(
-        "ignore",
-        message="'audioop' is deprecated and slated for removal in Python 3.13",
-        category=DeprecationWarning,
-    )
-    import audioop
 
 from speechrail.application.diarization import (
     DiarizationSession,
@@ -120,31 +108,6 @@ _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 logger = logging.getLogger(__name__)
 
 
-class Pcm16RateConverter:
-    """Stateful PCM16 mono rate conversion for the public 24 kHz profile."""
-
-    def __init__(self, *, input_rate: int, output_rate: int = 16_000) -> None:
-        self._input_rate = input_rate
-        self._output_rate = output_rate
-        self._state: Any = None
-
-    def convert(self, audio: bytes) -> bytes:
-        if len(audio) % 2:
-            raise RealtimeAdapterError("invalid_audio", "PCM16 audio must contain whole samples")
-        converted, self._state = audioop.ratecv(
-            audio,
-            2,
-            1,
-            self._input_rate,
-            self._output_rate,
-            self._state,
-        )
-        return converted
-
-    def reset(self) -> None:
-        self._state = None
-
-
 class OpenAIRealtimeSession:
     """Own one protocol-independent ASR/TTS session lifecycle.
 
@@ -230,8 +193,6 @@ class OpenAIRealtimeSession:
         self._last_partial_text = ""
         self._alignment_pcm.clear()
         self._alignment_overflow = False
-        self._input_sample_rate = 16_000
-        self._input_resampler: Pcm16RateConverter | None = None
         self._vad: Any = None
         self._shadow_vad: Any = None
         self._speech_admission: SpeechAdmission | None = None
@@ -270,7 +231,6 @@ class OpenAIRealtimeSession:
             "model": self._initial_model,
             "language": None,
             "prompt": "",
-            "input_sample_rate": 16_000,
             "expected_model_revision": None,
             "tts_enabled": False,
             "transcription_partial_mode": "delta",
@@ -345,8 +305,6 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
-        if self._input_resampler is not None:
-            self._input_resampler.reset()
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
@@ -478,12 +436,6 @@ class OpenAIRealtimeSession:
             config["tts_enabled"] = requested_tts_enabled
         else:
             config.setdefault("tts_enabled", False)
-        input_sample_rate = int(config.get("input_sample_rate", 16_000))
-        if self._timeline.accepted_samples > 0 and input_sample_rate != self._input_sample_rate:
-            raise RealtimeAdapterError(
-                "invalid_state",
-                "audio input format cannot change after the first audio frame",
-            )
         previous_partial_mode = self._config.get("transcription_partial_mode", "delta")
         previous_chunk_duration_ms = int(
             self._config.get(
@@ -617,13 +569,6 @@ class OpenAIRealtimeSession:
             self._speech_admission = None
             self._vad_raw_buffer.clear()
 
-        if input_sample_rate != self._input_sample_rate:
-            self._input_sample_rate = input_sample_rate
-            self._input_resampler = (
-                Pcm16RateConverter(input_rate=input_sample_rate)
-                if input_sample_rate != 16_000
-                else None
-            )
         self._config = config
         if requested_receipts is not None:
             self._render_receipts_enabled = requested_receipts
@@ -836,8 +781,6 @@ class OpenAIRealtimeSession:
             buffered_bytes=0,
             max_buffer_bytes=None,
         )
-        if self._input_resampler is not None:
-            audio = self._input_resampler.convert(audio)
         max_buf = self._settings.max_realtime_buffer_bytes
         if max_buf is not None and len(audio) > max_buf:
             raise RealtimeAdapterError(

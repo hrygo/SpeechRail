@@ -952,7 +952,6 @@ def apply_session_update(
     if "turn_detection" in session:
         turn_detection_val = turn_detection
         config["turn_detection"] = turn_detection_val
-    config.setdefault("input_sample_rate", 16_000)
 
     speechrail = session.get("speechrail")
     if isinstance(speechrail, dict) and "transcription" in speechrail:
