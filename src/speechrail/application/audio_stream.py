@@ -544,7 +544,7 @@ async def decode_upload(
     ffmpeg_executable: str | None = None,
     ffmpeg_path: Path | str | None = None,
     timeout_seconds: float | None = None,
-) -> AsyncGenerator[bytes, None]:
+) -> AsyncGenerator[bytes]:
     """将上传音频解码为 16 kHz mono PCM16, 并按块异步返回。
 
     ``ffmpeg_executable`` 仅用于确定性测试或已解析的受控调用方;

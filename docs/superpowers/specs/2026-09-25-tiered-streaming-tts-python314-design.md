@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.2"
+version: "1.3"
 date: 2026-09-24
 ---
 
@@ -277,15 +277,18 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | 阶段 | 状态 | 当前证据 / 未完成项 |
 |---|---|---|
 | W0 工作区基线 | complete | 基线 `25d4416f`；分支 `codex/tiered-streaming-tts-python314`；既有用户改动保留 |
-| W1 Realtime / audioop | complete | 移除不可达转换器；137 项 Realtime/caller-wire 回归、定向 Ruff、mypy通过；运行解释器仍为3.12.14，W2尚未验证目标3.14 |
-| W2–W11 | not started | 按实施指南逐阶段实施；真实模型与逐档性能不得由确定性测试替代 |
+| W1 Realtime / audioop | complete | 移除不可达转换器；137 项 Realtime/caller-wire 回归、定向 Ruff、mypy通过；该阶段验证时使用3.12.14，后续 W2 已独立验证3.14.7候选环境 |
+| W2 Python/runtime | complete | 3.14.7候选 runtime `--only-binary` 安装47个锁定包；MLX/ASR模块导入通过；`uv lock --check`、runtime-lock `--check`、zero-setup语法检查通过；9个定向测试文件352 passed、Ruff与130-file mypy通过。1个既有 Pydantic `mappingproxy` warning；未加载模型或切换正式服务 |
+| W3–W11 | not started | 按实施指南逐阶段实施；真实模型与逐档性能不得由确定性测试替代 |
 
-W1 对导入兼容性的验收是在当前解释器中阻断 `audioop` 导入后执行，不等价于 CPython 3.14 runtime/build 验收。
+W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
+
+W2 的 `requirements/shared.txt` 是 ASR/TTS role lock 的交集元数据，只参与 runtime identity/hash 校验，不作为安装输入。当前两种 role 共用一个 Python 环境，bootstrap 在一次 `uv pip sync` 中同时传入 `asr.txt` 与 `tts.txt`，因此 role-only 依赖仍安装；如需按 role 减少驻留依赖，必须先拆分环境并另行验证，不能把 shared 交集误解为依赖裁剪。
 
 ## 16. 评审结论与未验证项
 
 分档差异是方案的一部分：统一 Python/runtime、协议和生命周期，分开 CustomVoice 与 Base 增量实现，分开 q8/bf16 资源与声学验收。提高档位不是天然提高一致性，也不是天然降低延迟。
 
-尚未验证：完整 3.14 锁解析与运行、开放权重在两条 MLX 路径上的增量正确性、缓存内存预算、各档实际首音/取消/RTF、跨文本身份和 bf16 相对收益。这些分别由 A/B/F 门解决，不用占位实现掩盖。
+W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。尚未验证：开放权重在 CustomVoice 与 Base 两条路径上的真增量正确性、Metal 模型推理、缓存内存预算、各档实际首音/取消/RTF、跨文本身份和 bf16 相对收益。这些分别由 B/F 门解决，不用占位实现掩盖。
 
 本设计已获用户实施授权。进度按 Luna 指南逐阶段维护；本设计通过不代表尚未验证的运行态、声学质量或性能能力已获验收。

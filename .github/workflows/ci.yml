@@ -49,8 +49,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - name: Set up Python 3.12
-        run: uv python install 3.12
+      - name: Set up Python 3.14.7
+        run: uv python install 3.14.7
 
       - name: Install locked project dependencies
         run: uv sync --locked --extra dev --extra mcp
@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-26]
-        python-version: ["3.12"]
+        python-version: ["3.14.7"]
 
     steps:
       - name: Checkout repository
@@ -136,7 +136,7 @@ jobs:
           shopt -s nullglob
           wheels=(dist/speechrail-*.whl)
           test "${#wheels[@]}" -eq 1
-          uvx --python 3.12 --from "${wheels[0]}" speechrail install --help \
+          uvx --python 3.14.7 --from "${wheels[0]}" speechrail install --help \
             | grep -F 'usage: speechrail install'
 
       - name: Run test suite with coverage gate (Pytest)

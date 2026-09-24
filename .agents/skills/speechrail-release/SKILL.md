@@ -104,7 +104,7 @@ git diff --check
 uv build --no-sources --wheel
 python3 -m zipfile -l dist/speechrail-<version>-py3-none-any.whl
 shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
-uvx --python 3.12 --from dist/speechrail-<version>-py3-none-any.whl speechrail install --help
+uvx --python 3.14.7 --from dist/speechrail-<version>-py3-none-any.whl speechrail install --help
 ```
 
 测试清除环境中的 `SPEECHRAIL_API_KEY`，但不把任何凭据写入命令或输出。构建后核对文件名、dist-info、worker

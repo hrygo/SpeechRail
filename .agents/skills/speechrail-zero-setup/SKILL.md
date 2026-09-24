@@ -14,7 +14,7 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 
 ## 前置条件
 
-- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 26+ 与 Python 3.12 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 26+ 与 Python 3.14.7 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
   任何脚本中的较低版本检查都不构成当前项目基线的放行条件。
 - 依据目标 profile 的锁定制品、vendor runtime、wheel staging 与回退空间估算磁盘需求；脚本最小空间检查
   只是预检，不是完整容量保证。确认可访问所需锁定下载源。
@@ -43,10 +43,10 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
   --install-video-podcast-skill
 ```
 
-已有 `uv` 与 Python 3.12 时可直接调用核心安装器；同样必须显式确认：
+已有 `uv` 与 Python 3.14.7 时可直接调用核心安装器；同样必须显式确认：
 
 ```bash
-uv run --python 3.12 python \
+uv run --python 3.14.7 python \
   .agents/skills/speechrail-zero-setup/scripts/zero_setup.py \
   --yes --preset balanced
 ```
@@ -57,7 +57,7 @@ uv run --python 3.12 python \
 
 确认后依次完成：
 
-1. 检查架构、macOS、磁盘和依赖；缺失 Xcode CLT、Homebrew、`ffmpeg`、`uv` 或 Python 3.12 时按入口提示安装。
+1. 检查架构、macOS、磁盘和依赖；缺失 Xcode CLT、Homebrew、`ffmpeg`、`uv` 或 Python 3.14.7 时按入口提示安装。
 2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的 ASR/TTS 制品。`balanced`/`quality` 另按档位供给分人制品：从固定 Hugging Face revision 准备 CoreML Sortformer FP16 bundle，并从 ModelScope 按 `preset.aligner` 供给 `aligner-q8` / `aligner-bf16`；`light` 不供给任何分人制品。每个文件的 size 与 SHA-256 均须匹配锁定 manifest。
 3. 将已校验制品原子发布到 app home，创建隔离 worker runtime，写入权限为 `0600` 的私有配置，并执行 managed-runtime preflight。`balanced`/`quality` 的私有配置包含 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`；`light` 不写这两键。
 4. 安装用户级 `com.speechrail` LaunchAgent；启用时使用统一生命周期 controller。
@@ -79,7 +79,7 @@ app home 持续增长。因此磁盘预算还需考虑 release 累积，不能�
 
 ## 完成条件
 
-- 架构、系统版本、磁盘和 Python 3.12 检查通过；任何回退假设都已披露。
+- 架构、系统版本、磁盘和 Python 3.14.7 检查通过；任何回退假设都已披露。
 - 本次 wheel 的 metadata 版本与项目一致，SHA-256 已记录。
 - managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
 - `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。`balanced`/`quality` 额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；`light` 应报告分人未配置且 `/v1/models` 不含该别名。

@@ -37,22 +37,26 @@ def _role_file_hash(requirements: tuple[str, ...]) -> str:
 def _lock(
     *,
     lock_id: str = "fixture-runtime-v1",
-    python: str = "3.12.14",
+    python: str = "3.14.7",
     ffmpeg: str = "imageio-ffmpeg==0.6.0",
     file_hashes: Mapping[str, str] | None = None,
+    asr_requirements: tuple[str, ...] | None = None,
+    tts_requirements: tuple[str, ...] | None = None,
 ) -> RuntimeLock:
     requirement = f"fixture-asr==1.0 --hash=sha256:{_HASH}"
     tts_requirement = f"fixture-tts==2.0 --hash=sha256:{_HASH}"
+    asr_tokens = asr_requirements or (requirement,)
+    tts_tokens = tts_requirements or (tts_requirement,)
     return RuntimeLock(
         id=lock_id,
         python=python,
-        asr_requirements=(requirement,),
-        tts_requirements=(tts_requirement,),
+        asr_requirements=asr_tokens,
+        tts_requirements=tts_tokens,
         ffmpeg_artifact=ffmpeg,
         file_hashes=file_hashes
         or {
-            "runtime/asr.txt": _role_file_hash((requirement,)),
-            "runtime/tts.txt": _role_file_hash((tts_requirement,)),
+            "runtime/asr.txt": _role_file_hash(asr_tokens),
+            "runtime/tts.txt": _role_file_hash(tts_tokens),
         },
     )
 
@@ -111,8 +115,20 @@ def _check(result: object, name: str) -> bool:
     return next(check for check in checks if check.name == name).ok
 
 
+@pytest.mark.parametrize("version", ["3.14.0", "3.14.7"])
+def test_supported_runtime_python_versions(version: str) -> None:
+    expected = tuple(int(part) for part in version.split("."))
+    assert bootstrap._python_version_tuple(version) == expected
+
+
+@pytest.mark.parametrize("version", ["3.12.14", "3.13.15", "3.14", "3.15.0", "3.14.7rc1"])
+def test_runtime_python_version_rejects_non_314_releases(version: str) -> None:
+    with pytest.raises(RuntimeBootstrapError, match=r"3\.14"):
+        bootstrap._python_version_tuple(version)
+
+
 def test_runtime_identity_does_not_depend_on_preset() -> None:
-    lock = {"python": "3.12.0", "asr": ["a==1"], "tts": ["b==1"], "ffmpeg": "f1"}
+    lock = {"python": "3.14.7", "asr": ["a==1"], "tts": ["b==1"], "ffmpeg": "f1"}
 
     assert runtime_key(lock) == runtime_key(dict(lock))
 
@@ -126,7 +142,7 @@ def test_runtime_identity_accepts_lock_model_and_normalized_mapping() -> None:
 def test_runtime_identity_changes_when_any_lock_content_changes() -> None:
     lock = _lock()
 
-    assert runtime_key(lock) != runtime_key(lock.model_copy(update={"python": "3.12.13"}))
+    assert runtime_key(lock) != runtime_key(lock.model_copy(update={"python": "3.14.8"}))
     assert runtime_key(lock) != runtime_key(lock.model_copy(update={"id": "other"}))
     assert runtime_key(lock) != runtime_key(
         lock.model_copy(update={"file_hashes": {"runtime/asr.txt": "b" * 64}})
@@ -137,9 +153,9 @@ def test_runtime_identity_changes_when_any_lock_content_changes() -> None:
     "value",
     [
         {},
-        {"python": "3.12.0", "asr": [], "tts": ["b==1"], "ffmpeg": "f1"},
+        {"python": "3.14.7", "asr": [], "tts": ["b==1"], "ffmpeg": "f1"},
         {
-            "python": "3.12.0",
+            "python": "3.14.7",
             "asr": ["a==1"],
             "tts": ["b==1"],
             "ffmpeg": "f1",
@@ -178,6 +194,14 @@ def test_prepare_runtime_uses_one_release_per_lock_and_shared_python_version(
     assert result.tts_python.is_file()
     assert result.ffmpeg.is_file()
     install_calls = [command for command in runner.calls if command[:2] == ("uv", "pip")]
+    venv_call = next(command for command in runner.calls if command[:2] == ("uv", "venv"))
+    assert venv_call[2:4] == ("--python", lock.python)
+    python_version_calls = [
+        command[command.index("--python-version") + 1]
+        for command in install_calls
+        if "--python-version" in command
+    ]
+    assert python_version_calls and set(python_version_calls) == {lock.python}
     assert install_calls
     assert all("--only-binary" in command for command in install_calls)
     assert all("--require-hashes" in command for command in install_calls)
@@ -192,6 +216,40 @@ def test_prepare_runtime_uses_one_release_per_lock_and_shared_python_version(
     assert metadata["runtime_key"] == runtime_key(lock)
     assert metadata["lock_id"] == lock.id
     assert metadata["python"] == lock.python
+
+
+def test_shared_requirements_contains_only_the_role_intersection(tmp_path: Path) -> None:
+    asr_only = f"mlx-qwen3-asr==0.3.5 --hash=sha256:{_HASH}"
+    tts_only = f"mlx-audio==0.5.6 --hash=sha256:{_HASH}"
+    shared_asr = f"shared-lib==1.0 --hash=sha256:{_HASH}"
+    shared_tts = f"shared-lib==1.0 --hash=sha256:{'b' * 64}"
+    lock = _lock(
+        asr_requirements=(asr_only, shared_asr),
+        tts_requirements=(tts_only, shared_tts),
+    )
+    runner = FakeRunner()
+
+    result = prepare_runtime(lock, tmp_path, runner)
+
+    shared_path = result.release / "requirements" / "shared.txt"
+    expected_shared = (
+        f"shared-lib==1.0 --hash=sha256:{_HASH} --hash=sha256:{'b' * 64}\n"
+    ).encode()
+    assert shared_path.read_bytes() == expected_shared
+    metadata = json.loads((result.release / "runtime.json").read_text(encoding="utf-8"))
+    assert metadata["requirement_hashes"]["shared"] == hashlib.sha256(expected_shared).hexdigest()
+    assert bootstrap.load_prepared_runtime(tmp_path, lock).paths == result
+    sync_call = next(command for command in runner.calls if command[:3] == ("uv", "pip", "sync"))
+    assert sync_call[-2].endswith("/requirements/asr.txt")
+    assert sync_call[-1].endswith("/requirements/tts.txt")
+
+
+def test_shared_requirements_rejects_conflicting_role_pins() -> None:
+    asr = (f"shared-lib==1.0 --hash=sha256:{_HASH}",)
+    tts = (f"shared-lib==2.0 --hash=sha256:{_HASH}",)
+
+    with pytest.raises(RuntimeBootstrapError, match="conflicting pins"):
+        bootstrap._shared_requirements(asr, tts)
 
 
 def test_prepare_runtime_is_idempotent_for_same_lock(tmp_path: Path) -> None:
@@ -427,7 +485,7 @@ def test_prepare_runtime_rejects_symlink_escape_from_runner(tmp_path: Path) -> N
 def test_prepare_runtime_accepts_uv_style_external_python_symlink(tmp_path: Path) -> None:
     outside = tmp_path / "uv-managed-python" / "bin"
     outside.mkdir(parents=True)
-    interpreter = outside / "python3.12"
+    interpreter = outside / "python3.14"
     interpreter.write_text("fake managed python\n", encoding="utf-8")
     interpreter.chmod(0o700)
 

@@ -88,7 +88,7 @@ fi
 echo -e "${GREEN}[4/6] Homebrew 与音频解码器 (ffmpeg) 已就绪${NC}"
 
 # ------------------------------------------------------------------------------
-# 5. uv 与 Python 3.12 精准准备 (彻底解决用户机器 Python 版本不对的问题)
+# 5. uv 与 Python 3.14.7 精准准备 (彻底解决用户机器 Python 版本不对的问题)
 # ------------------------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
   echo -e "${YELLOW}[!] 未检测到 uv，开始自动安装现代 Python 包管理器 uv...${NC}"
@@ -102,18 +102,18 @@ elif [[ -d "$HOME/.cargo/bin" ]]; then
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-echo -e "${BLUE}[+] 自动下载并锁定标准的 CPython 3.12 运行时...${NC}"
-# 无论用户系统当前是什么版本的 Python，通过 uv 自动准备隔离的 Python 3.12
-uv python install 3.12
-echo -e "${GREEN}[5/6] uv 与专属 Python 3.12 已就绪 (无需担心系统 Python 版本)${NC}"
+echo -e "${BLUE}[+] 自动下载并锁定标准的 CPython 3.14.7 运行时...${NC}"
+# 无论用户系统当前是什么版本的 Python，通过 uv 自动准备隔离的 Python 3.14.7
+uv python install 3.14.7
+echo -e "${GREEN}[5/6] uv 与专属 Python 3.14.7 已就绪 (无需担心系统 Python 版本)${NC}"
 
 # ------------------------------------------------------------------------------
 # 6. 同步项目依赖并调起核心安装引擎 zero_setup.py
 # ------------------------------------------------------------------------------
 cd "$REPO_ROOT"
-echo -e "${BLUE}[+] 基于 Python 3.12 同步主工程依赖...${NC}"
-uv sync --python 3.12 --extra dev
+echo -e "${BLUE}[+] 基于 Python 3.14.7 同步主工程依赖...${NC}"
+uv sync --python 3.14.7 --extra dev
 
 echo -e "\n${GREEN}[6/6] 基座环境已全部准备完毕！进入 SpeechRail 自动化安装与校验流程...${NC}\n"
-# 强制指定由 Python 3.12 执行，完全避免调用错误版本
-uv run --python 3.12 python "$SCRIPT_DIR/zero_setup.py" "$@"
+# 强制指定由 Python 3.14.7 执行，完全避免调用错误版本
+uv run --python 3.14.7 python "$SCRIPT_DIR/zero_setup.py" "$@"

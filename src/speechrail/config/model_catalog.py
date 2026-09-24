@@ -275,6 +275,13 @@ class RuntimeLock(BaseModel):
     id: StrictStr = Field(min_length=1)
     python: StrictStr = Field(min_length=1)
     asr_requirements: tuple[StrictStr, ...] = Field(min_length=1)
+
+    @field_validator("python")
+    @classmethod
+    def validate_python(cls, value: str) -> str:
+        if re.fullmatch(r"3\.14\.\d+", value) is None:
+            raise ValueError("runtime Python must be a 3.14.x release")
+        return value
     tts_requirements: tuple[StrictStr, ...] = Field(min_length=1)
     ffmpeg_artifact: StrictStr = Field(min_length=1)
     file_hashes: Mapping[str, StrictStr] = Field(min_length=1)

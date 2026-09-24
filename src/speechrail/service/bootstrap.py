@@ -188,8 +188,8 @@ def _normalize_lock(lock: RuntimeLock | Mapping[str, object]) -> dict[str, objec
 
 
 def _python_version_tuple(version: str) -> tuple[int, int, int]:
-    if not re.fullmatch(r"3\.12\.\d+", version):
-        raise RuntimeBootstrapError("runtime Python must be a 3.12 release")
+    if not re.fullmatch(r"3\.14\.\d+", version):
+        raise RuntimeBootstrapError("runtime Python must be a 3.14.x release")
     try:
         major, minor, patch = (int(part) for part in version.split("."))
     except ValueError as exc:
@@ -339,9 +339,10 @@ def _role_requirements(lock: RuntimeLock, role: str) -> tuple[bytes, tuple[str, 
     return asset_bytes, parsed_requirements
 
 
-def _combined_requirements(requirements: Sequence[str]) -> tuple[str, ...]:
-    """Merge the two role manifests without weakening either pin or hash set."""
-    merged: dict[str, tuple[str, str, set[str]]] = {}
+def _role_requirement_map(
+    requirements: Sequence[str], *, role: str
+) -> dict[str, tuple[str, str, set[str]]]:
+    mapped: dict[str, tuple[str, str, set[str]]] = {}
     for requirement in requirements:
         match = _REQUIREMENT_RE.match(requirement)
         if match is None:
@@ -353,19 +354,44 @@ def _combined_requirements(requirements: Sequence[str]) -> tuple[str, ...]:
             for item in requirement.split()
             if item.startswith("--hash=sha256:")
         }
-        current = merged.get(package_key)
+        current = mapped.get(package_key)
         if current is not None:
             if current[1] != version:
                 raise RuntimeBootstrapError(
-                    f"shared runtime has conflicting pins for package {package_key}"
+                    f"{role} runtime has conflicting pins for package {package_key}"
                 )
             current[2].update(hashes)
         else:
-            merged[package_key] = (package, version, hashes)
-    return tuple(
-        f"{package}=={version} {' '.join(sorted(hashes))}"
-        for _, (package, version, hashes) in sorted(merged.items())
-    )
+            mapped[package_key] = (package, version, hashes)
+    return mapped
+
+
+def _shared_requirements(
+    asr_requirements: Sequence[str], tts_requirements: Sequence[str]
+) -> tuple[str, ...]:
+    """Return the hashed package intersection for shared runtime metadata.
+
+    The ASR and TTS requirement files are still both synced into their common
+    Python environment. This manifest records only pins required by both roles.
+    """
+    asr_by_package = _role_requirement_map(asr_requirements, role="ASR")
+    tts_by_package = _role_requirement_map(tts_requirements, role="TTS")
+    shared: list[str] = []
+    for package_key in sorted(asr_by_package.keys() & tts_by_package.keys()):
+        asr_package, asr_version, asr_hashes = asr_by_package[package_key]
+        _, tts_version, tts_hashes = tts_by_package[package_key]
+        if asr_version != tts_version:
+            raise RuntimeBootstrapError(
+                f"shared runtime has conflicting pins for package {package_key}"
+            )
+        hashes = sorted(asr_hashes | tts_hashes)
+        shared.append(f"{asr_package}=={asr_version} {' '.join(hashes)}")
+    return tuple(shared)
+
+
+def _requirements_file_bytes(requirements: Sequence[str]) -> bytes:
+    text = "\n".join(requirements)
+    return (text + "\n" if text else "").encode("utf-8")
 
 
 def _write_private(path: Path, data: bytes) -> str:
@@ -547,9 +573,9 @@ def _runtime_metadata_matches(
     expected_requirement_bytes = {
         "asr": asr_bytes,
         "tts": tts_bytes,
-        "shared": (
-            "\n".join(_combined_requirements((*asr_requirements, *tts_requirements))) + "\n"
-        ).encode("utf-8"),
+        "shared": _requirements_file_bytes(
+            _shared_requirements(asr_requirements, tts_requirements)
+        ),
         "ffmpeg": (ffmpeg_requirement + "\n").encode("utf-8"),
     }
     requirement_hashes = metadata.get("requirement_hashes")
@@ -751,7 +777,7 @@ def prepare_runtime(
     try:
         asr_bytes, asr_tokens = _role_requirements(lock, "asr")
         tts_bytes, tts_tokens = _role_requirements(lock, "tts")
-        shared_requirements = _combined_requirements((*asr_tokens, *tts_tokens))
+        shared_requirements = _shared_requirements(asr_tokens, tts_tokens)
         ffmpeg_requirement = _ffmpeg_requirement(lock)
         shared_environment = stage_release
         _run(("uv", "venv", "--python", lock.python, str(shared_environment)), runner)
@@ -767,7 +793,7 @@ def prepare_runtime(
         asr_hash = _write_private(asr_requirements_path, asr_bytes)
         tts_hash = _write_private(tts_requirements_path, tts_bytes)
         shared_hash = _write_private(
-            shared_requirements_path, ("\n".join(shared_requirements) + "\n").encode("utf-8")
+            shared_requirements_path, _requirements_file_bytes(shared_requirements)
         )
         ffmpeg_hash = _write_private(
             ffmpeg_requirements, (ffmpeg_requirement + "\n").encode("utf-8")
@@ -782,7 +808,7 @@ def prepare_runtime(
                 "--python",
                 str(shared_python),
                 "--python-version",
-                "3.12",
+                lock.python,
                 "--require-hashes",
                 "--only-binary",
                 ":all:",
@@ -801,7 +827,7 @@ def prepare_runtime(
                 "--python",
                 str(shared_python),
                 "--python-version",
-                "3.12",
+                lock.python,
                 "--require-hashes",
                 "--only-binary",
                 ":all:",
@@ -820,7 +846,7 @@ def prepare_runtime(
                 "--python",
                 str(shared_python),
                 "--python-version",
-                "3.12",
+                lock.python,
                 "--require-hashes",
                 "--only-binary",
                 ":all:",

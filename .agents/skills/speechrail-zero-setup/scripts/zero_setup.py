@@ -30,16 +30,16 @@ if machine not in {"arm64", "aarch64"}:
     sys.exit(1)
 
 
-def _auto_resolve_python_312() -> None:
-    """自动解决 Python 版本问题: 自动拉取 uv、安装独立 Python 3.12 并重启自身。"""
+def _auto_resolve_python_314() -> None:
+    """自动解决 Python 版本问题: 自动拉取 uv、安装独立 Python 3.14.7 并重启自身。"""
     import shutil
     import subprocess
     from pathlib import Path
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     print(
-        f"\033[1;33m[!] 检测到当前解释器为 Python {py_ver}，需专属 Python 3.12。\033[0m\n"
-        "\033[1;34m[+] 启动自动自愈引擎，正在为您自动获取 Python 3.12 并切换...\033[0m"
+        f"\033[1;33m[!] 检测到当前解释器为 Python {py_ver}，需专属 Python 3.14.7。\033[0m\n"
+        "\033[1;34m[+] 启动自动自愈引擎，正在为您自动获取 Python 3.14.7 并切换...\033[0m"
     )
 
     uv_bin = shutil.which("uv")
@@ -73,30 +73,30 @@ def _auto_resolve_python_312() -> None:
         print("\033[1;31m[ERROR] 未能定位安装后的 uv (~/.local/bin/uv)。\033[0m", file=sys.stderr)
         sys.exit(1)
 
-    print("\033[1;34m[+] 自动拉取并安装隔离的官方 CPython 3.12 运行时...\033[0m")
-    subprocess.run([uv_bin, "python", "install", "3.12"], check=True)
+    print("\033[1;34m[+] 自动拉取并安装隔离的官方 CPython 3.14.7 运行时...\033[0m")
+    subprocess.run([uv_bin, "python", "install", "3.14.7"], check=True)
 
     repo_root = Path(__file__).resolve().parents[4]
-    print("\033[1;34m[+] 同步主工程依赖至 Python 3.12 环境...\033[0m")
-    sync_cmd = [uv_bin, "sync", "--python", "3.12", "--extra", "dev"]
+    print("\033[1;34m[+] 同步主工程依赖至 Python 3.14.7 环境...\033[0m")
+    sync_cmd = [uv_bin, "sync", "--python", "3.14.7", "--extra", "dev"]
     subprocess.run(sync_cmd, cwd=repo_root, check=True)
 
-    print("\033[1;32m[✓] Python 3.12 准备完成，正在切换到专属运行时继续执行...\033[0m\n")
+    print("\033[1;32m[✓] Python 3.14.7 准备完成，正在切换到专属运行时继续执行...\033[0m\n")
     script_path = str(Path(__file__).resolve())
-    cmd = [uv_bin, "run", "--python", "3.12", "python", script_path, *sys.argv[1:]]
+    cmd = [uv_bin, "run", "--python", "3.14.7", "python", script_path, *sys.argv[1:]]
     ret = subprocess.run(cmd, cwd=repo_root)
     sys.exit(ret.returncode)
 
 
-if not ((3, 12) <= sys.version_info < (3, 13)) and "--yes" not in sys.argv[1:]:
+if not ((3, 14) <= sys.version_info < (3, 15)) and "--yes" not in sys.argv[1:]:
     print(
-        "[ERROR] 准备 Python 3.12 会下载并安装运行时；请显式传入 --yes。",
+        "[ERROR] 准备 Python 3.14.7 会下载并安装运行时；请显式传入 --yes。",
         file=sys.stderr,
     )
     sys.exit(2)
 
-if not ((3, 12) <= sys.version_info < (3, 13)):
-    _auto_resolve_python_312()
+if not ((3, 14) <= sys.version_info < (3, 15)):
+    _auto_resolve_python_314()
 
 # ==============================================================================
 # 业务逻辑主体
