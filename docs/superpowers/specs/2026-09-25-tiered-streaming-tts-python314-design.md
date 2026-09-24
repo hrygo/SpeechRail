@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.6"
+version: "1.7"
 date: 2026-09-25
 ---
 
@@ -281,7 +281,8 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W2 Python/runtime | complete | 3.14.7候选 runtime `--only-binary` 安装47个锁定包；MLX/ASR模块导入通过；`uv lock --check`、runtime-lock `--check`、zero-setup语法检查通过；9个定向测试文件352 passed、Ruff与130-file mypy通过。1个既有 Pydantic `mappingproxy` warning；未加载模型或切换正式服务 |
 | W3 App 协议基线 | complete | 保持当前完整文本 wire；生产 transport 仍用 `URLSessionWebSocketTask`，新增 fake-transport seam；TTS 事件关联 request/response identity，隔离旧终态/旧音频并抑制取消后迟到音频。按当前服务端序列化结构构造 fixture；`RealtimeContractTests` 12 passed，三处 App session 文件 `swiftc -frontend -parse` 通过，`git diff --check` 通过。SwiftPM 未 typecheck App session 文件、未做 App 构建/真实服务/音频/UI 验收；输出有 23 个非 target 文件未显式声明警告 |
 | W4 模型层真增量门 | complete（q8）/ bf16 待决 | CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线 + 长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；vendor HEAD `851f9567ecd27ad8f210cefc866c7d01525151e4` |
-| W5–W11 | in progress | W4 门通过后继续；当前无新增代码，设计约束为“Base 短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
+| W5 领域与身份 | complete | `domain/tts_stream.py`（options/双轴 state/limits/事件/port 与集中错误码）、`PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间，跨精度不共享）、`VoiceBinding.supports_incremental_stream`（仅 CustomVoice speaker 与 Base clone）；15+6+44 项定向测试通过，主仓全量 2111 passed/144 skipped、coverage 81.77%、`mypy src` 131 文件通过 |
+| W6–W11 | not started | W4 门通过、W5 领域契约定稿后继续；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 
@@ -292,6 +293,8 @@ W2 的 `requirements/shared.txt` 是 ASR/TTS role lock 的交集元数据，只�
 分档差异是方案的一部分：统一 Python/runtime、协议和生命周期，分开 CustomVoice 与 Base 增量实现，分开 q8/bf16 资源与声学验收。提高档位不是天然提高一致性，也不是天然降低延迟。
 
 W4 真实模型门（2026-09-25 修正后）表明：CustomVoice q8 与 Base q8 都能在同一 generation 内首 PCM 后追加文本并完整发声，四档统一真增量目标继续成立。Base 的前置条件是该 runtime 的 aligned ICL 布局必须把初始文本的尾部留在 trailing 队列：初始文本要跨过 prefill 槽位（`prefill_target_tokens < initial_text_token_count`），并配合短 reference；探针对该条件 fail-closed。此前“Base 只能全文本预填”的 Ruling 来自 `--schedule` 未接线加长 reference 的假阴性，已作废。剩下两个未决项是 Base bf16 的 catalog `README.md` 差异（需用户选择恢复快照、修订清单或移出承载性清单）与所有档位的声学/性能验收。
+
+W5 已把第 8/9 节的增量约束固化为 vendor-neutral 领域契约：唯一 limits/state/event 定义、必须连续的 append 序号与唯一终态、文本 codepoint 与音频字节两套独立预算，以及以内容身份+预处理+模型/量化/tokenizer/实现版本为命名空间的 prepared reference key（跨精度不共享）。这些仍是 fake 状态表验证，真实 adapter、worker 与 wire 尚未实现。
 
 W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。W4 已验证 CustomVoice q8 与 Base q8 的追加文本内容、首 PCM 与 append→next PCM（Base 条件见上）；尚未验证人耳 A/B、说话人相似度、自然度、真实 worker/协议、取消/重连、长稳 RTF、缓存内存预算和 bf16 相对收益。ASR 只证明内容缺失/一致，不能替代声学身份验收；质量门通过也不等于四档产品体验已验收。
 
