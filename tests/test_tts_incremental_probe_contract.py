@@ -215,7 +215,7 @@ def test_artifact_files_are_verified_without_exposing_paths(tmp_path: Path) -> N
 def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None:
     class FakeSession:
         generation_identity = "local-generation-secret-id"
-        initial_prefill_count = 1
+        initial_prefill_count = 0
         sample_rate = 24_000
         peak_memory_bytes = 123_456
 
@@ -236,6 +236,8 @@ def test_probe_requires_pcm_before_append_and_preserves_one_generation() -> None
 
         def step(self, *, max_steps: int) -> ProbeEvent:
             assert max_steps > 0
+            assert self.appended == ["你好，"] or self.finished
+            self.initial_prefill_count = 1
             return self.events.pop(0)
 
         def cancel(self) -> None:
@@ -265,7 +267,7 @@ def test_probe_writes_sanitized_failure_evidence_when_first_pcm_is_missing(
 ) -> None:
     class FakeSession:
         generation_identity = "generation-1"
-        initial_prefill_count = 1
+        initial_prefill_count = 0
         sample_rate = 24_000
         peak_memory_bytes = None
 
@@ -291,6 +293,7 @@ def test_probe_writes_sanitized_failure_evidence_when_first_pcm_is_missing(
     assert failure.value.evidence is not None
     assert failure.value.evidence.report["status"] == "streaming_contract_failed"
     assert failure.value.evidence.report["append_after_first_pcm"] is False
+    assert failure.value.evidence.report["initial_prefill_count"] == 0
     assert failure.value.evidence.report["sample_count"] == 0
     paths = write_probe_output(failure.value.evidence, tmp_path / "failed-probe")
     assert paths.report.is_file()
@@ -299,6 +302,74 @@ def test_probe_writes_sanitized_failure_evidence_when_first_pcm_is_missing(
     assert report["failure_code"] == "backend_waited_for_text_before_first_pcm"
     assert report["audio_file"] == "probe.wav"
     assert "你好" not in json.dumps(report)
+
+
+def test_probe_rejects_pcm_before_initial_prefill() -> None:
+    class FakeSession:
+        generation_identity = "generation-1"
+        initial_prefill_count = 0
+        sample_rate = 24_000
+        peak_memory_bytes = None
+
+        def append_text(self, text: str) -> None:
+            pass
+
+        def finish_input(self) -> None:
+            raise AssertionError("must fail before input is finished")
+
+        def step(self, *, max_steps: int) -> ProbeEvent:
+            return ProbeEvent("pcm", b"\x00\x00", 24_000, self.generation_identity)
+
+        def cancel(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    with pytest.raises(ProbeSessionError) as failure:
+        run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+
+    assert failure.value.failure_code == "initial_prefill_count_invalid"
+    assert failure.value.evidence is not None
+    assert failure.value.evidence.report["initial_prefill_count"] == 0
+    assert failure.value.evidence.report["sample_count"] == 0
+
+
+def test_probe_rejects_a_second_initial_prefill_after_first_pcm() -> None:
+    class FakeSession:
+        generation_identity = "generation-1"
+        initial_prefill_count = 0
+        sample_rate = 24_000
+        peak_memory_bytes = None
+
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def append_text(self, text: str) -> None:
+            pass
+
+        def finish_input(self) -> None:
+            pass
+
+        def step(self, *, max_steps: int) -> ProbeEvent:
+            self.steps += 1
+            self.initial_prefill_count = self.steps
+            if self.steps == 1:
+                return ProbeEvent("pcm", b"\x00\x00", 24_000, self.generation_identity)
+            return ProbeEvent("pcm", b"\x01\x00", 24_000, self.generation_identity)
+
+        def cancel(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    with pytest.raises(ProbeSessionError) as failure:
+        run_probe_session(FakeSession(), artifact=_artifact(), vendor_commit=VENDOR_COMMIT)
+
+    assert failure.value.failure_code == "initial_prefill_count_changed"
+    assert failure.value.evidence is not None
+    assert failure.value.evidence.report["initial_prefill_count"] == 2
 
 
 def test_invalid_session_metadata_is_closed_before_rejection() -> None:
@@ -339,7 +410,7 @@ def test_invalid_session_metadata_is_closed_before_rejection() -> None:
 def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> None:
     class FakeSession:
         generation_identity = "sensitive-generation-id"
-        initial_prefill_count = 1
+        initial_prefill_count = 0
         sample_rate = 24_000
         peak_memory_bytes = 10
 
@@ -357,6 +428,7 @@ def test_probe_output_only_contains_sanitized_report_and_pcm(tmp_path: Path) -> 
             pass
 
         def step(self, *, max_steps: int) -> ProbeEvent:
+            self.initial_prefill_count = 1
             return self.events.pop(0)
 
         def cancel(self) -> None:
