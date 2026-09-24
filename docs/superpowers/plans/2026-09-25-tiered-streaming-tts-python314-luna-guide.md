@@ -509,7 +509,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W1｜Realtime导入与采样契约**：移除不可达 `audioop`/24→16 kHz converter 与影子 sample-rate 配置；保留固定 16 kHz PCM16 wire。验收：`tests/test_realtime_openai.py` + `tests/test_realtime_caller_wire.py` 137 passed；定向 Ruff、mypy 及 diff check 通过。当前运行解释器是 3.12.14；缺失 audioop 导入由测试注入模拟，尚未证明 CPython 3.14 全依赖运行。
 - [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
 - [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
-- [ ] **W4｜模型门（准备未等于通过）**：离线探针契约与安全输入/报告骨架已完成；vendor扩展、CustomVoice q8 / Base q8 / Base bf16真实增量与安全EOS尚未证明，必须过模型门后才能进入W5。
+- [ ] **W4｜模型门（准备未等于通过）**：离线探针契约与安全输入/报告骨架已完成；vendor 扩展（session 控制器、增量 backend、probe SPI）已提交，但仅通过 fake/静态证据；CustomVoice q8 / Base q8 / Base bf16 真实增量、声学正确性与安全 EOS 尚未证明，必须过模型门后才能进入W5。
 - [ ] **W5｜领域与身份**：新增tts_stream port/state/limits；profile与reference租约、跨精度cache隔离通过。
 - [ ] **W6｜worker全双工**：单模型owner、单父端reader、有界队列与协作取消；fake IPC与旧ASR/TTS回归通过。
 - [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
@@ -554,5 +554,22 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - 发现 SPI 旧检查在 `open_probe_session` 刚返回时就要求 `initial_prefill_count == 1`，但探针随后才追加第一段目标文本；这会迫使实现预先用空文本 prefill，或把计数当占位值，无法证明真实的“文本条件 prefill 恰好一次”。
 - 修正 `ProbeSession` 契约和探针状态校验：打开时为 0；第一次文本 prefill 后只允许转为 1；必须在首 PCM 前达到 1，并在追加文本、finish 和 terminal 保持为 1。报告记录实际观察计数；未 prefill 的 PCM、重复 prefill 都以稳定失败码拒绝。SpeechRail 提交：`0a55b04b fix: validate TTS prefill after initial text`。
 - 验证：探针契约测试 `11 passed`（仓库 `.venv` CPython 3.12.14，显式关闭与本单测范围无关的全仓 coverage 门）；定向 Ruff、`MYPYPATH=src` 下该工具文件 mypy、CPython 3.14.7 `py_compile` 与 `git diff --check` 通过。未加载模型或运行真实增量 TTS。
+
+#### W4 session 控制器候选（2026-09-24）
+
+- 在固定上游候选分支的未提交工作区中新增 `IncrementalSessionDriver` 控制层：复用稳定文本前缀与 EOS feeder；由模型 backend 自报实际 `initial_prefill_count`，session 只接受从 0 到 1 的单次 prefill；按同一 generation identity 校验 PCM、等待文本、完成与失败；错误后禁止继续推进，并提供 cancel/close 清理入口。
+- 对应 fake backend 测试覆盖首段 prefill 后追加文本、文本饥饿不提前发 EOS、EOS 消费后 codec EOS、重复/缺失 prefill 计数、身份连续性、失败关闭与取消生命周期。16 项 session/text 单测在 CPython 3.14.7 通过；定向 Ruff、`py_compile`、`git diff --check` 通过。当前候选环境缺少 mypy 模块，未能执行该项。
+- **证据边界：** 该控制层仍未接入 Qwen3-TTS talker、KV cache、code predictor 或 vocoder；backend 对“仅首目标 token 进入一次真实 prefill”的承诺尚无模型实现证明。代码尚未提交；没有导入/加载模型权重、运行声学测试或性能测试。W4 与 W5 状态不变，真实 CustomVoice q8、Base q8、Base bf16 模型门仍未授权/未验收。
+
+#### W4 真增量 backend 与探针 SPI 落盘（2026-09-25）
+
+- 固定上游候选 checkout 的增量实现已按两个逻辑提交落盘：`c3e036b feat: drive Qwen3-TTS incremental input from one session`（`incremental.py` 的 `IncrementalSessionDriver`、backend/session 事件类型、session/text 测试）、`c9e855b feat: add Qwen3-TTS incremental backend and probe SPI`（`qwen3_tts.py` prefill 参数、`incremental_backend.py`、`incremental_probe.py` 及 backend/prefill/probe 测试）。基线仍为 `4ab7e6f7dedd69a136cfaa318c5dc8aed5119446`；vendor HEAD 现为 `c9e855b1d4d7661bfd341113051564b9a06b98a6`，`incremental_probe.__speechrail_vendor_commit__` 由该 checkout 的 `git rev-parse HEAD` 动态导出，未写死 SHA。未推送到任何远端。
+- `_prepare_generation_inputs` 与 `_prepare_icl_generation_inputs` 新增 `target_token_limit`（正整数校验，拒绝 bool/0/负数/浮点）与 `append_tts_eos`；两者默认值保持完整文本原行为不变。增量路径只把首个目标 token 放入一次 prefill，并把 TTS EOS 延迟到 `finish_input()` 之后。
+- `Qwen3TtsIncrementalBackend` 持有 talker KV cache、code predictor cache 与 vocoder streaming state：单次 prefill 后逐帧以「文本 embedding + 上一帧 codec embedding」推进，每帧重置 code predictor cache，文本 EOS 注入前禁用 codec EOS，逐帧经 `speech_tokenizer.decoder.streaming_step()` 输出 PCM16；`cancel()/close()` 幂等并重置 decoder 状态。`incremental_probe.py` 强制 `local_files_only=True`，设置 Hub/Transformers offline 环境变量与 `mx.random.seed`，并按 variant/precision/speaker/reference 组合校验后再加载本地模型路径。
+- 静态对齐核对（固定 commit 只读源码）：CustomVoice/Instruct 路径与 vendor 自身 `_generate_with_instruct` 逐帧循环同构 —— prefill 结束于 `text_embed[:, 3:4] + codec_bos`，其余目标 token 与 `tts_eos` 作为 trailing 队列逐帧投喂，trailing 用尽后转 `tts_pad_embed`；backend 的 `step()` 与该循环在输入构造、`_reset_code_cache`、EOS 判定与逐帧 streaming decode 上一一对应。
+- **Ruling（Base 风险，未通过模型门）：** vendor `_prepare_icl_generation_inputs` 采用 `non_streaming_mode=True` 布局，全部文本在 prefill 内与 codec pad 叠加，`trailing_text_hidden = tts_pad_embed`，即 Base 原本没有 trailing 文本队列。因此 Base 的“截断到 1 个目标 token、其余逐帧追加”不对应任何 vendor 已验证布局，只是候选实现；Base 是否成立必须由独立真模型门判定，禁止从 CustomVoice 结果外推。
+- 验证（CPython 3.14.7 候选环境，`mlx==0.32.2` + 仓库外站点包）：5 个 vendor 增量测试文件 `32 passed`（含 2 条 pytest-asyncio 配置项无法识别的 warning）；`ruff check`、`py_compile`、`git diff --check` 通过；按 vendor 自身 pre-commit 口径用 `black 26.3.1` 与 `isort 5.13.2 --profile black` 对涉及文件格式化并复检通过（此前分支上的 100 列写法并非 black-88 干净，本次一并修正）。测试共用同一进程内的 fake backend/tokenizer，未加载真实模型。
+- 交叉握手（不加载模型，未产生音频）：在仓库外候选环境执行 `tools/probe_tts_incremental.py` 的 `_load_vendor_extension()`，成功返回 `vendor_commit=c9e855b1d4d7661bfd341113051564b9a06b98a6` 与 `mlx_audio_version=0.5.6`，说明 SpeechRail 探针 SPI 与 fork 扩展在 CPython 3.14.7 下可实际对接。
+- **未完成/未授权：** 未加载任何模型权重（CustomVoice q8、Base q8、Base bf16 全未运行），未产生真实 PCM 或 `report.json`，未做人耳 A/B、声学正确性、首音延迟、RTF 或峰值内存测量，`correctness_review` 仍为 pending。W4 关键门未通过，W5 及其后生产接入不启动；Base 参考音频与对应文本仍需用户指定并明确授权后才能运行真实门。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
