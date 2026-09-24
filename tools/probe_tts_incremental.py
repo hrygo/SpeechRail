@@ -258,7 +258,12 @@ class ProbeEvent:
 
 class ProbeSession(Protocol):
     generation_identity: str
-    initial_prefill_count: int
+
+    @property
+    def initial_prefill_count(self) -> int:
+        """Zero before first text prefill, then exactly one for this generation."""
+        ...
+
     sample_rate: int
     peak_memory_bytes: int | None
 
@@ -387,7 +392,11 @@ def run_probe_session(
             raise ProbeSessionError("generation_identity_missing")
         generation_identity = session.generation_identity
         prefill_count = session.initial_prefill_count
-        if isinstance(prefill_count, bool) or prefill_count != 1:
+        if (
+            isinstance(prefill_count, bool)
+            or not isinstance(prefill_count, int)
+            or prefill_count != 0
+        ):
             raise ProbeSessionError("initial_prefill_count_invalid")
         sample_rate = session.sample_rate
         if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
@@ -485,12 +494,28 @@ def run_probe_session(
             report["failure_code"] = failure_code
         return ProbeEvidence(pcm16=pcm16, report=report)
 
+    def refresh_prefill_count(*, require_one: bool = False) -> None:
+        nonlocal prefill_count
+        current_count = session.initial_prefill_count
+        if (
+            isinstance(current_count, bool)
+            or not isinstance(current_count, int)
+            or current_count < prefill_count
+        ):
+            raise ProbeSessionError("initial_prefill_count_changed")
+        prefill_count = current_count
+        if prefill_count > 1:
+            raise ProbeSessionError("initial_prefill_count_changed")
+        if require_one and prefill_count != 1:
+            raise ProbeSessionError("initial_prefill_count_invalid")
+
     def next_checked_event(*, until: float) -> ProbeEvent:
         for _ in range(_MAX_STEP_CALLS):
             if time.monotonic() >= min(deadline, until):
                 break
             event = _event(session.step(max_steps=_STEP_SIZE))
             _check_event_identity(event, generation_identity)
+            refresh_prefill_count(require_one=event.kind == "pcm")
             if event.sample_rate not in {0, sample_rate}:
                 raise ProbeSessionError("session_sample_rate_changed")
             return event
@@ -498,6 +523,7 @@ def run_probe_session(
 
     try:
         session.append_text(schedule.initial_text)
+        refresh_prefill_count()
         first_deadline = started + _FIRST_PCM_TIMEOUT_SECONDS
         while first_pcm_at is None:
             event = next_checked_event(until=first_deadline)
@@ -512,8 +538,10 @@ def run_probe_session(
 
         append_at = time.monotonic()
         session.append_text(schedule.appended_text)
+        refresh_prefill_count(require_one=True)
         appended_text_count = 1
         session.finish_input()
+        refresh_prefill_count(require_one=True)
         for _ in range(_MAX_STEP_CALLS):
             event = next_checked_event(until=deadline)
             if event.kind == "pcm":
@@ -529,9 +557,7 @@ def run_probe_session(
             raise ProbeSessionError("backend_terminal_missing")
         if next_pcm_after_append_at is None:
             raise ProbeSessionError("pcm_after_append_missing")
-        final_prefill_count = session.initial_prefill_count
-        if isinstance(final_prefill_count, bool) or final_prefill_count != 1:
-            raise ProbeSessionError("initial_prefill_count_changed")
+        refresh_prefill_count(require_one=True)
         if session.generation_identity != generation_identity:
             raise ProbeSessionError("generation_identity_changed")
         pcm16 = b"".join(pcm_chunks)
