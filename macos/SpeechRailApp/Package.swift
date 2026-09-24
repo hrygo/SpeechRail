@@ -57,9 +57,7 @@ let package = Package(
                 "SettingsAssistantPane.swift",
                 "SettingsComponents.swift",
                 "SettingsView.swift",
-                "SessionCoordinator.swift",
                 "SessionExporter.swift",
-                "SessionStore.swift",
                 "SessionSurfaceViews.swift",
                 "SurfaceHeaderView.swift",
             ],
@@ -71,6 +69,7 @@ let package = Package(
                 "AudioSampleRing.swift",
                 "SpeechRailDesignTokens.swift",
                 "RealtimeASRClient.swift",
+                "TeleprompterRealtimeClientProtocol.swift",
                 // AppModel 及其最小闭包：测试目标与 Xcode 单测目标编译同一份实现，
                 // 让 cancel/refresh 等状态机回归能在两条 CI 门禁里跑（无桩替代）。
                 "AppModel.swift",
@@ -101,6 +100,13 @@ let package = Package(
                 "TeleprompterStore.swift",
                 "TeleprompterFollowController.swift",
                 "TeleprompterStageSettings.swift",
+                "TeleprompterStageInteractionPolicy.swift",
+                "TeleprompterVoiceAssistLifecycle.swift",
+                "TeleprompterSession.swift",
+                "TeleprompterStageView.swift",
+                "TeleprompterStageWindow.swift",
+                "SessionStore.swift",
+                "SessionCoordinator.swift",
             ]
         ),
         .testTarget(

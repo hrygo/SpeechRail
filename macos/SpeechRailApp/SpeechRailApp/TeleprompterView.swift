@@ -318,20 +318,19 @@ public struct TeleprompterView: View {
 
                 if session.isCapturing {
                     PageActionButton(
-                        title: "停止跟读",
+                        title: "关闭语音跟随",
                         icon: .stop,
-                        helpText: "停止当前跟读并释放麦克风"
+                        helpText: "停止语音跟随并释放麦克风，保留当前阅读位置"
                     ) {
-                        Task { await session.endFollowing() }
+                        Task { await session.disableVoiceAssist() }
                     }
                 } else if session.document != nil {
                     PageActionButton(
-                        title: "打开舞台",
+                        title: "打开提词器",
                         icon: .stage,
-                        helpText: "打开独立悬浮提词窗口"
+                        helpText: "打开独立悬浮提词窗口，默认手动阅读"
                     ) {
-                        prepareStage()
-                        stage.show()
+                        showStage()
                     }
                 }
             }
@@ -1252,21 +1251,20 @@ public struct TeleprompterView: View {
                         }
                         .speechRailButton(.primary)
 
-                        Button("手动看稿") {
-                            prepareStage()
-                            stage.show()
+                        Button("打开提词器") {
+                            showStage()
                         }
                         .speechRailButton(.secondary)
 
                     case .serviceNotReady, .serviceBusy, .streamFailed:
-                        Button("重新连接并跟读") {
-                            beginReading()
+                        Button("打开提词器") {
+                            showStage()
                         }
                         .speechRailButton(.primary)
 
-                        Button("手动看稿") {
-                            prepareStage()
-                            stage.show()
+                        Button("重试语音跟随") {
+                            showStage()
+                            Task { await session.enableVoiceAssist() }
                         }
                         .speechRailButton(.secondary)
 
@@ -1288,9 +1286,8 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
 
                     case .occupiedBy:
-                        Button("手动看稿") {
-                            prepareStage()
-                            stage.show()
+                        Button("打开提词器") {
+                            showStage()
                         }
                         .speechRailButton(.primary)
 
@@ -2188,19 +2185,11 @@ public struct TeleprompterView: View {
 
             case .ready, .ended:
                 Button {
-                    beginReading()
+                    showStage()
                 } label: {
-                    SpeechRailButtonLabel("打开舞台并开始跟读", icon: .play)
+                    SpeechRailButtonLabel("打开提词器", icon: .stage)
                 }
                 .speechRailButton(.primary)
-
-                Button {
-                    prepareStage()
-                    stage.show()
-                } label: {
-                    SpeechRailButtonLabel("只打开提词窗口", icon: .stage)
-                }
-                .speechRailButton(.secondary)
 
                 Button {
                     requestReadingCues()
@@ -2217,18 +2206,13 @@ public struct TeleprompterView: View {
 
             case .following, .paused, .uncertain, .manual:
                 Button {
-                    stage.show()
+                    showStage()
                 } label: {
                     SpeechRailButtonLabel("返回提词舞台", icon: .stage)
                 }
                 .speechRailButton(.primary)
 
-                Button {
-                    Task { await session.endFollowing() }
-                } label: {
-                    SpeechRailButtonLabel("停止跟读并解锁编辑", icon: .stop)
-                }
-                .speechRailButton(.secondary)
+                workbenchVoiceAssistControl
             }
 
             Spacer()
@@ -2379,6 +2363,50 @@ public struct TeleprompterView: View {
         }
     }
 
+    @ViewBuilder
+    private var workbenchVoiceAssistControl: some View {
+        switch session.voiceAssistState {
+        case .off:
+            EmptyView()
+        case .starting:
+            Button("正在开启语音跟随…") {}
+                .speechRailButton(.secondary)
+                .disabled(true)
+        case .following:
+            Button {
+                Task { await session.disableVoiceAssist() }
+            } label: {
+                SpeechRailButtonLabel("关闭语音跟随", icon: .stop)
+            }
+            .speechRailButton(.secondary)
+        case .stopping:
+            Button("正在停止语音跟随…") {}
+                .speechRailButton(.secondary)
+                .disabled(true)
+        case .stopFailed:
+            Button {
+                Task { await session.retryStopVoiceAssist() }
+            } label: {
+                SpeechRailButtonLabel("重试停止语音跟随", icon: .refresh)
+            }
+            .speechRailButton(.secondary)
+        case .pausedByUser:
+            Button {
+                Task { await session.enableVoiceAssist() }
+            } label: {
+                SpeechRailButtonLabel("恢复语音跟随", icon: .micFill)
+            }
+            .speechRailButton(.secondary)
+        case .unavailable:
+            Button {
+                Task { await session.enableVoiceAssist() }
+            } label: {
+                SpeechRailButtonLabel("重试语音跟随", icon: .refresh)
+            }
+            .speechRailButton(.secondary)
+        }
+    }
+
     private func formatClock(_ seconds: TimeInterval) -> String {
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
@@ -2441,19 +2469,12 @@ public struct TeleprompterView: View {
         }
     }
 
-    private func prepareStage() {
-        guard session.canEdit else { return }
-        if session.activeVersion == nil || session.phase == .draft {
-            do { try session.useDeterministicFallback() }
-            catch { operationMessage = error.localizedDescription }
-        }
-    }
-
-    private func beginReading() {
-        prepareStage()
-        guard session.activeVersion != nil else { return }
+    private func showStage() {
         stage.show()
-        Task { await session.beginFollowing() }
+        if let message = stage.lastPresentationError {
+            operationMessage = message
+            return
+        }
         operationMessage = nil
     }
 

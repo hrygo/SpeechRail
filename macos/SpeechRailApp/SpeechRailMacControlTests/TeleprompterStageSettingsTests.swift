@@ -59,6 +59,26 @@ struct TeleprompterStageSettingsTests {
         #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
     }
 
+    @Test("stage visibility preferences default off and persist independently")
+    func stageVisibilityPreferencesPersist() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        #expect(!settings.alwaysShowControls)
+        #expect(!settings.showClockAndProgress)
+
+        settings.alwaysShowControls = true
+        settings.showClockAndProgress = true
+        #expect(defaults.bool(forKey: "speechrail.teleprompter.stage.alwaysShowControls"))
+        #expect(defaults.bool(forKey: "speechrail.teleprompter.stage.showClockAndProgress"))
+
+        let reloaded = TeleprompterStageSettings(defaults: defaults)
+        #expect(reloaded.alwaysShowControls)
+        #expect(reloaded.showClockAndProgress)
+    }
+
     @Test("background transparency increases as the stage becomes more see-through")
     func backgroundTransparencyUsesUserFacingDirection() throws {
         let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"

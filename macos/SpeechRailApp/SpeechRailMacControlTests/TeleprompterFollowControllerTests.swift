@@ -19,6 +19,53 @@ struct TeleprompterFollowControllerTests {
         try TeleprompterSegmenter.segment(sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。")
     }
 
+    @Test func manualMovementClampsAtBothEnds() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.move(to: -10, segmentCount: segments.count)
+        #expect(controller.currentIndex == 0)
+        #expect(controller.mode == .manual)
+
+        controller.move(to: 999, segmentCount: segments.count)
+        #expect(controller.currentIndex == segments.count - 1)
+        #expect(controller.mode == .manual)
+    }
+
+    @Test func sameSegmentManualMovePreservesReadingOffset() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "a", transcript: "欢迎来到", segments: segments)
+        let positionBeforeMove = controller.position
+
+        controller.manualMove(to: 0, segmentCount: segments.count)
+
+        #expect(controller.position == positionBeforeMove)
+        #expect(controller.mode == .manual)
+    }
+
+    @Test func differentSegmentManualMoveStartsAtParagraphBeginning() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "a", transcript: "欢迎来到", segments: segments)
+        #expect(controller.position.utf16Offset > 0)
+
+        controller.manualMove(to: 1, segmentCount: segments.count)
+
+        #expect(controller.currentIndex == 1)
+        #expect(controller.position.utf16Offset == 0)
+        #expect(controller.mode == .manual)
+    }
+
+    @Test func eventsAfterManualTakeoverCannotMovePosition() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.move(to: 1, segmentCount: segments.count)
+        controller.receivePartial(itemID: "stale", delta: "欢迎来到今天的直播", segments: segments)
+        controller.receiveCompleted(itemID: "stale", transcript: "欢迎来到今天的直播", segments: segments)
+        #expect(controller.currentIndex == 1)
+        #expect(controller.mode == .manual)
+    }
+
     @Test func latencyDiagnosticsReportsBoundedPercentiles() {
         var diagnostics = TeleprompterLatencyDiagnostics(maxSamples: 3)
         diagnostics.recordAlignment(queueAgeMilliseconds: 1, matchMilliseconds: 4)

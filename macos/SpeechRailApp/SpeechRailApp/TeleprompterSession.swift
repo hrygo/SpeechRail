@@ -77,6 +77,8 @@ public final class TeleprompterSession {
 
     public private(set) var phase: Phase = .draft
     public private(set) var blocked: BlockReason?
+    public var voiceAssistState: TeleprompterVoiceAssistState { voiceLifecycle.state }
+    public var isMicrophoneCapturing: Bool { source != nil }
     public private(set) var document: TeleprompterDocument?
     public private(set) var versions: [TeleprompterVersion] = []
     public private(set) var unavailableDocuments: [TeleprompterV2DocumentListItem] = []
@@ -102,13 +104,19 @@ public final class TeleprompterSession {
     public private(set) var readingBlocks: [TeleprompterReadingBlock] = []
     public private(set) var runClock: TeleprompterRunClockState = TeleprompterRunClockState()
     private var clockTask: Task<Void, Never>?
+    private var stageGeneration: UUID?
+    private var stageCloseToken: UUID?
 
     public var canEdit: Bool {
         source == nil && client == nil && runningVersion == nil
             && phase != .preparing && !isResuming && !isStoppingIntentionally
             && !isTightening && !isAnnotating
     }
-    public var isCapturing: Bool { client != nil }
+    public var isCapturing: Bool { source != nil }
+    /// True only while this stage owns the monotonic run clock. Re-fronting a
+    /// window must not reset it, and closing retires it with the stage session.
+    public var isStageOpen: Bool { clockTask != nil }
+    public var isClosingStage: Bool { stageCloseToken != nil }
     public var isPreparingDraft: Bool { phase == .analyzing }
 
     public var hasUncheckedPreparationBoundaries: Bool {
@@ -195,6 +203,9 @@ public final class TeleprompterSession {
 
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
+    /// Transport injection keeps the production lifecycle testable without a
+    /// socket, model, microphone, or audio file.
+    public var realtimeClientFactory: (@MainActor (Int, String?) -> any TeleprompterRealtimeClientProtocol)?
     /// MapReduce preparation is injected so the session never knows provider,
     /// endpoint, credential, or response transport details.
     public var preparationClient: TeleprompterPreparationClient?
@@ -209,13 +220,15 @@ public final class TeleprompterSession {
     private let port: Int
     private let apiKey: String?
     private var source: AudioChunkSource?
-    private var client: RealtimeASRClient?
+    private var client: (any TeleprompterRealtimeClientProtocol)?
     private var pump: Task<Void, Never>?
     private var followController = TeleprompterFollowController()
     private let followAdapter = TeleprompterRealtimeFollowAdapter()
     private var isStoppingIntentionally = false
     private var runningVersion: TeleprompterVersion?
-    private var captureGeneration = UUID()
+    private var voiceLifecycle = TeleprompterVoiceAssistLifecycle()
+    private var voiceStopTask: Task<Void, Never>?
+    private var lastVoiceStopFailure: String?
     private var draftGeneration = UUID()
     private var preparationTask: Task<TeleprompterPreparationResult, Error>?
     private var tightenTask: Task<TeleprompterPreparationResult, Error>?
@@ -1279,11 +1292,56 @@ public final class TeleprompterSession {
         )
     }
 
+    /// Opens the reading surface without touching microphone or ASR state.
+    /// Existing saved position is preserved; a non-empty draft can use the
+    /// deterministic fallback, but an unaccepted AI draft is never adopted.
+    public func openForManualReading() throws {
+        if isClosingStage {
+            throw TeleprompterStageOpenError.closing
+        }
+        guard canEdit else {
+            throw TeleprompterStageOpenError.busy
+        }
+        if activeVersion == nil || phase == .draft {
+            try useDeterministicFallback()
+        }
+        guard activeVersion != nil else {
+            throw TeleprompterTextError.emptySource
+        }
+        if stageGeneration == nil {
+            stageGeneration = UUID()
+        }
+        followController.enterManual()
+        syncFollowState()
+        phase = .manual
+        blocked = nil
+        lastFailure = nil
+        if clockTask == nil {
+            startRunClock()
+        }
+        saveProgress()
+    }
+
+    /// Idempotent entry for the prepare page and stage window. Re-fronting an
+    /// already open stage must not reset position, timer, or voice state.
+    public func openForManualReadingIfNeeded() throws {
+        guard !isStageOpen else { return }
+        try openForManualReading()
+    }
+
+    /// Explicitly starts voice assistance at the current reading position.
     public func beginFollowing() async {
-        guard client == nil, phase != .preparing else { return }
+        await enableVoiceAssist()
+    }
+
+    public func enableVoiceAssist() async {
+        guard !isResuming, !isStoppingIntentionally else { return }
         if activeVersion == nil || phase == .draft {
             do { try useDeterministicFallback() }
-            catch { blocked = .noActiveVersion; return }
+            catch {
+                blocked = .noActiveVersion
+                return
+            }
         }
         guard activeVersion != nil else {
             blocked = .noActiveVersion
@@ -1291,28 +1349,89 @@ public final class TeleprompterSession {
             return
         }
         if let occupancy = coordinator.occupancy, occupancy.kind != .teleprompter {
-            blocked = .occupiedBy(occupancy.kind)
+            let reason = BlockReason.occupiedBy(occupancy.kind)
+            _ = voiceLifecycle.markUnavailable(reason: reason.title)
+            blocked = reason
             phase = .manual
             return
         }
+        guard let token = voiceLifecycle.beginStart() else {
+            if case .stopFailed = voiceLifecycle.state {
+                blocked = .streamFailed("上一次停止未完成，请先重试停止。")
+            }
+            return
+        }
         blocked = nil
-        await coordinator.requestStart(.teleprompter)
+        lastFailure = nil
+        phase = .preparing
+        do {
+            try await startVoiceAssistPipeline(generation: token)
+            guard voiceLifecycle.isCurrent(token) else { throw CancellationError() }
+            guard voiceLifecycle.markFollowing(token: token) else {
+                throw CancellationError()
+            }
+            phase = .following
+            if clockTask == nil { startRunClock() }
+            saveProgress()
+        } catch is CancellationError {
+            if voiceLifecycle.isCurrent(token), voiceLifecycle.state == .starting {
+                _ = voiceLifecycle.markStartFailed(
+                    token: token,
+                    reason: "语音跟随已取消。"
+                )
+            }
+            phase = .manual
+        } catch {
+            let reason = Self.blockReason(for: error)
+            blocked = reason
+            if voiceLifecycle.isCurrent(token), voiceLifecycle.state == .starting {
+                _ = voiceLifecycle.markStartFailed(
+                    token: token,
+                    reason: reason.title
+                )
+            }
+            phase = .manual
+            saveProgress()
+        }
     }
 
-    /// SessionCoordinator 的 starter：此时已取得 `.teleprompter` 占用，但还没有持久化记录。
+    /// Reconciles the explicit request with SessionCoordinator. The coordinator
+    /// executes `beginCapture`, so ownership and device release stay on the
+    /// existing single path.
+    private func startVoiceAssistPipeline(generation: UUID) async throws {
+        guard voiceLifecycle.isCurrent(generation) else {
+            throw CancellationError()
+        }
+        await coordinator.requestStart(.teleprompter)
+        guard voiceLifecycle.isCurrent(generation) else {
+            throw CancellationError()
+        }
+        guard client != nil, source != nil else {
+            throw Blocked(reason: blocked ?? .serviceNotReady("语音跟随没有启动。"))
+        }
+    }
+
+    /// Coordinator starter. The generation was issued synchronously by the
+    /// voice lifecycle before ownership was requested.
     public func beginCapture() async throws {
-        guard client == nil, let activeVersion else { throw Blocked(reason: .noActiveVersion) }
+        guard client == nil,
+              voiceLifecycle.state == .starting,
+              let activeVersion else {
+            throw Blocked(reason: .noActiveVersion)
+        }
+        let generation = voiceLifecycle.generation
         runningVersion = activeVersion
         invalidateAnalysis()
-        captureGeneration = UUID()
-        let generation = captureGeneration
         phase = .preparing
         blocked = nil
         lastFailure = nil
         do {
             try await startPipeline(generation: generation)
+            guard voiceLifecycle.isCurrent(generation) else {
+                throw CancellationError()
+            }
         } catch {
-            guard generation == captureGeneration else { throw error }
+            guard voiceLifecycle.isCurrent(generation) else { throw error }
             runningVersion = nil
             let reason = Self.blockReason(for: error)
             blocked = reason
@@ -1322,83 +1441,130 @@ public final class TeleprompterSession {
     }
 
     public func pauseFollowing() {
-        guard phase == .following || phase == .uncertain else { return }
-        followController.pause()
-        pauseRunClock()
-        syncFollowState()
-        phase = .paused
-        saveProgress()
+        _ = requestVoiceStop(destination: .pausedByUser)
     }
 
     public func resumeFollowing() async {
-        if client == nil, phase == .ready || phase == .ended || phase == .manual {
-            await beginFollowing()
-            return
+        await enableVoiceAssist()
+    }
+
+    /// Manual movement is always immediate. A live or starting voice session
+    /// loses its generation synchronously, then cleans up without blocking the
+    /// new reading position.
+    private func takeOverAndMove(to index: Int) {
+        guard let count = activeVersion?.segments.count, count > 0 else { return }
+        resetAdaptiveClockSamples()
+        if voiceLifecycle.state == .starting || voiceLifecycle.state == .following {
+            _ = requestVoiceStop(destination: .pausedByUser)
         }
-        guard phase == .paused || phase == .manual || phase == .uncertain else { return }
-        guard !isResuming else { return }
-        guard let client else { await beginFollowing(); return }
-        isResuming = true
-        let generation = captureGeneration
-        followController.pause()
-        defer { isResuming = false }
-        do {
-            try await client.drainAndClear(timeout: .seconds(8))
-        } catch {
-            guard generation == captureGeneration else { return }
-            await enterManual(.streamFailed("暂时无法恢复跟读，请重新开始。"))
-            return
-        }
-        guard generation == captureGeneration else { return }
-        followController.resume()
-        resumeRunClock()
+        followController.manualMove(to: index, segmentCount: count)
         syncFollowState()
-        phase = .following
-        blocked = nil
+        phase = .manual
         saveProgress()
     }
 
     public func moveToPrevious() {
-        guard let count = activeVersion?.segments.count else { return }
-        resetAdaptiveClockSamples()
-        followController.move(to: currentSegmentIndex - 1, segmentCount: count)
+        takeOverAndMove(to: max(0, currentSegmentIndex - 1))
+    }
+
+    public func moveToSegment(_ index: Int) {
+        takeOverAndMove(to: index)
+    }
+
+    public func restartToBeginning() {
+        takeOverAndMove(to: 0)
+    }
+
+    public func moveToNext() {
+        guard let count = activeVersion?.segments.count, count > 0 else { return }
+        takeOverAndMove(to: min(count - 1, currentSegmentIndex + 1))
+    }
+
+    /// Scroll gestures stop automatic advancement but never mutate the segment
+    /// index on their own.
+    public func takeOverForManualScroll() {
+        if phase == .manual,
+           voiceLifecycle.state != .starting,
+           voiceLifecycle.state != .following {
+            followController.enterManual()
+            syncFollowState()
+            return
+        }
+        guard voiceLifecycle.state == .starting || voiceLifecycle.state == .following else {
+            followController.enterManual()
+            syncFollowState()
+            phase = .manual
+            return
+        }
+        _ = requestVoiceStop(destination: .pausedByUser)
+        followController.enterManual()
         syncFollowState()
         phase = .manual
         saveProgress()
     }
 
-    public func moveToSegment(_ index: Int) {
-        guard let count = activeVersion?.segments.count else { return }
-        resetAdaptiveClockSamples()
-        followController.move(to: index, segmentCount: count)
+    @discardableResult
+    private func requestVoiceStop(
+        destination: TeleprompterVoiceAssistState
+    ) -> Task<Void, Never>? {
+        guard let token = voiceLifecycle.beginStop(destination: destination) else {
+            return nil
+        }
+        followController.enterManual()
         syncFollowState()
-        if client == nil && (phase == .ready || phase == .draft) {
-            // 候场就绪期间切换起讲段，保持就绪状态，便于一键开讲
+        phase = .manual
+        blocked = nil
+        saveProgress()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performVoiceStop(token: token)
+        }
+        voiceStopTask = task
+        return task
+    }
+
+    private func performVoiceStop(token: UUID) async {
+        guard voiceLifecycle.isCurrent(token) else { return }
+        if coordinator.occupancy?.kind == .teleprompter {
+            await coordinator.stopCapture(endingWith: .user)
         } else {
+            await stopCapture()
+        }
+        let failure = lastVoiceStopFailure
+        let accepted = voiceLifecycle.markStopped(
+            token: token,
+            failureReason: failure
+        )
+        guard accepted else { return }
+        switch voiceLifecycle.state {
+        case .off, .unavailable:
+            phase = isStageOpen
+                ? .manual
+                : (activeVersion == nil ? .draft : .ready)
+        case .pausedByUser, .stopFailed, .stopping, .starting, .following:
             phase = .manual
+        }
+        if let failure {
+            blocked = .streamFailed(failure)
         }
         saveProgress()
     }
 
-    public func restartToBeginning() {
-        guard let count = activeVersion?.segments.count else { return }
-        resetAdaptiveClockSamples()
-        followController.move(to: 0, segmentCount: count)
-        syncFollowState()
-        runClock.elapsedSeconds = 0
-        runClock.estimatedRemainingSeconds = remainingTextEstimate()
-        runClock.isPaused = false
-        phase = .ready
-        saveProgress()
+    public func disableVoiceAssist() async {
+        if let task = requestVoiceStop(destination: .off) {
+            await task.value
+        } else if let task = voiceStopTask {
+            await task.value
+        }
     }
 
-    public func moveToNext() {
-        guard let count = activeVersion?.segments.count else { return }
-        resetAdaptiveClockSamples()
-        followController.move(to: currentSegmentIndex + 1, segmentCount: count)
-        syncFollowState()
-        phase = .manual
-        saveProgress()
+    public func retryStopVoiceAssist() async {
+        guard case .stopFailed = voiceLifecycle.state,
+              let destination = voiceLifecycle.pendingStopDestination,
+              let task = requestVoiceStop(destination: destination) else {
+            return
+        }
+        await task.value
     }
 
     public func clearBlocked() {
@@ -1406,31 +1572,69 @@ public final class TeleprompterSession {
     }
 
     public func resetFollow() async {
-        await resumeFollowing()
+        await enableVoiceAssist()
+    }
+
+    /// Starts the close transition synchronously so a window-close delegate can
+    /// invalidate the stage before any asynchronous drain begins.
+    @discardableResult
+    func beginStageClose() -> Bool {
+        guard stageCloseToken == nil else { return false }
+        guard isStageOpen || voiceLifecycle.state != .off || source != nil || client != nil else {
+            return false
+        }
+        stageCloseToken = UUID()
+        stageGeneration = nil
+        stopRunClock()
+        _ = requestVoiceStop(destination: .off)
+        return true
+    }
+
+    /// Completes a close started by `beginStageClose()`. Reading remains blocked
+    /// during this transition so an old drain cannot retire a newer stage.
+    func finishStageClose() async {
+        guard let token = stageCloseToken else { return }
+        await disableVoiceAssist()
+        guard stageCloseToken == token else { return }
+        // `stopCapture` always closes the local client/source even when the
+        // drain barrier reports a failure. Once cleanup has run and no
+        // occupancy remains, a later reopen starts from a clean `off`.
+        if source == nil, client == nil, coordinator.occupancy == nil {
+            _ = voiceLifecycle.resetToOff()
+            blocked = nil
+        }
+        if stageGeneration == nil {
+            phase = activeVersion == nil ? .draft : .ready
+        }
+        saveProgress()
+        stageCloseToken = nil
+    }
+
+    /// Closing always stops this stage's resources and keeps the current
+    /// reading position. It never presents a completion summary and never
+    /// affects resources owned by another capability.
+    public func closeStage() async {
+        guard beginStageClose() else { return }
+        await finishStageClose()
     }
 
     public func endFollowing() async {
-        if coordinator.occupancy?.kind == .teleprompter {
-            await coordinator.stopCapture(endingWith: .user)
-        } else {
-            await stopCapture()
-        }
-        phase = .ended
-        saveProgress()
+        await closeStage()
     }
 
-    /// SessionCoordinator 的 stopper：停止采集、关闭 ASR、只保存段落进度。
+    /// SessionCoordinator stopper: stop capture, close ASR, preserve position.
     public func stopCapture() async {
         guard !isStoppingIntentionally else { return }
         isStoppingIntentionally = true
-        stopRunClock()
-        captureGeneration = UUID()
+        defer { isStoppingIntentionally = false }
+        lastVoiceStopFailure = nil
         source?.stop()
         source = nil
         if let client {
             do {
                 try await client.drainAndClear(timeout: .seconds(8))
             } catch {
+                lastVoiceStopFailure = error.localizedDescription
                 lastFailure = error.localizedDescription
             }
             await client.close()
@@ -1439,11 +1643,10 @@ public final class TeleprompterSession {
         pump?.cancel()
         pump = nil
         partialText = nil
-        followController.resetFollowWindow()
+        followController.enterManual()
         syncFollowState()
         saveProgress()
         runningVersion = nil
-        isStoppingIntentionally = false
     }
 
     private func startPipeline(generation: UUID) async throws {
@@ -1456,22 +1659,23 @@ public final class TeleprompterSession {
             }
         }
 
-        guard generation == captureGeneration else { throw CancellationError() }
+        guard generation == voiceLifecycle.generation else { throw CancellationError() }
 
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: 400,
-            diarizationEnabled: false,
-            apiKey: apiKey,
-            partialMode: .snapshot,
-            chunkDurationMilliseconds: 500
-        )
+        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey)
+            ?? RealtimeASRClient(
+                port: port,
+                silenceDurationMilliseconds: 400,
+                diarizationEnabled: false,
+                apiKey: apiKey,
+                partialMode: .snapshot,
+                chunkDurationMilliseconds: 500
+            )
         do {
             try await client.connect()
         } catch {
             throw Blocked(reason: .serviceNotReady(error.localizedDescription))
         }
-        guard generation == captureGeneration else {
+        guard generation == voiceLifecycle.generation else {
             await client.close()
             throw CancellationError()
         }
@@ -1483,10 +1687,10 @@ public final class TeleprompterSession {
             stream = try await source.start()
         } catch {
             await client.close()
-            if generation == captureGeneration { self.source = nil }
+            if generation == voiceLifecycle.generation { self.source = nil }
             throw Blocked(reason: Self.blockReason(for: error))
         }
-        guard generation == captureGeneration else {
+        guard generation == voiceLifecycle.generation else {
             source.stop()
             await client.close()
             throw CancellationError()
@@ -1500,15 +1704,18 @@ public final class TeleprompterSession {
         hasHeardSpeech = false
         coordinator.sessionDidStartRecording(id: nil)
         followController.resume()
-        startRunClock()
+        if clockTask == nil { startRunClock() }
         syncFollowState()
         phase = .following
         startPump(stream: stream, client: client)
     }
 
-    private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
+    private func startPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any TeleprompterRealtimeClientProtocol
+    ) {
         pump?.cancel()
-        let generation = captureGeneration
+        let generation = voiceLifecycle.generation
         pump = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 group.addTask { [weak self] in
@@ -1529,8 +1736,12 @@ public final class TeleprompterSession {
         }
     }
 
-    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient, generation: UUID) async {
-        guard generation == captureGeneration, !isStoppingIntentionally,
+    private func upload(
+        _ chunk: AudioChunk,
+        to client: any TeleprompterRealtimeClientProtocol,
+        generation: UUID
+    ) async {
+        guard voiceLifecycle.acceptsVoiceEvents(token: generation), !isStoppingIntentionally,
               !isResuming, followController.mode == .following else { return }
         do {
             try await client.append(chunk.pcm)
@@ -1540,7 +1751,7 @@ public final class TeleprompterSession {
                 )
             }
         } catch {
-            guard generation == captureGeneration else { return }
+            guard generation == voiceLifecycle.generation else { return }
             await enterManual(.streamFailed("语音连接中断，可以手动继续或重新开始。"))
         }
     }
@@ -1548,7 +1759,7 @@ public final class TeleprompterSession {
     private func handle(
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>, generation: UUID
     ) async {
-        guard generation == captureGeneration, !isStoppingIntentionally else { return }
+        guard voiceLifecycle.acceptsVoiceEvents(token: generation), !isStoppingIntentionally else { return }
         let handleStartedAt = ContinuousClock().now
         var didAlign = false
         defer {
@@ -1627,7 +1838,6 @@ public final class TeleprompterSession {
     }
 
     private func enterManual(_ reason: BlockReason) async {
-        captureGeneration = UUID()
         source?.stop()
         source = nil
         await client?.close()
@@ -1637,10 +1847,7 @@ public final class TeleprompterSession {
         if coordinator.occupancy?.kind == .teleprompter {
             await coordinator.stopCapture(endingWith: .user)
         }
-        // A transport failure freezes the run clock. Manual positioning is a
-        // user-controlled state, but it must not inherit a pre-failure speed
-        // sample or continue counting while disconnected.
-        pauseRunClock()
+        _ = voiceLifecycle.invalidateAfterFailure(reason: reason.title)
         followController.enterManual()
         syncFollowState()
         blocked = reason

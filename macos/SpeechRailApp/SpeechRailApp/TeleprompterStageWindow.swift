@@ -4,11 +4,21 @@ import SwiftUI
 
 @MainActor
 @Observable
+public final class TeleprompterStagePresentationState {
+    public var settingsRequestID: UUID?
+
+    public init() {}
+}
+
+@MainActor
+@Observable
 public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate {
     public let session: TeleprompterSession
     public let settings: TeleprompterStageSettings
+    public let presentation = TeleprompterStagePresentationState()
     private var panel: TeleprompterPanel?
-    private var isClosingProgrammatically = false
+    public private(set) var lastPresentationError: String?
+    public private(set) var isVisible = false
 
     public init(session: TeleprompterSession, settings: TeleprompterStageSettings) {
         self.session = session
@@ -16,6 +26,14 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
     }
 
     public func show() {
+        do {
+            try session.openForManualReadingIfNeeded()
+            lastPresentationError = nil
+        } catch {
+            lastPresentationError = error.localizedDescription
+            isVisible = false
+            return
+        }
         let panel = panel ?? makePanel()
         panel.setContentSize(
             NSSize(
@@ -24,19 +42,22 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             )
         )
         panel.orderFrontRegardless()
-        panel.makeKey()
+        isVisible = true
+    }
+
+    public func showSettings() {
+        show()
+        presentation.settingsRequestID = UUID()
     }
 
     public func close() {
-        guard let panel else { return }
-        isClosingProgrammatically = true
-        panel.close()
-        isClosingProgrammatically = false
+        panel?.close()
     }
 
     public func windowWillClose(_ notification: Notification) {
-        guard !isClosingProgrammatically else { return }
-        Task { await session.endFollowing() }
+        isVisible = false
+        guard session.beginStageClose() else { return }
+        Task { await session.finishStageClose() }
     }
 
     public func windowDidResize(_ notification: Notification) {
@@ -81,6 +102,7 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             rootView: TeleprompterStageView(
                 session: session,
                 settings: settings,
+                presentation: presentation,
                 close: { [weak self] in self?.close() }
             )
         )

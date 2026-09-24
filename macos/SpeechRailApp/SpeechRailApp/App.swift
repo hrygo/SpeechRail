@@ -496,6 +496,8 @@ struct SpeechRailApp: App {
                 navigation: navigation,
                 session: session,
                 caption: caption,
+                teleprompter: teleprompter,
+                teleprompterStage: teleprompterStage,
                 showDeveloperDetails: $showDeveloperDetails
             )
         }
@@ -548,6 +550,8 @@ struct SpeechRailCommands: Commands {
     let session: SessionCoordinator
     /// 字幕带的全局入口（`⌘⇧L`）。它**不需要 App 在前台**——菜单命令本来就在系统这一侧。
     let caption: CaptionSession
+    @Bindable var teleprompter: TeleprompterSession
+    @Bindable var teleprompterStage: TeleprompterStageWindowController
     @Binding var showDeveloperDetails: Bool
     @FocusedValue(\.selectedWorkCommand) private var selectedWorkCommand
     @FocusedValue(\.reloadPageCommand) private var reloadPageCommand
@@ -613,6 +617,43 @@ struct SpeechRailCommands: Commands {
             .disabled(!session.phase.isActive)
         }
 
+        CommandMenu("提词器") {
+            Button("打开提词器") {
+                teleprompterStage.show()
+            }
+            .disabled(teleprompter.activeVersion == nil && teleprompter.document == nil)
+
+            Divider()
+
+            Button("上一段") {
+                teleprompter.moveToPrevious()
+            }
+            .disabled(!teleprompterStage.isVisible || teleprompter.currentSegmentIndex <= 0)
+
+            Button("下一段") {
+                teleprompter.moveToNext()
+            }
+            .disabled(!teleprompterStage.isVisible || isTeleprompterAtLastSegment)
+
+            Button(voiceAssistCommandTitle) {
+                handleVoiceAssistCommand()
+            }
+            .disabled(!teleprompterStage.isVisible || teleprompter.voiceAssistState.isBusy)
+
+            Button("显示设置") {
+                teleprompterStage.showSettings()
+            }
+            .disabled(teleprompter.document == nil)
+
+            Divider()
+
+            Button("关闭提词器") {
+                teleprompterStage.close()
+            }
+            .keyboardShortcut(.escape, modifiers: [.command])
+            .disabled(!teleprompterStage.isVisible && !teleprompter.isStageOpen)
+        }
+
         CommandGroup(replacing: .help) {
             Button("SpeechRail 帮助") {
                 openWindow(id: SpeechRailApp.helpWindowID)
@@ -624,6 +665,43 @@ struct SpeechRailCommands: Commands {
     private var exportTitle: String {
         guard let selectedWorkCommand else { return "导出选中作品…" }
         return "导出“\(selectedWorkCommand.title)”…"
+    }
+
+    private var isTeleprompterAtLastSegment: Bool {
+        guard let count = teleprompter.activeVersion?.segments.count, count > 0 else { return true }
+        return teleprompter.currentSegmentIndex >= count - 1
+    }
+
+    private var voiceAssistCommandTitle: String {
+        switch teleprompter.voiceAssistState {
+        case .off:
+            "开启语音跟随"
+        case .starting:
+            "正在开启语音跟随…"
+        case .following:
+            "关闭语音跟随"
+        case .stopping:
+            "正在停止语音跟随…"
+        case .stopFailed:
+            "重试停止语音跟随"
+        case .pausedByUser:
+            "恢复语音跟随"
+        case .unavailable:
+            "重试语音跟随"
+        }
+    }
+
+    private func handleVoiceAssistCommand() {
+        switch teleprompter.voiceAssistState {
+        case .following:
+            Task { await teleprompter.disableVoiceAssist() }
+        case .stopFailed:
+            Task { await teleprompter.retryStopVoiceAssist() }
+        case .off, .pausedByUser, .unavailable:
+            Task { await teleprompter.enableVoiceAssist() }
+        case .starting, .stopping:
+            break
+        }
     }
 
     /// 所有路由的快捷键由 AppRoute 提供；缺一条就当作契约缺陷，

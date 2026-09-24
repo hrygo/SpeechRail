@@ -399,6 +399,19 @@ public struct TeleprompterFollowController: Sendable {
         followState = .manual
     }
 
+    /// Manual movement requested by a reader. Moving within the same paragraph
+    /// is a takeover, not a jump to its beginning; the current reading offset
+    /// must survive boundary commands such as previous-at-first-segment.
+    public mutating func manualMove(to index: Int, segmentCount: Int) {
+        guard segmentCount > 0 else { return }
+        let target = min(max(0, index), segmentCount - 1)
+        if target == position.segmentIndex {
+            enterManual()
+            return
+        }
+        move(to: target, segmentCount: segmentCount)
+    }
+
     public mutating func enterManual() {
         invalidatePending()
         mode = .manual

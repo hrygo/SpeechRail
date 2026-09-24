@@ -1,8 +1,8 @@
 ---
 title: "AI 提词器终版规格"
 status: final
-version: "1.1.0"
-date: 2026-09-21
+version: "1.1.1"
+date: 2026-09-24
 implementation_status: implemented_pending_model_and_ui_acceptance
 last_implementation_review: 2026-09-21
 supersedes:
@@ -13,6 +13,8 @@ supersedes:
 # AI 提词器终版规格
 
 本文是朗读稿整理、目标时长、MapReduce、审阅与跟读功能的唯一实施规格。规范中的“必须”“不得”是实现约束，“默认”是产品参数。`final` 表示设计文本完成，不表示功能已经实现或质量验收通过。算法参数在本文集中定义；发布前执行第 15 节验收，参数变化必须更新规格与对应测试。
+
+> 2026-09-24 范围更新：舞台改为“手动优先、语音辅助”后，[`提词器舞台：手动优先、语音辅助工程规格`](2026-09-24-teleprompter-manual-first-design.md) 取代本文中与舞台默认状态、控制显隐、空格/Command-A 等舞台快捷键、语音跟随生命周期和完稿反馈冲突的条款。本文继续约束朗读稿整理、目标时长、MapReduce、审阅、持久化与跟读算法；冲突以新规格为准。
 
 ## 1. 产品目标与范围
 

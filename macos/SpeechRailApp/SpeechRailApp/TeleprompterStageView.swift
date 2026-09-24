@@ -3,27 +3,49 @@ import SwiftUI
 public struct TeleprompterStageView: View {
     @Bindable private var session: TeleprompterSession
     @Bindable private var settings: TeleprompterStageSettings
+    @Bindable private var presentation: TeleprompterStagePresentationState
     private let close: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @State private var isBrowsingAll: Bool = false
-    @State private var hasAdoptedCalibration: Bool = false
     @State private var hoveredSegmentIndex: Int? = nil
-    @State private var isBreathingGlow: Bool = false
-    @State private var hasCopiedSummary: Bool = false
     @State private var isAppearancePopoverPresented = false
+    @State private var pointerInsideStage = false
+    @State private var controlsVisible = false
+    @State private var hideControlsTask: Task<Void, Never>?
+    @State private var initialRevealActive = true
+    @State private var initialRevealTask: Task<Void, Never>?
+    @State private var interactionState = TeleprompterStageInteractionState()
+    @State private var errorNoticeVisible = false
+    @State private var errorNoticeTask: Task<Void, Never>?
+    @FocusState private var focusedControl: StageControlFocus?
+
+    private enum StageControlFocus: Hashable {
+        case previous
+        case next
+        case voice
+        case display
+        case close
+    }
 
     public init(
         session: TeleprompterSession,
         settings: TeleprompterStageSettings,
+        presentation: TeleprompterStagePresentationState,
         close: @escaping () -> Void
     ) {
         self.session = session
         self.settings = settings
+        self.presentation = presentation
         self.close = close
     }
 
     public var body: some View {
+        stageWithLifecycle
+    }
+
+    private var stageBase: some View {
         stageContent
             .padding(SpeechRailDesignTokens.Teleprompter.stagePadding)
             .frame(
@@ -46,13 +68,29 @@ public struct TeleprompterStageView: View {
                 reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
                 value: isBrowsingAll
             )
-            .animation(
-                reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
-                value: hoveredSegmentIndex
-            )
             .accessibilityElement(children: .contain)
             .accessibilityLabel("AI 提词器舞台")
             .accessibilityValue("\(session.progressText)，\(statusText)")
+    }
+
+    private var stageWithPresentation: some View {
+        stageBase
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                controlsLayer
+            }
+            .onHover { isInside in
+                pointerInsideStage = isInside
+                interactionState.setPointerInside(isInside)
+                if isInside {
+                    revealControls(immediate: true)
+                } else {
+                    scheduleControlsHide()
+                }
+            }
+    }
+
+    private var stageWithObservation: some View {
+        stageWithPresentation
             .onChange(of: session.activeVersion?.id, initial: true) { _, _ in
                 scrollToReadingPosition()
             }
@@ -60,30 +98,81 @@ public struct TeleprompterStageView: View {
             .onChange(of: session.phase) { _, newPhase in
                 handlePhaseChange(to: newPhase)
             }
-            .onAppear {
-                if !reduceMotion {
-                    withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-                        isBreathingGlow = true
-                    }
+            .onChange(of: session.blocked) { _, blocked in
+                showErrorNoticeIfNeeded(blocked != nil || session.lastFailure != nil)
+            }
+            .onChange(of: session.lastFailure) { _, failure in
+                showErrorNoticeIfNeeded(failure != nil && session.blocked == nil)
+            }
+            .onChange(of: focusedControl) { _, _ in
+                handleControlFocusChange()
+            }
+            .onChange(of: isAppearancePopoverPresented) { _, presented in
+                if presented {
+                    revealControls(immediate: true)
+                } else {
+                    scheduleControlsHide()
                 }
+            }
+            .onChange(of: presentation.settingsRequestID) { _, requestID in
+                guard requestID != nil else { return }
+                isAppearancePopoverPresented = true
+            }
+    }
+
+    private var stageWithSettingsObservation: some View {
+        stageWithObservation
+            .onChange(of: isBrowsingAll) { _, browsing in
+                if browsing {
+                    session.takeOverForManualScroll()
+                }
+                scrollToReadingPosition()
+            }
+            .onChange(of: settings.alwaysShowControls) { _, _ in refreshControlsVisibility() }
+            .onChange(of: settings.showClockAndProgress) { _, _ in refreshControlsVisibility() }
+            .onChange(of: voiceOverEnabled) { _, _ in refreshControlsVisibility() }
+            .onChange(of: session.isStageOpen) { _, isOpen in
+                handleStageOpenChange(isOpen)
+            }
+    }
+
+    private var stageWithKeyboard: some View {
+        stageWithSettingsObservation
+            .onKeyPress(.tab) { handleTabKey() }
+            .onKeyPress(.space) { handleNextKey() }
+            .onKeyPress(.leftArrow) { handlePreviousKey() }
+            .onKeyPress(.rightArrow) { handleNextKey() }
+            .onKeyPress(.upArrow) { handlePreviousKey() }
+            .onKeyPress(.downArrow) { handleNextKey() }
+            .onKeyPress(.pageUp) { handlePreviousKey() }
+            .onKeyPress(.pageDown) { handleNextKey() }
+            .onKeyPress(.home) { handleHomeKey() }
+            .onKeyPress(.end) { handleEndKey() }
+            .onKeyPress(.escape) { handleEscapeKey() }
+    }
+
+    private var stageWithLifecycle: some View {
+        stageWithKeyboard
+            .onAppear { handleStageAppear() }
+            .onDisappear {
+                hideControlsTask?.cancel()
+                initialRevealTask?.cancel()
+                errorNoticeTask?.cancel()
             }
     }
 
     @ViewBuilder
     private var stageContent: some View {
         VStack(spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
-            if session.phase == .ended {
-                stageSummaryView
-            } else {
-                readingProgress
+            auxiliaryStatusBar
+            if errorNoticeVisible {
                 if let blocked = session.blocked {
                     attentionMessage(blocked: blocked)
-                } else if session.uncertainty != nil {
-                    adlibbingMessage
+                } else if let failure = session.lastFailure {
+                    saveFailureMessage(failure)
                 }
-                scriptStack
-                controls
             }
+            scriptStack
         }
     }
 
@@ -119,330 +208,205 @@ public struct TeleprompterStageView: View {
         if newPhase == .following {
             isBrowsingAll = false
         }
-        if newPhase == .ready {
-            hasAdoptedCalibration = false
+    }
+
+    private var acceptsReadingKeyCommands: Bool {
+        focusedControl == nil && !isAppearancePopoverPresented
+    }
+
+    private func handleControlFocusChange() {
+        let focusInside = focusedControl != nil
+        interactionState.setControlFocus(focusInside)
+        if focusInside {
+            revealControls(immediate: true)
+        } else if !pointerInsideStage && !isAppearancePopoverPresented {
+            scheduleControlsHide()
         }
     }
 
-    // MARK: - 舞台节奏与状态看板
+    private func handleStageOpenChange(_ isOpen: Bool) {
+        if isOpen {
+            beginInitialReveal()
+        } else {
+            initialRevealActive = false
+            interactionState = TeleprompterStageInteractionState()
+            pointerInsideStage = false
+            refreshControlsVisibility()
+        }
+    }
 
-    private var readingProgress: some View {
+    private func handleStageAppear() {
+        if session.isStageOpen {
+            beginInitialReveal()
+        }
+        refreshControlsVisibility()
+    }
+
+    private func handleTabKey() -> KeyPress.Result {
+        interactionState.requestKeyboardReveal()
+        revealControls(immediate: true)
+        return .ignored
+    }
+
+    private func handleNextKey() -> KeyPress.Result {
+        guard acceptsReadingKeyCommands else { return .ignored }
+        session.moveToNext()
+        return .handled
+    }
+
+    private func handlePreviousKey() -> KeyPress.Result {
+        guard acceptsReadingKeyCommands else { return .ignored }
+        session.moveToPrevious()
+        return .handled
+    }
+
+    private func handleHomeKey() -> KeyPress.Result {
+        guard acceptsReadingKeyCommands else { return .ignored }
+        session.restartToBeginning()
+        return .handled
+    }
+
+    private func handleEndKey() -> KeyPress.Result {
+        guard acceptsReadingKeyCommands else { return .ignored }
+        if let count = session.activeVersion?.segments.count, count > 0 {
+            session.moveToSegment(count - 1)
+        }
+        return .handled
+    }
+
+    private func handleEscapeKey() -> KeyPress.Result {
+        if isAppearancePopoverPresented {
+            isAppearancePopoverPresented = false
+        } else {
+            close()
+        }
+        return .handled
+    }
+
+    private var interactionVisibility: TeleprompterStageInteractionVisibility {
+        TeleprompterStageInteractionVisibility(
+            pointerInside: pointerInsideStage,
+            controlFocusInside: focusedControl != nil,
+            menuOrPopoverPresented: isAppearancePopoverPresented,
+            alwaysShowControls: settings.alwaysShowControls,
+            voiceOverEnabled: voiceOverEnabled,
+            initialRevealActive: initialRevealActive,
+            keyboardRevealRequested: interactionState.keyboardRevealRequested
+        )
+    }
+
+    private func refreshControlsVisibility() {
+        if TeleprompterStageInteractionPolicy.controlsVisible(for: interactionVisibility) {
+            revealControls(immediate: true)
+        } else {
+            scheduleControlsHide()
+        }
+    }
+
+    private func revealControls(immediate: Bool) {
+        hideControlsTask?.cancel()
+        hideControlsTask = nil
+        guard !controlsVisible else { return }
+        if reduceMotion || immediate {
+            controlsVisible = true
+        } else {
+            withAnimation(.easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+                controlsVisible = true
+            }
+        }
+    }
+
+    private func scheduleControlsHide() {
+        hideControlsTask?.cancel()
+        guard controlsVisible else { return }
+        hideControlsTask = Task { @MainActor in
+            try? await Task.sleep(for: TeleprompterStageInteractionPolicy.hideDelay)
+            guard !Task.isCancelled else { return }
+            if TeleprompterStageInteractionPolicy.controlsVisible(for: interactionVisibility) {
+                refreshControlsVisibility()
+                return
+            }
+            if reduceMotion {
+                controlsVisible = false
+            } else {
+                withAnimation(.easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+                    controlsVisible = false
+                }
+            }
+        }
+    }
+
+    private func beginInitialReveal() {
+        initialRevealTask?.cancel()
+        initialRevealActive = true
+        revealControls(immediate: true)
+        initialRevealTask = Task { @MainActor in
+            try? await Task.sleep(for: TeleprompterStageInteractionPolicy.initialRevealDuration)
+            guard !Task.isCancelled, session.isStageOpen else { return }
+            initialRevealActive = false
+            refreshControlsVisibility()
+        }
+    }
+
+    private func showErrorNoticeIfNeeded(_ shouldShow: Bool) {
+        guard shouldShow else { return }
+        errorNoticeTask?.cancel()
+        errorNoticeVisible = true
+        errorNoticeTask = Task { @MainActor in
+            try? await Task.sleep(for: TeleprompterStageInteractionPolicy.errorNoticeDuration)
+            guard !Task.isCancelled else { return }
+            errorNoticeVisible = false
+        }
+    }
+
+    private var auxiliaryStatusBar: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            // 1. 跟读动态与拾音状态胶囊
-            statusCapsule
+            if session.isMicrophoneCapturing {
+                Label("麦克风使用中", systemImage: "mic.fill")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .accessibilityLabel("麦克风使用中")
+            }
 
-            // 2. 细窄进度条与段落编号（支持时间 vs 文本双轨进度对照）
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                stageProgressBar
-                    .frame(minWidth: 46, maxWidth: 76)
-
+            if settings.showClockAndProgress {
                 Text(session.progressText)
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize()
-            }
-
-            // 3. 语速节奏指示胶囊（跟读进行中呈现）
-            if isFollowing && session.hasHeardSpeech {
-                paceIndicatorCapsule
+                Text(formatClock(session.runClock.elapsedSeconds))
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .accessibilityLabel("本次已用 \(formatClock(session.runClock.elapsedSeconds))")
             }
 
             Spacer(minLength: 0)
-
-            // 4. 全稿查阅 / 聚焦两段切换（候场、暂停、手动时可用）
-            if !isFollowing {
-                contextBrowsingToggle
-            }
-
-            // 5. 轻量计时看板
-            clockDashboard
         }
+        .frame(height: SpeechRailDesignTokens.Teleprompter.stageAuxiliaryBarHeight)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("提词进度与计时")
-        .accessibilityValue("\(session.progressText)，\(statusText)，已读 \(formatClock(session.runClock.elapsedSeconds))")
     }
 
-    private var stageProgressBar: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            let height = proxy.size.height
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(SpeechRailDesignTokens.Color.inputField.opacity(0.9))
-                    .frame(height: 4)
-
-                Capsule()
-                    .fill(SpeechRailDesignTokens.Color.rail)
-                    .frame(width: max(4, width * CGFloat(progressValue)), height: 4)
-
-                if session.targetMinutes > 0 && session.runClock.elapsedSeconds > 0 {
-                    let timeRatio = min(1.0, session.runClock.elapsedSeconds / max(1.0, session.runClock.targetSeconds))
-                    let tickX = min(max(0, width * CGFloat(timeRatio) - 1), width - 2)
-                    let isAhead = progressValue >= timeRatio
-                    RoundedRectangle(cornerRadius: 1, style: .continuous)
-                        .fill(isAhead ? SpeechRailDesignTokens.Color.ready : SpeechRailDesignTokens.Color.attention)
-                        .frame(width: 2, height: 8)
-                        .offset(x: tickX)
-                }
-            }
-            .frame(height: height, alignment: .center)
-        }
-        .frame(height: 8)
-    }
-
-    @ViewBuilder
-    private var statusCapsule: some View {
-        switch session.phase {
-        case .ready, .draft:
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "mic.badge.checkmark")
-                    .font(.system(size: 9))
-                Text("候场待命 · 空格开讲")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-            }
-            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-            .background(SpeechRailDesignTokens.Color.rail.opacity(0.14), in: Capsule())
-
-        case .following, .uncertain:
-            followStatusCapsule()
-
-        case .paused:
-            followStatusCapsule(hint: "空格继续")
-
-        case .manual:
-            followStatusCapsule(hint: "方向键校正")
-
-        case .preparing:
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                ProgressView()
-                    .controlSize(.mini)
-                Text("正在连接麦克风…")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-            }
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-            .background(SpeechRailDesignTokens.Color.inputField, in: Capsule())
-
-        default:
-            EmptyView()
-        }
-    }
-
-    private func followStatusCapsule(hint: String? = nil) -> some View {
-        let statusText = hint.map { "\(session.followStatusText) · \($0)" } ?? session.followStatusText
-        return HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            if session.followState == .tracking {
-                Circle()
-                    .fill(followStatusColor)
-                    .frame(
-                        width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
-                        height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
+    private var controlsLayer: some View {
+        ZStack(alignment: .bottom) {
+            if controlsVisible {
+                controls
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                    .background(
+                        .ultraThinMaterial,
+                        in: RoundedRectangle(
+                            cornerRadius: SpeechRailDesignTokens.Corner.container,
+                            style: .continuous
+                        )
                     )
-                    .opacity(isBreathingGlow ? 1.0 : 0.6)
-            } else {
-                Image(systemName: followStatusSymbol)
-                    .font(.system(size: 9))
-                    .opacity(session.followState == .waitingForSpeech || session.followState == .listening
-                        ? (isBreathingGlow ? 1.0 : 0.45) : 1.0)
-            }
-            Text(statusText)
-                .font(SpeechRailDesignTokens.Typography.captionMedium)
-        }
-        .foregroundStyle(followStatusColor)
-        .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-        .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-        .background(followStatusBackground, in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(statusText)
-    }
-
-    private var followStatusColor: Color {
-        switch session.followState {
-        case .waitingForSpeech, .listening, .catchingUp, .paused:
-            SpeechRailDesignTokens.Color.attention
-        case .tracking:
-            SpeechRailDesignTokens.Color.ready
-        case .freePlaying:
-            SpeechRailDesignTokens.Color.rail
-        case .manual:
-            SpeechRailDesignTokens.Color.inkSecondary
-        }
-    }
-
-    private var followStatusBackground: Color {
-        switch session.followState {
-        case .waitingForSpeech, .listening, .catchingUp, .paused:
-            SpeechRailDesignTokens.Color.attention.opacity(0.14)
-        case .tracking:
-            SpeechRailDesignTokens.Color.ready.opacity(0.14)
-        case .freePlaying:
-            SpeechRailDesignTokens.Color.rail.opacity(0.14)
-        case .manual:
-            SpeechRailDesignTokens.Color.inputField
-        }
-    }
-
-    private var followStatusSymbol: String {
-        switch session.followState {
-        case .waitingForSpeech: "mic.fill"
-        case .listening: "waveform"
-        case .tracking: "checkmark"
-        case .catchingUp: "arrow.triangle.2.circlepath"
-        case .freePlaying: "arrow.triangle.branch"
-        case .paused: "pause.fill"
-        case .manual: "hand.tap.fill"
-        }
-    }
-
-    private var currentPaceStatus: TeleprompterStagePaceStatus {
-        let total = session.activeVersion?.segments.count ?? 0
-        return TeleprompterStagePresentation.paceStatus(
-            currentIndex: session.currentSegmentIndex,
-            totalCount: total,
-            elapsedSeconds: session.runClock.elapsedSeconds,
-            targetSeconds: session.runClock.targetSeconds
-        )
-    }
-
-    private var paceDelta: TimeInterval? {
-        let total = session.activeVersion?.segments.count ?? 0
-        return TeleprompterStagePresentation.paceDeltaSeconds(
-            currentIndex: session.currentSegmentIndex,
-            totalCount: total,
-            elapsedSeconds: session.runClock.elapsedSeconds,
-            targetSeconds: session.runClock.targetSeconds
-        )
-    }
-
-    @ViewBuilder
-    private var paceIndicatorCapsule: some View {
-        let status = currentPaceStatus
-        if let delta = paceDelta {
-            let formatted = TeleprompterStagePresentation.formattedPaceDelta(deltaSeconds: delta)
-            if formatted.isAhead {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "hare.fill")
-                        .font(.system(size: 8))
-                    Text(formatted.label)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.rail.opacity(0.12), in: Capsule())
-                .help("当前进度超前预定用时 \(Int(round(delta))) 秒 · 保持当前语速可准时或提前完稿，后续段落可从容展开")
-            } else if formatted.isBehind {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "tortoise.fill")
-                        .font(.system(size: 8))
-                    Text(formatted.label)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.attention.opacity(0.14), in: Capsule())
-                .help("当前进度滞后预定用时 \(Int(round(abs(delta)))) 秒 · 建议适当加快语速或精简细节保持准时完稿")
-            } else {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 8))
-                    Text(formatted.label)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.ready.opacity(0.12), in: Capsule())
-                .help(status.advice)
-            }
-        } else {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 8))
-                Text(status.title)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-            }
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePaceIndicatorPaddingVertical)
-            .background(SpeechRailDesignTokens.Color.inputField, in: Capsule())
-            .help(status.advice)
-        }
-    }
-
-    private var contextBrowsingToggle: some View {
-        Button {
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
-                isBrowsingAll.toggle()
-                if isBrowsingAll {
-                    scrollToReadingPosition()
-                }
-            }
-        } label: {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: isBrowsingAll ? "rectangle.split.2x1" : "text.justify.left")
-                    .font(.system(size: 9))
-                Text(isBrowsingAll ? "聚焦两段" : "查阅全稿")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                kbdBadge("⌘A")
+                    .transition(
+                        reduceMotion
+                            ? .identity
+                            : .opacity.combined(with: .move(edge: .bottom))
+                    )
             }
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-        .background(
-            isBrowsingAll
-                ? SpeechRailDesignTokens.Color.rail.opacity(0.14)
-                : SpeechRailDesignTokens.Color.inputField.opacity(0.7),
-            in: SpeechRailDesignTokens.Corner.nestedShape
-        )
-        .foregroundStyle(
-            isBrowsingAll
-                ? SpeechRailDesignTokens.Color.rail
-                : SpeechRailDesignTokens.Color.inkSecondary
-        )
-        .help(isBrowsingAll ? "切换为跟读聚焦两段模式（快捷键 ⌘A）" : "展开查阅完整讲稿，可随时点选段落从容起讲（快捷键 ⌘A）")
-    }
-
-    private var clockDashboard: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Image(systemName: "stopwatch")
-                .font(SpeechRailDesignTokens.Typography.captionRegular)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-            Text(formatClock(session.runClock.elapsedSeconds))
-                .font(SpeechRailDesignTokens.Typography.technicalValue)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-
-            if session.targetMinutes > 0 {
-                Text("/")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                let isOvertime = session.runClock.elapsedSeconds > session.runClock.targetSeconds
-                Text(
-                    isOvertime
-                        ? "超时 \(formatClock(session.runClock.elapsedSeconds - session.runClock.targetSeconds))"
-                        : "剩 \(formatClock(session.runClock.estimatedRemainingSeconds))"
-                )
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(
-                    isOvertime
-                        ? SpeechRailDesignTokens.Color.attention
-                        : SpeechRailDesignTokens.Color.inkSecondary
-                )
-            }
-        }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-        .background(
-            SpeechRailDesignTokens.Color.inputField.opacity(0.6),
-            in: SpeechRailDesignTokens.Corner.nestedShape
-        )
+        .frame(height: SpeechRailDesignTokens.Teleprompter.stageControlAreaHeight)
+        .allowsHitTesting(controlsVisible)
+        .accessibilityHidden(!controlsVisible)
     }
 
     private func attentionMessage(blocked: TeleprompterSession.BlockReason) -> some View {
@@ -481,33 +445,20 @@ public struct TeleprompterStageView: View {
         .accessibilityValue(blocked.title)
     }
 
-    private var adlibbingMessage: some View {
-        let currentText = session.currentSegment?.text ?? ""
-        let offset = min(currentText.utf16.count, max(0, session.readingOffset))
-        let snippet = anchorSnippet(from: currentText, offset: offset, length: 8)
-
-        return HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Image(systemName: "arrow.triangle.branch")
+    private func saveFailureMessage(_ failure: String) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
-                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-            if !snippet.isEmpty {
-                Text("脱稿发挥中 · 读出下划线「\(snippet)…」即可自动归队")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            } else {
-                Text("脱稿发挥中 · 读回屏幕文字即可自动归队")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            }
-            Spacer(minLength: 0)
-            Text("按 ←/→ 或点击段落随时重定位")
+                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+            Text("进度未保存，当前阅读仍可继续。")
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(
-            SpeechRailDesignTokens.Color.rail.opacity(
+            SpeechRailDesignTokens.Color.attention.opacity(
                 SpeechRailDesignTokens.Teleprompter.stageAttentionBackgroundOpacity
             ),
             in: RoundedRectangle(
@@ -515,29 +466,10 @@ public struct TeleprompterStageView: View {
                 style: .continuous
             )
         )
-        .overlay(
-            RoundedRectangle(
-                cornerRadius: SpeechRailDesignTokens.Corner.nested,
-                style: .continuous
-            )
-            .strokeBorder(
-                SpeechRailDesignTokens.Color.rail.opacity(0.25),
-                lineWidth: SpeechRailDesignTokens.Stroke.hairline
-            )
-        )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("脱稿发挥中")
-        .accessibilityValue(snippet.isEmpty ? "脱稿发挥中，读回屏幕文字即可自动恢复跟读" : "脱稿发挥中，读出\(snippet)即可自动恢复跟读")
+        .accessibilityLabel("进度未保存，当前阅读仍可继续")
+        .accessibilityHint(failure)
     }
-
-    private func anchorSnippet(from text: String, offset: Int, length: Int = 8) -> String {
-        guard let range = Range(NSRange(location: min(offset, text.utf16.count), length: min(length, max(0, text.utf16.count - offset))), in: text) else {
-            return ""
-        }
-        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    // MARK: - 舞台段落阅读区
 
     private var scriptStack: some View {
         GeometryReader { geometry in
@@ -558,8 +490,14 @@ public struct TeleprompterStageView: View {
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
             }
             .scrollPosition($scrollPosition)
+            .onScrollPhaseChange { _, newPhase in
+                if newPhase == .interacting {
+                    session.takeOverForManualScroll()
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .textSelection(.enabled)
         .accessibilityLabel("朗读内容")
     }
 
@@ -599,121 +537,55 @@ public struct TeleprompterStageView: View {
         if let segments = session.activeVersion?.segments, segments.indices.contains(index) {
             let segment = segments[index]
             let isCurrent = index == session.currentSegmentIndex
-            let isHovered = hoveredSegmentIndex == index && !isCurrent
-            Button {
-                session.moveToSegment(index)
-            } label: {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    // 段落小标与引导
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        if isCurrent {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                Circle()
-                                    .fill(currentSegmentAccentColor)
-                                    .frame(
-                                        width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
-                                        height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
-                                    )
-                                Text(currentSegmentHeader(at: index))
-                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                    .foregroundStyle(currentSegmentAccentColor)
-                            }
-                            Spacer(minLength: 0)
-                            if segment.pauseHint == .medium || segment.pauseHint == .long {
-                                pauseHintBadge(segment.pauseHint)
-                            }
-                            Text(currentSegmentHint)
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        } else {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                Text(nonCurrentSegmentHeader(at: index))
-                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                    .foregroundStyle(isHovered ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.inkTertiary)
-                            }
-                            Spacer(minLength: 0)
-                            if isHovered {
-                                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                    Image(systemName: "arrow.turn.down.right")
-                                        .font(.system(size: 8))
-                                    Text("由此段起讲 ↵")
-                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                                }
-                            } else {
-                                Text(nonCurrentSegmentHint(at: index))
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            }
-                        }
-                    }
-
-                    // 正文内容
-                    Text(styledText(segment, index: index))
-                        .font(.system(
-                            size: settings.scriptPointSize,
-                            weight: isCurrent ? .semibold : .regular
-                        ))
-                        .lineSpacing(settings.lineSpacing)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    // 段末停顿与留白指引（处于当前主讲段且有停顿时呈现，精准落位在句末视线处）
-                    if isCurrent && (segment.pauseHint == .medium || segment.pauseHint == .long) {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                            Image(systemName: pauseHintIcon(segment.pauseHint))
-                                .font(.system(size: 8))
-                            Text(pauseHintGuidance(segment.pauseHint))
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                        }
-                        .foregroundStyle(pauseHintColor(segment.pauseHint))
-                        .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-                        .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-                        .background(pauseHintColor(segment.pauseHint).opacity(0.12), in: Capsule())
-                        .padding(.top, SpeechRailDesignTokens.Spacing.tiny)
-                    }
-                }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    isCurrent
-                        ? SpeechRailDesignTokens.Color.rail.opacity(
-                            SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity
-                        )
-                        : (isHovered ? SpeechRailDesignTokens.Color.inputField.opacity(0.55) : Color.clear),
-                    in: RoundedRectangle(
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(styledText(segment, index: index))
+                    .font(.system(
+                        size: settings.scriptPointSize,
+                        weight: isCurrent ? .semibold : .regular
+                    ))
+                    .lineSpacing(settings.lineSpacing)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("第 \(index + 1) 段，\(segment.text)")
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isCurrent
+                    ? SpeechRailDesignTokens.Color.rail.opacity(
+                        SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity
+                    )
+                    : Color.clear,
+                in: RoundedRectangle(
+                    cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                    style: .continuous
+                )
+            )
+            .overlay(alignment: .leading) {
+                if isCurrent {
+                    RoundedRectangle(
                         cornerRadius: SpeechRailDesignTokens.Corner.nested,
                         style: .continuous
                     )
-                )
-                .overlay(alignment: .leading) {
-                    if isCurrent {
-                        RoundedRectangle(
-                            cornerRadius: SpeechRailDesignTokens.Corner.nested,
-                            style: .continuous
-                        )
-                        .fill(currentSegmentAccentColor)
-                        .frame(width: SpeechRailDesignTokens.Teleprompter.stageCurrentRailWidth)
-                        .opacity(1.0)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                    .fill(currentSegmentAccentColor)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageCurrentRailWidth)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                } else {
+                    Button {
+                        session.moveToSegment(index)
+                    } label: {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 14, height: 14)
                     }
-                }
-                .overlay {
-                    if isHovered {
-                        RoundedRectangle(
-                            cornerRadius: SpeechRailDesignTokens.Corner.nested,
-                            style: .continuous
-                        )
-                        .strokeBorder(
-                            SpeechRailDesignTokens.Color.rail.opacity(0.25),
-                            lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                        )
-                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .help("从第 \(index + 1) 段开始")
+                    .accessibilityLabel("从第 \(index + 1) 段开始")
                 }
             }
-            .buttonStyle(.plain)
             .opacity(segmentOpacity(at: index))
             .onHover { isHovering in
                 if isHovering {
@@ -722,8 +594,8 @@ public struct TeleprompterStageView: View {
                     hoveredSegmentIndex = nil
                 }
             }
-            .accessibilityLabel("第 \(index + 1) 段，\(segment.text)")
-            .accessibilityAction(named: "从此段起讲") {
+            .accessibilityElement(children: .contain)
+            .accessibilityAction(named: "从此段开始") {
                 session.moveToSegment(index)
             }
         }
@@ -741,48 +613,6 @@ public struct TeleprompterStageView: View {
         }
     }
 
-    private func currentSegmentHeader(at index: Int) -> String {
-        if session.uncertainty != nil {
-            return "脱稿暂离 · 第 \(index + 1) 段"
-        } else if session.phase == .following {
-            return session.hasHeardSpeech ? "跟读对齐 · 第 \(index + 1) 段" : "待命起讲 · 第 \(index + 1) 段"
-        } else if session.phase == .paused {
-            return "已暂停 · 第 \(index + 1) 段"
-        } else if session.phase == .ready || session.phase == .draft {
-            return "候场起讲点 · 第 \(index + 1) 段"
-        } else {
-            return "当前定位 · 第 \(index + 1) 段"
-        }
-    }
-
-    private var currentSegmentHint: String {
-        if isFollowing {
-            return "空格暂停 · 点击可重设起讲点"
-        } else {
-            return "按空格立即开讲 · 当前从此段开始"
-        }
-    }
-
-    private func nonCurrentSegmentHeader(at index: Int) -> String {
-        if index < session.currentSegmentIndex {
-            return "已读段落 · 第 \(index + 1) 段"
-        } else if index == session.currentSegmentIndex + 1 {
-            return "下一段预备 · 第 \(index + 1) 段"
-        } else {
-            return "后续段落 · 第 \(index + 1) 段"
-        }
-    }
-
-    private func nonCurrentSegmentHint(at index: Int) -> String {
-        if index < session.currentSegmentIndex {
-            return "点击切换为此段重讲"
-        } else if index == session.currentSegmentIndex + 1 {
-            return "点击切换为主讲段"
-        } else {
-            return "点击跳转至此段起讲"
-        }
-    }
-
     private func segmentOpacity(at index: Int) -> Double {
         if index == session.currentSegmentIndex {
             return 1.0
@@ -797,54 +627,6 @@ public struct TeleprompterStageView: View {
         }
     }
 
-    private func pauseHintBadge(_ hint: TeleprompterPauseHint) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Image(systemName: pauseHintIcon(hint))
-                .font(.system(size: 8))
-            Text(pauseHintLabel(hint))
-                .font(SpeechRailDesignTokens.Typography.caption)
-        }
-        .foregroundStyle(pauseHintColor(hint))
-        .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-        .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-        .background(
-            pauseHintColor(hint).opacity(0.12),
-            in: Capsule()
-        )
-    }
-
-    private func pauseHintIcon(_ hint: TeleprompterPauseHint) -> String {
-        switch hint {
-        case .short: "wind"
-        case .medium: "timer"
-        case .long: "hourglass.bottomhalf.filled"
-        }
-    }
-
-    private func pauseHintLabel(_ hint: TeleprompterPauseHint) -> String {
-        switch hint {
-        case .short: "微换气"
-        case .medium: "留白 1s"
-        case .long: "驻足 2s"
-        }
-    }
-
-    private func pauseHintGuidance(_ hint: TeleprompterPauseHint) -> String {
-        switch hint {
-        case .short: "此处轻微换气 · 自然过渡"
-        case .medium: "段末留白 1 秒 · 稍作换气再接下段"
-        case .long: "段末驻足 2 秒 · 让要点落地再开下段"
-        }
-    }
-
-    private func pauseHintColor(_ hint: TeleprompterPauseHint) -> Color {
-        switch hint {
-        case .short: SpeechRailDesignTokens.Color.inkSecondary
-        case .medium: SpeechRailDesignTokens.Color.rail
-        case .long: SpeechRailDesignTokens.Color.ready
-        }
-    }
-
     private func styledText(_ segment: TeleprompterSegment, index: Int) -> AttributedString {
         var text = AttributedString(segment.text)
         let isCurrent = index == session.currentSegmentIndex
@@ -856,19 +638,6 @@ public struct TeleprompterStageView: View {
             if let range = Range(NSRange(location: 0, length: count), in: segment.text),
                let attributedRange = Range(range, in: text) {
                 text[attributedRange].foregroundColor = SpeechRailDesignTokens.Color.inkTertiary
-            }
-            if !segment.keywords.isEmpty {
-                for keyword in segment.keywords where !keyword.isEmpty {
-                    var searchRange = text.startIndex..<text.endIndex
-                    while let match = text[searchRange].range(of: keyword) {
-                        let matchEndOffset = text.characters.distance(from: text.startIndex, to: match.upperBound)
-                        if matchEndOffset > count {
-                            text[match].foregroundColor = SpeechRailDesignTokens.Color.rail
-                            text[match].inlinePresentationIntent = .stronglyEmphasized
-                        }
-                        searchRange = match.upperBound..<text.endIndex
-                    }
-                }
             }
             if session.uncertainty != nil && count < segment.text.utf16.count {
                 let anchorLen = min(8, segment.text.utf16.count - count)
@@ -892,136 +661,70 @@ public struct TeleprompterStageView: View {
         Button {
             isAppearancePopoverPresented.toggle()
         } label: {
-            Label("视效", systemImage: "slider.horizontal.3")
+            Label("显示设置", systemImage: "slider.horizontal.3")
         }
         .speechRailButton(.secondary)
-        .accessibilityLabel("调整提词卡字号和背景透明度")
-        .help("连续调节字号与背景透明度")
+        .accessibilityLabel("提词器显示设置")
+        .help("调节字号、背景透明度、计时进度与全稿查阅")
         .popover(isPresented: $isAppearancePopoverPresented, arrowEdge: .bottom) {
-            TeleprompterStageAppearancePopover(settings: settings)
+            TeleprompterStageAppearancePopover(
+                settings: settings,
+                isBrowsingAll: $isBrowsingAll
+            )
         }
     }
 
     private var controls: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            // 主动作：开始/暂停跟读
-            Button {
-                if isFollowing {
-                    session.pauseFollowing()
-                } else {
-                    isBrowsingAll = false
-                    Task { await session.resumeFollowing() }
-                }
-            } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: isFollowing ? "pause.fill" : "play.fill")
-                    Text(isFollowing ? "暂停提词" : startLabel)
-                    kbdBadge("␣")
-                }
-            }
-            .keyboardShortcut(.space, modifiers: [])
-            .accessibilityLabel(isFollowing ? "暂停跟读，快捷键空格" : "\(startLabel)，快捷键空格")
-            .disabled(session.isResuming || session.phase == .preparing)
-            .speechRailButton(isFollowing ? .secondary : .primary)
-
-            // 一级按钮：上一段
             Button {
                 session.moveToPrevious()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "chevron.left")
-                    Text("上一段")
-                    kbdBadge("←")
-                }
+                Label("上一段", systemImage: "chevron.left")
             }
-            .keyboardShortcut(.leftArrow, modifiers: [])
+            .focused($focusedControl, equals: .previous)
             .disabled(session.currentSegmentIndex <= 0)
             .speechRailButton(.secondary)
-            .help("切换到上一段（快捷键 ←）")
+            .help("上一段（← / ↑ / PageUp）")
 
-            // 一级按钮：下一段 / 完成演说
-            if isLastSegment && isFollowing {
-                Button {
-                    Task {
-                        await session.endFollowing()
-                    }
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text("完成演说")
-                    }
-                }
-                .speechRailButton(.primary)
-                .help("已至末段，点击完成演说并查看节奏小结")
-            } else {
-                Button {
-                    session.moveToNext()
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("下一段")
-                        Image(systemName: "chevron.right")
-                        kbdBadge("→")
-                    }
-                }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-                .disabled(isLastSegment)
-                .speechRailButton(.secondary)
-                .help("切换到下一段（快捷键 →）")
-            }
-
-            // 重读当前段
             Button {
-                Task { await session.resetFollow() }
+                session.moveToNext()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "arrow.counterclockwise")
-                    Text("重读本段")
-                    kbdBadge("R")
-                }
+                Label("下一段", systemImage: "chevron.right")
             }
-            .keyboardShortcut("r", modifiers: [])
-            .disabled(session.isResuming || session.phase == .preparing)
+            .focused($focusedControl, equals: .next)
+            .disabled(isLastSegment)
             .speechRailButton(.secondary)
-            .help("从当前段开头重新跟读（快捷键 R）")
+            .help("下一段（空格 / → / ↓ / PageDown）")
+
+            Button {
+                handleVoiceAssist()
+            } label: {
+                Label(voiceAssistTitle, systemImage: voiceAssistIcon)
+            }
+            .focused($focusedControl, equals: .voice)
+            .disabled(voiceAssistBusy)
+            .speechRailButton(session.voiceAssistState == .following ? .secondary : .primary)
+            .help(voiceAssistHelp)
 
             Spacer(minLength: 0)
 
             appearanceControl
+                .focused($focusedControl, equals: .display)
 
-            // 结束演说
             Button {
                 handleEndOrClose()
             } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "xmark")
-                    Text("结束")
-                    kbdBadge("Esc")
-                }
+                Label("关闭", systemImage: "xmark")
             }
-            .keyboardShortcut(.escape, modifiers: [])
-            .accessibilityLabel("结束提词，快捷键 Esc")
+            .focused($focusedControl, equals: .close)
             .speechRailButton(.destructive)
+            .help("关闭提词器（Esc）")
         }
         .controlSize(.regular)
         .background {
-            // 隐藏辅助快捷键：支持演示翻页笔（↑/↓、PageUp/PageDown）、首末跳段（Home/End）、字号缩放（⌘+/⌘-/⌘0）、透明度微调（⌘[/⌘]）与全稿查阅（⌘A）
+            // Optional text/background shortcuts only. Stage navigation and
+            // voice control are real controls plus application-menu commands.
             Group {
-                Button("") { session.moveToPrevious() }
-                    .keyboardShortcut(.upArrow, modifiers: [])
-                Button("") { session.moveToNext() }
-                    .keyboardShortcut(.downArrow, modifiers: [])
-                Button("") { session.moveToPrevious() }
-                    .keyboardShortcut(.pageUp, modifiers: [])
-                Button("") { session.moveToNext() }
-                    .keyboardShortcut(.pageDown, modifiers: [])
-                Button("") { session.moveToSegment(0) }
-                    .keyboardShortcut(.home, modifiers: [])
-                Button("") {
-                    if let last = session.activeVersion?.segments.count, last > 0 {
-                        session.moveToSegment(last - 1)
-                    }
-                }
-                .keyboardShortcut(.end, modifiers: [])
                 Button("") { settings.increaseFontScale() }
                     .keyboardShortcut("=", modifiers: [.command])
                 Button("") { settings.decreaseFontScale() }
@@ -1032,329 +735,81 @@ public struct TeleprompterStageView: View {
                     .keyboardShortcut("[", modifiers: [.command])
                 Button("") { settings.increaseOpacity() }
                     .keyboardShortcut("]", modifiers: [.command])
-                if !isFollowing {
-                    Button("") {
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
-                            isBrowsingAll.toggle()
-                            if isBrowsingAll { scrollToReadingPosition() }
-                        }
-                    }
-                    .keyboardShortcut("a", modifiers: [.command])
-                }
             }
             .opacity(0)
             .frame(width: 0, height: 0)
         }
     }
 
+    private var voiceAssistTitle: String {
+        switch session.voiceAssistState {
+        case .off:
+            "开启语音跟随"
+        case .starting:
+            "正在开启…"
+        case .following:
+            "关闭语音跟随"
+        case .stopping:
+            "正在停止…"
+        case .stopFailed:
+            "重试停止"
+        case .pausedByUser:
+            "恢复语音跟随"
+        case .unavailable:
+            "重试语音跟随"
+        }
+    }
+
+    private var voiceAssistIcon: String {
+        switch session.voiceAssistState {
+        case .following:
+            "mic.slash"
+        case .stopFailed:
+            "exclamationmark.arrow.triangle.2.circlepath"
+        default:
+            "mic"
+        }
+    }
+
+    private var voiceAssistBusy: Bool {
+        session.voiceAssistState.isBusy
+    }
+
+    private var voiceAssistHelp: String {
+        switch session.voiceAssistState {
+        case .stopFailed(let reason):
+            "停止未完成：\(reason)。请先重试停止，再开启新的跟随。"
+        case .unavailable(let reason):
+            "上次未开启：\(reason)。可手动继续，或重试语音跟随。"
+        case .following:
+            "关闭语音跟随并释放麦克风；当前阅读位置保留。"
+        case .pausedByUser:
+            "从当前段恢复语音跟随。"
+        case .off:
+            "从当前段开启语音跟随。"
+        case .starting, .stopping:
+            "正在处理麦克风与语音连接，请稍候。"
+        }
+    }
+
+    private func handleVoiceAssist() {
+        switch session.voiceAssistState {
+        case .following:
+            Task { await session.disableVoiceAssist() }
+        case .stopFailed:
+            Task { await session.retryStopVoiceAssist() }
+        case .off, .pausedByUser, .unavailable:
+            Task { await session.enableVoiceAssist() }
+        case .starting, .stopping:
+            break
+        }
+    }
+
     private func handleEndOrClose() {
-        if session.runClock.elapsedSeconds > 10 || session.currentSegmentIndex > 0 {
-            Task {
-                await session.endFollowing()
-            }
-        } else {
-            Task {
-                await session.endFollowing()
-                close()
-            }
+        Task {
+            await session.closeStage()
+            close()
         }
-    }
-
-    // MARK: - 舞台完稿与复盘小结
-
-    private var stageSummary: TeleprompterStageSummary {
-        let segments = session.activeVersion?.segments ?? []
-        return TeleprompterStagePresentation.computeSummary(
-            segments: segments,
-            currentSegmentIndex: session.currentSegmentIndex,
-            elapsedSeconds: session.runClock.elapsedSeconds,
-            targetSeconds: session.runClock.targetSeconds,
-            pace: session.pace,
-            currentCalibrationFactor: session.calibrationFactor
-        )
-    }
-
-    private var stageSummaryView: some View {
-        VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            // 1. 顶部复盘标头（专业、清晰、数据导向）
-            VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "chart.bar.xaxis")
-                    .font(.system(size: SpeechRailDesignTokens.Teleprompter.stageSummaryIconSize))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-
-                Text("演说复盘与节奏分析")
-                    .font(SpeechRailDesignTokens.Typography.windowTitle)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-
-                Text("本次提词已结束。以下是本次演说的时长、语速与节拍分析数据")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
-
-            // 2. 统计卡片栅格 (4 个核心量化指标)
-            let summary = stageSummary
-            let paceColor: Color = {
-                switch summary.paceStatus {
-                case .steady: SpeechRailDesignTokens.Color.ready
-                case .brisk: SpeechRailDesignTokens.Color.rail
-                case .slow: SpeechRailDesignTokens.Color.attention
-                case .establishing: SpeechRailDesignTokens.Color.inkSecondary
-                }
-            }()
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                summaryMetricCard(
-                    icon: "stopwatch",
-                    label: "实际用时",
-                    value: formatClock(summary.elapsedSeconds),
-                    subtext: timingSubtext(summary: summary)
-                )
-
-                let benchmarkWPM = Int(round(session.pace.cjkUnitsPerMinute / session.calibrationFactor))
-                let deltaWPM = summary.actualWPM - benchmarkWPM
-                let deltaStr = deltaWPM >= 0 ? "+\(deltaWPM)" : "\(deltaWPM)"
-                let wpmSubtext = summary.actualWPM > 0 ? "基准约 \(benchmarkWPM) 字/分 (\(deltaStr))" : "基准约 \(benchmarkWPM) 字/分"
-                summaryMetricCard(
-                    icon: "waveform",
-                    label: "实际语速",
-                    value: summary.actualWPM > 0 ? "\(summary.actualWPM) 字/分" : "--",
-                    subtext: wpmSubtext
-                )
-
-                summaryMetricCard(
-                    icon: "doc.text",
-                    label: "完成段数",
-                    value: "\(summary.completedSegments) / \(summary.totalSegments) 段",
-                    subtext: "总字数：共约 \(summary.totalSpokenUnits) 字"
-                )
-
-                summaryMetricCard(
-                    icon: "gauge.with.dots.needle.50percent",
-                    label: "节奏评估",
-                    value: summary.paceStatus.title,
-                    subtext: summary.paceStatus.advice,
-                    valueColor: paceColor
-                )
-            }
-            .frame(maxWidth: .infinity)
-
-            // 3. 个人语速基准校准卡（真实服务与能力沉淀闭环）
-            if summary.canCalibrate {
-                if summary.needsCalibration {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Image(systemName: "slider.horizontal.below.square.and.filled.rectangle")
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                            Text("更新个人语速基准 (推荐)")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            Text("实测语速为 \(summary.actualWPM) 字/分（建议系数 \(String(format: "%.2fx", summary.suggestedCalibrationFactor))）。采纳后，后续讲稿的时长预估和排期将自动按你的个人语速计算。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        }
-
-                        Spacer(minLength: 0)
-
-                        Button {
-                            session.applyTrialCalibration(k: summary.suggestedCalibrationFactor)
-                            hasAdoptedCalibration = true
-                        } label: {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                if hasAdoptedCalibration {
-                                    Image(systemName: "checkmark")
-                                }
-                                Text(hasAdoptedCalibration ? "已更新基准" : "采纳为个人基准")
-                            }
-                        }
-                        .disabled(hasAdoptedCalibration)
-                        .speechRailButton(hasAdoptedCalibration ? .secondary : .primary)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-                    .background(
-                        SpeechRailDesignTokens.Color.attention.opacity(0.08),
-                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .strokeBorder(
-                                SpeechRailDesignTokens.Color.attention.opacity(0.2),
-                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                            )
-                    )
-                } else {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                            Text("语速与当前基准高度吻合")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            Text("实测语速（约 \(summary.actualWPM) 字/分）与现有个人基准偏差在 2% 以内，当前排稿预估模型准确可靠，无需调整。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-                    .background(
-                        SpeechRailDesignTokens.Color.ready.opacity(0.08),
-                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .strokeBorder(
-                                SpeechRailDesignTokens.Color.ready.opacity(0.2),
-                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                            )
-                    )
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            // 4. 底部动作栏
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Button {
-                    session.restartToBeginning()
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Image(systemName: "arrow.counterclockwise")
-                        Text("重新演练")
-                        kbdBadge("␣")
-                    }
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                .speechRailButton(.secondary)
-                .help("重置回第一段，准备重新朗读演练（快捷键空格）")
-
-                Button {
-                    copySummaryReport(summary: stageSummary)
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Image(systemName: hasCopiedSummary ? "checkmark" : "doc.on.doc")
-                        Text(hasCopiedSummary ? "已复制复盘" : "复制复盘报告")
-                    }
-                }
-                .speechRailButton(.secondary)
-                .help("将本次演说复盘数据复制到剪贴板，方便归档沉淀")
-
-                Spacer()
-
-                Button {
-                    close()
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Image(systemName: "checkmark")
-                        Text("完成提词")
-                        kbdBadge("Esc")
-                    }
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                .speechRailButton(.primary)
-                .help("关闭提词舞台卡片并保留进度（快捷键 Esc）")
-            }
-        }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("演说复盘小结")
-    }
-
-    private func summaryMetricCard(
-        icon: String,
-        label: String,
-        value: String,
-        subtext: String,
-        valueColor: Color = SpeechRailDesignTokens.Color.ink
-    ) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: icon)
-                    .font(.system(size: 10))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                Text(label)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            Text(value)
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(valueColor)
-                .lineLimit(1)
-            Text(subtext)
-                .font(.system(size: 10))
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Teleprompter.stageSummaryMetricBoxMinHeight, alignment: .topLeading)
-        .padding(SpeechRailDesignTokens.Spacing.sm)
-        .background(
-            SpeechRailDesignTokens.Color.inputField.opacity(0.8),
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                .strokeBorder(
-                    SpeechRailDesignTokens.Surface.border,
-                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                )
-        )
-    }
-
-    private func copySummaryReport(summary: TeleprompterStageSummary) {
-        let docTitle: String = {
-            let raw = session.document?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return raw.isEmpty ? "未命名讲稿" : raw
-        }()
-        let benchmarkWPM = Int(round(session.pace.cjkUnitsPerMinute / session.calibrationFactor))
-        let deltaWPM = summary.actualWPM - benchmarkWPM
-        let deltaStr = deltaWPM >= 0 ? "+\(deltaWPM)" : "\(deltaWPM)"
-        let text = """
-        【SpeechRail 提词演说复盘报告】
-        · 讲稿篇目：\(docTitle)
-        · 实际用时：\(formatClock(summary.elapsedSeconds)) / 计划用时：\(formatClock(summary.targetSeconds))（\(timingSubtext(summary: summary))）
-        · 实际语速：\(summary.actualWPM) 字/分（基准语速：\(benchmarkWPM) 字/分，偏差 \(deltaStr)）
-        · 讲稿达成：\(summary.completedSegments) / \(summary.totalSegments) 段（演说字数：共约 \(summary.totalSpokenUnits) 字）
-        · 节奏评估：\(summary.paceStatus.title)（\(summary.paceStatus.advice)）
-        · 个人校准：建议系数 \(String(format: "%.2fx", summary.suggestedCalibrationFactor))（当前基准：\(String(format: "%.2fx", session.calibrationFactor))）
-        """
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        withAnimation {
-            hasCopiedSummary = true
-        }
-    }
-
-    private func timingSubtext(summary: TeleprompterStageSummary) -> String {
-        if summary.targetSeconds > 0 {
-            let diff = abs(summary.targetSeconds - summary.elapsedSeconds)
-            let percent = Int(round((diff / summary.targetSeconds) * 100))
-            if summary.elapsedSeconds <= summary.targetSeconds {
-                return diff < 3 ? "与计划时长吻合" : "提前 \(formatClock(diff)) (比计划快 \(percent)%)"
-            } else {
-                return "超出 \(formatClock(diff)) (比计划慢 \(percent)%)"
-            }
-        } else {
-            return "计划 \(session.targetMinutes) 分钟"
-        }
-    }
-
-    // MARK: - 辅助与纯文本格式化
-
-    private func kbdBadge(_ text: String) -> some View {
-        Text(text)
-            .font(SpeechRailDesignTokens.Typography.caption)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stageKbdBadgePaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stageKbdBadgePaddingVertical)
-            .background(
-                SpeechRailDesignTokens.Color.inputField.opacity(0.8),
-                in: RoundedRectangle(cornerRadius: 3, style: .continuous)
-            )
     }
 
     private var isLastSegment: Bool {
@@ -1366,19 +821,6 @@ public struct TeleprompterStageView: View {
         session.phase == .following || session.phase == .uncertain
     }
 
-    private var startLabel: String {
-        switch session.phase {
-        case .paused: "继续提词"
-        case .manual: "恢复跟读"
-        default: "开始提词"
-        }
-    }
-
-    private var progressValue: Double {
-        guard let count = session.activeVersion?.segments.count, count > 0 else { return 0 }
-        return min(1, Double(session.currentSegmentIndex + 1) / Double(count))
-    }
-
     private func formatClock(_ seconds: TimeInterval) -> String {
         let clamped = max(0, Int(seconds))
         let mins = clamped / 60
@@ -1388,18 +830,20 @@ public struct TeleprompterStageView: View {
 
     private var statusText: String {
         if let blocked = session.blocked { return blocked.title }
-        if session.isResuming { return "正在准备继续…" }
-        if session.uncertainty != nil { return "脱稿发挥中 · 读回屏幕文字即可自动归队" }
-        switch session.phase {
-        case .following: return session.hasHeardSpeech ? "语音识别正常跟读中" : "麦克风已就绪，请朗读屏幕稿件"
-        case .paused: return "已暂停跟读，按空格恢复"
-        case .manual: return "手动选段模式：可用 ← / → 校正起讲位置"
-        case .preparing: return "正在连接语音识别…"
-        case .analyzing: return "正在整理稿件…"
-        case .review: return "请先检查 AI 建议"
-        case .ready, .draft: return "候场待命：按空格键开始提词"
-        case .ended: return "提词已圆满结束"
-        case .uncertain: return "脱稿发挥中 · 读回屏幕文字即可自动归队"
+        if session.isResuming { return "正在准备语音跟随…" }
+        switch session.voiceAssistState {
+        case .starting:
+            return "正在开启语音跟随…"
+        case .following, .stopping:
+            return session.hasHeardSpeech ? "语音跟随中" : "麦克风已就绪，可以开始朗读"
+        case .stopFailed(let reason):
+            return "停止未完成：\(reason)"
+        case .pausedByUser:
+            return "语音跟随已暂停，可手动阅读"
+        case .unavailable:
+            return "语音跟随不可用，可手动继续"
+        case .off:
+            return "手动提词"
         }
     }
 }
@@ -1407,14 +851,31 @@ public struct TeleprompterStageView: View {
 @MainActor
 private struct TeleprompterStageAppearancePopover: View {
     let settings: TeleprompterStageSettings
+    @Binding var isBrowsingAll: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("提词卡视效")
+            Text("显示设置")
                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
             TeleprompterStageFontControl(settings: settings)
             TeleprompterStageTransparencyControl(settings: settings)
             TeleprompterStageQuickPresetControl(settings: settings)
+            Divider()
+            Toggle(
+                "始终显示控制",
+                isOn: Binding(
+                    get: { settings.alwaysShowControls },
+                    set: { settings.alwaysShowControls = $0 }
+                )
+            )
+            Toggle(
+                "显示计时与进度",
+                isOn: Binding(
+                    get: { settings.showClockAndProgress },
+                    set: { settings.showClockAndProgress = $0 }
+                )
+            )
+            Toggle("查阅全稿", isOn: $isBrowsingAll)
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .frame(width: SpeechRailDesignTokens.Teleprompter.stageAppearancePopoverWidth)

@@ -1230,6 +1230,10 @@ public enum SpeechRailDesignTokens {
         public static let stageMinimumHeight: CGFloat = 300
         public static let stagePadding: CGFloat = Spacing.lg
         public static let stageSegmentSpacing: CGFloat = Spacing.md
+        /// Fixed auxiliary/status and control reservations keep the reading
+        /// geometry stable while the controls fade out.
+        public static let stageAuxiliaryBarHeight: CGFloat = 24
+        public static let stageControlAreaHeight: CGFloat = 64
         public static let stageContentMaximumWidth: CGFloat = 720
         public static let stageScriptPointSize: CGFloat = 38
         public static let stageScriptMinimumPointSize: CGFloat = 28
@@ -1303,19 +1307,9 @@ public enum SpeechRailDesignTokens {
         /// 待启动预览滚动区最大高度与稿件行距
         public static let readyPreviewMaxHeight: CGFloat = 180
         public static let previewLineSpacing: CGFloat = 4
-        /// 舞台提词卡：呼吸停顿标签内边距与快捷微调步长
-        public static let stagePauseHintPaddingVertical: CGFloat = 2
-        public static let stagePauseHintPaddingHorizontal: CGFloat = 6
+        /// 舞台提词卡：快捷微调步长
         public static let stageQuickFontScaleStep: Double = 0.08
         public static let stageQuickOpacityStep: Double = 0.08
-        public static let stageKbdBadgePaddingVertical: CGFloat = 1
-        public static let stageKbdBadgePaddingHorizontal: CGFloat = 4
-        public static let stageStatusIndicatorSize: CGFloat = 6
-        /// 舞台提词卡：节奏指示胶囊与演说复盘小结
-        public static let stagePaceIndicatorPaddingVertical: CGFloat = 2
-        public static let stagePaceIndicatorPaddingHorizontal: CGFloat = 6
-        public static let stageSummaryIconSize: CGFloat = 40
-        public static let stageSummaryMetricBoxMinHeight: CGFloat = 60
     }
 
     /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert）

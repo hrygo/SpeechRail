@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.19"
+version: "0.8.20"
 date: 2026-09-24
 ---
 
@@ -23,7 +23,7 @@ date: 2026-09-24
 > [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
 > 本文的 token 与系统控件约束仍适用于这些页面。
 
-提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透光调节与文字不透明度分离，位置切换尊重 Reduce Motion。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
+提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透光调节与文字不透明度分离，位置切换尊重 Reduce Motion。舞台默认手动阅读，语音跟随必须显式开启；阅读层和控制层分离，控制层首次展示 2s、指针离开后延迟 250ms 淡出，但上下辅助区固定预留 `stageAuxiliaryBarHeight`（24pt）与 `stageControlAreaHeight`（64pt），隐藏只撤内容、命中和无障碍子树，不重排正文。非当前段使用右侧定位按钮跳转，不劫持正文文本选择；舞台菜单命令只在舞台可见时生效，不占用全局 Command-←/Command-→。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
 
 ## 1. 研究基线与 Logo 设计基因
 
@@ -409,6 +409,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
+| 提词器手动优先舞台（2026-09-24，review 后） | 阅读层与控制层分离；控制显隐策略为 2s 首次展示、250ms 隐藏、4s 错误提示，固定 24pt 辅助区与 64pt 控制区避免正文重排；指针、焦点、popover/menu、VoiceOver、键盘请求和「始终显示控制」均可阻止隐藏，焦点或指针离开后键盘请求正常结束。手动打开不启动语音，空格改为下一段，末段不弹总结；非当前段用右侧定位按钮，不劫持文本选择；工作台语音操作按 `off/starting/following/stopping/stopFailed/pausedByUser/unavailable` 显示，菜单舞台命令只在舞台可见时生效且不占用全局方向键。`swift test` 135 项 / 15 suite 通过；新测试文件与 Session/coordinator 依赖已接入 `SpeechRailAppTests` Unit Test Sources；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED，Xcode Unit Test-only TEST SUCCEEDED；`plutil -lint project.pbxproj` 通过。移除呼吸光效、脱稿归队、节奏看板和自动复盘旧 UI。**未做淡出几何、焦点/Tab、VoiceOver、Reduce Motion、真实采集与窄窗 UI 走查** | 2026-09-24 21:29 |
 | 全 App 单行输入统一（2026-09-24） | 新增 `.speechRailSingleLineInput(.compact/.regular)`：12pt 横向文字内边距 + 28/34pt 最小高度 + 输入槽表面合成一个声明。App 内 28 处单行输入（助手会话与记忆、设置各服务凭据、音色创作与编辑、提词器、会议记录、说话人命名）全部改走该配方，业务代码里的 `.textFieldStyle(.roundedBorder)` 清零；5 处紧凑档里 4 处组合式内联条（音色搜索、稿件搜索、记录搜索、目标时长）把配方接在整条容器上，让图标与尾部按钮一起落在槽内。多行编辑器继续用 `.speechRailRecessedSlot()`、整卡字段继续用 `.speechRailEditorCard()`。`swift test --package-path macos/SpeechRailApp` 110 项测试 / 12 个 suite 全部通过；App target 全部 85 个源文件 `swiftc -typecheck` 退出码 0（0 error，1 条既存 `maxTokens` 弃用告警）。**未完成完整 Xcode Debug 构建**：受限执行环境既不允许 SwiftPM manifest 的 `sandbox-exec`，也拒绝 GitHub 依赖解析；**未做桌面视觉走查或 UI 自动化** | 2026-09-24 19:45 |
 | App Debug 构建 | 历史 `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 20:33 |
 | App Release 构建（当前工作树） | 本次文档同步的最小构建检查未通过：未提交的 `SessionDesignSurface.swift:1083` 报 `Extraneous '}' at top level`；该文件不属于本次文档改动，未擅自修改 | 2026-09-20 |

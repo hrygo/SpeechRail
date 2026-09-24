@@ -21,6 +21,21 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+/// Failures that prevent a stage from owning or retiring its reading session.
+public enum TeleprompterStageOpenError: Error, Equatable, LocalizedError, Sendable {
+    case busy
+    case closing
+
+    public var errorDescription: String? {
+        switch self {
+        case .busy:
+            "提词器正在完成其他操作，请稍后再打开。"
+        case .closing:
+            "提词器正在关闭并释放语音资源，请稍后再打开。"
+        }
+    }
+}
+
 /// AI 整理前向用户说明的数据流边界。
 ///
 /// 文案不包含 endpoint、密钥或 provider 的实现细节，避免把敏感配置带入界面或持久化稿件。

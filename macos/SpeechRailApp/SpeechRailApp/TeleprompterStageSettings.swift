@@ -209,6 +209,13 @@ public final class TeleprompterStageSettings {
     private var opacityStorage: Double
     private var lineSpacingStorage: Double
     private var visibleSegmentCountStorage: Int
+    public var alwaysShowControls: Bool {
+        didSet { defaults.set(alwaysShowControls, forKey: Key.alwaysShowControls) }
+    }
+
+    public var showClockAndProgress: Bool {
+        didSet { defaults.set(showClockAndProgress, forKey: Key.showClockAndProgress) }
+    }
 
     public var width: Double {
         get { widthStorage }
@@ -355,6 +362,8 @@ public final class TeleprompterStageSettings {
             ),
             SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
         )
+        self.alwaysShowControls = defaults.bool(forKey: Key.alwaysShowControls)
+        self.showClockAndProgress = defaults.bool(forKey: Key.showClockAndProgress)
     }
 
     private enum Key {
@@ -363,6 +372,8 @@ public final class TeleprompterStageSettings {
         static let opacity = "speechrail.teleprompter.stage.opacity"
         static let lineSpacing = "speechrail.teleprompter.stage.lineSpacing"
         static let visibleSegmentCount = "speechrail.teleprompter.stage.visibleSegmentCount"
+        static let alwaysShowControls = "speechrail.teleprompter.stage.alwaysShowControls"
+        static let showClockAndProgress = "speechrail.teleprompter.stage.showClockAndProgress"
     }
 }
 
