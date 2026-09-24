@@ -65,21 +65,6 @@ struct SettingsAssistantPane: View {
                             "对话服务",
                             caption: "语音助手、会议纪要和 AI 提词器会共用这里的服务。"
                         )
-                        SettingsConnectionStatus(
-                            result: checkedModule == nil ? connectionResult : nil,
-                            isChecking: checkedModule == nil && isChecking,
-                            saveError: checkedModule == nil ? keySaveError : nil
-                        )
-                        if connectionResult == nil, !isChecking {
-                            Text(
-                                preferences.isLLMConfigured
-                                    ? "可以检查连接。"
-                                    : "先填写服务地址和模型，之后这里会告诉你下一步。"
-                            )
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
                     }
                 }
                 settingsRowSeparator
@@ -158,19 +143,37 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button(globalActionTitle) {
-                            onCheckConnection(nil, globalSaveRequested)
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Button(globalActionTitle) {
+                                onCheckConnection(nil, globalSaveRequested)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .speechRailPointerCursor()
+                            .help(globalActionHelp)
+                            .disabled(globalCheckDisabled)
+                            Text("按功能使用 Chat Completions 或 Responses；SpeechRail 不主动开启 thinking。")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .speechRailPointerCursor()
-                        .help(globalActionHelp)
-                        .disabled(globalCheckDisabled)
-                        Text("按功能使用 Chat Completions 或 Responses；SpeechRail 不主动开启 thinking。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+
+                        SettingsConnectionStatus(
+                            result: checkedModule == nil ? connectionResult : nil,
+                            isChecking: checkedModule == nil && isChecking,
+                            saveError: checkedModule == nil ? keySaveError : nil
+                        )
+                        if checkedModule == nil, connectionResult == nil, !isChecking {
+                            Text(
+                                preferences.isLLMConfigured
+                                    ? "可以检查连接。"
+                                    : "先填写服务地址和模型，之后这里会告诉你下一步。"
+                            )
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 settingsRowSeparator
