@@ -53,6 +53,21 @@ class VoiceBinding:
             supports_clone=self.is_clone,
         )
 
+    @property
+    def supports_incremental_stream(self) -> bool:
+        """Whether this binding may declare incremental streaming capability.
+
+        CustomVoice needs a verified vendor speaker binding and Base needs a
+        clone reference; VoiceDesign never declares a stable incremental role
+        even when its instruction path can synthesize complete text.
+        """
+
+        if self.variant == "base":
+            return self.is_clone
+        if self.variant == "custom_voice":
+            return self.speaker is not None
+        return False
+
 
 def resolve_binding(
     variant: str, voice: str, *, profile: VoiceProfile | None = None

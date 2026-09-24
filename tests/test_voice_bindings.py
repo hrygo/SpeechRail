@@ -113,3 +113,39 @@ def test_clone_binding_error_describes_missing_base_capability_without_tier_name
         resolve_binding("voice_design", "user_voice")
 
     assert "quality" not in str(excinfo.value).lower()
+
+
+def test_incremental_capability_is_limited_to_speaker_and_clone_bindings() -> None:
+    assert resolve_binding("custom_voice", "serena").supports_incremental_stream is True
+    assert (
+        VoiceBinding(
+            variant="custom_voice", voice="serena", speaker=None, instruction=None
+        ).supports_incremental_stream
+        is False
+    )
+    assert (
+        VoiceBinding(
+            variant="base",
+            voice="serena",
+            speaker=None,
+            instruction=None,
+            is_clone=True,
+            ref_audio_path="/tmp/ref.wav",
+            ref_text="参考文本",
+        ).supports_incremental_stream
+        is True
+    )
+    assert (
+        VoiceBinding(
+            variant="base", voice="serena", speaker=None, instruction=None, is_clone=False
+        ).supports_incremental_stream
+        is False
+    )
+
+
+@pytest.mark.parametrize("voice", ("serena", "vivian"))
+def test_voice_design_never_declares_incremental_stream(voice: str) -> None:
+    binding = resolve_binding("voice_design", voice)
+
+    assert binding.instruction
+    assert binding.supports_incremental_stream is False
