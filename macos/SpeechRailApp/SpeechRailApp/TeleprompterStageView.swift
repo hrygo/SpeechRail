@@ -204,71 +204,14 @@ public struct TeleprompterStageView: View {
             .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
             .background(SpeechRailDesignTokens.Color.rail.opacity(0.14), in: Capsule())
 
-        case .following:
-            if session.uncertainty != nil {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 9))
-                    Text("脱稿发挥中")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.rail.opacity(0.14), in: Capsule())
-            } else if session.hasHeardSpeech {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Circle()
-                        .fill(SpeechRailDesignTokens.Color.ready)
-                        .frame(
-                            width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
-                            height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
-                        )
-                        .opacity(isBreathingGlow ? 1.0 : 0.6)
-                    Text("跟读中 · 实时对齐")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                }
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.ready.opacity(0.14), in: Capsule())
-            } else {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 9))
-                        .opacity(isBreathingGlow ? 1.0 : 0.45)
-                    Text("等待开讲 · 麦克风就绪")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-                .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-                .background(SpeechRailDesignTokens.Color.attention.opacity(0.14), in: Capsule())
-            }
+        case .following, .uncertain:
+            followStatusCapsule()
 
         case .paused:
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "pause.fill")
-                    .font(.system(size: 8))
-                Text("已暂停 · 空格继续")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-            }
-            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-            .background(SpeechRailDesignTokens.Color.attention.opacity(0.14), in: Capsule())
+            followStatusCapsule(hint: "空格继续")
 
         case .manual:
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "hand.tap.fill")
-                    .font(.system(size: 8))
-                Text("随选段落 · 方向键校正")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-            }
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
-            .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
-            .background(SpeechRailDesignTokens.Color.inputField, in: Capsule())
+            followStatusCapsule(hint: "方向键校正")
 
         case .preparing:
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -284,6 +227,72 @@ public struct TeleprompterStageView: View {
 
         default:
             EmptyView()
+        }
+    }
+
+    private func followStatusCapsule(hint: String? = nil) -> some View {
+        let statusText = hint.map { "\(session.followStatusText) · \($0)" } ?? session.followStatusText
+        return HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            if session.followState == .tracking {
+                Circle()
+                    .fill(followStatusColor)
+                    .frame(
+                        width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
+                        height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
+                    )
+                    .opacity(isBreathingGlow ? 1.0 : 0.6)
+            } else {
+                Image(systemName: followStatusSymbol)
+                    .font(.system(size: 9))
+                    .opacity(session.followState == .waitingForSpeech || session.followState == .listening
+                        ? (isBreathingGlow ? 1.0 : 0.45) : 1.0)
+            }
+            Text(statusText)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+        }
+        .foregroundStyle(followStatusColor)
+        .padding(.horizontal, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingHorizontal)
+        .padding(.vertical, SpeechRailDesignTokens.Teleprompter.stagePauseHintPaddingVertical)
+        .background(followStatusBackground, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(statusText)
+    }
+
+    private var followStatusColor: Color {
+        switch session.followState {
+        case .waitingForSpeech, .listening, .catchingUp, .paused:
+            SpeechRailDesignTokens.Color.attention
+        case .tracking:
+            SpeechRailDesignTokens.Color.ready
+        case .freePlaying:
+            SpeechRailDesignTokens.Color.rail
+        case .manual:
+            SpeechRailDesignTokens.Color.inkSecondary
+        }
+    }
+
+    private var followStatusBackground: Color {
+        switch session.followState {
+        case .waitingForSpeech, .listening, .catchingUp, .paused:
+            SpeechRailDesignTokens.Color.attention.opacity(0.14)
+        case .tracking:
+            SpeechRailDesignTokens.Color.ready.opacity(0.14)
+        case .freePlaying:
+            SpeechRailDesignTokens.Color.rail.opacity(0.14)
+        case .manual:
+            SpeechRailDesignTokens.Color.inputField
+        }
+    }
+
+    private var followStatusSymbol: String {
+        switch session.followState {
+        case .waitingForSpeech: "mic.fill"
+        case .listening: "waveform"
+        case .tracking: "checkmark"
+        case .catchingUp: "arrow.triangle.2.circlepath"
+        case .freePlaying: "arrow.triangle.branch"
+        case .paused: "pause.fill"
+        case .manual: "hand.tap.fill"
         }
     }
 

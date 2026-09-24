@@ -50,7 +50,6 @@ let package = Package(
                 "ModelManagementView.swift",
                 "PreflightDiagnosticsView.swift",
                 "ProfilePickerView.swift",
-                "RealtimeASRClient.swift",
                 "RuntimeMonitoringView.swift",
                 "ServiceOverviewView.swift",
                 "ServiceRoutePreviewView.swift",
@@ -71,6 +70,7 @@ let package = Package(
                 "RuntimeMonitoringAccessibility.swift",
                 "AudioSampleRing.swift",
                 "SpeechRailDesignTokens.swift",
+                "RealtimeASRClient.swift",
                 // AppModel 及其最小闭包：测试目标与 Xcode 单测目标编译同一份实现，
                 // 让 cancel/refresh 等状态机回归能在两条 CI 门禁里跑（无桩替代）。
                 "AppModel.swift",

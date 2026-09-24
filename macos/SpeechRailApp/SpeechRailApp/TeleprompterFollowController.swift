@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 /// Bounded, in-memory latency evidence for one teleprompter run.
 ///
@@ -64,6 +65,51 @@ public struct TeleprompterLatencyDiagnostics: Sendable, Equatable {
     }
 }
 
+public enum TeleprompterFollowState: Equatable, Sendable {
+    case waitingForSpeech
+    case listening
+    case tracking
+    case catchingUp
+    case freePlaying
+    case paused
+    case manual
+}
+
+public enum TeleprompterFollowPresentation {
+    public static func statusText(for state: TeleprompterFollowState) -> String {
+        switch state {
+        case .waitingForSpeech: "等待声音请开讲…"
+        case .listening: "听见你了，正在跟上稿件…"
+        case .tracking: "跟读咬合"
+        case .catchingUp: "正在跟上稿件"
+        case .freePlaying: "自由发挥中"
+        case .paused: "已暂停"
+        case .manual: "手动浏览中"
+        }
+    }
+}
+
+/// Injectable evidence thresholds for provisional movement and recovery.
+public struct TeleprompterFollowPolicy: Equatable, Sendable {
+    public let provisionalMinimumConfidence: Double
+    public let provisionalMinimumMatches: Int
+    public let freePlayAfterMisses: Int
+    public let reanchorMargin: Double
+
+    public init(
+        provisionalMinimumConfidence: Double = 0.72,
+        provisionalMinimumMatches: Int = 2,
+        freePlayAfterMisses: Int = 2,
+        reanchorMargin: Double = 0.12
+    ) {
+        self.provisionalMinimumConfidence = provisionalMinimumConfidence.isFinite
+            ? min(1, max(0, provisionalMinimumConfidence)) : 0.72
+        self.provisionalMinimumMatches = max(1, provisionalMinimumMatches)
+        self.freePlayAfterMisses = max(1, freePlayAfterMisses)
+        self.reanchorMargin = reanchorMargin.isFinite ? min(1, max(0, reanchorMargin)) : 0.12
+    }
+}
+
 /// Pure event reducer. ASR text is bounded, in-memory only, and scoped to item IDs.
 public struct TeleprompterFollowController: Sendable {
     public private(set) var position: TeleprompterAligner.Position
@@ -72,14 +118,15 @@ public struct TeleprompterFollowController: Sendable {
     public private(set) var mode: TeleprompterRunMode
     public private(set) var uncertainty: Double?
     public private(set) var partialPreview: String?
+    public private(set) var followState: TeleprompterFollowState
+    public private(set) var lastMatchConfidence: Double?
+    public private(set) var lastMatchedCount = 0
 
     private struct Item: Sendable {
         var text: String
         let anchor: TeleprompterAligner.Position
         let sequence: Int
-        var previousEvidence = 0
         var snapshotRevision = 0
-        var lastSnapshotText: String?
     }
     private var items: [String: Item] = [:]
     private var retired: [String] = []
@@ -87,17 +134,43 @@ public struct TeleprompterFollowController: Sendable {
     private var history: [String] = []
     private var script: TeleprompterAligner.Script?
     private var scriptSegments: [TeleprompterSegment] = []
-    private let aligner = TeleprompterAligner()
+    private let policy: TeleprompterFollowPolicy
+    private let aligner: TeleprompterAligner
+    private var lastConfirmedPosition: TeleprompterAligner.Position
+    private var lowConfidenceStreak = 0
     private var nextSequence = 0
     private var finalizedSequence = -1
     private var provisionalItemID: String?
 
-    public init(currentIndex: Int = 0, mode: TeleprompterRunMode = .following) {
-        position = .init(segmentIndex: max(0, currentIndex), utf16Offset: 0)
+    public init(
+        currentIndex: Int = 0,
+        mode: TeleprompterRunMode = .following,
+        policy: TeleprompterFollowPolicy = .init()
+    ) {
+        let initialPosition = TeleprompterAligner.Position(segmentIndex: max(0, currentIndex), utf16Offset: 0)
+        position = initialPosition
+        lastConfirmedPosition = initialPosition
         self.mode = mode
+        self.policy = policy
+        aligner = TeleprompterAligner(configuration: .init(advanceMargin: policy.reanchorMargin))
+        switch mode {
+        case .following: followState = .waitingForSpeech
+        case .paused: followState = .paused
+        case .manual: followState = .manual
+        }
     }
 
-    public mutating func receivePartial(itemID: String, delta: String, segments: [TeleprompterSegment], eventID: String? = nil) {
+    public mutating func noteSpeechStarted() {
+        guard mode == .following, followState == .waitingForSpeech else { return }
+        followState = .listening
+    }
+
+    public mutating func receivePartial(
+        itemID: String,
+        delta: String,
+        segments: [TeleprompterSegment],
+        eventID: String? = nil
+    ) {
         guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
@@ -107,21 +180,13 @@ public struct TeleprompterFollowController: Sendable {
         guard item.sequence > finalizedSequence else { retire(itemID); return }
         item.text = String((item.text + delta).suffix(2048))
         partialPreview = item.text
-        let tokens = TeleprompterNormalizer.tokens(item.text)
-        let match = locate(tokens, script: script, anchor: position)
-        candidatePosition = match.position
-        // Two genuinely growing hypotheses are required before provisional scrolling.
-        if let candidate = match.position, match.confidence >= 0.88,
-           match.matchedCount >= 5, item.previousEvidence >= 3,
-           !TeleprompterNormalizer.tokens(delta).isEmpty,
-           isForward(candidate, from: position) {
-            position = candidate
-            provisionalItemID = itemID
-            uncertainty = nil
-        }
-        item.previousEvidence = match.position == nil ? 0 : match.matchedCount
+        if followState == .waitingForSpeech { followState = .listening }
+        let match = locate(TeleprompterCanonicalizer.values(item.text), script: script, anchor: position)
+        applyPreviewMatch(match, itemID: itemID)
         items[itemID] = item
-        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key { retire(oldest) }
+        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key {
+            retire(oldest)
+        }
     }
 
     public mutating func receiveSnapshot(
@@ -141,25 +206,21 @@ public struct TeleprompterFollowController: Sendable {
         item.snapshotRevision = revision
         item.text = String(text.suffix(2048))
         partialPreview = item.text
-        let tokens = TeleprompterNormalizer.tokens(item.text)
-        let match = locate(tokens, script: script, anchor: position)
-        candidatePosition = match.position
-        let isNewHypothesis = item.lastSnapshotText != item.text
-        if let candidate = match.position, match.confidence >= 0.88,
-           match.matchedCount >= 5,
-           (match.isUniqueNearAnchor || item.previousEvidence >= 3),
-           isNewHypothesis, isForward(candidate, from: position) {
-            position = candidate
-            provisionalItemID = itemID
-            uncertainty = nil
-        }
-        item.previousEvidence = match.position == nil ? 0 : match.matchedCount
-        item.lastSnapshotText = item.text
+        if followState == .waitingForSpeech { followState = .listening }
+        let match = locate(TeleprompterCanonicalizer.values(item.text), script: script, anchor: position)
+        applyPreviewMatch(match, itemID: itemID)
         items[itemID] = item
-        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key { retire(oldest) }
+        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key {
+            retire(oldest)
+        }
     }
 
-    public mutating func receiveCompleted(itemID: String, transcript: String, segments: [TeleprompterSegment], eventID: String? = nil) {
+    public mutating func receiveCompleted(
+        itemID: String,
+        transcript: String,
+        segments: [TeleprompterSegment],
+        eventID: String? = nil
+    ) {
         guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
@@ -169,45 +230,102 @@ public struct TeleprompterFollowController: Sendable {
         guard item.sequence > finalizedSequence else { retire(itemID); return }
         finalizedSequence = item.sequence
         let anchor = item.anchor
-        let tokens = TeleprompterNormalizer.tokens(transcript)
-        if tokens.count + history.count < 3 {
-            history += tokens
-            partialPreview = nil
-            if provisionalItemID == itemID { position = anchor; provisionalItemID = nil }
+        let tokens = TeleprompterCanonicalizer.values(transcript)
+        partialPreview = nil
+        if followState == .waitingForSpeech { followState = .listening }
+
+        guard !tokens.isEmpty else {
+            if provisionalItemID != nil { position = lastConfirmedPosition }
+            provisionalItemID = nil
+            candidatePosition = nil
             retire(itemID)
             return
         }
-        if !tokens.isEmpty {
-            var match = locate(tokens, script: script, anchor: position)
-            if match.position == nil, anchor != position {
-                match = locate(tokens, script: script, anchor: anchor)
-            }
-            candidatePosition = match.position
-            if let candidate = match.position {
-                position = candidate
-                uncertainty = nil
-                history = Array((history + tokens).suffix(48))
-            } else {
-                if provisionalItemID == itemID { position = anchor }
-                // Do not carry an off-script answer into the next return-to-script attempt.
-                history = []
-                uncertainty = match.confidence
-            }
-        } else if provisionalItemID == itemID {
-            position = anchor
+
+        var match = locate(tokens, script: script, anchor: position)
+        if match.position == nil, anchor != position {
+            let anchoredMatch = locate(tokens, script: script, anchor: anchor)
+            if anchoredMatch.position != nil { match = anchoredMatch }
         }
-        if provisionalItemID == itemID { provisionalItemID = nil }
-        partialPreview = nil
+        candidatePosition = match.position
+        lastMatchConfidence = match.confidence
+        lastMatchedCount = match.matchedCount
+
+        if let candidate = match.position {
+            position = candidate
+            lastConfirmedPosition = candidate
+            provisionalItemID = nil
+            uncertainty = nil
+            lowConfidenceStreak = 0
+            followState = .tracking
+            history = Array((history + tokens).suffix(48))
+        } else if tokens.count + history.count < 3 {
+            history = Array((history + tokens).suffix(24))
+            position = lastConfirmedPosition
+            provisionalItemID = nil
+            candidatePosition = nil
+            uncertainty = nil
+            if followState != .freePlaying { followState = .listening }
+        } else {
+            recordFinalMiss(match)
+        }
         retire(itemID)
     }
 
-    private func locate(_ tokens: [String], script: TeleprompterAligner.Script,
-                        anchor: TeleprompterAligner.Position) -> TeleprompterAligner.Match {
-        // Try the current utterance first so a detour/repeat cannot be pinned by old text.
+    private func locate(
+        _ tokens: [String],
+        script: TeleprompterAligner.Script,
+        anchor: TeleprompterAligner.Position
+    ) -> TeleprompterAligner.Match {
         let current = aligner.locate(tokens: tokens, script: script, anchor: anchor)
         if current.position != nil { return current }
-        guard tokens.count < 3 || current.confidence > 0 else { return current }
+        guard !history.isEmpty, tokens.count < 3 || current.confidence > 0 else { return current }
         return aligner.locate(tokens: Array(history.suffix(24)) + tokens, script: script, anchor: anchor)
+    }
+
+    private mutating func applyPreviewMatch(
+        _ match: TeleprompterAligner.Match,
+        itemID: String
+    ) {
+        candidatePosition = match.position
+        lastMatchConfidence = match.confidence
+        lastMatchedCount = match.matchedCount
+
+        guard let candidate = match.position else {
+            uncertainty = match.confidence
+            if followState != .freePlaying { followState = .catchingUp }
+            return
+        }
+
+        let sufficientEvidence = match.isUniqueNearAnchor
+            || (match.confidence >= policy.provisionalMinimumConfidence
+                && match.matchedCount >= policy.provisionalMinimumMatches)
+        guard sufficientEvidence else {
+            uncertainty = match.confidence
+            if followState != .freePlaying { followState = .catchingUp }
+            return
+        }
+
+        uncertainty = nil
+        if isForward(candidate, from: position) {
+            position = candidate
+            provisionalItemID = itemID
+            if followState != .freePlaying { followState = .tracking }
+        } else if candidate == position {
+            if followState != .freePlaying { followState = .tracking }
+        } else if followState != .freePlaying {
+            followState = .catchingUp
+        }
+    }
+
+    private mutating func recordFinalMiss(_ match: TeleprompterAligner.Match) {
+        position = lastConfirmedPosition
+        provisionalItemID = nil
+        candidatePosition = nil
+        history = []
+        uncertainty = match.confidence
+        lowConfidenceStreak += 1
+        followState = lowConfidenceStreak >= policy.freePlayAfterMisses ? .freePlaying : .catchingUp
     }
 
     private func isForward(
@@ -254,29 +372,116 @@ public struct TeleprompterFollowController: Sendable {
         candidatePosition = nil
         provisionalItemID = nil
         uncertainty = nil
+        lastConfirmedPosition = position
+        lastMatchConfidence = nil
+        lastMatchedCount = 0
+        lowConfidenceStreak = 0
     }
 
     public mutating func pause() {
         invalidatePending()
         mode = .paused
+        followState = .paused
     }
 
     public mutating func resume() {
         invalidatePending()
         mode = .following
+        followState = .waitingForSpeech
     }
 
     public mutating func move(to index: Int, segmentCount: Int) {
         guard segmentCount > 0 else { return }
         invalidatePending()
         position = .init(segmentIndex: min(max(0, index), segmentCount - 1), utf16Offset: 0)
+        lastConfirmedPosition = position
         mode = .manual
+        followState = .manual
     }
 
     public mutating func enterManual() {
         invalidatePending()
         mode = .manual
+        followState = .manual
     }
 
     public mutating func resetFollowWindow() { resume() }
+}
+
+
+public enum TeleprompterRealtimeFollowOutcome: Equatable, Sendable {
+    case aligned
+    case previewed
+    case ignored
+    case terminalFailure
+}
+
+/// Maps Realtime ASR events into the same deterministic follow reducer used by tests.
+/// Event IDs are bounded and retained only in memory for duplicate suppression.
+public struct TeleprompterRealtimeFollowAdapter: Sendable {
+    public init() {}
+
+    public func apply(
+        _ event: RealtimeASRClient.Event,
+        metadata: RealtimeEventMetadata,
+        segments: [TeleprompterSegment],
+        to controller: inout TeleprompterFollowController
+    ) -> TeleprompterRealtimeFollowOutcome {
+        switch event {
+        case .speechStarted:
+            let previousState = controller.followState
+            controller.noteSpeechStarted()
+            return controller.followState == previousState ? .ignored : .previewed
+
+        case .partial(let itemID, let delta):
+            let previousPosition = controller.position
+            let previousPreview = controller.partialPreview
+            controller.receivePartial(
+                itemID: itemID,
+                delta: delta,
+                segments: segments,
+                eventID: metadata.eventID
+            )
+            return controller.position != previousPosition || controller.partialPreview != previousPreview
+                ? .previewed : .ignored
+
+        case .partialSnapshot(let itemID, let revision, let text):
+            let previousPosition = controller.position
+            let previousPreview = controller.partialPreview
+            controller.receiveSnapshot(
+                itemID: itemID,
+                revision: revision,
+                text: text,
+                segments: segments,
+                eventID: metadata.eventID
+            )
+            return controller.position != previousPosition || controller.partialPreview != previousPreview
+                ? .previewed : .ignored
+
+        case .completed(let itemID, let transcript, _):
+            let previousPosition = controller.position
+            let previousState = controller.followState
+            let previousConfidence = controller.lastMatchConfidence
+            let previousMatchedCount = controller.lastMatchedCount
+            controller.receiveCompleted(
+                itemID: itemID,
+                transcript: transcript,
+                segments: segments,
+                eventID: metadata.eventID
+            )
+            let didAlign = controller.position != previousPosition
+                || (controller.followState == .tracking
+                    && (previousState != .tracking
+                        || controller.lastMatchConfidence != previousConfidence
+                        || controller.lastMatchedCount != previousMatchedCount))
+            return didAlign ? .aligned : .ignored
+
+        case .failed(_, _, _), .closed(_):
+            return .terminalFailure
+
+        default:
+            return .ignored
+        }
+    }
+
 }

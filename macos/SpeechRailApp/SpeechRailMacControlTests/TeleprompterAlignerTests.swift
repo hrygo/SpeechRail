@@ -83,4 +83,60 @@ struct TeleprompterPositionTests {
                                                 anchor: .init(segmentIndex: 0, utf16Offset: 0))
         #expect(result.position?.segmentIndex == 1)
     }
+
+    @Test func toleratesSubstitutedTailAndShortInput() throws {
+        let aligner = TeleprompterAligner()
+        let segments = try TeleprompterSegmenter.segment(sourceText: "现在介绍相机设置。最后导出照片。")
+        let substituted = aligner.locate(
+            transcript: "现在介绍相机参数",
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(substituted.position?.segmentIndex == 0)
+        #expect(substituted.confidence >= 0.72)
+
+        let shortSegments = try TeleprompterSegmenter.segment(sourceText: "欢迎。继续。")
+        let short = aligner.locate(
+            transcript: "继续",
+            segments: shortSegments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 2)
+        )
+        #expect(short.position?.segmentIndex == 1)
+        #expect(short.isUniqueNearAnchor)
+
+        let repeated = try TeleprompterSegmenter.segment(sourceText: "开场。继续。中间内容。继续。")
+        let ambiguous = aligner.locate(
+            transcript: "继续",
+            segments: repeated,
+            anchor: .init(segmentIndex: 2, utf16Offset: 0)
+        )
+        #expect(ambiguous.position == nil)
+    }
+
+    @Test func circleZeroYearSharesTheSamePositionAsItsArabicForm() throws {
+        let segments = try TeleprompterSegmenter.segment(sourceText: "我们从二〇二六年开始。")
+        let result = TeleprompterAligner().locate(
+            transcript: "我们从2026年开始",
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+
+        #expect(result.position?.segmentIndex == 0)
+        #expect(result.confidence == 1)
+    }
+
+    @Test func itnVariantsShareTheSameScriptPosition() throws {
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "我们在二零二六年把成功率提高到百分之五十。"
+        )
+        let result = TeleprompterAligner().locate(
+            transcript: "我们在2026年把成功率提高到50%",
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+
+        #expect(result.position?.segmentIndex == 0)
+        #expect(result.confidence >= 0.72)
+    }
+
 }
