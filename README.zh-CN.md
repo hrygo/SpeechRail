@@ -39,7 +39,7 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 负责麦克风采集、音频播放、会议数据、UI 与 LLM 编排。
 
 > [!NOTE]
-> SpeechRail 当前以 **Beta** 版本发布。`/readyz` 和成功的 smoke 请求只能确认服务就绪，
+> `/readyz` 和成功的 smoke 请求只能确认服务就绪，
 > 不代表普遍适用的质量、延迟或性能保证。
 
 ## 为什么选择 SpeechRail

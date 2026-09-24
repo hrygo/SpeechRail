@@ -40,9 +40,8 @@ resource admission, and capability reporting. Calling applications own
 microphone capture, playback, meeting storage, UI, and LLM orchestration.
 
 > [!NOTE]
-> SpeechRail is currently published as **Beta**. `/readyz` and a successful
-> smoke request confirm service readiness, not universal quality, latency, or
-> performance guarantees.
+> `/readyz` and a successful smoke request confirm service readiness, not
+> universal quality, latency, or performance guarantees.
 
 ## Why SpeechRail
 
