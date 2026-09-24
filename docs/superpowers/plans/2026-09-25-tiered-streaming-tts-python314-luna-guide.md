@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.6"
+version: "1.7"
 date: 2026-09-25
 ---
 
@@ -510,7 +510,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
 - [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
 - [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
-- [ ] **W5｜领域与身份**：新增tts_stream port/state/limits；profile与reference租约、跨精度cache隔离通过。
+- [x] **W5｜领域与身份**：新增 `domain/tts_stream.py`（options/双轴 state/limits/事件/port）与 `PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间）；`VoiceBinding.supports_incremental_stream` 只对 CustomVoice speaker 与 Base clone 为真。验收：`tests/test_tts_stream_state.py` 15 passed、`tests/test_tts_reference_condition.py` 6 passed、`tests/test_voice_bindings.py` 44 passed；另修正 W2 遗留的 `tests/test_profile_selection.py` 旧 runtime lock fixture（23 passed）。
 - [ ] **W6｜worker全双工**：单模型owner、单父端reader、有界队列与协作取消；fake IPC与旧ASR/TTS回归通过。
 - [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
 - [ ] **W8｜公共协议与能力**：严格parser、current音频事件、voice级支持；四档/错误/断线矩阵通过。
@@ -617,5 +617,16 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **未改变的证据：** 长 reference + 2 token 初始文本仍只发声首段；overlay 布局仍在文本尾部未完成时命中 `codec_eos_before_text_eos`；永久或长期抑制 codec EOS 仍是退化重复。三者都不能作为真增量路径。
 - **bf16 catalog 差异（2026-09-25 只读核对）：** `tts-1.7b-base-bf16` 与 `tts-1.7b-design-bf16` 只有 `README.md` 不符（本地 1026 B vs catalog 1645 B；本地 1068 B vs catalog 1203 B），其余权重、配置与 tokenizer 文件全部匹配；本地 README 是合法的对应 bf16 模型卡（design-bf16 与 design-q8 仅模型名不同）。处理方式需用户选择：恢复 pinned 快照、修订清单，或把 README 从承载性清单移出；在决定前不放宽校验，也不把 bf16 记为已验收。
 - **Ruling：** W4 关键门通过，W5–W10 继续实施。Base 真增量成立的条件是“短 reference + 初始文本跨过 prefill 槽位 + 剩余与新追加文本逐帧投喂同一 generation”，而不是全文本预填后追加。ASR 只证明显式文本内容，人耳 A/B、说话人相似度、自然度、RTF 长稳、真实 worker/协议与取消/重连仍未验收。
+
+### W5 实施与验收记录（2026-09-25）
+
+- `src/speechrail/domain/tts_stream.py`（新增，vendor-neutral，不导入 MLX）：`TtsStreamOptions`（request/response identity、voice、language、speed、expected voice/model revision）、`TtsStreamLimits`（append≤512、总量≤4096、待模型消费≤2048、待发送音频≤48000 B、输入等待15 s、utterance 120 s、最慢消费者2 s；整数与秒数分别校验并拒绝 bool）、`TtsStreamInputState`/`TtsStreamOutputState`/`TtsStreamTerminal`/`TtsStreamEvent`（含 `chunk_index`、`sample_offset`）、`TtsStreamStateMachine`、`IncrementalSpeechSession`/`IncrementalSpeechSynthesizer` port，以及集中注册的稳定错误码集合 `TTS_STREAM_ERROR_CODES`。
+- 状态表语义：append 序号从 0 起、必须连续单调，重复/缺口/非整数都返回 `tts_sequence_invalid` 且不推进 `accepted_sequence`；`finish_text(last_sequence)` 必须等于最后 ACK，重复 finish、finish 后 append 返回 `tts_input_closed`；超 append/总量返回 `tts_stream_limit_exceeded`，文本或音频队列超预算返回 `tts_backpressure`；终态 completed/cancelled/failed 各仅一次，cancel 幂等且优先于后续 fail；`accepted_sequence` 初值 -1，空输入 finish(-1) 产生零音频完成。
+- 文本按收到的 Unicode codepoints 计数（含空格与纯空白包），与音频字节预算分开；`enqueue_audio` 返回 `chunk_index`/`sample_offset` 且只按已 enqueue/dequeue 的字节释放预算。
+- `src/speechrail/domain/tts_reference_condition.py`：新增 `PreparedReferenceKey`（content_identity、preprocessing_version、model_revision、quantization、tokenizer_revision、implementation_version、conditioning_mode、schema），`digest` 为排序 JSON 的 sha256，即 prepared condition 的唯一缓存命名空间；新增 `prepared_reference_content_identity()` 与 `verify_prepared_reference_material()`，材料与 key 不符时 `PreparedReferenceIdentityError` fail-closed。`PreparedReferenceCondition` 改为持有 key，`model_revision` 仍可读。跨精度隔离由 key 覆盖 quantization 保证：q8 与 bf16、不同 tokenizer/模型/实现版本/预处理/conditioning 模式产生不同 digest。
+- `src/speechrail/backends/qwen3_voice_binding.py`：新增 `VoiceBinding.supports_incremental_stream`，仅 CustomVoice（有 vendor speaker 绑定）与 Base（is_clone）为真，VoiceDesign 一律为假；这是 W8/W10 能力声明的唯一来源，不能因档位名或 Python 升级统一报告支持。
+- 阶段门（主仓全量，CPython 3.12.14 `.venv`）：`pytest tests/` 收集 2255 项，2111 passed / 144 skipped / 0 failed，coverage 81.77%（门限 80%）；`mypy src` 131 个源文件通过；改动文件 `ruff check` 通过；`git diff --check` 通过。该全量运行同时暴露出并修复了 W2 遗留 fixture 缺陷（修复前 5 failed）。
+- 未纳入本阶段：未实现 `IncrementalSpeechSynthesizer` 的真实 adapter、未接入 worker/IPC、未改 public wire、未做真实 worker/REST/Realtime 验收、未做人耳或性能测量；`TtsStreamLimits` 是安全初值而非调优结果。
+- 顺带修复（W2 遗留，独立 commit）：`tests/test_profile_selection.py` 的 selection fixture 仍写死 `mlx-qwen-20260905`，与 W2 发布的 `mlx-qwen-20260924-py314` 不一致，导致 5 个无关测试在到达自身断言前就因 runtime lock mismatch 失败。改为从 `load_runtime_lock().id` 取值，避免再次漂移。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
