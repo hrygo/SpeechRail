@@ -174,7 +174,7 @@ date: 2026-09-24
 
 vendor 定点范围（基于核实的 v0.5.6）：`mlx_audio/tts/models/qwen3_tts/qwen3_tts.py`、`talker.py`、`speech_tokenizer.py`，必要时新增 `incremental.py` 与仅供模型门使用的 `incremental_probe.py`。Qwen3TTSBatchSession 不用于代替 append。
 
-**探针适配契约（已用于离线工具）：** `incremental_probe.py` 导出 `__speechrail_vendor_commit__` 与 `open_probe_session(..., local_files_only=True)`；返回的 session 提供 `append_text`、`finish_input`、有界 `step(max_steps)`、`cancel`、`close`，并暴露 `generation_identity`、`initial_prefill_count`、`sample_rate`、`peak_memory_bytes`。事件仅接受 PCM16、等待文本、完成或错误；这是 W4 的验证 SPI，不是 SpeechRail 生产 API。工具设置 Hub/Transformers offline 环境变量并传递 `local_files_only=True`；fork 必须遵守，尚需在真实模型门确认无远程回退。
+**探针适配契约（已用于离线工具）：** `incremental_probe.py` 导出 `__speechrail_vendor_commit__` 与 `open_probe_session(..., local_files_only=True)`；返回的 session 提供 `append_text`、`finish_input`、有界 `step(max_steps)`、`cancel`、`close`，并暴露 `generation_identity`、`initial_prefill_count`、`sample_rate`、`peak_memory_bytes`。`initial_prefill_count` 在 session 打开时必须为 0；初始文本进入模型 prefill 后允许单调变为 1；首 PCM 发出时必须为 1，并在后续 append/finish/terminal 中保持为 1。探针拒绝打开即虚报 prefill、首 PCM 前无 prefill 或同一 generation 再次 prefill。事件仅接受 PCM16、等待文本、完成或错误；这是 W4 的验证 SPI，不是 SpeechRail 生产 API。工具设置 Hub/Transformers offline 环境变量并传递 `local_files_only=True`；fork 必须遵守，尚需在真实模型门确认无远程回退。
 
 1. 基于明确 tag/commit建立可恢复候选 checkout，不修改安装目录。具体fork远端地址、commit、wheel版本/hash必须来自实际创建结果，本文不编造；远端创建/发布另获授权。
 2. 明确 CustomVoice 文本条件与 Base ICL prompt/pre-fill/trailing-text 布局，记录准确 token/position关系。不能把纯文本 token直接追加到混合声学 KV。
@@ -548,5 +548,11 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - 确定性验收：8 项状态测试通过；Ruff 检查通过；CPython 3.14.7 `py_compile` 通过。pytest 实际用仓库 `.venv` 的 CPython 3.12.14 运行，并出现 2 条 pytest-asyncio 配置项无法识别的 `PytestConfigWarning`；本轮未在 3.14.7 下运行 pytest/mypy。
 - **性能风险 / Ruling：** 为检测 tokenizer 边界变化，buffer 每次 append 都重新编码累计文本；这保证未消费尾部可重算、已消费前缀不被静默改写，但多次短 append 的总工作量可能呈二次增长。因此它是正确性优先的 W4 候选，不满足低延迟验收，也不能直接用于生产；必须接入实际 tokenizer 后测量，并在不破坏前缀保证的前提下优化或据实判门失败。
 - **未完成：** 未编写或运行真实模型 session adapter；未验证 q8 / bf16、增量 PCM、EOS、decoder 尾部、资源峰值、首音延迟或音色/文本正确性。
+
+#### W4 单次 prefill 计数门修正（2026-09-24）
+
+- 发现 SPI 旧检查在 `open_probe_session` 刚返回时就要求 `initial_prefill_count == 1`，但探针随后才追加第一段目标文本；这会迫使实现预先用空文本 prefill，或把计数当占位值，无法证明真实的“文本条件 prefill 恰好一次”。
+- 修正 `ProbeSession` 契约和探针状态校验：打开时为 0；第一次文本 prefill 后只允许转为 1；必须在首 PCM 前达到 1，并在追加文本、finish 和 terminal 保持为 1。报告记录实际观察计数；未 prefill 的 PCM、重复 prefill 都以稳定失败码拒绝。SpeechRail 提交：`0a55b04b fix: validate TTS prefill after initial text`。
+- 验证：探针契约测试 `11 passed`（仓库 `.venv` CPython 3.12.14，显式关闭与本单测范围无关的全仓 coverage 门）；定向 Ruff、`MYPYPATH=src` 下该工具文件 mypy、CPython 3.14.7 `py_compile` 与 `git diff --check` 通过。未加载模型或运行真实增量 TTS。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
