@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.5"
+version: "1.6"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 于 2026-09-25 判定 Base 真增量模型门失败，W5–W10 停止。** CustomVoice q8 的真增量 append 与 ASR 内容复核通过；Base q8/bf16 只能在全文本已进入 prefill 时正确生成，首 PCM 后追加文本没有声学效果，overlay 布局还会提前触发 codec EOS。W1–W3 的 Python 3.14、Realtime 与 App 协议基线仍可独立交付。后续若继续，必须为新模型/运行时或“Base 分段全文生成”重开设计和授权，不能在本实现中以重启、拼接或永久抑制 EOS 冒充真增量。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），继续 W5–W10。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 只受 catalog `README.md` 完整性差异阻塞，待用户决定；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -174,7 +174,7 @@ date: 2026-09-25
 
 vendor 定点范围（基于核实的 v0.5.6）：`mlx_audio/tts/models/qwen3_tts/qwen3_tts.py`、`talker.py`、`speech_tokenizer.py`，必要时新增 `incremental.py` 与仅供模型门使用的 `incremental_probe.py`。Qwen3TTSBatchSession 不用于代替 append。
 
-**探针适配契约（已用于离线工具）：** `incremental_probe.py` 导出 `__speechrail_vendor_commit__` 与 `open_probe_session(..., local_files_only=True)`；返回的 session 提供 `append_text`、`finish_input`、有界 `step(max_steps)`、`cancel`、`close`，并暴露 `generation_identity`、`initial_prefill_count`、`sample_rate`、`peak_memory_bytes`。`initial_prefill_count` 在 session 打开时必须为 0；初始文本进入模型 prefill 后允许单调变为 1；首 PCM 发出时必须为 1，并在后续 append/finish/terminal 中保持为 1。探针拒绝打开即虚报 prefill、首 PCM 前无 prefill 或同一 generation 再次 prefill。事件仅接受 PCM16、等待文本、完成或错误；这是 W4 的验证 SPI，不是 SpeechRail 生产 API。工具设置 Hub/Transformers offline 环境变量并传递 `local_files_only=True`；fork 必须遵守，尚需在真实模型门确认无远程回退。
+**探针适配契约（已用于离线工具）：** `incremental_probe.py` 导出 `__speechrail_vendor_commit__` 与 `open_probe_session(..., local_files_only=True)`；返回的 session 提供 `append_text`、`finish_input`、有界 `step(max_steps)`、`cancel`、`close`，并暴露 `generation_identity`、`initial_prefill_count`、`sample_rate`、`peak_memory_bytes`。`initial_prefill_count` 在 session 打开时必须为 0；初始文本进入模型 prefill 后允许单调变为 1；首 PCM 发出时必须为 1，并在后续 append/finish/terminal 中保持为 1。探针拒绝打开即虚报 prefill、首 PCM 前无 prefill 或同一 generation 再次 prefill。事件仅接受 PCM16、等待文本、完成或错误；这是 W4 的验证 SPI，不是 SpeechRail 生产 API。工具设置 Hub/Transformers offline 环境变量并传递 `local_files_only=True`；fork 必须遵守，尚需在真实模型门确认无远程回退。追加文本的 `append_text` 返回本次已提交但尚未消费的 token id 序列，session 另暴露 `prefill_target_tokens`（单次 prefill 已放进 KV 的目标文本 token 数）。探针要求 `prefill_target_tokens < len(initial_text_tokens)`，否则以 `prefill_did_not_enter_trailing_region` fail-closed，并要求该值在一次 generation 内不变；`--schedule` 是必需参数且与 variant 强制配对（CustomVoice `append-after-first-pcm-v1`、Base `base-trailing-after-first-pcm-v1`），不允许静默回落到其它档位的 schedule。Base 参考音频必须短到让初始文本跨过 prefill 槽位。
 
 1. 基于明确 tag/commit建立可恢复候选 checkout，不修改安装目录。具体fork远端地址、commit、wheel版本/hash必须来自实际创建结果，本文不编造；远端创建/发布另获授权。
 2. 明确 CustomVoice 文本条件与 Base ICL prompt/pre-fill/trailing-text 布局，记录准确 token/position关系。不能把纯文本 token直接追加到混合声学 KV。
@@ -185,7 +185,7 @@ vendor 定点范围（基于核实的 v0.5.6）：`mlx_audio/tts/models/qwen3_tt
 7. 首次PCM输出后再投递后半文本，断言同一generation identity/初始prefill次数=1、输出新增内容且无重启；用fake只能验证探针逻辑，真实声音正确性必须单独验收。
 8. CustomVoice q8、Base q8、Base bf16各一份报告；VoiceDesign完整文本/注册回归不得因扩展损坏。
 
-**报告结构（拟定）：** artifact_revision、variant、quantization、vendor_commit、python、input_schedule_id、initial_prefill_count、append_after_first_pcm、terminal、timings、sample_count、peak_resource_summary、correctness_review、limitations。真实文本/音频只在获授权的仓库外制品中，不进入普通日志。
+**报告结构（拟定）：** artifact_revision、variant、quantization、vendor_commit、python、input_schedule_id、initial_prefill_count、initial_text_token_count、prefill_target_tokens、appended_text_token_count、append_after_first_pcm、terminal、timings、sample_count、peak_resource_summary、correctness_review、limitations。真实文本/音频只在获授权的仓库外制品中，不进入普通日志。
 
 **完成条件：** 两条路径真增量和安全结束成立；若q8成立bf16未达性能，只能开放对应已验收档，四档完整目标仍未完成。失败时停止W5之后生产接入，保留W1–W3可独立交付的变化。
 
@@ -509,7 +509,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W1｜Realtime导入与采样契约**：移除不可达 `audioop`/24→16 kHz converter 与影子 sample-rate 配置；保留固定 16 kHz PCM16 wire。验收：`tests/test_realtime_openai.py` + `tests/test_realtime_caller_wire.py` 137 passed；定向 Ruff、mypy 及 diff check 通过。当前运行解释器是 3.12.14；缺失 audioop 导入由测试注入模拟，尚未证明 CPython 3.14 全依赖运行。
 - [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
 - [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
-- [x] **W4｜模型门（Ruling: Base 真增量不可行，W5+ 停止）**：CustomVoice q8 在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base q8 aligned 仅结构通过，追加文本无声；Base q8 overlay 提前 codec EOS 失败；Base bf16 catalog 因 `README.md` 完整性不匹配未过门，直接诊断也只在首段发声。简单永久抑制 EOS 会产生退化重复，不能作为替代。
+- [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
 - [ ] **W5｜领域与身份**：新增tts_stream port/state/limits；profile与reference租约、跨精度cache隔离通过。
 - [ ] **W6｜worker全双工**：单模型owner、单父端reader、有界队列与协作取消；fake IPC与旧ASR/TTS回归通过。
 - [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
@@ -568,11 +568,14 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - `Qwen3TtsIncrementalBackend` 持有 talker KV cache、code predictor cache 与 vocoder streaming state：单次 prefill 后逐帧以「文本 embedding + 上一帧 codec embedding」推进，每帧重置 code predictor cache，文本 EOS 注入前禁用 codec EOS，逐帧经 `speech_tokenizer.decoder.streaming_step()` 输出 PCM16；`cancel()/close()` 幂等并重置 decoder 状态。`incremental_probe.py` 强制 `local_files_only=True`，设置 Hub/Transformers offline 环境变量与 `mx.random.seed`，并按 variant/precision/speaker/reference 组合校验后再加载本地模型路径。
 - 静态对齐核对（固定 commit 只读源码）：CustomVoice/Instruct 路径与 vendor 自身 `_generate_with_instruct` 逐帧循环同构 —— prefill 结束于 `text_embed[:, 3:4] + codec_bos`，其余目标 token 与 `tts_eos` 作为 trailing 队列逐帧投喂，trailing 用尽后转 `tts_pad_embed`；backend 的 `step()` 与该循环在输入构造、`_reset_code_cache`、EOS 判定与逐帧 streaming decode 上一一对应。
 - **Ruling（Base 风险，未通过模型门）：** vendor `_prepare_icl_generation_inputs` 采用 `non_streaming_mode=True` 布局，全部文本在 prefill 内与 codec pad 叠加，`trailing_text_hidden = tts_pad_embed`，即 Base 原本没有 trailing 文本队列。因此 Base 的“截断到 1 个目标 token、其余逐帧追加”不对应任何 vendor 已验证布局，只是候选实现；Base 是否成立必须由独立真模型门判定，禁止从 CustomVoice 结果外推。
+- **修正（2026-09-25）：** 该 Ruling 只对 overlay 布局成立。aligned ICL 布局（`streaming_alignment=True`）中的文本按 `inline_lens = min(text_lens, codec_lens)` 与 reference codec 交错，超出 `codec_lens - ref_text_tokens` 的目标文本留在 trailing 队列，由调用方逐帧投喂；Base 增量因此走的是官方 streaming 布局，不是“截断到 1 个 token”的临时做法。判定结果见下方“W4 假阴性修正与最终模型门”。
 - 验证（CPython 3.14.7 候选环境，`mlx==0.32.2` + 仓库外站点包）：5 个 vendor 增量测试文件 `32 passed`（含 2 条 pytest-asyncio 配置项无法识别的 warning）；`ruff check`、`py_compile`、`git diff --check` 通过；按 vendor 自身 pre-commit 口径用 `black 26.3.1` 与 `isort 5.13.2 --profile black` 对涉及文件格式化并复检通过（此前分支上的 100 列写法并非 black-88 干净，本次一并修正）。测试共用同一进程内的 fake backend/tokenizer，未加载真实模型。
 - 交叉握手（不加载模型，未产生音频）：在仓库外候选环境执行 `tools/probe_tts_incremental.py` 的 `_load_vendor_extension()`，成功返回 `vendor_commit=c9e855b1d4d7661bfd341113051564b9a06b98a6` 与 `mlx_audio_version=0.5.6`，说明 SpeechRail 探针 SPI 与 fork 扩展在 CPython 3.14.7 下可实际对接。
 - **未完成/未授权：** 未加载任何模型权重（CustomVoice q8、Base q8、Base bf16 全未运行），未产生真实 PCM 或 `report.json`，未做人耳 A/B、声学正确性、首音延迟、RTF 或峰值内存测量，`correctness_review` 仍为 pending。W4 关键门未通过，W5 及其后生产接入不启动；Base 参考音频与对应文本仍需用户指定并明确授权后才能运行真实门。
 
-#### W4 真实模型门结果与 Ruling（2026-09-25）
+#### W4 真实模型门结果与 Ruling（2026-09-25，Ruling 已被同日修正取代）
+
+- **本节保留为原始记录，不能作为当前结论。** 其中的探针 schedule 与接线缺陷使 Base 在“整段初始文本已进入 prefill”的条件下被误判为不支持真增量；修正结论见“W4 假阴性修正与最终模型门”。
 
 - 本轮获用户明确授权加载本机已有模型并自行合成参考音频/文本；未下载模型、未切换正式服务、未推送远端。参考音频与全部探针/对照音频位于仓库外 `~/Library/Application Support/SpeechRail/benchmarks/tts-incremental-w4/`，仓库只记录脱敏结果和 Ruling。
 - vendor 候选最终 HEAD 为 `bcf7c92dff8b8b851773e9ed8b436a4f7a6b5c17`（基线 `4ab7e6f7dedd69a136cfaa318c5dc8aed5119446`）；报告均记录该 commit。最终代码的 5 个增量测试文件 `40 passed`，`black 26.3.1`、`isort 5.13.2 --profile black`、`py_compile` 与 `git diff --check` 通过；主仓探针契约 `11 passed`。Ruff 仍报告 vendor 既有代码债，本次只以仓库自身 pre-commit 门判定新增范围。
@@ -589,10 +592,30 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - EOS 可控性实验也不支持“只要抑制 EOS 就能修复”：在 TTS EOS 注入前持续屏蔽 codec EOS，会连续生成但不终止，实测 24 s 为退化重复，ASR 不包含追加句。因此永久或长期抑制 EOS 会造成失控，不能作为 W4 通过条件。
 - VoiceDesign 回归：q8 catalog 校验 13/13，全文普通生成 ASR 逐字正确；bf16 直接加载的全文普通生成也逐字正确，但其 `README.md` 与 catalog 不符（1068 B vs 1203 B），所以只能记为非 catalog 诊断，不能宣称为 extreme 已验收。
 - **Ruling：** W4 失败。light/balanced 的 CustomVoice q8 真增量路径已有真实模型、ASR 与首音/追加延迟证据；quality/extreme 的 Base 真增量路径不成立。按本指南完成条件，W5–W10 生产接入不启动，Base reference/revision/缓存/协议扩展不进入生产。W1–W3 的 Python 3.14、Realtime 与 App 协议基线保留并可独立交付。
-- **后续可选路线（均需新设计/授权，不在本指南自动执行）：**
-  1. 产品退坡：light/balanced 使用 CustomVoice q8 真增量；quality/extreme 继续使用 Base 固定 reference 的**完整语义段一次性生成**，保证身份但放弃跨段韵律连续，即原始“Base clone + 每轮单次 TTS”路线。
+- **后续可选路线（均需新设计/授权，不在本指南自动执行；Base 退坡路线在修正后不再必需）：**
+  1. 产品退坡（仅当修正后的 Base 门在真实服务/音质验收中再次失败）：light/balanced 使用 CustomVoice q8 真增量；quality/extreme 继续使用 Base 固定 reference 的**完整语义段一次性生成**，保证身份但放弃跨段韵律连续，即原始“Base clone + 每轮单次 TTS”路线。
   2. 后端替换：寻找或实现能把完整文本条件增量预填到既有 talker KV、再由新文本延续同一生成状态的新模型/运行时；必须重新执行独立模型门，不能只以 API 名称宣称支持。
   3. 重启/拼接：当前探针明确不允许把它当成同一 generation 的真增量；若产品接受，必须另建声学验收（接缝、韵律、身份和打断），不能复用本门结论。
 - **证据边界：** ASR 能证明显式文本内容缺失，不能替代人耳 A/B、说话人相似度、自然度、RTF 长稳或 bf16 性能验收；这些未执行。bf16 catalog 的 `README.md` 差异需用户决定恢复快照、修订清单还是隔离该文件，当前不放宽完整性检查。
+
+#### W4 假阴性修正与最终模型门（2026-09-25，取代上一节 Ruling）
+
+- **修正原因（探针条件缺陷，不是模型缺陷）：** 上一节用 `append-after-first-pcm-v1`（初始文本“你好，”，2 token）配 11.2 s 长 reference。该组合下 `codec_lens - ref_text_tokens` 远大于初始文本 token 数，官方 aligned ICL 布局把整段初始文本放进 prefill 槽位、trailing 队列为空，首 PCM 后追加的文本没有对应的逐帧文本输入通道，因此只发声首段。这是“初始文本已全部进入 prefill”造成的假阴性。
+- **暴露的工具缺陷：** `tools/probe_tts_incremental.py` 已解析并校验 `--schedule`，但 `main()` 未把 `request.schedule` 传给 `run_probe_session`，实际始终运行默认 schedule；`run_probe_session` 的 `schedule_id` 默认值使该错误静默通过。已改为必需参数并把 `request.schedule` 显式传入，调用方无法再回落到其它档位的 schedule。
+- **新增 fail-closed 门：** session 暴露 `prefill_target_tokens`；探针要求 `prefill_target_tokens < len(initial_text_tokens)`（否则 `prefill_did_not_enter_trailing_region`），要求该值在一次 generation 内保持不变（否则 `prefill_target_tokens_changed`），并要求 appended 文本提交至少一个 token（否则 `vendor_token_ids_invalid`）。variant 与 schedule 强制配对：CustomVoice `append-after-first-pcm-v1`，Base `base-trailing-after-first-pcm-v1`。
+- **Base schedule 参数：** 初始文本 26 token（“你好，我现在开始进行连续语音增量测试。为了确认后续文本能够继续发声，请保持自然语速和清晰发音。”）+ 追加文本（“追加内容现在继续，保持自然语速并完整结束。”）；reference 用 1.36 s 的 `reference-ultrashort/ref-d.wav`/`ref-d.txt`（“你好。”，CustomVoice q8 合成），全部制品在仓库外。
+- **vendor HEAD：** `851f9567ecd27ad8f210cefc866c7d01525151e4`（新增 driver/adapter 的 `prefill_target_tokens` 与 token 返回值；基线 `4ab7e6f7`）。报告中的 `vendor_commit` 均等于该 commit。
+- 逐档真实结果（seed 17，本机已授权加载的模型，未下载模型）：
+
+| 路径 | 探针结构 | 独立 ASR 内容 | 延迟/资源 |
+|---|---|---|---|
+| CustomVoice 0.6B q8（`append-after-first-pcm-v1`） | pass；initial 2 token，prefill 1，appended 9 token | 16/16 字符一致，追加句包含 | first PCM 45.1 ms；append→next PCM 23.5 ms；peak 2.37 GB |
+| Base 1.7B q8 `aligned`（`base-trailing-after-first-pcm-v1`） | pass；initial 26 token，prefill 16，appended 24 token | 62/62 字符一致，追加句包含 | first PCM 64.3 ms；append→next PCM 20.3 ms；peak 3.51 GB |
+| Base 1.7B bf16 | catalog 门未过（仅 `README.md` 大小/哈希不符） | 非 catalog 诊断：追加句包含，字符 LCS 0.984 | 非正式门证据，不能宣称 extreme 已验收 |
+| Base 1.7B q8 `overlay` | 不适用 | — | 该布局无 trailing 队列，不用于增量门 |
+
+- **未改变的证据：** 长 reference + 2 token 初始文本仍只发声首段；overlay 布局仍在文本尾部未完成时命中 `codec_eos_before_text_eos`；永久或长期抑制 codec EOS 仍是退化重复。三者都不能作为真增量路径。
+- **bf16 catalog 差异（2026-09-25 只读核对）：** `tts-1.7b-base-bf16` 与 `tts-1.7b-design-bf16` 只有 `README.md` 不符（本地 1026 B vs catalog 1645 B；本地 1068 B vs catalog 1203 B），其余权重、配置与 tokenizer 文件全部匹配；本地 README 是合法的对应 bf16 模型卡（design-bf16 与 design-q8 仅模型名不同）。处理方式需用户选择：恢复 pinned 快照、修订清单，或把 README 从承载性清单移出；在决定前不放宽校验，也不把 bf16 记为已验收。
+- **Ruling：** W4 关键门通过，W5–W10 继续实施。Base 真增量成立的条件是“短 reference + 初始文本跨过 prefill 槽位 + 剩余与新追加文本逐帧投喂同一 generation”，而不是全文本预填后追加。ASR 只证明显式文本内容，人耳 A/B、说话人相似度、自然度、RTF 长稳、真实 worker/协议与取消/重连仍未验收。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
