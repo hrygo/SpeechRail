@@ -72,7 +72,7 @@ public struct TeleprompterAligner: Sendable {
         let tokens: [Token]
         public init(segments: [TeleprompterSegment]) {
             tokens = segments.enumerated().flatMap { index, segment in
-                TeleprompterNormalizer.indexedTokens(segment.text).map {
+                TeleprompterCanonicalizer.units(segment.text).map {
                     Token(
                         value: $0.value,
                         start: .init(segmentIndex: index, utf16Offset: $0.range.start),
@@ -84,7 +84,7 @@ public struct TeleprompterAligner: Sendable {
     }
 
     public func locate(transcript: String, segments: [TeleprompterSegment], anchor: Position) -> Match {
-        locate(tokens: TeleprompterNormalizer.tokens(transcript), script: Script(segments: segments), anchor: anchor)
+        locate(tokens: TeleprompterCanonicalizer.values(transcript), script: Script(segments: segments), anchor: anchor)
     }
 
     /// Semi-global edit distance: free start in a bounded script window, but every
@@ -92,7 +92,7 @@ public struct TeleprompterAligner: Sendable {
     public func locate(tokens input: [String], script: Script, anchor: Position) -> Match {
         let input = Array(input.suffix(72))
         let none = Match(position: nil, confidence: 0, matchedCount: 0)
-        guard input.count >= 3, !script.tokens.isEmpty else { return none }
+        guard !input.isEmpty, !script.tokens.isEmpty else { return none }
         let anchorIndex = script.tokens.firstIndex {
             $0.position.segmentIndex > anchor.segmentIndex ||
             ($0.position.segmentIndex == anchor.segmentIndex && $0.position.utf16Offset >= anchor.utf16Offset)
@@ -100,6 +100,8 @@ public struct TeleprompterAligner: Sendable {
         let lower = max(0, anchorIndex - configuration.lookBehindTokens)
         let upper = min(script.tokens.count, anchorIndex + configuration.lookAheadTokens)
         let window = Array(script.tokens[lower..<upper])
+        guard !window.isEmpty else { return none }
+        let minimumMatches = max(1, min(3, input.count - 1))
         struct Cell {
             var cost: Double
             var matches: Int
@@ -129,10 +131,8 @@ public struct TeleprompterAligner: Sendable {
             let matches: Int
         }
         let candidates = (1...window.count).compactMap { end -> Candidate? in
-            // Trailing skipped script tokens never count as spoken progress.
-            guard equivalent(input.last!, window[end - 1].value) else { return nil }
             let cell = previous[end]
-            guard cell.matches >= min(4, input.count) else { return nil }
+            guard cell.matches >= minimumMatches else { return nil }
             return Candidate(end: end, start: cell.start,
                              confidence: max(0, 1 - cell.cost / Double(input.count)), matches: cell.matches)
         }.sorted {
@@ -153,7 +153,8 @@ public struct TeleprompterAligner: Sendable {
         let startsNearAnchor = abs((lower + best.start) - anchorIndex) <= 4
         let uniqueExactContinuation = best.confidence == 1 && best.matches >= 8 && continuesAnchor
             && (competitor?.confidence ?? 0) < 1
-        let uniqueNearAnchor = uniqueExactContinuation && startsNearAnchor
+        let uniqueNearAnchor = startsNearAnchor
+            && (competitor == nil || best.confidence - competitor!.confidence >= configuration.advanceMargin)
         if let competitor, best.confidence - competitor.confidence < configuration.advanceMargin,
            !uniqueExactContinuation {
             return Match(

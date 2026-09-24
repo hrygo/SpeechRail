@@ -74,6 +74,8 @@ public final class TeleprompterSession {
     public private(set) var readingOffset = 0
     public private(set) var isResuming = false
     public private(set) var hasHeardSpeech = false
+    public private(set) var followState: TeleprompterFollowState = .waitingForSpeech
+    public private(set) var followStatusText = TeleprompterFollowPresentation.statusText(for: .waitingForSpeech)
     /// In-memory timing evidence for diagnosing follow lag; no text or IDs are retained.
     public private(set) var followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
 
@@ -196,6 +198,7 @@ public final class TeleprompterSession {
     private var client: RealtimeASRClient?
     private var pump: Task<Void, Never>?
     private var followController = TeleprompterFollowController()
+    private let followAdapter = TeleprompterRealtimeFollowAdapter()
     private var isStoppingIntentionally = false
     private var runningVersion: TeleprompterVersion?
     private var captureGeneration = UUID()
@@ -1544,34 +1547,38 @@ public final class TeleprompterSession {
         }
         switch envelope.payload {
         case .speechStarted:
-            if followController.mode == .following, !isResuming { hasHeardSpeech = true }
-        case .partial(let itemID, let delta):
-            guard !isResuming, let activeVersion else { return }
-            followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments,
-                                            eventID: envelope.metadata.eventID)
+            guard !isResuming else { return }
+            _ = followAdapter.apply(
+                envelope.payload,
+                metadata: envelope.metadata,
+                segments: activeVersion?.segments ?? [],
+                to: &followController
+            )
+            if followController.mode == .following { hasHeardSpeech = true }
             syncFollowState()
-            didAlign = true
-        case .partialSnapshot(let itemID, let revision, let text):
+        case .partial(_, _), .partialSnapshot(_, _, _):
             guard !isResuming, let activeVersion else { return }
-            followController.receiveSnapshot(
-                itemID: itemID,
-                revision: revision,
-                text: text,
+            _ = followAdapter.apply(
+                envelope.payload,
+                metadata: envelope.metadata,
                 segments: activeVersion.segments,
-                eventID: envelope.metadata.eventID
+                to: &followController
             )
             syncFollowState()
             didAlign = true
-        case .completed(let itemID, let transcript, _):
+        case .completed(_, _, _):
             guard !isResuming, let activeVersion else { return }
-            followController.receiveCompleted(
-                itemID: itemID, transcript: transcript,
-                segments: activeVersion.segments, eventID: envelope.metadata.eventID
+            _ = followAdapter.apply(
+                envelope.payload,
+                metadata: envelope.metadata,
+                segments: activeVersion.segments,
+                to: &followController
             )
             syncFollowState()
             if followController.mode == .following {
                 phase = uncertainty == nil ? .following : .uncertain
             }
+            didAlign = true
         case .serverError(let code, let message, _, _, _, _):
             if code == "backend_busy" {
                 await enterManual(.serviceBusy(message))
@@ -1579,8 +1586,20 @@ public final class TeleprompterSession {
                 lastFailure = message
             }
         case .failed(_, let code, let message):
+            _ = followAdapter.apply(
+                envelope.payload,
+                metadata: envelope.metadata,
+                segments: activeVersion?.segments ?? [],
+                to: &followController
+            )
             await enterManual(.streamFailed("\(code)：\(message)"))
         case .closed:
+            _ = followAdapter.apply(
+                envelope.payload,
+                metadata: envelope.metadata,
+                segments: activeVersion?.segments ?? [],
+                to: &followController
+            )
             if !isStoppingIntentionally {
                 await enterManual(.streamFailed("Realtime 连接已断开，可以手动继续或重试。"))
             }
@@ -1618,6 +1637,8 @@ public final class TeleprompterSession {
         readingOffset = followController.position.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
+        followState = followController.followState
+        followStatusText = TeleprompterFollowPresentation.statusText(for: followState)
         if uncertainty != nil {
             resetAdaptiveClockSamples()
             runClock.estimatedRemainingSeconds = remainingTextEstimate()

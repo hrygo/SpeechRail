@@ -20,6 +20,10 @@
 - No UI automation, real microphone smoke, model download, service restart, installation, publishing, or benchmark is authorized by this plan. Visual acceptance is a separate user-authorized activity.
 - Preserve uncommitted and parallel work. Never use `git checkout --`, `git reset --hard`, or whole-file overwrite to remove another session's edits.
 
+## Implementation File-Boundary Ruling — 2026-09-24
+
+Keep the canonicalizer in the existing `TeleprompterNormalizer.swift`, and keep the Realtime adapter and follow presentation mapping beside the reducer in `TeleprompterFollowController.swift`; extend the already registered test files rather than adding Swift files or PBX references. The Xcode project uses explicit source membership, so co-location avoids adding project metadata without changing the planned public interfaces. The SwiftPM support target includes `RealtimeASRClient.swift` because the adapter consumes its event type. The local canonicalizer also accepts the common `〇` digit in year strings to preserve client-side alignment; this is a narrow prior-character-equivalence extension, not a change to server ITN behavior.
+
 ## Current Evidence
 
 ### Contract and test declarations
@@ -43,17 +47,17 @@
 
 | File | Responsibility |
 |---|---|
-| `macos/SpeechRailApp/SpeechRailApp/TeleprompterCanonicalizer.swift` | Create canonical units for script and ASR text: Unicode normalization, filler removal, numeric/ITN equivalence, and source ranges |
+| `macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift` | Existing source-indexed tokenization plus canonical units for script and ASR text, numeric/ITN equivalence, and UTF-16 ranges |
 | `macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift` | Bounded monotonic fuzzy matching and ambiguity scoring over canonical units |
 | `macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift` | Partial/snapshot/final reducer, provisional evidence, hysteresis, re-anchoring, and non-persistent diagnostics |
-| `macos/SpeechRailApp/SpeechRailApp/TeleprompterRealtimeFollowAdapter.swift` | Shared mapping from `RealtimeASRClient.Event` to follow-controller calls |
+| `macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift` | Follow-state reducer, shared Realtime event adapter, presentation-state labels, hysteresis, and bounded transient diagnostics |
 | `macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift` | Use the shared adapter and publish transient follow state to the stage |
 | `macos/SpeechRailApp/SpeechRailApp/TeleprompterStageView.swift` | Show user-language listening/matching/recovery status without displaying or persisting the full ASR transcript |
 | `macos/SpeechRailApp/Package.swift` | Compile the pure canonicalizer, aligner, controller, adapter, and their tests; keep unrelated app/network files excluded |
-| `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterCanonicalizerTests.swift` | Numeric, punctuation, Unicode, and ITN equivalence tests |
+| `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterNormalizerTests.swift` | Numeric, punctuation, Unicode, and ITN equivalence tests |
 | `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterAlignerTests.swift` | Realistic ASR variants, short fragments, ambiguity, and source-coordinate tests |
 | `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterFollowControllerTests.swift` | Partial/final state, hysteresis, rollback, detour, and re-anchor tests |
-| `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterRealtimeFollowAdapterTests.swift` | Wire-event-to-follow closed-loop regression tests |
+| `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterFollowControllerTests.swift` | Partial/final state, adapter wire closure, presentation labels, detour, and re-anchor regression tests |
 | `tests/test_itn.py` | Keep server ITN behavior pinned while the Swift canonicalizer mirrors the same cases |
 | `docs/developers/macos-app-teleprompter.md` | Update user-visible behavior, limits, diagnostics, and acceptance guidance |
 
@@ -71,16 +75,15 @@
 ### Task 1: Canonical text units and ITN equivalence
 
 **Files:**
-- Create: `macos/SpeechRailApp/SpeechRailApp/TeleprompterCanonicalizer.swift`
-- Modify: `macos/SpeechRailApp/Package.swift:67-104`
-- Test: `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterCanonicalizerTests.swift`, `tests/test_itn.py`
+- Modify: `macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift`
+- Test: `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterNormalizerTests.swift`, `tests/test_itn.py`
 
 **Interfaces:**
 - Consumes: `TeleprompterSourceRange`, `TeleprompterNormalizer.indexedTokens`.
 - Produces: `TeleprompterCanonicalizer.Unit` with `value: String`, `range: TeleprompterSourceRange`, and `isNumeric: Bool`; `TeleprompterCanonicalizer.units(_ text: String) -> [Unit]`; `TeleprompterCanonicalizer.values(_ text: String) -> [String]`.
 - Contract: equal canonical values mean the two spans are safe to compare for follow matching; ranges always refer to UTF-16 offsets in the input string. The accepted numeric cases must stay behaviorally compatible with `src/speechrail/domain/itn.py` and `tests/test_itn.py`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```swift
 import Testing
@@ -114,14 +117,14 @@ struct TeleprompterCanonicalizerTests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterCanonicalizerTests`
 Expected: FAIL because `TeleprompterCanonicalizer` is not defined.
 
-- [ ] **Step 3: Add the minimal canonicalizer**
+- [x] **Step 3: Add the minimal canonicalizer**
 
-Create `TeleprompterCanonicalizer.swift` with a deterministic scanner. It must first parse numeric expressions into one unit, then pass the remaining text through `TeleprompterNormalizer.indexedTokens`. Numeric canonical values use a fixed grammar, not locale formatting:
+Add `TeleprompterCanonicalizer` beside the indexed tokenizer in `TeleprompterNormalizer.swift`, with a deterministic scanner. It must first parse numeric expressions into one unit, then pass the remaining text through `TeleprompterNormalizer.indexedTokens`. Numeric canonical values use a fixed grammar, not locale formatting:
 
 ```swift
 import Foundation
@@ -154,17 +157,17 @@ public enum TeleprompterCanonicalizer {
 
 The parser should expose only the four public functions above; keep its grammar local and deterministic rather than introducing a third-party dependency.
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterCanonicalizerTests`
 Expected: PASS.
 
-- [ ] **Step 5: Run existing normalizer tests**
+- [x] **Step 5: Run existing normalizer tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterNormalizerTests`
 Expected: PASS; existing source-range and filler behavior remains unchanged.
 
-- [ ] **Step 6: Run server ITN parity tests**
+- [x] **Step 6: Run server ITN parity tests**
 
 Run: `uv run pytest tests/test_itn.py -q`
 Expected: PASS. If the client adds a new canonical form, add the equivalent server/client fixture in the same change instead of allowing one side to drift.
@@ -172,7 +175,7 @@ Expected: PASS. If the client adds a new canonical form, add the equivalent serv
 - [ ] **Step 7: Commit**
 
 ```bash
-git add macos/SpeechRailApp/SpeechRailApp/TeleprompterCanonicalizer.swift macos/SpeechRailApp/Package.swift macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterCanonicalizerTests.swift tests/test_itn.py
+git add macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterNormalizerTests.swift
 git commit -m "feat: canonicalize teleprompter ITN variants"
 ```
 
@@ -188,7 +191,7 @@ git commit -m "feat: canonicalize teleprompter ITN variants"
 - Consumes: `TeleprompterCanonicalizer.values`, `TeleprompterAligner.Script`, `TeleprompterAligner.Position`.
 - Produces: existing `TeleprompterAligner.Match`; callers keep using `position`, `startPosition`, `confidence`, `matchedCount`, `isUniqueExactContinuation`, and `isUniqueNearAnchor`.
 
-- [ ] **Step 1: Add failing realistic-ASR tests**
+- [x] **Step 1: Add failing realistic-ASR tests**
 
 Add these cases to `TeleprompterAlignerTests`:
 
@@ -222,12 +225,12 @@ Add these cases to `TeleprompterAlignerTests`:
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify the failure mode**
+- [x] **Step 2: Run the tests to verify the failure mode**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterAlignerTests`
 Expected: FAIL on `toleratesSubstitutedTailAndShortInput` and `itnVariantsShareTheSameScriptPosition`.
 
-- [ ] **Step 3: Replace tokenization and candidate admission**
+- [x] **Step 3: Replace tokenization and candidate admission**
 
 Change `Script.Token.value` construction and `locate(transcript:segments:anchor:)` to use `TeleprompterCanonicalizer.values`. Keep the bounded window and semi-global DP, but replace lines 131-142 with end-cell scoring:
 
@@ -251,12 +254,12 @@ let candidates = (1...window.count).compactMap { end -> Candidate? in
 
 Retain the existing competitor margin and `uniqueExactContinuation` guard. For one- or two-unit inputs, require either `isUniqueNearAnchor` or a confidence margin over the nearest competing end; a repeated short phrase elsewhere must return `Match(position: nil, ...)`.
 
-- [ ] **Step 4: Run the focused aligner tests**
+- [x] **Step 4: Run the focused aligner tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterAlignerTests`
 Expected: PASS, including the old literal, repeat, and unrelated-speech cases.
 
-- [ ] **Step 5: Check Unicode coordinates**
+- [x] **Step 5: Check Unicode coordinates**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterPositionTests`
 Expected: PASS. Add a supplementary-plane assertion if the existing emoji case does not cover the returned end position.
@@ -280,7 +283,7 @@ git commit -m "fix: align teleprompter ASR variants without tail exact-match"
 - Consumes: `TeleprompterAligner.Match`, `TeleprompterCanonicalizer.values`, `TeleprompterRunMode`.
 - Produces: `TeleprompterFollowController.followState`, `lastMatchConfidence`, `lastMatchedCount`, `candidatePosition`, `partialPreview`; existing `receivePartial`, `receiveSnapshot`, `receiveCompleted`, `pause`, `resume`, `move`, and `enterManual` signatures remain source-compatible.
 
-- [ ] **Step 1: Write failing state-machine tests**
+- [x] **Step 1: Write failing state-machine tests**
 
 ```swift
 @Test func partialCanPreviewForwardWithoutImmediateFinalRollback() throws {
@@ -310,12 +313,12 @@ git commit -m "fix: align teleprompter ASR variants without tail exact-match"
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterFollowControllerTests`
 Expected: FAIL because `followState` does not exist and rollback behavior is too aggressive.
 
-- [ ] **Step 3: Add state and hysteresis**
+- [x] **Step 3: Add state and hysteresis**
 
 Add a small public state enum and diagnostics fields:
 
@@ -333,12 +336,12 @@ public enum TeleprompterFollowState: Equatable, Sendable {
 
 Use a private `lastConfirmedPosition` and `lowConfidenceStreak`. Introduce an injectable `TeleprompterFollowPolicy` instead of scattering numeric gates: its initial defaults are `provisionalMinimumConfidence = 0.72`, `provisionalMinimumMatches = 2`, `freePlayAfterMisses = 2`, and `reanchorMargin = 0.12`; final acceptance continues to use `TeleprompterAligner.Configuration.minimumConfidence`. These are implementation starting points to calibrate with real ASR variants, not quality claims. A snapshot may move `position` provisionally when the match is forward and either unique near the anchor or exceeds the policy gate. A final match confirms the position; an isolated final mismatch keeps the last confirmed position for one item and increments `lowConfidenceStreak`. Two consecutive mismatches enter `freePlaying`, clear transient history, and retain the last confirmed position. A later unique forward or anchor-local match returns to `tracking` and re-anchors. Existing event deduplication, retired-item ordering, and manual/pause invalidation remain unchanged.
 
-- [ ] **Step 4: Run focused follow tests**
+- [x] **Step 4: Run focused follow tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterFollowControllerTests`
 Expected: PASS, including old ordering, repeated-event, long-turn, and manual-position cases.
 
-- [ ] **Step 5: Run canonicalizer and aligner tests together**
+- [x] **Step 5: Run canonicalizer and aligner tests together**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter 'TeleprompterCanonicalizerTests|TeleprompterAlignerTests|TeleprompterFollowControllerTests'`
 Expected: PASS. The global coverage gate may still report a focused-run coverage failure; use case results and exit diagnostics to distinguish that from test failures.
@@ -355,10 +358,10 @@ git commit -m "fix: stabilize teleprompter partial and final follow state"
 ### Task 4: One shared Realtime event adapter
 
 **Files:**
-- Create: `macos/SpeechRailApp/SpeechRailApp/TeleprompterRealtimeFollowAdapter.swift`
+- Modify: `macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift` to add the shared adapter beside the reducer
 - Modify: `macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift:1527-1589`
-- Modify: `macos/SpeechRailApp/Package.swift:38-104` to remove `RealtimeASRClient.swift` from `exclude`, list it in `sources`, and compile the new adapter in the test closure
-- Test: `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterRealtimeFollowAdapterTests.swift`
+- Modify: `macos/SpeechRailApp/Package.swift:38-104` to remove `RealtimeASRClient.swift` from `exclude` and list it in `sources`
+- Test: `macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterFollowControllerTests.swift`
 
 **Interfaces:**
 - Consumes: `RealtimeASRClient.Event`, `RealtimeEventMetadata`, `TeleprompterFollowController`.
@@ -367,7 +370,7 @@ git commit -m "fix: stabilize teleprompter partial and final follow state"
 
 The adapter must reconcile by `item_id`, not arrival rank. A snapshot replaces the current item text according to its revision; a completed event freezes that item's transcript. Completion events from different speech turns may arrive out of order, so a late final from an older item must never undo a newer confirmed position.
 
-- [ ] **Step 1: Write wire-event tests**
+- [x] **Step 1: Write wire-event tests**
 
 ```swift
 @Test func snapshotCompletedSequenceDrivesFollowPosition() throws {
@@ -387,23 +390,23 @@ The adapter must reconcile by `item_id`, not arrival rank. A snapshot replaces t
 
 Add cases for revision replacement (never append), duplicate `eventID`, late old final, `failed`, and `closed`. These cases must construct `RealtimeASRClient.Event` directly and assert controller state; no socket or live service is used.
 
-- [ ] **Step 2: Run the test to verify the adapter is missing**
+- [x] **Step 2: Run the test to verify the adapter is missing**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterRealtimeFollowAdapterTests`
 Expected: FAIL because `TeleprompterRealtimeFollowAdapter` is not defined.
 
-- [ ] **Step 3: Extract the reducer**
+- [x] **Step 3: Extract the reducer**
 
 Move the `switch envelope.payload` mapping for `speechStarted`, `partial`, `partialSnapshot`, `completed`, `failed`, and `closed` from `TeleprompterSession.handle` into the adapter. The adapter must pass `metadata.eventID` to `receivePartial`/`receiveSnapshot`/`receiveCompleted`; it must not log or persist transcript text.
 
 `TeleprompterSession.handle` then calls the adapter and `syncFollowState()` exactly once per relevant event. Keep backend error handling (`backend_busy`, `lastFailure`, `enterManual`) in the session because it owns UI and lifecycle state.
 
-- [ ] **Step 4: Run adapter tests**
+- [x] **Step 4: Run adapter tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterRealtimeFollowAdapterTests`
 Expected: PASS.
 
-- [ ] **Step 5: Build the package**
+- [x] **Step 5: Build the package**
 
 Run: `swift build --package-path macos/SpeechRailApp`
 Expected: PASS. `RealtimeASRClient.swift` is included because the adapter consumes its public `Event`; do not add `TeleprompterSession.swift`, `MicrophoneCapture.swift`, or unrelated app files to the test target. The tested reducer remains pure and deterministic and does not open a socket.
@@ -411,7 +414,7 @@ Expected: PASS. `RealtimeASRClient.swift` is included because the adapter consum
 - [ ] **Step 6: Commit**
 
 ```bash
-git add macos/SpeechRailApp/SpeechRailApp/TeleprompterRealtimeFollowAdapter.swift macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift macos/SpeechRailApp/Package.swift macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterRealtimeFollowAdapterTests.swift
+git add macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift macos/SpeechRailApp/Package.swift macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterFollowControllerTests.swift
 git commit -m "test: cover teleprompter realtime follow event closure"
 ```
 
@@ -428,7 +431,7 @@ git commit -m "test: cover teleprompter realtime follow event closure"
 - Consumes: `TeleprompterFollowState`, `TeleprompterFollowController.lastMatchConfidence`, `lastMatchedCount`, `partialPreview`.
 - Produces: `TeleprompterSession.followState`, `followStatusText`; stage displays only user-language status and progress, never a full ASR transcript.
 
-- [ ] **Step 1: Add presentation-state tests**
+- [x] **Step 1: Add presentation-state tests**
 
 ```swift
 @Test func statusLabelsDistinguishWaitingTrackingAndFreePlay() {
@@ -439,23 +442,23 @@ git commit -m "test: cover teleprompter realtime follow event closure"
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter TeleprompterFollowControllerTests`
 Expected: FAIL because `TeleprompterFollowPresentation` is not defined.
 
-- [ ] **Step 3: Add presentation mapping**
+- [x] **Step 3: Add presentation mapping**
 
 Add `TeleprompterFollowPresentation` to `TeleprompterFollowController.swift` or a small adjacent pure file. Map `waitingForSpeech`, `listening`, `tracking`, `catchingUp`, `freePlaying`, `paused`, and `manual` to ordinary user language. `syncFollowState()` publishes `followState` and `followStatusText`; it must not copy `partialPreview` into persistent state or logs.
 
 Update the existing `statusCapsule` in `TeleprompterStageView.swift` to consume `session.followStatusText` and `session.followState`, preserving semantic design tokens and accessibility labels. Do not add a raw recognition transcript, confidence number, token count, model name, or protocol event name to the primary stage UI.
 
-- [ ] **Step 4: Run focused presentation and follow tests**
+- [x] **Step 4: Run focused presentation and follow tests**
 
 Run: `swift test --package-path macos/SpeechRailApp --filter 'TeleprompterFollowControllerTests|TeleprompterStageSettingsTests'`
 Expected: PASS.
 
-- [ ] **Step 5: Build the App target**
+- [x] **Step 5: Build the App target**
 
 Run: `xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRailApp -configuration Debug build`
 Expected: PASS. This verifies the SwiftUI target without UI automation.
@@ -476,23 +479,23 @@ git commit -m "feat: expose teleprompter follow recovery status"
 - Modify: `contracts/realtime-openai.md` only if the implementation changes wire behavior
 - Test: existing `tests/test_realtime_openai.py`, `tests/test_realtime_caller_wire.py`, and Swift focused tests
 
-- [ ] **Step 1: Run server contract regression**
+- [x] **Step 1: Run server contract regression**
 
-Run: `uv run pytest tests/test_realtime_openai.py tests/test_realtime_caller_wire.py -q`
+Run: `uv run --extra dev pytest tests/test_realtime_openai.py tests/test_realtime_caller_wire.py tests/test_itn.py -q --no-cov`
 Expected: PASS. If the global coverage gate rejects a focused run, report that separately; do not treat coverage threshold failure as a behavioral test failure.
 
-- [ ] **Step 2: Run the complete Swift package tests**
+- [x] **Step 2: Run the complete Swift package tests**
 
 Run: `swift test --package-path macos/SpeechRailApp`
 Expected: PASS. Record any pre-existing failures rather than changing unrelated code.
 
-- [ ] **Step 3: Update active documentation**
+- [x] **Step 3: Update active documentation**
 
 Document the actual behavior and its limits: text-based follow tolerates ASR/ITN variants and short utterances, uses transient diagnostics, and is phrase-level rather than word-timestamp-accurate. Document that full live word-by-word tracking requires a future timestamp/forced-alignment capability and is not promised by this change.
 
 Use the OpenAI production checklist as the acceptance taxonomy: test representative production audio and each target language; include numbers, dates, currency, email addresses, product names, and domain terms; track empty, truncated, and delayed transcripts separately from recognition/edit-distance metrics; and define how the UI revises provisional text when later snapshots correct it.
 
-- [ ] **Step 4: Record acceptance evidence**
+- [x] **Step 4: Record acceptance evidence**
 
 The release report must separate:
 - deterministic fake-event tests;
