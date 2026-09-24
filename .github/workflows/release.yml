@@ -34,11 +34,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - name: Set up Python 3.12
-        run: uv python install 3.12
+      - name: Set up Python 3.14.7
+        run: uv python install 3.14.7
 
       - name: Verify release tag
-        run: uv run --no-project --python 3.12 python scripts/verify_release_tag.py --tag "$GITHUB_REF_NAME"
+        run: uv run --no-project --python 3.14.7 python scripts/verify_release_tag.py --tag "$GITHUB_REF_NAME"
 
   ci:
     name: Run reusable CI gates
@@ -179,7 +179,7 @@ jobs:
           ```bash
           cd ~/Downloads
           shasum -a 256 -c SHA256SUMS
-          uvx --python 3.12 --from ./speechrail-*.whl speechrail install --preset balanced --yes --enable
+          uvx --python 3.14.7 --from ./speechrail-*.whl speechrail install --preset balanced --yes --enable
           ```
 
           升级用同一条命令，但必须先停掉旧实例：先用已安装 runtime 的

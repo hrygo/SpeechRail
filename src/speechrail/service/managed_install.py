@@ -136,9 +136,10 @@ def _restore_current(layout: ServiceLayout, old_target: Path | None) -> None:
         layout.current_runtime.symlink_to(old_target, target_is_directory=True)
 
 
-def _release_id(wheel: Path) -> str:
+def _release_id(wheel: Path, python_version: str) -> str:
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()[:12]
-    return f"{wheel.stem}-{digest}"
+    python_tag = python_version.replace(".", "")
+    return f"{wheel.stem}-{digest}-py{python_tag}"
 
 
 def _write_private_config(destination: Path, content: str | bytes) -> None:
@@ -363,6 +364,7 @@ def _stage_wheel(
     *,
     uv_executable: str,
     runner: CommandRunner,
+    python_version: str,
     install_diarization: bool = False,
 ) -> tuple[Path, Path, bool]:
     """Stage one wheel release, optionally reusing a complete release.
@@ -372,7 +374,7 @@ def _stage_wheel(
     bundled ``speechrail-mcp`` proxy works out of the box with zero extra
     configuration; ``diarization`` stays opt-in because it needs a model path.
     """
-    release_dir = layout.runtime_root / "releases" / _release_id(wheel)
+    release_dir = layout.runtime_root / "releases" / _release_id(wheel, python_version)
     if release_dir.is_symlink():
         raise InstallerError("wheel release must not be a symlink")
     if release_dir.exists():
@@ -390,7 +392,7 @@ def _stage_wheel(
         extras.append("diarization")
     wheel_requirement += "[" + ",".join(extras) + "]"
     try:
-        _run((uv_executable, "venv", "--python", "3.12", str(venv_dir)), runner)
+        _run((uv_executable, "venv", "--python", python_version, str(venv_dir)), runner)
         _run(
             (
                 uv_executable,
@@ -553,6 +555,7 @@ def install_managed(
             layout,
             uv_executable=uv_executable,
             runner=runner,
+            python_version=selected_lock.python,
             install_diarization=(
                 diarization_assets is not None
                 or (

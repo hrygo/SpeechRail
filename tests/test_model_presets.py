@@ -636,7 +636,7 @@ def test_light_tier_uses_q8_quantization_under_schema_v2() -> None:
 def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> None:
     lock = RuntimeLock(
         id="fixture-lock",
-        python="3.12.14",
+        python="3.14.7",
         asr_requirements=(_hashed_requirement("asr"),),
         tts_requirements=(_hashed_requirement("tts"),),
         ffmpeg_artifact="imageio-ffmpeg==0.6.0",
@@ -650,11 +650,24 @@ def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> Non
         lock.file_hashes = {}  # type: ignore[misc]
 
 
+@pytest.mark.parametrize("python", ["3.12.14", "3.13.15", "3.14", "3.15.0", "3.14.7rc1"])
+def test_runtime_lock_rejects_unsupported_python(python: str) -> None:
+    with pytest.raises(ValidationError, match=r"3\.14"):
+        RuntimeLock(
+            id="fixture-lock",
+            python=python,
+            asr_requirements=(_hashed_requirement("asr"),),
+            tts_requirements=(_hashed_requirement("tts"),),
+            ffmpeg_artifact="imageio-ffmpeg==0.6.0",
+            file_hashes={"runtime/asr.txt": SHA256},
+        )
+
+
 def test_runtime_lock_rejects_unhashed_requirement() -> None:
     with pytest.raises(ValidationError, match="hash"):
         RuntimeLock(
             id="fixture-lock",
-            python="3.12.14",
+            python="3.14.7",
             asr_requirements=("asr==1.0",),
             tts_requirements=(_hashed_requirement("tts"),),
             ffmpeg_artifact="imageio-ffmpeg==0.6.0",
@@ -675,7 +688,7 @@ def test_runtime_lock_rejects_unpinned_or_injected_requirement(requirement: str)
     with pytest.raises(ValidationError, match=r"package==version|sha256"):
         RuntimeLock(
             id="fixture-lock",
-            python="3.12.14",
+            python="3.14.7",
             asr_requirements=(requirement,),
             tts_requirements=(_hashed_requirement("tts"),),
             ffmpeg_artifact="imageio-ffmpeg==0.6.0",
@@ -687,7 +700,7 @@ def test_runtime_lock_rejects_normalized_hash_path_collision() -> None:
     with pytest.raises(ValidationError, match="duplicate"):
         RuntimeLock(
             id="fixture-lock",
-            python="3.12.14",
+            python="3.14.7",
             asr_requirements=(_hashed_requirement("asr"),),
             tts_requirements=(_hashed_requirement("tts"),),
             ffmpeg_artifact="imageio-ffmpeg==0.6.0",
@@ -713,7 +726,7 @@ def test_load_runtime_lock_has_hashed_requirements() -> None:
     lock = load_runtime_lock()
 
     assert lock.id
-    assert lock.python.startswith("3.12.")
+    assert lock.python.startswith("3.14.")
     assert lock.asr_requirements
     assert lock.tts_requirements
     assert all("--hash=sha256:" in item for item in lock.asr_requirements)

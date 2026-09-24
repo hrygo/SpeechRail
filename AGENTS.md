@@ -51,7 +51,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 
 ### 平台与运行边界
 
-- Python 固定为 `>=3.12,<3.13`，使用 `uv` 与 PEP 621；Native 运行目标为 Apple Silicon macOS 26.0，不保留旧系统或旧架构兼容分支。
+- Python 固定为 `>=3.14,<3.15`，使用 `uv` 与 PEP 621；Native 运行目标为 Apple Silicon macOS 26.0，不保留旧系统或旧架构兼容分支。
 - 默认只绑定 loopback。非 loopback 暴露必须配置 `SPEECHRAIL_API_KEY`、Bearer 鉴权和明确的 origin 策略；禁止把 key 放在 URL query 中。
 - 请求路径不得下载模型、读取远程音频 URL 或静默访问网络。模型 snapshot、vendor Python、私有 `.env`、音频、日志、custom voice 数据和 benchmark 原始制品放在仓库外。
 

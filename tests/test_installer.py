@@ -157,6 +157,14 @@ def test_managed_install_rejects_an_active_service_before_staging(tmp_path: Path
     assert list(releases.iterdir()) == []
 
 
+def test_wheel_release_identity_includes_python_version(tmp_path: Path) -> None:
+    wheel, _ = _inputs(tmp_path)
+
+    assert install_macos._release_id(wheel, "3.14.7") != install_macos._release_id(
+        wheel, "3.14.8"
+    )
+
+
 def test_managed_state_remains_outside_release(tmp_path: Path) -> None:
     layout = ServiceLayout.for_app_home(tmp_path, user_home=tmp_path)
 
@@ -174,6 +182,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     model_calls: list[str] = []
     runtime_calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
+    runtime_lock = load_runtime_lock().model_copy(update={"python": "3.14.9"})
 
     async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
         model_calls.append(preset_id)
@@ -201,6 +210,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
             command, 0, stdout="", stderr=""
         ),
         runner=_runner_that_creates_python(calls),
+        runtime_lock=runtime_lock,
     )
 
     layout = ServiceLayout.for_app_home(app_home)
@@ -209,6 +219,8 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     assert result.runtime_key == "runtime-test"
     assert model_calls == ["quality"]
     assert runtime_calls == [("prepare-runtime",)]
+    venv_call = next(command for command in calls if command[:2] == ("uv", "venv"))
+    assert venv_call[2:4] == ("--python", runtime_lock.python)
     assert layout.current_runtime.is_symlink()
     assert layout.config_file.stat().st_mode & 0o777 == 0o600
     assert (app_home / "SpeechRail 设置.command").stat().st_mode & 0o777 == 0o700
@@ -575,7 +587,8 @@ def test_managed_rollback_error_does_not_skip_app_cleanup(
     assert isinstance(caught.value.__cause__, install_macos.InstallerError)
     assert layout.current_runtime.resolve() == old_release.resolve()
     assert not layout.config_file.exists()
-    release = layout.runtime_root / "releases" / install_macos._release_id(wheel)
+    release_id = install_macos._release_id(wheel, load_runtime_lock().python)
+    release = layout.runtime_root / "releases" / release_id
     assert not release.exists()
 
 
@@ -619,7 +632,8 @@ def test_managed_first_install_failure_removes_vendor_current_but_keeps_release(
     assert not layout.vendor_current.exists()
     assert not layout.vendor_current.is_symlink()
     assert (layout.vendor_root / "runtime-next").is_dir()
-    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+    release_id = install_macos._release_id(wheel, load_runtime_lock().python)
+    assert not (layout.runtime_releases / release_id).exists()
 
 
 def test_managed_install_preserves_existing_config_bytes(
@@ -803,7 +817,8 @@ def test_managed_first_install_enable_failure_removes_selection(
 
     assert not (app_home / "config" / "selection.json").exists()
     assert not layout.current_runtime.exists()
-    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+    release_id = install_macos._release_id(wheel, load_runtime_lock().python)
+    assert not (layout.runtime_releases / release_id).exists()
     assert any("service" in command and "enable" in command for command in calls)
     assert any("service" in command and "stop" in command for command in calls)
 
@@ -859,7 +874,8 @@ def test_managed_post_enable_verifier_failure_rolls_back(
 
     assert not (app_home / "config" / "selection.json").exists()
     assert not layout.current_runtime.exists()
-    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+    release_id = install_macos._release_id(wheel, load_runtime_lock().python)
+    assert not (layout.runtime_releases / release_id).exists()
     assert any("service" in command and "enable" in command for command in calls)
     assert any("service" in command and "stop" in command for command in calls)
 

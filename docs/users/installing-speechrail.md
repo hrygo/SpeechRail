@@ -45,7 +45,7 @@ shasum -a 256 -c SHA256SUMS
   是 `runtime/current` 指向的那份。
 - 首次安装需要联网：先访问 PyPI 装 wheel 的依赖，再访问项目锁定的模型源取模型 snapshot。模型准备
   只在显式确认（`--yes`）后发生，请求路径不会下载模型。
-- `uv`：安装命令通过 `uvx` 调用，Python 3.12 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
+- `uv`：安装命令通过 `uvx` 调用，Python 3.14.7 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
   直接给出安装地址，不会跑到一半才失败。
 - 不需要预装 `ffmpeg`：安装器把锁定的 `imageio-ffmpeg` 装进隔离 runtime，并让服务指向该副本。
 
@@ -61,7 +61,7 @@ wheel，因此不用手抄版本号；如果目录里还留着旧版本的 `spee
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS
-uvx --python 3.12 --from ./speechrail-*.whl \
+uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
   --yes \
   --preset balanced \
@@ -165,7 +165,7 @@ APP_HOME="$HOME/Library/Application Support/SpeechRail"
 SPEECHRAIL_CLI="$APP_HOME/runtime/current/.venv/bin/speechrail"
 "$SPEECHRAIL_CLI" service stop --app-home "$APP_HOME"
 cd ~/Downloads
-uvx --python 3.12 --from ./speechrail-*.whl speechrail install --yes --enable
+uvx --python 3.14.7 --from ./speechrail-*.whl speechrail install --yes --enable
 ```
 
   省略 `--preset` 会沿用当前档位；换档位用 `"$SPEECHRAIL_CLI" profile apply <tier> --yes`。
@@ -202,7 +202,7 @@ SPEECHRAIL_CLI="$HOME/Library/Application Support/SpeechRail/runtime/current/.ve
 | App 显示「无法连接本机服务」或菜单显示「服务未连接」 | 只装了 App，或服务没启动 | 先按第 3 节安装服务；已安装未启动时执行 `"$HOME/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail" service start --app-home "$HOME/Library/Application Support/SpeechRail"` |
 | 打开 App 提示无法验证开发者 / 无法检查恶意软件 | DMG 为 unsigned、未公证制品 | 确认来源与 `SHA256SUMS` 后走「隐私与安全性 → 仍要打开」；企业托管 Mac 可能禁止 |
 | `pip install` / `uv pip install` wheel 报平台不兼容 | wheel 平台标签为 `macosx_26_0_arm64` | 在 macOS 26+ Apple Silicon 上安装当前 wheel |
-| `uvx` 报 `no wheels with a matching Python version tag` | 默认用了比 3.12 更新的解释器 | 按第 3.1 节加上 `--python 3.12` |
+| `uvx` 报 `no wheels with a matching Python version tag` | 默认用了比 3.14.7 更新的解释器 | 按第 3.1 节加上 `--python 3.14.7` |
 | `install` 报 `uv is not on PATH` | 机器上没有 `uv` | 按提示访问 `https://docs.astral.sh/uv/getting-started/installation/` 安装后重试 |
 | `install` 报 wheel 版本与 installer 不一致 | CLI 与待安装 wheel 不是同一个版本 | 让 `uvx --from` 指向要安装的那个 wheel |
 | `install` 报 `requires the SpeechRail service to be stopped` | 旧实例还在运行，安装器拒绝热替换 | 先执行同一条报错里给出的 `service stop` 命令，再重跑安装（见第 6 节） |

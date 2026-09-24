@@ -13,7 +13,7 @@
   <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI 状态" /></a>
   <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Apple Silicon" />
-  <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/Python-3.14-3776AB.svg?logo=python&logoColor=white" alt="Python 3.14" />
   <img src="https://img.shields.io/badge/API-OpenAI%20compatible-412991.svg?logo=openai" alt="OpenAI 兼容" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
 </p>
@@ -94,7 +94,7 @@ OpenAI 能力前，请先阅读对应契约。
 
 - 受管运行时仅支持 Apple Silicon Mac 和 macOS 26.0 或更高版本；Intel Mac 与 Ubuntu/Linux 不是支持目标。Linux 可用于平台无关的开发检查。
 - 随附的 `SpeechRailApp` 同样以 macOS 26.0+、`arm64` 为目标。
-- 源码开发和 Python 服务 CLI 使用 `>=3.12,<3.13`。
+- 源码开发和 Python 服务 CLI 使用 `>=3.14,<3.15`。
 - 使用 [`uv`](https://docs.astral.sh/uv/) 管理依赖和环境。
 - 本地安装流程及部分音频格式需要 `ffmpeg` 解码/转码。受管安装器会在隔离运行时中附带固定版本的
   `imageio-ffmpeg`，因此执行 `speechrail install` 不要求系统预装 `ffmpeg`。
@@ -113,7 +113,7 @@ OpenAI 能力前，请先阅读对应契约。
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS
-uvx --python 3.12 --from ./speechrail-*.whl \
+uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
   --preset balanced \
   --yes \

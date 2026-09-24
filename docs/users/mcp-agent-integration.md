@@ -144,7 +144,7 @@ MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 
 | 条件 | 说明 |
 |---|---|
 | **主服务已运行** | `curl http://127.0.0.1:8201/readyz` 返回 200；MCP 只是代理，主服务停了工具会连接失败 |
-| **Python 3.12** | 与 SpeechRail 一致（`>=3.12,<3.13`） |
+| **Python 3.14** | 与 SpeechRail 一致（`>=3.14,<3.15`） |
 | **`mcp` 依赖** | proxy 依赖 `mcp>=2.1,<3`。**受管安装已随 release 提供**；仅源码模式需自行同步 |
 | **音频与 proxy 同机** | `audio_ref` 由 proxy 直读本机文件系统；远程 URL 被拒绝 |
 | **ChatGPT Web（可选）** | ChatGPT 只能连接远程 MCP；本机 SpeechRail 需用 `streamable-http` 接入 Secure MCP Tunnel 或受信任的 HTTPS 网关，不能使用本机 `stdio` |

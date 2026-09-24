@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.2"
+version: "1.3"
 date: 2026-09-24
 ---
 
@@ -503,7 +503,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 
 - [x] **W0｜单仓只读基线与写集归属**：基线 `25d4416f`；分支 `codex/tiered-streaming-tts-python314`；README/用户文档及三处 macOS 工作区改动均保留，阶段写集与其不重叠。
 - [x] **W1｜Realtime导入与采样契约**：移除不可达 `audioop`/24→16 kHz converter 与影子 sample-rate 配置；保留固定 16 kHz PCM16 wire。验收：`tests/test_realtime_openai.py` + `tests/test_realtime_caller_wire.py` 137 passed；定向 Ruff、mypy 及 diff check 通过。当前运行解释器是 3.12.14；缺失 audioop 导入由测试注入模拟，尚未证明 CPython 3.14 全依赖运行。
-- [ ] **W2｜统一Python/runtime锁**：bootstrap/installer/CI与锁工具一致；合并依赖、hash、失败保留current测试通过。
+- [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
 - [ ] **W3｜App协议与测试基线**：保持当前wire，建立传输/解析seam与response关联；SwiftPM纯测试可运行。
 - [ ] **W4｜模型门**：分别提交CustomVoice q8、Base q8/bf16探针与vendor制品身份；真增量不成立则停止下游并报告。
 - [ ] **W5｜领域与身份**：新增tts_stream port/state/limits；profile与reference租约、跨精度cache隔离通过。
@@ -513,5 +513,14 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [ ] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。
 - [ ] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。
 - [ ] **W11｜授权后逐档实测与发布**：质量/性能矩阵与完整回滚记录；未达标档不宣称完成；安装/提交/远端发布分别核对授权。
+
+### W2 实施与验收记录（2026-09-24）
+
+- 在仓库外建立 CPython `3.14.7` 候选开发环境和独立 MLX runtime 环境；按 ASR/TTS 带 hash 的 role lock 合并同步，`--only-binary :all:` 安装 47 个包。未下载或加载模型权重。
+- MLX 模块导入 smoke 通过：`mlx==0.32.2`、`mlx-audio==0.5.6`、`mlx-qwen3-asr==0.3.5`。
+- `uv lock --check --python 3.14.7`、`tools/update_runtime_lock.py --python 3.14.7 --id mlx-qwen-20260924-py314 --check`、zero-setup Bash/Python 语法检查通过。
+- Python 3.14.7 候选环境回归：`352 passed`；`ruff check src tests tools/update_runtime_lock.py` 通过；`mypy src` 对 130 个源文件通过。测试输出有一个既有 Pydantic `mappingproxy` serializer warning，未将其误记为失败或静默屏蔽。
+- **Ruling：** `requirements/shared.txt` 仅记录 ASR/TTS 锁的交集，用于 runtime 元数据与 hash 校验；它不是安装输入。当前 ASR/TTS 共用一个 Python 环境，bootstrap 对两个 role lock 在同一次 `uv pip sync` 中合并安装，因此 ASR-only/TTS-only 依赖仍会保留；交集清单不会减少实际安装包数。若要按 role 隔离依赖，需另行拆分运行环境，不属于 W2。
+- **未验收：** 未在正式 app home 执行安装/切换；未加载模型，未验证 Metal 推理、真实音色、增量生成、延迟或任何档位的质量/性能。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。

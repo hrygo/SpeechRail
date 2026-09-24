@@ -91,8 +91,8 @@ def test_managed_installer_does_not_own_skill_installation() -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_requires_explicit_confirmation_before_any_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -162,8 +162,8 @@ def test_zero_setup_requires_explicit_confirmation_before_any_mutation(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_keeps_video_skill_install_optional(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -261,8 +261,8 @@ def test_zero_setup_keeps_video_skill_install_optional(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_reads_private_api_key_without_exposing_it(
     tmp_path: Path,
@@ -295,8 +295,8 @@ def test_zero_setup_reads_private_api_key_without_exposing_it(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_smoke_failure_is_fatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -433,8 +433,8 @@ def _drive_smoke_provisioning(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_light_skips_diarization_smoke(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -450,8 +450,8 @@ def test_zero_setup_light_skips_diarization_smoke(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
-    reason="zero-setup is a macOS Python 3.12 entry point",
+    sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
+    reason="zero-setup is a macOS Python 3.14 entry point",
 )
 def test_zero_setup_balanced_runs_diarization_smoke(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

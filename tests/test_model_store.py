@@ -51,7 +51,7 @@ def _runtime_lock(lock_id: str = "fixture-lock") -> RuntimeLock:
     requirement = f"fixture==1.0 --hash=sha256:{_HASH}"
     return RuntimeLock(
         id=lock_id,
-        python="3.12.14",
+        python="3.14.7",
         asr_requirements=(requirement,),
         tts_requirements=(requirement,),
         ffmpeg_artifact="ffmpeg==1.0",

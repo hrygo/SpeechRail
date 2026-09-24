@@ -13,7 +13,7 @@
   <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
   <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Apple Silicon" />
-  <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/Python-3.14-3776AB.svg?logo=python&logoColor=white" alt="Python 3.14" />
   <img src="https://img.shields.io/badge/API-OpenAI%20compatible-412991.svg?logo=openai" alt="OpenAI compatible" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
 </p>
@@ -109,7 +109,7 @@ above.
   Intel Macs and Ubuntu/Linux are not supported runtime targets. Linux may be
   used for platform-neutral development checks only.
 - The bundled `SpeechRailApp` also targets macOS 26.0 or later and `arm64`.
-- Python `>=3.12,<3.13` for source development and the Python service CLI.
+- Python `>=3.14,<3.15` for source development and the Python service CLI.
 - [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
 - `ffmpeg` for the audio decoding/transcoding paths used by local setup and
   selected audio formats. The managed installer ships a pinned
@@ -132,7 +132,7 @@ then install with only `uv` — no source checkout:
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS
-uvx --python 3.12 --from ./speechrail-*.whl \
+uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
   --preset balanced \
   --yes \
