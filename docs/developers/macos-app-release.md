@@ -154,10 +154,9 @@ shasum -a 256 "/path/outside/repository/SpeechRail-<version>.zip"
 1. **定位一次。**核对目标路径（默认 `~/Applications/SpeechRail.app`）、现存候选 bundle 和来源证据。有对应最后一次源码改动的成功构建记录且产物仍在时复用；仅“文件较新”不够。源码变化、产物缺失或来源不明时才构建一次，不重跑已有且仍有效的测试。`macos_app_build.sh` 的普通 build 会清理临时 DerivedData，不能把已清理的验证产物当成可安装包。
 2. **准备并校验。**核对候选显示名、bundle identifier、version/build、目标平台，并执行 `scripts/macos_app_verify_local_xpc.sh <候选 SpeechRail.app>`。旧安装归档到仓库外 ZIP，检查归档完整性并记录哈希；新候选已有 bundle 时无需为了本机替换额外压缩再解压。将候选准备到安装目录同一文件系统的唯一临时父目录，子目录始终叫 `SpeechRail.app`，例如 `<临时父目录>/SpeechRail.app`；验证脚本拒绝其他 bundle 名称。所有暂存路径先确认不覆盖既有内容，失败清理/恢复处理在创建暂存产物前就绪。
 3. **退出并替换。**核实运行中 App 与随包 helper 的实际路径/身份，正常退出旧 App 并有界等待；不能只凭进程名判断归属，也不自动强杀。退出失败则保持旧安装并报告，不循环重试。将旧 bundle 暂存到同文件系统的唯一目录，再把新 bundle 重命名到安装路径；安装或静态校验失败则恢复旧 bundle。始终不触碰服务 runtime、selection、模型或登录项。
-4. **验证并交还。**核对安装路径的身份/version/build、签名与内嵌 XPC，并确认安装内容对应已验证候选；归档后源包未变时不重复计算同一归档哈希。成功后清理本次事务创建的暂存副本，保留旧版 ZIP 回退点。不启动新 App，不查 `/health`、`/readyz`、服务 PID/端口或执行 UI `status`/`preflight`；立即报告“已安装、未启动、待用户验收”、安装路径、版本和回退点，然后停止。
+4. **验证并交还。**核对安装路径的身份/version/build、签名与内嵌 XPC，并确认安装内容对应已验证候选；归档后源包未变时不重复计算同一归档哈希。成功后清理本次事务创建的暂存副本，保留旧版 ZIP 回退点；运行 `scripts/macos_app_verify_single_install.sh <安装路径>`，确认 LaunchServices 仅登记该正式 App 且无 UI test runner 登记。若检查失败，只在任务授权覆盖时清理经确认归属、无进程使用的 SpeechRail 生成副本：对精确路径执行 LaunchServices 注销后直接删除，避免移入废纸篓造成再次发现；不清空整个废纸篓或触碰无关 App。未授权清理时报告重复路径并停止。不启动新 App，不查 `/health`、`/readyz`、服务 PID/端口或执行 UI `status`/`preflight`；检查通过后立即报告“已安装、未启动、待用户验收”、安装路径、版本和回退点，然后停止。
 
-本机开发替换不自动 bump 版本，不代表正式发布通过。既有 DerivedData/归档副本不属于本次替换事务，
-不主动扩大为全盘查找或清理；若发现它们，只区分来源并按用户明确的整理范围处理。安装成功与用户验收通过必须分别表述。
+本机开发替换不自动 bump 版本，不代表正式发布通过。唯一登记检查限定在 SpeechRail bundle identifier，不做全盘 App 清理；既有副本仅在用户授权范围覆盖清理时处理。清理前核实精确路径、版本/来源和进程占用；清理后再次运行唯一登记检查。安装成功与用户验收通过必须分别表述。
 
 ### GitHub 制品安装
 

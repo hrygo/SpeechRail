@@ -39,7 +39,8 @@ description: >-
 - 一次只允许一个服务父进程、一个 ASGI worker 和一个 listener；不要在同一 app home 上并行发布、切档或
   benchmark。默认 loopback；不在仓库、命令、日志或 evidence 中写入 key、`.env`、音频、完整转写或模型路径。
 - App 实际安装只保留一个 bundle，默认路径为 `~/Applications/SpeechRail.app`。上一版本保留为 ZIP/归档回退点，
-  不能作为第二个 Applications/DerivedData 可执行副本。
+  不能作为第二个 Applications/DerivedData 可执行副本；Xcode build/test 临时 bundle 不得残留或进入 LaunchServices。
+- 会产出 App/test bundle 的构建必须通过仓库包装脚本：普通 build 用 `scripts/macos_app_build.sh`，UI test 仅在当次获准后用 `scripts/macos_app_test.sh`，archive/export 用对应发布脚本；禁止裸跑 `xcodebuild` 将 `.app` 留在长期 DerivedData 或临时目录。只读 `-showBuildSettings` 等查询除外。包装脚本使用隔离 DerivedData，在退出时注销本次 bundle 并直接清理，不把副本移入废纸篓。
 
 ## 平台基线
 
@@ -153,8 +154,8 @@ wheel 替换和 profile 切换分开执行；不要直接使用底层 `launchctl
 
 - 有与最后一次源码改动对应的成功构建证据和现存产物时直接复用；路径或时间戳只能帮助定位，不能独立证明来源。缺少可信产物才构建一次，不因安装重复跑测试或 bump 版本。
 - 只做必要的候选包检查、旧版归档、正常退出、同文件系统替换及安装后静态校验；具体事务与失败回退见快路径。
-- 不启动新 App、不做 UI/控制链路验收、不查服务运行态、不整理既有 DerivedData；这些不是用户自行验收模式的完成条件。
-- 静态校验通过即报告安装路径、版本和回退点，注明“未启动，待用户验收”，然后停止。不要在安装完成后继续扩展调查而延迟告知结果。
+- 不启动新 App、不做 UI/控制链路验收或查服务运行态。静态校验后必须运行 `scripts/macos_app_verify_single_install.sh <安装路径>`，确认 LaunchServices 只登记该安装 bundle，且没有 UI test runner 登记。
+- 若唯一登记检查发现重复项：仅当本次授权范围包含清理副本时，按 App 安装 SOP 核实来源、版本、进程占用后清理 SpeechRail 自有生成物；精确注销 LaunchServices 记录并删除生成副本，不移入废纸篓、不触碰无关 App、不清空整个废纸篓。范围未覆盖清理时停止并报告路径。静态校验与唯一登记通过后，报告安装路径、版本和回退点，注明“未启动，待用户验收”，然后停止。
 
 ### 构建与其他发布入口
 
@@ -166,6 +167,8 @@ plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.c
 # XCUITest 属 UI 自动化，会接管前台窗口与焦点：默认不运行，仅在当前用户明确要求时执行（见 AGENTS.md 硬约束）
 # scripts/macos_app_test.sh
 ```
+
+构建与测试的临时 `.app` 产物必须由包装脚本在 `EXIT` 收尾时先按精确路径注销、再直接删除；不要使用 `trash` 保留可被系统再次发现的副本。
 
 本机门禁使用 fake transport，不注册生产 helper，不启动/停止生产服务，不访问真实模型。`macos_app_test.sh`
 属 UI 自动化，会接管前台窗口与焦点，默认不运行，只有当前用户明确要求时才执行；未运行不构成发布失败，

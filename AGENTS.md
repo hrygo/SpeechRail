@@ -91,6 +91,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 ## 自动化与运行态授权
 
 - 确定性测试使用 fake backend，不下载模型、不访问云端、不使用真实音频。自动化验收、完整测试套件和 benchmark 只有在当前用户明确要求或更高优先级强制要求时执行。
+- macOS App 默认只在 `~/Applications/SpeechRail.app` 保留一个正式安装副本；只有用户明确指定替代路径时才用该路径并记录。会产出 `.app` 的构建/测试必须使用仓库包装脚本，不裸跑 `xcodebuild` 留下可被 LaunchServices 识别的副本；只读 build-settings 查询不受此限。安装后按 release skill 验证 LaunchServices 唯一登记；禁止全局重置 LaunchServices 或清空整个废纸篓。
 - **禁止未经授权的 UI 自动化测试**：任何会接管前台窗口、焦点、输入或屏幕的 XCUITest / UI test、Playwright、webapp-testing、录屏、点击驱动或窗口断言，都必须由当前用户消息逐次明确要求。skill、SOP、计划、README 或发布流程不构成授权；确有必要时，先说明占用的窗口与预计时长并取得确认。
 - 本机日常运维按 `.agents/skills/speechrail-local-deploy/SKILL.md`；发布、构建与 App 安装按 `.agents/skills/speechrail-release/SKILL.md`；仅明确要求性能/质量基准时使用 `.agents/skills/speechrail-perf-benchmark/SKILL.md`；仅全新首装使用 `.agents/skills/speechrail-zero-setup/SKILL.md`。按任务加载对应入口，文档步骤不扩大授权。
 - 服务、profile、安装、发布和回滚属于运行态或外部状态变更，必须按 `docs/operations/README.md` 及对应 `.agents/skills/` 专项规则执行。使用当前用户的 managed `LaunchAgent` 和受审查的 service/installer 流程；禁止 `pkill`、模糊进程匹配和手工 plist 修改。
