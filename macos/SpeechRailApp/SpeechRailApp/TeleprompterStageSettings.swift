@@ -12,19 +12,19 @@ public enum TeleprompterStagePaceStatus: String, Codable, Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .establishing: "感知节奏中"
-        case .steady: "从容稳健"
-        case .brisk: "步调微快"
-        case .slow: "温和舒缓"
+        case .establishing: "分析节奏中"
+        case .steady: "节奏与计划契合"
+        case .brisk: "用时超前 (偏快)"
+        case .slow: "用时滞后 (偏缓)"
         }
     }
 
     public var advice: String {
         switch self {
-        case .establishing: "放轻松，按你最自然的节奏讲，系统正在适应你的节拍…"
-        case .steady: "当前节奏非常舒适自然，听众正沉浸在你的分享中"
-        case .brisk: "时间很充裕，不妨多些停顿留白，让听众有消化思考的空间"
-        case .slow: "无需着急追赶，把核心要点讲透，细节可从容带过"
+        case .establishing: "正在采样开讲语速以评估时长进度…"
+        case .steady: "当前用时与计划高度同步，保持当前语速即可准时完稿"
+        case .brisk: "当前进度超前于预定时长，建议多做段落留白与从容展开"
+        case .slow: "当前用时超出计划节奏，建议适当加快语速或精简表达"
         }
     }
 }
@@ -110,6 +110,40 @@ public enum TeleprompterStagePresentation {
             }
         } else {
             return .steady
+        }
+    }
+
+    public static func paceDeltaSeconds(
+        currentIndex: Int,
+        totalCount: Int,
+        elapsedSeconds: TimeInterval,
+        targetSeconds: TimeInterval
+    ) -> TimeInterval? {
+        guard totalCount > 0, targetSeconds > 0, elapsedSeconds >= 5 else {
+            return nil
+        }
+        let progressRatio = Double(currentIndex + 1) / Double(totalCount)
+        guard progressRatio > 0.02 else { return nil }
+        let expectedElapsed = targetSeconds * progressRatio
+        return expectedElapsed - elapsedSeconds
+    }
+
+    public static func formattedPaceDelta(
+        deltaSeconds: TimeInterval
+    ) -> (label: String, isAhead: Bool, isBehind: Bool, isSync: Bool) {
+        let absSeconds = Int(round(abs(deltaSeconds)))
+        if absSeconds <= 3 {
+            return ("节拍吻合", false, false, true)
+        } else if deltaSeconds > 0 {
+            let mins = absSeconds / 60
+            let secs = absSeconds % 60
+            let timeStr = mins > 0 ? String(format: "+%d:%02d", mins, secs) : String(format: "+%ds", secs)
+            return ("超前 \(timeStr)", true, false, false)
+        } else {
+            let mins = absSeconds / 60
+            let secs = absSeconds % 60
+            let timeStr = mins > 0 ? String(format: "-%d:%02d", mins, secs) : String(format: "-%ds", secs)
+            return ("滞后 \(timeStr)", false, true, false)
         }
     }
 
@@ -210,6 +244,10 @@ public final class TeleprompterStageSettings {
 
     public func decreaseFontScale() {
         fontScale -= SpeechRailDesignTokens.Teleprompter.stageQuickFontScaleStep
+    }
+
+    public func resetFontScale() {
+        fontScale = 1.0
     }
 
     public func increaseOpacity() {

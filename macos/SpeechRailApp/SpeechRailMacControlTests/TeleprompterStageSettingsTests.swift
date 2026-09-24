@@ -271,4 +271,64 @@ struct TeleprompterStageSettingsTests {
         #expect(shortSummary.canCalibrate == false)
         #expect(shortSummary.needsCalibration == false)
     }
+
+    @Test("pace delta calculates quantitative difference and formatted badge")
+    func paceDeltaCalculatesDifferenceAndBadge() {
+        // Less than 5s -> nil
+        #expect(
+            TeleprompterStagePresentation.paceDeltaSeconds(
+                currentIndex: 0,
+                totalCount: 10,
+                elapsedSeconds: 3,
+                targetSeconds: 600
+            ) == nil
+        )
+
+        // Progress 50% (5 of 10) in 600s budget: expected is 300s.
+        // Actual elapsed is 260s: delta is +40s (ahead)
+        let aheadDelta = TeleprompterStagePresentation.paceDeltaSeconds(
+            currentIndex: 4,
+            totalCount: 10,
+            elapsedSeconds: 260,
+            targetSeconds: 600
+        )
+        #expect(aheadDelta == 40)
+        let aheadBadge = TeleprompterStagePresentation.formattedPaceDelta(deltaSeconds: 40)
+        #expect(aheadBadge.isAhead == true)
+        #expect(aheadBadge.isBehind == false)
+        #expect(aheadBadge.label == "超前 +40s")
+
+        // Actual elapsed is 340s: delta is -40s (behind)
+        let behindDelta = TeleprompterStagePresentation.paceDeltaSeconds(
+            currentIndex: 4,
+            totalCount: 10,
+            elapsedSeconds: 340,
+            targetSeconds: 600
+        )
+        #expect(behindDelta == -40)
+        let behindBadge = TeleprompterStagePresentation.formattedPaceDelta(deltaSeconds: -40)
+        #expect(behindBadge.isAhead == false)
+        #expect(behindBadge.isBehind == true)
+        #expect(behindBadge.label == "滞后 -40s")
+
+        // Actual elapsed is 298s: delta is +2s (within 3s sync)
+        let syncBadge = TeleprompterStagePresentation.formattedPaceDelta(deltaSeconds: 2)
+        #expect(syncBadge.isSync == true)
+        #expect(syncBadge.label == "节拍吻合")
+    }
+
+    @Test("stage settings reset font scale restores default scale")
+    func resetFontScaleRestoresDefaultScale() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        settings.increaseFontScale()
+        settings.increaseFontScale()
+        #expect(settings.fontScale > 1.0)
+
+        settings.resetFontScale()
+        #expect(settings.fontScale == 1.0)
+    }
 }
