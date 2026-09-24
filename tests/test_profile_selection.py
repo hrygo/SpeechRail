@@ -33,7 +33,7 @@ def _make_selection(
     asr: str = "asr-1.7b-q8",
     tts: str = "tts-1.7b-design-q8",
     generation: int = 1,
-    runtime_lock_id: str = "mlx-qwen-20260905",
+    runtime_lock_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -41,7 +41,9 @@ def _make_selection(
         "generation": generation,
         "asr": asr,
         "tts": tts,
-        "runtime_lock_id": runtime_lock_id,
+        # Default to whatever lock this build actually publishes so the fixture
+        # cannot drift away from the shipped runtime identity.
+        "runtime_lock_id": runtime_lock_id or load_runtime_lock().id,
     }
 
 
