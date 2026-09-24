@@ -13,7 +13,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from speechrail.application.realtime_openai import OpenAIRealtimeSession, Pcm16RateConverter
+import speechrail.application.realtime_openai as realtime_openai_module
+from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -1753,16 +1754,42 @@ def test_realtime_rejects_nested_legacy_audio_session() -> None:
     assert error["error"]["code"] == "unsupported_operation"
 
 
-def test_pcm24k_converter_is_frame_partition_invariant() -> None:
-    pcm = b"".join(index.to_bytes(2, "little", signed=True) for index in range(1200))
-    one_frame = Pcm16RateConverter(input_rate=24_000).convert(pcm)
-    split_converter = Pcm16RateConverter(input_rate=24_000)
-    split_frames = b"".join(
-        split_converter.convert(pcm[start : start + width])
-        for start, width in ((0, 214), (214, 782), (996, 1404))
-    )
+def test_realtime_module_imports_without_audioop(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+    import importlib
 
-    assert split_frames == one_frame
+    native_import = builtins.__import__
+
+    def import_without_audioop(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "audioop":
+            raise ModuleNotFoundError("No module named 'audioop'")
+        return native_import(name, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as blocker:
+            blocker.setattr(builtins, "__import__", import_without_audioop)
+            importlib.reload(realtime_openai_module)
+    except ModuleNotFoundError as exc:
+        # Restore the importable module object so a RED test does not poison
+        # later tests in this process.
+        importlib.reload(realtime_openai_module)
+        raise AssertionError("Realtime module must not depend on audioop") from exc
+
+
+def test_realtime_input_sample_rate_is_not_publicly_configurable() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {"input_sample_rate": 24_000},
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "unsupported_operation"
 
 
 def test_realtime_diarization_receives_partitioned_pcm_identically() -> None:
