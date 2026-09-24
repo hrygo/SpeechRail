@@ -1322,10 +1322,12 @@ public struct AssistantView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
                 if isSecret {
                     SecureField(placeholder, text: text)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
                 } else {
                     TextField(placeholder, text: text)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
                 }
                 Text(hint)
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -1862,16 +1864,7 @@ public struct AssistantView: View {
         TextField("说点什么，或在此打字输入…", text: $typed)
             .textFieldStyle(.plain)
             .font(SpeechRailDesignTokens.Typography.body)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-            .background(
-                SpeechRailDesignTokens.Color.inputField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-            }
+            .speechRailSingleLineInput(.regular)
             .onSubmit { send() }
             .disabled(!canCompose)
             .frame(maxWidth: .infinity)
@@ -2275,16 +2268,7 @@ public struct AssistantView: View {
             TextField(inputPlaceholder, text: $typed)
                 .textFieldStyle(.plain)
                 .font(SpeechRailDesignTokens.Typography.body)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                .background(
-                    SpeechRailDesignTokens.Color.inputField,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                }
+                .speechRailSingleLineInput(.regular)
                 .onSubmit { send() }
                 .disabled(!canCompose)
             Button("发送") { send() }
@@ -3055,16 +3039,7 @@ public struct AssistantView: View {
                         .speechRailPointerCursor()
                     }
                 }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
-                .background(
-                    SpeechRailDesignTokens.Color.inputField,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                )
+                .speechRailSingleLineInput(.compact)
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     ForEach(VoiceFilterScope.allCases) { scope in
@@ -3427,16 +3402,7 @@ public struct AssistantView: View {
                     TextField("输入要记住的事（如：回答优先使用 Swift）…", text: $newMemoryDraft)
                         .textFieldStyle(.plain)
                         .font(SpeechRailDesignTokens.Typography.body)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
-                        .background(
-                            SpeechRailDesignTokens.Color.inputField,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                        )
+                        .speechRailSingleLineInput(.regular)
                         .onSubmit { Task { await saveNewMemory() } }
 
                     HStack {
@@ -3968,7 +3934,8 @@ public struct AssistantView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("名字", text: $renameDraft)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .speechRailSingleLineInput(.regular)
                 .onSubmit { Task { await renameReviewedRecord() } }
             HStack {
                 Spacer(minLength: 0)
@@ -4009,7 +3976,8 @@ public struct AssistantView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("名字（列表里显示这一行）", text: $personaDraft.title)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .speechRailSingleLineInput(.regular)
             TextEditor(text: $personaDraft.body)
                 .font(SpeechRailDesignTokens.Typography.body)
                 .frame(minHeight: 140)

@@ -196,7 +196,8 @@ public struct SpeakerLabelingPanel: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 TextField("这位是谁？", text: $draftName)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .speechRailSingleLineInput(.regular)
                     .frame(minWidth: 120)
                     .onSubmit { Task { await save(speaker) } }
                 Button("保存") { Task { await save(speaker) } }

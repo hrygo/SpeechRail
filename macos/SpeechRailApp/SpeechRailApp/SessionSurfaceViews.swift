@@ -793,7 +793,8 @@ public struct SessionLibraryView: View {
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
 
                 TextField("搜索记录", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .speechRailSingleLineInput(.compact)
                     .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
                     .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
 

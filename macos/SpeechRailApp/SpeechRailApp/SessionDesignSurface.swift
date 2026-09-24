@@ -979,16 +979,7 @@ public struct SessionLibraryColumn: View {
                     .speechRailPointerCursor()
                 }
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
-            .background(
-                SpeechRailDesignTokens.Color.inputField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-            }
+            .speechRailSingleLineInput(.compact)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
 

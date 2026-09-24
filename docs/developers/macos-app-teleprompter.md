@@ -103,7 +103,7 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 ## 设计 token 约束
 
 所有提词器新增尺寸、字号、行距、背景透明度范围、内容最大宽度、视线吸顶偏移、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。舞台视觉窗口使用语义段落，不直接展示内部对齐切片；改变字体不会改变匹配坐标。
-- **标题输入几何**：工作台稿件名称复用统一可编辑输入槽；`workbenchDocumentTitleMinimumWidth` 保证至少 200pt 可读宽度，高度采用 `Control.prominentHeight`（40pt），作为工作台主要编辑入口给予更舒展的点击与聚焦空间；窄窗时将字数与状态降到第二行。
+- **标题输入几何**：工作台稿件名称复用统一单行输入配方 `.speechRailSingleLineInput(.regular)`；`workbenchDocumentTitleMinimumWidth` 保证至少 200pt 可读宽度，内部横向内边距固定 `Spacing.sm`（12pt），最小高度采用 `Control.regularHeight`（34pt）；窄窗时将字数与状态降到第二行。
 - **无级视效调节**：独立舞台的「视效」弹层提供字号与背景透明度连续滑杆，不设置 `step`；字号读数保留 0.1pt，背景透明度读数保留 0.01 控制百分比。快捷预设只作为便捷入口，不限制滑杆取值。
 - 准备页「原稿」编辑区固定在 `sourceEditorMinimumHeight`–`sourceEditorMaximumHeight`（144–360pt）范围内，默认取 `sourceEditorIdealHeight`（260pt）；超过上限后由原生 `TextEditor` 内部滚动。
 - 首次使用 AI 整理前，用面向普通用户的确认说明解释发送内容、触发时机、不会发送的音视频内容，以及本机/网络服务和保存策略的差异；不要把 `Responses-compatible endpoint`、`store=false` 等实现术语直接暴露给用户。
@@ -148,3 +148,5 @@ scripts/macos_app_build.sh --configuration Debug
 回退时仅撤回本轮源码差异，保留稿件 JSON；不可整文件还原并行任务的修改，也不可将 AI v2 输出交给旧 v1 decoder。
 
 2026-09-24：跟读闭环改为确定性 ITN 等价、尾词容错和短片段消歧；加入确认位置迟滞、自由发挥/重新锚定及共享 Realtime 事件 reducer。合成文本与 fake-event 验证不代表真实音频识别或视觉验收。
+
+2026-09-24：工作台稿件名称改用共享单行输入配方 `.speechRailSingleLineInput(.regular)`，统一 12pt 横向文字内边距与 34pt 最小高度；同一配方已覆盖全 App 28 处单行输入（证据与范围见 [`macOS App 设计系统与 Token`](macos-app-design-system.md) §6）。`swift test --package-path macos/SpeechRailApp` 110 项测试 / 12 个 suite 全部通过；完整 Xcode App Debug 构建在受限环境里既被 SwiftPM manifest 的 `sandbox-exec` 阻止、也因 GitHub 依赖解析被拒，未完成桌面视觉走查或 UI 自动化；真实观感与窄窗布局仍需人工验证。

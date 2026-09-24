@@ -3,7 +3,7 @@ title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
 version: "0.8.19"
-date: 2026-09-23
+date: 2026-09-24
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -23,7 +23,7 @@ date: 2026-09-23
 > [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
 > 本文的 token 与系统控件约束仍适用于这些页面。
 
-提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透光调节与文字不透明度分离，位置切换尊重 Reduce Motion。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享可编辑输入槽，最小宽度取 `workbenchDocumentTitleMinimumWidth`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
+提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透光调节与文字不透明度分离，位置切换尊重 Reduce Motion。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
 
 ## 1. 研究基线与 Logo 设计基因
 
@@ -136,9 +136,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 间距节奏 | `Spacing` | 使用 `tight/micro/xs/sm/md/gutter/lg/xl/hero`，基准节奏为 2/4/8/12/16/20/24/32/48 pt；页面级块间距固定用 `gutter`（20pt，稿实测），栏与栏用 `md`（16pt），网格项用 `sm`（12pt） |
 | 圆角几何 | `Corner` + `ConcentricRectangle` | **容器声明一次、叶面同心推导、控件固定取值**：容器用 `Corner.containerShape`（`RoundedRectangle(Corner.container = 12, .continuous)`）并由 `.containerShape()` 把形状发布给子层；**表面**叶面用 `Corner.nestedShape`（`ConcentricRectangle(corners: .concentric(minimum: .fixed(Corner.nested = 8)))`）跟随容器；**控件**（输入槽、图标框）用 `Corner.controlShape`（`RoundedRectangle(Corner.nested, .continuous)`，固定 8，= 稿 `radius/control` / `radius/field`）——它们的内缩 `cardInset = 20` 会让推导值 ≤ 0 而画成方角（§11.6 第四十八轮）。全 App 只有 12 / 8 两个半径数值，但形状有三个声明点；`speechRailContainerSurface(_:)` 是唯一的容器声明点。**注意量出来的口径**：叶面半径 = 容器半径 − 内缩（12→0），`minimum` 只在容器给不出半径时兜底、**不是**推导值的下限，所以内缩 ≥ 12pt 的叶面会得到方角（§11.6 第四十六轮）；`.continuous` 与 `.circular` 在同半径下缺角形状不同，两者必须并排量才分得清。**按钮不在这套几何里**：`SpeechRailButtonAppearance` 用原生 `.borderedProminent`/`.bordered` + `.controlSize`，圆角归 AppKit——离屏实测 macOS 26 的原生按钮就是**半高胶囊**（主按钮 36pt 高 / 缺角 66.8pt²、次按钮 28pt 高 / 41.2pt²，都等于 `高度 ÷ 2` 的胶囊），与 8pt continuous 参考（13.0pt²）明显不同档；键帽若还用自绘圆角，会和同排的系统按钮读成两个体系，所以快捷键提示改成按钮标签内的一段文字（§11.6 第四十八 / 五十一轮） |
 | 布局规整 | `Layout` | sidebar 220–280pt（ideal 240）、**inspector 定宽 360pt（`inspectorColumnWidth`，唯一声明点 `speechRailInspectorColumn()`）**、模型档位列 220–320pt（ideal 280）、音色名列 160–260pt（ideal 220）、页面内容内边距 `contentPadding = 20`、卡片内容内边距 `cardInset = 20`（稿 18，工具栏式卡片用 `md`/`sm` = 16/12）、窗口最小 1,120×720pt。详情列此前是一个**区间**（300–440，ideal 360），列宽因此是窗口余量、内容最小宽与打开顺序的函数：空态那一瞬会落到系统默认的 270，窗口紧时会被压到 300，两块目录页因此可以各是一个宽度（§11.6 第六十一轮） |
-| 控件高度 | `Control` | 稿的档位是 34 / 30 / 28（Figma `size/control`、次按钮、`controlComp`）。系统控件在本机实测为 `.regular` 24 / `.large` 28 / `.extraLarge` 36，且 `.controlSize` 不改标签字号，所以按钮高度一律走 `SpeechRailButtonAppearance`：主按钮 `.extraLarge`、次按钮/危险按钮 `.large`、安静按钮 `.regular`（见 §11.6 第二十一轮）。手写输入槽、页脚带等仍用 `Control.regularHeight`(34) / `compactHeight`(28) |
+| 控件高度 | `Control` | 稿的档位是 34 / 30 / 28（Figma `size/control`、次按钮、`controlComp`）。系统控件在本机实测为 `.regular` 24 / `.large` 28 / `.extraLarge` 36，且 `.controlSize` 不改标签字号，所以按钮高度一律走 `SpeechRailButtonAppearance`：主按钮 `.extraLarge`、次按钮/危险按钮 `.large`、安静按钮 `.regular`（见 §11.6 第二十一轮）。手写单行输入槽统一走 `.speechRailSingleLineInput(.compact/.regular)`：高度分别取 `compactHeight`(28) / `regularHeight`(34)，内部横向内边距固定 `Spacing.sm`(12)；多行编辑器只约束最小高度，不套单行输入高度 |
 | 头部（窗口工具栏） | `Toolbar` | 只有两个子档：`Identity`（页面身份锁：**`.navigation` 槽、槽内左对齐**、固定槽位 280×32、单行、尾截断、最小缩放 0.82）与 `Action`（头部动作控件：28pt 高、图标 14pt/18pt 框、左右内边距 8、图标与文字间距 4）。三条契约：页面名只在 `Identity` 出现一次（正文不重复标题）；头部动作要么是具体动作、要么是图标 + 精确的无障碍标签，不用「更多操作」这类通用文字标签常驻；状态不进头部（服务是否就绪由侧边栏底部状态区独家承担）。**身份槽的落点由系统给：`Identity` 必须是详情列的 leading 项**（窗口左沿那一格被系统侧栏切换按钮占用且不可移除），`.principal` 只适用于「窗口中心标题」，在带工具栏搜索框的页面上会整体左移 135pt（§11.6 第五十五轮）。`Icon.rowActionSize` 是**列表行内**动作，与本档不共用 |
-| 表面修饰 | `ViewModifiers` | `.speechRailSurface(_:)` / `.speechRailContentSurface()`（`Color.field` + 同心圆角，**无描边**——只有窗口级浮动层 `.elevated` 有材质与阴影）、`.speechRailRecessedSlot()`（`inputField` + 1pt `borderStrong` + `controlShape`，**只给表单字段**）、`.speechRailEditorCard()`（`field` + 1pt `borderStrong` + `containerShape`，**编辑卡**：整张卡就是那个字段）、`.speechRailField()`（只有 `recessedField` 底色，状态/操作条用）、`.speechRailInspectorPreviewPanel()`（`recessedField` + 1pt `separator` 描边 + `previewRadius`，**详情面板里的试听面板**，见 `SpeechRailInspectorPanel`）、`.speechRailKnurledCapsule()`（系统胶囊，仅选中态用强调色）。三个有边界的不是同一个 token，差别见 §3.2 第 3 条 |
+| 表面修饰 | `ViewModifiers` | `.speechRailSurface(_:)` / `.speechRailContentSurface()`（`Color.field` + 同心圆角，**无描边**——只有窗口级浮动层 `.elevated` 有材质与阴影）、`.speechRailRecessedSlot()`（`inputField` + 1pt `borderStrong` + `controlShape`，**只负责输入表面**）、`.speechRailSingleLineInput(_:)`（单行输入的几何与表面合同：`Spacing.sm` 横向内边距 + 28/34 最小高度 + `speechRailRecessedSlot()`）、`.speechRailEditorCard()`（`field` + 1pt `borderStrong` + `containerShape`，**编辑卡**：整张卡就是那个字段）、`.speechRailField()`（只有 `recessedField` 底色，状态/操作条用）、`.speechRailInspectorPreviewPanel()`（`recessedField` + 1pt `separator` 描边 + `previewRadius`，**详情面板里的试听面板**，见 `SpeechRailInspectorPanel`）、`.speechRailKnurledCapsule()`（系统胶囊，仅选中态用强调色）。三个有边界的不是同一个 token，差别见 §3.2 第 3 条 |
 | 字体层级 | `Typography` | 只用系统文本样式（`.title/.headline/.body/.callout/.subheadline/.caption` 等），不再使用 `design: .rounded` 或手挑字号；数字一律 `.monospacedDigit()`。稿的 `Title / Page` = 20pt Semi Bold，系统样式里没有 20，取 `.title`（22，+2pt）：页标题、卡片/面板标题、状态结论标题、诊断详情标题统一走这一档；行内状态与空态标题走 `Heading / Section`（13pt Semi Bold）。列头与状态胶囊用 `captionMedium`（稿 `Caption / Medium`，10pt Medium）；取值槽用 `technicalValue`（稿 `Callout` 12 + 应用自己的等宽数字约定）；`caption`/`technical` 只留给应用自有的密集区块（设置快捷键清单、诊断开发者折叠区、下载进度文件名） |
 | 动效反馈 | `Motion` | 仅保留系统级转场；按压缩放已从按钮移除，波形脉冲在 Reduce Motion 下退化为静态；选区反馈 `0.14s` |
 | 波形（听觉对象的形状） | `Waveform` | `resultBar`(12 根) / `candidateTile`(18 根) / `libraryPreview`(16 根) 三处只声明**条数与排布**（宽 `barWidth` 2、圆角 `barRadius` 1、间隙、峰值高度），条高一律来自真实音频的幅度包络（`envelopeBuckets` 32 桶、逐窗**峰值**、整段归一化，`AudioEnvelope`）；静音窗下限 `envelopeMinimumHeight`(3)；播放中未播到的部分 `remainingOpacity`(0.35)，进度取播放器真实的 `currentTime / duration`（`progressInterval` 20Hz）。`Pattern.heights` 只在**没有包络**时使用（「这段音频还没算过」，例如还没试听过的音色）。波形脉冲**只在**这种无包络的情形保留（§11.6 第五十七轮） |
@@ -198,9 +198,10 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    也不放服务状态。窗口里只保留**一个**搜索框，且它属于内容（音色库 / 我的作品的工具栏搜索）。
 2. **系统表面 (System Surfaces)**：`.speechRailSurface(_:)` 只渲染表面填充色（`Color.field`，见 §3.1 的例外）与同心圆角。承载交互或用层级表达关系的容器**没有边框、没有阴影、没有高光**；只有窗口级浮动层（`.elevated`）使用 `regularMaterial` 与系统阴影。
 3. **可编辑表面分两档，边界是它们的共同记号**。两档都带 1pt `Color.borderStrong` 边界，焦点态由系统 `keyboardFocusIndicatorColor` 描边而非自定义发光；**边界只属于可编辑**：状态/操作条用不带边界的 `.speechRailField()`，否则「有边框」不再等于「可以输入」（§11.6 第五十一轮）。
-   - **表单字段**（名称、seed、参考文案、重命名这类「卡片里的一格」）用 `.speechRailRecessedSlot()`：稿 `surface/field`（`Color.inputField`）+ `radius/field`(8)。
+   - **多行表单字段**（参考文案、参考录音稿这类「卡片里的一格」）用 `.speechRailRecessedSlot()` 自行给内边距：稿 `surface/field`（`Color.inputField`）+ `radius/field`(8)。
    - **编辑卡**（配音台文稿卡、音色创作描述卡——整张卡就是那个字段）用 `.speechRailEditorCard()`：稿 `surface/content`（`Color.field`）+ `radius/container`(12)。它比表单字段高一整级表面，**不是一个槽套在卡片里**：稿的 `main.js:1448-1452` 写过「在白卡里再套一个白输入框只会给同一句话画两圈边」，4x 帧的浅色与深色两版都只有一圈描边、且位于卡沿（§11.6 第五十三轮）。
-   两条配方都不是自造：稿的 `textField()` / `TextField` 组件集是 `surface/field` + 1pt `border/strong` + `radius/field`，聚焦态才换 `accent/rail` 2pt。
+   - **单行表单字段**必须使用 `.speechRailSingleLineInput(.regular)` 或 `.compact`；它把 12pt 横向文字内边距、最小高度和 `.speechRailRecessedSlot()` 合成一个声明，文字不得直接贴着输入槽边界。`.speechRailRecessedSlot()` 只负责表面；多行 `TextEditor` 或纵向 `TextField` 继续按编辑卡/内容槽规则单独给内边距，不套单行高度。
+  两条配方都不是自造：稿的 `textField()` / `TextField` 组件集是 `surface/field` + 1pt `border/strong` + `radius/field`，聚焦态才换 `accent/rail` 2pt。
 4. **指针与无障碍命中区**：可操作实例统一通过 `speechRailPointerCursor()` 暴露 pointing hand；自定义行/卡片使用 `SpeechRailInteractiveButtonStyle`；命中区由控件自身尺寸决定，不再对按钮强制 44pt 最小框架（该约束会挤压紧凑工具栏）。
    > 2026-09-16 该样式新增三个参数（§11.6 第五十二轮）：`horizontalInset`（默认 `Spacing.xs`(8)，
    > 行/叶面按钮的悬停填色比内容各宽 8pt）、`baseFill`（默认 `.clear`）、`corner`
@@ -238,7 +239,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 工具栏图标动作 | `PageActionButton`、`PageActionsMenu` | 纯图标动作在构造时提供具体中文 `helpText`；无障碍名称不得回退为 SF Symbol ID |
 | 列表行内动作 | `RowActionGlyph` + 独立 `Button`/`Menu` | 与行选择分开聚焦；播放/停止等状态更新名称；图标墨色和框尺寸统一用 `Icon` / `Control` token |
 | 可选择行与卡片 | 系统 `List`/`Table`，或 `Button` + `SpeechRailInteractiveButtonStyle` | 整行用系统可操作元素，不用 `.onTapGesture` 代替按钮；选中状态有文字或 `accessibilityValue`，不能只改变底色 |
-| 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；可编辑边界用 `.speechRailRecessedSlot()` 或 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
+| 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；**单行输入一律走 `.speechRailSingleLineInput(.compact/.regular)`**（12pt 横向内边距 + 28/34pt 最小高度 + 输入槽表面），组合式搜索条把配方接在整条容器上；多行编辑器用 `.speechRailRecessedSlot()` 自行给内边距，整卡字段用 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
 | 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
 
 每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文。
@@ -408,6 +409,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
+| 全 App 单行输入统一（2026-09-24） | 新增 `.speechRailSingleLineInput(.compact/.regular)`：12pt 横向文字内边距 + 28/34pt 最小高度 + 输入槽表面合成一个声明。App 内 28 处单行输入（助手会话与记忆、设置各服务凭据、音色创作与编辑、提词器、会议记录、说话人命名）全部改走该配方，业务代码里的 `.textFieldStyle(.roundedBorder)` 清零；5 处紧凑档里 4 处组合式内联条（音色搜索、稿件搜索、记录搜索、目标时长）把配方接在整条容器上，让图标与尾部按钮一起落在槽内。多行编辑器继续用 `.speechRailRecessedSlot()`、整卡字段继续用 `.speechRailEditorCard()`。`swift test --package-path macos/SpeechRailApp` 110 项测试 / 12 个 suite 全部通过；App target 全部 85 个源文件 `swiftc -typecheck` 退出码 0（0 error，1 条既存 `maxTokens` 弃用告警）。**未完成完整 Xcode Debug 构建**：受限执行环境既不允许 SwiftPM manifest 的 `sandbox-exec`，也拒绝 GitHub 依赖解析；**未做桌面视觉走查或 UI 自动化** | 2026-09-24 19:45 |
 | App Debug 构建 | 历史 `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 20:33 |
 | App Release 构建（当前工作树） | 本次文档同步的最小构建检查未通过：未提交的 `SessionDesignSurface.swift:1083` 报 `Extraneous '}' at top level`；该文件不属于本次文档改动，未擅自修改 | 2026-09-20 |
 | Swift 单元测试 | 本轮未运行；此前历史记录不作为本轮证据 | — |

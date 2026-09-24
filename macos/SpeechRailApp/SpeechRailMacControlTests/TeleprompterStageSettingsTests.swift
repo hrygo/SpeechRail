@@ -91,10 +91,12 @@ struct TeleprompterStageSettingsTests {
         #expect(abs(settings.backgroundTransparency - 0.2837) < 0.0001)
     }
 
-    @Test("workbench title field has readable width and prominent control height")
+    @Test("workbench title field uses the shared regular single-line geometry")
     func workbenchTitleGeometryIsReadable() {
         #expect(SpeechRailDesignTokens.Teleprompter.workbenchDocumentTitleMinimumWidth >= 200)
-        #expect(SpeechRailDesignTokens.Control.prominentHeight == 40)
+        #expect(SpeechRailSingleLineInputSize.regular.height == SpeechRailDesignTokens.Control.regularHeight)
+        #expect(SpeechRailSingleLineInputSize.regular.horizontalInset == SpeechRailDesignTokens.Spacing.sm)
+        #expect(SpeechRailSingleLineInputSize.compact.height == SpeechRailDesignTokens.Control.compactHeight)
     }
 
     @Test("transparency readout distinguishes nearby continuous values")

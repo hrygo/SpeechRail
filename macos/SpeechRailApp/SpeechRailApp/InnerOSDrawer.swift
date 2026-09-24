@@ -127,7 +127,8 @@ public struct InnerOSDrawer: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 // 占位文案按稿：说清"它只看哪一份上下文"，也是这一栏与助手页的区别。
                 TextField("问点什么（它只看这一场的文字记录，不联网）", text: $question)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .speechRailSingleLineInput(.regular)
                     .onSubmit { send() }
                 if session.state == .generating {
                     Button("取消") { session.cancel() }

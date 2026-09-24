@@ -440,6 +440,12 @@ public enum SpeechRailDesignTokens {
         public static let purposeIndicatorHeight: CGFloat = 14
     }
 
+    /// 单行输入槽的共享内容几何。描边、留白与高度必须是同一个组件契约，
+    /// 避免页面只接了输入槽表面却漏掉文本内边距或自行选择高度。
+    public enum SingleLineInput {
+        public static let horizontalInset: CGFloat = Spacing.sm
+    }
+
     /// Figma 的波形原语 `waveform(parent, bars, colorVar, gap)`（`main.js:345`）：
     /// 每根是 **2pt 宽、圆角 1、按给定高度垂直居中**的矩形，整块宽 `n × 2 + (n−1) × gap`、
     /// 高 `max(bars)`。稿的三处波形只在「根数 / 高度序列 / 间隙」上不同，所以这三个数
@@ -1407,6 +1413,16 @@ public extension View {
         modifier(SpeechRailSlotModifier(kind: .editableInput))
     }
 
+    /// 单行输入槽的唯一几何配方：表单表面、最小高度与文字内边距一起声明。
+    /// 多行编辑器不套用本配方，避免用单行控件高度压住可增长内容。
+    func speechRailSingleLineInput(
+        _ size: SpeechRailSingleLineInputSize = .regular
+    ) -> some View {
+        padding(.horizontal, size.horizontalInset)
+            .frame(minHeight: size.height)
+            .speechRailRecessedSlot()
+    }
+
     /// 编辑卡：整张卡就是那个字段（配音台文稿卡、音色创作描述卡）。
     func speechRailEditorCard() -> some View {
         modifier(SpeechRailSlotModifier(kind: .editorCard))
@@ -1474,6 +1490,22 @@ public enum SpeechRailSlotKind {
     case editorCard
     /// 非可编辑的状态 / 操作条：稿 `surface/panel`（`Color.recessedField`），只有底色。
     case statusBar
+}
+
+public enum SpeechRailSingleLineInputSize: Sendable {
+    case compact
+    case regular
+
+    public var height: CGFloat {
+        switch self {
+        case .compact: SpeechRailDesignTokens.Control.compactHeight
+        case .regular: SpeechRailDesignTokens.Control.regularHeight
+        }
+    }
+
+    public var horizontalInset: CGFloat {
+        SpeechRailDesignTokens.SingleLineInput.horizontalInset
+    }
 }
 
 /// Slot surface: 输入槽与状态条共用一套几何，只有「表面 + 边界」不同。

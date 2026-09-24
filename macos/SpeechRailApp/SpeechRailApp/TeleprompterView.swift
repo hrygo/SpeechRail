@@ -699,16 +699,7 @@ public struct TeleprompterView: View {
                         .speechRailPointerCursor()
                     }
                 }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
-                .background(
-                    SpeechRailDesignTokens.Color.inputField,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                }
+                .speechRailSingleLineInput(.compact)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
 
@@ -952,8 +943,7 @@ public struct TeleprompterView: View {
             .disabled(!session.canEdit || session.isPreparingDraft)
             .textFieldStyle(.plain)
             .font(SpeechRailDesignTokens.Typography.bodyMedium)
-            .frame(minHeight: SpeechRailDesignTokens.Control.prominentHeight)
-            .speechRailRecessedSlot()
+            .speechRailSingleLineInput(.regular)
             .frame(
                 minWidth: SpeechRailDesignTokens.Teleprompter.workbenchDocumentTitleMinimumWidth,
                 maxWidth: .infinity
@@ -1102,21 +1092,16 @@ public struct TeleprompterView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-            .background(
-                SpeechRailDesignTokens.Color.inputField,
-                in: SpeechRailDesignTokens.Corner.controlShape
-            )
-            .overlay(
-                SpeechRailDesignTokens.Corner.controlShape
-                    .strokeBorder(
-                        !isTargetMinutesValid && !targetMinutesInput.isEmpty
-                            ? SpeechRailDesignTokens.Color.attention
-                            : SpeechRailDesignTokens.Surface.border,
-                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                    )
-            )
+            .speechRailSingleLineInput(.compact)
+            .overlay {
+                if !isTargetMinutesValid && !targetMinutesInput.isEmpty {
+                    SpeechRailDesignTokens.Corner.controlShape
+                        .strokeBorder(
+                            SpeechRailDesignTokens.Color.attention,
+                            lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                        )
+                }
+            }
 
             Menu {
                 ForEach(TeleprompterTimingPolicy.quickTargets, id: \.self) { mins in
@@ -1670,7 +1655,7 @@ public struct TeleprompterView: View {
                                         TextField("修改后的朗读正文", text: $editingReviewItemText)
                                             .textFieldStyle(.plain)
                                             .font(SpeechRailDesignTokens.Typography.body)
-                                            .speechRailRecessedSlot()
+                                            .speechRailSingleLineInput(.regular)
 
                                         Button("保存并确认") {
                                             session.resolveReviewItem(id: item.id, action: .edit, customText: editingReviewItemText)

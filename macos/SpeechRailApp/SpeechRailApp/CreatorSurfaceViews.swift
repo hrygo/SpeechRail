@@ -1189,9 +1189,7 @@ public struct VoiceDesignView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             TextField("例如：夜航主持", text: $voiceName)
                 .textFieldStyle(.plain)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                .speechRailRecessedSlot()
+                .speechRailSingleLineInput(.regular)
                 .accessibilityLabel("音色保存名称")
         }
     }
@@ -1688,9 +1686,7 @@ private struct VoiceCandidateSaveSheet: View {
                 TextField("例如：夜航主持", text: $voiceName)
                     .textFieldStyle(.plain)
                     .focused($isNameFocused)
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                    .speechRailRecessedSlot()
+                    .speechRailSingleLineInput(.regular)
                     .accessibilityLabel("音色名称")
             }
 
@@ -2588,11 +2584,8 @@ private struct VoiceEditorSheet: View {
                 TextField("音色名称", text: $name)
                     .textFieldStyle(.plain)
                     .focused($focusedField, equals: .name)
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                    // 可编辑 = 输入槽（带 1pt `border/strong` 边界）；`.speechRailField()`
-                    // 留给非输入的状态/操作槽（第四十八轮定形状、第五十一轮定边界语义）。
-                    .speechRailRecessedSlot()
+                    // 可编辑 = 统一单行输入配方；边界、留白和高度由同一个组件契约维护。
+                    .speechRailSingleLineInput(.regular)
                     .accessibilityLabel("音色名称")
             }
 
@@ -2632,9 +2625,7 @@ private struct VoiceEditorSheet: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     TextField("0–4294967295", text: $seedText)
                         .textFieldStyle(.plain)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                        .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                        .speechRailRecessedSlot()
+                        .speechRailSingleLineInput(.regular)
                         .accessibilityLabel("采样种子")
                 }
             }
@@ -2929,9 +2920,7 @@ public struct WorksView: View {
             )
             TextField("作品名称", text: $renameText)
                 .textFieldStyle(.plain)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                .speechRailRecessedSlot()
+                .speechRailSingleLineInput(.regular)
                 .accessibilityLabel("作品名称")
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Spacer(minLength: 0)

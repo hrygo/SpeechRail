@@ -75,7 +75,8 @@ struct SettingsAssistantPane: View {
                             caption: "填写服务地址，不要把密钥放进地址里。"
                         )
                         TextField("例如 https://example.com/v1", text: addressBinding)
-                            .textFieldStyle(.roundedBorder)
+                            .textFieldStyle(.plain)
+                            .speechRailSingleLineInput(.regular)
                             .frame(maxWidth: 360)
                             .accessibilityLabel("服务地址")
                             .accessibilityHint("填写服务地址，不要把密钥放进地址里。")
@@ -96,7 +97,8 @@ struct SettingsAssistantPane: View {
                             caption: "填入这台服务里实际可用的模型名称。"
                         )
                         TextField("例如 speech-model", text: modelBinding)
-                            .textFieldStyle(.roundedBorder)
+                            .textFieldStyle(.plain)
+                            .speechRailSingleLineInput(.regular)
                             .frame(maxWidth: 360)
                             .accessibilityLabel("模型")
                             .accessibilityHint("填写这台服务里实际可用的模型名称。")
@@ -128,7 +130,8 @@ struct SettingsAssistantPane: View {
                         )
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             SecureField("输入密钥", text: $llmKeyDraft)
-                                .textFieldStyle(.roundedBorder)
+                                .textFieldStyle(.plain)
+                                .speechRailSingleLineInput(.regular)
                                 .frame(maxWidth: 280)
                                 .accessibilityLabel("密钥")
                                 .accessibilityHint("输入后使用检查并保存；密钥只保存到安全保管库。")
@@ -469,7 +472,8 @@ struct SettingsAssistantPane: View {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     settingsRowLabel("专用服务地址", caption: "只影响这个功能；地址里不要放密钥。")
                     TextField("例如 https://example.com/v1", text: moduleOverrideBinding(for: module, keyPath: \.baseURL))
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
                         .frame(maxWidth: 360)
                         .accessibilityLabel("\(module.title)专用服务地址")
                         .accessibilityHint("只影响这个功能；地址里不要放密钥。")
@@ -480,7 +484,8 @@ struct SettingsAssistantPane: View {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     settingsRowLabel("专用模型", caption: "这个功能会优先使用它；配置不完整时回退到全局。")
                     TextField("模型名称", text: moduleOverrideBinding(for: module, keyPath: \.model))
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
                         .frame(maxWidth: 360)
                         .accessibilityLabel("\(module.title)专用模型")
                         .accessibilityHint("配置不完整时会回退到全局配置。")
@@ -497,7 +502,8 @@ struct SettingsAssistantPane: View {
                     )
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         SecureField("输入专用密钥", text: moduleKeyBinding(for: module))
-                            .textFieldStyle(.roundedBorder)
+                            .textFieldStyle(.plain)
+                            .speechRailSingleLineInput(.regular)
                             .frame(maxWidth: 280)
                             .accessibilityLabel("\(module.title)专用密钥")
                             .accessibilityHint("留空表示继承全局密钥；新密钥只有检查成功后才保存。")
