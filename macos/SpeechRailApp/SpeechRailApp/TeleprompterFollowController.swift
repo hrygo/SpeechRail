@@ -412,6 +412,31 @@ public struct TeleprompterFollowController: Sendable {
         move(to: target, segmentCount: segmentCount)
     }
 
+    /// Moves to an exact source offset chosen by the reader. Offsets are UTF-16
+    /// based to match `TeleprompterAligner.Position` and are clamped to the
+    /// corresponding displayed segment.
+    public mutating func manualMove(
+        to target: TeleprompterAligner.Position,
+        segmentCount: Int,
+        segmentUTF16Lengths: [Int]
+    ) {
+        guard segmentCount > 0, segmentUTF16Lengths.count >= segmentCount else { return }
+        let index = min(max(target.segmentIndex, 0), segmentCount - 1)
+        let offset = min(max(target.utf16Offset, 0), max(0, segmentUTF16Lengths[index]))
+        let clamped = TeleprompterAligner.Position(segmentIndex: index, utf16Offset: offset)
+
+        if clamped == position {
+            enterManual()
+            return
+        }
+
+        invalidatePending()
+        position = clamped
+        lastConfirmedPosition = clamped
+        mode = .manual
+        followState = .manual
+    }
+
     public mutating func enterManual() {
         invalidatePending()
         mode = .manual

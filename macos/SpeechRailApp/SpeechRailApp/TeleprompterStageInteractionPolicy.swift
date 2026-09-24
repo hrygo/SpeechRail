@@ -60,6 +60,14 @@ public enum TeleprompterStageInteractionPolicy {
     public static let hideDelay: Duration = .milliseconds(250)
     public static let errorNoticeDuration: Duration = .seconds(4)
 
+    public static func acceptsReadingKeyCommands(
+        readingAreaFocused: Bool,
+        controlFocusInside: Bool,
+        menuOrPopoverPresented: Bool
+    ) -> Bool {
+        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented
+    }
+
     public static func controlsVisible(
         for input: TeleprompterStageInteractionVisibility
     ) -> Bool {

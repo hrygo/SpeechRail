@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.20"
+version: "0.8.21"
 date: 2026-09-24
 ---
 
@@ -23,7 +23,7 @@ date: 2026-09-24
 > [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
 > 本文的 token 与系统控件约束仍适用于这些页面。
 
-提词器阅读舞台按完整语义段落自然换行，只默认显示当前段和下一段；字词对齐切片仅用于跟读位置计算，不直接成为视觉行。当前段使用细窄强调线与轻微底色，背景透光调节与文字不透明度分离，位置切换尊重 Reduce Motion。舞台默认手动阅读，语音跟随必须显式开启；阅读层和控制层分离，控制层首次展示 2s、指针离开后延迟 250ms 淡出，但上下辅助区固定预留 `stageAuxiliaryBarHeight`（24pt）与 `stageControlAreaHeight`（64pt），隐藏只撤内容、命中和无障碍子树，不重排正文。非当前段使用右侧定位按钮跳转，不劫持正文文本选择；舞台菜单命令只在舞台可见时生效，不占用全局 Command-←/Command-→。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
+提词器阅读舞台依据字号和可用宽度拆分实际显示行，支持 1／2／3 行：一行显示当前行，两行显示当前行和下一行，三行上方是已读行、中间是当前行、下方是下一行，当前行保持在中间；每行均映射到原稿段落与 UTF-16 偏移，全稿浏览仍可滚动选择完整段落。正文填满可用宽度，背景透明度可调至 100%，完全透明时只隐藏舞台背景和装饰，不降低正文与控件透明度。舞台默认手动阅读，语音跟随必须显式开启；阅读层和控制层分离，控制层首次展示 2s、指针进入操作区后显示、离开后延迟 250ms 淡出；有效计时/采集状态才占用 24pt 辅助区，底部控制区固定预留 48pt。窗口高度按字号和显示行数调整，上限 360pt；绿色缩放只横向铺满当前屏幕可用区域，不进入全屏空间。快捷键和控制栏按行推进：空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 到首末行；菜单快捷键为 `⌘⌥←/→`，不占用全局裸方向键。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
 
 ## 1. 研究基线与 Logo 设计基因
 

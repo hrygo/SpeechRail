@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.4.0"
+version: "0.4.2"
 date: 2026-09-24
 ---
 
@@ -25,10 +25,10 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。
 2. 点击「打开提词器」直接进入可手动阅读的舞台；此动作不会申请麦克风或连接 ASR，AI 朗读标注也不会阻塞开始。
 3. 如使用 AI，先看懂“已经完成什么、原稿有没有被改、下一步要做什么”，再审阅朗读稿；默认路径使用普通用户语言，高级的拆分、合并和来源编辑收进“编辑本段”等渐进式披露入口。确认采用前可查看原文对照、修改、保留原文或跳过；编辑段落时清空对应旧辅助标注。
-4. 调整字号、背景透明度和显示段数；鼠标离开控制区后，非核心辅助信息与操作栏按 2 秒首次展示、250ms 延迟隐藏的规则淡出。正文布局和键盘可达性不随控制显隐变化。
-5. 使用空格/→/↓/PageDown 下一段，←/↑/PageUp 上一段，Home/End 首末段；非当前段右侧的定位按钮可直接跳到该段，当前段正文保留原生文本选择。短暂脱稿时保持位置，需要语音协助时再点击「开启语音跟随」。
+4. 在显示设置中选择 1／2／3 行并调整字号、背景透明度（0–100%）；三行模式上方显示已读行、中间显示当前行、下方预览下一行。正文按可用宽度自然折行并映射回稿件；三行在稿首／稿尾留空槽，避免当前行跳位。舞台按行数与字号调整高度，最多 360pt；绿色缩放横向铺满屏幕可用宽度。控制区首次展示 2 秒，指针进入操作区后显示，离开后 250ms 隐藏；正文布局和键盘可达性不随控制显隐变化。
+5. 使用空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 首末行；`⌘⌥←/→` 是应用菜单中的上一行／下一行快捷键。控制按钮和所有快捷键统一移动到对应行的原稿位置；「查阅全稿」仍提供完整段落滚动与文本选择。短暂脱稿时保持位置，需要语音协助时再点击「开启语音跟随」。
 6. 开启语音后，会话从当前段建立一条 pipeline；任何手动定位立即进入手动态、废弃旧 generation，并异步停止本功能麦克风、上传、drain/clear 和占用。只有明确点击「恢复/重试语音跟随」才可再次启动。
-7. 到达末段、反复下一段或读完末段都不会自动弹出总结或关闭窗口；用户点「关闭」、按 Esc 或关闭窗口时统一停止并释放提词器自己的资源，保留阅读位置。直播软件必须选择摄像头或目标内容窗口，不分享包含提词器的屏幕。不能依赖 `NSWindow.sharingType = .none` 隐藏窗口；当前 Apple 文档已将该值标注为系统不再使用的旧常量。
+7. 到达末行、反复下一行或读完末行都不会自动弹出总结或关闭窗口；用户点「关闭」、按 Esc 或关闭窗口时统一停止并释放提词器自己的资源，保留阅读位置。直播软件必须选择摄像头或目标内容窗口，不分享包含提词器的屏幕。不能依赖 `NSWindow.sharingType = .none` 隐藏窗口；当前 Apple 文档已将该值标注为系统不再使用的旧常量。
 
 ## 模块边界
 
@@ -98,7 +98,7 @@ v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结
 
 Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`eventID` 用于有界重复抑制，已终结 item 或较旧 item 的迟到 final 不得覆盖较新的确认位置。高置信 partial 可以暂定推进，final 才确认；一次 final 未匹配时保留最后确认位置并进入“追赶”状态，连续两次未匹配转为自由发挥。之后读回唯一、向前或锚点附近的稿件片段即可重新锚定。短片段若位置含糊则暂存有限上下文，不会因重复短语随机跳转。阈值是可注入策略的初始值，不是实音频质量结论；转写正文、item/event ID 和 PCM 都不落日志或持久化。 舞台状态胶囊区分“等待声音请开讲…”“听见你了，正在跟上稿件…”“跟读咬合”“正在跟上稿件”和“自由发挥中”，暂停与手动浏览时也显示对应状态；主舞台不展示识别原文、置信度或协议事件名。
 
-舞台在完整语义段落间滚动，当前段内的已读文字随 UTF-16 位置变化；字词对齐切片只服务跟读控制器，不作为独立视觉行。近距离重读可以回退；较远跳读需手动选段，当前没有全文语义重定位。手动定位、滚轮接管或关闭会同步撤销语音推进权，退休已知 item；会话层 drain/clear 排除尚未收到的旧事件，generation token 排除已关闭连接的迟到结果。手动接管后 final 不得把 UI 改回跟读态，也不得自动恢复采集。末段不触发完稿页或自动关闭；舞台计时按一次打开到关闭连续计算，不随语音启停重置。
+正常阅读舞台按当前字号与可用宽度展示 1／2／3 条实际排版行，当前原文位置以段落索引与 UTF-16 偏移定位；三行时上行为已读上下文、中行为当前行、下行为下一行。行列表是派生展示缓存，不进入稿件持久化。显式「查阅全稿」仍按完整语义段落滚动并允许原生文本选择；字词对齐切片只服务跟读控制器，不作为独立视觉行。语音跟读仍依据既有段落与 UTF-16 位置推进。手动定位、全稿滚动接管或关闭会同步撤销语音推进权，退休已知 item；会话层 drain/clear 排除尚未收到的旧事件，generation token 排除已关闭连接的迟到结果。手动接管后 final 不得把 UI 改回跟读态，也不得自动恢复采集。末行不触发完稿页或自动关闭；舞台计时按一次打开到关闭连续计算，不随语音启停重置。
 
 运行中不调用 LLM，不保存音频或转写。稿件和最后段落位置持久化；句内位置仅在本次运行内保留。AI、服务或识别失败均不阻止用户手动看稿。
 
@@ -108,16 +108,16 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 
 ## 设计 token 约束
 
-所有提词器新增尺寸、字号、行距、背景透明度范围、内容最大宽度、视线吸顶偏移和窗口 autosave 名称位于 `SpeechRailDesignTokens.Teleprompter`。舞台使用语义段落，不展示内部对齐切片；改变字号不会改变匹配坐标。
+所有提词器新增尺寸、字号、行距、背景透明度范围、内容间距、视线吸顶偏移和窗口 autosave 名称位于 `SpeechRailDesignTokens.Teleprompter`。正常阅读舞台以 `TeleprompterStageLineLayout` 得到的实际显示行为单位，显示条数为 1／2／3，默认 3 行；每行映射回原稿段落索引和 UTF-16 范围。全稿模式仍展示完整语义段落，不展示内部跟读对齐切片；正文填满舞台可用宽度。
 
 - **手动优先的阅读层**：正文、错误提示和最小辅助条是阅读层；操作栏是独立控制层。手动打开、翻段、滚轮接管和语音启停都不改变正文几何。
 - **控制显隐**：首次打开展示 2s，指针离开后延迟 250ms 隐藏；错误提示独立保留 4s。指针位于舞台、控制焦点存在、popover/menu 打开、VoiceOver 开启、键盘主动请求或用户选择「始终显示控制」时保持可见。所有时长集中在 `TeleprompterStageInteractionPolicy`，不允许页面散落第二套数值。
-- **固定预留，不重排**：顶部辅助条固定 `stageAuxiliaryBarHeight`（24pt），底部控制区固定 `stageControlAreaHeight`（64pt）。控制隐藏只撤下操作内容、命中与无障碍子树，不移除布局预留，避免台词跳动；隐藏区域不响应点击。
+- **紧凑预留，不重排**：顶部辅助条只在计时/进度或实际采集状态需要时显示，固定 `stageAuxiliaryBarHeight`（24pt）；底部控制区固定 `stageControlAreaHeight`（48pt）。隐藏只撤下操作内容与无障碍子树，保留紧凑槽位避免台词跳动；隐藏控件不响应点击。
 - **最小辅助状态**：只有实际采集时显示「麦克风使用中」角标；计时与进度默认关闭，用户开启 `showClockAndProgress` 后才显示。两者都不以常驻节奏评价、段末训导或状态看板抢占台词。
 - **末段即正文**：舞台没有自动完稿、复盘或末段关闭分支。用户关闭、按 Esc、窗口系统关闭和程序关闭统一调用 `closeStage()`，释放本功能的麦克风、client 与 coordinator 占用，同时保留阅读位置。
-- **键盘与菜单**：阅读区空格/→/↓/PageDown 下一段，←/↑/PageUp 上一段，Home/End 首末段，Esc 关闭；Tab 只请求显示控制区，焦点离开后仍按普通延迟隐藏。应用菜单提供打开、上一段、下一段、语音跟随、显示设置和关闭，上一段/下一段等舞台命令只在舞台可见时生效，不占用全局 Command-←/Command-→；关闭使用 Command-Esc。字号与背景透明度的 Command-=/-/0 和 Command-[/] 是控制栏内的辅助快捷键；不再用 Command-A 切换全稿，也不让空格隐式开启语音。
+- **键盘与菜单**：舞台阅读区域在用户显式打开窗口后获得键盘焦点；空格/→/↓/PageDown 下一显示行，←/↑/PageUp 上一显示行，Home/End 首末行，Esc 关闭。设置控件或弹层获得焦点时不执行阅读命令；关闭设置后焦点返回阅读区。Tab 请求显示控制区，应用菜单仍提供全部核心动作；菜单上一行/下一行分别使用 `⌘⌥←` / `⌘⌥→`，不占用全局裸方向键；关闭使用 Command-Esc。字号与背景透明度的 Command-=/-/0 和 Command-[/] 是舞台内辅助快捷键；不再用 Command-A 切换全稿，也不让空格隐式开启语音。
 - **语音与设置**：语音按钮状态来自 `TeleprompterVoiceAssistLifecycle`；`off`、`starting`、`following`、`stopping`、`stopFailed`、`pausedByUser`、`unavailable` 都必须有明确文案。`alwaysShowControls` 与 `showClockAndProgress` 使用独立 UserDefaults 键，默认关闭，旧版本可忽略。
-- **窗口边界**：舞台是独立 `NSPanel`，打开动作不调用 `makeKey()` 抢应用焦点；窗口只复用系统材质、语义色、系统按钮和既有 `Corner`/`Spacing`/`Typography`，不为隐藏控制新增自绘玻璃或裸视觉常量。
+- **窗口边界**：舞台是独立 `NSPanel`；用户从提词器入口打开时成为 key window 以确保局部快捷键可用，不在正文更新或后台语音回调时抢焦点。最大化经标准 frame 策略横向铺满屏幕可用宽度，高度不超过 `stageMaximumHeight`（360pt），并保留普通尺寸；读取设置时不会重置窗口。窗口只复用系统材质、语义色、系统按钮和既有 `Corner`/`Spacing`/`Typography`，不为隐藏控制新增自绘玻璃或裸视觉常量。
 
 ## 验收与限制
 
@@ -139,3 +139,5 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-24 20:28：舞台落地为「手动优先、语音辅助」。`TeleprompterSessionLifecycleTests` 覆盖手动打开零音频副作用、不采用未确认 AI 草稿、旧事件失效、延迟连接释放、幂等关闭、停止失败 fail-closed、位置保留与计时连续；新增 interaction/lifecycle 纯策略回归。`swift test` 共 128 项 / 15 个 suite 全部通过；88 个 App Swift 源文件经 `swiftc -disable-sandbox -typecheck -swift-version 6 -target arm64-apple-macos26.0` 退出码 0，仅 1 条既存 `maxTokens` 弃用警告。三项新增生产文件已加入 `SpeechRailApp.xcodeproj` 的 App target 与 Sources phase，`plutil -lint project.pbxproj` 通过；完整 Xcode App Debug 构建仍未执行：仓库包装脚本的审批通道返回内部错误；UI 淡出几何、焦点/Tab、VoiceOver、Reduce Motion、真实麦克风、真实服务端到端与窄窗观感均未验证，不能由单测或类型检查推断通过。
 
 2026-09-24 21:20：第二轮 review 修复完成。手动同段定位保留阅读偏移，跨段定位回到段首；键盘请求的控制显隐会在焦点或指针离开后正常结束；准备中/关闭中的手动打开分别返回忙碌/关闭错误；关闭语音后舞台保持手动；移除整段点击劫持，改为非当前段定位按钮；工作台语音操作按真实生命周期显示关闭/恢复/重试停止/重试语音；删除呼吸光效、脱稿归队、节奏看板和自动复盘等旧 UI 死代码；舞台菜单命令仅在舞台可见时出现且不再占用全局方向键。`swift test --disable-sandbox --package-path macos/SpeechRailApp --filter Teleprompter` 共 135 项 / 15 个 suite 全部通过；新测试文件与生产依赖已接入 `SpeechRailAppTests` Unit Test Sources，`plutil -lint project.pbxproj` 通过。21:26 `scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED；21:29 Xcode Unit Test-only TEST SUCCEEDED（135 项 / 15 suite）。UI 淡出几何、焦点/Tab、VoiceOver、Reduce Motion、真实麦克风与真实服务端到端仍未执行。
+
+2026-09-24 23:55 起：提词器舞台布局改为真实排版行，显示 1／2／3 条并以段落索引 + UTF-16 偏移导航；快捷键与菜单按行移动；透明度范围扩至 100%；工作台行数设置同步改名；标准窗口缩放横向铺满可用屏幕，并限制最大窗框高度。`TeleprompterStageSettingsTests` 23 项、`TeleprompterSessionLifecycleTests` 13 项和 `Teleprompter` 全部 142 项 / 15 suites 均通过；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED。上述是 Swift Testing 与 App 编译证据；由于项目要求逐次授权前台 UI 自动化，本轮未做桌面视觉、键盘焦点、VoiceOver、Reduce Motion 或真实麦克风验收，不能推断这些项目通过。

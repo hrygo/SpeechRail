@@ -1451,16 +1451,37 @@ public final class TeleprompterSession {
     /// Manual movement is always immediate. A live or starting voice session
     /// loses its generation synchronously, then cleans up without blocking the
     /// new reading position.
-    private func takeOverAndMove(to index: Int) {
-        guard let count = activeVersion?.segments.count, count > 0 else { return }
+    private func beginManualMovement() {
         resetAdaptiveClockSamples()
         if voiceLifecycle.state == .starting || voiceLifecycle.state == .following {
             _ = requestVoiceStop(destination: .pausedByUser)
         }
-        followController.manualMove(to: index, segmentCount: count)
+    }
+
+    private func finishManualMovement() {
         syncFollowState()
         phase = .manual
         saveProgress()
+    }
+
+    private func takeOverAndMove(to index: Int) {
+        guard let count = activeVersion?.segments.count, count > 0 else { return }
+        beginManualMovement()
+        followController.manualMove(to: index, segmentCount: count)
+        finishManualMovement()
+    }
+
+    /// Positions the reader at a visual line while retaining the existing
+    /// segment-plus-UTF-16-offset progress model.
+    public func moveToReadingPosition(_ position: TeleprompterAligner.Position) {
+        guard let segments = activeVersion?.segments, !segments.isEmpty else { return }
+        beginManualMovement()
+        followController.manualMove(
+            to: position,
+            segmentCount: segments.count,
+            segmentUTF16Lengths: segments.map { $0.text.utf16.count }
+        )
+        finishManualMovement()
     }
 
     public func moveToPrevious() {

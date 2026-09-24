@@ -5,13 +5,16 @@ public struct TeleprompterStageView: View {
     @Bindable private var settings: TeleprompterStageSettings
     @Bindable private var presentation: TeleprompterStagePresentationState
     private let close: () -> Void
+    private let requestWindowLayout: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var displayLines: [TeleprompterStageDisplayLine] = []
     @State private var isBrowsingAll: Bool = false
     @State private var hoveredSegmentIndex: Int? = nil
     @State private var isAppearancePopoverPresented = false
-    @State private var pointerInsideStage = false
+    @State private var pointerInsideControls = false
+    @FocusState private var readingAreaFocused: Bool
     @State private var controlsVisible = false
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var initialRevealActive = true
@@ -29,16 +32,24 @@ public struct TeleprompterStageView: View {
         case close
     }
 
+    private struct LineLayoutRequest: Equatable {
+        let segments: [TeleprompterSegment]
+        let pointSize: CGFloat
+        let availableWidth: CGFloat
+    }
+
     public init(
         session: TeleprompterSession,
         settings: TeleprompterStageSettings,
         presentation: TeleprompterStagePresentationState,
-        close: @escaping () -> Void
+        close: @escaping () -> Void,
+        requestWindowLayout: @escaping () -> Void = {}
     ) {
         self.session = session
         self.settings = settings
         self.presentation = presentation
         self.close = close
+        self.requestWindowLayout = requestWindowLayout
     }
 
     public var body: some View {
@@ -75,17 +86,10 @@ public struct TeleprompterStageView: View {
 
     private var stageWithPresentation: some View {
         stageBase
+            .focusable()
+            .focused($readingAreaFocused)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 controlsLayer
-            }
-            .onHover { isInside in
-                pointerInsideStage = isInside
-                interactionState.setPointerInside(isInside)
-                if isInside {
-                    revealControls(immediate: true)
-                } else {
-                    scheduleControlsHide()
-                }
             }
     }
 
@@ -95,6 +99,7 @@ public struct TeleprompterStageView: View {
                 scrollToReadingPosition()
             }
             .onChange(of: session.currentSegmentIndex) { _, _ in scrollToReadingPosition() }
+            .onChange(of: session.readingOffset) { _, _ in scrollToReadingPosition() }
             .onChange(of: session.phase) { _, newPhase in
                 handlePhaseChange(to: newPhase)
             }
@@ -112,11 +117,25 @@ public struct TeleprompterStageView: View {
                     revealControls(immediate: true)
                 } else {
                     scheduleControlsHide()
+                    Task { @MainActor in
+                        await Task.yield()
+                        readingAreaFocused = true
+                    }
                 }
             }
             .onChange(of: presentation.settingsRequestID) { _, requestID in
                 guard requestID != nil else { return }
                 isAppearancePopoverPresented = true
+            }
+            .onChange(of: presentation.lineNavigationRequestID) { _, requestID in
+                guard requestID != nil,
+                      session.isStageOpen,
+                      focusedControl == nil,
+                      !isAppearancePopoverPresented
+                else {
+                    return
+                }
+                moveByDisplayLine(presentation.lineNavigationDelta)
             }
     }
 
@@ -129,7 +148,15 @@ public struct TeleprompterStageView: View {
                 scrollToReadingPosition()
             }
             .onChange(of: settings.alwaysShowControls) { _, _ in refreshControlsVisibility() }
-            .onChange(of: settings.showClockAndProgress) { _, _ in refreshControlsVisibility() }
+            .onChange(of: settings.showClockAndProgress) { _, _ in
+                refreshControlsVisibility()
+                requestWindowLayout()
+            }
+            .onChange(of: settings.visibleLineCount) { _, _ in
+                scrollToReadingPosition()
+                requestWindowLayout()
+            }
+            .onChange(of: settings.fontScale) { _, _ in requestWindowLayout() }
             .onChange(of: voiceOverEnabled) { _, _ in refreshControlsVisibility() }
             .onChange(of: session.isStageOpen) { _, isOpen in
                 handleStageOpenChange(isOpen)
@@ -139,13 +166,13 @@ public struct TeleprompterStageView: View {
     private var stageWithKeyboard: some View {
         stageWithSettingsObservation
             .onKeyPress(.tab) { handleTabKey() }
-            .onKeyPress(.space) { handleNextKey() }
-            .onKeyPress(.leftArrow) { handlePreviousKey() }
-            .onKeyPress(.rightArrow) { handleNextKey() }
-            .onKeyPress(.upArrow) { handlePreviousKey() }
-            .onKeyPress(.downArrow) { handleNextKey() }
-            .onKeyPress(.pageUp) { handlePreviousKey() }
-            .onKeyPress(.pageDown) { handleNextKey() }
+            .onKeyPress(.space, phases: .down) { handleReadingKeyPress($0, by: 1) }
+            .onKeyPress(.leftArrow, phases: .down) { handleReadingKeyPress($0, by: -1) }
+            .onKeyPress(.rightArrow, phases: .down) { handleReadingKeyPress($0, by: 1) }
+            .onKeyPress(.upArrow, phases: .down) { handleReadingKeyPress($0, by: -1) }
+            .onKeyPress(.downArrow, phases: .down) { handleReadingKeyPress($0, by: 1) }
+            .onKeyPress(.pageUp, phases: .down) { handleReadingKeyPress($0, by: -1) }
+            .onKeyPress(.pageDown, phases: .down) { handleReadingKeyPress($0, by: 1) }
             .onKeyPress(.home) { handleHomeKey() }
             .onKeyPress(.end) { handleEndKey() }
             .onKeyPress(.escape) { handleEscapeKey() }
@@ -164,7 +191,9 @@ public struct TeleprompterStageView: View {
     @ViewBuilder
     private var stageContent: some View {
         VStack(spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
-            auxiliaryStatusBar
+            if session.isMicrophoneCapturing || settings.showClockAndProgress {
+                auxiliaryStatusBar
+            }
             if errorNoticeVisible {
                 if let blocked = session.blocked {
                     attentionMessage(blocked: blocked)
@@ -177,20 +206,24 @@ public struct TeleprompterStageView: View {
     }
 
     private var stageBackground: some View {
-        RoundedRectangle(
-            cornerRadius: SpeechRailDesignTokens.Corner.container,
-            style: .continuous
-        )
-        .fill(
-            SpeechRailDesignTokens.Color.canvas.opacity(settings.opacity * 0.72)
-        )
-        .background(
-            .ultraThinMaterial.opacity(settings.opacity),
-            in: RoundedRectangle(
-                cornerRadius: SpeechRailDesignTokens.Corner.container,
-                style: .continuous
-            )
-        )
+        Group {
+            if settings.opacity > 0 {
+                RoundedRectangle(
+                    cornerRadius: SpeechRailDesignTokens.Corner.container,
+                    style: .continuous
+                )
+                .fill(SpeechRailDesignTokens.Color.canvas.opacity(settings.opacity))
+                .background(
+                    .ultraThinMaterial.opacity(settings.opacity),
+                    in: RoundedRectangle(
+                        cornerRadius: SpeechRailDesignTokens.Corner.container,
+                        style: .continuous
+                    )
+                )
+            } else {
+                Color.clear
+            }
+        }
     }
 
     private var stageBorder: some View {
@@ -199,7 +232,7 @@ public struct TeleprompterStageView: View {
             style: .continuous
         )
         .strokeBorder(
-            SpeechRailDesignTokens.Surface.border,
+            SpeechRailDesignTokens.Surface.border.opacity(settings.opacity),
             lineWidth: SpeechRailDesignTokens.Stroke.hairline
         )
     }
@@ -211,7 +244,11 @@ public struct TeleprompterStageView: View {
     }
 
     private var acceptsReadingKeyCommands: Bool {
-        focusedControl == nil && !isAppearancePopoverPresented
+        TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+            readingAreaFocused: readingAreaFocused,
+            controlFocusInside: focusedControl != nil,
+            menuOrPopoverPresented: isAppearancePopoverPresented
+        )
     }
 
     private func handleControlFocusChange() {
@@ -219,7 +256,7 @@ public struct TeleprompterStageView: View {
         interactionState.setControlFocus(focusInside)
         if focusInside {
             revealControls(immediate: true)
-        } else if !pointerInsideStage && !isAppearancePopoverPresented {
+        } else if !pointerInsideControls && !isAppearancePopoverPresented {
             scheduleControlsHide()
         }
     }
@@ -230,7 +267,8 @@ public struct TeleprompterStageView: View {
         } else {
             initialRevealActive = false
             interactionState = TeleprompterStageInteractionState()
-            pointerInsideStage = false
+            pointerInsideControls = false
+            readingAreaFocused = false
             refreshControlsVisibility()
         }
     }
@@ -240,6 +278,11 @@ public struct TeleprompterStageView: View {
             beginInitialReveal()
         }
         refreshControlsVisibility()
+        Task { @MainActor in
+            await Task.yield()
+            guard session.isStageOpen, !isAppearancePopoverPresented, focusedControl == nil else { return }
+            readingAreaFocused = true
+        }
     }
 
     private func handleTabKey() -> KeyPress.Result {
@@ -248,15 +291,9 @@ public struct TeleprompterStageView: View {
         return .ignored
     }
 
-    private func handleNextKey() -> KeyPress.Result {
-        guard acceptsReadingKeyCommands else { return .ignored }
-        session.moveToNext()
-        return .handled
-    }
-
-    private func handlePreviousKey() -> KeyPress.Result {
-        guard acceptsReadingKeyCommands else { return .ignored }
-        session.moveToPrevious()
+    private func handleReadingKeyPress(_ keyPress: KeyPress, by delta: Int) -> KeyPress.Result {
+        guard keyPress.modifiers.isEmpty, acceptsReadingKeyCommands else { return .ignored }
+        moveByDisplayLine(delta)
         return .handled
     }
 
@@ -268,8 +305,8 @@ public struct TeleprompterStageView: View {
 
     private func handleEndKey() -> KeyPress.Result {
         guard acceptsReadingKeyCommands else { return .ignored }
-        if let count = session.activeVersion?.segments.count, count > 0 {
-            session.moveToSegment(count - 1)
+        if let lastLine = displayLines.last {
+            session.moveToReadingPosition(lastLine.position)
         }
         return .handled
     }
@@ -285,7 +322,7 @@ public struct TeleprompterStageView: View {
 
     private var interactionVisibility: TeleprompterStageInteractionVisibility {
         TeleprompterStageInteractionVisibility(
-            pointerInside: pointerInsideStage,
+            pointerInside: pointerInsideControls,
             controlFocusInside: focusedControl != nil,
             menuOrPopoverPresented: isAppearancePopoverPresented,
             alwaysShowControls: settings.alwaysShowControls,
@@ -404,9 +441,18 @@ public struct TeleprompterStageView: View {
                     )
             }
         }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .frame(height: SpeechRailDesignTokens.Teleprompter.stageControlAreaHeight)
-        .allowsHitTesting(controlsVisible)
         .accessibilityHidden(!controlsVisible)
+        .onHover { isInside in
+            pointerInsideControls = isInside
+            interactionState.setPointerInside(isInside)
+            if isInside {
+                revealControls(immediate: true)
+            } else {
+                scheduleControlsHide()
+            }
+        }
     }
 
     private func attentionMessage(blocked: TeleprompterSession.BlockReason) -> some View {
@@ -473,27 +519,70 @@ public struct TeleprompterStageView: View {
 
     private var scriptStack: some View {
         GeometryReader { geometry in
-            let contentWidth = min(
-                geometry.size.width,
-                SpeechRailDesignTokens.Teleprompter.stageContentMaximumWidth
+            let segments = session.activeVersion?.segments ?? []
+            let request = LineLayoutRequest(
+                segments: segments,
+                pointSize: settings.scriptPointSize,
+                availableWidth: max(
+                    1,
+                    floor(geometry.size.width - 2 * SpeechRailDesignTokens.Spacing.md)
+                )
             )
+            let browsingAll = isBrowsingAll && !isFollowing
+            let currentLineIndex = currentDisplayLineIndex
+            let lineSpacing = browsingAll
+                ? SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing
+                : max(SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing, CGFloat(settings.lineSpacing))
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
-                    ForEach(visibleSegmentIndices, id: \.self) { index in
-                        segmentRow(at: index)
-                            .id(segmentID(at: index))
+                LazyVStack(alignment: .leading, spacing: lineSpacing) {
+                    if browsingAll {
+                        ForEach(segments.indices, id: \.self) { index in
+                            segmentRow(at: index)
+                                .id(segmentID(at: index))
+                        }
+                    } else if let currentLineIndex {
+                        let slots = TeleprompterStagePresentation.visibleLineSlots(
+                            currentIndex: currentLineIndex,
+                            visibleCount: settings.visibleLineCount,
+                            totalCount: displayLines.count
+                        )
+                        ForEach(slots.indices, id: \.self) { slot in
+                            if let lineIndex = slots[slot] {
+                                displayLineRow(at: lineIndex, currentLineIndex: currentLineIndex)
+                                    .id(displayLines[lineIndex].id)
+                            } else {
+                                Color.clear
+                                    .frame(height: emptySlotHeight)
+                                    .id("empty-reading-slot-\(slot)")
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                    } else {
+                        ForEach(0..<settings.visibleLineCount, id: \.self) { slot in
+                            Color.clear
+                                .frame(height: emptySlotHeight)
+                                .id("empty-reading-slot-\(slot)")
+                                .accessibilityHidden(true)
+                        }
                     }
                 }
-                .frame(width: contentWidth, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                .frame(width: geometry.size.width, alignment: .leading)
             }
             .scrollPosition($scrollPosition)
+            .scrollDisabled(!browsingAll)
             .onScrollPhaseChange { _, newPhase in
-                if newPhase == .interacting {
+                if browsingAll && newPhase == .interacting {
                     session.takeOverForManualScroll()
                 }
+            }
+            .onChange(of: request, initial: true) { _, request in
+                displayLines = TeleprompterStageLineLayout.layout(
+                    segments: request.segments,
+                    pointSize: request.pointSize,
+                    availableWidth: request.availableWidth
+                )
+                scrollToReadingPosition()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -501,28 +590,58 @@ public struct TeleprompterStageView: View {
         .accessibilityLabel("朗读内容")
     }
 
-    private var visibleSegmentIndices: [Int] {
-        guard let count = session.activeVersion?.segments.count else { return [] }
-        return TeleprompterStagePresentation.visibleSegmentIndices(
-            currentIndex: session.currentSegmentIndex,
-            visibleCount: settings.visibleSegmentCount,
-            totalCount: count,
-            isBrowsingAll: isBrowsingAll && !isFollowing
+    private var currentReadingPosition: TeleprompterAligner.Position {
+        TeleprompterAligner.Position(
+            segmentIndex: session.currentSegmentIndex,
+            utf16Offset: session.readingOffset
         )
     }
 
-    private func scrollToReadingPosition() {
-        guard let id = currentSegmentID else { return }
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
-            scrollPosition.scrollTo(id: id, anchor: .top)
+    private var currentDisplayLineIndex: Int? {
+        TeleprompterStagePresentation.displayLineIndex(
+            for: currentReadingPosition,
+            lines: displayLines
+        )
+    }
+
+    private var currentDisplayLineID: String? {
+        guard let currentDisplayLineIndex,
+              displayLines.indices.contains(currentDisplayLineIndex) else {
+            return nil
         }
+        return displayLines[currentDisplayLineIndex].id
+    }
+
+    private var emptySlotHeight: CGFloat {
+        settings.scriptPointSize + 2 * SpeechRailDesignTokens.Spacing.xs
+    }
+
+    private func scrollToReadingPosition() {
+        let id = isBrowsingAll && !isFollowing ? currentSegmentID : currentDisplayLineID
+        guard let id else { return }
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+            scrollPosition.scrollTo(
+                id: id,
+                anchor: settings.visibleLineCount == 3 && !isBrowsingAll ? .center : .top
+            )
+        }
+    }
+
+    private func moveByDisplayLine(_ delta: Int) {
+        guard let target = TeleprompterStagePresentation.positionByMovingLine(
+            by: delta,
+            from: currentReadingPosition,
+            lines: displayLines
+        ) else {
+            return
+        }
+        session.moveToReadingPosition(target)
     }
 
     private var currentSegmentID: String? {
         guard let segments = session.activeVersion?.segments,
               segments.indices.contains(session.currentSegmentIndex) else { return nil }
-        let segment = segments[session.currentSegmentIndex]
-        return segment.id
+        return segments[session.currentSegmentIndex].id
     }
 
     private func segmentID(at index: Int) -> String {
@@ -530,6 +649,94 @@ public struct TeleprompterStageView: View {
             return "segment-\(index)"
         }
         return segments[index].id
+    }
+
+    private func displayLineRow(at index: Int, currentLineIndex: Int) -> some View {
+        let line = displayLines[index]
+        let isCurrent = index == currentLineIndex
+
+        return Text(styledText(line, index: index, currentLineIndex: currentLineIndex))
+            .font(.system(size: settings.scriptPointSize, weight: .regular))
+            .lineSpacing(settings.lineSpacing)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityLabel("第 \(index + 1) 行，\(line.text)")
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isCurrent
+                    ? SpeechRailDesignTokens.Color.rail.opacity(
+                        SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity * settings.opacity
+                    )
+                    : Color.clear,
+                in: RoundedRectangle(
+                    cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                    style: .continuous
+                )
+            )
+            .overlay(alignment: .leading) {
+                if isCurrent {
+                    RoundedRectangle(
+                        cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                        style: .continuous
+                    )
+                    .fill(currentSegmentAccentColor)
+                    .frame(width: SpeechRailDesignTokens.Teleprompter.stageCurrentRailWidth)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                }
+            }
+            .opacity(displayLineOpacity(at: index, currentLineIndex: currentLineIndex))
+            .accessibilityElement(children: .combine)
+            .accessibilityAction(named: "从此行开始") {
+                session.moveToReadingPosition(line.position)
+            }
+    }
+
+    private func displayLineOpacity(at index: Int, currentLineIndex: Int) -> Double {
+        if index == currentLineIndex {
+            1
+        } else if index < currentLineIndex {
+            0.40
+        } else {
+            SpeechRailDesignTokens.Teleprompter.stageNextSegmentOpacity
+        }
+    }
+
+    private func styledText(
+        _ line: TeleprompterStageDisplayLine,
+        index: Int,
+        currentLineIndex: Int
+    ) -> AttributedString {
+        var text = AttributedString(line.text)
+        guard index == currentLineIndex else {
+            text.foregroundColor = index < currentLineIndex
+                ? SpeechRailDesignTokens.Color.inkTertiary
+                : SpeechRailDesignTokens.Color.inkSecondary
+            return text
+        }
+
+        text.foregroundColor = SpeechRailDesignTokens.Color.ink
+        let readLength = min(
+            line.text.utf16.count,
+            max(0, session.readingOffset - line.utf16Start)
+        )
+        if let range = Range(NSRange(location: 0, length: readLength), in: line.text),
+           let attributedRange = Range(range, in: text) {
+            text[attributedRange].foregroundColor = SpeechRailDesignTokens.Color.inkTertiary
+        }
+        if session.uncertainty != nil && readLength < line.text.utf16.count {
+            let anchorLength = min(8, line.text.utf16.count - readLength)
+            if let anchorNSRange = Range(
+                NSRange(location: readLength, length: anchorLength),
+                in: line.text
+            ), let anchorRange = Range(anchorNSRange, in: text) {
+                text[anchorRange].underlineStyle = .single
+                text[anchorRange].foregroundColor = SpeechRailDesignTokens.Color.rail
+            }
+        }
+        return text
     }
 
     @ViewBuilder
@@ -555,7 +762,7 @@ public struct TeleprompterStageView: View {
             .background(
                 isCurrent
                     ? SpeechRailDesignTokens.Color.rail.opacity(
-                        SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity
+                        SpeechRailDesignTokens.Teleprompter.stageCurrentBackgroundOpacity * settings.opacity
                     )
                     : Color.clear,
                 in: RoundedRectangle(
@@ -654,7 +861,6 @@ public struct TeleprompterStageView: View {
         }
         return text
     }
-
     // MARK: - 舞台操控栏
 
     private var appearanceControl: some View {
@@ -677,24 +883,24 @@ public struct TeleprompterStageView: View {
     private var controls: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Button {
-                session.moveToPrevious()
+                moveByDisplayLine(-1)
             } label: {
-                Label("上一段", systemImage: "chevron.left")
+                Label("上一行", systemImage: "chevron.left")
             }
             .focused($focusedControl, equals: .previous)
-            .disabled(session.currentSegmentIndex <= 0)
+            .disabled(currentDisplayLineIndex.map { $0 == 0 } ?? true)
             .speechRailButton(.secondary)
-            .help("上一段（← / ↑ / PageUp）")
+            .help("上一行（← / ↑ / PageUp）")
 
             Button {
-                session.moveToNext()
+                moveByDisplayLine(1)
             } label: {
-                Label("下一段", systemImage: "chevron.right")
+                Label("下一行", systemImage: "chevron.right")
             }
             .focused($focusedControl, equals: .next)
-            .disabled(isLastSegment)
+            .disabled(currentDisplayLineIndex.map { $0 >= displayLines.count - 1 } ?? true)
             .speechRailButton(.secondary)
-            .help("下一段（空格 / → / ↓ / PageDown）")
+            .help("下一行（空格 / → / ↓ / PageDown）")
 
             Button {
                 handleVoiceAssist()
@@ -812,11 +1018,6 @@ public struct TeleprompterStageView: View {
         }
     }
 
-    private var isLastSegment: Bool {
-        guard let count = session.activeVersion?.segments.count else { return true }
-        return session.currentSegmentIndex >= count - 1
-    }
-
     private var isFollowing: Bool {
         session.phase == .following || session.phase == .uncertain
     }
@@ -857,6 +1058,20 @@ private struct TeleprompterStageAppearancePopover: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             Text("显示设置")
                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
+            Picker(
+                "显示行数",
+                selection: Binding(
+                    get: { settings.visibleLineCount },
+                    set: { settings.visibleLineCount = $0 }
+                )
+            ) {
+                ForEach(1...3, id: \.self) { count in
+                    Text("\(count) 行").tag(count)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("显示行数")
+            .help("三行时上方显示已读行，中间显示当前行，下方预览下一行；方向键可逐行翻动")
             TeleprompterStageFontControl(settings: settings)
             TeleprompterStageTransparencyControl(settings: settings)
             TeleprompterStageQuickPresetControl(settings: settings)
@@ -918,7 +1133,7 @@ private struct TeleprompterStageTransparencyControl: View {
             accessibilityValue: TeleprompterStageTransparencyPresentation.valueLabel(
                 for: settings.backgroundTransparency
             ),
-            helpText: "连续调节背景透光程度；读数是控制值，实际观感也受系统材质影响"
+            helpText: "100% 时隐藏提词背景，正文和控制仍保持可见"
         )
     }
 }
@@ -938,6 +1153,7 @@ private struct TeleprompterStageQuickPresetControl: View {
                 Button("默认 · 28% 透明") { settings.backgroundTransparency = 0.28 }
                 Button("透光 · 45% 透明") { settings.backgroundTransparency = 0.45 }
                 Button("更透光 · 65% 透明") { settings.backgroundTransparency = 0.65 }
+                Button("无背景 · 100% 透明") { settings.backgroundTransparency = 1 }
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("背景透明度快速预设")

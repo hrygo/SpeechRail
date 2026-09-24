@@ -625,15 +625,17 @@ struct SpeechRailCommands: Commands {
 
             Divider()
 
-            Button("上一段") {
-                teleprompter.moveToPrevious()
+            Button("上一行") {
+                teleprompterStage.moveReadingLine(by: -1)
             }
-            .disabled(!teleprompterStage.isVisible || teleprompter.currentSegmentIndex <= 0)
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(!teleprompterStage.isVisible)
 
-            Button("下一段") {
-                teleprompter.moveToNext()
+            Button("下一行") {
+                teleprompterStage.moveReadingLine(by: 1)
             }
-            .disabled(!teleprompterStage.isVisible || isTeleprompterAtLastSegment)
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(!teleprompterStage.isVisible)
 
             Button(voiceAssistCommandTitle) {
                 handleVoiceAssistCommand()
@@ -665,11 +667,6 @@ struct SpeechRailCommands: Commands {
     private var exportTitle: String {
         guard let selectedWorkCommand else { return "导出选中作品…" }
         return "导出“\(selectedWorkCommand.title)”…"
-    }
-
-    private var isTeleprompterAtLastSegment: Bool {
-        guard let count = teleprompter.activeVersion?.segments.count, count > 0 else { return true }
-        return teleprompter.currentSegmentIndex >= count - 1
     }
 
     private var voiceAssistCommandTitle: String {

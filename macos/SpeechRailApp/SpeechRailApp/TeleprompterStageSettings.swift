@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -66,23 +67,232 @@ public struct TeleprompterStageSummary: Equatable, Sendable {
     }
 }
 
-/// The stage is a reading surface, not a miniature editor. Keep the visible
-/// window semantic (current segment plus a small look-ahead) instead of
-/// exposing the alignment slices used by the follow controller.
+/// One visual row rendered by the stage, mapped back to its source segment.
+/// The UTF-16 range includes hard line-break characters; `text` omits trailing
+/// line-break characters so each SwiftUI row remains exactly one line.
+public struct TeleprompterStageDisplayLine: Equatable, Identifiable, Sendable {
+    public let segmentID: String
+    public let segmentIndex: Int
+    public let utf16Start: Int
+    public let utf16End: Int
+    public let text: String
+
+    public var id: String { "\(segmentID)-\(utf16Start)" }
+
+    public var position: TeleprompterAligner.Position {
+        TeleprompterAligner.Position(segmentIndex: segmentIndex, utf16Offset: utf16Start)
+    }
+
+    fileprivate init(
+        segmentID: String,
+        segmentIndex: Int,
+        utf16Start: Int,
+        utf16End: Int,
+        text: String
+    ) {
+        self.segmentID = segmentID
+        self.segmentIndex = segmentIndex
+        self.utf16Start = utf16Start
+        self.utf16End = utf16End
+        self.text = text
+    }
+}
+
+/// Uses AppKit's text layout to split each source segment into visual rows.
+/// Keep this result cached by the view until the source, font or width changes.
+@MainActor
+public enum TeleprompterStageLineLayout {
+    public static func layout(
+        segments: [TeleprompterSegment],
+        pointSize: CGFloat,
+        availableWidth: CGFloat
+    ) -> [TeleprompterStageDisplayLine] {
+        let safeWidth = availableWidth.isFinite ? max(1, availableWidth) : 1
+        let safePointSize = pointSize.isFinite ? max(1, pointSize) : 1
+        let font = NSFont.systemFont(ofSize: safePointSize)
+
+        return segments.enumerated().flatMap { segmentIndex, segment in
+            layout(
+                segment: segment,
+                segmentIndex: segmentIndex,
+                font: font,
+                width: safeWidth
+            )
+        }
+    }
+
+    private static func layout(
+        segment: TeleprompterSegment,
+        segmentIndex: Int,
+        font: NSFont,
+        width: CGFloat
+    ) -> [TeleprompterStageDisplayLine] {
+        let source = segment.text
+        let sourceNSString = source as NSString
+        let sourceLength = sourceNSString.length
+        guard sourceLength > 0 else { return [] }
+
+        let attributedText = NSAttributedString(
+            string: source,
+            attributes: [.font: font]
+        )
+        let storage = NSTextStorage(attributedString: attributedText)
+        let layoutManager = NSLayoutManager()
+        layoutManager.usesFontLeading = true
+        let container = NSTextContainer(
+            size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        )
+        container.lineFragmentPadding = 0
+        container.lineBreakMode = .byWordWrapping
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+
+        var rows: [TeleprompterStageDisplayLine] = []
+        var glyphIndex = 0
+        var nextUTF16Start = 0
+
+        while glyphIndex < layoutManager.numberOfGlyphs {
+            var glyphRange = NSRange(location: 0, length: 0)
+            _ = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphIndex,
+                effectiveRange: &glyphRange
+            )
+            guard glyphRange.length > 0 else { break }
+
+            var actualGlyphRange = NSRange(location: 0, length: 0)
+            let characterRange = layoutManager.characterRange(
+                forGlyphRange: glyphRange,
+                actualGlyphRange: &actualGlyphRange
+            )
+            let rowEnd = min(sourceLength, NSMaxRange(characterRange))
+            let rowStart = min(max(nextUTF16Start, characterRange.location), rowEnd)
+
+            if rowEnd > rowStart {
+                let sourceRange = NSRange(location: rowStart, length: rowEnd - rowStart)
+                let displayRange = displayRange(for: sourceRange, in: sourceNSString)
+                let displayText = sourceNSString.substring(with: displayRange)
+                rows.append(
+                    TeleprompterStageDisplayLine(
+                        segmentID: segment.id,
+                        segmentIndex: segmentIndex,
+                        utf16Start: rowStart,
+                        utf16End: rowEnd,
+                        text: displayText
+                    )
+                )
+                nextUTF16Start = rowEnd
+            }
+
+            glyphIndex = NSMaxRange(glyphRange)
+        }
+
+        // TextKit may omit a trailing empty line fragment after a terminal
+        // line break, but the source break still belongs to the final row.
+        if nextUTF16Start < sourceLength {
+            let sourceRange = NSRange(
+                location: nextUTF16Start,
+                length: sourceLength - nextUTF16Start
+            )
+            let displayRange = displayRange(for: sourceRange, in: sourceNSString)
+            rows.append(
+                TeleprompterStageDisplayLine(
+                    segmentID: segment.id,
+                    segmentIndex: segmentIndex,
+                    utf16Start: nextUTF16Start,
+                    utf16End: sourceLength,
+                    text: sourceNSString.substring(with: displayRange)
+                )
+            )
+        }
+
+        return rows
+    }
+
+    private static func displayRange(for sourceRange: NSRange, in source: NSString) -> NSRange {
+        var displayEnd = NSMaxRange(sourceRange)
+        while displayEnd > sourceRange.location {
+            let codeUnit = source.character(at: displayEnd - 1)
+            guard codeUnit == 0x000A || codeUnit == 0x000D || codeUnit == 0x2028 || codeUnit == 0x2029 else {
+                break
+            }
+            displayEnd -= 1
+        }
+        return NSRange(location: sourceRange.location, length: displayEnd - sourceRange.location)
+    }
+}
+
+/// Stable position and line-slot rules for the stage reading surface.
 public enum TeleprompterStagePresentation {
-    public static func visibleSegmentIndices(
+    /// Returns stable context slots around the current visual line. Missing
+    /// neighbors remain empty so three-line mode keeps the current row centered.
+    public static func visibleLineSlots(
         currentIndex: Int,
         visibleCount: Int,
-        totalCount: Int,
-        isBrowsingAll: Bool = false
-    ) -> [Int] {
+        totalCount: Int
+    ) -> [Int?] {
         guard totalCount > 0 else { return [] }
-        if isBrowsingAll {
-            return Array(0..<totalCount)
+
+        let current = min(max(currentIndex, 0), totalCount - 1)
+        let count = min(
+            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),
+            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount
+        )
+        switch count {
+        case 1:
+            return [current]
+        case 2:
+            return [current, current + 1 < totalCount ? current + 1 : nil]
+        default:
+            return [
+                current > 0 ? current - 1 : nil,
+                current,
+                current + 1 < totalCount ? current + 1 : nil,
+            ]
         }
-        let clampedCurrent = min(max(currentIndex, 0), totalCount - 1)
-        let count = min(max(visibleCount, 1), totalCount - clampedCurrent)
-        return Array(clampedCurrent..<(clampedCurrent + count))
+    }
+
+    public static func displayLineIndex(
+        for position: TeleprompterAligner.Position,
+        lines: [TeleprompterStageDisplayLine]
+    ) -> Int? {
+        let segmentLines = lines.indices.filter { lines[$0].segmentIndex == position.segmentIndex }
+        guard let firstIndex = segmentLines.first, let lastIndex = segmentLines.last else {
+            return nil
+        }
+
+        if let exactStart = segmentLines.first(where: { lines[$0].utf16Start == position.utf16Offset }) {
+            return exactStart
+        }
+        if let containing = segmentLines.first(where: {
+            lines[$0].utf16Start <= position.utf16Offset && position.utf16Offset < lines[$0].utf16End
+        }) {
+            return containing
+        }
+        if position.utf16Offset >= lines[lastIndex].utf16End {
+            return lastIndex
+        }
+        if position.utf16Offset < lines[firstIndex].utf16Start {
+            return firstIndex
+        }
+        return nil
+    }
+
+    public static func positionByMovingLine(
+        by delta: Int,
+        from position: TeleprompterAligner.Position,
+        lines: [TeleprompterStageDisplayLine]
+    ) -> TeleprompterAligner.Position? {
+        guard delta != 0,
+              let currentIndex = displayLineIndex(for: position, lines: lines)
+        else {
+            return nil
+        }
+
+        let lastIndex = lines.count - 1
+        let boundedDelta = min(max(delta, -currentIndex), lastIndex - currentIndex)
+        guard boundedDelta != 0 else { return nil }
+        return lines[currentIndex + boundedDelta].position
     }
 
     public static func paceStatus(
@@ -208,7 +418,7 @@ public final class TeleprompterStageSettings {
     private var fontScaleStorage: Double
     private var opacityStorage: Double
     private var lineSpacingStorage: Double
-    private var visibleSegmentCountStorage: Int
+    private var visibleLineCountStorage: Int
     public var alwaysShowControls: Bool {
         didSet { defaults.set(alwaysShowControls, forKey: Key.alwaysShowControls) }
     }
@@ -300,17 +510,17 @@ public final class TeleprompterStageSettings {
         }
     }
 
-    public var visibleSegmentCount: Int {
-        get { visibleSegmentCountStorage }
+    public var visibleLineCount: Int {
+        get { visibleLineCountStorage }
         set {
             let clamped = min(
-                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount),
-                SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),
+                SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount
             )
-            if visibleSegmentCountStorage != clamped {
-                visibleSegmentCountStorage = clamped
+            if visibleLineCountStorage != clamped {
+                visibleLineCountStorage = clamped
             }
-            defaults.set(clamped, forKey: Key.visibleSegmentCount)
+            defaults.set(clamped, forKey: Key.visibleLineCount)
         }
     }
 
@@ -355,12 +565,13 @@ public final class TeleprompterStageSettings {
             ),
             SpeechRailDesignTokens.Teleprompter.stageMaximumLineSpacing
         )
-        self.visibleSegmentCountStorage = min(
+        self.visibleLineCountStorage = min(
             max(
-                defaults.object(forKey: Key.visibleSegmentCount) as? Int ?? 3,
-                SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount
+                defaults.object(forKey: Key.visibleLineCount) as? Int
+                    ?? SpeechRailDesignTokens.Teleprompter.stageDefaultVisibleLineCount,
+                SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount
             ),
-            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount
+            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount
         )
         self.alwaysShowControls = defaults.bool(forKey: Key.alwaysShowControls)
         self.showClockAndProgress = defaults.bool(forKey: Key.showClockAndProgress)
@@ -371,7 +582,8 @@ public final class TeleprompterStageSettings {
         static let fontScale = "speechrail.teleprompter.stage.fontScale"
         static let opacity = "speechrail.teleprompter.stage.opacity"
         static let lineSpacing = "speechrail.teleprompter.stage.lineSpacing"
-        static let visibleSegmentCount = "speechrail.teleprompter.stage.visibleSegmentCount"
+        // Retain the existing key so users keep their selected 1/2/3 count.
+        static let visibleLineCount = "speechrail.teleprompter.stage.visibleSegmentCount"
         static let alwaysShowControls = "speechrail.teleprompter.stage.alwaysShowControls"
         static let showClockAndProgress = "speechrail.teleprompter.stage.showClockAndProgress"
     }
@@ -379,6 +591,64 @@ public final class TeleprompterStageSettings {
 
 enum TeleprompterStageTransparencyPresentation {
     static func valueLabel(for transparency: Double) -> String {
-        String(format: "%.2f%%", locale: Locale(identifier: "en_US_POSIX"), transparency * 100)
+        "\(Int((transparency * 100).rounded()))%"
+    }
+}
+
+enum TeleprompterStageGeometryPolicy {
+    static func preferredContentHeight(
+        visibleLineCount: Int,
+        scriptPointSize: CGFloat,
+        lineSpacing: CGFloat,
+        showsAuxiliaryStatus: Bool
+    ) -> CGFloat {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let count = min(
+            max(visibleLineCount, tokens.stageMinimumVisibleLineCount),
+            tokens.stageMaximumVisibleLineCount
+        )
+        let rowHeight = scriptPointSize + 2 * SpeechRailDesignTokens.Spacing.xs
+        let rowSpacing = CGFloat(max(0, count - 1)) * max(
+            tokens.stageSegmentSpacing,
+            lineSpacing
+        )
+        let auxiliaryHeight = showsAuxiliaryStatus ? tokens.stageAuxiliaryBarHeight + tokens.stageSegmentSpacing : 0
+        let requested = 2 * tokens.stagePadding
+            + CGFloat(count) * rowHeight
+            + rowSpacing
+            + auxiliaryHeight
+            + tokens.stageControlAreaHeight
+        return min(max(requested, tokens.stageMinimumHeight), tokens.stageMaximumHeight)
+    }
+
+    static func standardFrame(defaultFrame: CGRect, visibleFrame: CGRect) -> CGRect {
+        let maximumHeight = min(
+            SpeechRailDesignTokens.Teleprompter.stageMaximumHeight,
+            visibleFrame.height
+        )
+        let minimumHeight = min(
+            SpeechRailDesignTokens.Teleprompter.stageMinimumHeight,
+            maximumHeight
+        )
+        let height = min(max(defaultFrame.height, minimumHeight), maximumHeight)
+        return CGRect(
+            x: visibleFrame.minX,
+            y: visibleFrame.maxY - height,
+            width: visibleFrame.width,
+            height: height
+        )
+    }
+
+    static func cappedWindowFrameHeight(
+        _ requestedHeight: CGFloat,
+        visibleFrameHeight: CGFloat
+    ) -> CGFloat {
+        max(
+            0,
+            min(
+                requestedHeight,
+                min(SpeechRailDesignTokens.Teleprompter.stageMaximumHeight, visibleFrameHeight)
+            )
+        )
     }
 }

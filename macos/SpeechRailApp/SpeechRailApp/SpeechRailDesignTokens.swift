@@ -1226,25 +1226,26 @@ public enum SpeechRailDesignTokens {
         public static let sourceEditorMaximumHeight: CGFloat = 360
         public static let stageDefaultWidth: CGFloat = 760
         public static let stageMinimumWidth: CGFloat = 500
-        public static let stageDefaultHeight: CGFloat = 420
-        public static let stageMinimumHeight: CGFloat = 300
-        public static let stagePadding: CGFloat = Spacing.lg
-        public static let stageSegmentSpacing: CGFloat = Spacing.md
+        public static let stageDefaultHeight: CGFloat = 236
+        public static let stageMinimumHeight: CGFloat = 168
+        public static let stagePadding: CGFloat = Spacing.sm
+        public static let stageSegmentSpacing: CGFloat = Spacing.sm
         /// Fixed auxiliary/status and control reservations keep the reading
         /// geometry stable while the controls fade out.
         public static let stageAuxiliaryBarHeight: CGFloat = 24
-        public static let stageControlAreaHeight: CGFloat = 64
-        public static let stageContentMaximumWidth: CGFloat = 720
+        public static let stageControlAreaHeight: CGFloat = 48
         public static let stageScriptPointSize: CGFloat = 38
         public static let stageScriptMinimumPointSize: CGFloat = 28
         public static let stageScriptMaximumPointSize: CGFloat = 60
         public static let stageLineSpacing: CGFloat = 6
         /// 只调整舞台底色与材质叠层的透光感；不修改正文和控件自身的不透明度。
         public static let stageDefaultOpacity: Double = 0.72
-        public static let stageMaximumWidth: CGFloat = 1_200
+        public static let stageMaximumHeight: CGFloat = 360
+        public static let stageDefaultVisibleLineCount = 3
+        public static let stageMaximumWidth: CGFloat = 4_096
         public static let stageMinimumFontScale: Double = 0.67
         public static let stageMaximumFontScale: Double = 1.52
-        public static let stageMinimumOpacity: Double = 0.35
+        public static let stageMinimumOpacity: Double = 0
         public static let stageMaximumOpacity: Double = 1
         /// User-facing transparency is the inverse of the opacity range used by rendering.
         public static let stageMinimumTransparency: Double = 1 - stageMaximumOpacity
@@ -1253,8 +1254,8 @@ public enum SpeechRailDesignTokens {
         public static let stageAppearancePopoverWidth: CGFloat = 280
         public static let stageMinimumLineSpacing: Double = 0
         public static let stageMaximumLineSpacing: Double = 24
-        public static let stageMinimumVisibleSegmentCount = 1
-        public static let stageMaximumVisibleSegmentCount = 2
+        public static let stageMinimumVisibleLineCount = 1
+        public static let stageMaximumVisibleLineCount = 3
         public static let stageWindowAutosaveName = "SpeechRail.Teleprompter.Stage.v2"
         /// 舞台窗口首发距屏幕顶端偏移（贴近摄像头，建立自然眼神视线锚点）。
         public static let stageTopInset: CGFloat = 48

@@ -7,21 +7,22 @@ import Testing
 
 @MainActor
 struct TeleprompterStageSettingsTests {
-    @Test("visible segment count changes without recursive setter")
-    func visibleSegmentCountChangeDoesNotRecurse() throws {
+    @Test("visible line count changes without recursive setter")
+    func visibleLineCountChangeDoesNotRecurse() throws {
         let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let settings = TeleprompterStageSettings(defaults: defaults)
-        settings.visibleSegmentCount = 2
+        #expect(settings.visibleLineCount == 3)
+        settings.visibleLineCount = 3
 
-        #expect(settings.visibleSegmentCount == 2)
-        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
+        #expect(settings.visibleLineCount == 3)
+        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 3)
 
         defaults.removeObject(forKey: "speechrail.teleprompter.stage.visibleSegmentCount")
-        settings.visibleSegmentCount = 2
-        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
+        settings.visibleLineCount = 3
+        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 3)
     }
 
     @Test("stage settings clamp and persist their supported ranges")
@@ -52,11 +53,11 @@ struct TeleprompterStageSettingsTests {
         settings.lineSpacing = 100
         #expect(settings.lineSpacing == SpeechRailDesignTokens.Teleprompter.stageMaximumLineSpacing)
 
-        settings.visibleSegmentCount = 1
-        #expect(settings.visibleSegmentCount == SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount)
-        settings.visibleSegmentCount = 4
-        #expect(settings.visibleSegmentCount == SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount)
-        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 2)
+        settings.visibleLineCount = 1
+        #expect(settings.visibleLineCount == SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount)
+        settings.visibleLineCount = 4
+        #expect(settings.visibleLineCount == 3)
+        #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 3)
     }
 
     @Test("stage visibility preferences default off and persist independently")
@@ -93,8 +94,10 @@ struct TeleprompterStageSettingsTests {
         #expect(abs(defaults.double(forKey: "speechrail.teleprompter.stage.opacity") - 0.60) < 0.001)
 
         settings.backgroundTransparency = 1
-        #expect(settings.opacity == SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity)
-        #expect(abs(settings.backgroundTransparency - 0.65) < 0.001)
+        #expect(settings.opacity == 0)
+        #expect(settings.backgroundTransparency == 1)
+        #expect(defaults.double(forKey: "speechrail.teleprompter.stage.opacity") == 0)
+        #expect(TeleprompterStageSettings(defaults: defaults).backgroundTransparency == 1)
     }
 
     @Test("stage appearance values preserve fractional slider movement")
@@ -121,8 +124,9 @@ struct TeleprompterStageSettingsTests {
 
     @Test("transparency readout distinguishes nearby continuous values")
     func transparencyReadoutShowsFineMovement() {
-        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.283) == "28.30%")
-        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.284) == "28.40%")
+        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.283) == "28%")
+        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 0.284) == "28%")
+        #expect(TeleprompterStageTransparencyPresentation.valueLabel(for: 1) == "100%")
     }
 
     @Test("source editor keeps a bounded preparation-page height")
@@ -131,28 +135,196 @@ struct TeleprompterStageSettingsTests {
         #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorMaximumHeight)
     }
 
-    @Test("stage preview keeps the current and next semantic segments only")
-    func stagePreviewUsesSemanticSegmentWindow() {
+    @Test("stage preview shows one, two, or three actual display lines")
+    func stagePreviewUsesRequestedDisplayLineWindow() {
+        let centered: [Int?] = [3, 4, 5]
+        let atStart: [Int?] = [nil, 0, 1]
+        let atEnd: [Int?] = [8, 9, nil]
+
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 1, totalCount: 10) == [4])
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 2, totalCount: 10) == [4, 5])
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 3, totalCount: 10) == centered)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 0, visibleCount: 3, totalCount: 10) == atStart)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 9, visibleCount: 3, totalCount: 10) == atEnd)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: -1, visibleCount: 2, totalCount: 3) == [0, 1])
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 0, visibleCount: 3, totalCount: 0).isEmpty)
+    }
+
+    @Test("display-line layout wraps at the requested width and preserves UTF-16 source ranges")
+    func displayLineLayoutWrapsWithoutLosingUnicodeText() throws {
+        let source = "开场😀欢迎来到SpeechRail提词器，今天介绍快捷翻行。"
+        let segment = TeleprompterSegment(
+            id: "display-line-source",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+        let lines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: 20,
+            availableWidth: 82
+        )
+
+        #expect(lines.count > 1)
+        #expect(lines.first?.utf16Start == 0)
+        #expect(lines.last?.utf16End == source.utf16.count)
+        #expect(lines.map(\.text).joined() == source)
+        for (index, line) in lines.enumerated() {
+            #expect(line.segmentIndex == 0)
+            #expect(line.id == "display-line-source-\(line.utf16Start)")
+            #expect(line.utf16End - line.utf16Start == line.text.utf16.count)
+            #expect(Range(NSRange(location: line.utf16Start, length: line.text.utf16.count), in: source) != nil)
+            if index > 0 {
+                #expect(lines[index - 1].utf16End == line.utf16Start)
+            }
+        }
+    }
+
+    @Test("display-line ranges preserve hard breaks and segment boundaries")
+    func displayLineRangesCoverHardBreaksAndSegments() throws {
+        let firstText = "甲😀乙\n丙丁"
+        let secondText = "下一段"
+        let segments = [
+            TeleprompterSegment(
+                id: "first",
+                ordinal: 0,
+                sourceRange: TeleprompterSourceRange(start: 0, end: firstText.utf16.count),
+                text: firstText
+            ),
+            TeleprompterSegment(
+                id: "second",
+                ordinal: 1,
+                sourceRange: TeleprompterSourceRange(start: 0, end: secondText.utf16.count),
+                text: secondText
+            ),
+        ]
+
+        let lines = TeleprompterStageLineLayout.layout(
+            segments: segments,
+            pointSize: 18,
+            availableWidth: 400
+        )
+        let firstLines = lines.filter { $0.segmentIndex == 0 }
+        let secondLines = lines.filter { $0.segmentIndex == 1 }
+
+        #expect(firstLines.count == 2)
+        #expect(firstLines.first?.utf16Start == 0)
+        #expect(firstLines.last?.utf16End == firstText.utf16.count)
+        #expect(firstLines[0].utf16End == firstLines[1].utf16Start)
+        #expect(firstLines.map(\.text).joined() == "甲😀乙丙丁")
+        #expect(secondLines.count == 1)
+        #expect(secondLines[0].utf16Start == 0)
+        #expect(secondLines[0].utf16End == secondText.utf16.count)
+        #expect(secondLines[0].text == secondText)
+    }
+
+    @Test("reading position resolves and steps across display lines without wrapping")
+    func readingPositionStepsAcrossDisplayLines() throws {
+        let source = "第一行内容第二行内容第三行内容"
+        let segment = TeleprompterSegment(
+            id: "step-source",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+        let lines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: 20,
+            availableWidth: 70
+        )
+        #expect(lines.count > 1)
+
+        let firstPosition = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines[0].utf16Start)
+        let secondPosition = TeleprompterStagePresentation.positionByMovingLine(by: 1, from: firstPosition, lines: lines)
+        #expect(secondPosition == TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines[1].utf16Start))
+        #expect(TeleprompterStagePresentation.positionByMovingLine(by: -1, from: firstPosition, lines: lines) == nil)
+
+        let lastPosition = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines.last!.utf16Start)
+        #expect(TeleprompterStagePresentation.positionByMovingLine(by: 1, from: lastPosition, lines: lines) == nil)
+    }
+
+    @Test("line slots preserve a centered current row at script boundaries")
+    func displayLineSlotsStayCenteredAtBoundaries() {
+        let atStart: [Int?] = [nil, 0, 1]
+        let atMiddle: [Int?] = [3, 4, 5]
+        let atEnd: [Int?] = [8, 9, nil]
+
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 0, visibleCount: 3, totalCount: 10) == atStart)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 3, totalCount: 10) == atMiddle)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 9, visibleCount: 3, totalCount: 10) == atEnd)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 2, totalCount: 10) == [4, 5])
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 1, totalCount: 10) == [4])
+    }
+
+    @Test("stage preferred height grows with configured context and stays bounded")
+    func preferredHeightTracksVisibleRows() {
+        let one = TeleprompterStageGeometryPolicy.preferredContentHeight(
+            visibleLineCount: 1,
+            scriptPointSize: 38,
+            lineSpacing: 6,
+            showsAuxiliaryStatus: false
+        )
+        let two = TeleprompterStageGeometryPolicy.preferredContentHeight(
+            visibleLineCount: 2,
+            scriptPointSize: 38,
+            lineSpacing: 6,
+            showsAuxiliaryStatus: false
+        )
+        let three = TeleprompterStageGeometryPolicy.preferredContentHeight(
+            visibleLineCount: 3,
+            scriptPointSize: 38,
+            lineSpacing: 6,
+            showsAuxiliaryStatus: true
+        )
+
+        #expect(one < two)
+        #expect(two < three)
+        #expect(three <= SpeechRailDesignTokens.Teleprompter.stageMaximumHeight)
         #expect(
-            TeleprompterStagePresentation.visibleSegmentIndices(
-                currentIndex: 1,
-                visibleCount: 2,
-                totalCount: 107
-            ) == [1, 2]
+            TeleprompterStageGeometryPolicy.preferredContentHeight(
+                visibleLineCount: 3,
+                scriptPointSize: 60,
+                lineSpacing: 24,
+                showsAuxiliaryStatus: true
+            ) == SpeechRailDesignTokens.Teleprompter.stageMaximumHeight
+        )
+    }
+
+    @Test("standard zoom frame fills only the available width and caps height")
+    func standardZoomFrameFillsWidthAndCapsHeight() {
+        let visible = CGRect(x: 24, y: 40, width: 1_720, height: 1_040)
+        let frame = TeleprompterStageGeometryPolicy.standardFrame(
+            defaultFrame: CGRect(x: 0, y: 0, width: 1_720, height: 900),
+            visibleFrame: visible
+        )
+
+        #expect(frame.minX == visible.minX)
+        #expect(frame.width == visible.width)
+        #expect(frame.maxY == visible.maxY)
+        #expect(frame.height == SpeechRailDesignTokens.Teleprompter.stageMaximumHeight)
+    }
+
+    @Test("preferred window frame includes titlebar height within the stage cap")
+    func preferredWindowFrameIncludesTitlebarWithinStageCap() {
+        let maximum = SpeechRailDesignTokens.Teleprompter.stageMaximumHeight
+
+        #expect(
+            TeleprompterStageGeometryPolicy.cappedWindowFrameHeight(
+                388,
+                visibleFrameHeight: 1_040
+            ) == maximum
         )
         #expect(
-            TeleprompterStagePresentation.visibleSegmentIndices(
-                currentIndex: 106,
-                visibleCount: 2,
-                totalCount: 107
-            ) == [106]
+            TeleprompterStageGeometryPolicy.cappedWindowFrameHeight(
+                320,
+                visibleFrameHeight: 280
+            ) == 280
         )
         #expect(
-            TeleprompterStagePresentation.visibleSegmentIndices(
-                currentIndex: -1,
-                visibleCount: 2,
-                totalCount: 3
-            ) == [0, 1]
+            TeleprompterStageGeometryPolicy.cappedWindowFrameHeight(
+                320,
+                visibleFrameHeight: 1_040
+            ) == 320
         )
     }
 
@@ -160,8 +332,9 @@ struct TeleprompterStageSettingsTests {
     func stageDefaultsFavorCompactReadingSurface() {
         #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultWidth < 960)
         #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultHeight < 620)
-        #expect(SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleSegmentCount == 1)
-        #expect(SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount == 2)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount == 1)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount == 3)
+        #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultVisibleLineCount == 3)
         #expect(SpeechRailDesignTokens.Teleprompter.stageDefaultOpacity < 0.8)
     }
 
@@ -203,25 +376,6 @@ struct TeleprompterStageSettingsTests {
 
         for _ in 0..<50 { settings.decreaseOpacity() }
         #expect(settings.opacity == SpeechRailDesignTokens.Teleprompter.stageMinimumOpacity)
-    }
-
-    @Test("stage preview supports browsing all segments when requested")
-    func stagePreviewSupportsBrowsingAllSegments() {
-        let indices = TeleprompterStagePresentation.visibleSegmentIndices(
-            currentIndex: 2,
-            visibleCount: 2,
-            totalCount: 5,
-            isBrowsingAll: true
-        )
-        #expect(indices == [0, 1, 2, 3, 4])
-
-        let empty = TeleprompterStagePresentation.visibleSegmentIndices(
-            currentIndex: 0,
-            visibleCount: 2,
-            totalCount: 0,
-            isBrowsingAll: true
-        )
-        #expect(empty.isEmpty)
     }
 
     @Test("pace status calculates steady, brisk, slow, and establishing states")

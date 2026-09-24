@@ -46,6 +46,38 @@ struct TeleprompterStageInteractionPolicyTests {
         #expect(TeleprompterStageInteractionPolicy.controlsVisible(for: visible))
     }
 
+    @Test("reading shortcuts require reading focus and never steal control keys")
+    func readingShortcutFocusPolicy() {
+        #expect(
+            TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+                readingAreaFocused: true,
+                controlFocusInside: false,
+                menuOrPopoverPresented: false
+            )
+        )
+        #expect(
+            !TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+                readingAreaFocused: false,
+                controlFocusInside: false,
+                menuOrPopoverPresented: false
+            )
+        )
+        #expect(
+            !TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+                readingAreaFocused: true,
+                controlFocusInside: true,
+                menuOrPopoverPresented: false
+            )
+        )
+        #expect(
+            !TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+                readingAreaFocused: true,
+                controlFocusInside: false,
+                menuOrPopoverPresented: true
+            )
+        )
+    }
+
     @Test("visibility policy exposes the exact delay contract")
     func visibilityTimingIsStable() {
         #expect(TeleprompterStageInteractionPolicy.initialRevealDuration == .seconds(2))
