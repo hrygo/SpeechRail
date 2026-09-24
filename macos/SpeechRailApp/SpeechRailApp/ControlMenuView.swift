@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SpeechRailControlKit
 
@@ -73,7 +74,7 @@ public struct ControlMenuView: View {
             await model.refresh()
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-settings") {
-                openSettings()
+                revealSettings()
             }
 #endif
         }
@@ -102,7 +103,7 @@ public struct ControlMenuView: View {
     @ViewBuilder
     private var primaryActions: some View {
         Button {
-            openWindow(id: AppNavigationState.controlCenterWindowID)
+            revealControlCenter()
         } label: {
             Label("打开 SpeechRail", systemImage: "macwindow")
                 .speechRailMenuRow()
@@ -110,8 +111,7 @@ public struct ControlMenuView: View {
         .keyboardShortcut("o", modifiers: .command)
 
         Button {
-            navigation.request(.dubbing)
-            openWindow(id: AppNavigationState.controlCenterWindowID)
+            revealControlCenter(for: .dubbing)
         } label: {
             Label("开始配音", systemImage: AppRoute.dubbing.systemImage)
                 .speechRailMenuRow()
@@ -119,8 +119,7 @@ public struct ControlMenuView: View {
         .keyboardShortcut("n", modifiers: .command)
 
         Button {
-            navigation.request(.voiceDesign)
-            openWindow(id: AppNavigationState.controlCenterWindowID)
+            revealControlCenter(for: .voiceDesign)
         } label: {
             Label("音色创作", systemImage: AppRoute.voiceDesign.systemImage)
                 .speechRailMenuRow()
@@ -154,7 +153,7 @@ public struct ControlMenuView: View {
 
             Button {
                 Task { await caption.openBand() }
-                openWindow(id: AppNavigationState.controlCenterWindowID)
+                revealControlCenter()
             } label: {
                 Label("开始实时字幕", systemImage: AppRoute.captions.systemImage)
                     .speechRailMenuRow()
@@ -162,8 +161,7 @@ public struct ControlMenuView: View {
             .disabled(caption.phase.isLive)
 
             Button {
-                navigation.request(.meeting)
-                openWindow(id: AppNavigationState.controlCenterWindowID)
+                revealControlCenter(for: .meeting)
             } label: {
                 Label("开始会议", systemImage: AppRoute.meeting.systemImage)
                     .speechRailMenuRow()
@@ -174,7 +172,7 @@ public struct ControlMenuView: View {
                 Button {
                     session.requestEndCurrentSession()
                     // 带省略号 = 要问一句；窗口不出来的话那个确认没人能回答。
-                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                    revealControlCenter()
                 } label: {
                     Label("结束当前会话…", systemImage: "stop.circle")
                         .speechRailMenuRow()
@@ -192,8 +190,7 @@ public struct ControlMenuView: View {
 
     private var preflightAction: some View {
         Button {
-            navigation.request(.diagnostics)
-            openWindow(id: AppNavigationState.controlCenterWindowID)
+            revealControlCenter(for: .diagnostics)
             Task { await model.refreshPreflight() }
         } label: {
             Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
@@ -265,12 +262,27 @@ public struct ControlMenuView: View {
 
     private var settingsAction: some View {
         Button {
-            openSettings()
+            revealSettings()
         } label: {
             Label("打开设置…", systemImage: "gearshape")
                 .speechRailMenuRow()
         }
         .keyboardShortcut(",", modifiers: .command)
+    }
+
+    /// 菜单栏弹层中的窗口命令显式激活应用，避免窗口已创建但没有呈现在前台。
+    private func revealControlCenter(for route: AppRoute? = nil) {
+        if let route {
+            navigation.request(route)
+        }
+        openWindow(id: AppNavigationState.controlCenterWindowID)
+        NSApp.activate()
+    }
+
+    /// 设置是独立的 SwiftUI Settings scene，也要确保菜单栏应用回到前台。
+    private func revealSettings() {
+        openSettings()
+        NSApp.activate()
     }
 
     private var quitAction: some View {

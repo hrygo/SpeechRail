@@ -31,13 +31,13 @@ public final class TeleprompterSession {
         public var title: String {
             switch self {
             case .noActiveVersion: "还没有可跟读的稿子"
-            case .microphoneDenied: "麦克风不可用"
-            case .serviceNotReady: "语音识别还没准备好"
-            case .serviceBusy: "语音识别正在被其他功能使用"
+            case .microphoneDenied: "麦克风权限受限"
+            case .serviceNotReady: "语音识别服务未就绪"
+            case .serviceBusy: "语音识别正在被其他功能占用"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
-            case .streamFailed: "跟读暂时停了"
+            case .streamFailed: "语音跟读连接中断"
             case .aiUnavailable: "AI 整理暂时不可用"
-            case .storeUnavailable: "稿子保存失败"
+            case .storeUnavailable: "稿件保存失败"
             }
         }
 
@@ -47,12 +47,26 @@ public final class TeleprompterSession {
                 "先确认一份用于跟读的稿子，或直接按原文分段。"
             case .microphoneDenied:
                 "请在系统设置中允许 SpeechRail 使用麦克风，然后再试。你也可以先手动提词。"
-            case .serviceNotReady(let message), .serviceBusy(let message), .streamFailed(let message),
-                 .aiUnavailable(let message), .storeUnavailable(let message):
+            case .serviceNotReady:
+                "语音识别服务暂不可用。稍后重试，或选择手动看稿。"
+            case .serviceBusy:
+                "语音识别正在处理其他任务。稍后重试，或先手动看稿。"
+            case .streamFailed:
+                "语音跟读已中断。当前稿件仍保留，你可以重新连接，或继续手动看稿。"
+            case .aiUnavailable(let message):
+                Self.friendlyAIMessage(message)
+            case .storeUnavailable(let message):
                 message
             case .occupiedBy(let kind):
                 "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
             }
+        }
+
+        private static func friendlyAIMessage(_ raw: String) -> String {
+            if raw.contains("error") || raw.contains("fail") {
+                return "AI 整理服务暂时不可用，你可以直接使用原稿进行跟读，或稍后重试。"
+            }
+            return raw.isEmpty ? "AI 整理服务暂时不可用，可直接使用原稿。" : raw
         }
     }
 
@@ -1385,6 +1399,10 @@ public final class TeleprompterSession {
         syncFollowState()
         phase = .manual
         saveProgress()
+    }
+
+    public func clearBlocked() {
+        blocked = nil
     }
 
     public func resetFollow() async {
