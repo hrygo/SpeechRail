@@ -2,8 +2,8 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.4"
-date: 2026-09-24
+version: "1.5"
+date: 2026-09-25
 ---
 
 # 分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计
@@ -280,8 +280,8 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W1 Realtime / audioop | complete | 移除不可达转换器；137 项 Realtime/caller-wire 回归、定向 Ruff、mypy通过；该阶段验证时使用3.12.14，后续 W2 已独立验证3.14.7候选环境 |
 | W2 Python/runtime | complete | 3.14.7候选 runtime `--only-binary` 安装47个锁定包；MLX/ASR模块导入通过；`uv lock --check`、runtime-lock `--check`、zero-setup语法检查通过；9个定向测试文件352 passed、Ruff与130-file mypy通过。1个既有 Pydantic `mappingproxy` warning；未加载模型或切换正式服务 |
 | W3 App 协议基线 | complete | 保持当前完整文本 wire；生产 transport 仍用 `URLSessionWebSocketTask`，新增 fake-transport seam；TTS 事件关联 request/response identity，隔离旧终态/旧音频并抑制取消后迟到音频。按当前服务端序列化结构构造 fixture；`RealtimeContractTests` 12 passed，三处 App session 文件 `swiftc -frontend -parse` 通过，`git diff --check` 通过。SwiftPM 未 typecheck App session 文件、未做 App 构建/真实服务/音频/UI 验收；输出有 23 个非 target 文件未显式声明警告 |
-| W4 模型层真增量门 | preparation complete / model gate pending | 离线探针输入与报告契约、9项fake契约测试、Ruff/mypy及3.14.7语法检查完成；vendor fork及CustomVoice q8、Base q8/bf16真实增量、EOS和声学/性能验收未执行，等待明确模型加载授权与Base参考素材 |
-| W5–W11 | not started | W4真实模型门通过后按实施指南逐阶段实施；真实模型与逐档性能不得由确定性测试替代 |
+| W4 模型层真增量门 | model gate failed | CustomVoice q8 首 PCM 后追加文本与 ASR 全文通过；Base q8 `aligned` 只有首段发声、`overlay` 提前 codec EOS；Base bf16 catalog 完整性未过门且直接诊断同样只有首段；永久抑制 EOS 会退化重复。vendor HEAD `bcf7c92dff8b8b851773e9ed8b436a4f7a6b5c17` |
+| W5–W11 | stopped at W4 gate | Base 真增量语义在当前 Qwen3-TTS/mlx-audio 0.5.6 实现上不成立；按指南停止生产接入，等待新模型/运行时门或另行批准 Base 分段全文退坡方案 |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 
@@ -291,6 +291,8 @@ W2 的 `requirements/shared.txt` 是 ASR/TTS role lock 的交集元数据，只�
 
 分档差异是方案的一部分：统一 Python/runtime、协议和生命周期，分开 CustomVoice 与 Base 增量实现，分开 q8/bf16 资源与声学验收。提高档位不是天然提高一致性，也不是天然降低延迟。
 
-W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。尚未验证：开放权重在 CustomVoice 与 Base 两条路径上的真增量正确性、Metal 模型推理、缓存内存预算、各档实际首音/取消/RTF、跨文本身份和 bf16 相对收益。这些分别由 B/F 门解决，不用占位实现掩盖。
+W4 真实模型门表明：light/balanced 的 CustomVoice q8 真增量可继续；quality/extreme 的 Base ICL 在当前 runtime 下依赖完整 target text 预填，不能把首 PCM 后的新文本延续为可发声的同一状态。因此本设计原定的四档统一真增量目标不能原样实施，W5–W11 停止。若继续，需二选一并重新评审：切换到具备 stateful text append 的新模型/运行时，或明确接受 Base 固定 clone 的“完整语义段一次性生成”退坡。Python 3.14 与协议基线 W1–W3 不受该失败回滚影响。
+
+W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。W4 已验证 CustomVoice q8 的追加文本内容、首 PCM 与 append→next PCM，并判定 Base q8/bf16 的当前增量条件不成立；尚未验证人耳 A/B、说话人相似度、自然度、真实 worker/协议、取消/重连、长稳 RTF、缓存内存预算和 bf16 相对收益。ASR 只证明内容缺失/一致，不能替代声学身份验收。
 
 本设计已获用户实施授权。进度按 Luna 指南逐阶段维护；本设计通过不代表尚未验证的运行态、声学质量或性能能力已获验收。
