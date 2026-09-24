@@ -18,6 +18,8 @@ description: >-
 | 查询版本、评估 bump | 读取代码/标签并给出 SemVer 建议 | 否 |
 | 明确要求更新版本 | 修改对应版本材料并检查一致性 | 否 |
 | 只构建 wheel/App | 对应构建和产物校验；不自动 bump | 否 |
+| 从 GitHub 制品安装（默认全套） | 制品入口：同一发布的服务 wheel + App，先服务后 App | 服务与 App |
+| 本机 App 替换，用户自行验收 | 第 4 节快路径：备份、替换、静态验证后交还用户 | 仅 App |
 | App 本机验证 | 按请求做静态或非 UI 检查；接管窗口的测试需当前消息明确要求 | 依检查方式而定 |
 | 安装/替换或 bundle 整理 | 仅对指定单元安装、验收或清理，保留回退点 | 是 |
 
@@ -57,7 +59,7 @@ description: >-
 | MAJOR | 有意改变公共契约；当前项目不为旧数据或旧协议自动保留迁移层 |
 
 证据不足时列出待确认的公共影响，不仅凭不确定性提高版本；纯文档通常不单独发版。明确 `service-only`、`app-only` 或 `combined`，不要因
-“配套”扩大 scope。
+“配套”扩大已明确的单项 scope；“从制品安装”按本项目约定默认 combined，见下方制品入口。
 
 版本材料按字段核对：
 
@@ -108,6 +110,21 @@ uvx --python 3.12 --from dist/speechrail-<version>-py3-none-any.whl speechrail i
 模块、assets 和版本，并确认 wheel 能独立提供安装入口（`speechrail install --help` 在仓库外成功执行，
 macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
 
+## GitHub 制品安装（默认全套）
+
+本项目中“从制品安装”“使用 GitHub 制品安装”“安装某个 release/tag/run”默认指 **combined：服务 wheel + macOS App**，
+已有安装授权覆盖这两个单元，不重复询问是否安装服务。只有用户明确说“只装 App”或“只装服务”才缩小范围；
+给出单个资产链接只定位来源，不自动把全套降为单项，缺少另一项时先补齐同一发布的制品，无法补齐则报告阻碍。
+
+按 [GitHub 制品安装 SOP](../../../docs/developers/macos-app-release.md#github-制品安装) 锁定同一发布来源、下载并校验两个制品；
+不转成本地构建，不要求制品与当前工作区版本一致。要求“最新”时在实际安装时查询远端并固定具体版本；
+制品不包含未发布的本地修改，存在这种预期冲突时先澄清。缺失、过期或校验失败时保持原安装，不擅自换版本/run 或触发 CI。
+
+两个制品准备好后，按第 3 节替换并验证 managed 服务，再按第 4 节安装 App；保留服务和 App 两套独立回退点。
+“我来验收”只把交互体验验收交还用户，不免除服务安装后的启动、ready 与身份检查，也不允许只装 App 就报告全套完成。
+服务失败则不进入 App 替换；服务成功、App 失败时只回退 App，并明确报告两者实际状态，不宣称全套成功。
+全套安装不自动切换 profile、下载模型或进行性能/质量基准；缺少必要模型/配置时说明阻碍，不静默扩展操作。
+
 ## 3. 安全替换 managed 服务
 
 用户已要求安装或替换服务时，先读 local-deploy 的
@@ -128,6 +145,19 @@ wheel 替换和 profile 切换分开执行；不要直接使用底层 `launchctl
 
 ## 4. macOS App 构建、安装与清理
 
+### 本机 App 替换快路径
+
+已明确为本机 App-only，且用户说“替换安装，我来验收”或同义请求时，目标是**安装完成、等待用户验收**，不是完整发布验收。
+只读取 [App 安装快路径](../../../docs/developers/macos-app-release.md#本机替换用户自行验收)；已读且未变的材料直接复用，
+不展开服务运维、Developer ID、公证或基准流程，也不重新确认已有安装授权。
+
+- 有与最后一次源码改动对应的成功构建证据和现存产物时直接复用；路径或时间戳只能帮助定位，不能独立证明来源。缺少可信产物才构建一次，不因安装重复跑测试或 bump 版本。
+- 只做必要的候选包检查、旧版归档、正常退出、同文件系统替换及安装后静态校验；具体事务与失败回退见快路径。
+- 不启动新 App、不做 UI/控制链路验收、不查服务运行态、不整理既有 DerivedData；这些不是用户自行验收模式的完成条件。
+- 静态校验通过即报告安装路径、版本和回退点，注明“未启动，待用户验收”，然后停止。不要在安装完成后继续扩展调查而延迟告知结果。
+
+### 构建与其他发布入口
+
 scope 包含 App 构建时读取 [macOS App 分发与签名](../../../docs/developers/macos-app-release.md)，并执行：
 
 ```bash
@@ -143,18 +173,9 @@ plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.c
 时只能交付本地 Debug/Release 测试包，不能称为可分发版本；Distribution 还需逐项验证 nested code、
 Hardened Runtime、notarization、staple、Gatekeeper 和最终 ZIP，不能用 `codesign --deep` 掩盖问题。
 
-安装时退出旧 App，将最终 ZIP 解出的唯一 bundle 放到 `~/Applications/SpeechRail.app`，确认显示名、bundle
-identifier、版本/build 和 control-agent 状态。验收后只清理本次精确 staging、DerivedData、未交付 archive/export
-和旧测试 bundle；用 Finder/废纸篓处理，不做全局 LaunchServices 重置，不删除服务 app home、runtime、模型、
-配置或日志。最后检查：
-
-```bash
-mdfind 'kMDItemCFBundleIdentifier == "com.speechrail.desktop"'
-mdfind 'kMDItemFSName == "SpeechRailApp.app"'
-```
-
-第一查询应只保留唯一安装路径；测试/归档副本应在构建或临时目录清理后消失。若仍有多个
-`SpeechRail.app`，先列出真实路径并逐一判断，不盲删。
+安装与清理按 [App 安装 SOP](../../../docs/developers/macos-app-release.md#安装验收与清理) 的对应分支执行；
+App-only 用户自行验收走上面的快路径；combined 先完成服务安装验证，再复用 App 替换步骤。正式发布保留签名、公证与制品验证要求。只清理本次可确认归属的临时产物，
+既有构建副本的整理需单独覆盖该范围，不把 Spotlight 缓存结果当作安装失败或删除授权。
 
 ## 5. 运行验收、benchmark 与回滚
 

@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.5.4"
-date: 2026-09-20
+version: "0.5.7"
+date: 2026-09-24
 ---
 
 # SpeechRail macOS App 分发与签名
@@ -29,6 +29,8 @@ date: 2026-09-20
 `SpeechRail.app` 退出、更新或注销 control-agent 都不得停止、删除或覆盖 `com.speechrail`、`runtime/current`、selection、模型、私有 `.env` 或日志。服务发布与 App 发布可以独立回滚；联合发布时先完成服务 wheel 的 preflight/运行态验收，再验收 App 控制链路。
 
 ### 发布范围
+
+“从制品安装”默认选择 `combined`；仅在用户明确限定单项时选择 `service-only` 或 `app-only`。
 
 - `service-only`：只构建/安装服务 wheel；服务 PATCH 不因“配套”重建 App。
 - `app-only`：只构建 App；前提是当前服务支持 App 所需的 XPC `schema_version`、固定命令集合和 machine-output 字段。
@@ -144,18 +146,64 @@ shasum -a 256 "/path/outside/repository/SpeechRail-<version>.zip"
 
 ## 安装、验收与清理
 
+### 本机替换：用户自行验收
+
+适用于已授权的本机 Debug/Release App-only 替换，且用户明确自行验收；不适用于 Distribution、服务替换或联合发布。
+完成条件是正确产物已安装、静态校验通过且旧版可恢复，不包含 UI、控制链路或语音质量验收。
+
+1. **定位一次。**核对目标路径（默认 `~/Applications/SpeechRail.app`）、现存候选 bundle 和来源证据。有对应最后一次源码改动的成功构建记录且产物仍在时复用；仅“文件较新”不够。源码变化、产物缺失或来源不明时才构建一次，不重跑已有且仍有效的测试。`macos_app_build.sh` 的普通 build 会清理临时 DerivedData，不能把已清理的验证产物当成可安装包。
+2. **准备并校验。**核对候选显示名、bundle identifier、version/build、目标平台，并执行 `scripts/macos_app_verify_local_xpc.sh <候选 SpeechRail.app>`。旧安装归档到仓库外 ZIP，检查归档完整性并记录哈希；新候选已有 bundle 时无需为了本机替换额外压缩再解压。将候选准备到安装目录同一文件系统的唯一临时父目录，子目录始终叫 `SpeechRail.app`，例如 `<临时父目录>/SpeechRail.app`；验证脚本拒绝其他 bundle 名称。所有暂存路径先确认不覆盖既有内容，失败清理/恢复处理在创建暂存产物前就绪。
+3. **退出并替换。**核实运行中 App 与随包 helper 的实际路径/身份，正常退出旧 App 并有界等待；不能只凭进程名判断归属，也不自动强杀。退出失败则保持旧安装并报告，不循环重试。将旧 bundle 暂存到同文件系统的唯一目录，再把新 bundle 重命名到安装路径；安装或静态校验失败则恢复旧 bundle。始终不触碰服务 runtime、selection、模型或登录项。
+4. **验证并交还。**核对安装路径的身份/version/build、签名与内嵌 XPC，并确认安装内容对应已验证候选；归档后源包未变时不重复计算同一归档哈希。成功后清理本次事务创建的暂存副本，保留旧版 ZIP 回退点。不启动新 App，不查 `/health`、`/readyz`、服务 PID/端口或执行 UI `status`/`preflight`；立即报告“已安装、未启动、待用户验收”、安装路径、版本和回退点，然后停止。
+
+本机开发替换不自动 bump 版本，不代表正式发布通过。既有 DerivedData/归档副本不属于本次替换事务，
+不主动扩大为全盘查找或清理；若发现它们，只区分来源并按用户明确的整理范围处理。安装成功与用户验收通过必须分别表述。
+
+### GitHub 制品安装
+
+本项目的“从制品安装”默认安装**全套：服务 wheel + macOS App（combined）**，不是 App-only。
+只有用户明确要求“只装 App”或“只装服务”才缩小范围；单个资产链接不自动缩小范围，应定位同一发布的配套制品。
+这是安装入口，不是再次发布或本地重建。制品名称与校验文件以
+[Release workflow](../../.github/workflows/release.yml) 和安装时的远端元数据为准：
+
+| 来源 | 锁定的身份 | 全套下载集 |
+|---|---|---|
+| GitHub Release | 确认的仓库、release/tag、对应 commit 和两个目标 asset ID | 同一 release 的 `speechrail-<version>-*.whl`、`SpeechRail-<version>-macOS-arm64.dmg` 与 `SHA256SUMS` |
+| GitHub Actions | 确认的仓库、workflow、run ID/attempt、head SHA 和两个 artifact ID；相关构建/验证成功且 artifacts 未过期 | 同一发布 run 的 `speechrail-wheel`（wheel + `wheel.SHA256`）和 `speechrail-macos-dmg`（DMG + `dmg.SHA256`）；不使用未通过最终验证的 `speechrail-wheel-candidate` |
+
+1. **一次选定。**用户指定 tag/run/asset 就按该来源获取，不改选同名或“最近”产物。仅说 GitHub 安装且未指定来源时优先正式 Release；要求“最新”时查询当时的非草稿、非预发布 Release 并报告所选 tag，再固定两个具体 assets，下载中不继续追逐 latest。预发布或 Actions 按用户指定范围选择；目标不唯一才询问。全套两个制品必须对应同一发布版本和源码身份，不拼接不同 tag/run 的产物。远端制品不含未发布的本地 UI 修改，若用户同时要求安装这些修改，先解决来源冲突。
+2. **成套下载与校验。**使用已连接 GitHub 工具或已有认证的 CLI，将两个制品及校验文件下载到仓库外唯一目录；已缓存的同身份制品通过摘要校验即可复用，不下载无关 artifacts 或源码。Release 从 `SHA256SUMS` 提取两个目标文件各自唯一、精确文件名条目核对 SHA-256；显式单项安装时仅核对该项，不为校验补下未请求的另一项。Actions 若下载 ZIP，仅安全解出目标 artifacts 到临时目录，拒绝越界路径，分别用 `wheel.SHA256` 和 `dmg.SHA256` 校验内层制品；外层 ZIP digest 不能替代内层摘要。校验文件只当数据读取。条目缺失/重复、下载不完整、版本不配套或摘要不符时停止，尚不退出 App 或停止服务。
+3. **提前准备两个候选。**核对 wheel 的包身份/版本与所选发布证据；用 `hdiutil attach -readonly -nobrowse` 将 DMG 挂载到本次唯一挂载点，预设失败时 detach。将卷内 `SpeechRail.app` 准备到安装目录同一文件系统的暂存父目录，bundle 名保持 `SpeechRail.app`；核对其身份/version/build、平台、签名与内嵌 XPC。DMG 的 `Applications` 链接不改变默认 `~/Applications/SpeechRail.app` 目标。版本与所选 release/tag 或 run 证据对应，不与当前工作区 `pyproject.toml` 强行比较。无需重打 ZIP、重签名、pull/切换源码或本地重建/跑测试。
+4. **先服务，再 App。**两个制品准备好后，按 [发布 Skill 第 3 节](../../.agents/skills/speechrail-release/SKILL.md#3-安全替换-managed-服务) 与 operator contract 确认 managed runtime、活动请求/客户端及回退点，使用受支持的安装入口替换服务、启动并验证 ready 和身份；不套用 App-only 跳过服务检查的规则。服务通过后，复用上方 App 快路径第 2 步的旧版备份及第 3–4 步替换/静态验证，跳过已完成的候选检查和本地构建定位。显式单项请求只执行对应事务。“我来验收”不取消服务安装验证，但 App 交互/视觉验收由用户进行，不自动启动 App 或执行 UI 自动化。
+5. **按单元收尾。**服务失败则停止，不替换 App，按服务回滚流程处理；服务成功、App 失败则只恢复旧 App，不自动回退已通过的服务。卸载本次 DMG、清理本次暂存，保留两套回退点、来源/tag 或 run/artifact 身份和两个制品哈希；卸载失败单独报告，不强制卸载其他卷。立即分别报告服务版本与 ready/身份结果、App 版本与安装结果、回退点和待用户验收项；任何一项失败都不能报告“全套安装完成”。
+
+全套安装不自动切换 profile、下载模型、注册全新服务或执行性能/质量基准；全新机器另走首装流程，
+缺少必要模型/配置时说明阻碍，不静默改变用户运行配置。必要 smoke 仍按原授权范围执行，不把 ready 当作质量验收。
+当前工作流交付 ad hoc App，同源 checksum 证明完整性，不等于 Developer ID 身份、公证或 Gatekeeper 放行。
+不得删除 quarantine、关闭 Gatekeeper 或重签名绕过安全提示；遇到阻止时说明来源和签名状态，交由用户按系统流程决定。
+制品缺失、过期或构建未完成时保持原安装，报告具体阻碍；不无限轮询、不擅自 rerun workflow、
+换 run/版本、改为本地重建或只装其中一项充当全套。
+
+### 正式发布与另行授权的运行验收
+
+以下按发布单元及验收授权选用，不是本机替换的必跑清单。UI 自动化仍须当前用户明确要求；
+未获 UI 验收授权时交由用户执行，不因 SOP 步骤自行接管窗口。
+
 1. 联合发布先完成服务的 `/health`、`/readyz`、`/v1/models`、`/v1/voices` 和目标 smoke；App 不能替代服务验收。
 2. 退出旧 `SpeechRail.app`，将最终 ZIP 解出到临时目录，确认 bundle identity/version 后，只安装一个 bundle 到用户路径 `~/Applications/SpeechRail.app`；若使用其他路径，必须在 evidence 中明确记录。上一版本保留为 ZIP/归档制品，不作为第二个长期可执行 `.app`。
-3. 打开同一路径的 App，确认显示名、bundle identifier、version/build 和 control-agent 状态；用 UI 执行一次 `status`/`preflight` 只读控制，必要的 mutation 必须有单独授权。Debug/Release 应验证内嵌 `com.speechrail.desktop.local-control.xpc`；签名 Distribution 才通过 `SMAppService` 管理 `com.speechrail.desktop.control`。两种模式都不手工复制 plist、不直接调用 `launchctl`。
-4. 关闭 App 后再次检查 `com.speechrail`、唯一 8201 listener、`/health` 和 `/readyz`；App/Agent 退出不能停止服务。
-5. 清理本次精确 staging、DerivedData、`build/macos-derived-data`、未交付 archive/export 和旧测试 bundle；保留最终 ZIP、哈希、签名/公证结果及脱敏 evidence。不要删除服务 app home、`runtime/releases`、模型、selection、私有配置或日志，也不要全局重置 LaunchServices。
+3. 在运行验收范围已获授权时打开同一路径的 App，确认显示名、bundle identifier、version/build 和 control-agent 状态；用 UI 执行一次 `status`/`preflight` 只读控制，必要的 mutation 必须有单独授权。Debug/Release 应验证内嵌 `com.speechrail.desktop.local-control.xpc`；签名 Distribution 才通过 `SMAppService` 管理 `com.speechrail.desktop.control`。两种模式都不手工复制 plist、不直接调用 `launchctl`。
+4. 联合发布或明确要求检查服务独立运行时，关闭 App 后再次检查 `com.speechrail`、唯一 8201 listener、`/health` 和 `/readyz`；App/Agent 退出不能停止服务。
+5. 按已授权范围清理本次可确认归属的 staging、DerivedData、`build/macos-derived-data`、未交付 archive/export 和旧测试 bundle；保留最终 ZIP、哈希、签名/公证结果及脱敏 evidence。不要删除服务 app home、`runtime/releases`、模型、selection、私有配置或日志，也不要全局重置 LaunchServices。
 
 ```bash
 mdfind 'kMDItemCFBundleIdentifier == "com.speechrail.desktop"'
 mdfind 'kMDItemFSName == "SpeechRailApp.app"'
 ```
 
-清理后第一条查询只应保留唯一安装路径（默认 `~/Applications/SpeechRail.app`），第二条应为空。Finder 仍出现多个 `SpeechRail.app` 时，先逐一列出实际路径，区分已安装 bundle、Xcode DerivedData、仓库 build 和解压 staging，再清理精确测试副本；旧 `SpeechRailApp` 命名出现时视为发布失败。
+上面的 Spotlight 查询用于已授权的 bundle 整理，不是本机替换的默认门禁。清理本次产物后核对唯一安装路径
+（默认 `~/Applications/SpeechRail.app`）；搜索结果可能仍含既有构建副本或缓存，须核实实际路径和存在性，
+不能仅据此判定安装失败。Finder 出现多个 App 时，区分安装、DerivedData、archive/export 与 staging，
+只处理已确认归属且获授权的副本，不盲删。正式交付包仍不得使用旧 `SpeechRailApp.app` 命名。
 
 ## 回滚
 
@@ -163,7 +211,7 @@ mdfind 'kMDItemFSName == "SpeechRailApp.app"'
 - **服务-only 失败**：按 [版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md) 恢复旧 `runtime/current`、selection 和 LaunchAgent；不要为了服务回滚删除 App。
 - **联合发布失败**：服务验收通过而 App/XPC 失败时只回滚 App；服务失败时先恢复服务，再按需要恢复兼容 App。不能用 App 回滚替代服务回滚，也不能因 App 安装失败删除服务数据。
 
-回滚后重新执行 App version/build、helper 状态、唯一安装路径、App 退出后服务独立运行，以及服务 health/ready 检查。保留失败制品和原因摘要。
+回滚验证仍按原任务范围：App-only 用户自行验收只复核安装路径、version/build、签名与内嵌 XPC，保持 App 未启动；运行验收或联合发布才执行已授权的 helper/服务独立运行与 health/ready 检查。保留失败制品和原因摘要。
 
 ## 参考
 
