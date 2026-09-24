@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.3"
+version: "1.4"
 date: 2026-09-24
 ---
 
@@ -172,7 +172,9 @@ date: 2026-09-24
 
 **拟新增：** `tools/probe_tts_incremental.py`、`tests/test_tts_incremental_probe_contract.py`；vendor本地受控checkout不在此仓库冒充已有路径。
 
-vendor 定点范围（基于核实的 v0.5.6）：`mlx_audio/tts/models/qwen3_tts/qwen3_tts.py`、`talker.py`、`speech_tokenizer.py`，必要时新增该目录的 `incremental.py`。Qwen3TTSBatchSession 不用于代替 append。
+vendor 定点范围（基于核实的 v0.5.6）：`mlx_audio/tts/models/qwen3_tts/qwen3_tts.py`、`talker.py`、`speech_tokenizer.py`，必要时新增 `incremental.py` 与仅供模型门使用的 `incremental_probe.py`。Qwen3TTSBatchSession 不用于代替 append。
+
+**探针适配契约（已用于离线工具）：** `incremental_probe.py` 导出 `__speechrail_vendor_commit__` 与 `open_probe_session(..., local_files_only=True)`；返回的 session 提供 `append_text`、`finish_input`、有界 `step(max_steps)`、`cancel`、`close`，并暴露 `generation_identity`、`initial_prefill_count`、`sample_rate`、`peak_memory_bytes`。事件仅接受 PCM16、等待文本、完成或错误；这是 W4 的验证 SPI，不是 SpeechRail 生产 API。工具设置 Hub/Transformers offline 环境变量并传递 `local_files_only=True`；fork 必须遵守，尚需在真实模型门确认无远程回退。
 
 1. 基于明确 tag/commit建立可恢复候选 checkout，不修改安装目录。具体fork远端地址、commit、wheel版本/hash必须来自实际创建结果，本文不编造；远端创建/发布另获授权。
 2. 明确 CustomVoice 文本条件与 Base ICL prompt/pre-fill/trailing-text 布局，记录准确 token/position关系。不能把纯文本 token直接追加到混合声学 KV。
@@ -506,8 +508,8 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W0｜单仓只读基线与写集归属**：基线 `25d4416f`；分支 `codex/tiered-streaming-tts-python314`；README/用户文档及三处 macOS 工作区改动均保留，阶段写集与其不重叠。
 - [x] **W1｜Realtime导入与采样契约**：移除不可达 `audioop`/24→16 kHz converter 与影子 sample-rate 配置；保留固定 16 kHz PCM16 wire。验收：`tests/test_realtime_openai.py` + `tests/test_realtime_caller_wire.py` 137 passed；定向 Ruff、mypy 及 diff check 通过。当前运行解释器是 3.12.14；缺失 audioop 导入由测试注入模拟，尚未证明 CPython 3.14 全依赖运行。
 - [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
-- [ ] **W3｜App协议与测试基线**：保持当前wire，建立传输/解析seam与response关联；SwiftPM纯测试可运行。
-- [ ] **W4｜模型门**：分别提交CustomVoice q8、Base q8/bf16探针与vendor制品身份；真增量不成立则停止下游并报告。
+- [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
+- [ ] **W4｜模型门（准备未等于通过）**：离线探针契约与安全输入/报告骨架已完成；vendor扩展、CustomVoice q8 / Base q8 / Base bf16真实增量与安全EOS尚未证明，必须过模型门后才能进入W5。
 - [ ] **W5｜领域与身份**：新增tts_stream port/state/limits；profile与reference租约、跨精度cache隔离通过。
 - [ ] **W6｜worker全双工**：单模型owner、单父端reader、有界队列与协作取消；fake IPC与旧ASR/TTS回归通过。
 - [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
@@ -524,5 +526,14 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - Python 3.14.7 候选环境回归：`352 passed`；`ruff check src tests tools/update_runtime_lock.py` 通过；`mypy src` 对 130 个源文件通过。测试输出有一个既有 Pydantic `mappingproxy` serializer warning，未将其误记为失败或静默屏蔽。
 - **Ruling：** `requirements/shared.txt` 仅记录 ASR/TTS 锁的交集，用于 runtime 元数据与 hash 校验；它不是安装输入。当前 ASR/TTS 共用一个 Python 环境，bootstrap 对两个 role lock 在同一次 `uv pip sync` 中合并安装，因此 ASR-only/TTS-only 依赖仍会保留；交集清单不会减少实际安装包数。若要按 role 隔离依赖，需另行拆分运行环境，不属于 W2。
 - **未验收：** 未在正式 app home 执行安装/切换；未加载模型，未验证 Metal 推理、真实音色、增量生成、延迟或任何档位的质量/性能。
+
+
+### W4 离线探针准备记录（2026-09-24）
+
+- 新增 `tools/probe_tts_incremental.py` 与 `tests/test_tts_incremental_probe_contract.py`：要求显式本地绝对模型路径、catalog artifact key、variant/precision、仓库外新输出目录和 schedule；Base 必须给仓库外 reference audio + transcript。探针先校验 catalog 文件大小与 SHA-256，再导入 pinned vendor extension；设置 Hub/Transformers offline 环境变量并传入 `local_files_only=True`，实际远程回退由fork真实验收；不下载模型。
+- 成功或生成期失败均将脱敏报告落至仓库外 `report.json`，并保存完整/部分 `probe.wav`；报告包含 artifact manifest 摘要哈希、校验文件数、精度结构、分块/terminal/耗时/资源摘要和稳定失败码，不包含模型路径、speaker、reference transcript、输入 schedule 原文或 generation identity 原值。通过只记为 `streaming_contract_passed`，且 `correctness_review=pending_manual_audio_review`，不得当作音色/自然度验收。
+- 验证：探针契约测试 `9 passed`（当前 `.venv` CPython 3.12.14）；定向 Ruff 与 `.venv` mypy（131 个源码文件）通过；CPython 3.14.7 `py_compile` 通过，CLI `--help` 可用。未在3.14.7候选开发环境重跑本轮 pytest/mypy。
+- **Ruling：** 先固定 probe-only SPI，再写模型代码，可让真实门只接受同一generation identity、单次initial prefill、首PCM之后append、append后有新PCM及安全terminal；代价是fork必须实现该SPI，但它不构成生产API或已验证模型能力。
+- **未完成/阻塞门：** 尚未创建/修改vendor checkout、未加载任何模型、未产生真实报告，也未验证声学正确性、性能或资源峰值。真实模型验收前需用户明确授权加载已存在的 CustomVoice q8、Base q8、Base bf16；Base 参考音频与对应文本需由用户指定。此授权不包含下载模型、启动/切换服务或UI自动化。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
