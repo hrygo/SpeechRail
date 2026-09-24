@@ -801,7 +801,9 @@ def _cache_path(
     registered = _registered_destination_entries(
         registry, app_home, artifact.key, destination
     )
-    if registered and not any(_entry_content_matches_artifact(entry, artifact) for entry in registered):
+    if registered and not any(
+        _entry_content_matches_artifact(entry, artifact) for entry in registered
+    ):
         return None
     if _verify_snapshot(destination, artifact):
         return destination

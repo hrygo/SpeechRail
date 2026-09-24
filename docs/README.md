@@ -20,9 +20,9 @@ date: 2026-09-23
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-23）
+## 当前实现基线（2026-09-24）
 
-- 当前源码 release 为 SpeechRail `3.2.0`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
+- 当前源码 release 为 SpeechRail `3.2.1`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
 - Realtime 已切换为 current-only 无状态 Speech Plane；调用方拥有 LLM、历史、memory、tools、播放和 barge-in，服务端只交付 ASR/VAD/匿名分人事实与显式 TTS render。
 - `/health`、`/readyz` 和 `/v1/models` 只报告当前 profile、worker 和可选能力的实时状态；不得把某一台机器的一组 readiness 值写成所有安装的固定承诺。
 - Realtime `server_vad` 只交付端点事实。endpointing 窗口、播放队列和 barge-in 决策由调用方负责，不是 SpeechRail 的全局业务默认值。
