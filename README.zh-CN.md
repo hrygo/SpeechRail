@@ -67,7 +67,7 @@ SpeechRail 面向由多款本地客户端共享的一台 Apple Silicon Mac。它
 | `/v1/jobs` | 异步任务元数据 | 可选的 owner-scoped 持久任务记录；调用方提供不透明引用，不传原始音频或转写文本。 |
 | `speechrail-mcp` | Agent 接入 | 支持 `stdio` 或 `streamable-http` 的无状态 MCP 代理；它调用本地 REST 服务，不托管模型。 |
 
-讲话人分离仅在当前 `balanced`、`quality` 或候选 `extreme` profile 的本地 CoreML 资源就绪时
+讲话人分离仅在任务显式 opt-in，且本地 CoreML Sortformer 与点名 aligner 都已供给并就绪时
 可用。它只返回会话范围内的匿名标签，不识别人名，也不维护跨会话讲话人数据库。
 
 仓库还包含 `macos/SpeechRailApp` SwiftUI macOS 控制面。它读取服务状态，
@@ -115,7 +115,8 @@ cd ~/Downloads
 shasum -a 256 -c SHA256SUMS
 uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
-  --preset balanced \
+  --asr-spec quality \
+  --tts-spec quality \
   --yes \
   --enable
 ```
@@ -137,7 +138,8 @@ preflight、原子切换 `runtime/current`，并在 `--enable` 下注册、启�
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh --yes --preset balanced
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
+  --yes --asr-spec quality --tts-spec quality
 ```
 
 受管流程会准备隔离运行时、校验所选本地制品，并注册用户级 `LaunchAgent`。
@@ -234,26 +236,24 @@ ws://127.0.0.1:8201/v1/realtime
 SDK、cURL、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
 [`docs/users/integrations.md`](docs/users/integrations.md)。
 
-## 模型 profile
+## 模型规格
 
-不同 profile 共享公共 API 形状，但对外声明的能力取决于当前 catalog selection。
-profile 枚举包含候选 `extreme`；其正式启用仍受质量、资源和延迟证据门槛限制。BF16 权重类型
-本身不代表质量更高。
+不同规格共享公共 API 形状，ASR 与 TTS 可以分别选档；对外声明的能力取决于当前 catalog
+selection 与 readiness。BF16 权重类型本身不代表质量更高。
 
-| Profile | ASR | TTS | 分人与音色能力 |
+| 规格 | ASR | TTS 角色 | 分人与音色能力 |
 |---|---|---|---|
-| `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | 无 aligner、无分人；固定 CustomVoice 角色。 |
-| `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8`，可选匿名分人；固定 CustomVoice 角色。 |
-| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`，可选匿名分人、VoiceDesign 试听/设计和质量门控 Base 克隆。 |
-| `extreme`（候选） | `asr-1.7b-bf16` | `tts-1.7b-design-bf16` + `tts-1.7b-base-bf16` | 复用 `aligner-bf16`；候选 catalog 配置了分人与两种 TTS 能力；质量、资源和延迟证据仍待补齐。 |
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice 系统声音与 Base reference clone；分人需显式供给 Sortformer + aligner。 |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice 与 Base 角色；分人需显式供给。 |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + 仅设计作业使用的 `tts-1.7b-design-bf16` | bf16 制品继承同族 8-bit 门禁证据，未在本机单独复测；VoiceDesign 不进入普通合成。分人仍需显式供给。 |
 
-当前活动 profile 的 ASR/TTS 权重均为 8-bit；`quality` 使用 `aligner-bf16`，候选 `extreme` 的权重与 aligner 为 bf16。
-`quality` 与候选 `extreme` 将 VoiceDesign 和 Base 作为独立 TTS capability lane，可双 worker 常驻，
-不同 lane 可并发、同一 lane 仍串行；能力组仍会在配置的空闲冷却后关闭 worker，并按需惰性恢复。
+每个规格都把系统声音路由到 `custom_voice`、把参考克隆路由到 `base`；`reference` 另绑定仅用于
+设计作业的 `voice_design`。不同 lane 可并发，同一 lane 仍串行；能力组仍会在配置的空闲冷却后
+关闭 worker，并按下一个请求实际需要的角色惰性恢复。
 
-![四档模型与 TTS capability 关系图](docs/architecture/diagrams/four-tier-model-architecture.svg)
+![三档模型与 TTS capability 关系图](docs/architecture/diagrams/three-tier-model-architecture.svg)
 
-上图展示 profile 路由、模型共享、TTS capability 与共享资源/生命周期边界；旧版三档图仅作历史基线。
+上图展示规格路由、角色绑定、模型共享、TTS capability 与共享资源/生命周期边界。
 
 CLI 的 `setup` 会根据物理内存给出起始建议，但这不是硬件保证。使用 CLI 查看
 或切换受管 selection：
@@ -263,13 +263,17 @@ SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
 SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 "$SPEECHRAIL_CLI" profile list --app-home "$SPEECHRAIL_APP_HOME"
 "$SPEECHRAIL_CLI" profile status --app-home "$SPEECHRAIL_APP_HOME"
-"$SPEECHRAIL_CLI" profile apply balanced --app-home "$SPEECHRAIL_APP_HOME" --yes
+"$SPEECHRAIL_CLI" profile apply \
+  --asr-spec quality \
+  --tts-spec quality \
+  --app-home "$SPEECHRAIL_APP_HOME" \
+  --yes
 "$SPEECHRAIL_CLI" profile rollback --app-home "$SPEECHRAIL_APP_HOME" --yes
 ```
 
-请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有 profile 上都
-可用。VoiceDesign 试听/设计和 Base 克隆能力由当前有效能力决定；候选 catalog 为
-`quality` 和 `extreme` 配置了这些能力，但 Extreme 正式启用所需的质量、资源与延迟证据仍待补齐。
+请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有规格上都可用。
+VoiceDesign 试听/设计和 Base 克隆能力由当前有效能力决定；VoiceDesign 只绑定 `reference`，
+CustomVoice 与 Base 在每个规格中都存在。
 详见
 [`docs/users/api-contract.md`](docs/users/api-contract.md)。
 

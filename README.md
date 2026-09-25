@@ -71,8 +71,8 @@ It is a good fit when you need:
 | `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
 | `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it reports current REST capabilities, does not host models, and never switches profiles. |
 
-Speaker diarization is available only when the active `balanced`, `quality`, or
-candidate `extreme` profile has its local CoreML assets ready. It returns
+Speaker diarization is available only when the task explicitly opts in and both
+the local CoreML Sortformer bundle and a named aligner are ready. It returns
 session-scoped anonymous labels; it does not identify people or maintain a
 cross-session speaker database.
 
@@ -134,7 +134,8 @@ cd ~/Downloads
 shasum -a 256 -c SHA256SUMS
 uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
-  --preset balanced \
+  --asr-spec quality \
+  --tts-spec quality \
   --yes \
   --enable
 ```
@@ -163,7 +164,8 @@ git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
   --yes \
-  --preset balanced
+  --asr-spec quality \
+  --tts-spec quality
 ```
 
 Read the [zero-setup guide](.agents/skills/speechrail-zero-setup/SKILL.md)
@@ -265,30 +267,29 @@ be confirmed by `transcription_session.updated` before the first PCM frame.
 For SDK, cURL, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
 [`docs/users/integrations.md`](docs/users/integrations.md).
 
-## Model profiles
+## Model specs
 
-The public API payload shape is shared across profiles, but the advertised
-capability set follows the active catalog selection. Profile enums include the
-candidate `extreme`; formal activation is blocked pending quality, resource,
-and latency evidence. BF16 weight dtype does not establish a quality ranking.
+The public API payload shape is shared across specs, and ASR/TTS can select
+different tiers. The advertised capability set follows the active catalog
+selection and current readiness; BF16 weight dtype does not establish a quality
+ranking.
 
-| Profile | ASR | TTS | Diarization and voice behavior |
+| Spec | ASR | TTS roles | Diarization and voice behavior |
 |---|---|---|---|
-| `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | No aligner and no diarization; fixed CustomVoice roles. |
-| `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8` and optional anonymous diarization; fixed CustomVoice roles. |
-| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`, optional anonymous diarization, VoiceDesign preview/design, and quality-gated Base cloning. The two TTS capability workers may stay resident and different lanes may run concurrently; each lane remains serialized. |
-| `extreme` (candidate) | `asr-1.7b-bf16` | `tts-1.7b-design-bf16` + `tts-1.7b-base-bf16` | Reuses `aligner-bf16`; catalog configures diarization and the two TTS capabilities. Quality, resource, and latency remain unverified. |
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice system voices and Base reference clone; diarization requires explicit Sortformer + aligner provisioning. |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice and Base roles; diarization requires explicit provisioning. |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + design-only `tts-1.7b-design-bf16` | Reference precision inherits the same-family 8-bit gates and was not separately retested; VoiceDesign is excluded from ordinary synthesis. Diarization still requires explicit provisioning. |
 
-`quality` and candidate `extreme` keep VoiceDesign and Base as independent TTS capability lanes. They do
-not need to be repeatedly loaded and unloaded when switching voice workflows;
-the capability group can still trim/close both workers after the
-configured idle cooldown and restore them lazily for the next request.
+Every spec routes system voices through `custom_voice` and reference cloning
+through `base`; `reference` additionally binds `voice_design` for design jobs.
+Different lanes may run concurrently while one lane remains serialized. The
+capability group can still trim/close workers after the configured idle
+cooldown and restore the roles needed by the next request lazily.
 
-![Four-tier model and TTS capability relationship](docs/architecture/diagrams/four-tier-model-architecture.svg)
+![Three-spec model and TTS capability relationship](docs/architecture/diagrams/three-tier-model-architecture.svg)
 
-The diagram is the current overview of profile routing, model sharing, TTS
-capabilities, and the shared resource/lifecycle boundary. The older three-tier
-diagram remains as a historical baseline.
+The diagram is the current overview of spec routing, role binding, model
+sharing, TTS capabilities, and the shared resource/lifecycle boundary.
 
 Use the CLI to inspect or change a managed selection. `setup` provides a
 memory-based starting suggestion; it is not a hard hardware guarantee.
@@ -298,15 +299,18 @@ SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
 SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 "$SPEECHRAIL_CLI" profile list --app-home "$SPEECHRAIL_APP_HOME"
 "$SPEECHRAIL_CLI" profile status --app-home "$SPEECHRAIL_APP_HOME"
-"$SPEECHRAIL_CLI" profile apply balanced --app-home "$SPEECHRAIL_APP_HOME" --yes
+"$SPEECHRAIL_CLI" profile apply \
+  --asr-spec quality \
+  --tts-spec quality \
+  --app-home "$SPEECHRAIL_APP_HOME" \
+  --yes
 "$SPEECHRAIL_CLI" profile rollback --app-home "$SPEECHRAIL_APP_HOME" --yes
 ```
 
 Select voices from `/v1/voices` rather than assuming that a registered custom
-voice is usable on every profile. VoiceDesign preview/design and Base clone
-availability follow the current effective capability; the candidate catalog
-configures these capabilities for `quality` and `extreme`. The quality and
-resource gates for formal Extreme activation remain open. See
+voice is usable on every spec. VoiceDesign preview/design and Base clone
+availability follow the current effective capability; VoiceDesign is bound only
+to `reference`, while CustomVoice and Base are bound in every spec. See
 [`docs/users/api-contract.md`](docs/users/api-contract.md).
 
 ## Security and data handling
