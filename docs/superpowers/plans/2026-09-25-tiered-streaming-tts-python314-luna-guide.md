@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.13"
+version: "1.14"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W9 已交付，继续 W10–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付，继续 W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -683,3 +683,11 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **`AssistantTTSStreamCoordinator`（拟新增，已落地）：** 拥有 requestID/responseID、`acceptedSequence`、`inputClosed`、终态、ledger 与 replyGeneration；文本泵在**单个** Task 内按序发送并等 ACK，`finish_text` 只在最后一段被 ACK 之后发出（"LLM 完成事件不能越过未确认文本提前 finish"）。等待 started/ACK 的 continuation 按 request 身份存放，终态、断线、取消都会 resume，且只 resume 一次。
 - **播放背压：** 音频入队前先预约样本预算；超预算时等待 completion / 取消 / 2 秒超时，超时以明确失败收束（不无限积压）；`enqueuePlayback` 返回 `false` 时立刻归还预算。
 - **AssistantSession 接线：** `runReply` 的朗读路径不再逐句 `create`——第一批有效文本 `begin` 一次，后续 `offer(delta)`，LLM 流结束后 `finishInput()`；屏幕、history 与 SQLite 仍然只用**原始** LLM 文本，朗读清洗只在协调器的 `cleanForSpeech` 里做一次。服务端明确拒绝增量时只停朗读并报错，**不静默退回旧队列**。`stopSpeaking`/`stopCapture`/`handleUnexpectedClose`/插话都走协调器 `cancel`/`invalidate`；`replay` 的完整文本路径与进行中的增量 utterance 互斥。临时 drained 不再把相位提前退回 listening（由协调器终态判定）。
+
+### W10 实施与验收记录（2026-09-25）
+
+- **后端四档矩阵：** 新增 `tests/test_tts_stream_capability_matrix.py`（13 项）。light/balanced 的 `serena` 走 `custom_voice` speaker 且 `supported=true`；quality/extreme 的同一内置名走 `voice_design`，reason=`variant_not_supported`。已注册的 clone 在 light/balanced 上 `artifact_available=false`、reason=`voice_disabled`，在 quality/extreme 上 `voice_variant=base` 且 `supported=true`，不会把 clone 悄悄换成“相近内置声音”。`/v1/models` 的 `streaming_input` 只报告 `scope=per_voice` 与实现轴，绝不出现模型级 `supported`。
+- **App 能力 DTO：** `CreatorServiceClient.swift` 新增 `VoiceStreamingCapability` / `VoiceStreamingAxes`，`CreatorVoice.streaming` 缺失即为 `nil`（旧服务按未知处理），未声明的轴一律 `false`/`nil`；`ServiceModelCapabilities` 增加 `supportsStreamingInput` 与 `streamingProtocolNegotiated`，`/v1/models` 的 `capabilities.streaming_input` 只映射实现轴。纯映射测试 `StreamingTtsCapabilitiesTests.swift` 7 项通过。
+- **分档呈现：** `AssistantView` 的声音卡新增「边想边说 / 普通朗读」状态与按 reason 分支的用户语言说明；下拉列表每个音色带可/不可增量标签。quality/extreme 遇 instruction-only 声音时提示“先固定成克隆音色”，light/balanced 遇 clone 提示换预置声音，均不静默替换音色。
+- **切换保护：** `ModelManagementView` 在 `assistant.phase.isLive`（听/想/说）期间禁用「应用此档位」并说明“先结束这一轮或点停止”，确认对话框的动作入口也再挡一次，避免排队确认跨过助手开始说话的瞬间；切档不后台热切，用户显式停止后仍走既有受控流程。
+- **验证边界：** 确定性证据为 `swift test`（XCTest 214 passed，含新增 7 项；Swift Testing 135 passed）与主仓定向 pytest 55 passed、新增文件 13 passed；App 全量 `swiftc -typecheck` 通过（仅既有 `maxTokens` deprecation warning）。未做：App 构建/安装、真实服务、真实模型、可听延迟、UI 自动化（均未授权）。
