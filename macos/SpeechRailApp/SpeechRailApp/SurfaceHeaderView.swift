@@ -42,7 +42,10 @@ public struct WorkspaceTitleLockup: View {
         // Keep unusually long localized titles inside the fixed toolbar slot;
         // the text already uses a single line and tail truncation above.
         .clipped()
-        .id(route.id)
+        // 标题槽切路由时直接换字、不播插入过渡：之前这里的 `.id(route.id)`
+        // 会让每次侧栏切换都被当成旧标题移除 + 新标题插入，播一次默认
+        // push/fade（“飘入”）。同 struct 就地更新 + transaction 禁动画 = 瞬切。
+        .transaction { $0.animation = nil; $0.disablesAnimations = true }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(route.title)
         .accessibilityIdentifier("workspace-title")
