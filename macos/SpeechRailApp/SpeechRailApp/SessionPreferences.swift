@@ -365,11 +365,6 @@ public final class SessionPreferences {
         }
     }
 
-    /// 分人的**档位门禁**：`light` 档没有 aligner，不给分人（§14.3）。
-    ///
-    /// 读不到档位时**不拦**：那时由服务端来判（它会回 `diarization_not_available`），
-    /// 客户端凭一个未知值去禁用开关，会把"读不到"说成"不支持"。
-    /// 返回的是一句能直接写给用户的人话——开关置灰时必须说得出原因。
     private enum Key {
         static let llmBaseURL = "speechrail.llm.baseURL"
         static let llmModel = "speechrail.llm.model"

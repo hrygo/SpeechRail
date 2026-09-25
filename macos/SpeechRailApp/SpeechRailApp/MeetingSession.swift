@@ -413,7 +413,7 @@ public final class MeetingSession {
             interruptedAt = nil
             interruptionNote = nil
         }
-        configureLabeling(sessionID: sessionID, enabled: wantsDiarization, gateNote: nil)
+        configureLabeling(sessionID: sessionID, enabled: wantsDiarization)
 
         epoch += 1
         commitCursor = Date()
@@ -433,10 +433,9 @@ public final class MeetingSession {
         startPump(stream: stream, client: client)
     }
 
-    private func configureLabeling(sessionID: String?, enabled: Bool, gateNote: String?) {
+    private func configureLabeling(sessionID: String?, enabled: Bool) {
         guard let sessionID else { return }
         labeling.begin(sessionID: sessionID, enabled: enabled)
-        if let gateNote { labeling.markUnavailable(note: gateNote) }
     }
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
@@ -786,7 +785,7 @@ public final class MeetingSession {
         case "backend_busy":
             "语音服务同时在跑的会话已经满了。已经定稿的文字记录都还在。"
         case "diarization_not_available":
-            "这一档不标说话人；正文照常记录。"
+            "这场没有标出谁在说话；正文照常记录。"
         default:
             "\(code)：\(message)"
         }

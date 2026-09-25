@@ -83,10 +83,10 @@ public struct SpeakerLabelingPanel: View {
     private var unavailable: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("这台 Mac 现在的设置不标说话人")
+                Text("这场没有标出谁在说话")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(labeling.note ?? "正文照常记录；换成更准的一档之后，新开的会话就会有说话人。")
+                Text(labeling.note ?? "正文照常记录；要标出说话人，需要先在本机准备好说话人分离，并在开会前打开这个开关。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
