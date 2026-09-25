@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 运行时评估：mlx-qwen3-asr 端到端、性能与清理"
 status: superseded
-version: "1.3.0"
-date: 2026-09-23
+version: "1.4.0"
+date: 2026-09-26
 ---
 
 > 本文状态为 `superseded`。上文数字与 E1 结果是其记录日期下的历史测量；当前能力与启用门禁以
@@ -108,33 +108,31 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
   `service stop` → 恢复 `runtime/current` → `service start`；worker venv 死依赖
   可 `uv pip install qwen-asr==0.0.6 qwen3-asr-causal==0.1.0` 复原。
 
-## 7. 当前档位评估框架（四档 catalog v2，2026-09-23）
+## 7. 当前规格评估框架（三档 specs，2026-09-26）
 
 > 本节定义当前目录的评估口径，不报告新测量结果。`light` 的 4-bit 回退结论是 2026-09-11 的历史 E1 结果；
-> `extreme` 的质量、资源和延迟没有可引用的汇总报告，本轮不做性能或质量复测。
+> `reference` 的高精度制品按裁定继承同族 8-bit 档位的门禁证据，本轮不做性能或质量复测。
 
-当前四档各有独立精度与 aligner 变体，评估必须按档位分别记录，不得跨档套用单一数字：
+三档各有独立精度绑定，ASR 与 TTS 可分别选档，评估必须按实际组合分别记录，不得跨档套用单一数字：
 
-| 档位 | ASR / TTS | Aligner（分人专用） | 分人 | 评估重点 |
+| spec | ASR | TTS 角色 | Aligner（分人 opt-in） | 评估重点 |
 |---|---|---|---|---|
-| `light` | `asr-0.6b-q8` / `tts-0.6b-custom-q8` | — | ✗ | 8-bit ASR CER/WER 与 TTS 客观质量；4-bit 组合已评估并回退（E1 未过）|
-| `balanced` | `asr-1.7b-q8` / `tts-0.6b-custom-q8` | `aligner-q8` | ✓ | `aligner-q8` 的分人 DER/SACER 与资源包络 |
-| `quality` | `asr-1.7b-q8` / `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16` | ✓ | `aligner-bf16` 的分人 DER/SACER、VD/Base 双 worker 常驻峰值、跨 lane 并发与冷却恢复 |
-| `extreme`（候选） | `asr-1.7b-bf16` / `tts-1.7b-design-bf16` + `tts-1.7b-base-bf16` | `aligner-bf16` | ✓（目录声明） | 单独测 ASR CER/WER、TTS、分人、同 tick `phys_footprint`、冷载、首包和 RTF；未验前均为 `UNVERIFIED` |
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | `aligner-q8` | 8-bit ASR CER/WER 与 TTS 客观质量；4-bit 组合已评估并回退（E1 未过）|
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | `aligner-bf16` | 1.7B 8-bit 的 ASR/TTS 质量、首包、RTF 与常驻峰值 |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + `tts-1.7b-design-bf16` | `aligner-bf16` | bf16 组合的 CER/WER、TTS、分人、同 tick `phys_footprint`、冷载与首包；本轮按继承证据登记，未实测处为 `UNVERIFIED` |
 
 评估口径：
 
-- **精度策略**：`light`、`balanced`、`quality` 的 ASR/TTS 为 8-bit，`quality`/`extreme` 使用 bf16 aligner；`extreme` ASR/TTS 为 bf16。`light` 的 4-bit 组合已完成评估并在
-  E1 未通过（公开真人语料 1.38pp > 0.5pp）后回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`，不再是 pending
-  4-bit 档。§3 的 q8 数字仍是 release `1.1.0` 的历史实测，对当前 8-bit `light` 只能作为**方向性参考**，
-  不能替代 catalog v2 下按档位重新实测的结论。
-- **双 TTS worker 口径**：评估 `quality` 与 `extreme` 时须分别记录 `voice_design` / `voice_clone` 两个 worker 的常驻状态、各 lane
+- **精度策略**：`fast`、`quality` 的 ASR/TTS 为 8-bit，`reference` 为 bf16；aligner 由显式 opt-in 点名供给
+  （`aligner-q8` / `aligner-bf16`）。`fast` 的 4-bit 组合已完成历史评估并在
+  E1 未通过（公开真人语料 1.38pp > 0.5pp）后回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`。§3 的 q8 数字仍是
+  release `1.1.0` 的历史实测，只能作为**方向性参考**，不能替代当前 specs 矩阵下按组合重新实测的结论。
+- **TTS capability 口径**：评估时须分别记录 `custom_voice` / `base`（`reference` 另含 `voice_design`）各 worker 的常驻状态、各 lane
   的 RTF/P95、跨 lane 并发结果以及 capability group 冷却后的恢复延迟；不能跨精度档套用测量。
-- **aligner 变体**：`balanced`、`quality`、`extreme` 的 aligner 由 catalog 按档供给（`aligner-q8` / `aligner-bf16`），
-  评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。batch 的 word-level
+- **aligner 变体**：aligner 不随档位自动供给，评估须报告实际点名的变体；未供给时不做分人评估。batch 的 word-level
   timestamps 由 ASR 原生提供，不依赖 aligner；Realtime 当前只承诺 segment timestamps，因此不把
   streaming word-level 能力列入 aligner 评估。
 - **未测即 `unset`**：没有相应可审查证据的 RTF、物理内存与分人 DER/SACER 必须记为
-  `unset`，直到按[能力诊断与质量验收](capability-quality-acceptance.md) 的 E1–E7 门完成并留存聚合证据。
-  `extreme` 的质量/资源/延迟门均未提供证据，不得标为 PASS；`light` 的 ASR 精度（E1）是历史已完成并回退 q8 的结果。
-- 不得把 §2/§3 的历史数字、`readyz=200` 或模型存在当作当前档位的性能或质量结论。
+  `unset`，直到按[能力诊断与质量验收](capability-quality-acceptance.md) 的门完成并留存聚合证据。
+  `reference` 的质量、资源与延迟按继承裁定登记、未在本机单独实测，不得标为 PASS。
+- 不得把 §2/§3 的历史数字、`readyz=200` 或模型存在当作当前组合的性能或质量结论。

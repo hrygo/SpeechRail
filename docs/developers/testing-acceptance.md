@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.1.4"
-date: 2026-09-23
+version: "3.2.0"
+date: 2026-09-26
 ---
 
 # SpeechRail 测试与验收
@@ -63,27 +63,33 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 测试音频和 `/tmp/speechrail-smoke.pcm` 由操作者本地保存，结束后删除；提交/报告只保留最小
 结果摘要而非文本、音频或 PCM。
 
-## 档位与分人供给测试清单
+## 规格选择与分人供给测试清单
 
-catalog v2（按档位精度策略、aligner 作为分人制品、diarization 按档门控）由以下确定性测试文件覆盖：
+当前档位契约是**三档规格 + 双 spec**（`fast`/`quality`/`reference`，ASR 与 TTS 各自选择），
+分人是**任务级 opt-in**，不再由档位继承。以下确定性测试文件覆盖该契约：
 
 | 关注点 | 测试文件与代表用例 |
 |---|---|
-| v2 catalog 契约：`precision_policy`、preset `aligner`/`diarization`、schema v2、aligner 身份 | `tests/test_model_presets.py`（`test_load_catalog_matches_tier_precision_policy`、`test_light_tier_uses_q8_quantization_under_schema_v2`）、`tests/test_model_identity.py`（`test_aligner_artifact_*`）、`tests/test_model_catalog_builder.py`（`test_legal_metadata_produces_schema_v2_with_precision_policy`）|
-| selection 依档覆盖 aligner 目录、`light` 清空分人、aligner snapshot 缺失 fail closed | `tests/test_profile_selection.py`（`test_selection_overlays_aligner_dir_by_preset`、`test_light_selection_clears_aligner_and_diarization`、`test_missing_aligner_directory_raises`）|
-| `diarization_assets` 按档供给：`light` 不产物、`balanced`=`aligner-q8`、`quality` 与候选 `extreme`=`aligner-bf16`、复用/损坏/未知档 | `tests/test_installer.py`（`test_prepare_diarization_assets_*`）|
+| 发布矩阵：12 个制品、13 个 `(tier, role)` 绑定，catalog 拒绝缺口或越界 | `tests/test_model_presets.py`（`test_catalog_specs_match_the_required_role_matrix`、`test_load_catalog_matches_tier_precision_policy`）、`tests/test_model_catalog_builder.py`（`test_build_catalog_normalizes_artifacts_and_sorts_files`）|
+| selection v2：只按显式 artifact key 解析、不再从目录名推断、旧记录拒绝 | `tests/test_spec_selection.py`（`test_selection_resolves_only_from_the_explicit_v2_spec_fields`、`test_active_catalog_never_infers_identity_from_directory_names`、`test_legacy_selection_is_rejected_before_paths_are_used`）|
+| 每个档位都能解析到 catalog 绑定制品；缺 Base 或绑定制品 fail closed | `tests/test_spec_selection.py`（`test_every_target_spec_resolves_to_catalog_bound_artifacts`、`test_selection_requires_the_base_clone_snapshot`）、`tests/test_profile_selection.py`（`test_missing_asr_model_directory_raises_error`、`test_unavailable_bound_artifact_raises_error`）|
+| 制品准备落在 `models/<artifact_key>`，异步、原子发布、逐文件校验 | `tests/test_model_store.py`（`test_prepare_streams_locked_files_and_publishes_atomic_registry`、`test_download_async_streams_close_once_on_success_and_hash_failure`、`test_metadata_change_gets_new_identity_and_reuses_verified_files`）|
+| 分人供给只认显式 aligner：产物 / 不产物 / 复用 / 损坏 / 未知档 | `tests/test_installer.py`（`test_prepare_diarization_assets_provisions_aligner_q8`、`test_prepare_diarization_assets_reuses_verified_directory`、`test_prepare_diarization_assets_rejects_corrupt_existing_directory`、`test_prepare_diarization_assets_unknown_aligner_raises`）|
+| 三档申请与推荐：内存推荐只有建议语义、未知档位拒绝、失败不切档 | `tests/test_profile_commands.py`（`test_catalog_lists_three_spec_tiers_with_explicit_bindings`、`test_recommendation_uses_memory_only`、`test_apply_rejects_unknown_spec_tier`、`test_prepare_failure_keeps_previous_selection_and_skips_switch`）|
+| `profile apply` 只在 opt-in 时写分人键，供给失败显式报错 | `tests/test_profile_commands.py`（`test_apply_without_diarization_opt_in_skips_auxiliary_assets`、`test_diarization_writes_env_for_explicit_aligner`、`test_diarization_prepare_failure_is_explicit`）|
 | preflight aligner 门控：未设置时跳过、缺 CoreML 时仍校验、不完整 snapshot 拒绝 | `tests/test_service_preflight.py`（`test_preflight_skips_aligner_snapshot_when_aligner_dir_unset`、`test_preflight_checks_aligner_snapshot_without_coreml_bundle`、`test_preflight_rejects_incomplete_aligner_snapshot`）|
-| `profile apply` 写/删分人键、四档互切、供给失败显式报错 | `tests/test_profile_commands.py`（`test_apply_light_removes_diarization_env`、`test_apply_balanced_writes_diarization_env`、`test_diarization_prepare_failure_is_explicit`）|
-| installer / zero-setup 按档门控分人供给与 smoke | `tests/test_installer.py`（`test_managed_install_*diarization*`）、`tests/test_video_podcast_skill_install.py`（`test_zero_setup_light_skips_diarization_smoke`、`test_zero_setup_balanced_runs_diarization_smoke`）|
+| installer / zero-setup 传双 spec，分人供给按显式 aligner 门控 smoke | `tests/test_installer.py`（`test_managed_install_adds_diarization_when_configured`、`test_managed_install_without_diarization_assets_omits_diarization_config`）、`tests/test_video_podcast_skill_install.py`（`test_zero_setup_without_aligner_skips_diarization_smoke`、`test_zero_setup_with_aligner_runs_diarization_smoke`）|
 
-这些测试使用 fake backend 与脱敏 fixture，不加载真实模型、不下载 aligner。
+这些测试使用 fake backend 与脱敏 fixture，不加载真实模型、不下载 aligner。`reference` 档的高精度制品
+继承同族 8-bit 档位的门禁证据，未在本机逐项复测；能力认证集合见
+[Issue #95 交付认证](issue-95-certification.md)。
 
 ## 集成验收矩阵
 
 | 客户端/接口 | 当前状态 | 通过条件 |
 |---|---|---|
 | REST curl | 已完成本机 smoke | health / readyz / models 正常，短音频得到结果 |
-| REST TTS | 契约与 fake backend 已覆盖 | `/v1/voices` 有登记 preset，短文本返回 24 kHz PCM/WAV；真实 runtime 需另验收 |
+| REST TTS | 契约与 fake backend 已覆盖 | `/v1/voices` 返回已登记音色的真实 binding variant，短文本返回 24 kHz PCM/WAV；真实 runtime 需另验收 |
 | QwenPaw `whisper_api` | 已完成本机 smoke | provider 指向 `8201/v1`、应用完整重启、短中文音频有文本 |
 | OpenAI SDK | 可按兼容契约接入 | multipart 调用和错误处理符合 OpenAPI |
 | Hermes Agent | 待验收 | STT 专用 base URL/model 生效且不改变聊天 endpoint |

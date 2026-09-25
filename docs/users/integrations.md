@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.1.3"
-date: 2026-09-25
+version: "3.1.4"
+date: 2026-09-26
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -23,25 +23,29 @@ date: 2026-09-25
 
 ### 1.1 档位与能力可用性
 
-四档 profile（`light` Embedded / `balanced` Pro Workflow / `quality` Studio / 候选 `extreme`）共享同一套
-Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能力可用性**。客户端应查运行时能力，
-不要假定所有能力在全部档位都存在：
+三档规格（`fast` 轻快 / `quality` 品质 / `reference` 参考精度）共享同一套
+Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能力可用性**。识别与配音可分别选档
+（`asr_spec` / `tts_spec`），客户端应查运行时能力，不要假定所有能力在全部组合都存在：
 
-| 能力 | `light` | `balanced` | `quality` | `extreme`（候选） |
-|---|---|---|---|---|
-| ASR 文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ | ✓ |
-| 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ | ✓ |
-| 自然语言音色设计 / 试听与音色克隆 | ✗ | ✗ | ✓ | ✓ |
+| 能力 | `fast` | `quality` | `reference` |
+|---|---|---|---|
+| ASR 文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ |
+| 系统声音合成（`custom_voice`） | ✓ | ✓ | ✓ |
+| 参考克隆（`base`，就绪时） | ✓ | ✓ | ✓ |
+| 自然语言音色设计 / 试听（`voice_design`） | ✗ | ✗ | ✓ |
+| 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | 需显式供给 | 需显式供给 | 需显式供给 |
 
-- **分人需要支持分人的档位**：`balanced`、`quality`、候选 `extreme` 供给 aligner 与 Sortformer；`light` 不声明
+- **分人是任务 opt-in**：不分档位继承。需要显式供给外部 CoreML Sortformer 与一个 ForcedAligner
+  （`aligner-q8` / `aligner-bf16`）并保持 `diarization_ready=true`；未供给时不声明
   `gpt-4o-transcribe-diarize`，文件分人返回 `503 diarization_not_available`，Realtime 分人扩展也不会开启。
-- **词级时间戳四档都有**：由 ASR 原生提供（`timestamp_granularities`），与分人 / aligner 无关。
-- **音色设计 / 克隆**：当前 `quality` 与候选 `extreme` 的 catalog 配置 VoiceDesign/Base；`balanced`、`light` 上预览返回 `400 voice_preview_unsupported`，
-  克隆返回 `400 voice_cloning_unsupported`。
-- `extreme` 当前为候选档。没有质量、资源与延迟汇总证据前，不宣称其质量更高或建议用于正式运行。
+- **词级时间戳三档都有**：由 ASR 原生提供（`timestamp_granularities`），与分人 / aligner 无关。
+- **音色设计 / 克隆**：`voice_design` 只绑定 `reference`；`fast`、`quality` 上预览返回 `400 voice_preview_unsupported`。
+  参考克隆由每个档位的 `base` 角色提供；角色未解析成功或未就绪时，克隆返回 `400 voice_cloning_unsupported`。
+- `reference` 的 bf16 制品继承同族 8-bit 档位的门禁证据，未在本机单独复测。没有质量、资源与延迟
+  汇总证据前，不宣称其质量更高或建议用于正式运行。
 - 权威能力矩阵与运行时字段见 [公共 API 契约手册 §1.1](api-contract.md#11-档位与能力可用性矩阵)。
 
-`quality` 与候选 `extreme` 的 `voice_design` 与 `voice_clone` 由两个独立 TTS capability worker 处理。客户端无需管理 worker 的加载或卸载；不同 capability lane 可以并发，同一 lane 仍会按 worker lock 排队。空闲冷却会按 capability group 回收常驻权重，下一次请求再惰性恢复所需 worker，这不改变 endpoint、模型别名或错误 envelope。
+每个 TTS 档位的 `custom_voice` / `base` 角色（以及 `reference` 档的 `voice_design`）由独立 TTS capability worker 处理。客户端无需管理 worker 的加载或卸载；不同 capability lane 可以并发，同一 lane 仍会按 worker lock 排队。空闲冷却会按 capability group 回收常驻权重，下一次请求再惰性恢复所需 worker，这不改变 endpoint、模型别名或错误 envelope。
 
 ---
 
@@ -122,9 +126,9 @@ async function main() {
 main();
 ```
 
-> 上面第 3 段讲话人分离只在 `balanced` / `quality` 生效；在 `light` 上调用返回
+> 上面第 3 段讲话人分离只有在当前实例显式供给分人资产并 ready 时才生效；未供给时调用返回
 > `503 diarization_not_available`，`/v1/models` 也不列出 `gpt-4o-transcribe-diarize`。第 1 段的文件
-> 转写与 `segment`/`word` 时间戳在 `light` 上正常可用（ASR 原生提供）。
+> 转写与 `segment`/`word` 时间戳在任何档位都正常可用（ASR 原生提供）。
 
 ---
 
@@ -215,7 +219,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 
 ## 5. 文件、播报与实时字幕的自检和恢复
 
-发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。分人能力另查 `diarization_ready`：`balanced`、`quality` 与候选 `extreme` 配置分人制品，但仍须以当前 readiness 为准；`light` 不声明。
+发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。分人能力另查 `diarization_ready`：它取决于当前实例是否显式供给分人资产，与档位无关，仍须以当前 readiness 为准。
 
 文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送一次 `session.update`（`session.type=transcription`、`session.audio.input.format={"type":"audio/pcm","rate":24000}` 与 `session.speechrail.task`），等待 `session.updated` 回显，然后以 24 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`speechrail.transcription.hypothesis` 只提供同一 `utterance_id` 的最新全文（按严格递增 `revision` 替换），可证明的稳定前缀才映射为官方 append-only `delta`。需要播报时由调用方按 `speechrail.tts.start` → `speechrail.tts.append_text` → `speechrail.tts.finish_text` 驱动，并等待匹配 `request_id` 的 `completed`/`cancelled`/`failed`；当前 wire 没有 `input_audio_buffer.speech_started`，是否在出现新 hypothesis 时发送 `speechrail.tts.cancel` 由调用方播放策略决定，服务端不会自动取消。
 

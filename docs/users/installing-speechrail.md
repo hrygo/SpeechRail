@@ -2,8 +2,8 @@
 title: "SpeechRail 安装与首次使用"
 status: active
 audience: "本机最终用户、自部署用户"
-version: "1.3.0"
-date: 2026-09-21
+version: "1.4.0"
+date: 2026-09-26
 ---
 
 # 📦 SpeechRail 安装与首次使用
@@ -21,7 +21,7 @@ SpeechRail 的用户，说明每个发布文件是什么、该装哪一个、安
 
 | 文件 | 内容 | 用途 | 不包含 / 不能做什么 |
 |---|---|---|---|
-| `speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl` | Python 服务包：`speechrail` CLI、FastAPI 应用、内置 CoreML 分人 worker，以及 `speechrail install` 安装入口 | 安装服务与版本升级 | 不含模型 snapshot、vendor runtime 和 `.env`；这些由安装入口按档位准备 |
+| `speechrail-<version>-cp314-cp314-macosx_26_0_arm64.whl` | Python 服务包：`speechrail` CLI、FastAPI 应用、内置 CoreML 分人 worker，以及 `speechrail install` 安装入口 | 安装服务与版本升级 | 不含模型 snapshot、vendor runtime 和 `.env`；这些由安装入口按规格准备 |
 | `SpeechRail-<version>-macOS-arm64.dmg` | unsigned 的控制面 App | 服务装好后管理模型、档位、运行状态，以及配音/音色创作 | 不加载模型、不启动服务、不监听 8201；只在「音色克隆」按下录制时使用麦克风 |
 | `SHA256SUMS` | 上述两个制品的 SHA-256 | 下载后校验完整性 | — |
 
@@ -38,8 +38,10 @@ shasum -a 256 -c SHA256SUMS
 - Apple Silicon Mac（`arm64`）；Intel Mac 不受支持。
 - 服务与 App 的当前交付基线均为 macOS `26.0+`、Apple Silicon `arm64`。
 - 已发布的 wheel 平台标签是 `macosx_26_0_arm64`；`pip` / `uv` 只会在 macOS 26 及以上接受该制品。
-- 磁盘：单次全新安装预留 **≥ 25 GB**（`light` 约 2.99 GB、`balanced` 约 5.96 GB、`quality` 约
-  10.73 GB 的模型，外加隔离运行时）。模型与 vendor runtime 按清单复用，升级不会重复占用；每装一个
+- 磁盘：单次全新安装预留 **≥ 25 GB**：所选规格组合待准备的模型集按 catalog 清单估算约为
+  `fast/fast` 5.0 GB、`quality/quality` 8.7 GB、`reference/reference` 13.2 GB，另加隔离运行时；
+  分人资产（aligner 1.28 GB / 1.84 GB）与 `reference` 的 VoiceDesign 制品（4.5 GB）另计。模型与
+  vendor runtime 按清单复用，升级不会重复占用；每装一个
   **新版本** wheel 会在 `runtime/releases` 新增一个目录（重装同一份 wheel 则复用），而安装器不会
   自动清理旧版本——确认不再需要回退后，可以手动删除旧的 `runtime/releases/<旧版本>`，唯一不能删的
   是 `runtime/current` 指向的那份。
@@ -64,20 +66,22 @@ shasum -a 256 -c SHA256SUMS
 uvx --python 3.14.7 --from ./speechrail-*.whl \
   speechrail install \
   --yes \
-  --preset balanced \
+  --asr-spec quality \
+  --tts-spec quality \
   --enable
 ```
 
-这条命令做四件事：把该 wheel 装进独立的 release 目录、按档位准备并逐文件校验模型、执行 preflight、
+这条命令做四件事：把该 wheel 装进独立的 release 目录、按所选规格准备并逐文件校验模型、执行 preflight、
 原子切换 `runtime/current`；`--enable` 再注册并启动 `com.speechrail` LaunchAgent，并在结束后轮询
 `/readyz` 报告服务是否真的可用（超时不算失败，只提示后续排查命令）。模型准备要下载数 GB，
 通常需要几分钟，中途可以放心等待。
 
-- `--preset` 可选 `light`、`balanced`、`quality`，省略时按物理内存推荐。
+- `--asr-spec` 与 `--tts-spec` 各自可选 `fast`、`quality`、`reference`，可混搭；只传其中一项时另一项
+  沿用已有选择或按物理内存推荐（< 10 GiB 为 `fast/fast`，< 16 GiB 为 `quality/fast`，其余 `quality/quality`）。
 - 省略 `--wheel` 时会使用当前目录里唯一的 `speechrail-*.whl`；不带 `--yes` 时会先要求确认。
-- 安装器每个 app home 只保留一个档位：已装过服务时，省略 `--preset` 会沿用当前档位，避免升级时
-  被内存推荐改档；显式传一个不同档位会被拒绝，换档请用已安装 runtime 的
-  `speechrail profile apply <tier> --yes`。
+- 安装器每个 app home 只保留一组规格：已装过服务时，省略 `--asr-spec`/`--tts-spec` 会沿用当前组合，
+  避免升级时被内存推荐改档；显式传一组不同规格会被拒绝，换规格请用已安装 runtime 的
+  `speechrail profile apply --asr-spec <tier> --tts-spec <tier> --yes`。
 - 安装器只接受与自身版本一致的 wheel，避免 installer 与被安装的代码脱节。
 - 不加 `--enable` 时只安装不启动，命令结尾会打印该 runtime 自己的 `service start` 命令。
 - 命令结尾固定打印三样东西：已安装 runtime 的 `speechrail` CLI 路径、双击即可换档位的
@@ -99,11 +103,12 @@ uvx --python 3.14.7 --from ./speechrail-*.whl \
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh --yes --preset balanced
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
+  --yes --asr-spec quality --tts-spec quality
 ```
 
 这条路径也会检查并提示缺失的 Xcode CLT、Homebrew、`ffmpeg`、`uv`。磁盘、模型校验、失败恢复和
-各档位差异见 [SpeechRail 零配置首装 SOP](../../.agents/skills/speechrail-zero-setup/SKILL.md)。
+各规格差异见 [SpeechRail 零配置首装 SOP](../../.agents/skills/speechrail-zero-setup/SKILL.md)。
 
 ## 4. 安装 App（DMG）
 
@@ -132,7 +137,7 @@ open "$HOME/Applications/SpeechRail.app"
 ## 5. 首次验证
 
 第 3.1 节带 `--enable` 的安装已经检查过一次 `/readyz`；下面几条命令用于自己复核，或在没带
-`--enable`、或换档位之后手动确认：
+`--enable`、或更换规格组合之后手动确认：
 
 ```bash
 # 进程与子系统状态
@@ -168,14 +173,15 @@ cd ~/Downloads
 uvx --python 3.14.7 --from ./speechrail-*.whl speechrail install --yes --enable
 ```
 
-  省略 `--preset` 会沿用当前档位；换档位用 `"$SPEECHRAIL_CLI" profile apply <tier> --yes`。
+  省略 `--asr-spec`/`--tts-spec` 会沿用当前规格；换规格用
+  `"$SPEECHRAIL_CLI" profile apply --asr-spec <fast|quality|reference> --tts-spec <fast|quality|reference> --yes`。
   不要手工替换 `runtime/current` 或直接编辑 release venv。回退方式见
   [SpeechRail 版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)。
 
-  **升级不会重新下载已校验的模型。** 安装器按 `prepared_id`（档位 + runtime lock + 每个文件的
-  sha256 清单）复用本机 `models/<key>`，只重下清单变化、缺失或被改动的那些文件；分人资产按锁定清单、
-  vendor runtime 按 runtime lock 同样复用。所以升级的主要耗时是本机校验（读盘）与 preflight，
-  实测 `quality`（8.06 GiB 模型）复用校验约 3 秒，冷盘更慢但仍不产生下载流量。
+  **升级不会重新下载已校验的模型。** 安装器按 `prepared_id`（规格组合 + runtime lock + 每个文件的
+  sha256 清单）复用本机 `models/<artifact_key>`，只重下清单变化、缺失或被改动的那些文件；分人资产
+  按锁定清单、vendor runtime 按 runtime lock 同样复用。所以升级的主要耗时是本机校验（读盘）与
+  preflight，不产生额外下载流量；机械硬盘或冷盘更慢。
 - **升级 App**：退出旧 App，把新的 `SpeechRail.app` 复制到同一安装路径，保留上一份制品以便回滚。
 - **卸载 App**：退出并删除 App bundle 即可，不影响正在运行的服务。
 - **卸载服务**：
@@ -206,7 +212,7 @@ SPEECHRAIL_CLI="$HOME/Library/Application Support/SpeechRail/runtime/current/.ve
 | `install` 报 `uv is not on PATH` | 机器上没有 `uv` | 按提示访问 `https://docs.astral.sh/uv/getting-started/installation/` 安装后重试 |
 | `install` 报 wheel 版本与 installer 不一致 | CLI 与待安装 wheel 不是同一个版本 | 让 `uvx --from` 指向要安装的那个 wheel |
 | `install` 报 `requires the SpeechRail service to be stopped` | 旧实例还在运行，安装器拒绝热替换 | 先执行同一条报错里给出的 `service stop` 命令，再重跑安装（见第 6 节） |
-| `install` 报 `a different managed preset is already configured` | 一个 app home 只保留一个档位，显式传了别的档位 | 省略 `--preset` 沿用当前档位，或用已安装 runtime 的 `profile apply <tier> --yes` 换档 |
+| `install` 报 `a different managed selection is already configured` | 一个 app home 只保留一组规格，显式传了别的组合 | 省略 `--asr-spec`/`--tts-spec` 沿用当前规格，或用已安装 runtime 的 `profile apply --asr-spec <tier> --tts-spec <tier> --yes` 换规格 |
 | `--enable` 后提示服务未就绪 | 进程起来了但模型/运行时还没就绪 | 按提示执行 `"$HOME/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail" service preflight --app-home "$HOME/Library/Application Support/SpeechRail"`，再 `curl -s -i http://127.0.0.1:8201/readyz \| head -1` |
 | `/readyz` 返回 503 `backend_not_ready` | 服务已启动但模型或运行时未就绪 | 用 `speechrail service preflight` 与 [运维 Runbook](../operations/operations-runbook.md) 定位 |
 | App 无法打开 | App 基线是 macOS 26.0 | 在支持的 macOS 26+ Apple Silicon 环境中重新安装当前 DMG |

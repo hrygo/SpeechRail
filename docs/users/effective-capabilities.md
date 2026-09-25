@@ -2,8 +2,8 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.2.0"
-date: 2026-09-25
+version: "3.2.1"
+date: 2026-09-26
 ---
 
 # 有效能力快照与安全音色目录
@@ -85,6 +85,14 @@ namespaced capability 响应，`voices` 只使用其安全投影，不再输出
 矩阵测试覆盖 fast/quality/reference 与内置 speaker/固定自定义 revision、内容变更/重启、
 鉴权、别名、存储损坏和私有字段隔离。测试使用 fake backend；没有启动用户服务，
 不能据此宣称模型语言域、音质、不可变音色或并发推理版本锁已经验收。
+
+### 认证状态（2026-09-26）
+
+`fast`/`quality` 的制品有本机准备与逐文件 size/SHA-256 校验证据；`reference` 的 bf16 制品继承
+同族 8-bit 档位已通过的门禁证据，**未在本机单独复测**。因此本页的 `available=true` 只表示
+配置允许按需服务，不表示质量、音质、资源或长稳已认证。真实设备/播放器、长稳、联合实时全双工
+与基准阈值仍须按 [Issue #95 交付认证](../developers/issue-95-certification.md) 的专项授权执行，
+并登记 commit、engine revision、制品 revision、设备与样本数。
 
 ## 分句规划版本
 

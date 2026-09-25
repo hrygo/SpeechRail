@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.3.0"
-date: 2026-09-25
+version: "3.3.1"
+date: 2026-09-26
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -30,10 +30,9 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 
 客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系。
 TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 与
-`supports_instruction`。`quality` 的默认 TTS 是 `voice_design`，同时独立配置
-`base` clone capability；候选 `extreme` 也配置这两项能力，因此两档均可声明
-preview/instruction/clone。`balanced/light` 为 `custom_voice` 且不配置 Base clone
-capability。客户端必须读取运行时能力字段，不能仅由默认 `variant` 推断 clone。
+`supports_instruction`。三个 TTS 档位都绑定 `custom_voice`（系统声音）与 `base`（参考克隆）
+两个角色，`voice_design`（提示词设计）只绑定在 `reference` 档且快照缺失时降级为不可用。
+客户端必须读取运行时能力字段，不能仅由默认 `variant` 推断 clone 或 preview。
 
 ### 1.1 档位与能力可用性矩阵
 
@@ -125,10 +124,10 @@ string `id`、`type="transcript.text.segment"`、`start/end`、匿名 `speaker: 
 文件必须提供 `chunking_strategy=auto|server_vad`；known-speaker 参数明确返回
 `unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
 
-文件分人只在支持分人的档位可用：`balanced`、`quality` 已供给 aligner 与 Sortformer，候选
-`extreme` 配置 `aligner-bf16` 与匿名分人路径；`light`（Embedded）不供给且不在 `/v1/models` 声明
-`gpt-4o-transcribe-diarize`。在未配置、未就绪或不支持
-分人的 profile 上，请求不会触发模型下载，而是返回 `503 diarization_not_available`。
+文件分人是**任务级**能力，不由档位继承：需要显式供给外部 CoreML Sortformer bundle 与一个
+ForcedAligner（`aligner-q8` 或 `aligner-bf16`），且当前实例 `diarization_ready=true`。
+未供给时 `/v1/models` 不声明 `gpt-4o-transcribe-diarize`。在未配置、未就绪或不支持
+分人的实例上，请求不会触发模型下载，而是返回 `503 diarization_not_available`。
 安装可选依赖、准备仓库外部的绝对权重路径及检查 readiness 的步骤见[运行时部署方案](../operations/runtime-deployment.md)。
 
 ---
@@ -275,7 +274,9 @@ timing registry 容量不足均不会把成功的音频合成改判失败。取�
 九个 canonical 角色与 Qwen CustomVoice speaker 一一对应：`serena`、`vivian`、
 `uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
 `default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；别名解析与档位
-无关，客户端无需上送 profile。能力的**可用性**随当前档位和服务 readiness 不同（VoiceDesign 预览与 Base reference clone 当前由 `quality` 与候选 `extreme` 配置），见 §1.1。
+无关，客户端无需上送 profile。能力的**可用性**随当前规格组合和服务 readiness 不同：提示词设计
+只在绑定 `voice_design` 的 `reference` 档且快照就绪时可用，参考克隆在绑定 `base` 的档位就绪时
+可用，详见 §1.1。
 
 ---
 
@@ -287,7 +288,7 @@ timing registry 容量不足均不会把成功的音频合成改判失败。取�
 > 等价 consent 生命周期前，不会把本地 clone/reference API 宣称为该 OpenAI endpoint 的兼容实现。
 > 已创建的本地 voice 仍可通过 `/v1/audio/speech` 的字符串或 `{"id": ...}` 形式使用。
 
-SpeechRail 提供系统角色目录与自然语言音色设计（Voice Design）体系。系统角色在四档均
+SpeechRail 提供系统角色目录与自然语言音色设计（Voice Design）体系。系统角色在三个档位均
 可用；自定义 VoiceDesign 音色仅在当前权重声明 `supports_instruction=true` 时可合成。
 
 ### 5.1 系统预置音色与采样确定性保证
@@ -368,7 +369,7 @@ Authorization: Bearer <TOKEN>
 - `id` (string, 可选)：自定义音色标识符。若不提供则自动生成 `custom_<timestamp>_<rand>`。
 - `seed` (integer, 可选)：`0`–`4294967295` 的确定性采样种子；传入后固定该 recipe，未传入则由服务生成并持久化。
 
-**持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。克隆音频使用受控目录内的不可变文件名（`<voice_id>.<uuid>.wav`）；历史的 `<voice_id>.wav` 引用仍可读取。损坏、不可读或结构非法的 registry 会保留原文件并进入 fail-closed 状态，列表、写入和自定义音色解析返回 `503 voice_store_unavailable`，系统预置音色仍可使用。切换到不声明 Base clone capability 的 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回声明该能力且 ready 的 `quality` 或候选 `extreme` 后恢复。
+**持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。克隆音频使用受控目录内的不可变文件名（`<voice_id>.<uuid>.wav`）；历史的 `<voice_id>.wav` 引用仍可读取。损坏、不可读或结构非法的 registry 会保留原文件并进入 fail-closed 状态，列表、写入和自定义音色解析返回 `503 voice_store_unavailable`，系统预置音色仍可使用。当服务切到 `base` 角色未就绪或快照缺失的规格组合时，自建音色条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；对应角色恢复 ready 后再次可用。
 
 ### 5.3.1 读取与更新单个音色 (`GET/PATCH /v1/voices/{voice_id}`)
 读取单个音色返回与目录条目相同的完整安全 metadata：
@@ -411,7 +412,7 @@ Authorization: Bearer <TOKEN>
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
-该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；当前 catalog 在 `quality` 与候选 `extreme` 配置此能力。它用于声音工坊在用户保存 VoiceProfile 前试听
+该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；当前 catalog 只有 `reference` 档绑定 `voice_design`，且该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
 一个自然语言音色配方。请求期间的 instruction 和 seed 通过内部类型化 TTS 请求传入 worker；接口
 不会创建 VoiceProfile、写入 `custom_voices.json` 或保存音频文件。
 
@@ -429,12 +430,12 @@ Authorization: Bearer <TOKEN>
 
 `instruction` 最长 10000 字符，`input` 最长 4096 字符，`seed` 范围为 `0`–`4294967295`。
 支持 `mp3`、`opus`、`aac`、`flac`、`wav` 和 `pcm`；预览接口先在内存中完成生成与编码，
-因此后端或编码失败时仍能返回统一错误 envelope。`balanced` 和 `light` 返回
-`400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
+因此后端或编码失败时仍能返回统一错误 envelope。未绑定 `voice_design` 的档位（`fast`、`quality`）
+或快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 
-`quality` 与候选 `extreme` 在当前 catalog 配置从参考音频 + 脚本文本克隆自定义音色的能力，但 clone 与默认 VoiceDesign 已解耦：reference clone 固定由独立的 Qwen3-TTS Base capability 通过公开 reference-generation 接口执行；Base 可与 VoiceDesign 同时常驻，空闲冷却后可随 capability group 一起回收并在下一次请求时惰性恢复。VoiceDesign 不作为 clone fallback。`balanced` / `light` 调用返回 `400 voice_cloning_unsupported`。三个接口共用 `VoiceQualityReport` 结构。Extreme 的质量尚无可引用报告；2026-09-12 审计已确认现有 synthesis quality-run 存在假阳性缺口，因此绿色 `status=pass` 暂不能作为跨文本 speaker identity 或纯净度已证明的充分证据。
+从参考音频 + 脚本文本克隆自定义音色的能力与默认 VoiceDesign 已解耦：reference clone 固定由独立的 Qwen3-TTS Base capability 通过公开 reference-generation 接口执行；Base 与 VoiceDesign 各自独立常驻，空闲冷却后可随 capability group 一起回收并在下一次请求时惰性恢复。VoiceDesign 不作为 clone fallback。当当前组合的 `base` 角色（`tts_clone`）未解析成功或未就绪时，调用返回 `400 voice_cloning_unsupported`。三个接口共用 `VoiceQualityReport` 结构。`reference` 的高精度 bf16 制品继承同族 8-bit 档位的门禁证据，未在本机单独复测；2026-09-12 审计已确认现有 synthesis quality-run 存在假阳性缺口，因此绿色 `status=pass` 暂不能作为跨文本 speaker identity 或纯净度已证明的充分证据。
 
 #### 5.7.1 克隆并注册音色 (`POST /v1/voices/clone`)
 
