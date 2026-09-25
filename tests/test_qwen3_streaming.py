@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -144,7 +145,7 @@ def test_session_events_queue_is_bounded() -> None:
     assert session._events_queue.maxsize == 64  # type: ignore[attr-defined]
 
 
-def test_session_open_forwards_window_and_generation_limits() -> None:
+def test_session_open_forwards_task_streaming_policy() -> None:
     async def scenario() -> None:
         worker = FakeStreamingWorker()
         session = Qwen3StreamingSession(
@@ -152,9 +153,8 @@ def test_session_open_forwards_window_and_generation_limits() -> None:
             language="zh",
             prompt="prompt",
             session_id="sess_test",
-            chunk_sec=1.25,
-            left_context_sec=8.5,
-            right_context_ms=320,
+            chunk_duration_ms=500,
+            max_context_sec=8.82,
             max_new_tokens=128,
         )
         connect = asyncio.create_task(session.connect())
@@ -165,9 +165,8 @@ def test_session_open_forwards_window_and_generation_limits() -> None:
         )
         await connect
         opened = next(frame for frame in worker.sent if frame.get("type") == "session.open")
-        assert opened["chunk_sec"] == 1.25
-        assert opened["left_context_sec"] == 8.5
-        assert opened["right_context_ms"] == 320
+        assert opened["chunk_duration_ms"] == 500
+        assert opened["max_context_sec"] == 8.82
         assert opened["max_new_tokens"] == 128
         assert opened["capture_alignment"] is False
         await session.close()
@@ -278,14 +277,14 @@ def test_backend_config_requires_absolute_existing_paths(tmp_path: Path) -> None
         )
 
 
-def test_backend_config_rejects_unknown_mode(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="invalid streaming mode"):
+def test_backend_config_rejects_non_positive_max_context(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_context_sec"):
         Qwen3StreamingBackendConfig(
             repository_root=tmp_path,
             python_executable=Path("/usr/bin/python3"),
             model_dir=tmp_path,
             device="mps",
-            mode="unknown",  # type: ignore[arg-type]
+            max_context_sec=0.0,
         )
 
 
@@ -301,11 +300,16 @@ def test_settings_native_backend_fails_closed_without_python_or_model() -> None:
         )
 
 
-def test_settings_defaults_to_disabled_windowed() -> None:
+def test_settings_defaults_to_disabled_with_one_second_chunks() -> None:
     settings = Settings()
     assert settings.realtime_asr_backend == "disabled"
-    assert settings.qwen3_streaming_mode == "windowed"
+    assert settings.qwen3_streaming_chunk_duration_ms == 1_000
     assert settings.realtime_max_sessions == 3
+
+
+def test_settings_rejects_unevaluated_chunk_duration() -> None:
+    with pytest.raises(ValidationError, match="qwen3_streaming_chunk_duration_ms"):
+        Settings(qwen3_streaming_chunk_duration_ms=750, _env_file=None)  # type: ignore[call-arg]
 
 
 def test_settings_rejects_out_of_range_max_sessions() -> None:
@@ -315,32 +319,9 @@ def test_settings_rejects_out_of_range_max_sessions() -> None:
         Settings(realtime_max_sessions=9, _env_file=None)  # type: ignore[call-arg]
 
 
-def test_factory_rejects_causal_mode_for_non_english() -> None:
-    factory = NativeRealtimeFactory(
-        worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="causal",
-        next_session_id=lambda: "sess_test",
-    )
-    for language in ("zh", "auto", None):
-        with pytest.raises(RuntimeError, match="language_not_supported"):
-            factory.create(language=language, prompt="", options=RealtimeTranscriptionOptions())
-
-
-def test_factory_accepts_english_for_causal_mode() -> None:
-    factory = NativeRealtimeFactory(
-        worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="causal",
-        next_session_id=lambda: "sess_test",
-    )
-    session = factory.create(language="en", prompt="", options=RealtimeTranscriptionOptions())
-    assert session is not None
-    factory.release(session)
-
-
 def test_factory_applies_per_session_chunk_duration() -> None:
     factory = NativeRealtimeFactory(
         worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="windowed",
         next_session_id=lambda: "sess_test",
     )
     session = factory.create(
@@ -348,14 +329,37 @@ def test_factory_applies_per_session_chunk_duration() -> None:
         prompt="",
         options=RealtimeTranscriptionOptions(partial_mode="snapshot", chunk_duration_ms=500),
     )
-    assert session._chunk_sec == 0.5  # type: ignore[attr-defined]
+    assert session._chunk_duration_ms == 500  # type: ignore[attr-defined]
     factory.release(session)
 
 
-def test_factory_rejects_unknown_language_in_windowed_mode() -> None:
+def test_factory_applies_owner_max_context() -> None:
+    worker = FakeStreamingWorker()
+    worker.config = SimpleNamespace(max_context_sec=6.5, max_new_tokens=96)  # type: ignore[attr-defined]
+    factory = NativeRealtimeFactory(
+        worker=worker,  # type: ignore[arg-type]
+        next_session_id=lambda: "sess_test",
+    )
+    session = factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
+    assert session._max_context_sec == 6.5  # type: ignore[attr-defined]
+    assert session._max_new_tokens == 96  # type: ignore[attr-defined]
+    factory.release(session)
+
+
+def test_factory_accepts_any_supported_language() -> None:
     factory = NativeRealtimeFactory(
         worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="windowed",
+        next_session_id=lambda: "sess_test",
+    )
+    assert (
+        factory.create(language="zh", prompt="", options=RealtimeTranscriptionOptions())
+        is not None
+    )
+
+
+def test_factory_rejects_unsupported_language() -> None:
+    factory = NativeRealtimeFactory(
+        worker=FakeStreamingWorker(),  # type: ignore[arg-type]
         next_session_id=lambda: "sess_test",
     )
     with pytest.raises(RuntimeError, match="language_not_supported"):
@@ -366,7 +370,6 @@ def test_factory_enforces_max_sessions_cap() -> None:
     worker = FakeStreamingWorker()
     factory = NativeRealtimeFactory(
         worker=worker,  # type: ignore[arg-type]
-        mode="windowed",
         next_session_id=iter(["s1", "s2", "s3"]).__next__,
         max_sessions=2,
     )
@@ -385,7 +388,6 @@ def test_factory_enforces_max_sessions_cap() -> None:
 def test_factory_generates_distinct_sessions_by_session_id() -> None:
     factory = NativeRealtimeFactory(
         worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="windowed",
         next_session_id=iter(["s1", "s2"]).__next__,
         max_sessions=2,
     )
@@ -400,7 +402,6 @@ def test_factory_generates_distinct_sessions_by_session_id() -> None:
 def test_factory_session_limit_has_stable_busy_reason() -> None:
     factory = NativeRealtimeFactory(
         worker=FakeStreamingWorker(),  # type: ignore[arg-type]
-        mode="windowed",
         next_session_id=iter(["s1", "s2"]).__next__,
         max_sessions=1,
     )

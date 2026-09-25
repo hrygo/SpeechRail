@@ -2986,7 +2986,7 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
     """Verifies that accumulating audio frames drives flush() and produces incremental deltas."""
     client, factory = _client(
         flush_partials=("Hello", "Hello world"),
-        settings_kwargs={"qwen3_streaming_chunk_sec": 0.5},
+        settings_kwargs={"qwen3_streaming_chunk_duration_ms": 500},
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
@@ -3394,7 +3394,7 @@ def test_server_vad_silence_never_emits_text_before_commit() -> None:
     client, factory = _client(
         emit_text_on_flush="嗯",
         settings_kwargs={
-            "qwen3_streaming_chunk_sec": 1.0,
+            "qwen3_streaming_chunk_duration_ms": 1_000,
             "realtime_speech_admission_enabled": True,
         },
     )
@@ -3415,7 +3415,7 @@ def test_server_vad_silence_never_emits_text_before_commit() -> None:
         )
         assert socket.receive_json()["type"] == "transcription_session.updated"
 
-        # 1.0s chunk_sec = 32000 bytes. Send 40,000 bytes of zero PCM
+        # 1.0s chunk = 32000 bytes. Send 40,000 bytes of zero PCM
         silence_chunk = b"\x00\x00" * 320  # 640 bytes (20ms)
         for _ in range(65):  # 41,600 bytes > 32,000 bytes flush threshold
             socket.send_json(

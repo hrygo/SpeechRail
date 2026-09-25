@@ -241,6 +241,52 @@ def test_qwen3_engine_rejects_loader_variant_mismatch(
         Qwen3Engine(tmp_path, "mps", "float16")
 
 
+def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    init_kwargs: list[dict[str, object]] = []
+
+    class FakeSession:
+        def __init__(self, *, model: str) -> None:
+            del model
+            self.model = SimpleNamespace()
+            self.model_info = {
+                "dtype": "float16",
+                "model_type": "qwen3_asr",
+                "variant": "asr",
+            }
+
+        def init_streaming(self, **kwargs: object) -> object:
+            init_kwargs.append(dict(kwargs))
+            return SimpleNamespace(text="")
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.Session = FakeSession  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+
+    engine = Qwen3Engine(tmp_path, "mps", "float16")
+    engine.open_session(
+        session_id="sess_test",
+        language="zh",
+        context="prompt",
+        chunk_duration_ms=2_000,
+        max_context_sec=9.5,
+        max_new_tokens=128,
+        capture_alignment=False,
+    )
+
+    assert init_kwargs == [
+        {
+            "context": "prompt",
+            "language": "zh",
+            "chunk_size_sec": 2.0,
+            "max_context_sec": 9.5,
+            "max_new_tokens": 128,
+        }
+    ]
+
+
 class _FakeEngine:
     """Multi-session-capable engine stand-in for worker protocol contract tests."""
 
@@ -273,14 +319,13 @@ class _FakeEngine:
         session_id: str,
         language: str,
         context: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
         capture_alignment: bool = True,
     ) -> None:
-        del language, context, chunk_sec, left_context_sec
-        del right_context_ms, max_new_tokens, capture_alignment
+        del language, context, chunk_duration_ms, max_context_sec
+        del max_new_tokens, capture_alignment
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []
@@ -437,6 +482,44 @@ def test_worker_routes_and_isolates_concurrent_sessions() -> None:
     assert [f.get("session_id") for f in finished] == ["a", "b"]
 
 
+def test_worker_forwards_task_streaming_policy_to_engine() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class _SpyEngine(_FakeEngine):
+        def open_session(self, **kwargs: object) -> None:
+            recorded.append(dict(kwargs))
+            super().open_session(**kwargs)  # type: ignore[arg-type]
+
+    engine = _SpyEngine(Path("/tmp"), "mps", "float16", 512)
+    frames = [
+        _start_frame(),
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "session.open",
+            "session_id": "a",
+            "language": "zh",
+            "chunk_duration_ms": 500,
+            "max_context_sec": 6.5,
+            "max_new_tokens": 96,
+            "capture_alignment": False,
+        },
+    ]
+    responses = _run_serve(frames, engine=engine)
+
+    assert [f for f in responses if f.get("type") == "session.opened"]
+    assert recorded == [
+        {
+            "session_id": "a",
+            "language": "zh",
+            "context": "",
+            "chunk_duration_ms": 500,
+            "max_context_sec": 6.5,
+            "max_new_tokens": 96,
+            "capture_alignment": False,
+        }
+    ]
+
+
 def test_worker_commit_uses_only_that_sessions_audio() -> None:
     engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
     frames = [
@@ -537,9 +620,8 @@ class _RecordingAlignEngine(_FakeEngine):
         session_id: str,
         language: str,
         context: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
         capture_alignment: bool = True,
     ) -> None:
@@ -547,9 +629,8 @@ class _RecordingAlignEngine(_FakeEngine):
             session_id=session_id,
             language=language,
             context=context,
-            chunk_sec=chunk_sec,
-            left_context_sec=left_context_sec,
-            right_context_ms=right_context_ms,
+            chunk_duration_ms=chunk_duration_ms,
+            max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
             capture_alignment=capture_alignment,
         )

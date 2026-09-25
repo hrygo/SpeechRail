@@ -174,9 +174,8 @@ class WorkerEngine(Protocol):
         session_id: str,
         language: str,
         context: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
         capture_alignment: bool = True,
     ) -> None: ...
@@ -389,12 +388,11 @@ def _handle_session_open(
     raw_context = frame.get("context")
     context = raw_context if isinstance(raw_context, str) else ""
     try:
-        chunk_sec = _coerce_session_float(frame.get("chunk_sec", 2.0))
-        left_context_sec = _coerce_session_float(frame.get("left_context_sec", 12.0))
-        right_context_ms = _coerce_session_int(frame.get("right_context_ms", 640))
+        chunk_duration_ms = _coerce_session_int(frame.get("chunk_duration_ms", 1_000))
+        max_context_sec = _coerce_session_float(frame.get("max_context_sec", 12.64))
         max_new_tokens = _coerce_session_int(frame.get("max_new_tokens", 256))
         capture_alignment = frame.get("capture_alignment", False)
-        if chunk_sec <= 0 or left_context_sec < 0 or right_context_ms < 0 or max_new_tokens <= 0:
+        if chunk_duration_ms <= 0 or max_context_sec <= 0 or max_new_tokens <= 0:
             raise ValueError("invalid session option")
         if not isinstance(capture_alignment, bool):
             raise ValueError("invalid capture_alignment")
@@ -409,9 +407,8 @@ def _handle_session_open(
             session_id=session_id,
             language=language,
             context=context,
-            chunk_sec=chunk_sec,
-            left_context_sec=left_context_sec,
-            right_context_ms=right_context_ms,
+            chunk_duration_ms=chunk_duration_ms,
+            max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
             capture_alignment=capture_alignment,
         )
@@ -1055,9 +1052,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         session_id: str,
         language: str,
         context: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
         capture_alignment: bool = True,
     ) -> None:
@@ -1066,12 +1062,15 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if session_id in self._streaming_states:
             raise RuntimeError(f"session already open: {session_id}")
         streaming_language = None if language in {"auto", ""} else language
-        max_context_sec = left_context_sec + right_context_ms / 1000.0
+        if chunk_duration_ms <= 0:
+            raise ValueError("chunk_duration_ms must be positive")
+        if max_context_sec <= 0:
+            raise ValueError("max_context_sec must be positive")
         self._session_contexts[session_id] = (language, context)
         self._streaming_states[session_id] = self._session.init_streaming(
             context=context,
             language=streaming_language,
-            chunk_size_sec=chunk_sec,
+            chunk_size_sec=chunk_duration_ms / 1_000,
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
         )

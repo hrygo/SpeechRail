@@ -682,12 +682,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
             cache_limit_mb=settings.mlx_cache_limit_mb,
             memory_limit_mb=settings.mlx_memory_limit_mb,
-            mode=settings.qwen3_streaming_mode,
-            chunk_sec=settings.qwen3_streaming_chunk_sec,
-            left_context_sec=settings.qwen3_streaming_left_context_sec,
-            right_context_ms=settings.qwen3_streaming_right_context_ms,
-            hold_back_words=settings.qwen3_streaming_hold_back_words,
-            stable_iterations=settings.qwen3_streaming_stable_iterations,
+            max_context_sec=settings.qwen3_streaming_max_context_sec,
             max_new_tokens=settings.qwen3_streaming_max_new_tokens,
             timeout_seconds=settings.request_timeout_seconds,
         )
@@ -703,7 +698,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             streaming_worker = Qwen3StreamingWorker(streaming_config)
         realtime_asr_factory = NativeRealtimeFactory(
             worker=streaming_worker,
-            mode=settings.qwen3_streaming_mode,
             next_session_id=lambda: f"sess_{uuid4().hex}",
             max_sessions=settings.realtime_max_sessions,
         )

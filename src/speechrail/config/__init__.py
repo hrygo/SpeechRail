@@ -71,14 +71,9 @@ class Settings(BaseSettings):
     tts_top_p: float = Field(default=0.95, gt=0.0, le=1.0)
     tts_warmup_on_start: bool = True
     realtime_asr_backend: Literal["disabled", "native"] = "disabled"
-    qwen3_streaming_mode: Literal["windowed", "causal"] = "windowed"
-    qwen3_streaming_chunk_sec: float = Field(default=2.0, gt=0, le=30)
-    qwen3_streaming_left_context_sec: float = Field(default=12.0, ge=0, le=60)
-    qwen3_streaming_right_context_ms: int = Field(default=640, ge=0, le=10_000)
-    qwen3_streaming_hold_back_words: int = Field(default=6, ge=0, le=64)
-    qwen3_streaming_stable_iterations: int = Field(default=2, ge=1, le=16)
+    qwen3_streaming_chunk_duration_ms: int = 1_000
+    qwen3_streaming_max_context_sec: float = Field(default=12.64, gt=0, le=60)
     qwen3_streaming_max_new_tokens: int = Field(default=256, ge=32, le=2048)
-    qwen3_streaming_context: str = ""
     qwen3_aligner_model_dir: Path | None = None
     diarization_coreml_model_path: Path | None = None
     diarization_worker_path: Path = Field(default_factory=bundled_diarization_worker_path)
@@ -185,6 +180,15 @@ class Settings(BaseSettings):
         if value == ("default", "warm", "bright", "calm"):
             return tuple(VOICE_PROFILES)
         return tuple(dict.fromkeys(resolve_voice(voice) for voice in value))
+
+    @field_validator("qwen3_streaming_chunk_duration_ms")
+    @classmethod
+    def validate_streaming_chunk_duration(cls, value: int) -> int:
+        """Restrict the task streaming policy to the evaluated chunk durations."""
+
+        if value not in {500, 1_000, 2_000}:
+            raise ValueError("qwen3_streaming_chunk_duration_ms must be one of 500, 1000, 2000")
+        return value
 
     @field_validator("job_spool_dir")
     @classmethod

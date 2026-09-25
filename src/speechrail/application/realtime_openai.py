@@ -273,8 +273,8 @@ class OpenAIRealtimeSession:
             "expected_model_revision": None,
             "tts_enabled": False,
             "transcription_partial_mode": "delta",
-            "transcription_chunk_duration_ms": round(
-                self._settings.qwen3_streaming_chunk_sec * 1_000
+            "transcription_chunk_duration_ms": (
+                self._settings.qwen3_streaming_chunk_duration_ms
             ),
         }
 
@@ -288,7 +288,7 @@ class OpenAIRealtimeSession:
         return int(
             self._config.get(
                 "transcription_chunk_duration_ms",
-                round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                self._settings.qwen3_streaming_chunk_duration_ms,
             )
         ) / 1_000
 
@@ -487,7 +487,7 @@ class OpenAIRealtimeSession:
         previous_chunk_duration_ms = int(
             self._config.get(
                 "transcription_chunk_duration_ms",
-                round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                self._settings.qwen3_streaming_chunk_duration_ms,
             )
         )
         if self._timeline.accepted_samples > 0 and (
@@ -640,7 +640,7 @@ class OpenAIRealtimeSession:
                 "partial_mode": self._config.get("transcription_partial_mode", "delta"),
                 "chunk_duration_ms": self._config.get(
                     "transcription_chunk_duration_ms",
-                    round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                    self._settings.qwen3_streaming_chunk_duration_ms,
                 ),
             }
             expected_model_revision = self._config.get("expected_model_revision")
@@ -689,7 +689,7 @@ class OpenAIRealtimeSession:
                     chunk_duration_ms=int(
                         self._config.get(
                             "transcription_chunk_duration_ms",
-                            round(self._settings.qwen3_streaming_chunk_sec * 1_000),
+                            self._settings.qwen3_streaming_chunk_duration_ms,
                         )
                     ),
                 ),

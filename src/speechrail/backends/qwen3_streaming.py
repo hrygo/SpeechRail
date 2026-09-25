@@ -32,7 +32,6 @@ from speechrail.runtime.worker_process import (
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
 
-_MODE_NAMES = ("windowed", "causal")
 _SUPPORTED_LANGUAGES = {
     "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko",
     "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi",
@@ -80,19 +79,14 @@ class Qwen3StreamingBackendConfig:
     dtype: Literal["float16", "float32", "int8"] = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
-    mode: Literal["windowed", "causal"] = "windowed"
-    chunk_sec: float = 2.0
-    left_context_sec: float = 12.0
-    right_context_ms: int = 640
-    hold_back_words: int = 6
-    stable_iterations: int = 2
+    max_context_sec: float = 12.64
     max_new_tokens: int = 256
     timeout_seconds: float = 120.0
     worker_role: str = "streaming"
 
     def __post_init__(self) -> None:
-        if self.mode not in _MODE_NAMES:
-            raise ValueError("invalid streaming mode")
+        if self.max_context_sec <= 0:
+            raise ValueError("max_context_sec must be positive")
         root = self.repository_root.resolve(strict=True)
         python = self.python_executable.absolute()
         if not python.is_file():
@@ -243,18 +237,16 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         language: str,
         prompt: str,
         session_id: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
     ) -> None:
         self._worker = worker
         self._language = language
         self._prompt = prompt
         self._session_id = session_id
-        self._chunk_sec = chunk_sec
-        self._left_context_sec = left_context_sec
-        self._right_context_ms = right_context_ms
+        self._chunk_duration_ms = chunk_duration_ms
+        self._max_context_sec = max_context_sec
         self._max_new_tokens = max_new_tokens
         self._queue: asyncio.Queue[dict[str, object]] | None = None
         self._events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue(
@@ -303,9 +295,8 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                     "session_id": self._session_id,
                     "language": self._language,
                     "context": self._prompt,
-                    "chunk_sec": self._chunk_sec,
-                    "left_context_sec": self._left_context_sec,
-                    "right_context_ms": self._right_context_ms,
+                    "chunk_duration_ms": self._chunk_duration_ms,
+                    "max_context_sec": self._max_context_sec,
                     "max_new_tokens": self._max_new_tokens,
                     "capture_alignment": self._capture_alignment,
                 }
@@ -567,12 +558,10 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         self,
         *,
         worker: StreamingWorkerProtocol,
-        mode: Literal["windowed", "causal"],
         next_session_id: Callable[[], str],
         max_sessions: int = 2,
     ) -> None:
         self._worker = worker
-        self._mode = mode
         self._next_session_id = next_session_id
         self._max_sessions = max_sessions
         self._sessions: dict[str, Qwen3StreamingSession] = {}
@@ -591,8 +580,6 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         options: RealtimeTranscriptionOptions,
     ) -> Qwen3StreamingSession:
         resolved = (language or "auto").strip().lower()
-        if self._mode == "causal" and resolved not in {"en", "english"}:
-            raise _unsupported_language(resolved)
         if resolved not in _SUPPORTED_LANGUAGES and resolved != "auto":
             raise _unsupported_language(resolved)
         if len(self._sessions) >= self._max_sessions:
@@ -603,9 +590,8 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             language=resolved,
             prompt=prompt,
             session_id=self._next_session_id(),
-            chunk_sec=options.chunk_duration_ms / 1_000,
-            left_context_sec=getattr(config, "left_context_sec", 12.0),
-            right_context_ms=getattr(config, "right_context_ms", 640),
+            chunk_duration_ms=options.chunk_duration_ms,
+            max_context_sec=getattr(config, "max_context_sec", 12.64),
             max_new_tokens=getattr(config, "max_new_tokens", 256),
         )
         self._sessions[session.session_id] = session
