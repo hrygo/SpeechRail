@@ -577,7 +577,7 @@ def test_resource_monitor_wraps_public_calls_and_stop_result(tmp_path: Path) -> 
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_with_monitor(runner, monitor),
     )
@@ -603,7 +603,7 @@ def test_resource_monitor_start_failure_sends_no_http(tmp_path: Path) -> None:
         run_profile_benchmark(
             "http://127.0.0.1:8201",
             manifest,
-            profile="light",
+            profile="fast",
             phase="quality",
             dependencies=_with_monitor(runner, monitor),
         )
@@ -623,7 +623,7 @@ def test_resource_monitor_stops_after_http_runner_failure(tmp_path: Path) -> Non
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_with_monitor(runner, monitor),
     )
@@ -649,7 +649,7 @@ def test_resource_monitor_stop_failure_marks_incomplete_without_message(
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_with_monitor(runner, monitor),
     )
@@ -681,7 +681,7 @@ def test_resource_monitor_without_samples_is_marked_incomplete(tmp_path: Path) -
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_with_monitor(runner, monitor),
     )
@@ -709,7 +709,7 @@ def test_request_base_exception_survives_monitor_stop_failure(tmp_path: Path) ->
         run_profile_benchmark(
             "http://127.0.0.1:8201",
             manifest,
-            profile="light",
+            profile="fast",
             phase="quality",
             dependencies=_with_monitor(runner, monitor),
         )
@@ -724,7 +724,7 @@ def test_injected_monitor_never_releases_even_with_passed_manifest(tmp_path: Pat
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["phase_evidence"] = {
         phase: {"status": "passed", "real": True, "source": "operator"}
-        for phase in required_phases("light")
+        for phase in required_phases("fast")
     }
     payload["soak"] = {"status": "passed", "real": True, "source": "operator"}
     payload["switch"] = {"status": "passed", "real": True, "source": "operator"}
@@ -736,7 +736,7 @@ def test_injected_monitor_never_releases_even_with_passed_manifest(tmp_path: Pat
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_with_monitor(runner, monitor),
     )
@@ -747,10 +747,11 @@ def test_injected_monitor_never_releases_even_with_passed_manifest(tmp_path: Pat
 
 
 def test_required_phases_are_profile_specific_and_unknown_is_fail_closed() -> None:
-    light = required_phases("light")
-    assert {"m1_air_8gb", "quality", "cold", "warm", "soak", "switch"} <= light
-    assert PROFILE_DEVICE_PHASES["balanced"] in required_phases("balanced")
-    assert PROFILE_DEVICE_PHASES["quality"] in required_phases("quality")
+    required = {"quality", "cold", "warm", "soak", "switch"}
+    for profile in ("fast", "quality", "reference"):
+        phases = required_phases(profile)
+        assert required <= phases
+        assert PROFILE_DEVICE_PHASES[profile] in phases
 
     with pytest.raises(ValueError, match="unknown profile"):
         required_phases("experimental")
@@ -841,7 +842,7 @@ def test_asr_multipart_uses_extension_mime_and_stable_model(tmp_path: Path) -> N
     run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -861,7 +862,7 @@ def test_asr_multipart_uses_extension_mime_and_stable_model(tmp_path: Path) -> N
     run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(unknown_runner),
     )
@@ -888,7 +889,7 @@ def test_tts_rtf_uses_valid_returned_pcm_duration(tmp_path: Path) -> None:
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -913,7 +914,7 @@ def test_tts_empty_or_odd_pcm_is_not_success(tmp_path: Path, pcm: bytes) -> None
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -936,7 +937,7 @@ def test_auth_header_reads_environment_without_redacting_into_result(
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -983,7 +984,7 @@ def test_benchmark_auth_failure_stops_before_inference_request(tmp_path: Path) -
         run_profile_benchmark(
             "http://127.0.0.1:8201",
             manifest,
-            profile="light",
+            profile="fast",
             phase="quality",
             dependencies=_dependencies(runner),
         )
@@ -996,7 +997,7 @@ def test_default_sampler_keeps_fully_passed_manifest_closed(tmp_path: Path) -> N
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["phase_evidence"] = {
         phase: {"status": "passed", "real": True, "source": "operator"}
-        for phase in required_phases("light")
+        for phase in required_phases("fast")
     }
     payload["soak"] = {"status": "passed", "real": True, "source": "operator"}
     payload["switch"] = {"status": "passed", "real": True, "source": "operator"}
@@ -1011,7 +1012,7 @@ def test_default_sampler_keeps_fully_passed_manifest_closed(tmp_path: Path) -> N
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=dependencies,
     )
@@ -1038,7 +1039,7 @@ def test_benchmark_result_is_redacted_and_uses_public_api_with_actual_duration(
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -1082,7 +1083,7 @@ def test_release_gate_rejects_generic_architecture_as_chip_identity(tmp_path: Pa
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=dependencies,
     )
@@ -1096,7 +1097,7 @@ def test_injected_dependencies_cannot_be_recorded_as_release_evidence(tmp_path: 
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["phase_evidence"] = {
         phase: {"status": "passed", "real": True, "source": "operator"}
-        for phase in required_phases("light")
+        for phase in required_phases("fast")
     }
     payload["soak"] = {"status": "passed", "real": True, "source": "operator"}
     payload["switch"] = {"status": "passed", "real": True, "source": "operator"}
@@ -1106,7 +1107,7 @@ def test_injected_dependencies_cannot_be_recorded_as_release_evidence(tmp_path: 
     result = run_profile_benchmark(
         "http://127.0.0.1:8201",
         manifest,
-        profile="light",
+        profile="fast",
         phase="quality",
         dependencies=_dependencies(runner),
     )
@@ -1125,7 +1126,7 @@ def test_main_rejects_invalid_base_url_without_creating_output(tmp_path: Path) -
             "--manifest",
             str(tmp_path / "manifest.json"),
             "--profile",
-            "light",
+            "fast",
             "--phase",
             "quality",
             "--output",
