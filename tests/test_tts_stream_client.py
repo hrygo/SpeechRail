@@ -40,7 +40,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamOptions,
     TtsStreamTerminal,
 )
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 
 def _pcm(samples: int) -> bytes:
@@ -334,6 +334,57 @@ def test_close_cancels_a_live_session_without_hanging() -> None:
         events = await _collect(session.events())
         assert any(event.kind is TtsStreamEventKind.CANCELLED for event in events)
         assert transport.aborts == 0
+
+    _run(scenario)
+
+
+def test_a_frame_from_a_finished_utterance_is_dropped_not_fatal() -> None:
+    """A leaked terminal of this parent's own finished stream is stale, not fatal."""
+
+    async def scenario() -> None:
+        transport = ScriptedTransport(
+            [
+                _frame(FRAME_STREAM_DONE, request_id="req-old", terminal="cancelled"),
+                _frame(FRAME_STREAM_STARTED),
+            ]
+        )
+        synth = Qwen3TtsIncrementalSynthesizer(
+            transport, stream_protocol=1, cancel_grace_seconds=0.05
+        )
+        session = await synth.open_stream(
+            _options(), stale_request_ids=frozenset({"req-old"})
+        )
+        assert session.terminal is None
+        assert "dropped stale frame from req-old" in session.notices
+        await session.close()
+
+    _run(scenario)
+
+
+def test_an_unknown_foreign_frame_still_fails_closed() -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport(
+            [_frame(FRAME_STREAM_STARTED, request_id="req-someone-else")]
+        )
+        with pytest.raises(ProtocolError):
+            await _open(transport)
+
+    _run(scenario)
+
+
+def test_close_reaps_a_worker_that_never_retires_the_utterance() -> None:
+    """An utterance without its terminal leaves frames nobody will read.
+
+    The parent cannot hand that stream to the next one, so it must reap the
+    child instead of leaving the trailing frame on the shared wire.
+    """
+
+    async def scenario() -> None:
+        transport = ScriptedTransport([_frame(FRAME_STREAM_STARTED)])
+        session = await _open(transport)
+        await session.close()
+        assert session.used_abort_fallback is True
+        assert transport.aborts == 1
 
     _run(scenario)
 

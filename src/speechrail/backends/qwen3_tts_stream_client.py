@@ -114,9 +114,14 @@ class Qwen3TtsIncrementalSession:
         io_timeout_seconds: float = 120.0,
         cancel_grace_seconds: float = 5.0,
         start_fields: Mapping[str, object] | None = None,
+        stale_request_ids: frozenset[str] | None = None,
     ) -> None:
         self._transport = transport
         self._options = options
+        # Utterances this parent already owned on this worker.  Their frames can
+        # still be on the wire when the worker is torn down early, and they are
+        # stale by definition rather than a protocol violation.
+        self._stale_request_ids = stale_request_ids or frozenset()
         self._start_fields = (
             {
                 key: value
@@ -285,7 +290,7 @@ class Qwen3TtsIncrementalSession:
                     "request_id": self._options.request_id,
                 }
             )
-        await self._await_dispatcher(self._cancel_grace)
+        drained = await self._await_dispatcher(self._cancel_grace)
         if self._state.terminal is TtsStreamTerminal.CANCELLED:
             await self._publish(
                 TtsStreamEvent(
@@ -295,6 +300,10 @@ class Qwen3TtsIncrementalSession:
                 ),
                 drop_stale=True,
             )
+        if not drained:
+            # The worker never retired this utterance inside the grace, so its
+            # remaining frames have no owner left that will read them.
+            await self._abort()
 
     async def close(self) -> None:
         """Release the utterance, aborting the child only if it will not stop."""
@@ -314,7 +323,10 @@ class Qwen3TtsIncrementalSession:
             TtsStreamError("tts_input_closed", "the incremental session was closed")
         )
         self._put_terminal_nowait(None)
-        if self._fatal is not None:
+        if self._fatal is not None or self._state.terminal is None:
+            # Either the dispatcher faulted or this utterance ended without the
+            # worker's terminal: the shared frame stream is in an unknown state,
+            # and the next utterance must not inherit that.
             await self._abort()
 
     async def _dispatch(self) -> None:
@@ -342,8 +354,21 @@ class Qwen3TtsIncrementalSession:
 
     async def _handle_frame(self, frame: Mapping[str, object]) -> bool:
         frame_type = frame.get("type")
-        if frame.get("request_id") != self._options.request_id:
-            raise ProtocolError("incremental frame carried a foreign request_id")
+        request_id = frame.get("request_id")
+        if request_id != self._options.request_id:
+            if isinstance(request_id, str) and request_id in self._stale_request_ids:
+                # A finished utterance of this same parent left its terminal (or
+                # a trailing chunk) on the shared wire.  Drop it and keep
+                # reading instead of failing the new utterance.
+                self._note(f"dropped stale frame from {request_id}")
+                return True
+            # Name the offending frame: a leaked frame from a finished
+            # utterance is the one fault that must never be guessed at.
+            raise ProtocolError(
+                "incremental frame carried a foreign request_id "
+                f"(type={frame_type!r} request_id={request_id!r} "
+                f"expected={self._options.request_id!r})"
+            )
         if frame_type == FRAME_STREAM_STARTED:
             if self._started is not None and not self._started.done():
                 self._started.set_result(None)
@@ -489,13 +514,18 @@ class Qwen3TtsIncrementalSession:
                 waiter.set_exception(error)
         self._ack_waiters.clear()
 
-    async def _await_dispatcher(self, seconds: float) -> None:
+    async def _await_dispatcher(self, seconds: float) -> bool:
+        """Wait for the dispatcher; ``False`` means it never finished in time."""
+
         dispatcher = self._dispatcher
         if dispatcher is None or dispatcher.done():
-            return
-        with contextlib.suppress(TimeoutError):
+            return True
+        try:
             async with asyncio.timeout(seconds):
                 await asyncio.shield(dispatcher)
+        except TimeoutError:
+            return False
+        return True
 
     async def _abort(self) -> None:
         if self._abort_used:
@@ -532,12 +562,15 @@ class Qwen3TtsIncrementalSynthesizer:
         options: TtsStreamOptions,
         *,
         start_fields: Mapping[str, object] | None = None,
+        stale_request_ids: frozenset[str] | None = None,
     ) -> Qwen3TtsIncrementalSession:
         """Fail closed when the ready handshake never negotiated streaming.
 
         ``start_fields`` carries the conditioning frozen by the owning worker
         (voice-profile snapshot or clone reference); it can never replace the
-        utterance identity validated above.
+        utterance identity validated above.  ``stale_request_ids`` names the
+        utterances this parent already finished on this worker, whose frames
+        may still be on the wire.
         """
 
         if not self.supported:
@@ -552,6 +585,7 @@ class Qwen3TtsIncrementalSynthesizer:
             io_timeout_seconds=self._io_timeout,
             cancel_grace_seconds=self._cancel_grace,
             start_fields=start_fields,
+            stale_request_ids=stale_request_ids,
         )
         return await session.open()
 

@@ -227,6 +227,49 @@ def test_incremental_start_frame_carries_frozen_voice_profile(tmp_path: Path) ->
     asyncio.run(run())
 
 
+def test_a_leaked_terminal_from_a_finished_utterance_never_fails_the_next(
+    tmp_path: Path,
+) -> None:
+    """The worker hands the parent's own finished utterances to the next stream.
+
+    A cancelled or disconnected utterance can leave its terminal unread on the
+    shared wire.  The next utterance must recognise it as stale instead of
+    failing closed with a foreign request_id.
+    """
+
+    worker, transport = _worker(tmp_path, variant="custom_voice", stream_protocol=1)
+
+    async def run() -> None:
+        first = await worker.open_incremental_stream(
+            _options("serena", request_id="req-first", response_id="resp-first")
+        )
+        await first.close()
+        # The parent stopped reading after the first utterance, so its terminal
+        # is still queued when the next one starts.
+        transport._queue.put_nowait(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "tts_stream_done",
+                "request_id": "req-first",
+                "terminal": "cancelled",
+            }
+        )
+        second = await worker.open_incremental_stream(
+            _options("serena", request_id="req-second", response_id="resp-second")
+        )
+        try:
+            await second.append_text(0, "第二条")
+            await second.finish_text(0)
+            kinds = [event.kind async for event in second.events()]
+        finally:
+            await second.close()
+        # The leaked terminal was dropped, so the live utterance still reached
+        # its own terminal instead of inheriting the finished one.
+        assert kinds[-1] is TtsStreamEventKind.COMPLETED
+
+    asyncio.run(run())
+
+
 def test_a_failed_open_leaves_the_worker_ready_to_restart(tmp_path: Path) -> None:
     """A reaped child must not leave the worker marked started.
 
