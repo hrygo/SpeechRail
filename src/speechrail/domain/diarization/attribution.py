@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from .types import ActivityFrame, ActivityUpdate, Attribution, SampleSpan, TextUnit
+from speechrail.domain.audio_timeline import SampleSpan
+
+from .types import ActivityFrame, ActivityUpdate, Attribution, TextUnit
 
 
 def union_support(unit: SampleSpan, activities: Iterable[SampleSpan]) -> float:

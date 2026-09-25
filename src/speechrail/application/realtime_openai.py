@@ -11,7 +11,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
@@ -341,7 +341,7 @@ class OpenAIRealtimeSession:
 
         declared = self._config.get("alignment_granularity")
         if declared in {"character", "word", "segment"}:
-            return declared  # type: ignore[return-value]
+            return cast(AlignmentGranularity, declared)
         requested = self._config.get("timestamp_granularities")
         if isinstance(requested, (list, tuple)) and "character" in requested:
             return "character"

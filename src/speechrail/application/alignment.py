@@ -139,7 +139,10 @@ def _granularity_supported(
 def _is_character_token(token: str) -> bool:
     """Accept one base code point plus its combining marks, never a phrase."""
 
-    base, *marks = token
+    if not token:
+        return False
+    base = token[0]
+    marks = token[1:]
     if unicodedata.combining(base):
         return False
     return all(unicodedata.combining(mark) for mark in marks)

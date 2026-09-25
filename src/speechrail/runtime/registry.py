@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Final
 
@@ -18,14 +18,14 @@ VOICE_DESIGN_ROLE: Final[ModelRole] = "voice_design"
 
 # The vendor engine names the same routes differently.  The mapping is explicit
 # so a worker identity that does not match its plan role fails closed.
-ENGINE_VARIANT_BY_ROLE: Final = MappingProxyType(
+ENGINE_VARIANT_BY_ROLE: Final[Mapping[ModelRole, str]] = MappingProxyType(
     {
         "tts_custom_voice": "custom_voice",
         "tts_base": "base",
         "voice_design": "voice_design",
     }
 )
-ROLE_BY_ENGINE_VARIANT: Final = MappingProxyType(
+ROLE_BY_ENGINE_VARIANT: Final[Mapping[str, ModelRole]] = MappingProxyType(
     {variant: role for role, variant in ENGINE_VARIANT_BY_ROLE.items()}
 )
 

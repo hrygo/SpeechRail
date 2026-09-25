@@ -28,6 +28,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from speechrail.config.model_catalog import ModelRole
 from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
 from speechrail.domain.voice_validation import VoiceValidationRepository
@@ -65,7 +66,7 @@ class VoiceProfile:
         return self.instruction or self.ref_text or ""
 
     @property
-    def runtime_role(self) -> str | None:
+    def runtime_role(self) -> ModelRole | None:
         """Return the plan role that owns this voice, or None when design-only.
 
         ``system`` voices are built-in fixed speakers and therefore CustomVoice

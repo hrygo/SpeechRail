@@ -476,11 +476,11 @@ class ModelCatalog(BaseModel):
                 f"missing={missing} extra={extra}"
             )
         for (tier, role), artifact_key in bindings.items():
-            artifact = artifacts.get(artifact_key)
-            if artifact is None:
+            bound_artifact = artifacts.get(artifact_key)
+            if bound_artifact is None:
                 raise ValueError(f"spec {tier}/{role} references unknown artifact")
             expected_family, expected_variant = _ROLE_VARIANTS[role]
-            if (artifact.family, artifact.variant) != (
+            if (bound_artifact.family, bound_artifact.variant) != (
                 expected_family,
                 expected_variant,
             ):

@@ -386,6 +386,7 @@ def _candidate_validation(
         test_text_sha256=test_text_sha256,
     )
     failures: list[str] = []
+    machine_status: Literal["pass", "warn", "reject"]
     if quality.status == vq.VoiceQualityStatus.REJECT.value:
         machine_status = "reject"
         failures.append("output_invalid")

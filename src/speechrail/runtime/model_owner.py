@@ -150,14 +150,17 @@ class ModelOwner:
     def model(self) -> object | None:
         return self._model
 
+    def _raise_if_draining(self) -> None:
+        if self._state is OwnerState.DRAINING:
+            raise ModelOwnerDrainingError(f"owner is draining: {self._key.stable_id}")
+
     async def _ensure_loaded(self) -> None:
         if self._state is OwnerState.DRAINING:
             raise ModelOwnerDrainingError(f"owner is draining: {self._key.stable_id}")
         if self._model is not None and self._state in {OwnerState.READY, OwnerState.BUSY}:
             return
         async with self._load_lock:
-            if self._state is OwnerState.DRAINING:
-                raise ModelOwnerDrainingError(f"owner is draining: {self._key.stable_id}")
+            self._raise_if_draining()
             if self._model is not None and self._state in {OwnerState.READY, OwnerState.BUSY}:
                 return
             self._state = OwnerState.LOADING
