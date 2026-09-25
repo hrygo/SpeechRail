@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.17"
+version: "1.18"
 date: 2026-09-25
 ---
 
@@ -69,10 +69,10 @@ date: 2026-09-25
 
 | 档位 | ASR | 默认 TTS | clone capability | aligner / 分人 | 当前证据边界 |
 |---|---|---|---|---|---|
-| light | 0.6B q8 | CustomVoice 0.6B q8 | 无 | 无 / 关闭 | catalog 声明，不代表运行可用 |
-| balanced | 1.7B q8 | CustomVoice 0.6B q8 | 无 | q8 / 开启 | 与 light 共用同一 TTS artifact |
-| quality | 1.7B q8 | VoiceDesign 1.7B q8 | Base 1.7B q8 | bf16 / 开启 | 设计与克隆为不同 worker/capability |
-| extreme | 1.7B bf16 | VoiceDesign 1.7B bf16 | Base 1.7B bf16 | bf16 / 开启 | 候选档；质量、延迟和资源尚未验收 |
+| light | 0.6B q8 | CustomVoice 0.6B q8 | 无 | 无 / 关闭 | 2026-09-25 真实增量门通过：短句 first PCM p50 23.3 ms、RTF 0.208、`failures: []` |
+| balanced | 1.7B q8 | CustomVoice 0.6B q8 | 无 | q8 / 开启 | 同一 TTS artifact 增量门通过（p50 23.2 ms / RTF 0.208）；ASR 端到端与资源 not_run |
+| quality | 1.7B q8 | VoiceDesign 1.7B q8 | Base 1.7B q8 | bf16 / 开启 | 设计与克隆为不同 worker/capability；Base clone 增量门通过（p50 43.4 ms / RTF 0.237），身份 A/B 与长稳 not_run |
+| extreme | 1.7B bf16 | VoiceDesign 1.7B bf16 | Base 1.7B bf16 | bf16 / 开启 | Base bf16 clone 增量门通过（p50 55.5 ms / RTF 0.300）；资源峰值、可听与长稳 not_run，仍按候选档 |
 
 重要区别：quality 与 balanced 共用 ASR artifact，但不是同一 TTS；light 与 balanced 共用 TTS，但 ASR 和辅助能力不同，因此端到端延迟、内存与调度不能互相代替实测。
 
@@ -287,7 +287,7 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W8 公共协议与能力 | complete | public wire 增加 `speechrail.tts.start/append_text/finish_text` 与 `speechrail.tts.started/text_accepted`，音频沿用 `response.output_audio.delta` 并带 `speechrail.chunk_index/sample_offset`；ACK 序号定为 `append_sequence`（传输层已占用 `sequence`）；`create`/`start` 共用活动判定与 request-id 账本；`tts_stream_capability.py` 由 `/v1/models`、`/v1/voices` 与握手共用且 `budget_available` 不参与 `supported`。新增 `tests/test_realtime_tts_incremental.py` 16 项，定向 252 passed、主仓全量 2324 passed/7 skipped、ruff/mypy（136 文件）/diff check 通过。仅 fake session，未加载模型 |
 | W9 App 单轮增量文本与播放 | complete | ControlKit 增 start/append/finish DTO 与 started/text_accepted 解析；`RealtimeASRClient` 增流式三方法并校验 chunk_index/sample_offset/偶数字节；新增 `AssistantSpeechTextBuffer`（150 ms 三档紧急度、按 Unicode scalar 计量）、`AssistantPlaybackLedger`（1 秒样本预算、旧代隔离、暂时 drained ≠ 结束）、`AssistantTTSStreamCoordinator`（一轮一次 start/finish、ACK 未回不发 finish、背压超时明确失败）；播放完成语义由 `.dataConsumed` 改为 `.dataRendered`。`swift test` 全量 207 passed（含新增 30 项纯状态测试）；三个新增文件同时登记到 SwiftPM sources 与 Xcode 两处 Sources phase；App 全量源文件 `swiftc -typecheck` 通过。App 构建 / 真实 AVAudioEngine / 可听延迟 / UI 未验收（未授权） |
 | W10 分档能力呈现与切换保护 | complete | 后端四档矩阵 13 项（`tests/test_tts_stream_capability_matrix.py`）钉住 light/balanced=CustomVoice、quality/extreme=Base clone、VoiceDesign 永不提升、模型级不宣称逐音色支持；App 新增 `VoiceStreamingCapability`/`VoiceStreamingAxes` 与 `supportsStreamingInput`，缺失即未知、未声明轴 fail-closed（`StreamingTtsCapabilitiesTests` 7 项）；`AssistantView` 显示「边想边说 / 普通朗读」与按 reason 的下一步动作，`ModelManagementView` 在助手 live 期间禁用切档并再挡确认入口。仅纯 DTO/能力测试，未做 UI 自动化或真实服务验收 |
-| W11 逐档声学/性能与发布回滚 | in_progress（仅基准工具） | Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂”。`examples/perf/bench_tts_streaming.py` 已按公共 wire 顺序实现并以 21 项确定性测试钉住（`text_gap_ms` 与生成 RTF 分开报）；真实模型、逐档声学矩阵、§8.2 延迟/RTF 门与发布回滚全部未运行，需单独授权。两项阻塞的处理进度（2026-09-25）：承载 `qwen3_tts.incremental*` 的 mlx-audio 候选 fork（`851f9567…`）已不在本机与任何远端，改为在仓库内重建 overlay（`d278c5e3`，`vendor/mlx-audio-incremental/`，内容身份 `956926b1…`），CustomVoice q8 与 Base q8 门复验通过；安装态仍是 cp312 release 且不含增量 wire（已构建的 cp314 wheel 含 wire，安装即服务切换），overlay 进入正式运行时用“替换 lock 中的 mlx-audio 条目”还是“独立 overlay 制品”仍待定 |
+| W11 逐档声学/性能与发布回滚 | in_progress（四档真实增量门已过） | 2026-09-25：cp314 wheel 装成 managed runtime（`2b0eb8ff…`，回退点 `99bb218a…` 与 cp312 `b6d3394c…`），修复 client `_publish` 丢事件与 worker `_emit` 丢 `on_sent` 两处缺陷后，light/balanced/quality/extreme 四档真实 WebSocket + 真实模型基准 `failures: []`（短句 first PCM p50 23.2–55.5 ms、RTF p50 0.199–0.300；254 字长句与 400 ms 四段追加同样通过）；Base 参考音频需 ~2.4 s 级。未运行：真实播放欠载、打断/cancel 时延、长稳内存、跨文本身份 A/B、light/balanced 的 ASR 端到端、extreme 资源峰值、App 可听与发布回滚演练 |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 
@@ -298,6 +298,8 @@ W2 的 `requirements/shared.txt` 是 ASR/TTS role lock 的交集元数据，只�
 分档差异是方案的一部分：统一 Python/runtime、协议和生命周期，分开 CustomVoice 与 Base 增量实现，分开 q8/bf16 资源与声学验收。提高档位不是天然提高一致性，也不是天然降低延迟。
 
 W4 真实模型门（2026-09-25 修正后）表明：CustomVoice q8 与 Base q8 都能在同一 generation 内首 PCM 后追加文本并完整发声，四档统一真增量目标继续成立。Base 的前置条件是该 runtime 的 aligned ICL 布局必须把初始文本的尾部留在 trailing 队列：初始文本要跨过 prefill 槽位（`prefill_target_tokens < initial_text_token_count`），并配合短 reference；探针对该条件 fail-closed。此前“Base 只能全文本预填”的 Ruling 来自 `--schedule` 未接线加长 reference 的假阴性，已作废。Base bf16 的 catalog `README.md` 差异已由恢复 pinned 快照解决：两件 bf16 制品经仓库自带校验各 13/13 文件尺寸与 sha256 匹配，catalog 门按原规则通过，未放宽校验。剩余未决项是所有档位的声学/性能验收，以及 bf16 相对 q8 的实时门与资源收益（W11）。
+
+W11 真实增量门（2026-09-25）：cp314 wheel 已装成 managed runtime（`2b0eb8ff…`，保留 `99bb218a…` 与 cp312 `b6d3394c…` 回退点），并在修复两处真实缺陷后跑通四档真实基准。缺陷一在客户端：`qwen3_tts_stream_client._publish` 丢弃非终态事件，改为对 worker 施加背压；缺陷二在 worker：`_emit` 重建 `StreamFrame` 时丢掉 host 帧的 `on_sent`，`pending_audio_bytes` 只增不减，第 13 个 3840 B chunk 必越过 48000 B 预算并报 `tts_backpressure`（原始 wire trace 与 `48000/3840=12.5` 吻合，现已用确定性测试钉住）。四档短句结果：light 23.3 ms / RTF 0.208、balanced 23.2 ms / 0.208、quality 43.4 ms / 0.237、extreme 55.5 ms / 0.300，`failures: []`。身份与精度差异仍是分档核心：light/balanced 为 CustomVoice 内置 speaker 且 `tts_clone=None`，quality/extreme 为 Base clone，prepared reference 按量化隔离，同一 voice id 在两个精度下各自准备参考。Base 参考音频需 ~2.4 s 级，8.4 s 参考会触发 `prefill_did_not_enter_trailing_region`。**尚未验收：** 真实播放欠载、打断与 cancel 时延、长稳内存与缓存驻留、跨文本盲听身份 A/B、light/balanced 的 ASR 端到端、extreme 资源峰值、App 可听与发布/回滚演练；extreme 仍按候选档呈现，不因基准通过自动转正式实时档。
 
 W5 已把第 8/9 节的增量约束固化为 vendor-neutral 领域契约：唯一 limits/state/event 定义、必须连续的 append 序号与唯一终态、文本 codepoint 与音频字节两套独立预算，以及以内容身份+预处理+模型/量化/tokenizer/实现版本为命名空间的 prepared reference key（跨精度不共享）。W6 已在其上实现私有 adapter、worker 双线程与父进程 session：`tts_stream_protocol=1` 协商、单模型线程、单父端 dispatcher、voice lease 与独占 stream slot，以及 CustomVoice speaker / Base clone / VoiceDesign fail-closed 的条件映射。该层仍是 fake IPC 与确定性测试，真实模型、真实 worker 与 public wire 尚未验收。
 
