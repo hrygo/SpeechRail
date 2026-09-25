@@ -203,6 +203,20 @@ class ProfileStore:
         finally:
             os.close(parent)
 
+    def _remove_journal(self) -> None:
+        self._safe_path(self.journal_path)
+        try:
+            self.journal_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise OSError("could not consume profile transaction") from exc
+        parent = os.open(self.journal_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+
     def _has_profile_state(self) -> bool:
         """Check for profile records without creating a lock or parent directory."""
         self._safe_path(self.selection_path)
@@ -243,13 +257,16 @@ class ProfileStore:
 
         The managed installer uses it to migrate an existing selection onto the
         runtime lock published by the wheel, and to restore the previous record
-        when that installation fails.
+        when that installation fails. A finished transaction record is dropped
+        first, so recovery reads the replaced record instead of the old candidate.
         """
         validated = _selection(selection)
         with self._locked():
             journal = self._journal()
-            if journal is not None and journal["stage"] not in _TERMINAL:
-                raise RuntimeError("profile_store_busy")
+            if journal is not None:
+                if journal["stage"] not in _TERMINAL:
+                    raise RuntimeError("profile_store_busy")
+                self._remove_journal()
             if validated is None:
                 self._safe_path(self.selection_path)
                 self.selection_path.unlink(missing_ok=True)
