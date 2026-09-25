@@ -42,9 +42,8 @@ class _IsolationEngine:
         session_id: str,
         language: str,
         context: str,
-        chunk_sec: float = 2.0,
-        left_context_sec: float = 12.0,
-        right_context_ms: int = 640,
+        chunk_duration_ms: int = 1_000,
+        max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
         capture_alignment: bool = True,
     ) -> None:
@@ -54,9 +53,8 @@ class _IsolationEngine:
         self.sessions[session_id] = []
         self.align_buffers[session_id] = bytearray()
         self.open_args[session_id] = (
-            chunk_sec,
-            left_context_sec,
-            right_context_ms,
+            chunk_duration_ms,
+            max_context_sec,
             max_new_tokens,
         )
 
@@ -156,21 +154,19 @@ def _append_frame(session_id: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("chunk_sec", 0),
-        ("chunk_sec", -1),
-        ("chunk_sec", "bad"),
-        ("chunk_sec", float("inf")),
-        ("chunk_sec", True),
-        ("left_context_sec", -1),
-        ("left_context_sec", float("nan")),
-        ("left_context_sec", []),
-        ("left_context_sec", False),
-        ("right_context_ms", -1),
-        ("right_context_ms", -0.5),
-        ("right_context_ms", 1.5),
-        ("right_context_ms", float("inf")),
-        ("right_context_ms", "bad"),
-        ("right_context_ms", False),
+        ("chunk_duration_ms", 0),
+        ("chunk_duration_ms", -1),
+        ("chunk_duration_ms", "bad"),
+        ("chunk_duration_ms", float("inf")),
+        ("chunk_duration_ms", True),
+        ("chunk_duration_ms", 1.5),
+        ("max_context_sec", 0),
+        ("max_context_sec", -1),
+        ("max_context_sec", float("nan")),
+        ("max_context_sec", []),
+        ("max_context_sec", False),
+        ("max_context_sec", float("inf")),
+        ("max_context_sec", "bad"),
         ("max_new_tokens", 0),
         ("max_new_tokens", -1),
         ("max_new_tokens", 1.5),
@@ -216,9 +212,8 @@ def test_session_open_preserves_defaults_and_accepts_numeric_strings() -> None:
             _open_frame("defaults"),
             _open_frame(
                 "strings",
-                chunk_sec="1.5",
-                left_context_sec="0",
-                right_context_ms="320",
+                chunk_duration_ms="1500",
+                max_context_sec="7.5",
                 max_new_tokens="64",
             ),
         ],
@@ -227,8 +222,8 @@ def test_session_open_preserves_defaults_and_accepts_numeric_strings() -> None:
 
     assert not [frame for frame in responses if frame.get("type") == "error"]
     assert engine.open_args == {
-        "defaults": (2.0, 12.0, 640, 256),
-        "strings": (1.5, 0.0, 320, 64),
+        "defaults": (1_000, 12.64, 256),
+        "strings": (1_500, 7.5, 64),
     }
 
 
