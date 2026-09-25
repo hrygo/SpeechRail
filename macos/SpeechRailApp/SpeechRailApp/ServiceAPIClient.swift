@@ -51,15 +51,25 @@ public struct ServiceModelCapabilities: Equatable, Sendable {
     public let supportsPreview: Bool
     public let supportsClone: Bool
     public let supportsInstruction: Bool
+    /// 模型级增量输入实现轴（`capabilities.streaming_input`）。
+    ///
+    /// 它只说明**实现**是否协商成功，绝不代表每个音色都能增量合成；
+    /// 具体音色要读 `CreatorVoice.streaming`。旧服务未声明时为 `false`。
+    public let supportsStreamingInput: Bool
+    public let streamingProtocolNegotiated: Bool?
 
     public init(
         supportsPreview: Bool = false,
         supportsClone: Bool = false,
-        supportsInstruction: Bool = false
+        supportsInstruction: Bool = false,
+        supportsStreamingInput: Bool = false,
+        streamingProtocolNegotiated: Bool? = nil
     ) {
         self.supportsPreview = supportsPreview
         self.supportsClone = supportsClone
         self.supportsInstruction = supportsInstruction
+        self.supportsStreamingInput = supportsStreamingInput
+        self.streamingProtocolNegotiated = streamingProtocolNegotiated
     }
 
     /// 合并同一份快照里的多个模型条目。规范条目与兼容 alias 由同一份 active
@@ -68,7 +78,11 @@ public struct ServiceModelCapabilities: Equatable, Sendable {
         ServiceModelCapabilities(
             supportsPreview: supportsPreview || other.supportsPreview,
             supportsClone: supportsClone || other.supportsClone,
-            supportsInstruction: supportsInstruction || other.supportsInstruction
+            supportsInstruction: supportsInstruction || other.supportsInstruction,
+            supportsStreamingInput: supportsStreamingInput || other.supportsStreamingInput,
+            // 任一模型条目协商成功即可视为实现可用；全为 nil 才保持 nil。
+            streamingProtocolNegotiated: streamingProtocolNegotiated
+                ?? other.streamingProtocolNegotiated
         )
     }
 }
@@ -977,7 +991,9 @@ private struct ServiceModelEntry: Decodable {
         ServiceModelCapabilities(
             supportsPreview: capabilities?.supportsPreview == true,
             supportsClone: capabilities?.supportsClone == true,
-            supportsInstruction: capabilities?.supportsInstruction == true
+            supportsInstruction: capabilities?.supportsInstruction == true,
+            supportsStreamingInput: capabilities?.streamingInput?.implementationSupported == true,
+            streamingProtocolNegotiated: capabilities?.streamingInput?.protocolNegotiated
         )
     }
 
@@ -985,11 +1001,34 @@ private struct ServiceModelEntry: Decodable {
         let supportsPreview: Bool?
         let supportsClone: Bool?
         let supportsInstruction: Bool?
+        let streamingInput: DeclaredStreamingInput?
 
         enum CodingKeys: String, CodingKey {
             case supportsPreview = "supports_preview"
             case supportsClone = "supports_clone"
             case supportsInstruction = "supports_instruction"
+            case streamingInput = "streaming_input"
+        }
+    }
+
+    /// `capabilities.streaming_input` 只报告与音色无关的实现轴。
+    struct DeclaredStreamingInput: Decodable {
+        let implementationSupported: Bool?
+        let protocolNegotiated: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case implementationSupported = "implementation_supported"
+            case protocolNegotiated = "protocol_negotiated"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            implementationSupported = try container.decodeIfPresent(
+                Bool.self, forKey: .implementationSupported
+            )
+            protocolNegotiated = try container.decodeIfPresent(
+                Bool.self, forKey: .protocolNegotiated
+            )
         }
     }
 }
