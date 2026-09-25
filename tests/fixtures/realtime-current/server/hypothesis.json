@@ -1,0 +1,16 @@
+{
+  "type": "speechrail.transcription.hypothesis",
+  "event_id": "evt-srv-6",
+  "session_id": "sess-1",
+  "sequence": 6,
+  "task_id": "task-1",
+  "epoch": 0,
+  "utterance_id": "utt-1",
+  "revision": 3,
+  "text": "你好世界",
+  "sample_span": {
+    "start": 0,
+    "end": 24000
+  },
+  "stable_prefix_codepoints": 2
+}

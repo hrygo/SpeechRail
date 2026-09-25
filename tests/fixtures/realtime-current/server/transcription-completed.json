@@ -1,0 +1,9 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "event_id": "evt-srv-4",
+  "session_id": "sess-1",
+  "sequence": 4,
+  "item_id": "utt-1",
+  "content_index": 0,
+  "transcript": "你好。"
+}

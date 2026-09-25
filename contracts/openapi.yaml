@@ -16,7 +16,8 @@ info:
 
     The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
     multipart shape so existing SDK clients can be reused. The realtime
-    WebSocket contract is documented in contracts/realtime-openai.md.
+    WebSocket contract is documented in contracts/realtime-openai.md and
+    mechanically constrained by contracts/realtime-events.schema.json.
   license:
     name: MIT
     identifier: MIT

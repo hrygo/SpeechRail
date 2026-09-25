@@ -1,0 +1,16 @@
+{
+  "type": "speechrail.diarization.failed",
+  "event_id": "evt-srv-11",
+  "session_id": "sess-1",
+  "sequence": 11,
+  "task_id": "task-1",
+  "epoch": 0,
+  "utterance_id": "utt-1",
+  "transcript_revision": 3,
+  "metadata_revision": 2,
+  "error": {
+    "type": "server_error",
+    "code": "diarization_failed",
+    "message": "diarization failed"
+  }
+}

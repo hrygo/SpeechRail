@@ -1,0 +1,5 @@
+{
+  "type": "input_audio_buffer.append",
+  "event_id": "evt-audio-1",
+  "audio": "AA=="
+}

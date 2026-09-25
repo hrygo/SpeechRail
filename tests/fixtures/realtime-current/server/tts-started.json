@@ -1,0 +1,18 @@
+{
+  "type": "speechrail.tts.started",
+  "event_id": "evt-srv-12",
+  "session_id": "sess-1",
+  "sequence": 12,
+  "task_id": "task-1",
+  "plan_id": "plan-1",
+  "request_id": "req-tts-1",
+  "voice_revision": "vr_0123456789abcdef0123456789abcdef01234567",
+  "output_format": {
+    "type": "audio/pcm",
+    "sample_rate": 24000,
+    "channels": 1
+  },
+  "limits": {
+    "max_total_codepoints": 4096
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "speechrail.tts.text_accepted",
+  "event_id": "evt-srv-13",
+  "session_id": "sess-1",
+  "sequence": 13,
+  "task_id": "task-1",
+  "request_id": "req-tts-1",
+  "append_sequence": 0,
+  "accepted_codepoints": 7,
+  "total_codepoints": 7
+}

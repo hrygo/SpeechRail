@@ -1,0 +1,35 @@
+{
+  "type": "session.update",
+  "event_id": "evt-session-1",
+  "session": {
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "transcription": {
+          "model": "speechrail/qwen3-asr-1.7b",
+          "language": "zh",
+          "keywords": [
+            "SpeechRail"
+          ],
+          "timestamp_granularities": [
+            "segment"
+          ]
+        },
+        "turn_detection": null
+      }
+    },
+    "speechrail": {
+      "task": "caption",
+      "alignment": {
+        "enabled": false
+      },
+      "diarization": {
+        "enabled": false
+      }
+    }
+  }
+}

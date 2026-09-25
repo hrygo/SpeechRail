@@ -1,0 +1,219 @@
+{
+  "contract_version": 1,
+  "schema": "contracts/realtime-events.schema.json",
+  "cases": [
+    {
+      "name": "client_session_update",
+      "file": "client/session-update.json",
+      "valid": true
+    },
+    {
+      "name": "client_session_endpointing",
+      "file": "client/session-update-endpointing.json",
+      "valid": true
+    },
+    {
+      "name": "client_append",
+      "file": "client/append.json",
+      "valid": true
+    },
+    {
+      "name": "client_commit",
+      "file": "client/commit.json",
+      "valid": true
+    },
+    {
+      "name": "client_clear",
+      "file": "client/clear.json",
+      "valid": true
+    },
+    {
+      "name": "client_tts_start",
+      "file": "client/tts-start.json",
+      "valid": true
+    },
+    {
+      "name": "client_tts_append_text",
+      "file": "client/tts-append-text.json",
+      "valid": true
+    },
+    {
+      "name": "client_tts_finish_text",
+      "file": "client/tts-finish-text.json",
+      "valid": true
+    },
+    {
+      "name": "client_tts_cancel",
+      "file": "client/tts-cancel.json",
+      "valid": true
+    },
+    {
+      "name": "server_session_created",
+      "file": "server/session-created.json",
+      "valid": true
+    },
+    {
+      "name": "server_session_updated",
+      "file": "server/session-updated.json",
+      "valid": true
+    },
+    {
+      "name": "server_transcription_delta",
+      "file": "server/transcription-delta.json",
+      "valid": true
+    },
+    {
+      "name": "server_transcription_completed",
+      "file": "server/transcription-completed.json",
+      "valid": true
+    },
+    {
+      "name": "server_transcription_failed",
+      "file": "server/transcription-failed.json",
+      "valid": true
+    },
+    {
+      "name": "server_hypothesis",
+      "file": "server/hypothesis.json",
+      "valid": true
+    },
+    {
+      "name": "server_alignment_done",
+      "file": "server/alignment-done.json",
+      "valid": true
+    },
+    {
+      "name": "server_alignment_failed",
+      "file": "server/alignment-failed.json",
+      "valid": true
+    },
+    {
+      "name": "server_diarization_updated",
+      "file": "server/diarization-updated.json",
+      "valid": true
+    },
+    {
+      "name": "server_diarization_done",
+      "file": "server/diarization-done.json",
+      "valid": true
+    },
+    {
+      "name": "server_diarization_failed",
+      "file": "server/diarization-failed.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_started",
+      "file": "server/tts-started.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_text_accepted",
+      "file": "server/tts-text-accepted.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_audio_delta",
+      "file": "server/tts-audio-delta.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_completed",
+      "file": "server/tts-completed.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_cancelled",
+      "file": "server/tts-cancelled.json",
+      "valid": true
+    },
+    {
+      "name": "server_tts_failed",
+      "file": "server/tts-failed.json",
+      "valid": true
+    },
+    {
+      "name": "server_error",
+      "file": "server/error.json",
+      "valid": true
+    },
+    {
+      "name": "legacy_transcription_session_update",
+      "file": "invalid/legacy-transcription-session-update.json",
+      "valid": false,
+      "rejection": "removed event type; no alias"
+    },
+    {
+      "name": "legacy_flat_session_audio",
+      "file": "invalid/legacy-flat-session-audio.json",
+      "valid": false,
+      "rejection": "audio must be nested at session.audio.input"
+    },
+    {
+      "name": "legacy_tts_response_delta",
+      "file": "invalid/legacy-tts-response-delta.json",
+      "valid": false,
+      "rejection": "removed TTS output alias; only speechrail.tts.audio.delta is accepted"
+    },
+    {
+      "name": "legacy_tts_response_done",
+      "file": "invalid/legacy-tts-response-done.json",
+      "valid": false,
+      "rejection": "removed fake response lifecycle; use one SpeechRail TTS terminal"
+    },
+    {
+      "name": "unsupported_turn_detection",
+      "file": "invalid/unsupported-turn-detection.json",
+      "valid": false,
+      "rejection": "official turn_detection is null-only in the first subset"
+    },
+    {
+      "name": "unsupported_audio_format",
+      "file": "invalid/unsupported-audio-format.json",
+      "valid": false,
+      "rejection": "only 24 kHz mono PCM16 is accepted on the wire"
+    },
+    {
+      "name": "unsupported_model_precision",
+      "file": "invalid/unsupported-model-precision.json",
+      "valid": false,
+      "rejection": "Q4 and Q6 are not runtime catalog roles"
+    },
+    {
+      "name": "design_runtime_voice",
+      "file": "invalid/design-runtime-voice.json",
+      "valid": false,
+      "rejection": "VoiceDesign is design-job-only and cannot be a runtime TTS voice"
+    },
+    {
+      "name": "unknown_session_field",
+      "file": "invalid/unknown-session-field.json",
+      "valid": false,
+      "rejection": "unknown public fields fail closed"
+    },
+    {
+      "name": "wrong_pcm_rate",
+      "file": "invalid/wrong-pcm-rate.json",
+      "valid": false,
+      "rejection": "kernel rate 16 kHz must not be accepted on the 24 kHz wire"
+    },
+    {
+      "name": "unknown_tts_field",
+      "file": "invalid/unknown-tts-field.json",
+      "valid": false,
+      "rejection": "unknown namespaced fields fail closed"
+    },
+    {
+      "name": "missing_error_request_id",
+      "file": "invalid/missing-error-request-id.json",
+      "valid": false,
+      "rejection": "errors must carry a request identity"
+    },
+    {
+      "name": "missing_request_id",
+      "file": "invalid/missing-request-id.json",
+      "valid": false,
+      "rejection": "TTS start must carry a caller request identity"
+    }
+  ]
+}

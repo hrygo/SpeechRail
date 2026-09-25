@@ -1,0 +1,12 @@
+{
+  "type": "error",
+  "event_id": "evt-srv-18",
+  "request_id": "req-tts-1",
+  "session_id": "sess-1",
+  "sequence": 18,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "unsupported_operation",
+    "message": "not supported"
+  }
+}

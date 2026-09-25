@@ -1,0 +1,9 @@
+{
+  "type": "speechrail.tts.completed",
+  "event_id": "evt-srv-15",
+  "session_id": "sess-1",
+  "sequence": 15,
+  "task_id": "task-1",
+  "request_id": "req-tts-1",
+  "generated_samples": 24000
+}

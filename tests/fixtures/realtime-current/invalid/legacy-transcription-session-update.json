@@ -1,0 +1,6 @@
+{
+  "type": "transcription_session.update",
+  "session": {
+    "input_audio_format": "pcm16"
+  }
+}

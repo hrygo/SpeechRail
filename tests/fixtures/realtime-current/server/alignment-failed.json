@@ -1,0 +1,16 @@
+{
+  "type": "speechrail.alignment.failed",
+  "event_id": "evt-srv-8",
+  "session_id": "sess-1",
+  "sequence": 8,
+  "task_id": "task-1",
+  "epoch": 0,
+  "utterance_id": "utt-1",
+  "transcript_revision": 3,
+  "metadata_revision": 1,
+  "error": {
+    "type": "server_error",
+    "code": "alignment_failed",
+    "message": "alignment failed"
+  }
+}

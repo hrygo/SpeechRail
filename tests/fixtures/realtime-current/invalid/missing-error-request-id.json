@@ -1,0 +1,9 @@
+{
+  "type": "error",
+  "event_id": "evt-invalid-9",
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_event",
+    "message": "bad"
+  }
+}

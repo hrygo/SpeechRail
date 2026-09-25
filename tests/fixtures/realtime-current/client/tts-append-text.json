@@ -1,0 +1,7 @@
+{
+  "type": "speechrail.tts.append_text",
+  "event_id": "evt-tts-2",
+  "request_id": "req-tts-1",
+  "sequence": 0,
+  "text": "你好，SpeechRail。"
+}

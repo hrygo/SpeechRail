@@ -1,0 +1,7 @@
+{
+  "type": "response.done",
+  "response": {
+    "id": "resp-old",
+    "status": "completed"
+  }
+}
