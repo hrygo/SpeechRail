@@ -234,6 +234,45 @@ def test_append_is_acknowledged_and_audio_arrives_before_finish() -> None:
     _run(scenario)
 
 
+def test_audio_burst_is_paced_without_losing_chunks_or_the_terminal() -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport([_frame(FRAME_STREAM_STARTED)])
+        session = await _open(transport)
+
+        append = asyncio.create_task(session.append_text(0, ""))
+        await asyncio.sleep(0)
+        transport.push(
+            _frame(FRAME_STREAM_TEXT_ACCEPTED, sequence=0, accepted_codepoints=0)
+        )
+        await append
+        await session.finish_text(0)
+
+        chunk_count = 96
+        for index in range(chunk_count):
+            transport.push(
+                _frame(
+                    FRAME_STREAM_AUDIO,
+                    chunk_index=index,
+                    sample_offset=index * 10,
+                    _binary=_pcm(10),
+                )
+            )
+        transport.push(_frame(FRAME_STREAM_DONE, terminal="completed"))
+
+        events = await asyncio.wait_for(
+            _collect(session.events(), limit=chunk_count + 4), timeout=2.0
+        )
+        audio = [event for event in events if event.kind is TtsStreamEventKind.AUDIO]
+        assert [event.chunk_index for event in audio] == list(range(chunk_count))
+        assert [event.sample_offset for event in audio] == [
+            index * 10 for index in range(chunk_count)
+        ]
+        assert events[-1].kind is TtsStreamEventKind.COMPLETED
+        assert events[-1].terminal is TtsStreamTerminal.COMPLETED
+
+    _run(scenario)
+
+
 def test_sequence_gap_is_rejected_locally_without_a_round_trip() -> None:
     async def scenario() -> None:
         transport = LoopbackTransport(ScriptedSession)
