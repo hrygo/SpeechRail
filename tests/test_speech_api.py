@@ -201,8 +201,10 @@ def _preview_client(
             Settings(
                 api_key=None,
                 qwen3_model_dir=tmp_path / preset.asr,
+                asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
                 qwen3_tts_model_dir=tmp_path / preset.tts,
+                tts_resident_bytes=1 * 1024**3,
                 qwen3_tts_python=None,
             ),
             tts_synthesizer=synthesizer,
@@ -529,8 +531,10 @@ def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path
         create_app(
             Settings(
                 qwen3_model_dir=tmp_path / preset.asr,
+                asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
                 qwen3_tts_model_dir=tmp_path / preset.tts,
+                tts_resident_bytes=1 * 1024**3,
                 qwen3_tts_python=None,
             ),
             tts_synthesizer=FailIfCalled(),
@@ -605,6 +609,7 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
         qwen3_model_dir=None,
         qwen3_python=None,
         qwen3_tts_model_dir=snapshot,
+        tts_resident_bytes=1 * 1024**3,
         qwen3_tts_python=Path(executable),
         worker_lazy_load=False,
     )

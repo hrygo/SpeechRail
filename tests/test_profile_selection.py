@@ -108,6 +108,7 @@ def test_preserves_unrelated_user_configurations(
         compatibility_model_ids=("whisper-1", "custom-alias"),
         worker_idle_timeout_seconds=450.0,
         diarization_coreml_model_path=Path("/tmp/SortformerNvidiaLow_v2.1.mlmodelc"),
+        diarization_resident_bytes=1 * 1024**3,
         diarization_worker_path=Path("/tmp/SpeechRailDiarizationWorker"),
         max_upload_bytes=100_000_000,
     )
@@ -138,6 +139,7 @@ def test_tts_model_dir_is_updated_to_the_selected_custom_voice(
     original = _settings(
         qwen3_tts_python=Path("/fake/python"),
         qwen3_tts_model_dir=Path("/old/tts/dir"),
+        tts_resident_bytes=1 * 1024**3,
     )
     selection = _make_selection()
 

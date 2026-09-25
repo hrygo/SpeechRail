@@ -67,8 +67,10 @@ def _client(
     app = create_app(
         Settings(
             qwen3_model_dir=tmp_path / preset.asr,
+            asr_resident_bytes=1 * 1024**3,
             qwen3_python=None,
             qwen3_tts_model_dir=tmp_path / preset.tts,
+            tts_resident_bytes=1 * 1024**3,
             qwen3_tts_clone_model_dir=(
                 tmp_path / preset.tts_clone
                 if preset.tts_clone is not None
