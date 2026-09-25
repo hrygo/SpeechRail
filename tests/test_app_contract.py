@@ -133,8 +133,10 @@ def test_managed_selection_publishes_active_model_identity(
     assert asr_key is not None and tts_key is not None
     settings = Settings(
         qwen3_model_dir=tmp_path / asr_key,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=None,
         qwen3_tts_model_dir=tmp_path / tts_key,
+        tts_resident_bytes=1 * 1024**3,
         qwen3_tts_clone_model_dir=(tmp_path / clone_key if clone_key else None),
         qwen3_tts_python=None,
         selection_schema_version=2,
@@ -454,6 +456,7 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
     monkeypatch.setattr(services_module, "Qwen3Worker", FakeWorker)
     settings = Settings(
         qwen3_model_dir=snapshot,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=Path(executable),
         backend_ready=False,
         worker_lazy_load=False,
@@ -533,8 +536,10 @@ def test_startup_failure_closes_already_started_runtime_workers(
     )
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=Path(executable),
         qwen3_tts_model_dir=tts_snapshot,
+        tts_resident_bytes=1 * 1024**3,
         qwen3_tts_python=Path(executable),
         worker_lazy_load=False,
     )

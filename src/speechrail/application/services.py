@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -134,6 +134,34 @@ def _declared_footprint(
     )
 
 
+def _undeclared_composed_components(
+    settings: Settings,
+    *,
+    asr_from_settings: bool,
+    tts_from_settings: bool,
+    diarization_from_settings: bool,
+    asr_enabled: bool,
+    tts_enabled: bool,
+    diarization_enabled: bool,
+) -> tuple[str, ...]:
+    """Enabled components composed from settings without a declared peak.
+
+    An injected component (``AppOverrides``) is owned by the injector, so the
+    settings-based budget does not describe it and it is not judged here.
+    """
+
+    pairs = (
+        ("asr", asr_from_settings and asr_enabled, settings.asr_resident_bytes),
+        ("tts", tts_from_settings and tts_enabled, settings.tts_resident_bytes),
+        (
+            "diarization",
+            diarization_from_settings and diarization_enabled,
+            settings.diarization_resident_bytes,
+        ),
+    )
+    return tuple(name for name, composed, declared in pairs if composed and declared <= 0)
+
+
 def _serial_budget_policy(
     settings: Settings,
     *,
@@ -141,15 +169,23 @@ def _serial_budget_policy(
     tts_enabled: bool,
     diarization_enabled: bool,
     tts_worker_count: int = 1,
+    undeclared_components: Sequence[str] = (),
 ) -> tuple[bool, str]:
     """Decide whether declared single-task footprints prove heavy work fits.
 
-    Returns ``(reject, reason)``. A *declared* peak that exceeds the budget is
-    refused rather than loaded; an undeclared peak serializes without claiming
-    concurrency certification. ``allow_heavy_overlap=true`` still cannot make an
-    infeasible single task fit.
+    Returns ``(reject, reason)``. Heavy compute composed from settings is refused
+    when an enabled component has no declared peak (the resource profile cannot
+    confirm that even one task fits) and when a declared peak exceeds the budget.
+    Injected components are excluded because their memory contract belongs to the
+    injector, not to these settings.
     """
 
+    if undeclared_components:
+        return True, (
+            f"Enabled components {sorted(undeclared_components)} are composed from settings "
+            "without a declared resident peak; refusing heavy compute until a resource "
+            "profile exists"
+        )
     footprint = _declared_footprint(
         settings,
         asr_enabled=asr_enabled,
@@ -681,27 +717,41 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     admission = AdmissionQueue(settings.max_queue_size)
+    asr_enabled = (
+        transcribe is not None
+        or batch_transcriber is not None
+        or realtime_asr_factory is not None
+    )
+    tts_enabled = tts_synthesizer is not None
+    diarization_enabled = diarization_engine is not None
+    tts_worker_count = _resident_tts_worker_count(tts_synthesizer)
     allow_heavy_overlap, policy_reason = _heavy_overlap_policy(
         settings,
-        asr_enabled=(
-            transcribe is not None
-            or batch_transcriber is not None
-            or realtime_asr_factory is not None
+        asr_enabled=asr_enabled,
+        tts_enabled=tts_enabled,
+        diarization_enabled=diarization_enabled,
+        tts_worker_count=tts_worker_count,
+    )
+    undeclared_components = _undeclared_composed_components(
+        settings,
+        asr_from_settings=(
+            overrides.transcribe is None
+            and overrides.batch_transcriber is None
+            and overrides.realtime_asr_factory is None
         ),
-        tts_enabled=tts_synthesizer is not None,
-        diarization_enabled=diarization_engine is not None,
-        tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
+        tts_from_settings=overrides.tts_synthesizer is None,
+        diarization_from_settings=overrides.diarization_engine is None,
+        asr_enabled=asr_enabled,
+        tts_enabled=tts_enabled,
+        diarization_enabled=diarization_enabled,
     )
     reject_heavy_compute, budget_reason = _serial_budget_policy(
         settings,
-        asr_enabled=(
-            transcribe is not None
-            or batch_transcriber is not None
-            or realtime_asr_factory is not None
-        ),
-        tts_enabled=tts_synthesizer is not None,
-        diarization_enabled=diarization_engine is not None,
+        asr_enabled=asr_enabled,
+        tts_enabled=tts_enabled,
+        diarization_enabled=diarization_enabled,
         tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
+        undeclared_components=undeclared_components,
     )
     governor = ResourceGovernor(
         settings.governor_limits,

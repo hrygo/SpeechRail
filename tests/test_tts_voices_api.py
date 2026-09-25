@@ -32,8 +32,10 @@ def _managed_voice_client(tmp_path: Path, preset_id: str) -> TestClient:
         create_app(
             Settings(
                 qwen3_model_dir=tmp_path / preset.asr,
+                asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
                 qwen3_tts_model_dir=tmp_path / preset.tts,
+                tts_resident_bytes=1 * 1024**3,
                 qwen3_tts_python=None,
             ),
             tts_synthesizer=CapturingSpeechSynthesizer(),

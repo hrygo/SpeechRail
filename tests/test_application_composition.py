@@ -192,8 +192,10 @@ def test_fake_overrides_never_construct_real_qwen_workers(
     app = create_app(
         Settings(
             qwen3_model_dir=asr_snapshot,
+            asr_resident_bytes=1 * 1024**3,
             qwen3_python=Path(executable),
             qwen3_tts_model_dir=tts_snapshot,
+            tts_resident_bytes=1 * 1024**3,
             qwen3_tts_python=Path(executable),
         ),
         transcribe=fake_transcribe,  # type: ignore[arg-type]
@@ -271,6 +273,7 @@ def test_native_realtime_uses_dedicated_streaming_worker_not_batch(
 
     settings = Settings(
         qwen3_model_dir=snapshot,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=Path(executable),
         realtime_asr_backend="native",
         _env_file=None,
@@ -315,8 +318,10 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     )
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=Path(executable),
         qwen3_tts_model_dir=tts_snapshot,
+        tts_resident_bytes=1 * 1024**3,
         qwen3_tts_python=Path(executable),
         _env_file=None,
     )
@@ -359,6 +364,7 @@ def test_build_app_services_asr_and_streaming_dtype_resolves_from_snapshot(
 
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
+        asr_resident_bytes=1 * 1024**3,
         qwen3_python=Path(executable),
         realtime_asr_backend="native",
         _env_file=None,
@@ -637,3 +643,46 @@ def test_composition_keeps_serial_when_enabled_diarization_footprint_is_unknown(
     snapshot = services.governor.snapshot()
     assert snapshot.allow_heavy_overlap is False
     assert "unknown" in snapshot.policy_reason.lower()
+
+
+def test_serial_budget_policy_refuses_undeclared_settings_composed_component() -> None:
+    settings = Settings(_env_file=None, asr_resident_bytes=0, tts_resident_bytes=0)
+    undeclared = services_module._undeclared_composed_components(
+        settings,
+        asr_from_settings=True,
+        tts_from_settings=True,
+        diarization_from_settings=False,
+        asr_enabled=True,
+        tts_enabled=True,
+        diarization_enabled=False,
+    )
+    assert undeclared == ("asr", "tts")
+    reject, reason = services_module._serial_budget_policy(
+        settings,
+        asr_enabled=True,
+        tts_enabled=True,
+        diarization_enabled=False,
+        undeclared_components=undeclared,
+    )
+    assert reject is True
+    assert "without a declared resident peak" in reason
+
+
+def test_serial_budget_policy_does_not_judge_injected_components() -> None:
+    settings = Settings(_env_file=None, asr_resident_bytes=0, tts_resident_bytes=0)
+    undeclared = services_module._undeclared_composed_components(
+        settings,
+        asr_from_settings=False,
+        tts_from_settings=False,
+        diarization_from_settings=False,
+        asr_enabled=True,
+        tts_enabled=True,
+        diarization_enabled=True,
+    )
+    assert undeclared == ()
+
+
+def test_composition_keeps_serving_injected_components_without_declarations() -> None:
+    settings = Settings(_env_file=None, qwen3_model_dir=None, qwen3_python=None)
+    services = build_app_services(settings, AppOverrides(batch_transcriber=object()))
+    assert services.governor.snapshot().reject_heavy_compute is False
