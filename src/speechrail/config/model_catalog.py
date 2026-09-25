@@ -285,6 +285,7 @@ class RuntimeLock(BaseModel):
     tts_requirements: tuple[StrictStr, ...] = Field(min_length=1)
     ffmpeg_artifact: StrictStr = Field(min_length=1)
     file_hashes: Mapping[str, StrictStr] = Field(min_length=1)
+    vendor_overlays: Mapping[str, StrictStr] = Field(default_factory=dict)
 
     @field_validator("asr_requirements", "tts_requirements")
     @classmethod
@@ -306,6 +307,42 @@ class RuntimeLock(BaseModel):
                 raise ValueError("file_hashes contains duplicate normalized paths")
             normalized[normalized_path] = _sha256(digest, field_name="file_hashes value")
         return MappingProxyType(normalized)
+
+    @field_validator("vendor_overlays", mode="after")
+    @classmethod
+    def freeze_vendor_overlays(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        normalized: dict[str, str] = {}
+        for path, digest in value.items():
+            normalized_path = _relative_path(path, field_name="vendor_overlays key")
+            if not normalized_path.startswith("mlx_audio/"):
+                raise ValueError("vendor_overlays must target the mlx_audio package")
+            if normalized_path in normalized:
+                raise ValueError("vendor_overlays contains duplicate normalized paths")
+            normalized[normalized_path] = _sha256(
+                digest, field_name="vendor_overlays value"
+            )
+        return MappingProxyType(normalized)
+
+
+def runtime_overlay_source(relative_path: str) -> Path:
+    """Resolve an overlay destination from a wheel asset or the source checkout."""
+    normalized = _relative_path(relative_path, field_name="vendor overlay path")
+    if not normalized.startswith("mlx_audio/"):
+        raise ValueError("vendor overlay path must stay within mlx_audio")
+    asset_root = _ASSET_DIR / "vendor" / "mlx-audio-incremental" / "src"
+    source_root = _ASSET_DIR.parents[2] / "vendor" / "mlx-audio-incremental" / "src"
+    for root in (asset_root, source_root):
+        if not root.is_dir():
+            continue
+        resolved_root = root.resolve()
+        candidate = (resolved_root / normalized).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("vendor overlay path escapes its source root") from exc
+        if candidate.is_file():
+            return candidate
+    raise ValueError(f"vendor overlay asset is missing: {normalized}")
 
 
 class ModelCatalog(BaseModel):
@@ -488,6 +525,14 @@ def load_runtime_lock() -> RuntimeLock:
         actual_hash = hashlib.sha256(asset_path.read_bytes()).hexdigest()
         if actual_hash != expected_hash:
             raise ValueError(f"runtime lock asset hash mismatch: {relative_path}")
+    for relative_path, expected_hash in lock.vendor_overlays.items():
+        try:
+            overlay_path = runtime_overlay_source(relative_path)
+        except ValueError as exc:
+            raise ValueError(f"vendor overlay asset is missing: {relative_path}") from exc
+        actual_hash = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+        if actual_hash != expected_hash:
+            raise ValueError(f"vendor overlay hash mismatch: {relative_path}")
     return lock
 
 
@@ -506,4 +551,5 @@ __all__ = [
     "load_catalog",
     "load_runtime_lock",
     "preset",
+    "runtime_overlay_source",
 ]

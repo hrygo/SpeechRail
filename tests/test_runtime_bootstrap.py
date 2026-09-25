@@ -42,6 +42,7 @@ def _lock(
     file_hashes: Mapping[str, str] | None = None,
     asr_requirements: tuple[str, ...] | None = None,
     tts_requirements: tuple[str, ...] | None = None,
+    vendor_overlays: Mapping[str, str] | None = None,
 ) -> RuntimeLock:
     requirement = f"fixture-asr==1.0 --hash=sha256:{_HASH}"
     tts_requirement = f"fixture-tts==2.0 --hash=sha256:{_HASH}"
@@ -58,6 +59,7 @@ def _lock(
             "runtime/asr.txt": _role_file_hash(asr_tokens),
             "runtime/tts.txt": _role_file_hash(tts_tokens),
         },
+        vendor_overlays=vendor_overlays or {},
     )
 
 
@@ -86,6 +88,21 @@ class FakeRunner:
             python.parent.mkdir(parents=True, exist_ok=True)
             python.write_text("fake python\n", encoding="utf-8")
             python.chmod(0o700)
+        if command[:3] == ("uv", "pip", "sync"):
+            python = Path(command[command.index("--python") + 1])
+            python_version = command[command.index("--python-version") + 1]
+            major, minor, _ = python_version.split(".")
+            target = (
+                python.parent.parent
+                / "lib"
+                / f"python{major}.{minor}"
+                / "site-packages"
+                / "mlx_audio"
+                / "tts"
+                / "models"
+                / "qwen3_tts"
+            )
+            target.mkdir(parents=True, exist_ok=True)
         if command[:3] == ("uv", "pip", "install") and "--prefix" in command:
             prefix = Path(command[command.index("--prefix") + 1])
             ffmpeg = prefix / "bin" / "ffmpeg"
@@ -420,6 +437,79 @@ def test_prepare_runtime_uses_new_release_for_changed_lock_and_keeps_old_current
     assert current.is_symlink()
     assert current.resolve() == new.release.resolve()
     assert old.release.is_dir()
+
+
+def test_prepare_runtime_installs_hash_pinned_vendor_overlay(tmp_path: Path) -> None:
+    overlay_relative = "mlx_audio/tts/models/qwen3_tts/incremental.py"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "vendor"
+        / "mlx-audio-incremental"
+        / "src"
+        / overlay_relative
+    )
+    source_bytes = source.read_bytes()
+    lock = _lock(
+        vendor_overlays={overlay_relative: hashlib.sha256(source_bytes).hexdigest()}
+    )
+
+    result = prepare_runtime(lock, tmp_path, FakeRunner())
+
+    installed = (
+        result.release
+        / "lib"
+        / "python3.14"
+        / "site-packages"
+        / overlay_relative
+    )
+    assert installed.read_bytes() == source_bytes
+    metadata = json.loads((result.release / "runtime.json").read_text(encoding="utf-8"))
+    assert metadata["site_packages"] == "lib/python3.14/site-packages"
+    assert metadata["vendor_overlays"] == {
+        overlay_relative: hashlib.sha256(source_bytes).hexdigest()
+    }
+    assert bootstrap.load_prepared_runtime(tmp_path, lock).paths == result
+
+
+def test_prepare_runtime_rejects_vendor_overlay_source_hash_mismatch(tmp_path: Path) -> None:
+    lock = _lock(
+        vendor_overlays={
+            "mlx_audio/tts/models/qwen3_tts/incremental.py": "f" * 64,
+        }
+    )
+
+    with pytest.raises(RuntimeBootstrapError, match="overlay"):
+        prepare_runtime(lock, tmp_path, FakeRunner())
+
+    assert not (tmp_path / "vendor" / runtime_key(lock)).exists()
+
+
+def test_prepare_runtime_rebuilds_tampered_vendor_overlay(tmp_path: Path) -> None:
+    overlay_relative = "mlx_audio/tts/models/qwen3_tts/incremental.py"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "vendor"
+        / "mlx-audio-incremental"
+        / "src"
+        / overlay_relative
+    )
+    source_bytes = source.read_bytes()
+    lock = _lock(
+        vendor_overlays={overlay_relative: hashlib.sha256(source_bytes).hexdigest()}
+    )
+    first = prepare_runtime(lock, tmp_path, FakeRunner())
+    installed = first.release / "lib" / "python3.14" / "site-packages" / overlay_relative
+    installed.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeBootstrapError, match="overlay"):
+        bootstrap.load_prepared_runtime(tmp_path, lock)
+
+    runner = FakeRunner()
+    repaired = prepare_runtime(lock, tmp_path, runner)
+
+    assert repaired.release == first.release
+    assert installed.read_bytes() == source_bytes
+    assert runner.calls
 
 
 @pytest.mark.parametrize(

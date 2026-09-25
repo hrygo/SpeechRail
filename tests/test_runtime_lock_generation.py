@@ -54,6 +54,19 @@ def _write_inputs(root: Path) -> tuple[Path, Path]:
     tts = runtime / "tts.txt"
     asr.write_text(f"alpha==1.0 --hash=sha256:{_HASH_A}\n", encoding="utf-8")
     tts.write_text(f"zeta==2.0 --hash=sha256:{_HASH_B}\n", encoding="utf-8")
+    overlay = (
+        root
+        / "vendor"
+        / "mlx-audio-incremental"
+        / "src"
+        / "mlx_audio"
+        / "tts"
+        / "models"
+        / "qwen3_tts"
+        / "incremental.py"
+    )
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("INCREMENTAL = True\n", encoding="utf-8")
     return asr, tts
 
 
@@ -73,6 +86,11 @@ def test_build_runtime_lock_hashes_exact_requirement_files_and_uses_requested_py
         "file_hashes": {
             "runtime/asr.txt": hashlib.sha256(asr_path.read_bytes()).hexdigest(),
             "runtime/tts.txt": hashlib.sha256(tts_path.read_bytes()).hexdigest(),
+        },
+        "vendor_overlays": {
+            "mlx_audio/tts/models/qwen3_tts/incremental.py": hashlib.sha256(
+                b"INCREMENTAL = True\n"
+            ).hexdigest()
         },
     }
 

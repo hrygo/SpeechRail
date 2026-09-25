@@ -45,6 +45,19 @@ def test_custom_build_hook_skips_macos_native_worker_on_non_macos(
         raise AssertionError("the macOS native worker must not build on Linux")
 
     monkeypatch.setattr(hatch_build.subprocess, "run", unexpected_native_build)
+    overlay = (
+        tmp_path
+        / "vendor"
+        / "mlx-audio-incremental"
+        / "src"
+        / "mlx_audio"
+        / "tts"
+        / "models"
+        / "qwen3_tts"
+        / "incremental.py"
+    )
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("INCREMENTAL = True\n", encoding="utf-8")
     hook = SimpleNamespace(
         target_name="wheel",
         root=str(tmp_path),
@@ -54,5 +67,12 @@ def test_custom_build_hook_skips_macos_native_worker_on_non_macos(
 
     hatch_build.CustomBuildHook.initialize(hook, "2.0.3", build_data)
 
-    assert build_data == {}
+    assert build_data == {
+        "force_include": {
+            str(overlay): (
+                "speechrail/assets/vendor/mlx-audio-incremental/src/"
+                "mlx_audio/tts/models/qwen3_tts/incremental.py"
+            )
+        }
+    }
     assert not (tmp_path / "build" / "speechrail-native").exists()

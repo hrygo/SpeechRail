@@ -650,6 +650,34 @@ def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> Non
         lock.file_hashes = {}  # type: ignore[misc]
 
 
+def test_runtime_lock_freezes_vendor_overlays_within_mlx_audio() -> None:
+    lock = RuntimeLock(
+        id="fixture-lock",
+        python="3.14.7",
+        asr_requirements=(_hashed_requirement("asr"),),
+        tts_requirements=(_hashed_requirement("tts"),),
+        ffmpeg_artifact="imageio-ffmpeg==0.6.0",
+        file_hashes={"runtime/asr.txt": SHA256},
+        vendor_overlays={
+            "mlx_audio/tts/models/qwen3_tts/incremental.py": SHA256,
+        },
+    )
+
+    assert isinstance(lock.vendor_overlays, Mapping)
+    with pytest.raises(TypeError):
+        lock.vendor_overlays["mlx_audio/other.py"] = SHA256  # type: ignore[index]
+    with pytest.raises(ValidationError, match="mlx_audio"):
+        RuntimeLock(
+            id="fixture-lock",
+            python="3.14.7",
+            asr_requirements=(_hashed_requirement("asr"),),
+            tts_requirements=(_hashed_requirement("tts"),),
+            ffmpeg_artifact="imageio-ffmpeg==0.6.0",
+            file_hashes={"runtime/asr.txt": SHA256},
+            vendor_overlays={"speechrail/other.py": SHA256},
+        )
+
+
 @pytest.mark.parametrize("python", ["3.12.14", "3.13.15", "3.14", "3.15.0", "3.14.7rc1"])
 def test_runtime_lock_rejects_unsupported_python(python: str) -> None:
     with pytest.raises(ValidationError, match=r"3\.14"):
