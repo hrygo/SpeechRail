@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.20"
+version: "1.21"
 date: 2026-09-25
 ---
 
@@ -488,7 +488,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [ ] 排除输入饥饿后的生成RTF<1，争取≤0.7；另报真实播放欠载。
 - [ ] 用户打断→本地停旧音P95≤100ms；cancel→模型活动状态释放P95≤500ms。
 - [ ] 跨文本身份/可懂度不明显劣于对应固定身份完整文本基线，主观盲听与文本正确性分别记录。
-- [ ] 重复create/finish/cancel/失败循环无持续增长的活跃状态，缓存驻留与泄漏分开分析。
+- [x] 重复create/finish/cancel/失败循环无持续增长的活跃状态，缓存驻留与泄漏分开分析（2026-09-25，quality 档 40 轮 `--mode soak`：40/40 完成、40/40 取消、40/40 空转取消失败探针返回 `tts_not_active`，`failures: []`；活跃请求峰值 0、服务进程数恒为 2、governor release 每轮 +3 共 +120；footprint 首轮 3506.7→3662.8 MB 后 39 轮仅在 3661.1–3663.1 MB 间波动。范围见下方 soak 小节）。
 
 达不到则保留未完成，不自动降标准。整体延迟分解为VAD、ASR、LLM可朗读首段、TTS与播放，不以TTS单点替代端到端。
 
@@ -518,7 +518,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
 - [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
 - [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
-- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 真机运行共暴露三层缺陷——已完成 utterance 的残留帧污染下一轮、open 失败后 worker 仍标记 started、父端未读完终态却继续复用同一 wire——均已源码修复并加确定性回归，带修复的 wheel（`dc83d911…`）装机后 `--mode cancel --repeat 5` 连跑 5 轮 25/25 全部取消成功（见下方「W11 cancel 状态释放缺陷」与「W11 cancel 父端残留帧缺陷与真机复测」）；仍缺真实播放欠载/打断→停旧音时延/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
+- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 真机运行共暴露三层缺陷——已完成 utterance 的残留帧污染下一轮、open 失败后 worker 仍标记 started、父端未读完终态却继续复用同一 wire——均已源码修复并加确定性回归，带修复的 wheel（`dc83d911…`）装机后 `--mode cancel --repeat 5` 连跑 5 轮 25/25 全部取消成功（见下方「W11 cancel 状态释放缺陷」与「W11 cancel 父端残留帧缺陷与真机复测」）；长稳 soak 已在 quality 档跑通 40 轮（`failures: []`、足迹预热后持平，见下方「W11 长稳 soak」）；仍缺真实播放欠载/打断→停旧音时延、light/balanced/extreme 的 soak、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
 
 ### W2 实施与验收记录（2026-09-24）
 
@@ -768,5 +768,15 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
   4. 客户端 `_handle_frame` 对命中 `stale_request_ids` 的帧记 `_note` 后丢弃并继续读；对**未知**外来 id 仍 fail-closed，且错误信息改为携带 `type/request_id/expected`，避免下次只能靠猜。
 - **确定性回归（cp314，未加载模型）：** 新增 3 项客户端回归（已结束 utterance 的帧被丢弃、未知外来帧仍 fail-closed、worker 不退休 utterance 时 `close()` 必回收）与 1 项桥接回归（把泄漏终态塞进队列后，下一轮必须仍然跑完自己的终态，而不是报 `ProtocolError`）。桥接回归在不传 `stale_request_ids` 时可复现红灯，报错串与真机日志逐字一致（`request_id='req-first' expected='req-second'`）。定向联跑 56 passed；`-k "tts or realtime or stream"` 786 passed / 1626 deselected（69.7 s）；改动文件 `ruff check` 干净、`mypy --strict` 无问题。
 - **真机复测（已执行，运行态变更已获授权）：** 带本轮修复的 `speechrail-3.2.1-cp314-cp314-macosx_27_0_arm64.whl`（sha256 `dc83d91149fafc8d430bd6da072a62266b88a42a035033aa99d8bd34d834a57d`）装成 managed runtime（`runtime/current -> ...-dc83d91149fa-py3147`，`status=committed`、`readyz=true`、`downloaded_bytes=0`）。`--mode cancel --repeat 5` 连跑 5 轮：**25/25 全部 `cancelled_turns`，`failures: []`，`stale_audio_turns: 0`**；`cancel→terminal` p50 4.1–21.5 ms、p95 6.3–24.9 ms（预算 500 ms）；`next_start_accepted` p50 8.8–26.9 ms、p95 12.7–31.0 ms（证明槽位真的释放）。整段复测期间 `/health` 的 `fallback_abort_count=0`、`reload_count=0`——修复后走的是协作取消，不再靠杀子进程兜底；安装后日志中 `foreign request_id` 与 `tts_backend_failed` 均为 0 次。
-- **证据边界：** 上述 25 轮里 `dropped stale frame` 计数为 0，即泄漏已在源头消除，`stale_request_ids` 只是“帧已被读走、但归属上一轮”的纵深防御，本轮没有被触发。§8.2 中「打断→停旧音 P95 ≤ 100 ms」「cancel 后长稳 / soak」「真实播放欠载」与 App 可听验收仍为 **not_run**；本节只钉住 cancel→状态释放这条路径。
+- **证据边界：** 上述 25 轮里 `dropped stale frame` 计数为 0，即泄漏已在源头消除，`stale_request_ids` 只是“帧已被读走、但归属上一轮”的纵深防御，本轮没有被触发。§8.2 中「打断→停旧音 P95 ≤ 100 ms」「真实播放欠载」与 App 可听验收仍为 **not_run**；本节只钉住 cancel→状态释放这条路径，长稳 soak 见下方「W11 长稳 soak」小节。
 - **顺带观测（不是缺陷结论，不阻塞）：** `/health` 的 `tts_lifecycle.cooperative_cancel_supported` 是 router 对 primary 与 clone 的 AND。quality 档 primary 是 VoiceDesign 变体、按设计永不协商增量协议，所以该字段为 `false`，而 clone lane（Base）本身支持协作取消（本轮 25 轮即走该 lane）。该字段只是诊断信号，不代表“正在用的音色不支持”；system voice（如 `serena`）走 primary 时 `speechrail.tts.start` 会按预期 fail-closed 成 `tts_streaming_unsupported`。
+
+#### W11 长稳 soak 与 soak 工具自身的缺陷（2026-09-25）
+
+- **先修工具，再采信数据：** 首次跑 `--mode soak` 时同一连接上的三个循环全部报错（`cycleN_idle:AssertionError`、`cycle1_complete:RealtimeTurnError`）。根因在基准工具而非服务：`run_cancel_turn` 的 release probe 一旦收到 `speechrail.tts.started` 就 `break` 去测“重新准入门槛”，却把自己那次 probe 的 `response.done` 留在 socket 上；`--mode cancel` 每轮新建连接所以从未暴露，`--mode soak` 复用连接，于是下一轮把上一轮的终态当成自己的应答。用最小探针复现：`run_cancel_turn` 返回后 socket 上恰好还有一个 `response.done`（`status=cancelled`，无 `request_id`），随后才是空转取消的 `error`。修复：从 probe 的 `started` 帧取 `response_id`，返回前读完该 response 的终态（`504e1db3`）；脚本化回归在移除 drain 时精确复现那一个残留帧。修好后同样 3 轮 `failures: []`。
+- **40 轮真实 soak（2026-09-25 13:41–13:44 CST，quality 档，`tier-gate-clone-v2`，cp314 managed runtime `dc83d911…`，文本含 2026 与 48 kHz）：** `examples/perf/bench_tts_stream_lifecycle.py --mode soak --repeat 40`，每轮 = 一次完整合成 + 一次用户打断取消 + 一次空转取消失败探针，每轮之间采样 `/metrics`。
+  - 计数：`completed_turns=40`、`interrupted_turns=40`、`idle_cancel_codes` 全部 `tts_not_active`、`failures: []`（40 轮全程零失败）。
+  - **回收**：`speechrail_governor_releases_total{outcome="completed"}` 70→190（+120，正好 3/轮），说明每一次预订都归还了，没有轮次把 slot 留在自己手里。
+  - **活跃状态不增长**：`speechrail_governor_active_requests{class="realtime"}` 全程峰值 0；`speechrail_realtime_active_sessions` 峰值为 1，就是 soak 自己的那条连接；`speechrail_resource_footprint_process_count` 恒为 2（父进程 + 一个 worker 子进程），没有堆积子进程。
+  - **缓存驻留与泄漏分开**：观测足迹来自服务自身的 `footprint` 口径（`speechrail_resource_physical_footprint_bytes`，`..._footprint_complete` 每次都为 1，即所有服务自有进程都被采到），不是 MLX allocator 的 cached 计数。第 0 轮后足迹从 3506.7 MB 升到 3662.8 MB（模型/参考/缓冲预热），之后 39 轮只在 3661.1–3663.1 MB 之间波动，跨度 2.0 MB 且不单调上升。
+  - **证据边界：** 这是约 2.6 分钟、40 轮的窗口，只覆盖 quality 档（`extreme`/`light`/`balanced` 的 soak 未跑）。它支持“该窗口内活跃状态与常驻足迹不持续增长”，**不等于**已完成内存安全证明；按计划口径，`footprint` 不归零本身不作为泄漏依据，本结论也不以“活跃对象为零”单独成立——两项是分开观测、分别陈述的。
