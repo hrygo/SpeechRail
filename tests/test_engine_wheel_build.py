@@ -27,10 +27,21 @@ _REVISION = "b" * 40
 def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
     source = root / "vendor" / "engine-build" / "upstream" / "mlx_audio"
     source.mkdir(parents=True)
-    (source / "engine.py").write_text("ENGINE = 1\n", encoding="utf-8")
-    incremental = root / "vendor" / "mlx-audio-incremental" / "src"
+    (source / "__init__.py").write_text("ENGINE = 1\n", encoding="utf-8")
+    incremental = (
+        root
+        / "vendor"
+        / "mlx-audio-incremental"
+        / "src"
+        / "mlx_audio"
+        / "tts"
+        / "models"
+        / "qwen3_tts"
+    )
     incremental.mkdir(parents=True)
-    (incremental / "incremental.py").write_text("INCREMENTAL = True\n", encoding="utf-8")
+    (incremental / "incremental.py").write_text(
+        "INCREMENTAL = True\n", encoding="utf-8"
+    )
     spec = root / "vendor" / "engine-build" / "engine-build.json"
     spec.write_text(
         json.dumps(
@@ -52,10 +63,22 @@ def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
 
 
 def _fake_builder(source_root: Path, out_dir: Path) -> Path:
-    del source_root
+    overlay = (
+        source_root
+        / "mlx_audio"
+        / "tts"
+        / "models"
+        / "qwen3_tts"
+        / "incremental.py"
+    )
+    assert overlay.read_text(encoding="utf-8") == "INCREMENTAL = True\n"
     wheel = out_dir / _WHEEL_NAME
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("mlx_audio/__init__.py", "VERSION = '0.4.8'\n")
+        archive.writestr(
+            "mlx_audio/tts/models/qwen3_tts/incremental.py",
+            overlay.read_text(encoding="utf-8"),
+        )
     return wheel
 
 
@@ -130,4 +153,20 @@ def test_build_engine_wheel_rejects_a_non_archive_result(tmp_path: Path) -> None
         return wheel
 
     with pytest.raises(EngineWheelBuildError, match="archive"):
+        build_engine_wheel(spec, root=tmp_path, builder=broken_builder)
+
+
+def test_build_engine_wheel_rejects_an_archive_without_the_incremental_overlay(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+
+    def broken_builder(source_root: Path, out_dir: Path) -> Path:
+        assert (source_root / "mlx_audio" / "__init__.py").is_file()
+        wheel = out_dir / _WHEEL_NAME
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("mlx_audio/__init__.py", "VERSION = '0.4.8'\n")
+        return wheel
+
+    with pytest.raises(EngineWheelBuildError, match="incremental"):
         build_engine_wheel(spec, root=tmp_path, builder=broken_builder)

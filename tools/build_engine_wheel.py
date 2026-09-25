@@ -19,10 +19,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +88,70 @@ def _sha256_file(path: Path) -> str:
     if path.is_symlink() or not path.is_file():
         raise EngineWheelBuildError(f"engine build input is unavailable: {path.name}")
     return _sha256_bytes(path.read_bytes())
+
+
+def _overlay_files(incremental_root: Path) -> tuple[Path, ...]:
+    """Return the additive overlay files that must reach the built wheel."""
+
+    if incremental_root.is_symlink() or not incremental_root.is_dir():
+        raise EngineWheelBuildError("engine build input incremental overlay is missing")
+    files = tuple(
+        sorted(
+            (path for path in incremental_root.rglob("*") if path.is_file()),
+            key=lambda item: item.relative_to(incremental_root).as_posix(),
+        )
+    )
+    if not files:
+        raise EngineWheelBuildError("engine incremental overlay is empty")
+    for path in files:
+        if path.is_symlink():
+            raise EngineWheelBuildError("engine incremental overlay must not contain symlinks")
+    return files
+
+
+def _apply_patch(patch_path: Path, source_root: Path) -> None:
+    try:
+        completed = subprocess.run(
+            (
+                "patch",
+                "-p1",
+                "--batch",
+                "--forward",
+                "--input",
+                str(patch_path),
+            ),
+            cwd=source_root,
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:  # pragma: no cover - depends on the local toolchain
+        raise EngineWheelBuildError("engine build patch could not start") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise EngineWheelBuildError(
+            "engine build patch failed: " + (detail[-1] if detail else "unknown error")
+        )
+
+
+@contextmanager
+def _staged_source(
+    source_root: Path,
+    incremental_root: Path,
+    patch_path: Path | None,
+) -> Iterator[Path]:
+    """Stage upstream plus the reviewed additive overlay for a clean build."""
+
+    with tempfile.TemporaryDirectory(prefix="speechrail-engine-build-") as temporary:
+        staged = Path(temporary) / "source"
+        shutil.copytree(source_root, staged)
+        if patch_path is not None:
+            _apply_patch(patch_path, staged)
+        for overlay in _overlay_files(incremental_root):
+            relative = overlay.relative_to(incremental_root)
+            destination = staged / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(overlay, destination)
+        yield staged
 
 
 def hash_tree(paths: Iterable[Path], *, root: Path) -> str:
@@ -211,6 +278,7 @@ def build_engine_wheel(
         raise EngineWheelBuildError("pinned engine source checkout is missing")
     if spec.patch_path is not None and not spec.patch_path.is_file():
         raise EngineWheelBuildError("engine build patch is missing")
+    overlay_files = _overlay_files(spec.incremental_root)
     destination.mkdir(parents=True, exist_ok=True)
     build_inputs_sha256 = hash_tree(spec.build_inputs, root=resolved_root)
     patch_sha256 = hash_tree(
@@ -218,7 +286,8 @@ def build_engine_wheel(
         root=resolved_root,
     )
     build = builder or _default_builder
-    built = build(spec.source_root, destination)
+    with _staged_source(spec.source_root, spec.incremental_root, spec.patch_path) as staged:
+        built = build(staged, destination)
     wheel_path = destination / spec.wheel_name
     if built.resolve() != wheel_path.resolve():
         if not built.exists():
@@ -226,6 +295,18 @@ def build_engine_wheel(
         built.replace(wheel_path)
     if not zipfile.is_zipfile(wheel_path):
         raise EngineWheelBuildError("engine wheel is not a valid archive")
+    with zipfile.ZipFile(wheel_path) as archive:
+        members = set(archive.namelist())
+    missing_overlay = sorted(
+        path.relative_to(spec.incremental_root).as_posix()
+        for path in overlay_files
+        if path.relative_to(spec.incremental_root).as_posix() not in members
+    )
+    if missing_overlay:
+        raise EngineWheelBuildError(
+            "engine wheel is missing persistent incremental overlay files: "
+            + ", ".join(missing_overlay)
+        )
     provenance = {
         "filename": spec.wheel_name,
         "sha256": _sha256_file(wheel_path),
