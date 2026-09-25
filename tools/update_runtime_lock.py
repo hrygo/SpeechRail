@@ -13,6 +13,7 @@ from typing import Any
 FFMPEG_ARTIFACT = "imageio-ffmpeg==0.6.0"
 _RUNTIME_DIRECTORY = Path("src/speechrail/assets/runtime")
 _LOCK_PATH = Path("src/speechrail/assets/runtime-lock.json")
+_VENDOR_OVERLAY_DIRECTORY = Path("vendor/mlx-audio-incremental/src")
 _PYTHON_VERSION_RE = re.compile(r"3\.14\.\d+\Z")
 _LOCK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _REQUIREMENT_RE = re.compile(
@@ -98,6 +99,28 @@ def _read_requirement_file(path: Path, *, root: Path) -> tuple[tuple[str, ...], 
     return requirements, hashlib.sha256(raw).hexdigest()
 
 
+def _read_vendor_overlays(root: Path) -> dict[str, str]:
+    overlay_root = root / _VENDOR_OVERLAY_DIRECTORY
+    if not overlay_root.is_dir():
+        raise RuntimeLockGenerationError("vendor overlay directory is unavailable")
+    overlay_files = sorted(
+        path for path in overlay_root.rglob("*.py") if path.is_file()
+    )
+    if not overlay_files:
+        raise RuntimeLockGenerationError("vendor overlay contains no Python modules")
+    overlays: dict[str, str] = {}
+    for path in overlay_files:
+        if path.is_symlink():
+            raise RuntimeLockGenerationError("vendor overlay cannot contain symlinks")
+        relative = path.relative_to(overlay_root).as_posix()
+        if not relative.startswith("mlx_audio/"):
+            raise RuntimeLockGenerationError(
+                "vendor overlay modules must stay within mlx_audio"
+            )
+        overlays[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return overlays
+
+
 def build_runtime_lock(root: Path, *, lock_id: str, python_version: str) -> dict[str, Any]:
     """Build lock metadata solely from the two generated, hash-pinned .txt files."""
     if _LOCK_ID_RE.fullmatch(lock_id) is None:
@@ -120,6 +143,7 @@ def build_runtime_lock(root: Path, *, lock_id: str, python_version: str) -> dict
             "runtime/asr.txt": asr_hash,
             "runtime/tts.txt": tts_hash,
         },
+        "vendor_overlays": _read_vendor_overlays(resolved_root),
     }
 
 

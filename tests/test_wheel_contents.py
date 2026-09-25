@@ -13,6 +13,18 @@ _REQUIRED_WHEEL_FILES = {
     "speechrail/assets/runtime-lock.json",
     "speechrail/assets/runtime/asr.txt",
     "speechrail/assets/runtime/tts.txt",
+    (
+        "speechrail/assets/vendor/mlx-audio-incremental/src/"
+        "mlx_audio/tts/models/qwen3_tts/incremental.py"
+    ),
+    (
+        "speechrail/assets/vendor/mlx-audio-incremental/src/"
+        "mlx_audio/tts/models/qwen3_tts/incremental_backend.py"
+    ),
+    (
+        "speechrail/assets/vendor/mlx-audio-incremental/src/"
+        "mlx_audio/tts/models/qwen3_tts/incremental_probe.py"
+    ),
     "speechrail/backends/qwen3_worker.py",
     "speechrail/backends/qwen3_tts_worker.py",
     "speechrail/config/model_catalog.py",
@@ -77,6 +89,11 @@ def assert_wheel_contents(wheel_path: Path) -> None:
     assert "speechrail/assets/runtime-lock.json" in names
     assert "speechrail/assets/runtime/asr.txt" in names
     assert "speechrail/assets/runtime/tts.txt" in names
+    overlay_prefix = "speechrail/assets/vendor/mlx-audio-incremental/src/"
+    overlay_directory = "mlx_audio/tts/models/qwen3_tts/"
+    assert f"{overlay_prefix}{overlay_directory}incremental.py" in names
+    assert f"{overlay_prefix}{overlay_directory}incremental_backend.py" in names
+    assert f"{overlay_prefix}{overlay_directory}incremental_probe.py" in names
     assert "speechrail/backends/qwen3_worker.py" in names
     assert "speechrail/backends/qwen3_tts_worker.py" in names
     assert "speechrail/service/managed_install.py" in names
