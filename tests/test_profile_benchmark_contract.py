@@ -54,6 +54,7 @@ def test_perf_clients_use_shared_api_key_discovery() -> None:
     client_paths = (
         project_root / "examples" / "perf" / "bench_asr.py",
         project_root / "examples" / "perf" / "bench_tts.py",
+        project_root / "examples" / "perf" / "bench_tts_streaming.py",
         project_root / "examples" / "perf" / "bench_realtime.py",
         project_root / "examples" / "perf" / "benchmark_scenarios.py",
         project_root / "examples" / "perf" / "concurrent_realtime_smoke.py",
