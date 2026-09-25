@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.18"
+version: "1.19"
 date: 2026-09-25
 ---
 
@@ -518,7 +518,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
 - [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
 - [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
-- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；仍缺真实播放欠载/打断/cancel/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
+- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 首次真机运行暴露“已完成 utterance 的残留帧污染下一轮 + open 失败后 worker 仍标记 started”两处缺陷，已在源码修复并加确定性回归，真机复测待下一轮 wheel 安装（见下方「W11 cancel 状态释放缺陷」）；仍缺真实播放欠载/打断/cancel 时延/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
 
 ### W2 实施与验收记录（2026-09-24）
 
@@ -747,3 +747,11 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **分档差异（实测结论，回答“不同档升级方案是否有差异”）：** 协议与状态机四档完全一致（同一 `speechrail.tts.start/append_text/finish_text`、同一 worker 与 host 路径），差异只在身份条件与精度：light/balanced 用 CustomVoice 内置 speaker 且 `tts_clone=None`（无 clone 能力），quality 用 Base 1.7B q8 clone，extreme 用 Base 1.7B bf16 clone。Base 的 prepared reference 按量化隔离，同一 voice id 在 q8 与 bf16 下各自准备一次参考、不共享张量缓存；同一 TTS artifact 的 light 与 balanced 延迟同量级，但 ASR、分人与资源占用不同，端到端与内存不能互相代替。
 - **Base 参考音频需 ~2.4 s 级（新增结论）：** 8.4 s 参考会在 Base ICL 布局下触发 `prefill_did_not_enter_trailing_region`（探针 fail-closed）；本次 quality/extreme 门统一使用 2.4 s（57600 帧 @ 24 kHz）参考，四档全部通过。
 - **证据边界（not_run）：** 真实播放欠载、用户打断→停旧音、cancel→状态释放时延、跨文本盲听身份 A/B、长稳内存与缓存驻留趋势、light/balanced 的 ASR 端到端与分人、extreme 的资源峰值预算、App 可听验收与 UI 自动化、发布/签名/notarization 与远端 push。ASR 与基准只证明“文本被完整朗读且延迟达标”，不构成音色相似度、自然度或长稳验收；extreme 仍按候选档呈现。
+
+#### W11 cancel 状态释放缺陷（2026-09-25，已定位并修复；真机复测待下一轮）
+
+- **真机症状：** quality 档 `bench_tts_stream_lifecycle.py --mode cancel --repeat 5` 第 1 轮 `cancel_to_terminal_ms=71 ms` 正常，第 2–5 轮全部 `tts_backend_failed`；此后同档普通增量基准（不含 cancel）也持续失败，`/health` 仍报 `tts_ready=true`，`tts_lifecycle.warm_capability` 由 `both` 退成单一 lane。安装态 `~/Library/Logs/SpeechRail/speechrail.log`（2026-09-25T12:43:32）给出直接原因：新一轮 open 读到 `ProtocolError: incremental frame carried a foreign request_id`。
+- **根因一（worker，触发点）：** `StreamPump` 是进程级单 reader，`_read_loop` 对取消帧既置优先级标志又入 `_inbound`；`_drive_stream` 走优先级分支时只发终态、不入队消费，该帧因此留在队列里，被下一次 `_serve_frames` 当作“没有活动 utterance 的控制帧”答复，产生携带**旧 request_id** 的错误帧；新 utterance 的 dispatcher 判定外来帧并 fail-closed。
+- **根因二（父端，放大成“必须重启服务”）：** open 失败时客户端走 abort 兜底杀死子进程，而 `Qwen3TtsWorker.open_incremental_stream` 的异常路径既没有像 batch 路径那样失效 worker，也没有重置 `_started`，于是之后每个请求都往死管道写。
+- **修复：** 新增 `StreamPump.discard_ended_stream(request_id)`，`_drive_stream` 结束时只丢弃队首属于该已结束 request 的帧（后续 `stream.start` 保留）；`open_incremental_stream` 在失败且 `transport` 已死时调用 `_invalidate_after_abort(epoch)`，下一个请求自愈重启。新增 3 项确定性回归，其中把 `discard` 置空即可复现旧帧残留（可复现红灯），把 invalidation 置空即可复现 `_started=true` + 死 transport。定向联跑 121 passed、`ruff check` 干净（2026-09-25，CPython 3.12.14 主仓 `.venv`；未加载模型、未连接服务）。
+- **证据边界：** 本节只有代码级根因、修复与确定性回归。真机 `--mode cancel/soak` 复测需要重新构建并安装 wheel（运行态变更），本轮未执行；§8.2 的 cancel→状态释放与打断条目仍为 **not_run**。
