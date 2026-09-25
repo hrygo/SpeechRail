@@ -36,6 +36,10 @@ DerivedData/
 *.log
 /runtime/
 models/
+# The in-tree mlx-audio overlay is Python source that happens to live under a
+# package path named 'models', which the local model-snapshot rule above would
+# otherwise hide from git.
+!vendor/mlx-audio-incremental/src/mlx_audio/tts/models/
 secrets/
 .DS_Store
 .idea/
