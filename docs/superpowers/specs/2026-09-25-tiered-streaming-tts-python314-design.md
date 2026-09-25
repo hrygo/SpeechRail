@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.14"
+version: "1.15"
 date: 2026-09-25
 ---
 
@@ -287,7 +287,7 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W8 公共协议与能力 | complete | public wire 增加 `speechrail.tts.start/append_text/finish_text` 与 `speechrail.tts.started/text_accepted`，音频沿用 `response.output_audio.delta` 并带 `speechrail.chunk_index/sample_offset`；ACK 序号定为 `append_sequence`（传输层已占用 `sequence`）；`create`/`start` 共用活动判定与 request-id 账本；`tts_stream_capability.py` 由 `/v1/models`、`/v1/voices` 与握手共用且 `budget_available` 不参与 `supported`。新增 `tests/test_realtime_tts_incremental.py` 16 项，定向 252 passed、主仓全量 2324 passed/7 skipped、ruff/mypy（136 文件）/diff check 通过。仅 fake session，未加载模型 |
 | W9 App 单轮增量文本与播放 | complete | ControlKit 增 start/append/finish DTO 与 started/text_accepted 解析；`RealtimeASRClient` 增流式三方法并校验 chunk_index/sample_offset/偶数字节；新增 `AssistantSpeechTextBuffer`（150 ms 三档紧急度、按 Unicode scalar 计量）、`AssistantPlaybackLedger`（1 秒样本预算、旧代隔离、暂时 drained ≠ 结束）、`AssistantTTSStreamCoordinator`（一轮一次 start/finish、ACK 未回不发 finish、背压超时明确失败）；播放完成语义由 `.dataConsumed` 改为 `.dataRendered`。`swift test` 全量 207 passed（含新增 30 项纯状态测试）；三个新增文件同时登记到 SwiftPM sources 与 Xcode 两处 Sources phase；App 全量源文件 `swiftc -typecheck` 通过。App 构建 / 真实 AVAudioEngine / 可听延迟 / UI 未验收（未授权） |
 | W10 分档能力呈现与切换保护 | complete | 后端四档矩阵 13 项（`tests/test_tts_stream_capability_matrix.py`）钉住 light/balanced=CustomVoice、quality/extreme=Base clone、VoiceDesign 永不提升、模型级不宣称逐音色支持；App 新增 `VoiceStreamingCapability`/`VoiceStreamingAxes` 与 `supportsStreamingInput`，缺失即未知、未声明轴 fail-closed（`StreamingTtsCapabilitiesTests` 7 项）；`AssistantView` 显示「边想边说 / 普通朗读」与按 reason 的下一步动作，`ModelManagementView` 在助手 live 期间禁用切档并再挡确认入口。仅纯 DTO/能力测试，未做 UI 自动化或真实服务验收 |
-| W11 逐档声学/性能与发布回滚 | not started | 逐档声学/性能与发布回滚；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
+| W11 逐档声学/性能与发布回滚 | in_progress（仅基准工具） | Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂”。`examples/perf/bench_tts_streaming.py` 已按公共 wire 顺序实现并以 21 项确定性测试钉住（`text_gap_ms` 与生成 RTF 分开报）；真实模型、逐档声学矩阵、§8.2 延迟/RTF 门与发布回滚全部未运行，需单独授权 |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 

@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.14"
+version: "1.15"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付，继续 W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付；W11 的增量延迟基准工具已就绪（`2269e4de`），真实声学/性能门待单独授权。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -691,3 +691,11 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **分档呈现：** `AssistantView` 的声音卡新增「边想边说 / 普通朗读」状态与按 reason 分支的用户语言说明；下拉列表每个音色带可/不可增量标签。quality/extreme 遇 instruction-only 声音时提示“先固定成克隆音色”，light/balanced 遇 clone 提示换预置声音，均不静默替换音色。
 - **切换保护：** `ModelManagementView` 在 `assistant.phase.isLive`（听/想/说）期间禁用「应用此档位」并说明“先结束这一轮或点停止”，确认对话框的动作入口也再挡一次，避免排队确认跨过助手开始说话的瞬间；切档不后台热切，用户显式停止后仍走既有受控流程。
 - **验证边界：** 确定性证据为 `swift test`（XCTest 214 passed，含新增 7 项；Swift Testing 135 passed）与主仓定向 pytest 55 passed、新增文件 13 passed；App 全量 `swiftc -typecheck` 通过（仅既有 `maxTokens` deprecation warning）。未做：App 构建/安装、真实服务、真实模型、可听延迟、UI 自动化（均未授权）。
+
+### W11 实施记录（2026-09-25，仅基准工具就绪）
+
+- **增量延迟入口（新增）：** `examples/perf/bench_tts_streaming.py` 经 openai SDK 的 realtime 连接驱动单轮增量朗读，严格按公共契约顺序：`start` → 等 `speechrail.tts.started` → 逐段 `append_text` 并等对应的 `speechrail.tts.text_accepted` → 用最后一次 ACK 的序号发 `finish_text`。单次 append 上限取 `started.limits.max_append_codepoints`，采样率取线上 `output_format.sample_rate`（音频块有 `speechrail.sample_rate` 时以后者为准），不硬编码声音或档位；音频只计数、不落盘、不留存。
+- **两个数字分开报：** `append_to_first_pcm_ms` 覆盖调用方把文本交给服务之前的全部等待（含 `--append-interval-ms` 的小窗口），`generation_rtf` 只除模型真正持有 utterance 的窗口，调用方自己插入的供给间隙记为 `text_gap_ms` 并从该窗口扣除。P50/P95 用向上取的最近秩，样本少时只会偏保守，不会低于真实秩。
+- **确定性证据：** 新增 `tests/test_bench_tts_streaming.py` 21 项（切分与限额、百分位、汇总、完整 wire 顺序、缺失/失败/截断路径），并把新客户端并入 `tests/test_profile_benchmark_contract.py` 的共享 API-key 发现契约。实测 `ruff check` 干净、两文件联跑 69 passed（2026-09-25，CPython 3.12.14 主仓 `.venv`；未加载模型、未连接服务、未启动 worker）。
+- **验证边界（如实标注）：** 本轮只有工具与假连接测试。§8.2 的“首批可提交文本→首个可播放 PCM P95≤500ms”、排除饥饿后的生成 RTF、真实播放欠载、用户打断→停旧音 P95≤100ms、cancel→状态释放 P95≤500ms 全部 **not_run**；逐档声学矩阵、Base bf16 实时门、extreme 是否转正式实时档，以及发布/回滚演练同样 **not_run**。
+- **下一步需要单独授权：** 服务启停与逐档切换、真实推理与资源采样（读 `speechrail-perf-benchmark` 与本指南 §7.3）、App 构建/安装与 UI 自动化（按 macOS UI 授权规则逐次确认）、发布与回滚。授权之前不安装、不切档、不 push、不改运行态。
