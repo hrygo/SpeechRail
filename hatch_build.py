@@ -17,7 +17,7 @@ class CustomBuildHook(BuildHookInterface):
         del version
         if self.target_name != "wheel":
             return
-        _include_vendor_overlay(self, build_data)
+        _include_engine_wheel(self, build_data)
         if sys.platform != "darwin":
             # The application is macOS-only; Linux CI can build and test the
             # Python package without attempting to compile its CoreML worker.
@@ -47,24 +47,33 @@ class CustomBuildHook(BuildHookInterface):
         force_include[str(destination)] = "speechrail/_native/SpeechRailDiarizationWorker"
         build_data["infer_tag"] = True
 
-def _include_vendor_overlay(hook: object, build_data: dict[str, object]) -> None:
+def _include_engine_wheel(hook: object, build_data: dict[str, object]) -> None:
+    """Ship the controlled engine wheel and its provenance, not overlay sources.
+
+    The wheel only exists once ``tools/build_engine_wheel.py`` has passed the T03
+    build gate.  Until then nothing is force-included and the runtime lock carries
+    no ``engine_wheel`` pin, so a build never pretends to deliver a wheel it does
+    not have.
+    """
+
     root_value = getattr(hook, "root", None)
     if not isinstance(root_value, (str, Path)):
-        raise RuntimeError("vendor overlay hook root is invalid")
-    root = Path(root_value)
-    source_root = root / "vendor" / "mlx-audio-incremental" / "src"
-    if not source_root.is_dir():
-        raise RuntimeError("vendor overlay source directory is missing")
-    sources = sorted(path for path in source_root.rglob("*.py") if path.is_file())
-    if not sources:
-        raise RuntimeError("vendor overlay contains no Python modules")
+        raise RuntimeError("engine wheel hook root is invalid")
+    dist_root = Path(root_value) / "vendor" / "engine-build" / "dist"
+    if not dist_root.is_dir():
+        return
+    provenance = dist_root / "provenance.json"
+    wheels = sorted(path for path in dist_root.glob("*.whl") if path.is_file())
+    if not wheels:
+        if provenance.exists():
+            raise RuntimeError("engine wheel provenance has no wheel")
+        return
+    if len(wheels) != 1 or not provenance.is_file():
+        raise RuntimeError("engine build dist must contain exactly one wheel and provenance")
+    wheel = wheels[0]
+    if wheel.is_symlink() or provenance.is_symlink():
+        raise RuntimeError("engine wheel delivery cannot contain symlinks")
     force_include = build_data.setdefault("force_include", {})
     assert isinstance(force_include, dict)
-    for source in sources:
-        if source.is_symlink():
-            raise RuntimeError("vendor overlay cannot contain symlinks")
-        relative = source.relative_to(source_root).as_posix()
-        if not relative.startswith("mlx_audio/"):
-            raise RuntimeError("vendor overlay modules must stay within mlx_audio")
-        destination = "speechrail/assets/vendor/mlx-audio-incremental/src/" + relative
-        force_include[str(source)] = destination
+    force_include[str(wheel)] = "speechrail/assets/vendor/engine/dist/" + wheel.name
+    force_include[str(provenance)] = "speechrail/assets/vendor/engine/dist/provenance.json"

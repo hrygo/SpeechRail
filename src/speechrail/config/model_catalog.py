@@ -26,9 +26,47 @@ from pydantic import (
 Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
 Variant = Literal["asr", "voice_design", "custom_voice", "base", "aligner"]
 PresetId = Literal["extreme", "quality", "balanced", "light"]
+SpecTier = Literal["fast", "quality", "reference"]
+ModelRole = Literal[
+    "asr",
+    "tts_base",
+    "tts_custom_voice",
+    "voice_design",
+    "alignment",
+    "diarization",
+]
 # 未量化制品的权重数值格式。有了它, 目录里的每一份权重都能在同一个维度上说清
 # 精度: 量化制品用 `bits`, 未量化制品用 `dtype` (用户 2026-09-23)。
 WeightDtype = Literal["bf16", "fp16", "fp32"]
+
+# 目标三档与角色的唯一绑定表。缺失的制品绝不能由规格名字推断补齐。
+REQUIRED_SPEC_BINDINGS: Mapping[tuple[SpecTier, ModelRole], str] = MappingProxyType(
+    {
+        ("fast", "asr"): "asr-0.6b-q8",
+        ("quality", "asr"): "asr-1.7b-q8",
+        ("reference", "asr"): "asr-1.7b-bf16",
+        ("fast", "tts_base"): "tts-0.6b-base-q8",
+        ("quality", "tts_base"): "tts-1.7b-base-q8",
+        ("reference", "tts_base"): "tts-1.7b-base-bf16",
+        ("fast", "tts_custom_voice"): "tts-0.6b-custom-q8",
+        ("quality", "tts_custom_voice"): "tts-1.7b-custom-q8",
+        ("reference", "tts_custom_voice"): "tts-1.7b-custom-bf16",
+        ("reference", "voice_design"): "tts-1.7b-design-bf16",
+        ("fast", "alignment"): "aligner-q8",
+        ("quality", "alignment"): "aligner-bf16",
+        ("reference", "alignment"): "aligner-bf16",
+    }
+)
+
+_ROLE_VARIANTS: Mapping[ModelRole, tuple[Family, Variant]] = MappingProxyType(
+    {
+        "asr": ("qwen3_asr", "asr"),
+        "tts_base": ("qwen3_tts", "base"),
+        "tts_custom_voice": ("qwen3_tts", "custom_voice"),
+        "voice_design": ("qwen3_tts", "voice_design"),
+        "alignment": ("qwen3_forced_aligner", "aligner"),
+    }
+)
 
 _SCHEMA_VERSION = 2
 _REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
@@ -222,6 +260,16 @@ class ModelArtifact(BaseModel):
         return self
 
 
+class ModelSpecBinding(BaseModel):
+    """一个档位与角色的显式制品绑定, 不做名字推断。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tier: SpecTier
+    role: ModelRole
+    artifact_key: StrictStr = Field(min_length=1)
+
+
 class ModelPreset(BaseModel):
     """只引用 ASR、TTS 与可选 aligner 制品的预设。"""
 
@@ -267,6 +315,42 @@ def _precision_matches(quantization: QuantizationSpec, precision: int | Literal[
     return quantization.bits == precision and quantization.dtype is None
 
 
+class EngineWheelPin(BaseModel):
+    """受控引擎 wheel 的构建 provenance.
+
+    目标架构不再向 site-packages 覆盖 vendor 源文件: 语音引擎只能以唯一 wheel
+    交付, 且必须能由固定上游源码 + 补丁 + 构建输入重建. 这里记录 wheel 与重建
+    输入的哈希; 未登记时为 ``None`` (尚未通过构建门), 此时 runtime 不安装任何
+    overlay, 也不凭空声称 wheel 身份.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    filename: StrictStr = Field(min_length=1)
+    sha256: StrictStr
+    source_repository: StrictStr = Field(min_length=1)
+    source_revision: StrictStr
+    patch_sha256: StrictStr
+    build_inputs_sha256: StrictStr
+
+    @field_validator("sha256", "patch_sha256", "build_inputs_sha256")
+    @classmethod
+    def validate_hashes(cls, value: str) -> str:
+        return _sha256(value)
+
+    @field_validator("source_revision")
+    @classmethod
+    def validate_source_revision(cls, value: str) -> str:
+        return _revision(value)
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        if Path(value).name != value or not value.endswith(".whl"):
+            raise ValueError("engine wheel filename must be a bare .whl name")
+        return value
+
+
 class RuntimeLock(BaseModel):
     """全档共享且带哈希依赖的 runtime 锁定清单。"""
 
@@ -285,7 +369,7 @@ class RuntimeLock(BaseModel):
     tts_requirements: tuple[StrictStr, ...] = Field(min_length=1)
     ffmpeg_artifact: StrictStr = Field(min_length=1)
     file_hashes: Mapping[str, StrictStr] = Field(min_length=1)
-    vendor_overlays: Mapping[str, StrictStr] = Field(default_factory=dict)
+    engine_wheel: EngineWheelPin | None = None
 
     @field_validator("asr_requirements", "tts_requirements")
     @classmethod
@@ -308,41 +392,23 @@ class RuntimeLock(BaseModel):
             normalized[normalized_path] = _sha256(digest, field_name="file_hashes value")
         return MappingProxyType(normalized)
 
-    @field_validator("vendor_overlays", mode="after")
-    @classmethod
-    def freeze_vendor_overlays(cls, value: Mapping[str, str]) -> Mapping[str, str]:
-        normalized: dict[str, str] = {}
-        for path, digest in value.items():
-            normalized_path = _relative_path(path, field_name="vendor_overlays key")
-            if not normalized_path.startswith("mlx_audio/"):
-                raise ValueError("vendor_overlays must target the mlx_audio package")
-            if normalized_path in normalized:
-                raise ValueError("vendor_overlays contains duplicate normalized paths")
-            normalized[normalized_path] = _sha256(
-                digest, field_name="vendor_overlays value"
-            )
-        return MappingProxyType(normalized)
-
-
-def runtime_overlay_source(relative_path: str) -> Path:
-    """Resolve an overlay destination from a wheel asset or the source checkout."""
-    normalized = _relative_path(relative_path, field_name="vendor overlay path")
-    if not normalized.startswith("mlx_audio/"):
-        raise ValueError("vendor overlay path must stay within mlx_audio")
-    asset_root = _ASSET_DIR / "vendor" / "mlx-audio-incremental" / "src"
-    source_root = _ASSET_DIR.parents[2] / "vendor" / "mlx-audio-incremental" / "src"
+def runtime_wheel_source(filename: str) -> Path:
+    """Resolve the pinned engine wheel from the asset dir or the build checkout."""
+    if Path(filename).name != filename or not filename.endswith(".whl"):
+        raise ValueError("engine wheel filename must be a bare .whl name")
+    asset_root = _ASSET_DIR / "vendor" / "engine" / "dist"
+    source_root = _ASSET_DIR.parents[2] / "vendor" / "engine-build" / "dist"
     for root in (asset_root, source_root):
         if not root.is_dir():
             continue
-        resolved_root = root.resolve()
-        candidate = (resolved_root / normalized).resolve()
+        candidate = (root.resolve() / filename).resolve()
         try:
-            candidate.relative_to(resolved_root)
+            candidate.relative_to(root.resolve())
         except ValueError as exc:
-            raise ValueError("vendor overlay path escapes its source root") from exc
+            raise ValueError("engine wheel path escapes its source root") from exc
         if candidate.is_file():
             return candidate
-    raise ValueError(f"vendor overlay asset is missing: {normalized}")
+    raise ValueError(f"engine wheel asset is missing: {filename}")
 
 
 class ModelCatalog(BaseModel):
@@ -352,6 +418,7 @@ class ModelCatalog(BaseModel):
 
     schema_version: StrictInt
     artifacts: tuple[ModelArtifact, ...] = Field(min_length=1)
+    specs: tuple[ModelSpecBinding, ...] = Field(min_length=1)
     presets: tuple[ModelPreset, ...] = Field(min_length=4)
     precision_policy: Mapping[PresetId, TierPrecision]
 
@@ -391,6 +458,33 @@ class ModelCatalog(BaseModel):
             if artifact.key in artifacts:
                 raise ValueError(f"duplicate artifact key: {artifact.key}")
             artifacts[artifact.key] = artifact
+
+        bindings: dict[tuple[SpecTier, ModelRole], str] = {}
+        for binding in self.specs:
+            key = (binding.tier, binding.role)
+            if key in bindings:
+                raise ValueError(f"duplicate spec binding: {binding.tier}/{binding.role}")
+            bindings[key] = binding.artifact_key
+        # The catalog is the source of truth for which artifact serves a
+        # tier/role; the exact *target* matrix is enforced on load and by the
+        # catalog builder so synthetic catalogs in tests stay usable.
+        if set(bindings) != set(REQUIRED_SPEC_BINDINGS):
+            missing = sorted(set(REQUIRED_SPEC_BINDINGS) - set(bindings))
+            extra = sorted(set(bindings) - set(REQUIRED_SPEC_BINDINGS))
+            raise ValueError(
+                "catalog specs must cover the required matrix: "
+                f"missing={missing} extra={extra}"
+            )
+        for (tier, role), artifact_key in bindings.items():
+            artifact = artifacts.get(artifact_key)
+            if artifact is None:
+                raise ValueError(f"spec {tier}/{role} references unknown artifact")
+            expected_family, expected_variant = _ROLE_VARIANTS[role]
+            if (artifact.family, artifact.variant) != (
+                expected_family,
+                expected_variant,
+            ):
+                raise ValueError(f"spec {tier}/{role} references an incompatible artifact")
 
         presets: dict[PresetId, ModelPreset] = {}
         for item in self.presets:
@@ -454,8 +548,8 @@ class ModelCatalog(BaseModel):
         if quality.asr != balanced.asr:
             raise ValueError("quality and balanced presets must share the ASR artifact")
         for preset_id, item in (("quality", quality), ("extreme", extreme)):
-            if artifacts[item.tts].variant != "voice_design":
-                raise ValueError(f"{preset_id} preset must use a voice_design artifact")
+            if artifacts[item.tts].variant != "custom_voice":
+                raise ValueError(f"{preset_id} preset must use a custom_voice artifact")
             if item.tts_clone is None:
                 raise ValueError(f"{preset_id} preset must declare a base clone artifact")
             clone_artifact = artifacts.get(item.tts_clone)
@@ -488,6 +582,24 @@ class ModelCatalog(BaseModel):
                 return item
         raise KeyError(preset_id)
 
+    def binding(self, tier: SpecTier, role: ModelRole) -> str:
+        """按档位与角色返回显式制品 key。"""
+        for item in self.specs:
+            if item.tier == tier and item.role == role:
+                return item.artifact_key
+        raise KeyError(f"{tier}/{role}")
+
+    def artifact_for(self, tier: SpecTier, role: ModelRole) -> ModelArtifact | None:
+        """返回绑定的制品; 未绑定或缺失时返回 None, 绝不按名字推断。"""
+        try:
+            artifact_key = self.binding(tier, role)
+        except KeyError:
+            return None
+        for artifact in self.artifacts:
+            if artifact.key == artifact_key:
+                return artifact
+        return None
+
 
 def _load_json(path: Path) -> Mapping[str, object]:
     try:
@@ -502,7 +614,30 @@ def _load_json(path: Path) -> Mapping[str, object]:
 @lru_cache(maxsize=1)
 def load_catalog() -> ModelCatalog:
     """读取并校验仓库内的模型目录。"""
-    return ModelCatalog.model_validate(_load_json(_CATALOG_PATH))
+    catalog = ModelCatalog.model_validate(_load_json(_CATALOG_PATH))
+    assert_target_spec_bindings(catalog)
+    return catalog
+
+
+def assert_target_spec_bindings(catalog: ModelCatalog) -> None:
+    """Reject a shipped catalog that does not bind the frozen target matrix.
+
+    ``ModelCatalog`` keeps tier/role bindings data-driven so a synthetic
+    catalog can be validated in isolation. The artifact file that ships with
+    the service must still resolve every tier/role to the exact artifact the
+    target architecture names, so that gate lives here.
+    """
+
+    mismatched = sorted(
+        (tier, role)
+        for (tier, role), expected_key in REQUIRED_SPEC_BINDINGS.items()
+        if catalog.binding(tier, role) != expected_key
+    )
+    if mismatched:
+        raise ValueError(
+            "shipped catalog spec bindings must match the target matrix: "
+            f"mismatched={mismatched}"
+        )
 
 
 def preset(preset_id: str) -> ModelPreset:
@@ -525,31 +660,36 @@ def load_runtime_lock() -> RuntimeLock:
         actual_hash = hashlib.sha256(asset_path.read_bytes()).hexdigest()
         if actual_hash != expected_hash:
             raise ValueError(f"runtime lock asset hash mismatch: {relative_path}")
-    for relative_path, expected_hash in lock.vendor_overlays.items():
+    if lock.engine_wheel is not None:
         try:
-            overlay_path = runtime_overlay_source(relative_path)
+            wheel_path = runtime_wheel_source(lock.engine_wheel.filename)
         except ValueError as exc:
-            raise ValueError(f"vendor overlay asset is missing: {relative_path}") from exc
-        actual_hash = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
-        if actual_hash != expected_hash:
-            raise ValueError(f"vendor overlay hash mismatch: {relative_path}")
+            raise ValueError(
+                f"engine wheel asset is missing: {lock.engine_wheel.filename}"
+            ) from exc
+        if hashlib.sha256(wheel_path.read_bytes()).hexdigest() != lock.engine_wheel.sha256:
+            raise ValueError(f"engine wheel hash mismatch: {lock.engine_wheel.filename}")
     return lock
 
 
 __all__ = [
+    "REQUIRED_SPEC_BINDINGS",
     "ArtifactFile",
+    "EngineWheelPin",
     "Family",
     "ModelArtifact",
     "ModelCatalog",
     "ModelPreset",
+    "ModelSpecBinding",
     "PresetId",
     "QuantizationSpec",
     "RuntimeLock",
     "SourceLocation",
     "TierPrecision",
     "Variant",
+    "assert_target_spec_bindings",
     "load_catalog",
     "load_runtime_lock",
     "preset",
-    "runtime_overlay_source",
+    "runtime_wheel_source",
 ]

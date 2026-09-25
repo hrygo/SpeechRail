@@ -13,7 +13,18 @@ from typing import Any
 FFMPEG_ARTIFACT = "imageio-ffmpeg==0.6.0"
 _RUNTIME_DIRECTORY = Path("src/speechrail/assets/runtime")
 _LOCK_PATH = Path("src/speechrail/assets/runtime-lock.json")
-_VENDOR_OVERLAY_DIRECTORY = Path("vendor/mlx-audio-incremental/src")
+_ENGINE_BUILD_DIRECTORY = Path("vendor/engine-build/dist")
+_ENGINE_PROVENANCE_NAME = "provenance.json"
+_ENGINE_PIN_FIELDS = (
+    "filename",
+    "sha256",
+    "source_repository",
+    "source_revision",
+    "patch_sha256",
+    "build_inputs_sha256",
+)
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
+_REVISION_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 _PYTHON_VERSION_RE = re.compile(r"3\.14\.\d+\Z")
 _LOCK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _REQUIREMENT_RE = re.compile(
@@ -99,26 +110,46 @@ def _read_requirement_file(path: Path, *, root: Path) -> tuple[tuple[str, ...], 
     return requirements, hashlib.sha256(raw).hexdigest()
 
 
-def _read_vendor_overlays(root: Path) -> dict[str, str]:
-    overlay_root = root / _VENDOR_OVERLAY_DIRECTORY
-    if not overlay_root.is_dir():
-        raise RuntimeLockGenerationError("vendor overlay directory is unavailable")
-    overlay_files = sorted(
-        path for path in overlay_root.rglob("*.py") if path.is_file()
-    )
-    if not overlay_files:
-        raise RuntimeLockGenerationError("vendor overlay contains no Python modules")
-    overlays: dict[str, str] = {}
-    for path in overlay_files:
-        if path.is_symlink():
-            raise RuntimeLockGenerationError("vendor overlay cannot contain symlinks")
-        relative = path.relative_to(overlay_root).as_posix()
-        if not relative.startswith("mlx_audio/"):
+def _read_engine_wheel_pin(root: Path) -> dict[str, str] | None:
+    """Read the builder provenance, or ``None`` when the build gate has not run.
+
+    The shipped lock never carries a guessed wheel hash: until the controlled
+    build writes ``provenance.json`` next to its wheel, the lock stays without an
+    ``engine_wheel`` pin and the runtime installs the requirements only.
+    """
+
+    provenance_path = root / _ENGINE_BUILD_DIRECTORY / _ENGINE_PROVENANCE_NAME
+    if not provenance_path.is_file():
+        return None
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeLockGenerationError("engine wheel provenance is invalid") from exc
+    if not isinstance(provenance, dict) or set(provenance) != set(_ENGINE_PIN_FIELDS):
+        raise RuntimeLockGenerationError("engine wheel provenance fields are incomplete")
+    pin: dict[str, str] = {}
+    for field in _ENGINE_PIN_FIELDS:
+        value = provenance[field]
+        if not isinstance(value, str) or not value:
+            raise RuntimeLockGenerationError("engine wheel provenance values are invalid")
+        pin[field] = value
+    if Path(pin["filename"]).name != pin["filename"] or not pin["filename"].endswith(".whl"):
+        raise RuntimeLockGenerationError("engine wheel provenance filename is invalid")
+    if _SHA256_RE.fullmatch(pin["sha256"]) is None:
+        raise RuntimeLockGenerationError("engine wheel provenance hash is invalid")
+    if _REVISION_RE.fullmatch(pin["source_revision"]) is None:
+        raise RuntimeLockGenerationError("engine wheel provenance revision is invalid")
+    for field in ("patch_sha256", "build_inputs_sha256"):
+        if _SHA256_RE.fullmatch(pin[field]) is None:
             raise RuntimeLockGenerationError(
-                "vendor overlay modules must stay within mlx_audio"
+                f"engine wheel provenance {field} is invalid"
             )
-        overlays[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return overlays
+    wheel_path = root / _ENGINE_BUILD_DIRECTORY / pin["filename"]
+    if wheel_path.is_symlink() or not wheel_path.is_file():
+        raise RuntimeLockGenerationError("engine wheel artifact is unavailable")
+    if hashlib.sha256(wheel_path.read_bytes()).hexdigest() != pin["sha256"]:
+        raise RuntimeLockGenerationError("engine wheel artifact hash does not match")
+    return pin
 
 
 def build_runtime_lock(root: Path, *, lock_id: str, python_version: str) -> dict[str, Any]:
@@ -133,7 +164,7 @@ def build_runtime_lock(root: Path, *, lock_id: str, python_version: str) -> dict
     tts_path = resolved_root / _RUNTIME_DIRECTORY / "tts.txt"
     asr_requirements, asr_hash = _read_requirement_file(asr_path, root=resolved_root)
     tts_requirements, tts_hash = _read_requirement_file(tts_path, root=resolved_root)
-    return {
+    payload: dict[str, Any] = {
         "id": lock_id,
         "python": python_version,
         "asr_requirements": list(asr_requirements),
@@ -143,8 +174,11 @@ def build_runtime_lock(root: Path, *, lock_id: str, python_version: str) -> dict
             "runtime/asr.txt": asr_hash,
             "runtime/tts.txt": tts_hash,
         },
-        "vendor_overlays": _read_vendor_overlays(resolved_root),
     }
+    wheel_pin = _read_engine_wheel_pin(resolved_root)
+    if wheel_pin is not None:
+        payload["engine_wheel"] = wheel_pin
+    return payload
 
 
 def _render_runtime_lock(payload: dict[str, Any]) -> bytes:

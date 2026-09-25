@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from runpy import run_path
 
@@ -47,6 +48,9 @@ def test_parse_hashed_requirements_rejects_unpinned_or_ambiguous_entries(source:
         parse_hashed_requirements(source, source_name="fixture.txt")
 
 
+_WHEEL_NAME = "mlx_audio-0.4.8+speechrail.1-py3-none-any.whl"
+
+
 def _write_inputs(root: Path) -> tuple[Path, Path]:
     runtime = root / "src" / "speechrail" / "assets" / "runtime"
     runtime.mkdir(parents=True)
@@ -54,20 +58,24 @@ def _write_inputs(root: Path) -> tuple[Path, Path]:
     tts = runtime / "tts.txt"
     asr.write_text(f"alpha==1.0 --hash=sha256:{_HASH_A}\n", encoding="utf-8")
     tts.write_text(f"zeta==2.0 --hash=sha256:{_HASH_B}\n", encoding="utf-8")
-    overlay = (
-        root
-        / "vendor"
-        / "mlx-audio-incremental"
-        / "src"
-        / "mlx_audio"
-        / "tts"
-        / "models"
-        / "qwen3_tts"
-        / "incremental.py"
-    )
-    overlay.parent.mkdir(parents=True)
-    overlay.write_text("INCREMENTAL = True\n", encoding="utf-8")
     return asr, tts
+
+
+def _write_engine_build(root: Path, *, wheel_bytes: bytes = b"engine-wheel") -> Path:
+    dist = root / "vendor" / "engine-build" / "dist"
+    dist.mkdir(parents=True)
+    wheel = dist / _WHEEL_NAME
+    wheel.write_bytes(wheel_bytes)
+    provenance = {
+        "filename": _WHEEL_NAME,
+        "sha256": hashlib.sha256(wheel_bytes).hexdigest(),
+        "source_repository": "https://github.com/Blaizzy/mlx-audio",
+        "source_revision": "b" * 40,
+        "patch_sha256": "c" * 64,
+        "build_inputs_sha256": "d" * 64,
+    }
+    (dist / "provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+    return dist / "provenance.json"
 
 
 def test_build_runtime_lock_hashes_exact_requirement_files_and_uses_requested_python(
@@ -87,12 +95,34 @@ def test_build_runtime_lock_hashes_exact_requirement_files_and_uses_requested_py
             "runtime/asr.txt": hashlib.sha256(asr_path.read_bytes()).hexdigest(),
             "runtime/tts.txt": hashlib.sha256(tts_path.read_bytes()).hexdigest(),
         },
-        "vendor_overlays": {
-            "mlx_audio/tts/models/qwen3_tts/incremental.py": hashlib.sha256(
-                b"INCREMENTAL = True\n"
-            ).hexdigest()
-        },
     }
+
+
+def test_build_runtime_lock_records_the_built_engine_wheel_pin(tmp_path: Path) -> None:
+    _write_inputs(tmp_path)
+    _write_engine_build(tmp_path)
+
+    payload = build_runtime_lock(tmp_path, lock_id="candidate-314", python_version="3.14.7")
+
+    assert payload["engine_wheel"] == {
+        "filename": _WHEEL_NAME,
+        "sha256": hashlib.sha256(b"engine-wheel").hexdigest(),
+        "source_repository": "https://github.com/Blaizzy/mlx-audio",
+        "source_revision": "b" * 40,
+        "patch_sha256": "c" * 64,
+        "build_inputs_sha256": "d" * 64,
+    }
+
+
+def test_build_runtime_lock_rejects_a_mismatched_engine_wheel(tmp_path: Path) -> None:
+    _write_inputs(tmp_path)
+    provenance = _write_engine_build(tmp_path)
+    payload = json.loads(provenance.read_text(encoding="utf-8"))
+    payload["sha256"] = "f" * 64
+    provenance.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeLockGenerationError, match="engine wheel"):
+        build_runtime_lock(tmp_path, lock_id="candidate-314", python_version="3.14.7")
 
 
 def test_build_runtime_lock_rejects_non_314_python_and_invalid_id(tmp_path: Path) -> None:

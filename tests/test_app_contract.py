@@ -11,6 +11,7 @@ from speechrail.app import create_app
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 
 
 def _client() -> TestClient:
@@ -120,38 +121,47 @@ def test_health_exposes_safe_tts_lifecycle_counters() -> None:
     }
 
 
-@pytest.mark.parametrize("preset_id", ["extreme", "quality", "balanced", "light"])
-def test_managed_profile_publishes_active_model_identity(
-    tmp_path: Path,
-    preset_id: str,
+@pytest.mark.parametrize("asr_spec", ["fast", "quality", "reference"])
+def test_managed_selection_publishes_active_model_identity(
+    tmp_path: Path, asr_spec: str
 ) -> None:
     catalog = load_catalog()
-    preset = catalog.preset(preset_id)
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    asr_key = required_spec_artifact(asr_spec, "asr")
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    clone_key = required_spec_artifact("fast", "tts_base")
+    assert asr_key is not None and tts_key is not None
     settings = Settings(
-        qwen3_model_dir=tmp_path / preset.asr,
+        qwen3_model_dir=tmp_path / asr_key,
         qwen3_python=None,
-        qwen3_tts_model_dir=tmp_path / preset.tts,
-        qwen3_tts_clone_model_dir=(tmp_path / preset.tts_clone if preset.tts_clone else None),
+        qwen3_tts_model_dir=tmp_path / tts_key,
+        qwen3_tts_clone_model_dir=(tmp_path / clone_key if clone_key else None),
         qwen3_tts_python=None,
+        selection_schema_version=2,
+        selection_asr_spec=asr_spec,
+        selection_tts_spec="fast",
+        asr_artifact_key=asr_key,
+        tts_artifact_key=tts_key,
+        tts_base_artifact_key=clone_key,
     )
     client = TestClient(create_app(settings))
 
+    profile = f"{asr_spec}/fast"
     health = client.get("/health").json()
-    assert health["backend"] == preset.asr
-    assert health["profile"] == preset_id
+    assert health["backend"] == asr_key
+    assert health["profile"] == profile
 
     by_id = {
         item["id"]: item for item in client.get("/v1/models").json()["data"]
     }
-    asr = artifacts[preset.asr]
-    tts = artifacts[preset.tts]
+    asr = artifacts[asr_key]
+    tts = artifacts[tts_key]
     assert by_id[settings.model_id] == {
         "id": settings.model_id,
         "object": "model",
         "owned_by": "speechrail",
         "created": 0,
-        "profile": preset_id,
+        "profile": profile,
         "artifact": asr.key,
         "source_model": asr.model_id,
         "family": asr.family,
@@ -178,7 +188,7 @@ def test_managed_profile_publishes_active_model_identity(
         "object": "model",
         "owned_by": "speechrail",
         "created": 0,
-        "profile": preset_id,
+        "profile": profile,
         "artifact": tts.key,
         "source_model": tts.model_id,
         "family": tts.family,
@@ -191,7 +201,7 @@ def test_managed_profile_publishes_active_model_identity(
         for key in ("supports_preview", "supports_clone", "supports_instruction")
     } == {
         "supports_preview": tts.variant == "voice_design",
-        "supports_clone": preset.tts_clone is not None,
+        "supports_clone": clone_key is not None and clone_key in artifacts,
         "supports_instruction": tts.variant == "voice_design",
     }
     # W8 adds the voice-independent incremental axis at model scope. It must

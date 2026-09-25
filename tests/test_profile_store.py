@@ -14,16 +14,25 @@ from speechrail.service.profile_store import (
 )
 
 
-def selection(preset: str = "quality", generation: int = 1) -> dict[str, object]:
+def selection(
+    asr_spec: str = "quality",
+    tts_spec: str = "quality",
+    generation: int = 1,
+    auto: str = "off",
+) -> dict[str, object]:
     return {
-        "schema_version": 1, "preset": preset, "generation": generation,
-        "asr": "large-q8", "tts": "design-q8", "runtime_lock_id": "runtime-v1",
+        "schema_version": 2,
+        "asr_spec": asr_spec,
+        "tts_spec": tts_spec,
+        "auto": auto,
+        "generation": generation,
+        "runtime_lock_id": "runtime-v1",
     }
 
 
 def test_uncommitted_candidate_never_becomes_active(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
-    old, new = selection(), selection("light", 2)
+    old, new = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, new)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -41,7 +50,7 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path: Path) -> None:
 def test_extreme_selection_recovers_after_commit_and_rollback(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     old = selection("quality")
-    candidate = selection("extreme", 2)
+    candidate = selection("reference", "reference", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -55,7 +64,7 @@ def test_extreme_selection_recovers_after_commit_and_rollback(tmp_path: Path) ->
     assert recover_selection(tmp_path) == candidate
     assert json.loads((tmp_path / "config/selection.previous.json").read_text()) == old
 
-    rollback_operation = store.begin(candidate, selection("quality", 3))
+    rollback_operation = store.begin(candidate, selection("quality", "quality", 3))
     store.rollback(rollback_operation)
     assert recover_selection(tmp_path) == candidate
 
@@ -63,7 +72,7 @@ def test_extreme_selection_recovers_after_commit_and_rollback(tmp_path: Path) ->
 def test_commit_requires_successful_smoke_and_matching_operation(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    operation = store.begin(selection(), selection("light", 2))
+    operation = store.begin(selection(), selection("fast", "fast", 2))
     with pytest.raises(ValueError, match="transition"):
         store.commit(operation)
     with pytest.raises(ValueError, match="operation"):
@@ -75,20 +84,20 @@ def test_commit_requires_successful_smoke_and_matching_operation(tmp_path: Path)
 def test_parallel_switch_is_rejected_and_rollback_is_idempotent(tmp_path: Path) -> None:
     first, second = ProfileStore(tmp_path), ProfileStore(tmp_path)
     first.initialize(selection())
-    operation = first.begin(selection(), selection("balanced", 2))
+    operation = first.begin(selection(), selection("quality", "fast", 2))
     with pytest.raises(RuntimeError, match="busy"):
-        second.begin(selection(), selection("light", 2))
+        second.begin(selection(), selection("fast", "fast", 2))
     first.rollback(operation)
     first.rollback(operation)
     assert first.recover() == selection()
-    assert second.begin(selection(), selection("light", 2)) != operation
+    assert second.begin(selection(), selection("fast", "fast", 2)) != operation
 
 
 def test_new_install_failure_stays_unconfigured(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     assert recover_selection(tmp_path) is None
     assert not (tmp_path / "config").exists()
-    operation = store.begin(None, selection("light"))
+    operation = store.begin(None, selection("fast", "fast"))
     store.rollback(operation)
     assert store.recover() is None
 
@@ -96,7 +105,7 @@ def test_new_install_failure_stays_unconfigured(tmp_path: Path) -> None:
 def test_selection_and_transaction_files_are_private(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    store.begin(selection(), selection("light", 2))
+    store.begin(selection(), selection("fast", "fast", 2))
     for relative in ("config/selection.json", "state/profile-transaction.json"):
         assert stat.S_IMODE((tmp_path / relative).stat().st_mode) == 0o600
     for relative in ("config", "state"):
@@ -155,11 +164,16 @@ def test_replace_rejects_an_in_flight_transaction(tmp_path: Path) -> None:
 def test_invalid_selection_and_stale_generation_are_rejected(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    for candidate in (selection("light", 1), selection("other", 2), {**selection(), "host": "x"}):
+    candidates = (
+        selection("fast", "fast", 1),
+        selection("invalid", "quality", 2),
+        {**selection(), "host": "x"},
+    )
+    for candidate in candidates:
         with pytest.raises(ValueError):
             store.begin(selection(), candidate)
     with pytest.raises(ValueError, match="current"):
-        store.begin(selection("balanced"), selection("light", 2))
+        store.begin(selection("quality", "fast"), selection("fast", "fast", 2))
 
 
 def test_selection_symlink_never_overwrites_external_file(tmp_path: Path) -> None:
@@ -175,7 +189,7 @@ def test_selection_symlink_never_overwrites_external_file(tmp_path: Path) -> Non
 def test_corrupt_candidate_does_not_hide_last_known_good(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    store.begin(selection(), selection("light", 2))
+    store.begin(selection(), selection("fast", "fast", 2))
     path = tmp_path / "state/profile-transaction.json"
     record = json.loads(path.read_text())
     record["candidate"] = {"broken": True}
@@ -186,8 +200,8 @@ def test_corrupt_candidate_does_not_hide_last_known_good(tmp_path: Path) -> None
 def test_crash_after_selection_write_before_commit_uses_previous(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    store.begin(selection(), selection("light", 2))
-    (tmp_path / "config/selection.json").write_text(json.dumps(selection("light", 2)))
+    store.begin(selection(), selection("fast", "fast", 2))
+    (tmp_path / "config/selection.json").write_text(json.dumps(selection("fast", "fast", 2)))
     assert store.recover() == selection()
 
 
@@ -197,7 +211,7 @@ def test_commit_crash_at_each_atomic_write_recovers_old_selection(
 ) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
-    operation = store.begin(selection(), selection("light", 2))
+    operation = store.begin(selection(), selection("fast", "fast", 2))
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
         store.mark(operation, stage)
     store.stage_candidate(operation)
@@ -239,7 +253,7 @@ def test_stage_candidate_writes_one_shot_permit_and_claim_returns_lkg_afterward(
     tmp_path: Path,
 ) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -257,7 +271,7 @@ def test_stage_candidate_writes_one_shot_permit_and_claim_returns_lkg_afterward(
 
 def test_candidate_claim_requires_matching_operation_and_selection(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -276,7 +290,7 @@ def test_candidate_claim_rejects_tampered_candidate_or_selection(
     tmp_path: Path, tampered_file: str
 ) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -286,7 +300,7 @@ def test_candidate_claim_rejects_tampered_candidate_or_selection(
     if tampered_file == "journal":
         journal_path = tmp_path / "state/profile-transaction.json"
         journal = json.loads(journal_path.read_text())
-        journal["candidate"] = selection("balanced", 2)
+        journal["candidate"] = selection("quality", "fast", 2)
         journal_path.write_text(json.dumps(journal))
     else:
         (tmp_path / "config/selection.json").write_text(json.dumps(old))
@@ -298,7 +312,7 @@ def test_atomic_permit_consume_failure_falls_back_to_lkg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -314,7 +328,7 @@ def test_atomic_permit_consume_failure_falls_back_to_lkg(
 
 def test_rollback_removes_residual_startup_permit(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -329,7 +343,7 @@ def test_rollback_removes_residual_startup_permit(tmp_path: Path) -> None:
 
 def test_first_install_candidate_is_not_restarted_after_consumed_permit(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
-    candidate = selection("light")
+    candidate = selection("fast", "fast")
     operation = store.begin(None, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
         store.mark(operation, stage)
@@ -345,7 +359,7 @@ def test_invalid_startup_permit_falls_back_without_following_external_target(
     tmp_path: Path, mutation: str
 ) -> None:
     store = ProfileStore(tmp_path)
-    old, candidate = selection(), selection("light", 2)
+    old, candidate = selection(), selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, candidate)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):
@@ -366,3 +380,22 @@ def test_invalid_startup_permit_falls_back_without_following_external_target(
     assert claim_startup_selection(tmp_path) == old
     if mutation == "symlink":
         assert (tmp_path / "external.json").read_text() == "untouched"
+
+
+def test_legacy_selection_is_rejected_without_overwriting_the_user_record(tmp_path: Path) -> None:
+    selection_path = tmp_path / "config/selection.json"
+    selection_path.parent.mkdir(parents=True)
+    legacy = {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 1,
+        "asr": "asr-1.7b-q8",
+        "tts": "tts-1.7b-design-q8",
+        "runtime_lock_id": "runtime-v1",
+    }
+    selection_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="legacy selection"):
+        recover_selection(tmp_path)
+
+    assert json.loads(selection_path.read_text(encoding="utf-8")) == legacy

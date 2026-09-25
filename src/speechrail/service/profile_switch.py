@@ -50,25 +50,32 @@ def _resolve_selection(
     return resolve_prepared_selection(selection, app_home=app_home)
 
 
+def _selection_specs(prepared_id: str) -> tuple[str, str]:
+    parts = prepared_id.split("/")
+    if len(parts) != 2 or any(part not in {"fast", "quality", "reference"} for part in parts):
+        raise ValueError("prepared selection does not contain independent ASR/TTS specs")
+    return parts[0], parts[1]
+
+
 def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]:
+    asr_spec, tts_spec = _selection_specs(prepared.preset)
     return {
-        "schema_version": 1,
-        "preset": prepared.preset,
+        "schema_version": 2,
+        "asr_spec": asr_spec,
+        "tts_spec": tts_spec,
+        "auto": "off",
         "generation": generation,
-        "asr": prepared.asr.key,
-        "tts": prepared.tts.key,
-        "tts_clone": prepared.tts_clone.key if prepared.tts_clone is not None else None,
         "runtime_lock_id": prepared.runtime_lock_id,
     }
 
 
 def _matches(selection: Mapping[str, object], prepared: PreparedModelSet) -> bool:
+    asr_spec, tts_spec = _selection_specs(prepared.preset)
     return (
-        selection.get("preset") == prepared.preset
-        and selection.get("asr") == prepared.asr.key
-        and selection.get("tts") == prepared.tts.key
-        and selection.get("tts_clone")
-        == (prepared.tts_clone.key if prepared.tts_clone is not None else None)
+        selection.get("schema_version") == 2
+        and selection.get("asr_spec") == asr_spec
+        and selection.get("tts_spec") == tts_spec
+        and selection.get("auto", "off") == "off"
         and selection.get("runtime_lock_id") == prepared.runtime_lock_id
     )
 

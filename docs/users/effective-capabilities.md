@@ -2,8 +2,8 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.1.3"
-date: 2026-09-23
+version: "3.2.0"
+date: 2026-09-25
 ---
 
 # 有效能力快照与安全音色目录
@@ -19,7 +19,7 @@ date: 2026-09-23
 `service_instance_epoch` 在服务实例建立时生成；`catalog_revision` 由目录和配置内容
 决定，普通重复读取及 readiness 变化不改目录 revision；`snapshot_id` 同时覆盖实例
 与当前 availability。三个入口支持私有 ETag、If-None-Match 和 304；鉴权先于缓存判定。
-修改音色配方、启用列表、档位、配置制品或 TTS planner 策略会改变相关内容标识。
+修改音色配方、启用列表、ASR/TTS 独立规格、配置制品或 TTS planner 策略会改变相关内容标识。
 
 **这些标识不是推理版本锁。** 当前已有音色的 `voice_revision=null`、
 `voice_identity_assurance=legacy`。模型的 `assurance=configured_catalog` 只表示配置
@@ -48,13 +48,11 @@ date: 2026-09-23
 
 ## 参数按操作区分
 
-`quality` 与候选 `extreme` 的 catalog 配置默认 VoiceDesign 与 Base clone 两种不同 capability worker；实际可用性以当前有效快照为准。clone 使用
-Base，只允许 `speed=1.0`，拒绝调用方 instructions/seed。HTTP VoiceDesign 可以使用
-instructions；标准 Realtime response 不接收同一个参数。preview 的 seed 能力不代表
+`fast`、`quality` 与 `reference` 分别解析 ASR、固定自定义音色 Base 与内置 speaker CustomVoice 角色；实际可用性以当前有效快照为准。VoiceDesign 只在 `voice_design` 任务中运行，普通 Base clone 与 CustomVoice 路由不接受 Design 音色。
 普通 HTTP speech 支持 seed。语言完整取值域尚未在固定 vendor 上验证，因此报告 unknown。
 
 sample rate 描述 PCM 域；容器编码仍可能有其自身约束。HTTP EOF 当前只有传输层证据，
-Realtime 的 response.done 也不证明扬声器播放或内容读对。SSML/phoneme、clone 原生表演、
+Realtime 的 `speechrail.tts.completed` 也不证明扬声器播放或内容读对。SSML/phoneme、clone 原生表演、
 prepared-reference 条件缓存和精细时间轴，在适配与验收前不得由客户端自行假定支持。
 
 ## 最小披露与路由边界
@@ -76,7 +74,7 @@ namespaced capability 响应，`voices` 只使用其安全投影，不再输出
 
 ## 证据和剩余验收
 
-矩阵测试覆盖 light/balanced/quality/extreme 与 system/instruction/clone、内容变更/重启、
+矩阵测试覆盖 fast/quality/reference 与内置 speaker/固定自定义 revision、内容变更/重启、
 鉴权、别名、存储损坏和私有字段隔离。测试使用 fake backend；没有启动用户服务，
 不能据此宣称模型语言域、音质、不可变音色或并发推理版本锁已经验收。
 

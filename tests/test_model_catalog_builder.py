@@ -18,6 +18,7 @@ build_catalog = _catalog_builder.build_catalog
 require_immutable_revision = _catalog_builder.require_immutable_revision
 _normalise_precision = _catalog_builder._normalise_precision
 _normalise_quantization = _catalog_builder._normalise_quantization
+_REQUIRED_SPEC_BINDINGS = _catalog_builder._REQUIRED_SPEC_BINDINGS
 
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
@@ -31,159 +32,184 @@ def _file(path: str, *, digest: str | None = None, size: int = 4) -> dict[str, A
     }
 
 
+_BF16_QUANTIZATION: dict[str, Any] = {
+    "bits": None,
+    "dtype": "bf16",
+    "group_size": None,
+    "format": "none",
+}
+_Q8_QUANTIZATION: dict[str, Any] = {
+    "bits": 8,
+    "dtype": None,
+    "group_size": 64,
+    "format": "mlx",
+}
+
+
+def _files_for(family: str) -> list[dict[str, Any]]:
+    if family == "qwen3_tts":
+        return [
+            _file("config.json"),
+            _file("model.safetensors"),
+            _file("tokenizer.json"),
+            _file("speech_tokenizer/config.json"),
+            _file("speech_tokenizer/model.safetensors"),
+        ]
+    return [_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")]
+
+
 def _artifact(
     *,
-    key: str = "qwen3-asr-0.6b-8bit",
-    model_id: str = "Qwen/Qwen3-ASR-0.6B",
+    key: str = "asr-0.6b-q8",
+    model_id: str | None = None,
+    family: str = "qwen3_asr",
+    variant: str = "asr",
     files: list[dict[str, Any]] | None = None,
+    quantization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "key": key,
-        "model_id": model_id,
+        "model_id": model_id or f"fixture/{key}",
         "revision": REVISION,
-        "family": "qwen3",
-        "variant": "0.6b",
-        "quantization": {"bits": 8, "dtype": None, "group_size": 64, "format": "mlx"},
-        "files": files or [_file("config.json"), _file("model.safetensors")],
+        "family": family,
+        "variant": variant,
+        "quantization": dict(quantization or _Q8_QUANTIZATION),
+        "files": files if files is not None else _files_for(family),
         "sources": [
             {
                 "provider": "offline",
-                "repository": "fixture/qwen3-asr-0.6b",
+                "repository": f"fixture/{key}",
                 "revision": REVISION,
             }
         ],
     }
+
+
+def _canonical_artifacts() -> list[dict[str, Any]]:
+    return [
+        _artifact(key="asr-0.6b-q8"),
+        _artifact(key="asr-1.7b-q8"),
+        _artifact(key="asr-1.7b-bf16", quantization=_BF16_QUANTIZATION),
+        _artifact(key="tts-0.6b-custom-q8", family="qwen3_tts", variant="custom_voice"),
+        _artifact(key="tts-1.7b-custom-q8", family="qwen3_tts", variant="custom_voice"),
+        _artifact(
+            key="tts-1.7b-custom-bf16",
+            family="qwen3_tts",
+            variant="custom_voice",
+            quantization=_BF16_QUANTIZATION,
+        ),
+        _artifact(key="tts-0.6b-base-q8", family="qwen3_tts", variant="base"),
+        _artifact(key="tts-1.7b-base-q8", family="qwen3_tts", variant="base"),
+        _artifact(
+            key="tts-1.7b-base-bf16",
+            family="qwen3_tts",
+            variant="base",
+            quantization=_BF16_QUANTIZATION,
+        ),
+        _artifact(
+            key="tts-1.7b-design-bf16",
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=_BF16_QUANTIZATION,
+        ),
+        _artifact(key="aligner-q8", family="qwen3_forced_aligner", variant="aligner"),
+        _artifact(
+            key="aligner-bf16",
+            family="qwen3_forced_aligner",
+            variant="aligner",
+            quantization=_BF16_QUANTIZATION,
+        ),
+    ]
+
+
+def _canonical_specs() -> list[dict[str, Any]]:
+    return [
+        {"tier": tier, "role": role, "artifact_key": artifact_key}
+        for (tier, role), artifact_key in _REQUIRED_SPEC_BINDINGS.items()
+    ]
+
+
+def _canonical_presets() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "balanced",
+            "asr": "asr-1.7b-q8",
+            "tts": "tts-0.6b-custom-q8",
+            "tts_clone": None,
+            "aligner": "aligner-q8",
+            "diarization": True,
+        },
+        {
+            "id": "extreme",
+            "asr": "asr-1.7b-bf16",
+            "tts": "tts-1.7b-custom-bf16",
+            "tts_clone": "tts-1.7b-base-bf16",
+            "aligner": "aligner-bf16",
+            "diarization": True,
+        },
+        {
+            "id": "light",
+            "asr": "asr-0.6b-q8",
+            "tts": "tts-0.6b-custom-q8",
+            "tts_clone": None,
+            "aligner": None,
+            "diarization": False,
+        },
+        {
+            "id": "quality",
+            "asr": "asr-1.7b-q8",
+            "tts": "tts-1.7b-custom-q8",
+            "tts_clone": "tts-1.7b-base-q8",
+            "aligner": "aligner-bf16",
+            "diarization": True,
+        },
+    ]
+
+
+_CANONICAL_PRECISION_POLICY: dict[str, Any] = {
+    "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
+    "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
+    "balanced": {"asr": 8, "tts": 8, "aligner": 8},
+    "light": {"asr": 8, "tts": 8, "aligner": None},
+}
 
 
 def _catalog(
     *artifacts: dict[str, Any],
     precision_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    artifact_keys = [artifact["key"] for artifact in artifacts]
-    first_key = artifact_keys[0] if artifact_keys else "missing"
-    quantization = artifacts[0]["quantization"] if artifacts else {}
-    precision = quantization.get("dtype") or quantization.get("bits") or 8
-    presets = [
-        {"id": preset_id, "asr": first_key, "tts": first_key, "aligner": None, "diarization": False}
-        for preset_id in ("quality", "balanced", "light", "extreme")
-    ]
-    matching_precision_policy = {
-        preset_id: {"asr": precision, "tts": precision, "aligner": None}
-        for preset_id in ("quality", "balanced", "light", "extreme")
-    }
+    """Return a legal 12-artifact catalog, replacing canonical artifacts by key."""
+
+    by_key = {artifact["key"]: dict(artifact) for artifact in _canonical_artifacts()}
+    for artifact in artifacts:
+        by_key[artifact["key"]] = artifact
     return {
         "schema_version": 2,
-        "artifacts": list(artifacts),
-        "presets": presets,
-        "precision_policy": precision_policy or matching_precision_policy,
-    }
-
-
-def _aligner_artifact(*, key: str = "aligner-q8", bits: int | None = 8) -> dict[str, Any]:
-    return {
-        "key": key,
-        "model_id": "fixture/Qwen3-ForcedAligner-0.6B",
-        "revision": REVISION,
-        "family": "qwen3_forced_aligner",
-        "variant": "aligner",
-        "quantization": {
-            "bits": bits,
-            "dtype": "bf16" if bits is None else None,
-            "group_size": 64 if bits is not None else None,
-            "format": "mlx" if bits is not None else "none",
-        },
-        "files": [_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
-        "sources": [
-            {
-                "provider": "offline",
-                "repository": "fixture/qwen3-forced-aligner",
-                "revision": REVISION,
-            }
-        ],
+        "artifacts": list(by_key.values()),
+        "specs": _canonical_specs(),
+        "presets": _canonical_presets(),
+        "precision_policy": precision_policy or _CANONICAL_PRECISION_POLICY,
     }
 
 
 def _legal_metadata() -> dict[str, Any]:
-    asr = _artifact(
-        key="asr-1.7b-q8",
-        files=[_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
-    )
-    asr_bf16 = _artifact(
-        key="asr-1.7b-bf16",
-        files=[_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
-    )
-    asr_bf16["quantization"] = {
-        "bits": None,
-        "dtype": "bf16",
-        "group_size": None,
-        "format": "none",
-    }
-    tts_design_bf16 = _artifact(
-        key="tts-1.7b-design-bf16",
-        files=[
-            _file("config.json"),
-            _file("model.safetensors"),
-            _file("tokenizer.json"),
-            _file("speech_tokenizer/configuration.json"),
-            _file("speech_tokenizer/codec.safetensors"),
-        ],
-    )
-    tts_design_bf16["quantization"] = {
-        "bits": None,
-        "dtype": "bf16",
-        "group_size": None,
-        "format": "none",
-    }
-    tts_base_bf16 = dict(tts_design_bf16, key="tts-1.7b-base-bf16")
-    aligner_bf16 = _aligner_artifact(key="aligner-bf16", bits=None)
-    return {
-        "schema_version": 2,
-        "artifacts": [
-            asr,
-            asr_bf16,
-            tts_design_bf16,
-            tts_base_bf16,
-            _aligner_artifact(),
-            aligner_bf16,
-        ],
-        "presets": [
-            {
-                "id": "quality",
-                "asr": "asr-1.7b-q8",
-                "tts": "asr-1.7b-q8",
-                "aligner": "aligner-q8",
-                "diarization": True,
-            },
-            {
-                "id": "extreme",
-                "asr": "asr-1.7b-bf16",
-                "tts": "tts-1.7b-design-bf16",
-                "tts_clone": "tts-1.7b-base-bf16",
-                "aligner": "aligner-bf16",
-                "diarization": True,
-            },
-            {
-                "id": "balanced",
-                "asr": "asr-1.7b-q8",
-                "tts": "asr-1.7b-q8",
-                "aligner": "aligner-q8",
-                "diarization": True,
-            },
-            {
-                "id": "light",
-                "asr": "asr-1.7b-q8",
-                "tts": "asr-1.7b-q8",
-                "aligner": None,
-                "diarization": False,
-            },
-        ],
-        "precision_policy": {
-            "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-            "quality": {"asr": 8, "tts": 8, "aligner": 8},
-            "balanced": {"asr": 8, "tts": 8, "aligner": 8},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
-    }
+    return _catalog()
+
+
+def _preset(entries: dict[str, Any], preset_id: str) -> dict[str, Any]:
+    presets = entries["presets"]
+    assert isinstance(presets, list)
+    entry = next(item for item in presets if item["id"] == preset_id)
+    assert isinstance(entry, dict)
+    return entry
+
+
+def _artifact_by_key(catalog: dict[str, Any], key: str) -> dict[str, Any]:
+    artifacts = catalog["artifacts"]
+    assert isinstance(artifacts, list)
+    entry = next(item for item in artifacts if item["key"] == key)
+    assert isinstance(entry, dict)
+    return entry
 
 
 def test_mutable_revision_cannot_ship() -> None:
@@ -209,12 +235,14 @@ def test_build_catalog_normalizes_artifacts_and_sorts_files() -> None:
     catalog = build_catalog(_catalog(artifact))
 
     assert catalog["schema_version"] == 2
-    assert [item["path"] for item in catalog["artifacts"][0]["files"]] == [
+    assert len(catalog["artifacts"]) == 12
+    assert len(catalog["specs"]) == 13
+    assert [item["path"] for item in _artifact_by_key(catalog, "asr-0.6b-q8")["files"]] == [
         "config.json",
         "model.safetensors",
         "tokenizer.json",
     ]
-    assert catalog["artifacts"][0]["revision"] == REVISION
+    assert _artifact_by_key(catalog, "asr-0.6b-q8")["revision"] == REVISION
 
 
 def test_missing_file_hash_is_rejected() -> None:
@@ -264,7 +292,10 @@ def test_tts_artifact_with_speech_tokenizer_files_is_accepted() -> None:
 
     catalog = build_catalog(_catalog(tts))
 
-    assert catalog["artifacts"][0]["model_id"] == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    assert (
+        _artifact_by_key(catalog, "qwen3-tts-0.6b-customvoice-8bit")["model_id"]
+        == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    )
 
 
 def test_mirror_with_different_file_hash_is_rejected() -> None:
@@ -299,9 +330,13 @@ def test_runtime_lock_cannot_be_embedded_in_model_catalog() -> None:
 def test_duplicate_artifact_key_is_rejected() -> None:
     first = _artifact()
     second = _artifact(files=[_file("config.json"), _file("model.safetensors", digest="b" * 64)])
+    entries = _catalog()
+    artifacts = entries["artifacts"]
+    assert isinstance(artifacts, list)
+    artifacts.extend([first, second])
 
     with pytest.raises(ValueError, match="duplicate artifact key"):
-        build_catalog(_catalog(first, second))
+        build_catalog(entries)
 
 
 def test_cli_writes_only_to_an_explicit_output_path(
@@ -318,7 +353,7 @@ def test_preset_without_aligner_or_diarization_is_rejected() -> None:
     entries = _catalog(_artifact())
     presets = entries["presets"]
     assert isinstance(presets, list)
-    presets[0] = {"id": "quality", "asr": "qwen3-asr-0.6b-8bit", "tts": "qwen3-asr-0.6b-8bit"}
+    presets[0] = {"id": "balanced", "asr": "asr-1.7b-q8", "tts": "tts-0.6b-custom-q8"}
 
     with pytest.raises(ValueError, match=r"aligner|diarization"):
         build_catalog(entries)
@@ -356,7 +391,7 @@ def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
     assert isinstance(policy, dict)
     assert set(policy) == {"quality", "balanced", "light", "extreme"}
     assert policy["light"]["aligner"] is None
-    assert policy["quality"]["aligner"] == 8
+    assert policy["quality"]["aligner"] == "bf16"
     assert policy["extreme"] == {"asr": "bf16", "tts": "bf16", "aligner": "bf16"}
     assert {preset["id"] for preset in catalog["presets"]} == {
         "quality",
@@ -364,9 +399,14 @@ def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
         "light",
         "extreme",
     }
-    bf16_artifacts = {artifact["key"]: artifact for artifact in catalog["artifacts"]}
-    for key in ("asr-1.7b-bf16", "tts-1.7b-design-bf16", "tts-1.7b-base-bf16"):
-        assert bf16_artifacts[key]["quantization"] == {
+    for key in (
+        "asr-1.7b-bf16",
+        "tts-1.7b-custom-bf16",
+        "tts-1.7b-design-bf16",
+        "tts-1.7b-base-bf16",
+        "aligner-bf16",
+    ):
+        assert _artifact_by_key(catalog, key)["quantization"] == {
             "bits": None,
             "dtype": "bf16",
             "format": "none",

@@ -292,21 +292,24 @@ def _canonical_source(artifact: ModelArtifact) -> SourceLocation:
 def prepare_diarization_assets(
     app_home: Path,
     *,
-    preset_id: str,
+    aligner_key: str,
     downloader: ModelScopeDownloader,
     catalog: ModelCatalog | None = None,
     progress: ProgressCallback | None = None,
     cancel_event: asyncio.Event | None = None,
     prepared_id: str | None = None,
-) -> DiarizationAssetPaths | None:
-    """Provision the diarization assets a profile requires, or ``None`` when gated off."""
-    try:
-        selected_catalog = load_catalog() if catalog is None else catalog
-        preset = selected_catalog.preset(preset_id)
-    except KeyError as exc:
-        raise DiarizationAssetError(f"unknown diarization preset: {preset_id}") from exc
-    if not preset.diarization:
-        return None
+) -> DiarizationAssetPaths:
+    """Provision the explicit opt-in diarization assets for a task.
+
+    Diarization is a task-time option, not a spec tier, so the caller names the
+    aligner artifact it wants instead of inheriting one from a removed preset.
+    """
+    selected_catalog = load_catalog() if catalog is None else catalog
+    aligner_artifact = _artifact_for(selected_catalog, aligner_key)
+    if aligner_artifact.family != "qwen3_forced_aligner" or aligner_artifact.variant != "aligner":
+        raise DiarizationAssetError(
+            f"diarization aligner artifact has the wrong role: {aligner_key}"
+        )
 
     base = app_home / "diarization"
     if base.is_symlink():
@@ -331,10 +334,6 @@ def prepare_diarization_assets(
         prepared_id=prepared_id,
     )
 
-    aligner_key = preset.aligner
-    if aligner_key is None:
-        raise DiarizationAssetError(f"preset declares diarization without an aligner: {preset_id}")
-    aligner_artifact = _artifact_for(selected_catalog, aligner_key)
     aligner_files = {file.path: (file.size, file.sha256) for file in aligner_artifact.files}
     aligner = _publish_bundle(
         base=base,
@@ -352,10 +351,10 @@ def prepare_diarization_assets(
 def inspect_diarization_assets(
     app_home: Path,
     *,
-    preset_id: str,
+    aligner_key: str,
     catalog: ModelCatalog | None = None,
 ) -> tuple[DiarizationArtifactStatus, ...]:
-    """Return path-free status for the CoreML and aligner assets of a preset."""
+    """Return path-free status for the CoreML bundle plus one explicit aligner."""
     if not isinstance(app_home, Path) or not app_home.is_absolute():
         raise DiarizationAssetError("app_home must be an absolute path")
     if app_home.is_symlink():
@@ -363,12 +362,6 @@ def inspect_diarization_assets(
     selected_catalog = load_catalog() if catalog is None else catalog
     if not isinstance(selected_catalog, ModelCatalog):
         raise DiarizationAssetError("catalog must be a ModelCatalog")
-    try:
-        preset = selected_catalog.preset(preset_id)
-    except KeyError as exc:
-        raise DiarizationAssetError(f"unknown diarization preset: {preset_id}") from exc
-    if not preset.diarization:
-        return ()
     resolved_app_home = app_home.resolve()
     base = resolved_app_home / "diarization"
     base_is_symlink = base.is_symlink()
@@ -379,9 +372,6 @@ def inspect_diarization_assets(
         key: (size, MODEL_FILE_SHA256[key])
         for key, size in zip(MODEL_FILE_SHA256, _COREML_FILE_SIZES, strict=True)
     }
-    aligner_key = preset.aligner
-    if aligner_key is None:
-        raise DiarizationAssetError(f"preset declares diarization without an aligner: {preset_id}")
     aligner_artifact = _artifact_for(selected_catalog, aligner_key)
     aligner_files = {file.path: (file.size, file.sha256) for file in aligner_artifact.files}
 

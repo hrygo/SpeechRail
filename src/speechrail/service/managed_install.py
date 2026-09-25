@@ -26,6 +26,7 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.runtime.server_lock import ServerInstanceError, ServerInstanceLock
 from speechrail.service.bootstrap import (
     RuntimeCurrentSnapshot,
@@ -35,7 +36,7 @@ from speechrail.service.bootstrap import (
     snapshot_runtime_current,
 )
 from speechrail.service.installer_errors import InstallerError
-from speechrail.service.model_store import Downloader, prepare_models
+from speechrail.service.model_store import Downloader, prepare_spec_models
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.profile_store import ProfileStore, recover_selection
 
@@ -264,24 +265,28 @@ def _managed_config(
 
 
 def _selection_candidate(
-    catalog: ModelCatalog, runtime_lock: RuntimeLock, preset_id: str, generation: int
+    asr_spec: str,
+    tts_spec: str,
+    auto: str,
+    runtime_lock: RuntimeLock,
+    generation: int,
 ) -> dict[str, object]:
-    try:
-        selected = catalog.preset(preset_id)
-    except KeyError as exc:
-        raise InstallerError(f"unknown managed preset: {preset_id}") from exc
+    if asr_spec not in _SPEC_TIERS or tts_spec not in _SPEC_TIERS:
+        raise InstallerError(f"unknown managed spec tier: {asr_spec}/{tts_spec}")
+    if auto not in {"off", "resource"}:
+        raise InstallerError(f"unknown managed auto policy: {auto}")
     return {
-        "schema_version": 1,
-        "preset": selected.id,
+        "schema_version": 2,
+        "asr_spec": asr_spec,
+        "tts_spec": tts_spec,
+        "auto": auto,
         "generation": generation,
-        "asr": selected.asr,
-        "tts": selected.tts,
-        "tts_clone": selected.tts_clone,
         "runtime_lock_id": runtime_lock.id,
     }
 
 
-_SELECTION_IDENTITY_KEYS = ("schema_version", "preset", "asr", "tts")
+_SPEC_TIERS = frozenset({"fast", "quality", "reference"})
+_SELECTION_IDENTITY_KEYS = ("schema_version", "asr_spec", "tts_spec", "auto")
 
 
 def _same_selection(
@@ -435,7 +440,8 @@ def _stage_wheel(
 
 
 def _prepare_models_for_install(
-    preset_id: str,
+    asr_spec: str,
+    tts_spec: str,
     *,
     app_home: Path,
     downloader: Downloader,
@@ -445,8 +451,9 @@ def _prepare_models_for_install(
 ) -> str:
     try:
         return asyncio.run(
-            prepare_models(
-                preset_id,
+            prepare_spec_models(
+                asr_spec,  # type: ignore[arg-type]
+                tts_spec,  # type: ignore[arg-type]
                 app_home=app_home,
                 downloader=downloader,
                 catalog=catalog,
@@ -463,28 +470,26 @@ def _prepare_models_for_install(
 def _provision_managed_diarization_assets(
     app_home: Path,
     *,
-    preset_id: str,
+    aligner_key: str,
     downloader: Any,
 ) -> DiarizationInstallPaths:
-    """Provision the tier's locked diarization assets inside a managed install.
+    """Provision explicit opt-in diarization assets inside a managed install.
 
     The release workflow may already hand over verified paths.  When it does
-    not, the installer still owns the invariant that the selection's aligner
+    not, the installer still owns the invariant that the requested aligner
     directory exists before the new wheel's preflight resolves it; otherwise an
-    upgrade whose previous layout predates the per-tier directory fails closed.
+    upgrade whose previous layout predates the directory fails closed.
     """
     from speechrail.service.diarization_assets import prepare_diarization_assets
 
     try:
         provisioned = prepare_diarization_assets(
             app_home,
-            preset_id=preset_id,
+            aligner_key=aligner_key,
             downloader=downloader,
         )
     except Exception as exc:
         raise InstallerError("diarization asset preparation failed") from exc
-    if provisioned is None:
-        raise InstallerError("diarization assets were not prepared")
     return DiarizationInstallPaths(
         coreml_model_path=provisioned.coreml_model_path,
         aligner_model_dir=provisioned.aligner_model_dir,
@@ -495,8 +500,10 @@ def install_managed(
     wheel: Path,
     *,
     app_home: Path,
-    preset_id: str,
+    asr_spec: str,
+    tts_spec: str,
     downloader: Downloader,
+    auto: str = "off",
     runtime_runner: CommandRunner | None = None,
     uv_executable: str = "uv",
     require_tts: bool = True,
@@ -509,8 +516,9 @@ def install_managed(
     server_lock_directory: Path | None = None,
     post_enable: Callable[[Path, str], None] | None = None,
     diarization_assets: DiarizationInstallPaths | None = None,
+    diarization_aligner: str | None = None,
 ) -> InstallResult:
-    """Install one catalog preset with a shared, lock-keyed vendor runtime."""
+    """Install one explicit ASR/TTS spec pair with a shared, lock-keyed runtime."""
     if not wheel.is_file() or wheel.suffix != ".whl":
         raise InstallerError("wheel file is missing or invalid")
     if env_file is not None and not env_file.is_file():
@@ -525,9 +533,15 @@ def install_managed(
     try:
         selected_catalog = catalog if catalog is not None else load_catalog()
         selected_lock = runtime_lock if runtime_lock is not None else load_runtime_lock()
-        selected_preset = selected_catalog.preset(preset_id)
+        asr_key = required_spec_artifact(asr_spec, "asr")  # type: ignore[arg-type]
+        tts_key = required_spec_artifact(tts_spec, "tts_custom_voice")  # type: ignore[arg-type]
     except (KeyError, ValueError, TypeError) as exc:
         raise InstallerError("managed catalog or runtime lock is invalid") from exc
+    if asr_key is None or tts_key is None:
+        raise InstallerError(f"managed spec is not bound to artifacts: {asr_spec}/{tts_spec}")
+    artifact_keys = {artifact.key for artifact in selected_catalog.artifacts}
+    if asr_key not in artifact_keys or tts_key not in artifact_keys:
+        raise InstallerError(f"managed spec artifact is unavailable: {asr_key}/{tts_key}")
 
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
@@ -546,13 +560,14 @@ def install_managed(
     if type(previous_generation) is not int:
         raise InstallerError("managed selection is invalid")
     candidate = _selection_candidate(
-        selected_catalog,
+        asr_spec,
+        tts_spec,
+        auto,
         selected_lock,
-        preset_id,
         previous_generation + 1,
     )
     if current_selection is not None and not _same_selection(current_selection, candidate):
-        raise InstallerError("a different managed preset is already configured")
+        raise InstallerError("a different managed selection is already configured")
     selection_previous = dict(current_selection) if current_selection is not None else None
     selection_drift = _selection_drift(current_selection, candidate)
     config_created = False
@@ -569,10 +584,10 @@ def install_managed(
     try:
         # Provision before the managed config and preflight so the selection's
         # per-tier aligner directory exists when resolve_selection reads it.
-        if diarization_assets is None and selected_preset.diarization:
+        if diarization_assets is None and diarization_aligner is not None:
             diarization_assets = _provision_managed_diarization_assets(
                 layout.app_home,
-                preset_id=preset_id,
+                aligner_key=diarization_aligner,
                 downloader=downloader,
             )
         # Keep the application wheel in its own release before touching model/runtime state.
@@ -592,7 +607,8 @@ def install_managed(
             ),
         )
         prepared_id = _prepare_models_for_install(
-            preset_id,
+            asr_spec,
+            tts_spec,
             app_home=layout.app_home,
             downloader=downloader,
             catalog=selected_catalog,
@@ -623,8 +639,8 @@ def install_managed(
                 layout.config_file,
                 _managed_config(
                     layout,
-                    asr_key=selected_preset.asr,
-                    tts_key=selected_preset.tts,
+                    asr_key=asr_key,
+                    tts_key=tts_key,
                     diarization_assets=diarization_assets,
                 ),
             )

@@ -1,4 +1,10 @@
-"""Four-tier profile listing, selection, application and rollback."""
+"""Independent ASR/TTS spec listing, selection, application and rollback.
+
+The command group is still called ``profile`` for operators, but it never
+accepts the removed preset names: a selection is exactly two spec tiers plus an
+explicit ``auto`` policy, and auxiliary assets such as alignment or diarization
+are opt-in per task instead of being bound to a tier.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +21,13 @@ import httpx
 
 from speechrail.config import Settings
 from speechrail.config.model_catalog import ModelCatalog, load_catalog, load_runtime_lock
+from speechrail.domain.model_spec import ModelRole, required_spec_artifact
 from speechrail.service import vad_model
 from speechrail.service.diarization_assets import (
-    _COREML_FILE_SIZES,
     prepare_diarization_assets,
 )
 from speechrail.service.launchd import create_launch_agent_manager
-from speechrail.service.model_store import prepare_models, resolve_prepared_selection
+from speechrail.service.model_store import prepare_spec_models, resolve_prepared_selection
 from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import run_preflight
@@ -33,13 +39,20 @@ from speechrail.service.profile_switch import (
     apply_prepared_profile,
 )
 
-PresetId = Literal["extreme", "quality", "balanced", "light"]
-PrepareProfile = Callable[[str, Path], str]
+SpecTier = Literal["fast", "quality", "reference"]
+PrepareSelection = Callable[[str, str, Path], str]
 SwitchPrepared = Callable[[str, Path], ApplyResult]
 ResolvePrevious = Callable[[Mapping[str, object], Path], str]
 PrepareVadModel = Callable[[Path], None]
-PrepareDiarization = Callable[[str, Path], None]
-_ORDER: tuple[PresetId, ...] = ("extreme", "quality", "balanced", "light")
+PrepareDiarization = Callable[[Path, str], None]
+_ORDER: tuple[SpecTier, ...] = ("fast", "quality", "reference")
+_SUMMARY_ROLES: tuple[tuple[str, ModelRole], ...] = (
+    ("asr", "asr"),
+    ("tts", "tts_custom_voice"),
+    ("tts_base", "tts_base"),
+    ("voice_design", "voice_design"),
+    ("aligner", "alignment"),
+)
 _DIARIZATION_ENV_KEYS = (
     "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH",
     "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR",
@@ -55,52 +68,74 @@ class ProfileCommandError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ProfileSummary:
-    id: PresetId
-    asr: str
-    tts: str
+    """One spec tier's explicit artifact bindings, with ``None`` for gaps."""
+
+    id: SpecTier
+    asr: str | None
+    tts: str | None
     download_bytes: int
+    tts_base: str | None = None
+    voice_design: str | None = None
     aligner: str | None = None
-    tts_clone: str | None = None
+
+    def required_keys(self) -> tuple[str, ...]:
+        return tuple(
+            key
+            for key in (self.asr, self.tts, self.tts_base, self.voice_design, self.aligner)
+            if key is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ProfileStatus:
-    preset: str | None
+    """The committed independent selection, or an empty status when unconfigured."""
+
+    asr_spec: str | None
+    tts_spec: str | None
+    auto: str | None
     generation: int | None
-    asr: str | None
-    tts: str | None
+
+    @property
+    def label(self) -> str | None:
+        if self.asr_spec is None or self.tts_spec is None:
+            return None
+        suffix = "" if self.auto in (None, "off") else f" (auto={self.auto})"
+        return f"{self.asr_spec}/{self.tts_spec}{suffix}"
+
+
+def _bound_key(tier: SpecTier, role: ModelRole) -> str | None:
+    return required_spec_artifact(tier, role)
 
 
 def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, ...]:
+    """List the three spec tiers with their explicit role bindings and sizes."""
+
     selected_catalog = catalog or load_catalog()
     artifacts = {artifact.key: artifact for artifact in selected_catalog.artifacts}
     summaries: list[ProfileSummary] = []
-    for preset_id in _ORDER:
-        preset = selected_catalog.preset(preset_id)
-        artifact_keys = [preset.asr, preset.tts]
-        if preset.tts_clone is not None:
-            artifact_keys.append(preset.tts_clone)
-        if preset.aligner is not None:
-            artifact_keys.append(preset.aligner)
+    for tier in _ORDER:
+        bindings = {name: _bound_key(tier, role) for name, role in _SUMMARY_ROLES}
         download_bytes = sum(
-            item.size for key in artifact_keys for item in artifacts[key].files
+            item.size
+            for key in bindings.values()
+            if key is not None and key in artifacts
+            for item in artifacts[key].files
         )
-        if preset.diarization:
-            download_bytes += sum(_COREML_FILE_SIZES)
         summaries.append(
             ProfileSummary(
-                id=preset_id,
-                asr=preset.asr,
-                tts=preset.tts,
+                id=tier,
+                asr=bindings["asr"],
+                tts=bindings["tts"],
                 download_bytes=download_bytes,
-                aligner=preset.aligner,
-                tts_clone=preset.tts_clone,
+                tts_base=bindings["tts_base"],
+                voice_design=bindings["voice_design"],
+                aligner=bindings["aligner"],
             )
         )
     return tuple(summaries)
 
 
-def _model_value(profile: ProfileSummary | Mapping[str, object], name: str) -> object:
+def _spec_value(profile: ProfileSummary | Mapping[str, object], name: str) -> object:
     if isinstance(profile, Mapping):
         return profile.get(name)
     return getattr(profile, name)
@@ -110,26 +145,35 @@ def model_changes(
     old: ProfileSummary | Mapping[str, object],
     new: ProfileSummary | Mapping[str, object],
 ) -> frozenset[str]:
+    """Return the public spec fields that differ between two selections."""
+
     return frozenset(
         name
-        for name in ("asr", "tts", "tts_clone", "aligner")
-        if _model_value(old, name) != _model_value(new, name)
+        for name in ("asr", "tts", "tts_base", "voice_design", "aligner")
+        if _spec_value(old, name) != _spec_value(new, name)
     )
 
 
-def recommend_profile(total_memory_bytes: int) -> PresetId:
-    """Return a memory fallback suggestion (内存兜底建议) only.
+def recommend_selection(total_memory_bytes: int) -> tuple[SpecTier, SpecTier]:
+    """Return a memory-based starting (ASR spec, TTS spec) suggestion only.
 
-    The tier is the user's explicit choice; this helper merely maps physical
-    memory to a starting point and keeps the historical 10/16 GiB thresholds.
+    The tiers remain the user's explicit choice; this helper merely maps physical
+    memory to a safe starting point and keeps the historical 10/16 GiB thresholds.
     """
     if total_memory_bytes <= 0:
         raise ValueError("physical memory must be positive")
     if total_memory_bytes < 10 * 1024**3:
-        return "light"
+        return "fast", "fast"
     if total_memory_bytes < 16 * 1024**3:
-        return "balanced"
-    return "quality"
+        return "quality", "fast"
+    return "quality", "quality"
+
+
+# Kept for operators who still ask for a single tier; it names the ASR spec.
+def recommend_profile(total_memory_bytes: int) -> SpecTier:
+    """Return the recommended ASR spec tier for the installed physical memory."""
+
+    return recommend_selection(total_memory_bytes)[0]
 
 
 def profile_status(app_home: Path) -> ProfileStatus:
@@ -139,15 +183,22 @@ def profile_status(app_home: Path) -> ProfileStatus:
     generation = selection["generation"]
     if type(generation) is not int:
         raise ProfileCommandError("profile selection is invalid")
+    asr_spec = selection.get("asr_spec")
+    tts_spec = selection.get("tts_spec")
+    auto = selection.get("auto", "off")
+    if not isinstance(asr_spec, str) or not isinstance(tts_spec, str):
+        raise ProfileCommandError("profile selection is invalid")
+    if not isinstance(auto, str):
+        raise ProfileCommandError("profile selection is invalid")
     return ProfileStatus(
-        preset=str(selection["preset"]),
+        asr_spec=asr_spec,
+        tts_spec=tts_spec,
+        auto=auto,
         generation=generation,
-        asr=str(selection["asr"]),
-        tts=str(selection["tts"]),
     )
 
 
-def _prepare_profile(preset: str, app_home: Path) -> str:
+def _prepare_profile(asr_spec: str, tts_spec: str, app_home: Path) -> str:
     catalog = load_catalog()
     runtime_lock = load_runtime_lock()
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
@@ -155,8 +206,9 @@ def _prepare_profile(preset: str, app_home: Path) -> str:
         downloader = ModelScopeDownloader(client=client)
         try:
             return asyncio.run(
-                prepare_models(
-                    preset,
+                prepare_spec_models(
+                    asr_spec,  # type: ignore[arg-type]
+                    tts_spec,  # type: ignore[arg-type]
                     app_home=app_home,
                     downloader=downloader,
                     catalog=catalog,
@@ -275,44 +327,38 @@ def _update_env_keys(config_file: Path, updates: Mapping[str, str | None]) -> No
     _atomic_write_private(config_file, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
-def _prepare_diarization_assets(preset: str, app_home: Path) -> None:
-    """Provision the tier's diarization assets and mirror them into the private config.
+def _prepare_diarization_assets(app_home: Path, aligner_key: str) -> None:
+    """Opt-in diarization provisioning: CoreML asset plus one explicit aligner.
 
-    Unlike the optional Silero VAD, diarization is a hard tier capability: a
-    failure here must surface as :class:`ProfileCommandError` rather than being
-    silently skipped when the preset declares ``diarization``.
+    Diarization is a task-time option, not a spec tier, so the caller must name
+    the aligner artifact it actually wants. A failure here must surface as
+    :class:`ProfileCommandError` rather than being silently skipped.
     """
-    try:
-        catalog = load_catalog()
-        preset_model = catalog.preset(preset)
-    except KeyError as exc:
-        raise ProfileCommandError("unknown profile preset") from exc
+    catalog = load_catalog()
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    if aligner_key not in artifacts:
+        raise ProfileCommandError("unknown aligner artifact")
 
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
     with httpx.Client(timeout=timeout) as client:
         downloader = ModelScopeDownloader(client=client)
         try:
             paths = prepare_diarization_assets(
-                app_home, preset_id=preset, downloader=downloader
+                app_home,
+                aligner_key=aligner_key,
+                downloader=downloader,
+                catalog=catalog,
             )
         except Exception as exc:
             raise ProfileCommandError("diarization asset preparation failed") from exc
-
-    updates: Mapping[str, str | None]
-    if not preset_model.diarization:
-        updates = dict.fromkeys(_DIARIZATION_ENV_KEYS)
-    else:
-        if paths is None:
-            raise ProfileCommandError("diarization assets were not prepared")
-        updates = {
-            "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH": str(paths.coreml_model_path),
-            "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR": str(paths.aligner_model_dir),
-        }
-
+    if paths is None:
+        raise ProfileCommandError("diarization assets were not prepared")
+    updates: Mapping[str, str | None] = {
+        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH": str(paths.coreml_model_path),
+        "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR": str(paths.aligner_model_dir),
+    }
     layout = ServiceLayout.for_app_home(app_home)
     config_file = layout.config_file
-    if not config_file.is_file() and not preset_model.diarization:
-        return
     try:
         _update_env_keys(config_file, updates)
     except Exception as exc:
@@ -320,18 +366,26 @@ def _prepare_diarization_assets(preset: str, app_home: Path) -> None:
 
 
 def apply_profile(
-    preset: PresetId,
+    asr_spec: SpecTier,
+    tts_spec: SpecTier,
     *,
     app_home: Path,
-    prepare: PrepareProfile = _prepare_profile,
+    prepare: PrepareSelection = _prepare_profile,
     switch: SwitchPrepared = _switch_prepared,
     prepare_vad: PrepareVadModel = _prepare_optional_vad_model,
-    prepare_diarization: PrepareDiarization = _prepare_diarization_assets,
+    prepare_diarization: PrepareDiarization | None = None,
 ) -> ApplyResult:
+    """Prepare two explicit specs, then atomically switch the single service."""
+    if asr_spec not in _ORDER or tts_spec not in _ORDER:
+        raise ProfileCommandError("unknown spec tier")
     resolved_home = app_home.resolve()
-    prepared_id = prepare(preset, resolved_home)
+    prepared_id = prepare(asr_spec, tts_spec, resolved_home)
     prepare_vad(resolved_home)
-    prepare_diarization(preset, resolved_home)
+    if prepare_diarization is not None:
+        aligner_key = _bound_key(tts_spec, "alignment") or _bound_key(asr_spec, "alignment")
+        if aligner_key is None:
+            raise ProfileCommandError("no aligner artifact is bound to the selected specs")
+        prepare_diarization(resolved_home, aligner_key)
     return switch(prepared_id, resolved_home)
 
 
@@ -360,10 +414,12 @@ __all__ = [
     "ProfileCommandError",
     "ProfileStatus",
     "ProfileSummary",
+    "SpecTier",
     "apply_profile",
     "list_profiles",
     "model_changes",
     "profile_status",
     "recommend_profile",
+    "recommend_selection",
     "rollback_profile",
 ]

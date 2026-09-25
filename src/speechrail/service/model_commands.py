@@ -11,16 +11,12 @@ from pathlib import Path
 from speechrail.config.model_catalog import (
     ModelArtifact,
     ModelCatalog,
-    ModelPreset,
-    PresetId,
     RuntimeLock,
     load_catalog,
     load_runtime_lock,
 )
-from speechrail.service.diarization_assets import (
-    inspect_diarization_assets,
-    prepare_diarization_assets,
-)
+from speechrail.domain.model_spec import ModelRole, required_spec_artifact, required_spec_bindings
+from speechrail.service.diarization_assets import inspect_diarization_assets
 from speechrail.service.model_store import (
     DiskUsage,
     Downloader,
@@ -28,9 +24,8 @@ from speechrail.service.model_store import (
     ProgressCallback,
     inspect_prepared_artifacts,
     model_store_root,
-    prepare_models,
+    prepare_spec_models,
 )
-from speechrail.service.modelscope import ModelScopeDownloader
 
 
 def _selected_catalog(catalog: ModelCatalog | None) -> ModelCatalog:
@@ -50,13 +45,23 @@ def _canonical_source(artifact: ModelArtifact) -> Mapping[str, str]:
     raise ModelStoreError("model catalog source is inconsistent")
 
 
-def _artifact_required_by(catalog: ModelCatalog, key: str) -> list[PresetId]:
-    required_by: list[PresetId] = []
-    for profile in catalog.presets:
-        references = (profile.asr, profile.tts, profile.tts_clone, profile.aligner)
-        if key in references:
-            required_by.append(profile.id)
-    return required_by
+_SPEC_ORDER: tuple[str, ...] = ("fast", "quality", "reference")
+_SUMMARY_ROLES: tuple[tuple[str, ModelRole], ...] = (
+    ("asr", "asr"),
+    ("tts", "tts_custom_voice"),
+    ("tts_base", "tts_base"),
+    ("voice_design", "voice_design"),
+    ("aligner", "alignment"),
+)
+
+
+def _artifact_required_by(catalog: ModelCatalog, key: str) -> list[str]:
+    """Return the spec tiers that explicitly bind this artifact key."""
+    bound: list[str] = []
+    for tier, _role, artifact_key in required_spec_bindings():
+        if artifact_key == key and tier not in bound:
+            bound.append(tier)
+    return sorted(bound, key=_SPEC_ORDER.index)
 
 
 def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, object]:
@@ -69,7 +74,10 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
     selected = _selected_catalog(catalog)
     artifacts_by_key = {artifact.key: artifact for artifact in selected.artifacts}
     artifacts: list[dict[str, object]] = []
+    bound_keys = {artifact_key for _tier, _role, artifact_key in required_spec_bindings()}
     for artifact in selected.artifacts:
+        if artifact.key not in bound_keys:
+            continue
         required_by = _artifact_required_by(selected, artifact.key)
         if not required_by:
             continue
@@ -91,20 +99,16 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
         )
 
     profiles = [
-        _profile_payload(profile, artifacts_by_key)
-        for profile in selected.presets
+        _profile_payload(tier, artifacts_by_key) for tier in _SPEC_ORDER
     ]
     # 「这一档要用的文件」还包括一份不在目录里的 CoreML 分人资产 (它是 CoreML
-    # bundle, 有自己的 manifest, 不走 prepare_models)。用同样的行形状列出来,
-    # 界面才能把所有文件放在一张表里读, 而不会把同一份资产既算作分人输入、
-    # 又列成「已检测但未纳入当前目录」 (2026-09-23)。
-    diarization_presets = [preset.id for preset in selected.presets if preset.diarization]
-    if diarization_presets:
-        from speechrail.service.diarization_assets import coreml_diarization_row
+    # bundle, 有自己的 manifest, 不走 prepare_models)。分人是任务 opt-in, 不再
+    # 绑定档位, 用 required_by=["diarization"] 标记它可按任务准备。
+    from speechrail.service.diarization_assets import coreml_diarization_row
 
-        artifacts.append(coreml_diarization_row(required_by=diarization_presets))
+    artifacts.append(coreml_diarization_row(required_by=["diarization"]))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "command": "model.catalog",
         "status": "ok",
         "artifacts": artifacts,
@@ -113,30 +117,28 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
 
 
 def _profile_payload(
-    profile: ModelPreset, artifacts_by_key: Mapping[str, ModelArtifact]
+    tier: str, artifacts_by_key: Mapping[str, ModelArtifact]
 ) -> dict[str, object]:
-    """Build a profile row after the catalog has supplied its references."""
+    """Build one spec-tier row from its explicit role bindings."""
     # ModelCatalog exposes immutable Pydantic models; keep this helper private so
     # the public payload stays a plain, path-free mapping.
-    keys = [profile.asr, profile.tts]
-    if profile.tts_clone is not None:
-        keys.append(profile.tts_clone)
-    if profile.aligner is not None:
-        keys.append(profile.aligner)
+    bindings = {
+        name: required_spec_artifact(tier, role)  # type: ignore[arg-type]
+        for name, role in _SUMMARY_ROLES
+    }
     download_bytes = sum(
-        item.size for key in keys for item in artifacts_by_key[key].files
+        item.size
+        for key in bindings.values()
+        if key is not None and key in artifacts_by_key
+        for item in artifacts_by_key[key].files
     )
-    if profile.diarization:
-        from speechrail.service.diarization_assets import _COREML_FILE_SIZES
-
-        download_bytes += sum(_COREML_FILE_SIZES)
     return {
-        "id": profile.id,
-        "asr": profile.asr,
-        "tts": profile.tts,
-        "tts_clone": profile.tts_clone,
-        "aligner": profile.aligner,
-        "diarization": profile.diarization,
+        "id": tier,
+        "asr": bindings["asr"],
+        "tts": bindings["tts"],
+        "tts_base": bindings["tts_base"],
+        "voice_design": bindings["voice_design"],
+        "aligner": bindings["aligner"],
         "download_bytes": download_bytes,
     }
 
@@ -191,12 +193,16 @@ def model_status_payload(
         runtime_lock=runtime_lock,
     )
     diarization_by_key = {}
-    for preset in selected.presets:
-        if not preset.diarization:
-            continue
+    for aligner_key in sorted(
+        {
+            artifact_key
+            for _tier, role, artifact_key in required_spec_bindings()
+            if role == "alignment"
+        }
+    ):
         for item in inspect_diarization_assets(
             resolved_home,
-            preset_id=preset.id,
+            aligner_key=aligner_key,
             catalog=selected,
         ):
             diarization_by_key[item.key] = item
@@ -232,8 +238,9 @@ def model_status_payload(
     }
 
 
-async def prepare_profile_models(
-    preset: PresetId,
+async def prepare_selected_models(
+    asr_spec: str,
+    tts_spec: str,
     app_home: Path,
     *,
     progress: ProgressCallback | None = None,
@@ -243,20 +250,18 @@ async def prepare_profile_models(
     runtime_lock: RuntimeLock | None = None,
     disk_usage: DiskUsage | None = None,
 ) -> str:
-    """Prepare one profile's locked models without changing active selection."""
+    """Prepare only the two explicitly selected spec artifacts, opt-in only."""
     if downloader is None:
         raise ModelStoreError("downloader must be injected")
     selected = _selected_catalog(catalog)
     selected_lock = load_runtime_lock() if runtime_lock is None else runtime_lock
     if not isinstance(selected_lock, RuntimeLock):
         raise ModelStoreError("runtime_lock must be a RuntimeLock")
-    try:
-        selected_profile = selected.preset(preset)
-    except KeyError as exc:
-        raise ModelStoreError("unknown preset") from exc
-
-    prepared_id = await prepare_models(
-        preset,
+    if asr_spec not in _SPEC_ORDER or tts_spec not in _SPEC_ORDER:
+        raise ModelStoreError("unknown spec tier")
+    return await prepare_spec_models(
+        asr_spec,  # type: ignore[arg-type]
+        tts_spec,  # type: ignore[arg-type]
         app_home=app_home,
         progress=progress,
         downloader=downloader,
@@ -265,39 +270,10 @@ async def prepare_profile_models(
         cancel_event=cancel_event,
         disk_usage=disk_usage,
     )
-    if cancel_event is not None and cancel_event.is_set():
-        raise asyncio.CancelledError
-    if selected_profile.diarization:
-        if not isinstance(downloader, ModelScopeDownloader):
-            raise ModelStoreError("diarization preparation requires the ModelScope downloader")
-        try:
-            await asyncio.to_thread(
-                prepare_diarization_assets,
-                app_home,
-                preset_id=preset,
-                downloader=downloader,
-                catalog=selected,
-                progress=progress,
-                cancel_event=cancel_event,
-                prepared_id=prepared_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise ModelStoreError("diarization asset preparation failed") from exc
-        if progress is not None:
-            progress(
-                {
-                    "phase": "diarization_verified",
-                    "prepared_id": prepared_id,
-                    "preset": preset,
-                }
-            )
-    return prepared_id
 
 
 __all__ = [
     "model_catalog_payload",
     "model_status_payload",
-    "prepare_profile_models",
+    "prepare_selected_models",
 ]

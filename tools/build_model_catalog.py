@@ -47,6 +47,31 @@ _PRESET_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {"id", "asr", "tts", "aligner", "diarization"}
 )
 _PRESET_ALLOWED_FIELDS: Final[frozenset[str]] = _PRESET_REQUIRED_FIELDS | frozenset({"tts_clone"})
+_SPEC_TIERS: Final[frozenset[str]] = frozenset({"fast", "quality", "reference"})
+_SPEC_FIELDS: Final[frozenset[str]] = frozenset({"tier", "role", "artifact_key"})
+_SPEC_ROLE_VARIANTS: Final[dict[str, tuple[str, str]]] = {
+    "asr": ("qwen3_asr", "asr"),
+    "tts_base": ("qwen3_tts", "base"),
+    "tts_custom_voice": ("qwen3_tts", "custom_voice"),
+    "voice_design": ("qwen3_tts", "voice_design"),
+    "alignment": ("qwen3_forced_aligner", "aligner"),
+}
+# 与 `speechrail.config.model_catalog.REQUIRED_SPEC_BINDINGS` 同义, 本工具不导入包.
+_REQUIRED_SPEC_BINDINGS: Final[dict[tuple[str, str], str]] = {
+    ("fast", "asr"): "asr-0.6b-q8",
+    ("quality", "asr"): "asr-1.7b-q8",
+    ("reference", "asr"): "asr-1.7b-bf16",
+    ("fast", "tts_base"): "tts-0.6b-base-q8",
+    ("quality", "tts_base"): "tts-1.7b-base-q8",
+    ("reference", "tts_base"): "tts-1.7b-base-bf16",
+    ("fast", "tts_custom_voice"): "tts-0.6b-custom-q8",
+    ("quality", "tts_custom_voice"): "tts-1.7b-custom-q8",
+    ("reference", "tts_custom_voice"): "tts-1.7b-custom-bf16",
+    ("reference", "voice_design"): "tts-1.7b-design-bf16",
+    ("fast", "alignment"): "aligner-q8",
+    ("quality", "alignment"): "aligner-bf16",
+    ("reference", "alignment"): "aligner-bf16",
+}
 
 
 def _mapping(value: object, *, context: str) -> Mapping[str, object]:
@@ -353,6 +378,20 @@ def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> 
     }
 
 
+def _normalise_spec(value: object, *, index: int) -> dict[str, object]:
+    context = f"spec {index}"
+    data = _mapping(value, context=context)
+    _check_fields(data, _SPEC_FIELDS, context=context)
+    tier = _required_string(data, "tier", context=context)
+    if tier not in _SPEC_TIERS:
+        raise ValueError(f"{context}.tier must be one of fast, quality, reference")
+    role = _required_string(data, "role", context=context)
+    if role not in _SPEC_ROLE_VARIANTS:
+        raise ValueError(f"{context}.role is not a supported model role")
+    artifact_key = _required_string(data, "artifact_key", context=context)
+    return {"tier": tier, "role": role, "artifact_key": artifact_key}
+
+
 def _normalise_precision(
     value: object, *, preset_id: str, context: str
 ) -> dict[str, object]:
@@ -416,7 +455,9 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
 
     if not isinstance(entries, Mapping):
         raise ValueError("catalog input must be an object")
-    expected_top_level = frozenset({"schema_version", "artifacts", "presets", "precision_policy"})
+    expected_top_level = frozenset(
+        {"schema_version", "artifacts", "specs", "presets", "precision_policy"}
+    )
     _check_fields(entries, expected_top_level, context="catalog")
     schema_version = entries["schema_version"]
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
@@ -435,6 +476,41 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
             raise ValueError(f"catalog has duplicate artifact key: {key}")
         seen_keys.add(key)
         artifacts.append(artifact)
+
+    specs: list[dict[str, object]] = []
+    seen_bindings: set[tuple[str, str]] = set()
+    for spec_index, raw_spec in enumerate(_list(entries["specs"], context="catalog.specs")):
+        spec = _normalise_spec(raw_spec, index=spec_index)
+        binding = (str(spec["tier"]), str(spec["role"]))
+        if binding in seen_bindings:
+            raise ValueError(f"catalog has duplicate spec binding: {binding[0]}/{binding[1]}")
+        seen_bindings.add(binding)
+        specs.append(spec)
+    if seen_bindings != set(_REQUIRED_SPEC_BINDINGS):
+        missing = sorted(set(_REQUIRED_SPEC_BINDINGS).difference(seen_bindings))
+        extra = sorted(seen_bindings.difference(_REQUIRED_SPEC_BINDINGS))
+        raise ValueError(
+            "catalog.specs must match the required tier x role matrix"
+            f" (missing={missing}, extra={extra})"
+        )
+    artifacts_by_key = {str(artifact["key"]): artifact for artifact in artifacts}
+    for spec in specs:
+        binding = (str(spec["tier"]), str(spec["role"]))
+        artifact_key = str(spec["artifact_key"])
+        if _REQUIRED_SPEC_BINDINGS[binding] != artifact_key:
+            raise ValueError(
+                f"catalog spec {binding[0]}/{binding[1]} must bind "
+                f"{_REQUIRED_SPEC_BINDINGS[binding]}"
+            )
+        artifact = artifacts_by_key.get(artifact_key)
+        if artifact is None:
+            raise ValueError(
+                f"catalog spec {binding[0]}/{binding[1]} references unknown artifact"
+            )
+        if (artifact["family"], artifact["variant"]) != _SPEC_ROLE_VARIANTS[binding[1]]:
+            raise ValueError(
+                f"catalog spec {binding[0]}/{binding[1]} references an incompatible artifact"
+            )
 
     presets: list[dict[str, object]] = []
     seen_preset_ids: set[str] = set()
@@ -456,7 +532,6 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
         )
 
     precision_policy = _normalise_precision_policy(entries["precision_policy"])
-    artifacts_by_key = {str(artifact["key"]): artifact for artifact in artifacts}
     for preset in presets:
         preset_id = str(preset["id"])
         policy = precision_policy[preset_id]
@@ -491,6 +566,7 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
     return {
         "schema_version": _SCHEMA_VERSION,
         "artifacts": sorted(artifacts, key=lambda item: str(item["key"])),
+        "specs": sorted(specs, key=lambda item: (str(item["tier"]), str(item["role"]))),
         "presets": sorted(presets, key=lambda item: str(item["id"])),
         "precision_policy": precision_policy,
     }
