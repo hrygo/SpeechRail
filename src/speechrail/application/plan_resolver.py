@@ -13,6 +13,7 @@ from speechrail.config.model_catalog import ModelCatalog
 from speechrail.domain.model_spec import (
     ModelRole,
     ModelSpec,
+    ModelSpecRegistry,
     SpecTier,
     registry_from_catalog,
 )
@@ -93,7 +94,7 @@ def _tts_role(request: TaskRequest) -> ModelRole:
 
 
 def _resolve_model(
-    registry,
+    registry: ModelSpecRegistry,
     tier: SpecTier,
     role: ModelRole,
     *,
@@ -154,6 +155,8 @@ def resolve_plan(
     ):
         raise PlanResolutionError("unknown voice_revision")
 
+    asr_spec: SpecTier | None
+    tts_spec: SpecTier | None
     if request.allow_auto and (request.asr_spec is None or request.tts_spec is None):
         combination = _auto_combination(request, record, environment)
         asr_spec = request.asr_spec or combination.asr_spec

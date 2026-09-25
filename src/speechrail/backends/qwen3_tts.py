@@ -13,7 +13,7 @@ import contextlib
 import os
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import ExitStack, aclosing
 from dataclasses import dataclass
 from pathlib import Path
@@ -313,10 +313,10 @@ class Qwen3TtsWorker:
             await self._transport.abort()
             raise
 
-    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+    def synthesize(self, request: SpeechRequest) -> AsyncGenerator[AudioChunk]:
         """Yield ordered public PCM chunks while serializing private worker access."""
 
-        async def stream() -> AsyncIterator[AudioChunk]:
+        async def stream() -> AsyncGenerator[AudioChunk]:
             from speechrail.backends.qwen3_voice_binding import resolve_binding
             from speechrail.domain.tts import get_voice_registry
 
@@ -955,8 +955,8 @@ class Qwen3TtsCapabilityRouter:
             raise RuntimeError("tts_custom_voice_model_unavailable")
         return role, worker
 
-    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
-        async def stream() -> AsyncIterator[AudioChunk]:
+    def synthesize(self, request: SpeechRequest) -> AsyncGenerator[AudioChunk]:
+        async def stream() -> AsyncGenerator[AudioChunk]:
             _, worker = self._require_runtime_worker(request.voice)
             # Closing the router's iterator must also close the owning worker's
             # iterator, so the worker slot is released by the caller's teardown
@@ -967,10 +967,10 @@ class Qwen3TtsCapabilityRouter:
 
         return stream()
 
-    def synthesize_design(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+    def synthesize_design(self, request: SpeechRequest) -> AsyncGenerator[AudioChunk]:
         """Run one VoiceDesign candidate task; never used by normal synthesis."""
 
-        async def stream() -> AsyncIterator[AudioChunk]:
+        async def stream() -> AsyncGenerator[AudioChunk]:
             worker = self._workers.get(VOICE_DESIGN_ROLE)
             if worker is None:
                 raise RuntimeError("voice_design_model_unavailable")

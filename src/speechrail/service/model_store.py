@@ -993,7 +993,7 @@ def _selection_artifacts(
     tts_spec: SpecTier,
 ) -> tuple[ModelArtifact, ...]:
     artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
-    required = (
+    required: tuple[tuple[SpecTier, ModelRole], ...] = (
         (asr_spec, "asr"),
         (tts_spec, "tts_custom_voice"),
         # Selection resolution requires the Base clone directory for every tier,
@@ -1002,7 +1002,7 @@ def _selection_artifacts(
     )
     selected: list[ModelArtifact] = []
     for tier, role in required:
-        key = required_spec_artifact(cast(SpecTier, tier), cast(ModelRole, role))
+        key = required_spec_artifact(tier, role)
         if key is None or key not in artifacts_by_key:
             raise ModelStoreError(f"unavailable selected artifact: {tier}/{role}")
         selected.append(artifacts_by_key[key])

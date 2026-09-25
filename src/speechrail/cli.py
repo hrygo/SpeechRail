@@ -15,6 +15,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -23,6 +24,7 @@ import uvicorn
 
 from speechrail.config import Settings
 from speechrail.config.auth import resolve_api_key
+from speechrail.domain.model_spec import SpecTier
 from speechrail.observability.logging import configure_logging, default_log_directory
 from speechrail.observability.rollup import default_rollup_path
 from speechrail.runtime.server_lock import ServerInstanceLock
@@ -34,6 +36,9 @@ from speechrail.service import (
     run_preflight,
 )
 from speechrail.service.profile_switch import LaunchAgentServiceController
+
+if TYPE_CHECKING:
+    from speechrail.service.profile_commands import ProfileStatus, ProfileSummary
 
 _MACHINE_SCHEMA_VERSION = 1
 
@@ -453,7 +458,7 @@ def _run_agents(args: argparse.Namespace) -> int:
     return 0 if status not in {"drifted", "retained_due_to_conflict"} else 1
 
 
-def _selection_status_or_fail(app_home: Path) -> object:
+def _selection_status_or_fail(app_home: Path) -> ProfileStatus:
     """Read the committed selection, refusing a legacy record instead of ignoring it."""
     from speechrail.service import profile_commands
     from speechrail.service.profile_store import LegacySelectionError
@@ -468,7 +473,7 @@ def _selection_status_or_fail(app_home: Path) -> object:
         ) from exc
 
 
-def _profile_row(item: object) -> dict[str, object]:
+def _profile_row(item: ProfileSummary) -> dict[str, object]:
     return {
         "aligner": getattr(item, "aligner", None),
         "asr": getattr(item, "asr", None),
@@ -772,8 +777,8 @@ def _run_setup(args: argparse.Namespace) -> int:
     if not explicit and current.label is not None:
         print(f"Selection already configured: {current.label}")
         return 0
-    asr_spec = args.asr_spec or current.asr_spec or recommended_asr
-    tts_spec = args.tts_spec or current.tts_spec or recommended_tts
+    asr_spec = cast(SpecTier, args.asr_spec or current.asr_spec or recommended_asr)
+    tts_spec = cast(SpecTier, args.tts_spec or current.tts_spec or recommended_tts)
     if explicit:
         print(f"Selected specs: ASR={asr_spec}, TTS={tts_spec}")
     else:
@@ -975,7 +980,7 @@ def _install_download_plan(
     return pending, size
 
 
-def _installed_selection(app_home: Path) -> tuple[str, str] | None:
+def _installed_selection(app_home: Path) -> tuple[SpecTier, SpecTier] | None:
     """Return the specs this app home already committed to, if any.
 
     One app home keeps exactly one selection, so an upgrade must repeat the
@@ -988,8 +993,13 @@ def _installed_selection(app_home: Path) -> tuple[str, str] | None:
         return None
     asr_spec = selection.get("asr_spec")
     tts_spec = selection.get("tts_spec")
-    if isinstance(asr_spec, str) and isinstance(tts_spec, str):
-        return asr_spec, tts_spec
+    if (
+        isinstance(asr_spec, str)
+        and isinstance(tts_spec, str)
+        and asr_spec in {"fast", "quality", "reference"}
+        and tts_spec in {"fast", "quality", "reference"}
+    ):
+        return cast(SpecTier, asr_spec), cast(SpecTier, tts_spec)
     return None
 
 
@@ -1016,15 +1026,17 @@ def _run_install(args: argparse.Namespace) -> int:
     recommended_asr, recommended_tts = profile_commands.recommend_selection(
         _physical_memory_bytes()
     )
-    asr_spec = (
+    asr_spec = cast(
+        SpecTier,
         args.asr_spec
         or (installed_selection[0] if installed_selection else None)
-        or recommended_asr
+        or recommended_asr,
     )
-    tts_spec = (
+    tts_spec = cast(
+        SpecTier,
         args.tts_spec
         or (installed_selection[1] if installed_selection else None)
-        or recommended_tts
+        or recommended_tts,
     )
     auto = getattr(args, "auto", "off") or "off"
     explicit_specs = args.asr_spec is not None or args.tts_spec is not None

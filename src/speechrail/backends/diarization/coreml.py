@@ -12,12 +12,13 @@ from collections.abc import AsyncIterator, Callable
 from hashlib import sha256
 from pathlib import Path
 
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.diarization import (
     DiarizationError,
     DiarizationReadiness,
 )
 from speechrail.domain.diarization.ports import ActivitySession
-from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, SampleSpan
+from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
 
 MODEL_REVISION = "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"

@@ -109,7 +109,8 @@ def _decode_align_request(frame: dict[str, object]) -> tuple[str, bytes, str, st
 def _handle_align_text(
     frame: dict[str, object], output_stream: BinaryIO, engine: AlignerEngine
 ) -> None:
-    request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
+    raw_request_id = frame.get("request_id")
+    request_id: str | None = raw_request_id if isinstance(raw_request_id, str) else None
     try:
         request_id, pcm, language, text = _decode_align_request(frame)
         tokens = engine.align_text(pcm, text=text, language=language)

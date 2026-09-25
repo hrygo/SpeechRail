@@ -249,7 +249,7 @@ def _voice_entry(
     stream_service: TtsStreamService | None = None,
 ) -> dict[str, Any]:
     artifact = active.artifact_for_voice_mode(profile.mode)
-    variant = artifact.variant if artifact is not None else None
+    variant: str | None = artifact.variant if artifact is not None else None
     injected_backend = (
         active.tts is None
         and active.tts_clone is None

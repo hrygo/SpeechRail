@@ -36,8 +36,11 @@ class TtsExecutionMode(StrEnum):
 class VoiceRouteContext(Protocol):
     """The only profile fields routing may depend on."""
 
-    mode: str
-    revision: str | None
+    @property
+    def mode(self) -> str: ...
+
+    @property
+    def revision(self) -> str | None: ...
 
 
 class TtsRouteError(ValueError):
