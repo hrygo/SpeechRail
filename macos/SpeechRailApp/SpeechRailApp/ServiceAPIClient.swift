@@ -296,6 +296,50 @@ public final class ServiceAPIClient: @unchecked Sendable {
         ).audioData
     }
 
+    /// 正式制作：要多一份 render receipt 的 plan 身份与音色 revision。
+    ///
+    /// 收据拿不到不影响出音频——作品照常保存，只是身份字段留空，
+    /// 不在制作路径上因为追溯信息而报失败。
+    public func createSpeechRender(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> SpeechRenderResult {
+        let response = try await synthesize(
+            SpeechRequest(
+                input: text,
+                voice: .name(voiceID),
+                model: "speechrail/qwen3-tts",
+                responseFormat: "wav",
+                language: "auto",
+                speed: speed
+            ),
+            options: SpeechRailRequestOptions(
+                expectedVoiceRevision: options.expectedVoiceRevision,
+                expectedModelRevision: options.expectedModelRevision,
+                pronunciationSet: options.pronunciationSet,
+                receiptMode: "integrity",
+                timingMode: options.timingMode,
+                purpose: options.purpose,
+                latencyBudgetMs: options.latencyBudgetMs
+            )
+        )
+        var voiceRevision = options.expectedVoiceRevision
+        var planID: String?
+        if let receiptID = response.receiptID,
+           let receipt = try? await fetchReceipt(id: receiptID)
+        {
+            voiceRevision = receipt.voiceRevision ?? voiceRevision
+            planID = receipt.planID
+        }
+        return SpeechRenderResult(
+            audioData: response.audioData,
+            planID: planID,
+            voiceRevision: voiceRevision
+        )
+    }
+
     public func createVoicePreview(
         text: String,
         instruction: String,

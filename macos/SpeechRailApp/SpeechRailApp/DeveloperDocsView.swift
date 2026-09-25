@@ -150,8 +150,8 @@ public struct DeveloperDocsView: View {
     }
 
     private var profileSummary: String {
-        guard let profile = model.health?.profile else { return unreadFact }
-        return SpeechRailProfilePresentation.shortTitle(profile)
+        guard let selection = model.health?.selection else { return unreadFact }
+        return SpeechRailProfilePresentation.shortTitle(selection)
     }
 
     /// 事实格子里「没读到」的那句话要分清两件事：还在读，和读不到。

@@ -370,8 +370,8 @@ public struct ControlCenterView: View {
         if displayedHealth?.ready == true {
             // macOS App 设计系统 §4.1：侧边栏底部是全 App 唯一的常驻服务状态指示器，
             // 并且要带上当前运行档位（Figma 状态行同一写法）。
-            guard let profile = displayedHealth?.profile else { return "服务已就绪" }
-            return "服务已就绪 · \(SpeechRailProfilePresentation.shortTitle(profile))"
+            guard let selection = displayedHealth?.selection else { return "服务已就绪" }
+            return "服务已就绪 · \(SpeechRailProfilePresentation.shortTitle(selection))"
         }
         if model.service.serviceState == "unavailable" {
             return "服务不可用"

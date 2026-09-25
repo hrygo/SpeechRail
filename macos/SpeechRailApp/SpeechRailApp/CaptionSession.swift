@@ -149,9 +149,6 @@ public final class CaptionSession {
     /// 这一场要不要开分人。**每场一次**：契约规定只能在首个 PCM 之前协商。
     /// 默认关（§14.3 的开关粒度）。
     public var diarizationPreference: @MainActor () -> Bool = { false }
-    /// 档位能不能分人：给不出原因就说明可以。`light` 档返回一句人话，
-    /// 于是"开关置灰 + 写明原因"两侧说法一致（§14.3）。
-    public var diarizationGate: @MainActor () -> String? = { nil }
 
     private let coordinator: SessionCoordinator
     /// 分人归属账本。会议与字幕共用底座，这里持有的是本场那一个实例。
@@ -314,10 +311,9 @@ public final class CaptionSession {
         }
 
         // 分人在**首个 PCM 之前**协商一次，之后改不了（契约 §Diarization 扩展）。
-        // 档位不支持时不开，也不假装开——开关与说明由 `diarizationGate` 给同一句人话。
-        let wantedDiarization = diarizationPreference()
-        let gateNote = wantedDiarization ? diarizationGate() : nil
-        let diarizationEnabled = wantedDiarization && gateNote == nil
+        // 是否可用的唯一事实来源是服务的能力声明：这里按用户开关原样请求，
+        // 不在本地按档位拦截，服务不支持时以稳定错误回应。
+        let diarizationEnabled = diarizationPreference()
         diarizationActive = diarizationEnabled
         diarizationDrained = false
 
@@ -355,14 +351,13 @@ public final class CaptionSession {
                     kind: .captions,
                     engineProfile: profile,
                     audioSource: .microphone,
-                    diarization: diarizationEnabled ? .active : (wantedDiarization ? .unavailable : .off),
-                    diarizationNote: gateNote,
+                    diarization: diarizationEnabled ? .active : .off,
+                    diarizationNote: nil,
                     startedAt: startedAt
                 )
             )
             sessionID = record.id
             labeling.begin(sessionID: record.id, enabled: diarizationEnabled)
-            if let gateNote { labeling.markUnavailable(note: gateNote) }
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
             await client.close()

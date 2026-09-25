@@ -164,6 +164,17 @@ public struct JSONValue: Codable, Equatable, Sendable {
     }
 }
 
+public extension JSONValue {
+    /// 取对象里的一个非空字符串字段；不是对象、字段不是字符串或字符串为空时返回 `nil`。
+    func string(_ key: String) -> String? {
+        guard case let .object(fields) = storage,
+              case let .string(value) = fields[key]?.storage,
+              !value.isEmpty
+        else { return nil }
+        return value
+    }
+}
+
 public enum ServiceErrorCategory: Equatable, Sendable {
     case conflict
     case notReady
@@ -1244,6 +1255,8 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
     public let audio: JSONValue
     public let text: JSONValue?
     public let planner: JSONValue?
+    /// 服务端为这次渲染固定的 plan 身份：`{"plan_id": "plan_…", "window_index": …, …}`。
+    public let plan: JSONValue?
     public let errorCode: String?
     public let createdAt: Double
     public let completedAt: Double?
@@ -1258,6 +1271,7 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
         case audio
         case text
         case planner
+        case plan
         case errorCode = "error_code"
         case createdAt = "created_at"
         case completedAt = "completed_at"
@@ -1284,12 +1298,25 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
         }
         text = try container.decodeIfPresent(JSONValue.self, forKey: .text)
         planner = try container.decodeIfPresent(JSONValue.self, forKey: .planner)
+        plan = try container.decodeIfPresent(JSONValue.self, forKey: .plan)
         errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
         createdAt = try required(.createdAt)
         guard container.contains(.completedAt) else {
             throw ServiceContractDecodingError.missingRequiredField("completed_at")
         }
         completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
+    }
+}
+
+public extension RenderReceipt {
+    /// 这次渲染实际使用的音色 revision（receipt 里 `voice.revision`）。
+    var voiceRevision: String? {
+        voice.string("revision")
+    }
+
+    /// 这次渲染固定的 plan 身份（receipt 里 `plan.plan_id`）。
+    var planID: String? {
+        plan?.string("plan_id")
     }
 }
 

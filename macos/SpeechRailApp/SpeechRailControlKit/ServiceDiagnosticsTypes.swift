@@ -85,7 +85,8 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
     public let service: String?
     public let version: String?
     public let backend: String?
-    public let profile: SpeechRailProfile?
+    /// 运行中的规格对，wire 形如 `quality/quality`；未配置时为 nil。
+    public let profile: String?
     public let asrReady: Bool?
     public let asrRuntimeRevision: String?
     public let ttsReady: Bool?
@@ -105,7 +106,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         service: String? = nil,
         version: String? = nil,
         backend: String? = nil,
-        profile: SpeechRailProfile? = nil,
+        profile: String? = nil,
         asrReady: Bool? = nil,
         asrRuntimeRevision: String? = nil,
         ttsReady: Bool? = nil,
@@ -138,6 +139,11 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         self.realtimeVAD = realtimeVAD
         self.ready = ready
         self.jobSpoolReady = jobSpoolReady
+    }
+
+    /// 把运行规格对解析成两项独立档位；缺项或未知档位返回 nil。
+    public var selection: SpecSelection? {
+        SpecSelection(wire: profile)
     }
 
     enum CodingKeys: String, CodingKey {

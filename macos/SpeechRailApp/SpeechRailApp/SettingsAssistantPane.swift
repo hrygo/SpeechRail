@@ -428,9 +428,6 @@ struct SettingsAssistantPane: View {
     }
 
     private func diarizationCaption(for enabled: Bool) -> String {
-        if let note = SessionPreferences.diarizationGateNote(for: model.profile?.preset?.rawValue) {
-            return note
-        }
         return enabled
             ? "已开启：新会话会标出说话人，使用匿名编号。"
             : "默认关闭；打开后新会话才会标出说话人。"

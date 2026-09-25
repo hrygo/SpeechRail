@@ -23,7 +23,7 @@ public actor AgentOperationStore {
                             let interrupted = OperationSnapshot(
                                 operationID: entry.operation.operationID,
                                 command: entry.operation.command,
-                                profile: entry.operation.profile,
+                                selection: entry.operation.selection,
                                 state: .interrupted,
                                 phase: entry.operation.phase ?? "interrupted",
                                 progress: entry.operation.progress,
@@ -63,15 +63,15 @@ public actor AgentOperationStore {
         case .operationCancel:
             return cancelOperation(for: request)
         case .profileApply:
-            guard let profile = request.profile else {
-                return .failure(for: request, code: .invalidRequest, message: "profile is required")
+            guard let selection = request.selection else {
+                return .failure(for: request, code: .invalidRequest, message: "spec selection is required")
             }
-            return await acceptMutation(request, command: .profileApply(profile))
+            return await acceptMutation(request, command: .profileApply(selection))
         case .modelPrepare:
-            guard let profile = request.profile else {
-                return .failure(for: request, code: .invalidRequest, message: "profile is required")
+            guard let selection = request.selection else {
+                return .failure(for: request, code: .invalidRequest, message: "spec selection is required")
             }
-            return await acceptMutation(request, command: .modelPrepare(profile))
+            return await acceptMutation(request, command: .modelPrepare(selection))
         case .status:
             return await execute(request, command: .service(.status))
         case .start:
@@ -149,7 +149,7 @@ public actor AgentOperationStore {
         let accepted = OperationSnapshot(
             operationID: operationID,
             command: request.command,
-            profile: Self.profile(for: command),
+            selection: Self.selection(for: command),
             state: .accepted,
             phase: "accepted"
         )
@@ -235,7 +235,7 @@ public actor AgentOperationStore {
         let updated = OperationSnapshot(
             operationID: current.operationID,
             command: current.command,
-            profile: current.profile,
+            selection: current.selection,
             state: .running,
             phase: progress.phase ?? current.phase ?? "download",
             progress: progress,
@@ -269,7 +269,7 @@ public actor AgentOperationStore {
         let snapshot = OperationSnapshot(
             operationID: operationID,
             command: command,
-            profile: operations[operationID]?.profile,
+            selection: operations[operationID]?.selection,
             state: finalState,
             phase: phase,
             progress: response?.operation?.progress ?? operations[operationID]?.progress,
@@ -347,7 +347,7 @@ public actor AgentOperationStore {
         let cancelling = OperationSnapshot(
             operationID: operation.operationID,
             command: operation.command,
-            profile: operation.profile,
+            selection: operation.selection,
             state: .running,
             phase: "cancelling",
             progress: operation.progress,
@@ -445,9 +445,9 @@ public actor AgentOperationStore {
         }
     }
 
-    nonisolated private static func profile(for command: ManagedCommand) -> SpeechRailProfile? {
+    nonisolated private static func selection(for command: ManagedCommand) -> SpecSelection? {
         switch command {
-        case let .profileApply(profile), let .modelPrepare(profile): profile
+        case let .profileApply(selection), let .modelPrepare(selection): selection
         default: nil
         }
     }

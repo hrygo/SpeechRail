@@ -472,8 +472,8 @@ public struct SessionLibraryView: View {
 
     private var statusFacts: [String] {
         var facts = [kind.title]
-        if let profile = model.health?.profile {
-            facts.append(SpeechRailProfilePresentation.shortTitle(profile))
+        if let selection = model.health?.selection {
+            facts.append(SpeechRailProfilePresentation.shortTitle(selection))
         }
         return facts
     }
@@ -732,8 +732,8 @@ public struct SessionLibraryView: View {
     }
 
     private var profileRowText: String {
-        guard let profile = model.health?.profile else { return "未读取" }
-        return SpeechRailProfilePresentation.shortTitle(profile)
+        guard let selection = model.health?.selection else { return "未读取" }
+        return SpeechRailProfilePresentation.shortTitle(selection.asrSpec)
     }
 
     private var lastRecordText: String {

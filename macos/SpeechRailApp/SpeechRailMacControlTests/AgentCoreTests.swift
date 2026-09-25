@@ -191,7 +191,7 @@ final class AgentCoreTests: XCTestCase {
         let operation = OperationSnapshot(
             operationID: "control_safe_123",
             command: .modelPrepare,
-            profile: .balanced,
+            selection: .quick(.quality),
             state: .running,
             phase: "download",
             progress: OperationProgressSnapshot(
@@ -234,7 +234,7 @@ final class AgentCoreTests: XCTestCase {
         let runner = ProgressBlockingRunner()
         let store = AgentOperationStore(runner: runner)
         let accepted = await store.handle(
-            ControlRequest(command: .modelPrepare, profile: .quality, confirmation: true)
+            ControlRequest(command: .modelPrepare, selection: .quick(.quality), confirmation: true)
         )
         let operationID = try XCTUnwrap(accepted.operation?.operationID)
 
@@ -259,7 +259,7 @@ final class AgentCoreTests: XCTestCase {
         let operation = OperationSnapshot(
             operationID: "control_recover_123",
             command: .modelPrepare,
-            profile: .quality,
+            selection: .quick(.quality),
             state: .running,
             phase: "download",
             progress: OperationProgressSnapshot(
@@ -275,7 +275,7 @@ final class AgentCoreTests: XCTestCase {
         let recovered = try XCTUnwrap(status.modelStatus?.activeOperation)
 
         XCTAssertEqual(recovered.operationID, operation.operationID)
-        XCTAssertEqual(recovered.profile, .quality)
+        XCTAssertEqual(recovered.selection, .quick(.quality))
         XCTAssertEqual(recovered.state, .interrupted)
         XCTAssertEqual(recovered.progress?.completedBytes, 16)
         let operationStatus = await store.handle(
@@ -301,7 +301,7 @@ final class AgentCoreTests: XCTestCase {
             OperationSnapshot(
                 operationID: "control_old_123",
                 command: .modelPrepare,
-                profile: .quality,
+                selection: .quick(.quality),
                 state: .interrupted,
                 phase: "download"
             )
@@ -310,7 +310,7 @@ final class AgentCoreTests: XCTestCase {
         let store = AgentOperationStore(runner: runner, journal: journal)
         let request = ControlRequest(
             command: .modelPrepare,
-            profile: .light,
+            selection: .quick(.fast),
             confirmation: true
         )
 
@@ -318,7 +318,7 @@ final class AgentCoreTests: XCTestCase {
         let status = await store.handle(ControlRequest(command: .modelStatus))
 
         XCTAssertEqual(status.modelStatus?.activeOperation?.operationID, accepted.operation?.operationID)
-        XCTAssertEqual(status.modelStatus?.activeOperation?.profile, .light)
+        XCTAssertEqual(status.modelStatus?.activeOperation?.selection, .quick(.fast))
 
         await runner.complete()
     }
@@ -331,7 +331,7 @@ final class AgentCoreTests: XCTestCase {
         let store = AgentOperationStore(runner: ModelStatusRunner(), journal: journal)
         let request = ControlRequest(
             command: .modelPrepare,
-            profile: .light,
+            selection: .quick(.fast),
             confirmation: true
         )
 
@@ -378,7 +378,7 @@ final class AgentCoreTests: XCTestCase {
         let store = AgentOperationStore(runner: runner)
         let apply = ControlRequest(
             command: .profileApply,
-            profile: .light,
+            selection: .quick(.fast),
             confirmation: true
         )
 
@@ -399,7 +399,7 @@ final class AgentCoreTests: XCTestCase {
         let store = AgentOperationStore(runner: runner)
         let request = ControlRequest(
             command: .modelPrepare,
-            profile: .quality,
+            selection: .quick(.quality),
             confirmation: true
         )
 
@@ -431,7 +431,7 @@ final class AgentCoreTests: XCTestCase {
         let store = AgentOperationStore(runner: FailureEnvelopeRunner())
         let apply = ControlRequest(
             command: .profileApply,
-            profile: .balanced,
+            selection: .quick(.quality),
             confirmation: true
         )
 
@@ -480,7 +480,7 @@ final class AgentCoreTests: XCTestCase {
 
         let result = try await ProcessManagedCommandRunner(
             locator: ManagedRuntimeLocator(appHome: root)
-        ).run(.profileApply(.quality))
+        ).run(.profileApply(.quick(.quality)))
 
         XCTAssertEqual(result.exitCode, 1)
         XCTAssertEqual(result.response?.status, .failed)
@@ -510,7 +510,7 @@ final class AgentCoreTests: XCTestCase {
 
         let result = try await ProcessManagedCommandRunner(
             locator: ManagedRuntimeLocator(appHome: root)
-        ).run(.profileApply(.quality))
+        ).run(.profileApply(.quick(.quality)))
 
         let message = try XCTUnwrap(result.message)
         XCTAssertTrue(message.contains("failed at"))
@@ -577,7 +577,7 @@ final class AgentCoreTests: XCTestCase {
         let recorder = ProgressRecorder()
         let result = try await ProcessManagedCommandRunner(
             locator: ManagedRuntimeLocator(appHome: root)
-        ).run(.modelPrepare(.quality)) { snapshot in
+        ).run(.modelPrepare(.quick(.quality))) { snapshot in
             recorder.append(snapshot)
         }
 

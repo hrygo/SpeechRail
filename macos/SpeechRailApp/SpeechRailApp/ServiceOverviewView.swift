@@ -55,8 +55,8 @@ public struct ServiceOverviewView: View {
                     value: model.controlPlaneMessage == nil ? "已响应" : "不可用"
                 )
                 Divider()
-                LabeledContent("运行档位", value: displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取")
-                LabeledContent("配置档位", value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取")
+                LabeledContent("运行档位", value: SpeechRailProfilePresentation.title(displayedHealth?.selection))
+                LabeledContent("配置档位", value: SpeechRailProfilePresentation.title(model.profile?.selection))
                 LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
                 LabeledContent("作业队列", value: displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
@@ -252,7 +252,7 @@ public struct ServiceOverviewView: View {
             Divider()
             runtimeRow(
                 "当前档位",
-                displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取"
+                SpeechRailProfilePresentation.title(displayedHealth?.selection)
             )
             Divider()
             runtimeRow("服务端口", serviceAddressText)
@@ -460,17 +460,8 @@ public struct ServiceOverviewView: View {
         if health.diarization?.configured == false {
             return ServiceCapability(
                 title: title,
-                status: health.profile == .light ? .unsupported : .notReady,
-                reason: health.profile == .light
-                    ? "这一档不标说话人。"
-                    : "当前部署没有开启「谁在说话」。"
-            )
-        }
-        if health.profile == .light {
-            return ServiceCapability(
-                title: title,
-                status: .unsupported,
-                reason: "这一档不标说话人。"
+                status: .notReady,
+                reason: "当前部署没有开启「谁在说话」。"
             )
         }
         return ServiceCapability(
@@ -638,8 +629,8 @@ public struct ServiceOverviewView: View {
             return "\(detail)。没有把旧的健康快照当作成功结果，请重新读取或打开诊断。"
         }
         if profileMismatch,
-           let configured = model.profile?.preset,
-           let runtime = displayedHealth?.profile
+           let configured = model.profile?.selection,
+           let runtime = displayedHealth?.selection
         {
             return "服务正在跑 \(SpeechRailProfilePresentation.shortTitle(runtime)) 这一档，"
                 + "但配置里存的是 \(SpeechRailProfilePresentation.shortTitle(configured))。"
@@ -698,8 +689,8 @@ public struct ServiceOverviewView: View {
     }
 
     private var profileMismatch: Bool {
-        guard let configured = model.profile?.preset,
-              let runtime = displayedHealth?.profile
+        guard let configured = model.profile?.selection,
+              let runtime = displayedHealth?.selection
         else { return false }
         return configured != runtime
     }

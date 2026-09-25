@@ -470,57 +470,73 @@ enum SpeechRailRuntimeStatePresentation {
 }
 
 enum SpeechRailProfilePresentation {
-    /// 侧边栏底部状态区用的是短名（`服务已就绪 · 均衡`，macOS App 设计系统 §4.1），
-    /// 卡片与取值行才用 `title` 的「档位 · 取向」写法。
+    /// 档位短名（`服务已就绪 · 品质`，macOS App 设计系统 §4.1）。
     ///
-    /// **一律给中文名**（用户 2026-09-19：「还有一些用户看不懂的词汇」）：原来这里原样
-    /// 摆着 `Extreme` / `Quality` / `Balanced` / `Light`——那是制品与 CLI 的 preset 名，中文界面里
-    /// 既读不出来也记不住，而用户在这一行要知道的只是「这台 Mac 现在处在哪一档」。
-    /// 内部键（`quality` 等）只留在开发者文档与诊断页：那里本来就是对着 CLI 看的。
-    static func shortTitle(_ profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .extreme:
-            "极致"
+    /// **一律给中文名**（用户 2026-09-19：「还有一些用户看不懂的词汇」）：`fast`/`quality`/
+    /// `reference` 是制品与 CLI 的档位键，中文界面里直接摆出来既读不出来也记不住，
+    /// 而用户在这一行要知道的只是「这台 Mac 现在处在哪一档」。内部键只留在开发者文档
+    /// 与诊断页：那里本来就是对着 CLI 看的。
+    static func shortTitle(_ tier: SpeechRailProfile) -> String {
+        switch tier {
+        case .fast:
+            "轻快"
         case .quality:
-            "精准"
-        case .balanced:
-            "均衡"
-        case .light:
-            "轻量"
+            "品质"
+        case .reference:
+            "参考"
         case .unrecognized:
             "未识别的档位"
         }
     }
 
-    static func title(_ profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .extreme:
-            "极致 · 更高权重精度"
+    static func title(_ tier: SpeechRailProfile) -> String {
+        switch tier {
+        case .fast:
+            "轻快 · 模型文件较小"
         case .quality:
-            "精准 · 支持音色创作"
-        case .balanced:
-            "均衡 · 日常使用"
-        case .light:
-            "轻量 · 模型文件较小"
+            "品质 · 日常使用"
+        case .reference:
+            "参考 · 更高权重精度"
         case .unrecognized:
             "未识别的档位"
         }
     }
 
     /// 档位卡上那句「这一档对用户意味着什么」；效果对比尚无证据时不按权重精度推断质量。
-    static func purpose(_ profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .extreme:
-            "使用更高精度的模型，支持音色创作和克隆；识别、配音效果与速度尚未完成对比验证。"
+    static func purpose(_ tier: SpeechRailProfile) -> String {
+        switch tier {
+        case .fast:
+            "使用较小的模型文件，加载更快；识别与配音的实际差异尚未完成对比验证。"
         case .quality:
-            "支持音色创作和克隆；与「极致」的实际效果差异尚未完成对比验证。"
-        case .balanced:
-            "支持区分说话人，适合日常识别与配音。"
-        case .light:
-            "使用较小的模型文件；不区分说话人，也不能创作音色。"
+            "默认档位，识别与配音共用同一档；实际效果差异尚未完成对比验证。"
+        case .reference:
+            "使用更高精度的权重，占用更多内存；识别与配音的实际差异尚未完成对比验证。"
         case .unrecognized:
             "服务返回了 App 尚不认识的档位；请更新 App 后再管理模型。"
         }
+    }
+
+    /// 一对独立规格的短标签：两档相同只写一个档位名，不同则分别标出识别与配音。
+    static func shortTitle(_ selection: SpecSelection?) -> String {
+        guard let selection else { return "档位未读取" }
+        if let quick = selection.quickTier {
+            return shortTitle(quick)
+        }
+        return "识别\(shortTitle(selection.asrSpec)) · 配音\(shortTitle(selection.ttsSpec))"
+    }
+
+    static func title(_ selection: SpecSelection?) -> String {
+        guard let selection else { return "未读取" }
+        if let quick = selection.quickTier {
+            return title(quick)
+        }
+        return "识别\(title(selection.asrSpec)) · 配音\(title(selection.ttsSpec))"
+    }
+
+    /// 诊断页与开发者文档用的原始键（对着 CLI 看的那种）。
+    static func label(_ selection: SpecSelection?) -> String {
+        guard let selection else { return "未配置" }
+        return selection.wireValue
     }
 }
 

@@ -14,6 +14,8 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         var appends: [(sequence: Int, text: String)] = []
         var finishes: [Int] = []
         var cancels = 0
+        var epochs: [Int] = []
+        var events: [String] = []
         var played: [Data] = []
         var outcomes: [(generation: Int, outcome: AssistantTTSStreamCoordinator.Outcome)] = []
     }
@@ -50,8 +52,9 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             recorder.finishes.append(lastSequence)
         }
         coordinator.sendCancel = { recorder.cancels += 1 }
-        coordinator.enqueuePlayback = { pcm in
+        coordinator.enqueuePlayback = { pcm, epoch in
             recorder.played.append(pcm)
+            recorder.epochs.append(epoch)
             return true
         }
         coordinator.stopPlayback = {}
@@ -157,7 +160,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             pcm: Data([1, 2, 3, 4])
         )
 
-        coordinator.notePlaybackCompleted(samples: 2)
+        coordinator.notePlaybackCompleted(samples: 2, epoch: 4)
         XCTAssertTrue(coordinator.isDrained)
         XCTAssertTrue(recorder.outcomes.isEmpty, "只是暂时排空，不能宣布整轮结束")
 
@@ -181,7 +184,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.isAwaitingPlayback)
         XCTAssertTrue(recorder.outcomes.isEmpty)
 
-        coordinator.notePlaybackCompleted(samples: 3)
+        coordinator.notePlaybackCompleted(samples: 3, epoch: 5)
         XCTAssertEqual(recorder.outcomes.count, 1, "整轮只在音频真的播完之后收束一次")
         XCTAssertEqual(recorder.outcomes.first?.outcome, .completed)
     }
@@ -283,5 +286,97 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.queuedSamples, 0)
         XCTAssertTrue(recorder.outcomes.isEmpty)
         XCTAssertEqual(recorder.cancels, 0, "断线/设备重建只作废本地状态，不发网络命令")
+    }
+
+    /// 一个可以卡住/放行的屏障：用来观察"停播"与"网络取消"的先后，不碰真实音频设备。
+    @MainActor
+    private final class Gate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private(set) var entered = false
+        private var released = false
+
+        func enter() async {
+            entered = true
+            guard !released else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release() {
+            released = true
+            let pending = continuation
+            continuation = nil
+            pending?.resume()
+        }
+    }
+
+    func testCancelWaitsForThePlaybackStopBarrierBeforeCancellingTheServer() async throws {
+        let (coordinator, recorder) = makeHarness()
+        let gate = Gate()
+        coordinator.stopPlayback = {
+            recorder.events.append("stop-entered")
+            await gate.enter()
+            recorder.events.append("stop-finished")
+        }
+        coordinator.sendCancel = {
+            recorder.cancels += 1
+            recorder.events.append("server-cancel")
+        }
+        try await coordinator.begin(generation: 20, requestID: "req-20")
+
+        let cancel = Task { @MainActor in await coordinator.cancel() }
+        await waitUntil({ gate.entered }, message: "取消没有先进入停播屏障")
+
+        XCTAssertEqual(recorder.cancels, 0, "停播屏障没落地之前不许发网络取消")
+        gate.release()
+        await cancel.value
+
+        let stopped = try XCTUnwrap(recorder.events.firstIndex(of: "stop-finished"))
+        let cancelled = try XCTUnwrap(recorder.events.firstIndex(of: "server-cancel"))
+        XCTAssertLessThan(stopped, cancelled, "停播屏障必须先于网络取消")
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.cancelled])
+        XCTAssertFalse(coordinator.isActive)
+    }
+
+    func testLatePlaybackCompletionFromAnEarlierEpochCannotTouchTheNewLedger() async throws {
+        let (coordinator, recorder) = makeHarness()
+        try await coordinator.begin(generation: 30, requestID: "req-30")
+        await coordinator.handleAudio(requestID: "req-30", pcm: Data([1, 2, 3, 4]))
+        XCTAssertEqual(recorder.epochs, [30], "入队时就要把这一代的身份交给播放层")
+        XCTAssertEqual(coordinator.queuedSamples, 2)
+
+        // 新一轮开始，而上一轮的最后一块还在路上。
+        try await coordinator.begin(generation: 31, requestID: "req-31")
+        await coordinator.handleAudio(requestID: "req-31", pcm: Data([1, 2, 3, 4]))
+        XCTAssertEqual(recorder.epochs, [30, 31])
+        XCTAssertEqual(coordinator.queuedSamples, 2)
+
+        coordinator.notePlaybackCompleted(samples: 2, epoch: 30)
+        XCTAssertEqual(coordinator.queuedSamples, 2, "上一代迟到的 dataRendered 不许动新一代的账本")
+
+        coordinator.notePlaybackCompleted(samples: 2, epoch: 31)
+        XCTAssertEqual(coordinator.queuedSamples, 0, "本代的 dataRendered 才归还本代的预算")
+    }
+
+    func testCancelDoesNotRestoreAudioWhenTheServerCancelHangs() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(30)
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        coordinator.sendCancel = { try await Task.sleep(for: .seconds(30)) }
+        try await coordinator.begin(generation: 40, requestID: "req-40")
+        await coordinator.handleAudio(requestID: "req-40", pcm: Data([1, 2, 3, 4]))
+
+        let startedAt = ContinuousClock().now
+        await coordinator.cancel()
+
+        XCTAssertLessThan(
+            startedAt.duration(to: ContinuousClock().now),
+            .seconds(1),
+            "后端取消不回话时，本地取消不能一直吊着"
+        )
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.cancelled])
+        XCTAssertFalse(coordinator.isActive)
+
+        await coordinator.handleAudio(requestID: "req-40", pcm: Data([5, 6, 7, 8]))
+        XCTAssertEqual(recorder.played.count, 1, "取消失败或超时都不许把旧音放回来")
     }
 }

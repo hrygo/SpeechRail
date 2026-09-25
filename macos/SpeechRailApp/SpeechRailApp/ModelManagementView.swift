@@ -8,7 +8,7 @@ public struct ModelManagementView: View {
     @Environment(AssistantSession.self) private var assistant
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
-    @State private var selectedProfile: SpeechRailProfile = .balanced
+    @State private var selectedProfile: SpeechRailProfile = .quality
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
 
@@ -44,11 +44,11 @@ public struct ModelManagementView: View {
                     Task {
                         switch action {
                         case .download:
-                            await model.prepareModels(for: selectedProfile)
+                            await model.prepareModels(.quick(selectedProfile))
                         case .apply:
                             // 确认对话框可能在助手开始说话后才被按下；这里再挡一次。
                             guard !assistant.phase.isLive else { return }
-                            await model.execute(.profileApply, profile: selectedProfile)
+                            await model.execute(.profileApply, selection: .quick(selectedProfile))
                         }
                     }
                 }
@@ -60,17 +60,17 @@ public struct ModelManagementView: View {
         .task {
             model.refreshControlAgentStatus()
             await model.refreshModelsAndHealth()
-            if let active = model.operation?.profile ?? model.profile?.preset {
-                selectedProfile = active
+            if let active = model.operation?.selection ?? model.profile?.selection {
+                selectedProfile = active.quickTier ?? active.ttsSpec
             }
             selectFirstArtifactIfNeeded()
         }
-        .onChange(of: model.profile?.preset) { _, value in
-            if let value { selectedProfile = value }
+        .onChange(of: model.profile?.selection) { _, value in
+            if let value { selectedProfile = value.quickTier ?? value.ttsSpec }
         }
-        .onChange(of: model.operation?.profile) { _, value in
-            if let value, availableProfiles.contains(value) {
-                selectedProfile = value
+        .onChange(of: model.operation?.selection) { _, value in
+            if let quick = value?.quickTier, availableProfiles.contains(quick) {
+                selectedProfile = quick
             }
         }
         .onChange(of: selectedProfile) { _, _ in
@@ -153,8 +153,8 @@ public struct ModelManagementView: View {
     private var profileCards: some View {
         let profiles = availableProfiles
         let cardMinimumWidth = SpeechRailDesignTokens.Layout.modelProfileCardMinimumWidth
-        let rowMinimumWidth = profiles.count == 4
-            ? SpeechRailDesignTokens.Layout.modelProfileCardsFourColumnBreakpoint
+        let rowMinimumWidth = profiles.count == SpeechRailProfile.allCases.count
+            ? SpeechRailDesignTokens.Layout.modelProfileCardsRowBreakpoint
             : cardMinimumWidth * CGFloat(profiles.count)
                 + SpeechRailDesignTokens.Spacing.sm * CGFloat(max(0, profiles.count - 1))
         let twoColumnGrid = [
@@ -199,7 +199,7 @@ public struct ModelManagementView: View {
                 },
                 specs: profileSpecs(for: profile),
                 isSelected: selectedProfile == profile,
-                isRunning: currentServiceProfile == profile
+                isRunning: currentServiceProfile == .quick(profile)
             ) {
                 selectedProfile = profile
             }
@@ -216,7 +216,7 @@ public struct ModelManagementView: View {
                 value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"
             ),
             ProfileSpec(label: "音色创作", value: voiceCreationSupport(for: summary)),
-            ProfileSpec(label: "识别与配音", value: profile == .extreme ? "效果待验证" : "已有档位"),
+            ProfileSpec(label: "识别与配音", value: profile == .reference ? "效果待验证" : "已有档位"),
         ]
     }
 
@@ -267,14 +267,14 @@ public struct ModelManagementView: View {
             profileContextValue(
                 title: "当前服务",
                 value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取",
-                tone: currentServiceProfile == selectedProfile ? .healthy : .attention
+                tone: currentServiceProfile == .quick(selectedProfile) ? .healthy : .attention
             )
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
             profileContextValue(
                 title: "配置档位",
                 value: configuredProfile.map { profileTitle(for: $0) } ?? "未配置",
-                tone: configuredProfile == selectedProfile ? .healthy : .attention
+                tone: configuredProfile == .quick(selectedProfile) ? .healthy : .attention
             )
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
@@ -682,17 +682,17 @@ public struct ModelManagementView: View {
     /// `/health` is the source of truth for the profile the running service is
     /// actually using. The XPC profile snapshot remains useful as the desired
     /// configuration, but must not be presented as a running-state fact.
-    private var currentServiceProfile: SpeechRailProfile? {
+    private var currentServiceProfile: SpecSelection? {
         guard model.healthFailure == nil else { return nil }
-        return model.health?.profile
+        return model.health?.selection
     }
 
     private var availableProfiles: [SpeechRailProfile] {
         model.modelCatalog?.selectableProfiles ?? []
     }
 
-    private var configuredProfile: SpeechRailProfile? {
-        model.profile?.preset
+    private var configuredProfile: SpecSelection? {
+        model.profile?.selection
     }
 
     private var profileContextAccessibilityValue: String {
@@ -857,8 +857,8 @@ public struct ModelManagementView: View {
             )
         }
 
-        if currentServiceProfile == selectedProfile,
-           configuredProfile == selectedProfile
+        if currentServiceProfile == .quick(selectedProfile),
+           configuredProfile == .quick(selectedProfile)
         {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.seal.fill",
@@ -867,7 +867,7 @@ public struct ModelManagementView: View {
                 detail: "配置与运行是同一档；模型按需加载，空闲后自动释放内存。"
             )
         }
-        if currentServiceProfile == selectedProfile {
+        if currentServiceProfile == .quick(selectedProfile) {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.circle",
                 tone: .healthy,
@@ -932,19 +932,27 @@ public struct ModelManagementView: View {
                 tone: .neutral
             )
         }
-        guard let runtimeProfile = health.profile else {
+        guard let runtimeSelection = health.selection else {
             return ModelArtifactUsagePresentation(
                 text: "运行档位未读取",
                 tone: .neutral
             )
         }
-        if let configuredProfile, configuredProfile != runtimeProfile {
+        if let configuredProfile, configuredProfile != runtimeSelection {
             return ModelArtifactUsagePresentation(
                 text: "配置档位与运行时不一致 · 当前服务未确认使用",
                 tone: .critical
             )
         }
-        guard let activeSummary = summary(for: runtimeProfile) else {
+        let asrSummary = summary(for: runtimeSelection.asrSpec)
+        let ttsSummary = summary(for: runtimeSelection.ttsSpec)
+        let asrBinding = asrSummary?.asr
+        let ttsBinding = ttsSummary?.tts
+        let cloneBinding = ttsSummary?.ttsClone
+        let alignerBinding = asrSummary?.aligner ?? ttsSummary?.aligner
+        let diarizationConfigured = (asrSummary?.diarization ?? false)
+            || (ttsSummary?.diarization ?? false)
+        guard asrBinding != nil || ttsBinding != nil else {
             return ModelArtifactUsagePresentation(
                 text: "当前服务档位模型映射未读取",
                 tone: .neutral
@@ -963,28 +971,27 @@ public struct ModelManagementView: View {
             )
         }
 
-        if key == activeSummary.asr {
+        if key == asrBinding {
             return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · ASR",
+                label: "当前服务 · " + profileTitle(for: runtimeSelection) + " · ASR",
                 ready: health.asrReady,
                 state: health.asrState
             )
         }
-        if key == activeSummary.tts {
+        if key == ttsBinding {
             return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · TTS",
+                label: "当前服务 · " + profileTitle(for: runtimeSelection) + " · TTS",
                 ready: health.ttsReady,
                 state: health.ttsState
             )
         }
-        if key == activeSummary.ttsClone {
+        if key == cloneBinding {
             return cloneRuntimeUsage(
-                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · 克隆 TTS",
+                label: "当前服务 · " + profileTitle(for: runtimeSelection) + " · 克隆 TTS",
                 health: health
             )
         }
-        if activeSummary.diarization,
-           key == activeSummary.aligner || key == "diarization-coreml" {
+        if diarizationConfigured, key == alignerBinding || key == "diarization-coreml" {
             let ready = health.diarization?.ready ?? health.diarizationReady
             guard let ready else {
                 return ModelArtifactUsagePresentation(
@@ -1139,8 +1146,8 @@ public struct ModelManagementView: View {
 
     private func selectAvailableProfileIfNeeded() {
         guard !availableProfiles.contains(selectedProfile) else { return }
-        if availableProfiles.contains(.balanced) {
-            selectedProfile = .balanced
+        if availableProfiles.contains(.quality) {
+            selectedProfile = .quality
         } else if let first = availableProfiles.first {
             selectedProfile = first
         }
@@ -1175,7 +1182,7 @@ public struct ModelManagementView: View {
             details.append("当前可用磁盘空间 \(formatBytes(freeBytes))")
         }
         details.append("已校验的模型文件不会重下，首次加载可能更久，其他档位模型不会删除")
-        if selectedProfile == .extreme {
+        if selectedProfile == .reference {
             details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
         }
         return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。"
@@ -1213,6 +1220,10 @@ public struct ModelManagementView: View {
 
     private func profileTitle(for profile: SpeechRailProfile) -> String {
         SpeechRailProfilePresentation.title(profile)
+    }
+
+    private func profileTitle(for selection: SpecSelection) -> String {
+        SpeechRailProfilePresentation.title(selection)
     }
 
     private func profilePurpose(for profile: SpeechRailProfile) -> String {

@@ -239,6 +239,18 @@ public final class AppModel {
         return state == .accepted || state == .running
     }
 
+    /// 会话占用时的切档拦截原因（识别中 / 朗读中 / 制作中）。
+    ///
+    /// 由 App 装配层注入：会话进行中切档会重启本地服务并丢开正在跑的模型，
+    /// 所以这里**排队而不是偷偷热切**，并且要给出「下一步做什么」。
+    /// `nil` 表示现在可以切。
+    public var sessionActivity: (@MainActor () -> String?)?
+
+    /// 当前是否被会话占用挡住切档；挡住时返回给用户的那句人话。
+    public var profileSwitchBlockedReason: String? {
+        sessionActivity?()
+    }
+
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
     private let capabilityClient: any ServiceModelCapabilityClient
@@ -1306,12 +1318,13 @@ public final class AppModel {
         defer { isCreatingSpeech = false }
 
         do {
-            let data = try await creatorClient.createSpeech(
+            let render = try await creatorClient.createSpeechRender(
                 text: scriptText,
                 voiceID: voice.id,
                 speed: speed,
                 options: speechRequestOptions(for: voice)
             )
+            let data = render.audioData
             try Task.checkCancellation()
             let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             let work = CreativeWork(
@@ -1322,6 +1335,15 @@ public final class AppModel {
                 scriptText: scriptText,
                 voiceID: voice.id,
                 voiceName: voice.name,
+                // 这一次渲染固定下来的身份：音色 revision 与 plan。
+                // 之后全局默认怎么变，这份作品都指向当时的那一版；
+                // 想换到新 plan 只能由用户显式重做，产生新的 render revision。
+                voiceRevision: render.voiceRevision,
+                planID: render.planID,
+                renderRevision: (try? workStore.nextRenderRevision(
+                    scriptText: scriptText,
+                    voiceID: voice.id
+                )) ?? 1,
                 durationSeconds: audioPlaybackController.duration(for: data),
                 audioFileName: "\(workID).wav"
             )
@@ -1870,8 +1892,9 @@ public final class AppModel {
         }
     }
 
-    public func prepareModels(for profile: SpeechRailProfile) async {
-        await execute(.modelPrepare, profile: profile)
+    /// 下载并校验一对规格要用的制品；不改变服务运行态。
+    public func prepareModels(_ selection: SpecSelection) async {
+        await execute(.modelPrepare, selection: selection)
     }
 
     public func cancelCurrentOperation() async {
@@ -1924,7 +1947,7 @@ public final class AppModel {
 
     public func execute(
         _ command: ControlCommand,
-        profile selectedProfile: SpeechRailProfile? = nil
+        selection: SpecSelection? = nil
     ) async {
         guard !isBusy else { return }
         guard canExecuteMutation(for: command) else { return }
@@ -1947,7 +1970,7 @@ public final class AppModel {
             let response = try await transport.send(
                 ControlRequest(
                     command: command,
-                    profile: selectedProfile,
+                    selection: selection,
                     confirmation: command.requiresConfirmation
                 )
             )
@@ -2332,6 +2355,10 @@ public final class AppModel {
         refreshControlAgentStatus()
         if command != .operationCancel && hasActiveMutation {
             setMessage("已有操作正在进行，请等待当前操作完成。", generation: messageGeneration)
+            return false
+        }
+        if command == .profileApply, let reason = sessionActivity?() {
+            setMessage(reason, generation: messageGeneration)
             return false
         }
         guard controlAgentStatus.allowsMutation else {

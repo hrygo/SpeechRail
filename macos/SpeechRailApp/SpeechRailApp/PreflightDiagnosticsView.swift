@@ -62,8 +62,8 @@ public struct PreflightDiagnosticsView: View {
                     title: "诊断上下文",
                     detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
                 )
-                LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
-                LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
+                LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
+                LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
                 LabeledContent("服务状态", value: model.service.serviceState)
                 LabeledContent("检查数量", value: String(model.preflightChecks.count))
                 if let selectedCheck {
@@ -356,8 +356,8 @@ public struct PreflightDiagnosticsView: View {
                         if isModelRelatedCheck(selectedCheck) {
                             modelEvidenceRows
                         }
-                        LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
-                        LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
+                        LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
+                        LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
                         LabeledContent("服务状态", value: model.service.serviceState)
                     }
                     .font(SpeechRailDesignTokens.Typography.technical)
@@ -748,8 +748,8 @@ public struct PreflightDiagnosticsView: View {
             return "service_context: 按设置省略（运行档位、配置档位、服务状态、健康结果）"
         }
         return """
-        runtime_profile: \(displayedHealth?.profile?.rawValue ?? "未读取")
-        configured_profile: \(model.profile?.preset?.rawValue ?? "未配置")
+        runtime_profile: \(displayedHealth?.profile ?? "未读取")
+        configured_profile: \(SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
         service_state: \(safeIdentifier(model.service.serviceState))
         health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
         health_failure: \(healthFailureSummary)

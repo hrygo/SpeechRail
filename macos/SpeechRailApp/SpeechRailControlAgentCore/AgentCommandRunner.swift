@@ -13,11 +13,11 @@ public enum ManagedCommand: Equatable, Sendable {
     case service(ManagedServiceCommand)
     case profileList
     case profileStatus
-    case profileApply(SpeechRailProfile)
+    case profileApply(SpecSelection)
     case profileRollback
     case modelCatalog
     case modelStatus
-    case modelPrepare(SpeechRailProfile)
+    case modelPrepare(SpecSelection)
 
     public var controlCommand: ControlCommand {
         switch self {
@@ -51,9 +51,12 @@ public enum ManagedCommand: Equatable, Sendable {
             return commandPrefix + ["profile", "list", "--app-home", home, "--json"]
         case .profileStatus:
             return commandPrefix + ["profile", "status", "--app-home", home, "--json"]
-        case let .profileApply(profile):
+        case let .profileApply(selection):
             return commandPrefix + [
-                "profile", "apply", profile.rawValue, "--yes", "--app-home", home, "--json",
+                "profile", "apply",
+                "--asr-spec", selection.asrSpec.rawValue,
+                "--tts-spec", selection.ttsSpec.rawValue,
+                "--yes", "--app-home", home, "--json",
             ]
         case .profileRollback:
             return commandPrefix + [
@@ -63,9 +66,12 @@ public enum ManagedCommand: Equatable, Sendable {
             return commandPrefix + ["model", "catalog", "--app-home", home, "--json"]
         case .modelStatus:
             return commandPrefix + ["model", "status", "--app-home", home, "--json"]
-        case let .modelPrepare(profile):
+        case let .modelPrepare(selection):
             return commandPrefix + [
-                "model", "prepare", profile.rawValue, "--yes", "--app-home", home, "--json",
+                "model", "prepare",
+                "--asr-spec", selection.asrSpec.rawValue,
+                "--tts-spec", selection.ttsSpec.rawValue,
+                "--yes", "--app-home", home, "--json",
             ]
         }
     }
@@ -406,7 +412,8 @@ private struct CLIEnvelope: Decodable {
     let message: String?
     let serviceState: String?
     let operationID: String?
-    let preset: String?
+    let asrSpec: String?
+    let ttsSpec: String?
     let generation: Int?
     let asr: String?
     let tts: String?
@@ -426,7 +433,8 @@ private struct CLIEnvelope: Decodable {
         case message
         case serviceState = "service_state"
         case operationID = "operation_id"
-        case preset
+        case asrSpec = "asr_spec"
+        case ttsSpec = "tts_spec"
         case generation
         case asr
         case tts
@@ -620,12 +628,16 @@ private enum CLIOutputDecoder {
             )
         }
         let profile: ProfileSnapshot?
-        if envelope.preset != nil || envelope.generation != nil || envelope.asr != nil || envelope.tts != nil {
-            let preset = envelope.preset.map {
-                SpeechRailProfile(rawValue: $0) ?? .unrecognized($0)
-            }
+        if envelope.asrSpec != nil || envelope.ttsSpec != nil
+            || envelope.generation != nil || envelope.asr != nil || envelope.tts != nil
+        {
             profile = ProfileSnapshot(
-                preset: preset,
+                asrSpec: envelope.asrSpec.map {
+                    SpeechRailProfile(rawValue: $0) ?? .unrecognized($0)
+                },
+                ttsSpec: envelope.ttsSpec.map {
+                    SpeechRailProfile(rawValue: $0) ?? .unrecognized($0)
+                },
                 generation: envelope.generation,
                 asr: envelope.asr,
                 tts: envelope.tts

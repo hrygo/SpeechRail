@@ -314,12 +314,12 @@ public struct ControlMenuView: View {
     }
 
     private var profileText: String {
-        guard model.healthFailure == nil, let profile = model.health?.profile else {
+        guard model.healthFailure == nil, let selection = model.health?.selection else {
             return "档位未读取"
         }
         // 状态行要的是当前档位短名（REDESIGN-SPEC §7.9、macOS App 设计系统 §4.1）。
         // 完整用途说明只放档位卡与选择后的详情中。
-        return SpeechRailProfilePresentation.shortTitle(profile)
+        return SpeechRailProfilePresentation.shortTitle(selection)
     }
 
     private var statusSummary: String {

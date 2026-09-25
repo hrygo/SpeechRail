@@ -367,9 +367,8 @@ public final class MeetingSession {
         }
         gapCount = 0
 
-        // 分人：档位给不出时**不声明**，并如实写一句（§14.3 的档位门禁）。
-        let gateNote = SessionPreferences.diarizationGateNote(for: profile)
-        let wantsDiarization = (preferences?.meetingDiarizationEnabled ?? false) && gateNote == nil
+        // 分人现在是任务级 opt-in：按用户开关声明，服务端不可用时如实回报失败。
+        let wantsDiarization = preferences?.meetingDiarizationEnabled ?? false
 
         let client = RealtimeASRClient(
             port: port,
@@ -392,8 +391,8 @@ public final class MeetingSession {
                     kind: .meeting,
                     engineProfile: profile,
                     audioSource: selection.resolvedSource,
-                    diarization: wantsDiarization ? .active : (gateNote == nil ? .off : .unavailable),
-                    diarizationNote: gateNote,
+                    diarization: wantsDiarization ? .active : .off,
+                    diarizationNote: nil,
                     llmEndpoint: minutesConfiguration?.normalizedBaseURL,
                     llmModel: minutesConfiguration?.model
                 )
@@ -414,7 +413,7 @@ public final class MeetingSession {
             interruptedAt = nil
             interruptionNote = nil
         }
-        configureLabeling(sessionID: sessionID, enabled: wantsDiarization, gateNote: gateNote)
+        configureLabeling(sessionID: sessionID, enabled: wantsDiarization, gateNote: nil)
 
         epoch += 1
         commitCursor = Date()

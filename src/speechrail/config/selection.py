@@ -149,6 +149,21 @@ def _require_directory(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _optional_directory(path: Path) -> Path | None:
+    """Return a present, non-staging snapshot directory, or ``None`` when absent.
+
+    Opt-in artifacts (the VoiceDesign snapshot) may not be prepared yet.  Their
+    absence must degrade the published capability set rather than fail the whole
+    selection, so the advertised capabilities always match what is on disk and
+    a prepared ASR/TTS/Base set can still activate.
+    """
+
+    resolved = path.resolve()
+    if ".staging" in resolved.parts:
+        raise SelectionError("staging models cannot be used as active selection")
+    return resolved if resolved.is_dir() else None
+
+
 def resolve_selection(
     settings: Settings,
     selection: Mapping[str, object] | None,
@@ -201,7 +216,7 @@ def resolve_selection(
         else None
     )
     design_dir = (
-        _require_directory(models_dir / voice_design.key, label="TTS design model")
+        _optional_directory(models_dir / voice_design.key)
         if voice_design is not None
         else None
     )
@@ -227,7 +242,7 @@ def resolve_selection(
         "tts_artifact_key": tts.key,
         "tts_base_artifact_key": tts_base.key if tts_base is not None else None,
         "voice_design_artifact_key": (
-            voice_design.key if voice_design is not None else None
+            voice_design.key if design_dir is not None else None
         ),
         "alignment_artifact_key": None,
     }
