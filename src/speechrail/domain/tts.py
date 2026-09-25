@@ -26,12 +26,17 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from speechrail.config.model_catalog import ModelRole
 from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
 from speechrail.domain.voice_validation import VoiceValidationRepository
+
+if TYPE_CHECKING:
+    # Plan roles are catalog vocabulary.  Importing them for real would make
+    # ``speechrail.domain.tts`` pull in the ``speechrail.config`` package, which
+    # in turn imports this module, so the annotation stays type-only.
+    from speechrail.config.model_catalog import ModelRole
 
 logger = logging.getLogger(__name__)
 

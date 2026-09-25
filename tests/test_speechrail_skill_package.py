@@ -15,7 +15,10 @@ def test_packaged_speechrail_skill_covers_the_published_mcp_surface() -> None:
     assert len(manifest["tools"]) == 15
     assert "references/realtime.md" in manifest["references"]
     realtime = root.joinpath("references", "realtime.md").read_text(encoding="utf-8")
-    assert "speechrail.transcription.snapshot" in realtime
+    # The installed artifact must teach the current wire: one revisioned mutable
+    # hypothesis event, never the removed ``partial_mode`` snapshot event.
+    assert "speechrail.transcription.hypothesis" in realtime
+    assert "speechrail.transcription.snapshot" not in realtime
     assert set(manifest["resources"]) == {
         "speechrail://capabilities",
         "speechrail://voices",

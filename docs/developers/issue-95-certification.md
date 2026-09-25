@@ -2,7 +2,7 @@
 title: "Issue #95 交付认证方案与证据索引"
 status: draft
 audience: "SpeechRail 维护者与验收人"
-version: "0.2.1"
+version: "0.3.0"
 date: 2026-09-26
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-26
 > 与各项阈值的**建议稿**。计划要求这些数值经评审确认后才可执行；本文不自行把建议值当成通过标准，
 > 也不代表任何真实模型、性能、质量或长时稳定性已验证。授权与阈值确认前不部署、不基准、不做 UI 自动化。
 >
-> 非运行态门（代码 / 契约 / 编译 / 文档静态门）已于 2026-09-26 完成并登记在 §7.1；运行态认证
+> 非运行态门（代码 / 契约 / 编译 / 文档静态门 + 完整 pytest 套件）已于 2026-09-26 完成并登记在 §7.1；运行态认证
 > 仍未开始（§7.2、§8），P5 保持未勾选。
 
 ## 1. 认证目标与边界
@@ -144,7 +144,8 @@ date: 2026-09-26
 | 供应链（受控引擎 wheel） | 通过：固定上游 revision + overlay/patch 摘要校验，连续两次重建 byte-identical；`runtime-lock.json` 写入 `engine_wheel` pin。**未在本机安装该 wheel** | `vendor/engine-build/engine-build.json`、`src/speechrail/assets/runtime-lock.json` |
 | 制品 | 通过：catalog 装载时 `assert_target_spec_bindings()` 对 13 个 `(tier, role)` 绑定精确匹配；缺失制品按授权异步准备完成并逐文件 size / SHA-256 校验为 `verified`（准备记录与制品在仓库外） | 同上；`src/speechrail/assets/model-catalog.json` |
 | T04 owner 抽象 | `runtime/model_owner.py` 与 `tests/test_model_owner.py`（13 passed）是 T04 规格产出的 owner / lease 抽象与其 fake 验证面；生产侧「唯一 owner」由按 plan role 绑定的 TTS capability router + 进程级 drain 承担，**未接入** `application/services.py`（不做 live hot-swap） | 账本「2026-09-26 T04 收口复核 Ruling」 |
-| 交付范围 | 未运行完整 pytest 套件（仓库 addopts 强制 ≥80% 覆盖率门，计划列为需明确授权项）；未部署、未切档、未加载真实模型 | 同上 |
+| 完整回归套件 | 通过：`uv run --extra dev pytest` → **2484 passed / 1 skipped / 0 failed**，覆盖率 81.42%（≥80 门通过）；该次首次全量执行暴露的 6 项 T02/T07/T10 迁移遗漏与 1 项 `domain.tts ↔ config` 循环导入已修复并复跑全绿 | 同上 |
+| 交付范围 | 未部署、未切档、未加载真实模型；`scripts/macos_app_test.sh`（含 UI 自动化）与真实设备/播放器验收未执行 | 同上 |
 
 ### 7.2 运行态登记（待授权，尚未开始）
 
@@ -162,7 +163,8 @@ date: 2026-09-26
 - 真实模型加载、真实音频、真实 worker smoke、真实 LLM 端到端。
 - 延迟 / 质量 / 长稳 / 播放器基准。
 - `scripts/macos_app_test.sh`（含 XCUITest / UI 自动化，需逐次明确授权，会接管前台窗口与输入）。
-- 完整 pytest 套件（`uv run --extra dev pytest`，仓库 addopts 强制 ≥80% 覆盖率门）。
+
+完整 pytest 套件（`uv run --extra dev pytest`）已于 2026-09-26 执行并通过，见 §7.1；它属于非运行态门，不扩大上述运行态范围。
 
 ## 9. 需用户确认的决策点
 
