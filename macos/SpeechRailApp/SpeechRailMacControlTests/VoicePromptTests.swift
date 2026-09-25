@@ -17,7 +17,9 @@ final class VoicePromptTests: XCTestCase {
         XCTAssertTrue(contract.contains("# 输出契约"))
         XCTAssertTrue(contract.contains("# 优先级"))
         XCTAssertTrue(contract.contains("不要 markdown"))
-        XCTAssertTrue(contract.contains("普通话"))
+        XCTAssertTrue(contract.contains("跟随用户当前使用的语言"))
+        XCTAssertFalse(contract.contains("一律用普通话"))
+        XCTAssertFalse(contract.contains("只能用中文"))
     }
 
     func testStyleBlockDefersToContractAndKeepsPersona() {
