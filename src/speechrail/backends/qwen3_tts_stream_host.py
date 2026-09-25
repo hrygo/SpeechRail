@@ -325,6 +325,15 @@ class TtsStreamHost:
             frames = self._terminate(event.error_code or "tts_backend_failed")
             return HostStepResult(frames=frames, terminal=True)
         if event.kind == "finished":
+            if self._state.input_state is not TtsStreamInputState.CLOSED:
+                # The vendor driver only reports codec EOS after the text EOS
+                # embedding entered model state, so finishing early means the
+                # model and the caller disagree about the utterance boundary.
+                frames = self._terminate(
+                    "tts_backend_failed",
+                    detail="the model finished before the input was closed",
+                )
+                return HostStepResult(frames=frames, terminal=True)
             frames = self._complete()
             return HostStepResult(frames=frames, terminal=True)
         if event.kind == "waiting_for_text":
