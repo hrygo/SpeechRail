@@ -172,10 +172,10 @@ def test_qwen3_engine_reports_four_bit_snapshot_without_requantizing(
     assert engine.identity.dtype == "int8"
 
 
-def test_qwen3_engine_reports_successful_runtime_int8_quantization(
+def test_qwen3_engine_reports_eight_bit_snapshot_without_requantizing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    expected = _snapshot_identity()
+    expected = _snapshot_identity(bits=8, group_size=64)
     monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
     quantize_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -185,32 +185,37 @@ def test_qwen3_engine_reports_successful_runtime_int8_quantization(
     _install_fake_asr_runtime(
         monkeypatch,
         model_info={
-            "dtype": "float16",
+            "dtype": "int8",
             "model_type": "qwen3_asr",
             "variant": "asr",
+            "quantization_bits": 8,
+            "quantization_group_size": 64,
         },
         quantize_fn=quantize_model,
     )
 
     engine = Qwen3Engine(tmp_path, "mps", "int8")
 
-    assert quantize_calls and quantize_calls[0][1] == {"bits": 8, "group_size": 64}
+    assert quantize_calls == []
     assert engine.identity.quantization_bits == 8
     assert engine.identity.quantization_group_size == 64
+    assert engine.identity.quantization_format == "mlx"
     assert engine.identity.dtype == "int8"
 
 
-def test_qwen3_engine_rejects_runtime_int8_quantization_failure(
+def test_qwen3_engine_refuses_quantizing_bf16_into_a_q8_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A BF16 snapshot must never stand in for the certified Q8 artifact."""
+
     expected = _snapshot_identity()
     monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    quantize_calls: list[object] = []
 
     def quantize_model(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise RuntimeError("quantization failed")
+        quantize_calls.append((args, kwargs))
 
-    _install_fake_asr_runtime(
+    calls = _install_fake_asr_runtime(
         monkeypatch,
         model_info={
             "dtype": "float16",
@@ -220,8 +225,66 @@ def test_qwen3_engine_rejects_runtime_int8_quantization_failure(
         quantize_fn=quantize_model,
     )
 
-    with pytest.raises(RuntimeError, match=r"quantization|identity"):
+    with pytest.raises(RuntimeError, match="backend_quantization_unavailable"):
         Qwen3Engine(tmp_path, "mps", "int8")
+
+    assert quantize_calls == []
+    assert calls == []
+
+
+def test_qwen3_engine_maps_bfloat16_request_to_loader_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "mlx.core.bfloat16",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+        },
+    )
+
+    engine = Qwen3Engine(tmp_path, "mps", "bfloat16")
+
+    assert engine.identity.dtype == "bfloat16"
+    assert engine.identity.compute_dtype == "bfloat16"
+    assert engine.identity.compute_config == "mps"
+    assert engine.identity.quantization_format == "none"
+    assert engine.identity.quantization_bits is None
+
+
+def test_qwen3_engine_requires_a_loader_dtype_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fallback inference: an unreported dtype fails closed instead of guessing."""
+
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={"model_type": "qwen3_asr", "variant": "asr"},
+    )
+
+    with pytest.raises(RuntimeError, match="loader reported no dtype"):
+        Qwen3Engine(tmp_path, "mps", "float16")
+
+
+def test_qwen3_engine_rejects_a_loader_dtype_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "bfloat16",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="loader reported"):
+        Qwen3Engine(tmp_path, "mps", "float16")
+
 
 
 def test_qwen3_engine_rejects_loader_variant_mismatch(
@@ -407,6 +470,11 @@ def test_worker_ready_reports_model_identity_without_relabeling_four_bit() -> No
     engine.identity = WorkerIdentity(
         device="mps",
         dtype="int8",
+        compute_dtype="bfloat16",
+        compute_config="mps",
+        quantization_format="affine",
+        engine_revision="0.3.5",
+        codec_dtype="float32",
         family="qwen3_asr",
         model_variant="asr",
         quantization_bits=4,
@@ -426,8 +494,13 @@ def test_worker_ready_reports_model_identity_without_relabeling_four_bit() -> No
         "model_loaded": True,
         "family": "qwen3_asr",
         "model_variant": "asr",
+        "compute_dtype": "bfloat16",
+        "compute_config": "mps",
+        "quantization_format": "affine",
         "quantization_bits": 4,
         "quantization_group_size": 64,
+        "engine_revision": "0.3.5",
+        "codec_dtype": "float32",
         "weight_fingerprint": "shape:" + ("b" * 64),
     }
 
@@ -437,6 +510,9 @@ def test_worker_rejects_ready_identity_metadata_mismatch() -> None:
     engine.identity = WorkerIdentity(
         device="mps",
         dtype="int8",
+        compute_dtype="bfloat16",
+        compute_config="mps",
+        quantization_format="affine",
         family="qwen3_tts",
         model_variant="voice_design",
         quantization_bits=8,
@@ -1057,73 +1133,43 @@ def test_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> No
     assert snapshot_is_quantized(malformed) is False
 
 
-def test_resolve_engine_dtype_is_honest_about_in_memory_quantize_failure() -> None:
-    """A failed in-memory int8 request must not be labelled int8.
+def test_resolve_engine_dtype_never_guesses_or_fakes_a_q8_artifact() -> None:
+    """Strict dtype resolution: no device-default fallback, no in-memory Q8."""
 
-    The identity reports the precision the model actually loaded (fail-closed on
-    truth), so an unachievable int8 request surfaces as ``backend_identity_mismatch``
-    instead of silently running fp16 under an int8 label.
-    """
     from speechrail.backends.qwen3_worker import _resolve_engine_dtype
 
-    default = "float16"
-
-    # Pre-quantized snapshot is reliably int8.
+    # A pre-quantized snapshot is int8 because of the artifact itself.
     assert (
         _resolve_engine_dtype(
-            snapshot_quantized=True,
-            requested_dtype="float16",
-            loaded_dtype="bfloat16",
-            default_dtype=default,
-            quantize_raised=False,
+            snapshot_quantized=True, requested_dtype="int8", loaded_dtype="int8"
         )
         == "int8"
     )
 
-    # Requested int8 that did not raise: trust the vendor API contract.
+    # A BF16 request maps to the engine report, including the MLX dtype prefix.
     assert (
         _resolve_engine_dtype(
             snapshot_quantized=False,
-            requested_dtype="int8",
-            loaded_dtype="bfloat16",
-            default_dtype=default,
-            quantize_raised=False,
-        )
-        == "int8"
-    )
-
-    # Requested int8 that raised: report what actually loaded, not the intent.
-    assert (
-        _resolve_engine_dtype(
-            snapshot_quantized=False,
-            requested_dtype="int8",
-            loaded_dtype="float16",
-            default_dtype=default,
-            quantize_raised=True,
-        )
-        == "float16"
-    )
-
-    # Non-int8 request on a non-quantized snapshot: report the loaded precision.
-    assert (
-        _resolve_engine_dtype(
-            snapshot_quantized=False,
-            requested_dtype="float16",
-            loaded_dtype="bfloat16",
-            default_dtype=default,
-            quantize_raised=False,
+            requested_dtype="bfloat16",
+            loaded_dtype="mlx.core.bfloat16",
         )
         == "bfloat16"
     )
 
-    # A bare default (no loaded dtype reported) falls back to the device default.
-    assert (
+    # An unreported dtype fails closed instead of claiming the device default.
+    with pytest.raises(RuntimeError, match="loader reported no dtype"):
         _resolve_engine_dtype(
-            snapshot_quantized=False,
-            requested_dtype="float16",
-            loaded_dtype="",
-            default_dtype=default,
-            quantize_raised=False,
+            snapshot_quantized=False, requested_dtype="float16", loaded_dtype=None
         )
-        == "float16"
-    )
+
+    # A disagreeing report fails closed instead of being relabeled.
+    with pytest.raises(RuntimeError, match="loader reported"):
+        _resolve_engine_dtype(
+            snapshot_quantized=False, requested_dtype="float16", loaded_dtype="bfloat16"
+        )
+
+    # BF16 weights are never quantized in memory to impersonate the certified artifact.
+    with pytest.raises(RuntimeError, match="backend_quantization_unavailable"):
+        _resolve_engine_dtype(
+            snapshot_quantized=False, requested_dtype="int8", loaded_dtype="float16"
+        )

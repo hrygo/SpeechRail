@@ -12,7 +12,7 @@ import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Final, Protocol
 
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
 from speechrail.config.model_catalog import QuantizationSpec
@@ -97,28 +97,90 @@ def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
     return min(cap, max(32, int(audio_sec * 6) + 24))
 
 
+_ENGINE_DTYPE_ALIASES: Final = {
+    "float16": "float16",
+    "fp16": "float16",
+    "f16": "float16",
+    "float32": "float32",
+    "fp32": "float32",
+    "f32": "float32",
+    "bfloat16": "bfloat16",
+    "bf16": "bfloat16",
+    "int8": "int8",
+}
+_WEIGHT_DTYPE_ALIASES: Final = {
+    "BF16": "bfloat16",
+    "F16": "float16",
+    "F32": "float32",
+}
+_ENGINE_DTYPE_VALUES: Final = frozenset(_ENGINE_DTYPE_ALIASES.values())
+_NON_QUANTIZED_DTYPE_VALUES: Final = frozenset({"float16", "float32", "bfloat16"})
+_QUANTIZATION_FORMATS: Final = frozenset({"none", "affine", "mlx"})
+
+
+def _normalize_engine_dtype(value: object) -> str | None:
+    """Normalize the vendor loader's runtime dtype report, or ``None`` when absent."""
+
+    if not isinstance(value, str):
+        return None
+    return _ENGINE_DTYPE_ALIASES.get(value.removeprefix("mlx.core.").strip().lower())
+
+
 def _resolve_engine_dtype(
     *,
     snapshot_quantized: bool,
     requested_dtype: str,
-    loaded_dtype: str,
-    default_dtype: str,
-    quantize_raised: bool,
+    loaded_dtype: object,
 ) -> str:
-    """Resolve the honest worker identity dtype from the actual load state.
+    """Return the verified effective weight dtype, never a fallback guess.
 
-    A pre-quantized ``-8bit`` snapshot loads int8 weights directly and is never
-    re-quantized at load time. A requested in-memory int8 that raised an exception
-    is NOT claimed as int8 (fail-closed on truth): the identity reports the
-    precision the model actually loaded, so an unachievable int8 request surfaces
-    as a clear ``backend_identity_mismatch`` instead of silently running fp16
-    under an int8 label.
+    A pre-quantized snapshot carries int8 weights in the artifact itself and is
+    loaded directly: it is never re-quantized, and its identity comes from the
+    inspected snapshot. A non-quantized snapshot has to be requested at, and
+    report, the same precision; when the loader does not report a dtype the worker
+    fails closed instead of claiming the device default. An ``int8`` request on a
+    non-quantized snapshot is refused outright, because quantizing BF16 weights in
+    memory yields weights that are not the certified Q8 artifact and must never be
+    labeled as one.
     """
+
     if snapshot_quantized:
         return "int8"
-    if requested_dtype == "int8" and not quantize_raised:
-        return "int8"
-    return loaded_dtype or default_dtype
+    if requested_dtype == "int8":
+        raise RuntimeError(
+            "backend_quantization_unavailable: non-quantized snapshot cannot be int8"
+        )
+    observed = _normalize_engine_dtype(loaded_dtype)
+    if observed is None:
+        raise RuntimeError("backend_identity_mismatch: loader reported no dtype")
+    if observed != requested_dtype:
+        raise RuntimeError(
+            f"backend_identity_mismatch: loader reported {observed}, requested {requested_dtype}"
+        )
+    return observed
+
+
+def _declared_tensor_dtype(
+    identity: SnapshotIdentity, *names: str
+) -> str | None:
+    """Return the declared safetensors dtype of the first matching tensor group."""
+
+    for name in names:
+        for group, dtype in identity.mixed_precision:
+            if group == name:
+                return _WEIGHT_DTYPE_ALIASES.get(dtype)
+    return None
+
+
+def _resolved_engine_revision() -> str | None:
+    """Return the installed engine package version, or ``None`` when undiscoverable."""
+
+    try:
+        from importlib.metadata import version
+
+        return version("mlx-qwen3-asr")
+    except Exception:
+        return None
 
 
 def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> None:
@@ -141,8 +203,23 @@ def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> 
 
 @dataclass(frozen=True, slots=True)
 class WorkerIdentity:
+    """Observable identity of one loaded ASR worker.
+
+    ``dtype`` is the effective weight dtype (``int8`` when the artifact ships
+    quantized weights). ``compute_dtype`` records the non-quantized weight
+    precision the snapshot declares, ``quantization_format`` how the weights are
+    quantized, ``compute_config`` the device-scoped compute configuration,
+    ``engine_revision`` the installed engine build and ``codec_dtype`` the
+    codec/speech-tokenizer precision when the snapshot declares one.
+    """
+
     device: str
     dtype: str
+    compute_dtype: str
+    compute_config: str
+    quantization_format: str
+    engine_revision: str | None = None
+    codec_dtype: str | None = None
     family: str | None = None
     model_variant: str | None = None
     quantization_bits: int | None = None
@@ -683,6 +760,26 @@ def _identity_matches_asr(identity: object, *, device: str, dtype: str) -> bool:
         return False
     if variant is not None and variant != "asr":
         return False
+    compute_config = getattr(identity, "compute_config", None)
+    if compute_config is not None and compute_config != device:
+        return False
+    compute_dtype = getattr(identity, "compute_dtype", None)
+    if compute_dtype is not None and compute_dtype not in _NON_QUANTIZED_DTYPE_VALUES:
+        return False
+    quantization_format = getattr(identity, "quantization_format", None)
+    if quantization_format is not None:
+        if quantization_format not in _QUANTIZATION_FORMATS:
+            return False
+        if (bits is None) != (quantization_format == "none"):
+            return False
+    codec_dtype = getattr(identity, "codec_dtype", None)
+    if codec_dtype is not None and codec_dtype not in _ENGINE_DTYPE_VALUES:
+        return False
+    engine_revision = getattr(identity, "engine_revision", None)
+    if engine_revision is not None and (
+        not isinstance(engine_revision, str) or not engine_revision
+    ):
+        return False
     expected_dtype = "int8" if bits is not None else (dtype or (
         "float16" if device == "mps" else "float32"
     ))
@@ -698,8 +795,13 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
         "sample_rate",
         "family",
         "model_variant",
+        "compute_dtype",
+        "compute_config",
+        "quantization_format",
         "quantization_bits",
         "quantization_group_size",
+        "engine_revision",
+        "codec_dtype",
         "weight_fingerprint",
     ):
         value = getattr(identity, attribute, None)
@@ -966,54 +1068,47 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         expected = inspect_model(model_dir)
         if expected.family != "qwen3_asr" or expected.variant != "asr":
             raise RuntimeError("backend_identity_mismatch: unsupported ASR snapshot identity")
+        snapshot_quantized = expected.quantization.bits is not None
+        # The certified Q8 artifact is a distinct snapshot. Refuse an in-memory
+        # int8 request on unquantized weights before loading anything: BF16
+        # weights quantized at load time are not that artifact and must never be
+        # reported under its identity.
+        if dtype == "int8" and not snapshot_quantized:
+            raise RuntimeError(
+                "backend_quantization_unavailable: non-quantized snapshot cannot be int8"
+            )
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         self._session = mlx_qwen3_asr.Session(model=str(model_dir))
         loader_sources = _check_loader_identity(self._session, expected)
-        snapshot_quantized = expected.quantization.bits is not None
-
-        # In-memory INT8 quantization when requested on a non-quantized snapshot.
-        # A snapshot that already ships quantized weights (e.g. an ``-8bit`` MLX
-        # snapshot) must NOT be re-quantized: it is loaded directly as int8.
-        quantize_raised = False
-        runtime_quantized = False
-        if dtype == "int8" and not snapshot_quantized:
-            try:
-                from mlx_qwen3_asr.convert import quantize_model  # type: ignore[import-not-found]
-
-                quantize_model(self._session.model, bits=8, group_size=64)
-            except Exception as exc:
-                quantize_raised = True
-                print(f"Warning: in-memory INT8 quantization failed: {exc}", file=sys.stderr)
-                raise RuntimeError("backend_quantization_failed") from exc
-            runtime_quantized = True
-            _clear_metal_cache()
 
         info_dtype = _loader_value(loader_sources, ("dtype",))
-        loaded_dtype = "" if info_dtype is _MISSING else str(info_dtype)
-        if loaded_dtype.startswith("mlx.core."):
-            loaded_dtype = loaded_dtype.removeprefix("mlx.core.")
-        default_dtype = "float16" if device == "mps" else "float32"
         resolved_dtype = _resolve_engine_dtype(
             snapshot_quantized=snapshot_quantized,
             requested_dtype=dtype,
-            loaded_dtype=loaded_dtype,
-            default_dtype=default_dtype,
-            quantize_raised=quantize_raised,
+            loaded_dtype=None if info_dtype is _MISSING else info_dtype,
         )
-        quantization = expected.quantization
-        if runtime_quantized:
-            quantization = QuantizationSpec(bits=8, group_size=64, format="affine")
+        declared = expected.quantization.dtype
+        compute_dtype = (
+            (_WEIGHT_DTYPE_ALIASES.get(declared) if declared is not None else None)
+            or _declared_tensor_dtype(expected, "weights", "embedding")
+            or resolved_dtype
+        )
         self._max_new_tokens = max_new_tokens
         self._aligner_model_dir = aligner_model_dir
         self._forced_aligner: object | None = None
         self.identity = WorkerIdentity(
             device=device,
             dtype=resolved_dtype,
+            compute_dtype=compute_dtype,
+            compute_config=device,
+            quantization_format=expected.quantization.format,
+            engine_revision=_resolved_engine_revision(),
+            codec_dtype=_declared_tensor_dtype(expected, "codec"),
             family=expected.family,
             model_variant=expected.variant,
-            quantization_bits=quantization.bits,
-            quantization_group_size=quantization.group_size,
+            quantization_bits=expected.quantization.bits,
+            quantization_group_size=expected.quantization.group_size,
             weight_fingerprint=expected.weight_fingerprint,
         )
         self._streaming_states: dict[str, object] = {}
@@ -1189,7 +1284,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
     parser = argparse.ArgumentParser(description="SpeechRail Unified Qwen3-ASR worker")
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--device", choices=("mps", "cpu"), required=True)
-    parser.add_argument("--dtype", choices=("float16", "float32", "int8"), default="float16")
+    parser.add_argument(
+        "--dtype",
+        choices=("float16", "float32", "bfloat16", "int8"),
+        default="float16",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--cache-limit-mb", type=int, default=256)
     parser.add_argument("--memory-limit-mb", type=int, default=0)

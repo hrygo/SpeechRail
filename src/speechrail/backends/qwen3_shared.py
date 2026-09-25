@@ -261,6 +261,7 @@ class Qwen3SharedWorker:
                 if (
                     ready.get("device") != self.config.device
                     or ready.get("dtype") != self.config.dtype
+                    or ready.get("compute_config") != self.config.device
                 ):
                     raise RuntimeError("backend_identity_mismatch")
             except BaseException:
