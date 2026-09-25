@@ -19,10 +19,12 @@ two different IDs.
 from __future__ import annotations
 
 import contextlib
+import queue
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol
+from typing import BinaryIO, Final, Literal, Protocol
 
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
@@ -34,7 +36,12 @@ from speechrail.domain.tts_stream import (
     TtsStreamStateMachine,
     TtsStreamTerminal,
 )
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
+from speechrail.runtime.worker_protocol import (
+    PROTOCOL_VERSION,
+    ProtocolError,
+    read_frame,
+    write_frame,
+)
 
 TTS_STREAM_PROTOCOL_VERSION: Final[int] = 1
 
@@ -47,6 +54,10 @@ FRAME_STREAM_TEXT_ACCEPTED: Final[str] = "tts_stream_text_accepted"
 FRAME_STREAM_AUDIO: Final[str] = "tts_stream_audio"
 FRAME_STREAM_DONE: Final[str] = "tts_stream_done"
 FRAME_STREAM_ERROR: Final[str] = "tts_stream_error"
+
+# Idle poll granularity: small enough to notice a closed pipe promptly, large
+# enough that a worker waiting for its next request stays nearly idle.
+_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 
 STREAM_FRAME_TYPES: Final[frozenset[str]] = frozenset(
     {FRAME_STREAM_START, FRAME_STREAM_TEXT, FRAME_STREAM_FINISH, FRAME_STREAM_CANCEL}
@@ -495,6 +506,161 @@ class TtsStreamHost:
             session.close()
 
 
+class StreamPump:
+    """Move frames between the worker pipes and the model loop with bounded queues.
+
+    The reader thread only decodes frames and enqueues them, so a cancel that
+    arrives while the model is mid-step is still observed through a priority
+    flag instead of waiting behind a full text queue.  The writer thread owns
+    stdout, so a parent that stops reading can never stall inference; it reports
+    the broken pipe back through ``write_error`` instead.
+    """
+
+    def __init__(
+        self,
+        input_stream: BinaryIO,
+        output_stream: BinaryIO,
+        *,
+        inbound_capacity: int = 64,
+        outbound_capacity: int = 32,
+    ) -> None:
+        if inbound_capacity < 1 or outbound_capacity < 1:
+            raise ValueError("frame queues must be positive")
+        self._input = input_stream
+        self._output = output_stream
+        self._inbound: queue.Queue[dict[str, object]] = queue.Queue(
+            maxsize=inbound_capacity
+        )
+        self._outbound: queue.Queue[StreamFrame | None] = queue.Queue(
+            maxsize=outbound_capacity
+        )
+        self._cancel = threading.Event()
+        self._read_finished = threading.Event()
+        self._closed = False
+        self._reader: threading.Thread | None = None
+        self._writer: threading.Thread | None = None
+        self.cancel_request_id: str | None = None
+        self.read_error: BaseException | None = None
+        self.write_error: BaseException | None = None
+
+    def start(self) -> None:
+        self._reader = threading.Thread(
+            target=self._read_loop, name="tts-worker-reader", daemon=True
+        )
+        self._writer = threading.Thread(
+            target=self._write_loop, name="tts-worker-writer", daemon=True
+        )
+        self._reader.start()
+        self._writer.start()
+
+    @property
+    def at_eof(self) -> bool:
+        """True once the parent closed stdin and every queued frame was drained."""
+
+        return self._read_finished.is_set() and self._inbound.empty()
+
+    @property
+    def cancel_pending(self) -> bool:
+        return self._cancel.is_set()
+
+    def poll(self, timeout: float | None = None) -> dict[str, object] | None:
+        """Return the next inbound frame, or ``None`` on timeout, EOF or failure.
+
+        The short internal wait is what lets a reader thread that died (clean EOF
+        or a malformed frame) wake a model loop parked with no deadline; without
+        it an idle worker would never notice the parent closed the pipe.
+        """
+
+        if self.write_error is not None:
+            return None
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                return self._inbound.get_nowait()
+            except queue.Empty:
+                pass
+            if self.read_error is not None or self.write_error is not None:
+                return None
+            if self._read_finished.is_set() and self._inbound.empty():
+                return None
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                return None
+            wait = _POLL_INTERVAL_SECONDS
+            if deadline is not None:
+                wait = min(wait, max(0.0, deadline - now))
+            try:
+                return self._inbound.get(timeout=wait)
+            except queue.Empty:
+                continue
+
+    def submit(self, frame: StreamFrame, *, timeout: float | None = None) -> bool:
+        """Queue one outbound frame; ``False`` means the parent stopped reading."""
+
+        if self.write_error is not None:
+            return False
+        try:
+            self._outbound.put(frame, timeout=timeout)
+        except queue.Full:
+            return False
+        return True
+
+    def acknowledge_cancel(self, request_id: str | None) -> None:
+        """Retire the priority flag once the model has stopped for that stream."""
+
+        if request_id is None or self.cancel_request_id == request_id:
+            self.cancel_request_id = None
+            self._cancel.clear()
+
+    def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
+        """Stop both threads without ever waiting unbounded on a stuck pipe."""
+
+        self._closed = True
+        with contextlib.suppress(queue.Full):
+            self._outbound.put_nowait(None)
+        for thread in (self._writer, self._reader):
+            if thread is not None:
+                thread.join(timeout=join_timeout_seconds)
+
+    def _read_loop(self) -> None:
+        try:
+            while not self._closed:
+                frame = read_frame(self._input)
+                if frame is None:
+                    return
+                if frame.get("type") == FRAME_STREAM_CANCEL:
+                    request_id = frame.get("request_id")
+                    if isinstance(request_id, str) and request_id:
+                        self.cancel_request_id = request_id
+                        self._cancel.set()
+                    # The flag is the authoritative signal; dropping the
+                    # duplicate frame keeps the reader from stalling on a full
+                    # text queue.
+                    with contextlib.suppress(queue.Full):
+                        self._inbound.put_nowait(frame)
+                    continue
+                self._inbound.put(frame)
+        except BaseException as exc:
+            self.read_error = exc
+        finally:
+            self._read_finished.set()
+
+    def _write_loop(self) -> None:
+        while True:
+            item = self._outbound.get()
+            if item is None:
+                return
+            try:
+                write_frame(self._output, item.payload, binary_payload=item.binary)
+            except BaseException as exc:
+                self.write_error = exc
+                return
+            if item.on_sent is not None:
+                with contextlib.suppress(Exception):
+                    item.on_sent()
+
+
+
 _TERMINAL_EVENT_KINDS: Final[dict[TtsStreamTerminal, TtsStreamEventKind]] = {
     TtsStreamTerminal.COMPLETED: TtsStreamEventKind.COMPLETED,
     TtsStreamTerminal.CANCELLED: TtsStreamEventKind.CANCELLED,
@@ -520,6 +686,7 @@ __all__ = [
     "ModelStepEvent",
     "StreamCommand",
     "StreamFrame",
+    "StreamPump",
     "TtsStreamHost",
     "parse_stream_command",
 ]

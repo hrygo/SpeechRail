@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.8"
+version: "1.9"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），继续 W5–W10。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 只受 catalog `README.md` 完整性差异阻塞，待用户决定；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5/W6 已交付，继续 W7–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -511,7 +511,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
 - [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
 - [x] **W5｜领域与身份**：新增 `domain/tts_stream.py`（options/双轴 state/limits/事件/port）与 `PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间）；`VoiceBinding.supports_incremental_stream` 只对 CustomVoice speaker 与 Base clone 为真。验收：`tests/test_tts_stream_state.py` 15 passed、`tests/test_tts_reference_condition.py` 6 passed、`tests/test_voice_bindings.py` 44 passed；另修正 W2 遗留的 `tests/test_profile_selection.py` 旧 runtime lock fixture（23 passed）。
-- [ ] **W6｜worker全双工**：单模型owner、单父端reader、有界队列与协作取消；fake IPC与旧ASR/TTS回归通过。
+- [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
 - [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
 - [ ] **W8｜公共协议与能力**：严格parser、current音频事件、voice级支持；四档/错误/断线矩阵通过。
 - [ ] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。
@@ -628,5 +628,16 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - 阶段门（主仓全量，CPython 3.12.14 `.venv`）：`pytest tests/` 收集 2255 项，2111 passed / 144 skipped / 0 failed，coverage 81.77%（门限 80%）；`mypy src` 131 个源文件通过；改动文件 `ruff check` 通过；`git diff --check` 通过。该全量运行同时暴露出并修复了 W2 遗留 fixture 缺陷（修复前 5 failed）。
 - 未纳入本阶段：未实现 `IncrementalSpeechSynthesizer` 的真实 adapter、未接入 worker/IPC、未改 public wire、未做真实 worker/REST/Realtime 验收、未做人耳或性能测量；`TtsStreamLimits` 是安全初值而非调优结果。
 - 顺带修复（W2 遗留，独立 commit）：`tests/test_profile_selection.py` 的 selection fixture 仍写死 `mlx-qwen-20260905`，与 W2 发布的 `mlx-qwen-20260924-py314` 不一致，导致 5 个无关测试在到达自身断言前就因 runtime lock mismatch 失败。改为从 `load_runtime_lock().id` 取值，避免再次漂移。
+
+### W6 实施与验收记录（2026-09-25）
+
+- **私有协议（未 bump 共享版本）：** TTS 握手在 `ready` 上协商 `tts_stream_protocol=1`；父→子 `tts_stream_start/text/finish/cancel`，子→父 `tts_stream_started/text_accepted/audio/done/error`，每帧携带 `request_id`；`tts_stream_start` 冻结 `voice_profile`（非 clone）或 `ref_audio`/`ref_text`（Base clone）。`PROTOCOL_VERSION` 未改，无新增 HTTP/Realtime/MCP 帧。
+- **worker 进程：** `serve` 改为 reader thread（只解帧入有界队列）+ 单模型线程（唯一 MLX owner）+ writer thread（有界输出队列）；取消用 `threading.Event` 优先标志，即使模型在 `step()` 中也能优先处理；退出 `pump.stop()` join，写端断开只结束该 worker，不 `pkill` 其他进程。
+- **模型适配：** 新增 `src/speechrail/backends/qwen3_tts_incremental.py`，把 vendor `IncrementalSessionDriver` 的 `pcm/waiting_for_text/finished/error` 映射为 `ModelStepEvent`；底座固定 W4 门验证过的 `aligned` Base layout 与 vendor 默认采样。`MlxQwenTtsEngine.open_incremental_session` 复用 `validate_tts_parameters`/`generation_condition`：CustomVoice 只接合法 speaker，Base 只接 clone reference，VoiceDesign fail-closed。
+- **父进程 session：** `Qwen3TtsIncrementalSynthesizer/Session` 只启用一个 receive dispatcher；append/finish 走 send+ACK，音频带连续 `chunk_index`/`sample_offset`；终态只发布一次。取消先协作，超过 `cancel_grace` 才 `transport.abort()` 精确回收子进程。
+- **worker 租约与串行：** `Qwen3TtsWorker.open_incremental_stream` 在整个 utterance 内持有 voice lease（含 `expected_revision` 严格匹配）与独占 incremental slot；完整文本 `synthesize` 与 stream 串行不抢读；`trim_memory` 在活动流期间跳过；`Qwen3TtsCapabilityRouter.open_incremental_stream` 按 profile mode 路由 clone lane，clone worker 缺席时 fail-closed 返回 `tts_streaming_unsupported`。
+- **回收语义：** 强制 abort 后 worker 置 not-ready、`fallback_abort_count` 计数，下一次请求走既有受控重启；不遗留后台写线程，不在服务级杀进程。
+- **测试与验收（CPython 3.12.14 `.venv`，2026-09-25）：** 新增 `tests/test_qwen3_tts_incremental_bridge.py` 10 项（协议未协商与 VoiceDesign fail-closed、CustomVoice 冻结 profile start 帧、Base clone reference start 帧、协作取消不 abort、活动 stream 期间 batch 串行、router lane 路由、vendor 事件映射）；`tests/test_qwen3_tts_worker.py` 增加真实 `BytesIO` pipe 的 `serve` 端到端（ready→started→text_accepted→audio→done，1 个 `_FakeIncrementalSession`）。联合回归 188 passed；改动文件 `ruff check`、`mypy` 通过；`git diff --check` 通过。
+- **未纳入/未验证：** 本轮只做 fake IPC、字段协商与确定性状态；未加载模型、未产生真实 PCM、未做真实 worker/并发/取消超期/长稳/内存峰值验收；application 资源治理（W7）、public wire（W8）、App 协调（W9）、分档呈现（W10）与逐档声学/性能（W11）未开始。真实模型门与逐档验收结论仍以 W4/W11 为准。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。

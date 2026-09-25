@@ -12,6 +12,7 @@ import pytest
 import speechrail.backends.qwen3_tts_worker as worker_module
 from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_native import snapshot_is_quantized
+from speechrail.backends.qwen3_tts_stream_host import ModelStepEvent
 from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
@@ -426,3 +427,138 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
         "code": "worker_load_error",
     }
     assert "boom-model-load" in capsys.readouterr().err
+
+
+class _FakeIncrementalSession:
+    """One append-only session used to prove the full pipe wire end to end."""
+
+    generation_identity = "gen-1"
+    sample_rate = 24_000
+    prefill_target_tokens = 1
+
+    def __init__(self) -> None:
+        self.steps = 0
+        self.appended: list[str] = []
+        self.finished = 0
+        self.cancelled = 0
+        self.closed = 0
+
+    def append_text(self, text: str) -> tuple[int, ...]:
+        self.appended.append(text)
+        return (11, 12)
+
+    def finish_input(self) -> None:
+        self.finished += 1
+
+    def step(self, *, max_steps: int) -> ModelStepEvent:
+        assert max_steps > 0
+        self.steps += 1
+        if self.steps == 1:
+            return ModelStepEvent(kind="pcm", pcm16=b"\x00\x00")
+        return ModelStepEvent(kind="finished")
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+    def close(self) -> None:
+        # The vendor driver's close is idempotent; the host releases on the
+        # terminal and again from the per-utterance finally.
+        if self.closed:
+            return
+        self.closed += 1
+
+
+def test_serve_drives_one_incremental_utterance_over_the_pipe(tmp_path: Path) -> None:
+    class IncrementalEngine(FakeEngine):
+        def __init__(self) -> None:
+            self.session = _FakeIncrementalSession()
+            self.opened: dict[str, object] | None = None
+
+        def open_incremental_session(self, **kwargs: object) -> _FakeIncrementalSession:
+            self.opened = kwargs
+            return self.session
+
+    engine = IncrementalEngine()
+    source = BytesIO()
+    target = BytesIO()
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "tts_stream_start",
+            "request_id": "req-stream",
+            "response_id": "resp-stream",
+            "voice": "default",
+            "speed": 1.0,
+            "language": "auto",
+        },
+    )
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "tts_stream_text",
+            "request_id": "req-stream",
+            "sequence": 0,
+            "text": "你好",
+        },
+    )
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "tts_stream_finish",
+            "request_id": "req-stream",
+            "last_sequence": 0,
+        },
+    )
+    source.seek(0)
+
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: engine,
+    )
+
+    target.seek(0)
+    ready = read_frame(target)
+    started = read_frame(target)
+    accepted = read_frame(target)
+    audio = read_frame(target)
+    done = read_frame(target)
+    assert read_frame(target) is None
+
+    assert ready["tts_stream_protocol"] == 1
+    assert started["type"] == "tts_stream_started"
+    assert started["request_id"] == "req-stream"
+    assert started["response_id"] == "resp-stream"
+    assert started["prefill_target_tokens"] == 1
+    assert accepted["type"] == "tts_stream_text_accepted"
+    assert accepted["accepted_tokens"] == 2
+    assert audio["type"] == "tts_stream_audio"
+    assert audio["_binary"] == b"\x00\x00"
+    assert done == {
+        "version": PROTOCOL_VERSION,
+        "type": "tts_stream_done",
+        "request_id": "req-stream",
+        "terminal": "completed",
+        "event": "completed",
+    }
+    assert engine.session.appended == ["你好"]
+    assert engine.session.finished == 1
+    assert engine.session.closed == 1
