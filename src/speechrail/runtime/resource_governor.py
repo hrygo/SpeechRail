@@ -41,6 +41,10 @@ class GovernorQueueFullError(RuntimeError):
     """The bounded waiting queue for a work class is full."""
 
 
+class GovernorBudgetError(GovernorQueueFullError):
+    """Declared footprints prove heavy compute cannot fit the memory budget."""
+
+
 @dataclass(frozen=True, slots=True)
 class GovernorSnapshot:
     active_realtime: int
@@ -51,6 +55,8 @@ class GovernorSnapshot:
     active_tts: int = 0
     allow_heavy_overlap: bool = True
     policy_reason: str = "caller default"
+    reject_heavy_compute: bool = False
+    budget_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,8 @@ class ResourceGovernor:
         clock: Callable[[], float] | None = None,
         allow_heavy_overlap: bool = True,
         policy_reason: str = "caller default",
+        reject_heavy_compute: bool = False,
+        budget_reason: str = "",
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
@@ -99,6 +107,8 @@ class ResourceGovernor:
         self._clock = clock or time.monotonic
         self._allow_heavy_overlap = allow_heavy_overlap
         self._policy_reason = policy_reason
+        self._reject_heavy_compute = reject_heavy_compute
+        self._budget_reason = budget_reason
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
@@ -196,6 +206,8 @@ class ResourceGovernor:
             active_tts=self._active_tts,
             allow_heavy_overlap=self._allow_heavy_overlap,
             policy_reason=self._policy_reason,
+            reject_heavy_compute=self._reject_heavy_compute,
+            budget_reason=self._budget_reason,
         )
 
     def lane_available(
@@ -208,6 +220,8 @@ class ResourceGovernor:
         still queue behind work that arrives first.
         """
 
+        if self._reject_heavy_compute:
+            return False
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
         return not (self._is_tts(work_class) and self._tts_lane_busy(resource_key))
@@ -219,6 +233,13 @@ class ResourceGovernor:
         purpose: WorkPurpose,
     ) -> float:
         async with self._condition:
+            if self._reject_heavy_compute:
+                if self._on_reject is not None:
+                    self._on_reject(work_class)
+                raise GovernorBudgetError(
+                    self._budget_reason
+                    or "declared footprints exceed the memory budget; refusing heavy compute"
+                )
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
                 if self._on_reject is not None:
@@ -419,6 +440,7 @@ class ResourceGovernor:
 
 
 __all__ = [
+    "GovernorBudgetError",
     "GovernorLimits",
     "GovernorQueueFullError",
     "GovernorSnapshot",

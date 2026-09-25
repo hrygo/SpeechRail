@@ -104,3 +104,66 @@ def test_component_footprint_rejects_negative_or_boolean_values() -> None:
         ComponentFootprint(asr_bytes=-1)
     with pytest.raises(ValueError, match="footprint"):
         ComponentFootprint(asr_bytes=True)  # type: ignore[arg-type]
+
+
+def test_shared_dependencies_are_counted_once_not_twice() -> None:
+    # When the per-component peaks already fold in shared deps, declaring a
+    # separate shared term would double-count the same peak: reject it.
+    with pytest.raises(ValueError, match="shared"):
+        ComponentFootprint(asr_bytes=1 * GIB, shared_dependency_bytes=1 * GIB)
+
+    separate = ComponentFootprint(
+        asr_bytes=1 * GIB,
+        tts_bytes=0,
+        shared_dependency_bytes=1 * GIB,
+        includes_shared_dependencies=False,
+    )
+    assert separate.total_bytes == 1 * GIB + 1 * GIB
+
+    folded = ComponentFootprint(asr_bytes=2 * GIB, tts_bytes=0)
+    assert folded.total_bytes == 2 * GIB
+
+
+def test_incremental_peak_workspace_and_margin_are_budgeted() -> None:
+    footprint = ComponentFootprint(
+        asr_bytes=1 * GIB,
+        tts_bytes=0,
+        active_peak_bytes=1 * GIB,
+        workspace_bytes=512 * 1024**2,
+        safety_margin_bytes=256 * 1024**2,
+    )
+    assert footprint.resident_bytes == 1 * GIB
+    assert footprint.incremental_bytes == 1 * GIB + 512 * 1024**2 + 256 * 1024**2
+    assert footprint.total_bytes == 1 * GIB + footprint.incremental_bytes
+
+    unknown_peak = ComponentFootprint(asr_bytes=1 * GIB, active_peak_bytes=None)
+    assert unknown_peak.total_bytes is None
+    decision, reason = can_overlap_heavy_compute(8 * GIB, unknown_peak)
+    assert decision is False
+    assert "unknown" in reason.lower()
+
+
+def test_declared_single_task_that_cannot_fit_is_refused() -> None:
+    budget = budget_for_hardware(8 * GIB)  # 4 GiB
+    oversized = ComponentFootprint(asr_bytes=5 * GIB, tts_bytes=0)
+    admit, reason, certified = oversized.serial_admission(budget)
+    assert admit is False
+    assert certified is True
+    assert "exceeds" in reason.lower()
+
+    fits = ComponentFootprint(asr_bytes=1 * GIB, tts_bytes=0)
+    admit, reason, certified = fits.serial_admission(budget)
+    assert admit is True
+    assert certified is True
+    assert "within" in reason.lower()
+
+
+def test_undeclared_single_task_serializes_without_certifying() -> None:
+    budget = budget_for_hardware(16 * GIB)
+    undeclared = ComponentFootprint(asr_bytes=None, tts_bytes=1 * GIB)
+    admit, reason, certified = undeclared.serial_admission(budget)
+    # Serial admission stays available for undeclared peaks, but concurrency is
+    # explicitly not certified.
+    assert admit is True
+    assert certified is False
+    assert "undeclared" in reason.lower()

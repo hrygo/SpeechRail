@@ -125,6 +125,15 @@ class Settings(BaseSettings):
     asr_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
     tts_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
     diarization_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    # Declared peaks are normally measured per-component phys_footprint values,
+    # which already fold in tokenizer/codec/shared weights. Set
+    # `resident_declaration_includes_shared` to false only when shared deps are
+    # declared separately, so the same peak is never counted twice.
+    resident_declaration_includes_shared: bool = True
+    shared_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    active_peak_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    workspace_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    resident_safety_margin_bytes: int = Field(default=0, ge=0, le=(1 << 40))
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     realtime_diarization_drain_deadline_seconds: float = Field(default=20.0, gt=0, le=120)
     realtime_speech_admission_enabled: bool = True

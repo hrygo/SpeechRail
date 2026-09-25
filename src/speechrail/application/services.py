@@ -101,6 +101,72 @@ def _resident_tts_worker_count(component: object | None) -> int:
     return count if type(count) is int and count >= 1 else 1
 
 
+def _declared_footprint(
+    settings: Settings,
+    *,
+    asr_enabled: bool,
+    tts_enabled: bool,
+    diarization_enabled: bool,
+    tts_worker_count: int,
+) -> ComponentFootprint:
+    """Build the explicit resident/incremental footprint schema from settings."""
+
+    def _bytes(enabled: bool, declared: int) -> int | None:
+        if not enabled:
+            return 0
+        return declared if declared > 0 else None
+
+    if tts_worker_count < 1:
+        raise ValueError("tts_worker_count must be positive")
+    return ComponentFootprint(
+        asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
+        tts_bytes=_bytes(
+            tts_enabled, settings.tts_resident_bytes * tts_worker_count
+        ),
+        diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
+        service_bytes=_SERVICE_OVERHEAD_BYTES,
+        shared_dependency_bytes=settings.shared_resident_bytes,
+        active_peak_bytes=settings.active_peak_resident_bytes,
+        workspace_bytes=settings.workspace_resident_bytes,
+        safety_margin_bytes=settings.resident_safety_margin_bytes,
+        includes_shared_dependencies=settings.resident_declaration_includes_shared,
+        device=settings.device,
+    )
+
+
+def _serial_budget_policy(
+    settings: Settings,
+    *,
+    asr_enabled: bool,
+    tts_enabled: bool,
+    diarization_enabled: bool,
+    tts_worker_count: int = 1,
+) -> tuple[bool, str]:
+    """Decide whether declared single-task footprints prove heavy work fits.
+
+    Returns ``(reject, reason)``. A *declared* peak that exceeds the budget is
+    refused rather than loaded; an undeclared peak serializes without claiming
+    concurrency certification. ``allow_heavy_overlap=true`` still cannot make an
+    infeasible single task fit.
+    """
+
+    footprint = _declared_footprint(
+        settings,
+        asr_enabled=asr_enabled,
+        tts_enabled=tts_enabled,
+        diarization_enabled=diarization_enabled,
+        tts_worker_count=tts_worker_count,
+    )
+    try:
+        budget = budget_for_hardware(detect_system_memory_bytes())
+    except (RuntimeError, ValueError) as exc:
+        # No trustworthy budget: keep serving serial work rather than refusing
+        # outright, but never certify concurrency.
+        return False, f"Unsupported hardware budget: {exc}; serializing workloads"
+    admit, reason, _certified = footprint.serial_admission(budget)
+    return (not admit), reason
+
+
 def _heavy_overlap_policy(
     settings: Settings,
     *,
@@ -121,21 +187,12 @@ def _heavy_overlap_policy(
     if settings.allow_heavy_overlap == "false":
         return False, "heavy overlap disabled by configuration"
 
-    def _bytes(enabled: bool, declared: int) -> int | None:
-        if not enabled:
-            return 0
-        return declared if declared > 0 else None
-
-    if tts_worker_count < 1:
-        raise ValueError("tts_worker_count must be positive")
-    tts_declared_bytes = settings.tts_resident_bytes * tts_worker_count
-
-    footprint = ComponentFootprint(
-        asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
-        tts_bytes=_bytes(tts_enabled, tts_declared_bytes),
-        diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
-        service_bytes=_SERVICE_OVERHEAD_BYTES,
-        device=settings.device,
+    footprint = _declared_footprint(
+        settings,
+        asr_enabled=asr_enabled,
+        tts_enabled=tts_enabled,
+        diarization_enabled=diarization_enabled,
+        tts_worker_count=tts_worker_count,
     )
     if settings.allow_heavy_overlap == "true":
         return True, "heavy overlap forced on by configuration"
@@ -288,6 +345,9 @@ class AppServices:
             "heavy_overlap_allowed": bool(getattr(snapshot, "allow_heavy_overlap", False)),
             "heavy_overlap_reason": str(
                 getattr(snapshot, "policy_reason", "未提供")
+            ),
+            "heavy_compute_rejected": bool(
+                getattr(snapshot, "reject_heavy_compute", False)
             ),
             "asr_scheduler_active_mode": (
                 mode_snapshot.active_mode if mode_snapshot is not None else None
@@ -632,6 +692,17 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         diarization_enabled=diarization_engine is not None,
         tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
     )
+    reject_heavy_compute, budget_reason = _serial_budget_policy(
+        settings,
+        asr_enabled=(
+            transcribe is not None
+            or batch_transcriber is not None
+            or realtime_asr_factory is not None
+        ),
+        tts_enabled=tts_synthesizer is not None,
+        diarization_enabled=diarization_engine is not None,
+        tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
+    )
     governor = ResourceGovernor(
         settings.governor_limits,
         on_reject=metrics.record_governor_rejection,
@@ -639,6 +710,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         on_release=metrics.record_governor_release,
         allow_heavy_overlap=allow_heavy_overlap,
         policy_reason=policy_reason,
+        reject_heavy_compute=reject_heavy_compute,
+        budget_reason=budget_reason,
     )
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
