@@ -2,13 +2,13 @@
 title: "SpeechRail 音色克隆架构设计与工程交接"
 status: active
 audience: "SpeechRail / Sona 核心开发者"
-version: "2.2"
-date: 2026-09-23
+version: "2.3"
+date: 2026-09-26
 ---
 
 # SpeechRail 音色克隆架构设计与工程交接
 
-> 本文定义 **reference voice cloning** 的当前实现边界。完整的 Quality / Extreme 音色创造/稳定化路线见 [Quality / Extreme 音色能力架构](quality-voice-capabilities.md)。
+> 本文定义 **reference voice cloning** 的当前实现边界。完整的 Quality / Reference 音色创造/稳定化路线见 [Quality / Reference 音色能力架构](quality-voice-capabilities.md)。
 
 ## 1. 当前决策
 
@@ -16,22 +16,24 @@ Reference clone 与 VoiceDesign 已正式分离：
 
 - `voice_design`：仅负责提示词驱动的开放式音色创造与配置该 variant 的 profile 默认 TTS；
 - `base`：仅负责 reference audio + exact transcript 的 clone；
-- `custom_voice`：Balanced/Light 固定 speaker；
-- `quality` 安装 `tts_clone=tts-1.7b-base-q8`；候选 `extreme` 安装 `tts_clone=tts-1.7b-base-bf16`。能力是否可用以服务当前声明为准。
+- `custom_voice`：系统固定 speaker，普通合成与普通实时 TTS 的默认角色；
+- 每个 TTS 档位都绑定 `tts_base` 与 `tts_custom_voice` 两个角色（`fast`/`quality` 为 8-bit，`reference` 为 bf16），`voice_design` 只绑定在 `reference`。能力是否可用以服务当前声明为准。
 
 旧版“VoiceDesign 私有 `_generate_icl()` 直接做 clone”的实现不再是架构基线。Base clone 使用 MLX-Audio 的公开 `generate(text=..., ref_audio=..., ref_text=...)` 路径，使 speaker encoder / ICL 条件由 Base 模型按其公开接口建立。
 
-## 2. 四档能力矩阵
+## 2. 三档角色矩阵
 
-| 档位 | 默认 TTS | Clone capability | Prompt voice design | Reference clone |
-|---|---|---|---|---|
-| `light` | CustomVoice 0.6B q8 | — | ✗ | ✗ |
-| `balanced` | CustomVoice 0.6B q8 | — | ✗ | ✗ |
-| `quality` | VoiceDesign 1.7B q8 | **Base 1.7B q8（独立 worker，可与 VoiceDesign 并发）** | ✓ | ✓ |
-| `extreme`（候选） | VoiceDesign 1.7B bf16 | **Base 1.7B bf16（独立 worker，可与 VoiceDesign 并发）** | ✓ | ✓ |
+档位只决定模型精度；ASR 与 TTS 可分别选档（`asr_spec` / `tts_spec`），下表按 TTS 档位列角色：
 
+| TTS 档位 | 系统声音 `tts_custom_voice` | 参考克隆 `tts_base` | 提示词设计 `voice_design` |
+|---|---|---|---|
+| `fast` | CustomVoice 0.6B q8 | Base 0.6B q8（独立 worker） | ✗ |
+| `quality` | CustomVoice 1.7B q8 | Base 1.7B q8（独立 worker） | ✗ |
+| `reference` | CustomVoice 1.7B bf16 | Base 1.7B bf16（独立 worker） | VoiceDesign 1.7B bf16 |
+
+VoiceDesign 与 Base 在 `reference` 下是两条独立 capability lane：跨 lane 可并发，同一 lane 串行。
 `/v1/models` 只有在 Base capability 实际解析成功时才声明 `supports_clone=true`。`/v1/voices` 对 clone profile 返回其真实 binding variant `base`，而不是把它伪装成 `voice_design`。
-`extreme` 的质量、资源与延迟尚未验证；此表描述目录能力，不表示质量更高或正式启用。
+`reference` 的高精度制品继承同族 8-bit 档位的门禁证据，尚未在真实设备上单独复测质量、资源与延迟；此表描述目录绑定，不表示质量排名或已认证。
 
 ## 3. 请求数据流
 
@@ -51,7 +53,7 @@ sequenceDiagram
     S->>API: POST /v1/audio/speech (voice=clone_id)
     API->>VR: resolve clone profile
     API->>R: SpeechRequest
-    R->>R: route to voice_clone lane; keep VoiceDesign resident
+    R->>R: route to the selected tts_base role; never fall back to VoiceDesign
     R->>B: start Base on first clone when lazy loading is enabled
     B->>VR: lease immutable reference revision
     B->>B: public generate(ref_audio, ref_text, target text)
@@ -63,7 +65,7 @@ sequenceDiagram
 
 `POST /v1/voices/clone`：
 
-1. 当前服务同时提供 VoiceDesign 与 Base capability 时可进入；
+1. 当前服务实际解析到所选 TTS spec 的 Base capability 时可进入；
 2. 上传与 `ref_text` 在服务端重新校验，客户端 validate 不能作为旁路凭证；
 3. VoiceRegistry 创建不可变 reference revision；
 4. 返回的 voice entry `variant=base`；
@@ -87,16 +89,16 @@ sequenceDiagram
 
 Base worker 内部解码 reference，并调用 vendor public `generate`；不再调用 `_generate_icl` 私有方法。
 
-## 6. 双 worker 与资源边界
+## 6. 按角色 worker 与资源边界
 
-`quality` 与候选 `extreme` 安装 VoiceDesign 与 Base 两套 TTS 权重，并通过 `Qwen3TtsCapabilityRouter` 维护两个独立 worker：
+每个 TTS spec 都绑定 `tts_custom_voice` 与 `tts_base`，`reference` 另绑定只用于设计作业的 `voice_design`。`Qwen3TtsCapabilityRouter` 按角色维护独立 worker：
 
-- eager lifecycle 按顺序 warm 两个 worker；lazy lifecycle 先加载当前请求所需 worker，后续另一 capability 首次使用时再加载；
-- `voice_design` 与 `voice_clone` 是不同 governor resource lane，可以并发；同一 lane 仍由 worker lock 串行；
+- eager lifecycle 按当前配置 warm 所需角色；lazy lifecycle 先加载当前请求所需 worker，后续其他角色首次使用时再加载；
+- `custom_voice`、`base` 与 `voice_design` 是不同 governor resource lane，可以按预算并发；同一 lane 仍由 worker lock 串行；
 - capability 切换不关闭另一 worker，避免“设计音色 → clone”请求反复冷启动；
-- router 受既有 `WorkerIdleEvictor` 管理，warm standby trim 两个 worker，冷却到期后整体 close；冷驱逐后按请求懒加载，不改变路由关系。
+- router 受既有 `WorkerIdleEvictor` 管理，warm standby 按 capability group trim，冷却到期后整体 close；冷驱逐后按请求懒加载，不改变路由关系。
 
-因此这两档活跃态的 RAM 必须分别按 VoiceDesign + Base 两个 worker 的实测峰值验收；不能沿用旧 VoiceDesign-only 数据或将 Quality 数据套用到 Extreme。`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单 worker 声明，heavy-overlap 预算在 composition 阶段按可能常驻的 worker 数量相加。
+因此各 spec、各角色活跃态的 RAM 必须分别实测验收；不能沿用旧 VoiceDesign-only 数据，也不能把 Quality 数据套用到其他 spec。`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单 worker 声明，heavy-overlap 预算在 composition 阶段按可能常驻的 worker 数量相加。
 
 ## 7. Reference 音频质量
 
@@ -138,10 +140,10 @@ Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建�
 
 本架构变化至少要求：
 
-- catalog/preset schema tests；
+- catalog/spec binding schema tests；
 - managed install / profile selection / preflight tests；
 - VoiceBinding variant tests；
 - Base public clone generation tests；
-- capability router lazy-load/eager-start、双 lane 并发、同 lane 串行与组级 eviction tests；
+- capability router lazy-load/eager-start、不同 lane 并发、同 lane 串行与组级 eviction tests；
 - clone HTTP API + TTS IPC tests；
-- Ubuntu/macOS Python 3.12 CI 全绿。
+- Ubuntu/macOS Python 3.14 CI 全绿。

@@ -4,57 +4,48 @@
      viewBox="0 0 1920 1200"
      role="img"
      aria-labelledby="diagram-title diagram-desc">
-  <title id="diagram-title">SpeechRail 三档模型与 Quality 双 TTS capability 关系图</title>
-  <desc id="diagram-desc">客户端通过共享的 FastAPI OpenAI-compatible Gateway 和 profile capability router 进入三档运行时。Light 与 Balanced 的普通 /v1/audio/speech 请求进入 CustomVoice；Quality 再按请求入口分流：preset、instruction、preview 和 generated voice design 进入 VoiceDesign，reference audio clone 或 clone voice synthesis 进入 Base。设计音色的 generated reference 通过 VoiceDesign → Base handoff 形成 clone voice。Quality 同时管理两个独立 TTS worker，跨 capability lane 可以并发，同一 lane 串行，冷却后按 Quality group 回收并在下一次请求时惰性恢复。</desc>
+  <title id="diagram-title">SpeechRail 三档规格、ASR/TTS 角色与资源边界</title>
+  <desc id="diagram-desc">客户端通过共享 FastAPI Gateway 和 Plan Resolver 进入 fast、quality 或 reference 规格。ASR 与 TTS 可独立选档；每个 TTS 规格绑定 custom_voice 与 base 角色，只有 reference 另绑定仅用于设计作业的 voice_design。Alignment 与 Diarization 是显式 opt-in 的独立制品，不随规格继承。</desc>
 
   <defs>
     <style>
       <![CDATA[
         text {
           font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-          fill: #132238;
+          fill: #15243a;
         }
         .canvas { fill: #f7f9fc; }
         .title { font-size: 34px; font-weight: 700; letter-spacing: -0.4px; }
-        .subtitle { font-size: 17px; font-weight: 400; fill: #405a78; }
+        .subtitle { font-size: 17px; font-weight: 400; fill: #425b79; }
         .box-title { font-size: 20px; font-weight: 700; }
-        .box-copy { font-size: 16px; font-weight: 500; fill: #38516e; }
-        .box-copy-small { font-size: 14px; font-weight: 400; fill: #405a78; }
-        .profile-title { font-size: 25px; font-weight: 700; }
-        .profile-subtitle { font-size: 15px; font-weight: 500; }
-        .section-label { font-size: 14px; font-weight: 700; letter-spacing: 0.8px; fill: #405a78; }
-        .model-title { font-size: 16px; font-weight: 700; fill: #38516e; }
-        .model-key { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 18px; font-weight: 700; }
-        .model-key-small { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 14px; font-weight: 700; }
-        .model-copy { font-size: 15px; font-weight: 500; fill: #405a78; }
-        .model-copy-small { font-size: 13px; font-weight: 500; fill: #405a78; }
-        .note { font-size: 15px; font-weight: 500; fill: #405a78; }
-        .callout { font-size: 16px; font-weight: 700; }
-        .footer-title { font-size: 16px; font-weight: 700; }
-        .footer-copy { font-size: 15px; font-weight: 500; fill: #38516e; }
-        .flow { fill: none; stroke: #1f5fae; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round; }
-        .route-flow { fill: none; stroke: #1f5fae; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-        .route-label { font-size: 12px; font-weight: 700; fill: #4b2e8c; }
-        .lifecycle { fill: none; stroke: #a56600; stroke-width: 2.5; stroke-dasharray: 10 8; stroke-linecap: round; stroke-linejoin: round; }
-        .shared-line { fill: none; stroke: #6e87a5; stroke-width: 2; stroke-dasharray: 6 7; stroke-linecap: round; }
-        .handoff-line { fill: none; stroke: #7652bf; stroke-width: 2; stroke-dasharray: 4 4; stroke-linecap: round; }
+        .box-copy { font-size: 15px; font-weight: 500; fill: #3b5573; }
+        .box-copy-small { font-size: 13px; font-weight: 400; fill: #4b647f; }
+        .card-title { font-size: 26px; font-weight: 700; }
+        .card-subtitle { font-size: 14px; font-weight: 600; }
+        .section-label { font-size: 12px; font-weight: 700; letter-spacing: 0.9px; fill: #4b647f; }
+        .role-title { font-size: 15px; font-weight: 700; fill: #38516e; }
+        .model-key { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 15px; font-weight: 700; }
+        .model-copy { font-size: 13px; font-weight: 500; fill: #425b79; }
+        .note { font-size: 13px; font-weight: 500; fill: #4b647f; }
+        .footer-title { font-size: 17px; font-weight: 700; }
+        .footer-copy { font-size: 14px; font-weight: 500; fill: #38516e; }
+        .flow { fill: none; stroke: #1f5fae; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+        .shared-line { fill: none; stroke: #6e87a5; stroke-width: 2; stroke-dasharray: 7 7; stroke-linecap: round; }
         .top-box { fill: #ffffff; stroke: #b9c8d9; stroke-width: 2; }
         .shared-box { fill: #edf4fc; stroke: #7ea6d1; stroke-width: 2; }
-        .route-pill { fill: #ffffff; stroke: #ab91df; stroke-width: 1.6; }
-        .profile-card { fill: #ffffff; stroke-width: 2.5; }
-        .model-card { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.8; }
-        .quality-model-card { fill: #fbf9ff; stroke: #ab91df; stroke-width: 1.8; }
-        .aux-card { fill: #f7f9fc; stroke: #c5d2e0; stroke-width: 1.8; }
-        .lifecycle-box { fill: #fff8e8; stroke: #d19a35; stroke-width: 1.8; stroke-dasharray: 8 6; }
-        .light-fill { fill: #e7f6ec; }
-        .light-stroke { stroke: #3c9560; }
-        .light-text { fill: #205d38; }
-        .balanced-fill { fill: #fff5d9; }
-        .balanced-stroke { stroke: #c2851c; }
-        .balanced-text { fill: #704700; }
-        .quality-fill { fill: #efe8ff; }
-        .quality-stroke { stroke: #7652bf; }
-        .quality-text { fill: #4b2e8c; }
+        .fast-card { fill: #ffffff; stroke: #3c9560; stroke-width: 2.5; }
+        .fast-header { fill: #e7f6ec; }
+        .fast-text { fill: #205d38; }
+        .quality-card { fill: #ffffff; stroke: #c2851c; stroke-width: 2.5; }
+        .quality-header { fill: #fff5d9; }
+        .quality-text { fill: #704700; }
+        .reference-card { fill: #ffffff; stroke: #7652bf; stroke-width: 2.5; }
+        .reference-header { fill: #efe8ff; }
+        .reference-text { fill: #4b2e8c; }
+        .role-box { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.6; }
+        .role-box-design { fill: #fbf9ff; stroke: #ab91df; stroke-width: 1.6; }
+        .optional-box { fill: #f5f7fa; stroke: #c5d2e0; stroke-width: 1.6; stroke-dasharray: 7 5; }
+        .lifecycle-box { fill: #fff8e8; stroke: #d19a35; stroke-width: 1.6; stroke-dasharray: 8 6; }
         .blue-text { fill: #1f5fae; }
         .orange-text { fill: #835600; }
       ]]>
@@ -62,165 +53,134 @@
     <marker id="flow-arrow" markerWidth="11" markerHeight="11" refX="10" refY="5.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L11,5.5 L0,11 Z" fill="#1f5fae"/>
     </marker>
-    <marker id="lifecycle-arrow" markerWidth="11" markerHeight="11" refX="10" refY="5.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L11,5.5 L0,11 Z" fill="#a56600"/>
-    </marker>
-    <marker id="handoff-arrow" markerWidth="11" markerHeight="11" refX="10" refY="5.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L11,5.5 L0,11 Z" fill="#7652bf"/>
-    </marker>
   </defs>
 
   <rect class="canvas" x="0" y="0" width="1920" height="1200"/>
 
-  <text class="title" x="60" y="58">SpeechRail 三档模型与 Quality 双 TTS capability</text>
-  <text class="subtitle" x="60" y="88">共享 API 入口与资源边界 · profile 选择模型组合 · Quality 以两条 capability lane 支撑设计与克隆</text>
+  <text class="title" x="60" y="58">SpeechRail 三档规格、ASR/TTS 角色与资源边界</text>
+  <text class="subtitle" x="60" y="88">ASR 与 TTS 独立选档 · custom_voice / base 每档绑定 · voice_design 仅 reference 且仅设计作业</text>
 
-  <!-- Shared request path -->
-  <rect class="top-box" x="60" y="130" width="300" height="120" rx="16"/>
-  <text class="box-title" x="85" y="169">Clients / Agents</text>
-  <text class="box-copy" x="85" y="198">OpenAI SDK · Sona · Open-WebUI</text>
-  <text class="box-copy-small" x="85" y="224">HTTP REST / WebSocket</text>
+  <rect class="top-box" x="60" y="125" width="310" height="120" rx="16"/>
+  <text class="box-title" x="85" y="164">Clients / Agents</text>
+  <text class="box-copy" x="85" y="193">OpenAI SDK · Sona · 本地 App</text>
+  <text class="box-copy-small" x="85" y="220">REST · current-only WebSocket</text>
 
-  <rect class="top-box" x="450" y="130" width="400" height="120" rx="16"/>
-  <text class="box-title" x="475" y="169">FastAPI / OpenAI-compatible Gateway</text>
-  <text class="box-copy" x="475" y="198">same API contract · request ID · error envelope</text>
-  <text class="box-copy-small" x="475" y="224">session admission · server_vad · barge-in</text>
+  <rect class="top-box" x="465" y="125" width="420" height="120" rx="16"/>
+  <text class="box-title" x="490" y="164">FastAPI Gateway</text>
+  <text class="box-copy" x="490" y="193">request ID · bounded input · stable errors</text>
+  <text class="box-copy-small" x="490" y="220">admission · server VAD · lifecycle</text>
 
-  <rect class="top-box" x="930" y="130" width="360" height="120" rx="16"/>
-  <text class="box-title" x="955" y="169">Profile + capability Router</text>
-  <text class="box-copy" x="955" y="198">select tier → default TTS worker</text>
-  <text class="box-copy-small" x="955" y="224">Quality → voice_design / voice_clone lane</text>
+  <rect class="top-box" x="980" y="125" width="420" height="120" rx="16"/>
+  <text class="box-title" x="1005" y="164">Plan Resolver + Router</text>
+  <text class="box-copy" x="1005" y="193">asr_spec / tts_spec / task kind / voice revision</text>
+  <text class="box-copy-small" x="1005" y="220">显式角色路由 · 不按目录名或旧 preset 推断</text>
 
-  <rect class="shared-box" x="1370" y="130" width="490" height="120" rx="16"/>
-  <text class="box-title" x="1395" y="169">Shared host session layer</text>
-  <text class="box-copy" x="1395" y="198">server_vad / Silero VAD · admission · barge-in</text>
-  <text class="box-copy-small" x="1395" y="224">不是第三个 ASR/TTS worker</text>
+  <rect class="shared-box" x="1495" y="125" width="365" height="120" rx="16"/>
+  <text class="box-title" x="1520" y="164">Task opt-in services</text>
+  <text class="box-copy" x="1520" y="193">Alignment worker · Sortformer worker</text>
+  <text class="box-copy-small" x="1520" y="220">仅任务显式开启 · 不随规格继承</text>
 
-  <path class="flow" d="M360 190 H450" marker-end="url(#flow-arrow)"/>
-  <path class="flow" d="M850 190 H930" marker-end="url(#flow-arrow)"/>
-  <path class="shared-line" d="M1290 190 H1370"/>
+  <path class="flow" d="M370 185 H465" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M885 185 H980" marker-end="url(#flow-arrow)"/>
+  <path class="shared-line" d="M1400 185 H1495"/>
 
-  <!-- Router fan-out -->
-  <path class="route-flow" d="M1000 250 V282 H335 V318" marker-end="url(#flow-arrow)"/>
-  <path class="route-flow" d="M1110 250 V318" marker-end="url(#flow-arrow)"/>
-  <path class="route-flow" d="M1220 250 V282 H1585 V318" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M1045 245 V285 H330 V333" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M1190 245 V333" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M1335 245 V285 H1650 V333" marker-end="url(#flow-arrow)"/>
 
-  <!-- light profile -->
-  <rect class="profile-card light-stroke" x="45" y="330" width="580" height="690" rx="20"/>
-  <rect class="light-fill" x="45" y="330" width="580" height="72" rx="20"/>
-  <rect class="light-fill" x="45" y="382" width="580" height="20"/>
-  <text class="profile-title light-text" x="75" y="363">LIGHT · Embedded</text>
-  <text class="profile-subtitle light-text" x="75" y="387">8GB+ · three-tier 8-bit preset</text>
+  <!-- fast -->
+  <rect class="fast-card" x="60" y="345" width="540" height="545" rx="20"/>
+  <path class="fast-header" d="M60 365 Q60 345 80 345 H580 Q600 345 600 365 V420 H60 Z"/>
+  <text class="card-title fast-text" x="88" y="383">FAST</text>
+  <text class="card-subtitle fast-text" x="88" y="408">轻快 · 8-bit ASR/TTS</text>
 
-  <rect class="model-card" x="75" y="425" width="520" height="100" rx="13"/>
-  <text class="model-title" x="100" y="454">ASR worker</text>
-  <text class="model-key" x="100" y="482">asr-0.6b-q8</text>
-  <text class="model-copy" x="100" y="508">Qwen3-ASR 0.6B · 8-bit</text>
+  <rect class="role-box" x="88" y="440" width="484" height="72" rx="12"/>
+  <text class="role-title" x="108" y="466">ASR</text>
+  <text class="model-key" x="108" y="492">asr-0.6b-q8</text>
+  <text class="model-copy" x="340" y="492">单共享 ASR owner</text>
 
-  <rect class="model-card" x="75" y="545" width="520" height="100" rx="13"/>
-  <text class="model-title" x="100" y="574">TTS capability worker</text>
-  <text class="model-key" x="100" y="602">tts-0.6b-custom-q8</text>
-  <text class="model-copy" x="100" y="628">/v1/audio/speech → CustomVoice · 8-bit</text>
+  <rect class="role-box" x="88" y="530" width="484" height="72" rx="12"/>
+  <text class="role-title" x="108" y="556">TTS custom_voice</text>
+  <text class="model-key" x="108" y="582">tts-0.6b-custom-q8</text>
+  <text class="model-copy" x="365" y="582">系统声音</text>
 
-  <rect class="aux-card" x="75" y="665" width="520" height="100" rx="13"/>
-  <text class="section-label" x="100" y="695">OPTIONAL COMPONENTS</text>
-  <text class="callout" x="100" y="725">无 aligner · 无 diarization</text>
-  <text class="model-copy" x="100" y="749">词级时间戳由 ASR 原生提供</text>
+  <rect class="role-box" x="88" y="620" width="484" height="72" rx="12"/>
+  <text class="role-title" x="108" y="646">TTS base</text>
+  <text class="model-key" x="108" y="672">tts-0.6b-base-q8</text>
+  <text class="model-copy" x="365" y="672">参考克隆</text>
 
-  <path class="shared-line" d="M100 820 H570"/>
-  <text class="footer-title light-text" x="100" y="855">Light runtime boundary</text>
-  <text class="footer-copy" x="100" y="884">单 TTS lane · 可配置 idle eviction</text>
-  <text class="footer-copy" x="100" y="911">不声明 `gpt-4o-transcribe-diarize`</text>
+  <rect class="optional-box" x="88" y="710" width="484" height="145" rx="12"/>
+  <text class="section-label" x="108" y="738">TASK OPT-IN</text>
+  <text class="model-copy" x="108" y="765">aligner：显式点名 aligner-q8</text>
+  <text class="model-copy" x="108" y="790">Diarization：Sortformer + aligner 都就绪才声明</text>
+  <text class="note" x="108" y="825">词级时间戳来自 ASR 原生输出，不依赖 aligner</text>
 
-  <!-- balanced profile -->
-  <rect class="profile-card balanced-stroke" x="670" y="330" width="580" height="690" rx="20"/>
-  <rect class="balanced-fill" x="670" y="330" width="580" height="72" rx="20"/>
-  <rect class="balanced-fill" x="670" y="382" width="580" height="20"/>
-  <text class="profile-title balanced-text" x="700" y="363">BALANCED · Pro Workflow</text>
-  <text class="profile-subtitle balanced-text" x="700" y="387">16–24GB · three-tier 8-bit preset</text>
+  <!-- quality -->
+  <rect class="quality-card" x="660" y="345" width="540" height="545" rx="20"/>
+  <path class="quality-header" d="M660 365 Q660 345 680 345 H1180 Q1200 345 1200 365 V420 H660 Z"/>
+  <text class="card-title quality-text" x="688" y="383">QUALITY</text>
+  <text class="card-subtitle quality-text" x="688" y="408">品质 · 1.7B 8-bit ASR/TTS</text>
 
-  <rect class="model-card" x="700" y="425" width="520" height="100" rx="13"/>
-  <text class="model-title" x="725" y="454">ASR worker</text>
-  <text class="model-key" x="725" y="482">asr-1.7b-q8</text>
-  <text class="model-copy" x="725" y="508">Qwen3-ASR 1.7B · 8-bit</text>
+  <rect class="role-box" x="688" y="440" width="484" height="72" rx="12"/>
+  <text class="role-title" x="708" y="466">ASR</text>
+  <text class="model-key" x="708" y="492">asr-1.7b-q8</text>
+  <text class="model-copy" x="940" y="492">单共享 ASR owner</text>
 
-  <rect class="model-card" x="700" y="545" width="520" height="100" rx="13"/>
-  <text class="model-title" x="725" y="574">TTS capability worker</text>
-  <text class="model-key" x="725" y="602">tts-0.6b-custom-q8</text>
-  <text class="model-copy" x="725" y="628">/v1/audio/speech → CustomVoice · 8-bit</text>
+  <rect class="role-box" x="688" y="530" width="484" height="72" rx="12"/>
+  <text class="role-title" x="708" y="556">TTS custom_voice</text>
+  <text class="model-key" x="708" y="582">tts-1.7b-custom-q8</text>
+  <text class="model-copy" x="965" y="582">系统声音</text>
 
-  <rect class="aux-card" x="700" y="665" width="520" height="120" rx="13"/>
-  <text class="section-label" x="725" y="695">DIARIZATION PATH</text>
-  <text class="model-key-small" x="725" y="725">aligner-q8</text>
-  <text class="model-copy" x="850" y="725">+ CoreML Sortformer</text>
-  <text class="model-copy" x="725" y="754">仅分人路径使用 · 输出 session-scoped 匿名 label</text>
+  <rect class="role-box" x="688" y="620" width="484" height="72" rx="12"/>
+  <text class="role-title" x="708" y="646">TTS base</text>
+  <text class="model-key" x="708" y="672">tts-1.7b-base-q8</text>
+  <text class="model-copy" x="965" y="672">参考克隆</text>
 
-  <path class="shared-line" d="M725 820 H1195"/>
-  <text class="footer-title balanced-text" x="725" y="855">Balanced runtime boundary</text>
-  <text class="footer-copy" x="725" y="884">单 TTS lane · diarization ready</text>
-  <text class="footer-copy" x="725" y="911">aligner 不参与普通词级时间戳</text>
+  <rect class="optional-box" x="688" y="710" width="484" height="145" rx="12"/>
+  <text class="section-label" x="708" y="738">TASK OPT-IN</text>
+  <text class="model-copy" x="708" y="765">aligner：显式点名 aligner-bf16</text>
+  <text class="model-copy" x="708" y="790">Diarization：Sortformer + aligner 都就绪才声明</text>
+  <text class="note" x="708" y="825">不继承 reference 的 VoiceDesign</text>
 
-  <!-- quality profile -->
-  <rect class="profile-card quality-stroke" x="1295" y="330" width="580" height="690" rx="20"/>
-  <rect class="quality-fill" x="1295" y="330" width="580" height="72" rx="20"/>
-  <rect class="quality-fill" x="1295" y="382" width="580" height="20"/>
-  <text class="profile-title quality-text" x="1325" y="363">QUALITY · Studio</text>
-  <text class="profile-subtitle quality-text" x="1325" y="387">32GB+ · 8-bit ASR/TTS · aligner bf16</text>
+  <!-- reference -->
+  <rect class="reference-card" x="1260" y="345" width="600" height="545" rx="20"/>
+  <path class="reference-header" d="M1260 365 Q1260 345 1280 345 H1840 Q1860 345 1860 365 V420 H1260 Z"/>
+  <text class="card-title reference-text" x="1288" y="383">REFERENCE</text>
+  <text class="card-subtitle reference-text" x="1288" y="408">参考精度 · bf16 · 继承同族 8-bit 门禁证据</text>
 
-  <rect class="model-card" x="1325" y="415" width="520" height="88" rx="13"/>
-  <text class="model-title" x="1350" y="444">ASR worker</text>
-  <text class="model-key" x="1350" y="472">asr-1.7b-q8</text>
-  <text class="model-copy" x="1585" y="472">Qwen3-ASR 1.7B · 8-bit</text>
+  <rect class="role-box" x="1288" y="440" width="544" height="72" rx="12"/>
+  <text class="role-title" x="1308" y="466">ASR</text>
+  <text class="model-key" x="1308" y="492">asr-1.7b-bf16</text>
+  <text class="model-copy" x="1545" y="492">单共享 ASR owner</text>
 
-  <rect class="quality-model-card" x="1325" y="520" width="520" height="300" rx="13"/>
-  <text class="section-label quality-text" x="1350" y="548">TTS CAPABILITY ROUTER · 双常驻允许</text>
-  <text class="model-copy-small quality-text" x="1350" y="573">设计音色：VoiceDesign → generated reference → Base clone voice</text>
+  <rect class="role-box" x="1288" y="530" width="260" height="72" rx="12"/>
+  <text class="role-title" x="1308" y="556">TTS custom_voice</text>
+  <text class="model-key" x="1308" y="582">tts-1.7b-custom-bf16</text>
 
-  <rect class="route-pill" x="1345" y="585" width="230" height="32" rx="10"/>
-  <text class="route-label" x="1460" y="606" text-anchor="middle">preset · instruction · preview</text>
-  <path class="route-flow" d="M1460 617 V636" marker-end="url(#flow-arrow)"/>
+  <rect class="role-box" x="1572" y="530" width="260" height="72" rx="12"/>
+  <text class="role-title" x="1592" y="556">TTS base</text>
+  <text class="model-key" x="1592" y="582">tts-1.7b-base-bf16</text>
 
-  <rect class="route-pill" x="1595" y="585" width="230" height="32" rx="10"/>
-  <text class="route-label" x="1710" y="606" text-anchor="middle">reference audio · clone voice</text>
-  <path class="route-flow" d="M1710 617 V636" marker-end="url(#flow-arrow)"/>
+  <rect class="role-box-design" x="1288" y="620" width="544" height="72" rx="12"/>
+  <text class="role-title" x="1308" y="646">TTS voice_design · 仅设计作业</text>
+  <text class="model-key" x="1308" y="672">tts-1.7b-design-bf16</text>
+  <text class="model-copy" x="1585" y="672">普通 synthesize 拒绝 Design</text>
 
-  <rect class="quality-model-card quality-stroke" x="1345" y="636" width="230" height="157" rx="12"/>
-  <text class="model-title quality-text" x="1365" y="663">VoiceDesign</text>
-  <text class="model-key-small" x="1365" y="689">tts-1.7b-design-q8</text>
-  <text class="model-copy-small" x="1365" y="713">lane: voice_design</text>
-  <text class="model-copy-small" x="1365" y="738">/v1/audio/speech</text>
-  <text class="model-copy-small" x="1365" y="759">/v1/voices/previews</text>
-  <text class="model-copy-small" x="1365" y="780">/v1/voices/designs → ref</text>
+  <rect class="optional-box" x="1288" y="710" width="544" height="145" rx="12"/>
+  <text class="section-label" x="1308" y="738">TASK OPT-IN</text>
+  <text class="model-copy" x="1308" y="765">aligner：显式点名 aligner-bf16</text>
+  <text class="model-copy" x="1308" y="790">Diarization：与 fast/quality 同为任务 opt-in</text>
+  <text class="note" x="1308" y="825">bf16 未在本机逐项复测，不导出质量排名</text>
 
-  <rect class="quality-model-card quality-stroke" x="1595" y="636" width="230" height="157" rx="12"/>
-  <text class="model-title quality-text" x="1615" y="663">Base</text>
-  <text class="model-key-small" x="1615" y="689">tts-1.7b-base-q8</text>
-  <text class="model-copy-small" x="1615" y="713">lane: voice_clone</text>
-  <text class="model-copy-small" x="1615" y="738">/v1/voices/clone</text>
-  <text class="model-copy-small" x="1615" y="759">clone_id → /v1/audio/speech</text>
-  <text class="model-copy-small" x="1615" y="780">voice.variant=base</text>
+  <!-- shared boundary -->
+  <rect class="shared-box" x="60" y="925" width="1800" height="150" rx="18"/>
+  <text class="footer-title blue-text" x="88" y="960">Resource Governor · shared runtime boundary</text>
+  <text class="footer-copy" x="88" y="990">ASR∥TTS 仅在声明峰值与物理内存预算允许时重叠；TTS 不同角色 lane 可并发，同一 lane 由 worker lock 串行。</text>
+  <text class="footer-copy" x="88" y="1017">一个 SpeechRail 服务、一个 ASGI worker、一个 ASR owner；不因并发复制进程。请求路径不下载模型、不读取远程音频 URL。</text>
+  <text class="footer-copy" x="88" y="1044">Alignment 与 Diarization 只在任务 opt-in 且制品就绪时启动独立 worker；未供给时对应能力不对外声明。</text>
 
-  <path class="handoff-line" d="M1575 715 H1595" marker-end="url(#handoff-arrow)"/>
-  <text class="callout quality-text" x="1350" y="812">跨 lane 可并发 · 同 lane worker lock 串行</text>
-
-  <rect class="aux-card" x="1325" y="840" width="520" height="80" rx="13"/>
-  <text class="section-label" x="1350" y="869">DIARIZATION PATH</text>
-  <text class="model-key-small" x="1350" y="898">aligner-bf16</text>
-  <text class="model-copy" x="1510" y="898">+ CoreML Sortformer · 仅分人路径</text>
-
-  <rect class="lifecycle-box" x="1325" y="935" width="520" height="75" rx="13"/>
-  <text class="section-label orange-text" x="1350" y="961">QUALITY GROUP LIFECYCLE</text>
-  <text class="model-copy" x="1350" y="984">VD + Base resident → cooldown → trim/close group</text>
-  <text class="model-copy" x="1350" y="1004">next request → lazy restore selected worker</text>
-
-  <!-- Shared scheduling and artifact relationship -->
-  <rect class="shared-box" x="45" y="1045" width="1830" height="115" rx="18"/>
-  <text class="footer-title blue-text" x="75" y="1080">Resource Governor · shared runtime boundary</text>
-  <text class="footer-copy" x="75" y="1110">ASR∥TTS：物理内存预算允许才重叠 · Quality TTS∥TTS 仅开放 VD/Base 跨 lane 并发</text>
-  <text class="footer-copy" x="75" y="1137">不复制 ASR worker / 不复制服务进程 · 同一 lane 与 ASR∥ASR 仍受单 worker 约束</text>
-
-  <path class="shared-line" d="M1000 1065 V1140"/>
-  <text class="footer-title blue-text" x="1040" y="1080">Catalog artifact sharing</text>
-  <text class="footer-copy" x="1040" y="1110">balanced ↔ quality：asr-1.7b-q8</text>
-  <text class="footer-copy" x="1040" y="1137">light ↔ balanced：tts-0.6b-custom-q8</text>
+  <rect class="lifecycle-box" x="1200" y="950" width="625" height="95" rx="13"/>
+  <text class="footer-title orange-text" x="1225" y="980">Capability group lifecycle</text>
+  <text class="footer-copy" x="1225" y="1008">按请求懒加载角色 → 可驻留的不同 lane 并发 → 空闲冷却</text>
+  <text class="footer-copy" x="1225" y="1033">→ trim/close group → 下一请求只恢复需要的角色</text>
 </svg>

@@ -2,8 +2,8 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "3.1.3"
-date: 2026-09-23
+version: "3.2.0"
+date: 2026-09-26
 ---
 
 # 🌟 SpeechRail 产品全景白皮书
@@ -51,9 +51,9 @@ mindmap
 - **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
 
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
-- **按档位声明模型精度**：ASR 与 TTS 使用 MLX/MPS 运行。`light`、`balanced`、`quality` 的语音权重为 8-bit（`quality` aligner 为 bf16）；候选 `extreme` 的 ASR、TTS 与 aligner 为 bf16。该精度差异不证明质量、资源或延迟更优。曾评估的 4-bit `light` 方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
+- **按规格声明模型精度**：ASR 与 TTS 使用 MLX/MPS 运行。`fast`、`quality` 使用 8-bit 语音权重；`reference` 使用 bf16，并按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。该精度差异不证明质量、资源或延迟更优。曾评估的 4-bit 轻量方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
 - **有界推理链路**：WAV 容器支持 fast-path；Resource Governor、worker 生命周期与有限队列共同控制单机资源。延迟和吞吐不在产品概述中作固定承诺。
-- **整句语音合成**：24 kHz 自然语音生成，支持多语种与预设音色；`quality` 由 VoiceDesign（1.7B）驱动并支持自然语言创建新音色，同时由独立 Base（1.7B）capability worker 承担参考音频克隆；候选 `extreme` 使用相同能力但为 bf16 权重；`balanced`/`light` 由 CustomVoice（0.6B）提供固定预设音色。
+- **整句语音合成**：24 kHz 自然语音生成，支持多语种与预设音色；每个 TTS spec 都有 CustomVoice 系统声音与 Base reference clone；`reference` 另含仅供设计作业使用的 VoiceDesign（1.7B BF16）。设计与克隆使用独立 capability lane，不把 Design 作为普通合成或 clone fallback。
 
 ### 🔌 3. 标准语音契约与清晰编排边界
 - **REST 子集**：`/v1/audio/transcriptions` 与 `/v1/audio/speech` 提供文档声明的 OpenAI 兼容语音接口。
@@ -85,33 +85,32 @@ journey
       导出媒体音频: 5: WAV/MP3/PCM 批量产出
 ```
 
-SpeechRail 以四个**用户差异化档位**交付共享 API payload 契约；档位只选择权重、按档位量化精度与是否供给分人制品，worker 协议与调度保持共享：
+SpeechRail 以三个**用户差异化规格**交付共享 API payload 契约；ASR 与 TTS 独立选档，规格只绑定权重与角色制品，分人、对齐和 VoiceDesign 仍由任务显式 opt-in，worker 协议与调度保持共享：
 
-| 档位 | 用户定位 | 适配硬件 | 权重精度 | 分人 |
+| spec | 用户定位 | ASR / TTS 权重 | TTS 角色 | 分人 |
 |---|---|---|---|---|
-| 🟢 `light`（Embedded） | 嵌入/听写、个人桌面助手 | 8GB 基础机（Air / Mini） | 8-bit | ✗ 不供给 aligner / CoreML |
-| 🟡 `balanced`（Pro Workflow） | 会议、播客、访谈 | 16–24GB 主流机（Pro / Max） | 8-bit | ✓ Sortformer + `aligner-q8` |
-| 🟣 `quality`（Studio） | 创作者、R&D | 32GB+ 旗舰机（Max / Ultra） | 8-bit（aligner bf16） | ✓ Sortformer + `aligner-bf16` |
-| `extreme`（候选） | 显式选择的 BF16 profile | 未定义固定硬件门槛 | bf16 ASR/TTS/aligner | ✓ Sortformer + 复用 `aligner-bf16` |
+| 🟢 `fast` | 嵌入/听写、个人桌面助手 | 8-bit | CustomVoice + Base | 按显式供给 |
+| 🟡 `quality` | 会议、播客、访谈、日常创作 | 8-bit | CustomVoice + Base | 按显式供给 |
+| 🟣 `reference` | 参考精度、声音设计作业 | bf16（继承 8-bit 门禁证据） | CustomVoice + Base + VoiceDesign | 按显式供给 |
 
-`quality` 与候选 `extreme` 的 VoiceDesign 与 Base 是两条独立 TTS capability lane：允许双常驻，面向不同 lane 的请求可以并发，同一 lane 仍串行。空闲冷却可以将两者作为一个 capability group trim/close，下一次请求再惰性恢复所需 worker。
+`fast` / `quality` / `reference` 的 CustomVoice 与 Base 是独立 TTS capability lane；`reference` 的 VoiceDesign 是仅供设计作业的第三条 lane。不同 lane 可并发，同一 lane 仍串行；空闲冷却后按 capability group trim/close，下一次请求再惰性恢复所需角色。设备内存推荐只作为起始建议，不写成硬门槛。
 
-![四档模型与 TTS capability 关系图](../architecture/diagrams/four-tier-model-architecture.svg)
+![三档模型与 TTS capability 关系图](../architecture/diagrams/three-tier-model-architecture.svg)
 
-### 画像一：🟢 `light`（Embedded）— 桌面智能体与语音输入用户 (Desktop Agents)
+### 画像一：🟢 `fast`— 桌面智能体与语音输入用户 (Desktop Agents)
 - **典型应用**：QwenPaw、Hermes Agent、本地听写工具。
 - **核心诉求**：随时按下快捷键说话，极速返回精准转写文本；绝不上传麦克风录音至云端。
 - **SpeechRail 解法**：通过 `/v1/audio/transcriptions` 或 `whisper-1` 别名直连，秒级返回识别结果。
 
-### 画像二：🟡 `balanced`（Pro Workflow）— 沉浸式会议与协同办公用户 (Meeting & Collaboration)
+### 画像二：🟡 `quality`— 沉浸式会议与协同办公用户 (Meeting & Collaboration)
 - **典型应用**：Sona 会议助理、团队协作套件。
 - **核心诉求**：长时间连续会议流式字幕、说话人分离（Diarization）、低延迟无缝对齐。
-- **SpeechRail 解法**：通过 `/v1/realtime` 提供全双工流式 ASR、Server VAD 及 Sortformer 匿名声纹分割（`balanced`、`quality` 与候选 `extreme` 配置分人制品，能力按 readiness 声明）。
+- **SpeechRail 解法**：通过 `/v1/realtime` 提供流式 ASR、Server VAD；分人由任务显式 opt-in，只有 Sortformer 与点名 aligner 供给且 readiness 成功时才声明匿名声纹分割。
 
-### 画像三：🟣 `quality`（Studio）— 内容创作者与自动化配音系统 (Content Creators)
+### 画像三：🟣 `reference`— 内容创作者与自动化配音系统 (Content Creators)
 - **典型应用**：播客生成器、小说朗读器、短视频配音脚本。
 - **核心诉求**：多情感、多角色、高保真自然声音输出，支持长文案与流式断句播放。
-- **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 音频，提供 `warm`、`calm`、`bright` 等预设音色；`quality` 与候选 `extreme` 的自然语言设计与参考音频克隆分别路由到 VoiceDesign/Base 两个 capability worker，不触发两套模型的频繁来回切换。`extreme` 的质量与资源证据尚未验证。
+- **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 音频，提供 `warm`、`calm`、`bright` 等预设音色；`reference` 的自然语言设计路由到 VoiceDesign，普通系统声音与参考音频克隆分别路由到 CustomVoice/Base capability worker，不触发模型频繁来回切换。
 
 ---
 
@@ -125,15 +124,16 @@ SpeechRail 以四个**用户差异化档位**交付共享 API payload 契约；�
 | **高保真文案朗读** | 24kHz 整句/分段语音合成 | `POST /v1/audio/speech` | 契约可用；音质、RTF 与首音时延按 runtime 单独验收 | 听书工具, 配音工作流 |
 | **长音频异步离线处理** | 任务队列与 Spool 调度 | `POST/GET/DELETE /v1/jobs` | 提供有界队列；吞吐与 OOM 包络需按 profile 验收 | 后台自动化任务, SRE 批处理 |
 
-### 4.1 四档能力矩阵（API 声明契约）
+### 4.1 三档能力矩阵（API 声明契约）
 
-| 能力 | `light` | `balanced` | `quality` | `extreme`（候选） |
+| 能力 | `fast` | `quality` | `reference` |
 |---|---|---|---|
-| 批量 ASR（分段与词级时间戳）/ Realtime（分段事实） | ✓ | ✓ | ✓ | ✓ |
-| 说话人分离 (Diarization) | ✗ | ✓ | ✓ | ✓ |
-| VoiceDesign / 音色克隆 | ✗ | ✗ | ✓ | ✓ |
+| 批量 ASR（分段与词级时间戳）/ Realtime（分段事实） | ✓ | ✓ | ✓ |
+| 系统声音 / 参考克隆（`custom_voice` / `base`） | ✓ | ✓ | ✓ |
+| 说话人分离 (Diarization) | 按显式供给 | 按显式供给 | 按显式供给 |
+| VoiceDesign（仅设计作业） | ✗ | ✗ | ✓ |
 
-> 说明：本表描述 catalog 中的能力供给，不构成固定性能 SLA 或质量排名；服务只向客户端声明当前 ready 的能力。词级时间戳由 ASR 原生提供，与 aligner 无关，四档均可用。`balanced`、`quality`、`extreme` 配置分人制品；`quality` 与候选 `extreme` 配置 VoiceDesign 与 Base。`extreme` 尚无质量、资源与延迟证据，正式启用保持阻塞。公共 API payload 结构一致，profile 枚举增加 `extreme`。
+> 说明：本表描述 catalog 中的角色供给，不构成固定性能 SLA 或质量排名；服务只向客户端声明当前 ready 的能力。词级时间戳由 ASR 原生提供，与 aligner 无关，三档均可用。分人是任务级 opt-in，不配置或未供给制品时不会出现在 `/v1/models`。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测；公共 API payload 结构一致，ASR/TTS 规格可独立选择。
 
 ---
 

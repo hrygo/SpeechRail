@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "3.1.4"
-date: 2026-09-23
+version: "3.2.1"
+date: 2026-09-26
 ---
 
 # 📚 SpeechRail 文档中心
@@ -20,7 +20,7 @@ date: 2026-09-23
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-24）
+## 当前实现基线（2026-09-26）
 
 - 当前源码 release 为 SpeechRail `3.2.1`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
 - Realtime 已切换为 current-only 无状态 Speech Plane；调用方拥有 LLM、历史、memory、tools、播放和 barge-in，服务端只交付 ASR/VAD/匿名分人事实与显式 TTS render。
@@ -28,7 +28,7 @@ date: 2026-09-23
 - Realtime `server_vad` 只交付端点事实。endpointing 窗口、播放队列和 barge-in 决策由调用方负责，不是 SpeechRail 的全局业务默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
 - clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
-- `quality` 与候选 `extreme` 都配置 `voice_design` VoiceDesign 和 `voice_clone` Base 两条独立 capability lane；不同 lane 可并发，同一 lane 由 worker lock 串行，空闲冷却后按 capability group 回收。`extreme` 的质量、资源与延迟尚未验证，不继承 `quality` 的测量证据。
+- 每个 TTS spec 都绑定 `custom_voice` 与 `base`；仅 `reference` 另绑定只用于设计作业的 `voice_design`。不同 capability lane 可并发，同一 lane 由 worker lock 串行，空闲冷却后按 capability group 回收。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测，也不导出质量排名。
 
 ---
 
@@ -72,8 +72,9 @@ flowchart TD
         end
         subgraph TTS_Box ["Qwen3-TTS capability workers"]
             direction TB
-            TTS_VD["VoiceDesign worker<br/>• voice_design lane<br/>• 1.7B q8 quality / bf16 extreme"]
-            TTS_Base["Base worker<br/>• voice_clone lane<br/>• 1.7B q8 quality / bf16 extreme"]
+            TTS_Custom["CustomVoice worker<br/>• custom_voice lane<br/>• 0.6B q8 fast / 1.7B q8 quality / bf16 reference"]
+            TTS_VD["VoiceDesign worker<br/>• voice_design lane<br/>• 1.7B bf16 reference · 仅设计作业"]
+            TTS_Base["Base worker<br/>• voice_clone lane<br/>• 0.6B/1.7B q8 / 1.7B bf16"]
         end
     end
 
@@ -87,9 +88,9 @@ flowchart TD
     Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
 
-![四档模型与共享 API、能力路由关系图](architecture/diagrams/four-tier-model-architecture.svg)
+![三档模型与共享 API、能力路由关系图](architecture/diagrams/three-tier-model-architecture.svg)
 
-上图概览当前四档模型组合、profile/capability 路由与共享资源边界。`extreme` 仍是候选档，质量、资源与延迟尚未验证；图示不代表质量排名、机器门槛或正式启用状态。
+上图概览当前三档模型组合、spec/capability 路由与共享资源边界。分人按任务显式供给，`reference` 继承同族 8-bit 门禁证据但未单独复测；图示不代表质量排名、机器门槛或正式启用状态。
 
 ---
 
@@ -97,10 +98,10 @@ flowchart TD
 
 | 功能模块 | 运行状态 | 协议与入口 | 核心能力特征 | 验证证据 |
 |---|---|---|---|---|
-| **批量语音识别 (ASR)** | 契约可用，按 runtime readiness | `POST /v1/audio/transcriptions` | 文档声明的 OpenAI multipart 子集，支持 `verbose_json`、`srt`、`vtt`；分人格式按 profile 条件启用 | 确定性契约测试；真实质量需按授权单独验收 |
+| **批量语音识别 (ASR)** | 契约可用，按 runtime readiness | `POST /v1/audio/transcriptions` | 文档声明的 OpenAI multipart 子集，支持 `verbose_json`、`srt`、`vtt`；分人格式按任务 opt-in 与供给状态启用 | 确定性契约测试；真实质量需按授权单独验收 |
 | **语音合成 (TTS)** | 契约可用，按 runtime readiness | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 等文档声明格式，按能力快照选择音色 | 确定性契约测试；真实音质与性能需按授权单独验收 |
 | **实时流式 (Realtime)** | 契约可用 | `WS /v1/realtime` | current-only 无状态 ASR/TTS 子集；服务端提供 VAD 事实，调用方负责 LLM、队列、播放和 barge-in，并显式提交 `speechrail.tts.*` | Python 契约/回归与 Native 纯测试；真实模型/音频质量需单独验收 |
-| **说话人分离 (Diarization)** | 可选，按 profile 与资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in | 私有 CoreML Sortformer FP16 worker；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
+| **说话人分离 (Diarization)** | 可选，需显式供给 sortformer/aligner 且资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in | 私有 CoreML Sortformer FP16 worker + 独立 aligner；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
 | **macOS 常驻运维服务** | 流程可用，按安装态验收 | `speechrail service` CLI | 用户级 LaunchAgent 管理、状态检查和受控回滚 | 确定性测试与安装态证据分开记录 |
 
 ---
