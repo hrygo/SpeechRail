@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 _SHA256_RE = r"[0-9a-fA-F]{64}"
@@ -164,23 +166,50 @@ def _tracked_source_files(source_root: Path) -> tuple[Path, ...]:
     return tuple(sorted(files, key=lambda item: item.relative_to(source_root).as_posix()))
 
 
-def _overlay_files(incremental_root: Path) -> tuple[Path, ...]:
+def _overlay_files(
+    incremental_root: Path,
+    repository_root: Path,
+) -> tuple[Path, ...]:
     """Return the additive overlay files that must reach the built wheel."""
 
     if incremental_root.is_symlink() or not incremental_root.is_dir():
         raise EngineWheelBuildError("engine build input incremental overlay is missing")
-    files = tuple(
-        sorted(
-            (path for path in incremental_root.rglob("*") if path.is_file()),
-            key=lambda item: item.relative_to(incremental_root).as_posix(),
-        )
-    )
+    try:
+        relative_root = incremental_root.relative_to(repository_root).as_posix()
+    except ValueError as exc:
+        raise EngineWheelBuildError(
+            "engine incremental overlay must stay inside the repository"
+        ) from exc
+    names = _run_git_bytes(
+        repository_root,
+        "ls-files",
+        "-z",
+        "--full-name",
+        "--",
+        relative_root,
+    ).split(b"\0")
+    files: list[Path] = []
+    for raw_name in names:
+        if not raw_name:
+            continue
+        try:
+            relative = raw_name.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise EngineWheelBuildError("engine incremental overlay has a non-UTF-8 path") from exc
+        path = repository_root / relative
+        try:
+            path.resolve().relative_to(incremental_root.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise EngineWheelBuildError(
+                "engine incremental overlay file escapes its root"
+            ) from exc
+        if path.is_symlink() or not path.is_file():
+            raise EngineWheelBuildError("engine incremental overlay is not a regular file")
+        files.append(path)
+    files.sort(key=lambda item: item.relative_to(incremental_root).as_posix())
     if not files:
         raise EngineWheelBuildError("engine incremental overlay is empty")
-    for path in files:
-        if path.is_symlink():
-            raise EngineWheelBuildError("engine incremental overlay must not contain symlinks")
-    return files
+    return tuple(files)
 
 
 def _apply_patch(patch_path: Path, source_root: Path) -> None:
@@ -211,6 +240,7 @@ def _apply_patch(patch_path: Path, source_root: Path) -> None:
 def _staged_source(
     source_root: Path,
     source_files: tuple[Path, ...],
+    overlay_files: tuple[Path, ...],
     incremental_root: Path,
     patch_path: Path | None,
 ) -> Iterator[Path]:
@@ -226,7 +256,7 @@ def _staged_source(
             shutil.copy2(source, destination)
         if patch_path is not None:
             _apply_patch(patch_path, staged)
-        for overlay in _overlay_files(incremental_root):
+        for overlay in overlay_files:
             relative = overlay.relative_to(incremental_root)
             destination = staged / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -320,9 +350,28 @@ def load_build_spec(root: Path, spec_path: Path) -> EngineBuildSpec:
     )
 
 
-def _default_builder(source_root: Path, out_dir: Path) -> Path:
+def _engine_build_environment(source_root: Path) -> dict[str, str]:
+    """Pin wheel timestamps to the immutable upstream commit time."""
+
+    epoch = _run_git(source_root, "show", "-s", "--format=%ct", "HEAD")
+    if not epoch.isdigit():
+        raise EngineWheelBuildError("engine source checkout has no valid commit timestamp")
+    environment = os.environ.copy()
+    environment["SOURCE_DATE_EPOCH"] = epoch
+    return environment
+
+
+def _default_builder(
+    source_root: Path,
+    out_dir: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
     """Build with uv's isolated PEP 517 frontend from the pinned source checkout."""
 
+    build_environment = (
+        dict(environment) if environment is not None else _engine_build_environment(source_root)
+    )
     try:
         completed = subprocess.run(
             (
@@ -333,6 +382,7 @@ def _default_builder(source_root: Path, out_dir: Path) -> Path:
                 str(out_dir),
                 str(source_root),
             ),
+            env=build_environment,
             check=False,
             capture_output=True,
         )
@@ -365,14 +415,24 @@ def build_engine_wheel(
     source_files = _tracked_source_files(spec.source_root)
     if spec.patch_path is not None and not spec.patch_path.is_file():
         raise EngineWheelBuildError("engine build patch is missing")
-    overlay_files = _overlay_files(spec.incremental_root)
+    overlay_files = _overlay_files(spec.incremental_root, resolved_root)
     destination.mkdir(parents=True, exist_ok=True)
-    build_inputs_sha256 = hash_tree(spec.build_inputs, root=resolved_root)
+    build_inputs = tuple(
+        overlay
+        for item in spec.build_inputs
+        for overlay in (
+            overlay_files if item == spec.incremental_root else (item,)
+        )
+    )
+    build_inputs_sha256 = hash_tree(build_inputs, root=resolved_root)
     patch_sha256 = hash_tree(
-        (spec.patch_path,) if spec.patch_path is not None else (spec.incremental_root,),
+        (spec.patch_path,) if spec.patch_path is not None else overlay_files,
         root=resolved_root,
     )
-    build = builder or _default_builder
+    build = builder or partial(
+        _default_builder,
+        environment=_engine_build_environment(spec.source_root),
+    )
     wheel_path = destination / spec.wheel_name
     with tempfile.TemporaryDirectory(
         prefix=".engine-wheel-", dir=destination
@@ -380,6 +440,7 @@ def build_engine_wheel(
         with _staged_source(
             spec.source_root,
             source_files,
+            overlay_files,
             spec.incremental_root,
             spec.patch_path,
         ) as staged:

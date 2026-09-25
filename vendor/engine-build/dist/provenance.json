@@ -1,0 +1,8 @@
+{
+  "build_inputs_sha256": "d4e4b9797c2821e8ff25b33f4735daa7eb80e949045162249566c13dde4627cb",
+  "filename": "mlx_audio-0.5.6-py3-none-any.whl",
+  "patch_sha256": "a7521bb21ee3d4b22cba13fb4954bb1a24a1fe51e627ff430560f76c9fc34d63",
+  "sha256": "a717972afcbbf07dd3ed3ff30f9f26b8c2b20f07664c25c1dae915b0afe57502",
+  "source_repository": "https://github.com/Blaizzy/mlx-audio",
+  "source_revision": "4ab7e6f7dedd69a136cfaa318c5dc8aed5119446"
+}
