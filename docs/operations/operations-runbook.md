@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.9.0"
-date: 2026-09-23
+version: "1.10.0"
+date: 2026-09-26
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -20,15 +20,15 @@ date: 2026-09-23
 
 ```mermaid
 graph TD
-    A[🔍 1. 系统与依赖检查] -->|Python 3.12, ffmpeg, uv| B[📂 2. 外部模型 Snapshot 完整性]
+    A[🔍 1. 系统与依赖检查] -->|Python 3.14, ffmpeg, uv| B[📂 2. 外部模型 Snapshot 完整性]
     B -->|Qwen3-ASR / TTS 目录存在且文件齐全| C[🐍 3. 隔离 Worker Python 虚拟环境]
     C -->|可正常导入 MLX / 模型 SDK| D[⚙️ 4. 准备未提交的私有 .env]
     D -->|权限设置为 chmod 600| E[🚀 5. 执行 Pre-flight 验证]
 ```
 
-- [ ] **系统依赖**：`python3 --version` (3.12.x)、`ffmpeg -version` (在系统 `PATH` 中)、`uv --version`。
+- [ ] **系统依赖**：`python3 --version` (3.14.x)、`ffmpeg -version` (在系统 `PATH` 中)、`uv --version`。
 - [ ] **ASR 运行时**：外部绝对路径 `SPEECHRAIL_QWEN3_MODEL_DIR` 与专用 `SPEECHRAIL_QWEN3_PYTHON` 均存在且具备执行权限。
-- [ ] **TTS 运行时 (可选)**：外部绝对路径 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与专用 `SPEECHRAIL_QWEN3_TTS_PYTHON` 配置完整；`quality` / `extreme` reference clone 还需 `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` 指向对应 Base snapshot（managed profile 自动注入）。
+- [ ] **TTS 运行时 (可选)**：外部绝对路径 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与专用 `SPEECHRAIL_QWEN3_TTS_PYTHON` 配置完整；reference clone 由所选 TTS 档位绑定的 `tts_base` 角色提供，还需 `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` 指向对应 Base snapshot（managed selection 自动注入）。
 - [ ] **安全边界**：`.env` 文件权限已设为 `chmod 600 .env`，且 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false`。
 
 ---
@@ -168,8 +168,8 @@ SPEECHRAIL_CLI="$APP_HOME/runtime/current/.venv/bin/speechrail"
 uv build --no-sources --wheel
 
 # 4. 通过 wheel 自带的唯一 managed installer 准备 active profile、preflight、plist 和 runtime/current
-WHEEL="dist/speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl"
-uvx --python 3.12 --from "$WHEEL" speechrail install --yes --enable
+WHEEL="dist/speechrail-<version>-cp314-cp314-macosx_26_0_arm64.whl"
+uvx --python 3.14.7 --from "$WHEEL" speechrail install --yes --enable
 
 # 5. 安装器已通过 lifecycle controller 启动服务；验证端点与真实 TTS→ASR smoke
 curl --fail http://127.0.0.1:8201/health

@@ -2,8 +2,8 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "3.1.3"
-date: 2026-09-23
+version: "3.2.0"
+date: 2026-09-26
 ---
 
 # 能力诊断与质量验收
@@ -46,35 +46,36 @@ managed release 并重新发布，再重复 preflight；不要在客户端单独
 legacy。若 profile 未配置或 artifact 不可用，再用同一 managed CLI 的 `profile status --app-home "$APP_HOME"`
 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史快照或 `readyz=200` 记作当前质量通过。
 
-## 四档能力门控与按档位精度
+## 三档能力门控与制品精度
 
-四档的公共 API payload 结构一致，但 profile 枚举新增 `extreme`，并按档位门控分人制品与精度策略（完整组成见[运行时与部署](runtime-deployment.md)）：
+三档的公共 API payload 结构一致；ASR 与 TTS 可分别选档，分人是任务级 opt-in（完整组成见[运行时与部署](runtime-deployment.md)）：
 
-| 能力 | `light` | `balanced` | `quality` | `extreme`（候选） |
-|---|---|---|---|---|
-| batch segment + word timestamps | ✓ | ✓ | ✓ | ✓ |
-| realtime segment timestamps | ✓ | ✓ | ✓ | ✓ |
-| diarization（`gpt-4o-transcribe-diarize`） | ✗ | ✓ | ✓ | ✓ |
-| aligner（分人专用） | — | `aligner-q8` | `aligner-bf16` | `aligner-bf16` |
-| ASR/TTS precision | 8-bit | 8-bit | 8-bit | bf16（候选，未验质量） |
+| 能力 | `fast` | `quality` | `reference` |
+|---|---|---|---|
+| batch segment + word timestamps | ✓ | ✓ | ✓ |
+| realtime segment timestamps | ✓ | ✓ | ✓ |
+| 系统声音 / 参考克隆（`custom_voice` / `base`） | ✓ | ✓ | ✓ |
+| prompt 音色设计（`voice_design`） | ✗ | ✗ | ✓ |
+| diarization（`gpt-4o-transcribe-diarize`） | 按显式供给 | 按显式供给 | 按显式供给 |
+| ASR/TTS precision | 8-bit | 8-bit | bf16（继承 8-bit 门禁证据，未单独复测） |
 
-- **diarization 门控**：`balanced` / `quality` / 候选 `extreme` 配置 CoreML Sortformer 与 aligner；只有运行时 readiness 成功时才声明 `gpt-4o-transcribe-diarize`。`light` 不供给分人制品，也不在 `/v1/models` 声明该别名。
-- **aligner 是分人专用制品**：由安装器与 `profile apply` 供给到 `app_home/diarization/<aligner-key>`，只服务
-  分人对固定正文的对齐；它不进入 `PreparedModelSet`，也不参与词级时间戳。
+- **diarization 门控**：分人不是档位属性。只有本次实例显式供给 CoreML Sortformer 与一个点名 aligner（`aligner-q8` / `aligner-bf16`）且运行时 readiness 成功时才声明 `gpt-4o-transcribe-diarize`；未供给时 `/v1/models` 不含该别名。
+- **aligner 是分人专用 opt-in 制品**：由安装器与 `profile apply` 供给到 `app_home/diarization/<aligner-key>`，只服务
+  分人对固定正文的对齐；它不进入三档准备集合，也不参与词级时间戳。
 - **批量词级时间戳由 ASR 原生提供**（`timestamp_granularities`）；Realtime 当前只承诺 `segment`，
   `word` 请求明确拒绝，不把 batch 能力推断成 streaming 能力。
 - `diarization_ready` 是动态能力声明：该档未启用分人时不存在，不得用 `readyz=200` 推断分人可用。
-- **E1 结果（2026-09-11，历史三档验收）**：公开真人语料实测 light 的 0.6B 4-bit ASR 相对 8-bit 基线劣化
+- **E1 结果（2026-09-11，历史三档验收）**：公开真人语料实测 light（历史档位名，现对应 `fast`）的 0.6B 4-bit ASR 相对 8-bit 基线劣化
   **1.38pp**（en WER +1.25pp、zh CER +1.46pp）> 0.5pp 阈值，**E1 FAILED**；依计划「未过即回退
   上一精度」，light 回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`（8-bit）。因此 E2 不再对 light 构成
   门控；截至 2026-09-11，`asr-0.6b-q4` / `tts-0.6b-custom-q4` 制品仍保留在当时的 catalog 且不被任何档位使用；2026-09-24 已从当前 catalog 退役。
 
 ## Clone TTS 响度能力
 
-当前 Quality Realtime 在独立 Base clone capability 实际配置时，通过
+当前 Realtime 在独立 Base clone capability（每个 TTS 档位的 `tts_base` 角色）实际配置且 ready 时，通过
 `/v1/models[].capabilities.supports_clone=true` 声明可用性（同一份也可从
-`/v1/speechrail/capabilities` 的原子快照读取）。默认 TTS `variant` 仍可为 `voice_design`；客户端不能再由
-默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
+`/v1/speechrail/capabilities` 的原子快照读取）。系统声音走 `custom_voice`，只有 `reference` 档另绑定
+`voice_design`；客户端不能由默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
 normalization 使用请求级状态，并以私有 200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，
 不是客户端可依赖的公共 Realtime delta 大小承诺。
 
@@ -136,7 +137,7 @@ uv run python tools/evaluate_diarization_e2e.py \
 
 ## 历史三档重排验收门（E1–E7）
 
-以下 E1–E7 记录的是 2026-09-11 的三档重排验收条件，不自动证明新候选 `extreme` 已通过。若某门缺少工具，必须先补齐或在
+以下 E1–E7 记录的是 2026-09-11 的三档重排验收条件，不自动证明今天的 `reference` 档已通过。若某门缺少工具，必须先补齐或在
 记录中显式标注 `UNVERIFIED-BLOCKING`，不得留空阈值：
 
 | 门 | 范围 | 通过条件 |
@@ -149,16 +150,18 @@ uv run python tools/evaluate_diarization_e2e.py \
 | E6 | 能力诚实 | `light` 的 `/v1/models` 不含 `gpt-4o-transcribe-diarize`；`balanced`/`quality` 含且可用 |
 | E7 | 记录 | 聚合证据写入 `docs/operations/<日期>-tier-repositioning-acceptance.md`，不落原始媒体/文本 |
 
-E1–E7 的历史报告只适用于当时记录的三档组合。新档位须单独通过以下门禁，不能沿用 `quality` 数字或以 BF16 权重精度代替结果。
+E1–E7 的历史报告只适用于当时记录的三档组合。`reference` 档不能沿用 `quality` 数字，也不能用 BF16 权重精度
+代替结果；按用户裁定，`reference` 继承同族 8-bit 档位已通过的门禁证据，**未在本机单独复测**。
 
-## Extreme 候选档启用门
+## `reference` 档的证据登记（继承裁定）
 
 | 门 | 通过条件 | 当前状态 |
 |---|---|---|
-| 静态代码与契约 | catalog、API/App/MCP 契约、文档与定向 fake 测试一致；MCP 不含切档路径 | 候选代码静态门由本次实施记录，不代表运行态验收 |
-| App 前向兼容 | 新 App 能解码旧服务、四档服务和未知档位；未知值不能成为控制请求。正式启用前还须发布/安装兼容 App | 源码门可静态验证；安装与发布未做 |
-| R2 质量 | 对同口径公开真人 ASR CER/WER 的劣化绝对差值 ≤0.5pp；“质量最高”宣传另需 TTS 对比依据 | **BLOCKED：没有可引用报告；本次不复测** |
-| R3 资源/延迟 | 有版本、硬件、模型 revision 和采样口径可追溯的同 tick `phys_footprint`、冷载、首包、RTF 与 resident 声明依据 | **UNVERIFIED：没有可引用报告；本次不复测** |
-| R4 正式启用 | 前向兼容与 R2/R3 证据通过，随后另行获准受管切档和公共 API smoke | **BLOCKED：本次不切档、不安装、不发布** |
+| 静态代码与契约 | catalog、API/App/MCP 契约、文档与定向 fake 测试一致；MCP 不含切档路径 | 数据与选择路径静态门由本次实施记录，不代表运行态验收 |
+| App 前向兼容 | App 能解码当前服务、三档组合与未知档位；未知值不能成为控制请求 | 源码门经 App 构建验证；安装与发布未做 |
+| R2 质量 | 对同口径公开真人 ASR CER/WER 的劣化绝对差值 ≤0.5pp；“质量最高”宣传另需 TTS 对比依据 | **继承证据：沿用同族 8-bit 档位的门禁结果；未在本机单独复测** |
+| R3 资源/延迟 | 有版本、硬件、模型 revision 和采样口径可追溯的同 tick `phys_footprint`、冷载、首包、RTF 与 resident 声明依据 | **继承证据：沿用同族 8-bit 档位的结果；本机未复测** |
+| R4 正式启用 | 能力前置条件与制品校验通过，随后另行获准受管切档和公共 API smoke | **未授权：本次不切档、不安装、不发布** |
 
-`/readyz=200`、静态构建、档位出现在候选 catalog 中，都不能替代 R2/R3 或正式启用门。用户明确不要求性能测试，因此本轮不安排性能或质量复测；对应结论保持 BLOCKED/UNVERIFIED。
+`/readyz=200`、静态构建、规格出现在 catalog 中，都不能替代 R2/R3 或正式启用门。用户明确不要求性能测试，
+因此本轮不安排性能或质量复测；对应结论按继承裁定登记，不写成「已认证」。

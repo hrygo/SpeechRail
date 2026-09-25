@@ -2,8 +2,8 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.7.0"
-date: 2026-09-23
+version: "2.7.1"
+date: 2026-09-26
 ---
 
 # 🔌 SpeechRail MCP 主流 Agent 集成指南
@@ -424,7 +424,7 @@ claude mcp add --scope user speechrail \
 1. **先 `describe()`**：确认 `tier`、`readiness`、`available=true` 的音色，再调用其它工具。
 2. **音频用 `audio_ref`**：本地路径或 `file://`。传 `http(s)`/`s3` 等 URL 会被拒（`remote_audio_unsupported`），
    base64 会被拒（`base64_not_supported`）。
-3. **档位能力差异**：`diarize` 需 `diarization_ready=true`（`balanced`、`quality` 与候选 `extreme` 当前配置分人制品）；
+3. **能力差异**：`diarize` 需 `diarization_ready=true`（分人是任务级 opt-in，取决于当前实例是否显式供给 Sortformer + aligner，与档位无关）；
    `preview_voice`、`design_voice` 和 `clone_voice` 只在当前有效能力快照明确声明 VoiceDesign/Base 时可用。
 4. **忙时退避**：遇 `backend_busy` / `queue_full`（`retryable=true`）按 `retry_after` 退避重试，勿死循环。
 5. **长任务**：同步 `transcribe`/`synthesize` 超时或报 `audio_too_long` 时，改用 `create_job` + `get_job`。

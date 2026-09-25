@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.8"
-date: 2026-09-23
+version: "0.5.9"
+date: 2026-09-26
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -119,7 +119,7 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 - 异步 profile operation 的 `OperationSnapshot` 必须保留 `phase`、`errorCode` 和 `message`，并由 `operationStatus` 返回；App 收到 `failed`/`cancelled` 终态必须显示可读原因和错误码，不能只显示 `managed command failed`。
 - 每个 XPC 请求都有有限超时；helper 无法启动或无响应时，App 显示可恢复的控制面错误，不得无限等待。切换类 mutation 不在未知提交状态下自动重放，避免重复执行。
 - UI 测试中的 fake transport 必须覆盖一次失败终态；真实安装包验收仍需额外执行一次 App → XPC → managed CLI → `com.speechrail` 的切档往返，不能把 fake UI test 视为生产链路证明。
-- 档位选择器首次显示以服务返回的 active profile 为准；切档失败回滚后重新同步 active profile，避免把默认 `balanced` 当成用户选择。
+- 档位选择器首次显示以服务返回的 active profile 为准；切档失败回滚后重新同步 active profile，避免把默认 `quality` 当成用户选择。
 
 ## 常见恢复
 
