@@ -89,6 +89,14 @@ def _tier_kwargs(tier: str, tmp_path: Path) -> dict[str, Any]:
 def test_realtime_handshake_reports_the_runtime_role_matrix(
     tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The Realtime session object advertises no capability; REST owns discovery.
+
+    The single current wire removed ``speech_capabilities`` from the session so
+    that one runtime fact has one home.  The Realtime handshake must therefore
+    stay silent about roles while the REST capability snapshot reports the two
+    TTS roles the active tier actually routes to.
+    """
+
     monkeypatch.setattr(
         "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
     )
@@ -101,13 +109,17 @@ def test_realtime_handshake_reports_the_runtime_role_matrix(
 
     with client.websocket_connect("/v1/realtime") as socket:
         created = socket.receive_json()
-        handshake = created["session"]["speech_capabilities"]["streaming_tts"]
+        assert created["type"] == "session.created"
+        assert "speech_capabilities" not in created["session"]
 
-    # The handshake answers for the default system voice, which always has the
-    # CustomVoice role on every target tier.
-    assert handshake["supported"] is True
-    assert handshake["voice_mode"] == "system"
-    assert handshake["voice_variant"] == "custom_voice"
+    snapshot = client.get("/v1/speechrail/capabilities")
+    assert snapshot.status_code == 200
+    models = snapshot.json()["models"]
+    # System speakers resolve to CustomVoice and clone references to Base on
+    # every target tier; discovery reports both roles from the same plan.
+    assert models["tts"]["variant"] == "custom_voice"
+    assert models["tts_clone"]["variant"] == "base"
+    assert models["tts"]["artifact"] != models["tts_clone"]["artifact"]
 
 
 @pytest.mark.parametrize("tier", _TIERS)

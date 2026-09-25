@@ -67,14 +67,14 @@ VR_INTERACTION_TTS_LANGUAGE=auto
 ```
 
 已使用真实本地 PCM 验证历史 Realtime `session.update → append → commit → transcription.completed`，
-该记录只作为历史证据；当前契约使用 `transcription_session.update`，并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为调用方驱动的 SpeechRail Realtime/REST：
+该记录只作为历史证据；当前契约使用 `session.update` + `input_audio_buffer.append/commit`，并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为调用方驱动的 SpeechRail Realtime/REST：
 `sona` 保留 Pipecat、播放、回声、persona、会议、PostgreSQL 与 UI，仅消费
 SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM、会议、PostgreSQL 或 UI。
 
 多人会议的文件分人使用 OpenAI 原生 `model="gpt-4o-transcribe-diarize"` 与
 `response_format="diarized_json"`，消费匿名 A–D `speaker`。Realtime 分人只需在首个 PCM 前发送
-`transcription_session.update` 中的 `session.speechrail.diarization.enabled=true`，随后处理
-`speechrail.diarization.updated`、`speechrail.diarization.status` 与 `speechrail.diarization.done`。所有 Realtime 调用方按 `3.0.0` current-only 契约接入，不提供旧事件迁移层。
+`session.update` 中的 `session.speechrail.diarization.enabled=true`，随后处理
+`speechrail.diarization.updated`、`speechrail.diarization.done`（失败为 `speechrail.diarization.failed`）。所有 Realtime 调用方按当前 `4.0.0` current-only 契约接入，不提供旧事件迁移层。
 缺少固定 CoreML profile 时以 `diarization_not_available` fail closed，不会静默降级为已标注的单
 speaker 会议。姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
 

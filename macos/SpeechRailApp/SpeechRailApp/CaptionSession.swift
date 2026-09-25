@@ -18,8 +18,8 @@ import SpeechRailControlKit
 //   - **时间码是相对会话开始的墙钟秒**（§15 的 `t_start` 注释）。暂停与断线留下的空档
 //     因此在导出物里是**看得见的跳变**，而不是被悄悄抹平——那正是 §16.7 要的证据。
 //     不用"已录音频的秒数"当基准，因为那会把空档伪装成连续。
-//   - **`timing_quality` 写 NULL**。它来自 `attribution_units`，属于分人那一步（阶段 4）；
-//     字幕这一档没有对齐结果，就不该假装有。
+//   - **`timing_quality` 只在拿到对齐证据时才写**。它随 `speechrail.alignment.done`
+//     独立到达，属于分人那一步；字幕不协商对齐时这一列保持 NULL，不假装有时间码。
 
 @MainActor
 @Observable
@@ -174,6 +174,11 @@ public final class CaptionSession {
     /// 序号是库现场取的 `MAX+1`（§15.7 R2 ①），同一个 item 到两次就会多出一行；
     /// 幂等这一层因此在客户端，而不是在库里。
     private var committedItemIDs: Set<String> = []
+    /// `utterance_id` → 已落库的行。对齐与分人结果随后按 item 找回那一行
+    /// （文本 final 不再携带 `attribution_units`，契约 §5.2）。
+    private var lineByItem: [String: (lineID: String, ordinal: Int)] = [:]
+    /// 已经补写过 `timing_quality` 的行；同一行只写一次。
+    private var timingQualityApplied: Set<String> = []
     /// 这一场是否协商过分人（决定了结束时要等 EOF 屏障）。
     private var diarizationActive = false
     /// `speechrail.diarization.done` 是否已经到达。
@@ -320,8 +325,7 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationEnabled,
-            apiKey: apiKey,
-            chunkDurationMilliseconds: TranscriptionSessionUpdate.captionChunkDurationMilliseconds
+            apiKey: apiKey
         )
         do {
             try await client.connect()
@@ -342,6 +346,8 @@ public final class CaptionSession {
         terminalCount = 0
         currentOrdinal = 0
         committedItemIDs = []
+        lineByItem = [:]
+        timingQualityApplied = []
         isStoppingIntentionally = false
         do {
             let record = try await coordinator.createSession(
@@ -508,8 +514,7 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationActive,
-            apiKey: apiKey,
-            chunkDurationMilliseconds: TranscriptionSessionUpdate.captionChunkDurationMilliseconds
+            apiKey: apiKey
         )
         do {
             try await client.connect()
@@ -567,59 +572,70 @@ public final class CaptionSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .speechStarted, .speechStopped,
-             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _):
+        case .ready, .configured, .alignmentFailed,
+             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _),
+             .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 字幕会话不接线 TTS：增量 utterance 属于助手那一层。
             break
-        case .committed:
-            let now = Date()
-            pendingItem = (start: commitCursor ?? now, end: now)
-            commitCursor = now
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
         case .partialSnapshot(_, _, let text):
             partialText = text.isEmpty ? nil : text
-        case .segment:
-            // 分人扩展**不发** `.segment`（契约：避免双写）。真收到说明这一档没协商扩展，
-            // 那就不按它切行：一次 utterance 一行，时间码取上面那份提交边界（与服务端 VAD 同源）。
-            break
-        case .completed(let itemID, let transcript, let units):
+        case .completed(let itemID, let transcript):
+            // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
+            // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
+            let now = Date()
+            pendingItem = (start: commitCursor ?? now, end: now)
+            commitCursor = now
             terminalCount += 1
-            await commit(itemID: itemID, transcript: transcript, units: units)
+            await commit(itemID: itemID, transcript: transcript)
         case .failed(_, let code, let message):
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
             partialText = nil
-        case .attribution(_, let units, let links):
-            await labeling.apply(units: units)
-            labeling.noteSuggestions(links)
-            // 归属修订不改正文，所以它**不留新行**：库里那一行的正文与时间码都不动（§15.3 第 2 条）。
-            if !lines.isEmpty {
-                lines = lines.map { line in
-                    var updated = line
-                    if let label = labeling.attributedLabel(forLineID: line.id) {
-                        updated.speakerLabel = label
-                    }
-                    return updated
-                }
-            }
+        case .attribution(let itemID, let units, let isFinal):
+            await applyAttribution(itemID: itemID, units: units)
+            if isFinal { diarizationDrained = true }
         case .diarizationDegraded(let code, let message):
             labeling.markDegraded(code: code, message: message)
             if let sessionID, let note = labeling.note {
                 await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
             }
-        case .diarizationDone:
-            diarizationDrained = true
-        case .responseAudio(_, _, _), .responseDone(_, _, _, _):
-            // TTS 不属于这一层（字幕与会议都不说话）。
-            break
-        case .serverError(let code, let message, _, _, _, _):
+        case .serverError(let code, let message, _):
             await handleServerError(code: code, message: message)
-        case .cleared:
-            break
         case .closed(let code):
             await handleUnexpectedClose(code: code)
+        }
+    }
+
+    /// 对齐（文本 → 采样区间）与分人（采样区间 → 匿名说话人）随后到达：
+    /// 先记住 `segment_uid` → 行，再原位改归属，并补写一次 `timing_quality`。
+    /// 正文与时间码一个字不动，也不留新行（§15.3 第 2 条）。
+    private func applyAttribution(
+        itemID: String,
+        units: [RealtimeASRClient.AttributionUnit]
+    ) async {
+        guard let entry = lineByItem[itemID], !units.isEmpty else { return }
+        labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
+        await labeling.apply(units: units)
+        if let quality = Self.timingQuality(from: units),
+           timingQualityApplied.insert(entry.lineID).inserted {
+            do {
+                try await coordinator.attachTimingQuality(lineID: entry.lineID, quality: quality)
+            } catch {
+                lastFailure = error.localizedDescription
+                timingQualityApplied.remove(entry.lineID)
+            }
+        }
+        if !lines.isEmpty {
+            lines = lines.map { line in
+                var updated = line
+                if let label = labeling.attributedLabel(forLineID: line.id) {
+                    updated.speakerLabel = label
+                }
+                return updated
+            }
         }
     }
 
@@ -628,8 +644,7 @@ public final class CaptionSession {
     /// 会多出一行——幂等在这里，不在库里。
     private func commit(
         itemID: String,
-        transcript: String,
-        units: [RealtimeASRClient.AttributionUnit] = []
+        transcript: String
     ) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         partialText = nil
@@ -640,12 +655,6 @@ public final class CaptionSession {
             committedItemIDs.insert(itemID)
         }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
-        // 归属先算：`LineDraft` 里就要带上它，否则修订事件到达之前这一行看起来是"未标注"。
-        let initialLabel = units.compactMap { unit -> String? in
-            guard let speaker = unit.speaker, !speaker.isEmpty else { return nil }
-            return speaker
-        }.first
-        let timingQuality = Self.timingQuality(from: units)
         let lineID = UUID().uuidString
         let ordinal: Int
         do {
@@ -655,10 +664,9 @@ public final class CaptionSession {
                     role: .speaker,
                     text: text,
                     source: .microphone,
-                    speakerLabel: initialLabel,
+                    speakerLabel: nil,
                     tStart: window.start.timeIntervalSince(startedAt),
-                    tEnd: window.end.timeIntervalSince(startedAt),
-                    timingQuality: timingQuality
+                    tEnd: window.end.timeIntervalSince(startedAt)
                 ),
                 id: lineID
             )
@@ -668,9 +676,10 @@ public final class CaptionSession {
             lastFailure = error.localizedDescription
             return
         }
-        // 行已经在了，这时候才把 `segment_uid` → 行 的对应关系记进账本：
-        // 之后的 `diarization.updated` 就是按这张表原位修订的。
-        labeling.register(units: units, lineID: lineID, ordinal: ordinal)
+        // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
+        if !itemID.isEmpty {
+            lineByItem[itemID] = (lineID: lineID, ordinal: ordinal)
+        }
         currentOrdinal = ordinal
         lines.append(
             Line(
@@ -679,7 +688,7 @@ public final class CaptionSession {
                 text: text,
                 start: window.start.timeIntervalSince(startedAt),
                 end: window.end.timeIntervalSince(startedAt),
-                speakerLabel: initialLabel
+                speakerLabel: nil
             )
         )
     }

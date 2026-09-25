@@ -8,11 +8,11 @@ import Synchronization
 // 这个文件**同时编进 App 与 `SpeechRailCaptureHelper` 两个 target**（见 `Package.swift`
 // 与 `project.pbxproj` 的 Sources）：它是唯一一份 tap 实现，helper 只是它的宿主进程。
 // 因此它**不能引用 App 侧的任何类型**（`AudioChunkSource`、`AudioChunk` 都不在这里出现），
-// 出口只有一条很窄的约定：16 kHz / 单声道 / PCM16 的 `Data` + 0…1 的电平。
+// 出口只有一条很窄的约定：24 kHz / 单声道 / PCM16 的 `Data` + 0…1 的电平。
 //
 // 四条硬约束（与 `MicrophoneCapture` 同源）：
 //
-//   1. **线上格式固定 16 kHz / 单声道 / PCM16**：契约规定"首个 PCM 之后不得改格式"，
+//   1. **线上格式固定 24 kHz / 单声道 / PCM16**：契约规定"首个 PCM 之后不得改格式"，
 //      归一放在来源这一侧，客户端就不可能违反它（§3.4）。
 //   2. **实时回调里不分配、不加锁、不做 I/O**（§5.13）：回调只把交错后的 Float 写进
 //      预分配环形缓冲（原子读写下标 + 裸指针），格式转换与电平计算都由 drain 线程做。
@@ -137,16 +137,16 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             case .formatUnavailable:
                 "读不出这台设备的音频格式。"
             case .converterUnavailable:
-                "这台设备的音频格式转不成 16 kHz 单声道。"
+                "这台设备的音频格式转不成 24 kHz 单声道。"
             case .noBundleIdentifiers:
                 "没有选择要采集的 App。"
             }
         }
     }
 
-    /// 出口格式由这里定死：16 kHz / 单声道 / PCM16。
-    public static let sampleRate: Double = 16_000
-    /// 一次交付的时长（40 ms = 640 帧）。与麦克风那一条路同一个节奏。
+    /// 出口格式由这里定死：24 kHz / 单声道 / PCM16。
+    public static let sampleRate: Double = 24_000
+    /// 一次交付的时长（40 ms = 960 帧）。与麦克风那一条路同一个节奏。
     private static let chunkDuration: TimeInterval = 0.04
 
     private let configuration: Configuration
@@ -370,7 +370,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         timer.resume()
     }
 
-    /// 把环里能读到的样本转成 16 kHz 单声道 PCM16，按 40 ms 一块交付。
+    /// 把环里能读到的样本转成 24 kHz 单声道 PCM16，按 40 ms 一块交付。
     private func drain() {
         stateLock.lock()
         let running = isRunning

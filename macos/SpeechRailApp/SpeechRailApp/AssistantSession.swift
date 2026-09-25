@@ -244,8 +244,6 @@ public final class AssistantSession {
     /// 仅从同一代 capability snapshot 读取 TTS catalog revision；未知时保持 nil，
     /// 让服务按普通协商处理，不从模型名或本地时间推断 revision。
     public var realtimeModelRevision: @MainActor (String?) -> String? = { _ in nil }
-    /// 回执是显式协商项；没有用户/功能偏好时不主动打开。
-    public var realtimeRenderReceiptsEnabled: @MainActor (String?) -> Bool = { _ in false }
 
     private let coordinator: SessionCoordinator
     private let provider = LLMProvider()
@@ -273,12 +271,8 @@ public final class AssistantSession {
     private var currentReplyInterrupted = false
     /// 服务端是否在生成 TTS（用来区分"在思考"与"在说话"）。
     private var isSpeaking = false
-    /// 调用方拥有的句子队列：SpeechRail 同一连接同时只接受一个 active TTS。
-    private var pendingTTS: [String] = []
-    private var ttsRequestInFlight = false
-    private var activeTTSRequestID: String?
     /// 单轮增量 TTS 的状态机（`speechrail.tts.start/append_text/finish_text`）。
-    /// 逐句 `create` 队列只留给"重播"这类完整文本路径，助手每轮不再走它。
+    /// 首轮回复与"重播"都走同一条增量路径，没有第二套逐句队列。
     private var ttsStream: AssistantTTSStreamCoordinator?
     /// 当前 Responses 流的所有权。停止/插话会取消任务并递增代际，旧流即使
     /// 上游不及时响应，也不能继续把 delta、TTS 或落库写回当前会话。
@@ -402,12 +396,24 @@ public final class AssistantSession {
     /// 重播某一句话（打字提问的回复也能听——「不朗读」不等于「不能听」）。
     public func replay(turn: Turn) async {
         guard turn.role == .assistant else { return }
-        guard ttsStream?.isActive != true else { return }
+        guard let stream = ttsStream, !stream.isActive else { return }
         isSpeaking = true
         phase = .speaking
         // 重播与首次朗读同一条口径：过一遍清洗，否则漏出来的标记会被念第二遍。
         let utterance = VoicePrompt.spokenText(from: turn.text)
-        await enqueueTTS(utterance.isEmpty ? turn.text : utterance)
+        do {
+            try await stream.begin(
+                generation: replyGeneration,
+                requestID: "tts_req_\(UUID().uuidString.lowercased())"
+            )
+        } catch {
+            isSpeaking = false
+            phase = .listening
+            lastFailure = error.localizedDescription
+            return
+        }
+        stream.offer(utterance.isEmpty ? turn.text : utterance)
+        await stream.finishInput()
     }
 
     /// 静音 / 取消静音。**不结束会话**：麦克风还在会话手里，只是不上行。
@@ -423,7 +429,6 @@ public final class AssistantSession {
         guard phase == .speaking || phase == .thinking || isSpeaking || replyTask != nil else { return }
         currentReplyInterrupted = true
         invalidateReply()
-        pendingTTS.removeAll()
         if let stream = ttsStream, stream.isActive {
             // 增量路径：一次调用里完成"本地作废 → 停播 → 取消服务端"。
             await stream.cancel()
@@ -492,7 +497,7 @@ public final class AssistantSession {
         }
 
         // 一条连接同时承载 ASR 与 caller-owned TTS（§5.5）；LLM、历史和句子队列
-        // 都留在本地，服务端只接收 `speechrail.tts.create`。
+        // 都留在本地，服务端只接收增量 TTS 的 `speechrail.tts.*` 子集。
         let client = RealtimeASRClient(
             port: port,
             silenceDurationMilliseconds: 400,
@@ -500,7 +505,6 @@ public final class AssistantSession {
             apiKey: serviceKey,
             expectedModelRevision: realtimeModelRevision(voiceID),
             expectedVoiceRevision: realtimeVoiceRevision(voiceID),
-            renderReceiptsEnabled: realtimeRenderReceiptsEnabled(voiceID),
             callerTTSEnabled: true
         )
         do {
@@ -565,9 +569,6 @@ public final class AssistantSession {
         partialText = nil
         streamingReply = nil
         committedItemIDs = []
-        pendingTTS = []
-        ttsRequestInFlight = false
-        activeTTSRequestID = nil
         currentOrdinal = 0
         isStoppingIntentionally = false
         memories = ((try? await coordinator.memories(activeOnly: true)) ?? []).map(\.body)
@@ -612,7 +613,6 @@ public final class AssistantSession {
         phase = .ending
         isStoppingIntentionally = true
         invalidateReply()
-        pendingTTS.removeAll()
         ttsStream?.invalidate()
         if let audioSession {
             audioSession.stop()
@@ -653,9 +653,6 @@ public final class AssistantSession {
         sessionID = nil
         isMutedForPlayback = false
         isSpeaking = false
-        pendingTTS.removeAll()
-        ttsRequestInFlight = false
-        activeTTSRequestID = nil
         ttsStream?.invalidate()
         ttsStream = nil
     }
@@ -710,106 +707,82 @@ public final class AssistantSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .diarizationDone, .attribution, .diarizationDegraded,
-             .segment, .speechStopped:
+        case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded:
             break
-        case .committed:
-            let now = Date()
-            pendingItem = (start: commitCursor ?? now, end: now)
-            commitCursor = now
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
+            await noteSpeechEvidence()
             partialText = (partialText ?? "") + delta
         case .partialSnapshot(_, _, let text):
+            await noteSpeechEvidence()
             partialText = text.isEmpty ? nil : text
-        case .completed(let itemID, let transcript, _):
+        case .completed(let itemID, let transcript):
             await commitUserTurn(itemID: itemID, transcript: transcript)
         case .failed(_, let code, let message):
             partialText = nil
             lastFailure = "\(code)：\(message)"
-        case .speechStarted:
-            // 实时对讲：插话是否打断由客户端决定；服务端只上报 VAD 事实。
-            guard mode.allowsBargeIn, isSpeaking || replyTask != nil else { return }
-            currentReplyInterrupted = true
-            invalidateReply()
-            pendingTTS.removeAll()
-            if let stream = ttsStream, stream.isActive {
-                // 增量路径：本地立刻失效 + 停播，再取消服务端（顺序由协调器保证）。
-                await stream.cancel()
-            } else {
-                if let audioSession {
-                    await audioSession.stopPlayback()
-                } else {
-                    await playback?.stop()
-                }
-                if let client { try? await client.cancelTTS() }
-            }
-            isSpeaking = false
-            phase = .listening
-        case .ttsStarted(let requestID, let responseID, let limits):
+        case .ttsStarted(let requestID, let taskID, let limits):
             _ = ttsStream?.handleStarted(
                 requestID: requestID,
-                responseID: responseID,
+                taskID: taskID,
                 limits: limits
             )
-        case .ttsTextAccepted(let requestID, let responseID, let appendSequence, let totalCodepoints):
+        case .ttsTextAccepted(let requestID, _, let appendSequence, let totalCodepoints):
             _ = ttsStream?.handleTextAccepted(
                 requestID: requestID,
-                responseID: responseID,
                 appendSequence: appendSequence,
                 totalCodepoints: totalCodepoints
             )
-        case .responseAudio(let requestID, let responseID, let pcm):
+        case .ttsAudio(let requestID, _, let pcm):
             isSpeaking = true
             phase = .speaking
             // 半双工：从这一刻起闭麦（一问一答的口径）。
             isMutedForPlayback = !mode.allowsBargeIn
             if let stream = ttsStream, stream.isActive {
-                await stream.handleAudio(requestID: requestID, responseID: responseID, pcm: pcm)
-                return
+                await stream.handleAudio(requestID: requestID, pcm: pcm)
             }
-            guard requestID == activeTTSRequestID else { return }
-            if let audioSession {
-                await audioSession.enqueuePlayback(pcm)
-            } else {
-                await playback?.enqueue(pcm)
-            }
-        case .responseDone(let requestID, let responseID, let status, _):
+        case .ttsEnded(let requestID, _, let status, let code, let message):
             if let stream = ttsStream, stream.isActive {
-                await stream.handleTerminal(
-                    requestID: requestID,
-                    responseID: responseID,
-                    status: status
-                )
-                return
+                await stream.handleTerminal(requestID: requestID, status: status)
             }
-            guard requestID == activeTTSRequestID else { return }
-            activeTTSRequestID = nil
-            ttsRequestInFlight = false
+            if status == "failed" {
+                lastFailure = [code, message].compactMap { $0 }.joined(separator: "：")
+            }
             if status == "cancelled" {
                 currentReplyInterrupted = true
-                pendingTTS.removeAll()
-            } else {
-                await sendNextTTSIfNeeded()
             }
-        case .serverError(let code, let message, _, _, _, let requestID):
+        case .serverError(let code, let message, let requestID):
             if let stream = ttsStream, stream.isActive {
                 await stream.handleServerError(requestID: requestID, code: code, message: message)
             }
-            if let requestID, requestID == activeTTSRequestID {
-                // Preflight/worker errors may arrive without response.done.  A
-                // request-scoped error must release the caller-owned queue;
-                // otherwise the assistant remains permanently "in flight".
-                activeTTSRequestID = nil
-                ttsRequestInFlight = false
-                pendingTTS.removeAll()
-            }
             lastFailure = Self.readableError(code: code, message: message)
-        case .cleared:
-            break
         case .closed(let code):
             await handleUnexpectedClose(code: code)
         }
+    }
+
+    /// 当前 wire 没有服务端 VAD 事件（`speech_started` 已移除，契约 §5.1），
+    /// 所以 barge-in 完全由客户端决定：**允许插话时，第一次收到非空识别结果
+    /// 就是"用户开始说话"**。半双工模式下播放期本来就不上行，自然不会触发。
+    private func noteSpeechEvidence() async {
+        guard mode.allowsBargeIn, isSpeaking || replyTask != nil, !currentReplyInterrupted else {
+            return
+        }
+        currentReplyInterrupted = true
+        invalidateReply()
+        if let stream = ttsStream, stream.isActive {
+            // 增量路径：本地立刻失效 + 停播，再取消服务端（顺序由协调器保证）。
+            await stream.cancel()
+        } else {
+            if let audioSession {
+                await audioSession.stopPlayback()
+            } else {
+                await playback?.stop()
+            }
+            if let client { try? await client.cancelTTS() }
+        }
+        isSpeaking = false
+        phase = .listening
     }
 
     /// 用户说完一句：落库 → 调大模型 → 逐句合成。
@@ -915,34 +888,6 @@ public final class AssistantSession {
             self.isMutedForPlayback = false
         }
         return tts
-    }
-
-    /// Queue caller-generated sentences and submit them one at a time. The
-    /// Speech Plane deliberately has no server-side queue or conversation text.
-    private func enqueueTTS(_ text: String) async {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return }
-        pendingTTS.append(normalized)
-        await sendNextTTSIfNeeded()
-    }
-
-    private func sendNextTTSIfNeeded() async {
-        guard !ttsRequestInFlight, !pendingTTS.isEmpty, let client else { return }
-        let text = pendingTTS.removeFirst()
-        ttsRequestInFlight = true
-        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
-        activeTTSRequestID = requestID
-        do {
-            try Task.checkCancellation()
-            try await client.sendTTSCreate(text: text, requestID: requestID)
-        } catch is CancellationError {
-            if activeTTSRequestID == requestID { activeTTSRequestID = nil }
-            ttsRequestInFlight = false
-        } catch {
-            if activeTTSRequestID == requestID { activeTTSRequestID = nil }
-            ttsRequestInFlight = false
-            lastFailure = error.localizedDescription
-        }
     }
 
     private func beginReply(spoken: Bool) {

@@ -203,13 +203,13 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 上面的最小 TTS 请求适合一次性验证。若调用方需要跨请求保持同一音色，应先读取
 `GET /v1/speechrail/capabilities`，从同一份 snapshot 复制 `voice_revision` 与 TTS model 的
 `catalog_revision`，分别发送 `SpeechRail-Expected-Voice-Revision` 和
-`SpeechRail-Expected-Model-Revision`。Realtime 的 `speechrail.tts.create` 使用同样的
-`expected_voice_revision`；revision 不可用时省略 pin，不要从 voice 名称推断版本。
+`SpeechRail-Expected-Model-Revision`。Realtime 的 `speechrail.tts.start` 使用同样的
+`voice_revision` / `expected_model_revision`；revision 不可用时省略 pin，不要从 voice 名称推断版本。
 
 需要低延迟播报时改用增量模式：先发 `speechrail.tts.start`，再随 LLM 文本到达持续
 `speechrail.tts.append_text`，最后 `speechrail.tts.finish_text`。该模式要求当前 voice
-具备增量路径，先读 `GET /v1/voices` 的 `streaming`（或握手的
-`speech_capabilities.streaming_tts`）并以 `supported` 为准；`instruction`
+具备增量路径，先读 `GET /v1/voices` 的 `streaming`（或同一份
+`/v1/speechrail/capabilities` 原子快照）并以 `supported` 为准；`instruction`
 （VoiceDesign）音色当前不支持，需要先注册固定音色 clone。`supported=false` 时按其
 `reason`/`hint` 处理，不要静默退化为等待全文再合成。
 
@@ -217,6 +217,6 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 
 发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。分人能力另查 `diarization_ready`：`balanced`、`quality` 与候选 `extreme` 配置分人制品，但仍须以当前 readiness 为准；`light` 不声明。
 
-文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送 `transcription_session.update`，然后以 16 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`delta` 只含可追加的稳定前缀。需要播报时由调用方发送 `speechrail.tts.create`；收到 `input_audio_buffer.speech_started` 后是否发送 `speechrail.tts.cancel` 由调用方播放策略决定，服务端不会自动取消。
+文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送一次 `session.update`（`session.type=transcription`、`session.audio.input.format={"type":"audio/pcm","rate":24000}` 与 `session.speechrail.task`），等待 `session.updated` 回显，然后以 24 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`speechrail.transcription.hypothesis` 只提供同一 `utterance_id` 的最新全文（按严格递增 `revision` 替换），可证明的稳定前缀才映射为官方 append-only `delta`。需要播报时由调用方按 `speechrail.tts.start` → `speechrail.tts.append_text` → `speechrail.tts.finish_text` 驱动，并等待匹配 `request_id` 的 `completed`/`cancelled`/`failed`；当前 wire 没有 `input_audio_buffer.speech_started`，是否在出现新 hypothesis 时发送 `speechrail.tts.cancel` 由调用方播放策略决定，服务端不会自动取消。
 
 遇到 `backend_busy`、`queue_full` 或 `backend_timeout` 时，不重放未确认的实时音频。按 `retryable`/`retry_after` 退避，实时连接关闭后建立新会话；文件任务可改用 Jobs 并轮询。服务侧恢复顺序是使用当前 managed runtime 的 `speechrail service status`、`speechrail service preflight`，再读取 `/health`；不要用源码环境推断 managed 安装态。完整能力与质量证据见[能力诊断与质量验收](../operations/capability-quality-acceptance.md)。

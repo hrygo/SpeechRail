@@ -417,7 +417,7 @@ def _voice_entry(
                 "parameters": {**common, "instructions": parameter("unsupported")},
                 "output": {"codecs": ["pcm16"], "pcm_sample_rate": 24_000, "channels": 1},
                 "scheduling_class": "realtime_tts",
-                "terminal_evidence": "response.done",
+                "terminal_evidence": "speechrail.tts.completed",
             },
         },
         "conditional_synthesis": parameter(

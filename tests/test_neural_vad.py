@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
+from realtime_wire import server_vad, session_update
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.backends.neural_vad import SileroVadDetector
@@ -145,17 +146,7 @@ def test_realtime_session_silero_preflight_failure_fails_explicitly() -> None:
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                    }
-                },
-            }
-        )
+        socket.send_json(session_update(endpointing=server_vad(threshold=0.5)))
         err = socket.receive_json()
         assert err["type"] == "error"
         assert err["error"]["code"] == "backend_not_ready"
@@ -176,12 +167,7 @@ def test_realtime_session_reports_missing_onnxruntime_without_fallback(
         )
         with client.websocket_connect("/v1/realtime") as socket:
             socket.receive_json()
-            socket.send_json(
-                {
-                    "type": "transcription_session.update",
-                    "session": {"turn_detection": {"type": "server_vad"}},
-                }
-            )
+            socket.send_json(session_update(endpointing=server_vad()))
             error = socket.receive_json()
 
     assert error["type"] == "error"
@@ -275,12 +261,7 @@ def test_silero_commit_with_subframe_remainder_does_not_error(tmp_path: Path) ->
         async def run() -> None:
             session = OpenAIRealtimeSession(services, session_id="s", send=send)
             await session._update_session(
-                {
-                    "type": "transcription_session.update",
-                    "session": {
-                        "turn_detection": {"type": "server_vad", "threshold": 0.5}
-                    },
-                }
+                session_update(endpointing=server_vad(threshold=0.5))
             )
             # 640 bytes (20ms) — below one 512-sample frame; commit must not
             # score it through Silero and must close out the empty turn cleanly.
@@ -296,8 +277,13 @@ def test_silero_commit_with_subframe_remainder_does_not_error(tmp_path: Path) ->
         asyncio.run(run())
 
     assert all(event["type"] != "error" for event in sent), sent
-    committed = [e for e in sent if e["type"] == "input_audio_buffer.committed"]
-    assert len(committed) == 1
+    completed = [
+        event
+        for event in sent
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["transcript"] == ""
 
 
 def test_shared_ort_session_reused_across_detectors(monkeypatch, tmp_path: Path) -> None:
@@ -389,10 +375,10 @@ def test_shadow_vad_records_agreement_metrics(tmp_path: Path) -> None:
         return len(sent)
 
     sine = b"".join(
-        int(5000 * math.sin(2 * math.pi * 200.0 * i / 16_000)).to_bytes(
+        int(5000 * math.sin(2 * math.pi * 200.0 * i / 24_000)).to_bytes(
             2, "little", signed=True
         )
-        for i in range(512)
+        for i in range(768)
     )
 
     with patch.object(SileroVadDetector, "_ensure_session", _fake_ensure), patch.object(
@@ -402,16 +388,13 @@ def test_shadow_vad_records_agreement_metrics(tmp_path: Path) -> None:
         async def run() -> None:
             session = OpenAIRealtimeSession(services, session_id="s", send=send)
             await session._update_session(
-                {
-                    "type": "transcription_session.update",
-                    "session": {
-                        "turn_detection": {"type": "server_vad", "threshold": 0.5}
-                    },
-                }
+                session_update(endpointing=server_vad(threshold=0.5))
             )
             # 3 speech frames (primary ~1.0, shadow 0.9 -> both_speech) and
             # 3 silence frames (primary 0.0, shadow 0.9 -> shadow_only).
-            for pcm in [sine, sine, sine, bytes(1024), bytes(1024), bytes(1024)]:
+            # The 24k wire is resampled to the 16k kernel, so one 512-sample
+            # kernel frame is 768 wire samples (1536 bytes).
+            for pcm in [sine, sine, sine, bytes(1536), bytes(1536), bytes(1536)]:
                 await session._append_audio(
                     {
                         "type": "input_audio_buffer.append",

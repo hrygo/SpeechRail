@@ -1,86 +1,142 @@
 import Foundation
 
-/// Canonical current-only transcription session configuration.
+/// Canonical current-only transcription session configuration (`session.update`).
 ///
-/// The factory intentionally exposes only the fields SpeechRail implements;
-/// it cannot emit the removed `session.update` or conversation/response
-/// orchestration fields.
-public struct TranscriptionSessionUpdate: Sendable {
-    public enum PartialMode: String, Sendable {
-        case delta
-        case snapshot
+/// The factory intentionally exposes only the fields SpeechRail implements; it
+/// cannot emit the removed `transcription_session.update`, flat
+/// `input_audio_format`, or conversation/response orchestration fields.
+public struct SpeechRailSessionUpdate: Sendable {
+    /// The one wire audio contract: 24 kHz mono PCM16 little-endian.
+    public static let wireSampleRate = 24_000
+
+    public enum Task: String, Sendable {
+        case conversation
+        case caption
+        case transcription
+        case render
+        case voiceDesign = "voice_design"
     }
 
-    /// Supported cadence for live subtitle partial updates.
-    ///
-    /// The service accepts 500 ms as its lowest low-latency transcription chunk;
-    /// callers still choose it explicitly so the general session default remains
-    /// suitable for clients that prefer fewer model refreshes.
-    public static let captionChunkDurationMilliseconds = 500
+    /// Server-side endpointing lives in the SpeechRail namespace; the official
+    /// `audio.input.turn_detection` field stays `null` when it is set.
+    public struct Endpointing: Sendable, Equatable {
+        public var threshold: Double
+        public var prefixPaddingMilliseconds: Int
+        public var silenceDurationMilliseconds: Int
 
-    public let type = "transcription_session.update"
+        public init(
+            threshold: Double = 0.5,
+            prefixPaddingMilliseconds: Int = 300,
+            silenceDurationMilliseconds: Int = 400
+        ) {
+            self.threshold = threshold
+            self.prefixPaddingMilliseconds = prefixPaddingMilliseconds
+            self.silenceDurationMilliseconds = silenceDurationMilliseconds
+        }
+
+        var jsonObject: [String: Any] {
+            [
+                "mode": "server_vad",
+                "threshold": threshold,
+                "prefix_padding_ms": prefixPaddingMilliseconds,
+                "silence_duration_ms": silenceDurationMilliseconds
+            ]
+        }
+    }
+
+    public struct Alignment: Sendable, Equatable {
+        public var enabled: Bool
+        /// `segment` / `word` / `character`; `nil` lets the server choose.
+        public var granularity: String?
+        /// `q8` / `bf16`; `nil` lets the server choose.
+        public var precision: String?
+
+        public init(enabled: Bool, granularity: String? = nil, precision: String? = nil) {
+            self.enabled = enabled
+            self.granularity = granularity
+            self.precision = precision
+        }
+
+        var jsonObject: [String: Any] {
+            var object: [String: Any] = ["enabled": enabled]
+            if let granularity { object["granularity"] = granularity }
+            if let precision { object["precision"] = precision }
+            return object
+        }
+    }
+
+    public let eventID: String
     public let model: String
-    public let threshold: Double
-    public let prefixPaddingMilliseconds: Int
-    public let silenceDurationMilliseconds: Int
-    public let callerTTSEnabled: Bool
+    public let task: Task
+    public let language: String?
+    public let prompt: String?
+    public let keywords: [String]?
+    public let timestampGranularities: [String]?
+    public let endpointing: Endpointing?
+    public let ttsEnabled: Bool
+    public let alignment: Alignment
     public let diarizationEnabled: Bool
-    public let expectedModelRevision: String?
-    public let renderReceiptsEnabled: Bool
-    public let partialMode: PartialMode
-    public let chunkDurationMilliseconds: Int
+    public let expectedASRRevision: String?
+    public let expectedTTSRevision: String?
 
     public init(
         model: String,
-        threshold: Double = 0.5,
-        prefixPaddingMilliseconds: Int = 300,
-        silenceDurationMilliseconds: Int = 400,
-        callerTTSEnabled: Bool = false,
+        task: Task = .conversation,
+        language: String? = nil,
+        prompt: String? = nil,
+        keywords: [String]? = nil,
+        timestampGranularities: [String]? = nil,
+        endpointing: Endpointing? = nil,
+        ttsEnabled: Bool = false,
+        alignment: Alignment = Alignment(enabled: false),
         diarizationEnabled: Bool = false,
-        expectedModelRevision: String? = nil,
-        renderReceiptsEnabled: Bool = false,
-        partialMode: PartialMode = .delta,
-        chunkDurationMilliseconds: Int = 2_000
+        expectedASRRevision: String? = nil,
+        expectedTTSRevision: String? = nil,
+        eventID: String = "evt_session_update"
     ) {
+        self.eventID = eventID
         self.model = model
-        self.threshold = threshold
-        self.prefixPaddingMilliseconds = prefixPaddingMilliseconds
-        self.silenceDurationMilliseconds = silenceDurationMilliseconds
-        self.callerTTSEnabled = callerTTSEnabled
+        self.task = task
+        self.language = language
+        self.prompt = prompt
+        self.keywords = keywords
+        self.timestampGranularities = timestampGranularities
+        self.endpointing = endpointing
+        self.ttsEnabled = ttsEnabled
+        self.alignment = alignment
         self.diarizationEnabled = diarizationEnabled
-        self.expectedModelRevision = expectedModelRevision
-        self.renderReceiptsEnabled = renderReceiptsEnabled
-        self.partialMode = partialMode
-        self.chunkDurationMilliseconds = chunkDurationMilliseconds
+        self.expectedASRRevision = expectedASRRevision
+        self.expectedTTSRevision = expectedTTSRevision
     }
 
     public var jsonObject: [String: Any] {
+        var transcription: [String: Any] = ["model": model]
+        if let language { transcription["language"] = language }
+        if let prompt, !prompt.isEmpty { transcription["prompt"] = prompt }
+        if let keywords { transcription["keywords"] = keywords }
+        if let timestampGranularities {
+            transcription["timestamp_granularities"] = timestampGranularities
+        }
         var speechrail: [String: Any] = [
-            "tts": ["enabled": callerTTSEnabled]
+            "task": task.rawValue,
+            "tts": ["enabled": ttsEnabled],
+            "alignment": alignment.jsonObject,
+            "diarization": ["enabled": diarizationEnabled]
         ]
-        if diarizationEnabled {
-            speechrail["diarization"] = ["enabled": true]
-        }
-        if let expectedModelRevision {
-            speechrail["model_revision"] = ["expected": expectedModelRevision]
-        }
-        if renderReceiptsEnabled {
-            speechrail["render_receipts"] = ["enabled": true]
-        }
-        speechrail["transcription"] = [
-            "partial_mode": partialMode.rawValue,
-            "chunk_duration_ms": chunkDurationMilliseconds
-        ]
+        if let endpointing { speechrail["endpointing"] = endpointing.jsonObject }
+        if let expectedASRRevision { speechrail["expected_asr_revision"] = expectedASRRevision }
+        if let expectedTTSRevision { speechrail["expected_tts_revision"] = expectedTTSRevision }
         return [
-            "type": type,
+            "type": "session.update",
+            "event_id": eventID,
             "session": [
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": ["model": model],
-                "turn_detection": [
-                    "type": "server_vad",
-                    "threshold": threshold,
-                    "prefix_padding_ms": prefixPaddingMilliseconds,
-                    "silence_duration_ms": silenceDurationMilliseconds
+                "type": "transcription",
+                "audio": [
+                    "input": [
+                        "format": ["type": "audio/pcm", "rate": Self.wireSampleRate],
+                        "transcription": transcription,
+                        "turn_detection": NSNull()
+                    ]
                 ],
                 "speechrail": speechrail
             ]
@@ -88,60 +144,23 @@ public struct TranscriptionSessionUpdate: Sendable {
     }
 }
 
-/// Stateless caller-owned TTS render command.
-public struct SpeechRailTTSCreate: Sendable {
-    public let type = "speechrail.tts.create"
-    public let requestID: String
-    public let text: String
-    public let voice: String?
-    public let speed: Double?
-    public let expectedVoiceRevision: String?
-
-    public init(
-        requestID: String,
-        text: String,
-        voice: String? = nil,
-        speed: Double? = nil,
-        expectedVoiceRevision: String? = nil
-    ) {
-        self.requestID = requestID
-        self.text = text
-        self.voice = voice
-        self.speed = speed
-        self.expectedVoiceRevision = expectedVoiceRevision
-    }
-
-    public var jsonObject: [String: Any] {
-        var object: [String: Any] = [
-            "type": type,
-            "request_id": requestID,
-            "text": text
-        ]
-        if let voice { object["voice"] = voice }
-        if let speed { object["speed"] = speed }
-        if let expectedVoiceRevision { object["expected_voice_revision"] = expectedVoiceRevision }
-        return object
-    }
-}
-
 /// Explicit caller-owned TTS cancellation command.
 public struct SpeechRailTTSCancel: Sendable {
     public let type = "speechrail.tts.cancel"
     public let requestID: String
-    public let responseID: String?
+    public let eventID: String
 
-    public init(requestID: String, responseID: String? = nil) {
+    public init(requestID: String, eventID: String = UUID().uuidString) {
         self.requestID = requestID
-        self.responseID = responseID
+        self.eventID = eventID
     }
 
     public var jsonObject: [String: Any] {
-        var object: [String: Any] = [
+        [
             "type": type,
+            "event_id": eventID,
             "request_id": requestID
         ]
-        if let responseID { object["response_id"] = responseID }
-        return object
     }
 }
 
@@ -251,32 +270,38 @@ public struct RealtimeSequenceValidator: Sendable {
     }
 }
 
-/// The ASR close barrier. A clear is safe only after every committed item has
-/// reached a terminal completed/failed state.
+/// The ASR close barrier for the current wire.
+///
+/// The single current wire has no per-item `input_audio_buffer.committed`
+/// acknowledgement: an input item becomes observable only through its
+/// transcription terminal. The caller therefore declares every item it is
+/// about to commit with `expectItem()`, and the barrier is satisfied by the
+/// matching number of terminal events rather than by inferring a count from
+/// removed server events.
 public struct RealtimeCloseBarrier: Equatable, Sendable {
-    private var committedItemIDs: Set<String> = []
-    private var terminalItemIDs: Set<String> = []
+    private var expectedItems = 0
+    private var settledItems = 0
 
     public init() {}
 
-    public var isReadyToClear: Bool {
-        committedItemIDs.subtracting(terminalItemIDs).isEmpty
+    public var isReadyToClear: Bool { settledItems >= expectedItems }
+
+    /// Items that were declared but have not reached a terminal yet.
+    public var pendingItems: Int { max(0, expectedItems - settledItems) }
+
+    /// Declare one input item the caller is about to commit.
+    public mutating func expectItem() {
+        expectedItems += 1
     }
 
-    public var pendingItemIDs: Set<String> {
-        committedItemIDs.subtracting(terminalItemIDs)
+    /// One declared item reached `completed`.
+    public mutating func completed() {
+        settledItems += 1
     }
 
-    public mutating func committed(itemID: String) {
-        committedItemIDs.insert(itemID)
-    }
-
-    public mutating func completed(itemID: String) {
-        terminalItemIDs.insert(itemID)
-    }
-
-    public mutating func failed(itemID: String) {
-        terminalItemIDs.insert(itemID)
+    /// One declared item reached `failed`; a failed terminal still settles it.
+    public mutating func failed() {
+        settledItems += 1
     }
 }
 
@@ -308,42 +333,50 @@ public enum RealtimeClosePlan {
 
 /// `speechrail.tts.start`：把一个 utterance 绑到**同一次**生成状态上。
 ///
-/// 与 `speechrail.tts.create` 互斥：两者共享同一个「连接内只允许一个活动 TTS」
-/// 判定，差别只在于文本是一次给完还是持续追加。
+/// `task` 与 `voice` 都是**必填**：服务端据此为这一轮选唯一角色与音色身份。
+/// 文本不再随 start 一次给完，而是通过 `speechrail.tts.append_text` 持续追加。
 public struct SpeechRailTTSStart: Sendable {
     public let type = "speechrail.tts.start"
     public let requestID: String
-    public let voice: String?
+    public let task: SpeechRailSessionUpdate.Task
+    public let voice: String
     public let speed: Double?
-    public let expectedVoiceRevision: String?
+    public let voiceRevision: String?
     public let expectedModelRevision: String?
     /// 只能**收紧**服务端默认值；放宽会被 `tts_stream_limit_exceeded` 拒绝。
     public let limits: [String: Double]?
+    public let eventID: String
 
     public init(
         requestID: String,
-        voice: String? = nil,
+        task: SpeechRailSessionUpdate.Task,
+        voice: String,
         speed: Double? = nil,
-        expectedVoiceRevision: String? = nil,
+        voiceRevision: String? = nil,
         expectedModelRevision: String? = nil,
-        limits: [String: Double]? = nil
+        limits: [String: Double]? = nil,
+        eventID: String = UUID().uuidString
     ) {
         self.requestID = requestID
+        self.task = task
         self.voice = voice
         self.speed = speed
-        self.expectedVoiceRevision = expectedVoiceRevision
+        self.voiceRevision = voiceRevision
         self.expectedModelRevision = expectedModelRevision
         self.limits = limits
+        self.eventID = eventID
     }
 
     public var jsonObject: [String: Any] {
         var object: [String: Any] = [
             "type": type,
-            "request_id": requestID
+            "event_id": eventID,
+            "request_id": requestID,
+            "task": task.rawValue,
+            "voice": voice
         ]
-        if let voice { object["voice"] = voice }
         if let speed { object["speed"] = speed }
-        if let expectedVoiceRevision { object["expected_voice_revision"] = expectedVoiceRevision }
+        if let voiceRevision { object["voice_revision"] = voiceRevision }
         if let expectedModelRevision { object["expected_model_revision"] = expectedModelRevision }
         if let limits { object["limits"] = limits }
         return object
@@ -356,52 +389,60 @@ public struct SpeechRailTTSStart: Sendable {
 public struct SpeechRailTTSAppendText: Sendable {
     public let type = "speechrail.tts.append_text"
     public let requestID: String
-    public let responseID: String?
     public let sequence: Int
     public let text: String
+    public let eventID: String
 
-    public init(requestID: String, sequence: Int, text: String, responseID: String? = nil) {
+    public init(
+        requestID: String,
+        sequence: Int,
+        text: String,
+        eventID: String = UUID().uuidString
+    ) {
         self.requestID = requestID
-        self.responseID = responseID
         self.sequence = sequence
         self.text = text
+        self.eventID = eventID
     }
 
     public var jsonObject: [String: Any] {
-        var object: [String: Any] = [
+        [
             "type": type,
+            "event_id": eventID,
             "request_id": requestID,
             "sequence": sequence,
             "text": text
         ]
-        if let responseID { object["response_id"] = responseID }
-        return object
     }
 }
 
 /// `speechrail.tts.finish_text`：关闭文本输入并继续生成尾音。
 ///
-/// `last_sequence` 必须等于最后一次 ACK 的 `append_sequence`；空输入为 `-1`。
+/// `last_sequence` 必须等于最后一次 ACK 的 `append_sequence`（非负）。没有任何
+/// ACK 的空输入没有可用的屏障，调用方应当取消这一轮而不是发 `finish_text`。
 public struct SpeechRailTTSFinishText: Sendable {
     public let type = "speechrail.tts.finish_text"
     public let requestID: String
-    public let responseID: String?
     public let lastSequence: Int
+    public let eventID: String
 
-    public init(requestID: String, lastSequence: Int, responseID: String? = nil) {
+    public init(
+        requestID: String,
+        lastSequence: Int,
+        eventID: String = UUID().uuidString
+    ) {
         self.requestID = requestID
         self.lastSequence = lastSequence
-        self.responseID = responseID
+        self.eventID = eventID
     }
 
     public var jsonObject: [String: Any] {
-        var object: [String: Any] = [
+        [
             "type": type,
+            "event_id": eventID,
             "request_id": requestID,
             "last_sequence": lastSequence
         ]
-        if let responseID { object["response_id"] = responseID }
-        return object
     }
 }
 
@@ -479,28 +520,19 @@ public struct TTSStreamLimits: Equatable, Sendable {
 /// `speechrail.tts.started`：utterance 已取得准入。客户端在此之前不得 append。
 public struct TTSSessionStarted: Equatable, Sendable {
     public let requestID: String
-    public let responseID: String
-    public let protocolVersion: Int?
-    public let implementationVersion: String?
-    public let voice: String?
-    public let voiceVariant: String?
-    public let voiceMode: String?
+    public let taskID: String?
+    public let planID: String?
+    public let voiceRevision: String?
     public let limits: TTSStreamLimits?
     public let sampleRate: Int
     public let channels: Int
 
     public init?(object: [String: Any]) {
-        guard
-            let requestID = object["request_id"] as? String,
-            let responseID = object["response_id"] as? String
-        else { return nil }
+        guard let requestID = object["request_id"] as? String else { return nil }
         self.requestID = requestID
-        self.responseID = responseID
-        self.protocolVersion = object["protocol_version"] as? Int
-        self.implementationVersion = object["implementation_version"] as? String
-        self.voice = object["voice"] as? String
-        self.voiceVariant = object["voice_variant"] as? String
-        self.voiceMode = object["voice_mode"] as? String
+        self.taskID = object["task_id"] as? String
+        self.planID = object["plan_id"] as? String
+        self.voiceRevision = object["voice_revision"] as? String
         let limitObject = object["limits"] as? [String: Any]
         self.limits = limitObject.flatMap(TTSStreamLimits.init(object:))
         let format = object["output_format"] as? [String: Any]
@@ -515,7 +547,7 @@ public struct TTSSessionStarted: Equatable, Sendable {
 /// 连接级 `sequence`——两者同名会被静默覆盖，所以线上字段叫 `append_sequence`。
 public struct TTSTextAccepted: Equatable, Sendable {
     public let requestID: String
-    public let responseID: String
+    public let taskID: String?
     public let appendSequence: Int
     public let acceptedCodepoints: Int
     public let totalCodepoints: Int
@@ -523,37 +555,33 @@ public struct TTSTextAccepted: Equatable, Sendable {
     public init?(object: [String: Any]) {
         guard
             let requestID = object["request_id"] as? String,
-            let responseID = object["response_id"] as? String,
             let appendSequence = object["append_sequence"] as? Int
         else { return nil }
         self.requestID = requestID
-        self.responseID = responseID
+        self.taskID = object["task_id"] as? String
         self.appendSequence = appendSequence
         self.acceptedCodepoints = object["accepted_codepoints"] as? Int ?? 0
         self.totalCodepoints = object["total_codepoints"] as? Int ?? 0
     }
 }
 
-/// `response.output_audio.delta.speechrail`：一块增量 PCM 的字节精确位置。
+/// `speechrail.tts.audio.delta`：一块增量 PCM 的字节精确位置。
+///
+/// `chunk_index` / `sample_offset` 是**顶层**字段；输出格式固定 24 kHz / mono
+/// PCM16，由 `speechrail.tts.started.output_format` 协商，块里不重复声明。
 public struct TTSAudioPosition: Equatable, Sendable {
     public static let canonicalSampleRate = 24_000
 
     public let chunkIndex: Int
     public let sampleOffset: Int
-    public let sampleRate: Int
-    public let channels: Int
 
-    public init?(speechrail: Any?) {
+    public init?(object: [String: Any]) {
         guard
-            let speechrail = speechrail as? [String: Any],
-            speechrail["kind"] as? String == "tts",
-            let chunkIndex = speechrail["chunk_index"] as? Int,
-            let sampleOffset = speechrail["sample_offset"] as? Int
+            let chunkIndex = object["chunk_index"] as? Int,
+            let sampleOffset = object["sample_offset"] as? Int
         else { return nil }
         self.chunkIndex = chunkIndex
         self.sampleOffset = sampleOffset
-        self.sampleRate = speechrail["sample_rate"] as? Int ?? Self.canonicalSampleRate
-        self.channels = speechrail["channels"] as? Int ?? 1
     }
 
     /// 这一块之后的下一个 sample offset（mono PCM16：一个样本两个字节）。

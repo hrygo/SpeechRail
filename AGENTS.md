@@ -34,7 +34,7 @@
 - 开发与测试：`docs/developers/README.md`、`docs/developers/testing-acceptance.md`；
 - macOS 开发：`docs/developers/macos-app-development.md`；UI/UX：`docs/developers/macos-app-design-system.md`；
 - 运维：`docs/operations/README.md`；决策：`docs/decisions/README.md`；历史：`docs/archive/README.md`；
-- 公共接口：`contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/diarization/v1/`；实现主要位于 `src/speechrail/`，macOS 控制面位于 `macos/`，回归与契约测试位于 `tests/`。
+- 公共接口：`contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/realtime-events.schema.json`；实现主要位于 `src/speechrail/`，macOS 控制面位于 `macos/`，回归与契约测试位于 `tests/`。
 
 版本、profile、模型、能力档位和资源预算等易变事实，必须从当前代码、配置、catalog、契约或对应专业文档核实；不得依据本文件中的历史快照做结论。
 

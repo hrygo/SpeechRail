@@ -13,70 +13,66 @@ The authoritative wire contract is
 
 ## Negotiate before sending audio
 
-Send the transcription options in `transcription_session.update` before the
-first `input_audio_buffer.append`:
+Send the transcription options in `session.update` before the first
+`input_audio_buffer.append`:
 
 ```json
 {
-  "type": "transcription_session.update",
+  "type": "session.update",
   "session": {
-    "speechrail": {
-      "transcription": {
-        "partial_mode": "snapshot",
-        "chunk_duration_ms": 500
+    "audio": {
+      "input": {
+        "format": {"type": "audio/pcm", "rate": 24000},
+        "transcription": {"model": "speechrail/qwen3-asr-1.7b"}
       }
-    }
+    },
+    "speechrail": {"task": "transcription"}
   }
 }
 ```
 
-Wait for `transcription_session.updated` and use the echoed effective values.
-If the server returns `error`, fail the session setup; do not start audio
-with an unconfirmed option. The public values are:
+Wait for `session.updated` and use the echoed effective values. If the server
+returns `error`, fail the session setup; do not start audio with an unconfirmed
+option.
 
-- `partial_mode`: `delta` (default) or `snapshot`;
-- `chunk_duration_ms`: `500`, `1000`, or `2000` (default `2000`).
+- The only supported input is 24 kHz mono PCM16; other rates and codecs are
+  rejected rather than silently reinterpreted.
+- Server-side endpointing is opt-in on `session.speechrail.endpointing`
+  (`{"mode": "server_vad", ...}`); leave it out to drive turns with an explicit
+  `input_audio_buffer.commit`.
+- Alignment, diarization and TTS are separate `session.speechrail` opt-ins and
+  never turn on implicitly.
 
-Both options are session-scoped. After the first PCM frame they cannot be
-changed; the server returns `invalid_state`. Unknown fields or unsupported
-values are errors, not silently ignored. For a teleprompter, start with
-`snapshot` and `500`; validate quality and resource cost for the target
-language before changing the product default.
+These options are session-scoped. After the first accepted PCM frame they cannot
+be changed; the server returns `invalid_state`. Unknown fields or unsupported
+values are errors, not silently ignored.
 
 ## Partial semantics
 
-`delta` is append-only: each
-`conversation.item.input_audio_transcription.delta` contains only new stable
-text. A client must not append a delta after a rewrite that it did not
-receive; wait for the terminal completed event.
+`speechrail.transcription.hypothesis` is the latest mutable hypothesis for one
+`utterance_id`. It carries a monotonic `revision`, the full `text`, the
+`sample_span`, and `stable_prefix_codepoints`:
 
-`snapshot` sends the latest mutable hypothesis as a complete replacement:
+For one `utterance_id`:
 
-```json
-{
-  "type": "speechrail.transcription.snapshot",
-  "item_id": "item_...",
-  "content_index": 0,
-  "revision": 3,
-  "text": "这是当前最新的识别全文"
-}
-```
-
-For one `item_id`:
-
-- replace the stored text; never concatenate snapshots;
+- replace the stored text; never concatenate hypotheses;
 - accept only a strictly newer `revision`;
 - deduplicate repeated `event_id` values and ignore stale revisions;
-- allow an empty snapshot as a valid replacement;
+- allow an empty hypothesis as a valid replacement;
 - treat `conversation.item.input_audio_transcription.completed` as the
   terminal authoritative transcript and do not let a late partial move the
   item afterward.
 
-The snapshot is provisional recognition, not a final reading fact. A
-teleprompter should apply its own bounded matching and monotonic-position
-policy; it should not infer the reading position from text length or ask an
-LLM to make every realtime position update.
+`conversation.item.input_audio_transcription.delta` is different: it carries
+only the *provable* stable prefix as append-only text. A client may append a
+delta, but must never append after a rewrite it did not receive; wait for the
+terminal `completed` event instead. When stability cannot be proven the server
+sends only a hypothesis, never a guessed delta.
 
-`completed`/`failed` still close the ASR turn. The extension changes partial
-delivery and ASR flush cadence only; it does not add server-side LLM,
-conversation, TTS playback, or MCP state.
+The hypothesis is provisional recognition, not a final reading fact. A
+teleprompter should apply its own bounded matching and monotonic-position
+policy; it should not infer the reading position from text length or ask an LLM
+to make every realtime position update.
+
+`completed`/`failed` close the ASR turn. The extension changes partial delivery
+only; it does not add server-side LLM, conversation, TTS playback, or MCP state.

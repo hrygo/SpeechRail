@@ -54,10 +54,11 @@ private actor URLSessionRealtimeASRTransport: RealtimeASRTransport {
 //
 // 三条从契约直接落下来的硬约束，写在这里免得以后被"顺手优化"掉：
 //
-//   1. **线上格式固定 16 kHz / 单声道 / PCM16**，而且**首个 PCM 之后不得改格式**。
+//   1. **线上格式固定 24 kHz / 单声道 / PCM16**，而且**首个 PCM 之后不得改格式**。
 //      换设备只能重建采集、不重开会话（`TECHNICAL-DESIGN` §5.2 第 5 条）。
-//   2. **partial 只进内存**：`delta` 是"可直接追加的稳定前缀"，服务端不会发不可追加的切片，
-//      但上游仍可能改写尾部——所以定稿只认 `completed` 的全量 `transcript`。
+//   2. **partial 只进内存**：官方 `delta` 是可追加的稳定前缀，
+//      `speechrail.transcription.hypothesis` 是**可改写全文**（必须整段替换）——
+//      所以定稿只认 `completed` 的全量 `transcript`。
 //   3. **`backend_busy` 是准入结果，不是异常**：它连的是会话占用守卫，不是错误弹窗
 //      （`IMPLEMENTATION-READINESS` §3 的同一条结论）。
 
@@ -68,8 +69,8 @@ public actor RealtimeASRClient {
     public static let canonicalASRModel = "speechrail/qwen3-asr-1.7b"
 
     /// 流式转写的线上格式。当前 SpeechRail transcription session 固定使用
-    /// 16 kHz / 单声道 / PCM16；原生层归一到这个格式。
-    public static let sampleRate: Double = 16_000
+    /// 24 kHz / 单声道 / PCM16；原生层归一到这个格式，服务端再重采样到 16 kHz 内核。
+    public static let sampleRate: Double = 24_000
 
     public enum Failure: LocalizedError, Equatable, Sendable {
         case unsupportedModel(String)
@@ -102,135 +103,105 @@ public actor RealtimeASRClient {
         }
     }
 
-    /// 分人归属的一段。分人档位下由 `speechrail.diarization.updated` 修正，
-    /// **只改归属，不改正文**（§15.3 第 2 条）。
-    public struct Segment: Sendable, Equatable {
-        public var id: String
-        public var text: String
-        public var start: TimeInterval
-        public var end: TimeInterval
-        public var speaker: String?
-
-        public init(id: String, text: String, start: TimeInterval, end: TimeInterval, speaker: String? = nil) {
-            self.id = id
-            self.text = text
-            self.start = start
-            self.end = end
-            self.speaker = speaker
-        }
-    }
-
-    /// 分人扩展里的一个**归属单元**（`attribution_units`）。
+    /// 一个**归属单元**：对齐器给的可冻结文本片段，加上分人给出的匿名标签。
     ///
-    /// `segmentUID` 是服务端给的稳定标识：正文不可变，归属靠它原位修订。客户端因此必须
-    /// 记住「这个 uid 落在库里哪一行」——否则后续的修订事件无处可写（`SpeakerLabeling`）。
+    /// 当前 wire 把两件事分开：`speechrail.alignment.done` 给 `segment_uid` 与
+    /// 文本/采样区间，`speechrail.diarization.*` 只给「采样区间 → 匿名说话人」。
+    /// 客户端按采样区间重叠把两者合起来，`segmentUID` 仍是正文不可变、归属原位
+    /// 修订的稳定坐标（`SpeakerLabeling`）。
     public struct AttributionUnit: Sendable, Equatable {
         public var segmentUID: String
-        public var revision: Int
-        /// `tentative` / `stable` / `unknown`。**只有 unknown 会把 speaker 清空**。
-        public var status: String
         public var speaker: String?
         public var textStart: Int?
         public var textEnd: Int?
         public var audioStartSample: Int?
         public var audioEndSample: Int?
         public var timingQuality: String?
+        public var granularity: String?
 
         public init(
             segmentUID: String,
-            revision: Int = 0,
-            status: String = "stable",
             speaker: String? = nil,
             textStart: Int? = nil,
             textEnd: Int? = nil,
             audioStartSample: Int? = nil,
             audioEndSample: Int? = nil,
-            timingQuality: String? = nil
+            timingQuality: String? = nil,
+            granularity: String? = nil
         ) {
             self.segmentUID = segmentUID
-            self.revision = revision
-            self.status = status
             self.speaker = speaker
             self.textStart = textStart
             self.textEnd = textEnd
             self.audioStartSample = audioStartSample
             self.audioEndSample = audioEndSample
             self.timingQuality = timingQuality
-        }
-
-        /// 修订是否已经"定下来"。`tentative` 中途可能被改掉，落库没有坏处（原位更新），
-        /// 但界面上的chip要区分「暂定」与「已定」。
-        public var isStable: Bool { status == "stable" || status == "unknown" }
-    }
-
-    /// 会话级声学建议：服务端认为这几个匿名标签可能是同一个人。
-    /// **只是建议**：要不要合并由用户按（§14.3 的边界：不做声纹、不跨会话）。
-    public struct SpeakerLink: Sendable, Equatable {
-        public var from: String
-        public var to: String
-        public var confidence: Double?
-
-        public init(from: String, to: String, confidence: Double? = nil) {
-            self.from = from
-            self.to = to
-            self.confidence = confidence
+            self.granularity = granularity
         }
     }
 
-    /// 服务端事件里**字幕会话真正需要的**那一部分。其余事件（TTS 的 response.*）不收进枚举：
-    /// 这一层不做播放，收进来只会多一条没人处理的分支。
+    /// `speechrail.diarization.*` 的一条分人区间：采样区间 → 匿名说话人。
+    ///
+    /// 说话人为 `nil` 表示这一段没有可用的归属（服务端明确给了 unknown）。
+    public struct DiarizationSpan: Sendable, Equatable {
+        public var speaker: String?
+        public var startSample: Int
+        public var endSample: Int
+
+        public init(speaker: String?, startSample: Int, endSample: Int) {
+            self.speaker = speaker
+            self.startSample = startSample
+            self.endSample = endSample
+        }
+    }
+
+    /// 服务端事件里**会话层真正需要的那一部分**。
     public enum Event: Sendable {
         /// `session.created`：握手完成，服务端声明了实际能力。
         case ready(model: String)
-        /// `transcription_session.updated`：配置生效，可以开始喂 PCM。
+        /// `session.updated`：配置生效，可以开始喂 PCM。
         case configured
-        case speechStarted
-        case speechStopped
-        case committed(itemID: String)
-        /// partial（内存态）。它是增量，调用点自己累加。
+        /// 官方 append-only partial（内存态）。它是增量，调用点自己累加。
         case partial(itemID: String, delta: String)
-        /// 可修订 partial 的最新全文。调用点必须替换 item 文本，不得追加。
+        /// 可修订 partial 的最新全文（`speechrail.transcription.hypothesis`）。
+        /// 调用点必须替换 item 文本，不得追加。
         case partialSnapshot(itemID: String, revision: Int, text: String)
-        case segment(itemID: String, segment: Segment)
-        /// 终态。分人会话额外带归属单元（未启用分人时为空数组）。
-        case completed(itemID: String, transcript: String, units: [AttributionUnit])
+        /// 文本终态。当前 wire 的 final 只承载正文；对齐与匿名声归属**随后独立到达**，
+        /// 不得等待它们、也不得用它们改写正文。
+        case completed(itemID: String, transcript: String)
         case failed(itemID: String, code: String, message: String)
-        /// `speechrail.diarization.updated`：归属修订，**只改归属列**。
-        case attribution(stableThroughSample: Int, units: [AttributionUnit], links: [SpeakerLink])
-        /// `speechrail.diarization.status`：一次 active→degraded。正文继续，标签停更。
+        /// 归属（对齐 + 分人）修订，**只改归属列**。
+        ///
+        /// `isFinal` 为 true 表示这是分人收口后的最后一份（`speechrail.diarization.done`）。
+        case attribution(itemID: String, units: [AttributionUnit], isFinal: Bool)
+        /// `speechrail.alignment.failed`：对齐拿不到证据。正文仍成功，只是没有时间码。
+        case alignmentFailed(itemID: String, code: String, message: String)
+        /// `speechrail.diarization.failed`：一次 active→degraded。正文继续，标签停更。
         case diarizationDegraded(code: String, message: String)
-        /// `speechrail.diarization.done`：EOF 屏障到位，末段不会丢。
-        case diarizationDone(throughSample: Int, status: String)
         /// TTS 音频块（24 kHz PCM16）。助手那一侧才用得上。
-        case responseAudio(requestID: String, responseID: String, pcm: Data)
+        case ttsAudio(requestID: String, taskID: String?, pcm: Data)
         /// 增量 utterance 已取得准入（`speechrail.tts.started`）。
         /// **收到它之前不得 append，服务端在此之前也不会发 PCM。**
-        case ttsStarted(requestID: String, responseID: String, limits: TTSStreamLimits?)
+        case ttsStarted(requestID: String, taskID: String?, limits: TTSStreamLimits?)
         /// 一次 append 的 ACK（`speechrail.tts.text_accepted`）。
         /// ACK 失败不推进 `appendSequence`——调用方只认这些回执推进序号。
         case ttsTextAccepted(
             requestID: String,
-            responseID: String,
+            taskID: String?,
             appendSequence: Int,
             totalCodepoints: Int
         )
-        /// TTS 一轮结束：`completed` / `cancelled` / `failed`。
-        case responseDone(
+        /// TTS 一轮结束：`speechrail.tts.completed` / `.cancelled` / `.failed`。
+        /// 每次 utterance **恰好一个** terminal；失败带稳定错误码与消息。
+        case ttsEnded(
             requestID: String,
-            responseID: String,
+            taskID: String?,
             status: String,
-            receipt: RenderReceipt?
+            code: String?,
+            message: String?
         )
-        case serverError(
-            code: String,
-            message: String,
-            retryable: Bool?,
-            busyReason: String?,
-            retryHint: String?,
-            requestID: String?
-        )
-        /// `input_audio_buffer.cleared`：清空屏障的服务端确认。
-        case cleared
+        /// 顶层 `error`。请求级错误带 `request_id`；会话级错误没有。
+        case serverError(code: String, message: String, requestID: String?)
         case closed(code: Int?)
     }
 
@@ -243,13 +214,14 @@ public actor RealtimeASRClient {
     private let threshold: Double
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
+    /// `session.speechrail.task`（会话层语义标签）。
+    private let sessionTask: SpeechRailSessionUpdate.Task
     private let expectedModelRevision: String?
     /// 当前 caller-owned TTS voice 的 revision。随 voice 一起在连接内更新。
     private var expectedVoiceRevision: String?
-    private let renderReceiptsEnabled: Bool
     private let callerTTSEnabled: Bool
-    private let partialMode: TranscriptionSessionUpdate.PartialMode
-    private let chunkDurationMilliseconds: Int
+    /// `speechrail.tts.start` 的 task：助手会话固定 `conversation`。
+    private let ttsTask: SpeechRailSessionUpdate.Task
     private let session: URLSession
 
     private var transport: (any RealtimeASRTransport)?
@@ -262,7 +234,7 @@ public actor RealtimeASRClient {
     /// 下一次 caller-owned TTS request 使用的音色。
     private var voice: String?
     private var activeTTSRequestID: String?
-    private var activeTTSResponseID: String?
+    private var activeTTSTaskID: String?
     private var activeTTSAudioSuppressed = false
     /// 当前 request 是否已经进入增量模式（收到过 `speechrail.tts.started`）。
     private var activeTTSStreaming = false
@@ -276,10 +248,17 @@ public actor RealtimeASRClient {
     private var finishEventID: String?
     private var finishSent = false
     private var clearSent = false
-    private var clearAcknowledged = false
-    private var committedEventCount = 0
+    /// 自最后一次文本终态以来上行过的 PCM 字节：决定关闭时是否真的还有一个
+    /// 待终结的输入 item（当前 wire 没有 `input_audio_buffer.committed` 回执）。
+    private var appendedBytesSinceTerminal = 0
     private var closeBarrier = RealtimeCloseBarrier()
     private var diarizationAcknowledged = false
+    /// 当前 item 的对齐单元（`speechrail.alignment.done`），按 `item_id` 暂存，
+    /// 与分人采样区间合并后交给会话层。全部只存内存，且按 item 有界。
+    private var alignmentUnitsByItem: [String: [AttributionUnit]] = [:]
+    private var alignmentOrder: [String] = []
+    /// 当前 item 的分人区间（`speechrail.diarization.*`）。
+    private var diarizationSpansByItem: [String: [DiarizationSpan]] = [:]
     private var sequenceValidator = RealtimeSequenceValidator()
     /// Latest sequence diagnostic. The event envelope remains the source of
     /// truth; this property is only a non-sensitive convenience for session UI.
@@ -298,15 +277,14 @@ public actor RealtimeASRClient {
         silenceDurationMilliseconds: Int = 400,
         threshold: Double = 0.5,
         diarizationEnabled: Bool = false,
+        sessionTask: SpeechRailSessionUpdate.Task = .conversation,
         voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared,
         expectedModelRevision: String? = nil,
         expectedVoiceRevision: String? = nil,
-        renderReceiptsEnabled: Bool = false,
         callerTTSEnabled: Bool = false,
-        partialMode: TranscriptionSessionUpdate.PartialMode = .delta,
-        chunkDurationMilliseconds: Int = 2_000
+        ttsTask: SpeechRailSessionUpdate.Task = .conversation
     ) {
         var components = URLComponents()
         components.scheme = "ws"
@@ -322,12 +300,11 @@ public actor RealtimeASRClient {
         self.silenceDurationMilliseconds = silenceDurationMilliseconds
         self.threshold = threshold
         self.diarizationEnabled = diarizationEnabled
+        self.sessionTask = sessionTask
         self.expectedModelRevision = expectedModelRevision
         self.expectedVoiceRevision = expectedVoiceRevision
-        self.renderReceiptsEnabled = renderReceiptsEnabled
         self.callerTTSEnabled = callerTTSEnabled
-        self.partialMode = partialMode
-        self.chunkDurationMilliseconds = chunkDurationMilliseconds
+        self.ttsTask = ttsTask
         self.voice = voice
         self.session = session
     }
@@ -366,8 +343,8 @@ public actor RealtimeASRClient {
         await transport.resume()
         startReceiveLoop(using: transport)
 
-        // `transcription_session.update` 要在首个 PCM **之前**落地：格式、分人和
-        // caller-owned TTS 都在这一刻协商。
+        // `session.update` 要在首个 PCM **之前**落地：24 kHz 格式、任务、
+        // 分人与 caller-owned TTS 都在这一刻协商。
         do {
             try await send(configurationEvent())
             try await waitForConfigurationAcknowledgement()
@@ -384,20 +361,22 @@ public actor RealtimeASRClient {
 
     // MARK: - 上行
 
-    /// 追加一段 16 kHz / 单声道 / PCM16。
+    /// 追加一段 24 kHz / 单声道 / PCM16。
     public func append(_ pcm: Data) async throws {
         guard !pcm.isEmpty else { return }
         let payload: [String: Any] = [
             "type": "input_audio_buffer.append",
+            "event_id": UUID().uuidString,
             "audio": pcm.base64EncodedString()
         ]
+        appendedBytesSinceTerminal += pcm.count
         try await send(payload)
     }
 
-    /// 手动触发终态。`server_vad` 模式下服务端自己会提交，这一条是给"用户按了结束"用的：
-    /// 它保证最后半句也走完 `committed` → `completed`，而不是留在缓冲区里丢掉。
+    /// 手动触发终态。`endpointing` 打开时服务端自己会在静音处提交，这一条是给
+    /// "用户按了结束"用的：它保证最后半句也走完一次提交，而不是留在缓冲区里丢掉。
     public func commit() async throws {
-        try await send(["type": "input_audio_buffer.commit"])
+        try await send(["type": "input_audio_buffer.commit", "event_id": UUID().uuidString])
     }
 
     /// Discards the uncommitted input buffer. Repeating the operation on one
@@ -405,22 +384,30 @@ public actor RealtimeASRClient {
     /// fresh clear barrier.
     public func clear() async throws {
         guard !clearSent else { return }
-        try await send(["type": "input_audio_buffer.clear"])
+        try await send(["type": "input_audio_buffer.clear", "event_id": UUID().uuidString])
         clearSent = true
     }
 
     /// Closes one logical recording without treating a socket close as an ASR
-    /// receipt. The server must first acknowledge the commit and terminal
-    /// state of every committed item, then acknowledge `clear`.
+    /// receipt.
+    ///
+    /// The single current wire has no `input_audio_buffer.committed` or
+    /// `cleared` acknowledgement: an item becomes observable only through its
+    /// transcription terminal, and `clear` is a local discard. When PCM has
+    /// been uploaded since the last terminal the caller declares one input item
+    /// and waits for **its** terminal (whichever commit owner produced it);
+    /// otherwise the server has already finalized the last turn.
     public func drainAndClear(timeout: Duration = .seconds(8)) async throws {
-        let committedCountBeforeCommit = committedEventCount
+        let hasOutstandingInput = appendedBytesSinceTerminal > 0
+        if hasOutstandingInput {
+            closeBarrier.expectItem()
+        }
         try await withStageTimeout(stage: .commit, timeout: timeout) {
             try await self.commit()
         }
-        try await waitForCommittedItems(
-            timeout: timeout,
-            afterCommittedEventCount: committedCountBeforeCommit
-        )
+        if hasOutstandingInput {
+            try await waitForDeclaredItems(timeout: timeout)
+        }
         if diarizationEnabled {
             try await withStageTimeout(stage: .diarization, timeout: timeout) {
                 try await self.finishDiarization()
@@ -430,7 +417,6 @@ public actor RealtimeASRClient {
         try await withStageTimeout(stage: .clear, timeout: timeout) {
             try await self.clear()
         }
-        try await waitForClearAcknowledgement(timeout: timeout)
     }
 
     /// 换音色。**下一次 TTS request 生效**，只影响 TTS，不进 prompt。
@@ -440,52 +426,30 @@ public actor RealtimeASRClient {
         self.expectedVoiceRevision = expectedVoiceRevision
     }
 
-    /// 让服务端把调用方生成的一段文本念出来（助手用；字幕/会议不调）。
-    /// LLM、历史、句子切分和排队都在调用方；这里仅提交一个无状态 render request。
-    public func sendTTSCreate(text: String, requestID: String? = nil) async throws {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let requestID = requestID ?? "tts_req_\(UUID().uuidString.lowercased())"
-        activeTTSRequestID = requestID
-        activeTTSResponseID = nil
-        activeTTSAudioSuppressed = false
-        do {
-            try await send(
-                SpeechRailTTSCreate(
-                    requestID: requestID,
-                    text: text,
-                    voice: voice,
-                    expectedVoiceRevision: expectedVoiceRevision
-                ).jsonObject
-            )
-        } catch {
-            if activeTTSRequestID == requestID {
-                activeTTSRequestID = nil
-                activeTTSResponseID = nil
-                activeTTSAudioSuppressed = false
-            }
-            throw error
-        }
-    }
-
     /// 开始一次增量 utterance（契约 §3.3.1）。
     ///
     /// 返回只表示 `speechrail.tts.start` 已发出；必须等到 `.ttsStarted` 才能 append。
     /// 文本、序列号、ACK 等待和打断都归调用方（`AssistantTTSStreamCoordinator`）。
     public func startTTSStream(requestID: String, speed: Double? = nil) async throws {
         activeTTSRequestID = requestID
-        activeTTSResponseID = nil
+        activeTTSTaskID = nil
         activeTTSAudioSuppressed = false
         activeTTSStreaming = false
         activeTTSConsumedSequence = -1
         expectedAudioChunkIndex = 0
         expectedAudioSampleOffset = 0
+        guard let voice, !voice.isEmpty else {
+            clearActiveTTS()
+            throw Failure.transport("没有可用的朗读音色")
+        }
         do {
             try await send(
                 SpeechRailTTSStart(
                     requestID: requestID,
+                    task: ttsTask,
                     voice: voice,
                     speed: speed,
-                    expectedVoiceRevision: expectedVoiceRevision,
+                    voiceRevision: expectedVoiceRevision,
                     expectedModelRevision: expectedModelRevision
                 ).jsonObject
             )
@@ -504,8 +468,7 @@ public actor RealtimeASRClient {
             SpeechRailTTSAppendText(
                 requestID: requestID,
                 sequence: sequence,
-                text: text,
-                responseID: activeTTSResponseID
+                text: text
             ).jsonObject
         )
     }
@@ -518,8 +481,7 @@ public actor RealtimeASRClient {
         try await send(
             SpeechRailTTSFinishText(
                 requestID: requestID,
-                lastSequence: lastSequence,
-                responseID: activeTTSResponseID
+                lastSequence: lastSequence
             ).jsonObject
         )
     }
@@ -530,7 +492,7 @@ public actor RealtimeASRClient {
         // 用户侧停止优先：取消确认在途期间即使服务端再发 delta，也不能进入播放层。
         activeTTSAudioSuppressed = true
         try await send(
-            SpeechRailTTSCancel(requestID: requestID, responseID: activeTTSResponseID).jsonObject
+            SpeechRailTTSCancel(requestID: requestID).jsonObject
         )
     }
 
@@ -561,21 +523,29 @@ public actor RealtimeASRClient {
     }
 
     /// 转写会话的配置。形状对着服务端的 current-only 解析写：
-    /// `input_audio_format` 固定 `pcm16`，转写模型位于 `input_audio_transcription`。
+    /// `session.audio.input.format` 固定 24 kHz `audio/pcm`，转写模型位于
+    /// `session.audio.input.transcription`，SpeechRail 扩展位于 `session.speechrail`。
     ///
     /// 分人按 `session.speechrail.diarization.enabled` opt-in，**只能在这里声明一次**：
     /// 首个 PCM 之后再协商，服务端按契约回 `invalid_state`（§14.3 的开关粒度）。
+    /// 分人需要「采样区间 → 说话人」与「文本 → 采样区间」两半，所以同批打开
+    /// `speechrail.alignment`（服务端的对齐器是分人的既有前置条件）。
     private func configurationEvent() -> [String: Any] {
-        TranscriptionSessionUpdate(
+        SpeechRailSessionUpdate(
             model: model,
-            threshold: threshold,
-            silenceDurationMilliseconds: silenceDurationMilliseconds,
-            callerTTSEnabled: callerTTSEnabled,
+            task: sessionTask,
+            endpointing: SpeechRailSessionUpdate.Endpointing(
+                threshold: threshold,
+                silenceDurationMilliseconds: silenceDurationMilliseconds
+            ),
+            ttsEnabled: callerTTSEnabled,
+            alignment: SpeechRailSessionUpdate.Alignment(
+                enabled: diarizationEnabled,
+                granularity: diarizationEnabled ? "segment" : nil
+            ),
             diarizationEnabled: diarizationEnabled,
-            expectedModelRevision: expectedModelRevision,
-            renderReceiptsEnabled: renderReceiptsEnabled,
-            partialMode: partialMode,
-            chunkDurationMilliseconds: chunkDurationMilliseconds
+            expectedASRRevision: nil,
+            expectedTTSRevision: expectedModelRevision
         ).jsonObject
     }
 
@@ -620,10 +590,8 @@ public actor RealtimeASRClient {
         }
     }
 
-    private func waitForCommittedItems(
-        timeout: Duration,
-        afterCommittedEventCount baseline: Int
-    ) async throws {
+    /// Wait until every declared input item has reached a terminal.
+    private func waitForDeclaredItems(timeout: Duration) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while true {
@@ -631,29 +599,11 @@ public actor RealtimeASRClient {
             if didClose {
                 throw Failure.closed(closeCode)
             }
-            if committedEventCount > baseline, closeBarrier.isReadyToClear {
+            if closeBarrier.isReadyToClear {
                 return
             }
             guard clock.now < deadline else {
                 throw Failure.drainTimedOut(.terminalItems)
-            }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-    }
-
-    private func waitForClearAcknowledgement(timeout: Duration) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while true {
-            try Task.checkCancellation()
-            if didClose {
-                throw Failure.closed(closeCode)
-            }
-            if clearAcknowledged {
-                return
-            }
-            guard clock.now < deadline else {
-                throw Failure.drainTimedOut(.clear)
             }
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -732,21 +682,9 @@ public actor RealtimeASRClient {
         case "session.created":
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
             emit(.ready(model: model))
-        case "transcription_session.updated":
+        case "session.updated":
             configurationAcknowledged = true
             emit(.configured)
-        case "input_audio_buffer.speech_started":
-            emit(.speechStarted)
-        case "input_audio_buffer.speech_stopped":
-            emit(.speechStopped)
-        case "input_audio_buffer.committed":
-            let itemID = object["item_id"] as? String ?? ""
-            committedEventCount += 1
-            closeBarrier.committed(itemID: itemID)
-            emit(.committed(itemID: itemID))
-        case "input_audio_buffer.cleared":
-            clearAcknowledged = true
-            emit(.cleared)
         case "conversation.item.input_audio_transcription.delta":
             emit(
                 .partial(
@@ -754,84 +692,91 @@ public actor RealtimeASRClient {
                     delta: object["delta"] as? String ?? ""
                 )
             )
-        case "speechrail.transcription.snapshot":
-            let itemID = object["item_id"] as? String ?? ""
+        case "speechrail.transcription.hypothesis":
+            // 官方 `delta` 是可证明的稳定前缀；hypothesis 是**可改写全文**。两者分开解码，
+            // 调用点用整段替换而不是追加（契约 §5.1）。
+            let itemID = object["utterance_id"] as? String ?? ""
             guard let revision = Self.int(object["revision"]), revision > 0,
                   let text = object["text"] as? String else {
-                emit(.failed(itemID: itemID, code: "invalid_snapshot", message: "流式转写快照格式无效"))
+                emit(.failed(itemID: itemID, code: "invalid_hypothesis", message: "流式转写快照格式无效"))
                 return
             }
             emit(.partialSnapshot(itemID: itemID, revision: revision, text: text))
-        case "conversation.item.input_audio_transcription.segment":
-            emit(
-                .segment(
-                    itemID: object["item_id"] as? String ?? "",
-                    segment: Segment(
-                        id: object["id"] as? String ?? UUID().uuidString,
-                        text: object["text"] as? String ?? "",
-                        // 契约里 segment 的时间单位是秒；分人模式下这些是词级对齐结果。
-                        start: Self.seconds(object["start"]) ?? 0,
-                        end: Self.seconds(object["end"]) ?? 0,
-                        speaker: object["speaker"] as? String
-                    )
-                )
-            )
         case "conversation.item.input_audio_transcription.completed":
             let itemID = object["item_id"] as? String ?? ""
-            closeBarrier.completed(itemID: itemID)
+            settleDeclaredItem(failed: false)
+            emit(.completed(itemID: itemID, transcript: object["transcript"] as? String ?? ""))
+        case "conversation.item.input_audio_transcription.failed":
+            let itemID = object["item_id"] as? String ?? ""
+            let error = object["error"] as? [String: Any]
+            settleDeclaredItem(failed: true)
             emit(
-                .completed(
+                .failed(
                     itemID: itemID,
-                    transcript: object["transcript"] as? String ?? "",
-                    units: Self.attributionUnits(object["attribution_units"])
+                    code: error?["code"] as? String ?? object["code"] as? String ?? "backend_error",
+                    message: error?["message"] as? String ?? object["message"] as? String ?? "流式转写失败"
+                )
+            )
+        case "speechrail.alignment.done":
+            guard let itemID = object["utterance_id"] as? String else { break }
+            alignmentUnitsByItem[itemID] = Self.alignmentUnits(object["units"])
+            emit(attribution(itemID: itemID, isFinal: false))
+        case "speechrail.alignment.failed":
+            let itemID = object["utterance_id"] as? String ?? ""
+            let error = object["error"] as? [String: Any]
+            emit(
+                .alignmentFailed(
+                    itemID: itemID,
+                    code: error?["code"] as? String ?? "alignment_failed",
+                    message: error?["message"] as? String ?? "对齐没有拿到时间证据。"
                 )
             )
         case "speechrail.diarization.updated":
-            emit(
-                .attribution(
-                    stableThroughSample: Self.int(object["stable_through_sample"]) ?? 0,
-                    units: Self.attributionUnits(object["updates"]),
-                    links: Self.speakerLinks(object["speaker_links"])
-                )
-            )
-        case "speechrail.diarization.status":
+            guard let itemID = object["utterance_id"] as? String else { break }
+            diarizationSpansByItem[itemID] = Self.diarizationSpans(object["units"])
+            emit(attribution(itemID: itemID, isFinal: false))
+        case "speechrail.diarization.done":
+            guard let itemID = object["utterance_id"] as? String else { break }
+            diarizationSpansByItem[itemID] = Self.diarizationSpans(object["units"])
+            diarizationAcknowledged = true
+            emit(attribution(itemID: itemID, isFinal: true))
+        case "speechrail.diarization.failed":
+            let error = object["error"] as? [String: Any]
             emit(
                 .diarizationDegraded(
-                    code: object["code"] as? String ?? "diarization_degraded",
-                    message: object["message"] as? String ?? "说话人编号停止更新了。"
+                    code: error?["code"] as? String ?? "diarization_degraded",
+                    message: error?["message"] as? String ?? "说话人编号停止更新了。"
                 )
             )
-        case "speechrail.diarization.done":
-            diarizationAcknowledged = true
-            emit(
-                .diarizationDone(
-                    throughSample: Self.int(object["through_sample"]) ?? 0,
-                    status: object["status"] as? String ?? "complete"
-                )
-            )
-        case "response.created":
-            // The current server contract does not put caller request_id on
-            // response.created. Its ordered single-active-TTS flow associates
-            // this response with the locally active request.
-            if activeTTSRequestID != nil, activeTTSResponseID == nil,
-               let responseID = (object["response"] as? [String: Any])?["id"] as? String,
-               !responseID.isEmpty {
-                activeTTSResponseID = responseID
-            }
         case "speechrail.tts.started":
             guard
                 let started = TTSSessionStarted(object: object),
-                started.requestID == activeTTSRequestID,
-                activeTTSResponseID == nil || activeTTSResponseID == started.responseID
+                started.requestID == activeTTSRequestID
             else { break }
-            activeTTSResponseID = started.responseID
+            // 播放层只认 canonical 24 kHz / mono PCM16。服务端协商出别的格式时明确失败，
+            // 不把未协商的字节当 24k 喂给播放器（§6 第 3 条）。
+            guard started.sampleRate == TTSAudioPosition.canonicalSampleRate,
+                  started.channels == 1 else {
+                emit(
+                    .ttsEnded(
+                        requestID: started.requestID,
+                        taskID: started.taskID,
+                        status: "failed",
+                        code: "unsupported_output_format",
+                        message: "语音服务给出的输出格式不是 24 kHz 单声道。"
+                    )
+                )
+                clearActiveTTS()
+                break
+            }
+            activeTTSTaskID = started.taskID
             activeTTSStreaming = true
             expectedAudioChunkIndex = 0
             expectedAudioSampleOffset = 0
             emit(
                 .ttsStarted(
                     requestID: started.requestID,
-                    responseID: started.responseID,
+                    taskID: started.taskID,
                     limits: started.limits
                 )
             )
@@ -839,24 +784,22 @@ public actor RealtimeASRClient {
             guard
                 let accepted = TTSTextAccepted(object: object),
                 accepted.requestID == activeTTSRequestID,
-                accepted.responseID == activeTTSResponseID,
                 accepted.appendSequence == activeTTSConsumedSequence + 1
             else { break }
             activeTTSConsumedSequence = accepted.appendSequence
             emit(
                 .ttsTextAccepted(
                     requestID: accepted.requestID,
-                    responseID: accepted.responseID,
+                    taskID: accepted.taskID,
                     appendSequence: accepted.appendSequence,
                     totalCodepoints: accepted.totalCodepoints
                 )
             )
-        case "response.output_audio.delta":
-            // 旧 response、取消后的迟到块：静默隔离，不进播放层。
+        case "speechrail.tts.audio.delta":
+            // 旧 request、取消后的迟到块、身份不符的块：静默隔离，不进播放层。
             guard
                 let requestID = activeTTSRequestID,
-                let responseID = activeTTSResponseID,
-                object["response_id"] as? String == responseID,
+                object["request_id"] as? String == requestID,
                 !activeTTSAudioSuppressed
             else { break }
             guard
@@ -872,95 +815,135 @@ public actor RealtimeASRClient {
                 droppedAudioChunks += 1
                 break
             }
-            emit(.responseAudio(requestID: requestID, responseID: responseID, pcm: data))
-        case "response.done":
-            let response = object["response"] as? [String: Any]
-            let responseID = response?["id"] as? String
-            let speechrail = object["speechrail"] as? [String: Any]
+            emit(.ttsAudio(requestID: requestID, taskID: activeTTSTaskID, pcm: data))
+        case "speechrail.tts.completed", "speechrail.tts.cancelled", "speechrail.tts.failed":
             guard
-                let requestID = speechrail?["request_id"] as? String,
-                speechrail?["kind"] as? String == "tts",
-                speechrail?["orchestration"] as? String == "caller",
-                requestID == activeTTSRequestID,
-                let responseID,
-                responseID == activeTTSResponseID
+                let requestID = object["request_id"] as? String,
+                requestID == activeTTSRequestID
             else { break }
-            let status = response?["status"] as? String ?? "completed"
+            let status: String
+            var code: String?
+            var message: String?
+            switch type {
+            case "speechrail.tts.completed":
+                status = "completed"
+            case "speechrail.tts.cancelled":
+                status = "cancelled"
+            default:
+                status = "failed"
+                let error = object["error"] as? [String: Any]
+                code = error?["code"] as? String ?? "tts_failed"
+                message = error?["message"] as? String ?? "这一轮朗读失败了。"
+            }
             emit(
-                .responseDone(
+                .ttsEnded(
                     requestID: requestID,
-                    responseID: responseID,
+                    taskID: activeTTSTaskID ?? object["task_id"] as? String,
                     status: status,
-                    receipt: Self.renderReceipt(from: object)
+                    code: code,
+                    message: message
                 )
             )
             clearActiveTTS()
-        case "conversation.item.input_audio_transcription.failed":
-            let itemID = object["item_id"] as? String ?? ""
-            closeBarrier.failed(itemID: itemID)
-            emit(
-                .failed(
-                    itemID: itemID,
-                    code: object["code"] as? String ?? "backend_error",
-                    message: object["message"] as? String ?? "流式转写失败"
-                )
-            )
         case "error":
             let error = object["error"] as? [String: Any]
-            let speechrail = (error?["speechrail"] as? [String: Any])
-                ?? (object["speechrail"] as? [String: Any])
             let errorMessage = error?["message"] as? String ?? "语音服务返回了一个错误"
             if !configurationAcknowledged {
                 configurationFailure = .transport(errorMessage)
             }
-            let requestID = error?["request_id"] as? String
-            if requestID == activeTTSRequestID {
+            let requestID = error?["request_id"] as? String ?? object["request_id"] as? String
+            if let requestID, requestID == activeTTSRequestID {
                 clearActiveTTS()
             }
             emit(
                 .serverError(
                     code: error?["code"] as? String ?? error?["type"] as? String ?? "unknown",
                     message: errorMessage,
-                    retryable: speechrail?["retryable"] as? Bool ?? error?["retryable"] as? Bool,
-                    busyReason: speechrail?["busy_reason"] as? String ?? error?["busy_reason"] as? String,
-                    retryHint: speechrail?["retry_hint"] as? String ?? error?["retry_hint"] as? String,
                     requestID: requestID
                 )
             )
         default:
-            // 其余事件（TTS 的 response.*）不属于这一层：不报错，也不记日志——
-            // 它们只是我们没订阅的那一半协议。
+            // 其余事件不属于这一层：不报错，也不记日志。
             break
         }
     }
 
-    /// `attribution_units` 与 `updates` 的形状一致，共用一份解析（契约 §Diarization 扩展）。
-    private static func attributionUnits(_ value: Any?) -> [AttributionUnit] {
+    /// 一个转写终态把"自上次终态以来上行过 PCM"的计数归零，并让**已声明**的
+    /// 输入 item 到达终态。服务端自己按静音提交时我们没有声明过 item，
+    /// 那就只清计数、不动屏障。
+    private func settleDeclaredItem(failed: Bool) {
+        appendedBytesSinceTerminal = 0
+        guard closeBarrier.pendingItems > 0 else { return }
+        if failed {
+            closeBarrier.failed()
+        } else {
+            closeBarrier.completed()
+        }
+    }
+
+    /// 把对齐单元与分人区间按采样重叠合起来，交给会话层（§5.2）。
+    private func attribution(itemID: String, isFinal: Bool) -> Event {
+        let units = alignmentUnitsByItem[itemID] ?? []
+        guard !units.isEmpty else {
+            return .attribution(itemID: itemID, units: [], isFinal: isFinal)
+        }
+        let spans = diarizationSpansByItem[itemID] ?? []
+        let merged = units.map { unit -> AttributionUnit in
+            var updated = unit
+            if let start = unit.audioStartSample, let end = unit.audioEndSample, end > start {
+                updated.speaker = Self.speaker(forStart: start, end: end, spans: spans)
+            }
+            return updated
+        }
+        return .attribution(itemID: itemID, units: merged, isFinal: isFinal)
+    }
+
+    /// 取与 `[start, end)` 重叠最多的分人区间的说话人（没有重叠就是 `nil`）。
+    private static func speaker(forStart start: Int, end: Int, spans: [DiarizationSpan]) -> String? {
+        var best: (overlap: Int, speaker: String?)?
+        for span in spans {
+            let overlap = min(end, span.endSample) - max(start, span.startSample)
+            guard overlap > 0 else { continue }
+            if best == nil || overlap > best!.overlap {
+                best = (overlap, span.speaker)
+            }
+        }
+        return best?.speaker
+    }
+
+    /// `speechrail.alignment.done.units`：文本片段 → 采样区间（`segment_uid` 是修订坐标）。
+    private static func alignmentUnits(_ value: Any?) -> [AttributionUnit] {
         guard let items = value as? [[String: Any]] else { return [] }
         return items.compactMap { item in
             guard let uid = item["segment_uid"] as? String else { return nil }
             return AttributionUnit(
                 segmentUID: uid,
-                revision: int(item["revision"]) ?? 0,
-                status: item["status"] as? String ?? "stable",
-                speaker: item["speaker"] as? String,
+                speaker: nil,
                 textStart: int(item["text_start"]),
                 textEnd: int(item["text_end"]),
                 audioStartSample: int(item["audio_start_sample"]),
                 audioEndSample: int(item["audio_end_sample"]),
-                timingQuality: item["timing_quality"] as? String
+                timingQuality: item["timing_quality"] as? String,
+                granularity: item["granularity"] as? String
             )
         }
     }
 
-    private static func speakerLinks(_ value: Any?) -> [SpeakerLink] {
+    /// `speechrail.diarization.updated/done.units`：采样区间 → 匿名说话人（可空）。
+    private static func diarizationSpans(_ value: Any?) -> [DiarizationSpan] {
         guard let items = value as? [[String: Any]] else { return [] }
         return items.compactMap { item in
-            guard
-                let from = item["from"] as? String ?? item["speaker"] as? String,
-                let to = item["to"] as? String ?? item["target"] as? String
+            guard let span = item["sample_span"] as? [String: Any],
+                  let start = int(span["start"]),
+                  let end = int(span["end"]),
+                  end > start
             else { return nil }
-            return SpeakerLink(from: from, to: to, confidence: seconds(item["confidence"]))
+            let speaker = item["speaker"] as? String
+            return DiarizationSpan(
+                speaker: (speaker?.isEmpty ?? true) ? nil : speaker,
+                startSample: start,
+                endSample: end
+            )
         }
     }
 
@@ -972,40 +955,14 @@ public actor RealtimeASRClient {
         return nil
     }
 
-    private static func seconds(_ value: Any?) -> TimeInterval? {
-        if let double = value as? Double { return double }
-        if let int = value as? Int { return TimeInterval(int) }
-        if let number = value as? NSNumber { return number.doubleValue }
-        return nil
-    }
-
-    /// Decode the current top-level `speechrail.render_receipt` shape.
-    private static func renderReceipt(from object: [String: Any]) -> RenderReceipt? {
-        var candidates: [[String: Any]] = []
-        if let speechrail = object["speechrail"] as? [String: Any],
-           let receipt = speechrail["render_receipt"] as? [String: Any] {
-            candidates.append(receipt)
-        }
-
-        let decoder = JSONDecoder()
-        for candidate in candidates {
-            guard let data = try? JSONSerialization.data(withJSONObject: candidate),
-                  let receipt = try? decoder.decode(RenderReceipt.self, from: data)
-            else { continue }
-            return receipt
-        }
-        return nil
-    }
-
-    /// 增量 PCM 的块序号与 sample offset 必须严格连续，格式必须是 canonical
-    /// 24 kHz / mono PCM16；不合格的块宁可丢掉，也不能把错位音频拼进同一轮播放缓冲。
+    /// 增量 PCM 的块序号与 sample offset 必须严格连续。输出格式由 `started.output_format`
+    /// 协商（只接受 canonical 24 kHz / mono PCM16）；不合格的块宁可丢掉，
+    /// 也不能把错位音频拼进同一轮播放缓冲。
     private func acceptAudioPosition(object: [String: Any], pcmBytes: Int) -> Bool {
-        guard let position = TTSAudioPosition(speechrail: object["speechrail"]) else { return false }
+        guard let position = TTSAudioPosition(object: object) else { return false }
         guard
             position.chunkIndex == expectedAudioChunkIndex,
-            position.sampleOffset == expectedAudioSampleOffset,
-            position.sampleRate == TTSAudioPosition.canonicalSampleRate,
-            position.channels == 1
+            position.sampleOffset == expectedAudioSampleOffset
         else { return false }
         expectedAudioChunkIndex += 1
         expectedAudioSampleOffset = position.nextSampleOffset(pcmBytes: pcmBytes)
@@ -1016,7 +973,7 @@ public actor RealtimeASRClient {
     /// 否则旧 response 的迟到终态会抹掉新一轮的状态。
     private func clearActiveTTS() {
         activeTTSRequestID = nil
-        activeTTSResponseID = nil
+        activeTTSTaskID = nil
         activeTTSAudioSuppressed = false
         activeTTSStreaming = false
         activeTTSConsumedSequence = -1
@@ -1044,7 +1001,7 @@ public actor RealtimeASRClient {
         let transport = self.transport
         self.transport = nil
         activeTTSRequestID = nil
-        activeTTSResponseID = nil
+        activeTTSTaskID = nil
         activeTTSAudioSuppressed = true
         await transport?.cancel()
         continuation?.yield(

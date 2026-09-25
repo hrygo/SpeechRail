@@ -332,9 +332,9 @@ public final class AudioSourceCoordinator {
 
 // MARK: - 合流
 
-/// 把若干路 16 kHz / 单声道 / PCM16 合成**一条**同样格式的流。
+/// 把若干路 24 kHz / 单声道 / PCM16 合成**一条**同样格式的流。
 ///
-/// 时钟由它自己定：每 40 ms 从每一路的抖动缓冲里取 640 帧，缺的补静音。于是输出
+/// 时钟由它自己定：每 40 ms 从每一路的抖动缓冲里取 960 帧，缺的补静音。于是输出
 /// 严格等间隔、没有一路能把整条流拖慢；某一路上游卡住只表现为**缺口数 +1**。
 ///
 /// 这是"混音在 host time 域完成"的可实现版本：单机场景下各路都是同一块声卡出来的，
@@ -345,9 +345,11 @@ actor StreamMixer {
         var gaps: Int
     }
 
+    /// 合流用的只有 wire 这一个采样率，不在这里复制第二份假设。
+    private static let sampleRate = MicrophoneCapture.sampleRate
     /// 一路最多留 400 ms：再多只说明它比时钟快，丢掉比无限堆积好。
-    private static let maximumBufferedBytes = 16_000 * 2 * 4 / 10
-    private static let bytesPerChunk = 16_000 * 2 * 40 / 1000
+    private static let maximumBufferedBytes = Int(sampleRate) * 2 * 4 / 10
+    private static let bytesPerChunk = Int(sampleRate) * 2 * 40 / 1000
 
     private let sources: [AsyncStream<AudioChunk>]
     private var buffers: [Data]

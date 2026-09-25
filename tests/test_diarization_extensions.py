@@ -1,11 +1,13 @@
-"""R2 regressions: SPK-E2E-1 extension negotiation and canonical-only delivery.
+"""Current-wire regressions for the caller-opted diarization/alignment extension.
 
-Four client/server combinations are covered: legacy clients never receive
-``speechrail.*`` events, an un-negotiated capability is neither advertised nor
-sent, requesting the extension on a server without it fails closed, and a
-successfully negotiated session delivers unique per-commit items with
-attribution units instead of legacy ``.segment`` events.  The JSON Schemas and
-fixtures under ``contracts/diarization/v1/`` are validated here as well.
+The single protocol schema is ``contracts/realtime-events.schema.json``.  There
+is no separate ``speechrail.diarization.v1`` negotiation, no
+``transcription_session.update`` and no legacy ``.segment`` /
+``input_audio_buffer.committed`` event: diarization is opted in on
+``session.update`` (``session.speechrail.diarization``) and its units ride on
+``speechrail.diarization.updated`` / ``.done`` / ``.failed``.  These tests pin
+that vocabulary end to end against a fake ASR, a fake aligner and a scripted
+diarization activity port.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +23,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
+from realtime_wire import session_update
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
+    apply_session_update,
     diarization_done_event,
-    diarization_update_event,
+    diarization_failed,
+    diarization_updated,
 )
 from speechrail.config import Settings
 from speechrail.domain.alignment import (
@@ -42,198 +46,86 @@ from speechrail.domain.diarization import (
 from speechrail.domain.ports import RealtimeTranscriptionOptions, StreamingAsrEvent
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
-CONTRACT_DIR = Path(__file__).resolve().parents[1] / "contracts" / "diarization" / "v1"
-EXTENSION = "speechrail.diarization.v1"
-
-_SCHEMA_BY_TYPE = {
-    "conversation.item.input_audio_transcription.completed": "completed.schema.json",
-    "speechrail.diarization.updated": "update.schema.json",
-    "speechrail.diarization.status": "status.schema.json",
-    "speechrail.diarization.done": "finalized.schema.json",
-}
+ROOT = Path(__file__).resolve().parents[1]
+_SCHEMA = json.loads(
+    (ROOT / "contracts" / "realtime-events.schema.json").read_text(encoding="utf-8")
+)
 
 
 # ---------------------------------------------------------------------------
-# Schema and fixture validation
+# Schema validation: the emitted extension events are current-wire members
 
 
-def _load(name: str) -> dict[str, Any]:
-    with (CONTRACT_DIR / "fixtures" / name).open(encoding="utf-8") as handle:
-        return json.load(handle)
+def _validate(def_name: str, event: dict[str, Any]) -> None:
+    schema = {"$ref": f"#/$defs/{def_name}", "$defs": _SCHEMA["$defs"]}
+    Draft202012Validator(schema).validate(event)
 
 
-def _schema(name: str) -> dict[str, Any]:
-    with (CONTRACT_DIR / name).open(encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def test_runtime_diarization_events_match_v1_schemas() -> None:
-    events = (
-        (
-            "update.schema.json",
-            diarization_update_event(
-                group_generation=None,
-                stable_through_sample=10,
-                updates=[
-                    {
-                        "segment_uid": "segment-1",
-                        "revision": 1,
-                        "status": "unknown",
-                        "speaker": None,
-                        "coverage_ratio": 0.0,
-                        "overlap_ratio": 0.0,
-                        "candidates": [],
-                    }
-                ],
-                speaker_links=[],
-            ),
-        ),
-        (
-            "finalized.schema.json",
-            diarization_done_event(
-                finalization_id="finish-1",
-                through_sample=10,
-                stable_through_sample=10,
-                status="complete",
-                reason=None,
-                last_update_sequence=1,
-            ),
-        ),
-    )
-    for schema_name, event in events:
-        errors = list(Draft202012Validator(_schema(schema_name)).iter_errors(event))
-        assert not errors, f"{schema_name}: {[error.message for error in errors]}"
-
-
-def test_finish_request_matches_v1_schema() -> None:
-    event = {"type": "speechrail.diarization.finish", "event_id": "finish-1"}
-    errors = list(
-        Draft202012Validator(_schema("finalize-request.schema.json")).iter_errors(event)
-    )
-    assert not errors, [error.message for error in errors]
-
-
-def test_negotiated_session_contract_matches_v1_schema() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        updated = _negotiate(socket)
-
-    contract = updated["session"]["speechrail"]["diarization"]
-    errors = list(
-        Draft202012Validator(_schema("session.schema.json")).iter_errors(contract)
-    )
-    assert not errors, [error.message for error in errors]
-
-
-def _fixture_units_are_semantically_valid(event: dict[str, Any]) -> bool:
-    """Semantic rules JSON Schema cannot express for completed events."""
-    units = event.get("attribution_units")
-    transcript = event.get("transcript", "")
-    if not isinstance(units, list):
-        return False
-    covered = 0
-    for unit in units:
-        if not isinstance(unit, dict):
-            return False
-        start, end = unit.get("text_start"), unit.get("text_end")
-        if (
-            not isinstance(start, int)
-            or not isinstance(end, int)
-            or isinstance(start, bool)
-            or isinstance(end, bool)
-            or start < covered
-            or end <= start
-            or end > len(transcript)
-        ):
-            return False
-        if (
-            unit.get("audio_start_sample", 0) >= unit.get("audio_end_sample", -1)
-            and event.get("audio_start_sample") != event.get("audio_end_sample")
-        ):
-            return False
-        covered = end
-    return covered in (0, len(transcript))
-
-
-def _update_is_semantically_valid(event: dict[str, Any]) -> bool:
-    """Semantic rules JSON Schema cannot express for update events."""
-    revisions: dict[str, int] = {}
-    ratios = [event.get("similarity", 1.0)]
-    for update in event.get("updates", []):
-        segment = update.get("segment_uid")
-        revision = update.get("revision")
-        if segment in revisions and revisions[segment] == revision:
-            return False
-        if update.get("status") == "unknown" and update.get("speaker") is not None:
-            return False
-        revisions[segment] = revision
-        ratios.append(update.get("coverage_ratio", 1.0))
-        ratios.append(update.get("overlap_ratio", 0.0))
-        ratios.extend(
-            candidate.get("support_ratio", 1.0)
-            for candidate in update.get("candidates", [])
-        )
-        if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in ratios):
-            return False
-    return True
-
-
-def test_valid_extension_fixtures_pass_schema_and_semantics() -> None:
-    for path in sorted(CONTRACT_DIR.glob("valid_*.json")):
-        fixture = _load(path.name)
-        if path.name == "valid_legacy_completed.json":
-            # Legacy baseline: must not carry extension fields at all.
-            assert "audio_start_sample" not in fixture
-            assert "attribution_units" not in fixture
-            continue
-        schema_name = _SCHEMA_BY_TYPE[fixture["type"]]
-        validator = Draft202012Validator(_schema(schema_name))
-        errors = sorted(validator.iter_errors(fixture), key=lambda e: e.json_path)
-        assert not errors, f"{path.name}: {[e.message for e in errors]}"
-        if fixture["type"] == "conversation.item.input_audio_transcription.completed":
-            assert _fixture_units_are_semantically_valid(fixture), path.name
-        elif fixture["type"] == "speechrail.diarization.updated":
-            assert _update_is_semantically_valid(fixture), path.name
-
-
-def test_invalid_fixtures_are_rejected() -> None:
-    schema_fixture_names = {
-        "invalid_bool_sample.json",
-        "invalid_relation.json",
+def _envelope(payload: dict[str, Any], *, sequence: int) -> dict[str, Any]:
+    return {
+        "event_id": f"evt-{sequence}",
+        "session_id": "sess-1",
+        "sequence": sequence,
+        **payload,
     }
-    for name in schema_fixture_names:
-        fixture = _load(name)
-        schema_name = _SCHEMA_BY_TYPE[fixture["type"]]
-        validator = Draft202012Validator(_schema(schema_name))
-        assert not validator.is_valid(fixture), f"{name} must fail schema validation"
 
-    overflow = _load("invalid_too_many_updates.json")
-    target = overflow.pop("_repeat_updates_to")
-    overflow["updates"] = (overflow["updates"] * (target // len(overflow["updates"]) + 1))[:target]
-    validator = Draft202012Validator(_schema("update.schema.json"))
-    assert not validator.is_valid(overflow)
 
-    nan_fixture = _load("invalid_nan_ratio.json")
-    assert math.isnan(nan_fixture["updates"][0]["coverage_ratio"])
-
-    for name, check in (
-        ("invalid_nan_ratio.json", _update_is_semantically_valid),
-        ("invalid_out_of_bounds_char_range.json", _fixture_units_are_semantically_valid),
-        ("invalid_unknown_with_speaker.json", _update_is_semantically_valid),
-        ("invalid_revision_conflict.json", _update_is_semantically_valid),
-    ):
-        assert not check(_load(name)), f"{name} must fail semantic validation"
+def test_runtime_extension_events_match_the_current_schema() -> None:
+    units = [{"speaker": "speaker_1", "sample_span": {"start": 0, "end": 24000}}]
+    _validate(
+        "server_diarization_updated",
+        _envelope(
+            diarization_updated(
+                task_id="task-1",
+                epoch=0,
+                utterance_id="utt-1",
+                transcript_revision=1,
+                metadata_revision=1,
+                units=units,
+            ),
+            sequence=1,
+        ),
+    )
+    _validate(
+        "server_diarization_done",
+        _envelope(
+            diarization_done_event(
+                task_id="task-1",
+                epoch=0,
+                utterance_id="utt-1",
+                transcript_revision=1,
+                metadata_revision=1,
+                units=units,
+            ),
+            sequence=2,
+        ),
+    )
+    _validate(
+        "server_diarization_failed",
+        _envelope(
+            diarization_failed(
+                task_id="task-1",
+                epoch=0,
+                utterance_id="utt-1",
+                transcript_revision=1,
+                metadata_revision=1,
+                code="diarization_failed",
+                message="failed",
+            ),
+            sequence=3,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
-# WebSocket four-combination harness
+# Fakes
 
 
 class _FakeStreamingSession:
     def __init__(self, *, language: str | None, prompt: str) -> None:
         del language, prompt
         self.received: list[bytes] = []
+        self.commits = 0
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
 
     async def connect(self) -> None:
@@ -247,6 +139,7 @@ class _FakeStreamingSession:
 
     async def commit(self, want_segments: bool = False) -> None:
         del want_segments
+        self.commits += 1
         await self.events_queue.put(
             StreamingAsrEvent(
                 kind="completed",
@@ -273,6 +166,7 @@ class _FakeStreamingSession:
 class _FakeStreamingFactory:
     def __init__(self) -> None:
         self.sessions: list[_FakeStreamingSession] = []
+        self.released: list[object] = []
 
     def create(
         self,
@@ -287,16 +181,11 @@ class _FakeStreamingFactory:
         return session
 
     def release(self, session: object) -> None:
-        del session
-
-
-def _speaker_script(frame_index: int) -> tuple[int, float]:
-    del frame_index
-    return (0, 0.9)
+        self.released.append(session)
 
 
 class _FakeActivitySession:
-    """Scripted T3 port: activity is independent from the ASR commit boundary."""
+    """Scripted activity port: speaker ownership is independent of ASR."""
 
     def __init__(self, *, epoch: str, mode: str = "normal") -> None:
         self._epoch = epoch
@@ -318,7 +207,9 @@ class _FakeActivitySession:
                 replace_span=SampleSpan(start_sample, end),
                 frames=(
                     ActivityFrame(
-                        SampleSpan(start_sample, end), (0.9, 0.0, 0.0, 0.0), frozenset({0})
+                        SampleSpan(start_sample, end),
+                        (0.9, 0.0, 0.0, 0.0),
+                        frozenset({0}),
                     ),
                 )
                 if end > start_sample
@@ -348,8 +239,11 @@ class _FakeActivitySession:
 
 
 class _FakeDiarizationEngine:
-    def __init__(self, *, supports_stream: bool) -> None:
+    """Streaming-capable engine the runtime may or may not be allowed to use."""
+
+    def __init__(self, *, supports_stream: bool, mode: str = "normal") -> None:
         self._supports_stream = supports_stream
+        self._mode = mode
         self.streams: list[_FakeActivitySession] = []
 
     @property
@@ -359,7 +253,7 @@ class _FakeDiarizationEngine:
     def open(self, *, epoch: str) -> _FakeActivitySession:
         if not self._supports_stream:
             raise RuntimeError("streaming diarization is not supported")
-        session = _FakeActivitySession(epoch=epoch)
+        session = _FakeActivitySession(epoch=epoch, mode=self._mode)
         self.streams.append(session)
         return session
 
@@ -389,25 +283,51 @@ class _UnavailableTextAligner:
         )
 
 
-def _client(*, supports_stream: bool) -> tuple[TestClient, _FakeStreamingFactory]:
-    streaming_factory = _FakeStreamingFactory()
+def _services(
+    *,
+    engine: object,
+    aligner: object,
+    streaming_factory: object,
+    drain_deadline: float = 0.3,
+):
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,
         diarization_model_path=None,
         diarization_embedding_model_path=None,
+        realtime_diarization_drain_deadline_seconds=drain_deadline,
     )
-    services = build_app_services(
+    return build_app_services(
         settings,
         AppOverrides(
             realtime_asr_factory=streaming_factory,  # type: ignore[arg-type]
-            diarization_engine=_FakeDiarizationEngine(supports_stream=supports_stream),  # type: ignore[arg-type]
-            text_aligner=_FakeTextAligner(),
+            diarization_engine=engine,  # type: ignore[arg-type]
+            text_aligner=aligner,  # type: ignore[arg-type]
         ),
+    )
+
+
+def _client(
+    *,
+    supports_stream: bool,
+    aligner: object | None = None,
+    drain_deadline: float = 0.3,
+    mode: str = "normal",
+) -> tuple[TestClient, _FakeStreamingFactory]:
+    streaming_factory = _FakeStreamingFactory()
+    services = _services(
+        engine=_FakeDiarizationEngine(supports_stream=supports_stream, mode=mode),
+        aligner=aligner if aligner is not None else _FakeTextAligner(),
+        streaming_factory=streaming_factory,
+        drain_deadline=drain_deadline,
     )
     app = FastAPI()
     app.include_router(create_openai_realtime_router(services))
     return TestClient(app), streaming_factory
+
+
+# ---------------------------------------------------------------------------
+# Helpers
 
 
 def _pcm16(samples: int) -> str:
@@ -420,12 +340,16 @@ def _open(socket) -> dict[str, Any]:
     return created
 
 
-def _update_session(socket, session: dict[str, Any]) -> dict[str, Any]:
-    socket.send_json({"type": "transcription_session.update", "session": session})
+def _update_session(socket, event: dict[str, Any]) -> dict[str, Any]:
+    socket.send_json(event)
     while True:
-        event = socket.receive_json()
-        if event["type"] in {"transcription_session.updated", "error"}:
-            return event
+        event_out = socket.receive_json()
+        if event_out["type"] in {"session.updated", "error"}:
+            return event_out
+
+
+def _negotiate(socket, **kwargs: Any) -> dict[str, Any]:
+    return _update_session(socket, session_update(diarization={"enabled": True}, **kwargs))
 
 
 def _append_and_commit(socket, samples: int) -> list[dict[str, Any]]:
@@ -443,233 +367,6 @@ def _append_and_commit(socket, samples: int) -> list[dict[str, Any]]:
             return events
 
 
-def _negotiate(socket, *, hint: int | None = None) -> dict[str, Any]:
-    del hint
-    return _update_session(
-        socket,
-        {
-            "speechrail": {"diarization": {"enabled": True}},
-        },
-    )
-
-
-def test_realtime_diarization_uses_one_namespaced_opt_in_switch() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        updated = _update_session(
-            socket,
-            {"speechrail": {"diarization": {"enabled": True}}},
-        )
-
-    assert updated["type"] == "transcription_session.updated"
-    assert updated["session"]["speechrail"]["diarization"] == {
-        "enabled": True,
-        "version": 1,
-        "max_speakers": 4,
-    }
-
-
-def test_second_realtime_diarization_session_fails_busy_without_affecting_the_first() -> None:
-    client, _ = _client(supports_stream=True)
-    with (
-        client.websocket_connect("/v1/realtime") as first,
-        client.websocket_connect("/v1/realtime") as second,
-    ):
-        _open(first)
-        _open(second)
-        assert _negotiate(first)["type"] == "transcription_session.updated"
-        rejected = _negotiate(second)
-
-        assert rejected["type"] == "error"
-        assert rejected["error"]["code"] == "backend_busy"
-        first.send_json({"type": "transcription_session.update", "session": {}})
-        assert first.receive_json()["type"] == "transcription_session.updated"
-
-
-def test_realtime_rejects_retired_diarization_request_shapes() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        updated = _update_session(
-            socket,
-            {"input_audio_transcription": {"diarization": {"enabled": True}}},
-        )
-
-    assert updated["type"] == "error"
-    assert updated["error"]["code"] == "invalid_diarization"
-
-
-# ---------------------------------------------------------------------------
-# Combination 1: legacy client (no extensions) on a capable server
-
-
-def test_client_without_opt_in_never_receives_extension_types() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        # A capable server advertises the capability string to everyone;
-        # legacy clients ignore it and must never see extension EVENTS.
-        _open(socket)
-        updated = _update_session(
-            socket,
-            {
-                "input_audio_transcription": {"model": "whisper-1"},
-            },
-        )
-        assert updated["type"] == "transcription_session.updated"
-        assert "diarization_contract" not in updated["session"]
-
-        events = _append_and_commit(socket, 8000)
-        completed = events[-1]
-        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
-        assert "audio_start_sample" not in completed
-        assert "attribution_units" not in completed
-        assert all(not event["type"].startswith("speechrail.") for event in events)
-
-
-# ---------------------------------------------------------------------------
-# Combination 2: new client against a server without the capability
-
-
-def test_unavailable_extension_is_rejected_and_session_stays_legacy() -> None:
-    client, _ = _client(supports_stream=False)
-    with client.websocket_connect("/v1/realtime") as socket:
-        created = _open(socket)
-        assert EXTENSION not in created["session"]["capabilities"]
-
-        response = _negotiate(socket)
-        assert response["type"] == "error"
-        assert response["error"]["code"] == "diarization_not_available"
-
-        events = _append_and_commit(socket, 8000)
-        completed = events[-1]
-        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
-        assert "attribution_units" not in completed
-        assert all(not event["type"].startswith("speechrail.") for event in events)
-
-
-# ---------------------------------------------------------------------------
-# Combination 3: negotiated extension mode
-
-
-def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        created = _open(socket)
-        assert EXTENSION not in created["session"]["capabilities"]
-
-        updated = _negotiate(socket)
-        assert updated["type"] == "transcription_session.updated"
-        assert updated["session"]["speechrail"]["diarization"] == {
-            "enabled": True,
-            "version": 1,
-            "max_speakers": 4,
-        }
-
-        first = _append_and_commit(socket, 8000)
-        committed1 = first[0]
-        completed1 = first[-1]
-        assert committed1["type"] == "input_audio_buffer.committed"
-        assert not committed1["item_id"].endswith("_input")
-        assert completed1["type"] == "conversation.item.input_audio_transcription.completed"
-        assert completed1["event_version"] == 1
-        # 对齐在新架构里异步运行. 文本 final 先到且只带 pending,
-        # 归属单元随后由 alignment.done 与 diarization.updated 承载.
-        assert completed1["diagnostics"]["alignment"]["status"] == "pending"
-        assert completed1["diagnostics"]["unit_count"] == 0
-        assert completed1["attribution_units"] == []
-        assert completed1["audio_start_sample"] == 0
-        assert completed1["audio_end_sample"] == 8000
-        transcript = completed1["transcript"]
-        assert not any(
-            event["type"] == "conversation.item.input_audio_transcription.segment"
-            for event in first
-        )
-        assert not any(event["type"].startswith("speechrail.") for event in first)
-
-        alignment = _collect_until(socket, "speechrail.alignment.done")[-1]
-        assert alignment["utterance_id"] == completed1["item_id"]
-        units = alignment["units"]
-        assert units
-        assert "".join(
-            transcript[unit["text_start"] : unit["text_end"]] for unit in units
-        ) == transcript
-        assert all(unit["timing_quality"] == "aligned" for unit in units)
-        assert all(
-            unit["audio_start_sample"] >= 0 and unit["audio_end_sample"] <= 8000
-            for unit in units
-        )
-
-        second = _append_and_commit(socket, 4000)
-        committed2 = next(
-            event for event in second if event["type"] == "input_audio_buffer.committed"
-        )
-        completed2 = next(
-            event
-            for event in second
-            if event["type"] == "conversation.item.input_audio_transcription.completed"
-        )
-        assert committed2["item_id"] != committed1["item_id"]
-        assert completed2["audio_start_sample"] == 8000
-        assert completed2["audio_end_sample"] == 12000
-        assert completed2["item_id"] != completed1["item_id"]
-
-
-def test_extensions_cannot_change_after_first_pcm() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        _append_and_commit(socket, 8000)
-
-        # Late negotiation (legacy -> extension) after accepted PCM is a
-        # mid-stream modification and must fail closed; re-sending the
-        # identical negotiated payload stays idempotent.
-        response = _negotiate(socket)
-        assert response["type"] == "error"
-        assert response["error"]["code"] == "invalid_state"
-
-
-def test_negotiated_extensions_renegotiate_idempotently() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        assert _negotiate(socket)["type"] == "transcription_session.updated"
-        _append_and_commit(socket, 8000)
-        # Re-sending the identical negotiated payload is not a modification.
-        assert _negotiate(socket)["type"] == "transcription_session.updated"
-
-
-def test_apply_session_update_rejects_unknown_extension_values() -> None:
-    event = {
-        "type": "transcription_session.update",
-        "session": {
-            "input_audio_transcription": {
-                "diarization": {"enabled": True, "extensions": ["speechrail.diarization.v2"]}
-            }
-        },
-    }
-    from speechrail.compatibility.openai_realtime import apply_session_update
-
-    with pytest.raises(Exception) as excinfo:
-        apply_session_update(
-            event,
-            session_id="s",
-            asr_model="speechrail/qwen3-asr-1.7b",
-            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-        )
-    assert "invalid_diarization" in str(excinfo.value) or getattr(
-        excinfo.value, "code", ""
-    ) == "invalid_diarization"
-
-
-# ---------------------------------------------------------------------------
-# R4: finalize barrier, degraded states, single-model lease
-
-
-def _finalize_request(finalization_id: str) -> dict[str, str]:
-    return {"type": "speechrail.diarization.finish", "event_id": finalization_id}
-
-
 def _collect_until(socket, event_type: str, limit: int = 64) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for _ in range(limit):
@@ -680,62 +377,228 @@ def _collect_until(socket, event_type: str, limit: int = 64) -> list[dict[str, A
     raise AssertionError(f"never received {event_type}")
 
 
-def test_finalize_is_a_barrier() -> None:
+_FINISH = "speechrail.diarization.finish"
+
+
+def _finish_event(finalization_id: str) -> dict[str, str]:
+    return {"type": _FINISH, "event_id": finalization_id}
+
+
+# ---------------------------------------------------------------------------
+# Negotiation
+
+
+def test_diarization_opt_in_uses_the_session_speechrail_switch() -> None:
     client, _ = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
-        _negotiate(socket)
+        updated = _negotiate(socket)
+
+    assert updated["type"] == "session.updated"
+    assert updated["session"]["speechrail"]["diarization"] == {"enabled": True}
+    assert "diarization_contract" not in updated["session"]
+
+
+def test_second_diarization_session_fails_busy_without_affecting_the_first() -> None:
+    client, _ = _client(supports_stream=True)
+    with (
+        client.websocket_connect("/v1/realtime") as first,
+        client.websocket_connect("/v1/realtime") as second,
+    ):
+        _open(first)
+        _open(second)
+        assert _negotiate(first)["type"] == "session.updated"
+        # Opting in eagerly claims the single diarization lane, so a second
+        # session cannot negotiate it until the first releases it.
+        rejected = _negotiate(second)
+        assert rejected["type"] == "error"
+        assert rejected["error"]["code"] == "backend_busy"
+
+        assert _negotiate(first)["type"] == "session.updated"
+
+
+def test_retired_diarization_shapes_are_rejected() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        legacy = _update_session(
+            socket, {"type": "transcription_session.update", "session": {}}
+        )
+        assert legacy["type"] == "error"
+        assert legacy["error"]["code"] == "unsupported_operation"
+
+        # Diarization belongs under session.speechrail, never inside
+        # audio.input.transcription; the retired shape is an unknown field.
+        nested = _update_session(
+            socket,
+            session_update(extra_transcription={"diarization": {"enabled": True}}),
+        )
+        assert nested["type"] == "error"
+        assert nested["error"]["code"] == "unsupported_operation"
+
+
+def test_apply_session_update_rejects_unknown_extension_values() -> None:
+    event = session_update(
+        diarization={"enabled": True, "extensions": ["speechrail.diarization.v2"]}
+    )
+    with pytest.raises(Exception) as excinfo:
+        apply_session_update(
+            event,
+            session_id="s",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+            current_config={},
+        )
+    # The retired ``extensions`` field is rejected, not silently ignored.
+    assert getattr(excinfo.value, "code", "") == "invalid_event"
+
+
+# ---------------------------------------------------------------------------
+# Opted-out clients and unavailable capability
+
+
+def test_client_without_opt_in_never_receives_extension_types() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        assert _update_session(socket, session_update())["type"] == "session.updated"
+
+        events = _append_and_commit(socket, 8000)
+        completed = events[-1]
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert "attribution_units" not in completed
+        assert "diagnostics" not in completed
+        assert "event_version" not in completed
+        assert all(not event["type"].startswith("speechrail.") for event in events)
+
+
+def test_unavailable_diarization_is_rejected_and_session_stays_current() -> None:
+    client, _ = _client(supports_stream=False)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        rejected = _negotiate(socket)
+        assert rejected["type"] == "error"
+        assert rejected["error"]["code"] == "diarization_not_available"
+
+        events = _append_and_commit(socket, 8000)
+        assert events[-1]["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
+        assert all(not event["type"].startswith("speechrail.") for event in events)
+
+
+# ---------------------------------------------------------------------------
+# Negotiated delivery
+
+
+def test_negotiated_session_delivers_units_on_the_wire_timeline() -> None:
+    client, factory = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        assert _negotiate(socket)["type"] == "session.updated"
+
         first = _append_and_commit(socket, 8000)
+        completed = first[-1]
+        # The text final is the current transcription final: no attribution
+        # units, diagnostics or event_version ride on it, and there is no
+        # legacy input_audio_buffer.committed acknowledgement.
+        assert completed == {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": completed["event_id"],
+            "session_id": completed["session_id"],
+            "sequence": completed["sequence"],
+            "item_id": completed["item_id"],
+            "content_index": 0,
+            "transcript": "你好",
+        }
+        assert all(
+            event["type"] != "input_audio_buffer.committed" for event in first
+        )
+        assert all(
+            event["type"] != "conversation.item.input_audio_transcription.segment"
+            for event in first
+        )
+        assert all(not event["type"].startswith("speechrail.") for event in first)
+
+        alignment = _collect_until(socket, "speechrail.alignment.done")[-1]
+        assert alignment["utterance_id"] == completed["item_id"]
+        text_start = alignment["units"][0]["text_start"]
+        text_end = alignment["units"][0]["text_end"]
+        assert (text_start, text_end) == (0, len(completed["transcript"]))
+        assert alignment["units"][0]["granularity"] == "segment"
+        assert all(
+            unit["granularity"] in {"segment", "word", "character"}
+            for unit in alignment["units"]
+        )
+        # The wire clock is 24 kHz while the aligner owns 16 kHz kernel spans.
+        assert alignment["sample_span"]["end"] == 8000
+        assert alignment["units"][0]["audio_end_sample"] <= 8000
+
+        update = _collect_until(socket, "speechrail.diarization.updated")[-1]
+        assert update["units"], "a speaker revision must carry the frozen units"
+        assert all({"speaker", "sample_span"} == set(unit) for unit in update["units"])
+        assert all(
+            unit["sample_span"]["end"] > unit["sample_span"]["start"]
+            for unit in update["units"]
+        )
+
         second = _append_and_commit(socket, 4000)
-
-        socket.send_json(_finalize_request("final_1"))
-        tail = _collect_until(socket, "speechrail.diarization.done")
-        final = tail[-1]
-        tail_updates = [e for e in tail if e["type"] == "speechrail.diarization.updated"]
-
-        all_updates = [
-            e for e in [*first, *second, *tail]
-            if e["type"] == "speechrail.diarization.updated"
-        ]
-        assert all_updates, "updates must flow before the finalized barrier"
-        assert final["last_update_sequence"] == all_updates[-1]["sequence"]
-        assert tail_updates, "finalize must flush pending attribution updates first"
-        assert final["sequence"] > all_updates[-1]["sequence"]
-        assert final["status"] == "complete"
-        assert final["reason"] is None
-        assert final["through_sample"] == 12000
-        assert final["stable_through_sample"] == final["through_sample"]
+        completed2 = second[-1]
+        assert completed2["item_id"] != completed["item_id"]
+        # The manual wire releases and reopens the streaming slot per commit.
+        assert len(factory.sessions) == 2
+        assert sum(session.commits for session in factory.sessions) == 2
 
 
-def test_finalize_retry_is_idempotent_and_conflicting_id_rejected() -> None:
+def test_diarization_cannot_change_after_first_audio() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _append_and_commit(socket, 8000)
+
+        # Enabling diarization after accepted PCM is a mid-stream modification
+        # and must fail closed instead of silently changing the session.
+        response = _negotiate(socket)
+        assert response["type"] == "error"
+        assert response["error"]["code"] == "invalid_state"
+
+
+# ---------------------------------------------------------------------------
+# Finish barrier and degraded terminals
+
+
+def test_finish_barrier_emits_done_with_units_and_is_idempotent() -> None:
     client, _ = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
         _negotiate(socket)
         _append_and_commit(socket, 8000)
-        socket.send_json(_finalize_request("final_1"))
-        first = _collect_until(socket, "speechrail.diarization.done")[-1]
+        _collect_until(socket, "speechrail.diarization.updated")
 
-        socket.send_json(_finalize_request("final_1"))
+        socket.send_json(_finish_event("final_1"))
+        done = _collect_until(socket, "speechrail.diarization.done")[-1]
+        assert done["units"], "the barrier reports the final speaker units"
+        assert all({"speaker", "sample_span"} == set(unit) for unit in done["units"])
+
+        # The same finalization_id replays the same terminal payload.
+        socket.send_json(_finish_event("final_1"))
         replay = _collect_until(socket, "speechrail.diarization.done")[-1]
-        assert replay["finalization_id"] == first["finalization_id"]
-        assert replay["status"] == first["status"]
-        assert replay["through_sample"] == first["through_sample"]
-        assert replay["last_update_sequence"] == first["last_update_sequence"]
+        assert replay["units"] == done["units"]
+        assert replay["task_id"] == done["task_id"]
 
-        socket.send_json(_finalize_request("final_2"))
+        socket.send_json(_finish_event("final_2"))
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "invalid_state"
 
 
-def test_finalize_rejects_further_audio() -> None:
+def test_finish_rejects_further_audio() -> None:
     client, _ = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
         _negotiate(socket)
         _append_and_commit(socket, 8000)
-        socket.send_json(_finalize_request("final_1"))
+        socket.send_json(_finish_event("final_1"))
         _collect_until(socket, "speechrail.diarization.done")
 
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(100)})
@@ -744,189 +607,82 @@ def test_finalize_rejects_further_audio() -> None:
         assert error["error"]["code"] == "invalid_state"
 
 
-def test_empty_meeting_finalize_has_zero_update_sequence() -> None:
-    client, _ = _client(supports_stream=True)
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        _negotiate(socket)
-        socket.send_json(_finalize_request("final_empty"))
-        final = _collect_until(socket, "speechrail.diarization.done")[-1]
-        assert final["status"] == "complete"
-        assert final["through_sample"] == 0
-        assert final["stable_through_sample"] == 0
-        assert final["last_update_sequence"] == 0
-
-
-class _RaisingContinuous:
-    """Continuous stream whose native step raises invalid output."""
-
-    async def append(self, pcm: bytes, start_sample: int) -> None:
-        del pcm, start_sample
-
-    async def activities(self, through_sample: int):
-        del through_sample
-        from speechrail.domain.diarization import DiarizationError
-
-        raise DiarizationError("native dimension mismatch", code="diarization_invalid_output")
-
-    async def finish(self, through_sample: int):
-        del through_sample
-        from speechrail.domain.diarization import DiarizationError
-
-        raise DiarizationError("native dimension mismatch", code="diarization_invalid_output")
-
-    async def close(self) -> None:
-        return None
-
-
-class _LeaseFakeDiarizationEngine(_FakeDiarizationEngine):
-    """Counts weight loads once; streams can hang or raise for R4 tests."""
-
-    def __init__(self, *, stream_mode: str) -> None:
-        super().__init__(supports_stream=True)
-        self.weight_loads = 0
-        self.stream_mode = stream_mode
-
-    def open(self, *, epoch: str):
-        if self.weight_loads == 0:
-            self.weight_loads = 1  # weights load exactly once per engine
-        session = _FakeActivitySession(epoch=epoch, mode=self.stream_mode)
-        self.streams.append(session)
-        return session
-
-
-def _lease_client(*, stream_mode: str, drain_deadline: float = 0.3):
-    streaming_factory = _FakeStreamingFactory()
-    settings = Settings(
-        qwen3_model_dir=None,
-        qwen3_python=None,
-        diarization_model_path=None,
-        diarization_embedding_model_path=None,
-        realtime_diarization_drain_deadline_seconds=drain_deadline,
-    )
-    engine = _LeaseFakeDiarizationEngine(stream_mode=stream_mode)
-    services = build_app_services(
-        settings,
-        AppOverrides(
-            realtime_asr_factory=streaming_factory,  # type: ignore[arg-type]
-            diarization_engine=engine,  # type: ignore[arg-type]
-            text_aligner=_FakeTextAligner(),
-        ),
-    )
-    app = FastAPI()
-    app.include_router(create_openai_realtime_router(services))
-    return TestClient(app), engine
-
-
-def test_hung_native_degrades_finalization_and_keeps_asr_text() -> None:
-    client, engine = _lease_client(stream_mode="hanging")
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        _negotiate(socket)
-        first = _append_and_commit(socket, 8000)
-        completed = first[-1]
-        assert completed["transcript"] == "你好"
-
-        socket.send_json(_finalize_request("final_hang"))
-        tail = _collect_until(socket, "speechrail.diarization.done")
-        final = tail[-1]
-        assert final["status"] == "degraded"
-        assert final["reason"] == "finalization_timeout"
-        assert final["through_sample"] == 8000
-        assert final["stable_through_sample"] <= final["through_sample"]
-
-        status_events = [
-            e for e in tail if e["type"] == "speechrail.diarization.status"
-        ]
-        assert len(status_events) == 1
-        assert status_events[0]["reason"] == "finalization_timeout"
-
-    # A second session during/after the hang must not load a second model.
-    with client.websocket_connect("/v1/realtime") as socket:
-        _open(socket)
-        _negotiate(socket)
-    assert engine.weight_loads == 1
-
-
-def test_native_exception_sends_unknown_updates_then_one_status() -> None:
-    client, _ = _lease_client(stream_mode="raising")
+def test_hung_native_finalization_degrades_without_losing_text() -> None:
+    client, _ = _client(supports_stream=True, drain_deadline=0.3, mode="hanging")
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
         _negotiate(socket)
         events = _append_and_commit(socket, 8000)
-        completed = events[-1]
-        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert events[-1]["transcript"] == "你好"
+
+        socket.send_json(_finish_event("final_hang"))
+        tail = _collect_until(socket, "speechrail.diarization.failed")
+        failed = tail[-1]
+        assert failed["error"]["code"] == "finalization_timeout"
+
+
+def test_native_exception_sends_one_failed_event() -> None:
+    client, _ = _client(supports_stream=True, mode="raising")
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(8000)})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+
+        completed: dict[str, Any] | None = None
+        failed: dict[str, Any] | None = None
+        for _ in range(64):
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                completed = event
+            elif event["type"] == "speechrail.diarization.failed":
+                failed = event
+            if completed is not None and failed is not None:
+                break
+
+        assert completed is not None
         assert completed["transcript"] == "你好"
-
-        socket.send_json(_finalize_request("final_deg"))
-        tail = _collect_until(socket, "speechrail.diarization.done")
-        all_events = [*events, *tail]
-        updates = [e for e in all_events if e["type"] == "speechrail.diarization.updated"]
-        degraded = next(
-            event for event in all_events if event["type"] == "speechrail.diarization.status"
-        )
-        assert degraded["status"] == "degraded"
-        assert degraded["reason"] == "diarization_invalid_output"
-        assert degraded["since_sample"] == 8000
-        assert updates, "delivered units must be terminated as unknown first"
-        assert all(
-            update["status"] == "unknown" and update["speaker"] is None
-            for update in updates[-1]["updates"]
-        )
-
-        # The degraded transition happens at most once per session.
-        assert sum(1 for e in tail if e["type"] == "speechrail.diarization.status") == 0
-        final = tail[-1]
-        assert final["status"] == "degraded"
-        assert final["reason"] == "diarization_invalid_output"
+        assert failed is not None
+        assert failed["error"]["code"] in {
+            "diarization_invalid_output",
+            "diarization_overloaded",
+        }
 
 
-class _MisalignedStreamingSession(_FakeStreamingSession):
-    async def commit(self, want_segments: bool = False) -> None:
-        del want_segments
-        await self.events_queue.put(
-            StreamingAsrEvent(
-                kind="completed",
-                text="不同意。",
-                language="zh",
-                segments=(
-                    TranscriptSegment(id=0, start_ms=0, end_ms=500, text="同意。"),
-                ),
+def test_unavailable_alignment_emits_failed_without_rewriting_text() -> None:
+    class _MisalignedStreamingSession(_FakeStreamingSession):
+        async def commit(self, want_segments: bool = False) -> None:
+            del want_segments
+            self.commits += 1
+            await self.events_queue.put(
+                StreamingAsrEvent(
+                    kind="completed",
+                    text="不同意。",
+                    language="zh",
+                    segments=(
+                        TranscriptSegment(id=0, start_ms=0, end_ms=500, text="同意。"),
+                    ),
+                )
             )
-        )
-        await self.events_queue.put(None)
+            await self.events_queue.put(None)
 
+    class _MisalignedStreamingFactory(_FakeStreamingFactory):
+        def create(
+            self,
+            *,
+            language: str | None,
+            prompt: str,
+            options: RealtimeTranscriptionOptions,
+        ) -> _MisalignedStreamingSession:
+            del language, prompt, options
+            session = _MisalignedStreamingSession(language=None, prompt="")
+            self.sessions.append(session)
+            return session
 
-class _MisalignedStreamingFactory:
-    def create(
-        self,
-        *,
-        language: str | None,
-        prompt: str,
-        options: RealtimeTranscriptionOptions,
-    ) -> _MisalignedStreamingSession:
-        del language, prompt, options
-        return _MisalignedStreamingSession(language=None, prompt="")
-
-    def release(self, session: object) -> None:
-        del session
-
-
-def test_unavailable_alignment_emits_unknown_update() -> None:
-    streaming_factory = _MisalignedStreamingFactory()
-    settings = Settings(
-        qwen3_model_dir=None,
-        qwen3_python=None,
-        diarization_model_path=None,
-        diarization_embedding_model_path=None,
-    )
-    services = build_app_services(
-        settings,
-        AppOverrides(
-            realtime_asr_factory=streaming_factory,  # type: ignore[arg-type]
-            diarization_engine=_FakeDiarizationEngine(supports_stream=True),  # type: ignore[arg-type]
-            text_aligner=_UnavailableTextAligner(),
-        ),
+    services = _services(
+        engine=_FakeDiarizationEngine(supports_stream=True),
+        aligner=_UnavailableTextAligner(),
+        streaming_factory=_MisalignedStreamingFactory(),
     )
     app = FastAPI()
     app.include_router(create_openai_realtime_router(services))
@@ -937,21 +693,12 @@ def test_unavailable_alignment_emits_unknown_update() -> None:
         _negotiate(socket)
         events = _append_and_commit(socket, 8000)
         completed = events[-1]
-        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
         assert completed["transcript"] == "不同意。"
-        assert completed["attribution_units"] == []
-        assert completed["diagnostics"]["alignment"]["status"] == "pending"
+        assert "attribution_units" not in completed
 
-        update_events = _collect_until(socket, "speechrail.diarization.updated")
-        failed = [
-            event
-            for event in update_events
-            if event["type"] == "speechrail.alignment.failed"
-        ]
-        assert failed
-        assert failed[-1]["error"]["code"] == "alignment_unavailable"
-        update = update_events[-1]
-        assert len(update["updates"]) == 1
-        assert update["updates"][0]["status"] == "unknown"
-        assert update["updates"][0]["speaker"] is None
-        assert update["updates"][0]["revision"] == 1
+        tail = _collect_until(socket, "speechrail.alignment.failed")
+        failed = tail[-1]
+        assert failed["error"]["code"] == "alignment_unavailable"

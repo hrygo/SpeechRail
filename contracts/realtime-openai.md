@@ -77,6 +77,7 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 | `input_audio_buffer.append` | `event_id`, `audio` | 追加 24 kHz PCM16 |
 | `input_audio_buffer.commit` | `event_id` | 结束当前输入 turn，最多产生一个 ASR final |
 | `input_audio_buffer.clear` | `event_id` | 清空未提交输入；不产生 final |
+| `speechrail.diarization.finish` | `event_id` | 关闭已 opt-in 的 diarization 会话；同 `event_id` 可重放，异 `event_id` 拒绝 |
 | `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice` | 开始一个增量 TTS utterance |
 | `speechrail.tts.append_text` | `event_id`, `request_id`, `sequence`, `text` | 追加不可变稳定文本；sequence 从 0 连续递增 |
 | `speechrail.tts.finish_text` | `event_id`, `request_id`, `last_sequence` | 关闭文本侧并以最后 ACK 序号为屏障 |
@@ -94,11 +95,13 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 ### 5.1 ASR
 
 - `session.created`、`session.updated`
-- `input_audio_buffer.speech_started`、`input_audio_buffer.speech_stopped`
-- `input_audio_buffer.committed`、`input_audio_buffer.cleared`
 - `conversation.item.input_audio_transcription.delta`
 - `conversation.item.input_audio_transcription.completed`
 - `conversation.item.input_audio_transcription.failed`
+
+服务端没有 `input_audio_buffer.speech_started` / `speech_stopped`，也没有
+`input_audio_buffer.committed` / `cleared` 回执：`commit` 的可观察屏障就是随后的
+transcription 事件，`clear` 是本地丢弃语义（其后的一次 commit 产生空 final）。
 
 hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
@@ -120,8 +123,8 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
 只有可证明的稳定前缀才能映射到官方 append-only delta；无法证明稳定时只发 hypothesis，
 最终统一发 completed。一个 utterance 恰好一个 text final，重复 commit 不产生双 final。
-opt-in Diarization 下的 completed 只承载文本与 sample 边界（`attribution_units` 为空、
-`diagnostics.alignment.status = "pending"`），对齐结果随后以独立事件到达。
+`completed` 只承载 `type`、`item_id`、`content_index` 与 `transcript`；对齐与匿名 speaker
+归属随后以独立的 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
 
 ### 5.2 Alignment 与 Diarization
 

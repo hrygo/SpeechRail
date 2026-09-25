@@ -509,21 +509,25 @@ def _open_lifecycle_connection(
     recv_until(events, errors, "session.created", timeout=15, event_log=event_log)
     conn.send(
         {
-            "type": "transcription_session.update",
+            "type": "session.update",
             "session": {
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    "silence_duration_ms": 400,
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24_000},
+                        "transcription": {"model": "whisper-1"},
+                        "turn_detection": None,
+                    }
                 },
-                "speechrail": {"diarization": {"enabled": True}},
+                "speechrail": {
+                    "task": "conversation",
+                    "endpointing": {"mode": "server_vad", "silence_duration_ms": 400},
+                    "diarization": {"enabled": True},
+                },
             },
         }
     )
-    recv_until(
-        events, errors, "transcription_session.updated", timeout=15, event_log=event_log
-    )
+    recv_until(events, errors, "session.updated", timeout=15, event_log=event_log)
     return conn, events, errors, event_log
 
 

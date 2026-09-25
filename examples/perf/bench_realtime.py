@@ -25,7 +25,7 @@ from openai import OpenAI
 
 from speechrail.config.auth import resolve_api_key
 
-_SERVER_VAD_SILENCE_TAIL_BYTES = 32_000  # 1 second of 16 kHz mono PCM16
+_SERVER_VAD_SILENCE_TAIL_BYTES = 32_000  # 1 second of 16 kHz mono PCM16 of trailing silence
 
 
 class RealtimeEventError(RuntimeError):
@@ -158,29 +158,31 @@ def _run_connected_session(
     recv_until(events, errors, "session.created", timeout=15, event_log=event_log)
     setup_ms = (time.monotonic() - t0) * 1000
 
-    session: dict[str, object] = {
-        "input_audio_format": "pcm16",
-        "input_audio_transcription": {"model": "whisper-1", "language": "zh"},
-        "turn_detection": (
-            {"type": "manual"}
-            if turn_detection == "manual"
-            else {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 400,
-            }
-        ),
-    }
+    speechrail: dict[str, object] = {"task": "transcription"}
+    if turn_detection != "manual":
+        speechrail["endpointing"] = {
+            "mode": "server_vad",
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 400,
+        }
     if diarization:
-        session["speechrail"] = {"diarization": {"enabled": True}}
+        speechrail["diarization"] = {"enabled": True}
+    session: dict[str, object] = {
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {"model": "whisper-1", "language": "zh"},
+                "turn_detection": "manual" if turn_detection == "manual" else None,
+            }
+        },
+        "speechrail": speechrail,
+    }
     conn.send({
-        "type": "transcription_session.update",
+        "type": "session.update",
         "session": session,
     })
-    recv_until(
-        events, errors, "transcription_session.updated", timeout=15, event_log=event_log
-    )
+    recv_until(events, errors, "session.updated", timeout=15, event_log=event_log)
 
     input_pcm = (
         pcm + b"\x00" * _SERVER_VAD_SILENCE_TAIL_BYTES
@@ -199,16 +201,9 @@ def _run_connected_session(
         t0 = time.monotonic()
         conn.send({"type": "input_audio_buffer.commit"})
     else:
-        stopped_at = time.monotonic()
-        recv_until(
-            events,
-            errors,
-            "input_audio_buffer.speech_stopped",
-            timeout=60,
-            event_log=event_log,
-        )
+        # The current wire has no ``speech_stopped`` acknowledgement: the server
+        # VAD auto-commits, and the transcription final is the observable barrier.
         t0 = time.monotonic()
-        vad_to_asr_started_ms = (t0 - stopped_at) * 1000
     completed, _ = recv_until(
         events,
         errors,
@@ -240,17 +235,41 @@ def _run_connected_session(
         diarization_done = True
 
     t0 = time.monotonic()
+    tts_request_id = f"benchmark-{session_no}-{time.monotonic_ns()}"
     conn.send(
         {
-            "type": "speechrail.tts.create",
-            "request_id": f"benchmark-{session_no}-{time.monotonic_ns()}",
-            "text": tts_text,
+            "type": "speechrail.tts.start",
+            "request_id": tts_request_id,
+            "task": "conversation",
+            "voice": "serena",
         }
     )
     recv_until(
         events,
         errors,
-        "response.output_audio.delta",
+        "speechrail.tts.started",
+        timeout=60,
+        event_log=event_log,
+    )
+    conn.send(
+        {
+            "type": "speechrail.tts.append_text",
+            "request_id": tts_request_id,
+            "sequence": 0,
+            "text": tts_text,
+        }
+    )
+    conn.send(
+        {
+            "type": "speechrail.tts.finish_text",
+            "request_id": tts_request_id,
+            "last_sequence": 0,
+        }
+    )
+    recv_until(
+        events,
+        errors,
+        "speechrail.tts.audio.delta",
         timeout=60,
         event_log=event_log,
     )
@@ -258,7 +277,7 @@ def _run_connected_session(
 
     kinds: list[str] = []
     total_bytes = 0
-    response_done = False
+    tts_completed = False
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         try:
@@ -270,13 +289,23 @@ def _run_connected_session(
         k = str(get("type", ev))
         kinds.append(k)
         event_log.append(k)
-        if k == "response.output_audio.delta":
-            total_bytes += len(get("delta", ev) or b"")
-        if k == "response.done":
-            response_done = True
+        if k == "speechrail.tts.audio.delta":
+            delta = get("delta", ev)
+            if isinstance(delta, str) and delta:
+                total_bytes += len(base64.b64decode(delta))
+        if k in (
+            "speechrail.tts.completed",
+            "speechrail.tts.cancelled",
+            "speechrail.tts.failed",
+        ):
+            tts_completed = k == "speechrail.tts.completed"
             break
-    if not response_done:
-        raise TimeoutError("no response.done")
+    if not kinds or kinds[-1] not in (
+        "speechrail.tts.completed",
+        "speechrail.tts.cancelled",
+        "speechrail.tts.failed",
+    ):
+        raise TimeoutError("no speechrail.tts terminal")
 
     return {
         "session": session_no,
@@ -291,17 +320,10 @@ def _run_connected_session(
         "tts_bytes": total_bytes,
         "transcript_present": bool(transcript.strip()),
         "transcript_chars": len(transcript),
-        "response_done": response_done,
-        "vad_started": "input_audio_buffer.speech_started" in event_log,
-        "vad_stopped": "input_audio_buffer.speech_stopped" in event_log,
+        "tts_completed": tts_completed,
         "diarization_updated": "speechrail.diarization.updated" in event_log,
         "diarization_done": diarization_done,
         "event_types": event_log,
-        **(
-            {"vad_to_asr_started_ms": vad_to_asr_started_ms}
-            if turn_detection == "server_vad"
-            else {}
-        ),
     }
 
 

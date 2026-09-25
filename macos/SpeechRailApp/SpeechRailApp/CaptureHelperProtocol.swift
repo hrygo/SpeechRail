@@ -9,7 +9,7 @@ import Foundation
 //
 //   1. **helper 不做会话决策**。它只认识"给我这些 bundle id、按这个输出设备出 PCM"和
 //      "停"，不认识会话、不解析文本、不落盘、不联网。
-//   2. **上行只有 PCM 与电平**。每一块就是 40 ms 的 16 kHz 单声道 PCM16；
+//   2. **上行只有 PCM 与电平**。每一块就是 40 ms 的 24 kHz 单声道 PCM16；
 //      没有控制消息混在音频里（控制走另一条方法的 reply）。
 
 /// App → helper。方法都是显式的：`NSXPCConnection` 的 `remoteObjectProxy` 只转发
@@ -35,7 +35,7 @@ import Foundation
 
 /// helper → App。helper 侧的 `remoteObjectProxy` 就是这个协议。
 @objc public protocol SpeechRailCaptureHelperClientProtocol {
-    /// 一块 PCM（16 kHz / 单声道 / PCM16）+ 这一块的真实电平（0…1）。
+    /// 一块 PCM（24 kHz / 单声道 / PCM16）+ 这一块的真实电平（0…1）。
     func deliver(pcm: Data, level: Double)
 
     /// 采集**自己停下来了**（来源 App 全退、设备被拔、tap 失效）。

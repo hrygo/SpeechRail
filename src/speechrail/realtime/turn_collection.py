@@ -1,9 +1,19 @@
 """Bounded reference consumer for SpeechRail's manual ASR commit/clear barrier.
 
 Feed every server event (including session events) in wire order. The caller
-owns one serialized writer and must stop appending before begin_close(), then
-send commit followed by clear. This proves protocol completion, not ASR quality
-or sample-exact audio acceptance. No audio or transcript is logged here.
+owns one serialized writer and must stop appending before ``begin_close()``,
+declare one ``expect_item()`` per commit it is about to send, then write commit
+followed by clear. ``clear`` is a local state transition on the current wire
+and has no server acknowledgement.
+
+The single current wire has no per-item ``input_audio_buffer.committed``
+acknowledgement: an input item becomes observable only through its
+``conversation.item.input_audio_transcription.completed`` terminal. The caller
+therefore owns the expected item count, and the collector proves the barrier
+(one terminal per declared item, in order) rather than
+inferring the count from removed server events. This proves protocol
+completion, not ASR quality or sample-exact audio acceptance. No audio or
+transcript is logged here.
 """
 from __future__ import annotations
 
@@ -42,6 +52,7 @@ class ManualTurnCollector:
         self._order: list[str] = []
         self._texts: dict[str, str] = {}
         self._text_chars = 0
+        self._expected_items = 0
 
     def _fail(self, reason: str) -> None:
         self.state = "failed"
@@ -54,12 +65,32 @@ class ManualTurnCollector:
             self._fail("append_during_close")
             raise ValueError("turn_not_collecting")
 
+    def expect_item(self) -> None:
+        """Declare one committed input item the caller is about to commit."""
+        if self.state != "collecting":
+            self._fail("commit_during_close")
+            raise ValueError("turn_not_collecting")
+        if self._expected_items >= self._limits[1]:
+            self._fail("item_budget_exceeded")
+            raise ValueError("item_budget_exceeded")
+        self._expected_items += 1
+
     def begin_close(self) -> None:
         """Mark the sole outstanding commit/clear pair before writing either."""
         if self.state != "collecting":
             self._fail("duplicate_close")
             raise ValueError("turn_not_collecting")
         self.state = "closing"
+        if len(self._order) == self._expected_items:
+            self._complete()
+
+    def _complete(self) -> None:
+        self.state = "completed"
+        self.result = CollectedTranscript(
+            epoch=self.epoch,
+            item_ids=tuple(self._order),
+            text="".join(self._texts[item] for item in self._order),
+        )
 
     def cancel(self) -> None:
         self.state = "cancelled"
@@ -103,35 +134,30 @@ class ManualTurnCollector:
         kind = event.get("type")
         if kind in {"error", "conversation.item.input_audio_transcription.failed"}:
             self._fail("upstream_error")
-        elif kind == "input_audio_buffer.committed":
-            item = event.get("item_id")
-            if (
-                not isinstance(item, str) or not 0 < len(item) <= 256
-                or item in self._order or len(self._order) >= self._limits[1]
-            ):
-                self._fail("invalid_committed_item")
-                return
-            self._order.append(item)
         elif kind == "conversation.item.input_audio_transcription.completed":
             item, text = event.get("item_id"), event.get("transcript")
-            if not isinstance(item, str) or item not in self._order or not isinstance(text, str):
+            if (
+                not isinstance(item, str)
+                or not 0 < len(item) <= 256
+                or not isinstance(text, str)
+                or len(self._order) >= self._limits[1]
+            ):
                 self._fail("invalid_terminal")
                 return
             if item in self._texts:
                 if self._texts[item] != text:
                     self._fail("conflicting_terminal")
                 return
+            if len(self._order) >= self._expected_items:
+                # A terminal for an item the caller never declared cannot be
+                # attributed to this barrier.
+                self._fail("unexpected_item")
+                return
             if self._text_chars + len(text) > self._limits[2]:
                 self._fail("text_budget_exceeded")
                 return
+            self._order.append(item)
             self._texts[item] = text
             self._text_chars += len(text)
-        elif kind == "input_audio_buffer.cleared":
-            if self.state != "closing" or not self._order or len(self._texts) != len(self._order):
-                self._fail("incomplete_barrier")
-                return
-            self.state = "completed"
-            self.result = CollectedTranscript(
-                epoch=self.epoch, item_ids=tuple(self._order),
-                text="".join(self._texts[item] for item in self._order),
-            )
+            if self.state == "closing" and len(self._order) == self._expected_items:
+                self._complete()

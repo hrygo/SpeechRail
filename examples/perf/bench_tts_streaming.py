@@ -64,13 +64,39 @@ from typing import Any
 from openai import OpenAI
 
 from speechrail.config.auth import resolve_api_key
+from speechrail.domain.tts import DEFAULT_VOICE_ID as DEFAULT_VOICE
 
 DEFAULT_SAMPLE_RATE = 24_000
 _BYTES_PER_SAMPLE = 2
+_DEFAULT_ASR_MODEL = "whisper-1"
+
+
+def session_update_event(model: str = _DEFAULT_ASR_MODEL) -> dict[str, Any]:
+    """Build the one current-only ``session.update`` that enables incremental TTS.
+
+    The single wire carries the ASR model under ``session.audio.input`` and the
+    SpeechRail extension under ``session.speechrail``; there is no flat
+    ``input_audio_format`` and no ``transcription_session.update``.
+    """
+
+    return {
+        "type": "session.update",
+        "session": {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": DEFAULT_SAMPLE_RATE},
+                    "transcription": {"model": model},
+                    "turn_detection": None,
+                }
+            },
+            "speechrail": {"task": "conversation", "tts": {"enabled": True}},
+        },
+    }
 
 
 class RealtimeTurnError(RuntimeError):
-    """A stable server error that ended the utterance before ``response.created``."""
+    """A stable server error that ended the utterance before ``speechrail.tts.started``."""
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -351,13 +377,6 @@ def _started_sample_rate(event: dict[str, Any]) -> int | None:
     return _positive_int(output_format.get("sample_rate"))
 
 
-def _audio_sample_rate(event: dict[str, Any]) -> int | None:
-    metadata = event.get("speechrail")
-    if not isinstance(metadata, dict):
-        return None
-    return _positive_int(metadata.get("sample_rate"))
-
-
 def _append_limit(event: dict[str, Any]) -> int | None:
     limits = event.get("limits")
     if not isinstance(limits, dict):
@@ -365,20 +384,11 @@ def _append_limit(event: dict[str, Any]) -> int | None:
     return _positive_int(limits.get("max_append_codepoints"))
 
 
-def _response_status(event: dict[str, Any]) -> str | None:
-    response = event.get("response")
-    if not isinstance(response, dict):
-        return None
-    status = response.get("status")
-    return status if isinstance(status, str) else None
-
-
-def _response_id(event: dict[str, Any]) -> str | None:
-    response = event.get("response")
-    if not isinstance(response, dict):
-        return None
-    identifier = response.get("id")
-    return identifier if isinstance(identifier, str) else None
+def _failure_code(event: dict[str, Any]) -> str:
+    error = event.get("error")
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return str(error["code"])
+    return "tts_backend_failed"
 
 
 def _event_object(event: object) -> dict[str, Any]:
@@ -569,6 +579,7 @@ def run_incremental_turn(
     connection: Any,
     *,
     text: str,
+    model: str = _DEFAULT_ASR_MODEL,
     voice: str | None = None,
     slices: int = 3,
     append_interval_seconds: float = 0.0,
@@ -591,23 +602,16 @@ def run_incremental_turn(
     deadline = clock() + timeout_seconds
     reader = InterruptibleRealtimeReader(connection, clock)
     try:
-        connection.send(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        _recv_until_reader(
-            reader, deadline, frozenset({"transcription_session.updated"})
-        )
+        connection.send(session_update_event(model))
+        _recv_until_reader(reader, deadline, frozenset({"session.updated"}))
 
         request_id = f"bench_stream_{int(clock() * 1000)}"
         start: dict[str, Any] = {
             "type": "speechrail.tts.start",
             "request_id": request_id,
+            "task": "conversation",
+            "voice": voice or DEFAULT_VOICE,
         }
-        if voice is not None:
-            start["voice"] = voice
         submitted_at = clock()
         connection.send(start)
 
@@ -617,7 +621,7 @@ def run_incremental_turn(
         first_stable_text_at: float | None = None
         started_at: float | None = None
         finish_sent_at: float | None = None
-        response_id: str | None = None
+        task_id: str | None = None
         arrivals: list[tuple[float, int]] = []
         terminal_at = submitted_at
         terminal_status: str | None = None
@@ -665,30 +669,29 @@ def run_incremental_turn(
             event, now = _receive_event(reader, deadline)
             kind = event.get("type")
 
-            if kind == "response.created":
-                created = True
-            elif kind == "speechrail.tts.started":
+            if kind == "speechrail.tts.started":
                 event_request_id = event.get("request_id")
                 if event_request_id is not None and event_request_id != request_id:
                     raise ValueError("started event carried a foreign request_id")
-                raw_response_id = event.get("response_id")
-                if isinstance(raw_response_id, str):
-                    response_id = raw_response_id
+                raw_task_id = event.get("task_id")
+                if isinstance(raw_task_id, str):
+                    task_id = raw_task_id
                 started_at = now
                 started = True
+                created = True
                 sample_rate = _started_sample_rate(event) or sample_rate
                 pieces = _append_schedule(text, slices, max_codepoints=_append_limit(event))
             elif kind == "speechrail.tts.text_accepted":
                 event_request_id = event.get("request_id")
                 if event_request_id is not None and event_request_id != request_id:
                     raise ValueError("text_accepted event carried a foreign request_id")
-                event_response_id = event.get("response_id")
+                event_task_id = event.get("task_id")
                 if (
-                    response_id is not None
-                    and event_response_id is not None
-                    and event_response_id != response_id
+                    task_id is not None
+                    and event_task_id is not None
+                    and event_task_id != task_id
                 ):
-                    raise ValueError("text_accepted event carried a foreign response_id")
+                    raise ValueError("text_accepted event carried a foreign task_id")
                 sequence = event.get("append_sequence")
                 if isinstance(sequence, bool) or not isinstance(sequence, int):
                     raise ValueError("text_accepted event had no integer append_sequence")
@@ -699,9 +702,8 @@ def run_incremental_turn(
                     )
                 accepted_sequence = sequence
                 acknowledged_at = now
-            elif kind == "response.output_audio.delta":
+            elif kind == "speechrail.tts.audio.delta":
                 chunk = _decode_audio(event.get("delta"))
-                sample_rate = _audio_sample_rate(event) or sample_rate
                 if chunk:
                     if first_audio_at is None:
                         first_audio_at = now
@@ -712,11 +714,18 @@ def run_incremental_turn(
                 if not created:
                     raise RealtimeTurnError(code)
                 failure = failure or code
-            elif kind == "response.done":
+            elif kind == "speechrail.tts.completed":
                 terminal_at = now
-                terminal_status = _response_status(event) or "unknown"
-                if terminal_status != "completed":
-                    failure = failure or f"response_{terminal_status}"
+                terminal_status = "completed"
+                break
+            elif kind == "speechrail.tts.cancelled":
+                terminal_at = now
+                terminal_status = "cancelled"
+                break
+            elif kind == "speechrail.tts.failed":
+                terminal_at = now
+                terminal_status = "failed"
+                failure = failure or _failure_code(event)
                 break
 
         if audio_bytes % _BYTES_PER_SAMPLE:
@@ -798,6 +807,7 @@ def main() -> None:
             trace = run_incremental_turn(
                 connection,
                 text=args.text,
+                model=args.model,
                 voice=args.voice,
                 slices=args.slices,
                 append_interval_seconds=args.append_interval_ms / 1000,

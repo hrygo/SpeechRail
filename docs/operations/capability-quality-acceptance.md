@@ -36,7 +36,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 | clone TTS | deterministic seed、clone-only sampling、request-local loudness freeze、peak ceiling、reference signal validation |
 | clone speed | 非 `1.0` 明确返回 `clone_speed_unsupported` |
 
-上述 subtitle/meeting policy 是调用方通过 Realtime `transcription_session.update.session.turn_detection` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
+上述 subtitle/meeting policy 是调用方通过 Realtime `session.update` 的 `session.speechrail.endpointing` 传入的 server_vad 策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
 
 先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`，并使用
 `"$APP_HOME/runtime/current/.venv/bin/speechrail"`。恢复顺序固定为：`service status` →
@@ -72,8 +72,8 @@ legacy。若 profile 未配置或 artifact 不可用，再用同一 managed CLI 
 ## Clone TTS 响度能力
 
 当前 Quality Realtime 在独立 Base clone capability 实际配置时，通过
-`session.created.session.speech_capabilities.supports_clone=true` 声明可用性，并同时声明
-`audio_loudness_profile=stable_loudness_v1`。默认 TTS `variant` 仍可为 `voice_design`；客户端不能再由
+`/v1/models[].capabilities.supports_clone=true` 声明可用性（同一份也可从
+`/v1/speechrail/capabilities` 的原子快照读取）。默认 TTS `variant` 仍可为 `voice_design`；客户端不能再由
 默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
 normalization 使用请求级状态，并以私有 200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，
 不是客户端可依赖的公共 Realtime delta 大小承诺。

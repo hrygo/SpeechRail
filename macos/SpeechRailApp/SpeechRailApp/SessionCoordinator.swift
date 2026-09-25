@@ -453,6 +453,11 @@ public final class SessionCoordinator {
         try await store.attachSpeakerLabel(lineID: lineID, label: label)
     }
 
+    /// 对齐证据独立于文本 final 到达，只补写 `timing_quality` 这一列（§15.3 第 2 条）。
+    public func attachTimingQuality(lineID: String, quality: SessionTimingQuality?) async throws {
+        try await store.attachTimingQuality(lineID: lineID, quality: quality)
+    }
+
     /// 改显示名：写 `speaker_name`，`line.text` 与证据引用都不动（§6.2.1）。
     public func renameSpeaker(sessionID: String, label: String, name: String) async throws {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)
