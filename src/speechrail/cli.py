@@ -969,6 +969,7 @@ def _install_download_plan(
     keys = (
         required_spec_artifact(asr_spec, "asr"),  # type: ignore[arg-type]
         required_spec_artifact(tts_spec, "tts_custom_voice"),  # type: ignore[arg-type]
+        required_spec_artifact(tts_spec, "tts_base"),  # type: ignore[arg-type]
     )
     artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
     pending = tuple(

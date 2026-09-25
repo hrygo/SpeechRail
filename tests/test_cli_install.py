@@ -19,6 +19,7 @@ import pytest
 
 from speechrail import __version__, cli
 from speechrail.cli import main
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.service import managed_install, profile_commands
 from speechrail.service.installer_errors import InstallerError
 from speechrail.service.managed_install import InstallResult
@@ -230,6 +231,26 @@ def test_install_names_the_artifacts_it_still_has_to_fetch(
     out = capsys.readouterr().out
     assert "downloading tts-1.7b-base-q8" in out
     assert "up to 2.0 GiB" in out
+
+
+def test_download_plan_counts_every_role_preparation_fetches(tmp_path: Path) -> None:
+    """A first run must not understate the fetch set.
+
+    Preparation provisions ``asr`` + ``tts_custom_voice`` + ``tts_base`` for the
+    selected specs, so the header's "still to download" plan has to name the same
+    three roles instead of a shorter list.
+    """
+
+    plan = cli._install_download_plan(tmp_path / "app-home", "quality", "quality")
+
+    assert plan is not None
+    pending, pending_bytes = plan
+    assert set(pending) == {
+        required_spec_artifact("quality", "asr"),
+        required_spec_artifact("quality", "tts_custom_voice"),
+        required_spec_artifact("quality", "tts_base"),
+    }
+    assert pending_bytes > 0
 
 
 def test_install_renders_progress_and_a_download_summary(
