@@ -518,13 +518,19 @@ struct TeleprompterSessionLifecycleTests {
         harness.makeThreeSegmentDocument()
         try harness.session.openForManualReading()
 
-        try await Task.sleep(for: .milliseconds(350))
-        let beforeVoice = harness.session.runClock.elapsedSeconds
+        var beforeVoice = harness.session.runClock.elapsedSeconds
+        for _ in 0..<60 where beforeVoice <= 0 {
+            try await Task.sleep(for: .milliseconds(50))
+            beforeVoice = harness.session.runClock.elapsedSeconds
+        }
         #expect(beforeVoice > 0)
 
         await harness.session.enableVoiceAssist()
-        try await Task.sleep(for: .milliseconds(350))
-        let afterVoice = harness.session.runClock.elapsedSeconds
+        var afterVoice = harness.session.runClock.elapsedSeconds
+        for _ in 0..<60 where afterVoice <= beforeVoice {
+            try await Task.sleep(for: .milliseconds(50))
+            afterVoice = harness.session.runClock.elapsedSeconds
+        }
         #expect(afterVoice > beforeVoice)
 
         await harness.session.closeStage()
