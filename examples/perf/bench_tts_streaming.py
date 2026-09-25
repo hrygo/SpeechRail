@@ -69,6 +69,7 @@ class StreamingTurnTrace:
     sample_rate: int = DEFAULT_SAMPLE_RATE
     text_gap_seconds: float = 0.0
     failure: str | None = None
+    audio_arrivals: tuple[tuple[float, int], ...] = ()
 
     @property
     def append_to_first_pcm_seconds(self) -> float | None:
@@ -95,6 +96,28 @@ class StreamingTurnTrace:
         if generating is None or self.audio_seconds <= 0:
             return None
         return generating / self.audio_seconds
+
+    @property
+    def playback_headroom_seconds(self) -> float | None:
+        """Smallest audio buffer the caller held while playing this turn.
+
+        A caller that starts playing on the first audio byte has, at every later
+        arrival, ``received - elapsed`` seconds of unplayed audio.  The minimum of
+        that value is the wire-level underrun margin: a negative number means a
+        real player would have run dry before that chunk arrived.  The first
+        arrival is excluded because playback has not started before it.  This is
+        a supply-cadence proxy, not a measurement of the audio device.
+        """
+
+        if len(self.audio_arrivals) < 2 or self.first_audio_at is None:
+            return None
+        first_at, _ = self.audio_arrivals[0]
+        bytes_per_second = self.sample_rate * _BYTES_PER_SAMPLE
+        worst: float | None = None
+        for at, cumulative in self.audio_arrivals[1:]:
+            headroom = cumulative / bytes_per_second - (at - first_at)
+            worst = headroom if worst is None else min(worst, headroom)
+        return worst
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
@@ -125,6 +148,9 @@ class StreamingTurnSummary:
     completed_turns: int
     failed_turns: int
     failures: tuple[str, ...] = ()
+    playback_headroom_ms_p50: float | None = None
+    playback_headroom_ms_p95: float | None = None
+    underrun_turns: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -145,6 +171,11 @@ class StreamingTurnSummary:
                 "p50": self.text_gap_ms_p50,
                 "p95": self.text_gap_ms_p95,
             },
+            "playback_headroom_ms": {
+                "p50": self.playback_headroom_ms_p50,
+                "p95": self.playback_headroom_ms_p95,
+            },
+            "underrun_turns": self.underrun_turns,
         }
 
 
@@ -160,6 +191,11 @@ def summarise(traces: list[StreamingTurnTrace]) -> StreamingTurnSummary:
     text_gap = [
         trace.text_gap_seconds * 1000 for trace in traces if trace.first_audio_at is not None
     ]
+    headroom = [
+        seconds * 1000
+        for trace in traces
+        if (seconds := trace.playback_headroom_seconds) is not None
+    ]
     completed = sum(1 for trace in traces if trace.first_audio_at is not None)
     return StreamingTurnSummary(
         samples=len(first_pcm),
@@ -172,6 +208,9 @@ def summarise(traces: list[StreamingTurnTrace]) -> StreamingTurnSummary:
         completed_turns=completed,
         failed_turns=len(traces) - completed,
         failures=tuple(trace.failure for trace in traces if trace.failure is not None),
+        playback_headroom_ms_p50=percentile(headroom, 0.50),
+        playback_headroom_ms_p95=percentile(headroom, 0.95),
+        underrun_turns=sum(1 for value in headroom if value < 0),
     )
 
 
@@ -337,6 +376,7 @@ def run_incremental_turn(
     pieces: list[str] = []
     gaps: list[tuple[float, float]] = []
     first_audio_at: float | None = None
+    arrivals: list[tuple[float, int]] = []
     terminal_at = submitted_at
     audio_bytes = 0
     sample_rate = DEFAULT_SAMPLE_RATE
@@ -393,9 +433,11 @@ def run_incremental_turn(
         elif kind == "response.output_audio.delta":
             chunk = _decode_audio(event.get("delta"))
             sample_rate = _audio_sample_rate(event) or sample_rate
-            if chunk and first_audio_at is None:
-                first_audio_at = now
-            audio_bytes += len(chunk)
+            if chunk:
+                if first_audio_at is None:
+                    first_audio_at = now
+                audio_bytes += len(chunk)
+                arrivals.append((now, audio_bytes))
         elif kind == "error":
             code = _error_code(event)
             if not created:
@@ -421,6 +463,7 @@ def run_incremental_turn(
         sample_rate=sample_rate,
         text_gap_seconds=text_gap_seconds,
         failure=failure,
+        audio_arrivals=tuple(arrivals),
     )
 
 
@@ -442,6 +485,9 @@ def summary_line(trace: StreamingTurnTrace) -> str:
     text = f"first_pcm={first * 1000:.0f}ms " if first is not None else "first_pcm=n/a "
     text += f"rtf={rtf_value:.2f} " if rtf_value is not None else "rtf=n/a "
     text += f"text_gap={trace.text_gap_seconds * 1000:.0f}ms"
+    headroom = trace.playback_headroom_seconds
+    if headroom is not None:
+        text += f" headroom={headroom * 1000:.0f}ms"
     if trace.failure is not None:
         text += f" failure={trace.failure}"
     return text

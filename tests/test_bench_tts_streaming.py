@@ -205,6 +205,68 @@ def test_trace_without_audio_publishes_no_ratio() -> None:
     assert trace.generation_rtf is None
 
 
+def test_playback_headroom_reports_the_worst_supply_gap() -> None:
+    # 80 ms per chunk at 24 kHz PCM16 = 3840 bytes.
+    chunk = 3840
+    headroom = StreamingTurnTrace(
+        submitted_at=0.0,
+        first_audio_at=1.0,
+        terminal_at=2.0,
+        audio_bytes=chunk * 2,
+        audio_arrivals=((1.0, chunk), (1.10, chunk * 2)),
+    )
+    # Second chunk arrives 100 ms after the first but only adds 80 ms of audio.
+    assert headroom.playback_headroom_seconds == pytest.approx(0.060)
+
+    steady = StreamingTurnTrace(
+        submitted_at=0.0,
+        first_audio_at=1.0,
+        terminal_at=2.0,
+        audio_bytes=chunk * 3,
+        audio_arrivals=((1.0, chunk), (1.05, chunk * 2), (1.10, chunk * 3)),
+    )
+    assert steady.playback_headroom_seconds == pytest.approx(0.110)
+
+
+def test_playback_headroom_needs_at_least_two_arrivals() -> None:
+    single = StreamingTurnTrace(
+        submitted_at=0.0,
+        first_audio_at=1.0,
+        terminal_at=1.5,
+        audio_bytes=3840,
+        audio_arrivals=((1.0, 3840),),
+    )
+    assert single.playback_headroom_seconds is None
+    assert summarise([single]).playback_headroom_ms_p50 is None
+
+
+def test_summarise_counts_underrun_turns_separately() -> None:
+    # A starved turn: the second chunk lands after the first would have run out.
+    starved = StreamingTurnTrace(
+        submitted_at=0.0,
+        first_audio_at=1.0,
+        terminal_at=2.0,
+        audio_bytes=3840 * 2,
+        audio_arrivals=((1.0, 3840), (1.20, 3840 * 2)),
+    )
+    healthy = StreamingTurnTrace(
+        submitted_at=0.0,
+        first_audio_at=1.0,
+        terminal_at=2.0,
+        audio_bytes=3840 * 2,
+        audio_arrivals=((1.0, 3840), (1.04, 3840 * 2)),
+    )
+
+    summary = summarise([starved, healthy])
+    assert summary.underrun_turns == 1
+    # The nearest-rank rule reports the optimistic side of a two-sample run, so
+    # the starved turn is visible through the counter rather than the percentile.
+    assert summary.playback_headroom_ms_p50 == pytest.approx(120.0)
+    payload = summary.as_dict()
+    assert payload["underrun_turns"] == 1
+    assert payload["playback_headroom_ms"]["p50"] == summary.playback_headroom_ms_p50
+
+
 def test_summarise_counts_incomplete_turns_without_averaging_them_in() -> None:
     complete = StreamingTurnTrace(
         submitted_at=0.0, first_audio_at=0.4, terminal_at=2.4, audio_bytes=48_000
