@@ -54,7 +54,7 @@ paths:
                 service: speechrail
                 version: 3.2.1
                 backend: asr-1.7b-q8
-                profile: quality
+                profile: quality/quality
                 asr_ready: true
                 asr_runtime_revision: null
                 tts_ready: true
@@ -1989,6 +1989,12 @@ components:
         planner:
           type: [object, 'null']
           additionalProperties: true
+        plan:
+          type: [object, 'null']
+          description: >-
+            Immutable render plan identity (plan_id, window_index, checkpoint_id).
+            Clients keep it to prove which plan and voice revision produced one render.
+          additionalProperties: true
         error_code:
           type: [string, 'null']
         created_at:
@@ -2125,8 +2131,10 @@ components:
           example: asr-1.7b-q8
         profile:
           type: [string, 'null']
-          enum: [extreme, quality, balanced, light, null]
-          description: Active managed profile; null for an unmanaged runtime.
+          pattern: '^(fast|quality|reference)/(fast|quality|reference)$'
+          description: >
+            Active managed selection as `<asr_spec>/<tts_spec>`; null for an
+            unmanaged runtime. ASR and TTS tiers are chosen independently.
         asr_ready:
           type: boolean
           description: ASR is configured and able to serve on demand.
@@ -2337,8 +2345,10 @@ components:
             only on alias entries; canonical entries omit it.
         profile:
           type: [string, 'null']
-          enum: [extreme, quality, balanced, light, null]
-          description: Active managed profile on canonical entries.
+          pattern: '^(fast|quality|reference)/(fast|quality|reference)$'
+          description: >
+            Active managed selection as `<asr_spec>/<tts_spec>` on canonical
+            entries; ASR and TTS tiers are chosen independently.
         artifact:
           type: string
           description: Immutable managed artifact key on canonical entries.

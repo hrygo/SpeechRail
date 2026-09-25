@@ -11,7 +11,7 @@ final class ControlKitTests: XCTestCase {
         let request = ControlRequest(
             requestID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
             command: .profileApply,
-            profile: .balanced,
+            selection: .quick(.quality),
             confirmation: true
         )
         let response = ControlResponse(
@@ -43,13 +43,13 @@ final class ControlKitTests: XCTestCase {
     }
 
     func testEveryProfileIsRepresentedByTheStableEnum() {
-        XCTAssertEqual(SpeechRailProfile.allCases, [.extreme, .quality, .balanced, .light])
+        XCTAssertEqual(SpeechRailProfile.allCases, [.fast, .quality, .reference])
     }
 
     func testUnknownProfileDecodesForFactsButCannotBeSelectedOrSent() throws {
         let health = try JSONDecoder().decode(
             HealthSnapshot.self,
-            from: Data(#"{"profile":"future_tier"}"#.utf8)
+            from: Data(#"{"profile":"future_tier/quality"}"#.utf8)
         )
         let summary = try JSONDecoder().decode(
             ProfileSummary.self,
@@ -57,24 +57,26 @@ final class ControlKitTests: XCTestCase {
                 #"{"id":"future_tier","asr":"asr","tts":"tts","download_bytes":10}"#.utf8
             )
         )
-        let unknown = try XCTUnwrap(health.profile)
-
-        XCTAssertEqual(unknown, .unrecognized("future_tier"))
-        XCTAssertEqual(summary.id, unknown)
+        XCTAssertEqual(health.profile, "future_tier/quality")
+        XCTAssertNil(health.selection, "one unknown side means no resolvable spec pair")
+        XCTAssertEqual(summary.id, .unrecognized("future_tier"))
         XCTAssertEqual(
             try JSONDecoder().decode(
                 ProfileSummary.self,
                 from: JSONEncoder().encode(summary)
             ).id,
-            unknown
+            .unrecognized("future_tier")
         )
-        XCTAssertFalse(unknown.isSelectable)
+        XCTAssertFalse(summary.id.isSelectable)
 
         for command in [ControlCommand.profileApply, .modelPrepare] {
             XCTAssertThrowsError(
                 try ControlRequest(
                     command: command,
-                    profile: unknown,
+                    selection: SpecSelection(
+                        asrSpec: .unrecognized("future_tier"),
+                        ttsSpec: .quality
+                    ),
                     confirmation: true
                 ).validate()
             ) { error in
@@ -88,12 +90,11 @@ final class ControlKitTests: XCTestCase {
     }
 
     func testSelectableProfilesComeOnlyFromTheConnectedServiceCatalog() {
-        let legacyCatalog = ModelCatalogSnapshot(
+        let publishedCatalog = ModelCatalogSnapshot(
             artifacts: [],
             profiles: [
                 ProfileSummary(id: .quality, asr: "asr", tts: "tts", downloadBytes: 10),
-                ProfileSummary(id: .balanced, asr: "asr", tts: "tts", downloadBytes: 10),
-                ProfileSummary(id: .light, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .fast, asr: "asr", tts: "tts", downloadBytes: 10),
                 ProfileSummary(
                     id: .unrecognized("future_tier"),
                     asr: "asr",
@@ -102,21 +103,17 @@ final class ControlKitTests: XCTestCase {
                 ),
             ]
         )
-        let fourTierCatalog = ModelCatalogSnapshot(
+        let referenceCatalog = ModelCatalogSnapshot(
             artifacts: [],
             profiles: [
+                ProfileSummary(id: .fast, asr: "asr", tts: "tts", downloadBytes: 10),
                 ProfileSummary(id: .quality, asr: "asr", tts: "tts", downloadBytes: 10),
-                ProfileSummary(id: .balanced, asr: "asr", tts: "tts", downloadBytes: 10),
-                ProfileSummary(id: .extreme, asr: "asr", tts: "tts", downloadBytes: 10),
-                ProfileSummary(id: .light, asr: "asr", tts: "tts", downloadBytes: 10),
+                ProfileSummary(id: .reference, asr: "asr", tts: "tts", downloadBytes: 10),
             ]
         )
 
-        XCTAssertEqual(legacyCatalog.selectableProfiles, [.quality, .balanced, .light])
-        XCTAssertEqual(
-            fourTierCatalog.selectableProfiles,
-            [.extreme, .quality, .balanced, .light]
-        )
+        XCTAssertEqual(publishedCatalog.selectableProfiles, [.fast, .quality])
+        XCTAssertEqual(referenceCatalog.selectableProfiles, [.fast, .quality, .reference])
     }
 
     func testRemainingDownloadUpperBoundRequiresCompleteStatusAndMatchingTotals() {
@@ -132,7 +129,7 @@ final class ControlKitTests: XCTestCase {
                 quantization: ModelQuantizationSnapshot(format: "none"),
                 sizeBytes: sizeBytes,
                 fileCount: 1,
-                requiredBy: [.extreme]
+                requiredBy: [.reference]
             )
         }
 
@@ -158,7 +155,7 @@ final class ControlKitTests: XCTestCase {
             ],
             profiles: [
                 ProfileSummary(
-                    id: .extreme,
+                    id: .reference,
                     asr: "asr",
                     tts: "design",
                     ttsClone: "base",
@@ -174,7 +171,7 @@ final class ControlKitTests: XCTestCase {
             ],
             disk: disk
         )
-        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: partialStatuses))
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .reference, statuses: partialStatuses))
 
         let completeStatuses = ModelStatusSnapshot(
             artifacts: [
@@ -185,7 +182,7 @@ final class ControlKitTests: XCTestCase {
             disk: disk
         )
         XCTAssertEqual(
-            catalog.remainingDownloadUpperBound(for: .extreme, statuses: completeStatuses),
+            catalog.remainingDownloadUpperBound(for: .reference, statuses: completeStatuses),
             500
         )
 
@@ -198,10 +195,10 @@ final class ControlKitTests: XCTestCase {
             disk: disk
         )
         XCTAssertEqual(
-            catalog.remainingDownloadUpperBound(for: .extreme, statuses: verifiedStatuses),
+            catalog.remainingDownloadUpperBound(for: .reference, statuses: verifiedStatuses),
             0
         )
-        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: nil))
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .reference, statuses: nil))
     }
 
     func testRemainingDownloadUpperBoundIncludesCoreMLDiarizationBundle() {
@@ -217,7 +214,7 @@ final class ControlKitTests: XCTestCase {
                 quantization: ModelQuantizationSnapshot(format: "none"),
                 sizeBytes: sizeBytes,
                 fileCount: 1,
-                requiredBy: [.extreme]
+                requiredBy: [.reference]
             )
         }
 
@@ -243,7 +240,7 @@ final class ControlKitTests: XCTestCase {
             ],
             profiles: [
                 ProfileSummary(
-                    id: .extreme,
+                    id: .reference,
                     asr: "asr",
                     tts: "design",
                     ttsClone: "base",
@@ -262,7 +259,7 @@ final class ControlKitTests: XCTestCase {
             artifacts: verifiedModelStatuses,
             disk: disk
         )
-        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .extreme, statuses: missingCoreMLStatus))
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: .reference, statuses: missingCoreMLStatus))
 
         let pendingCoreMLStatus = ModelStatusSnapshot(
             artifacts: verifiedModelStatuses,
@@ -270,7 +267,7 @@ final class ControlKitTests: XCTestCase {
             disk: disk
         )
         XCTAssertEqual(
-            catalog.remainingDownloadUpperBound(for: .extreme, statuses: pendingCoreMLStatus),
+            catalog.remainingDownloadUpperBound(for: .reference, statuses: pendingCoreMLStatus),
             300
         )
 
@@ -280,7 +277,7 @@ final class ControlKitTests: XCTestCase {
             disk: disk
         )
         XCTAssertEqual(
-            catalog.remainingDownloadUpperBound(for: .extreme, statuses: verifiedCoreMLStatus),
+            catalog.remainingDownloadUpperBound(for: .reference, statuses: verifiedCoreMLStatus),
             0
         )
     }
@@ -310,7 +307,7 @@ final class ControlKitTests: XCTestCase {
     func testModelPrepareRequestRoundTripsProgressAndCatalog() throws {
         let request = ControlRequest(
             command: .modelPrepare,
-            profile: .quality,
+            selection: .quick(.quality),
             confirmation: true
         )
         let response = ControlResponse(
@@ -371,7 +368,7 @@ final class ControlKitTests: XCTestCase {
         let operation = OperationSnapshot(
             operationID: "model_recovery_123",
             command: .modelPrepare,
-            profile: .quality,
+            selection: .quick(.quality),
             state: .interrupted,
             phase: "download",
             progress: OperationProgressSnapshot(
@@ -401,7 +398,7 @@ final class ControlKitTests: XCTestCase {
 
         XCTAssertEqual(decoded.schemaVersion, ControlConstants.schemaVersion)
         XCTAssertEqual(decoded.modelStatus?.activeOperation, operation)
-        XCTAssertEqual(decoded.modelStatus?.activeOperation?.profile, .quality)
+        XCTAssertEqual(decoded.modelStatus?.activeOperation?.selection, .quick(.quality))
         XCTAssertEqual(decoded.modelStatus?.activeOperation?.state, .interrupted)
     }
 
@@ -827,27 +824,28 @@ final class ControlKitTests: XCTestCase {
         XCTAssertEqual(RuntimeHistogramPresentation.spokenAverage(2.5, unit: ""), "2.500")
     }
 
-    func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {
+    func testProfileSummaryAcceptsPayloadWithoutDiarization() throws {
         let data = Data(
-            #"{"id":"balanced","asr":"asr","tts":"tts","aligner":null,"download_bytes":10}"#
+            #"{"id":"quality","asr":"asr","tts":"tts","aligner":null,"download_bytes":10}"#
                 .utf8
         )
 
         let decoded = try ControlWireCodec.decode(ProfileSummary.self, from: data)
 
-        XCTAssertEqual(decoded.id, .balanced)
+        XCTAssertEqual(decoded.id, .quality)
         XCTAssertFalse(decoded.diarization)
     }
 
     func testProfileApplyArgumentsAreFixedAndPreserveHomeAsOneArgument() {
         let home = URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
-        let arguments = ManagedCommand.profileApply(.quality).arguments(appHome: home)
+        let arguments = ManagedCommand.profileApply(.quick(.quality)).arguments(appHome: home)
 
         XCTAssertEqual(
             arguments,
             [
-                "-m", "speechrail", "profile", "apply", "quality", "--yes", "--app-home",
-                "/tmp/SpeechRail Test Home", "--json",
+                "-m", "speechrail", "profile", "apply", "--asr-spec", "quality",
+                "--tts-spec", "quality", "--yes", "--app-home", "/tmp/SpeechRail Test Home",
+                "--json",
             ]
         )
         XCTAssertFalse(arguments.joined(separator: " ").contains("sh -c"))
@@ -855,13 +853,14 @@ final class ControlKitTests: XCTestCase {
 
     func testModelPrepareArgumentsUseTheLockedCommandAndRequireNoShell() {
         let home = URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
-        let arguments = ManagedCommand.modelPrepare(.quality).arguments(appHome: home)
+        let arguments = ManagedCommand.modelPrepare(.quick(.quality)).arguments(appHome: home)
 
         XCTAssertEqual(
             arguments,
             [
-                "-m", "speechrail", "model", "prepare", "quality", "--yes", "--app-home",
-                "/tmp/SpeechRail Test Home", "--json",
+                "-m", "speechrail", "model", "prepare", "--asr-spec", "quality",
+                "--tts-spec", "quality", "--yes", "--app-home", "/tmp/SpeechRail Test Home",
+                "--json",
             ]
         )
         XCTAssertFalse(arguments.contains("--url"))

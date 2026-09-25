@@ -6,6 +6,12 @@ public struct CreativeWork: Codable, Equatable, Identifiable, Sendable {
     public let scriptText: String
     public let voiceID: String
     public let voiceName: String
+    /// 制作当时实际生效的音色 revision。缺省表示这份记录没有捕捉到身份（老记录）。
+    public let voiceRevision: String?
+    /// 制作当时服务端固定的 plan 身份；刷新到新 plan 只能由用户显式重做。
+    public let planID: String?
+    /// 同一份文稿 + 同一个音色的第几次显式制作。老记录按第 1 次读。
+    public let renderRevision: Int
     public let createdAt: Date
     public let durationSeconds: Double?
     public let audioFileName: String
@@ -16,6 +22,9 @@ public struct CreativeWork: Codable, Equatable, Identifiable, Sendable {
         scriptText: String,
         voiceID: String,
         voiceName: String,
+        voiceRevision: String? = nil,
+        planID: String? = nil,
+        renderRevision: Int = 1,
         createdAt: Date = Date(),
         durationSeconds: Double? = nil,
         audioFileName: String
@@ -25,9 +34,29 @@ public struct CreativeWork: Codable, Equatable, Identifiable, Sendable {
         self.scriptText = scriptText
         self.voiceID = voiceID
         self.voiceName = voiceName
+        self.voiceRevision = voiceRevision
+        self.planID = planID
+        self.renderRevision = max(1, renderRevision)
         self.createdAt = createdAt
         self.durationSeconds = durationSeconds
         self.audioFileName = audioFileName
+    }
+
+    /// 无损读取：`works.json` 里老记录没有身份字段时必须照样能读出来，
+    /// 不补写磁盘、不丢已有项目。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        scriptText = try container.decode(String.self, forKey: .scriptText)
+        voiceID = try container.decode(String.self, forKey: .voiceID)
+        voiceName = try container.decode(String.self, forKey: .voiceName)
+        voiceRevision = try container.decodeIfPresent(String.self, forKey: .voiceRevision)
+        planID = try container.decodeIfPresent(String.self, forKey: .planID)
+        renderRevision = max(1, try container.decodeIfPresent(Int.self, forKey: .renderRevision) ?? 1)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        durationSeconds = try container.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        audioFileName = try container.decode(String.self, forKey: .audioFileName)
     }
 }
 
@@ -216,6 +245,9 @@ public final class CreativeWorkStore {
                 scriptText: existing.scriptText,
                 voiceID: existing.voiceID,
                 voiceName: existing.voiceName,
+                voiceRevision: existing.voiceRevision,
+                planID: existing.planID,
+                renderRevision: existing.renderRevision,
                 createdAt: existing.createdAt,
                 durationSeconds: existing.durationSeconds,
                 audioFileName: existing.audioFileName
@@ -242,6 +274,18 @@ public final class CreativeWorkStore {
             throw CreativeWorkStoreError.audioUnavailable
         }
         return audioURL
+    }
+
+    /// 同一份文稿 + 同一个音色的下一次制作编号。
+    ///
+    /// 作品记录只会追加、不会就地改写：全局默认变了也就不会回头改已有项目，
+    /// 只有用户显式重做一次才会产生新的 render revision。
+    public func nextRenderRevision(scriptText: String, voiceID: String) throws -> Int {
+        let previous = try list()
+            .filter { $0.scriptText == scriptText && $0.voiceID == voiceID }
+            .map(\.renderRevision)
+            .max()
+        return (previous ?? 0) + 1
     }
 
     public func loadAudio(for work: CreativeWork) throws -> Data {

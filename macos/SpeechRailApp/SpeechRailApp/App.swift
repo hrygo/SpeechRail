@@ -269,18 +269,16 @@ struct SpeechRailApp: App {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
                 return .ready(
-                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                    profile: SpeechRailProfilePresentation.shortTitle(appModel?.health?.selection)
                 )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
         }
         // 字幕的分人开关：档位给不出分人时接口会回 `diarization_not_available`，
-        // 所以这里先按档位挡一道——**开关置灰时要说得出原因**（§14.3 的档位门禁）。
+        // 分人现在是任务级 opt-in，能力由服务能力快照与 `health.diarization` 报告，
+        // 不再按档位拦截。
         captionSession.diarizationPreference = { sessionPreferences.captionsDiarizationEnabled }
-        captionSession.diarizationGate = {
-            SessionPreferences.diarizationGateNote(for: coordinator.lastKnownProfile)
-        }
         assistantSession.availableVoices = { [weak appModel] in
             (appModel?.safeVoiceCatalog?.data ?? []).filter(\.available).map(\.name)
         }
@@ -303,7 +301,7 @@ struct SpeechRailApp: App {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
                 return .ready(
-                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                    profile: SpeechRailProfilePresentation.shortTitle(appModel?.health?.selection)
                 )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
@@ -316,7 +314,7 @@ struct SpeechRailApp: App {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
                 return .ready(
-                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                    profile: SpeechRailProfilePresentation.shortTitle(appModel?.health?.selection)
                 )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
@@ -338,7 +336,7 @@ struct SpeechRailApp: App {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
                 return .ready(
-                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                    profile: SpeechRailProfilePresentation.shortTitle(appModel?.health?.selection)
                 )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
@@ -749,7 +747,7 @@ private struct UITestServiceDiagnosticsClient:
             service: "speechrail",
             version: "fixture",
             backend: "fake-asr",
-            profile: .quality,
+            profile: "quality/quality",
             asrReady: true,
             ttsReady: true,
             ttsWarm: true,
@@ -1284,7 +1282,13 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 requestID: request.requestID,
                 command: request.command,
                 status: .ok,
-                profile: ProfileSnapshot(preset: .quality, generation: 1, asr: "fake-asr", tts: "fake-tts")
+                profile: ProfileSnapshot(
+                    asrSpec: .quality,
+                    ttsSpec: .quality,
+                    generation: 1,
+                    asr: "fake-asr",
+                    tts: "fake-tts"
+                )
             )
         case .modelCatalog:
             if modelUnsupported {
@@ -1307,14 +1311,13 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 quantization: ModelQuantizationSnapshot(bits: 8, groupSize: 64, format: "fixture"),
                 sizeBytes: 0,
                 fileCount: 1,
-                requiredBy: [.extreme, .quality, .balanced, .light]
+                requiredBy: [.fast, .quality, .reference]
             )
             let profiles = SpeechRailProfile.allCases.map {
                 ProfileSummary(
                     id: $0,
                     asr: "fake-asr",
                     tts: "fake-tts",
-                    diarization: $0 != .light,
                     downloadBytes: 0
                 )
             }
@@ -1353,7 +1356,7 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                         ? OperationSnapshot(
                             operationID: "ui-test-recovered-model",
                             command: .modelPrepare,
-                            profile: .quality,
+                            selection: .quick(.quality),
                             state: .interrupted,
                             phase: "download",
                             progress: OperationProgressSnapshot(

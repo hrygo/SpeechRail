@@ -6,12 +6,14 @@ import SpeechRailControlKit
 /// 它拥有 `requestID`、append 序号、`inputClosed`、终态、播放排空和 `generation`；
 /// `AssistantSession` 只负责 LLM、history 与落库，不再自己切句、排队、逐句提交。
 ///
-/// 三条不许打折的规则：
+/// 四条不许打折的规则：
 ///
 ///   1. **一轮一次 start、一次 finish**：LLM 结束事件不能越过还没 ACK 的文本提前 finish；
 ///   2. **旧代一律隔离**：`started` / ACK / audio / done 都带身份，不匹配就整条丢弃，
 ///      旧 `done` 不许清掉新一轮的状态；
 ///   3. **暂时排空 ≠ 整轮结束**：只有"服务端终态 + 本代音频排空"才回报 `.completed`。
+///   4. **打断先停播、再取消网络**：本地作废 epoch 并清空排队预算 → await 停播屏障 →
+///      才发 `cancel`；后端取消超时/失败都不恢复旧音，迟到的 `dataRendered` 由 epoch 丢弃。
 ///
 /// 所有外部依赖（发送、停播、入队、时钟、休眠）都是注入的，纯测试里不碰硬件。
 @MainActor
@@ -27,6 +29,8 @@ final class AssistantTTSStreamCoordinator {
         var acknowledgementTimeout: Duration = .seconds(5)
         /// 播放队列满时的等待上限，超过就明确失败，不无限积压。
         var playbackWaitTimeout: Duration = .seconds(2)
+        /// 停播屏障落地之后，等后端确认取消的上限；超时也不回滚本地静音。
+        var cancellationTimeout: Duration = .seconds(2)
 
         static let `default` = Configuration()
     }
@@ -66,8 +70,10 @@ final class AssistantTTSStreamCoordinator {
     var sendAppend: @MainActor (Int, String) async throws -> Void = { _, _ in }
     var sendFinish: @MainActor (Int) async throws -> Void = { _ in }
     var sendCancel: @MainActor () async throws -> Void = {}
+    /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**：播放层必须在"真的播完"
+    /// 的回调里把它原样带回，迟到块才可能被识别出来。
     /// 返回 `false` 表示这一块没有真的进播放队列，预算必须原样还回去。
-    var enqueuePlayback: @MainActor (Data) async -> Bool = { _ in true }
+    var enqueuePlayback: @MainActor (Data, Int) async -> Bool = { _, _ in true }
     var stopPlayback: @MainActor () async -> Void = {}
     /// 朗读前的清洗（去掉 Markdown、把符号念成词）。返回空串表示这一段不用发声，
     /// 既不占序号也不占预算。
@@ -176,18 +182,18 @@ final class AssistantTTSStreamCoordinator {
         await task?.value
     }
 
-    /// 打断/收尾：本地立刻作废这一代（旧包不再进播放），再取消服务端。
+    /// 打断/收尾：本地立刻作废这一代（旧包不再进播放），**等停播屏障落地**，再取消服务端。
+    ///
+    /// 顺序是有意的：`invalidate()` 先推进 epoch 并清空本地排队预算，然后 `await` 停播
+    /// （返回即表示播放层已经丢下旧代缓冲），最后才发网络取消。后端取消超时或失败都
+    /// 不回滚本地静音，也不把旧音放回来。
     func cancel() async {
         guard requestID != nil else { return }
         let generation = self.generation
         invalidate()
-        stopPlaybackNow()
-        do {
-            try await sendCancel()
-        } catch {
-            // 取消失败不回滚本地状态：用户侧静音已经生效。
-        }
-        reportOutcome(.cancelled, generation: generation)
+        await stopPlayback()
+        await cancelServerBounded()
+        reportOutcome(.cancelled, generation: generation, playbackAlreadyStopped: true)
     }
 
     /// 只作废本地状态，不发网络命令（断线、设备重建时用）。
@@ -242,7 +248,7 @@ final class AssistantTTSStreamCoordinator {
         guard samples > 0 else { return }
         guard await awaitPlaybackBudget(samples: samples) else { return }
         guard ledger.reserve(samples: samples) else { return }
-        guard await enqueuePlayback(pcm) else {
+        guard await enqueuePlayback(pcm, generation) else {
             // 没进队列就别占着预算，否则这一轮会一直等一块永远播不完的音频。
             _ = ledger.complete(samples: samples, generation: ledger.generation)
             return
@@ -273,9 +279,11 @@ final class AssistantTTSStreamCoordinator {
         fail(Failure.server(text))
     }
 
-    /// 播放器报"这一块真的播完了"（`dataRendered` 语义）。旧代 completion 不污染新状态。
-    func notePlaybackCompleted(samples: Int) {
-        guard ledger.complete(samples: samples, generation: ledger.generation) else { return }
+    /// 播放器报"这一块真的播完了"（`dataRendered` 语义）。
+    /// `epoch` 是入队时交给播放层的身份：**旧代的迟到回调必须整条丢掉**，
+    /// 否则它会把新一轮的排队预算当成自己的还掉，让整轮提前宣布播完。
+    func notePlaybackCompleted(samples: Int, epoch: Int) {
+        guard ledger.complete(samples: samples, generation: epoch) else { return }
         resolve(.playback, .satisfied)
         if ledger.isUtteranceFinished {
             report(.completed)
@@ -422,20 +430,56 @@ final class AssistantTTSStreamCoordinator {
         reportOutcome(outcome, generation: generation)
     }
 
-    private func reportOutcome(_ outcome: Outcome, generation: Int) {
+    private func reportOutcome(
+        _ outcome: Outcome,
+        generation: Int,
+        playbackAlreadyStopped: Bool = false
+    ) {
         self.outcome = outcome
         pumpTask?.cancel()
         pumpTask = nil
         inputClosed = true
         releaseWaiters(outcome == .cancelled ? .cancelled : .failed("这一轮已经结束。"))
         prefetched.removeAll()
-        stopPlaybackNow()
+        if !playbackAlreadyStopped { stopPlaybackNow() }
         onOutcome(generation, outcome)
     }
 
     private func stopPlaybackNow() {
         let stop = stopPlayback
         Task { @MainActor in await stop() }
+    }
+
+    /// 等后端确认取消，但**有上限**：后端不回话时不能把打断吊在这里。
+    /// 超时只是不再等回执，本地静音与作废已经从 `invalidate()` 起生效。
+    private func cancelServerBounded() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let latch = CompletionLatch(continuation)
+            Task { @MainActor in
+                try? await sendCancel()
+                latch.finish()
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: configuration.cancellationTimeout)
+                latch.finish()
+            }
+        }
+    }
+
+    /// 只放行一次的等待闩：网络回执与超时谁先到都只 resume 一次。
+    @MainActor
+    private final class CompletionLatch {
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        init(_ continuation: CheckedContinuation<Void, Never>) {
+            self.continuation = continuation
+        }
+
+        func finish() {
+            let pending = continuation
+            continuation = nil
+            pending?.resume()
+        }
     }
 
     private enum WaitTarget: Hashable {

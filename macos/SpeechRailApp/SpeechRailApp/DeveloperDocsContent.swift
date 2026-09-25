@@ -132,7 +132,7 @@ enum DeveloperDocsCatalog {
                 ),
                 .bullets([
                     "系统音色用 canonical 名称或 OpenAI 标准别名调用；客户端应选 available=true 的那条。",
-                    "声音设计（/v1/voices/designs）让服务端生成参考音频并注册；需要当前服务同时声明 VoiceDesign 与 Base。",
+                    "声音设计（/v1/voice-designs）先下发候选，再用 Base 模型在受控文本上复验后才发布；需要当前服务同时声明 VoiceDesign 与 Base。",
                     "参考录音注册（/v1/voices/clone）接受 2–45 秒、不超过 15 MB 的音频，"
                     + "服务端统一转码成 24 kHz 单声道参考。",
                     "ref_text 必须是用户实际朗读的内容：服务端用它核对参考音频，匹配不上不会注册。",
@@ -154,18 +154,18 @@ enum DeveloperDocsCatalog {
         DeveloperDocTopic(
             id: "profiles",
             title: "分档能力对照",
-            summary: "light / balanced / quality / extreme 的差异",
+            summary: "fast / quality / reference 三档，识别与配音分别选择",
             systemImage: "slider.horizontal.3",
             blocks: [
                 .bullets([
-                    "light：只有识别与合成，没有 aligner，也没有分人。",
-                    "balanced：aligner-q8，可匿名分人。",
-                    "quality：aligner-bf16，可匿名分人；支持 VoiceDesign 与 Base 克隆。",
-                    "extreme（候选）：ASR、TTS 与 aligner 使用 bf16，并配置 VoiceDesign、Base 与分人；识别/配音质量、资源和延迟尚未验证，正式启用保持阻塞。"
+                    "fast：ASR 0.6B、TTS 0.6B 的 8-bit 权重，aligner 用 aligner-q8；模型文件最小。",
+                    "quality：ASR 1.7B、TTS 1.7B 的 8-bit 权重，aligner 用 aligner-bf16；日常默认。",
+                    "reference：ASR 1.7B、TTS 1.7B 的 bf16 权重，aligner 用 aligner-bf16；设计模型快照就绪时声明 VoiceDesign。权重精度更高、占用更多内存。",
+                    "分人（谁在说话）不再由档位单独决定：它按当前服务的对齐模型、CoreML 资产与任务开关计算；克隆与声音设计按 /v1/models 的 capabilities 决定展示。"
                 ]),
                 .paragraph(
-                    "档位改变的是服务端发布的能力，不是客户端 payload 形状：四个 profile 共用同一套 REST 与 "
-                    + "WebSocket payload 契约，profile 枚举包含 extreme；普通 UI 按 /v1/models 的 capabilities 决定展示哪些入口；"
+                    "档位改变的是服务端发布的能力，不是客户端 payload 形状：识别与配音各自选档，在 wire 上都落到同一对 "
+                    + "asr_spec/tts_spec，共用同一套 REST 与 WebSocket payload 契约；普通 UI 按 /v1/models 的 capabilities 决定展示哪些入口；"
                     + "需要一次同代、可缓存的完整发现结果时读取 /v1/speechrail/capabilities，"
                     + "其 schema_version 固定为 effective_capabilities_v1。"
                 ),

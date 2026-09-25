@@ -427,19 +427,7 @@ public final class AssistantSession {
     /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking || replyTask != nil else { return }
-        currentReplyInterrupted = true
-        invalidateReply()
-        if let stream = ttsStream, stream.isActive {
-            // 增量路径：一次调用里完成"本地作废 → 停播 → 取消服务端"。
-            await stream.cancel()
-        } else {
-            if let audioSession {
-                await audioSession.stopPlayback()
-            } else {
-                await playback?.stop()
-            }
-            if let client { try? await client.cancelTTS() }
-        }
+        await interruptCurrentReply()
         isSpeaking = false
         streamingReply = nil
         phase = .listening
@@ -447,6 +435,34 @@ public final class AssistantSession {
         // 若最后一条是助手且处于生成/朗读中，标记被打断
         if let lastIndex = turns.indices.last, turns[lastIndex].role == .assistant {
             turns[lastIndex].isInterrupted = true
+        }
+    }
+
+    /// 打断一次正在生成/朗读的回答（ESC、「停止朗读」与 barge-in 共用这条路）。
+    ///
+    /// 顺序按目标架构 §5：**先 invalidate epoch、清空本地队列 → await 停播屏障 → 再取消**。
+    /// LLM 侧的"取消"只是本地断开这一轮生成（没有网络往返），因此与后面的 TTS 网络取消
+    /// 天然并行；真正必须排序的是"停播先于网络取消"——增量路径由协调器保证，
+    /// 非增量路径在这里显式等播放层停完。后端取消超时也不把旧音放回来。
+    private func interruptCurrentReply() async {
+        currentReplyInterrupted = true
+        // ① 本地先作废：LLM 不再产出。TTS 这一代的作废与排队预算清空在 cancel() 内部完成。
+        invalidateReply()
+        // ② 停播屏障 → ③ 取消。
+        if let stream = ttsStream, stream.isActive {
+            await stream.cancel()
+        } else {
+            await stopPlaybackLayer()
+            if let client { try? await client.cancelTTS() }
+        }
+    }
+
+    /// 直接让播放层停下（没有增量协调器时的屏障）。
+    private func stopPlaybackLayer() async {
+        if let audioSession {
+            await audioSession.stopPlayback()
+        } else if let playback {
+            await playback.stop()
         }
     }
 
@@ -533,8 +549,8 @@ public final class AssistantSession {
         }
         if let audioSession {
             audioSession.onPlaybackDrained = playbackDrained
-            audioSession.onPlaybackBufferRendered = { [weak tts] frames in
-                tts?.notePlaybackCompleted(samples: frames)
+            audioSession.onPlaybackBufferRendered = { [weak tts] epoch, frames in
+                tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
             }
             audioSession.onFailure = { [weak self] message in
                 guard let self else { return }
@@ -554,8 +570,8 @@ public final class AssistantSession {
                 throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
             }
             player.onDrained = playbackDrained
-            player.onBufferRendered = { [weak tts] frames in
-                tts?.notePlaybackCompleted(samples: frames)
+            player.onBufferRendered = { [weak tts] epoch, frames in
+                tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
             }
             playback = player
         }
@@ -768,19 +784,7 @@ public final class AssistantSession {
         guard mode.allowsBargeIn, isSpeaking || replyTask != nil, !currentReplyInterrupted else {
             return
         }
-        currentReplyInterrupted = true
-        invalidateReply()
-        if let stream = ttsStream, stream.isActive {
-            // 增量路径：本地立刻失效 + 停播，再取消服务端（顺序由协调器保证）。
-            await stream.cancel()
-        } else {
-            if let audioSession {
-                await audioSession.stopPlayback()
-            } else {
-                await playback?.stop()
-            }
-            if let client { try? await client.cancelTTS() }
-        }
+        await interruptCurrentReply()
         isSpeaking = false
         phase = .listening
     }
@@ -853,13 +857,13 @@ public final class AssistantSession {
             try await client.finishTTSText(lastSequence: lastSequence)
         }
         tts.sendCancel = { try await client.cancelTTS() }
-        tts.enqueuePlayback = { [weak self] pcm in
+        tts.enqueuePlayback = { [weak self] pcm, epoch in
             guard let self else { return false }
             if let audioSession = self.audioSession {
-                return await audioSession.enqueuePlayback(pcm)
+                return await audioSession.enqueuePlayback(pcm, epoch: epoch)
             }
             if let playback = self.playback {
-                return await playback.enqueue(pcm)
+                return await playback.enqueue(pcm, epoch: epoch)
             }
             return false
         }

@@ -370,16 +370,6 @@ public final class SessionPreferences {
     /// 读不到档位时**不拦**：那时由服务端来判（它会回 `diarization_not_available`），
     /// 客户端凭一个未知值去禁用开关，会把"读不到"说成"不支持"。
     /// 返回的是一句能直接写给用户的人话——开关置灰时必须说得出原因。
-    public static func diarizationGateNote(for profile: String?) -> String? {
-        guard let profile else { return nil }
-        let normalized = profile.lowercased()
-        guard normalized.contains("light") else { return nil }
-        // 换档的名字给中文短名（用户 2026-09-19：界面里不出现 `Balanced` / `Quality`
-        // 这类内部名）——用户要去「模型」页选的就是那三张卡上的字。
-        return "这台 Mac 现在用的是最省的一档，不标说话人；去「模型」页换成「均衡」或「精准」，"
-            + "新开的会话就能在行上看到谁在说。"
-    }
-
     private enum Key {
         static let llmBaseURL = "speechrail.llm.baseURL"
         static let llmModel = "speechrail.llm.model"

@@ -534,8 +534,8 @@ public struct MeetingView: View {
 
     /// 只显示健康快照实际报告的活动档位，不由当前已加载档位推断质量排名。
     private var profileRowText: String {
-        guard let profile = model.health?.profile else { return "未读取" }
-        return SpeechRailProfilePresentation.shortTitle(profile)
+        guard let selection = model.health?.selection else { return "未读取" }
+        return SpeechRailProfilePresentation.shortTitle(selection.asrSpec)
     }
 
     private func openAudioPrivacySettings() {

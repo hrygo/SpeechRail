@@ -104,7 +104,7 @@ public struct OperationJournal: Sendable {
         return OperationSnapshot(
             operationID: sanitizedIdentifier(operation.operationID) ?? "operation",
             command: operation.command,
-            profile: operation.profile,
+            selection: operation.selection,
             state: operation.state,
             phase: sanitizedText(operation.phase),
             progress: progress,

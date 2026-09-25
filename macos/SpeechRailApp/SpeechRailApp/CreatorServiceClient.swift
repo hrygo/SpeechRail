@@ -495,6 +495,25 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// 一次正式制作（render）的结果：音频 + 这一次渲染的身份。
+///
+/// 制作项目要把"用哪一版音色、在哪一份 plan 下渲出来的"记进自己的档案，
+/// 这样全局默认音色/档位变化后，已有项目的回放与追溯仍然指向当时的那一版；
+/// 刷新到新 plan 只能由用户显式重做一次，产生新的 render revision。
+public struct SpeechRenderResult: Sendable {
+    public let audioData: Data
+    /// 服务端 render receipt 里的 plan 身份（`plan_<digest[:32]>`）；服务端没给就是 nil。
+    public let planID: String?
+    /// 这一次实际生效的音色 revision；服务端没给就是 nil。
+    public let voiceRevision: String?
+
+    public init(audioData: Data, planID: String?, voiceRevision: String?) {
+        self.audioData = audioData
+        self.planID = planID
+        self.voiceRevision = voiceRevision
+    }
+}
+
 public protocol SpeechRailCreatorClient: Sendable {
     func fetchVoices() async throws -> [CreatorVoice]
     func fetchVoice(id: String) async throws -> CreatorVoice
@@ -504,6 +523,13 @@ public protocol SpeechRailCreatorClient: Sendable {
         speed: Double,
         options: SpeechRailRequestOptions
     ) async throws -> Data
+    /// 正式制作：在 `createSpeech` 之外再把这次渲染的身份带回来（服务端支持时）。
+    func createSpeechRender(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> SpeechRenderResult
     func createVoicePreview(
         text: String,
         instruction: String,
@@ -574,6 +600,25 @@ public protocol SpeechRailCreatorClient: Sendable {
 }
 
 public extension SpeechRailCreatorClient {
+    /// 默认退化：拿不到渲染身份时仍返回音频，`planID`/`voiceRevision` 留空。
+    func createSpeechRender(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> SpeechRenderResult {
+        SpeechRenderResult(
+            audioData: try await createSpeech(
+                text: text,
+                voiceID: voiceID,
+                speed: speed,
+                options: options
+            ),
+            planID: nil,
+            voiceRevision: nil
+        )
+    }
+
     func createVoice(
         name: String,
         instruction: String,

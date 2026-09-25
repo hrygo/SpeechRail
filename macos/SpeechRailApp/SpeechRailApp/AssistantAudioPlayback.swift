@@ -36,8 +36,9 @@ final class PCMStreamPlayer: @unchecked Sendable {
 
     /// 队列播完（真正静音）时回调一次。界面用它把相位从"正在说话"退回"正在聆听"。
     var onDrained: (@MainActor () -> Void)?
-    /// 每一块真的播完时回调一次（帧数）。增量 TTS 用它逐块归还播放预算。
-    var onBufferRendered: (@MainActor (Int) -> Void)?
+    /// 每一块真的播完时回调一次（入队时的 epoch、帧数）。增量 TTS 用它逐块归还播放预算；
+    /// epoch 让迟到的回调无法改动新一轮的账本。
+    var onBufferRendered: (@MainActor (Int, Int) -> Void)?
 
     func start() async throws {
         guard
@@ -69,7 +70,7 @@ final class PCMStreamPlayer: @unchecked Sendable {
 
     /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了），返回 `false`。
     @discardableResult
-    func enqueue(_ pcm: Data) async -> Bool {
+    func enqueue(_ pcm: Data, epoch: Int) async -> Bool {
         guard !pcm.isEmpty else { return false }
         let frames = pcm.count / MemoryLayout<Int16>.size
         guard frames > 0, let format else { return false }
@@ -93,12 +94,15 @@ final class PCMStreamPlayer: @unchecked Sendable {
         // 在欠载或大缓冲下会明显早到，不能拿来当"用户听完了"。
         player.scheduleBuffer(buffer, completionCallbackType: .dataRendered) { [weak self] _ in
             guard let self else { return }
-            let state = self.lock.withLock { () -> (isLast: Bool, rendered: (@MainActor (Int) -> Void)?) in
+            let state = self.lock.withLock {
+                () -> (isLast: Bool, rendered: (@MainActor (Int, Int) -> Void)?) in
+                // 停播之后到的 `dataRendered` 一律丢掉：它属于上一代，不许动新一轮的账本。
+                guard !self.stopped else { return (false, nil) }
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
                 return (self.pendingBuffers == 0, self.onBufferRendered)
             }
             if let rendered = state.rendered {
-                Task { @MainActor in rendered(frames) }
+                Task { @MainActor in rendered(epoch, frames) }
             }
             if state.isLast {
                 Task { @MainActor in self.onDrained?() }

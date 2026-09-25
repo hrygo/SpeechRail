@@ -3,7 +3,10 @@ import SpeechRailControlKit
 
 public struct ProfilePickerView: View {
     @Environment(AppModel.self) private var model
-    @State private var selectedProfile: SpeechRailProfile = .balanced
+    @State private var quickTier: SpeechRailProfile = .quality
+    @State private var asrSpec: SpeechRailProfile = .quality
+    @State private var ttsSpec: SpeechRailProfile = .quality
+    @State private var showsAdvanced = false
     @State private var isConfirmingProfileApply = false
 
     public init() {}
@@ -12,44 +15,80 @@ public struct ProfilePickerView: View {
         model.modelCatalog?.selectableProfiles ?? []
     }
 
-    private var profileConfirmationMessage: String {
-        let summary = model.modelCatalog?.profiles.first(where: { $0.id == selectedProfile })
-        let remaining = model.modelCatalog?.remainingDownloadUpperBound(
-            for: selectedProfile,
-            statuses: model.modelStatus
-        )
-        var details: [String] = []
-        if let summary {
-            details.append("该档模型总大小 \(formatBytes(summary.downloadBytes))")
+    /// 快捷组合只写两项 specs；高级项按各自的选择独立提交。
+    private var pendingSelection: SpecSelection {
+        showsAdvanced
+            ? SpecSelection(asrSpec: asrSpec, ttsSpec: ttsSpec)
+            : .quick(quickTier)
+    }
+
+    private var selectionSummary: String {
+        SpeechRailProfilePresentation.title(pendingSelection)
+    }
+
+    /// 为什么现在不能切：会话占用最先说，其次是别的操作在做。
+    private var blockedReason: String? {
+        if let reason = model.profileSwitchBlockedReason { return reason }
+        if model.hasActiveMutation || model.isBusy { return "正在执行其他操作，完成后再切档。" }
+        if !model.controlAgentStatus.allowsMutation {
+            return "\(model.controlAgentStatus.title)：\(model.controlAgentStatus.detail)"
         }
-        if let remaining {
-            details.append(
-                remaining == 0
-                    ? "模型已全部下载并校验"
-                    : "尚需下载不超过 \(formatBytes(remaining))"
-            )
+        return nil
+    }
+
+    private var profileConfirmationMessage: String {
+        let target = pendingSelection
+        var details: [String] = ["识别 \(SpeechRailProfilePresentation.shortTitle(target.asrSpec))、配音 \(SpeechRailProfilePresentation.shortTitle(target.ttsSpec))"]
+        if target.asrSpec == target.ttsSpec {
+            // 快捷组合：目录里正好有一个整档总量，可以给出明确估算。
+            if let summary = model.modelCatalog?.profiles.first(where: { $0.id == target.ttsSpec }) {
+                details.append("该档模型总大小 \(formatBytes(summary.downloadBytes))")
+            }
+            if let remaining = model.modelCatalog?.remainingDownloadUpperBound(
+                for: target.ttsSpec,
+                statuses: model.modelStatus
+            ) {
+                details.append(
+                    remaining == 0
+                        ? "模型已全部下载并校验"
+                        : "尚需下载不超过 \(formatBytes(remaining))"
+                )
+            } else {
+                details.append("需下载量待确认")
+            }
         } else {
-            details.append("需下载量待确认")
+            // 分别调整的混合选择没有单一整档总量；不按其中一档冒充组合大小。
+            details.append("组合下载量将在准备时按缺失制品校验")
         }
         if let freeBytes = model.modelStatus?.disk.freeBytes {
             details.append("当前可用磁盘空间 \(formatBytes(freeBytes))")
         }
         details.append("已校验文件不会重下，首次加载可能更久，其他档位模型不会删除")
-        if selectedProfile == .extreme {
+        if target.asrSpec == .reference || target.ttsSpec == .reference {
             details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
         }
-        details.append("切换后会重新读取服务状态")
-        return "确认应用\(SpeechRailProfilePresentation.title(selectedProfile))？\(details.joined(separator: "；"))。"
+        details.append("切换会重启本地服务，正在进行的识别与朗读会先结束")
+        return "确认应用\(selectionSummary)？\(details.joined(separator: "；"))。"
     }
 
-    private func syncSelectedProfile() {
-        if let active = model.profile?.preset, availableProfiles.contains(active) {
-            selectedProfile = active
-        } else if !availableProfiles.contains(selectedProfile),
-                  let first = availableProfiles.first
-        {
-            selectedProfile = first
+    /// 把已提交（或正在应用）的选择回填到两套控件上。
+    private func syncSelection() {
+        if let selection = model.operation?.selection ?? model.profile?.selection {
+            asrSpec = selection.asrSpec
+            ttsSpec = selection.ttsSpec
+            if let quick = selection.quickTier {
+                quickTier = quick
+            } else {
+                showsAdvanced = true
+                if let fallback = availableProfiles.first {
+                    quickTier = fallback
+                }
+            }
+        } else if !availableProfiles.contains(quickTier), let first = availableProfiles.first {
+            quickTier = first
         }
+        if !availableProfiles.contains(asrSpec), let first = availableProfiles.first { asrSpec = first }
+        if !availableProfiles.contains(ttsSpec), let first = availableProfiles.first { ttsSpec = first }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -68,7 +107,7 @@ public struct ProfilePickerView: View {
                         description: Text("服务目录尚未返回可管理的档位，请重新读取模型状态。")
                     )
                 } else {
-                    Picker("档位", selection: $selectedProfile) {
+                    Picker("档位", selection: $quickTier) {
                         ForEach(availableProfiles, id: \.self) { profile in
                             Text(SpeechRailProfilePresentation.shortTitle(profile))
                                 .tag(profile)
@@ -76,23 +115,25 @@ public struct ProfilePickerView: View {
                     }
                     .pickerStyle(.segmented)
                     .speechRailPointerCursor()
-                    Text(SpeechRailProfilePresentation.title(selectedProfile))
+                    .disabled(showsAdvanced)
+                    Text(SpeechRailProfilePresentation.title(quickTier))
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text(SpeechRailProfilePresentation.purpose(selectedProfile))
+                    Text(SpeechRailProfilePresentation.purpose(quickTier))
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    advancedSpecs
                 }
                 Button("应用档位") {
                     isConfirmingProfileApply = true
                 }
                 .speechRailButton(.primary)
                 .disabled(
-                    model.isBusy
-                        || model.hasActiveMutation
-                        || !model.controlAgentStatus.allowsMutation
-                        || !availableProfiles.contains(selectedProfile)
+                    blockedReason != nil
+                        || !pendingSelection.isSelectable
+                        || !availableProfiles.contains(pendingSelection.asrSpec)
+                        || !availableProfiles.contains(pendingSelection.ttsSpec)
                 )
                 .confirmationDialog(
                     profileConfirmationMessage,
@@ -100,12 +141,21 @@ public struct ProfilePickerView: View {
                     titleVisibility: .visible
                 ) {
                     Button("应用档位", role: .destructive) {
-                        guard availableProfiles.contains(selectedProfile) else { return }
-                        Task { await model.execute(.profileApply, profile: selectedProfile) }
+                        let target = pendingSelection
+                        guard availableProfiles.contains(target.asrSpec),
+                              availableProfiles.contains(target.ttsSpec)
+                        else { return }
+                        Task { await model.execute(.profileApply, selection: target) }
                     }
                     Button("取消", role: .cancel) {}
                 }
-                if let active = model.profile?.preset {
+                if let reason = blockedReason {
+                    Text(reason)
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let active = model.profile?.selection {
                     Text("当前：\(SpeechRailProfilePresentation.title(active))")
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -132,20 +182,52 @@ public struct ProfilePickerView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .task(id: model.profile?.preset) {
-                syncSelectedProfile()
+            .task(id: model.profile?.selection) {
+                syncSelection()
             }
             .onChange(of: model.modelCatalog) { _, _ in
-                syncSelectedProfile()
+                syncSelection()
             }
             .onChange(of: model.operation?.state) { _, state in
                 if state == .failed || state == .cancelled {
-                    syncSelectedProfile()
+                    syncSelection()
                 }
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .speechRailContentSurface()
+    }
+
+    /// 高级项：ASR 与 TTS 各自选档，写进同一对 `asr_spec`/`tts_spec`。
+    @ViewBuilder
+    private var advancedSpecs: some View {
+        DisclosureGroup("分别调整识别与配音", isExpanded: $showsAdvanced) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Picker("识别档位", selection: $asrSpec) {
+                    ForEach(availableProfiles, id: \.self) { profile in
+                        Text(SpeechRailProfilePresentation.shortTitle(profile))
+                            .tag(profile)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .speechRailPointerCursor()
+                Picker("配音档位", selection: $ttsSpec) {
+                    ForEach(availableProfiles, id: \.self) { profile in
+                        Text(SpeechRailProfilePresentation.shortTitle(profile))
+                            .tag(profile)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .speechRailPointerCursor()
+                Text(selectionSummary)
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        }
+        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+        .speechRailPointerCursor()
     }
 
     private func operationStateText(_ state: OperationState) -> String {

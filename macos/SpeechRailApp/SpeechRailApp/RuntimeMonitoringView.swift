@@ -1855,7 +1855,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var serviceIdentity: String {
-        let profile = displayedHealth?.profile.map { SpeechRailProfilePresentation.title($0) }
+        let profile = SpeechRailProfilePresentation.title(displayedHealth?.selection)
             ?? "档位未读取"
         let version = displayedHealth?.version ?? "版本未读取"
         return profile + " · " + version
@@ -1937,7 +1937,7 @@ public struct RuntimeMonitoringView: View {
         SpeechRail 脱敏监控摘要
         generated_at: \(formatter.string(from: Date()))
         service_state: \(model.service.serviceState)
-        profile: \(displayedHealth?.profile?.rawValue ?? "未读取")
+        profile: \(displayedHealth?.profile ?? "未读取")
         version: \(displayedHealth?.version ?? "未读取")
         health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
         metrics_updated_at: \(model.lastMetricsRefresh.map { formatter.string(from: $0) } ?? "未读取")

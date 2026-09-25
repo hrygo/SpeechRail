@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.21"
-date: 2026-09-24
+version: "0.8.22"
+date: 2026-09-26
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -144,9 +144,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 波形（听觉对象的形状） | `Waveform` | `resultBar`(12 根) / `candidateTile`(18 根) / `libraryPreview`(16 根) 三处只声明**条数与排布**（宽 `barWidth` 2、圆角 `barRadius` 1、间隙、峰值高度），条高一律来自真实音频的幅度包络（`envelopeBuckets` 32 桶、逐窗**峰值**、整段归一化，`AudioEnvelope`）；静音窗下限 `envelopeMinimumHeight`(3)；播放中未播到的部分 `remainingOpacity`(0.35)，进度取播放器真实的 `currentTime / duration`（`progressInterval` 20Hz）。`Pattern.heights` 只在**没有包络**时使用（「这段音频还没算过」，例如还没试听过的音色）。波形脉冲**只在**这种无包络的情形保留（§11.6 第五十七轮） |
 | Inspector 面板 | `SpeechRailInspectorPanel` + `SpeechRailInspectorLabeledContentStyle` | 目录页（音色库 / 我的作品）右侧详情面**唯一的结构声明点**：身份带（`Typography.display` + `Typography.caption`/`inkTertiary` 徽标）→ 整宽 hairline → 试听段（`.speechRailInspectorPreviewPanel()`，段内边距 `previewWrapInsetY`）→ hairline → 取值段（`Inspector.contentPadding`）→ hairline → 固定动作区（`Inspector.actionPadding`，在 `ScrollView` 之外）。取值行用 `SpeechRailInspectorLabeledContentStyle`：标签列固定 `Inspector.labelColumnWidth = 92`，取值右对齐、可选文本，供全 App inspector 复用。其他六页的「开发者详情」是另一套（`DeveloperInspector`） |
 
-模型档位卡使用 `Layout.modelProfileCardMinimumWidth = 220pt`；四列所需断点由
-`Layout.modelProfileCardsFourColumnBreakpoint = 4 × 220 + 3 × Spacing.sm(12) = 916pt`
-计算。断点依据档位卡容器的可用宽度，不是整个窗口宽度；不足时固定两列，避免四列挤压正文。
+模型档位卡使用 `Layout.modelProfileCardMinimumWidth = 220pt`；三档单行所需断点由
+`Layout.modelProfileCardsRowBreakpoint = 3 × 220 + 2 × Spacing.sm(12) = 684pt`
+计算。断点依据档位卡容器的可用宽度，不是整个窗口宽度；不足时固定两列，避免三列挤压正文。
 
 **2026-09-21 Token 复审收敛**：`Control` 是控件几何的唯一来源，`Interaction` 是命中区的唯一来源，
 `Menu` 与 `Layout.inspectorColumnWidth` 各自只保留自己的布局声明；`Button` 只保留快捷键提示的不透明度。
@@ -314,11 +314,12 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    > `SpeechRailDisclosureGroupStyle` 标签里原先垫的那层 `Color.clear`），它会和
    > `ScrollView` 平分栏目高度；该样式已按此收口（§11.6 第五十四轮 ④）。
 4. **服务中枢 (Service Core)**：四要素状态结论大面板（图标 + 结论标签 + 影响范围 + 单一主动作），并列展示 ASR 词级时间戳、VoiceDesign 并发与 FluidAudio 匿名分人能力矩阵。
-5. **模型档位 (Model Profiles)**：服务目录实际发布的档位构成选择集；四档在宽度充足时一行展示，不足时按两列排成 2×2。
-   卡片最小宽度与四列断点使用 `SpeechRailDesignTokens.Layout.modelProfileCardMinimumWidth` 和
-   `modelProfileCardsFourColumnBreakpoint`；不得把未由服务目录发布的档位显示为可执行选择。未知档位只用于事实展示，不能发出应用或准备命令。
+5. **模型档位 (Model Profiles)**：服务目录实际发布的档位构成选择集；轻快 / 品质 / 参考三档在宽度充足时一行展示，不足时按两列排成 2×2。
+   卡片最小宽度与单行断点使用 `SpeechRailDesignTokens.Layout.modelProfileCardMinimumWidth` 和
+   `modelProfileCardsRowBreakpoint`；不得把未由服务目录发布的档位显示为可执行选择。未知档位只用于事实展示，不能发出应用或准备命令。
    卡片以短标题、用途、服务声明能力、效果验证状态和「该档模型总大小」帮助选择；效果未验证时不得按权重精度推出质量排名。
-   `ProfilePickerView` 只用短名作为分段选择项，并在选中后展示完整说明。模型准备/下载采用确定性 `OperationBar`（MB/s 速度、预计时间、SHA256 校验进度、安全回退确认）。
+   快捷路径只选一个档位（两项 specs 取同值），需要时在「分别调整识别与配音」里独立改 ASR / TTS；两者在 wire 上都落到同一对 `asr_spec`/`tts_spec`，切换前先说明它会重启本地服务、正在进行的识别与朗读会先结束。
+   档位分段选择项只用短名，选中后展示完整说明。模型准备/下载采用确定性 `OperationBar`（MB/s 速度、预计时间、SHA256 校验进度、安全回退确认）。
    模型文件列表是四列表格（模型文件 / 精度 / 文件 / 校验），行内只保留一眼要量的字段——来源、目标档位与使用状态在右侧 Inspector；
    校验列取值用 `statusPresentation.title` 的原样输出（已验证 / 未下载 / 校验失败 / 下载中 / 状态未知）。
    表里列的是**这一档要用的全部文件**：catalog 制品，加上不在目录里、但同样按档位供给的锁定 CoreML 分人资产（它按同一行形状下发，状态由分人 lane 回答），所以「谁在说话」那一节只在服务漏发这一行时才会出现；
