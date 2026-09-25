@@ -103,6 +103,22 @@ def test_selection_and_transaction_files_are_private(tmp_path: Path) -> None:
         assert stat.S_IMODE((tmp_path / relative).stat().st_mode) == 0o700
 
 
+def test_replace_updates_and_restores_committed_selection(tmp_path: Path) -> None:
+    store = ProfileStore(tmp_path)
+    original = selection()
+    replacement = {**original, "generation": 2, "runtime_lock_id": "runtime-v2"}
+    store.initialize(original)
+
+    store.replace(replacement)
+    assert recover_selection(tmp_path) == replacement
+
+    store.replace(original)
+    assert recover_selection(tmp_path) == original
+
+    store.replace(None)
+    assert recover_selection(tmp_path) is None
+
+
 def test_invalid_selection_and_stale_generation_are_rejected(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     store.initialize(selection())
