@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.12"
+version: "1.13"
 date: 2026-09-25
 ---
 
@@ -285,7 +285,8 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W6 worker 双向控制与父进程 session | complete | 私有 `tts_stream_protocol=1` 协商；`StreamPump` 双线程 + 有界队列、单模型线程；`TtsStreamHost`/client 单父端 dispatcher；新增 `qwen3_tts_incremental.py` adapter（CustomVoice speaker、Base clone、VoiceDesign fail-closed）；`Qwen3TtsWorker.open_incremental_stream` 全程持 voice lease 与独占 slot，完整文本 synthesize 与 stream 串行，router 按 clone lane 路由；`tests/test_qwen3_tts_incremental_bridge.py` 10 项、`test_qwen3_tts_worker.py` 增真实 `BytesIO` pipe 端到端，联合回归 188 passed，ruff/mypy/`git diff --check` 通过。仅 fake IPC，未加载模型 |
 | W7 application 资源治理与输出生命周期 | complete | `application/tts_stream.py`：`TtsStreamService.open` 按 voice lane 进入 `governor.reserve`，持 worker 租约与 vendor session（独占 worker slot + voice lease）；终态同 loop 同步认领且只有控制器 task 写 sink，终态后不投递音频、receipt 只收束一次；等待文本期间不被 idle 驱逐，`evict_warm_capability` 遇活跃 utterance 返回 `backend_busy` 而不强卸载；receipt 只在发送成功后 `accept_pcm` 并绑定实际 runtime revision；输入饥饿/墙钟/慢消费者分别以 `tts_input_timeout`/`tts_backend_failed`/`tts_backpressure` 收束。新增 11 项 application 测试，定向 114 passed、主仓全量 2308 passed/7 skipped、ruff/mypy/diff check 通过。仅 fake session，未加载模型 |
 | W8 公共协议与能力 | complete | public wire 增加 `speechrail.tts.start/append_text/finish_text` 与 `speechrail.tts.started/text_accepted`，音频沿用 `response.output_audio.delta` 并带 `speechrail.chunk_index/sample_offset`；ACK 序号定为 `append_sequence`（传输层已占用 `sequence`）；`create`/`start` 共用活动判定与 request-id 账本；`tts_stream_capability.py` 由 `/v1/models`、`/v1/voices` 与握手共用且 `budget_available` 不参与 `supported`。新增 `tests/test_realtime_tts_incremental.py` 16 项，定向 252 passed、主仓全量 2324 passed/7 skipped、ruff/mypy（136 文件）/diff check 通过。仅 fake session，未加载模型 |
-| W9–W11 | not started | W8 后继续：App 协调、分档呈现、逐档声学/性能与发布回滚；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
+| W9 App 单轮增量文本与播放 | complete | ControlKit 增 start/append/finish DTO 与 started/text_accepted 解析；`RealtimeASRClient` 增流式三方法并校验 chunk_index/sample_offset/偶数字节；新增 `AssistantSpeechTextBuffer`（150 ms 三档紧急度、按 Unicode scalar 计量）、`AssistantPlaybackLedger`（1 秒样本预算、旧代隔离、暂时 drained ≠ 结束）、`AssistantTTSStreamCoordinator`（一轮一次 start/finish、ACK 未回不发 finish、背压超时明确失败）；播放完成语义由 `.dataConsumed` 改为 `.dataRendered`。`swift test` 全量 207 passed（含新增 30 项纯状态测试）；三个新增文件同时登记到 SwiftPM sources 与 Xcode 两处 Sources phase；App 全量源文件 `swiftc -typecheck` 通过。App 构建 / 真实 AVAudioEngine / 可听延迟 / UI 未验收（未授权） |
+| W10–W11 | not started | 分档呈现与切换保护、逐档声学/性能与发布回滚；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 
@@ -302,6 +303,8 @@ W5 已把第 8/9 节的增量约束固化为 vendor-neutral 领域契约：唯�
 W7 已把增量 utterance 的资源与输出生命周期固定在 application 层：governor reserve、worker 租约与 vendor session（独占 worker slot 与 voice lease）由同一控制器持有，终态认领是同一 event loop 上的同步写入且只有控制器 task 写 sink，所以 vendor `completed`、调用方 `cancel` 与输入/墙钟超时竞争时只有一个胜者，终态之后不会再有音频或第二次 receipt 收束；等待文本期间不释放租约（`WorkerIdleEvictor` 不会卸载），组级 `evict_warm_capability` 对活跃 utterance 明确返回 busy 而不强卸载；render receipt 只统计真正通过发送边界的 PCM，并在 start 绑定实际 runtime revision。该层仍是 fake session 与确定性测试，未接入 public wire，也未做真实 worker、取消超时、长稳或内存峰值验收。
 
 W8 已把领域、worker 与应用层的增量能力开放到 current-only public wire：`speechrail.tts.start/append_text/finish_text` 与严格 parser 固定在兼容层，`speechrail.tts.started/text_accepted` 提供协议版本、生效 limits 与逐次 append 确认，音频继续使用 `response.output_audio.delta`（只在 `speechrail` 扩展对象里补字节精确位置），终态仍由 `_finalize_tts` 唯一认领。两处实现决策值得记录：ACK 的追加序号定名 `append_sequence`，因为传输层已给每个事件打上连接级 `sequence`，沿用同名会被静默覆盖；本段文本的 ACK 先于其 transcript 回显。能力声明改由单一 resolver 提供，`/v1/models[].capabilities.streaming_input` 只声明 `scope=per_voice` 的实现轴，`/v1/voices[].streaming` 与握手 `speech_capabilities.streaming_tts` 给出同一 voice 级裁决，`budget_available` 作为瞬时信号明确不参与 `supported`。该层仍是 fake session 与确定性测试：未加载模型、未产生真实 PCM，真实 worker、断线重连、长稳与逐档声学/延迟仍待 W11。
+
+W9 已把增量能力接到原生 App 的助手轮次上：ControlKit 提供 start/append/finish 三个上行 DTO 与 `speechrail.tts.started/text_accepted` 的解析，`RealtimeASRClient` 复用同一条连接与唯一 receive loop，并在音频入口按 request/response 身份、`chunk_index`/`sample_offset` 连续性与偶数字节过滤（旧 response 的块静默隔离，本轮畸形块单独计数）。纯状态层拆成三件可测对象：`AssistantSpeechTextBuffer` 负责“什么时候可以交给模型”——150 ms 上限内不切开还在长的数字/单位/英文尾词与未闭合 Markdown，限额按 Unicode scalar 计；`AssistantPlaybackLedger` 负责“这一轮到底结束没有”——服务端终态与本代音频排空必须同时成立，暂时 drained 只表示欠载；`AssistantTTSStreamCoordinator` 负责一轮 utterance 的身份、序号、ACK 等待、背压与取消，LLM 结束事件不能越过未确认文本提前 `finish_text`。播放完成语义随之从 `.dataConsumed` 改为 `.dataRendered`，并新增逐块 `onPlaybackBufferRendered(frames)` 用于归还预算。`AssistantSession.runReply` 的朗读路径已不再逐句 `create`：第一批有效文本开始一次、后续追加、流结束关输入，屏幕/历史/落库仍只用原始 LLM 文本。该层经验证的是确定性状态机（`swift test` 207 passed，含新增 30 项纯状态测试）与 App 全量源文件的 `swiftc -typecheck`；未加载模型、未做 App 构建、真实 AVAudioEngine、可听延迟与 UI 验收。
 
 W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。W4 已验证 CustomVoice q8 与 Base q8 的追加文本内容、首 PCM 与 append→next PCM（Base 条件见上）；bf16 已通过 catalog 完整性门但尚未进入模型/实时测量。尚未验证人耳 A/B、说话人相似度、自然度、真实 worker/协议、取消/重连、长稳 RTF、缓存内存预算和 bf16 相对收益。ASR 只证明内容缺失/一致，不能替代声学身份验收；质量门通过也不等于四档产品体验已验收。
 

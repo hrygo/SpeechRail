@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.12"
+version: "1.13"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W8 已交付，继续 W9–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W9 已交付，继续 W10–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -672,3 +672,14 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **有意未改：** `runtime/resource_governor.py` 只为能力 resolver 增加一个只读的 `lane_available(work_class, resource_key)` 瞬时查询，不预留、不改既有准入规则；`_tts_artifact_for_mode` 的既有 clone fallback 与完整文本路径保持原样，不在本阶段顺带重构。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
+
+### W9 实施与验收记录（2026-09-25）
+
+- **ControlKit 新 DTO：** `RealtimeContractTypes.swift` 增 `SpeechRailTTSStart` / `SpeechRailTTSAppendText` / `SpeechRailTTSFinishText`（字段与服务端 §3.3.1 逐一对齐）与 `TTSSessionStarted` / `TTSTextAccepted` / `TTSStreamLimits` / `TTSAudioPosition` 四个解析器。解析器只读线上形状，不复制服务端业务枚举。
+- **客户端方法：** `RealtimeASRClient` 增 `startTTSStream` / `appendTTSText(_:sequence:)` / `finishTTSText(lastSequence:)`，复用同一个 receive loop 与 `cancelTTS`；新增事件 `.ttsStarted` / `.ttsTextAccepted`。`response.output_audio.delta` 在增量模式额外校验 `kind=tts`、`chunk_index` 与 `sample_offset` **严格连续**、24 kHz / mono，且字节数为偶数；不合格块丢弃并计入 `droppedAudioChunks`，旧 response 的块静默隔离不计入。
+- **`AssistantSpeechTextBuffer`（拟新增，已落地）：** 三档紧急度——保守（不切开还在长的数字/单位/英文尾词，且不切开未闭合的 Markdown）、到点（150 ms 上限，退到最后一个天然停顿）、强制（文本泵连等 20 轮后整段交出，避免永不闭合的 Markdown 卡住整轮）。限额按 `unicodeScalars.count` 计（`String.count` 是 grapheme，不能冒充 codepoint）。时钟注入，测试不实际 sleep。
+- **`AssistantPlaybackLedger`（拟新增，已落地）：** 记录 generation / queuedSamples / inputClosed / serverTerminal / drain。1 秒（24 000 samples = 48 000 bytes）排队预算；所有写入口带 generation，旧代 completion 整条丢弃；`isUtteranceFinished = serverTerminal && drained`，**暂时 drained 不等于结束**。
+- **`.dataConsumed` → `.dataRendered`：** `AudioEngineSession.enqueuePlayback` 与 `PCMStreamPlayer.enqueue` 的完成回调都改为 `.dataRendered`，并新增 `onPlaybackBufferRendered(frames)` 逐块回调；`.dataConsumed` 只代表播放器把数据拿走了，欠载/大缓冲下会明显早到。`enqueuePlayback` 改为返回 `Bool`，没进队列的块必须把已预约预算还回去。
+- **`AssistantTTSStreamCoordinator`（拟新增，已落地）：** 拥有 requestID/responseID、`acceptedSequence`、`inputClosed`、终态、ledger 与 replyGeneration；文本泵在**单个** Task 内按序发送并等 ACK，`finish_text` 只在最后一段被 ACK 之后发出（"LLM 完成事件不能越过未确认文本提前 finish"）。等待 started/ACK 的 continuation 按 request 身份存放，终态、断线、取消都会 resume，且只 resume 一次。
+- **播放背压：** 音频入队前先预约样本预算；超预算时等待 completion / 取消 / 2 秒超时，超时以明确失败收束（不无限积压）；`enqueuePlayback` 返回 `false` 时立刻归还预算。
+- **AssistantSession 接线：** `runReply` 的朗读路径不再逐句 `create`——第一批有效文本 `begin` 一次，后续 `offer(delta)`，LLM 流结束后 `finishInput()`；屏幕、history 与 SQLite 仍然只用**原始** LLM 文本，朗读清洗只在协调器的 `cleanForSpeech` 里做一次。服务端明确拒绝增量时只停朗读并报错，**不静默退回旧队列**。`stopSpeaking`/`stopCapture`/`handleUnexpectedClose`/插话都走协调器 `cancel`/`invalidate`；`replay` 的完整文本路径与进行中的增量 utterance 互斥。临时 drained 不再把相位提前退回 listening（由协调器终态判定）。
