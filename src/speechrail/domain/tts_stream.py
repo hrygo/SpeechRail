@@ -28,6 +28,7 @@ TTS_STREAM_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "tts_input_timeout",
         "tts_stream_limit_exceeded",
         "tts_backpressure",
+        "tts_backend_failed",
     }
 )
 
