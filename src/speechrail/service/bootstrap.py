@@ -295,8 +295,8 @@ def _parse_requirement_file(data: bytes) -> tuple[str, ...]:
     pending: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line:
-            raise RuntimeBootstrapError("runtime requirement file contains an empty line")
+        if not line or line.startswith("#"):
+            continue
         continuation = line.endswith("\\")
         if continuation:
             line = line[:-1].rstrip()
