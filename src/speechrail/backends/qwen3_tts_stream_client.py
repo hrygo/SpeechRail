@@ -287,12 +287,13 @@ class Qwen3TtsIncrementalSession:
             )
         await self._await_dispatcher(self._cancel_grace)
         if self._state.terminal is TtsStreamTerminal.CANCELLED:
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.CANCELLED,
                     response_id=self._options.response_id,
                     terminal=TtsStreamTerminal.CANCELLED,
-                )
+                ),
+                drop_stale=True,
             )
 
     async def close(self) -> None:
@@ -312,7 +313,7 @@ class Qwen3TtsIncrementalSession:
         self._fail_pending_waiters(
             TtsStreamError("tts_input_closed", "the incremental session was closed")
         )
-        self._events.put_nowait(None)
+        self._put_terminal_nowait(None)
         if self._fatal is not None:
             await self._abort()
 
@@ -320,7 +321,7 @@ class Qwen3TtsIncrementalSession:
         try:
             while True:
                 frame = await self._transport.receive(wait_for_frame=True)
-                if not self._handle_frame(frame):
+                if not await self._handle_frame(frame):
                     return
         except asyncio.CancelledError:
             raise
@@ -329,23 +330,24 @@ class Qwen3TtsIncrementalSession:
             if self._started is not None and not self._started.done():
                 self._started.set_exception(exc)
             self._fail_pending_waiters(exc)
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.FAILED,
                     response_id=self._options.response_id,
                     terminal=TtsStreamTerminal.FAILED,
                     error_code=_registered_code(getattr(exc, "code", None)),
-                )
+                ),
+                drop_stale=True,
             )
 
-    def _handle_frame(self, frame: Mapping[str, object]) -> bool:
+    async def _handle_frame(self, frame: Mapping[str, object]) -> bool:
         frame_type = frame.get("type")
         if frame.get("request_id") != self._options.request_id:
             raise ProtocolError("incremental frame carried a foreign request_id")
         if frame_type == FRAME_STREAM_STARTED:
             if self._started is not None and not self._started.done():
                 self._started.set_result(None)
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.STARTED,
                     response_id=self._options.response_id,
@@ -364,7 +366,7 @@ class Qwen3TtsIncrementalSession:
                 waiter.set_result(None)
             else:
                 self._note(f"unmatched text acknowledgement for sequence {sequence}")
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.TEXT_ACCEPTED,
                     response_id=self._options.response_id,
@@ -374,7 +376,7 @@ class Qwen3TtsIncrementalSession:
             )
             return True
         if frame_type == FRAME_STREAM_AUDIO:
-            self._publish(self._audio_event(frame))
+            await self._publish(self._audio_event(frame))
             return True
         if frame_type == FRAME_STREAM_DONE:
             terminal = frame.get("terminal")
@@ -391,7 +393,7 @@ class Qwen3TtsIncrementalSession:
                     self._state.complete()
                 else:
                     self._state.cancel()
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=kind, response_id=self._options.response_id, terminal=outcome
                 )
@@ -410,7 +412,7 @@ class Qwen3TtsIncrementalSession:
                 return True
             if self._state.terminal is None:
                 self._state.fail(code)
-            self._publish(
+            await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.FAILED,
                     response_id=self._options.response_id,
@@ -446,31 +448,36 @@ class Qwen3TtsIncrementalSession:
             sample_offset=sample_offset,
         )
 
-    def _publish(self, event: TtsStreamEvent) -> None:
+    async def _publish(
+        self, event: TtsStreamEvent, *, drop_stale: bool = False
+    ) -> None:
         if self._terminal_published:
             return
         terminal = event.kind in _TERMINAL_EVENTS
         if terminal:
-            # A terminal outcome must always reach the caller, so a stalled
-            # consumer loses stale audio instead of losing the ending.
-            while True:
-                try:
-                    self._events.put_nowait(event)
-                    break
-                except asyncio.QueueFull:
-                    with contextlib.suppress(asyncio.QueueEmpty):
-                        self._events.get_nowait()
+            # Normal completion preserves every queued audio chunk. Cancellation
+            # and internal faults use ``drop_stale`` so the ending still reaches
+            # a consumer that has stopped draining.
+            if drop_stale:
+                self._put_terminal_nowait(event)
+            else:
+                await self._events.put(event)
             self._terminal_published = True
             return
-        try:
-            self._events.put_nowait(event)
-        except asyncio.QueueFull:
-            self._note("dropped an incremental event because the caller is not reading")
-            if self._state.terminal is None:
-                self._state.fail("tts_backpressure")
-                self._fail_pending_waiters(
-                    TtsStreamError("tts_backpressure", "the caller is not reading events")
-                )
+        # Apply backpressure to the worker instead of dropping audio. A fast
+        # model must not turn normal downstream pacing into a terminal failure.
+        await self._events.put(event)
+
+    def _put_terminal_nowait(self, event: TtsStreamEvent | None) -> None:
+        """Reserve the terminal slot, dropping only stale queued events."""
+
+        while True:
+            try:
+                self._events.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    self._events.get_nowait()
 
     def _note(self, message: str) -> None:
         if len(self._notices) < 16:
