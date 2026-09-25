@@ -22,4 +22,14 @@ def tts_resource_key(synthesizer: object | None, voice: str) -> str | None:
     return key.strip()
 
 
-__all__ = ["tts_resource_key"]
+def supports_incremental_stream(synthesizer: object | None) -> bool:
+    """Return whether a synthesizer exposes the negotiated incremental port.
+
+    Capability is never inferred from a profile name, a resident model or the
+    Python version: only an implementation that actually offers the append-only
+    entry point can serve an incremental utterance.
+    """
+    return callable(getattr(synthesizer, "open_incremental_stream", None))
+
+
+__all__ = ["supports_incremental_stream", "tts_resource_key"]

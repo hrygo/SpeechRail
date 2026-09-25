@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import anyio
 import pytest
 
-from speechrail.backends.qwen3_tts import Qwen3TtsCapabilityRouter
+from speechrail.backends.qwen3_tts import Qwen3TtsCapabilityRouter, TtsWorkerBusyError
 from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.runtime.busy import BusyReason
 
 
 class _Registry:
@@ -239,3 +240,29 @@ async def test_start_preserves_already_warm_clone_capability(
     assert primary.started == 1
     assert clone.started == 1
     assert clone.alive
+
+
+@pytest.mark.anyio
+async def test_router_reports_busy_instead_of_evicting_an_active_utterance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group-level evict must never cut off an utterance that still owns a worker."""
+
+    registry = _Registry({"designed": "instruction"})
+    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
+    primary = _Worker("voice_design")
+    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
+    await router.start()
+    primary.active_incremental_stream = True  # type: ignore[attr-defined]
+
+    assert router.active_incremental_streams == 1
+    with pytest.raises(TtsWorkerBusyError) as raised:
+        await router.evict_warm_capability()
+
+    assert raised.value.code == "backend_busy"
+    assert raised.value.busy_reason == BusyReason.BACKEND_TRANSITION
+    assert primary.alive is True
+
+    primary.active_incremental_stream = False  # type: ignore[attr-defined]
+    await router.evict_warm_capability()
+    assert primary.alive is False

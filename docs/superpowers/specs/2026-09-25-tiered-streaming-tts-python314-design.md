@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.9"
+version: "1.10"
 date: 2026-09-25
 ---
 
@@ -283,7 +283,8 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W4 模型层真增量门 | complete（q8）；bf16 catalog 门已过 | CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线 + 长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；vendor HEAD `851f9567ecd27ad8f210cefc866c7d01525151e4` |
 | W5 领域与身份 | complete | `domain/tts_stream.py`（options/双轴 state/limits/事件/port 与集中错误码）、`PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间，跨精度不共享）、`VoiceBinding.supports_incremental_stream`（仅 CustomVoice speaker 与 Base clone）；15+6+44 项定向测试通过，主仓全量 2111 passed/144 skipped、coverage 81.77%、`mypy src` 131 文件通过 |
 | W6 worker 双向控制与父进程 session | complete | 私有 `tts_stream_protocol=1` 协商；`StreamPump` 双线程 + 有界队列、单模型线程；`TtsStreamHost`/client 单父端 dispatcher；新增 `qwen3_tts_incremental.py` adapter（CustomVoice speaker、Base clone、VoiceDesign fail-closed）；`Qwen3TtsWorker.open_incremental_stream` 全程持 voice lease 与独占 slot，完整文本 synthesize 与 stream 串行，router 按 clone lane 路由；`tests/test_qwen3_tts_incremental_bridge.py` 10 项、`test_qwen3_tts_worker.py` 增真实 `BytesIO` pipe 端到端，联合回归 188 passed，ruff/mypy/`git diff --check` 通过。仅 fake IPC，未加载模型 |
-| W7–W11 | not started | W6 后继续：application 资源治理、public wire、App 协调、分档呈现、逐档声学/性能与发布回滚；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
+| W7 application 资源治理与输出生命周期 | complete | `application/tts_stream.py`：`TtsStreamService.open` 按 voice lane 进入 `governor.reserve`，持 worker 租约与 vendor session（独占 worker slot + voice lease）；终态同 loop 同步认领且只有控制器 task 写 sink，终态后不投递音频、receipt 只收束一次；等待文本期间不被 idle 驱逐，`evict_warm_capability` 遇活跃 utterance 返回 `backend_busy` 而不强卸载；receipt 只在发送成功后 `accept_pcm` 并绑定实际 runtime revision；输入饥饿/墙钟/慢消费者分别以 `tts_input_timeout`/`tts_backend_failed`/`tts_backpressure` 收束。新增 11 项 application 测试，定向 114 passed、主仓全量 2308 passed/7 skipped、ruff/mypy/diff check 通过。仅 fake session，未加载模型 |
+| W8–W11 | not started | W7 后继续：public wire、App 协调、分档呈现、逐档声学/性能与发布回滚；Base 约束为“短 reference + 跨 prefill 槽位初始文本 + 单 generation 逐帧投喂” |
 
 W1 对导入兼容性的验收是在当时的 Python 3.12.14 环境中阻断 `audioop` 导入后执行；W2 随后在独立 CPython 3.14.7 候选环境完成依赖安装、导入与确定性回归，但不等价于正式 app home 切换或真实 Metal/模型推理验收。
 
@@ -296,6 +297,8 @@ W2 的 `requirements/shared.txt` 是 ASR/TTS role lock 的交集元数据，只�
 W4 真实模型门（2026-09-25 修正后）表明：CustomVoice q8 与 Base q8 都能在同一 generation 内首 PCM 后追加文本并完整发声，四档统一真增量目标继续成立。Base 的前置条件是该 runtime 的 aligned ICL 布局必须把初始文本的尾部留在 trailing 队列：初始文本要跨过 prefill 槽位（`prefill_target_tokens < initial_text_token_count`），并配合短 reference；探针对该条件 fail-closed。此前“Base 只能全文本预填”的 Ruling 来自 `--schedule` 未接线加长 reference 的假阴性，已作废。Base bf16 的 catalog `README.md` 差异已由恢复 pinned 快照解决：两件 bf16 制品经仓库自带校验各 13/13 文件尺寸与 sha256 匹配，catalog 门按原规则通过，未放宽校验。剩余未决项是所有档位的声学/性能验收，以及 bf16 相对 q8 的实时门与资源收益（W11）。
 
 W5 已把第 8/9 节的增量约束固化为 vendor-neutral 领域契约：唯一 limits/state/event 定义、必须连续的 append 序号与唯一终态、文本 codepoint 与音频字节两套独立预算，以及以内容身份+预处理+模型/量化/tokenizer/实现版本为命名空间的 prepared reference key（跨精度不共享）。W6 已在其上实现私有 adapter、worker 双线程与父进程 session：`tts_stream_protocol=1` 协商、单模型线程、单父端 dispatcher、voice lease 与独占 stream slot，以及 CustomVoice speaker / Base clone / VoiceDesign fail-closed 的条件映射。该层仍是 fake IPC 与确定性测试，真实模型、真实 worker 与 public wire 尚未验收。
+
+W7 已把增量 utterance 的资源与输出生命周期固定在 application 层：governor reserve、worker 租约与 vendor session（独占 worker slot 与 voice lease）由同一控制器持有，终态认领是同一 event loop 上的同步写入且只有控制器 task 写 sink，所以 vendor `completed`、调用方 `cancel` 与输入/墙钟超时竞争时只有一个胜者，终态之后不会再有音频或第二次 receipt 收束；等待文本期间不释放租约（`WorkerIdleEvictor` 不会卸载），组级 `evict_warm_capability` 对活跃 utterance 明确返回 busy 而不强卸载；render receipt 只统计真正通过发送边界的 PCM，并在 start 绑定实际 runtime revision。该层仍是 fake session 与确定性测试，未接入 public wire，也未做真实 worker、取消超时、长稳或内存峰值验收。
 
 W2 已验证候选依赖锁、3.14.7 MLX/ASR 模块导入及确定性回归。W4 已验证 CustomVoice q8 与 Base q8 的追加文本内容、首 PCM 与 append→next PCM（Base 条件见上）；bf16 已通过 catalog 完整性门但尚未进入模型/实时测量。尚未验证人耳 A/B、说话人相似度、自然度、真实 worker/协议、取消/重连、长稳 RTF、缓存内存预算和 bf16 相对收益。ASR 只证明内容缺失/一致，不能替代声学身份验收；质量门通过也不等于四档产品体验已验收。
 

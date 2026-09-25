@@ -291,6 +291,21 @@ def test_stream_events_and_cancel_stay_cooperative(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_worker_reports_occupancy_while_an_utterance_waits_for_text(tmp_path: Path) -> None:
+    """The exclusive slot is the worker-level occupancy a group evict consults."""
+
+    worker, _ = _worker(tmp_path, variant="custom_voice", stream_protocol=1)
+
+    async def run() -> None:
+        assert worker.active_incremental_stream is False
+        session = await worker.open_incremental_stream(_options())
+        assert worker.active_incremental_stream is True
+        await session.close()
+        assert worker.active_incremental_stream is False
+
+    asyncio.run(run())
+
+
 def test_batch_synthesis_waits_for_the_active_incremental_stream(tmp_path: Path) -> None:
     worker, transport = _worker(tmp_path, variant="custom_voice", stream_protocol=1)
     request = SpeechRequest(text="你好", voice="serena", output_format="pcm16")

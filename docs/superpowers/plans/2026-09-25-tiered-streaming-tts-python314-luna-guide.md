@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.9"
+version: "1.10"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5/W6 已交付，继续 W7–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5/W6/W7 已交付，继续 W8–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -512,7 +512,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
 - [x] **W5｜领域与身份**：新增 `domain/tts_stream.py`（options/双轴 state/limits/事件/port）与 `PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间）；`VoiceBinding.supports_incremental_stream` 只对 CustomVoice speaker 与 Base clone 为真。验收：`tests/test_tts_stream_state.py` 15 passed、`tests/test_tts_reference_condition.py` 6 passed、`tests/test_voice_bindings.py` 44 passed；另修正 W2 遗留的 `tests/test_profile_selection.py` 旧 runtime lock fixture（23 passed）。
 - [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
-- [ ] **W7｜应用资源与终态**：governor/profile/worker全生命周期收束；cancel/finish竞态及receipt口径通过。
+- [x] **W7｜应用资源与终态**：`application/tts_stream.py` 收束 governor reserve、worker 租约与 vendor session 的整个 utterance；终态同步认领且只有控制器 task 写 sink，cancel/finish/超时竞态只有一个胜者；等待文本不释放租约、组级 evict 返回 busy；receipt 只计已发送 PCM。验收：定向 114 passed，主仓全量 2308 passed / 7 skipped，ruff/mypy/diff check 通过（详见下方 W7 记录）。
 - [ ] **W8｜公共协议与能力**：严格parser、current音频事件、voice级支持；四档/错误/断线矩阵通过。
 - [ ] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。
 - [ ] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。
@@ -639,5 +639,20 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **回收语义：** 强制 abort 后 worker 置 not-ready、`fallback_abort_count` 计数，下一次请求走既有受控重启；不遗留后台写线程，不在服务级杀进程。
 - **测试与验收（CPython 3.12.14 `.venv`，2026-09-25）：** 新增 `tests/test_qwen3_tts_incremental_bridge.py` 10 项（协议未协商与 VoiceDesign fail-closed、CustomVoice 冻结 profile start 帧、Base clone reference start 帧、协作取消不 abort、活动 stream 期间 batch 串行、router lane 路由、vendor 事件映射）；`tests/test_qwen3_tts_worker.py` 增加真实 `BytesIO` pipe 的 `serve` 端到端（ready→started→text_accepted→audio→done，1 个 `_FakeIncrementalSession`）。联合回归 188 passed；改动文件 `ruff check`、`mypy` 通过；`git diff --check` 通过。
 - **未纳入/未验证：** 本轮只做 fake IPC、字段协商与确定性状态；未加载模型、未产生真实 PCM、未做真实 worker/并发/取消超期/长稳/内存峰值验收；application 资源治理（W7）、public wire（W8）、App 协调（W9）、分档呈现（W10）与逐档声学/性能（W11）未开始。真实模型门与逐档验收结论仍以 W4/W11 为准。
+
+### W7 实施与验收记录（2026-09-25）
+
+- **应用层控制器：** 新增 `src/speechrail/application/tts_stream.py`。`TtsStreamService.open` 复用 `tts_resource_key`→`router.resource_key_for_voice` 取得 lane key，以 `REALTIME_TTS`/`INTERACTIVE` 进入 `governor.reserve`，再取可选 worker 租约，最后打开 vendor session（session 内部持有独占 worker slot 与 voice lease）。`TtsStreamService.supported` 只由 `open_incremental_stream` 是否存在决定，不按档位名或 Python 版本推断。
+- **回收顺序：** `StreamController` 固定“停止生成/reader → 确认回收 → 释放引用 → 释放资源”：`session.close()`（内部释放 worker slot 与 voice lease）先于 `AsyncExitStack.aclose()`（worker 租约、governor reserve）。打开失败时按同一顺序回滚，`VoiceRevokedError` 等参考租约故障原样上抛且不泄漏准入。
+- **单一终态：** 终态认领是同 loop 上的同步状态写入，只有控制器自身 task 经同一发送锁写 sink，因此 vendor `completed`、调用方 `cancel`、输入饥饿与墙钟超时竞争时只有一个胜者；终态之后不再投递任何音频，receipt 也只收束一次。
+- **租约与驱逐：** 等待文本期间保持 worker 租约，`WorkerIdleEvictor` 不会因 idle 卸载；`Qwen3TtsWorker.active_incremental_stream` 与 `Qwen3TtsCapabilityRouter.active_incremental_streams` 暴露占用（含等待文本），`evict_warm_capability` 遇活跃 utterance 抛 `TtsWorkerBusyError`（`code=backend_busy`、`busy_reason=backend_transition`），不强卸载。
+- **render_receipts 复用：** `TtsStreamReceipt` 在 start 时 `begin` 并立即 `bind_observed_runtime_revision` 记录实际 runtime revision；PCM 只在 sink 成功返回后 `accept_pcm`，未发送 PCM 不计入 sample/bytes；终态只 `complete/cancel/fail` 一次；服务端不报告播放进度。
+- **时限与背压：** `input_wait_seconds` 内无新文本即以 `tts_input_timeout` 失败并主动终止；`utterance_wall_clock_seconds` 覆盖整个 utterance；单次发送以 `slow_consumer_seconds` 为上限，超时按 `tts_backpressure` 收束。
+- **不保留文本：** 控制器不保存整轮 prompt，append 文本只转发给模型；日志只记稳定 code 与异常类型，后台 task 异常经 done-callback 记录而非静默。
+- **组合根：** `AppServices` 新增 `tts_streams`，与 `render_receipts` 共享同一 `RenderReceiptRegistry`（二者不再各自默认新建）；`worker_lease` 取自已注册 evictor 的 `lease_lock_of(tts_worker).lease`，无 evictor 时为 `None`。
+- **测试与验收（CPython 3.12.14 `.venv`，2026-09-25）：** 新增 `tests/test_tts_stream_application.py` 11 项（finish/cancel 竞态单一终态、终态后不投递音频、只计已发送 PCM、慢消费者 `tts_backpressure`、输入饥饿超时、等待文本期间不被 idle 驱逐、回收顺序、跨 lane 超预算 fail-closed、参考撤销释放准入、未支持 fail-closed、组合根共享 registry）；`tests/test_qwen3_tts_capability_router_lifecycle.py` 增组级 evict busy 用例；`tests/test_qwen3_tts_incremental_bridge.py` 增 worker 占用用例。定向 114 passed；主仓全量 2315 收集 / 2308 passed / 7 skipped / 0 failed；`ruff check src tests` 与 `mypy src`（135 文件）通过；`git diff --check` 通过。
+- **未纳入/未验证：** 本轮只用 fake session 与确定性状态；未加载模型、未接 public wire、未改 Realtime/HTTP 契约、未做真实 worker/音频/取消超期/长稳/内存峰值验收；W8–W11 未开始。
+- **有意未改：** `runtime/resource_governor.py` 无需扩展——既有 keyed lane、`total_capacity` 与 realtime/batch 规则已足以表达“跨 lane 超预算 fail-closed”，本阶段不为其增加未被消费的参数或分支。
+- **环境差异记录：** W5 记录的全量为 2255 收集 / 2111 passed / 144 skipped，本轮同机同解释器为 2314 收集 / 2307 passed / 7 skipped；测试跳过数差异来自收集范围与环境，不是本阶段引入的功能差异，发布前应按 release 流程重新核对。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
