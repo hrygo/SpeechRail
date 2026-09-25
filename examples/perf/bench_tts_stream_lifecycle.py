@@ -16,7 +16,10 @@ budget in §8.2:
 ``--mode soak`` repeats complete / interrupt / idle-cancel-failure cycles and
 samples ``/metrics`` between them, so a leaked session, a wedged worker or a
 never-released governance slot shows up as a rising gauge or as a worker that
-never returns to ``warm_standby``.
+never returns to ``warm_standby``.  Each sample also carries the service's own
+physical footprint, its process count and whether that reading was complete,
+plus the completed-reservation counter, so recovery and the memory trend are
+read separately instead of being inferred from one another.
 
 The trace follows the public contract: session update, ``speechrail.tts.start``,
 wait for ``speechrail.tts.started``, append one slice, wait for
@@ -70,6 +73,14 @@ _GAUGES = (
     'speechrail_worker_status{component="tts",state="warm_standby"}',
     'speechrail_worker_evictions_total{component="Qwen3TtsCapabilityRouter",phase="cold_evict"}',
     'speechrail_worker_evictions_total{component="Qwen3TtsCapabilityRouter",phase="standby"}',
+    # Reservation accounting: the counter proves every cycle really released its
+    # reservation, which an idle active-request gauge alone cannot show.
+    'speechrail_governor_releases_total{class="realtime_tts",outcome="completed",purpose="interactive"}',
+    # Memory trend uses the service's own authoritative footprint definition, so
+    # the soak cannot mistake MLX allocator caching for a leak, or the reverse.
+    "speechrail_resource_physical_footprint_bytes",
+    "speechrail_resource_footprint_process_count",
+    "speechrail_resource_footprint_complete",
 )
 
 
