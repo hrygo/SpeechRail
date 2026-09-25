@@ -119,21 +119,15 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.install_macos import (  # noqa: E402
-    DiarizationInstallPaths,
     InstallerError,
     install_managed,
 )
 
 from speechrail import __version__  # noqa: E402
-from speechrail.config.model_catalog import load_catalog  # noqa: E402
-from speechrail.service.diarization_assets import (  # noqa: E402
-    DiarizationAssetError,
-    prepare_diarization_assets,
-)
 from speechrail.service.launchd import ServiceError  # noqa: E402
 from speechrail.service.model_store import resolve_prepared_models  # noqa: E402
 from speechrail.service.modelscope import ModelScopeDownloader  # noqa: E402
-from speechrail.service.profile_commands import recommend_profile  # noqa: E402
+from speechrail.service.profile_commands import recommend_selection  # noqa: E402
 from speechrail.service.profile_smoke import (  # noqa: E402
     PublicApiSmokeProbe,
     SmokeProbeError,
@@ -190,7 +184,7 @@ def _get_physical_memory_bytes() -> int:
             return pages * page_size
     except (OSError, ValueError):
         pass
-    raise InstallerError("无法读取物理内存；请使用 --preset 显式选择运行档位")
+    raise InstallerError("无法读取物理内存；请使用 --asr-spec/--tts-spec 显式选择规格档位")
 
 
 def _wheel_version(wheel: Path) -> str:
@@ -345,7 +339,9 @@ def _run_diarization_smoke_test(base_url: str, *, api_key: str | None = None) ->
 
 def run_zero_setup(
     *,
-    preset: str | None = None,
+    asr_spec: str | None = None,
+    tts_spec: str | None = None,
+    diarization_aligner: str | None = None,
     app_home: Path | None = None,
     enable: bool = True,
     run_smoke: bool = True,
@@ -362,12 +358,14 @@ def run_zero_setup(
     ).resolve()
 
     mem_bytes = _get_physical_memory_bytes()
-    selected_preset = preset or recommend_profile(mem_bytes)
+    recommended_asr, recommended_tts = recommend_selection(mem_bytes)
+    selected_asr_spec = asr_spec or recommended_asr
+    selected_tts_spec = tts_spec or recommended_tts
     _log(
         "PLAN",
         f"目标安装路径: {resolved_app_home}\n"
         f"        统一内存大小: {mem_bytes / (1024**3):.1f} GiB\n"
-        f"        选定运行档位: \033[1;32m{selected_preset}\033[0m",
+        f"        选定规格: \033[1;32mASR={selected_asr_spec} / TTS={selected_tts_spec}\033[0m",
     )
 
     wheel_path = _build_wheel()
@@ -377,14 +375,18 @@ def run_zero_setup(
         install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
         _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
 
-    _log("INSTALL", f"开始拉取锁定模型并安装隔离运行时 (预设: {selected_preset})...")
     _log(
         "INSTALL",
-        "首次下载含 ASR/TTS 制品，并按档位供给分人资产（balanced/quality 含 CoreML Sortformer 与 "
-        "ForcedAligner；light 不供给），全程完成 SHA-256 校验；请保持网络连接稳定。",
+        f"开始拉取锁定模型并安装隔离运行时 (ASR={selected_asr_spec}, TTS={selected_tts_spec})...",
+    )
+    _log(
+        "INSTALL",
+        "首次下载含所选规格的 ASR/TTS 制品；分人资产（CoreML Sortformer 与 ForcedAligner）是任务级 "
+        "opt-in，只有传入 --diarization-aligner 时才会额外供给；全程完成 SHA-256 校验；"
+        "请保持网络连接稳定。",
     )
 
-    diarization_enabled = load_catalog().preset(selected_preset).diarization
+    diarization_enabled = diarization_aligner is not None
 
     post_enable = None
     if enable:
@@ -408,27 +410,15 @@ def run_zero_setup(
     timeout = httpx.Timeout(connect=30.0, read=timeout_seconds, write=30.0, pool=30.0)
     with httpx.Client(timeout=timeout) as client:
         downloader = ModelScopeDownloader(client=client)
-        try:
-            assets = prepare_diarization_assets(
-                resolved_app_home, preset_id=selected_preset, downloader=downloader
-            )
-        except DiarizationAssetError as exc:
-            raise InstallerError("diarization asset preparation failed") from exc
         result = install_managed(
             wheel_path,
             app_home=resolved_app_home,
-            preset_id=selected_preset,
+            asr_spec=selected_asr_spec,
+            tts_spec=selected_tts_spec,
             downloader=downloader,
             enable=enable,
             post_enable=post_enable,
-            diarization_assets=(
-                DiarizationInstallPaths(
-                    coreml_model_path=assets.coreml_model_path,
-                    aligner_model_dir=assets.aligner_model_dir,
-                )
-                if assets is not None
-                else None
-            ),
+            diarization_aligner=diarization_aligner,
         )
 
     _log("INFO", f"应用主目录: {result.app_home}")
@@ -462,11 +452,19 @@ def main() -> None:
         help="确认安装依赖、下载模型、写入 app home 并注册用户级 LaunchAgent",
     )
     parser.add_argument(
-        "--preset",
-        choices=("quality", "balanced", "light"),
-        help=(
-            "指定运行档位（默认根据本机内存推荐：8GB=light, 16GB=balanced, 16GB+=quality）"
-        ),
+        "--asr-spec",
+        choices=("fast", "quality", "reference"),
+        help="指定识别规格档位（默认按本机内存推荐：<10GiB=fast, <16GiB=quality, 其余=quality）",
+    )
+    parser.add_argument(
+        "--tts-spec",
+        choices=("fast", "quality", "reference"),
+        help="指定配音规格档位（默认按本机内存推荐：<10GiB=fast, <16GiB=fast, 其余=quality）",
+    )
+    parser.add_argument(
+        "--diarization-aligner",
+        choices=("aligner-q8", "aligner-bf16"),
+        help="额外准备分人资产（CoreML Sortformer + 指定 ForcedAligner）；不传则不供给分人能力",
     )
     parser.add_argument(
         "--app-home",
@@ -492,7 +490,9 @@ def main() -> None:
 
     try:
         run_zero_setup(
-            preset=args.preset,
+            asr_spec=args.asr_spec,
+            tts_spec=args.tts_spec,
+            diarization_aligner=args.diarization_aligner,
             app_home=args.app_home,
             enable=not args.no_enable,
             run_smoke=not args.skip_smoke,

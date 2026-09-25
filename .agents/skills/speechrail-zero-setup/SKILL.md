@@ -18,7 +18,7 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
   任何脚本中的较低版本检查都不构成当前项目基线的放行条件。
 - 依据目标 profile 的锁定制品、vendor runtime、wheel staging 与回退空间估算磁盘需求；脚本最小空间检查
   只是预检，不是完整容量保证。确认可访问所需锁定下载源。
-- profile 推荐以代码中的 `recommend_profile()` 为内存兜底建议；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
+- 规格推荐以代码中的 `recommend_selection()` 为内存兜底建议；ASR 与 TTS 两项规格独立选择（`--asr-spec` / `--tts-spec`），无法读取物理内存时停止自动推荐并要求用户显式指定。
 - 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。
 
 ## 首选入口
@@ -34,12 +34,14 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 ```bash
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
   --yes \
-  --preset balanced \
+  --asr-spec quality \
+  --tts-spec quality \
   --app-home "$HOME/Library/Application Support/SpeechRail"
 
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
   --yes \
-  --preset balanced \
+  --asr-spec fast \
+  --tts-spec fast \
   --install-video-podcast-skill
 ```
 
@@ -48,7 +50,7 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 ```bash
 uv run --python 3.14.7 python \
   .agents/skills/speechrail-zero-setup/scripts/zero_setup.py \
-  --yes --preset balanced
+  --yes --asr-spec quality --tts-spec quality
 ```
 
 `zero_setup.py` 在独立输出目录构建本次唯一 wheel，核对 wheel metadata 版本并记录 SHA-256；不会从 `dist/` 猜测旧产物。默认不安装用户级 `video-podcast` skill，该操作只有传入 `--install-video-podcast-skill` 时才执行，且失败不应改变 managed runtime。
@@ -58,10 +60,10 @@ uv run --python 3.14.7 python \
 确认后依次完成：
 
 1. 检查架构、macOS、磁盘和依赖；缺失 Xcode CLT、Homebrew、`ffmpeg`、`uv` 或 Python 3.14.7 时按入口提示安装。
-2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的 ASR/TTS 制品。`balanced`/`quality` 另按档位供给分人制品：从固定 Hugging Face revision 准备 CoreML Sortformer FP16 bundle，并从 ModelScope 按 `preset.aligner` 供给 `aligner-q8` / `aligner-bf16`；`light` 不供给任何分人制品。每个文件的 size 与 SHA-256 均须匹配锁定 manifest。
-3. 将已校验制品原子发布到 app home，创建隔离 worker runtime，写入权限为 `0600` 的私有配置，并执行 managed-runtime preflight。`balanced`/`quality` 的私有配置包含 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`；`light` 不写这两键。
+2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的 ASR/TTS 制品（所选 ASR 规格 + 所选 TTS 规格的 `tts_custom_voice` / `tts_base` 角色），统一落在 `models/<artifact_key>`。分人是任务级 opt-in，只有传入 `--diarization-aligner aligner-q8|aligner-bf16` 时才额外供给：从固定 revision 准备 CoreML Sortformer FP16 bundle，并从 ModelScope 按点名 artifact 供给对应 ForcedAligner。每个文件的 size 与 SHA-256 均须匹配锁定 manifest。
+3. 将已校验制品原子发布到 app home，创建隔离 worker runtime，写入权限为 `0600` 的私有配置，并执行 managed-runtime preflight。仅当本次供给分人资产时，私有配置才包含 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。
 4. 安装用户级 `com.speechrail` LaunchAgent；启用时使用统一生命周期 controller。
-5. 使用 `PublicApiSmokeProbe` 在进程内读取必要凭据，验证 health、ready、models、voices、TTS 和 ASR；`balanced`/`quality` 再以不落盘的短 PCM 调用 `gpt-4o-transcribe-diarize` / `diarized_json`（`light` 跳过分人 smoke）。失败时由安装事务恢复旧指针或清理首次安装状态，并返回非零。
+5. 使用 `PublicApiSmokeProbe` 在进程内读取必要凭据，验证 health、ready、models、voices、TTS 和 ASR；本次供给分人资产时再以不落盘的短 PCM 调用 `gpt-4o-transcribe-diarize` / `diarized_json`，未供给时跳过该 smoke。失败时由安装事务恢复旧指针或清理首次安装状态，并返回非零。
 
 不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
@@ -82,7 +84,7 @@ app home 持续增长。因此磁盘预算还需考虑 release 累积，不能�
 - 架构、系统版本、磁盘和 Python 3.14.7 检查通过；任何回退假设都已披露。
 - 本次 wheel 的 metadata 版本与项目一致，SHA-256 已记录。
 - managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
-- `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。`balanced`/`quality` 额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；`light` 应报告分人未配置且 `/v1/models` 不含该别名。
+- `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。本次供给分人资产时额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；未供给时应报告分人未配置且 `/v1/models` 不含该别名。
 - 安装失败时旧 runtime/selection 保持可恢复；首次安装失败时不留下可误启动的半配置。
 - 只有显式请求安装 `video-podcast` 时才验证其用户级副本；该技能不是 SpeechRail 服务安装的完成条件。
 

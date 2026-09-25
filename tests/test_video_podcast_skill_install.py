@@ -152,7 +152,8 @@ def test_zero_setup_requires_explicit_confirmation_before_any_mutation(
 
     with pytest.raises(zero_setup.InstallerError, match="explicit confirmation"):
         zero_setup.run_zero_setup(
-            preset="light",
+            asr_spec="fast",
+            tts_spec="fast",
             app_home=tmp_path / "app",
             enable=False,
             run_smoke=False,
@@ -210,8 +211,11 @@ def test_zero_setup_keeps_video_skill_install_optional(
 
     monkeypatch.setattr(zero_setup.httpx, "Client", FakeClient)
 
+    install_calls: list[dict[str, object]] = []
+
     def fake_install_managed(*args: object, **kwargs: object) -> SimpleNamespace:
-        del args, kwargs
+        del args
+        install_calls.append(dict(kwargs))
         events.append(("service", None))
         return SimpleNamespace(
             app_home=tmp_path / "app",
@@ -221,23 +225,9 @@ def test_zero_setup_keeps_video_skill_install_optional(
 
     monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
 
-    def fake_prepare_diarization_assets(
-        app_home: Path, *, preset_id: str, downloader: object
-    ) -> SimpleNamespace | None:
-        del downloader
-        if preset_id == "light":
-            return None
-        return SimpleNamespace(
-            coreml_model_path=app_home / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
-            aligner_model_dir=app_home / "diarization" / "Qwen3-ForcedAligner-0.6B",
-        )
-
-    monkeypatch.setattr(
-        zero_setup, "prepare_diarization_assets", fake_prepare_diarization_assets
-    )
-
     zero_setup.run_zero_setup(
-        preset="light",
+        asr_spec="fast",
+        tts_spec="fast",
         app_home=tmp_path / "app",
         enable=False,
         run_smoke=False,
@@ -245,10 +235,15 @@ def test_zero_setup_keeps_video_skill_install_optional(
     )
 
     assert [kind for kind, _ in events] == ["service"]
+    assert install_calls[-1]["asr_spec"] == "fast"
+    assert install_calls[-1]["tts_spec"] == "fast"
+    assert install_calls[-1]["diarization_aligner"] is None
 
     events.clear()
     zero_setup.run_zero_setup(
-        preset="light",
+        asr_spec="quality",
+        tts_spec="reference",
+        diarization_aligner="aligner-bf16",
         app_home=tmp_path / "app",
         enable=False,
         run_smoke=False,
@@ -258,6 +253,9 @@ def test_zero_setup_keeps_video_skill_install_optional(
 
     assert [kind for kind, _ in events] == ["skill", "service"]
     assert events[0][1] == zero_setup.REPO_ROOT / ".agents" / "skills" / "video-podcast"
+    assert install_calls[-1]["asr_spec"] == "quality"
+    assert install_calls[-1]["tts_spec"] == "reference"
+    assert install_calls[-1]["diarization_aligner"] == "aligner-bf16"
 
 
 @pytest.mark.skipif(
@@ -380,11 +378,10 @@ def _drive_smoke_provisioning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    preset: str,
-    assets: object,
+    diarization_aligner: str | None,
 ) -> tuple[list[str], list[object]]:
     events: list[str] = []
-    captured_assets: list[object] = []
+    captured_aligners: list[object] = []
     wheel = tmp_path / "speechrail.whl"
     wheel.write_bytes(b"test wheel")
 
@@ -399,21 +396,12 @@ def _drive_smoke_provisioning(
         lambda *a, **k: events.append("diarization"),
     )
 
-    def fake_prepare(
-        app_home: Path, *, preset_id: str, downloader: object
-    ) -> object:
-        del app_home, downloader
-        assert preset_id == preset
-        return assets
-
-    monkeypatch.setattr(zero_setup, "prepare_diarization_assets", fake_prepare)
-
     def fake_install_managed(*args: object, **kwargs: object) -> SimpleNamespace:
         del args
-        captured_assets.append(kwargs.get("diarization_assets"))
+        captured_aligners.append(kwargs.get("diarization_aligner"))
         post_enable = kwargs.get("post_enable")
         assert callable(post_enable)
-        post_enable(tmp_path / "app", f"prepared-{preset}")
+        post_enable(tmp_path / "app", "prepared-spec-pair")
         return SimpleNamespace(
             app_home=tmp_path / "app",
             plist_path=tmp_path / "com.speechrail.plist",
@@ -423,49 +411,46 @@ def _drive_smoke_provisioning(
     monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
 
     zero_setup.run_zero_setup(
-        preset=preset,
+        asr_spec="quality",
+        tts_spec="quality",
+        diarization_aligner=diarization_aligner,
         app_home=tmp_path / "app",
         enable=True,
         run_smoke=True,
         confirmed=True,
     )
-    return events, captured_assets
+    return events, captured_aligners
 
 
 @pytest.mark.skipif(
     sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
     reason="zero-setup is a macOS Python 3.14 entry point",
 )
-def test_zero_setup_light_skips_diarization_smoke(
+def test_zero_setup_without_aligner_skips_diarization_smoke(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     zero_setup = _load_zero_setup("speechrail_zero_setup_light_gate_test")
 
-    events, captured_assets = _drive_smoke_provisioning(
-        zero_setup, tmp_path, monkeypatch, preset="light", assets=None
+    events, captured_aligners = _drive_smoke_provisioning(
+        zero_setup, tmp_path, monkeypatch, diarization_aligner=None
     )
 
     assert events == ["asr_tts"]
-    assert captured_assets == [None]
+    assert captured_aligners == [None]
 
 
 @pytest.mark.skipif(
     sys.platform != "darwin" or not ((3, 14) <= sys.version_info < (3, 15)),
     reason="zero-setup is a macOS Python 3.14 entry point",
 )
-def test_zero_setup_balanced_runs_diarization_smoke(
+def test_zero_setup_with_aligner_runs_diarization_smoke(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     zero_setup = _load_zero_setup("speechrail_zero_setup_balanced_gate_test")
-    assets = SimpleNamespace(
-        coreml_model_path=tmp_path / "app" / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
-        aligner_model_dir=tmp_path / "app" / "diarization" / "aligner-q8",
-    )
 
-    events, captured_assets = _drive_smoke_provisioning(
-        zero_setup, tmp_path, monkeypatch, preset="balanced", assets=assets
+    events, captured_aligners = _drive_smoke_provisioning(
+        zero_setup, tmp_path, monkeypatch, diarization_aligner="aligner-q8"
     )
 
     assert events == ["asr_tts", "diarization"]
-    assert len(captured_assets) == 1
-    assert captured_assets[0] is not None
+    assert captured_aligners == ["aligner-q8"]
