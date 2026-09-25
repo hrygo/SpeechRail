@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.17"
+version: "1.18"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付；W11 的增量延迟基准工具已就绪（`2269e4de`），真实声学/性能门待单独授权。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付；W11 已在 cp314 managed runtime 安装态跑通四档真实增量门（light/balanced/quality/extreme 的短句、长句与多段追加基准 `failures: []`），仍缺真实播放欠载、打断/cancel 时延、长稳内存与 App 可听验收。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -481,6 +481,8 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 
 ## 8.2 初始性能目标（待实际验收，不是当前成绩）
 
+**已实测（2026-09-25，cp314 安装态，真实 worker 与真实模型，每条件重复 3 次）：** 温态“首批文本→首个可播放 PCM”短句 p50 23.2–55.5 ms、p95 ≤ 71 ms（extreme 首次含冷参考准备 1791 ms）；排除调用方供给间隙后的生成 RTF p50 0.199–0.300，全部 < 1。四段追加（`--append-interval-ms 400`）p50 811.5–822.9 ms，其中约 408 ms 是调用方自报的 `text_gap_ms`。**仍未测：** 真实播放欠载、用户打断→停旧音 P95 ≤ 100 ms、cancel→模型状态释放 P95 ≤ 500 ms、跨文本盲听身份 A/B、重复 create/finish/cancel 的长稳内存趋势；这些条目不会因上面的延迟数字自动勾选。
+
 - [ ] 温态首批可提交文本→客户端首个可播放PCM P95≤500ms，另报实际首播。
 - [ ] 小窗口额外等待探索100–200ms，初始150ms；未等整轮文本。
 - [ ] 排除输入饥饿后的生成RTF<1，争取≤0.7；另报真实播放欠载。
@@ -516,7 +518,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
 - [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
 - [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
-- [ ] **W11｜授权后逐档实测与发布**：质量/性能矩阵与完整回滚记录；未达标档不宣称完成；安装/提交/远端发布分别核对授权。
+- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；仍缺真实播放欠载/打断/cancel/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
 
 ### W2 实施与验收记录（2026-09-24）
 
@@ -726,3 +728,22 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **与原 W4 报告的对照：** appended token 数（9 / 24）与 `prefill_target_tokens`（1 / 16）逐项一致；首 PCM 与 append→next PCM 同数量级（原 45.1/23.5 ms、64.3/20.3 ms），Base 音频 13.84 s → 13.12 s 属采样差异。**W4 的 q8 结论可从 `851f9567` 迁移到 `956926b1`。**
 - **证据边界（not_run）：** 逐档（light/balanced/quality/extreme）真实门、Base bf16 实时门、§8.2 全部性能目标、真实 worker/协议端到端、App 可听验收与发布/回滚演练均未执行。ASR 只证明显式文本内容，不构成音色相似度、自然度或长稳验收。
 - **剩余阻塞：** 安装态 runtime（cp312）仍无增量 wire；增量 overlay 进入正式运行时的形式（替换锁中的 `mlx-audio` 条目，或作为独立 overlay 制品并入 `runtime-lock.json`）与 cp314 wheel 安装尚未执行。
+
+#### W11 逐档真实增量门（2026-09-25，cp314 managed runtime 安装态）
+
+- **安装与回退点：** 用户放行后，带本轮修复的 `speechrail-3.2.1-cp314-cp314-macosx_27_0_arm64.whl`（sha256 `2b0eb8ff840b786a425d96904ec95d0e019c9a4d95c0083098e5af732ef0788f`）装成 managed runtime：`runtime/current -> ...-2b0eb8ff840b-py3147`，`status=committed`、`readyz=true`、`downloaded_bytes=0`、`preset=quality`。回退点保留：上一 cp314 release `...-99bb218ae871-py3147` 与 cp312 `...-b6d3394c3dcd`。安装态源码已核对含 `_emit_frame`（不是只信安装退出码）。
+- **本轮修复的两个真实缺陷（各自原子 commit）：**
+  1. `609ab0ce`：`qwen3_tts_stream_client._publish` 由“丢弃非终态事件”改为对 worker 施加背压，避免突发音频被计成 `tts_backpressure`；终态仍按 `drop_stale` 分派，取消/内部故障立即挤出陈旧事件。
+  2. `aab7971a`：worker 的 `_emit` 重建 `StreamFrame` 时丢掉 host 帧上的 `on_sent`，`pending_audio_bytes` 只增不减，第 13 个 3840 B chunk 必然越过 `max_pending_audio_bytes=48000` 并报 `tts_backpressure`（wire trace 实测 13 个 delta 后报错，与 `48000/3840=12.5` 完全吻合）。改为 `_emit_frame` / `_emit_frame_best_effort` 透传回调；新增 `test_worker_retires_the_audio_budget_once_frames_are_delivered`，把回调重新丢弃即可复现 `tts_backpressure`（可复现红灯）。
+- **逐档真实增量基准**（`examples/perf/bench_tts_streaming.py`，真实 WebSocket + 真实 worker + 真实模型，`--repeat 3`，温态；数字为 p50，长句 254 字、四段追加 400 ms 间隔）：
+
+| 档位 | ASR / TTS | voice | 短句 first PCM / RTF | 长句 first PCM / RTF | 四段追加 first PCM / RTF | failures |
+|---|---|---|---|---|---|---|
+| light | asr-0.6b-q8 / tts-0.6b-custom-q8 | serena | 23.3 ms / 0.208 | 27.5 ms / 0.215 | 813.3 ms / 0.226 | `[]` |
+| balanced | asr-1.7b-q8 / tts-0.6b-custom-q8 | serena | 23.2 ms / 0.208 | 未测 | 820.9 ms / 0.199 | `[]` |
+| quality | asr-1.7b-q8 / tts-1.7b-base-q8 | tier-gate-clone-v2 | 43.4 ms / 0.237 | 182.7 ms / 0.268 | 822.9 ms / 0.240 | `[]` |
+| extreme | asr-1.7b-bf16 / tts-1.7b-base-bf16 | tier-gate-clone-v2 | 55.5 ms / 0.300（p95 1791 ms，含冷参考准备） | 56.7 ms / 0.332 | 811.5 ms / 0.295 | `[]` |
+
+- **分档差异（实测结论，回答“不同档升级方案是否有差异”）：** 协议与状态机四档完全一致（同一 `speechrail.tts.start/append_text/finish_text`、同一 worker 与 host 路径），差异只在身份条件与精度：light/balanced 用 CustomVoice 内置 speaker 且 `tts_clone=None`（无 clone 能力），quality 用 Base 1.7B q8 clone，extreme 用 Base 1.7B bf16 clone。Base 的 prepared reference 按量化隔离，同一 voice id 在 q8 与 bf16 下各自准备一次参考、不共享张量缓存；同一 TTS artifact 的 light 与 balanced 延迟同量级，但 ASR、分人与资源占用不同，端到端与内存不能互相代替。
+- **Base 参考音频需 ~2.4 s 级（新增结论）：** 8.4 s 参考会在 Base ICL 布局下触发 `prefill_did_not_enter_trailing_region`（探针 fail-closed）；本次 quality/extreme 门统一使用 2.4 s（57600 帧 @ 24 kHz）参考，四档全部通过。
+- **证据边界（not_run）：** 真实播放欠载、用户打断→停旧音、cancel→状态释放时延、跨文本盲听身份 A/B、长稳内存与缓存驻留趋势、light/balanced 的 ASR 端到端与分人、extreme 的资源峰值预算、App 可听验收与 UI 自动化、发布/签名/notarization 与远端 push。ASR 与基准只证明“文本被完整朗读且延迟达标”，不构成音色相似度、自然度或长稳验收；extreme 仍按候选档呈现。
