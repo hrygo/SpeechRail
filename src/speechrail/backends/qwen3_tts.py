@@ -486,6 +486,7 @@ class Qwen3TtsWorker:
 
         await self._incremental_slot.acquire()
         inner: Qwen3TtsIncrementalSession | None = None
+        epoch: int | None = None
         stack = contextlib.ExitStack()
         try:
             profile = stack.enter_context(
@@ -544,6 +545,12 @@ class Qwen3TtsWorker:
                     await inner.close()
             stack.close()
             self._release_incremental_slot()
+            if epoch is not None and not self._transport.alive:
+                # A failed open can reap the child through the client's abort
+                # fallback.  Leaving the worker marked started would make every
+                # later request write into a dead pipe, so invalidate it the way
+                # the batch path does and let the next request restart it.
+                await self._invalidate_after_abort(epoch)
             raise
 
     def _incremental_start_fields(

@@ -33,7 +33,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamEventKind,
     TtsStreamOptions,
 )
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 _PCM = b"\x01\x00\x02\x00"
 
@@ -223,6 +223,37 @@ def test_incremental_start_frame_carries_frozen_voice_profile(tmp_path: Path) ->
             assert "ref_audio" not in start
         finally:
             await session.close()
+
+    asyncio.run(run())
+
+
+def test_a_failed_open_leaves_the_worker_ready_to_restart(tmp_path: Path) -> None:
+    """A reaped child must not leave the worker marked started.
+
+    The client aborts the transport when a stream never opens, so the worker has
+    to invalidate itself the way the batch path does.  Keeping the started flag
+    would make every later request write into a dead pipe and surface as
+    ``tts_backend_failed`` until the whole service was restarted.
+    """
+
+    worker, transport = _worker(tmp_path, variant="custom_voice", stream_protocol=1)
+    transport.answer = False
+    transport._queue.put_nowait(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "tts_stream_error",
+            "request_id": "req_someone_else",
+            "code": "tts_backend_failed",
+            "terminal": True,
+        }
+    )
+
+    async def run() -> None:
+        with pytest.raises(ProtocolError):
+            await worker.open_incremental_stream(_options())
+        assert transport.alive is False
+        assert worker._started is False
+        assert worker.active_incremental_stream is False
 
     asyncio.run(run())
 
