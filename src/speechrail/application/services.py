@@ -11,6 +11,7 @@ from uuid import uuid4
 from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.application.render_receipts import RenderReceiptRegistry
+from speechrail.application.tts_stream import TtsStreamService
 from speechrail.application.tts_timings import TtsTimingRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
 from speechrail.backends.model_identity import inspect_model, is_observed_runtime_revision
@@ -180,6 +181,7 @@ class AppServices:
     metrics: Metrics = field(default_factory=Metrics)
     render_receipts: RenderReceiptRegistry = field(default_factory=RenderReceiptRegistry)
     tts_timings: TtsTimingRegistry = field(default_factory=TtsTimingRegistry)
+    tts_streams: TtsStreamService | None = None
 
     @property
     def asr_ready(self) -> bool:
@@ -676,6 +678,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     ):
         text_aligner = FixedTextAligner(asr_worker)
 
+    render_receipts = RenderReceiptRegistry()
+
     evictor: WorkerIdleEvictor | None = None
     if settings.worker_idle_timeout_seconds > 0:
         # The CoreML engine creates one Swift child for each session and that
@@ -692,6 +696,17 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 min_uptime_seconds=settings.worker_min_uptime_seconds,
                 on_eviction=metrics.record_eviction,
             )
+
+    tts_streams = TtsStreamService(
+        synthesizer=tts_synthesizer,
+        governor=governor,
+        receipts=render_receipts,
+        worker_lease=(
+            evictor.lease_lock_of(tts_worker).lease
+            if evictor is not None and tts_worker is not None
+            else None
+        ),
+    )
 
     asr_owner = getattr(asr_worker, "shared_owner", asr_worker) if asr_worker is not None else None
     streaming_owner = (
@@ -724,4 +739,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         lifecycle=lifecycle,
         text_aligner=text_aligner,
         metrics=metrics,
+        render_receipts=render_receipts,
+        tts_streams=tts_streams,
     )

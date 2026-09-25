@@ -36,6 +36,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamOptions,
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -48,6 +49,15 @@ if TYPE_CHECKING:
 
 DeliveryEventRecorder = Callable[[str, int], None]
 TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
+
+
+class TtsWorkerBusyError(RuntimeError):
+    """A lifecycle operation was refused because an utterance still owns the worker."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "backend_busy"
+        self.busy_reason = BusyReason.BACKEND_TRANSITION
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +206,12 @@ class Qwen3TtsWorker:
         """Whether this worker negotiated the private append-only protocol."""
 
         return self._stream_protocol == 1
+
+    @property
+    def active_incremental_stream(self) -> bool:
+        """Whether one utterance currently owns this worker, including while it waits."""
+
+        return self._incremental_slot.locked()
 
     @property
     def lifecycle_stats(self) -> dict[str, int | bool]:
@@ -744,6 +760,16 @@ class Qwen3TtsCapabilityRouter:
         return 1 + (1 if self.clone is not None else 0)
 
     @property
+    def active_incremental_streams(self) -> int:
+        """Return how many utterances currently hold a worker, waiting text included."""
+
+        count = 0
+        for worker in (self.primary,) + ((self.clone,) if self.clone is not None else ()):
+            if getattr(worker, "active_incremental_stream", False):
+                count += 1
+        return count
+
+    @property
     def alive(self) -> bool:
         return self.primary.alive or bool(self.clone is not None and self.clone.alive)
 
@@ -884,7 +910,14 @@ class Qwen3TtsCapabilityRouter:
         return None
 
     async def evict_warm_capability(self) -> None:
-        """Release all TTS workers before a heavyweight validation phase or idle eviction."""
+        """Release all TTS workers before a heavyweight validation phase or idle eviction.
+
+        An active incremental utterance owns its worker until its single terminal
+        outcome, so a group-level eviction reports busy instead of cutting the
+        session off mid-sentence.
+        """
+        if self.active_incremental_streams:
+            raise TtsWorkerBusyError("an incremental TTS utterance still owns a worker")
         async with self._capability_lock:
             workers = (self.clone, self.primary) if self.clone is not None else (self.primary,)
             for worker in workers:
