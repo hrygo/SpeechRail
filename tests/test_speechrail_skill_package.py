@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from importlib import resources
+
+
+def _registered_tool_names() -> set[str]:
+    """Return the tool names the shipped MCP server actually registers."""
+
+    from speechrail.mcp import server as mcp_server
+
+    async def collect() -> set[str]:
+        registered = await mcp_server.create_server().list_tools()
+        return {tool.name for tool in registered}
+
+    return asyncio.run(collect())
 
 
 def test_packaged_speechrail_skill_covers_the_published_mcp_surface() -> None:
@@ -12,7 +25,14 @@ def test_packaged_speechrail_skill_covers_the_published_mcp_surface() -> None:
     assert skill.startswith("---\nname: speechrail\n")
     assert "describe" in skill
     assert manifest["skill"] == "speechrail"
-    assert len(manifest["tools"]) == 15
+    tools = manifest["tools"]
+    assert len(tools) == len(set(tools)), "manifest must not repeat a tool"
+    # The manifest is the coverage contract for the registered surface, so a new
+    # public MCP tool that never reaches the installed skill fails here instead
+    # of silently shipping an under-documented artifact.
+    assert set(tools) == _registered_tool_names()
+    for name in tools:
+        assert name in skill, f"SKILL.md must advertise the {name!r} tool"
     assert "references/realtime.md" in manifest["references"]
     realtime = root.joinpath("references", "realtime.md").read_text(encoding="utf-8")
     # The installed artifact must teach the current wire: one revisioned mutable

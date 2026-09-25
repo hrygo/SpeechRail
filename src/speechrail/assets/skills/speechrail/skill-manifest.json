@@ -1,7 +1,7 @@
 {
   "schema_version": "speechrail_skill_manifest_v1",
   "skill": "speechrail",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "mcp_contract": "speechrail-mcp",
   "tools": [
     "describe",
@@ -15,6 +15,9 @@
     "cancel_job",
     "get_voice",
     "design_voice",
+    "confirm_voice_design",
+    "validate_voice_design",
+    "publish_voice_design",
     "clone_voice",
     "validate_voice",
     "list_jobs",

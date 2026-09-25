@@ -20,7 +20,8 @@ pass.
 Tool coverage:
 
 - speech: `transcribe`, `synthesize`, `preview_voice`
-- voices: `create_voice`, `get_voice`, `design_voice`, `clone_voice`,
+- voices: `create_voice`, `get_voice`, `design_voice`, `confirm_voice_design`,
+  `validate_voice_design`, `publish_voice_design`, `clone_voice`,
   `validate_voice`, `delete_voice`
 - jobs: `create_job`, `get_job`, `list_jobs`, `get_job_result`, `cancel_job`
 

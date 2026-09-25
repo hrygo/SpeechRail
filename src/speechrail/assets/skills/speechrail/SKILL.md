@@ -53,8 +53,9 @@ publish, download models, restart services, or upload user data.
 
 The skill covers all published tools: `describe`, `transcribe`, `synthesize`,
 `preview_voice`, `create_voice`, `delete_voice`, `create_job`, `get_job`,
-`cancel_job`, `get_voice`, `design_voice`, `clone_voice`, `validate_voice`,
-`list_jobs`, and `get_job_result`. It also covers the read-only resources
+`cancel_job`, `get_voice`, `design_voice`, `confirm_voice_design`,
+`validate_voice_design`, `publish_voice_design`, `clone_voice`,
+`validate_voice`, `list_jobs`, and `get_job_result`. It also covers the read-only resources
 `speechrail://capabilities`, `speechrail://voices`, and
 `speechrail://models`. The Realtime reference documents a direct WebSocket
 extension; it does not add an MCP tool or authorize a private REST route. Use
