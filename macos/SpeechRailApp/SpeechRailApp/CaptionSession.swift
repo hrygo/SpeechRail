@@ -567,7 +567,9 @@ public final class CaptionSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .speechStarted, .speechStopped:
+        case .ready, .configured, .speechStarted, .speechStopped,
+             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _):
+            // 字幕会话不接线 TTS：增量 utterance 属于助手那一层。
             break
         case .committed:
             let now = Date()

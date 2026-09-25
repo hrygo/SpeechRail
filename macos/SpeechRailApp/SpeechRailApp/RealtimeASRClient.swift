@@ -203,6 +203,17 @@ public actor RealtimeASRClient {
         case diarizationDone(throughSample: Int, status: String)
         /// TTS 音频块（24 kHz PCM16）。助手那一侧才用得上。
         case responseAudio(requestID: String, responseID: String, pcm: Data)
+        /// 增量 utterance 已取得准入（`speechrail.tts.started`）。
+        /// **收到它之前不得 append，服务端在此之前也不会发 PCM。**
+        case ttsStarted(requestID: String, responseID: String, limits: TTSStreamLimits?)
+        /// 一次 append 的 ACK（`speechrail.tts.text_accepted`）。
+        /// ACK 失败不推进 `appendSequence`——调用方只认这些回执推进序号。
+        case ttsTextAccepted(
+            requestID: String,
+            responseID: String,
+            appendSequence: Int,
+            totalCodepoints: Int
+        )
         /// TTS 一轮结束：`completed` / `cancelled` / `failed`。
         case responseDone(
             requestID: String,
@@ -253,6 +264,14 @@ public actor RealtimeASRClient {
     private var activeTTSRequestID: String?
     private var activeTTSResponseID: String?
     private var activeTTSAudioSuppressed = false
+    /// 当前 request 是否已经进入增量模式（收到过 `speechrail.tts.started`）。
+    private var activeTTSStreaming = false
+    /// 最后一个被 ACK 的 append 序号；从 -1 起，与契约的"空输入为 -1"一致。
+    private var activeTTSConsumedSequence = -1
+    private var expectedAudioChunkIndex = 0
+    private var expectedAudioSampleOffset = 0
+    /// 因请求不匹配/序号不连续/奇数字节而被丢掉的音频块计数（诊断用）。
+    public private(set) var droppedAudioChunks = 0
     /// `finish` 的 event_id。契约要求同一个 id 重试幂等、不同 id 拒绝。
     private var finishEventID: String?
     private var finishSent = false
@@ -446,6 +465,63 @@ public actor RealtimeASRClient {
             }
             throw error
         }
+    }
+
+    /// 开始一次增量 utterance（契约 §3.3.1）。
+    ///
+    /// 返回只表示 `speechrail.tts.start` 已发出；必须等到 `.ttsStarted` 才能 append。
+    /// 文本、序列号、ACK 等待和打断都归调用方（`AssistantTTSStreamCoordinator`）。
+    public func startTTSStream(requestID: String, speed: Double? = nil) async throws {
+        activeTTSRequestID = requestID
+        activeTTSResponseID = nil
+        activeTTSAudioSuppressed = false
+        activeTTSStreaming = false
+        activeTTSConsumedSequence = -1
+        expectedAudioChunkIndex = 0
+        expectedAudioSampleOffset = 0
+        do {
+            try await send(
+                SpeechRailTTSStart(
+                    requestID: requestID,
+                    voice: voice,
+                    speed: speed,
+                    expectedVoiceRevision: expectedVoiceRevision,
+                    expectedModelRevision: expectedModelRevision
+                ).jsonObject
+            )
+        } catch {
+            if activeTTSRequestID == requestID { clearActiveTTS() }
+            throw error
+        }
+    }
+
+    /// 往当前 utterance 追加一段已经稳定的文本。
+    public func appendTTSText(_ text: String, sequence: Int) async throws {
+        guard let requestID = activeTTSRequestID else {
+            throw Failure.transport("没有活动的 TTS utterance")
+        }
+        try await send(
+            SpeechRailTTSAppendText(
+                requestID: requestID,
+                sequence: sequence,
+                text: text,
+                responseID: activeTTSResponseID
+            ).jsonObject
+        )
+    }
+
+    /// 关闭文本输入。`lastSequence` 必须是最后一次 ACK 的序号；空输入为 `-1`。
+    public func finishTTSText(lastSequence: Int) async throws {
+        guard let requestID = activeTTSRequestID else {
+            throw Failure.transport("没有活动的 TTS utterance")
+        }
+        try await send(
+            SpeechRailTTSFinishText(
+                requestID: requestID,
+                lastSequence: lastSequence,
+                responseID: activeTTSResponseID
+            ).jsonObject
+        )
     }
 
     /// 取消正在合成的 TTS（用户插话）。未发送的音频由服务端丢弃。
@@ -742,15 +818,60 @@ public actor RealtimeASRClient {
                !responseID.isEmpty {
                 activeTTSResponseID = responseID
             }
+        case "speechrail.tts.started":
+            guard
+                let started = TTSSessionStarted(object: object),
+                started.requestID == activeTTSRequestID,
+                activeTTSResponseID == nil || activeTTSResponseID == started.responseID
+            else { break }
+            activeTTSResponseID = started.responseID
+            activeTTSStreaming = true
+            expectedAudioChunkIndex = 0
+            expectedAudioSampleOffset = 0
+            emit(
+                .ttsStarted(
+                    requestID: started.requestID,
+                    responseID: started.responseID,
+                    limits: started.limits
+                )
+            )
+        case "speechrail.tts.text_accepted":
+            guard
+                let accepted = TTSTextAccepted(object: object),
+                accepted.requestID == activeTTSRequestID,
+                accepted.responseID == activeTTSResponseID,
+                accepted.appendSequence == activeTTSConsumedSequence + 1
+            else { break }
+            activeTTSConsumedSequence = accepted.appendSequence
+            emit(
+                .ttsTextAccepted(
+                    requestID: accepted.requestID,
+                    responseID: accepted.responseID,
+                    appendSequence: accepted.appendSequence,
+                    totalCodepoints: accepted.totalCodepoints
+                )
+            )
         case "response.output_audio.delta":
+            // 旧 response、取消后的迟到块：静默隔离，不进播放层。
             guard
                 let requestID = activeTTSRequestID,
                 let responseID = activeTTSResponseID,
                 object["response_id"] as? String == responseID,
-                !activeTTSAudioSuppressed,
-                let base64 = object["delta"] as? String,
-                let data = Data(base64Encoded: base64)
+                !activeTTSAudioSuppressed
             else { break }
+            guard
+                let base64 = object["delta"] as? String,
+                let data = Data(base64Encoded: base64),
+                !data.isEmpty,
+                data.count.isMultiple(of: MemoryLayout<Int16>.size)
+            else {
+                droppedAudioChunks += 1
+                break
+            }
+            if activeTTSStreaming, !acceptAudioPosition(object: object, pcmBytes: data.count) {
+                droppedAudioChunks += 1
+                break
+            }
             emit(.responseAudio(requestID: requestID, responseID: responseID, pcm: data))
         case "response.done":
             let response = object["response"] as? [String: Any]
@@ -773,9 +894,7 @@ public actor RealtimeASRClient {
                     receipt: Self.renderReceipt(from: object)
                 )
             )
-            activeTTSRequestID = nil
-            activeTTSResponseID = nil
-            activeTTSAudioSuppressed = false
+            clearActiveTTS()
         case "conversation.item.input_audio_transcription.failed":
             let itemID = object["item_id"] as? String ?? ""
             closeBarrier.failed(itemID: itemID)
@@ -796,9 +915,7 @@ public actor RealtimeASRClient {
             }
             let requestID = error?["request_id"] as? String
             if requestID == activeTTSRequestID {
-                activeTTSRequestID = nil
-                activeTTSResponseID = nil
-                activeTTSAudioSuppressed = false
+                clearActiveTTS()
             }
             emit(
                 .serverError(
@@ -878,6 +995,33 @@ public actor RealtimeASRClient {
             return receipt
         }
         return nil
+    }
+
+    /// 增量 PCM 的块序号与 sample offset 必须严格连续，格式必须是 canonical
+    /// 24 kHz / mono PCM16；不合格的块宁可丢掉，也不能把错位音频拼进同一轮播放缓冲。
+    private func acceptAudioPosition(object: [String: Any], pcmBytes: Int) -> Bool {
+        guard let position = TTSAudioPosition(speechrail: object["speechrail"]) else { return false }
+        guard
+            position.chunkIndex == expectedAudioChunkIndex,
+            position.sampleOffset == expectedAudioSampleOffset,
+            position.sampleRate == TTSAudioPosition.canonicalSampleRate,
+            position.channels == 1
+        else { return false }
+        expectedAudioChunkIndex += 1
+        expectedAudioSampleOffset = position.nextSampleOffset(pcmBytes: pcmBytes)
+        return true
+    }
+
+    /// 清空当前 TTS 关联。**只有身份匹配的调用方才该调用它**，
+    /// 否则旧 response 的迟到终态会抹掉新一轮的状态。
+    private func clearActiveTTS() {
+        activeTTSRequestID = nil
+        activeTTSResponseID = nil
+        activeTTSAudioSuppressed = false
+        activeTTSStreaming = false
+        activeTTSConsumedSequence = -1
+        expectedAudioChunkIndex = 0
+        expectedAudioSampleOffset = 0
     }
 
     private func emit(_ event: Event) {

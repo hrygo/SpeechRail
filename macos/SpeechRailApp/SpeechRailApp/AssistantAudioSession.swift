@@ -7,8 +7,14 @@ import Foundation
 protocol AssistantAudioSession: AnyObject, AudioChunkSource {
     func configure(mode: AssistantMode)
     var onPlaybackDrained: (@MainActor () -> Void)? { get set }
+    /// 每一块**真的播完**（`dataRendered`，不是 `.dataConsumed`）时回调一次，带回帧数。
+    /// 增量 TTS 的播放预算靠它逐块归还；"排空"与"播完"是两件事。
+    var onPlaybackBufferRendered: (@MainActor (Int) -> Void)? { get set }
     var onFailure: (@MainActor (String) -> Void)? { get set }
-    func enqueuePlayback(_ pcm: Data) async
+    /// 返回 `false` 表示这一块**没有**进播放队列（已停止/设备不可用），
+    /// 调用方必须把已经预约的播放预算还回去。
+    @discardableResult
+    func enqueuePlayback(_ pcm: Data) async -> Bool
     func stopPlayback() async
 }
 
@@ -73,6 +79,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     private var playbackGeneration = 0
     private var pendingBuffers = 0
     private var playbackDrainedHandler: (@MainActor () -> Void)?
+    private var playbackBufferRenderedHandler: (@MainActor (Int) -> Void)?
     private var failureHandler: (@MainActor (String) -> Void)?
 
     init() {
@@ -87,6 +94,11 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     var onPlaybackDrained: (@MainActor () -> Void)? {
         get { stateLock.withLock { playbackDrainedHandler } }
         set { stateLock.withLock { playbackDrainedHandler = newValue } }
+    }
+
+    var onPlaybackBufferRendered: (@MainActor (Int) -> Void)? {
+        get { stateLock.withLock { playbackBufferRenderedHandler } }
+        set { stateLock.withLock { playbackBufferRenderedHandler = newValue } }
     }
 
     var onFailure: (@MainActor (String) -> Void)? {
@@ -163,15 +175,16 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
     }
 
-    func enqueuePlayback(_ pcm: Data) async {
-        guard !pcm.isEmpty, let playbackFormat else { return }
+    @discardableResult
+    func enqueuePlayback(_ pcm: Data) async -> Bool {
+        guard !pcm.isEmpty, let playbackFormat else { return false }
         let frameCount = pcm.count / MemoryLayout<Int16>.size
         guard frameCount > 0,
               let buffer = AVAudioPCMBuffer(
                 pcmFormat: playbackFormat,
                 frameCapacity: AVAudioFrameCount(frameCount)
               )
-        else { return }
+        else { return false }
         buffer.frameLength = AVAudioFrameCount(frameCount)
         if let destination = buffer.int16ChannelData?[0] {
             pcm.withUnsafeBytes { raw in
@@ -189,13 +202,13 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             pendingBuffers += 1
             return (playbackGeneration, resetCapture)
         }
-        guard let reservation else { return }
+        guard let reservation else { return false }
         let boxedBuffer = AssistantPCMBufferBox(buffer)
 
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+        return await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
             queue.async { [weak self] in
                 guard let self else {
-                    done.resume()
+                    done.resume(returning: false)
                     return
                 }
                 let accepted = self.stateLock.withLock {
@@ -205,20 +218,25 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
                 }
                 guard accepted, let player = self.player else {
                     self.cancelPlaybackReservation(generation: reservation.generation)
-                    done.resume()
+                    done.resume(returning: false)
                     return
                 }
                 if reservation.resetCapture {
                     self.ring.discardPending()
                 }
+                // `.dataRendered`：真的送进了输出，而不是"AVAudioPlayerNode 已经消化了这段数据"。
+                // 增量 TTS 的播放预算和"整轮播完"都按这个语义记账。
                 player.scheduleBuffer(
                     boxedBuffer.buffer,
-                    completionCallbackType: .dataConsumed
+                    completionCallbackType: .dataRendered
                 ) { [weak self] _ in
-                    self?.didFinishPlaybackBuffer(generation: reservation.generation)
+                    self?.didFinishPlaybackBuffer(
+                        generation: reservation.generation,
+                        frames: frameCount
+                    )
                 }
                 if !player.isPlaying { player.play() }
-                done.resume()
+                done.resume(returning: true)
             }
         }
     }
@@ -637,20 +655,30 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
     }
 
-    private func didFinishPlaybackBuffer(generation: Int) {
-        let result: (@MainActor () -> Void)? = stateLock.withLock {
+    private func didFinishPlaybackBuffer(generation: Int, frames: Int) {
+        let handlers: (
+            rendered: (@MainActor (Int) -> Void)?,
+            drained: (@MainActor () -> Void)?,
+            discardCapture: Bool
+        )? = stateLock.withLock {
             guard generation == playbackGeneration, !stopped else { return nil }
             pendingBuffers = max(0, pendingBuffers - 1)
-            guard pendingBuffers == 0 else { return nil }
-            return playbackDrainedHandler
+            return (
+                rendered: playbackBufferRenderedHandler,
+                drained: pendingBuffers == 0 ? playbackDrainedHandler : nil,
+                discardCapture: !mode.allowsBargeIn
+            )
         }
-        guard let result else { return }
-        let shouldDiscardCapture = stateLock.withLock { !mode.allowsBargeIn }
+        guard let handlers else { return }
+        if let rendered = handlers.rendered {
+            Task { @MainActor in rendered(frames) }
+        }
+        guard let drained = handlers.drained else { return }
         queue.async { [weak self] in
-            if shouldDiscardCapture {
+            if handlers.discardCapture {
                 self?.ring.discardPending()
             }
-            Task { @MainActor in result() }
+            Task { @MainActor in drained() }
         }
     }
 }
