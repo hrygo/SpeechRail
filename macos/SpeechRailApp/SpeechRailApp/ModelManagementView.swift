@@ -4,6 +4,8 @@ import SwiftUI
 public struct ModelManagementView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    /// 助手还在听/想/说时不能切档：切档会重启服务，等于把这一轮打断。
+    @Environment(AssistantSession.self) private var assistant
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedProfile: SpeechRailProfile = .balanced
@@ -44,6 +46,8 @@ public struct ModelManagementView: View {
                         case .download:
                             await model.prepareModels(for: selectedProfile)
                         case .apply:
+                            // 确认对话框可能在助手开始说话后才被按下；这里再挡一次。
+                            guard !assistant.phase.isLive else { return }
                             await model.execute(.profileApply, profile: selectedProfile)
                         }
                     }
@@ -524,6 +528,12 @@ public struct ModelManagementView: View {
                         .lineLimit(1)
                 }
             }
+            if assistantBlocksProfileSwitch {
+                Text(profileSwitchBlockedByAssistantText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !missingDiarizationKeys.isEmpty {
                 Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -782,7 +792,16 @@ public struct ModelManagementView: View {
     }
 
     private var canApplyProfile: Bool {
-        canPrepareModels && profileArtifactsVerified
+        canPrepareModels && profileArtifactsVerified && !assistant.phase.isLive
+    }
+
+    /// 助手进行中时，用普通用户能懂的话说明为什么现在不能切档、下一步做什么。
+    private var profileSwitchBlockedByAssistantText: String {
+        "助手正在进行中（\(assistant.phase.title)）。先结束这一轮，或点「停止」把助手停下来，再应用档位。"
+    }
+
+    private var assistantBlocksProfileSwitch: Bool {
+        assistant.phase.isLive
     }
 
     private var profileArtifactsVerified: Bool {
