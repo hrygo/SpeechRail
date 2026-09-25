@@ -2,7 +2,7 @@
 title: "Issue #95 交付认证方案与证据索引"
 status: draft
 audience: "SpeechRail 维护者与验收人"
-version: "0.2.0"
+version: "0.2.1"
 date: 2026-09-26
 ---
 
@@ -143,6 +143,7 @@ date: 2026-09-26
 | 静态 / 契约 / 编译 | 通过：计划 §8.1 四组定向验收合计 **571 passed**（207 / 82 / 123 / 159）；`ruff` 全绿；`mypy src` 148 文件无错；Realtime 契约 41 fixtures / 32 tracked fields；文档与版本一致性 ok；`swift test` 144 tests / 15 suites；`scripts/macos_app_build.sh` **BUILD SUCCEEDED** | 账本 `.superpowers/sdd/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide/progress.md` |
 | 供应链（受控引擎 wheel） | 通过：固定上游 revision + overlay/patch 摘要校验，连续两次重建 byte-identical；`runtime-lock.json` 写入 `engine_wheel` pin。**未在本机安装该 wheel** | `vendor/engine-build/engine-build.json`、`src/speechrail/assets/runtime-lock.json` |
 | 制品 | 通过：catalog 装载时 `assert_target_spec_bindings()` 对 13 个 `(tier, role)` 绑定精确匹配；缺失制品按授权异步准备完成并逐文件 size / SHA-256 校验为 `verified`（准备记录与制品在仓库外） | 同上；`src/speechrail/assets/model-catalog.json` |
+| T04 owner 抽象 | `runtime/model_owner.py` 与 `tests/test_model_owner.py`（13 passed）是 T04 规格产出的 owner / lease 抽象与其 fake 验证面；生产侧「唯一 owner」由按 plan role 绑定的 TTS capability router + 进程级 drain 承担，**未接入** `application/services.py`（不做 live hot-swap） | 账本「2026-09-26 T04 收口复核 Ruling」 |
 | 交付范围 | 未运行完整 pytest 套件（仓库 addopts 强制 ≥80% 覆盖率门，计划列为需明确授权项）；未部署、未切档、未加载真实模型 | 同上 |
 
 ### 7.2 运行态登记（待授权，尚未开始）
