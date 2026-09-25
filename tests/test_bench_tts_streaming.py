@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -18,6 +19,10 @@ from examples.perf.bench_tts_streaming import (
     run_incremental_turn,
     summarise,
 )
+
+from speechrail.app import create_app
+from speechrail.config import Settings
+from test_realtime_tts_incremental import FakeIncrementalSynthesizer, _preset_kwargs
 
 _STARTED = {
     "type": "speechrail.tts.started",
@@ -70,6 +75,19 @@ class FakeConnection:
 
     def of_type(self, kind: str) -> list[dict[str, Any]]:
         return [event for event in self.sent if event["type"] == kind]
+
+
+class _WebSocketBenchmarkAdapter:
+    """Adapt a test websocket to the benchmark's ``send`` / ``recv`` seam."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def send(self, event: dict[str, Any]) -> None:
+        self._session.send_json(event)
+
+    def recv(self) -> dict[str, Any]:
+        return self._session.receive_json()
 
 
 def _audio_delta(payload: bytes, *, sample_rate: int = 24_000) -> dict[str, Any]:
@@ -359,3 +377,36 @@ def test_run_incremental_turn_rejects_unusable_arguments(
 
     with pytest.raises(ValueError, match=message):
         run_incremental_turn(connection, text="增量", clock=clock, sleep=clock.sleep, **kwargs)
+
+
+def test_run_incremental_turn_drives_the_real_realtime_server() -> None:
+    """The probe must speak the protocol the server actually implements.
+
+    This runs the real ``create_app`` Realtime translation layer, the real
+    admission and the real ``StreamController`` against a vendor-neutral fake
+    synthesizer, so a drifting probe cannot pass on scripted events alone.
+    """
+
+    synthesizer = FakeIncrementalSynthesizer(audio_chunks=(b"\x01\x02" * 12_000,))
+    client = TestClient(
+        create_app(Settings(**_preset_kwargs("balanced")), tts_synthesizer=synthesizer)
+    )
+
+    with client.websocket_connect("/v1/realtime") as socket:
+        trace = run_incremental_turn(
+            _WebSocketBenchmarkAdapter(socket),
+            text="你好，这是增量朗读的延迟测量。",
+            slices=2,
+            timeout_seconds=30.0,
+        )
+
+    assert trace.failure is None
+    assert trace.first_audio_at is not None
+    assert trace.append_to_first_pcm_seconds is not None
+    assert trace.audio_bytes == 24_000
+    assert trace.audio_seconds == pytest.approx(0.5)
+
+    session = synthesizer.sessions[0]
+    assert [sequence for sequence, _ in session.appended] == [0, 1]
+    assert "".join(piece for _, piece in session.appended) == "你好，这是增量朗读的延迟测量。"
+    assert session.finished == 1
