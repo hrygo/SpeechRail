@@ -1,22 +1,22 @@
 ---
-title: "Quality / Extreme 档音色创造、克隆与稳定化能力架构"
+title: "Quality / Reference 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "1.4"
-date: 2026-09-23
+version: "2.0"
+date: 2026-09-26
 ---
 
-# Quality / Extreme 档音色创造、克隆与稳定化能力架构
+# Quality / Reference 档音色创造、克隆与稳定化能力架构
 
 ## 1. 决策摘要
 
-`quality` 与候选 `extreme` 的 catalog 都配置**音色创造（voice design）**和**参考音色克隆（voice clone）**能力。两档只在权重精度与其证据状态上不同；能力是否可用仍由当前运行时实际声明决定。两类任务不再由同一个模型混用：
+当前 catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`reference` 另绑定仅供设计作业使用的 `voice_design`。能力是否可用仍由当前运行时实际声明决定。三类任务不再由同一个模型混用：
 
-- **提示词设计音色**：Qwen3-TTS VoiceDesign 1.7B，职责是根据自然语言描述创造声线；
-- **参考音频克隆**：Qwen3-TTS Base 1.7B，职责是根据参考音频 + 准确参考文本复现 speaker identity；
-- **常规内置音色**：`quality` / 候选 `extreme` 由 VoiceDesign 提供，`balanced/light` 由 CustomVoice 0.6B 提供；
-- **双 capability worker**：Base 作为 `quality.tts_clone` / `extreme.tts_clone` capability artifact 安装，并与 VoiceDesign 使用独立 worker。两者可以同时常驻、分别处理请求；懒加载只决定首次加载时机，不会在 capability 切换时卸载另一模型。
-- **候选精度状态**：`quality` 使用 q8 speech artifacts；`extreme` 使用 bf16 speech artifacts。后者尚无质量、资源或延迟验证，不能推导质量排名或正式发布结论。
+- **提示词设计音色**：只由 `reference` 的 Qwen3-TTS VoiceDesign 1.7B BF16 承担，职责是根据自然语言描述创造声线；普通 synthesize 不接受 Design 音色。
+- **参考音频克隆**：由所选 TTS spec 的 Qwen3-TTS Base 承担，职责是根据参考音频 + 准确参考文本复现 speaker identity；`fast` / `quality` 为 8-bit，`reference` 为 bf16。
+- **常规内置音色**：三档均由 CustomVoice 提供；0.6B 用于 `fast`，1.7B 用于 `quality` / `reference`。
+- **按角色 capability worker**：每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`reference` 另绑定 `voice_design`。角色各自使用独立 worker，可分别处理请求；懒加载只决定首次加载时机，不会在正常 capability 切换时反复换模。
+- **精度证据**：`quality` 使用 q8 speech artifacts；`reference` 使用 bf16 speech artifacts，按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。继承证据不推导质量排名、资源峰值或正式启用状态。
 
 该设计修正了旧实现把参考克隆请求送入 VoiceDesign 私有 `_generate_icl()` 的职责混用。clone 现在只允许由 `base` variant 经 MLX-Audio **公开 `generate(...)` 接口**执行。
 
@@ -43,7 +43,7 @@ flowchart LR
 
 目标语义是“创造一种声音”，而不是“复刻一个已有的人”。VoiceDesign 接收文本描述，例如年龄感、音高、口音、情绪和播报风格。
 
-本 PR 的运行时边界：
+当前运行时边界：
 
 1. prompt-created voice 继续由 VoiceDesign 合成；
 2. VoiceDesign 不再被允许承接 reference clone；
@@ -75,38 +75,21 @@ VoiceDesign、CustomVoice 均不得作为 reference clone fallback。Base 不可
 
 ## 3. Catalog 与能力建模
 
-`ModelPreset` 将模型档位与 capability artifact 分离：
+`ModelSpec` 将 spec tier 与 capability artifact 分离；运行目录的精确绑定矩阵如下：
 
-```yaml
-quality:
-  asr: asr-1.7b-q8
-  tts: tts-1.7b-design-q8
-  tts_clone: tts-1.7b-base-q8
-  aligner: aligner-bf16
-  diarization: true
-extreme:
-  asr: asr-1.7b-bf16
-  tts: tts-1.7b-design-bf16
-  tts_clone: tts-1.7b-base-bf16
-  aligner: aligner-bf16
-  diarization: true
+| spec | `asr` | `tts_custom_voice` | `tts_base` | `voice_design` |
+|---|---|---|---|---|
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | `tts-0.6b-base-q8` | — |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` | `tts-1.7b-base-q8` | — |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` | `tts-1.7b-base-bf16` | `tts-1.7b-design-bf16` |
 
-balanced:
-  tts: tts-0.6b-custom-q8
-  tts_clone: null
-
-light:
-  tts: tts-0.6b-custom-q8
-  tts_clone: null
-```
-
-`tts` 表示档位的默认 TTS；`tts_clone` 是可选的 clone capability，并不把 Base 伪装成默认 TTS。`/v1/models` 的 `supports_clone` 只有在运行时实际解析到 `base` capability 时才为 `true`。
+`tts_custom_voice` 承载固定系统声音；`tts_base` 承担 reference clone；`voice_design` 只承担设计作业。`/v1/models` 的 `supports_clone` 只有在运行时实际解析到 Base capability 时才为 `true`。
 
 Base artifact 使用不可变模型 revision 和逐文件 SHA-256，遵循与其他 managed artifacts 相同的离线、校验、原子发布和 fail-closed 规则。
 
 ## 4. 运行时模型槽：双 capability 并行与冷却驱逐
 
-`quality` 与候选 `extreme` 的 `Qwen3TtsCapabilityRouter` 各自维护两个独立的 capability worker，而不是在请求之间交换一个模型槽：
+`Qwen3TtsCapabilityRouter` 按角色维护独立 worker，而不是在请求之间交换一个模型槽；`reference` 的 VoiceDesign 只为设计任务加载：
 
 ```mermaid
 flowchart LR
@@ -124,17 +107,17 @@ flowchart LR
 
 运行规则：
 
-1. 非懒加载模式下服务启动按顺序 warm primary VoiceDesign 与 Base；懒加载模式下先按请求加载所需 worker，另一 worker 在首次使用时加载；
-2. 请求根据 VoiceProfile 进入 `voice_design` 或 `voice_clone` lane；不同 lane 可以并发，同一 lane 由对应 worker 的私有 lock 串行；
+1. 非懒加载模式下服务按当前 plan 所需的角色 warm；懒加载模式下先按请求加载所需 worker，其他角色在首次使用时加载；
+2. 请求根据 VoiceProfile 与任务进入 `custom_voice`、`base` 或 `voice_design` lane；不同 lane 可以并发，同一 lane 由对应 worker 的私有 lock 串行；
 3. capability 切换只改变路由，不关闭另一 worker，因此连续的“设计音色 → 使用已有 clone”不会反复加载/卸载模型；
-4. `/health` 的 `tts_lifecycle.warm_capability` 在双 warm 时报告 `both`，并以 `warm_capabilities` 给出 `voice_design` / `voice_clone` 明细；探测不得触发模型加载；
-5. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
+4. `/health` 的 `tts_lifecycle.warm_capability` 以 `warm_capabilities` 给出当前实际驻留的角色明细；探测不得触发模型加载；
+5. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 `custom_voice` / `base` / `voice_design` 身份由独立的 `model_variant` 表达；
 6. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
 7. `quality-runs` 作为批量 TTS 工作必须进入带 capability key 的 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
-8. `WorkerIdleEvictor` 把 router 视为一个能力组：warm standby 同时 trim 两个 worker，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求惰性恢复所需 worker，不发生请求级互斥换模；
+8. `WorkerIdleEvictor` 把当前 capability group 作为回收单位：warm standby 一起 trim，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求惰性恢复所需角色，不发生请求级互斥换模；
 9. 合成门通过后，先在同一请求 deadline 内释放两个 TTS worker，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
 
-双常驻会增加 `quality` / 候选 `extreme` 的活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。Extreme 的峰值尚未验证，不能复用 Quality 的测量值。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的 worker。
+多角色常驻会增加活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。不同 spec、不同角色的峰值不可互相外推。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的角色。
 
 ## 5. VoiceProfile / VoiceRevision 收敛方向
 
@@ -183,11 +166,11 @@ SpeechRail 应成为 canonical reference 的权威处理边界：
 
 当前服务端已对新注册参考执行一次有界规范化，并关闭 vendor 的 `volume_normalize`：20 ms 窗口以 -45 dBFS 能量阈值筛选，目标 -20 dBFS，增益最多 +9 dB、衰减最多 12 dB，并以 0.95 样本峰值上限优先约束；仅裁剪首尾低能量区并保留约 200 ms 边界，内部停顿不改写。这些是工程初始值，并非目标机实测最优参数。
 
-该能量筛选**不是神经 VAD 或降噪器**，不能保证移除背景噪声，也不能识别多人或修复混响。Sona 的录音端增益仍需协同整改；现有参考不会自动重写，因此本 PR 不宣称全链路单次归一或专业表达已经完成。旧音色不自动迁移；需要继续使用时必须重新注册或按当前路径重新验收，禁止用静默更换参考掩盖模型变化。
+该能量筛选**不是神经 VAD 或降噪器**，不能保证移除背景噪声，也不能识别多人或修复混响。Sona 的录音端增益仍需协同整改；现有参考不会自动重写，因此本轮实现不宣称全链路单次归一或专业表达已经完成。旧音色不自动迁移；需要继续使用时必须重新注册或按当前路径重新验收，禁止用静默更换参考掩盖模型变化。
 
 ## 7. “像本人”与“播得专业”必须解耦
 
-Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同一个目标。Quality 后续提供两种体验：
+Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同一个目标。后续表达控制可提供两种体验：
 
 - **原声保真**：优先保留用户身份、口音与自然表达；
 - **自然播报/专业表达**：保留身份，但语速、停顿、重音、情绪由独立表达控制承担。
@@ -211,16 +194,15 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 
 ## 9. 分阶段演进
 
-### Phase A — 本 PR：能力职责正确化
+### Phase A — 已实施（2026-09-26）：能力职责正确化
 
-- catalog 增加 Base clone artifact；
-- Quality preset 增加 `tts_clone`；
+- catalog 为每个 spec 绑定 Base clone artifact；
 - Base 成为唯一 reference clone variant；
 - clone 改走 vendor public `generate`；
-- capability router 实现 VoiceDesign/Base 双 worker、分 lane 并发与组级 idle eviction；
+- capability router 按 `custom_voice` / `base` / `voice_design` 角色路由、分 lane 并发与组级 idle eviction；VoiceDesign 只绑定 `reference` 且只服务设计作业；
 - managed install / profile / preflight / model capability 全链同步；
 - README、架构与当前边界更新；
-- 保持 Balanced/Light 与现有公共请求形状不变。
+- 公共 API payload 结构保持稳定，规格与能力通过显式 spec/role 声明。
 
 ### Phase B — 参考音频质量流水线
 
@@ -245,7 +227,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 
 ## 10. 回滚
 
-- catalog/preset 回滚到无 `tts_clone` 的版本即可恢复旧安装集合；
+- catalog/spec binding 回滚到前一已验证矩阵即可恢复旧安装集合；
 - runtime router 可以整体回滚，不修改已有 clone reference 文件格式；
-- 本 PR 不自动重写已有 VoiceProfile，不做不可逆音色资产迁移；
+- 当前实现不自动重写已有 VoiceProfile，不做不可逆音色资产迁移；
 - 不允许在回滚时把 clone 请求重新静默送给 VoiceDesign；若 Base 不存在，应显式把 clone capability 标记为不可用。

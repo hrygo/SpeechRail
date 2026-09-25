@@ -317,7 +317,7 @@ structured content，不缓存音频，也不负责播放。
 ### 5.3 `preview_voice`、`create_voice` 与 `delete_voice`
 
 `preview_voice` 接受 `instruction` 与 `text`，只在活动有效能力快照声明 TTS artifact 的
-variant 为 `voice_design` 时可用。当前 catalog 的 `quality` 与候选 `extreme` 都配置该能力。试听是 ephemeral；它不创建持久 voice。指令应使用中英文描述声学特征，
+variant 为 `voice_design` 时可用。当前 catalog 只有 `reference` 档绑定 `voice_design`，且在快照就绪时声明该能力。试听是 ephemeral；它不创建持久 voice。指令应使用中英文描述声学特征，
 不要模仿真实人物，不写互相矛盾或无信息量的形容词。
 
 `create_voice` 通过 `POST /v1/voices` 创建 instruction voice。创建不限当前档位，但能力不可用时会在当前快照中报告 `available=false`；档位由 MCP 外部的操作者管理，MCP 不切换或建议自动切换。`seed` 只是服务契约允许的创建参数，

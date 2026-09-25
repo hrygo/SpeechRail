@@ -2,8 +2,8 @@
 title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
 audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
-version: "2.3"
-date: 2026-09-23
+version: "2.4"
+date: 2026-09-26
 ---
 
 # VoiceDesign 能力优势与音色稳定性边界
@@ -14,12 +14,12 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 
 但 VoiceDesign 不再承担 SpeechRail 的 reference voice cloning。当前职责是：
 
-- `quality / VoiceDesign 1.7B q8` 与候选 `extreme / VoiceDesign 1.7B bf16`：提示词音色设计与各自 profile 的默认 TTS；
-- `quality / Base 1.7B q8` 与候选 `extreme / Base 1.7B bf16`：参考音频克隆，由独立 capability worker 承担；允许与 VoiceDesign 双常驻，所在 capability group 冷却后可一起回收并在下一次请求时惰性恢复；
-- `balanced/light / CustomVoice 0.6B`：九个固定 speaker；
+- `reference` 的 VoiceDesign 1.7B BF16：提示词音色设计，只服务设计作业，普通 synthesize 不接受 Design 音色；
+- 每个 TTS spec 的 Base（`fast`/`quality` 为 8-bit，`reference` 为 bf16）：参考音频克隆，由独立 capability worker 承担；允许与其他角色按预算并发，所在 capability group 冷却后可一起回收并在下一次请求时惰性恢复；
+- 每个 TTS spec 的 CustomVoice：固定内置 speaker，普通合成与普通实时 TTS 的默认角色（`fast` 0.6B，`quality`/`reference` 1.7B）；
 - Prompt voice 如果后续需要“跨任意文本始终像同一个人”，走 **VoiceDesign → canonical reference → Base stabilization**，而不是反复让 VoiceDesign 对每段目标文本重新拟合身份。
 
-完整架构见 [Quality / Extreme 音色创造、克隆与稳定化能力架构](quality-voice-capabilities.md)。`extreme` 的模型质量与运行资源尚未验证，不从 BF16 dtype 推断效果。
+完整架构见 [Quality / Reference 档音色创造、克隆与稳定化能力架构](quality-voice-capabilities.md)。`reference` 的 bf16 制品按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测，也不从 BF16 dtype 推断质量效果或资源峰值。
 
 ## 2. 为什么要分离创造与复现
 
@@ -34,16 +34,19 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 
 旧实现用 VoiceDesign 私有 ICL 方法承接 reference clone，会把“模型内部能够接受参考上下文”误解为“这是该模型最合适、最稳定的 speaker clone contract”。2026-09-12 起，这条路径不再是 SpeechRail 架构基线。
 
-## 3. Quality 与 Extreme 的双模型能力与双常驻
+## 3. 按角色绑定的能力与并发
 
-`quality` catalog 安装：
+catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base` 两个角色，`reference` 另绑定只用于设计作业的 `voice_design`：
 
-- `tts-1.7b-design-q8`：primary；
-- `tts-1.7b-base-q8`：`tts_clone` capability。
+| TTS spec | 内置声音 `tts_custom_voice` | 参考克隆 `tts_base` | 提示词设计 `voice_design` |
+|---|---|---|---|
+| `fast` | CustomVoice 0.6B q8 | Base 0.6B q8 | — |
+| `quality` | CustomVoice 1.7B q8 | Base 1.7B q8 | — |
+| `reference` | CustomVoice 1.7B bf16 | Base 1.7B bf16 | VoiceDesign 1.7B bf16 |
 
-候选 `extreme` 使用 `tts-1.7b-design-bf16` 与 `tts-1.7b-base-bf16`；两档的能力路由相同，权重精度不同。Quality 的运行数据不能代替 Extreme 验收。
+三个角色是独立 governor lane，可以按预算并发；同一 lane 由对应 worker 的私有 lock 串行。精度身份不等于质量排名：`reference` 的 bf16 制品按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。
 
-运行时使用双 worker capability router。懒加载模式下 Base 首次 clone 才加载，但切回普通 VoiceDesign 请求不会关闭 Base；两个不同 capability lane 可以并发。`WorkerIdleEvictor` 在冷却后整体驱逐这组 TTS worker，下一次请求再按需恢复，避免连续请求在 VD/Base 之间反复换模。
+运行时使用按角色的 capability router。懒加载模式下每个角色在首次使用时加载，加载后在同一任务内不因角色切换而反复换模；`WorkerIdleEvictor` 在冷却后以 capability group 为单位整体驱逐 TTS worker，下一次请求再按需恢复，避免连续请求在角色之间反复换模。
 
 ## 4. Prompt-created voice 当前边界
 
@@ -94,5 +97,5 @@ Quality 后续可引入“自然播报”模式，对 Base conditioning 方式�
 
 - [Qwen3-TTS 官方仓库](https://github.com/QwenLM/Qwen3-TTS)
 - [Qwen3-TTS Base 模型](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base)
-- [SpeechRail Quality 音色能力架构](quality-voice-capabilities.md)
+- [SpeechRail Quality / Reference 档音色能力架构](quality-voice-capabilities.md)
 - [SpeechRail 音色克隆架构设计与工程交接](voice-cloning-design-and-handoff.md)
