@@ -262,7 +262,7 @@ Realtime wire is current-only: `delta` partials are append-only, while the
 optional `snapshot` extension replaces the complete text for an item according
 to its monotonic `revision`. Both `partial_mode` and `chunk_duration_ms` must
 be confirmed by `transcription_session.updated` before the first PCM frame.
-For SDK, cURL, Sona, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
+For SDK, cURL, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
 [`docs/users/integrations.md`](docs/users/integrations.md).
 
 ## Model profiles

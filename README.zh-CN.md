@@ -231,7 +231,7 @@ ws://127.0.0.1:8201/v1/realtime
 的单调递增 `revision` 替换完整文本。`partial_mode` 与 `chunk_duration_ms` 必须先收到
 `transcription_session.updated` 的实际回显，再发送首个 PCM；首个 PCM 后不能修改。具体事件顺序见
 [`contracts/realtime-openai.md`](contracts/realtime-openai.md)。
-SDK、cURL、Sona、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
+SDK、cURL、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
 [`docs/users/integrations.md`](docs/users/integrations.md)。
 
 ## 模型 profile
