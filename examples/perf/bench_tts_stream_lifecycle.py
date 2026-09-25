@@ -54,6 +54,7 @@ from bench_tts_streaming import (
     _error_code,
     _recv,
     _recv_until,
+    _response_id,
     _response_status,
     _started_sample_rate,
     percentile,
@@ -243,6 +244,7 @@ def run_cancel_turn(
     failure: str | None = None
     # One extra request id carries the release probe after the terminal.
     probe_request_id = f"{request_id}_probe"
+    probe_response_id: str | None = None
     probe_sent = False
 
     while True:
@@ -279,13 +281,17 @@ def run_cancel_turn(
         if kind == "speechrail.tts.started":
             if probe_sent and next_start_accepted_at is None:
                 next_start_accepted_at = now
-                # The probe only measures re-admission; stop it immediately.
+                response = event.get("response_id")
+                probe_response_id = response if isinstance(response, str) else None
+                # The probe only measures re-admission, so stop it immediately --
+                # but its terminal still has to be read, or the next cycle on this
+                # shared connection would mistake it for an answer of its own.
                 cancel_sent_at = cancel_sent_at or now
                 connection.send(
                     {"type": "speechrail.tts.cancel", "request_id": probe_request_id}
                 )
-                break
-            started = True
+            else:
+                started = True
             sample_rate = _started_sample_rate(event) or sample_rate
         elif kind == "speechrail.tts.text_accepted":
             acknowledged = True
@@ -305,6 +311,9 @@ def run_cancel_turn(
             failure = failure or code
         elif kind == "response.done":
             status = _response_status(event)
+            if probe_response_id is not None and _response_id(event) == probe_response_id:
+                # The release probe is retired, so this cycle owns no more frames.
+                break
             if terminal_at is None:
                 terminal_at = now
                 terminal_status = status

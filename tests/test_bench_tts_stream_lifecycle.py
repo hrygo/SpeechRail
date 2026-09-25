@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import sys
 import urllib.request
 from pathlib import Path
@@ -66,6 +67,11 @@ class ScriptedConnection:
         event = self._script.pop(0)
         self._clock.advance(0.001)
         return event
+
+    def remaining(self) -> list[dict[str, Any]]:
+        """Frames this connection never delivered to the turn under test."""
+
+        return list(self._script)
 
 
 def test_cancel_trace_separates_teardown_from_release() -> None:
@@ -216,3 +222,49 @@ def test_soak_sampling_keeps_footprint_and_release_evidence(
     ] == 52
     # Free-form series never enter the artifact.
     assert not any("unrelated" in name for name in observed)
+
+
+def test_cancel_turn_leaves_the_shared_connection_clean() -> None:
+    """A cancelled turn must read its own release probe terminal before returning.
+
+    ``--mode soak`` reuses one connection for complete / interrupt / idle-cancel
+    cycles.  A release probe that stopped at ``speechrail.tts.started`` left its
+    own ``response.done`` queued, and the very next cycle then read that frame as
+    an answer to itself: the idle-cancel probe asserted, and the following
+    complete turn failed with ``RealtimeTurnError``.
+    """
+
+    clock = FakeClock()
+    connection = ScriptedConnection(
+        [
+            {"type": "transcription_session.updated"},
+            {"type": "speechrail.tts.started", "response_id": "resp_cancel"},
+            {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
+            {
+                "type": "response.output_audio.delta",
+                "delta": base64.b64encode(b"\x01\x00\x02\x00").decode("ascii"),
+                "speechrail": {"sample_rate": 24_000},
+            },
+            {
+                "type": "response.done",
+                "response": {"id": "resp_cancel", "status": "cancelled"},
+            },
+            {"type": "speechrail.tts.started", "response_id": "resp_probe"},
+            {
+                "type": "response.done",
+                "response": {"id": "resp_probe", "status": "cancelled"},
+            },
+        ],
+        clock,
+    )
+
+    trace = run_cancel_turn(
+        connection, text="你好，这是一次被中断的增量朗读。", clock=clock
+    )
+
+    assert trace.failure is None
+    assert trace.terminal_status == "cancelled"
+    assert trace.next_start_accepted_at is not None
+    # The release probe's own terminal is gone, so a cycle that shares this
+    # socket cannot mistake it for its own answer.
+    assert connection.remaining() == []

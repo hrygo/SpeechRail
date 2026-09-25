@@ -286,6 +286,14 @@ def _response_status(event: dict[str, Any]) -> str | None:
     return status if isinstance(status, str) else None
 
 
+def _response_id(event: dict[str, Any]) -> str | None:
+    response = event.get("response")
+    if not isinstance(response, dict):
+        return None
+    identifier = response.get("id")
+    return identifier if isinstance(identifier, str) else None
+
+
 def _event_object(event: object) -> dict[str, Any]:
     """Normalize one server event to a plain mapping.
 
