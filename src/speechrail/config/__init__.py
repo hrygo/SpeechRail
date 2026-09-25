@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
     tts_model_id: str = "speechrail/qwen3-tts"
+    selection_schema_version: int | None = None
+    selection_asr_spec: Literal["fast", "quality", "reference"] | None = None
+    selection_tts_spec: Literal["fast", "quality", "reference"] | None = None
+    selection_auto: Literal["off", "resource"] = "off"
+    selection_generation: int | None = None
+    selection_runtime_lock_id: str | None = None
+    asr_artifact_key: str | None = None
+    tts_artifact_key: str | None = None
+    tts_base_artifact_key: str | None = None
+    voice_design_artifact_key: str | None = None
+    alignment_artifact_key: str | None = None
     tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
     qwen3_tts_model_dir: Path | None = None
     qwen3_tts_clone_model_dir: Path | None = None

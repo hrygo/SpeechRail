@@ -42,7 +42,7 @@ def _lock(
     file_hashes: Mapping[str, str] | None = None,
     asr_requirements: tuple[str, ...] | None = None,
     tts_requirements: tuple[str, ...] | None = None,
-    vendor_overlays: Mapping[str, str] | None = None,
+    engine_wheel: Mapping[str, object] | None = None,
 ) -> RuntimeLock:
     requirement = f"fixture-asr==1.0 --hash=sha256:{_HASH}"
     tts_requirement = f"fixture-tts==2.0 --hash=sha256:{_HASH}"
@@ -59,7 +59,7 @@ def _lock(
             "runtime/asr.txt": _role_file_hash(asr_tokens),
             "runtime/tts.txt": _role_file_hash(tts_tokens),
         },
-        vendor_overlays=vendor_overlays or {},
+        engine_wheel=engine_wheel,
     )
 
 
@@ -488,76 +488,89 @@ def test_prepare_runtime_uses_new_release_for_changed_lock_and_keeps_old_current
     assert old.release.is_dir()
 
 
-def test_prepare_runtime_installs_hash_pinned_vendor_overlay(tmp_path: Path) -> None:
-    overlay_relative = "mlx_audio/tts/models/qwen3_tts/incremental.py"
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "vendor"
-        / "mlx-audio-incremental"
-        / "src"
-        / overlay_relative
-    )
-    source_bytes = source.read_bytes()
-    lock = _lock(
-        vendor_overlays={overlay_relative: hashlib.sha256(source_bytes).hexdigest()}
-    )
+_ENGINE_WHEEL_NAME = "mlx_audio-0.4.8+speechrail.1-py3-none-any.whl"
 
-    result = prepare_runtime(lock, tmp_path, FakeRunner())
 
-    installed = (
-        result.release
-        / "lib"
-        / "python3.14"
-        / "site-packages"
-        / overlay_relative
-    )
-    assert installed.read_bytes() == source_bytes
-    metadata = json.loads((result.release / "runtime.json").read_text(encoding="utf-8"))
-    assert metadata["site_packages"] == "lib/python3.14/site-packages"
-    assert metadata["vendor_overlays"] == {
-        overlay_relative: hashlib.sha256(source_bytes).hexdigest()
+def _wheel_pin(
+    wheel: Path,
+    *,
+    sha256: str | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> dict[str, object]:
+    if monkeypatch is not None:
+        monkeypatch.setattr(bootstrap, "runtime_wheel_source", lambda name: wheel)
+    return {
+        "filename": _ENGINE_WHEEL_NAME,
+        "sha256": sha256 or hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        "source_repository": "https://github.com/Blaizzy/mlx-audio",
+        "source_revision": "b" * 40,
+        "patch_sha256": "c" * 64,
+        "build_inputs_sha256": "d" * 64,
     }
+
+
+def _write_fake_wheel(tmp_path: Path) -> Path:
+    wheel = tmp_path / _ENGINE_WHEEL_NAME
+    wheel.write_bytes(b"fake-engine-wheel-bytes")
+    return wheel
+
+
+def test_prepare_runtime_installs_hash_pinned_engine_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = _write_fake_wheel(tmp_path)
+    pin = _wheel_pin(wheel, monkeypatch=monkeypatch)
+    lock = _lock(engine_wheel=pin)
+
+    runner = FakeRunner()
+    result = prepare_runtime(lock, tmp_path, runner)
+
+    install_calls = [call for call in runner.calls if "install" in call]
+    assert any(str(wheel) in call for call in install_calls)
+    manifest = json.loads(
+        (result.release / "engine-wheel" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest == {
+        "filename": _ENGINE_WHEEL_NAME,
+        "sha256": pin["sha256"],
+        "wheel": _ENGINE_WHEEL_NAME,
+    }
+    metadata = json.loads((result.release / "runtime.json").read_text(encoding="utf-8"))
+    assert metadata["engine_wheel"] == pin
     assert bootstrap.load_prepared_runtime(tmp_path, lock).paths == result
 
 
-def test_prepare_runtime_rejects_vendor_overlay_source_hash_mismatch(tmp_path: Path) -> None:
+def test_prepare_runtime_rejects_engine_wheel_source_hash_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = _write_fake_wheel(tmp_path)
     lock = _lock(
-        vendor_overlays={
-            "mlx_audio/tts/models/qwen3_tts/incremental.py": "f" * 64,
-        }
+        engine_wheel=_wheel_pin(wheel, sha256="f" * 64, monkeypatch=monkeypatch)
     )
 
-    with pytest.raises(RuntimeBootstrapError, match="overlay"):
+    with pytest.raises(RuntimeBootstrapError, match="engine wheel"):
         prepare_runtime(lock, tmp_path, FakeRunner())
 
     assert not (tmp_path / "vendor" / runtime_key(lock)).exists()
 
 
-def test_prepare_runtime_rebuilds_tampered_vendor_overlay(tmp_path: Path) -> None:
-    overlay_relative = "mlx_audio/tts/models/qwen3_tts/incremental.py"
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "vendor"
-        / "mlx-audio-incremental"
-        / "src"
-        / overlay_relative
-    )
-    source_bytes = source.read_bytes()
-    lock = _lock(
-        vendor_overlays={overlay_relative: hashlib.sha256(source_bytes).hexdigest()}
-    )
+def test_prepare_runtime_rebuilds_tampered_engine_wheel_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = _write_fake_wheel(tmp_path)
+    lock = _lock(engine_wheel=_wheel_pin(wheel, monkeypatch=monkeypatch))
     first = prepare_runtime(lock, tmp_path, FakeRunner())
-    installed = first.release / "lib" / "python3.14" / "site-packages" / overlay_relative
-    installed.write_text("tampered\n", encoding="utf-8")
+    record = first.release / "engine-wheel" / "manifest.json"
+    record.write_text('{"filename": "tampered"}\n', encoding="utf-8")
 
-    with pytest.raises(RuntimeBootstrapError, match="overlay"):
+    with pytest.raises(RuntimeBootstrapError, match="engine wheel"):
         bootstrap.load_prepared_runtime(tmp_path, lock)
 
     runner = FakeRunner()
     repaired = prepare_runtime(lock, tmp_path, runner)
 
     assert repaired.release == first.release
-    assert installed.read_bytes() == source_bytes
+    assert json.loads(record.read_text(encoding="utf-8"))["filename"] == _ENGINE_WHEEL_NAME
     assert runner.calls
 
 

@@ -346,31 +346,38 @@ def test_profile_list_and_status_are_read_only(
     monkeypatch.setattr(
         profile_commands,
         "profile_status",
-        lambda app_home: profile_commands.ProfileStatus("balanced", 3, "asr", "tts"),
+        lambda app_home: profile_commands.ProfileStatus("quality", "fast", "off", 3),
     )
 
     assert cli.main(["profile", "list", "--app-home", str(tmp_path)]) == 0
     output = capsys.readouterr().out
-    assert "extreme" in output
-    assert "quality" in output
-    assert "balanced" in output
-    assert "light" in output
-    assert "balanced *" in output
+    assert "Current selection: quality/fast" in output
+    for tier in ("fast", "quality", "reference"):
+        assert f"{tier}:" in output
 
     assert cli.main(["profile", "status", "--app-home", str(tmp_path)]) == 0
-    assert "balanced" in capsys.readouterr().out
+    assert "quality/fast" in capsys.readouterr().out
 
 
-def test_parser_accepts_extreme_only_as_an_explicit_preset() -> None:
+def test_parser_accepts_independent_specs_and_rejects_the_old_preset_flag() -> None:
     parser = cli._parser()
+    for arguments in (
+        ["setup", "--asr-spec", "quality", "--tts-spec", "fast"],
+        ["install", "--asr-spec", "quality", "--tts-spec", "fast"],
+        ["profile", "apply", "--asr-spec", "quality", "--tts-spec", "fast"],
+        ["model", "prepare", "--asr-spec", "quality", "--tts-spec", "fast"],
+    ):
+        parsed = parser.parse_args(arguments)
+        assert parsed.asr_spec == "quality"
+        assert parsed.tts_spec == "fast"
     for arguments in (
         ["setup", "--preset", "extreme"],
         ["install", "--preset", "extreme"],
         ["profile", "apply", "extreme"],
         ["model", "prepare", "extreme"],
     ):
-        parsed = parser.parse_args(arguments)
-        assert parsed.preset == "extreme"
+        with pytest.raises(SystemExit):
+            parser.parse_args(arguments)
 
 
 def test_setup_yes_uses_memory_recommendation_without_machine_model_detection(
@@ -389,12 +396,12 @@ def test_setup_yes_uses_memory_recommendation_without_machine_model_detection(
     monkeypatch.setattr(
         profile_commands,
         "apply_profile",
-        lambda preset, app_home: calls.append(preset)
+        lambda asr_spec, tts_spec, *, app_home: calls.append(f"{asr_spec}/{tts_spec}")
         or ApplyResult("committed", "op_test", None),
     )
 
     assert cli.main(["setup", "--yes", "--app-home", str(tmp_path)]) == 0
-    assert calls == ["light"]
+    assert calls == ["fast/fast"]
 
 
 def test_profile_apply_cancel_does_not_prepare_or_stop(
@@ -406,10 +413,24 @@ def test_profile_apply_cancel_does_not_prepare_or_stop(
     monkeypatch.setattr(
         profile_commands,
         "apply_profile",
-        lambda preset, app_home: pytest.fail("apply must not run"),
+        lambda *args, **kwargs: pytest.fail("apply must not run"),
     )
 
-    assert cli.main(["profile", "apply", "light", "--app-home", str(tmp_path)]) == 1
+    assert (
+        cli.main(
+            [
+                "profile",
+                "apply",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
+                "--app-home",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
 
 
 def test_noninteractive_profile_apply_requires_yes(
@@ -421,10 +442,24 @@ def test_noninteractive_profile_apply_requires_yes(
     monkeypatch.setattr(
         profile_commands,
         "apply_profile",
-        lambda preset, app_home: pytest.fail("apply must not run"),
+        lambda *args, **kwargs: pytest.fail("apply must not run"),
     )
 
-    assert cli.main(["profile", "apply", "light", "--app-home", str(tmp_path)]) == 1
+    assert (
+        cli.main(
+            [
+                "profile",
+                "apply",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
+                "--app-home",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert "--yes" in capsys.readouterr().err
 
 
@@ -597,9 +632,9 @@ def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
 @pytest.mark.parametrize(
     ("argv", "forbidden_call"),
     [
-        (["profile", "apply", "balanced"], "apply_profile"),
+        (["profile", "apply", "--asr-spec", "quality", "--tts-spec", "fast"], "apply_profile"),
         (["profile", "rollback"], "rollback_profile"),
-        (["setup", "--preset", "light"], "apply_profile"),
+        (["setup", "--asr-spec", "fast", "--tts-spec", "fast"], "apply_profile"),
     ],
 )
 def test_mutating_profile_commands_delegate_to_current_managed_runtime(

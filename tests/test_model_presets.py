@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import speechrail.config.model_catalog as model_catalog
 from speechrail.config.model_catalog import (
+    REQUIRED_SPEC_BINDINGS,
     ArtifactFile,
     ModelArtifact,
     ModelCatalog,
@@ -81,83 +82,64 @@ def _artifact(
 
 
 def _catalog_payload() -> dict[str, object]:
+    bf16: dict[str, object] = {
+        "bits": None,
+        "group_size": None,
+        "format_name": "none",
+        "dtype": "bf16",
+    }
     artifacts = [
-        _artifact(key="asr-q4", family="qwen3_asr", variant="asr", bits=4),
-        _artifact(key="asr-q8", family="qwen3_asr", variant="asr", bits=8),
-        _artifact(key="tts-custom-q4", family="qwen3_tts", variant="custom_voice", bits=4),
-        _artifact(key="tts-custom-q8", family="qwen3_tts", variant="custom_voice", bits=8),
-        _artifact(key="tts-design-q8", family="qwen3_tts", variant="voice_design", bits=8),
-        _artifact(key="tts-base-q8", family="qwen3_tts", variant="base", bits=8),
+        _artifact(key="asr-0.6b-q8", family="qwen3_asr", variant="asr", bits=8),
+        _artifact(key="asr-1.7b-q8", family="qwen3_asr", variant="asr", bits=8),
+        _artifact(key="asr-1.7b-bf16", family="qwen3_asr", variant="asr", **bf16),
+        _artifact(key="tts-0.6b-custom-q8", family="qwen3_tts", variant="custom_voice", bits=8),
+        _artifact(key="tts-1.7b-custom-q8", family="qwen3_tts", variant="custom_voice", bits=8),
+        _artifact(
+            key="tts-1.7b-custom-bf16", family="qwen3_tts", variant="custom_voice", **bf16
+        ),
+        _artifact(key="tts-0.6b-base-q8", family="qwen3_tts", variant="base", bits=8),
+        _artifact(key="tts-1.7b-base-q8", family="qwen3_tts", variant="base", bits=8),
+        _artifact(key="tts-1.7b-base-bf16", family="qwen3_tts", variant="base", **bf16),
+        _artifact(key="tts-1.7b-design-bf16", family="qwen3_tts", variant="voice_design", **bf16),
         _artifact(key="aligner-q8", family="qwen3_forced_aligner", variant="aligner", bits=8),
-        _artifact(
-            key="aligner-bf16",
-            family="qwen3_forced_aligner",
-            variant="aligner",
-            bits=None,
-            group_size=None,
-            format_name="none",
-            dtype="bf16",
-        ),
-        _artifact(
-            key="asr-1.7b-bf16",
-            family="qwen3_asr",
-            variant="asr",
-            bits=None,
-            group_size=None,
-            format_name="none",
-            dtype="bf16",
-        ),
-        _artifact(
-            key="tts-1.7b-design-bf16",
-            family="qwen3_tts",
-            variant="voice_design",
-            bits=None,
-            group_size=None,
-            format_name="none",
-            dtype="bf16",
-        ),
-        _artifact(
-            key="tts-1.7b-base-bf16",
-            family="qwen3_tts",
-            variant="base",
-            bits=None,
-            group_size=None,
-            format_name="none",
-            dtype="bf16",
-        ),
+        _artifact(key="aligner-bf16", family="qwen3_forced_aligner", variant="aligner", **bf16),
     ]
     return {
         "schema_version": 2,
         "artifacts": artifacts,
+        "specs": [
+            {"tier": tier, "role": role, "artifact_key": artifact_key}
+            for (tier, role), artifact_key in REQUIRED_SPEC_BINDINGS.items()
+        ],
         "presets": [
             {
-                "id": "quality",
-                "asr": "asr-q8",
-                "tts": "tts-design-q8",
-                "tts_clone": "tts-base-q8",
-                "aligner": "aligner-bf16",
-                "diarization": True,
-            },
-            {
                 "id": "balanced",
-                "asr": "asr-q8",
-                "tts": "tts-custom-q8",
+                "asr": "asr-1.7b-q8",
+                "tts": "tts-0.6b-custom-q8",
                 "tts_clone": None,
                 "aligner": "aligner-q8",
                 "diarization": True,
             },
             {
                 "id": "light",
-                "asr": "asr-q8",
-                "tts": "tts-custom-q8",
+                "asr": "asr-0.6b-q8",
+                "tts": "tts-0.6b-custom-q8",
                 "tts_clone": None,
                 "aligner": None,
                 "diarization": False,
             },
             {
+                "id": "quality",
+                "asr": "asr-1.7b-q8",
+                "tts": "tts-1.7b-custom-q8",
+                "tts_clone": "tts-1.7b-base-q8",
+                "aligner": "aligner-bf16",
+                "diarization": True,
+            },
+            {
                 "id": "extreme",
                 "asr": "asr-1.7b-bf16",
-                "tts": "tts-1.7b-design-bf16",
+                "tts": "tts-1.7b-custom-bf16",
                 "tts_clone": "tts-1.7b-base-bf16",
                 "aligner": "aligner-bf16",
                 "diarization": True,
@@ -170,6 +152,14 @@ def _catalog_payload() -> dict[str, object]:
             "light": {"asr": 8, "tts": 8, "aligner": None},
         },
     }
+
+
+def _preset_entry(payload: dict[str, object], preset_id: str) -> dict[str, object]:
+    presets = payload["presets"]
+    assert isinstance(presets, list)
+    entry = next(item for item in presets if item["id"] == preset_id)
+    assert isinstance(entry, dict)
+    return entry
 
 
 def _hashed_requirement(name: str) -> str:
@@ -193,7 +183,8 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
 
     assert catalog.schema_version == 2
-    assert len(catalog.artifacts) == 10
+    assert len(catalog.artifacts) == 12
+    assert len(catalog.specs) == len(REQUIRED_SPEC_BINDINGS)
     assert {item.id for item in catalog.presets} == {"quality", "balanced", "light", "extreme"}
     assert catalog.preset("quality") == preset("quality")
 
@@ -232,16 +223,27 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     assert by_id["balanced"].aligner == "aligner-q8"
     assert by_id["balanced"].diarization is True
     assert by_id["quality"].asr == "asr-1.7b-q8"
-    assert by_id["quality"].tts == "tts-1.7b-design-q8"
+    assert by_id["quality"].tts == "tts-1.7b-custom-q8"
     assert by_id["quality"].tts_clone == "tts-1.7b-base-q8"
     assert artifacts[by_id["quality"].tts_clone].variant == "base"
     assert by_id["quality"].aligner == "aligner-bf16"
     assert by_id["quality"].diarization is True
     assert by_id["extreme"].asr == "asr-1.7b-bf16"
-    assert by_id["extreme"].tts == "tts-1.7b-design-bf16"
+    assert by_id["extreme"].tts == "tts-1.7b-custom-bf16"
     assert by_id["extreme"].tts_clone == "tts-1.7b-base-bf16"
     assert by_id["extreme"].aligner == "aligner-bf16"
     assert by_id["extreme"].diarization is True
+
+
+def test_catalog_specs_match_the_required_role_matrix() -> None:
+    catalog = load_catalog()
+
+    bindings = {(item.tier, item.role): item.artifact_key for item in catalog.specs}
+
+    assert bindings == dict(REQUIRED_SPEC_BINDINGS)
+    assert catalog.binding("quality", "tts_custom_voice") == "tts-1.7b-custom-q8"
+    assert catalog.artifact_for("reference", "tts_base") is not None
+    assert catalog.artifact_for("fast", "voice_design") is None
 
 
 def test_tier_precision_accepts_bf16_asr_tts_and_aligner() -> None:
@@ -270,12 +272,9 @@ def test_catalog_rejects_extreme_precision_policy_mismatch(
         ModelCatalog.model_validate(payload)
 
 
-def test_extreme_preset_requires_voice_design_and_base_clone() -> None:
+def test_extreme_preset_requires_custom_voice_and_base_clone() -> None:
     payload = _catalog_payload()
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    extreme = presets[3]
-    assert isinstance(extreme, dict)
+    extreme = _preset_entry(payload, "extreme")
     extreme["tts_clone"] = None
 
     with pytest.raises(ValidationError, match="must declare a base clone"):
@@ -284,11 +283,8 @@ def test_extreme_preset_requires_voice_design_and_base_clone() -> None:
 
 def test_extreme_clone_rejects_non_base_tts_artifact() -> None:
     payload = _catalog_payload()
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    extreme = presets[3]
-    assert isinstance(extreme, dict)
-    extreme["tts_clone"] = "tts-design-q8"
+    extreme = _preset_entry(payload, "extreme")
+    extreme["tts_clone"] = "tts-1.7b-custom-q8"
 
     with pytest.raises(ValidationError, match="variant=base"):
         ModelCatalog.model_validate(payload)
@@ -297,7 +293,7 @@ def test_extreme_clone_rejects_non_base_tts_artifact() -> None:
 @pytest.mark.parametrize(
     ("preset_id", "clone_key"),
     [
-        ("extreme", "tts-base-q8"),
+        ("extreme", "tts-1.7b-base-q8"),
         ("quality", "tts-1.7b-base-bf16"),
     ],
 )
@@ -305,9 +301,7 @@ def test_catalog_clone_precision_matches_preset_tts_policy(
     preset_id: str, clone_key: str
 ) -> None:
     payload = _catalog_payload()
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    selected = next(item for item in presets if item["id"] == preset_id)
+    selected = _preset_entry(payload, preset_id)
     selected["tts_clone"] = clone_key
 
     with pytest.raises(ValidationError, match=r"clone.*precision|precision.*clone"):
@@ -523,15 +517,8 @@ def test_artifact_rejects_unsupported_family_variant(family: str, variant: str) 
 
 def test_catalog_rejects_bad_reference() -> None:
     payload = _catalog_payload()
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    presets[0] = {
-        "id": "quality",
-        "asr": "missing",
-        "tts": "tts-design-q8",
-        "aligner": "aligner-bf16",
-        "diarization": True,
-    }
+    quality = _preset_entry(payload, "quality")
+    quality["asr"] = "missing"
 
     with pytest.raises(ValidationError, match=r"artifact|reference|asr"):
         ModelCatalog.model_validate(payload)
@@ -577,10 +564,7 @@ def test_catalog_rejects_precision_policy_bits_mismatch() -> None:
 
 def test_catalog_rejects_aligner_policy_mismatch() -> None:
     payload = _catalog_payload()
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    light = presets[2]
-    assert isinstance(light, dict)
+    light = _preset_entry(payload, "light")
     light["aligner"] = "aligner-q8"
 
     with pytest.raises(ValidationError, match=r"aligner|precision_policy"):
@@ -608,18 +592,15 @@ def test_catalog_rejects_aligner_reference_with_wrong_identity() -> None:
     artifacts = payload["artifacts"]
     assert isinstance(artifacts, list)
     artifacts.append(_artifact(key="fake-aligner", family="qwen3_asr", variant="asr", bits=8))
-    assert isinstance(payload["presets"], list)
     policy = payload["precision_policy"]
     assert isinstance(policy, dict)
     assert isinstance(policy["light"], dict)
     policy["light"]["aligner"] = 8
-    payload["presets"][2] = {
-        "id": "light",
-        "asr": "asr-q8",
-        "tts": "tts-custom-q8",
-        "aligner": "fake-aligner",
-        "diarization": True,
-    }
+    light = _preset_entry(payload, "light")
+    light["asr"] = "asr-0.6b-q8"
+    light["tts"] = "tts-0.6b-custom-q8"
+    light["aligner"] = "fake-aligner"
+    light["diarization"] = True
 
     with pytest.raises(ValidationError, match=r"aligner|variant|family"):
         ModelCatalog.model_validate(payload)
@@ -629,8 +610,8 @@ def test_light_tier_uses_q8_quantization_under_schema_v2() -> None:
     catalog = ModelCatalog.model_validate(_catalog_payload())
     by_id = {item.id: item for item in catalog.presets}
 
-    assert by_id["light"].asr == "asr-q8"
-    assert by_id["light"].tts == "tts-custom-q8"
+    assert by_id["light"].asr == "asr-0.6b-q8"
+    assert by_id["light"].tts == "tts-0.6b-custom-q8"
 
 
 def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> None:
@@ -650,7 +631,7 @@ def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> Non
         lock.file_hashes = {}  # type: ignore[misc]
 
 
-def test_runtime_lock_freezes_vendor_overlays_within_mlx_audio() -> None:
+def test_runtime_lock_pins_the_engine_wheel_by_build_provenance() -> None:
     lock = RuntimeLock(
         id="fixture-lock",
         python="3.14.7",
@@ -658,15 +639,22 @@ def test_runtime_lock_freezes_vendor_overlays_within_mlx_audio() -> None:
         tts_requirements=(_hashed_requirement("tts"),),
         ffmpeg_artifact="imageio-ffmpeg==0.6.0",
         file_hashes={"runtime/asr.txt": SHA256},
-        vendor_overlays={
-            "mlx_audio/tts/models/qwen3_tts/incremental.py": SHA256,
+        engine_wheel={
+            "filename": "mlx_audio-0.4.8+speechrail.1-py3-none-any.whl",
+            "sha256": SHA256,
+            "source_repository": "https://github.com/Blaizzy/mlx-audio",
+            "source_revision": "b" * 40,
+            "patch_sha256": "c" * 64,
+            "build_inputs_sha256": "d" * 64,
         },
     )
 
-    assert isinstance(lock.vendor_overlays, Mapping)
-    with pytest.raises(TypeError):
-        lock.vendor_overlays["mlx_audio/other.py"] = SHA256  # type: ignore[index]
-    with pytest.raises(ValidationError, match="mlx_audio"):
+    assert lock.engine_wheel is not None
+    with pytest.raises(ValidationError):
+        lock.engine_wheel.sha256 = "f" * 64  # type: ignore[misc]
+    # The lock no longer carries vendor overlay destinations; only a wheel pin
+    # may describe the engine delivery.
+    with pytest.raises(ValidationError, match="vendor_overlays"):
         RuntimeLock(
             id="fixture-lock",
             python="3.14.7",
@@ -674,7 +662,24 @@ def test_runtime_lock_freezes_vendor_overlays_within_mlx_audio() -> None:
             tts_requirements=(_hashed_requirement("tts"),),
             ffmpeg_artifact="imageio-ffmpeg==0.6.0",
             file_hashes={"runtime/asr.txt": SHA256},
-            vendor_overlays={"speechrail/other.py": SHA256},
+            vendor_overlays={"mlx_audio/tts/models/qwen3_tts/incremental.py": SHA256},
+        )
+    with pytest.raises(ValidationError):
+        RuntimeLock(
+            id="fixture-lock",
+            python="3.14.7",
+            asr_requirements=(_hashed_requirement("asr"),),
+            tts_requirements=(_hashed_requirement("tts"),),
+            ffmpeg_artifact="imageio-ffmpeg==0.6.0",
+            file_hashes={"runtime/asr.txt": SHA256},
+            engine_wheel={
+                "filename": "../escape.whl",
+                "sha256": SHA256,
+                "source_repository": "https://github.com/Blaizzy/mlx-audio",
+                "source_revision": "b" * 40,
+                "patch_sha256": "c" * 64,
+                "build_inputs_sha256": "d" * 64,
+            },
         )
 
 

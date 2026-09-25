@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Final, cast
 from uuid import uuid4
 
-from speechrail.config.model_catalog import RuntimeLock, runtime_overlay_source
+from speechrail.config.model_catalog import RuntimeLock, runtime_wheel_source
 
 _SCHEMA_VERSION: Final = 1
 _VENDOR_DIRNAME: Final = "vendor"
@@ -125,6 +125,22 @@ class RuntimeCurrentSnapshot:
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeBootstrapError("runtime snapshot target escapes vendor root") from exc
 
+def _engine_wheel_payload(lock: RuntimeLock) -> dict[str, object] | None:
+    """Serialize the pinned engine wheel provenance, or ``None`` before the gate."""
+
+    pin = lock.engine_wheel
+    if pin is None:
+        return None
+    return {
+        "filename": pin.filename,
+        "sha256": pin.sha256,
+        "source_repository": pin.source_repository,
+        "source_revision": pin.source_revision,
+        "patch_sha256": pin.patch_sha256,
+        "build_inputs_sha256": pin.build_inputs_sha256,
+    }
+
+
 def _runtime_lock_payload(lock: RuntimeLock) -> dict[str, object]:
     return {
         "id": lock.id,
@@ -133,7 +149,7 @@ def _runtime_lock_payload(lock: RuntimeLock) -> dict[str, object]:
         "tts_requirements": list(lock.tts_requirements),
         "ffmpeg_artifact": lock.ffmpeg_artifact,
         "file_hashes": dict(lock.file_hashes),
-        "vendor_overlays": dict(lock.vendor_overlays),
+        "engine_wheel": _engine_wheel_payload(lock),
     }
 
 
@@ -147,7 +163,7 @@ def _mapping_payload(value: Mapping[str, object]) -> dict[str, object]:
         "tts_requirements",
         "ffmpeg_artifact",
         "file_hashes",
-        "vendor_overlays",
+        "engine_wheel",
     }
     if set(raw) == aliases:
         python = raw["python"]
@@ -495,27 +511,23 @@ def _site_packages_path(release: Path, python_version: str) -> Path:
     return site_packages
 
 
-def _vendor_overlay_entries(lock: RuntimeLock) -> tuple[tuple[str, bytes], ...]:
-    entries: list[tuple[str, bytes]] = []
-    for destination, expected_hash in sorted(lock.vendor_overlays.items()):
-        try:
-            source = runtime_overlay_source(destination)
-        except ValueError as exc:
-            raise RuntimeBootstrapError("vendor overlay source is missing") from exc
-        try:
-            data = source.read_bytes()
-        except OSError as exc:
-            raise RuntimeBootstrapError("vendor overlay source cannot be read") from exc
-        if hashlib.sha256(data).hexdigest() != expected_hash:
-            raise RuntimeBootstrapError("vendor overlay source hash mismatch")
-        entries.append((destination, data))
-    return tuple(entries)
+def _engine_wheel_path(lock: RuntimeLock) -> Path:
+    """Resolve and hash-verify the pinned engine wheel, or fail closed."""
 
-
-def _validate_vendor_overlay_target(site_packages: Path) -> None:
-    target = _safe_runtime_path(site_packages, "mlx_audio/tts/models/qwen3_tts")
-    if not target.is_dir():
-        raise RuntimeBootstrapError("pinned mlx_audio overlay target is missing")
+    pin = lock.engine_wheel
+    if pin is None:
+        raise RuntimeBootstrapError("engine wheel is not pinned by the runtime lock")
+    try:
+        wheel = runtime_wheel_source(pin.filename)
+    except ValueError as exc:
+        raise RuntimeBootstrapError("engine wheel source is missing") from exc
+    try:
+        actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeBootstrapError("engine wheel source cannot be read") from exc
+    if actual != pin.sha256:
+        raise RuntimeBootstrapError("engine wheel source hash mismatch")
+    return wheel
 
 
 def _validate_executable(
@@ -564,7 +576,7 @@ def _metadata_for(
         "worker_modules": {"asr": "mlx_qwen3_asr", "tts": "mlx_audio"},
         "pythonpath": {"asr": [], "tts": []},
         "site_packages": _site_packages_relative(lock.python),
-        "vendor_overlays": dict(lock.vendor_overlays),
+        "engine_wheel": _engine_wheel_payload(lock),
         "artifact_identity": {
             "asr_lock_file": lock.file_hashes.get("runtime/asr.txt"),
             "tts_lock_file": lock.file_hashes.get("runtime/tts.txt"),
@@ -658,19 +670,22 @@ def _runtime_metadata_matches(
     expected_site_packages = _site_packages_relative(lock.python)
     if metadata.get("site_packages") != expected_site_packages:
         raise RuntimeBootstrapError("prepared runtime site-packages identity is invalid")
-    if metadata.get("vendor_overlays") != dict(lock.vendor_overlays):
-        raise RuntimeBootstrapError("prepared runtime vendor overlay identity is invalid")
-    site_packages = _site_packages_path(release, lock.python)
-    for destination, expected_hash in lock.vendor_overlays.items():
-        overlay_path = _safe_runtime_path(site_packages, destination)
-        if overlay_path.is_symlink() or not overlay_path.is_file():
-            raise RuntimeBootstrapError("prepared runtime vendor overlay is missing")
-        try:
-            actual_hash = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise RuntimeBootstrapError("prepared runtime vendor overlay cannot be read") from exc
-        if actual_hash != expected_hash:
-            raise RuntimeBootstrapError("prepared runtime vendor overlay hash is invalid")
+    if metadata.get("engine_wheel") != _engine_wheel_payload(lock):
+        raise RuntimeBootstrapError("prepared runtime engine wheel identity is invalid")
+    if lock.engine_wheel is not None:
+        wheel = _engine_wheel_path(lock)
+        installed_record = _safe_runtime_path(
+            release, "engine-wheel/manifest.json"
+        )
+        if installed_record.is_symlink() or not installed_record.is_file():
+            raise RuntimeBootstrapError("prepared runtime engine wheel record is missing")
+        installed = _read_json(installed_record)
+        if installed != {
+            "filename": lock.engine_wheel.filename,
+            "sha256": lock.engine_wheel.sha256,
+            "wheel": wheel.name,
+        }:
+            raise RuntimeBootstrapError("prepared runtime engine wheel record is invalid")
     if metadata.get("artifact_identity") != {
         "asr_lock_file": lock.file_hashes.get("runtime/asr.txt"),
         "tts_lock_file": lock.file_hashes.get("runtime/tts.txt"),
@@ -892,14 +907,41 @@ def prepare_runtime(
             runner,
         )
 
-        overlay_entries = _vendor_overlay_entries(lock)
-        if overlay_entries:
-            site_packages = _site_packages_path(stage_release, lock.python)
-            _validate_vendor_overlay_target(site_packages)
-            for destination, data in overlay_entries:
-                overlay_path = _safe_runtime_path(site_packages, destination)
-                _ensure_directory(overlay_path.parent)
-                _write_private(overlay_path, data)
+        if lock.engine_wheel is not None:
+            wheel = _engine_wheel_path(lock)
+            _run(
+                (
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(shared_python),
+                    "--python-version",
+                    lock.python,
+                    "--no-deps",
+                    "--only-binary",
+                    ":all:",
+                    str(wheel),
+                ),
+                runner,
+            )
+            record = stage_release / "engine-wheel" / "manifest.json"
+            _ensure_directory(record.parent)
+            _write_private(
+                record,
+                (
+                    json.dumps(
+                        {
+                            "filename": lock.engine_wheel.filename,
+                            "sha256": lock.engine_wheel.sha256,
+                            "wheel": wheel.name,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            )
 
         ffmpeg_path = stage_release / "ffmpeg" / "bin" / "ffmpeg"
         _run(

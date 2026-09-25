@@ -18,6 +18,7 @@ from speechrail.config.model_catalog import (
     load_runtime_lock,
 )
 from speechrail.config.selection import resolve_selection
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import diarization_assets
 from speechrail.service import managed_install as install_macos
@@ -26,7 +27,11 @@ from speechrail.service.diarization_assets import DiarizationAssetError
 from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
-from speechrail.service.profile_store import ProfileStore, recover_selection
+from speechrail.service.profile_store import (
+    LegacySelectionError,
+    ProfileStore,
+    recover_selection,
+)
 
 _REAL_MANAGED_DIARIZATION_PROVISIONING = install_macos._provision_managed_diarization_assets
 
@@ -48,8 +53,8 @@ def _isolate_managed_service_lock(
 def _stub_managed_diarization_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep offline tests from downloading assets; the upgrade regression opts back in."""
 
-    def fake_provisioning(app_home: Path, *, preset_id: str, downloader: object) -> None:
-        del app_home, preset_id, downloader
+    def fake_provisioning(app_home: Path, *, aligner_key: str, downloader: object) -> None:
+        del app_home, aligner_key, downloader
 
     monkeypatch.setattr(
         install_macos, "_provision_managed_diarization_assets", fake_provisioning
@@ -117,17 +122,15 @@ def _fake_runtime_switching(app_home: Path) -> RuntimePaths:
 
 
 def _selection_payload() -> bytes:
-    catalog = load_catalog()
     lock = load_runtime_lock()
-    selected = catalog.preset("quality")
     return (
         json.dumps(
             {
-                "schema_version": 1,
-                "preset": "quality",
+                "schema_version": 2,
+                "asr_spec": "quality",
+                "tts_spec": "fast",
+                "auto": "off",
                 "generation": 7,
-                "asr": selected.asr,
-                "tts": selected.tts,
                 "runtime_lock_id": lock.id,
             },
             sort_keys=True,
@@ -145,7 +148,8 @@ def test_managed_install_rejects_an_active_service_before_staging(tmp_path: Path
             install_macos.install_managed(
                 wheel,
                 app_home=app_home,
-                preset_id="quality",
+                asr_spec="quality",
+                tts_spec="fast",
                 downloader=object(),
                 server_lock_directory=tmp_path,
             )
@@ -174,7 +178,7 @@ def test_managed_state_remains_outside_release(tmp_path: Path) -> None:
     assert layout.vendor_root == tmp_path / "vendor"
 
 
-def test_managed_install_prepares_preset_and_keeps_service_disabled(
+def test_managed_install_prepares_selection_and_keeps_service_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
@@ -184,8 +188,8 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     runtime = _fake_runtime(tmp_path)
     runtime_lock = load_runtime_lock().model_copy(update={"python": "3.14.9"})
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        model_calls.append(preset_id)
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        model_calls.append(f"{asr_spec}/{tts_spec}")
         return "prepared-quality"
 
     def fake_prepare_runtime(lock: object, app_home: Path, runner: object) -> RuntimePaths:
@@ -193,7 +197,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
         runtime_calls.append(("prepare-runtime",))
         return runtime
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", fake_prepare_runtime)
     monkeypatch.setattr(
         install_macos,
@@ -204,7 +208,8 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     result = install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -217,7 +222,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     assert result.enabled is False
     assert result.prepared_id == "prepared-quality"
     assert result.runtime_key == "runtime-test"
-    assert model_calls == ["quality"]
+    assert model_calls == ["quality/fast"]
     assert runtime_calls == [("prepare-runtime",)]
     venv_call = next(command for command in calls if command[:2] == ("uv", "venv"))
     assert venv_call[2:4] == ("--python", runtime_lock.python)
@@ -235,7 +240,10 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     )
     assert "SPEECHRAIL_API_KEY" not in config
     selection = json.loads((app_home / "config" / "selection.json").read_text())
-    assert selection["preset"] == "quality"
+    assert selection["schema_version"] == 2
+    assert selection["asr_spec"] == "quality"
+    assert selection["tts_spec"] == "fast"
+    assert selection["auto"] == "off"
     assert not any("launchctl" in part for command in calls for part in command)
 
 
@@ -246,11 +254,11 @@ def test_managed_install_defaults_to_mcp_extra(
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -261,7 +269,8 @@ def test_managed_install_defaults_to_mcp_extra(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -288,11 +297,11 @@ def test_managed_install_adds_diarization_when_configured(
         encoding="utf-8",
     )
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -303,7 +312,8 @@ def test_managed_install_adds_diarization_when_configured(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -329,11 +339,11 @@ def test_managed_install_writes_verified_diarization_paths_for_fresh_install(
     coreml.mkdir()
     aligner.mkdir()
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -344,7 +354,8 @@ def test_managed_install_writes_verified_diarization_paths_for_fresh_install(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -367,11 +378,11 @@ def test_managed_install_without_diarization_assets_omits_diarization_config(
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-light"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -382,7 +393,8 @@ def test_managed_install_without_diarization_assets_omits_diarization_config(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="light",
+        asr_spec="fast",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -399,18 +411,18 @@ def test_managed_install_without_diarization_assets_omits_diarization_config(
     assert "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR" not in config
 
 
-def test_managed_install_same_preset_reuses_wheel_release(
+def test_managed_install_same_selection_reuses_wheel_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -426,7 +438,8 @@ def test_managed_install_same_preset_reuses_wheel_release(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -438,7 +451,8 @@ def test_managed_install_same_preset_reuses_wheel_release(
     second = install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -451,15 +465,15 @@ def test_managed_install_same_preset_reuses_wheel_release(
     assert selection_path.read_bytes() == selection_before
 
 
-def _legacy_quality_selection() -> dict[str, object]:
-    selected = load_catalog().preset("quality")
+def _quality_selection() -> dict[str, object]:
+    """A committed v2 selection whose runtime lock predates the published wheel."""
+
     return {
-        "schema_version": 1,
-        "preset": "quality",
+        "schema_version": 2,
+        "asr_spec": "quality",
+        "tts_spec": "fast",
+        "auto": "off",
         "generation": 41,
-        "asr": selected.asr,
-        "tts": selected.tts,
-        "tts_clone": selected.tts_clone,
         "runtime_lock_id": "mlx-qwen-20260905",
     }
 
@@ -467,11 +481,11 @@ def _legacy_quality_selection() -> dict[str, object]:
 def _stub_managed_pipeline(
     monkeypatch: pytest.MonkeyPatch, *, preflight_ok: bool = True
 ) -> None:
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -484,11 +498,18 @@ def _stub_managed_pipeline(
     )
 
 
-def _install_stubbed(wheel: Path, app_home: Path, *, preset_id: str = "quality") -> object:
+def _install_stubbed(
+    wheel: Path,
+    app_home: Path,
+    *,
+    asr_spec: str = "quality",
+    tts_spec: str = "fast",
+) -> object:
     return install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id=preset_id,
+        asr_spec=asr_spec,
+        tts_spec=tts_spec,
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -497,13 +518,12 @@ def _install_stubbed(wheel: Path, app_home: Path, *, preset_id: str = "quality")
     )
 
 
-def test_managed_install_migrates_same_profile_to_published_runtime_lock(
+def test_managed_install_migrates_same_selection_to_published_runtime_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
     lock = load_runtime_lock()
-    profile = load_catalog().preset("quality")
-    ProfileStore(app_home).initialize(_legacy_quality_selection())
+    ProfileStore(app_home).initialize(_quality_selection())
     observed: dict[str, object] = {}
     _stub_managed_pipeline(monkeypatch)
 
@@ -518,53 +538,56 @@ def test_managed_install_migrates_same_profile_to_published_runtime_lock(
 
     assert observed["runtime_lock_id"] == lock.id
     assert observed["generation"] == 42
-    assert observed["tts_clone"] == profile.tts_clone
+    assert observed["asr_spec"] == "quality"
+    assert observed["tts_spec"] == "fast"
+    assert observed["auto"] == "off"
     assert recover_selection(app_home) == observed
 
 
-def test_managed_install_backfills_selection_fields_missing_from_the_record(
+def test_managed_install_rejects_legacy_selection_without_overwriting_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
-    lock = load_runtime_lock()
-    profile = load_catalog().preset("quality")
-    # A record written before tts_clone existed that already names the published lock.
-    ProfileStore(app_home).initialize(
-        {
-            "schema_version": 1,
-            "preset": "quality",
-            "generation": 7,
-            "asr": profile.asr,
-            "tts": profile.tts,
-            "runtime_lock_id": lock.id,
-        }
-    )
+    legacy = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "preset": "quality",
+                "generation": 7,
+                "asr": "Qwen3-ASR-1.7B-8bit",
+                "tts": "Qwen3-TTS-1.7B-8bit",
+                "tts_clone": "Qwen3-TTS-1.7B-8bit-Base",
+                "runtime_lock_id": load_runtime_lock().id,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    selection_path = app_home / "config" / "selection.json"
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_bytes(legacy)
+    selection_path.chmod(0o600)
     _stub_managed_pipeline(monkeypatch)
 
-    _install_stubbed(wheel, app_home)
+    with pytest.raises(LegacySelectionError):
+        _install_stubbed(wheel, app_home)
 
-    assert recover_selection(app_home) == {
-        "schema_version": 1,
-        "preset": "quality",
-        "generation": 8,
-        "asr": profile.asr,
-        "tts": profile.tts,
-        "tts_clone": profile.tts_clone,
-        "runtime_lock_id": lock.id,
-    }
+    assert selection_path.read_bytes() == legacy
 
 
-def test_managed_install_rejects_a_different_preset(
+def test_managed_install_rejects_a_different_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
-    ProfileStore(app_home).initialize(_legacy_quality_selection())
+    ProfileStore(app_home).initialize(_quality_selection())
     selection_path = app_home / "config" / "selection.json"
     before = selection_path.read_bytes()
     _stub_managed_pipeline(monkeypatch)
 
-    with pytest.raises(install_macos.InstallerError, match="different managed preset"):
-        _install_stubbed(wheel, app_home, preset_id="balanced")
+    with pytest.raises(
+        install_macos.InstallerError, match="different managed selection"
+    ):
+        _install_stubbed(wheel, app_home, asr_spec="fast", tts_spec="fast")
 
     assert selection_path.read_bytes() == before
 
@@ -573,14 +596,14 @@ def test_managed_install_restores_selection_when_runtime_preflight_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel, app_home = _inputs(tmp_path)
-    legacy = _legacy_quality_selection()
-    ProfileStore(app_home).initialize(legacy)
+    selection = _quality_selection()
+    ProfileStore(app_home).initialize(selection)
     _stub_managed_pipeline(monkeypatch, preflight_ok=False)
 
     with pytest.raises(install_macos.InstallerError, match="preflight"):
         _install_stubbed(wheel, app_home)
 
-    assert recover_selection(app_home) == legacy
+    assert recover_selection(app_home) == selection
 
 
 @pytest.mark.parametrize("failure_stage", ["runtime", "preflight", "service", "profile"])
@@ -609,8 +632,8 @@ def test_managed_failure_restores_app_and_vendor_currents(
     selection_path.chmod(0o600)
     calls: list[tuple[str, ...]] = []
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
     def fake_prepare_runtime(lock: object, prepared_app_home: Path, runner: object) -> RuntimePaths:
@@ -619,7 +642,7 @@ def test_managed_failure_restores_app_and_vendor_currents(
             raise install_macos.InstallerError("runtime preparation failed")
         return _fake_runtime_switching(prepared_app_home)
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", fake_prepare_runtime)
     monkeypatch.setattr(
         install_macos,
@@ -655,7 +678,8 @@ def test_managed_failure_restores_app_and_vendor_currents(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+        tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -683,11 +707,11 @@ def test_managed_rollback_error_does_not_skip_app_cleanup(
     old_vendor.mkdir(parents=True)
     layout.vendor_current.symlink_to(old_vendor, target_is_directory=True)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -708,7 +732,8 @@ def test_managed_rollback_error_does_not_skip_app_cleanup(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+        tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -731,11 +756,11 @@ def test_managed_first_install_failure_removes_vendor_current_but_keeps_release(
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -751,7 +776,8 @@ def test_managed_first_install_failure_removes_vendor_current_but_keeps_release(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+        tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -779,11 +805,11 @@ def test_managed_install_preserves_existing_config_bytes(
     layout.config_file.chmod(0o600)
     runtime = _fake_runtime(tmp_path)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -794,7 +820,8 @@ def test_managed_install_preserves_existing_config_bytes(
     install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -873,11 +900,11 @@ def test_managed_install_only_enables_when_requested(
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(
         install_macos,
@@ -888,7 +915,8 @@ def test_managed_install_only_enables_when_requested(
     result = install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
         downloader=object(),
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -908,11 +936,11 @@ def test_managed_first_install_enable_failure_removes_selection(
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -938,7 +966,8 @@ def test_managed_first_install_enable_failure_removes_selection(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+        tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -962,11 +991,11 @@ def test_managed_post_enable_verifier_failure_rolls_back(
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -994,7 +1023,8 @@ def test_managed_post_enable_verifier_failure_rolls_back(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+        tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -1022,16 +1052,19 @@ def test_managed_preparation_failure_keeps_previous_current_runtime(
     old_release.mkdir(parents=True)
     layout.current_runtime.symlink_to(old_release, target_is_directory=True)
 
-    async def failing_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
+    async def failing_prepare_models(
+        asr_spec: str, tts_spec: str, **kwargs: object
+    ) -> str:
+        del asr_spec, tts_spec, kwargs
         raise RuntimeError("fake downloader failed")
 
-    monkeypatch.setattr(install_macos, "prepare_models", failing_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", failing_prepare_models)
     with pytest.raises(install_macos.InstallerError, match="model preparation failed"):
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+            tts_spec="fast",
             downloader=object(),
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""
@@ -1216,6 +1249,14 @@ def _b2_catalog() -> ModelCatalog:
                     4,
                     _b2_tts_variant(b"c04"),
                 ),
+                _b2_artifact(
+                    "tts-17b-custom-bf16",
+                    "qwen3_tts",
+                    "custom_voice",
+                    None,
+                    _b2_tts_variant(b"c17bf16"),
+                    dtype="bf16",
+                ),
                 _b2_artifact("aligner-q8", "qwen3_forced_aligner", "aligner", 8, aligner_files),
                 _b2_artifact(
                     "aligner-bf16",
@@ -1225,6 +1266,59 @@ def _b2_catalog() -> ModelCatalog:
                     aligner_files,
                     dtype="bf16",
                 ),
+            ],
+            # 合成目录只需覆盖完整 13 个 tier 与 role 键; 本用例只关心 aligner
+            # 供给, 其余角色复用同 family/variant 的本地制品.
+            "specs": [
+                {"tier": "fast", "role": "asr", "artifact_key": "asr-06b-q8"},
+                {"tier": "quality", "role": "asr", "artifact_key": "asr-17b-q8"},
+                {"tier": "reference", "role": "asr", "artifact_key": "asr-17b-bf16"},
+                {
+                    "tier": "fast",
+                    "role": "tts_base",
+                    "artifact_key": "tts-17b-base-q8",
+                },
+                {
+                    "tier": "quality",
+                    "role": "tts_base",
+                    "artifact_key": "tts-17b-base-q8",
+                },
+                {
+                    "tier": "reference",
+                    "role": "tts_base",
+                    "artifact_key": "tts-17b-base-bf16",
+                },
+                {
+                    "tier": "fast",
+                    "role": "tts_custom_voice",
+                    "artifact_key": "tts-06b-custom-q8",
+                },
+                {
+                    "tier": "quality",
+                    "role": "tts_custom_voice",
+                    "artifact_key": "tts-06b-custom-q8",
+                },
+                {
+                    "tier": "reference",
+                    "role": "tts_custom_voice",
+                    "artifact_key": "tts-06b-custom-q8",
+                },
+                {
+                    "tier": "reference",
+                    "role": "voice_design",
+                    "artifact_key": "tts-17b-design-bf16",
+                },
+                {"tier": "fast", "role": "alignment", "artifact_key": "aligner-q8"},
+                {
+                    "tier": "quality",
+                    "role": "alignment",
+                    "artifact_key": "aligner-bf16",
+                },
+                {
+                    "tier": "reference",
+                    "role": "alignment",
+                    "artifact_key": "aligner-bf16",
+                },
             ],
             "presets": [
                 {
@@ -1244,7 +1338,7 @@ def _b2_catalog() -> ModelCatalog:
                 {
                     "id": "quality",
                     "asr": "asr-17b-q8",
-                    "tts": "tts-17b-design-q8",
+                    "tts": "tts-06b-custom-q8",
                     "tts_clone": "tts-17b-base-q8",
                     "aligner": "aligner-bf16",
                     "diarization": True,
@@ -1252,7 +1346,7 @@ def _b2_catalog() -> ModelCatalog:
                 {
                     "id": "extreme",
                     "asr": "asr-17b-bf16",
-                    "tts": "tts-17b-design-bf16",
+                    "tts": "tts-17b-custom-bf16",
                     "tts_clone": "tts-17b-base-bf16",
                     "aligner": "aligner-bf16",
                     "diarization": True,
@@ -1327,30 +1421,14 @@ def _b2_setup(monkeypatch: pytest.MonkeyPatch) -> _B2Downloader:
     return _B2Downloader(dict(_B2_ALIGNER_PAYLOADS), _B2_COREML_BYTES)
 
 
-def test_prepare_diarization_assets_light_provisions_nothing(
+def test_prepare_diarization_assets_provisions_aligner_q8(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     downloader = _b2_setup(monkeypatch)
     app_home = tmp_path / "app"
 
     result = diarization_assets.prepare_diarization_assets(
-        app_home, preset_id="light", downloader=downloader
-    )
-
-    assert result is None
-    assert not (app_home / "diarization").exists()
-    assert downloader.download_calls == []
-    assert downloader.http.urls == []
-
-
-def test_prepare_diarization_assets_balanced_provisions_aligner_q8(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    downloader = _b2_setup(monkeypatch)
-    app_home = tmp_path / "app"
-
-    result = diarization_assets.prepare_diarization_assets(
-        app_home, preset_id="balanced", downloader=downloader
+        app_home, aligner_key="aligner-q8", downloader=downloader
     )
 
     assert result is not None
@@ -1370,14 +1448,14 @@ def test_prepare_diarization_assets_balanced_provisions_aligner_q8(
     )
 
 
-def test_prepare_diarization_assets_quality_provisions_aligner_bf16(
+def test_prepare_diarization_assets_provisions_aligner_bf16(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     downloader = _b2_setup(monkeypatch)
     app_home = tmp_path / "app"
 
     result = diarization_assets.prepare_diarization_assets(
-        app_home, preset_id="quality", downloader=downloader
+        app_home, aligner_key="aligner-bf16", downloader=downloader
     )
 
     assert result is not None
@@ -1392,13 +1470,13 @@ def test_prepare_diarization_assets_reuses_verified_directory(
     app_home = tmp_path / "app"
 
     first = diarization_assets.prepare_diarization_assets(
-        app_home, preset_id="balanced", downloader=downloader
+        app_home, aligner_key="aligner-q8", downloader=downloader
     )
     downloads_after_first = list(downloader.download_calls)
     urls_after_first = list(downloader.http.urls)
 
     second = diarization_assets.prepare_diarization_assets(
-        app_home, preset_id="balanced", downloader=downloader
+        app_home, aligner_key="aligner-q8", downloader=downloader
     )
 
     assert second == first
@@ -1417,18 +1495,18 @@ def test_prepare_diarization_assets_rejects_corrupt_existing_directory(
 
     with pytest.raises(DiarizationAssetError):
         diarization_assets.prepare_diarization_assets(
-            app_home, preset_id="balanced", downloader=downloader
+            app_home, aligner_key="aligner-q8", downloader=downloader
         )
 
 
-def test_prepare_diarization_assets_unknown_preset_raises(
+def test_prepare_diarization_assets_unknown_aligner_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     downloader = _b2_setup(monkeypatch)
 
     with pytest.raises(DiarizationAssetError):
         diarization_assets.prepare_diarization_assets(
-            tmp_path / "app", preset_id="turbo", downloader=downloader
+            tmp_path / "app", aligner_key="unknown-aligner", downloader=downloader
         )
 
 
@@ -1458,8 +1536,12 @@ def test_managed_upgrade_provisions_tier_aligner_before_preflight(
     wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
-    selected = load_catalog().preset("quality")
-    for key in (selected.asr, selected.tts):
+    asr_key = required_spec_artifact("quality", "asr")
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    base_key = required_spec_artifact("fast", "tts_base")
+    assert asr_key is not None and tts_key is not None and base_key is not None
+    # Preflight resolves the committed selection against the prepared snapshots.
+    for key in (asr_key, tts_key, base_key):
         (app_home / "models" / key).mkdir(parents=True, exist_ok=True)
     # Simulate the 2.2.2 layout: the selection is already committed, but only
     # the legacy aligner directory exists, not the per-tier aligner-bf16.
@@ -1470,13 +1552,11 @@ def test_managed_upgrade_provisions_tier_aligner_before_preflight(
     selection_path.chmod(0o600)
     calls: list[tuple[str, ...]] = []
 
-    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
-        del preset_id, kwargs
-        assert selected.tts_clone is not None
-        (app_home / "models" / selected.tts_clone).mkdir(parents=True, exist_ok=True)
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
         return "prepared-quality"
 
-    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
     monkeypatch.setattr(
         install_macos,
         "prepare_runtime",
@@ -1497,7 +1577,9 @@ def test_managed_upgrade_provisions_tier_aligner_before_preflight(
     result = install_macos.install_managed(
         wheel,
         app_home=app_home,
-        preset_id="quality",
+        asr_spec="quality",
+        tts_spec="fast",
+        diarization_aligner="aligner-bf16",
         downloader=downloader,
         runtime_runner=lambda command: subprocess.CompletedProcess(
             command, 0, stdout="", stderr=""
@@ -1555,7 +1637,9 @@ def test_managed_diarization_provisioning_failure_rolls_back(
         install_macos.install_managed(
             wheel,
             app_home=app_home,
-            preset_id="quality",
+            asr_spec="quality",
+            tts_spec="fast",
+            diarization_aligner="aligner-bf16",
             downloader=downloader,
             runtime_runner=lambda command: subprocess.CompletedProcess(
                 command, 0, stdout="", stderr=""

@@ -365,6 +365,93 @@
       "files": [
         {
           "path": "README.md",
+          "sha256": "29acd85b1992a608daab6cf532606aef3f28cf6ee836eb039b47a918eed93b37",
+          "size": 1026
+        },
+        {
+          "path": "config.json",
+          "sha256": "b404fb6f99dac6f7a81f3a03af5675b131ecf9936ac75a7c9d75e54044600044",
+          "size": 5522
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "size": 245
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "size": 1671839
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "9488e7005cc0cf44f8804eb543668d0763bb1c649ce6f1eddc663519524b3182",
+          "size": 1304461214
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "7829f1cc24f5cbd7d7a3ba888bb08c7cf52d82ba79a4f0f3756d41f8bf5e52b4",
+          "size": 77731
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "size": 127
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "size": 2336
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "size": 76
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "size": 682293092
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "size": 234
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "size": 7344
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "tts-0.6b-base-q8",
+      "model_id": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+      "quantization": {
+        "bits": 8,
+        "dtype": null,
+        "format": "mlx",
+        "group_size": 64
+      },
+      "revision": "191c7e693b16f4cb44572665b4c1547973fc79eb",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+          "revision": "191c7e693b16f4cb44572665b4c1547973fc79eb"
+        }
+      ],
+      "variant": "base"
+    },
+    {
+      "family": "qwen3_tts",
+      "files": [
+        {
+          "path": "README.md",
           "sha256": "43eb391246ca355e5eaa3fa74b8f9a433dd48d68cdec1e04321f9c1b2c9fd855",
           "size": 1068
         },
@@ -621,6 +708,180 @@
       "files": [
         {
           "path": "README.md",
+          "sha256": "a267cf6e1207e8ab20fd972a38c6f178ffb98defa230f77e9dd26d3b20daf8ef",
+          "size": 1068
+        },
+        {
+          "path": "config.json",
+          "sha256": "9c0f62abb48c432361fdcd54da1fd9fe00a993c0acccef5d45c2d3edd5932fb1",
+          "size": 5853
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "size": 245
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "size": 1671839
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "3a791fb8250fc32ab0259b679d834159d3c8516af62f033ff2b9f42913e3fab6",
+          "size": 3833402589
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "abf019e063dcc595d7aef7c9554d2806ffdc58746a7ac6238cb26177af8d431f",
+          "size": 32458
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "size": 127
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "size": 2336
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "size": 76
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "size": 682293092
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "size": 234
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "size": 7344
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "tts-1.7b-custom-bf16",
+      "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",
+      "quantization": {
+        "bits": null,
+        "dtype": "bf16",
+        "format": "none",
+        "group_size": null
+      },
+      "revision": "42f1b6f64e97fc99fb233061829dca78c6dda6e6",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",
+          "revision": "42f1b6f64e97fc99fb233061829dca78c6dda6e6"
+        }
+      ],
+      "variant": "custom_voice"
+    },
+    {
+      "family": "qwen3_tts",
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "50fe8f13fc95466beb50a96ae743e40573512754e80330373a043f4bd34d6212",
+          "size": 1118
+        },
+        {
+          "path": "config.json",
+          "sha256": "43f29f9ab55cf387bd2ce1d07e9d95a5ca8974fa2fda4e2b45c13ae64aad3bfa",
+          "size": 6058
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "size": 245
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "size": 1671839
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "b696f4bf45f54497b6de758981e76f1410bd68af05a657477dee466b0202df1a",
+          "size": 2393308931
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "2551ed02dc288b90cd6b7ec98652433f08ef2ae98fb3eda5248a4b9e5b47d08b",
+          "size": 71786
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "size": 127
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "size": 2336
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "size": 76
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "size": 682293092
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "size": 234
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "size": 7344
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      ],
+      "key": "tts-1.7b-custom-q8",
+      "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+      "quantization": {
+        "bits": 8,
+        "dtype": null,
+        "format": "mlx",
+        "group_size": 64
+      },
+      "revision": "08b854525817066e04ef6b6430a3faa0eebd24d2",
+      "sources": [
+        {
+          "provider": "modelscope",
+          "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+          "revision": "08b854525817066e04ef6b6430a3faa0eebd24d2"
+        }
+      ],
+      "variant": "custom_voice"
+    },
+    {
+      "family": "qwen3_tts",
+      "files": [
+        {
+          "path": "README.md",
           "sha256": "9a7ca18ad574b63bfd39fccb05a6e4f8841eccb1b60d738860f27ef3c74978c6",
           "size": 1203
         },
@@ -702,93 +963,6 @@
         }
       ],
       "variant": "voice_design"
-    },
-    {
-      "family": "qwen3_tts",
-      "files": [
-        {
-          "path": "README.md",
-          "sha256": "0d342ad28927ddd1a65c8ee936f513ab324b6f4442fe0b61750c264c767aa199",
-          "size": 1068
-        },
-        {
-          "path": "config.json",
-          "sha256": "b91c47798e77e259e6b86987e48d7a5eca8e703205e00afb63fe08ec5251f983",
-          "size": 5437
-        },
-        {
-          "path": "generation_config.json",
-          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
-          "size": 245
-        },
-        {
-          "path": "merges.txt",
-          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
-          "size": 1671839
-        },
-        {
-          "path": "model.safetensors",
-          "sha256": "1a84179d87c972353ccdd9b48f3c4422509b3d1b11030d32358312fb0f3800d7",
-          "size": 2393308931
-        },
-        {
-          "path": "model.safetensors.index.json",
-          "sha256": "2551ed02dc288b90cd6b7ec98652433f08ef2ae98fb3eda5248a4b9e5b47d08b",
-          "size": 71786
-        },
-        {
-          "path": "preprocessor_config.json",
-          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
-          "size": 127
-        },
-        {
-          "path": "speech_tokenizer/config.json",
-          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
-          "size": 2336
-        },
-        {
-          "path": "speech_tokenizer/configuration.json",
-          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
-          "size": 76
-        },
-        {
-          "path": "speech_tokenizer/model.safetensors",
-          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
-          "size": 682293092
-        },
-        {
-          "path": "speech_tokenizer/preprocessor_config.json",
-          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
-          "size": 234
-        },
-        {
-          "path": "tokenizer_config.json",
-          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
-          "size": 7344
-        },
-        {
-          "path": "vocab.json",
-          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
-          "size": 2776833
-        }
-      ],
-      "key": "tts-1.7b-design-q8",
-      "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
-      "quantization": {
-        "bits": 8,
-        "dtype": null,
-        "format": "mlx",
-        "group_size": 64
-      },
-      "revision": "319768077bff672bfbea587c72982016052e8d43",
-      "sources": [
-        {
-          "provider": "modelscope",
-          "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
-          "revision": "319768077bff672bfbea587c72982016052e8d43"
-        }
-      ],
-      "variant": "voice_design"
     }
   ],
   "precision_policy": {
@@ -827,7 +1001,7 @@
       "asr": "asr-1.7b-bf16",
       "diarization": true,
       "id": "extreme",
-      "tts": "tts-1.7b-design-bf16",
+      "tts": "tts-1.7b-custom-bf16",
       "tts_clone": "tts-1.7b-base-bf16"
     },
     {
@@ -843,9 +1017,76 @@
       "asr": "asr-1.7b-q8",
       "diarization": true,
       "id": "quality",
-      "tts": "tts-1.7b-design-q8",
+      "tts": "tts-1.7b-custom-q8",
       "tts_clone": "tts-1.7b-base-q8"
     }
   ],
-  "schema_version": 2
+  "schema_version": 2,
+  "specs": [
+    {
+      "artifact_key": "aligner-q8",
+      "role": "alignment",
+      "tier": "fast"
+    },
+    {
+      "artifact_key": "asr-0.6b-q8",
+      "role": "asr",
+      "tier": "fast"
+    },
+    {
+      "artifact_key": "tts-0.6b-base-q8",
+      "role": "tts_base",
+      "tier": "fast"
+    },
+    {
+      "artifact_key": "tts-0.6b-custom-q8",
+      "role": "tts_custom_voice",
+      "tier": "fast"
+    },
+    {
+      "artifact_key": "aligner-bf16",
+      "role": "alignment",
+      "tier": "quality"
+    },
+    {
+      "artifact_key": "asr-1.7b-q8",
+      "role": "asr",
+      "tier": "quality"
+    },
+    {
+      "artifact_key": "tts-1.7b-base-q8",
+      "role": "tts_base",
+      "tier": "quality"
+    },
+    {
+      "artifact_key": "tts-1.7b-custom-q8",
+      "role": "tts_custom_voice",
+      "tier": "quality"
+    },
+    {
+      "artifact_key": "aligner-bf16",
+      "role": "alignment",
+      "tier": "reference"
+    },
+    {
+      "artifact_key": "asr-1.7b-bf16",
+      "role": "asr",
+      "tier": "reference"
+    },
+    {
+      "artifact_key": "tts-1.7b-base-bf16",
+      "role": "tts_base",
+      "tier": "reference"
+    },
+    {
+      "artifact_key": "tts-1.7b-custom-bf16",
+      "role": "tts_custom_voice",
+      "tier": "reference"
+    },
+    {
+      "artifact_key": "tts-1.7b-design-bf16",
+      "role": "voice_design",
+      "tier": "reference"
+    }
+  ]
 }

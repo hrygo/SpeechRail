@@ -112,22 +112,25 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     entry = data["voices"][0]
     assert entry["voice_revision"] is None
     assert entry["voice_identity_assurance"] == "legacy"
-    assert entry["available"] is (tier in {"quality", "extreme"} or mode == "system")
+    # The target architecture keeps VoiceDesign out of daily routing, so the
+    # tier's primary TTS is CustomVoice (built-in speakers) and the clone lane
+    # is Base. Only those two roles resolve; an unpublished instruction draft
+    # stays unavailable until it is published as a Base-served revision.
+    assert entry["available"] is (
+        mode == "system" or (mode == "clone" and tier in {"quality", "extreme"})
+    )
     encoded = str(data)
     for secret in ["PRIVATE_INSTRUCTION", "PRIVATE_REFERENCE", "/private/", "PRIVATE_QUALITY"]:
         assert secret not in encoded
     if mode == "clone":
         assert entry["variant"] == ("base" if tier in {"quality", "extreme"} else None)
         assert entry["operations"]["http_speech"]["parameters"]["speed"]["values"] == [1.0]
-        assert (
-            entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
-            == "unsupported"
-        )
-    elif tier in {"quality", "extreme"}:
-        assert (
-            entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
-            == "supported"
-        )
+    # Instructions are a VoiceDesign-only parameter; no tier's primary TTS is
+    # VoiceDesign, so both built-in speakers and the Base clone lane reject them.
+    assert (
+        entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
+        == "unsupported"
+    )
     parameters = entry["operations"]["http_speech"]["parameters"]
     assert parameters["seed"]["status"] == "unsupported"
     assert parameters["phoneme"]["status"] == "unsupported"
@@ -190,7 +193,15 @@ def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> N
 
     from speechrail.application.capability_snapshot import build_capability_snapshot
 
-    profile = voices.VoiceProfile(id="local", instruction="first", mode="instruction")
+    # A clone revision is the target's routable custom voice; an unpublished
+    # instruction draft is intentionally unavailable, so readiness would not be
+    # observable on it.
+    profile = voices.VoiceProfile(
+        id="local",
+        mode="clone",
+        ref_text="first",
+        audio_path="/private/reference.wav",
+    )
 
     def snap(profile, *, ready=True):
         return build_capability_snapshot(
@@ -205,7 +216,7 @@ def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> N
     initial = snap(profile)
     assert (
         initial["catalog_revision"]
-        != snap(replace(profile, instruction="second"))["catalog_revision"]
+        != snap(replace(profile, ref_text="second"))["catalog_revision"]
     )
     assert initial["catalog_revision"] == snap(profile, ready=False)["catalog_revision"]
     assert initial["snapshot_id"] != snap(profile, ready=False)["snapshot_id"]
@@ -295,9 +306,10 @@ def test_content_addressed_voice_revision_enables_conditional_synthesis() -> Non
     profile = voices.VoiceProfile(
         id="local",
         name="Local",
-        instruction="stable private recipe",
+        mode="clone",
         seed=42,
-        mode="instruction",
+        ref_text="stable private recipe",
+        audio_path="/private/reference.wav",
         revision=revision,
     )
     data = build_capability_snapshot(

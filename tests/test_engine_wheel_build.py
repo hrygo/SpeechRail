@@ -1,0 +1,133 @@
+"""Offline tests for the controlled engine wheel builder and its provenance."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import zipfile
+from pathlib import Path
+from runpy import run_path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+TOOL = run_path(str(_ROOT / "tools" / "build_engine_wheel.py"))
+EngineWheelBuildError = TOOL["EngineWheelBuildError"]
+build_engine_wheel = TOOL["build_engine_wheel"]
+hash_tree = TOOL["hash_tree"]
+load_build_spec = TOOL["load_build_spec"]
+
+LOCK_TOOL = run_path(str(_ROOT / "tools" / "update_runtime_lock.py"))
+read_engine_wheel_pin = LOCK_TOOL["_read_engine_wheel_pin"]
+
+_WHEEL_NAME = "mlx_audio-0.4.8+speechrail.1-py3-none-any.whl"
+_REVISION = "b" * 40
+
+
+def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
+    source = root / "vendor" / "engine-build" / "upstream" / "mlx_audio"
+    source.mkdir(parents=True)
+    (source / "engine.py").write_text("ENGINE = 1\n", encoding="utf-8")
+    incremental = root / "vendor" / "mlx-audio-incremental" / "src"
+    incremental.mkdir(parents=True)
+    (incremental / "incremental.py").write_text("INCREMENTAL = True\n", encoding="utf-8")
+    spec = root / "vendor" / "engine-build" / "engine-build.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "source_repository": "https://github.com/Blaizzy/mlx-audio",
+                "source_revision": revision,
+                "wheel_name": _WHEEL_NAME,
+                "source_root": "vendor/engine-build/upstream",
+                "incremental_root": "vendor/mlx-audio-incremental/src",
+                "build_inputs": [
+                    "vendor/engine-build/upstream",
+                    "vendor/mlx-audio-incremental/src",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return spec
+
+
+def _fake_builder(source_root: Path, out_dir: Path) -> Path:
+    del source_root
+    wheel = out_dir / _WHEEL_NAME
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("mlx_audio/__init__.py", "VERSION = '0.4.8'\n")
+    return wheel
+
+
+def test_hash_tree_is_stable_across_path_order(tmp_path: Path) -> None:
+    first = tmp_path / "a.py"
+    second = tmp_path / "b.py"
+    first.write_bytes(b"first\n")
+    second.write_bytes(b"second\n")
+
+    assert hash_tree((first, second), root=tmp_path) == hash_tree(
+        (second, first), root=tmp_path
+    )
+    second.write_bytes(b"changed\n")
+    assert hash_tree((first, second), root=tmp_path) != hash_tree(
+        (first,), root=tmp_path
+    )
+
+
+def test_build_engine_wheel_writes_provenance_the_lock_generator_accepts(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+
+    build = build_engine_wheel(
+        spec, root=tmp_path, builder=_fake_builder
+    )
+
+    assert build.wheel_path.name == _WHEEL_NAME
+    assert build.provenance["source_revision"] == _REVISION
+    assert build.provenance["source_repository"] == "https://github.com/Blaizzy/mlx-audio"
+    assert build.sha256 == hashlib.sha256(build.wheel_path.read_bytes()).hexdigest()
+    provenance_path = tmp_path / "vendor" / "engine-build" / "dist" / "provenance.json"
+    assert json.loads(provenance_path.read_text(encoding="utf-8")) == dict(
+        build.provenance
+    )
+    # The runtime lock is generated from this exact provenance.
+    assert read_engine_wheel_pin(tmp_path) == dict(build.provenance)
+
+
+def test_build_engine_wheel_is_deterministic_for_the_same_inputs(tmp_path: Path) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+
+    first = build_engine_wheel(spec, root=tmp_path, builder=_fake_builder)
+    second = build_engine_wheel(spec, root=tmp_path, builder=_fake_builder)
+
+    assert first.provenance["build_inputs_sha256"] == second.provenance["build_inputs_sha256"]
+    assert first.provenance["patch_sha256"] == second.provenance["patch_sha256"]
+
+
+def test_build_spec_rejects_an_unpinned_revision(tmp_path: Path) -> None:
+    with pytest.raises(EngineWheelBuildError, match="revision"):
+        load_build_spec(tmp_path, _write_spec(tmp_path, revision="main"))
+
+
+def test_build_engine_wheel_rejects_missing_inputs(tmp_path: Path) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+    import shutil
+
+    shutil.rmtree(tmp_path / "vendor" / "mlx-audio-incremental" / "src")
+
+    with pytest.raises(EngineWheelBuildError, match="input"):
+        build_engine_wheel(spec, root=tmp_path, builder=_fake_builder)
+
+
+def test_build_engine_wheel_rejects_a_non_archive_result(tmp_path: Path) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+
+    def broken_builder(source_root: Path, out_dir: Path) -> Path:
+        del source_root
+        wheel = out_dir / _WHEEL_NAME
+        wheel.write_bytes(b"not-a-wheel")
+        return wheel
+
+    with pytest.raises(EngineWheelBuildError, match="archive"):
+        build_engine_wheel(spec, root=tmp_path, builder=broken_builder)

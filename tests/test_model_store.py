@@ -94,7 +94,9 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
 ]:
     definitions = (
         ("asr", "qwen3_asr", "asr", 8, None),
-        ("design", "qwen3_tts", "voice_design", 8, None),
+        # Quality's primary TTS is a CustomVoice artifact in the target
+        # architecture; the fixture keeps its legacy key but not the variant.
+        ("design", "qwen3_tts", "custom_voice", 8, None),
         ("custom", "qwen3_tts", "custom_voice", 8, None),
         ("base", "qwen3_tts", "base", 8, None),
         ("asr-bf16", "qwen3_asr", "asr", None, "bf16"),
@@ -149,6 +151,36 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
         {
             "schema_version": 2,
             "artifacts": artifacts,
+            # Synthetic bindings: this fixture exercises download/registry
+            # mechanics, so it keeps its own small artifact keys while still
+            # covering every tier x role the catalog schema requires.
+            "specs": [
+                {"tier": "fast", "role": "asr", "artifact_key": "asr"},
+                {"tier": "quality", "role": "asr", "artifact_key": "asr"},
+                {"tier": "reference", "role": "asr", "artifact_key": "asr-bf16"},
+                {"tier": "fast", "role": "tts_custom_voice", "artifact_key": "custom"},
+                {"tier": "quality", "role": "tts_custom_voice", "artifact_key": "custom"},
+                {
+                    "tier": "reference",
+                    "role": "tts_custom_voice",
+                    "artifact_key": "custom-bf16",
+                },
+                {"tier": "fast", "role": "tts_base", "artifact_key": "base"},
+                {"tier": "quality", "role": "tts_base", "artifact_key": "base"},
+                {"tier": "reference", "role": "tts_base", "artifact_key": "base-bf16"},
+                {
+                    "tier": "reference",
+                    "role": "voice_design",
+                    "artifact_key": "design-bf16",
+                },
+                {"tier": "fast", "role": "alignment", "artifact_key": "aligner-bf16"},
+                {"tier": "quality", "role": "alignment", "artifact_key": "aligner-bf16"},
+                {
+                    "tier": "reference",
+                    "role": "alignment",
+                    "artifact_key": "aligner-bf16",
+                },
+            ],
             "presets": [
                 {
                     "id": "quality",
@@ -177,7 +209,7 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                 {
                     "id": "extreme",
                     "asr": "asr-bf16",
-                    "tts": "design-bf16",
+                    "tts": "custom-bf16",
                     "tts_clone": "base-bf16",
                     "aligner": "aligner-bf16",
                     "diarization": False,
@@ -755,7 +787,7 @@ async def test_extreme_prepare_reuses_verified_bf16_artifacts_without_download(
     assert second_downloader.calls == []
     assert set(registered_prepared_artifacts(
         tmp_path, preset_id="extreme", catalog=catalog, runtime_lock=lock
-    )) == {"asr-bf16", "design-bf16", "base-bf16"}
+    )) == {"asr-bf16", "custom-bf16", "base-bf16"}
 
 
 @pytest.mark.anyio
@@ -1198,22 +1230,13 @@ async def test_resolve_prepared_models_returns_verified_immutable_identity(
 
 
 @pytest.mark.anyio
-async def test_resolve_prepared_selection_uses_catalog_and_lock_identity(tmp_path: Path) -> None:
+async def test_resolve_prepared_models_uses_catalog_and_lock_identity(tmp_path: Path) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
     prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
-    selected = catalog.preset("quality")
-    selection = {
-        "schema_version": 1,
-        "preset": "quality",
-        "generation": 1,
-        "asr": selected.asr,
-        "tts": selected.tts,
-        "runtime_lock_id": lock.id,
-    }
 
-    result = resolve_prepared_selection(
-        selection,
+    result = resolve_prepared_models(
+        prepared_id,
         app_home=tmp_path,
         catalog=catalog,
         runtime_lock=lock,

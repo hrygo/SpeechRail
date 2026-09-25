@@ -27,6 +27,7 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.domain.model_spec import ModelRole, SpecTier, required_spec_artifact
 
 _REGISTRY_SCHEMA_VERSION = 1
 _REGISTRY_FILENAME = "model-preparations.json"
@@ -773,13 +774,11 @@ def registered_prepared_artifacts(
         app_home, catalog, runtime_lock
     )
     try:
-        preset = selected_catalog.preset(preset_id)
-    except KeyError as exc:
+        resolved_artifacts = _resolver_artifacts(selected_catalog, preset_id)
+    except ModelStoreError as exc:
         raise ModelStoreError(f"unknown preset: {preset_id}") from exc
-    artifacts_by_key = {artifact.key: artifact for artifact in selected_catalog.artifacts}
-    keys = [preset.asr, preset.tts]
-    if preset.tts_clone is not None:
-        keys.append(preset.tts_clone)
+    artifacts_by_key = {artifact.key: artifact for artifact in resolved_artifacts}
+    keys = [artifact.key for artifact in resolved_artifacts]
     registry = _read_registry(_registry_path(resolved_app_home))
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
@@ -918,7 +917,10 @@ def _resolver_registry_path(app_home: Path) -> Path:
 def _resolver_artifacts(
     catalog: ModelCatalog, preset_id: str
 ) -> tuple[ModelArtifact, ...]:
-    """Return every catalog artifact required by one preset."""
+    """Return every catalog artifact required by one prepared selection."""
+    specs = _parse_spec_selection_id(preset_id)
+    if specs is not None:
+        return _selection_artifacts(catalog, specs[0], specs[1])
     try:
         selected_preset = catalog.preset(preset_id)
         artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
@@ -950,6 +952,70 @@ def _resolver_artifacts(
             raise ModelStoreError("prepared clone model identity is invalid")
         artifacts += (clone,)
     return artifacts
+
+
+def _spec_selection_id(asr_spec: SpecTier, tts_spec: SpecTier) -> str:
+    return f"{asr_spec}/{tts_spec}"
+
+
+def _parse_spec_selection_id(selection_id: str) -> tuple[SpecTier, SpecTier] | None:
+    parts = selection_id.split("/")
+    if len(parts) != 2 or any(part not in {"fast", "quality", "reference"} for part in parts):
+        return None
+    return cast(SpecTier, parts[0]), cast(SpecTier, parts[1])
+
+
+_SPEC_TIERS = frozenset({"fast", "quality", "reference"})
+
+
+def _selection_specs(selection: object) -> tuple[SpecTier, SpecTier]:
+    """Extract independent ASR/TTS specs from a record, mapping or model instance."""
+    from speechrail.service.profile_store import SelectionRecord
+
+    if isinstance(selection, SelectionRecord):
+        return selection.asr_spec, selection.tts_spec
+    if isinstance(selection, Mapping):
+        asr_spec = selection.get("asr_spec")
+        tts_spec = selection.get("tts_spec")
+        if asr_spec in _SPEC_TIERS and tts_spec in _SPEC_TIERS:
+            return cast(SpecTier, asr_spec), cast(SpecTier, tts_spec)
+        raise ModelStoreError("selection identity is invalid")
+    try:
+        record = SelectionRecord.model_validate(selection)
+    except Exception as exc:
+        raise ModelStoreError("selection identity is invalid") from exc
+    return record.asr_spec, record.tts_spec
+
+
+def _selection_artifacts(
+    catalog: ModelCatalog,
+    asr_spec: SpecTier,
+    tts_spec: SpecTier,
+) -> tuple[ModelArtifact, ...]:
+    artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
+    required = (
+        (asr_spec, "asr"),
+        (tts_spec, "tts_custom_voice"),
+        # Selection resolution requires the Base clone directory for every tier,
+        # so preparation has to fetch it or the prepared set can never activate.
+        (tts_spec, "tts_base"),
+    )
+    selected: list[ModelArtifact] = []
+    for tier, role in required:
+        key = required_spec_artifact(cast(SpecTier, tier), cast(ModelRole, role))
+        if key is None or key not in artifacts_by_key:
+            raise ModelStoreError(f"unavailable selected artifact: {tier}/{role}")
+        selected.append(artifacts_by_key[key])
+    if (
+        selected[0].family != "qwen3_asr"
+        or selected[0].variant != "asr"
+        or selected[1].family != "qwen3_tts"
+        or selected[1].variant != "custom_voice"
+        or selected[2].family != "qwen3_tts"
+        or selected[2].variant != "base"
+    ):
+        raise ModelStoreError("selected artifact identity is invalid")
+    return tuple(selected)
 
 
 def _strict_prepared_path(
@@ -1135,15 +1201,11 @@ def resolve_prepared_selection(
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
 ) -> PreparedModelSet:
-    """Resolve a validated SelectionRecord to its exact prepared model set."""
+    """Resolve a validated independent ASR/TTS selection to a verified model set."""
     try:
-        from speechrail.service.profile_store import SelectionRecord
-
-        record = (
-            selection
-            if isinstance(selection, SelectionRecord)
-            else SelectionRecord.model_validate(selection)
-        )
+        asr_spec, tts_spec = _selection_specs(selection)
+    except ModelStoreError:
+        raise
     except Exception as exc:
         raise ModelStoreError("selection identity is invalid") from exc
 
@@ -1151,12 +1213,9 @@ def resolve_prepared_selection(
         app_home, catalog, runtime_lock
     )
     try:
-        if record.runtime_lock_id != resolved_runtime_lock.id:
-            raise ModelStoreError("selection identity is invalid")
-        artifacts = _resolver_artifacts(resolved_catalog, record.preset)
-        if record.asr != artifacts[0].key or record.tts != artifacts[1].key:
-            raise ModelStoreError("selection identity is invalid")
-        prepared_id = _prepared_id(record.preset, resolved_runtime_lock, artifacts)
+        artifacts = _selection_artifacts(resolved_catalog, asr_spec, tts_spec)
+        selection_id = _spec_selection_id(asr_spec, tts_spec)
+        prepared_id = _prepared_id(selection_id, resolved_runtime_lock, artifacts)
         return resolve_prepared_models(
             prepared_id,
             app_home=resolved_app_home,
@@ -1167,7 +1226,6 @@ def resolve_prepared_selection(
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise ModelStoreError("selection does not resolve to a prepared model set") from exc
-
 
 def _validate_model_store_paths(root: Path) -> None:
     if not root.exists():
@@ -1459,9 +1517,10 @@ def _update_moved_registry_paths(
                 entry["path"] = moved[old_path]
 
 
-async def prepare_models(
+async def _prepare_models_impl(
     preset_id: str,
     *,
+    artifacts: tuple[ModelArtifact, ...] | None,
     app_home: Path,
     progress: ProgressCallback | None = None,
     downloader: Downloader,
@@ -1471,7 +1530,7 @@ async def prepare_models(
     max_retries: int = 2,
     disk_usage: DiskUsage | None = None,
 ) -> str:
-    """Download a catalog preset into verified local snapshots and return its prepared ID."""
+    """Download one explicit artifact set into verified snapshots."""
     if not isinstance(preset_id, str) or not preset_id:
         raise ModelStoreError("preset must be a non-empty string")
     if (
@@ -1491,18 +1550,23 @@ async def prepare_models(
     elif not isinstance(runtime_lock, RuntimeLock):
         raise ModelStoreError("runtime_lock must be a RuntimeLock")
 
-    try:
-        selected_preset = catalog.preset(preset_id)
-    except KeyError as exc:
-        raise ModelStoreError(f"unknown preset: {preset_id}") from exc
-    artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
-    try:
-        artifact_keys = [selected_preset.asr, selected_preset.tts]
-        if selected_preset.tts_clone is not None:
-            artifact_keys.append(selected_preset.tts_clone)
-        artifacts = tuple(artifacts_by_key[key] for key in artifact_keys)
-    except KeyError as exc:
-        raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
+    if artifacts is None:
+        try:
+            selected_preset = catalog.preset(preset_id)
+        except KeyError as exc:
+            raise ModelStoreError(f"unknown preset: {preset_id}") from exc
+        artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
+        try:
+            artifact_keys = [selected_preset.asr, selected_preset.tts]
+            if selected_preset.tts_clone is not None:
+                artifact_keys.append(selected_preset.tts_clone)
+            artifacts = tuple(artifacts_by_key[key] for key in artifact_keys)
+        except KeyError as exc:
+            raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
+    else:
+        artifacts = tuple(artifacts)
+        if not artifacts or len({artifact.key for artifact in artifacts}) != len(artifacts):
+            raise ModelStoreError("explicit artifact set is invalid")
 
     for artifact in artifacts:
         if not artifact.sources or not artifact.files:
@@ -1649,6 +1713,98 @@ async def prepare_models(
             staging_root.rmdir()
 
 
+async def prepare_models(
+    preset_id: str,
+    *,
+    app_home: Path,
+    progress: ProgressCallback | None = None,
+    downloader: Downloader,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+    cancel_event: asyncio.Event | None = None,
+    max_retries: int = 2,
+    disk_usage: DiskUsage | None = None,
+) -> str:
+    """Download a legacy preset artifact group into verified snapshots."""
+
+    return await _prepare_models_impl(
+        preset_id,
+        artifacts=None,
+        app_home=app_home,
+        progress=progress,
+        downloader=downloader,
+        catalog=catalog,
+        runtime_lock=runtime_lock,
+        cancel_event=cancel_event,
+        max_retries=max_retries,
+        disk_usage=disk_usage,
+    )
+
+
+async def prepare_spec_models(
+    asr_spec: SpecTier,
+    tts_spec: SpecTier,
+    *,
+    app_home: Path,
+    progress: ProgressCallback | None = None,
+    downloader: Downloader,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+    cancel_event: asyncio.Event | None = None,
+    max_retries: int = 2,
+    disk_usage: DiskUsage | None = None,
+) -> str:
+    """Prepare only the ASR and primary TTS artifacts named by two explicit specs."""
+
+    if asr_spec not in _SPEC_TIERS or tts_spec not in _SPEC_TIERS:
+        raise ModelStoreError("selection identity is invalid")
+    resolved_app_home, resolved_catalog, resolved_runtime_lock = _resolver_inputs(
+        app_home, catalog, runtime_lock
+    )
+    artifacts = _selection_artifacts(resolved_catalog, asr_spec, tts_spec)
+    return await _prepare_models_impl(
+        _spec_selection_id(asr_spec, tts_spec),
+        artifacts=artifacts,
+        app_home=resolved_app_home,
+        progress=progress,
+        downloader=downloader,
+        catalog=resolved_catalog,
+        runtime_lock=resolved_runtime_lock,
+        cancel_event=cancel_event,
+        max_retries=max_retries,
+        disk_usage=disk_usage,
+    )
+
+
+async def prepare_selection_models(
+    selection: object,
+    *,
+    app_home: Path,
+    progress: ProgressCallback | None = None,
+    downloader: Downloader,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+    cancel_event: asyncio.Event | None = None,
+    max_retries: int = 2,
+    disk_usage: DiskUsage | None = None,
+) -> str:
+    """Prepare only the ASR and primary TTS artifacts explicitly selected by specs."""
+
+    asr_spec, tts_spec = _selection_specs(selection)
+    return await prepare_spec_models(
+        asr_spec,
+        tts_spec,
+        app_home=app_home,
+        progress=progress,
+        downloader=downloader,
+        catalog=catalog,
+        runtime_lock=runtime_lock,
+        cancel_event=cancel_event,
+        max_retries=max_retries,
+        disk_usage=disk_usage,
+    )
+
+
 __all__ = [
     "Downloader",
     "ModelIntegrity",
@@ -1660,6 +1816,8 @@ __all__ = [
     "inspect_prepared_artifacts",
     "model_store_root",
     "prepare_models",
+    "prepare_selection_models",
+    "prepare_spec_models",
     "registered_prepared_artifacts",
     "resolve_prepared_models",
     "resolve_prepared_selection",

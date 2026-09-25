@@ -30,38 +30,38 @@ _STAGES = {
 _TERMINAL = {"COMMITTED", "ROLLED_BACK", "NOT_READY"}
 
 
+class LegacySelectionError(ValueError):
+    """A persisted selection predates the independent ASR/TTS schema."""
+
+
 class SelectionRecord(BaseModel):
-    """持久化选择记录已准备的模型键和共同 runtime 身份。"""
+    """Persist only the two independent spec tiers and one startup generation."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: StrictInt
-    preset: Literal["extreme", "quality", "balanced", "light"]
+    schema_version: Literal[2]
+    asr_spec: Literal["fast", "quality", "reference"]
+    tts_spec: Literal["fast", "quality", "reference"]
+    auto: Literal["off", "resource"] = "off"
     generation: StrictInt = Field(gt=0)
-    asr: StrictStr
-    tts: StrictStr
-    tts_clone: StrictStr | None = None
     runtime_lock_id: StrictStr
 
-    @field_validator("schema_version")
+    @field_validator("runtime_lock_id")
     @classmethod
-    def version_supported(cls, value: int) -> int:
-        if value != 1:
-            raise ValueError("unsupported selection schema")
-        return value
-
-    @field_validator("asr", "tts", "tts_clone", "runtime_lock_id")
-    @classmethod
-    def safe_key(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def safe_key(cls, value: str) -> str:
         if not _SAFE_KEY.fullmatch(value):
-            raise ValueError("invalid model or runtime key")
+            raise ValueError("invalid runtime key")
         return value
 
 
 def _selection(value: object) -> dict[str, object] | None:
     if value is None:
         return None
+    if isinstance(value, Mapping):
+        schema_version = value.get("schema_version")
+        if schema_version == 1 or "preset" in value or "asr" in value or "tts" in value:
+            raise LegacySelectionError(
+                "legacy selection schema is unsupported; reconfigure ASR and TTS specs"
+            )
     return dict(SelectionRecord.model_validate(value).model_dump(exclude_none=True))
 
 

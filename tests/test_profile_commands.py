@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from speechrail.config.model_catalog import load_catalog
 from speechrail.service import profile_commands as commands
-from speechrail.service.diarization_assets import (
-    _COREML_FILE_SIZES,
-    DiarizationAssetPaths,
-)
+from speechrail.service.diarization_assets import DiarizationAssetPaths
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.profile_commands import (
     ProfileCommandError,
@@ -20,68 +18,80 @@ from speechrail.service.profile_commands import (
     list_profiles,
     model_changes,
     profile_status,
-    recommend_profile,
+    recommend_selection,
     rollback_profile,
 )
-from speechrail.service.profile_store import ProfileStore
+from speechrail.service.profile_store import LegacySelectionError, ProfileStore
 from speechrail.service.profile_switch import ApplyResult
 
 
-def _selection(preset: str, generation: int) -> dict[str, object]:
-    selected = load_catalog().preset(preset)
+def _selection(asr_spec: str, tts_spec: str, generation: int) -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "preset": preset,
+        "schema_version": 2,
+        "asr_spec": asr_spec,
+        "tts_spec": tts_spec,
+        "auto": "off",
         "generation": generation,
-        "asr": selected.asr,
-        "tts": selected.tts,
         "runtime_lock_id": "speechrail-mlx-py312-v1",
     }
 
 
-def test_catalog_lists_four_tiers_and_extreme_changes_only_weight_tier() -> None:
+def test_catalog_lists_three_spec_tiers_with_explicit_bindings() -> None:
     catalog = load_catalog()
     profiles = list_profiles(catalog)
-    assert [profile.id for profile in profiles] == ["extreme", "quality", "balanced", "light"]
+    assert [profile.id for profile in profiles] == ["fast", "quality", "reference"]
     by_id = {profile.id: profile for profile in profiles}
-    extreme = by_id["extreme"]
-    balanced = by_id["balanced"]
-    light = by_id["light"]
+    fast = by_id["fast"]
     quality = by_id["quality"]
-    assert balanced.asr != light.asr
-    assert balanced.tts == light.tts
-    assert model_changes(balanced, light) == frozenset({"asr", "aligner"})
-    assert balanced.aligner == "aligner-q8"
+    reference = by_id["reference"]
+
+    assert fast.asr == "asr-0.6b-q8"
+    assert fast.tts == "tts-0.6b-custom-q8"
+    assert fast.tts_base == "tts-0.6b-base-q8"
+    assert fast.aligner == "aligner-q8"
+    assert quality.asr == "asr-1.7b-q8"
+    assert quality.tts == "tts-1.7b-custom-q8"
+    assert quality.tts_base == "tts-1.7b-base-q8"
     assert quality.aligner == "aligner-bf16"
-    assert extreme.asr != quality.asr
-    assert extreme.tts != quality.tts
-    assert extreme.tts_clone != quality.tts_clone
-    assert extreme.aligner == quality.aligner == "aligner-bf16"
-    assert model_changes(quality, extreme) == frozenset({"asr", "tts", "tts_clone"})
-    assert light.aligner is None
+    assert reference.asr == "asr-1.7b-bf16"
+    assert reference.tts == "tts-1.7b-custom-bf16"
+    assert reference.tts_base == "tts-1.7b-base-bf16"
+    assert reference.voice_design == "tts-1.7b-design-bf16"
+    assert fast.voice_design is None
+    assert quality.voice_design is None
+
+    assert model_changes(fast, quality) == frozenset(
+        {"asr", "tts", "tts_base", "aligner"}
+    )
+    assert model_changes(quality, reference) == frozenset(
+        {"asr", "tts", "tts_base", "voice_design"}
+    )
 
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
 
     def artifact_bytes(key: str) -> int:
         return sum(file.size for file in artifacts[key].files)
 
-    sortformer_bytes = sum(_COREML_FILE_SIZES)
-    balanced_asr_tts = artifact_bytes("asr-1.7b-q8") + artifact_bytes("tts-0.6b-custom-q8")
-    for profile in profiles:
-        assert profile.download_bytes > 0
-    assert light.download_bytes == (
-        artifact_bytes("asr-0.6b-q8") + artifact_bytes("tts-0.6b-custom-q8")
+    # ``download_bytes`` is the total size of every role a tier binds, including
+    # the Base clone TTS weights and the reference-only design weights.
+    assert fast.download_bytes == (
+        artifact_bytes("asr-0.6b-q8")
+        + artifact_bytes("tts-0.6b-custom-q8")
+        + artifact_bytes("tts-0.6b-base-q8")
+        + artifact_bytes("aligner-q8")
     )
-    assert balanced.download_bytes == (
-        balanced_asr_tts + artifact_bytes("aligner-q8") + sortformer_bytes
-    )
-    assert quality.download_bytes > balanced_asr_tts
-    assert extreme.download_bytes == (
-        artifact_bytes("asr-1.7b-bf16")
-        + artifact_bytes("tts-1.7b-design-bf16")
-        + artifact_bytes("tts-1.7b-base-bf16")
+    assert quality.download_bytes == (
+        artifact_bytes("asr-1.7b-q8")
+        + artifact_bytes("tts-1.7b-custom-q8")
+        + artifact_bytes("tts-1.7b-base-q8")
         + artifact_bytes("aligner-bf16")
-        + sortformer_bytes
+    )
+    assert reference.download_bytes == (
+        artifact_bytes("asr-1.7b-bf16")
+        + artifact_bytes("tts-1.7b-custom-bf16")
+        + artifact_bytes("tts-1.7b-base-bf16")
+        + artifact_bytes("tts-1.7b-design-bf16")
+        + artifact_bytes("aligner-bf16")
     )
 
 
@@ -94,30 +104,53 @@ def test_model_changes_accepts_the_public_mapping_shape() -> None:
 @pytest.mark.parametrize(
     ("memory_gib", "expected"),
     [
-        (8, "light"),
-        (12, "balanced"),
-        (16, "quality"),
-        (32, "quality"),
-        (64, "quality"),
-        (128, "quality"),
+        (8, ("fast", "fast")),
+        (12, ("quality", "fast")),
+        (16, ("quality", "quality")),
+        (64, ("quality", "quality")),
+        (128, ("quality", "quality")),
     ],
 )
-def test_recommendation_uses_memory_only(memory_gib: int, expected: str) -> None:
-    assert recommend_profile(memory_gib * 1024**3) == expected
+def test_recommendation_uses_memory_only(
+    memory_gib: int, expected: tuple[str, str]
+) -> None:
+    assert recommend_selection(memory_gib * 1024**3) == expected
 
 
 def test_status_is_read_only_and_preserves_unconfigured_directory(tmp_path: Path) -> None:
-    assert profile_status(tmp_path).preset is None
+    assert profile_status(tmp_path).label is None
     assert not (tmp_path / "config").exists()
     assert not (tmp_path / "state").exists()
 
 
-def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
+def test_status_rejects_a_legacy_selection_record(tmp_path: Path) -> None:
+    path = tmp_path / "config" / "selection.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "preset": "quality",
+                "generation": 1,
+                "asr": "asr-1.7b-q8",
+                "tts": "tts-1.7b-design-q8",
+                "runtime_lock_id": "speechrail-mlx-py312-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(LegacySelectionError):
+        profile_status(tmp_path)
+    # The refusal must not rewrite the user's file.
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_apply_prepares_then_switches_with_opt_in_diarization(tmp_path: Path) -> None:
     events: list[str] = []
 
-    def prepare(preset: str, app_home: Path) -> str:
-        events.append(f"prepare:{preset}:{app_home.name}")
-        return "prepared-light"
+    def prepare(asr_spec: str, tts_spec: str, app_home: Path) -> str:
+        events.append(f"prepare:{asr_spec}/{tts_spec}:{app_home.name}")
+        return "prepared-fast"
 
     def switch(prepared_id: str, app_home: Path) -> ApplyResult:
         events.append(f"switch:{prepared_id}:{app_home.name}")
@@ -126,11 +159,12 @@ def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
     def prepare_vad(app_home: Path) -> None:
         events.append(f"prepare_vad:{app_home.name}")
 
-    def prepare_diarization(preset: str, app_home: Path) -> None:
-        events.append(f"prepare_diarization:{preset}:{app_home.name}")
+    def prepare_diarization(app_home: Path, aligner_key: str) -> None:
+        events.append(f"prepare_diarization:{aligner_key}:{app_home.name}")
 
     result = apply_profile(
-        "light",
+        "fast",
+        "fast",
         app_home=tmp_path,
         prepare=prepare,
         switch=switch,
@@ -139,100 +173,78 @@ def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
     )
     assert result.status == "committed"
     assert events == [
-        f"prepare:light:{tmp_path.name}",
+        f"prepare:fast/fast:{tmp_path.name}",
         f"prepare_vad:{tmp_path.name}",
-        f"prepare_diarization:light:{tmp_path.name}",
-        f"switch:prepared-light:{tmp_path.name}",
+        f"prepare_diarization:aligner-q8:{tmp_path.name}",
+        f"switch:prepared-fast:{tmp_path.name}",
     ]
 
 
-def test_apply_extreme_uses_existing_transaction_order(tmp_path: Path) -> None:
+def test_apply_without_diarization_opt_in_skips_auxiliary_assets(tmp_path: Path) -> None:
     events: list[str] = []
 
-    def prepare(preset: str, app_home: Path) -> str:
-        events.append(f"prepare:{preset}:{app_home.name}")
-        return "prepared-extreme"
+    def prepare(asr_spec: str, tts_spec: str, app_home: Path) -> str:
+        events.append(f"prepare:{asr_spec}/{tts_spec}")
+        return "prepared-quality"
 
     def switch(prepared_id: str, app_home: Path) -> ApplyResult:
-        events.append(f"switch:{prepared_id}:{app_home.name}")
-        return ApplyResult("committed", "op_extreme", None)
+        events.append("switch")
+        return ApplyResult("committed", "op_quality", None)
 
-    result = apply_profile(
-        "extreme",
+    apply_profile(
+        "quality",
+        "quality",
         app_home=tmp_path,
         prepare=prepare,
         switch=switch,
         prepare_vad=lambda app_home: events.append("prepare_vad"),
-        prepare_diarization=lambda preset, app_home: events.append(f"prepare_diarization:{preset}"),
     )
-
-    assert result.status == "committed"
-    assert events == [
-        f"prepare:extreme:{tmp_path.name}",
-        "prepare_vad",
-        "prepare_diarization:extreme",
-        f"switch:prepared-extreme:{tmp_path.name}",
-    ]
+    assert events == ["prepare:quality/quality", "prepare_vad", "switch"]
 
 
-def test_extreme_prepare_failure_keeps_quality_selection_and_skips_switch(
+def test_apply_rejects_unknown_spec_tier(tmp_path: Path) -> None:
+    with pytest.raises(ProfileCommandError, match="unknown spec tier"):
+        apply_profile(
+            "extreme",  # type: ignore[arg-type]
+            "quality",
+            app_home=tmp_path,
+            prepare=lambda asr, tts, app_home: "unused",
+            switch=lambda prepared_id, app_home: ApplyResult("committed", None, None),
+        )
+
+
+def test_prepare_failure_keeps_previous_selection_and_skips_switch(
     tmp_path: Path,
 ) -> None:
-    old_selection = _selection("quality", 1)
+    old_selection = _selection("quality", "quality", 1)
     store = ProfileStore(tmp_path)
     store.initialize(old_selection)
     switch_calls: list[str] = []
 
-    def prepare(preset: str, app_home: Path) -> str:
-        assert preset == "extreme"
+    def prepare(asr_spec: str, tts_spec: str, app_home: Path) -> str:
+        assert (asr_spec, tts_spec) == ("reference", "reference")
         raise ProfileCommandError("bf16 artifact failed verification")
 
     def switch(prepared_id: str, app_home: Path) -> ApplyResult:
         switch_calls.append(prepared_id)
-        store.initialize(_selection("extreme", 2))
-        return ApplyResult("committed", "op_extreme", None)
+        store.initialize(_selection("reference", "reference", 2))
+        return ApplyResult("committed", "op_reference", None)
 
     with pytest.raises(ProfileCommandError, match="failed verification"):
         apply_profile(
-            "extreme",
+            "reference",
+            "reference",
             app_home=tmp_path,
             prepare=prepare,
             switch=switch,
             prepare_vad=lambda app_home: None,
-            prepare_diarization=lambda preset, app_home: None,
         )
 
     assert switch_calls == []
     assert store.recover() == old_selection
 
 
-def test_apply_light_removes_diarization_env(tmp_path: Path, monkeypatch) -> None:
-    layout = ServiceLayout.for_app_home(tmp_path)
-    layout.config_file.parent.mkdir(parents=True, mode=0o700)
-    layout.config_file.write_text(
-        "SPEECHRAIL_PORT=8201\n"
-        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/old/coreml\n"
-        "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR=/old/aligner\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        commands,
-        "prepare_diarization_assets",
-        lambda app_home, *, preset_id, downloader: None,
-    )
-    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
-
-    _prepare_diarization_assets("light", tmp_path)
-
-    text = layout.config_file.read_text(encoding="utf-8")
-    assert "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH" not in text
-    assert "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR" not in text
-    assert "SPEECHRAIL_PORT=8201\n" in text
-    assert (layout.config_file.stat().st_mode & 0o777) == 0o600
-
-
-def test_apply_balanced_writes_diarization_env(tmp_path: Path, monkeypatch) -> None:
+def test_diarization_writes_env_for_explicit_aligner(tmp_path: Path, monkeypatch) -> None:
     layout = ServiceLayout.for_app_home(tmp_path)
     layout.config_file.parent.mkdir(parents=True, mode=0o700)
     layout.config_file.write_text(
@@ -244,22 +256,44 @@ def test_apply_balanced_writes_diarization_env(tmp_path: Path, monkeypatch) -> N
         coreml_model_path=tmp_path / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
         aligner_model_dir=tmp_path / "diarization" / "aligner-q8",
     )
+    seen: list[str] = []
 
-    monkeypatch.setattr(
-        commands,
-        "prepare_diarization_assets",
-        lambda app_home, *, preset_id, downloader: paths,
-    )
+    def fake(app_home, *, aligner_key, downloader, catalog=None):
+        seen.append(aligner_key)
+        return paths
+
+    monkeypatch.setattr(commands, "prepare_diarization_assets", fake)
     monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
 
-    _prepare_diarization_assets("balanced", tmp_path)
+    _prepare_diarization_assets(tmp_path, "aligner-q8")
 
+    assert seen == ["aligner-q8"]
     text = layout.config_file.read_text(encoding="utf-8")
     assert f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={paths.coreml_model_path}\n" in text
     assert f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={paths.aligner_model_dir}\n" in text
     assert text.count("SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=") == 1
     assert "SPEECHRAIL_PORT=8201\n" in text
     assert (layout.config_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_diarization_rejects_an_unknown_aligner(tmp_path: Path) -> None:
+    with pytest.raises(ProfileCommandError, match="unknown aligner"):
+        _prepare_diarization_assets(tmp_path, "aligner-missing")
+
+
+def test_diarization_prepare_failure_is_explicit(tmp_path: Path, monkeypatch) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    layout.config_file.write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
+
+    def boom(app_home, *, aligner_key, downloader, catalog=None):
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(commands, "prepare_diarization_assets", boom)
+    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
+
+    with pytest.raises(ProfileCommandError, match="diarization asset preparation failed"):
+        _prepare_diarization_assets(tmp_path, "aligner-q8")
 
 
 def test_env_writer_replaces_exported_and_spaced_keys_in_place(tmp_path: Path) -> None:
@@ -290,24 +324,10 @@ def test_env_writer_replaces_exported_and_spaced_keys_in_place(tmp_path: Path) -
     assert (config_file.stat().st_mode & 0o777) == 0o600
 
 
-def test_diarization_prepare_failure_is_explicit(tmp_path: Path, monkeypatch) -> None:
-    layout = ServiceLayout.for_app_home(tmp_path)
-    layout.config_file.parent.mkdir(parents=True, mode=0o700)
-    layout.config_file.write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
-
-    def boom(app_home, *, preset_id, downloader):
-        raise RuntimeError("download failed")
-
-    monkeypatch.setattr(commands, "prepare_diarization_assets", boom)
-    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
-
-    with pytest.raises(ProfileCommandError):
-        _prepare_diarization_assets("balanced", tmp_path)
-
-
 def test_rollback_uses_previous_complete_pair_without_download(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
-    old, current = _selection("quality", 1), _selection("light", 2)
+    old = _selection("quality", "quality", 1)
+    current = _selection("fast", "fast", 2)
     store.initialize(old)
     operation = store.begin(old, current)
     for stage in ("VERIFIED", "STOPPING", "SWITCHING"):

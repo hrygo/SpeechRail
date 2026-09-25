@@ -1,4 +1,4 @@
-"""Resolve managed model selection into runtime settings while preserving user configuration."""
+"""Resolve independent ASR/TTS specs into runtime settings without name guessing."""
 
 from __future__ import annotations
 
@@ -14,16 +14,17 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.domain.model_spec import ModelRole, SpecTier, required_spec_artifact
 from speechrail.service.profile_store import SelectionRecord
 
 
 class SelectionError(ValueError):
-    """Raised when managed selection cannot be resolved into runtime settings."""
+    """Managed selection cannot be resolved into one explicit artifact identity."""
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveModelCatalog:
-    """Public model identity matched from already-resolved managed paths."""
+    """Explicit model identity published by the resolved service settings."""
 
     profile: str | None
     asr: ModelArtifact | None
@@ -31,53 +32,92 @@ class ActiveModelCatalog:
     tts_clone: ModelArtifact | None
     aligner: str | None
     diarization: bool
+    asr_spec: SpecTier | None = None
+    tts_spec: SpecTier | None = None
+    auto: str = "off"
+    generation: int | None = None
+    voice_design: ModelArtifact | None = None
+
+
+def _artifact_for_spec(
+    catalog: ModelCatalog,
+    tier: SpecTier,
+    role: ModelRole,
+    *,
+    required: bool,
+) -> ModelArtifact | None:
+    artifact_key = required_spec_artifact(tier, role)
+    if artifact_key is None:
+        if required:
+            raise SelectionError(f"spec matrix has no artifact for {tier}/{role}")
+        return None
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    artifact = artifacts.get(artifact_key)
+    if artifact is None:
+        if required:
+            raise SelectionError(
+                f"unavailable model artifact for selected spec: {tier}/{role}"
+            )
+        return None
+    return artifact
 
 
 def active_model_catalog(
     settings: Settings,
     catalog: ModelCatalog | None = None,
 ) -> ActiveModelCatalog:
-    """Match active model directories to the packaged immutable catalog."""
+    """Read explicit selection identity; never infer identity from a directory name."""
 
     resolved_catalog = catalog or load_catalog()
+    if (
+        settings.selection_schema_version != 2
+        or settings.asr_artifact_key is None
+        or settings.tts_artifact_key is None
+    ):
+        return ActiveModelCatalog(
+            profile=None,
+            asr=None,
+            tts=None,
+            tts_clone=None,
+            aligner=settings.alignment_artifact_key,
+            diarization=settings.diarization_coreml_model_path is not None,
+        )
     artifacts = {artifact.key: artifact for artifact in resolved_catalog.artifacts}
-    asr_key = settings.qwen3_model_dir.name if settings.qwen3_model_dir else None
-    tts_key = settings.qwen3_tts_model_dir.name if settings.qwen3_tts_model_dir else None
-    asr = artifacts.get(asr_key) if asr_key else None
-    tts = artifacts.get(tts_key) if tts_key else None
-    matched_preset = next(
-        (
-            preset
-            for preset in resolved_catalog.presets
-            if preset.asr == asr_key and preset.tts == tts_key
-        ),
-        None,
-    )
-    aligner = (
-        settings.qwen3_aligner_model_dir.name
-        if settings.qwen3_aligner_model_dir
-        else None
-    )
-    diarization = matched_preset.diarization if matched_preset is not None else False
-    configured_clone_key = (
-        settings.qwen3_tts_clone_model_dir.name
-        if settings.qwen3_tts_clone_model_dir is not None
-        else None
-    )
-    preset_clone_key = matched_preset.tts_clone if matched_preset is not None else None
-    tts_clone = (
-        artifacts.get(configured_clone_key)
-        if configured_clone_key is not None and configured_clone_key == preset_clone_key
-        else None
-    )
     return ActiveModelCatalog(
-        profile=matched_preset.id if matched_preset is not None else None,
-        asr=asr,
-        tts=tts,
-        tts_clone=tts_clone,
-        aligner=aligner,
-        diarization=diarization,
+        profile=(
+            f"{settings.selection_asr_spec}/{settings.selection_tts_spec}"
+            if settings.selection_asr_spec is not None
+            and settings.selection_tts_spec is not None
+            else None
+        ),
+        asr=artifacts.get(settings.asr_artifact_key),
+        tts=artifacts.get(settings.tts_artifact_key),
+        tts_clone=(
+            artifacts.get(settings.tts_base_artifact_key)
+            if settings.tts_base_artifact_key is not None
+            else None
+        ),
+        aligner=settings.alignment_artifact_key,
+        diarization=settings.diarization_coreml_model_path is not None,
+        asr_spec=settings.selection_asr_spec,
+        tts_spec=settings.selection_tts_spec,
+        auto=settings.selection_auto,
+        generation=settings.selection_generation,
+        voice_design=(
+            artifacts.get(settings.voice_design_artifact_key)
+            if settings.voice_design_artifact_key is not None
+            else None
+        ),
     )
+
+
+def _require_directory(path: Path, *, label: str) -> Path:
+    resolved = path.resolve()
+    if ".staging" in resolved.parts:
+        raise SelectionError("staging models cannot be used as active selection")
+    if not resolved.is_dir():
+        raise SelectionError(f"{label} snapshot directory is missing: {resolved}")
+    return resolved
 
 
 def resolve_selection(
@@ -88,128 +128,80 @@ def resolve_selection(
     *,
     runtime_lock: RuntimeLock | None = None,
 ) -> Settings:
-    """Overlay managed model selection on existing settings without altering other configs."""
+    """Overlay one v2 selection while preserving unrelated user configuration."""
+
     if selection is None:
         return settings
-
     if not isinstance(selection, Mapping):
         raise ValueError("selection must be a mapping or None")
-
     try:
         record = SelectionRecord.model_validate(selection)
     except Exception as exc:
-        raise ValueError(f"invalid selection record: {exc}") from exc
+        raise SelectionError(f"invalid selection record: {exc}") from exc
 
     if runtime_lock is None:
         runtime_lock = load_runtime_lock()
     elif not isinstance(runtime_lock, RuntimeLock):
         raise ValueError("runtime_lock must be a RuntimeLock")
     if record.runtime_lock_id != runtime_lock.id:
-        raise ValueError(
+        raise SelectionError(
             f"selection runtime lock does not match published lock: {record.runtime_lock_id}"
         )
+    if not isinstance(catalog, ModelCatalog):
+        raise ValueError("catalog must be a ModelCatalog")
+
+    asr = _artifact_for_spec(catalog, record.asr_spec, "asr", required=True)
+    tts = _artifact_for_spec(
+        catalog, record.tts_spec, "tts_custom_voice", required=True
+    )
+    tts_base = _artifact_for_spec(catalog, record.tts_spec, "tts_base", required=False)
+    voice_design = _artifact_for_spec(
+        catalog, record.tts_spec, "voice_design", required=False
+    )
+    assert asr is not None and tts is not None
 
     resolved_app_home = Path(app_home).resolve()
     if not resolved_app_home.is_absolute():
         raise ValueError("app_home must be an absolute path")
-
-    if not isinstance(catalog, ModelCatalog):
-        raise ValueError("catalog must be a ModelCatalog")
-    artifacts_map = {a.key: a for a in catalog.artifacts}
-
-    asr_key = record.asr
-    tts_key = record.tts
-
-    if asr_key not in artifacts_map:
-        raise ValueError(f"unknown ASR artifact key: {asr_key}")
-    if tts_key not in artifacts_map:
-        raise ValueError(f"unknown TTS artifact key: {tts_key}")
-
-    asr_artifact = artifacts_map[asr_key]
-    tts_artifact = artifacts_map[tts_key]
-
-    if asr_artifact.family != "qwen3_asr" or asr_artifact.variant != "asr":
-        raise ValueError("ASR artifact must use family=qwen3_asr and variant=asr")
-    if tts_artifact.family != "qwen3_tts" or tts_artifact.variant not in {
-        "voice_design",
-        "custom_voice",
-        "base",
-    }:
-        raise ValueError(
-            "TTS artifact must use family=qwen3_tts and variant=voice_design, custom_voice, or base"
-        )
-
-    expected_preset = catalog.preset(record.preset)
-    if expected_preset.asr != asr_key or expected_preset.tts != tts_key:
-        raise ValueError(f"selection artifacts do not match preset: {record.preset}")
-
     models_dir = (resolved_app_home / "models").resolve()
-    asr_dir = (models_dir / asr_key).resolve()
-    tts_dir = (models_dir / tts_key).resolve()
-    clone_key = expected_preset.tts_clone
-    clone_dir = (models_dir / clone_key).resolve() if clone_key is not None else None
+    asr_dir = _require_directory(models_dir / asr.key, label="ASR model")
+    tts_dir = _require_directory(models_dir / tts.key, label="TTS model")
+    clone_dir = (
+        _require_directory(models_dir / tts_base.key, label="TTS clone model")
+        if tts_base is not None
+        else None
+    )
     vendor_current = resolved_app_home / "vendor" / "current"
     vendor_python = vendor_current / "bin" / "python"
     vendor_ffmpeg = vendor_current / "ffmpeg" / "bin" / "ffmpeg"
 
-    try:
-        asr_dir.relative_to(models_dir)
-        tts_dir.relative_to(models_dir)
-        if clone_dir is not None:
-            clone_dir.relative_to(models_dir)
-    except ValueError as exc:
-        raise ValueError("model path escapes models directory") from exc
-
-    if ".staging" in asr_dir.parts or ".staging" in tts_dir.parts:
-        raise ValueError("staging models cannot be used as active selection")
-
-    if not asr_dir.is_dir():
-        raise ValueError(f"ASR model snapshot directory is missing: {asr_dir}")
-
-    # TTS: Only overlay if TTS was already enabled in settings or configured with a runtime.
-    # Old installations without TTS enabled must not have it automatically enabled.
-    tts_configured = (
-        settings.qwen3_tts_model_dir is not None
-        or settings.qwen3_tts_python is not None
-    )
-
-    final_tts_dir: Path | None = None
-    final_clone_dir: Path | None = None
-    if tts_configured:
-        if not tts_dir.is_dir():
-            raise ValueError(f"TTS model snapshot directory is missing: {tts_dir}")
-        final_tts_dir = tts_dir
-        if clone_dir is not None:
-            if not clone_dir.is_dir():
-                raise ValueError(f"TTS clone model snapshot directory is missing: {clone_dir}")
-            final_clone_dir = clone_dir
-
     updates: dict[str, object] = {
         "qwen3_model_dir": asr_dir,
+        "qwen3_tts_model_dir": tts_dir,
+        "qwen3_tts_clone_model_dir": clone_dir,
         "qwen3_python": vendor_python,
+        "qwen3_tts_python": vendor_python,
         "ffmpeg_path": vendor_ffmpeg,
+        "selection_schema_version": 2,
+        "selection_asr_spec": record.asr_spec,
+        "selection_tts_spec": record.tts_spec,
+        "selection_auto": record.auto,
+        "selection_generation": record.generation,
+        "selection_runtime_lock_id": record.runtime_lock_id,
+        "asr_artifact_key": asr.key,
+        "tts_artifact_key": tts.key,
+        "tts_base_artifact_key": tts_base.key if tts_base is not None else None,
+        "voice_design_artifact_key": (
+            voice_design.key if voice_design is not None else None
+        ),
+        "alignment_artifact_key": None,
     }
-
-    if expected_preset.aligner is None:
-        updates["qwen3_aligner_model_dir"] = None
-        updates["diarization_coreml_model_path"] = None
-    else:
-        aligner_dir = (resolved_app_home / "diarization" / expected_preset.aligner)
-        if not aligner_dir.is_dir():
-            raise SelectionError(f"aligner snapshot is missing: {expected_preset.aligner}")
-        updates["qwen3_aligner_model_dir"] = aligner_dir
-        if not expected_preset.diarization:
-            updates["diarization_coreml_model_path"] = None
-
-    if asr_artifact.quantization.bits == 8:
-        updates["dtype"] = "int8"
-
-    if tts_configured:
-        updates["qwen3_tts_model_dir"] = final_tts_dir
-        updates["qwen3_tts_clone_model_dir"] = final_clone_dir
-        updates["qwen3_tts_python"] = vendor_python
-
     return settings.model_copy(update=updates)
 
 
-__all__ = ["ActiveModelCatalog", "SelectionError", "active_model_catalog", "resolve_selection"]
+__all__ = [
+    "ActiveModelCatalog",
+    "SelectionError",
+    "active_model_catalog",
+    "resolve_selection",
+]

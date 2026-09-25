@@ -9,10 +9,12 @@ from speechrail.service.model_store import PreparedArtifact, PreparedModelSet
 from speechrail.service.profile_store import ProfileStore
 from speechrail.service.profile_switch import ApplyResult, apply_prepared_profile
 
+_SPEC_PAIRS = {"quality": "quality/quality", "light": "fast/fast"}
 
-def _prepared(preset: str, *, with_clone: bool = False) -> PreparedModelSet:
-    asr_key = "asr-small" if preset == "light" else "asr-large"
-    tts_key = "tts-design" if preset == "quality" else "tts-custom"
+
+def _prepared(name: str, *, with_clone: bool = False) -> PreparedModelSet:
+    asr_key = "asr-small" if name == "light" else "asr-large"
+    tts_key = "tts-design" if name == "quality" else "tts-custom"
     asr = PreparedArtifact(
         key=asr_key,
         path=Path(f"/models/{asr_key}"),
@@ -31,7 +33,7 @@ def _prepared(preset: str, *, with_clone: bool = False) -> PreparedModelSet:
         model_id=f"fixture/{tts_key}",
         revision="b" * 40,
         family="qwen3_tts",
-        variant="voice_design" if preset == "quality" else "custom_voice",
+        variant="voice_design" if name == "quality" else "custom_voice",
         quantization={},
         source={},
         sources=(),
@@ -54,8 +56,8 @@ def _prepared(preset: str, *, with_clone: bool = False) -> PreparedModelSet:
         else None
     )
     return PreparedModelSet(
-        prepared_id=f"prepared-{preset}",
-        preset=preset,
+        prepared_id=f"prepared-{name}",
+        preset=_SPEC_PAIRS[name],
         runtime_lock_id="runtime-v1",
         asr=asr,
         tts=tts,
@@ -64,17 +66,15 @@ def _prepared(preset: str, *, with_clone: bool = False) -> PreparedModelSet:
 
 
 def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]:
-    selection: dict[str, object] = {
-        "schema_version": 1,
-        "preset": prepared.preset,
+    asr_spec, tts_spec = prepared.preset.split("/")
+    return {
+        "schema_version": 2,
+        "asr_spec": asr_spec,
+        "tts_spec": tts_spec,
+        "auto": "off",
         "generation": generation,
-        "asr": prepared.asr.key,
-        "tts": prepared.tts.key,
         "runtime_lock_id": prepared.runtime_lock_id,
     }
-    if prepared.tts_clone is not None:
-        selection["tts_clone"] = prepared.tts_clone.key
-    return selection
 
 
 class FakeService:
@@ -137,9 +137,9 @@ def _selection_resolver(
 ):
     def resolve(selection: Mapping[str, object], app_home: Path) -> PreparedModelSet:
         assert app_home.is_absolute()
-        preset = str(selection["preset"])
-        events.append(f"resolve_previous:{preset}")
-        return choices[preset]
+        combo = f"{selection['asr_spec']}/{selection['tts_spec']}"
+        events.append(f"resolve_previous:{combo}")
+        return choices[combo]
 
     return resolve
 
@@ -157,17 +157,17 @@ def test_success_stops_before_staging_and_commits_only_after_smoke(tmp_path: Pat
         smoke=FakeSmoke(events),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
-        selection_resolver=_selection_resolver({"quality": old}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
     )
 
     assert result.status == "committed"
     assert store.recover() == _selection(candidate, 2)
     assert events == [
-        "resolve:light",
-        "resolve_previous:quality",
+        "resolve:fast/fast",
+        "resolve_previous:quality/quality",
         "stop",
         "start",
-        "smoke:light",
+        "smoke:fast/fast",
     ]
 
 
@@ -200,24 +200,24 @@ def test_failed_candidate_smoke_restores_and_smokes_previous_once(tmp_path: Path
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events),
-        smoke=FakeSmoke(events, fail_presets={"light"}),
+        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
-        selection_resolver=_selection_resolver({"quality": old}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
     )
 
     assert result.status == "rolled_back"
     assert result.error_code == "profile_switch_failed"
     assert store.recover() == _selection(old, 1)
     assert events == [
-        "resolve:light",
-        "resolve_previous:quality",
+        "resolve:fast/fast",
+        "resolve_previous:quality/quality",
         "stop",
         "start",
-        "smoke:light",
+        "smoke:fast/fast",
         "stop",
         "start",
-        "smoke:quality",
+        "smoke:quality/quality",
     ]
 
 
@@ -231,10 +231,10 @@ def test_failed_rollback_is_not_ready_and_does_not_retry(tmp_path: Path) -> None
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events, fail_start_at=2),
-        smoke=FakeSmoke(events, fail_presets={"light"}),
+        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
-        selection_resolver=_selection_resolver({"quality": old}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
     )
 
     assert result.status == "not_ready"
@@ -256,19 +256,19 @@ def test_same_complete_selection_is_idempotent(tmp_path: Path) -> None:
         smoke=FakeSmoke(events),
         store=store,
         prepared_resolver=_id_resolver(current, events),
-        selection_resolver=_selection_resolver({"light": current}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["light"]: current}, events),
     )
 
     assert result == ApplyResult(status="unchanged", operation_id=None, error_code=None)
-    assert events == ["resolve:light"]
+    assert events == ["resolve:fast/fast"]
 
 
-def test_new_clone_capability_reapplies_an_existing_quality_selection(
+def test_a_different_spec_pair_reapplies_an_existing_selection(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    old = _prepared("quality")
-    candidate = _prepared("quality", with_clone=True)
+    old = _prepared("quality", with_clone=True)
+    candidate = _prepared("light")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -279,17 +279,17 @@ def test_new_clone_capability_reapplies_an_existing_quality_selection(
         smoke=FakeSmoke(events),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
-        selection_resolver=_selection_resolver({"quality": old}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
     )
 
     assert result.status == "committed"
     assert store.recover() == _selection(candidate, 2)
     assert events == [
-        "resolve:quality",
-        "resolve_previous:quality",
+        "resolve:fast/fast",
+        "resolve_previous:quality/quality",
         "stop",
         "start",
-        "smoke:quality",
+        "smoke:fast/fast",
     ]
 
 
@@ -303,15 +303,15 @@ def test_recovery_continues_when_second_stop_reports_failure(tmp_path: Path) -> 
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events, fail_stop_at=2),
-        smoke=FakeSmoke(events, fail_presets={"light"}),
+        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
-        selection_resolver=_selection_resolver({"quality": old}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
     )
 
     assert result.status == "rolled_back"
     assert store.recover() == _selection(old, 1)
-    assert events[-3:] == ["stop", "start", "smoke:quality"]
+    assert events[-3:] == ["stop", "start", "smoke:quality/quality"]
 
 
 def test_interrupt_rolls_back_before_propagating(tmp_path: Path) -> None:
@@ -328,11 +328,11 @@ def test_interrupt_rolls_back_before_propagating(tmp_path: Path) -> None:
             smoke=FakeSmoke(events, interrupt=True),
             store=store,
             prepared_resolver=_id_resolver(candidate, events),
-            selection_resolver=_selection_resolver({"quality": old}, events),
+            selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
         )
 
     assert store.recover() == _selection(old, 1)
-    assert events[-3:] == ["stop", "start", "smoke:quality"]
+    assert events[-3:] == ["stop", "start", "smoke:quality/quality"]
 
 
 def test_failed_first_install_stays_stopped_and_unconfigured(tmp_path: Path) -> None:
@@ -342,10 +342,10 @@ def test_failed_first_install_stays_stopped_and_unconfigured(tmp_path: Path) -> 
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events),
-        smoke=FakeSmoke(events, fail_presets={"light"}),
+        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
         prepared_resolver=_id_resolver(candidate, events),
     )
 
     assert result.status == "rolled_back"
     assert ProfileStore(tmp_path).recover() is None
-    assert events == ["resolve:light", "stop", "start", "smoke:light", "stop"]
+    assert events == ["resolve:fast/fast", "stop", "start", "smoke:fast/fast", "stop"]

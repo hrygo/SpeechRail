@@ -102,6 +102,36 @@ def _apply_observability_defaults(settings: Settings, app_home: Path) -> None:
         settings.metrics_rollup_dir = default_rollup_path(app_home)
 
 
+_SPEC_TIER_CHOICES = ("fast", "quality", "reference")
+
+
+def _add_spec_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    required: bool = False,
+    with_auto: bool = True,
+) -> None:
+    parser.add_argument(
+        "--asr-spec",
+        choices=_SPEC_TIER_CHOICES,
+        required=required,
+        help="explicit ASR spec tier",
+    )
+    parser.add_argument(
+        "--tts-spec",
+        choices=_SPEC_TIER_CHOICES,
+        required=required,
+        help="explicit TTS spec tier",
+    )
+    if with_auto:
+        parser.add_argument(
+            "--auto",
+            choices=("off", "resource"),
+            default="off",
+            help="auto policy applied only at new task boundaries",
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="speechrail", description="SpeechRail local ASR/TTS runtime"
@@ -123,13 +153,9 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     setup = subcommands.add_parser(
-        "setup", help="choose and apply a four-tier model profile"
+        "setup", help="choose and apply independent ASR and TTS specs"
     )
-    setup.add_argument(
-        "--preset",
-        choices=("extreme", "quality", "balanced", "light"),
-        help="explicitly override the recommendation",
-    )
+    _add_spec_arguments(setup, with_auto=False)
     setup.add_argument("--app-home", type=Path, help="use this installed app home")
     setup.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
 
@@ -142,11 +168,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="release wheel to install; defaults to the only speechrail-*.whl in this directory",
     )
-    install.add_argument(
-        "--preset",
-        choices=("extreme", "quality", "balanced", "light"),
-        help="explicitly override the recommendation",
-    )
+    _add_spec_arguments(install)
     install.add_argument("--app-home", type=Path, help="use this installed app home")
     install.add_argument("--yes", action="store_true", help="install without an interactive prompt")
     install.add_argument(
@@ -167,7 +189,7 @@ def _parser() -> argparse.ArgumentParser:
             "--json", action="store_true", help="emit one machine-readable JSON envelope"
         )
     apply = profile_commands.add_parser("apply")
-    apply.add_argument("preset", choices=("extreme", "quality", "balanced", "light"))
+    _add_spec_arguments(apply, required=True, with_auto=False)
     apply.add_argument("--app-home", type=Path, help="use this installed app home")
     apply.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
     apply.add_argument(
@@ -191,7 +213,7 @@ def _parser() -> argparse.ArgumentParser:
             "--json", action="store_true", help="emit one machine-readable JSON envelope"
         )
     prepare = model_commands.add_parser("prepare")
-    prepare.add_argument("preset", choices=("extreme", "quality", "balanced", "light"))
+    _add_spec_arguments(prepare, required=True, with_auto=False)
     prepare.add_argument("--app-home", type=Path, help="use this installed app home")
     prepare.add_argument("--yes", action="store_true", help="prepare without an interactive prompt")
     prepare.add_argument(
@@ -431,68 +453,94 @@ def _run_agents(args: argparse.Namespace) -> int:
     return 0 if status not in {"drifted", "retained_due_to_conflict"} else 1
 
 
+def _selection_status_or_fail(app_home: Path) -> object:
+    """Read the committed selection, refusing a legacy record instead of ignoring it."""
+    from speechrail.service import profile_commands
+    from speechrail.service.profile_store import LegacySelectionError
+
+    try:
+        return profile_commands.profile_status(app_home)
+    except LegacySelectionError as exc:
+        raise ServiceError(
+            "this app home still has a legacy selection; reconfigure it with: "
+            "speechrail profile apply --asr-spec <fast|quality|reference> "
+            "--tts-spec <fast|quality|reference> --yes"
+        ) from exc
+
+
+def _profile_row(item: object) -> dict[str, object]:
+    return {
+        "aligner": getattr(item, "aligner", None),
+        "asr": getattr(item, "asr", None),
+        "download_bytes": getattr(item, "download_bytes", 0),
+        "id": getattr(item, "id", None),
+        "tts": getattr(item, "tts", None),
+        "tts_base": getattr(item, "tts_base", None),
+        "voice_design": getattr(item, "voice_design", None),
+    }
+
+
 def _run_profile(args: argparse.Namespace) -> int:
     from speechrail.service import profile_commands
 
     app_home = (args.app_home or _default_app_home()).resolve()
     machine_output = bool(getattr(args, "json", False))
     if args.profile_command == "list":
-        current = profile_commands.profile_status(app_home).preset
+        status = _selection_status_or_fail(app_home)
+        current = status.label
         profiles = profile_commands.list_profiles()
         if machine_output:
             _print_machine(
                 {
                     "command": "profile.list",
                     "current": current,
-                    "profiles": [
-                        {
-                            "aligner": item.aligner,
-                            "asr": item.asr,
-                            "download_bytes": item.download_bytes,
-                            "id": item.id,
-                            "tts": item.tts,
-                        }
-                        for item in profiles
-                    ],
+                    "selection": {
+                        "asr_spec": status.asr_spec,
+                        "auto": status.auto,
+                        "generation": status.generation,
+                        "tts_spec": status.tts_spec,
+                    },
+                    "profiles": [_profile_row(item) for item in profiles],
                     "status": "ok",
                 }
             )
             return 0
+        if current is not None:
+            print(f"Current selection: {current}")
         for item in profiles:
-            marker = " *" if item.id == current else ""
             print(
-                f"{item.id}{marker}: ASR={item.asr}, TTS={item.tts}, "
+                f"{item.id}: ASR={item.asr}, TTS={item.tts}, "
                 f"download={_format_bytes(item.download_bytes)}"
             )
         return 0
     if args.profile_command == "status":
-        status = profile_commands.profile_status(app_home)
+        status = _selection_status_or_fail(app_home)
         if machine_output:
             _print_machine(
                 {
-                    "asr": status.asr,
+                    "asr_spec": status.asr_spec,
+                    "auto": status.auto,
                     "command": "profile.status",
                     "generation": status.generation,
-                    "preset": status.preset,
+                    "selection": status.label,
                     "status": "ok",
-                    "tts": status.tts,
+                    "tts_spec": status.tts_spec,
                 }
             )
             return 0
-        if status.preset is None:
-            print("Profile: unconfigured")
+        if status.label is None:
+            print("Selection: unconfigured")
         else:
-            print(
-                f"Profile: {status.preset} (generation {status.generation}, "
-                f"ASR={status.asr}, TTS={status.tts})"
-            )
+            print(f"Selection: {status.label} (generation {status.generation})")
         return 0
     if args.profile_command == "apply":
-        summary = next(item for item in profile_commands.list_profiles() if item.id == args.preset)
+        summary = next(
+            item for item in profile_commands.list_profiles() if item.id == args.asr_spec
+        )
         if not machine_output:
             print(
-                f"Apply profile '{summary.id}' "
-                f"(up to {_format_bytes(summary.download_bytes)} download)."
+                f"Apply ASR spec '{args.asr_spec}' and TTS spec '{args.tts_spec}' "
+                f"(ASR={summary.asr}, TTS={args.tts_spec})."
             )
         if not _confirm(args.yes):
             if machine_output:
@@ -508,8 +556,16 @@ def _run_profile(args: argparse.Namespace) -> int:
                 print("Cancelled.")
             return 1
         managed_python = _managed_runtime_for_mutation(app_home)
+        command_args: tuple[str, ...] = (
+            "profile",
+            "apply",
+            "--asr-spec",
+            args.asr_spec,
+            "--tts-spec",
+            args.tts_spec,
+            "--yes",
+        )
         if managed_python is not None:
-            command_args: tuple[str, ...] = ("profile", "apply", args.preset, "--yes")
             if machine_output:
                 command_args += ("--json",)
             return _delegate_managed_command(
@@ -518,12 +574,14 @@ def _run_profile(args: argparse.Namespace) -> int:
                 managed_python=managed_python,
             )
         return _print_apply_result(
-            profile_commands.apply_profile(args.preset, app_home=app_home),
+            profile_commands.apply_profile(
+                args.asr_spec, args.tts_spec, app_home=app_home
+            ),
             machine_output=machine_output,
         )
     if args.profile_command == "rollback":
         if not machine_output:
-            print("Restore the previously committed profile.")
+            print("Restore the previously committed selection.")
         if not _confirm(args.yes):
             if machine_output:
                 _print_machine(
@@ -618,7 +676,15 @@ def _run_model(args: argparse.Namespace) -> int:
 
         managed_python = _managed_runtime_for_mutation(app_home)
         if managed_python is not None:
-            command_args: tuple[str, ...] = ("model", "prepare", args.preset, "--yes")
+            command_args: tuple[str, ...] = (
+                "model",
+                "prepare",
+                "--asr-spec",
+                args.asr_spec,
+                "--tts-spec",
+                args.tts_spec,
+                "--yes",
+            )
             if machine_output:
                 command_args += ("--json",)
             return _delegate_managed_command(
@@ -652,8 +718,9 @@ def _run_model(args: argparse.Namespace) -> int:
         try:
             with httpx.Client(timeout=timeout) as client:
                 prepared_id = asyncio.run(
-                    model_commands.prepare_profile_models(
-                        args.preset,
+                    model_commands.prepare_selected_models(
+                        args.asr_spec,
+                        args.tts_spec,
                         app_home,
                         progress=progress,
                         downloader=ModelScopeDownloader(client=client),
@@ -697,19 +764,31 @@ def _run_setup(args: argparse.Namespace) -> int:
     from speechrail.service import profile_commands
 
     app_home = (args.app_home or _default_app_home()).resolve()
-    current = profile_commands.profile_status(app_home)
-    if args.preset is None and current.preset is not None:
-        print(f"Profile already configured: {current.preset}")
+    current = _selection_status_or_fail(app_home)
+    recommended_asr, recommended_tts = profile_commands.recommend_selection(
+        _physical_memory_bytes()
+    )
+    explicit = args.asr_spec is not None or args.tts_spec is not None
+    if not explicit and current.label is not None:
+        print(f"Selection already configured: {current.label}")
         return 0
-    preset = args.preset or profile_commands.recommend_profile(_physical_memory_bytes())
-    if args.preset is None:
-        print(f"Recommended profile by physical memory: {preset}")
+    asr_spec = args.asr_spec or current.asr_spec or recommended_asr
+    tts_spec = args.tts_spec or current.tts_spec or recommended_tts
+    if explicit:
+        print(f"Selected specs: ASR={asr_spec}, TTS={tts_spec}")
     else:
-        print(f"Selected profile: {preset}")
-    summary = next(item for item in profile_commands.list_profiles() if item.id == preset)
+        print(
+            "Recommended specs by physical memory: "
+            f"ASR={recommended_asr}, TTS={recommended_tts}"
+        )
+    profiles = {item.id: item for item in profile_commands.list_profiles()}
+    asr_summary = profiles.get(asr_spec)
+    tts_summary = profiles.get(tts_spec)
+    if asr_summary is None or tts_summary is None:
+        raise ServiceError("recommended spec tier is not in the catalog")
     print(
-        f"ASR={summary.asr}, TTS={summary.tts}, "
-        f"download up to {_format_bytes(summary.download_bytes)}."
+        f"ASR={asr_summary.asr}, TTS={tts_summary.tts}, "
+        f"download up to {_format_bytes(asr_summary.download_bytes + tts_summary.download_bytes)}."
     )
     if not _confirm(args.yes):
         print("Cancelled.")
@@ -717,11 +796,13 @@ def _run_setup(args: argparse.Namespace) -> int:
     managed_python = _managed_runtime_for_mutation(app_home)
     if managed_python is not None:
         return _delegate_managed_command(
-            ("setup", "--preset", preset, "--yes"),
+            ("setup", "--asr-spec", asr_spec, "--tts-spec", tts_spec, "--yes"),
             app_home,
             managed_python=managed_python,
         )
-    return _print_apply_result(profile_commands.apply_profile(preset, app_home=app_home))
+    return _print_apply_result(
+        profile_commands.apply_profile(asr_spec, tts_spec, app_home=app_home)
+    )
 
 
 def _wheel_metadata_version(wheel: Path) -> str:
@@ -851,7 +932,9 @@ def _describe_install_event(event: dict[str, object]) -> str | None:
     return label
 
 
-def _install_download_plan(app_home: Path, preset_id: str) -> tuple[tuple[str, ...], int] | None:
+def _install_download_plan(
+    app_home: Path, asr_spec: str, tts_spec: str
+) -> tuple[tuple[str, ...], int] | None:
     """Return the artifacts an install still has to fetch, and their size.
 
     Only the registry and the catalog are read, so this stays cheap and cannot
@@ -859,6 +942,7 @@ def _install_download_plan(app_home: Path, preset_id: str) -> tuple[tuple[str, .
     whatever fails.  ``None`` means the plan could not be determined.
     """
     from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+    from speechrail.domain.model_spec import required_spec_artifact
     from speechrail.service.model_store import (
         ModelStoreError,
         registered_prepared_artifacts,
@@ -870,39 +954,43 @@ def _install_download_plan(app_home: Path, preset_id: str) -> tuple[tuple[str, .
         covered = set(
             registered_prepared_artifacts(
                 app_home,
-                preset_id=preset_id,
+                preset_id=f"{asr_spec}/{tts_spec}",
                 catalog=catalog,
                 runtime_lock=runtime_lock,
             )
         )
-        preset = catalog.preset(preset_id)
     except (KeyError, ModelStoreError, OSError, ValueError):
         return None
-    keys = [preset.asr, preset.tts]
-    if preset.tts_clone is not None:
-        keys.append(preset.tts_clone)
+    keys = (
+        required_spec_artifact(asr_spec, "asr"),  # type: ignore[arg-type]
+        required_spec_artifact(tts_spec, "tts_custom_voice"),  # type: ignore[arg-type]
+    )
     artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
-    pending = tuple(key for key in keys if key not in covered and key in artifacts_by_key)
+    pending = tuple(
+        key
+        for key in keys
+        if key is not None and key not in covered and key in artifacts_by_key
+    )
     size = sum(item.size for key in pending for item in artifacts_by_key[key].files)
     return pending, size
 
 
-def _installed_preset(app_home: Path) -> str | None:
-    """Return the preset this app home already committed to, if any.
+def _installed_selection(app_home: Path) -> tuple[str, str] | None:
+    """Return the specs this app home already committed to, if any.
 
-    One app home keeps exactly one preset, so an upgrade must repeat the
-    installed tier instead of falling back to the memory recommendation.
+    One app home keeps exactly one selection, so an upgrade must repeat the
+    installed specs instead of falling back to the memory recommendation.
     """
     from speechrail.service.profile_store import recover_selection
 
-    try:
-        selection = recover_selection(app_home)
-    except (OSError, ValueError):
-        return None
+    selection = recover_selection(app_home)
     if not selection:
         return None
-    preset = selection.get("preset")
-    return preset if isinstance(preset, str) else None
+    asr_spec = selection.get("asr_spec")
+    tts_spec = selection.get("tts_spec")
+    if isinstance(asr_spec, str) and isinstance(tts_spec, str):
+        return asr_spec, tts_spec
+    return None
 
 
 def _run_install(args: argparse.Namespace) -> int:
@@ -911,29 +999,52 @@ def _run_install(args: argparse.Namespace) -> int:
     from speechrail.service import profile_commands
     from speechrail.service.installer_errors import InstallerError
     from speechrail.service.managed_install import install_managed, setup_launcher_path
+    from speechrail.service.profile_store import LegacySelectionError
 
     machine_output = bool(getattr(args, "json", False))
     app_home = (args.app_home or _default_app_home()).resolve()
     wheel = _resolve_install_wheel(getattr(args, "wheel", None), version=__version__)
     uv_executable = _require_uv()
-    installed_preset = _installed_preset(app_home)
-    preset = (
-        args.preset
-        or installed_preset
-        or profile_commands.recommend_profile(_physical_memory_bytes())
+    try:
+        installed_selection = _installed_selection(app_home)
+    except LegacySelectionError as exc:
+        raise ServiceError(
+            "this app home still has a legacy selection; reconfigure it with: "
+            "speechrail profile apply --asr-spec <fast|quality|reference> "
+            "--tts-spec <fast|quality|reference> --yes"
+        ) from exc
+    recommended_asr, recommended_tts = profile_commands.recommend_selection(
+        _physical_memory_bytes()
     )
-    summary = next(item for item in profile_commands.list_profiles() if item.id == preset)
+    asr_spec = (
+        args.asr_spec
+        or (installed_selection[0] if installed_selection else None)
+        or recommended_asr
+    )
+    tts_spec = (
+        args.tts_spec
+        or (installed_selection[1] if installed_selection else None)
+        or recommended_tts
+    )
+    auto = getattr(args, "auto", "off") or "off"
+    explicit_specs = args.asr_spec is not None or args.tts_spec is not None
+    profiles = {item.id: item for item in profile_commands.list_profiles()}
+    asr_summary = profiles[asr_spec]
+    tts_summary = profiles[tts_spec]
     enable = bool(getattr(args, "enable", False))
     installed_cli = f'"{app_home}/runtime/current/.venv/bin/speechrail"'
     if not machine_output:
-        carried = installed_preset is not None and args.preset is None
+        carried = installed_selection is not None and not explicit_specs
         print(f"Wheel: {wheel.name}")
         suffix = " — kept from the installed service" if carried else ""
-        print(f"Profile: {preset} (ASR={summary.asr}, TTS={summary.tts}){suffix}")
+        print(
+            f"Specs: ASR={asr_spec}, TTS={tts_spec} "
+            f"(ASR={asr_summary.asr}, TTS={tts_summary.tts}){suffix}"
+        )
         print(f"App home: {app_home}")
-        plan = _install_download_plan(app_home, preset)
+        plan = _install_download_plan(app_home, asr_spec, tts_spec)
         if plan is None:
-            budget = _format_bytes(summary.download_bytes)
+            budget = _format_bytes(asr_summary.download_bytes + tts_summary.download_bytes)
             print(f"Download up to {budget} before the service is ready.")
         elif not plan[0]:
             print(
@@ -998,7 +1109,9 @@ def _run_install(args: argparse.Namespace) -> int:
             result = install_managed(
                 wheel,
                 app_home=app_home,
-                preset_id=preset,
+                asr_spec=asr_spec,
+                tts_spec=tts_spec,
+                auto=auto,
                 downloader=ModelScopeDownloader(client=client),
                 enable=enable,
                 progress=progress,
@@ -1010,11 +1123,11 @@ def _run_install(args: argparse.Namespace) -> int:
                 "install must not replace a running service; stop it first: "
                 f"{installed_cli} service stop --app-home \"{app_home}\""
             ) from exc
-        if "different managed preset is already configured" in str(exc):
+        if "different managed selection is already configured" in str(exc):
             raise ServiceError(
-                "install keeps one preset per app home; an installed service already "
-                f"selected {installed_preset or 'a tier'}, so repeat that preset or switch "
-                f"tiers with: {installed_cli} profile apply <tier> --yes"
+                "install keeps one selection per app home; an installed service already "
+                "selected different specs, so repeat those specs or switch with: "
+                f"{installed_cli} profile apply --asr-spec <tier> --tts-spec <tier> --yes"
             ) from exc
         raise
 
@@ -1036,9 +1149,11 @@ def _run_install(args: argparse.Namespace) -> int:
             "command": "install",
             "downloaded_bytes": downloaded_bytes,
             "enabled": result.enabled,
+            "asr_spec": asr_spec,
+            "auto": auto,
             "prepared_id": result.prepared_id,
-            "preset": preset,
             "reused_artifacts": sorted(reused),
+            "tts_spec": tts_spec,
             "runtime_cli": str(runtime_cli),
             "runtime_python": str(result.runtime_python),
             "status": "committed",

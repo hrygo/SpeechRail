@@ -14,7 +14,7 @@ from speechrail.service import ServiceError
 def _profile_status() -> object:
     from speechrail.service import profile_commands
 
-    return profile_commands.ProfileStatus("balanced", 7, "asr-balanced", "tts-balanced")
+    return profile_commands.ProfileStatus("quality", "fast", "off", 7)
 
 
 def _profile_summaries() -> tuple[object, ...]:
@@ -22,11 +22,30 @@ def _profile_summaries() -> tuple[object, ...]:
 
     return (
         profile_commands.ProfileSummary(
-            "extreme", "asr-extreme", "tts-extreme", 4 * 1024**3, "aligner-bf16"
+            "fast",
+            "asr-fast",
+            "tts-fast",
+            1 * 1024**3,
+            tts_base="tts-base-fast",
+            aligner="aligner-q8",
         ),
-        profile_commands.ProfileSummary("quality", "asr-quality", "tts-quality", 3 * 1024**3),
-        profile_commands.ProfileSummary("balanced", "asr-balanced", "tts-balanced", 2 * 1024**3),
-        profile_commands.ProfileSummary("light", "asr-light", "tts-light", 1 * 1024**3),
+        profile_commands.ProfileSummary(
+            "quality",
+            "asr-quality",
+            "tts-quality",
+            3 * 1024**3,
+            tts_base="tts-base-quality",
+            aligner="aligner-bf16",
+        ),
+        profile_commands.ProfileSummary(
+            "reference",
+            "asr-reference",
+            "tts-reference",
+            4 * 1024**3,
+            tts_base="tts-base-reference",
+            voice_design="tts-design-reference",
+            aligner="aligner-bf16",
+        ),
     )
 
 
@@ -43,38 +62,43 @@ def test_profile_list_json_is_stable_and_path_free(
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "command": "profile.list",
-        "current": "balanced",
+        "current": "quality/fast",
+        "schema_version": 1,
+        "selection": {
+            "asr_spec": "quality",
+            "auto": "off",
+            "generation": 7,
+            "tts_spec": "fast",
+        },
         "profiles": [
             {
-                "aligner": "aligner-bf16",
-                "asr": "asr-extreme",
-                "download_bytes": 4 * 1024**3,
-                "id": "extreme",
-                "tts": "tts-extreme",
+                "aligner": "aligner-q8",
+                "asr": "asr-fast",
+                "download_bytes": 1 * 1024**3,
+                "id": "fast",
+                "tts": "tts-fast",
+                "tts_base": "tts-base-fast",
+                "voice_design": None,
             },
             {
-                "aligner": None,
+                "aligner": "aligner-bf16",
                 "asr": "asr-quality",
                 "download_bytes": 3 * 1024**3,
                 "id": "quality",
                 "tts": "tts-quality",
+                "tts_base": "tts-base-quality",
+                "voice_design": None,
             },
             {
-                "aligner": None,
-                "asr": "asr-balanced",
-                "download_bytes": 2 * 1024**3,
-                "id": "balanced",
-                "tts": "tts-balanced",
-            },
-            {
-                "aligner": None,
-                "asr": "asr-light",
-                "download_bytes": 1 * 1024**3,
-                "id": "light",
-                "tts": "tts-light",
+                "aligner": "aligner-bf16",
+                "asr": "asr-reference",
+                "download_bytes": 4 * 1024**3,
+                "id": "reference",
+                "tts": "tts-reference",
+                "tts_base": "tts-base-reference",
+                "voice_design": "tts-design-reference",
             },
         ],
-        "schema_version": 1,
         "status": "ok",
     }
     assert str(tmp_path) not in json.dumps(payload)
@@ -91,13 +115,14 @@ def test_profile_status_json_contains_only_public_fields(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
-        "asr": "asr-balanced",
+        "asr_spec": "quality",
+        "auto": "off",
         "command": "profile.status",
         "generation": 7,
-        "preset": "balanced",
         "schema_version": 1,
+        "selection": "quality/fast",
         "status": "ok",
-        "tts": "tts-balanced",
+        "tts_spec": "fast",
     }
 
 
@@ -112,12 +137,23 @@ def test_profile_apply_json_has_no_human_prefix(
     monkeypatch.setattr(
         profile_commands,
         "apply_profile",
-        lambda preset, app_home: ApplyResult("committed", "op_test", None),
+        lambda asr_spec, tts_spec, *, app_home: ApplyResult("committed", "op_test", None),
     )
 
     assert (
         cli.main(
-            ["profile", "apply", "light", "--app-home", str(tmp_path), "--yes", "--json"]
+            [
+                "profile",
+                "apply",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
+                "--app-home",
+                str(tmp_path),
+                "--yes",
+                "--json",
+            ]
         )
         == 0
     )
@@ -145,7 +181,7 @@ def test_profile_apply_json_preserves_a_safe_failure_message(
     monkeypatch.setattr(
         profile_commands,
         "apply_profile",
-        lambda preset, app_home: ApplyResult(
+        lambda asr_spec, tts_spec, *, app_home: ApplyResult(
             status="rolled_back",
             operation_id="op_test",
             error_code="profile_switch_failed",
@@ -155,7 +191,18 @@ def test_profile_apply_json_preserves_a_safe_failure_message(
 
     assert (
         cli.main(
-            ["profile", "apply", "light", "--app-home", str(tmp_path), "--yes", "--json"]
+            [
+                "profile",
+                "apply",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
+                "--app-home",
+                str(tmp_path),
+                "--yes",
+                "--json",
+            ]
         )
         == 1
     )
@@ -235,10 +282,9 @@ def test_model_catalog_json_is_path_free(capsys: pytest.CaptureFixture[str]) -> 
     assert payload["command"] == "model.catalog"
     assert payload["status"] == "ok"
     assert {item["id"] for item in payload["profiles"]} == {
-        "extreme",
+        "fast",
         "quality",
-        "balanced",
-        "light",
+        "reference",
     }
     assert all("path" not in item and "url" not in item for item in payload["artifacts"])
 
@@ -262,7 +308,10 @@ def test_model_prepare_json_requires_confirmation(
             [
                 "model",
                 "prepare",
-                "light",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
                 "--app-home",
                 str(tmp_path),
                 "--json",
