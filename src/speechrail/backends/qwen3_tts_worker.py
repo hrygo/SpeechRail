@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import math
 import sys
@@ -15,6 +16,17 @@ from typing import Any, BinaryIO, Literal, Protocol
 
 from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
+from speechrail.backends.qwen3_tts_stream_host import (
+    FRAME_STREAM_ERROR,
+    FRAME_STREAM_START,
+    STREAM_FRAME_TYPES,
+    TTS_STREAM_PROTOCOL_VERSION,
+    IncrementalModelSession,
+    StreamFrame,
+    StreamPump,
+    TtsStreamHost,
+    parse_stream_command,
+)
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
@@ -30,6 +42,10 @@ from speechrail.domain.tts import (
 from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
 from speechrail.domain.tts_request import validate_tts_parameters
+from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
+    TtsStreamOptions,
+)
 from speechrail.domain.tts_text_planner import TtsTextPlanner
 from speechrail.domain.tts_timing import TtsTimingChunk, TtsTimingSidecar
 from speechrail.runtime.worker_protocol import (
@@ -41,6 +57,9 @@ from speechrail.runtime.worker_protocol import (
 
 TTS_BACKEND_ID = "mlx-qwen3-tts"
 _CLONE_LOUDNESS_CHUNK_MS = 200
+# How long the model thread may wait for the parent to accept one output
+# frame before the parent is treated as a stopped consumer.
+_OUTPUT_SUBMIT_TIMEOUT_SECONDS: float = DEFAULT_TTS_STREAM_LIMITS.slow_consumer_seconds
 _CLONE_TEMPERATURE = 0.1
 _CLONE_TOP_P = 0.95
 
@@ -618,6 +637,84 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             if pcm:
                 yield pcm
 
+    def open_incremental_session(
+        self,
+        *,
+        voice: str,
+        speed: float,
+        language: str,
+        instruction: str | None = None,
+        seed: int | None = None,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
+    ) -> IncrementalModelSession:
+        """Open one append-only generation on this process's single MLX model.
+
+        Conditioning is frozen exactly like ``_generate``: CustomVoice resolves a
+        verified speaker, Base resolves a clone reference, and VoiceDesign stays
+        fail-closed because its instruction path has no verified incremental role.
+        """
+
+        from speechrail.backends.qwen3_tts_incremental import (
+            open_vendor_incremental_session,
+        )
+        from speechrail.domain.tts_stream import TtsStreamError
+
+        variant = self.identity.model_variant or "voice_design"
+        is_clone = ref_audio is not None or ref_text is not None
+        if variant not in {"custom_voice", "base"}:
+            raise TtsStreamError(
+                "tts_streaming_unsupported",
+                "the voice design variant has no incremental generation path",
+            )
+        if variant == "base" and not is_clone:
+            raise TtsStreamError(
+                "tts_streaming_unsupported",
+                "the base variant requires a clone reference for incremental generation",
+            )
+        validated = validate_tts_parameters(
+            model_variant=variant,  # type: ignore[arg-type]
+            is_clone=is_clone,
+            speed=speed,
+            language=language,
+            instruction=instruction,
+            seed=seed,
+        )
+        if is_clone:
+            if not ref_audio:
+                raise RuntimeError("failed to load reference audio: file missing")
+            if ref_text is None or not ref_text.strip():
+                raise RuntimeError("failed to load reference text: text missing")
+            audio_array = self._load_reference_audio(ref_audio)
+            # The append-only path cannot know the full text at seed time, so the
+            # reference-derived seed keeps one clone voice stable across requests.
+            _seed_clone_generation(voice=voice, text="", ref_text=ref_text)
+            return open_vendor_incremental_session(
+                self._model,
+                variant="base",
+                language=validated.language,
+                ref_audio=audio_array,
+                ref_text=ref_text,
+            )
+        if profile is None and instruction is None:
+            profile = get_voice_profile(voice)
+        condition = generation_condition(
+            "custom_voice", voice, instruction=instruction, profile=profile
+        )
+        speaker = condition.get("voice")
+        if not isinstance(speaker, str) or not speaker:
+            raise TtsStreamError(
+                "tts_streaming_unsupported",
+                "the resolved voice has no verified custom speaker",
+            )
+        return open_vendor_incremental_session(
+            self._model,
+            variant="custom_voice",
+            speaker=speaker,
+            language=validated.language,
+        )
+
     def _load_reference_audio(self, ref_audio: str) -> Any:
         """Read one local ICL reference with bounded, revision-aware caching."""
 
@@ -758,7 +855,13 @@ def serve(
     sample_rate: int,
     engine_factory: EngineFactory,
 ) -> None:
-    """Serve only framed local IPC; no request can select a model or URL."""
+    """Serve only framed local IPC; no request can select a model or URL.
+
+    This function's thread is the single owner of MLX state.  A reader thread
+    decodes commands into a bounded queue and a writer thread owns stdout, so
+    appending text or cancelling still works while the model is mid-step and a
+    parent that stops reading can never wedge inference.
+    """
     start = read_frame(input_stream)
     if (
         start is None
@@ -791,6 +894,7 @@ def serve(
             {"version": PROTOCOL_VERSION, "type": "error", "code": "backend_identity_mismatch"},
         )
         return
+    opener = getattr(engine, "open_incremental_session", None)
     ready: dict[str, object] = {
         "version": PROTOCOL_VERSION,
         "type": "ready",
@@ -801,122 +905,386 @@ def serve(
         "model_loaded": True,
         "profile_snapshot_version": 1,
     }
+    if callable(opener):
+        # Negotiated per transport instead of bumping the shared ASR/TTS
+        # protocol number, which producers and consumers pin together.
+        ready["tts_stream_protocol"] = TTS_STREAM_PROTOCOL_VERSION
     ready.update(_ready_identity_fields(identity))
-    write_frame(
-        output_stream,
-        ready,
-    )
-    while frame := read_frame(input_stream):
-        if frame.get("type") == "trim_memory":
-            # Fire-and-forget: no confirmation frame so the framing of the next
-            # synthesize response is never pushed out of alignment.
-            _clear_metal_cache()
-            continue
-        request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
-        try:
-            (
-                request_id,
-                text,
-                voice,
-                speed,
-                language,
-                ref_audio,
-                ref_text,
-                instruction,
-                seed,
-                timing_mode,
-            ) = _decode_synthesis_request(frame)
-            synth_kwargs: dict[str, Any] = {
-                "voice": voice,
-                "speed": speed,
-                "language": language,
-            }
-            profile = _decode_profile_snapshot(frame.get("voice_profile"), voice=voice)
-            if profile is not None:
-                if ref_audio is not None or ref_text is not None:
-                    raise ProtocolError("invalid voice profile snapshot")
-                synth_kwargs["profile"] = profile
-            if ref_audio is not None or ref_text is not None:
-                synth_kwargs["ref_audio"] = ref_audio
-                synth_kwargs["ref_text"] = ref_text
-            if instruction is not None:
-                synth_kwargs["instruction"] = instruction
-            if seed is not None:
-                synth_kwargs["seed"] = seed
-            for index, pcm in enumerate(
-                engine.synthesize(text, **synth_kwargs)
-            ):
-                if not pcm or len(pcm) % 2:
-                    raise ProtocolError("invalid PCM chunk")
-                write_frame(
-                    output_stream,
-                    {
-                        "version": PROTOCOL_VERSION,
-                        "type": "audio",
-                        "request_id": request_id,
-                        "chunk_index": index,
-                    },
-                    binary_payload=pcm,
-                )
-            consume_stats = getattr(engine, "consume_delivery_stats", None)
-            stats = consume_stats() if callable(consume_stats) else {}
-            completed: dict[str, object] = {
-                "version": PROTOCOL_VERSION,
-                "type": "completed",
-                "request_id": request_id,
-            }
-            if stats:
-                completed["delivery_stats"] = stats
-            if timing_mode == "chunk":
-                consume_timing = getattr(engine, "consume_timing_sidecar", None)
-                timing = consume_timing() if callable(consume_timing) else None
-                if isinstance(timing, dict):
-                    completed["timing_sidecar"] = timing
-                else:
-                    completed["timing_unavailable_reason"] = (
-                        "backend_timing_metadata_unavailable"
-                    )
-            write_frame(
-                output_stream,
-                completed,
-            )
-            _clear_metal_cache()
-        except ProtocolError:
-            write_frame(
-                output_stream,
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": "worker_invalid_request",
-                    "request_id": request_id,
-                },
-            )
-            _clear_metal_cache()
-        except VoiceStoreUnavailableError:
-            write_frame(
-                output_stream,
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": "voice_store_unavailable",
-                    "request_id": request_id,
-                },
-            )
-            _clear_metal_cache()
-        except Exception as exc:
-            traceback.print_exc(file=sys.stderr)
-            code = _stable_worker_error_code(exc)
-            write_frame(
-                output_stream,
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": code,
-                    "request_id": request_id,
-                },
-            )
-            _clear_metal_cache()
+    write_frame(output_stream, ready)
 
+    pump = StreamPump(input_stream, output_stream)
+    pump.start()
+    try:
+        _serve_frames(pump, engine, opener if callable(opener) else None)
+    finally:
+        pump.stop()
+
+
+class _OutputClosedError(RuntimeError):
+    """The parent stopped reading this worker's stdout."""
+
+
+def _emit(
+    pump: StreamPump,
+    payload: dict[str, object],
+    binary: bytes | None = None,
+    *,
+    timeout: float = _OUTPUT_SUBMIT_TIMEOUT_SECONDS,
+) -> None:
+    if not pump.submit(StreamFrame(payload, binary=binary), timeout=timeout):
+        raise _OutputClosedError("the parent stopped reading worker output")
+
+
+def _emit_best_effort(
+    pump: StreamPump, payload: dict[str, object], binary: bytes | None = None
+) -> None:
+    with contextlib.suppress(_OutputClosedError):
+        _emit(pump, payload, binary)
+
+
+def _worker_error_frame(
+    request_id: str | None, code: str, *, version: int = PROTOCOL_VERSION
+) -> dict[str, object]:
+    return {
+        "version": version,
+        "type": "error",
+        "code": code,
+        "request_id": request_id,
+    }
+
+
+def _stream_error_frame(
+    request_id: str | None,
+    code: str,
+    *,
+    terminal: bool,
+    sequence: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "version": PROTOCOL_VERSION,
+        "type": FRAME_STREAM_ERROR,
+        "request_id": request_id,
+        "code": code,
+        "terminal": terminal,
+    }
+    if sequence is not None:
+        payload["sequence"] = sequence
+    return payload
+
+
+def _serve_frames(
+    pump: StreamPump,
+    engine: TtsWorkerEngine,
+    opener: Callable[..., IncrementalModelSession] | None,
+) -> None:
+    """The model loop: one frame at a time, one utterance at a time."""
+
+    while True:
+        frame = pump.poll(timeout=None)
+        if frame is None:
+            if pump.read_error is not None:
+                traceback.print_exception(pump.read_error, file=sys.stderr)
+            return
+        try:
+            _dispatch_frame(pump, engine, opener, frame)
+        except _OutputClosedError:
+            return
+
+
+def _dispatch_frame(
+    pump: StreamPump,
+    engine: TtsWorkerEngine,
+    opener: Callable[..., IncrementalModelSession] | None,
+    frame: dict[str, object],
+) -> None:
+    frame_type = frame.get("type")
+    if frame_type == "trim_memory":
+        # Fire-and-forget: no confirmation frame so the framing of the next
+        # response is never pushed out of alignment.
+        _clear_metal_cache()
+        return
+    if frame_type in STREAM_FRAME_TYPES:
+        if opener is None:
+            request_id = frame.get("request_id")
+            _emit(
+                pump,
+                _stream_error_frame(
+                    request_id if isinstance(request_id, str) else None,
+                    "tts_streaming_unsupported",
+                    terminal=True,
+                ),
+            )
+            return
+        if frame_type != FRAME_STREAM_START:
+            request_id = frame.get("request_id")
+            _emit(
+                pump,
+                _stream_error_frame(
+                    request_id if isinstance(request_id, str) else None,
+                    "tts_input_closed",
+                    terminal=False,
+                ),
+            )
+            return
+        _run_stream(pump, opener, frame)
+        return
+    _run_synthesize(pump, engine, frame)
+
+
+def _open_stream_session(
+    opener: Callable[..., IncrementalModelSession],
+    fields: _SynthesisFields,
+    frame: dict[str, object],
+) -> IncrementalModelSession:
+    """Resolve the frozen conditioning the caller sent and open model state."""
+
+    profile = _decode_profile_snapshot(frame.get("voice_profile"), voice=fields.voice)
+    kwargs: dict[str, Any] = {
+        "voice": fields.voice,
+        "speed": fields.speed,
+        "language": fields.language,
+    }
+    if profile is not None:
+        if fields.ref_audio is not None or fields.ref_text is not None:
+            raise ProtocolError("invalid voice profile snapshot")
+        kwargs["profile"] = profile
+    if fields.ref_audio is not None or fields.ref_text is not None:
+        kwargs["ref_audio"] = fields.ref_audio
+        kwargs["ref_text"] = fields.ref_text
+    if fields.instruction is not None:
+        kwargs["instruction"] = fields.instruction
+    if fields.seed is not None:
+        kwargs["seed"] = fields.seed
+    return opener(**kwargs)
+
+
+def _run_stream(
+    pump: StreamPump,
+    opener: Callable[..., IncrementalModelSession],
+    frame: dict[str, object],
+) -> None:
+    request_id = frame.get("request_id")
+    response_id = frame.get("response_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    try:
+        parse_stream_command(frame)
+        fields = _decode_synthesis_fields(
+            frame, expected_type=FRAME_STREAM_START, require_text=False
+        )
+        if not isinstance(response_id, str) or not response_id:
+            raise ProtocolError("incremental stream start requires a response_id")
+    except ProtocolError:
+        _emit(
+            pump,
+            _stream_error_frame(request_id, "worker_invalid_request", terminal=True),
+        )
+        return
+    try:
+        session = _open_stream_session(opener, fields, frame)
+    except VoiceStoreUnavailableError:
+        _emit(
+            pump,
+            _stream_error_frame(request_id, "voice_store_unavailable", terminal=True),
+        )
+        return
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        _emit(
+            pump,
+            _stream_error_frame(request_id, "worker_inference_error", terminal=True),
+        )
+        return
+
+    options = TtsStreamOptions(
+        request_id=request_id,
+        response_id=response_id,
+        voice=fields.voice,
+        language=fields.language,
+        speed=fields.speed,
+    )
+    try:
+        host = TtsStreamHost(session, options)
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        with contextlib.suppress(Exception):
+            session.close()
+        _emit(
+            pump,
+            _stream_error_frame(request_id, "worker_inference_error", terminal=True),
+        )
+        return
+    try:
+        _drive_stream(pump, host)
+    finally:
+        host.close()
+
+
+def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
+    """Interleave bounded model steps with control frames from the parent."""
+
+    for outbound in host.started_frames():
+        _emit(pump, outbound.payload, outbound.binary)
+    request_id = host.options.request_id
+    while True:
+        if pump.cancel_pending and pump.cancel_request_id == request_id:
+            for outbound in host.cancel():
+                _emit(pump, outbound.payload, outbound.binary)
+            pump.acknowledge_cancel(request_id)
+            return
+        if _drain_stream_commands(pump, host):
+            return
+        if host.terminal is not None:
+            return
+        result = host.step()
+        for outbound in result.frames:
+            _emit(pump, outbound.payload, outbound.binary)
+        if result.terminal or host.terminal is not None:
+            return
+        if not result.waiting_for_text:
+            continue
+        frame = pump.poll(timeout=host.timeout_remaining())
+        if frame is None:
+            if (
+                pump.at_eof
+                or pump.read_error is not None
+                or pump.write_error is not None
+            ):
+                for outbound in host.cancel():
+                    _emit_best_effort(pump, outbound.payload, outbound.binary)
+                return
+            for outbound in host.expire():
+                _emit(pump, outbound.payload, outbound.binary)
+            return
+        if _apply_stream_frame(pump, host, frame):
+            return
+
+
+def _drain_stream_commands(pump: StreamPump, host: TtsStreamHost) -> bool:
+    """Apply every already-queued command; ``True`` means the stream ended."""
+
+    while True:
+        frame = pump.poll(timeout=0)
+        if frame is None:
+            return host.terminal is not None
+        if _apply_stream_frame(pump, host, frame):
+            return True
+
+
+def _apply_stream_frame(
+    pump: StreamPump, host: TtsStreamHost, frame: dict[str, object]
+) -> bool:
+    request_id = host.options.request_id
+    try:
+        command = parse_stream_command(frame)
+    except ProtocolError:
+        _emit(
+            pump,
+            _stream_error_frame(request_id, "worker_invalid_request", terminal=False),
+        )
+        return False
+    if command.request_id != request_id:
+        _emit(
+            pump,
+            _stream_error_frame(
+                command.request_id, "tts_sequence_invalid", terminal=False
+            ),
+        )
+        return False
+    if command.kind == "cancel":
+        for outbound in host.cancel():
+            _emit(pump, outbound.payload, outbound.binary)
+        pump.acknowledge_cancel(request_id)
+        return True
+    if command.kind == "finish":
+        assert command.last_sequence is not None
+        for outbound in host.finish_input(command.last_sequence):
+            _emit(pump, outbound.payload, outbound.binary)
+    elif command.kind == "text":
+        assert command.sequence is not None and command.text is not None
+        for outbound in host.accept_text(command.sequence, command.text):
+            _emit(pump, outbound.payload, outbound.binary)
+    else:
+        _emit(
+            pump,
+            _stream_error_frame(
+                request_id, "worker_invalid_request", terminal=False
+            ),
+        )
+        return False
+    return host.terminal is not None
+
+
+def _run_synthesize(
+    pump: StreamPump, engine: TtsWorkerEngine, frame: dict[str, object]
+) -> None:
+    raw_request_id = frame.get("request_id")
+    request_id: str | None = raw_request_id if isinstance(raw_request_id, str) else None
+    try:
+        fields = _decode_synthesis_request(frame)
+        request_id = fields.request_id
+        synth_kwargs: dict[str, Any] = {
+            "voice": fields.voice,
+            "speed": fields.speed,
+            "language": fields.language,
+        }
+        profile = _decode_profile_snapshot(frame.get("voice_profile"), voice=fields.voice)
+        if profile is not None:
+            if fields.ref_audio is not None or fields.ref_text is not None:
+                raise ProtocolError("invalid voice profile snapshot")
+            synth_kwargs["profile"] = profile
+        if fields.ref_audio is not None or fields.ref_text is not None:
+            synth_kwargs["ref_audio"] = fields.ref_audio
+            synth_kwargs["ref_text"] = fields.ref_text
+        if fields.instruction is not None:
+            synth_kwargs["instruction"] = fields.instruction
+        if fields.seed is not None:
+            synth_kwargs["seed"] = fields.seed
+        for index, pcm in enumerate(engine.synthesize(fields.text, **synth_kwargs)):
+            if not pcm or len(pcm) % 2:
+                raise ProtocolError("invalid PCM chunk")
+            _emit(
+                pump,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "audio",
+                    "request_id": request_id,
+                    "chunk_index": index,
+                },
+                pcm,
+            )
+        consume_stats = getattr(engine, "consume_delivery_stats", None)
+        stats = consume_stats() if callable(consume_stats) else {}
+        completed: dict[str, object] = {
+            "version": PROTOCOL_VERSION,
+            "type": "completed",
+            "request_id": request_id,
+        }
+        if stats:
+            completed["delivery_stats"] = stats
+        if fields.timing_mode == "chunk":
+            consume_timing = getattr(engine, "consume_timing_sidecar", None)
+            timing = consume_timing() if callable(consume_timing) else None
+            if isinstance(timing, dict):
+                completed["timing_sidecar"] = timing
+            else:
+                completed["timing_unavailable_reason"] = (
+                    "backend_timing_metadata_unavailable"
+                )
+        _emit(pump, completed)
+        _clear_metal_cache()
+    except ProtocolError:
+        _emit(pump, _worker_error_frame(request_id, "worker_invalid_request"))
+        _clear_metal_cache()
+    except VoiceStoreUnavailableError:
+        _emit(pump, _worker_error_frame(request_id, "voice_store_unavailable"))
+        _clear_metal_cache()
+    except _OutputClosedError:
+        raise
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        _emit(pump, _worker_error_frame(request_id, _stable_worker_error_code(exc)))
+        _clear_metal_cache()
 
 
 def _decode_profile_snapshot(raw: object, *, voice: str) -> VoiceProfile | None:
@@ -944,20 +1312,35 @@ def _decode_profile_snapshot(raw: object, *, voice: str) -> VoiceProfile | None:
     )
 
 
-def _decode_synthesis_request(
+@dataclass(frozen=True, slots=True)
+class _SynthesisFields:
+    """Validated private synthesis fields shared by the batch and stream paths."""
+
+    request_id: str
+    text: str
+    voice: str
+    speed: float
+    language: str
+    ref_audio: str | None
+    ref_text: str | None
+    instruction: str | None
+    seed: int | None
+    timing_mode: str | None
+
+
+def _decode_synthesis_fields(
     frame: dict[str, object],
-) -> tuple[
-    str,
-    str,
-    str,
-    float,
-    str,
-    str | None,
-    str | None,
-    str | None,
-    int | None,
-    str | None,
-]:
+    *,
+    expected_type: str,
+    require_text: bool = True,
+) -> _SynthesisFields:
+    """Validate one private synthesis-shaped frame without querying voice storage.
+
+    The incremental ``tts_stream_start`` frame deliberately reuses this decoder
+    so the two paths can never drift on speed, language, seed or instruction
+    rules; only the presence of a text body differs.
+    """
+
     request_id = frame.get("request_id")
     text = frame.get("text")
     voice = frame.get("voice")
@@ -972,11 +1355,14 @@ def _decode_synthesis_request(
         raise ProtocolError("invalid timing_mode in synthesize request")
     if (
         frame.get("version") != PROTOCOL_VERSION
-        or frame.get("type") != "synthesize"
+        or frame.get("type") != expected_type
         or not isinstance(request_id, str)
         or not request_id
-        or not isinstance(text, str)
-        or not text.strip()
+        or (
+            require_text
+            and (not isinstance(text, str) or not text.strip())
+        )
+        or (text is not None and not isinstance(text, str))
         or not isinstance(voice, str)
         or not voice.strip()
         or not isinstance(speed, (float, int))
@@ -1015,18 +1401,22 @@ def _decode_synthesis_request(
             raise ProtocolError("invalid seed in synthesize request")
         validated_seed = seed
 
-    return (
-        request_id,
-        text,
-        voice,
-        float(speed),
-        language.strip(),
-        validated_ref_audio,
-        validated_ref_text,
-        validated_instruction,
-        validated_seed,
-        timing_mode,
+    return _SynthesisFields(
+        request_id=request_id,
+        text=text if isinstance(text, str) else "",
+        voice=voice,
+        speed=float(speed),
+        language=language.strip(),
+        ref_audio=validated_ref_audio,
+        ref_text=validated_ref_text,
+        instruction=validated_instruction,
+        seed=validated_seed,
+        timing_mode=timing_mode,
     )
+
+
+def _decode_synthesis_request(frame: dict[str, object]) -> _SynthesisFields:
+    return _decode_synthesis_fields(frame, expected_type="synthesize")
 
 
 def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None = None) -> None:

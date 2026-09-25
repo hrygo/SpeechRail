@@ -13,17 +13,28 @@ import contextlib
 import os
 import time
 from collections.abc import AsyncIterator, Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
 from speechrail.backends.model_identity import observed_runtime_revision
+from speechrail.backends.qwen3_tts_stream_client import (
+    Qwen3TtsIncrementalSession,
+    Qwen3TtsIncrementalSynthesizer,
+)
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.domain.tts import VoiceStoreUnavailableError
+from speechrail.domain.tts import VoiceProfile, VoiceStoreUnavailableError
 from speechrail.domain.tts_errors import TtsBackendError, from_worker_frame
 from speechrail.domain.tts_request import validate_tts_parameters
+from speechrail.domain.tts_stream import (
+    IncrementalSpeechSession,
+    TtsStreamError,
+    TtsStreamEvent,
+    TtsStreamOptions,
+)
 from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
@@ -31,6 +42,9 @@ from speechrail.runtime.worker_process import (
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
+
+if TYPE_CHECKING:
+    from speechrail.backends.qwen3_voice_binding import VoiceBinding
 
 DeliveryEventRecorder = Callable[[str, int], None]
 TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
@@ -148,6 +162,11 @@ class Qwen3TtsWorker:
         self._lock = asyncio.Lock()
         self._started = False
         self._supports_profile_snapshot = False
+        self._stream_protocol: int | None = None
+        # One incremental utterance owns this slot until its terminal outcome.
+        # Complete-text synthesis waits here instead of racing the stream's
+        # single receive dispatcher on the same worker transport.
+        self._incremental_slot = asyncio.Lock()
         self._epoch: int = 0
         self._fallback_abort_count = 0
         self._reload_count = 0
@@ -173,18 +192,27 @@ class Qwen3TtsWorker:
         return self._runtime_revision if self.ready else None
 
     @property
+    def supports_incremental_stream(self) -> bool:
+        """Whether this worker negotiated the private append-only protocol."""
+
+        return self._stream_protocol == 1
+
+    @property
     def lifecycle_stats(self) -> dict[str, int | bool]:
         """Expose path-free cancellation evidence for local diagnostics.
 
-        The current vendor worker serves one synchronous generation at a time
-        and has no verified cooperative cancellation checkpoint.  A cancelled
-        incomplete stream therefore uses the bounded abort fallback.  Keep the
-        counters explicit so a future vendor capability change can be measured
-        instead of being assumed from a successful cancellation response.
+        The batch path serves one synchronous generation at a time and has no
+        verified cooperative cancellation checkpoint, so a cancelled batch
+        stream uses the bounded abort fallback.  The negotiated incremental path
+        does check cancellation between bounded model steps.  Keep the counters
+        explicit so a capability change can be measured instead of being assumed
+        from a successful cancellation response.
         """
 
         return {
-            "cooperative_cancel_supported": False,
+            # Only the negotiated incremental path has a verified cooperative
+            # cancellation checkpoint; the batch path still aborts.
+            "cooperative_cancel_supported": self._stream_protocol == 1,
             "fallback_abort_count": self._fallback_abort_count,
             "reload_count": self._reload_count,
         }
@@ -198,6 +226,7 @@ class Qwen3TtsWorker:
             return
         is_reload = self._epoch > 0
         self._supports_profile_snapshot = False
+        self._stream_protocol = None
         self._runtime_revision = None
         self._worker_attempt_id = f"tts_attempt_{uuid4().hex}"
         try:
@@ -238,6 +267,12 @@ class Qwen3TtsWorker:
             self._supports_profile_snapshot = (
                 type(snapshot_version) is int and snapshot_version == 1
             )
+            stream_protocol = ready.get("tts_stream_protocol")
+            self._stream_protocol = (
+                stream_protocol
+                if type(stream_protocol) is int and stream_protocol == 1
+                else None
+            )
             self._runtime_revision = observed_runtime_revision(ready)
             self._started = True
             self._epoch += 1
@@ -276,7 +311,7 @@ class Qwen3TtsWorker:
                     instruction=request.instruction,
                     seed=request.seed,
                 )
-                async with self._lock:
+                async with self._incremental_slot, self._lock:
                     if not self._started:
                         await self._start_locked()
                     epoch = self._epoch
@@ -417,6 +452,127 @@ class Qwen3TtsWorker:
 
         return stream()
 
+    async def open_incremental_stream(
+        self,
+        options: TtsStreamOptions,
+    ) -> IncrementalSpeechSession:
+        """Open one append-only utterance while holding its worker and voice lease.
+
+        The exclusive incremental slot is held for the whole utterance, so a
+        complete-text synthesis either finishes before this call or waits until
+        the stream reaches its single terminal outcome.  The voice lease keeps a
+        clone reference alive and rejects a revision change that happened after
+        the caller captured ``expected_voice_revision``.
+        """
+
+        from speechrail.backends.qwen3_voice_binding import resolve_binding
+        from speechrail.domain.tts import get_voice_registry
+
+        await self._incremental_slot.acquire()
+        inner: Qwen3TtsIncrementalSession | None = None
+        stack = contextlib.ExitStack()
+        try:
+            profile = stack.enter_context(
+                get_voice_registry().lease_profile(
+                    options.voice,
+                    expected_revision=options.expected_voice_revision,
+                )
+            )
+            binding = resolve_binding(self.model_variant, options.voice, profile=profile)
+            if not binding.supports_incremental_stream:
+                raise TtsStreamError(
+                    "tts_streaming_unsupported",
+                    "the resolved voice binding has no verified incremental path",
+                )
+            if binding.is_clone and (
+                not binding.ref_audio_path or not (binding.ref_text or "").strip()
+            ):
+                raise TtsStreamError(
+                    "tts_backend_failed",
+                    "the clone voice has no usable reference audio and text",
+                )
+            validated = validate_tts_parameters(
+                model_variant=cast(TtsModelVariant, self.model_variant),
+                is_clone=binding.is_clone,
+                speed=options.speed,
+                language=options.language,
+                instruction=None,
+                seed=None,
+            )
+            start_fields = self._incremental_start_fields(
+                binding,
+                profile,
+                speed=validated.speed,
+                language=validated.language,
+            )
+            async with self._lock:
+                if not self._started:
+                    await self._start_locked()
+                if not self.supports_incremental_stream:
+                    raise TtsStreamError(
+                        "tts_streaming_unsupported",
+                        "the TTS worker did not negotiate the incremental stream protocol",
+                    )
+                epoch = self._epoch
+                synthesizer = Qwen3TtsIncrementalSynthesizer(
+                    self._transport,
+                    stream_protocol=self._stream_protocol,
+                )
+                inner = await synthesizer.open_stream(options, start_fields=start_fields)
+                session = _LeasedTtsStreamSession(self, inner, stack, epoch=epoch)
+                self.last_active = time.monotonic()
+                return session
+        except BaseException:
+            if inner is not None:
+                with contextlib.suppress(Exception):
+                    await inner.close()
+            stack.close()
+            self._release_incremental_slot()
+            raise
+
+    def _incremental_start_fields(
+        self,
+        binding: VoiceBinding,
+        profile: VoiceProfile,
+        *,
+        speed: float,
+        language: str,
+    ) -> dict[str, object]:
+        """Freeze the child-side conditioning for one incremental utterance."""
+
+        fields: dict[str, object] = {"speed": speed, "language": language}
+        if binding.is_clone:
+            fields["ref_audio"] = binding.ref_audio_path
+            fields["ref_text"] = binding.ref_text or ""
+        elif self._supports_profile_snapshot:
+            # The child must not re-resolve a mutable instruction profile after
+            # this lease or between acoustic text chunks.
+            fields["voice_profile"] = {
+                "id": profile.id,
+                "mode": profile.mode,
+                "instruction": profile.instruction,
+                "seed": profile.seed,
+                "temperature": profile.temperature,
+            }
+        return fields
+
+    async def _invalidate_after_abort(self, epoch: int) -> None:
+        """Mark a forcibly reaped worker not-ready, mirroring the batch path."""
+
+        async with self._lock:
+            if self._epoch != epoch:
+                return
+            self._started = False
+            self._runtime_revision = None
+            self._fallback_abort_count += 1
+            self._record_delivery_event("abort_fallback")
+
+    def _release_incremental_slot(self) -> None:
+        """Return the single incremental slot; exactly one holder releases it."""
+
+        if self._incremental_slot.locked():
+            self._incremental_slot.release()
+
     def _store_timing_sidecar(
         self,
         response_id: str,
@@ -475,7 +631,9 @@ class Qwen3TtsWorker:
             ) from exc
 
     async def trim_memory(self) -> None:
-        if self.alive:
+        # A trim frame arriving mid-utterance would be misread as a stream
+        # control frame by the model thread; skip it until the stream closes.
+        if self.alive and not self._incremental_slot.locked():
             with contextlib.suppress(Exception):
                 await self._transport.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
 
@@ -486,6 +644,78 @@ class Qwen3TtsWorker:
             self._runtime_revision = None
             self._epoch += 1
             await self._transport.abort()
+
+
+class _LeasedTtsStreamSession:
+    """One parent-side incremental utterance plus its worker and voice lease.
+
+    Releasing the exclusive worker slot and the voice lease is idempotent and
+    happens exactly once, on the terminal event, cancel or close whichever comes
+    first.  A worker that had to be aborted is marked not-ready so the next
+    request restarts it through the existing controlled path.
+    """
+
+    def __init__(
+        self,
+        worker: Qwen3TtsWorker,
+        inner: Qwen3TtsIncrementalSession,
+        lease: ExitStack,
+        *,
+        epoch: int,
+    ) -> None:
+        self._worker = worker
+        self._inner = inner
+        self._lease = lease
+        self._epoch = epoch
+        self._released = False
+
+    @property
+    def options(self) -> TtsStreamOptions:
+        return self._inner.options
+
+    @property
+    def used_abort_fallback(self) -> bool:
+        """Whether this utterance had to reap its worker instead of stopping it."""
+
+        return self._inner.used_abort_fallback
+
+    async def append_text(self, sequence: int, text: str) -> None:
+        await self._inner.append_text(sequence, text)
+
+    async def finish_text(self, last_sequence: int) -> None:
+        await self._inner.finish_text(last_sequence)
+
+    async def events(self) -> AsyncIterator[TtsStreamEvent]:
+        async for event in self._inner.events():
+            if event.terminal is not None:
+                await self._release()
+            yield event
+            if event.terminal is not None:
+                return
+
+    async def cancel(self) -> None:
+        try:
+            await self._inner.cancel()
+        finally:
+            await self._release()
+
+    async def close(self) -> None:
+        await self._release()
+
+    async def _release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            await self._inner.close()
+        finally:
+            try:
+                if self._inner.used_abort_fallback:
+                    await self._worker._invalidate_after_abort(self._epoch)
+            finally:
+                self._worker._release_incremental_slot()
+                self._lease.__exit__(None, None, None)
+
 
 class Qwen3TtsCapabilityRouter:
     """Route TTS capabilities through independent, lifecycle-owned workers.
@@ -624,6 +854,24 @@ class Qwen3TtsCapabilityRouter:
         else:
             selected = self.primary
         return selected.synthesize(request)
+
+    async def open_incremental_stream(
+        self,
+        options: TtsStreamOptions,
+    ) -> IncrementalSpeechSession:
+        """Route one incremental utterance to the lane that owns its voice."""
+
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(options.voice)
+        if profile.mode == "clone":
+            if self.clone is None:
+                raise TtsStreamError(
+                    "tts_streaming_unsupported",
+                    "the voice clone base model is not resident",
+                )
+            return await self.clone.open_incremental_stream(options)
+        return await self.primary.open_incremental_stream(options)
 
     def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
         """Consume timing metadata from whichever worker served the response."""

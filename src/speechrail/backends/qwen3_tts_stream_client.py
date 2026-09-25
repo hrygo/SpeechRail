@@ -54,6 +54,19 @@ _TERMINAL_EVENTS: Final[frozenset[TtsStreamEventKind]] = frozenset(
 )
 _FALLBACK_ERROR_CODE: Final[str] = "tts_backend_failed"
 
+# Conditioning fields travel with the utterance but may never redefine the
+# identity or envelope the parent already validated.
+_RESERVED_START_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "version",
+        "type",
+        "request_id",
+        "response_id",
+        "voice",
+        "stream_protocol",
+    }
+)
+
 
 class StreamTransport(Protocol):
     """The slice of ``AsyncFramedWorkerProcess`` the stream client depends on."""
@@ -100,9 +113,19 @@ class Qwen3TtsIncrementalSession:
         limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
         io_timeout_seconds: float = 120.0,
         cancel_grace_seconds: float = 5.0,
+        start_fields: Mapping[str, object] | None = None,
     ) -> None:
         self._transport = transport
         self._options = options
+        self._start_fields = (
+            {
+                key: value
+                for key, value in start_fields.items()
+                if key not in _RESERVED_START_FIELDS
+            }
+            if start_fields
+            else {}
+        )
         self._limits = limits
         self._io_timeout = io_timeout_seconds
         self._cancel_grace = cancel_grace_seconds
@@ -162,6 +185,7 @@ class Qwen3TtsIncrementalSession:
             "language": self._options.language,
             "stream_protocol": 1,
         }
+        frame.update(self._start_fields)
         if self._options.expected_voice_revision is not None:
             frame["expected_voice_revision"] = self._options.expected_voice_revision
         if self._options.expected_model_revision is not None:
@@ -496,8 +520,18 @@ class Qwen3TtsIncrementalSynthesizer:
     def supported(self) -> bool:
         return self._stream_protocol == 1
 
-    async def open_stream(self, options: TtsStreamOptions) -> Qwen3TtsIncrementalSession:
-        """Fail closed when the ready handshake never negotiated streaming."""
+    async def open_stream(
+        self,
+        options: TtsStreamOptions,
+        *,
+        start_fields: Mapping[str, object] | None = None,
+    ) -> Qwen3TtsIncrementalSession:
+        """Fail closed when the ready handshake never negotiated streaming.
+
+        ``start_fields`` carries the conditioning frozen by the owning worker
+        (voice-profile snapshot or clone reference); it can never replace the
+        utterance identity validated above.
+        """
 
         if not self.supported:
             raise TtsStreamError(
@@ -510,6 +544,7 @@ class Qwen3TtsIncrementalSynthesizer:
             limits=self._limits,
             io_timeout_seconds=self._io_timeout,
             cancel_grace_seconds=self._cancel_grace,
+            start_fields=start_fields,
         )
         return await session.open()
 
