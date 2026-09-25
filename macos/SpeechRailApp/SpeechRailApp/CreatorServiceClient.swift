@@ -242,6 +242,111 @@ public struct VoiceCreationSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// 服务端对某个音色的增量 TTS 判定（`/v1/voices[].streaming`）。
+///
+/// 每个轴单独取值，客户端**不得**把“模型支持流式”读成“每个音色都支持流式”：
+/// `supported` 已经把变体、制品、档位、参考条件与实现协商合并成一个结论，
+/// `axes` 只用于解释为什么。服务端未声明（旧服务）时整段为 `nil`，
+/// 界面按“未声明/不可用”处理，绝不推断为 `true`。
+public struct VoiceStreamingCapability: Codable, Equatable, Sendable {
+    public let supported: Bool
+    public let reason: String?
+    public let hint: String?
+    public let protocolVersion: Int?
+    public let implementationVersion: String?
+    public let voiceMode: String
+    public let voiceVariant: String?
+    public let axes: VoiceStreamingAxes
+
+    public init(
+        supported: Bool,
+        reason: String? = nil,
+        hint: String? = nil,
+        protocolVersion: Int? = nil,
+        implementationVersion: String? = nil,
+        voiceMode: String = "",
+        voiceVariant: String? = nil,
+        axes: VoiceStreamingAxes = VoiceStreamingAxes()
+    ) {
+        self.supported = supported
+        self.reason = reason
+        self.hint = hint
+        self.protocolVersion = protocolVersion
+        self.implementationVersion = implementationVersion
+        self.voiceMode = voiceMode
+        self.voiceVariant = voiceVariant
+        self.axes = axes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case supported
+        case reason
+        case hint
+        case protocolVersion = "protocol_version"
+        case implementationVersion = "implementation_version"
+        case voiceMode = "voice_mode"
+        case voiceVariant = "voice_variant"
+        case axes
+    }
+}
+
+/// 增量判定的分轴证据。缺失字段一律按失败处理（`false` / `nil`）。
+public struct VoiceStreamingAxes: Codable, Equatable, Sendable {
+    public let variantSupported: Bool
+    public let artifactAvailable: Bool
+    public let profileEnabled: Bool
+    public let referenceReady: Bool
+    public let implementationSupported: Bool
+    public let protocolNegotiated: Bool?
+    public let ready: Bool
+    public let budgetAvailable: Bool?
+
+    public init(
+        variantSupported: Bool = false,
+        artifactAvailable: Bool = false,
+        profileEnabled: Bool = false,
+        referenceReady: Bool = false,
+        implementationSupported: Bool = false,
+        protocolNegotiated: Bool? = nil,
+        ready: Bool = false,
+        budgetAvailable: Bool? = nil
+    ) {
+        self.variantSupported = variantSupported
+        self.artifactAvailable = artifactAvailable
+        self.profileEnabled = profileEnabled
+        self.referenceReady = referenceReady
+        self.implementationSupported = implementationSupported
+        self.protocolNegotiated = protocolNegotiated
+        self.ready = ready
+        self.budgetAvailable = budgetAvailable
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        variantSupported = try container.decodeIfPresent(Bool.self, forKey: .variantSupported) ?? false
+        artifactAvailable = try container.decodeIfPresent(Bool.self, forKey: .artifactAvailable) ?? false
+        profileEnabled = try container.decodeIfPresent(Bool.self, forKey: .profileEnabled) ?? false
+        referenceReady = try container.decodeIfPresent(Bool.self, forKey: .referenceReady) ?? false
+        implementationSupported = try container.decodeIfPresent(
+            Bool.self, forKey: .implementationSupported
+        ) ?? false
+        protocolNegotiated = try container.decodeIfPresent(Bool.self, forKey: .protocolNegotiated)
+        ready = try container.decodeIfPresent(Bool.self, forKey: .ready) ?? false
+        budgetAvailable = try container.decodeIfPresent(Bool.self, forKey: .budgetAvailable)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case variantSupported = "variant_supported"
+        case artifactAvailable = "artifact_available"
+        case profileEnabled = "profile_enabled"
+        case referenceReady = "reference_ready"
+        case implementationSupported = "implementation_supported"
+        case protocolNegotiated = "protocol_negotiated"
+        case ready
+        case budgetAvailable = "budget_available"
+    }
+}
+
 public struct CreatorVoiceCapabilities: Codable, Equatable, Sendable {
     public let supportsSpeaker: Bool
     public let supportsInstruction: Bool
@@ -285,6 +390,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     public let availabilityReason: SafeVoiceAvailabilityReason?
     public let quality: VoiceQualityReportSnapshotV2?
     public let creation: VoiceCreationSnapshot?
+    /// `nil` 表示服务端未声明增量能力（旧服务或未实现）：按“不可用/未知”处理。
+    public let streaming: VoiceStreamingCapability?
 
     public init(
         id: String,
@@ -306,7 +413,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         revoked: Bool = false,
         availabilityReason: SafeVoiceAvailabilityReason? = nil,
         quality: VoiceQualityReportSnapshotV2? = nil,
-        creation: VoiceCreationSnapshot? = nil
+        creation: VoiceCreationSnapshot? = nil,
+        streaming: VoiceStreamingCapability? = nil
     ) {
         self.id = id
         self.name = name
@@ -328,6 +436,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         self.availabilityReason = availabilityReason
         self.quality = quality
         self.creation = creation
+        self.streaming = streaming
     }
 
     public init(from decoder: Decoder) throws {
@@ -358,6 +467,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         )
         quality = try container.decodeIfPresent(VoiceQualityReportSnapshotV2.self, forKey: .quality)
         creation = try container.decodeIfPresent(VoiceCreationSnapshot.self, forKey: .creation)
+        streaming = try container.decodeIfPresent(VoiceStreamingCapability.self, forKey: .streaming)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -381,6 +491,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case availabilityReason = "availability_reason"
         case quality
         case creation
+        case streaming
     }
 }
 
