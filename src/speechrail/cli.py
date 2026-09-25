@@ -252,7 +252,10 @@ def _parser() -> argparse.ArgumentParser:
             command_parser.add_argument(
                 "--host-python",
                 type=Path,
-                help="probe optional service dependencies with this Python executable",
+                help=(
+                    "validate from this release and probe optional service "
+                    "dependencies with this Python executable"
+                ),
             )
     return parser
 
@@ -1308,9 +1311,12 @@ def _run_service(
     host_python: Path | None = None,
     json_output: bool = False,
 ) -> int | None:
-    if app_home is not None:
+    # An explicit --host-python marks a staged release: the installer checks a wheel
+    # before runtime/current moves, so the invoking release owns the checks instead of
+    # delegating to the runtime that is still installed with the previous lock.
+    staged_preflight = command == "preflight" and host_python is not None
+    if app_home is not None and not staged_preflight:
         resolved_app_home = app_home.expanduser().absolute()
-        layout = ServiceLayout.for_app_home(resolved_app_home)
         managed_python = _managed_runtime_for_mutation(resolved_app_home)
         if managed_python is not None:
             return _delegate_service_command(

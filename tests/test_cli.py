@@ -530,6 +530,48 @@ def test_service_preflight_does_not_fall_back_to_source_when_managed_runtime_is_
     assert "managed runtime Python" in capsys.readouterr().err
 
 
+def test_service_preflight_with_host_python_runs_in_the_invoking_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A staged install checks its own wheel before runtime/current moves."""
+    layout = cli.ServiceLayout.for_app_home(tmp_path)
+    managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.touch()
+    managed_python.chmod(0o700)
+    source_python = tmp_path / "source-python"
+    source_python.touch()
+    source_python.chmod(0o700)
+    monkeypatch.setattr(cli.sys, "executable", str(source_python))
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("a staged preflight must not delegate"),
+    )
+    captured: dict[str, object] = {}
+
+    def preflight(*args: object, **kwargs: object) -> PreflightResult:
+        captured["kwargs"] = kwargs
+        return PreflightResult(ok=True, checks=())
+
+    monkeypatch.setattr(cli, "run_preflight", preflight)
+
+    assert (
+        cli.main(
+            [
+                "service",
+                "preflight",
+                "--app-home",
+                str(tmp_path),
+                "--host-python",
+                str(source_python),
+            ]
+        )
+        == 0
+    )
+    assert captured["kwargs"] == {"require_tts": True, "host_python": source_python}
+
+
 def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
