@@ -1,6 +1,8 @@
 import XCTest
 @testable import SpeechRailControlKit
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 /// W10：分档能力呈现的纯映射测试。
 ///

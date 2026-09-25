@@ -1,5 +1,7 @@
 import XCTest
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 /// 纯状态测试：注入手动时钟，不实际 sleep。只验证"什么时候切、
 /// 切在哪、按什么单位算限额"，不涉及任何模型的声学表现。

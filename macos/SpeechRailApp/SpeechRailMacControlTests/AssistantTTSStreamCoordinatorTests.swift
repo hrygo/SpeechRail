@@ -1,5 +1,7 @@
 import XCTest
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 /// 协调器的纯状态测试：假服务端 + 假播放器，不碰 WebSocket、麦克风或音频设备。
 /// 这里证明的是**状态机接线**（一轮一次 start/finish、旧代隔离、暂时排空不等于结束），

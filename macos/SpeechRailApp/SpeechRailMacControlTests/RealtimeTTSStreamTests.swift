@@ -1,6 +1,8 @@
 import XCTest
 @testable import SpeechRailControlKit
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 /// 增量 TTS 的线上形状测试：DTO 字段与服务端 §3.3.1 对齐，
 /// 客户端只把**身份匹配、序号连续、偶数字节**的音频块交给上层。
