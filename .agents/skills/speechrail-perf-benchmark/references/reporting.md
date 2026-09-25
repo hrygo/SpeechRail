@@ -19,6 +19,12 @@
 
 “持平”必须使用预先固定的噪声带或统计区间；单轮波动不得直接归因。实测为 0 才写 0，缺失值写 N/A。
 
+**增量 TTS 流式口径：** `speechrail-perf/tts-streaming/2` 起，`append_to_first_pcm_ms` 以首个稳定文本
+*发送* 时刻为锚，`generation_rtf` 不扣除客户端插入的 gap（gap 单独报 `text_gap_ms`），
+`playback_headroom_ms` 在加入新到包之前判断余量，成功分母只包含 `terminal=completed` 且 PCM 有效的样本，
+`cancelled` 单独归类。更早的 `/1` 摘要为旧口径：原样保留、不继承认证，也不与 `/2` 或其他口径不同的
+数字直接比较。
+
 ## 归档报告模板
 
 正式归档时保存为 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，并更新索引。
