@@ -25,6 +25,27 @@ def create_capability_router(services: AppServices) -> APIRouter:
     active = active_model_catalog(services.settings)
     epoch = uuid4().hex
 
+    def asr_capability_facts() -> dict[str, object]:
+        """Declared ASR-side facts for discovery; never includes busy state."""
+
+        served = services.asr_ready
+        return {
+            "available": served,
+            "ready": served,
+            "reason": None if served else "asr_not_configured",
+            "max_upload_bytes": services.settings.max_upload_bytes,
+            "max_audio_seconds": services.settings.max_audio_seconds,
+            "alignment_available": services.text_aligner is not None,
+            "jobs_available": services.job_repository is not None,
+            "realtime_formats": ("pcm16",),
+            "realtime_pcm_sample_rate": 24_000,
+            "realtime_endpointing": ("server_vad",),
+            # WebSocket bidirectional traffic is not a joint realtime
+            # certification; until that gate passes discovery reports
+            # half-duplex only.
+            "realtime_full_duplex_certified": False,
+        }
+
     def respond(
         request: Request, *, voice_id: str | None = None, listing: bool = False
     ) -> Response:
@@ -61,6 +82,7 @@ def create_capability_router(services: AppServices) -> APIRouter:
                 sample_rate=services.settings.tts_sample_rate,
                 validation_records=validations,
                 validation_bindings=validation_bindings,
+                asr_capabilities=asr_capability_facts(),
             )
         except (VoiceStoreUnavailableError, VoiceValidationStoreUnavailableError):
             return error_response(

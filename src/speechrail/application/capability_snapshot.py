@@ -456,6 +456,92 @@ def _voice_entry(
     }
 
 
+def asr_operations(asr_capabilities: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build ASR-side operation entries from declared facts.
+
+    Conservative by default: without declared facts every ASR operation reports
+    ``unsupported`` with a readiness reason instead of falsely claiming support.
+    Busy/activity state is deliberately absent so it can never deform the
+    supported-capability enumeration; only the readiness reason varies.
+    """
+
+    facts = dict(asr_capabilities or {})
+    available = bool(facts.get("available", False))
+    ready = bool(facts.get("ready", False))
+    served = available and ready
+    declared_reason = facts.get("reason")
+    reason = (
+        declared_reason
+        if isinstance(declared_reason, str) and declared_reason
+        else None
+        if served
+        else ("asr_not_configured" if not available else "asr_not_ready")
+    )
+    alignment_available = bool(facts.get("alignment_available", False))
+    jobs_available = bool(facts.get("jobs_available", False))
+    languages = facts.get("languages")
+    language_values = (
+        [str(value) for value in languages] if isinstance(languages, (list, tuple)) else []
+    )
+    realtime_formats = facts.get("realtime_formats")
+    realtime_endpointing = facts.get("realtime_endpointing")
+    full_duplex = bool(facts.get("realtime_full_duplex_certified", False))
+    limits = {
+        "max_upload_bytes": facts.get("max_upload_bytes"),
+        "max_audio_seconds": facts.get("max_audio_seconds"),
+    }
+    return {
+        "transcription": {
+            "status": "supported" if served else "unsupported",
+            "reason": reason,
+            "input": limits,
+            "granularity": "segment",
+            "languages": {
+                "status": "supported" if language_values else "unknown",
+                "values": language_values,
+            },
+            "output": {
+                "formats": ["json", "text", "verbose_json"],
+                "word_timestamps": False,
+            },
+            "terminal_evidence": "transcription.completed",
+        },
+        "alignment_transcription": {
+            "status": "supported" if (served and alignment_available) else "unsupported",
+            "reason": (
+                None
+                if served and alignment_available
+                else reason or "alignment_artifact_not_bound"
+            ),
+            "input": limits,
+            "granularity": "word",
+            "terminal_evidence": "alignment.completed",
+        },
+        "realtime_transcription": {
+            "status": "supported" if served else "unsupported",
+            "reason": reason,
+            "input": {
+                "formats": [str(value) for value in realtime_formats]
+                if isinstance(realtime_formats, (list, tuple))
+                else ["pcm16"],
+                "pcm_sample_rate": facts.get("realtime_pcm_sample_rate", 24_000),
+                "endpointing": [str(value) for value in realtime_endpointing]
+                if isinstance(realtime_endpointing, (list, tuple))
+                else ["server_vad"],
+            },
+            "duplex": "full_duplex" if full_duplex else "half_duplex",
+            "terminal_evidence": "transcription.completed",
+        },
+        "jobs": {
+            "status": "supported" if jobs_available else "unsupported",
+            "reason": None if jobs_available else "job_spool_not_configured",
+            "input": limits,
+            "scheduling": {"default_class": "batch_transcription", "hard_preemption": False},
+            "terminal_evidence": "job.completed",
+        },
+    }
+
+
 def build_capability_snapshot(
     profiles: Sequence[VoiceProfile],
     active: ActiveModelCatalog,
@@ -467,6 +553,7 @@ def build_capability_snapshot(
     validation_records: Mapping[str, Mapping[str, Any]] | None = None,
     runtime_revision: str | None = None,
     validation_bindings: Mapping[str, Mapping[str, Any]] | None = None,
+    asr_capabilities: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure snapshot assembly; no model imports, registry calls, or network access."""
     ordered = sorted(profiles, key=lambda profile: profile.id)
@@ -490,10 +577,15 @@ def build_capability_snapshot(
             "schema": SCHEMA_VERSION,
             "models": models,
             "profile": active.profile,
+            "selection_generation": active.generation,
             "recipes": private_versions,
             "enabled": sorted(enabled_voices),
             "rate": sample_rate,
             "tts_text_planner": planner_policy,
+            # Engine revision, selection generation and ASR certification facts
+            # must invalidate the content validator when they change.
+            "runtime_revision": runtime_revision,
+            "asr_capabilities": asr_capabilities,
             "realtime": {
                 "orchestration": "caller",
                 "server_llm": False,
@@ -557,12 +649,17 @@ def build_capability_snapshot(
                 "speed": parameter("supported", minimum=0.25, maximum=4.0),
                 "creates_persistent_voice": False,
             },
+            **asr_operations(asr_capabilities),
         },
         "guarantees": {
             "discovery_only": True,
             "inference_version_pin": False,
             "admission_reserved": False,
             "no_sensitive_attribute_inference": True,
+            "websocket_bidirectional_is_not_full_duplex": True,
+            "realtime_full_duplex": bool(
+                (asr_capabilities or {}).get("realtime_full_duplex_certified", False)
+            ),
         },
     }
     result["snapshot_id"] = content_revision(result)

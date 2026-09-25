@@ -51,6 +51,14 @@ date: 2026-09-25
 `fast`、`quality` 与 `reference` 分别解析 ASR、固定自定义音色 Base 与内置 speaker CustomVoice 角色；实际可用性以当前有效快照为准。VoiceDesign 只在 `voice_design` 任务中运行，普通 Base clone 与 CustomVoice 路由不接受 Design 音色。
 普通 HTTP speech 支持 seed。语言完整取值域尚未在固定 vendor 上验证，因此报告 unknown。
 
+ASR 侧操作在 `operations` 中按 `transcription`、`alignment_transcription`、
+`realtime_transcription` 与 `jobs` 分别披露真实输入上限（`max_upload_bytes`、
+`max_audio_seconds`）、粒度、语言取值域、输出能力与就绪原因。这些枚举只由配置、
+绑定制品与认证事实决定，与 busy/队列状态无关：并发繁忙不会让已支持能力变成
+unsupported。`realtime_transcription.duplex` 与 `guarantees.realtime_full_duplex`
+只在联合实时验收通过后才是 `full_duplex`/`true`；WebSocket 双向收发本身不构成
+全双工认证，未认证时明确报告 `half_duplex`。
+
 sample rate 描述 PCM 域；容器编码仍可能有其自身约束。HTTP EOF 当前只有传输层证据，
 Realtime 的 `speechrail.tts.completed` 也不证明扬声器播放或内容读对。SSML/phoneme、clone 原生表演、
 prepared-reference 条件缓存和精细时间轴，在适配与验收前不得由客户端自行假定支持。
