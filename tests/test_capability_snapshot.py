@@ -445,3 +445,99 @@ def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
     assert state["production_ready"] is False
     assert state["production_ready_reason"] == "stale_synthesis_validation"
     assert state["synthesis"]["stale_reason"] == "model_runtime_identity_unknown"
+
+
+def _snapshot(**overrides):
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    kwargs = {
+        "epoch": "e",
+        "ready": True,
+        "enabled_voices": frozenset(),
+        "sample_rate": 24_000,
+    }
+    kwargs.update(overrides)
+    return build_capability_snapshot((), _active("quality"), **kwargs)
+
+
+def test_asr_operations_are_conservative_without_declared_facts() -> None:
+    snapshot = _snapshot()
+    ops = snapshot["operations"]
+    assert ops["transcription"]["status"] == "unsupported"
+    assert ops["transcription"]["reason"] == "asr_not_configured"
+    assert ops["transcription"]["granularity"] == "segment"
+    assert ops["alignment_transcription"]["status"] == "unsupported"
+    assert ops["alignment_transcription"]["granularity"] == "word"
+    assert ops["realtime_transcription"]["duplex"] == "half_duplex"
+    assert ops["jobs"]["status"] == "unsupported"
+    assert snapshot["guarantees"]["websocket_bidirectional_is_not_full_duplex"] is True
+    assert snapshot["guarantees"]["realtime_full_duplex"] is False
+
+
+def test_asr_operations_reflect_declared_input_limits_and_readiness() -> None:
+    facts = {
+        "available": True,
+        "ready": True,
+        "max_upload_bytes": 25 * 1024**2,
+        "max_audio_seconds": 120,
+        "alignment_available": True,
+        "jobs_available": True,
+        "realtime_formats": ("pcm16",),
+        "realtime_pcm_sample_rate": 24_000,
+        "realtime_endpointing": ("server_vad",),
+    }
+    ops = _snapshot(asr_capabilities=facts)["operations"]
+    assert ops["transcription"]["status"] == "supported"
+    assert ops["transcription"]["reason"] is None
+    assert ops["transcription"]["input"]["max_upload_bytes"] == 25 * 1024**2
+    assert ops["transcription"]["input"]["max_audio_seconds"] == 120
+    assert ops["transcription"]["languages"]["status"] == "unknown"
+    assert ops["alignment_transcription"]["status"] == "supported"
+    assert ops["realtime_transcription"]["input"]["pcm_sample_rate"] == 24_000
+    assert ops["jobs"]["status"] == "supported"
+
+
+def test_full_duplex_is_reported_only_after_joint_certification() -> None:
+    uncertified = _snapshot(
+        asr_capabilities={"available": True, "ready": True}
+    )
+    assert uncertified["operations"]["realtime_transcription"]["duplex"] == "half_duplex"
+    assert uncertified["guarantees"]["realtime_full_duplex"] is False
+
+    certified = _snapshot(
+        asr_capabilities={
+            "available": True,
+            "ready": True,
+            "realtime_full_duplex_certified": True,
+        }
+    )
+    assert certified["operations"]["realtime_transcription"]["duplex"] == "full_duplex"
+    assert certified["guarantees"]["realtime_full_duplex"] is True
+    # Certification changes are content changes and must invalidate discovery.
+    assert certified["catalog_revision"] != uncertified["catalog_revision"]
+
+
+def test_engine_revision_and_selection_generation_invalidate_revision() -> None:
+    baseline = _snapshot(runtime_revision="engine-1")
+    other_engine = _snapshot(runtime_revision="engine-2")
+    assert baseline["catalog_revision"] != other_engine["catalog_revision"]
+    assert baseline["snapshot_id"] != other_engine["snapshot_id"]
+
+
+def test_busy_state_does_not_deform_supported_capability_enumeration() -> None:
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    facts = {"available": True, "ready": True}
+    snapshot = build_capability_snapshot(
+        (),
+        _active("quality"),
+        epoch="e",
+        ready=True,
+        enabled_voices=frozenset(),
+        sample_rate=24_000,
+        asr_capabilities=facts,
+    )
+    # build_capability_snapshot is pure: it accepts no activity/busy input at
+    # all, so a busy lane cannot shrink the supported operations it reports.
+    assert snapshot["operations"]["transcription"]["status"] == "supported"
+    assert snapshot["operations"]["realtime_transcription"]["status"] == "supported"
