@@ -188,6 +188,38 @@ class VoiceValidationResult(BaseModel):
     validation_persisted: bool | None = None
 
 
+class VoiceDesignCandidateRecord(BaseModel):
+    """A private VoiceDesign candidate before production publication."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    target_voice_id: str | None = None
+    name: str | None = None
+    language: str | None = None
+    state: str | None = None
+    revision: str | None = None
+    created_at: float | None = None
+    updated_at: float | None = None
+    confirmed_at: float | None = None
+    published_at: float | None = None
+    published_voice_revision: str | None = None
+    error_code: str | None = None
+    source_model: dict[str, Any] | None = None
+    reference: dict[str, Any] | None = None
+    validations: list[dict[str, Any]] = Field(default_factory=list)
+    publishable: bool = False
+
+
+class VoiceDesignPublishResult(BaseModel):
+    """The published candidate projection plus the immutable voice record."""
+
+    model_config = ConfigDict(extra="allow")
+
+    candidate: VoiceDesignCandidateRecord
+    voice: VoiceRecord
+
+
 class JobRecord(BaseModel):
     """A durable transcription/speech job record."""
 

@@ -242,10 +242,10 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 
 ## 5. MCP 工具契约
 
-当前工具集为 15 个：既有的请求级语音/任务工具，加上音色详情、VoiceDesign/Base 注册、
+当前工具集为 18 个：既有的请求级语音/任务工具，加上音色详情、VoiceDesign 候选确认/复验/发布、
 输出验收和 job 结果恢复。工具的公开 schema、标题、注解和结构化输出由
 `src/speechrail/mcp` 注册；`ctx`、REST client 等内部参数不会出现在 MCP input schema。
-工具集不包含 profile apply/setup/prepare 或同义档位变更能力。VoiceDesign/Base 注册是音色资源操作，不改变活动档位；调用前先核对当前有效能力快照，能力缺失时在 REST mutation 前拒绝。
+工具集不包含 profile apply/setup/prepare 或同义档位变更能力。VoiceDesign/Base 候选与发布是音色资源操作，不改变活动档位；调用前先核对当前有效能力快照，能力缺失时在 REST mutation 前拒绝。
 
 | 工具 | 作用 | 关键约束 | 注解 |
 |---|---|---|---|
@@ -255,7 +255,10 @@ MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；�
 | `preview_voice` | 试听 VoiceDesign 指令 | 当前快照声明 VoiceDesign 可用时；不持久化 voice | 非 read-only、非 destructive |
 | `create_voice` | 创建持久 instruction voice | `instruction` ≤10000；可选 seed | 非 read-only、非 destructive |
 | `get_voice` | 读取一个安全音色详情 | 返回验证/production 状态，不返回参考路径 | read-only、idempotent |
-| `design_voice` | VoiceDesign 生成参考并注册 Base clone | 新 ID、参考文本、幂等 key 可选；注册后 output 仍待验收 | 非 read-only |
+| `design_voice` | 创建私有 VoiceDesign 候选 | 新 ID、参考文本、幂等 key 可选；不注册生产音色 | 非 read-only |
+| `confirm_voice_design` | 确认候选参考文本 | 编辑文本会生成新 revision 并清除旧验证 | 非 read-only、idempotent |
+| `validate_voice_design` | Base 新文本复验或附加人工听审 | 机器验证不能替代身份/自然度听审；同一候选可保留多条证据 | 非 read-only |
+| `publish_voice_design` | 原子发布已验证候选 | 必须具备当前 revision 的完整机器与人工通过记录；重复发布不产生第二个 revision | 非 read-only、idempotent |
 | `clone_voice` | 从本地参考音频注册 Base clone | path/file URI；参考门禁通过不等于输出通过 | 非 read-only |
 | `validate_voice` | 对已注册音色执行 synthesis quality-runs | 有计算成本；绑定当前 voice/model revision | 非 read-only |
 | `delete_voice` | 删除持久 custom voice | 系统 voice 受保护 | destructive、idempotent |
@@ -337,13 +340,16 @@ transcription 读取音频，speech 读取 UTF-8 文本，不能把同步 `synth
 ### 5.5 VoiceDesign、Base 与 output gate
 
 `preview_voice` / `create_voice` 是 VoiceDesign instruction voice 流程；它们描述并试听自然语言
-音色，不产生 Base clone。`design_voice` 才是“VoiceDesign 生成参考音频 → 通过 reference gate →
-注册 Base clone”的组合流程；`clone_voice` 则从本地参考音频直接进入同一 Base reference gate。
+音色，不产生 Base clone。`design_voice` 只创建私有候选；`confirm_voice_design` 固定参考与
+transcript revision；`validate_voice_design` 用不同文本执行 Base 复验，并在用户实际听审后附加
+identity/naturalness 结论；`publish_voice_design` 才原子创建生产音色。`clone_voice` 则从本地
+参考音频直接进入同一 Base reference gate。
 
 两条 gate 必须分开判断：
 
 1. `reference` 通过只证明参考音频满足时长、信噪比、转写一致性等注册条件；
-2. `validate_voice` 执行真实 Base synthesis probes，并把结果绑定到当前 `voice_revision`、模型
+2. `validate_voice_design` 与 `validate_voice` 执行真实 Base synthesis probes，并把结果绑定到当前
+   candidate/`voice_revision`、模型
    artifact/catalog revision、已观测 runtime identity、reference preprocessing、generation
    recipe 和 policy；
 3. 普通 `synthesize` 默认允许未验证试听；正式成片必须传
@@ -378,7 +384,9 @@ resource 内容随 profile、ready 状态和目录变化，不应长期缓存。
 | `describe` | `DescribeResult` | tier、profile、readiness、models、voices、effective capabilities |
 | `transcribe` | `TranscribeResult` | text、segments、words、language、duration |
 | `synthesize` / `preview_voice` | `AudioArtifact` | host、audio_path、content_type、output_format、bytes；synthesize 另含 request/validation/revision |
-| `create_voice` / `delete_voice` | `VoiceRecord` | id、name、mode、available、capabilities |
+| `create_voice` / `clone_voice` / `delete_voice` | `VoiceRecord` | id、name、mode、available、capabilities |
+| `design_voice` / `confirm_voice_design` / `validate_voice_design` | `VoiceDesignCandidateRecord` | id、state、revision、reference、validations、publishable |
+| `publish_voice_design` | `VoiceDesignPublishResult` | candidate、voice |
 | job 工具 | `JobRecord` | id、kind、state、result_ref、params |
 
 结果模型允许服务端扩展字段并对非关键字段使用安全默认值；这不改变 REST 错误和输入校验的

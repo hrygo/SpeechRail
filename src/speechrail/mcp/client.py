@@ -470,9 +470,9 @@ class SpeechRailClient:
         language: str = "zh",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """POST the generated-reference VoiceDesign/Base registration request."""
+        """Create one private VoiceDesign candidate."""
         body = {
-            "id": voice_id,
+            "voice_id": voice_id,
             "name": name,
             "instruction": instruction,
             "reference_text": reference_text,
@@ -480,7 +480,67 @@ class SpeechRailClient:
             "language": language,
         }
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        response = await self._request("POST", "voices/designs", headers=headers, json=body)
+        response = await self._request(
+            "POST",
+            "voice-designs",
+            headers=headers,
+            json=body,
+        )
+        return self._object(response)
+
+    async def confirm_voice_design(
+        self,
+        *,
+        candidate_id: str,
+        reference_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Confirm a candidate reference, optionally editing its transcript."""
+        body = {"reference_text": reference_text} if reference_text is not None else {}
+        response = await self._request(
+            "POST",
+            f"voice-designs/{candidate_id}/confirm",
+            json=body,
+        )
+        return self._object(response)
+
+    async def validate_voice_design(
+        self,
+        *,
+        candidate_id: str,
+        test_text: str | None = None,
+        capability_key: str | None = None,
+        human_review: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Run Base validation or attach an explicit human audition review."""
+        body: dict[str, Any] = {}
+        if test_text is not None:
+            body["test_text"] = test_text
+        if capability_key is not None:
+            body["capability_key"] = capability_key
+        if human_review is not None:
+            body["human_review"] = human_review
+        response = await self._request(
+            "POST",
+            f"voice-designs/{candidate_id}/validate",
+            json=body,
+        )
+        return self._object(response)
+
+    async def publish_voice_design(
+        self,
+        *,
+        candidate_id: str,
+        expected_candidate_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish one exact validated candidate as an immutable Base voice."""
+        body: dict[str, Any] = {}
+        if expected_candidate_revision is not None:
+            body["expected_candidate_revision"] = expected_candidate_revision
+        response = await self._request(
+            "POST",
+            f"voice-designs/{candidate_id}/publish",
+            json=body,
+        )
         return self._object(response)
 
     async def clone_voice(

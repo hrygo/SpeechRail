@@ -56,7 +56,7 @@ graph TD
 
 ## 生成式注册补充入口
 
-[生成式音色注册](generated-voice-registration.md) 说明 `/v1/voices/designs` 的资源边界、来源记录和失败回退；当前 API 不提供旧数据迁移层。
+[生成式音色注册](generated-voice-registration.md) 说明 `/v1/voice-designs` 的候选、确认、Base 复验、人工听审和原子发布；当前 API 不提供旧数据迁移层。
 
 ## 🔑 核心架构原则
 

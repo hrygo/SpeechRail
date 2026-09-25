@@ -448,7 +448,7 @@ Authorization: Bearer <TOKEN>
 | `id` | string | 否 | 可选音色标识符，匹配 `^[a-zA-Z0-9_-]{1,64}$` |
 
 - **幂等**：可选 `Idempotency-Key` 请求头用于去重重试。服务在用户目录维护有界、原子写入的 durable journal，记录 `(owner, operation, key_hash, payload_fingerprint)`；同一 key 与不同 payload 返回 `409 idempotency_conflict`，pending/已完成记录在进程重启后仍可见，已完成且结果仍存在时直接 `201` 回放原 `VoiceProfile`，不重复推理。未知的写入结果保持 pending 并 fail-closed，不静默创建第二份音色；journal 不落原始 key、音频或参考正文。音频、`ref_text`、名称或目标 ID 变化都会形成不同 payload，仍可能被 `voice_quality_reject` 拒绝。
-- **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分；先对上传原始音频分级以尽早拒绝无效输入，再规范化为语音感知归一后的 canonical WAV 并对该 canonical 音频重新分级，持久化的参考资产与 `quality` 报告均描述 canonical 音频（与 `/v1/voices/designs` 同一契约）；canonical 重评结果为 `reject` 时同样返回 `400` 不落库。
+- **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分；先对上传原始音频分级以尽早拒绝无效输入，再规范化为语音感知归一后的 canonical WAV 并对该 canonical 音频重新分级，持久化的参考资产与 `quality` 报告均描述 canonical 音频（与 `/v1/voice-designs` 同一契约）；canonical 重评结果为 `reject` 时同样返回 `400` 不落库。
   - `status=reject`：拒绝注册，返回 `400`，错误 envelope 为 `{"error": {"code": "voice_quality_reject", ...}, "quality_report": {...}}`（`quality_report` 与 `error` 同级）。客户端以响应体 `error.code` 作为可见的错误码信号；服务端内部通过 `X-SpeechRail-Error-Code` 响应头把错误码交给观测中间件消费，该头在到达客户端前已被中间件移除，不属于客户端可见契约。
   - `status=warn` 或 `pass`：正常注册，`201` 返回的 `VoiceProfile` 携带 `quality` 字段（即该报告，含 `status` 与 `run_id`）。
 - **历史音色**：本次架构切换（clone 固定走 Base capability）之前注册的 clone 音色，其已存储的 `voice_quality_v1` 报告描述的是旧合成路径，不代表当前 Base 路径表现；需通过 `/v1/voices/{voice_id}/quality-runs` 重新验证后方可继续作为质量依据。
@@ -619,13 +619,18 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 | **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |
 
 
-## 生成参考并注册新的 Base 音色
+## 生成参考并发布新的 Base 音色
 
-`POST /v1/voices/designs` 是 SpeechRail 专用的增量接口，仅在当前 VoiceDesign 与 Base 能力均可用时接受请求；当前 catalog 在 `quality` 与候选 `extreme` 配置这两项能力。它不改变 `/v1/voices` 仅保存提示词的语义，也不改变录音上传的 `/v1/voices/clone`。
+`/v1/voice-designs` 是 SpeechRail 专用的候选生命周期接口。候选创建只要求当前选择提供
+VoiceDesign 与本地 Batch ASR；Base 能力只在 `validate`/`publish` 阶段要求。候选不会出现在
+`/v1/voices`，不会改变 `/v1/voices` 仅保存提示词的语义，也不改变录音上传的
+`/v1/voices/clone`。
+
+### 1. 创建候选 (`POST /v1/voice-designs`)
 
 ```json
 {
-  "id": "narrator_base",
+  "voice_id": "narrator_base",
   "name": "Narrator",
   "instruction": "清晰自然的中文声音，表达平稳。",
   "reference_text": "请用自然清晰的声音朗读这段参考文字，保持平稳的语气和适中的节奏。",
@@ -634,10 +639,32 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 }
 ```
 
-`id` 必须为新的小写字母、数字、下划线或连字符组合（1–64 字符），不得使用系统 ID/alias；`name` 1–64 字符；`instruction` 1–10000 字符；`reference_text` 20–240 字符；seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不接受 URL、参考音频、速度控制或其他额外字段。
+`voice_id` 必须为新的小写字母、数字、下划线或连字符组合（1–64 字符），不得使用系统
+ID/alias；`name` 1–64 字符；`instruction` 1–10000 字符；`reference_text` 20–240 字符；
+seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不接受 URL、参考音频、
+速度控制或其他额外字段。
 
-201 响应包含 `voice`（标准 VoiceProfile，mode=clone、variant=base、含 creation 来源信息）以及 `synthesis_validation: "unevaluated"`。`voice.quality` 只描述生成参考与 ASR 内容核验，输出 probe_count=0；后续使用 `/v1/audio/speech` 调用 Base，并用 `/v1/voices/{id}/quality-runs` 单独验证输出。
+201 响应包含安全的 `candidate` 元数据，不含参考正文或私有路径；参考质量仍标明
+`probe_count=0`。可选 `Idempotency-Key` 在成功后可回放原候选，不重复生成；
+同一 key 复用不同请求返回 409 `idempotency_conflict`。
 
-可选 `Idempotency-Key` 启用有界 durable 去重：同一 key 与相同 canonical 请求在成功后可回放原结果，服务重启或进程中断后不会静默发布第二份资产；同一 key 复用不同请求返回 409 `idempotency_conflict`，不带 key 的重复请求仍按新的目标 ID/现有资产冲突处理。`ID` 已存在（含并发创建）返回 409 `voice_already_exists`，不会覆盖旧资产。资源繁忙为 429，超时或 ASR 不可用为 503，内容不匹配为 400 `transcript_mismatch`，无效输出为 400/502。任何模型或 ASR 阶段失败都不会发布半成品；若发布后 journal 完成状态无法持久化，服务返回可重试的 503 并保留 pending 状态以阻止重复发布。
+### 2. 确认候选 (`POST /v1/voice-designs/{candidate_id}/confirm`)
+
+服务重新转写已保存的规范参考，并要求与（可选编辑的）`reference_text` 相似度达标。
+编辑参考文本会产生新的 candidate revision 并清除旧验证，不能复用旧证据。
+
+### 3. Base 复验与人工听审 (`POST /v1/voice-designs/{candidate_id}/validate`)
+
+机器模式必须使用不同于参考文本的 `test_text`（省略时服务选择受控文本），并由目标
+Base 角色重新合成、质检、转写且绑定 runtime identity。机器数值不会把
+identity/naturalness 标为通过。人工模式在机器通过后通过 `human_review` 附加实际听审结论；
+不能由自动指标代替。
+
+### 4. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
+
+只有当前 revision 同时具备完整机器通过和人工 identity/naturalness 通过时才能发布。
+201 响应包含已发布 `candidate` 与标准 `voice`（mode=clone、variant=base）；重复发布同一
+candidate 返回 200 且不会创建第二个 revision。目标 ID 无 revision 冲突时原子 create-only；
+失败或取消保留私有候选，不影响已有音色。
 
 语料质量与声纹稳定性尚需实机校准；详见[生成式音色注册架构](../architecture/generated-voice-registration.md)。

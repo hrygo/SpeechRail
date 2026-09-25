@@ -24,7 +24,10 @@ _TOOL_ANNOTATIONS: dict[str, tuple[str, bool, bool, bool]] = {
     "preview_voice": ("Audition a voice instruction", False, False, False),
     "create_voice": ("Create a persistent voice", False, False, False),
     "get_voice": ("Get voice details", True, False, True),
-    "design_voice": ("Design and register a Base voice", False, False, False),
+    "design_voice": ("Create a VoiceDesign candidate", False, False, False),
+    "confirm_voice_design": ("Confirm a VoiceDesign candidate", False, False, True),
+    "validate_voice_design": ("Validate a VoiceDesign candidate", False, False, False),
+    "publish_voice_design": ("Publish a VoiceDesign candidate", False, False, True),
     "clone_voice": ("Clone a voice from local audio", False, False, False),
     "validate_voice": ("Validate a registered voice", False, False, False),
     "delete_voice": ("Delete a voice", False, True, True),
@@ -60,7 +63,24 @@ _TOOL_OUTPUT_KEYS: dict[str, set[str]] = {
     "preview_voice": {"audio_path", "content_type", "output_format", "bytes"},
     "create_voice": {"id", "name", "mode", "available", "capabilities"},
     "get_voice": {"id", "name", "mode", "available", "capabilities"},
-    "design_voice": {"id", "name", "mode", "available", "capabilities"},
+    "design_voice": {"id", "target_voice_id", "name", "state", "revision", "publishable"},
+    "confirm_voice_design": {
+        "id",
+        "target_voice_id",
+        "name",
+        "state",
+        "revision",
+        "publishable",
+    },
+    "validate_voice_design": {
+        "id",
+        "target_voice_id",
+        "name",
+        "state",
+        "revision",
+        "publishable",
+    },
+    "publish_voice_design": {"candidate", "voice"},
     "clone_voice": {"id", "name", "mode", "available", "capabilities"},
     "validate_voice": {"status", "run_id", "failure_codes", "validation_persisted"},
     "delete_voice": {"id", "name", "mode", "available", "capabilities"},
@@ -82,6 +102,9 @@ _TOOL_REQUIRED: dict[str, list[str]] = {
     "create_job": ["kind", "input_ref"],
     "get_voice": ["voice_id"],
     "design_voice": ["voice_id", "name", "instruction", "reference_text"],
+    "confirm_voice_design": ["candidate_id"],
+    "validate_voice_design": ["candidate_id"],
+    "publish_voice_design": ["candidate_id"],
     "clone_voice": ["audio_ref", "name", "ref_text"],
     "validate_voice": ["voice_id"],
     "get_job": ["job_id"],
@@ -109,6 +132,9 @@ def test_server_registers_all_published_tools() -> None:
         "create_voice",
         "get_voice",
         "design_voice",
+        "confirm_voice_design",
+        "validate_voice_design",
+        "publish_voice_design",
         "clone_voice",
         "validate_voice",
         "delete_voice",
@@ -153,6 +179,22 @@ def test_tool_schemas_never_leak_client_context() -> None:
     assert set(by_name["get_voice"].input_schema.get("properties", {})) == {"voice_id"}
     assert set(by_name["design_voice"].input_schema.get("properties", {})) == {
         "voice_id", "name", "instruction", "reference_text", "seed", "language", "idempotency_key"
+    }
+    assert set(by_name["confirm_voice_design"].input_schema.get("properties", {})) == {
+        "candidate_id",
+        "reference_text",
+    }
+    assert set(by_name["validate_voice_design"].input_schema.get("properties", {})) == {
+        "candidate_id",
+        "test_text",
+        "capability_key",
+        "validation_id",
+        "identity_review",
+        "naturalness_review",
+    }
+    assert set(by_name["publish_voice_design"].input_schema.get("properties", {})) == {
+        "candidate_id",
+        "expected_candidate_revision",
     }
     assert set(by_name["clone_voice"].input_schema.get("properties", {})) == {
         "audio_ref", "name", "ref_text", "voice_id", "idempotency_key"

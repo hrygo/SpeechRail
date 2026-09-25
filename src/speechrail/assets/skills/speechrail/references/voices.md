@@ -6,9 +6,11 @@ There are three distinct creation routes:
    create an identity.
 2. `create_voice` persists an instruction recipe. It is not a generated
    reference and is not a Base clone.
-3. `design_voice` generates a reference with VoiceDesign, validates its text,
-   and registers the resulting clone for Base. Its output validation remains
-   explicit; do not call it production-ready from registration alone.
+3. `design_voice` creates a private VoiceDesign candidate. Call
+   `confirm_voice_design` to fix its transcript, `validate_voice_design` with a
+   different Base test text, attach identity/naturalness review only after human
+   audition, then call `publish_voice_design`. Candidate generation and machine
+   validation do not publish a production voice.
 4. `clone_voice` registers a user-provided local reference recording through
    the reference-audio gate. A gate pass proves the reference, not synthesis.
 

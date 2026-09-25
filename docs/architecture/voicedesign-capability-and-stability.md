@@ -49,12 +49,15 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 
 本 PR 保持兼容：已有 prompt-created profile 仍直接由 VoiceDesign 合成，不自动修改 voice asset。
 
-当前已通过 `/v1/voices/designs` 提供显式生成参考注册：创建全新 Base-bound clone，保存来源 hash，原音色不变。VoiceRevision 的持久化历史、CAS update、rollback、revoke 和 delete 已由 registry 提供；这仍不等于输出声纹验收通过，不能将参考注册完成视为整体声学完成：
+当前已通过 `/v1/voice-designs` 提供候选生命周期：确认参考、用不同文本进行 Base 复验、
+完成人工听审后再原子发布全新 Base-bound clone，并保存来源 hash，原音色不变。
+VoiceRevision 的持久化历史、CAS update、rollback、revoke 和 delete 已由 registry 提供；
+候选或机器验证完成都不等于输出声纹验收通过，不能将发布视为整体声学完成：
 
 ```text
 instruction
   → VoiceDesign 生成候选 canonical reference
-  → 质量门 + 人工试听（可选）
+  → 质量门 + 显式人工听审
   → Base 建立新 VoiceRevision，并进入可回滚的 revision 历史
   → 后续目标文本由 Base 复现
 ```
