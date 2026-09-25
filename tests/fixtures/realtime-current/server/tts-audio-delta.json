@@ -1,0 +1,11 @@
+{
+  "type": "speechrail.tts.audio.delta",
+  "event_id": "evt-srv-14",
+  "session_id": "sess-1",
+  "sequence": 14,
+  "task_id": "task-1",
+  "request_id": "req-tts-1",
+  "chunk_index": 0,
+  "sample_offset": 0,
+  "delta": "AA=="
+}

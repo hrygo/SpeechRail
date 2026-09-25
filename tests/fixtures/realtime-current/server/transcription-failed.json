@@ -1,0 +1,13 @@
+{
+  "type": "conversation.item.input_audio_transcription.failed",
+  "event_id": "evt-srv-5",
+  "session_id": "sess-1",
+  "sequence": 5,
+  "item_id": "utt-1",
+  "content_index": 0,
+  "error": {
+    "type": "server_error",
+    "code": "backend_failed",
+    "message": "transcription failed"
+  }
+}

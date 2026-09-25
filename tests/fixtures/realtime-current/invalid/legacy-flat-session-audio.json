@@ -1,0 +1,14 @@
+{
+  "type": "session.update",
+  "event_id": "evt-invalid-1",
+  "session": {
+    "type": "transcription",
+    "input_audio_format": "pcm16",
+    "input_audio_transcription": {
+      "model": "speechrail/qwen3-asr-1.7b"
+    },
+    "speechrail": {
+      "task": "caption"
+    }
+  }
+}

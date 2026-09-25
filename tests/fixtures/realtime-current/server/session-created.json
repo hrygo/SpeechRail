@@ -1,0 +1,38 @@
+{
+  "type": "session.created",
+  "event_id": "evt-srv-1",
+  "session_id": "sess-1",
+  "sequence": 1,
+  "session": {
+    "id": "sess-1",
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "transcription": {
+          "model": "speechrail/qwen3-asr-1.7b",
+          "language": "zh",
+          "keywords": [
+            "SpeechRail"
+          ],
+          "timestamp_granularities": [
+            "segment"
+          ]
+        },
+        "turn_detection": null
+      }
+    },
+    "speechrail": {
+      "task": "caption",
+      "alignment": {
+        "enabled": false
+      },
+      "diarization": {
+        "enabled": false
+      }
+    }
+  }
+}

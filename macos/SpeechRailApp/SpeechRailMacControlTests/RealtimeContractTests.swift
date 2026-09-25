@@ -5,6 +5,76 @@ import XCTest
 #endif
 
 final class RealtimeContractTests: XCTestCase {
+    func testSharedCurrentRealtimeFixturesAreMechanicallyValid() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtureRoot = repoRoot
+            .appendingPathComponent("tests/fixtures/realtime-current", isDirectory: true)
+        let manifest = try jsonObject(
+            at: fixtureRoot.appendingPathComponent("manifest.json")
+        )
+        XCTAssertEqual(manifest["contract_version"] as? Int, 1)
+        let cases = try XCTUnwrap(manifest["cases"] as? [[String: Any]])
+
+        var names = Set<String>()
+        for fixtureCase in cases {
+            let name = try XCTUnwrap(fixtureCase["name"] as? String)
+            XCTAssertTrue(names.insert(name).inserted, "duplicate fixture: \(name)")
+            let relative = try XCTUnwrap(fixtureCase["file"] as? String)
+            let payload = try jsonObject(at: fixtureRoot.appendingPathComponent(relative))
+            if fixtureCase["valid"] as? Bool == true {
+                try assertCurrentClientShape(payload, name: name)
+            } else {
+                XCTAssertNotNil(fixtureCase["rejection"] as? String, name)
+                if ["legacy_transcription_session_update", "legacy_tts_response_delta", "legacy_tts_response_done"].contains(name) {
+                    let type = payload["type"] as? String
+                    XCTAssertTrue(
+                        ["transcription_session.update", "response.output_audio.delta", "response.done"].contains(type ?? ""),
+                        name
+                    )
+                }
+            }
+        }
+
+        XCTAssertTrue(names.contains("legacy_transcription_session_update"))
+        XCTAssertTrue(names.contains("design_runtime_voice"))
+    }
+
+    private func assertCurrentClientShape(_ payload: [String: Any], name: String) throws {
+        let type = try XCTUnwrap(payload["type"] as? String, name)
+        if type == "session.update" {
+            XCTAssertNotNil(payload["event_id"], name)
+            let session = try XCTUnwrap(payload["session"] as? [String: Any], name)
+            let audio = try XCTUnwrap(session["audio"] as? [String: Any], name)
+            let input = try XCTUnwrap(audio["input"] as? [String: Any], name)
+            let format = try XCTUnwrap(input["format"] as? [String: Any], name)
+            XCTAssertEqual(format["type"] as? String, "audio/pcm", name)
+            XCTAssertEqual(format["rate"] as? Int, 24_000, name)
+            XCTAssertNil(input["turn_detection"] as? [String: Any], name)
+            let speechrail = try XCTUnwrap(session["speechrail"] as? [String: Any], name)
+            XCTAssertNotNil(speechrail["task"] as? String, name)
+        } else if type.hasPrefix("speechrail.tts.") {
+            XCTAssertNotNil(payload["event_id"], name)
+            XCTAssertNotNil(payload["request_id"], name)
+        } else if type == "input_audio_buffer.append" {
+            XCTAssertNotNil(payload["event_id"], name)
+            let audio = try XCTUnwrap(payload["audio"] as? String, name)
+            XCTAssertFalse(audio.isEmpty, name)
+        } else if type.hasPrefix("input_audio_buffer.") {
+            XCTAssertNotNil(payload["event_id"], name)
+        }
+    }
+
+    private func jsonObject(at url: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any],
+            url.path
+        )
+    }
     func testSequenceValidatorReportsGapAndRegression() {
         var validator = RealtimeSequenceValidator()
 

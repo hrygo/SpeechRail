@@ -1,0 +1,262 @@
+{
+  "contract_version": 1,
+  "description": "Every public wire field maps to a validator, TaskRequest field, adapter responsibility, positive fixture, and optional rejection fixture.",
+  "fields": [
+    {
+      "path": "session.id",
+      "validator": "schema:session.id",
+      "task_request": "ResolvedPlan.task_id/session metadata",
+      "adapter": "session.created/updated encoder",
+      "positive_case": "server_session_created",
+      "reject_case": null
+    },
+    {
+      "path": "session.audio.input.format.type",
+      "validator": "schema:pcm_format.type",
+      "task_request": "TaskRequest.input_format",
+      "adapter": "session parser + encoder",
+      "positive_case": "client_session_update",
+      "reject_case": "unsupported_audio_format"
+    },
+    {
+      "path": "session.audio.input.format.rate",
+      "validator": "schema:pcm_format.rate",
+      "task_request": "TaskRequest.input_format",
+      "adapter": "wire-to-kernel resampler",
+      "positive_case": "client_session_update",
+      "reject_case": "wrong_pcm_rate"
+    },
+    {
+      "path": "session.audio.input.transcription.model",
+      "validator": "schema:registered_model",
+      "task_request": "TaskRequest.asr_spec",
+      "adapter": "plan resolver + ASR owner",
+      "positive_case": "client_session_update",
+      "reject_case": "unsupported_model_precision"
+    },
+    {
+      "path": "session.speechrail.task",
+      "validator": "schema:speechrail_session.task",
+      "task_request": "TaskRequest.kind",
+      "adapter": "plan resolver",
+      "positive_case": "client_session_update",
+      "reject_case": null
+    },
+    {
+      "path": "session.speechrail.alignment.enabled",
+      "validator": "schema:alignment_options.enabled",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "alignment admission",
+      "positive_case": "client_session_update",
+      "reject_case": null
+    },
+    {
+      "path": "session.speechrail.diarization.enabled",
+      "validator": "schema:diarization_options.enabled",
+      "task_request": "TaskRequest.diarization_options",
+      "adapter": "diarization admission",
+      "positive_case": "client_session_update",
+      "reject_case": null
+    },
+    {
+      "path": "session.speechrail.endpointing.mode",
+      "validator": "schema:endpointing.mode",
+      "task_request": "TaskRequest.endpointing",
+      "adapter": "server VAD admission",
+      "positive_case": "client_session_endpointing",
+      "reject_case": "unsupported_turn_detection"
+    },
+    {
+      "path": "audio",
+      "validator": "schema:client_append.audio",
+      "task_request": "TaskRequest.input_format",
+      "adapter": "input_audio_buffer append",
+      "positive_case": "client_append",
+      "reject_case": null
+    },
+    {
+      "path": "request_id",
+      "validator": "schema:client_tts_start.request_id",
+      "task_request": "TaskRequest.task_id",
+      "adapter": "TTS stream state machine",
+      "positive_case": "client_tts_start",
+      "reject_case": "missing_request_id"
+    },
+    {
+      "path": "task",
+      "validator": "schema:client_tts_start.task",
+      "task_request": "TaskRequest.kind",
+      "adapter": "TTS admission",
+      "positive_case": "client_tts_start",
+      "reject_case": null
+    },
+    {
+      "path": "voice",
+      "validator": "schema:client_tts_start.voice",
+      "task_request": "TaskRequest.voice_revision",
+      "adapter": "voice binding router",
+      "positive_case": "client_tts_start",
+      "reject_case": "design_runtime_voice"
+    },
+    {
+      "path": "voice_revision",
+      "validator": "schema:client_tts_start.voice_revision",
+      "task_request": "TaskRequest.voice_revision",
+      "adapter": "voice binding router",
+      "positive_case": "client_tts_start",
+      "reject_case": null
+    },
+    {
+      "path": "sequence",
+      "validator": "schema:client_tts_append_text.sequence",
+      "task_request": "TaskRequest.text_sequence",
+      "adapter": "incremental TTS ACK",
+      "positive_case": "client_tts_append_text",
+      "reject_case": "unknown_tts_field"
+    },
+    {
+      "path": "last_sequence",
+      "validator": "schema:client_tts_finish_text.last_sequence",
+      "task_request": "TaskRequest.text_sequence",
+      "adapter": "incremental TTS finish barrier",
+      "positive_case": "client_tts_finish_text",
+      "reject_case": null
+    },
+    {
+      "path": "delta",
+      "validator": "schema:transcription_delta.delta",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "ASR delta adapter",
+      "positive_case": "server_transcription_delta",
+      "reject_case": "legacy_tts_response_delta"
+    },
+    {
+      "path": "transcript",
+      "validator": "schema:transcription_completed.transcript",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "ASR final adapter",
+      "positive_case": "server_transcription_completed",
+      "reject_case": null
+    },
+    {
+      "path": "task_id",
+      "validator": "schema:hypothesis.task_id",
+      "task_request": "ResolvedPlan.task_id",
+      "adapter": "metadata revision gate",
+      "positive_case": "server_hypothesis",
+      "reject_case": null
+    },
+    {
+      "path": "epoch",
+      "validator": "schema:hypothesis.epoch",
+      "task_request": "ResolvedPlan.selection_generation",
+      "adapter": "epoch invalidation",
+      "positive_case": "server_hypothesis",
+      "reject_case": null
+    },
+    {
+      "path": "utterance_id",
+      "validator": "schema:hypothesis.utterance_id",
+      "task_request": "TaskRequest.task_id",
+      "adapter": "utterance lifecycle",
+      "positive_case": "server_hypothesis",
+      "reject_case": null
+    },
+    {
+      "path": "revision",
+      "validator": "schema:hypothesis.revision",
+      "task_request": "TaskRequest.output_revision",
+      "adapter": "hypothesis revision gate",
+      "positive_case": "server_hypothesis",
+      "reject_case": null
+    },
+    {
+      "path": "sample_span.start",
+      "validator": "schema:sample_span.start",
+      "task_request": "TaskRequest.input_format",
+      "adapter": "audio timeline mapper",
+      "positive_case": "server_hypothesis",
+      "reject_case": null
+    },
+    {
+      "path": "transcript_revision",
+      "validator": "schema:alignment_done.transcript_revision",
+      "task_request": "ResolvedPlan.required_outputs",
+      "adapter": "alignment revision gate",
+      "positive_case": "server_alignment_done",
+      "reject_case": null
+    },
+    {
+      "path": "metadata_revision",
+      "validator": "schema:alignment_done.metadata_revision",
+      "task_request": "ResolvedPlan.required_outputs",
+      "adapter": "auxiliary revision gate",
+      "positive_case": "server_alignment_done",
+      "reject_case": null
+    },
+    {
+      "path": "units",
+      "validator": "schema:alignment_done.units",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "alignment/diarization adapter",
+      "positive_case": "server_alignment_done",
+      "reject_case": null
+    },
+    {
+      "path": "plan_id",
+      "validator": "schema:tts_started.plan_id",
+      "task_request": "ResolvedPlan.plan_id",
+      "adapter": "TTS identity gate",
+      "positive_case": "server_tts_started",
+      "reject_case": null
+    },
+    {
+      "path": "output_format.sample_rate",
+      "validator": "schema:output_format.sample_rate",
+      "task_request": "TaskRequest.output_format",
+      "adapter": "TTS output format negotiation",
+      "positive_case": "server_tts_started",
+      "reject_case": "unsupported_audio_format"
+    },
+    {
+      "path": "append_sequence",
+      "validator": "schema:tts_text_accepted.append_sequence",
+      "task_request": "TaskRequest.text_sequence",
+      "adapter": "incremental TTS ACK",
+      "positive_case": "server_tts_text_accepted",
+      "reject_case": null
+    },
+    {
+      "path": "chunk_index",
+      "validator": "schema:tts_audio_delta.chunk_index",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "TTS audio delivery ledger",
+      "positive_case": "server_tts_audio_delta",
+      "reject_case": null
+    },
+    {
+      "path": "sample_offset",
+      "validator": "schema:tts_audio_delta.sample_offset",
+      "task_request": "TaskRequest.required_outputs",
+      "adapter": "TTS audio delivery ledger",
+      "positive_case": "server_tts_audio_delta",
+      "reject_case": null
+    },
+    {
+      "path": "generated_samples",
+      "validator": "schema:tts_completed.generated_samples",
+      "task_request": "ResolvedPlan.limits",
+      "adapter": "TTS terminal accounting",
+      "positive_case": "server_tts_completed",
+      "reject_case": "legacy_tts_response_done"
+    },
+    {
+      "path": "error.code",
+      "validator": "schema:error_object.code",
+      "task_request": "TaskRequest.task_id",
+      "adapter": "stable error envelope",
+      "positive_case": "server_error",
+      "reject_case": "missing_error_request_id"
+    }
+  ]
+}

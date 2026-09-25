@@ -1,0 +1,20 @@
+{
+  "type": "speechrail.diarization.done",
+  "event_id": "evt-srv-10",
+  "session_id": "sess-1",
+  "sequence": 10,
+  "task_id": "task-1",
+  "epoch": 0,
+  "utterance_id": "utt-1",
+  "transcript_revision": 3,
+  "metadata_revision": 2,
+  "units": [
+    {
+      "speaker": "speaker_1",
+      "sample_span": {
+        "start": 0,
+        "end": 24000
+      }
+    }
+  ]
+}

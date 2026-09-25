@@ -1,0 +1,9 @@
+{
+  "type": "conversation.item.input_audio_transcription.delta",
+  "event_id": "evt-srv-3",
+  "session_id": "sess-1",
+  "sequence": 3,
+  "item_id": "utt-1",
+  "content_index": 0,
+  "delta": "你好"
+}

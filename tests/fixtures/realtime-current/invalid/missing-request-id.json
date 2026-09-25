@@ -1,0 +1,6 @@
+{
+  "type": "speechrail.tts.start",
+  "event_id": "evt-invalid-10",
+  "task": "conversation",
+  "voice": "serena"
+}

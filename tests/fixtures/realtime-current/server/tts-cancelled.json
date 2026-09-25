@@ -1,0 +1,8 @@
+{
+  "type": "speechrail.tts.cancelled",
+  "event_id": "evt-srv-16",
+  "session_id": "sess-1",
+  "sequence": 16,
+  "task_id": "task-1",
+  "request_id": "req-tts-1"
+}

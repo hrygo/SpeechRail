@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.2.0"
-date: 2026-09-23
+version: "3.3.0"
+date: 2026-09-25
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -37,25 +37,18 @@ capability。客户端必须读取运行时能力字段，不能仅由默认 `va
 
 ### 1.1 档位与能力可用性矩阵
 
-SpeechRail 有四档运行 profile：`light` Embedded、`balanced` Pro Workflow、`quality` Studio，以及候选 `extreme`。四档**共享同一套** Canonical 模型名、OpenAI 别名、端点路径、请求/响应 schema、错误
-envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”。客户端应以 `GET /v1/models`、
-`GET /health`/`/readyz` 的运行时字段为准，不要假定某能力在全部档位都存在。
+SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三个快捷组合只同时填写两项规格，不保存第三份 preset 真相；高级设置可分别调整两项规格。
 
-| 能力 | `light` (Embedded) | `balanced` (Pro Workflow) | `quality` (Studio) | `extreme` (候选) |
-|---|---|---|---|---|
-| 批量文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ | ✓ |
-| 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ | ✓ |
-| 自然语言音色设计 / 试听（VoiceDesign） | ✗ | ✗ | ✓ | ✓ |
-| 参考音频克隆（Base，`/v1/voices/clone`） | ✗ | ✗ | ✓ | ✓ |
+| spec | ASR | 内置 speaker TTS | 固定自定义 revision TTS |
+|---|---|---|---|
+| `fast` | 0.6B Q8 | 0.6B CustomVoice Q8 | 0.6B Base Q8 |
+| `quality` | 1.7B Q8 | 1.7B CustomVoice Q8 | 1.7B Base Q8 |
+| `reference` | 1.7B BF16 | 1.7B CustomVoice BF16 | 1.7B Base BF16 |
 
-> - **词级时间戳由 ASR 原生提供**：`timestamp_granularities=["segment", "word"]` 在四档均可用，
->   与 aligner 无关。aligner 是分人专用制品，不是词级时间戳的依赖。
-> - **分人只在支持分人的档位声明**：`gpt-4o-transcribe-diarize` 与 `diarized_json` 仅在
->   `balanced`、`quality` 与候选 `extreme` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
->   文件分人与 Realtime 分人扩展（`transcription_session.update.session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
-> - **音色能力跟随当前模型能力**：当前 `quality` 与候选 `extreme` 配置 VoiceDesign 和独立 Base capability；`balanced`、`light` 不配置它们。客户端仍须以当前 `/v1/models` 和有效能力快照为准，不能仅凭档位名假设可用。
-> - **双 capability lane**：配置 VoiceDesign 与 Base 的档位由两个独立 worker 提供；不同 capability 可同时常驻并发，同一 capability lane 内串行。开启懒加载时按首次请求加载，连续请求不会因 capability 切换反复换模；空闲冷却后两个 worker 作为能力组回收，下一次请求惰性恢复所需 worker。
-> - **候选档证据边界**：`extreme` 使用 BF16 权重，但 ASR/TTS 质量、资源峰值和延迟尚未验证；权重精度不构成质量结论，正式启用与质量宣传保持阻塞。
+> - **能力由有效快照决定**：客户端不能仅凭 spec 名称推断 Alignment、Diarization、VoiceDesign、语言或实时并发已经可用。
+> - **辅助能力按任务 opt-in**：VAD、Alignment、Diarization 与 VoiceDesign 不随规格自动开启；VoiceDesign 只在设计作业中运行。
+> - **首批组合认证**为三个同档组合和 `ASR quality + TTS fast`；每个组合按实际 TTS 角色分别记录证据。
+> - **无历史 alias**：旧 `light`/`balanced`/`extreme`、Q4/Q6、Design runtime voice 与旧 Realtime wire 都明确拒绝。
 
 ---
 
@@ -216,18 +209,15 @@ alias/模型选择行为。
 `expected_model_revision` 显式指定。冲突时应重新 `describe()`，由业务决定继续使用旧版、
 回滚到历史 revision，还是切换音色。
 
-Realtime 客户端可在 `transcription_session.update.session.speechrail` 中使用
-`model_revision: {"expected": "<40-char-hex>"}` 绑定同一 catalog artifact；服务端在
-`transcription_session.updated` 回显匹配 revision，并在首个 PCM 前以 `model_revision_conflict` 拒绝未知或
-不匹配的 revision。该扩展只证明配置 catalog 身份，不等同于权重内容 hash 或 worker 重启后
-身份证明。
+Realtime 客户端在 `session.update.session.speechrail` 中使用
+`expected_asr_revision` / `expected_tts_revision` 绑定计划身份；服务端在 `session.updated`
+回显已解析身份，并在首个工作前以 `model_revision_conflict` 拒绝未知或不匹配的 revision。
 
-调用方提交 `speechrail.tts.create` 时，还可在事件中携带
-`expected_voice_revision: "vr_..."`。Native App 和其他需要跨请求音色一致性的客户端应从同一份
-effective capability snapshot 读取当前 voice 的 `voice_revision`，并在换音色时同步更新 voice 与
-revision；revision 缺失时保持字段省略，不从 voice 名称推断。服务端在该次 TTS render 的首个音频
-交付前校验 voice pin，冲突或撤销时返回稳定的 `voice_revision_conflict` / `voice_revoked`，不会
-静默改用另一音色。
+调用方提交 `speechrail.tts.start` 时携带 `voice_revision` 与
+`expected_model_revision`。Native App 和其他需要跨请求音色一致性的客户端应从同一份
+effective capability snapshot 读取当前 voice 的 `voice_revision`；revision 缺失时省略 pin，
+不能从 voice 名称推断。服务端在该次 utterance 首个 PCM 前校验 pin，冲突或撤销时返回稳定的
+`voice_revision_conflict`，不会静默改用另一音色。
 
 客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
 `ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
@@ -417,7 +407,7 @@ Authorization: Bearer <TOKEN>
 ### 5.5 在语音合成中使用自定义音色
 创建成功后，自建音色的 `id` 可直接传入任何合成接口：
 - **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
-- **Realtime 流式会话**：`WS /v1/realtime` 中通过 `speechrail.tts.create` 的 `voice` 字段传入 `custom_xxx`；会话更新不保存 voice 状态。
+- **Realtime 流式会话**：`WS /v1/realtime` 中通过 `speechrail.tts.start` 的 `voice` 与 `voice_revision` 字段传入 `custom_xxx`；会话更新不保存 voice 状态。
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
@@ -511,58 +501,86 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 
 ## 6. Realtime current-only WebSocket (`WS /v1/realtime`)
 
-连接端点：`ws://127.0.0.1:8201/v1/realtime`。本节是 current-only 语义；没有旧事件翻译、双 wire profile 或 `/v2` 迁移层。SpeechRail 是无状态 Speech Plane，调用方拥有 LLM、历史、工具、播放和 barge-in。
+连接端点：`ws://127.0.0.1:8201/v1/realtime`。唯一机器 schema 与共享 fixtures 位于
+[`contracts/realtime-events.schema.json`](../../contracts/realtime-events.schema.json) 和
+`tests/fixtures/realtime-current/`。本节与它们必须同批更新；没有旧事件翻译、双 wire profile
+或 `/v2` 迁移层。
 
-### 核心支持事件列表
-| 事件名称 (Type) | 方向 | 说明 |
-|---|---|---|
-| `transcription_session.update` | 客户端 → 服务端 | 在 `session` 中配置 ASR、`pcm16`、manual/server_vad 与 `speechrail` extensions |
-| `input_audio_buffer.append` | 客户端 → 服务端 | 追加 16kHz PCM16 音频块 (Base64 编码) |
-| `input_audio_buffer.commit` | 客户端 → 服务端 | 提交当前音频缓冲并触发识别 |
-| `input_audio_buffer.clear` | 客户端 → 服务端 | 清空未提交缓冲 |
-| `input_audio_buffer.speech_started/stopped` | 服务端 → 客户端 | VAD 事实；不会自动取消 TTS |
-| `speechrail.tts.create` | 客户端 → 服务端 | 提交调用方已决定播放的文本，开始无状态 TTS |
-| `speechrail.tts.start` | 客户端 → 服务端 | 开始一个增量 TTS utterance（LLM 边生成、调用方边追加文本） |
-| `speechrail.tts.append_text` | 客户端 → 服务端 | 向活动 utterance 追加一段已经稳定的文本；`sequence` 从 `0` 起严格连续 |
-| `speechrail.tts.finish_text` | 客户端 → 服务端 | 关闭文本输入并继续生成尾音；`last_sequence` 必须等于最后一次 ACK |
-| `speechrail.tts.cancel` | 客户端 → 服务端 | 按 `request_id` 显式取消当前 TTS（完整文本与增量模式共用） |
-| `speechrail.tts.started` | 服务端 → 客户端 | 增量 utterance 已取得准入并开始生成，携带 `protocol_version`、implementation、voice 与生效 `limits` |
-| `speechrail.tts.text_accepted` | 服务端 → 客户端 | 确认一次 append，携带 `append_sequence`、`accepted_codepoints`、`total_codepoints` |
-| `response.output_audio.delta` / `done` | 服务端 → 客户端 | 当前唯一的流式 PCM16 音频事件；增量模式下 `delta` 事件额外携带 `speechrail.{chunk_index,sample_offset,...}` |
-| `response.done` | 服务端 → 客户端 | TTS `completed` / `failed` / `cancelled` 终态 |
+### 6.1 音频与会话
 
-### 6.1 增量 TTS（低延迟流式文本输入）
+- wire 输入固定为 24 kHz mono PCM16 little-endian；服务端边界有状态转换到 16 kHz ASR 内核。
+- 唯一会话配置事件为 `session.update`，方向客户端 → 服务端。配置位于
+  `session.audio.input`，而非旧平铺字段。
+- `audio.input.turn_detection` 仅接受 `null` 或 `"manual"`；服务端 VAD 使用
+  `session.speechrail.endpointing.mode="server_vad"`。
+- `session.speechrail.task` 选择 `conversation`、`caption`、`transcription`、`render` 或
+  `voice_design`；Alignment、Diarization 按请求 opt-in。
+- 更新成功返回 `session.updated`。失败不半应用配置；未知字段、旧字段、Q4/Q6、Design runtime
+  voice 和未实现官方 VAD 都返回稳定错误。
 
-完整文本 `speechrail.tts.create` 每次都是一次独立 render：跨句身份靠固定音色保证，但每段之间会重新开始生成状态，长回复被 planner 分块时韵律仍可能断开。增量模式把一轮回复的多个文本片段送进**同一个生成状态**，因此同时改善首音延迟与跨句韵律连续性。
-
-```text
-speechrail.tts.start        → speechrail.tts.started
-speechrail.tts.append_text* → speechrail.tts.text_accepted* + response.output_audio_transcript.delta*
-response.output_audio.delta*
-speechrail.tts.finish_text  → response.output_audio_transcript.done / response.output_audio.done / response.done
+```json
+{
+  "type": "session.update",
+  "event_id": "evt_1",
+  "session": {
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {"type": "audio/pcm", "rate": 24000},
+        "transcription": {"model": "speechrail/qwen3-asr-1.7b"},
+        "turn_detection": null
+      }
+    },
+    "speechrail": {"task": "caption", "alignment": {"enabled": false}}
+  }
+}
 ```
 
-要点：
+### 6.2 事件列表
 
-- **互斥**：`create` 与 `start` 共享「连接内只允许一个活动 TTS」判定和同一个 `request_id` 账本。活动期间两者都返回 `tts_in_progress`；空闲时重复 `request_id` 返回 `tts_request_invalid`。
-- **能力按 voice 解析**：`session.created` / `transcription_session.updated` 的 `speech_capabilities.streaming_tts`、`GET /v1/voices[].streaming` 和 `GET /v1/models[].capabilities.streaming_input` 消费同一个 resolver。模型级只声明 `scope="per_voice"` 的实现轴，不声称所有音色都能增量；`supported=false` 时读 `reason` 与 `hint`，不要自行降级成等待全文。
-- **当前支持范围**：`custom_voice`（内置 speaker）与 `base` clone 支持增量；VoiceDesign `instruction` 音色明确不支持，需要先在服务端注册固定音色 clone 再选择。
-- **配额**：单次 append、utterance 总量、待消费队列分别限制 Unicode codepoint，音频队列单独按字节限制。请求只能收紧 `limits`，放宽返回 `tts_stream_limit_exceeded`。
-- **错误码**：`tts_streaming_unsupported`、`tts_sequence_invalid`、`tts_input_closed`、`tts_input_timeout`、`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_backend_failed`。失败先发一次 `error`，再以一次 `response.done(status=failed)` 收敛；`error` 不是终态。
-- **字段提醒**：`speechrail.tts.text_accepted.append_sequence` 是调用方的追加序号；每个事件上都有的 `sequence` 是传输层连接序号，两者不同名也不同义。
-
-完整的字段、序列与状态机以 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md) 为准。
-
-### 6.2 多人会议讲话人分离扩展
-Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 只增加一个 opt-in 字段：`transcription_session.update.session.speechrail.diarization.enabled=true`。必须在首个 PCM 前设置，`transcription_session.updated` 回显 `enabled/version/max_speakers`。旧的根级或 `input_audio_transcription.diarization` 形状固定返回 `invalid_diarization`。未开启的会话不接收分人事件，也不会创建分人会话。开启后，已完成正文通过本地固定文本对齐获得时间边界，绝不为分人再次识别或替换正文。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
-
-| 扩展事件名称 (Type) | 方向 | 说明 |
+| 事件名称 | 方向 | 说明 |
 |---|---|---|
-| `conversation.item.input_audio_transcription.completed` | 服务端 → 客户端 | 携带全局 `audio_start_sample`/`audio_end_sample` 与不可变 `attribution_units`（含稳定 `segment_uid`、字符切片及时间质量） |
-| `speechrail.diarization.updated` | 服务端 → 客户端 | 异步推送该 item 的完整归属快照；`speaker` 可为 null，标签只在当前 session 有效 |
-| `speechrail.diarization.status` | 服务端 → 客户端 | 发生过载或算子异常时触发单次降级通知（`status: degraded`），正文保持正常转写交付 |
-| `speechrail.diarization.finish` | 客户端 → 服务端 | 录制结束屏障请求，携带 `event_id`，触发服务端排空声学尾部与待定归属 |
-| `speechrail.diarization.done` | 服务端 → 客户端 | 屏障终态响应，携带 `last_update_sequence` 与样本水位，客户端校验后安全触发会议纪要 |
+| `input_audio_buffer.append` | 客户端 → 服务端 | 追加 Base64 24 kHz PCM16 |
+| `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final |
+| `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
+| `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits |
+| `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
+| `speechrail.tts.finish_text` | 客户端 → 服务端 | 以最后 ACK sequence 关闭文本侧 |
+| `speechrail.tts.cancel` | 客户端 → 服务端 | 取消匹配 utterance，取消优先 |
+| `speechrail.tts.started` | 服务端 → 客户端 | 回显 task/plan/request、voice revision、PCM 格式与生效 limits |
+| `speechrail.tts.text_accepted` | 服务端 → 客户端 | 精确 ACK `append_sequence` 与 codepoint 计数 |
+| `speechrail.tts.audio.delta` | 服务端 → 客户端 | 唯一 TTS 音频块事件，携带 chunk/sample offset |
+| `speechrail.tts.completed/cancelled/failed` | 服务端 → 客户端 | 每次 utterance 恰好一个 SpeechRail terminal |
+| `speechrail.transcription.hypothesis` | 服务端 → 客户端 | 可修订全文；不能当作 append-only delta |
+| `speechrail.alignment.done/failed` | 服务端 → 客户端 | 独立辅助终态，不改写 ASR final |
+| `speechrail.diarization.updated/done/failed` | 服务端 → 客户端 | session-scoped 匿名归属元数据 |
+
+### 6.3 ASR final 与辅助结果
+
+一个 utterance 恰好一个 `conversation.item.input_audio_transcription.completed`。hypothesis 的
+`revision` 递增，只有已证明稳定前缀才能映射到官方 delta。Alignment 和 Diarization 携带
+`task_id`、`epoch`、`utterance_id`、`transcript_revision` 与 `metadata_revision`；迟到、旧 epoch、
+旧 revision 或取消后的结果必须丢弃。辅助失败不会把已发出的 final 改成失败。
+
+### 6.4 增量 TTS
+
+```text
+speechrail.tts.start -> speechrail.tts.started
+speechrail.tts.append_text* -> speechrail.tts.text_accepted*
+speechrail.tts.audio.delta*
+speechrail.tts.finish_text -> speechrail.tts.completed | speechrail.tts.failed
+speechrail.tts.cancel -> speechrail.tts.cancelled
+```
+
+- `sequence` 是 append 序号，从 0 连续递增；每个事件的 `sequence` 是连接级序号，两者不同义。
+- 追加不重新 prepare reference、不重建 utterance；一轮只初始化一个 worker utterance。
+- `finish_text.last_sequence` 必须等于最后 ACK；音频队列满不能阻塞 cancel/terminal。
+- 身份 pin、参考条件缓存和验证记录按 artifact/engine/precision/tokenizer/codec/preprocessing 隔离。
+- `response.output_audio.delta`、`response.done`、`speechrail.tts.create` 和
+  `response.output_audio_transcript.*` 都是明确拒绝项，不提供 alias。
+
+完整字段行为表由 [`contracts/realtime-field-matrix.json`](../../contracts/realtime-field-matrix.json)
+锁定；运行校验入口为 `scripts/check_realtime_contract.py` 与共享 Python/Swift fixtures。
 
 ---
 

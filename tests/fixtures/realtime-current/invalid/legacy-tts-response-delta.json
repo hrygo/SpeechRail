@@ -1,0 +1,5 @@
+{
+  "type": "response.output_audio.delta",
+  "response_id": "resp-old",
+  "delta": "AA=="
+}

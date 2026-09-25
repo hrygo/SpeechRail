@@ -1,0 +1,5 @@
+{
+  "type": "speechrail.tts.cancel",
+  "event_id": "evt-tts-4",
+  "request_id": "req-tts-1"
+}

@@ -1,0 +1,13 @@
+{
+  "type": "speechrail.tts.failed",
+  "event_id": "evt-srv-17",
+  "session_id": "sess-1",
+  "sequence": 17,
+  "task_id": "task-1",
+  "request_id": "req-tts-1",
+  "error": {
+    "type": "server_error",
+    "code": "tts_backend_failed",
+    "message": "tts failed"
+  }
+}
