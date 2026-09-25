@@ -238,6 +238,24 @@ class ProfileStore:
                 raise ValueError("selection already initialized")
             self._write(self.selection_path, validated)
 
+    def replace(self, selection: Mapping[str, object] | None) -> None:
+        """Replace the committed selection while no profile transaction is in flight.
+
+        The managed installer uses it to migrate an existing selection onto the
+        runtime lock published by the wheel, and to restore the previous record
+        when that installation fails.
+        """
+        validated = _selection(selection)
+        with self._locked():
+            journal = self._journal()
+            if journal is not None and journal["stage"] not in _TERMINAL:
+                raise RuntimeError("profile_store_busy")
+            if validated is None:
+                self._safe_path(self.selection_path)
+                self.selection_path.unlink(missing_ok=True)
+                return
+            self._write(self.selection_path, validated)
+
     def begin(
         self, previous: Mapping[str, object] | None, candidate: Mapping[str, object]
     ) -> str:

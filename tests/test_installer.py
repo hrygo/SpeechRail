@@ -26,7 +26,7 @@ from speechrail.service.diarization_assets import DiarizationAssetError
 from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
-from speechrail.service.profile_store import recover_selection
+from speechrail.service.profile_store import ProfileStore, recover_selection
 
 _REAL_MANAGED_DIARIZATION_PROVISIONING = install_macos._provision_managed_diarization_assets
 
@@ -449,6 +449,138 @@ def test_managed_install_same_preset_reuses_wheel_release(
     assert second.enabled is False
     assert sum(command[:2] == ("uv", "venv") for command in calls) == 1
     assert selection_path.read_bytes() == selection_before
+
+
+def _legacy_quality_selection() -> dict[str, object]:
+    selected = load_catalog().preset("quality")
+    return {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 41,
+        "asr": selected.asr,
+        "tts": selected.tts,
+        "tts_clone": selected.tts_clone,
+        "runtime_lock_id": "mlx-qwen-20260905",
+    }
+
+
+def _stub_managed_pipeline(
+    monkeypatch: pytest.MonkeyPatch, *, preflight_ok: bool = True
+) -> None:
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(
+        install_macos,
+        "prepare_runtime",
+        lambda lock, prepared_app_home, runner: _fake_runtime_switching(prepared_app_home),
+    )
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=preflight_ok, checks=()),
+    )
+
+
+def _install_stubbed(wheel: Path, app_home: Path, *, preset_id: str = "quality") -> object:
+    return install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id=preset_id,
+        downloader=object(),
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=_runner_that_creates_python([]),
+    )
+
+
+def test_managed_install_migrates_same_profile_to_published_runtime_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    lock = load_runtime_lock()
+    profile = load_catalog().preset("quality")
+    ProfileStore(app_home).initialize(_legacy_quality_selection())
+    observed: dict[str, object] = {}
+    _stub_managed_pipeline(monkeypatch)
+
+    def observe_preflight(*args: object, **kwargs: object) -> PreflightResult:
+        del args, kwargs
+        observed.update(recover_selection(app_home) or {})
+        return PreflightResult(ok=True, checks=())
+
+    monkeypatch.setattr(install_macos, "run_preflight", observe_preflight)
+
+    _install_stubbed(wheel, app_home)
+
+    assert observed["runtime_lock_id"] == lock.id
+    assert observed["generation"] == 42
+    assert observed["tts_clone"] == profile.tts_clone
+    assert recover_selection(app_home) == observed
+
+
+def test_managed_install_backfills_selection_fields_missing_from_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    lock = load_runtime_lock()
+    profile = load_catalog().preset("quality")
+    # A record written before tts_clone existed that already names the published lock.
+    ProfileStore(app_home).initialize(
+        {
+            "schema_version": 1,
+            "preset": "quality",
+            "generation": 7,
+            "asr": profile.asr,
+            "tts": profile.tts,
+            "runtime_lock_id": lock.id,
+        }
+    )
+    _stub_managed_pipeline(monkeypatch)
+
+    _install_stubbed(wheel, app_home)
+
+    assert recover_selection(app_home) == {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 8,
+        "asr": profile.asr,
+        "tts": profile.tts,
+        "tts_clone": profile.tts_clone,
+        "runtime_lock_id": lock.id,
+    }
+
+
+def test_managed_install_rejects_a_different_preset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    ProfileStore(app_home).initialize(_legacy_quality_selection())
+    selection_path = app_home / "config" / "selection.json"
+    before = selection_path.read_bytes()
+    _stub_managed_pipeline(monkeypatch)
+
+    with pytest.raises(install_macos.InstallerError, match="different managed preset"):
+        _install_stubbed(wheel, app_home, preset_id="balanced")
+
+    assert selection_path.read_bytes() == before
+
+
+def test_managed_install_restores_selection_when_runtime_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    legacy = _legacy_quality_selection()
+    ProfileStore(app_home).initialize(legacy)
+    _stub_managed_pipeline(monkeypatch, preflight_ok=False)
+
+    with pytest.raises(install_macos.InstallerError, match="preflight"):
+        _install_stubbed(wheel, app_home)
+
+    assert recover_selection(app_home) == legacy
 
 
 @pytest.mark.parametrize("failure_stage", ["runtime", "preflight", "service", "profile"])

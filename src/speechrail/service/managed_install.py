@@ -276,16 +276,39 @@ def _selection_candidate(
         "generation": generation,
         "asr": selected.asr,
         "tts": selected.tts,
+        "tts_clone": selected.tts_clone,
         "runtime_lock_id": runtime_lock.id,
     }
+
+
+_SELECTION_IDENTITY_KEYS = ("schema_version", "preset", "asr", "tts")
 
 
 def _same_selection(
     current: dict[str, object] | None, candidate: dict[str, object]
 ) -> bool:
+    """Return whether both records select the same managed profile."""
     if current is None:
         return False
-    return all(current.get(key) == value for key, value in candidate.items() if key != "generation")
+    return all(current.get(key) == candidate.get(key) for key in _SELECTION_IDENTITY_KEYS)
+
+
+def _selection_drift(
+    current: dict[str, object] | None, candidate: dict[str, object]
+) -> tuple[str, ...]:
+    """Return the candidate fields the committed record does not already carry.
+
+    ``generation`` is skipped because every install bumps it. The runtime lock
+    identity stays in, so reinstalling the same profile migrates the committed
+    record onto the lock published by the wheel instead of failing.
+    """
+    if current is None:
+        return ()
+    return tuple(
+        key
+        for key, value in candidate.items()
+        if key != "generation" and current.get(key) != value
+    )
 
 
 def _configured_service_port(layout: ServiceLayout, env_file: Path | None) -> int:
@@ -530,6 +553,8 @@ def install_managed(
     )
     if current_selection is not None and not _same_selection(current_selection, candidate):
         raise InstallerError("a different managed preset is already configured")
+    selection_previous = dict(current_selection) if current_selection is not None else None
+    selection_drift = _selection_drift(current_selection, candidate)
     config_created = False
     release_created = False
     release_dir: Path | None = None
@@ -537,6 +562,7 @@ def install_managed(
     runtime_snapshot: RuntimeCurrentSnapshot | None = None
     switched = False
     selection_created = False
+    selection_updated = False
     enable_attempted = False
     current_python: Path | None = None
     selection_path = layout.app_home / "config" / "selection.json"
@@ -603,6 +629,10 @@ def install_managed(
                 ),
             )
             config_created = True
+
+        if selection_drift:
+            ProfileStore(layout.app_home).replace(candidate)
+            selection_updated = True
 
         preflight = run_preflight(
             runtime_python,
@@ -703,6 +733,12 @@ def install_managed(
         if config_created:
             try:
                 layout.config_file.unlink(missing_ok=True)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+        if selection_updated:
+            try:
+                ProfileStore(layout.app_home).replace(selection_previous)
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
