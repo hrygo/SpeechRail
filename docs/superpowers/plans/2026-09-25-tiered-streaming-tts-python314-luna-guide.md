@@ -514,8 +514,8 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
 - [x] **W7｜应用资源与终态**：`application/tts_stream.py` 收束 governor reserve、worker 租约与 vendor session 的整个 utterance；终态同步认领且只有控制器 task 写 sink，cancel/finish/超时竞态只有一个胜者；等待文本不释放租约、组级 evict 返回 busy；receipt 只计已发送 PCM。验收：定向 114 passed，主仓全量 2308 passed / 7 skipped，ruff/mypy/diff check 通过（详见下方 W7 记录）。
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
-- [ ] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。
-- [ ] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。
+- [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
+- [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
 - [ ] **W11｜授权后逐档实测与发布**：质量/性能矩阵与完整回滚记录；未达标档不宣称完成；安装/提交/远端发布分别核对授权。
 
 ### W2 实施与验收记录（2026-09-24）
