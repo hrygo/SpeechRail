@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from examples.perf.bench_tts_stream_lifecycle import (
     CancelTurnTrace,
+    fetch_gauges,
     probe_idle_cancel,
     run_cancel_turn,
     summarise_cancel,
@@ -166,3 +168,51 @@ def test_run_cancel_turn_drives_the_real_realtime_server() -> None:
     assert trace.next_start_accepted_at is not None
     assert synthesizer.sessions[0].cancelled is True
     assert synthesizer.sessions[0].closed is True
+
+
+def test_soak_sampling_keeps_footprint_and_release_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A soak must read recovery and the memory trend, not just active gauges.
+
+    Watching only the active-request gauges cannot tell a released reservation
+    from one that never came back, and cannot separate MLX allocator caching
+    from a real physical-footprint trend.  Both come from the service's own
+    authoritative metrics, so the artifact has to carry them.
+    """
+
+    metrics = (
+        "# HELP speechrail_realtime_active_sessions sessions\n"
+        "speechrail_realtime_active_sessions 0\n"
+        'speechrail_governor_releases_total{class="realtime_tts",'
+        'outcome="completed",purpose="interactive"} 52\n'
+        "speechrail_resource_physical_footprint_bytes 3.50602e+09\n"
+        "speechrail_resource_footprint_process_count 3\n"
+        "speechrail_resource_footprint_complete 1\n"
+        'speechrail_unrelated_free_form{prompt="private"} 7\n'
+    )
+
+    class _Response:
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return metrics.encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: _Response())
+
+    observed = fetch_gauges(metrics_url="http://127.0.0.1:8201/metrics", api_key=None)
+
+    assert observed["speechrail_resource_physical_footprint_bytes"] == 3.50602e09
+    assert observed["speechrail_resource_footprint_process_count"] == 3
+    assert observed["speechrail_resource_footprint_complete"] == 1
+    assert observed["speechrail_realtime_active_sessions"] == 0
+    assert observed[
+        'speechrail_governor_releases_total{class="realtime_tts",'
+        'outcome="completed",purpose="interactive"}'
+    ] == 52
+    # Free-form series never enter the artifact.
+    assert not any("unrelated" in name for name in observed)
