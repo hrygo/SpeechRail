@@ -7,10 +7,12 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_pronunciation import PronunciationRegistry
+
+_VOICE_ID = "serena"
 
 
 class CaptureSynthesizer:
@@ -34,16 +36,12 @@ def _client(
     tmp_path: Path,
     monkeypatch,
 ) -> tuple[TestClient, CaptureSynthesizer, PronunciationRegistry]:
-    preset = load_catalog().preset("quality")
+    asr_key = required_spec_artifact("quality", "asr")
+    tts_key = required_spec_artifact("quality", "tts_custom_voice")
+    assert asr_key is not None and tts_key is not None
     voice_registry = VoiceRegistry(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voices",
-    )
-    voice_registry.create_custom_profile(
-        name="Narrator",
-        instruction="stable",
-        voice_id="narrator",
-        seed=7,
     )
     pronunciation_registry = PronunciationRegistry(
         tmp_path / "pronunciation.json"
@@ -63,16 +61,11 @@ def _client(
     synth = CaptureSynthesizer()
     app = create_app(
         Settings(
-            qwen3_model_dir=tmp_path / preset.asr,
+            qwen3_model_dir=tmp_path / asr_key,
             asr_resident_bytes=1 * 1024**3,
             qwen3_python=None,
-            qwen3_tts_model_dir=tmp_path / preset.tts,
+            qwen3_tts_model_dir=tmp_path / tts_key,
             tts_resident_bytes=1 * 1024**3,
-            qwen3_tts_clone_model_dir=(
-                tmp_path / preset.tts_clone
-                if preset.tts_clone is not None
-                else None
-            ),
             qwen3_tts_python=None,
         ),
         tts_synthesizer=synth,
@@ -118,7 +111,7 @@ def test_v1_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
-            "voice": "narrator",
+            "voice": _VOICE_ID,
             "response_format": "wav",
             "language": "zh",
         },
@@ -151,7 +144,7 @@ def test_v1_pronunciation_header_does_not_force_receipt(
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
-            "voice": "narrator",
+            "voice": _VOICE_ID,
             "response_format": "wav",
         },
     )
@@ -195,7 +188,7 @@ def test_timing_mapping_downgrades_when_a_pronunciation_span_is_split(
         json={
             "model": "speechrail/qwen3-tts",
             "input": "长",
-            "voice": "narrator",
+            "voice": _VOICE_ID,
             "response_format": "pcm",
             "language": "zh",
         },
@@ -245,7 +238,7 @@ def test_pronunciation_management_cas_privacy_and_revoke(
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
-            "voice": "narrator",
+            "voice": _VOICE_ID,
             "response_format": "wav",
         },
     )

@@ -515,6 +515,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
 
     class FailingTtsWorker:
         ready = False
+        model_variant = "custom_voice"
 
         def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
             del config
@@ -532,7 +533,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
     monkeypatch.setattr(
         services_module,
         "inspect_model",
-        lambda _: SimpleNamespace(variant="voice_design"),
+        lambda _: SimpleNamespace(variant="custom_voice"),
     )
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
