@@ -1,10 +1,12 @@
-"""Measure teleprompter realtime snapshot latency without persisting transcript text.
+"""Measure teleprompter realtime hypothesis latency without persisting transcript text.
 
-The input WAV must be a local, authorized 16 kHz mono PCM16 fixture. Audio is
-sent at its real 100 ms cadence; burst uploading would hide the latency that a
-speaker experiences. The output contains only timings, bounded event counts,
-revision diagnostics, and audio duration. It never writes transcript text,
-item IDs, event IDs, audio bytes, or text hashes.
+The input WAV must be a local, authorized 24 kHz mono PCM16 fixture (the single
+realtime wire rate). Audio is sent at its real 100 ms cadence; burst uploading
+would hide the latency that a speaker experiences. The current wire exposes one
+mutable partial-text event, ``speechrail.transcription.hypothesis``; the probe
+times its cadence and revision monotonicity. The output contains only timings,
+bounded event counts, revision diagnostics, and audio duration. It never writes
+transcript text, item IDs, event IDs, audio bytes, or text hashes.
 
 Usage:
   uv run python tools/probe_teleprompter_latency.py <external.wav> \
@@ -34,7 +36,7 @@ from openai import OpenAI
 from speechrail.config.auth import resolve_api_key  # type: ignore[import-untyped]
 
 UPLOAD_CHUNK_MILLISECONDS = 100
-SAMPLE_RATE = 16_000
+SAMPLE_RATE = 24_000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 
@@ -58,7 +60,7 @@ class WaveFixture:
 
 
 def load_wave_fixture(path: Path) -> WaveFixture:
-    """Read and validate an external 16 kHz mono PCM16 WAV."""
+    """Read and validate an external 24 kHz mono PCM16 WAV."""
 
     try:
         with wave.open(str(path), "rb") as source:
@@ -68,7 +70,7 @@ def load_wave_fixture(path: Path) -> WaveFixture:
                 or source.getsampwidth() != SAMPLE_WIDTH_BYTES
                 or source.getcomptype() != "NONE"
             ):
-                raise ProbeInputError("WAV must be 16 kHz mono PCM16")
+                raise ProbeInputError("WAV must be 24 kHz mono PCM16")
             frame_count = source.getnframes()
             pcm = source.readframes(frame_count)
     except (OSError, EOFError, wave.Error) as exc:
@@ -160,12 +162,9 @@ def run_probe(
     base_url: str,
     app_home: Path | None,
     model: str,
-    chunk_duration_ms: int,
 ) -> dict[str, object]:
-    """Run one real-time snapshot session and return sanitized evidence."""
+    """Run one real-time hypothesis session and return sanitized evidence."""
 
-    if chunk_duration_ms not in {500, 1_000, 2_000}:
-        raise ProbeInputError("chunk duration must be 500, 1000, or 2000 ms")
     client = OpenAI(api_key=resolve_api_key(app_home=app_home) or "local", base_url=base_url)
     connection: Any = client.realtime.connect(model=model).enter()
     events: queue.Queue[tuple[float, object]] = queue.Queue()
@@ -180,9 +179,9 @@ def run_probe(
 
     event_counts: Counter[str] = Counter()
     upload_lateness: list[float] = []
-    snapshot_gaps: list[float] = []
+    partial_gaps: list[float] = []
     revisions: list[int] = []
-    first_snapshot_at: float | None = None
+    first_partial_at: float | None = None
     completed_at: float | None = None
     stream_started = time.monotonic()
     try:
@@ -192,24 +191,24 @@ def run_probe(
         event_counts["session.created"] += 1
         connection.send(
             {
-                "type": "transcription_session.update",
+                "type": "session.update",
                 "session": {
-                    "input_audio_format": "pcm16",
-                    "input_audio_transcription": {"model": model, "language": "zh"},
-                    "turn_detection": {"type": "manual"},
-                    "speechrail": {
-                        "transcription": {
-                            "partial_mode": "snapshot",
-                            "chunk_duration_ms": chunk_duration_ms,
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
+                            "transcription": {"model": model, "language": "zh"},
+                            "turn_detection": "manual",
                         }
                     },
+                    "speechrail": {"task": "caption"},
                 },
             }
         )
         configured_at, _ = _receive_until(
-            events, errors, "transcription_session.updated", timeout_seconds=15
+            events, errors, "session.updated", timeout_seconds=15
         )
-        event_counts["transcription_session.updated"] += 1
+        event_counts["session.updated"] += 1
 
         bytes_per_chunk = SAMPLE_RATE * SAMPLE_WIDTH_BYTES * UPLOAD_CHUNK_MILLISECONDS // 1_000
         chunk_count = 0
@@ -228,19 +227,19 @@ def run_probe(
             chunk_count += 1
         connection.send({"type": "input_audio_buffer.commit"})
 
-        last_snapshot_at: float | None = None
+        last_partial_at: float | None = None
         while completed_at is None:
             received_at, event = events.get(timeout=60)
             event_type = _event_type(event)
             event_counts[event_type] += 1
             if event_type == "error":
                 raise RealtimeProbeError(_error_code(event))
-            if event_type == "speechrail.transcription.snapshot":
-                if first_snapshot_at is None:
-                    first_snapshot_at = received_at
-                if last_snapshot_at is not None:
-                    snapshot_gaps.append((received_at - last_snapshot_at) * 1_000)
-                last_snapshot_at = received_at
+            if event_type == "speechrail.transcription.hypothesis":
+                if first_partial_at is None:
+                    first_partial_at = received_at
+                if last_partial_at is not None:
+                    partial_gaps.append((received_at - last_partial_at) * 1_000)
+                last_partial_at = received_at
                 revision = _value(event, "revision")
                 if isinstance(revision, int):
                     revisions.append(revision)
@@ -254,24 +253,23 @@ def run_probe(
         1 for previous, current in itertools.pairwise(revisions) if current <= previous
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "tool": "speechrail-probe-teleprompter-latency",
         "evidence_mode": "real",
         "model": model,
-        "partial_mode": "snapshot",
-        "chunk_duration_ms": chunk_duration_ms,
+        "partial_mode": "hypothesis",
         "upload_chunk_ms": UPLOAD_CHUNK_MILLISECONDS,
         "audio_seconds": fixture.duration_seconds,
         "setup_ms": (configured_at - created_at) * 1_000,
         "upload_lateness": timing_summary(upload_lateness),
-        "snapshot_gap": timing_summary(snapshot_gaps),
-        "first_snapshot_ms": (
-            None if first_snapshot_at is None else (first_snapshot_at - stream_started) * 1_000
+        "partial_gap": timing_summary(partial_gaps),
+        "first_partial_ms": (
+            None if first_partial_at is None else (first_partial_at - stream_started) * 1_000
         ),
         "completed_ms": (
             None if completed_at is None else (completed_at - stream_started) * 1_000
         ),
-        "snapshot_count": len(revisions),
+        "partial_count": len(revisions),
         "revision_regressions": revision_regressions,
         "event_counts": dict(sorted(event_counts.items())),
         "audio_chunks": chunk_count,
@@ -284,13 +282,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         required=True,
-        choices=("extreme", "quality", "balanced", "light"),
+        choices=("fast", "quality", "reference"),
     )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--app-home", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8201/v1")
     parser.add_argument("--model", default="whisper-1")
-    parser.add_argument("--chunk-duration-ms", type=int, default=500)
     args = parser.parse_args(argv)
     try:
         if args.output.exists() or args.output.is_symlink():
@@ -303,7 +300,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_url=args.base_url,
             app_home=args.app_home,
             model=args.model,
-            chunk_duration_ms=args.chunk_duration_ms,
         )
         result["profile"] = args.profile
         args.output.write_text(
@@ -312,7 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ProbeInputError, RealtimeProbeError, TimeoutError) as exc:
         print(f"error: {type(exc).__name__}: {exc}")
         return 2
-    print(f"wrote {args.output} snapshots={result['snapshot_count']}")
+    print(f"wrote {args.output} partials={result['partial_count']}")
     return 0
 
 

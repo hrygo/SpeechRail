@@ -67,16 +67,16 @@ Proxy 不负责：
 Realtime 仍由调用方直连唯一的 `/v1/realtime`。MCP 只代理无状态 REST 的 ASR、TTS、音色和
 job 工具；需要实时字幕、语音助手或会议能力的客户端自行拥有连接、会话状态、LLM 编排、播放
 与打断策略。SpeechRail Realtime 只交付 ASR/VAD/匿名分人事实，并处理调用方显式发送的
-`speechrail.tts.create` / `speechrail.tts.cancel`。
+`speechrail.tts.start` / `append_text` / `finish_text` / `cancel`。
 
-对于提词器或实时字幕，调用方可在首个 PCM 前协商
-`session.speechrail.transcription.partial_mode`（`delta` 或 `snapshot`）与
-`chunk_duration_ms`（公开值 `500/1000/2000`），等待
-`transcription_session.updated` 回显后再开始采集。snapshot 事件
-`speechrail.transcription.snapshot` 传递同一 ASR item 的最新全文；调用方按严格递增
-`revision` 替换文本，不得把它当作追加 delta。首个 PCM 后不能修改选项，服务返回
-`invalid_state`。这些字段和事件属于 Realtime wire contract，不是 MCP tool、resource 或
-MCP session 状态；详见 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
+对于提词器或实时字幕，调用方在首个 PCM 前用一次 `session.update` 声明
+`session.type=transcription`、24 kHz mono PCM16 与
+`session.speechrail.{task,alignment,diarization}`，等待 `session.updated` 回显后再开始采集。可修订
+partial 是 `speechrail.transcription.hypothesis`：`text` 是同一 `utterance_id` 的最新全文，调用方
+按严格递增 `revision` 替换文本，不得把它当作追加 delta；只有可证明的稳定前缀才映射到官方
+append-only `delta`。首个 PCM 后不能修改配置，服务返回 `invalid_state`。这些字段和事件属于
+Realtime wire contract，不是 MCP tool、resource 或 MCP session 状态；详见
+[`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
 
 ## 2. 进程、传输与安全
 

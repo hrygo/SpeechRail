@@ -40,7 +40,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             case .unsupportedInput:
                 "输入设备没有可用的采样率。"
             case .converterUnavailable:
-                "这个输入设备的格式转不成 16 kHz 单声道。"
+                "这个输入设备的格式转不成 24 kHz 单声道。"
             case .voiceProcessingUnavailable(let message):
                 "系统语音处理不可用：\(message)"
             case .engineFailed(let message):
@@ -49,7 +49,8 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
     }
 
-    private static let captureSampleRate: Double = 16_000
+    /// 近端采集与 wire 同一个采样率；播放侧另有自己的协商格式。
+    private static let captureSampleRate: Double = 24_000
     private static let playbackSampleRate: Double = 24_000
     private static let chunkDuration: DispatchTimeInterval = .milliseconds(100)
     private static let ringCapacity = 131_072

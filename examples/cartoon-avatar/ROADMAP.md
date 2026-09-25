@@ -92,13 +92,13 @@ flowchart LR
 
 **本阶段范围：**
 
-- 接入现有 `/v1/realtime` TTS：调用方显式发送 `speechrail.tts.create`，接收 `response.output_audio.delta`。仍保留 R0 完整 WAV 模式作为可显式选择的回退路径。
+- 接入现有 `/v1/realtime` TTS：调用方显式发送 `speechrail.tts.start` + `speechrail.tts.append_text`/`finish_text`，接收 `speechrail.tts.audio.delta`。仍保留 R0 完整 WAV 模式作为可显式选择的回退路径。
 - 用浏览器音频线程消费 PCM 队列，以采样时钟驱动播放和嘴部；设置队列上限、欠载状态和超时，不无限缓存。
 - 停止同时清空本地音频队列并发送 `speechrail.tts.cancel`；把“本地已停”和“服务端取消已确认”分开处理。
-- 用 response ID 和本地 generation 丢弃旧音频。断线后创建新 session，不自动恢复或重播中断内容。
+- 用 `request_id` 和本地 generation 丢弃旧音频。断线后创建新 session，不自动恢复或重播中断内容。
 - 先沿用首版 600 码点限制验证流式链路，达到门槛后再依据实测考虑扩展文本长度；不同时引入批量任务系统。
 
-**技术依据与尚待验证：** 当前仓库契约声明输出为 24 kHz PCM16，使用 `response.output_audio.delta` 和 `response.done` 终态；调用方拥有 LLM、播放队列和 barge-in 策略。它们是协议依据，不是本示例已获得的低延迟保证。客户端不能把文本回显事件当作词级时间戳。浏览器可使用 AudioWorklet 执行独立音频线程处理，兼容性与安全上下文仍需在目标环境验证。[Realtime 契约](../../contracts/realtime-openai.md)、[MDN AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet)。
+**技术依据与尚待验证：** 当前仓库契约声明输出为 24 kHz PCM16，使用 `speechrail.tts.audio.delta` 与 `speechrail.tts.completed`/`cancelled`/`failed` 单终态；调用方拥有 LLM、播放队列和 barge-in 策略。它们是协议依据，不是本示例已获得的低延迟保证。客户端不能把文本回执事件当作词级时间戳。浏览器可使用 AudioWorklet 执行独立音频线程处理，兼容性与安全上下文仍需在目标环境验证。[Realtime 契约](../../contracts/realtime-openai.md)、[MDN AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet)。
 
 **验收门槛（提议目标，非当前实测）：**
 

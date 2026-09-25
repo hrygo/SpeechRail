@@ -127,11 +127,10 @@ class _WebSocketBenchmarkAdapter:
         return self._session.receive_json()
 
 
-def _audio_delta(payload: bytes, *, sample_rate: int = 24_000) -> dict[str, Any]:
+def _audio_delta(payload: bytes) -> dict[str, Any]:
     return {
-        "type": "response.output_audio.delta",
+        "type": "speechrail.tts.audio.delta",
         "delta": base64.b64encode(payload).decode("ascii"),
-        "speechrail": {"kind": "tts", "sample_rate": sample_rate},
     }
 
 
@@ -156,8 +155,7 @@ def _selection_kwargs(tier: str = "quality") -> dict[str, Any]:
 def _handshake() -> list[dict[str, Any]]:
     return [
         {"type": "session.created"},
-        {"type": "transcription_session.updated"},
-        {"type": "response.created"},
+        {"type": "session.updated"},
     ]
 
 
@@ -195,14 +193,14 @@ def test_recv_normalizes_typed_sdk_events() -> None:
     class TypedEvent:
         def model_dump(self, *, mode: str) -> dict[str, Any]:
             assert mode == "json"
-            return {"type": "response.created"}
+            return {"type": "speechrail.tts.started"}
 
     class Connection:
         def recv(self) -> TypedEvent:
             return TypedEvent()
 
     assert _recv(Connection(), deadline=1.0, clock=lambda: 0.0) == {
-        "type": "response.created"
+        "type": "speechrail.tts.started"
     }
 
 
@@ -403,23 +401,22 @@ def test_run_incremental_turn_follows_the_incremental_protocol() -> None:
         *_handshake(),
         _STARTED,
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
-        {"type": "response.output_audio_transcript.delta", "delta": "增量"},
         {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
         _audio_delta(b"\x01\x02" * 24_000),
-        {"type": "response.output_audio.done"},
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
     trace, connection = _turn(script, text="你好，世界", slices=2)
 
     assert [event["type"] for event in connection.sent] == [
-        "transcription_session.update",
+        "session.update",
         "speechrail.tts.start",
         "speechrail.tts.append_text",
         "speechrail.tts.append_text",
         "speechrail.tts.finish_text",
     ]
     start = connection.sent[1]
-    assert "voice" not in start
+    assert start["voice"] == "serena"
+    assert start["task"] == "conversation"
     appends = connection.of_type("speechrail.tts.append_text")
     assert [event["sequence"] for event in appends] == [0, 1]
     assert "".join(event["text"] for event in appends) == "你好，世界"
@@ -438,7 +435,7 @@ def test_run_incremental_turn_pins_the_requested_voice() -> None:
         _STARTED,
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
         _audio_delta(b"\x00\x00" * 24_000),
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
     _, connection = _turn(script, text="单段", slices=1, voice="serena")
 
@@ -448,10 +445,13 @@ def test_run_incremental_turn_pins_the_requested_voice() -> None:
 def test_run_incremental_turn_adopts_the_sample_rate_reported_on_the_wire() -> None:
     script = [
         *_handshake(),
-        _STARTED,
+        {
+            **_STARTED,
+            "output_format": {"type": "pcm16", "sample_rate": 48_000, "channels": 1},
+        },
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
-        _audio_delta(b"\x00\x00" * 24_000, sample_rate=48_000),
-        {"type": "response.done", "response": {"status": "completed"}},
+        _audio_delta(b"\x00\x00" * 24_000),
+        {"type": "speechrail.tts.completed"},
     ]
     trace, _ = _turn(script, text="单段", slices=1)
 
@@ -466,7 +466,7 @@ def test_run_incremental_turn_reports_a_gap_that_ended_before_first_audio() -> N
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
         {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
         _audio_delta(b"\x00\x00" * 24_000),
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
     trace, _ = _turn(script, text="两段文本", slices=2, append_interval_seconds=0.5)
 
@@ -482,7 +482,7 @@ def test_run_incremental_turn_does_not_hide_a_client_gap_in_generation_rtf() -> 
         _audio_delta(b"\x00\x00" * 24_000),
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
         {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
     trace, _ = _turn(script, text="两段文本", slices=2, append_interval_seconds=0.5)
 
@@ -499,10 +499,10 @@ def test_run_incremental_turn_waits_for_the_matching_ack_not_any_packet() -> Non
         [
             *_handshake(),
             _STARTED,
-            {"type": "response.output_audio.delta", "delta": ""},
+            {"type": "speechrail.tts.audio.delta", "delta": ""},
             {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
             {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
-            {"type": "response.done", "response": {"status": "completed"}},
+            {"type": "speechrail.tts.completed"},
         ],
         clock,
     )
@@ -527,7 +527,7 @@ def test_run_incremental_turn_rejects_a_mismatched_ack_sequence() -> None:
         *_handshake(),
         _STARTED,
         {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
 
     with pytest.raises(ValueError, match="did not match"):
@@ -541,7 +541,7 @@ def test_interval_sleep_does_not_block_audio_receive() -> None:
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
         _audio_delta(b"\x00\x00" * 240),
         {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
     connection = AckAwareConnection(script, time.monotonic)
 
@@ -590,7 +590,7 @@ def test_run_incremental_turn_surfaces_a_pre_created_failure() -> None:
     connection = FakeConnection(
         [
             {"type": "session.created"},
-            {"type": "transcription_session.updated"},
+            {"type": "session.updated"},
             {"type": "error", "error": {"code": "tts_in_progress"}},
         ],
         clock,
@@ -605,7 +605,7 @@ def test_run_incremental_turn_records_a_terminal_failure_without_audio() -> None
         *_handshake(),
         _STARTED,
         {"type": "error", "error": {"code": "tts_backpressure"}},
-        {"type": "response.done", "response": {"status": "failed"}},
+        {"type": "speechrail.tts.failed", "error": {"code": "tts_backpressure"}},
     ]
     trace, _ = _turn(script, text="增量", slices=1)
 
@@ -620,7 +620,7 @@ def test_run_incremental_turn_rejects_truncated_audio() -> None:
         _STARTED,
         {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
         _audio_delta(b"\x01\x02\x03"),
-        {"type": "response.done", "response": {"status": "completed"}},
+        {"type": "speechrail.tts.completed"},
     ]
 
     with pytest.raises(ValueError, match="truncated"):

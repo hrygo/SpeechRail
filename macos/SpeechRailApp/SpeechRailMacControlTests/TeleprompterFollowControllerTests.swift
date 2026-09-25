@@ -357,7 +357,7 @@ struct TeleprompterRealtimeFollowAdapterTests {
             to: &controller
         )
         let outcome = adapter.apply(
-            .completed(itemID: "i", transcript: "欢迎来到今天的直播", units: []),
+            .completed(itemID: "i", transcript: "欢迎来到今天的直播"),
             metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
             segments: segments,
             to: &controller
@@ -411,7 +411,7 @@ struct TeleprompterRealtimeFollowAdapterTests {
             to: &controller
         )
         _ = adapter.apply(
-            .completed(itemID: "new", transcript: "最后演示照片导出", units: []),
+            .completed(itemID: "new", transcript: "最后演示照片导出"),
             metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
             segments: segments,
             to: &controller
@@ -419,7 +419,7 @@ struct TeleprompterRealtimeFollowAdapterTests {
         let newerPosition = controller.position
 
         _ = adapter.apply(
-            .completed(itemID: "old", transcript: "欢迎来到今天的直播", units: []),
+            .completed(itemID: "old", transcript: "欢迎来到今天的直播"),
             metadata: .init(eventID: "e3", sessionID: "s", sequence: 3),
             segments: segments,
             to: &controller

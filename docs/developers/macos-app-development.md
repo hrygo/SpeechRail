@@ -38,28 +38,33 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 不要把多次读取 `/v1/models`、`/v1/voices` 拼成原子结果。音色列表（`/v1/voices`）是用户数据，
 可以为空，「还没有克隆音色」不能推出「服务没有克隆能力」；用列表反推能力会报出假的「未就绪」。
 
-App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 通过
-`speechrail.tts.create.expected_voice_revision` 绑定当前 voice，并在切换音色时同时更新 voice
-与 revision；REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
+App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 在 `session.update` 的
+`session.speechrail.expected_tts_revision` 与 `speechrail.tts.start` 的
+`voice_revision`/`expected_model_revision` 上绑定当前 voice 与 TTS model，并在切换音色时同时更新
+voice 与 revision；REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
 `SpeechRail-Expected-Model-Revision` 传递同代约束。匹配不到可用 voice、对应 operation 或
 revision 时显式保持 `nil`，走服务端普通协商，不从 voice 名称、模型名或本地时间推断版本。
 
 ### Native Realtime 编排边界（current-only）
 
-`SpeechRailApp` 的 `RealtimeASRClient` 只发当前契约：先发
-`transcription_session.update`，再发 `input_audio_buffer.append/commit/clear`。语音助手会在本地
-Responses 流中完成 LLM、历史、记忆、人设和工具编排，把句子放入本地 `pendingTTS` 队列，逐条发送
-`speechrail.tts.create`；同一 WebSocket 同时只允许一个服务端 TTS render，收到 `response.done` 后才
-提交下一句。
+`SpeechRailApp` 的 `RealtimeASRClient` 只发当前契约：先发一次 `session.update`
+（`session.type=transcription`、24 kHz mono PCM16、`session.audio.input.transcription.model` 与
+`session.speechrail.{task,tts,alignment,diarization,endpointing}`），再发
+`input_audio_buffer.append/commit/clear`。语音助手会在本地 Responses 流中完成 LLM、历史、记忆、
+人设和工具编排，把稳定句子按连续 `sequence` 用 `speechrail.tts.append_text` 追加到同一个
+utterance，再用 `speechrail.tts.finish_text` 关闭文本侧；同一 WebSocket 同时只允许一个服务端 TTS
+utterance，收到匹配 `request_id` 的 terminal（`completed`/`cancelled`/`failed`）后才提交下一句。
 
 每个可验证的 caller-owned TTS request 都带当前 voice revision；Realtime 建连和会话内换音色都从
 同一份 effective snapshot 重新解析。revision 不可用时不伪造 pin；服务端返回 revision conflict
 时由调用方重新发现并决定是否继续，不自动改用最新音色。
 
-服务端的 `input_audio_buffer.speech_started` 只是 VAD 事实。实时对讲模式由 `AssistantSession` 根据
-播放状态清空本地播放队列并显式发送 `speechrail.tts.cancel`；服务端不自动替 App 做 barge-in。旧
-`session.update`、`conversation.item.create`、`response.create/cancel` 和 `response.audio.*` 不会被
-Native 或服务端翻译。
+当前 wire 没有 `input_audio_buffer.speech_started`/`speech_stopped`：服务端只回 ASR
+hypothesis（`speechrail.transcription.hypothesis`，按 `utterance_id` + 严格递增 `revision` 替换全文）与
+text final，alignment 和匿名分人归属随后独立到达。实时对讲模式由 `AssistantSession` 在出现首个非空
+hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；服务端不自动替 App 做 barge-in。
+旧 `transcription_session.update`、`conversation.item.create`、`response.create/cancel` 和
+`response.audio.*` 不会被 Native 或服务端翻译。
 
 ## 当前控制面 surface
 

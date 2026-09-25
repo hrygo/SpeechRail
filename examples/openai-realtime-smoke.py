@@ -1,11 +1,11 @@
 """Minimal OpenAI-Realtime-compatible smoke via the official openai SDK.
 
 Connects to SpeechRail's /v1/realtime using `client.realtime.connect()`
-(the exact path a standard OpenAI client would use), streams a 16 kHz mono
+(the exact path a standard OpenAI client would use), streams a 24 kHz mono
 PCM16 file, commits, and waits for the final transcription.
 
 Requires: openai>=1.40, SPEECHRAIL_REALTIME_ASR_BACKEND=native on the server,
-and a real s16le/16 kHz/mono PCM file. Do not run against a fake backend.
+and a real s16le/24 kHz/mono PCM file. Do not run against a fake backend.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from openai import OpenAI
 
 PCM16: dict[str, int | str] = {
     "type": "audio/pcm",
-    "rate": 16_000,
+    "rate": 24_000,
     "channels": 1,
     "sample_width": 2,
 }
@@ -31,7 +31,7 @@ PCM16: dict[str, int | str] = {
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("pcm_file", type=Path, help="s16le/16 kHz/mono PCM file")
+    parser.add_argument("pcm_file", type=Path, help="s16le/24 kHz/mono PCM file")
     parser.add_argument(
         "--base-url",
         default=os.getenv("SPEECHRAIL_BASE_URL", "http://127.0.0.1:8201/v1"),
@@ -90,20 +90,25 @@ def run(options: argparse.Namespace) -> None:
 
         connection.send(
             {
-                "type": "transcription_session.update",
+                "type": "session.update",
                 "session": {
-                    "input_audio_format": "pcm16",
-                    "input_audio_transcription": {
-                        "model": options.model,
-                        "language": options.language,
+                    "audio": {
+                        "input": {
+                            "format": PCM16,
+                            "transcription": {
+                                "model": options.model,
+                                "language": options.language,
+                            },
+                            "turn_detection": "manual",
+                        }
                     },
-                    "turn_detection": {"type": "manual"},
+                    "speechrail": {"task": "transcription"},
                 },
             }
         )
         updated = recv(deadline - time.monotonic())
-        if _get(updated, "type") != "transcription_session.updated":
-            raise SystemExit(f"expected transcription_session.updated, got {updated}")
+        if _get(updated, "type") != "session.updated":
+            raise SystemExit(f"expected session.updated, got {updated}")
 
         audio = options.pcm_file.read_bytes()
         for i in range(0, len(audio), 32000):

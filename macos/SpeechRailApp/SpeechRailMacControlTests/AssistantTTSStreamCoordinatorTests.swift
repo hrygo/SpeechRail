@@ -10,7 +10,6 @@ import XCTest
 final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     private final class Recorder {
         var requestID = ""
-        var responseID = "resp-1"
         var started: [String] = []
         var appends: [(sequence: Int, text: String)] = []
         var finishes: [Int] = []
@@ -32,7 +31,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             if acknowledgeStart {
                 _ = coordinator?.handleStarted(
                     requestID: requestID,
-                    responseID: recorder.responseID,
+                    taskID: nil,
                     limits: nil
                 )
             }
@@ -42,7 +41,6 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             if acknowledgeAppend {
                 _ = coordinator?.handleTextAccepted(
                     requestID: recorder.requestID,
-                    responseID: recorder.responseID,
                     appendSequence: sequence,
                     totalCodepoints: text.unicodeScalars.count
                 )
@@ -84,7 +82,6 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         await coordinator.handleAudio(
             requestID: "req-7",
-            responseID: "resp-1",
             pcm: Data([1, 2, 3, 4])
         )
 
@@ -124,7 +121,6 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertTrue(
             coordinator.handleTextAccepted(
                 requestID: "req-8",
-                responseID: "resp-1",
                 appendSequence: 0,
                 totalCodepoints: 3
             )
@@ -145,7 +141,6 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertEqual(recorder.cancels, 1)
         await coordinator.handleAudio(
             requestID: "req-3",
-            responseID: "resp-1",
             pcm: Data([9, 9, 9, 9])
         )
         XCTAssertTrue(recorder.played.isEmpty, "取消之后到的音频不许再进播放层")
@@ -159,7 +154,6 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         await waitUntil({ coordinator.acceptedSequence == 0 })
         await coordinator.handleAudio(
             requestID: "req-4",
-            responseID: "resp-1",
             pcm: Data([1, 2, 3, 4])
         )
 
@@ -167,7 +161,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.isDrained)
         XCTAssertTrue(recorder.outcomes.isEmpty, "只是暂时排空，不能宣布整轮结束")
 
-        await coordinator.handleTerminal(requestID: "req-4", responseID: "resp-1", status: "completed")
+        await coordinator.handleTerminal(requestID: "req-4", status: "completed")
         XCTAssertEqual(recorder.outcomes.count, 1)
         XCTAssertEqual(recorder.outcomes.first?.outcome, .completed)
         XCTAssertEqual(recorder.outcomes.first?.generation, 4)
@@ -180,11 +174,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         await waitUntil({ coordinator.acceptedSequence == 0 })
         await coordinator.handleAudio(
             requestID: "req-5",
-            responseID: "resp-1",
             pcm: Data([1, 2, 3, 4, 5, 6])
         )
 
-        await coordinator.handleTerminal(requestID: "req-5", responseID: "resp-1", status: "completed")
+        await coordinator.handleTerminal(requestID: "req-5", status: "completed")
         XCTAssertTrue(coordinator.isAwaitingPlayback)
         XCTAssertTrue(recorder.outcomes.isEmpty)
 
@@ -200,20 +193,18 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertFalse(
             coordinator.handleTextAccepted(
                 requestID: "req-6",
-                responseID: "resp-1",
                 appendSequence: 3,
                 totalCodepoints: 0
             ),
             "跳号的 ACK 不能推进序号"
         )
         XCTAssertFalse(
-            coordinator.handleStarted(requestID: "req-old", responseID: "resp-old", limits: nil)
+            coordinator.handleStarted(requestID: "req-old", taskID: "task-old", limits: nil)
         )
-        await coordinator.handleTerminal(requestID: "req-old", responseID: "resp-old", status: "completed")
+        await coordinator.handleTerminal(requestID: "req-old", status: "completed")
         await coordinator.handleServerError(requestID: "req-old", code: "tts_not_active", message: "旧请求")
         await coordinator.handleAudio(
             requestID: "req-old",
-            responseID: "resp-old",
             pcm: Data([1, 2])
         )
 
@@ -250,14 +241,12 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         await coordinator.handleAudio(
             requestID: "req-10",
-            responseID: "resp-1",
             pcm: Data([1, 2, 3, 4])
         )
         XCTAssertEqual(recorder.played.count, 1)
 
         await coordinator.handleAudio(
             requestID: "req-10",
-            responseID: "resp-1",
             pcm: Data([5, 6, 7, 8])
         )
 

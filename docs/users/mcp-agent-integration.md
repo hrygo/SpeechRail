@@ -32,18 +32,16 @@ date: 2026-09-23
 > cold/unknown runtime 不复用旧 pass。durable job 的 `input_ref` 只接受 allowlist 内的本地绝对路径或 `file://`
 > URI，不读取远程资源。
 >
-> **Realtime 边界**：`partial_mode`、`chunk_duration_ms` 和
-> `speechrail.transcription.snapshot` 由直连 `/v1/realtime` 的客户端使用；它们不新增 MCP tool，
-> 也不改变 MCP `transcribe` 的请求/响应语义。
+> **Realtime 边界**：24 kHz 输入、可修订 hypothesis、alignment 与匿名分人选项由直连
+> `/v1/realtime` 的客户端使用；它们不新增 MCP tool，也不改变 MCP `transcribe` 的请求/响应语义。
 
-> **当前边界（2026-09-21）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
+> **当前边界（2026-09-26）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
 > `describe/transcribe/synthesize/voice/job` 工具；它不创建 Realtime WebSocket handle。
 > Native、Sona 或其他调用方直连 `/v1/realtime`，并自行拥有 LLM、历史、memory、persona、
-> tools、播放队列和 barge-in；Realtime TTS 只能由调用方显式发送 `speechrail.tts.create`/
-> `speechrail.tts.cancel` 驱动。需要低延迟可修订 partial 时，客户端可在首个 PCM 前协商
-> `speechrail.transcription.partial_mode=snapshot` 和
-> `chunk_duration_ms=500|1000|2000`，等待 `transcription_session.updated` 后再采集；
-> snapshot 是按 `item_id` + 严格递增 `revision` 替换全文，不是可追加 delta。旧 Realtime
+> tools、播放队列和 barge-in；Realtime TTS 只能由调用方显式发送 `speechrail.tts.start`/
+> `append_text`/`finish_text`/`cancel` 驱动。会话配置在首个 PCM 前用一次 `session.update`
+> 声明；可修订 partial 是服务端发出的 `speechrail.transcription.hypothesis`，其 `text` 是同一
+> `utterance_id` 的最新全文，按严格递增 `revision` 替换而不是追加。旧 Realtime
 > 事件不会被 MCP 或服务端翻译。详见
 > [Realtime 契约](../../contracts/realtime-openai.md) 与配套
 > [skill reference](../../src/speechrail/assets/skills/speechrail/references/realtime.md)。
@@ -115,27 +113,35 @@ MCP 直接失败，不回退到 `/v1/models` + `/v1/voices`，也不伪造能力
 ### 1.3 Realtime 转写扩展（不属于 MCP tool）
 
 MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 Realtime partial。实时字幕或
-提词器应由调用方直接连接 `/v1/realtime`，并在首个 PCM 前发送：
+提词器应由调用方直接连接 `/v1/realtime`，并在首个 PCM 前发送一次 `session.update`：
 
 ```json
 {
-  "type": "transcription_session.update",
+  "type": "session.update",
+  "event_id": "evt_1",
   "session": {
-    "speechrail": {
-      "transcription": {
-        "partial_mode": "snapshot",
-        "chunk_duration_ms": 500
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {"type": "audio/pcm", "rate": 24000},
+        "transcription": {"model": "<registered-speechrail-model>", "language": "zh"},
+        "turn_detection": null
       }
+    },
+    "speechrail": {
+      "task": "caption",
+      "alignment": {"enabled": true, "granularity": "word"}
     }
   }
 }
 ```
 
-调用方必须等待 `transcription_session.updated` 的实际回显。公开分块值只有
-`500/1000/2000` ms；首个 PCM 后修改返回 `invalid_state`。在 `snapshot` 模式下，
-`speechrail.transcription.snapshot` 的 `text` 是同一 item 的最新全文，按严格递增
-`revision` 替换而不是追加；completed 仍是终态权威文本。该扩展不让 MCP 代理持有连接、
-创建会话或管理 LLM/播放状态。
+调用方必须等待 `session.updated` 的实际回显；首个 PCM 后再次更新返回 `invalid_state`。wire PCM
+固定 24 kHz mono PCM16 little-endian，服务端内部按有状态重采样到 16 kHz。partial 是
+`speechrail.transcription.hypothesis`：`text` 是同一 `utterance_id` 的最新全文，按严格递增
+`revision` 替换而不是追加；`conversation.item.input_audio_transcription.completed` 仍是终态权威
+文本，固定对齐与匿名归属随后由 `speechrail.alignment.done` / `speechrail.diarization.*` 独立到达。
+该扩展不让 MCP 代理持有连接、创建会话或管理 LLM/播放状态。
 
 ---
 

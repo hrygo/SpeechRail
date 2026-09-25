@@ -9,9 +9,10 @@ Verifies Direction-1 multiplexing end to end:
 - batch transcription still succeeds while realtime sessions are live
 
 Requires: SPEECHRAIL_REALTIME_ASR_BACKEND=native on the server and a real
-s16le/16 kHz/mono PCM file. API keys are auto-discovered from the managed app
-home (or can be supplied through SPEECHRAIL_API_KEY). No server-side model is
-loaded by this script itself.
+s16le/24 kHz/mono PCM file (the single wire is 24 kHz; the server resamples to
+its 16 kHz kernel internally). API keys are auto-discovered from the managed
+app home (or can be supplied through SPEECHRAIL_API_KEY). No server-side model
+is loaded by this script itself.
 
 Usage:
   uv run python examples/perf/concurrent_realtime_smoke.py audio_10s.pcm
@@ -42,7 +43,7 @@ CHUNK_BYTES = 96 * 1024
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("pcm_file", type=Path, help="s16le/16 kHz/mono PCM file")
+    parser.add_argument("pcm_file", type=Path, help="s16le/24 kHz/mono PCM file")
     parser.add_argument(
         "--base-url",
         default=os.getenv("SPEECHRAIL_BASE_URL", "http://127.0.0.1:8201"),
@@ -90,23 +91,26 @@ async def run_session(
     await ws.send(
         json.dumps(
             {
-                "type": "transcription_session.update",
+                "type": "session.update",
                 "session": {
-                    "input_audio_format": "pcm16",
-                    "input_audio_transcription": {
-                        "model": "whisper-1",
-                        "language": language,
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "transcription": {"model": "whisper-1", "language": language},
+                            "turn_detection": "manual",
+                        }
                     },
-                    "turn_detection": {"type": "manual"},
+                    "speechrail": {"task": "transcription"},
                 },
             }
         )
     )
     await recv_until_type(
         ws,
-        "transcription_session.updated",
+        "session.updated",
         10,
-        f"{session_name}:transcription_session.updated",
+        f"{session_name}:session.updated",
     )
 
     for offset in range(0, len(pcm), CHUNK_BYTES):

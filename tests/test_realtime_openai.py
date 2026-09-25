@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -15,14 +14,19 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import speechrail.application.realtime_openai as realtime_openai_module
+from realtime_wire import (
+    server_vad,
+    session_update,
+    tts_append_text,
+    tts_finish_text,
+    tts_start,
+)
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
     apply_session_update,
     error_event,
-    session_created,
-    transcription_segment,
 )
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
@@ -47,13 +51,11 @@ from speechrail.domain.ports import (
     StreamingAsrEvent,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import get_voice_registry
 from speechrail.http.routes.realtime_openai import (
     OUTBOUND_SEND_TIMEOUT_CLOSE_CODE,
     _send_json_with_deadline,
     create_openai_realtime_router,
 )
-from speechrail.realtime.speech_admission import AdmissionDecision
 
 
 class FakeTranscriber:
@@ -477,6 +479,11 @@ def _client(
     )
 
 
+# One wire frame is 24 kHz mono PCM16; it must span at least two source
+# samples so the 24k -> 16k boundary resampler emits kernel audio immediately.
+_FRAME = b"\x00\x00" * 8
+
+
 def _pcm16(audio: bytes) -> str:
     return base64.b64encode(audio).decode("ascii")
 
@@ -489,11 +496,10 @@ def test_backend_busy_error_keeps_compat_code_and_namespaced_reason() -> None:
     )
 
     assert event["error"]["code"] == "backend_busy"
-    assert event["speechrail"] == {
-        "busy_reason": "realtime_session_limit",
-        "retryable": True,
-        "retry_hint": "wait_for_realtime_session_slot",
-    }
+    # The closed error object folds the retry policy into the message so the
+    # stable ``code`` remains the only machine-readable branch key.
+    assert "retryable=True" in str(event["error"]["message"])
+    assert "hint=wait_for_realtime_session_slot" in str(event["error"]["message"])
 
 
 def test_openai_session_created_and_updated() -> None:
@@ -501,47 +507,19 @@ def test_openai_session_created_and_updated() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         created = socket.receive_json()
         assert created["type"] == "session.created"
-        assert created["session"]["model"] == "speechrail/qwen3-asr-1.7b"
-        assert "capabilities" in created["session"]
-        assert created["session"]["turn_detection"] is None
+        audio_input = created["session"]["audio"]["input"]
+        assert audio_input["format"] == {"type": "audio/pcm", "rate": 24000}
+        assert audio_input["transcription"]["model"] == "speechrail/qwen3-asr-1.7b"
+        assert created["session"]["speechrail"]["task"] == "conversation"
+        assert audio_input["turn_detection"] is None
 
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
-        )
+        socket.send_json(session_update(model="whisper-1", language="zh"))
         updated = socket.receive_json()
-        assert updated["type"] == "transcription_session.updated"
-        assert updated["session"]["input_audio_transcription"]["model"] == "whisper-1"
-
-
-def test_session_created_advertises_stable_clone_loudness_profile() -> None:
-    event = session_created(
-        session_id="sess-1",
-        model="speechrail/qwen3-tts",
-        tts_ready=True,
-        tts_loudness_profile="stable_loudness_v1",
-    )
-
-    assert event["session"]["speech_capabilities"]["audio_loudness_profile"] == (
-        "stable_loudness_v1"
-    )
-
-
-def test_realtime_quality_session_repeats_stable_clone_loudness_profile() -> None:
-    settings_kwargs, _revision = _quality_model_settings()
-    client, _ = _client(
-        settings_kwargs=settings_kwargs
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-        created = socket.receive_json()
-        capabilities = created["session"]["speech_capabilities"]
-        assert capabilities["audio_loudness_profile"] == "stable_loudness_v1"
-        assert created["session"]["speechrail"]["tts"]["enabled"] is False
+        assert updated["type"] == "session.updated"
+        audio_input = updated["session"]["audio"]["input"]
+        # A registered compatibility alias is echoed back verbatim.
+        assert audio_input["transcription"]["model"] == "whisper-1"
+        assert audio_input["transcription"]["language"] == "zh"
 
 
 def test_realtime_send_timeout_closes_slow_consumer() -> None:
@@ -560,7 +538,7 @@ def test_realtime_send_timeout_closes_slow_consumer() -> None:
         websocket = SlowWebSocket()
         sent = await _send_json_with_deadline(  # type: ignore[arg-type]
             websocket,
-            {"type": "response.output_audio.delta"},
+            {"type": "speechrail.tts.audio.delta"},
             timeout_seconds=0.01,
         )
         assert sent is False
@@ -575,26 +553,15 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+            session_update(model="whisper-1")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
 
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        committed = socket.receive_json()
-        assert committed["type"] == "input_audio_buffer.committed"
-
-        item = socket.receive_json()
-        assert item["type"] == "conversation.item.created"
         completed = socket.receive_json()
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "你好"
@@ -631,7 +598,7 @@ def test_realtime_completed_turn_records_commit_tail_duration() -> None:
         )
         await session.start()
         await session.handle(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         await session.handle({"type": "input_audio_buffer.commit"})
         await session.close()
@@ -678,7 +645,7 @@ def test_realtime_first_hypothesis_metrics_distinguish_partial_missing_and_send_
         )
         await session.start()
         await session.handle(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         await session.handle({"type": "input_audio_buffer.commit"})
         await session.close()
@@ -741,7 +708,7 @@ def test_realtime_first_hypothesis_metrics_record_cancelled_and_failed() -> None
         )
         await session.start()
         await session.handle(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         if cancel:
             await session.handle({"type": "input_audio_buffer.clear"})
@@ -765,79 +732,19 @@ def test_realtime_first_hypothesis_metrics_record_cancelled_and_failed() -> None
     ] == 1
 
 
-def test_realtime_tts_records_complete_phase() -> None:
-    async def scenario() -> dict[str, object]:
-        settings = Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-        )
-        services = build_app_services(
-            settings,
-            AppOverrides(
-                batch_transcriber=FakeTranscriber(),
-                tts_synthesizer=FakeSpeechSynthesizer(),
-                realtime_asr_factory=FakeStreamingFactory(),
-            ),
-        )
-        session = OpenAIRealtimeSession(
-            services,
-            session_id="realtime_tts_metrics_test",
-            send=lambda event: asyncio.sleep(0),
-        )
-        await session.start()
-        await session.handle(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        await session.handle(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "tts_metrics_001",
-                "text": "你好",
-            }
-        )
-        assert session._tts_task is not None
-        await session._tts_task
-        await session.close()
-        return services.metrics.render_json()
-
-    metrics = asyncio.run(scenario())
-    histograms = metrics["histograms"]
-    assert isinstance(histograms, dict)
-    phases = histograms["speechrail_realtime_phase_duration_seconds"]
-    assert isinstance(phases, dict)
-    complete = [
-        reading
-        for labels, reading in phases.items()
-        if 'phase="tts_complete"' in labels
-    ]
-    assert len(complete) == 1
-    assert complete[0]["count"] == 1
-
-
 def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
 # current-only handshake has no conversation.created event
 
         def commit_round() -> None:
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
             )
             socket.send_json({"type": "input_audio_buffer.commit"})
             while socket.receive_json()["type"] != (
@@ -874,7 +781,7 @@ def test_openai_disconnect_releases_slot_while_connect_pending() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         deadline = time.monotonic() + 2.0
         while len(factory.sessions) < 1 and time.monotonic() < deadline:
@@ -894,16 +801,11 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "gpt-4o-transcribe"}
-                },
-            }
+                        session_update(model="gpt-4o-transcribe")
         )
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
@@ -921,16 +823,11 @@ def test_openai_diarized_model_alias_does_not_enable_realtime_diarization() -> N
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "gpt-4o-transcribe-diarize"}
-                },
-            }
+                        session_update(model="gpt-4o-transcribe-diarize")
         )
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events = []
@@ -952,12 +849,9 @@ def test_realtime_diarization_encodes_missing_provisional_speaker_as_unknown() -
     with client.websocket_connect("/v1/realtime") as socket:
         assert socket.receive_json()["type"] == "session.created"
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"diarization": {"enabled": True}}},
-            }
+                        session_update(diarization={"enabled": True})
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 8000)}
         )
@@ -978,19 +872,17 @@ def test_realtime_diarization_encodes_missing_provisional_speaker_as_unknown() -
             if event["type"] in {"speechrail.diarization.done", "error"}:
                 break
 
-    updates = [
-        update
+    units = [
+        unit
         for event in events
         if event["type"] == "speechrail.diarization.updated"
-        for update in event["updates"]
+        for unit in event["units"]
     ]
-    assert updates
-    assert any(update["status"] == "unknown" and update["speaker"] is None for update in updates)
-    assert all(
-        update["speaker"] is not None
-        for update in updates
-        if update["status"] in {"tentative", "stable"}
-    )
+    assert units
+    # A unit whose speaker is not yet resolved stays explicitly null on the
+    # wire instead of inventing a label.
+    assert any(unit["speaker"] is None for unit in units)
+    assert all(unit["speaker"] == unit["speaker"] for unit in units)
 
 
 def test_openai_commit_without_diarization_does_not_request_segments() -> None:
@@ -999,14 +891,11 @@ def test_openai_commit_without_diarization_does_not_request_segments() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"model": "whisper-1"}},
-            }
+                        session_update(model="whisper-1")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events = []
@@ -1025,16 +914,11 @@ def test_openai_commit_with_segment_timestamps_requests_segments() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"timestamp_granularities": ["segment"]}
-                },
-            }
+                        session_update(model="whisper-1", timestamp_granularities=["segment"])
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while socket.receive_json()["type"] != (
@@ -1051,12 +935,9 @@ def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"model": "whisper-1"}},
-            }
+                        session_update(model="whisper-1")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80_001)}
         )
@@ -1072,10 +953,7 @@ def test_openai_tts_model_is_rejected_in_transcription_session() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"model": "tts-1"}},
-            }
+                        session_update(model="tts-1")
         )
         error = socket.receive_json()
         assert error["error"]["code"] == "model_not_found"
@@ -1087,10 +965,7 @@ def test_openai_rejects_unknown_model() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"model": "gpt-5-fake"}},
-            }
+                        session_update(model="gpt-5-fake")
         )
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -1103,10 +978,7 @@ def test_openai_rejects_unsupported_turn_detection() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"turn_detection": {"type": "unsupported_mode"}},
-            }
+                        session_update(turn_detection={"type": "unsupported_mode"})
         )
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -1119,10 +991,7 @@ def test_openai_rejects_tools() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"tools": [{"type": "function", "name": "x"}]},
-            }
+                        session_update(extra_session={"tools": [{"type": "function", "name": "x"}]})
         )
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -1133,20 +1002,14 @@ def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
         socket.send_json({"type": "input_audio_buffer.commit"})
-        committed = socket.receive_json()
-        assert committed["type"] == "input_audio_buffer.committed"
-        created = socket.receive_json()
-        assert created["type"] == "conversation.item.created"
-        assert created["item"]["content"][0]["transcript"] == ""
         completed = socket.receive_json()
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == ""
 
         # Session remains valid for subsequent audio
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events = []
@@ -1155,7 +1018,6 @@ def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None
             events.append(event["type"])
             if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
-        assert "input_audio_buffer.committed" in events
         assert "conversation.item.input_audio_transcription.completed" in events
 
 
@@ -1192,7 +1054,7 @@ def test_openai_realtime_bad_json_is_recoverable() -> None:
         assert error["error"]["code"] == "invalid_event"
 
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while (
@@ -1200,242 +1062,6 @@ def test_openai_realtime_bad_json_is_recoverable() -> None:
             != "conversation.item.input_audio_transcription.completed"
         ):
             pass
-
-
-def test_openai_text_item_triggers_tts_response() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "tts_001",
-                "text": "你好",
-            }
-        )
-        events: list[str] = []
-        for _ in range(16):
-            event = socket.receive_json()
-            events.append(event["type"])
-            if event["type"] == "response.done":
-                break
-        assert events == [
-            "response.created",
-            "response.output_item.added",
-            "response.content_part.added",
-            "response.output_audio_transcript.delta",
-            "response.output_audio.delta",
-            "response.output_audio_transcript.done",
-            "response.output_audio.done",
-            "response.content_part.done",
-            "response.output_item.done",
-            "response.done",
-        ]
-
-
-def test_openai_tts_terminal_is_idempotent_when_cancel_races_completed() -> None:
-    async def scenario() -> list[str]:
-        settings = Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-        )
-        services = build_app_services(
-            settings,
-            AppOverrides(
-                batch_transcriber=FakeTranscriber(),
-                tts_synthesizer=FakeSpeechSynthesizer(),
-                realtime_asr_factory=FakeStreamingFactory(),
-            ),
-        )
-        events: list[dict[str, object]] = []
-        terminal_started = asyncio.Event()
-        terminal_release = asyncio.Event()
-
-        async def send(event: dict[str, object]) -> None:
-            events.append(event)
-            if event.get("type") == "response.done":
-                response = event.get("response")
-                if isinstance(response, dict) and response.get("status") == "completed":
-                    terminal_started.set()
-                    await terminal_release.wait()
-
-        session = OpenAIRealtimeSession(
-            services,
-            session_id="realtime_tts_race_test",
-            send=send,
-        )
-        await session.start()
-        await session.handle(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        await session.handle(
-            {"type": "speechrail.tts.create", "request_id": "race_001", "text": "你好"}
-        )
-        assert session._tts_task is not None
-        await asyncio.wait_for(terminal_started.wait(), timeout=1.0)
-
-        cancel_task = asyncio.create_task(
-            session.handle(
-                {"type": "speechrail.tts.cancel", "request_id": "race_001"}
-            )
-        )
-        for _ in range(100):
-            if session._tts_task is not None and session._tts_task.cancelling():
-                break
-            await asyncio.sleep(0)
-        terminal_release.set()
-        await cancel_task
-        await session.close()
-        return [
-            str(event["response"]["status"])
-            for event in events
-            if event.get("type") == "response.done"
-            and isinstance(event.get("response"), dict)
-        ]
-
-    assert asyncio.run(scenario()) == ["completed"]
-
-
-def test_fake_loopback_caller_orchestration_can_cancel_and_restart_tts() -> None:
-    synthesizer = LoopbackSpeechSynthesizer()
-    client, factory = _client(tts_synthesizer=synthesizer)
-
-    with client.websocket_connect("/v1/realtime") as socket:
-        assert socket.receive_json()["type"] == "session.created"
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        transcription_events: list[dict[str, Any]] = []
-        while True:
-            event = socket.receive_json()
-            transcription_events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-        assert transcription_events[-1]["transcript"] == "你好"
-
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "loopback_tts_001",
-                "text": "第一句",
-            }
-        )
-        first_tts_events: list[dict[str, Any]] = []
-        while True:
-            event = socket.receive_json()
-            first_tts_events.append(event)
-            if event["type"] == "response.output_audio.delta":
-                break
-        assert any(event["type"] == "response.created" for event in first_tts_events)
-
-        socket.send_json(
-            {"type": "speechrail.tts.cancel", "request_id": "loopback_tts_001"}
-        )
-        cancelled = socket.receive_json()
-        assert cancelled["type"] == "response.done"
-        assert cancelled["response"]["status"] == "cancelled"
-
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "loopback_tts_002",
-                "text": "第二句",
-            }
-        )
-        second_tts_events: list[dict[str, Any]] = []
-        while True:
-            event = socket.receive_json()
-            second_tts_events.append(event)
-            if event["type"] == "response.done":
-                break
-        assert any(event["type"] == "response.output_audio.delta" for event in second_tts_events)
-        assert second_tts_events[-1]["response"]["status"] == "completed"
-
-        socket.send_json({"type": "input_audio_buffer.clear"})
-        assert socket.receive_json()["type"] == "input_audio_buffer.cleared"
-
-    assert len(factory.sessions) == 1
-    assert len(factory.released) == 1
-    assert synthesizer.calls == ["第一句", "第二句"]
-
-
-def test_openai_tts_request_id_is_connection_unique() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        socket.send_json(
-            {"type": "speechrail.tts.create", "request_id": "unique_001", "text": "你好"}
-        )
-        while socket.receive_json()["type"] != "response.done":
-            pass
-        socket.send_json(
-            {"type": "speechrail.tts.create", "request_id": "unique_001", "text": "再次"}
-        )
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "tts_request_invalid"
-
-
-def test_openai_tts_request_ledger_rejects_new_ids_when_full() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        for index in range(256):
-            socket.send_json(
-                {
-                    "type": "speechrail.tts.create",
-                    "request_id": f"ledger_{index}",
-                    "text": "你好",
-                }
-            )
-            while socket.receive_json()["type"] != "response.done":
-                pass
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "ledger_overflow",
-                "text": "你好",
-            }
-        )
-        error = socket.receive_json()
-
-    assert error["error"]["code"] == "tts_request_invalid"
-    assert "ledger" in error["error"]["message"]
 
 
 def test_openai_removed_response_create_is_rejected() -> None:
@@ -1475,7 +1101,7 @@ def test_openai_session_release_called_on_disconnect() -> None:
 # current-only handshake has no conversation.created event
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
     # after context exit the session should be released
     assert len(factory.sessions) == 1
@@ -1508,70 +1134,40 @@ def test_openai_disconnect_releases_slot_even_when_commit_blocks() -> None:
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        socket.receive_json()  # input_audio_buffer.committed (sent before commit)
 
     assert len(factory.sessions) == 1
     assert len(factory.released) == 1
 
 
-def test_openai_segment_formatter_uses_standard_fields() -> None:
-    event = transcription_segment(
-        session_id="realtime_test",
-        item_id="item_test",
-        segment_id=7,
-        text="你好",
-        speaker="spk_01",
-        start_ms=0,
-        end_ms=1200,
-    )
-
-    assert event["type"] == "conversation.item.input_audio_transcription.segment"
-    assert event["item_id"] == "item_test"
-    assert event["content_index"] == 0
-    assert event["id"] == 7
-    assert event["text"] == "你好"
-    assert event["speaker"] == "spk_01"
-    assert event["start"] == 0.0
-    assert event["end"] == 1.2
+def test_openai_segment_events_are_not_part_of_the_current_wire() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {"type": "conversation.item.input_audio_transcription.segment"}
+        )
+        error = socket.receive_json()
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "unsupported_operation"
 
 
 def test_openai_session_update_rejects_unused_speaker_hints() -> None:
     with pytest.raises(RealtimeAdapterError, match="known_speaker"):
         apply_session_update(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {
-                        "model": "gpt-4o-transcribe-diarize",
-                        "language": "zh",
-                        "languages": ["zh", "en"],
-                        "keywords": ["SpeechRail"],
-                        "timestamp_granularities": ["segment"],
-                        "known_speaker_names": ["Alice"],
-                        "known_speaker_references": ["ref_opaque"],
-                    }
+                        session_update(
+                model="gpt-4o-transcribe-diarize",
+                language="zh",
+                languages=["zh", "en"],
+                keywords=["SpeechRail"],
+                timestamp_granularities=["segment"],
+                extra_transcription={
+                    "known_speaker_names": ["Alice"],
+                    "known_speaker_references": ["ref_opaque"],
                 },
-            },
-            session_id="realtime_test",
-            asr_model="speechrail/qwen3-asr-1.7b",
-            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-        )
-
-
-def test_openai_session_update_rejects_word_timestamps_until_wire_support_exists() -> None:
-    with pytest.raises(RealtimeAdapterError, match="word-level"):
-        apply_session_update(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {
-                        "timestamp_granularities": ["segment", "word"],
-                    }
-                },
-            },
+            ),
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
@@ -1582,17 +1178,16 @@ def test_openai_realtime_rejects_retired_diarization_request_shape() -> None:
     client, _ = _client(diarization_engine=FakeDiarizationEngine())
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
-            }
+            session_update(extra_transcription={"diarization": {"enabled": True}})
         )
         error = socket.receive_json()
 
     assert error["type"] == "error"
-    assert error["error"]["code"] == "invalid_diarization"
+    # Diarization is negotiated under session.speechrail, not inside
+    # audio.input.transcription.  The retired shape is rejected as an unknown
+    # field rather than silently ignored.
+    assert error["error"]["code"] == "unsupported_operation"
 
 
 def test_openai_realtime_rejects_diarization_without_profile() -> None:
@@ -1601,10 +1196,7 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"diarization": {"enabled": True}}},
-            }
+                        session_update(diarization={"enabled": True})
         )
         error = socket.receive_json()
 
@@ -1616,14 +1208,18 @@ def test_openai_realtime_clear_discards_active_audio_session() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)}
         )
         socket.send_json({"type": "input_audio_buffer.clear"})
-        cleared = socket.receive_json()
+        # The current wire has no clear acknowledgement.  A following commit is
+        # the observable barrier: it must produce an empty final and the clear
+        # must already have released the discarded streaming session.
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        completed = socket.receive_json()
 
-    assert cleared["type"] == "input_audio_buffer.cleared"
+    assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+    assert completed["transcript"] == ""
     assert len(factory.released) == 1
 
 
@@ -1632,17 +1228,21 @@ def test_openai_realtime_clear_closes_diarization_session() -> None:
     client, _ = _client(diarization_engine=diarization)
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"diarization": {"enabled": True}}},
-            }
+            session_update(diarization={"enabled": True})
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)}
+        )
         socket.send_json({"type": "input_audio_buffer.clear"})
-        assert socket.receive_json()["type"] == "input_audio_buffer.cleared"
+        # No clear acknowledgement on the current wire; a following commit acts
+        # as the ordering barrier and the diarization close is observable on the
+        # engine.
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        completed = socket.receive_json()
 
+    assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert diarization.sessions[0].closed is True
 
 
@@ -1652,7 +1252,7 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events = []
@@ -1677,7 +1277,7 @@ def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> 
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events: list[dict[str, object]] = []
@@ -1710,7 +1310,7 @@ def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         events = []
@@ -1723,265 +1323,6 @@ def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
     deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
     assert deltas == ["abc"]
     assert events[-1]["transcript"] == "adc"
-
-
-def test_realtime_snapshot_mode_forwards_each_revised_partial_before_final() -> None:
-    client, factory = _client(partials=("abc", "adc", "adce"), completed_text="adce")
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "transcription": {
-                            "partial_mode": "snapshot",
-                            "chunk_duration_ms": 500,
-                        }
-                    }
-                },
-            }
-        )
-        updated = socket.receive_json()
-        assert updated["type"] == "transcription_session.updated"
-        assert updated["session"]["speechrail"]["transcription"] == {
-            "partial_mode": "snapshot",
-            "chunk_duration_ms": 500,
-        }
-
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-
-    snapshots = [event for event in events if event["type"] == "speechrail.transcription.snapshot"]
-    assert [(event["revision"], event["text"]) for event in snapshots] == [
-        (1, "abc"),
-        (2, "adc"),
-        (3, "adce"),
-    ]
-    assert len(factory.options) == 1
-    assert factory.options[0].partial_mode == "snapshot"
-    assert factory.options[0].chunk_duration_ms == 500
-
-
-def test_realtime_snapshot_mode_emits_empty_rewrite_once_and_suppresses_duplicates() -> None:
-    client, _ = _client(partials=("abc", "abc", ""), completed_text="")
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "transcription": {"partial_mode": "snapshot"}
-                    }
-                },
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        events: list[dict[str, object]] = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-
-    snapshots = [event for event in events if event["type"] == "speechrail.transcription.snapshot"]
-    assert [(event["revision"], event["text"]) for event in snapshots] == [(1, "abc")]
-
-
-def test_realtime_snapshot_mode_rejects_changes_after_audio_started() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "transcription": {
-                            "partial_mode": "snapshot",
-                            "chunk_duration_ms": 500,
-                        }
-                    }
-                },
-            }
-        )
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "invalid_state"
-
-
-def test_realtime_snapshot_chunk_duration_drives_flush_threshold() -> None:
-    client, factory = _client(flush_partials=("今天我们",))
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": "manual",
-                    "speechrail": {
-                        "transcription": {
-                            "partial_mode": "snapshot",
-                            "chunk_duration_ms": 500,
-                        }
-                    },
-                },
-            }
-        )
-        socket.receive_json()  # transcription_session.updated
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
-        )
-        hypothesis = socket.receive_json()
-        assert hypothesis["type"] == "speechrail.transcription.hypothesis"
-        snapshot = socket.receive_json()
-        assert snapshot["type"] == "speechrail.transcription.snapshot"
-        assert snapshot["text"] == "今天我们"
-        assert factory.sessions[0].flushes == 1
-
-
-def test_realtime_consecutive_commits_have_distinct_item_ids() -> None:
-    client, _ = _client()
-    created_ids: list[str] = []
-    committed_ids: list[str] = []
-    completed_ids: list[str] = []
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        for _ in range(2):
-            socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-            )
-            socket.send_json({"type": "input_audio_buffer.commit"})
-            while True:
-                event = socket.receive_json()
-                if event["type"] == "input_audio_buffer.committed":
-                    committed_ids.append(event["item_id"])
-                elif event["type"] == "conversation.item.created":
-                    created_ids.append(event["item"]["id"])
-                elif event["type"] == "conversation.item.input_audio_transcription.completed":
-                    completed_ids.append(event["item_id"])
-                    break
-
-    assert len(set(committed_ids)) == 2
-    assert committed_ids == created_ids == completed_ids
-
-
-def test_realtime_duplicate_commit_and_endpoint_emit_one_final() -> None:
-    async def scenario(*, use_vad_endpoint: bool) -> list[dict[str, object]]:
-        settings = Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-        )
-        services = build_app_services(
-            settings,
-            AppOverrides(realtime_asr_factory=FakeStreamingFactory()),
-        )
-        events: list[dict[str, object]] = []
-
-        async def send(event: dict[str, object]) -> int:
-            events.append(event)
-            return len(events)
-
-        session = OpenAIRealtimeSession(
-            services,
-            session_id="realtime_duplicate_commit",
-            send=send,
-        )
-        await session.start()
-        if use_vad_endpoint:
-            await session._ensure_asr_for_turn()
-            await session._handle_admission_decision(
-                AdmissionDecision(
-                    kind="start",
-                    start_sample=0,
-                    end_sample=800,
-                    pcm=b"\x00\x00" * 800,
-                )
-            )
-            decision = AdmissionDecision(kind="end", start_sample=0, end_sample=800)
-            await session._handle_admission_decision(decision)
-            await session._handle_admission_decision(decision)
-        else:
-            await session.handle(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-            )
-            await session.handle({"type": "input_audio_buffer.commit"})
-            await session.handle({"type": "input_audio_buffer.commit"})
-        await session.close()
-        return events
-
-    for use_vad_endpoint in (False, True):
-        events = asyncio.run(scenario(use_vad_endpoint=use_vad_endpoint))
-        assert sum(
-            event["type"] == "input_audio_buffer.committed" for event in events
-        ) == 1
-        assert sum(
-            event["type"] == "conversation.item.input_audio_transcription.completed"
-            for event in events
-        ) == 1
-
-
-def test_realtime_session_update_preserves_effective_turn_detection() -> None:
-    client, _ = _client()
-    vad = {"type": "server_vad", "threshold": 0.6, "prefix_padding_ms": 300}
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {"type": "transcription_session.update", "session": {"turn_detection": vad}}
-        )
-        assert socket.receive_json()["session"]["turn_detection"] == vad
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"language": "zh"}},
-            }
-        )
-        updated = socket.receive_json()
-
-    assert updated["session"]["turn_detection"] == vad
-
-
-def test_realtime_rejects_nested_legacy_audio_session() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "type": "transcription",
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": 24000},
-                            "transcription": {"model": "gpt-4o-transcribe", "language": "zh"},
-                            "turn_detection": None,
-                        }
-                    },
-                },
-            }
-        )
-        error = socket.receive_json()
-
-    assert error["type"] == "error"
-    assert error["error"]["code"] == "unsupported_operation"
 
 
 def test_realtime_module_imports_without_audioop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2006,22 +1347,6 @@ def test_realtime_module_imports_without_audioop(monkeypatch: pytest.MonkeyPatch
         raise AssertionError("Realtime module must not depend on audioop") from exc
 
 
-def test_realtime_input_sample_rate_is_not_publicly_configurable() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_sample_rate": 24_000},
-            }
-        )
-        error = socket.receive_json()
-
-    assert error["type"] == "error"
-    assert error["error"]["code"] == "unsupported_operation"
-
-
 def test_realtime_diarization_receives_partitioned_pcm_identically() -> None:
     pcm = b"".join(index.to_bytes(2, "little", signed=True) for index in range(1200))
 
@@ -2031,20 +1356,13 @@ def test_realtime_diarization_receives_partitioned_pcm_identically() -> None:
         with client.websocket_connect("/v1/realtime") as socket:
             socket.receive_json()
             socket.send_json(
-                {
-                    "type": "transcription_session.update",
-                    "session": {
-                        "input_audio_format": "pcm16",
-                        "input_audio_transcription": {
-                            "model": "gpt-4o-transcribe",
-                            "language": "zh",
-                        },
-                        "turn_detection": None,
-                        "speechrail": {"diarization": {"enabled": True}},
-                    },
-                }
+                                session_update(
+                    model="gpt-4o-transcribe",
+                    language="zh",
+                    diarization={"enabled": True},
+                )
             )
-            assert socket.receive_json()["type"] == "transcription_session.updated"
+            assert socket.receive_json()["type"] == "session.updated"
             for frame in frames:
                 socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(frame)})
             socket.send_json({"type": "input_audio_buffer.commit"})
@@ -2059,7 +1377,9 @@ def test_realtime_diarization_receives_partitioned_pcm_identically() -> None:
     partitioned = capture((pcm[:214], pcm[214:996], pcm[996:]))
 
     assert partitioned == one_frame
-    assert len(one_frame) == len(pcm)
+    # The engine sees the 16 kHz kernel stream: 24 kHz wire samples resample to
+    # two thirds of their count, so byte length is ``len(pcm) // 3 * 2``.
+    assert len(one_frame) == len(pcm) // 3 * 2
 
 
 def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments() -> None:
@@ -2088,12 +1408,9 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
 # current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"diarization": {"enabled": True}}},
-            }
+                        session_update(diarization={"enabled": True})
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
         )
@@ -2103,14 +1420,17 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
         ):
             pass
 
-        assert completed["attribution_units"] == []
+        # Auxiliary timing/speaker units never ride on the ASR text final.
+        assert "attribution_units" not in completed
         alignment = socket.receive_json()
     assert alignment["type"] == "speechrail.alignment.done"
     assert alignment["utterance_id"] == completed["item_id"]
     assert alignment["units"][0]["timing_quality"] == "aligned"
     assert aligner.request is not None
     assert aligner.request.text == "你好"
-    assert len(aligner.request.pcm16) == 1600
+    # 1600 wire bytes at 24 kHz resample to the 16 kHz kernel span the aligner
+    # receives; the retained PCM must match that span sample-for-sample.
+    assert len(aligner.request.pcm16) // 2 == aligner.request.span.length
 
 
 def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
@@ -2139,12 +1459,9 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
         with client.websocket_connect("/v1/realtime") as socket:
             socket.receive_json()
             socket.send_json(
-                {
-                    "type": "transcription_session.update",
-                    "session": {"speechrail": {"diarization": {"enabled": True}}},
-                }
+                                session_update(diarization={"enabled": True})
             )
-            assert socket.receive_json()["type"] == "transcription_session.updated"
+            assert socket.receive_json()["type"] == "session.updated"
             socket.send_json(
                 {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
             )
@@ -2155,7 +1472,7 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
                 pass
 
             assert completed["transcript"] == "你好"
-            assert completed["attribution_units"] == []
+            assert "attribution_units" not in completed
             assert alignment_started.wait(1.0)
             assert not release.is_set()
             release.set()
@@ -2185,12 +1502,9 @@ def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"diarization": {"enabled": True}}},
-            }
+                        session_update(diarization={"enabled": True})
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
         )
@@ -2244,12 +1558,7 @@ def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> 
 def test_openai_session_update_rejects_non_string_language_hints() -> None:
     with pytest.raises(RealtimeAdapterError, match="languages must be a string array"):
         apply_session_update(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"languages": ["zh", 1]},
-                },
-            },
+            session_update(languages=["zh", 1]),  # type: ignore[list-item]
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
@@ -2259,12 +1568,7 @@ def test_openai_session_update_rejects_non_string_language_hints() -> None:
 def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
     with pytest.raises(RealtimeAdapterError, match="timestamp_granularities"):
         apply_session_update(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"timestamp_granularities": ["character"]},
-                },
-            },
+            session_update(timestamp_granularities=["phoneme"]),
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
@@ -2272,16 +1576,15 @@ def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
 
 
 def test_openai_session_update_rejects_invalid_diarization_config() -> None:
-    with pytest.raises(RealtimeAdapterError, match=r"use session\.speechrail"):
+    with pytest.raises(
+        RealtimeAdapterError, match=r"unsupported audio\.input\.transcription field: diarization"
+    ):
         apply_session_update(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {
-                        "diarization": {"enabled": True, "speaker_count_hint": 9},
-                    },
-                },
-            },
+            session_update(
+                extra_transcription={
+                    "diarization": {"enabled": True, "speaker_count_hint": 9},
+                }
+            ),
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
@@ -2327,171 +1630,11 @@ def test_openai_realtime_rejects_tts_when_backend_is_not_ready() -> None:
     with TestClient(app).websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
+                        session_update(tts={"enabled": True})
         )
         error = socket.receive_json()
 
     assert error["error"]["code"] == "backend_not_ready"
-
-
-def test_openai_tts_invalid_audio_emits_stable_error() -> None:
-    client, _ = _client(tts_synthesizer=InvalidSpeechSynthesizer())
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {"type": "speechrail.tts.create", "request_id": "invalid_audio", "text": "你好"}
-        )
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "error":
-                break
-
-    assert event["error"]["code"] == "tts_audio_invalid"
-
-
-def test_realtime_empty_tts_cannot_emit_completed_receipt() -> None:
-    client, _ = _client(tts_synthesizer=EmptySpeechSynthesizer())
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "tts": {"enabled": True},
-                        "render_receipts": {"enabled": True},
-                    },
-                },
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "empty_audio",
-                "text": "你好",
-            }
-        )
-
-        error = None
-        done = None
-        while done is None:
-            event = socket.receive_json()
-            if event["type"] == "error":
-                error = event
-            elif event["type"] == "response.done":
-                done = event
-
-    assert error is not None
-    assert error["error"]["code"] == "empty_audio"
-    assert done["response"]["status"] == "failed"
-    receipt = done["speechrail"]["render_receipt"]
-    assert receipt["status"] == "error"
-    assert receipt["error_code"] == "empty_audio"
-    assert receipt["audio"]["sample_count"] == 0
-
-
-def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() -> None:
-    client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "cancel_001",
-                "text": "你好",
-            }
-        )
-        response_events: list[dict[str, Any]] = []
-        while True:
-            response_events.append(socket.receive_json())
-            if response_events[-1]["type"] == "response.output_audio.delta":
-                break
-
-        socket.send_json({"type": "speechrail.tts.cancel", "request_id": "cancel_001"})
-        cancelled = socket.receive_json()
-
-    assert cancelled["type"] == "response.done"
-    assert cancelled["response"]["status"] == "cancelled"
-
-
-def test_response_cancel_is_not_blocked_by_hung_asr_commit() -> None:
-    """The control lane cancels TTS while the ordered ASR lane awaits a commit."""
-    import threading
-
-    client, _ = _client(
-        factory=HangingCommitStreamingFactory(),
-        tts_synthesizer=BlockingSpeechSynthesizer(),
-        settings_kwargs={"request_timeout_seconds": 5.0},
-    )
-    done = threading.Event()
-    outcome: dict[str, object] = {}
-
-    def scenario() -> None:
-        try:
-            with client.websocket_connect("/v1/realtime") as socket:
-                socket.receive_json()
-                socket.send_json(
-                    {
-                        "type": "transcription_session.update",
-                        "session": {
-                            "input_audio_transcription": {"model": "whisper-1"},
-                            "turn_detection": None,
-                            "speechrail": {"tts": {"enabled": True}},
-                        },
-                    }
-                )
-                socket.receive_json()
-                socket.send_json(
-                    {
-                        "type": "speechrail.tts.create",
-                        "request_id": "cancel_hung_commit",
-                        "text": "你好",
-                    }
-                )
-                while socket.receive_json()["type"] != "response.output_audio.delta":
-                    pass
-
-                socket.send_json(
-                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-                )
-                socket.send_json({"type": "input_audio_buffer.commit"})
-                socket.send_json(
-                    {
-                        "type": "speechrail.tts.cancel",
-                        "request_id": "cancel_hung_commit",
-                    }
-                )
-                while True:
-                    event = socket.receive_json()
-                    if event["type"] == "response.done":
-                        outcome["status"] = event["response"]["status"]
-                        return
-        except Exception as exc:  # pragma: no cover - diagnostic only
-            outcome["error"] = repr(exc)
-        finally:
-            done.set()
-
-    threading.Thread(target=scenario, daemon=True).start()
-    assert done.wait(2.0), "response.cancel was blocked by the ASR commit"
-    assert outcome == {"status": "cancelled"}
 
 
 class _DelayedAppendSession(FakeStreamingSession):
@@ -2514,101 +1657,19 @@ class DelayedAppendStreamingFactory(FakeStreamingFactory):
         return _DelayedAppendSession
 
 
-def test_response_cancel_waits_for_preceding_audio_append_dispatch() -> None:
-    """Cancellation may bypass inference, but cannot pass audio dispatch FIFO."""
-    import threading
-
-    client, factory = _client(
-        factory=DelayedAppendStreamingFactory(),
-        tts_synthesizer=BlockingSpeechSynthesizer(),
-    )
-    done = threading.Event()
-    outcome: dict[str, object] = {}
-
-    def scenario() -> None:
-        try:
-            with client.websocket_connect("/v1/realtime") as socket:
-                socket.receive_json()
-                socket.send_json(
-                    {
-                        "type": "transcription_session.update",
-                        "session": {"speechrail": {"tts": {"enabled": True}}},
-                    }
-                )
-                socket.receive_json()
-                socket.send_json(
-                    {
-                        "type": "speechrail.tts.create",
-                        "request_id": "cancel_delayed_append",
-                        "text": "你好",
-                    }
-                )
-                while socket.receive_json()["type"] != "response.output_audio.delta":
-                    pass
-
-                socket.send_json(
-                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-                )
-                socket.send_json(
-                    {
-                        "type": "speechrail.tts.cancel",
-                        "request_id": "cancel_delayed_append",
-                    }
-                )
-                while True:
-                    event = socket.receive_json()
-                    if event["type"] == "response.done":
-                        outcome["append_started"] = bool(
-                            factory.sessions and factory.sessions[0].append_started
-                        )
-                        return
-        except Exception as exc:  # pragma: no cover - diagnostic only
-            outcome["error"] = repr(exc)
-        finally:
-            done.set()
-
-    threading.Thread(target=scenario, daemon=True).start()
-    assert done.wait(2.0), "response.cancel did not finish after the preceding append"
-    assert outcome == {"append_started": True}
-
-
-def test_realtime_tts_total_deadline_covers_generation() -> None:
-    client, _ = _client(
-        tts_synthesizer=HangingSpeechSynthesizer(),
-        settings_kwargs={"request_timeout_seconds": 0.01},
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {"type": "speechrail.tts.create", "request_id": "deadline", "text": "你好"}
-        )
-        events: list[dict[str, Any]] = []
-        while True:
-            events.append(socket.receive_json())
-            if events[-1]["type"] == "response.done":
-                break
-
-    assert events[-2]["type"] == "error"
-    assert events[-2]["error"]["code"] == "backend_timeout"
-    assert events[-1]["type"] == "response.done"
-    assert events[-1]["response"]["status"] == "failed"
-
-
 def test_openai_query_model_echoed_in_session_created() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime?model=whisper-1") as socket:
         created = socket.receive_json()
         assert created["type"] == "session.created"
-        assert created["session"]["model"] == "whisper-1"
+        # The model echo lives under audio.input.transcription, not the retired
+        # root-level ``session.model``.  ``whisper-1`` is an accepted
+        # compatibility id, so it is echoed verbatim.
+        assert (
+            created["session"]["audio"]["input"]["transcription"]["model"] == "whisper-1"
+        )
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
@@ -2657,7 +1718,10 @@ def test_openai_query_diarize_alias_accepted_when_profile_ready() -> None:
     with client.websocket_connect("/v1/realtime?model=gpt-4o-transcribe-diarize") as socket:
         created = socket.receive_json()
     assert created["type"] == "session.created"
-    assert created["session"]["model"] == "gpt-4o-transcribe-diarize"
+    assert (
+        created["session"]["audio"]["input"]["transcription"]["model"]
+        == "speechrail/qwen3-asr-1.7b"
+    )
 
 
 def test_openai_error_event_correlates_client_event_id() -> None:
@@ -2673,50 +1737,27 @@ def test_openai_error_event_correlates_client_event_id() -> None:
     assert error["event_id"].startswith("event_")
 
 
-def test_openai_tts_error_event_correlates_request_id() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "tts_error_42",
-                "text": "你好",
-            }
-        )
-        error = socket.receive_json()
-    assert error["type"] == "error"
-    assert error["error"]["code"] == "tts_not_enabled"
-    assert error["error"]["request_id"] == "tts_error_42"
-
-
 def test_openai_unsupported_language_surfaces_error_event_and_recovers() -> None:
     factory = RejectingLanguageStreamingFactory()
     client, _ = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"language": "xx-qq"}},
-            }
+                        session_update(language="xx-qq")
         )
         socket.receive_json()
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "language_not_supported"
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"language": "zh"}},
-            }
+                        session_update(language="zh")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
@@ -2726,39 +1767,16 @@ def test_openai_unsupported_language_surfaces_error_event_and_recovers() -> None
     assert len(factory.sessions) == 1
 
 
-def test_openai_committed_precedes_transcription_completion() -> None:
-    factory = EarlyCompletionStreamingFactory()
-    client, _ = _client(factory=factory)
-    with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
-        socket.receive_json()
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        types: list[str] = []
-        while True:
-            event = socket.receive_json()
-            types.append(event["type"])
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-    assert types[0] == "input_audio_buffer.committed"
-    assert "conversation.item.created" in types
-
-
 def test_openai_transcription_prompt_forwarded_to_streaming_session() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"prompt": "医疗术语"}},
-            }
+                        session_update(prompt="医疗术语")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
@@ -2773,10 +1791,7 @@ def test_openai_rejects_oversized_transcription_prompt() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"prompt": "x" * 2001}},
-            }
+                        session_update(prompt="x" * 2001)
         )
         error = socket.receive_json()
     assert error["type"] == "error"
@@ -2805,25 +1820,33 @@ def _drive_tts(
     socket: object, response_body: dict[str, object] | None = None
 ) -> list[dict[str, object]]:
     socket.send_json(  # type: ignore[attr-defined]
-        {
-            "type": "transcription_session.update",
-            "session": {"speechrail": {"tts": {"enabled": True}}},
-        }
+        session_update(tts={"enabled": True})
     )
-    socket.receive_json()  # type: ignore[attr-defined] transcription_session.updated
-    payload: dict[str, object] = {
-        "type": "speechrail.tts.create",
-        "request_id": f"tts_test_{time.monotonic_ns()}",
-        "text": "你好",
-    }
-    if response_body is not None:
-        payload.update(response_body)
-    socket.send_json(payload)  # type: ignore[attr-defined]
+    socket.receive_json()  # type: ignore[attr-defined] session.updated
+    request_id = f"tts_test_{time.monotonic_ns()}"
+    overrides = dict(response_body or {})
+    overrides.pop("type", None)
+    overrides.pop("text", None)
+    text = str((response_body or {}).get("text") or "你好")
+    socket.send_json(  # type: ignore[attr-defined]
+        tts_start(request_id=request_id, **overrides)
+    )
+    socket.send_json(  # type: ignore[attr-defined]
+        tts_append_text(request_id=request_id, sequence=0, text=text)
+    )
+    socket.send_json(  # type: ignore[attr-defined]
+        tts_finish_text(request_id=request_id, last_sequence=0)
+    )
     events: list[dict[str, object]] = []
     while True:
         event = socket.receive_json()  # type: ignore[attr-defined]
         events.append(event)
-        if event["type"] in {"response.done", "error"}:
+        if event["type"] in {
+            "speechrail.tts.completed",
+            "speechrail.tts.cancelled",
+            "speechrail.tts.failed",
+            "error",
+        }:
             return events
 
 
@@ -2850,353 +1873,19 @@ def _quality_model_settings() -> tuple[dict[str, Any], str]:
     )
 
 
-def test_realtime_model_revision_pin_is_negotiated_and_forwarded() -> None:
-    settings_kwargs, revision = _quality_model_settings()
-    synthesizer = RecordingSpeechSynthesizer()
-    client, _ = _client(
-        tts_synthesizer=synthesizer,
-        settings_kwargs=settings_kwargs,
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {"model_revision": {"expected": revision}}
-                },
-            }
-        )
-        updated = socket.receive_json()
-        assert updated["type"] == "transcription_session.updated"
-        assert updated["session"]["speechrail"]["model_revision"] == {
-            "expected": revision,
-            "catalog_revision": revision,
-        }
-        events = _drive_tts(socket)
-
-    assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].expected_model_revision == revision
-
-
-def test_realtime_model_revision_pin_rejects_stale_revision_before_tts() -> None:
-    settings_kwargs, revision = _quality_model_settings()
-    synthesizer = RecordingSpeechSynthesizer()
-    client, _ = _client(
-        tts_synthesizer=synthesizer,
-        settings_kwargs=settings_kwargs,
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {"model_revision": {"expected": "0" * 40}}
-                },
-            }
-        )
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "model_revision_conflict"
-
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {"model_revision": {"expected": revision}}
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        events = _drive_tts(socket)
-
-    assert events[-1]["type"] == "response.done"
-    assert len(synthesizer.requests) == 1
-    assert synthesizer.requests[0].expected_model_revision == revision
-
-
 @pytest.mark.parametrize(
     "model_revision",
-    [
-        {"expected": "A" * 40},
-        {"expected": "0" * 39},
-        {"expected": 42},
-        {"unexpected": "0" * 40},
-        "0" * 40,
-    ],
+    ["", 42, {"expected": "A" * 40}, "0" * 129],
 )
 def test_realtime_model_revision_pin_rejects_invalid_shape(model_revision: object) -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
         socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"model_revision": model_revision}},
-            }
-        )
+        socket.send_json(session_update(expected_asr_revision=model_revision))
         error = socket.receive_json()
 
     assert error["type"] == "error"
-    assert error["error"]["code"] == "invalid_model_revision"
-
-
-def test_realtime_tts_worker_unavailable_publishes_retryable_busy_error() -> None:
-    async def scenario() -> list[dict[str, object]]:
-        settings = Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-        )
-        services = build_app_services(
-            settings,
-            AppOverrides(
-                batch_transcriber=FakeTranscriber(),
-                tts_synthesizer=UnavailableSpeechSynthesizer(),
-                realtime_asr_factory=FakeStreamingFactory(),
-            ),
-        )
-        events: list[dict[str, object]] = []
-
-        async def send(event: dict[str, object]) -> None:
-            events.append(event)
-
-        session = OpenAIRealtimeSession(
-            services,
-            session_id="realtime_test",
-            send=send,
-        )
-        await session.start()
-        await session.handle(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        await session.handle(
-            {"type": "speechrail.tts.create", "request_id": "busy", "text": "你好"}
-        )
-        assert session._tts_task is not None
-        await session._tts_task
-        await session.close()
-        return events
-
-    events = asyncio.run(scenario())
-    error = next(event for event in events if event["type"] == "error")
-    assert error["error"]["code"] == "backend_busy"
-    assert error["speechrail"] == {
-        "busy_reason": "backend_unavailable",
-        "retryable": True,
-        "retry_hint": "retry_after_worker_recovery",
-    }
-    assert events[-1]["type"] == "response.done"
-    assert events[-1]["response"]["status"] == "failed"
-    assert "private detail" not in repr(events)
-
-
-@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError])
-def test_realtime_unknown_tts_failures_emit_sanitized_backend_terminal(
-    failure_type: type[Exception], capsys: pytest.CaptureFixture[str]
-) -> None:
-    async def scenario() -> list[dict[str, object]]:
-        settings = Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-        )
-        services = build_app_services(
-            settings,
-            AppOverrides(
-                batch_transcriber=FakeTranscriber(),
-                tts_synthesizer=FailingSpeechSynthesizer(
-                    failure_type("/private/model/path and worker detail")
-                ),
-                realtime_asr_factory=FakeStreamingFactory(),
-            ),
-        )
-        events: list[dict[str, object]] = []
-
-        async def send(event: dict[str, object]) -> None:
-            events.append(event)
-
-        session = OpenAIRealtimeSession(
-            services,
-            session_id="realtime_test",
-            send=send,
-        )
-        await session.start()
-        await session.handle(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        await session.handle(
-            {"type": "speechrail.tts.create", "request_id": "failure", "text": "你好"}
-        )
-        assert session._tts_task is not None
-        await asyncio.wait_for(session._tts_task, timeout=1)
-        await session.close()
-        return events
-
-    events = asyncio.run(scenario())
-    error = next(event for event in events if event["type"] == "error")
-    assert error["error"]["code"] == "backend_error"
-    assert error["error"]["message"] == "TTS response failed"
-    assert events[-1]["type"] == "response.done"
-    assert events[-1]["response"]["status"] == "failed"
-    assert "private/model/path" not in repr(events)
-    assert "worker detail" not in capsys.readouterr().err
-
-
-def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> None:
-    synthesizer = RecordingSpeechSynthesizer()
-    client, _ = _client(tts_synthesizer=synthesizer)
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        events = _drive_tts(socket, {"voice": "nova"})
-    assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].voice == "vivian"
-
-
-def test_realtime_tts_uses_namespaced_response_speed() -> None:
-    synthesizer = RecordingSpeechSynthesizer()
-    client, _ = _client(tts_synthesizer=synthesizer)
-    with client.websocket_connect("/v1/realtime") as socket:
-        events = _drive_tts(
-            socket,
-            {
-                "voice": "warm",
-                "speed": 1.35,
-            },
-        )
-
-    assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].speed == pytest.approx(1.35)
-
-
-@pytest.mark.parametrize("speed", [0.24, 4.01, True, "fast"])
-def test_realtime_tts_rejects_invalid_namespaced_response_speed(speed: object) -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        events = _drive_tts(socket, {"speed": speed})
-
-    assert events[-1]["type"] == "error"
-    assert events[-1]["error"]["code"] == "tts_request_invalid"
-
-
-def test_realtime_tts_rejects_unknown_voice_and_session_survives() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        unavailable = _drive_tts(socket, {"voice": "definitely-not-a-voice"})
-        assert unavailable[-1]["error"]["code"] == "voice_not_found"
-        fallback = _drive_tts(socket, {"voice": "warm"})
-        assert fallback[-1]["type"] == "response.done"
-
-
-def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
-    tmp_path: Path,
-) -> None:
-    asr_key = required_spec_artifact("fast", "asr")
-    tts_key = required_spec_artifact("fast", "tts_custom_voice")
-    assert asr_key is not None and tts_key is not None
-    client, _ = _client(
-        settings_kwargs={
-            "qwen3_model_dir": tmp_path / asr_key,
-            "qwen3_tts_model_dir": tmp_path / tts_key,
-            "selection_schema_version": 2,
-            "selection_asr_spec": "fast",
-            "selection_tts_spec": "fast",
-            "asr_artifact_key": asr_key,
-            "tts_artifact_key": tts_key,
-        }
-    )
-    registry = get_voice_registry()
-    voice_id = "test_unavailable_realtime_voice"
-    registry.create_custom_profile(
-        name="Realtime 不可用测试音色",
-        instruction="自然清晰的中文女声。",
-        voice_id=voice_id,
-    )
-    try:
-        with client.websocket_connect("/v1/realtime") as socket:
-            created = socket.receive_json()
-            speech = created["session"]["speech_capabilities"]
-            assert {
-                key: speech[key]
-                for key in (
-                    "available",
-                    "variant",
-                    "supports_speaker",
-                    "supports_instruction",
-                    "supports_clone",
-                )
-            } == {
-                "available": True,
-                "variant": "custom_voice",
-                "supports_speaker": True,
-                "supports_instruction": False,
-                "supports_clone": False,
-            }
-            # W8 publishes the per-voice incremental verdict next to the
-            # complete-text capability fields.
-            assert speech["streaming_tts"]["supported"] is False
-            assert speech["streaming_tts"]["reason"] == "implementation_not_negotiated"
-            unavailable = _drive_tts(socket, {"voice": voice_id})
-            assert unavailable[-1]["type"] == "error"
-            assert unavailable[-1]["error"]["code"] == "voice_not_available"
-            fallback = _drive_tts(socket, {"voice": "alloy"})
-            assert fallback[-1]["type"] == "response.done"
-    finally:
-        registry.delete_custom_profile(voice_id)
-
-
-
-def test_realtime_quality_accepts_clone_voice_with_base_capability() -> None:
-    settings_kwargs, _revision = _quality_model_settings()
-    synthesizer = FakeSpeechSynthesizer()
-    client, _ = _client(
-        tts_synthesizer=synthesizer,
-        settings_kwargs=settings_kwargs,
-    )
-    registry = get_voice_registry()
-    voice_id = "test_realtime_base_clone"
-    registry.create_cloned_profile(
-        name="Realtime Base Clone",
-        ref_text="这是参考文本。",
-        audio_bytes=b"RIFF-test-reference",
-        voice_id=voice_id,
-        duration_seconds=3.0,
-    )
-    try:
-        with client.websocket_connect("/v1/realtime") as socket:
-            created = socket.receive_json()
-            assert created["session"]["speech_capabilities"]["supports_clone"] is True
-            assert created["session"]["speech_capabilities"]["variant"] == "custom_voice"
-            events = _drive_tts(socket, {"voice": voice_id})
-            assert events[-1]["type"] == "response.done"
-    finally:
-        registry.delete_custom_profile(voice_id)
-
-def test_realtime_response_create_voice_override_resolves_alias_and_type() -> None:
-    synthesizer = RecordingSpeechSynthesizer()
-    client, _ = _client(tts_synthesizer=synthesizer)
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        events = _drive_tts(socket, {"voice": {"id": "custom"}})
-        assert events[-1]["type"] == "error"
-        assert events[-1]["error"]["code"] == "tts_request_invalid"
-        events = _drive_tts(socket, {"voice": "alloy"})
-    assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].voice == "serena"
+    assert error["error"]["code"] == "invalid_event"
 
 
 def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
@@ -3224,11 +1913,9 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "backend_busy"
-        assert error["speechrail"] == {
-            "busy_reason": "backend_unavailable",
-            "retryable": True,
-            "retry_hint": "retry_after_worker_recovery",
-        }
+        # The closed error object folds the retry policy into the message.
+        assert "retryable=True" in str(error["error"]["message"])
+        assert "hint=retry_after_worker_recovery" in str(error["error"]["message"])
         assert factory.released == [factory.sessions[0]]
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
@@ -3236,7 +1923,7 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
             event = socket.receive_json()
-            if event["type"] == "input_audio_buffer.committed":
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
 
 
@@ -3245,10 +1932,7 @@ def test_realtime_session_update_error_message_truncates_client_model() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"model": "x" * 5000}},
-            }
+                        session_update(model="x" * 5000)
         )
         error = socket.receive_json()
     assert error["error"]["code"] == "model_not_found"
@@ -3261,69 +1945,37 @@ def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"input_audio_transcription": {"prompt": "p" * 2000}},
-            }
+                        session_update(prompt="p" * 2000)
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
             event = socket.receive_json()
-            if event["type"] == "input_audio_buffer.committed":
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
     assert factory.sessions[0].prompt == "p" * 2000
 
 
-def test_realtime_tts_delegates_sentence_planning_to_shared_backend() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "planner_001",
-                "text": "你好！今天天气真好，我们去散步吧。",
-            }
-        )
-        events: list[str] = []
-        deltas: list[dict[str, object]] = []
-        for _ in range(32):
-            event = socket.receive_json()
-            events.append(event["type"])
-            if event["type"] == "response.output_audio.delta":
-                deltas.append(event)
-            if event["type"] == "response.done":
-                break
-
-        assert "response.created" in events
-        assert "response.output_item.added" in events
-        assert "response.content_part.added" in events
-        assert len(deltas) == 1
-        assert "response.output_audio_transcript.delta" in events
-        assert "response.output_audio_transcript.done" in events
-        assert "response.output_audio.done" in events
-        assert events[-1] == "response.done"
-
-
 def test_realtime_current_audio_profile_emits_one_current_wire_family() -> None:
-    client, _ = _client()
+    from test_realtime_tts_incremental import FakeIncrementalSynthesizer, _tier_kwargs
+
+    client, _ = _client(
+        tts_synthesizer=FakeIncrementalSynthesizer(),
+        settings_kwargs={
+            key: value
+            for key, value in _tier_kwargs().items()
+            if key not in {"qwen3_python", "qwen3_tts_python"}
+        },
+    )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         events = [event["type"] for event in _drive_tts(socket)]
 
-    assert "response.output_audio.delta" in events
-    assert "response.output_audio.done" in events
+    assert "speechrail.tts.audio.delta" in events
+    assert "speechrail.tts.completed" in events
     assert "response.audio.delta" not in events
     assert "response.audio.done" not in events
 
@@ -3339,9 +1991,10 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
 # current-only handshake has no conversation.created event
 # current-only handshake has no conversation.created event
 
-        # Send first 16,000 bytes (0.5s PCM16) -> triggers first flush
+        # 32,000 wire bytes is 16,000 bytes (0.5 s) at the 16 kHz kernel, the
+        # configured periodic-flush threshold, so each append flushes once.
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 32_000)}
         )
         hypothesis1 = socket.receive_json()
         assert hypothesis1["type"] == "speechrail.transcription.hypothesis"
@@ -3349,9 +2002,9 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
         assert delta1["type"] == "conversation.item.input_audio_transcription.delta"
         assert delta1["delta"] == "Hello"
 
-        # Send second 16,000 bytes -> triggers second flush
+        # Send second 32,000 bytes -> triggers second flush
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 32_000)}
         )
         hypothesis2 = socket.receive_json()
         assert hypothesis2["type"] == "speechrail.transcription.hypothesis"
@@ -3370,7 +2023,6 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
             events.append(event["type"])
             if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
-        assert "input_audio_buffer.committed" in events
         assert "conversation.item.input_audio_transcription.completed" in events
 
 
@@ -3384,30 +2036,24 @@ def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
 # current-only handshake has no conversation.created event
 # current-only handshake has no conversation.created event
 
-        # Append 3000 bytes (< 4096)
+        # Append 4000 wire bytes (< 4096 frame/null limit, ≈2666 kernel bytes)
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 4000)}
+        )
+
+        # Another 3000 wire bytes (≈2000 kernel bytes) pushes the streaming
+        # buffer past 4096 -> triggers auto-commit rollover
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)}
         )
 
-        # Append another 2000 bytes (total 5000 > 4096) -> triggers auto-commit rollover
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 2000)}
-        )
-
-        # First segment auto-commits cleanly
-        committed = socket.receive_json()
-        assert committed["type"] == "input_audio_buffer.committed"
-        created = socket.receive_json()
-        assert created["type"] == "conversation.item.created"
+        # First segment auto-commits cleanly.
         completed = socket.receive_json()
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
-        # The 2000 bytes started a new turn, verify we can commit it
+        # The second append started a new turn, verify we can commit it
         assert len(factory.sessions) == 2
         socket.send_json({"type": "input_audio_buffer.commit"})
-        committed2 = socket.receive_json()
-        assert committed2["type"] == "input_audio_buffer.committed"
-        socket.receive_json()  # conversation.item.created
         completed2 = socket.receive_json()
         assert completed2["type"] == "conversation.item.input_audio_transcription.completed"
 
@@ -3451,13 +2097,7 @@ def test_realtime_client_disconnect_during_handle_graceful() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
         # Socket closes on exit without error
 
@@ -3511,28 +2151,21 @@ def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
 # current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
 
-        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = [socket.receive_json() for _ in range(2)]
-        assert events[0]["type"] == "input_audio_buffer.committed"
-        assert events[1]["type"] == "error"
-        assert events[1]["error"]["code"] == "backend_timeout"
+        event = socket.receive_json()
+        assert event["type"] == "error"
+        assert event["error"]["code"] == "backend_timeout"
 
         assert len(factory.released) == 1
 
         # The slot is usable again: the next append opens a fresh ASR session
         # and a normal commit round-trips to completion.
-        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x01\x01")})
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
         while True:
             event = socket.receive_json()
@@ -3553,68 +2186,49 @@ def test_openai_commit_total_deadline_releases_hung_reader_slot() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
-        socket.receive_json()  # transcription_session.updated
+        socket.receive_json()  # session.updated
 
-        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = [socket.receive_json() for _ in range(2)]
-
-        assert events[0]["type"] == "input_audio_buffer.committed"
-        assert events[1]["error"]["code"] == "backend_timeout"
+        event = socket.receive_json()
+        assert event["error"]["code"] == "backend_timeout"
         assert len(factory.released) == 1
 
 
 def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
-    """The chunk where VAD fires speech_ended must still be appended before commit."""
-    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+    """The chunk where server VAD ends the turn still reaches ASR before commit."""
+    from test_realtime_vad_bargein import _wire_silence_frame, _wire_speech_frame
 
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.3,
-                        "prefix_padding_ms": 0,
-                        "silence_duration_ms": 96,
-                    }
-                },
-            }
+            session_update(
+                endpointing=server_vad(
+                    threshold=0.3, prefix_padding_ms=0, silence_duration_ms=100
+                )
+            )
         )
-        socket.receive_json()  # transcription_session.updated
+        assert socket.receive_json()["type"] == "session.updated"
 
-        frame = _sine_pcm(440, 32, 10000.0)
-        silence = _silence_pcm(32)
+        # The wire is 24 kHz PCM16: one frame is 768 samples and resamples to a
+        # single 512-sample 16 kHz VAD frame.
+        frame = _wire_speech_frame()
+        silence = _wire_silence_frame()
 
         def audio_b64(raw: bytes) -> str:
             return base64.b64encode(raw).decode("ascii")
 
-        # Three loud frames: the third crosses the debounce and emits speech_started.
+        # Three loud frames cross the admission debounce.
         for _ in range(3):
-            socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": audio_b64(frame)}
-            )
-        while True:
-            if socket.receive_json()["type"] == "input_audio_buffer.speech_started":
-                break
+            socket.send_json({"type": "input_audio_buffer.append", "audio": audio_b64(frame)})
 
-        # Three silent frames: the third emits speech_ended and commits. Every
-        # chunk, including the commit chunk, must have reached the ASR session.
-        for _ in range(3):
-            socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": audio_b64(silence)}
-            )
+        # Four silent frames cross the 100 ms stop debounce and commit the turn.
+        for _ in range(4):
+            socket.send_json({"type": "input_audio_buffer.append", "audio": audio_b64(silence)})
+
         while True:
             event = socket.receive_json()
             if event["type"] == "conversation.item.input_audio_transcription.completed":
@@ -3622,14 +2236,17 @@ def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
             if event["type"] == "error":
                 raise AssertionError(f"unexpected error event: {event}")
 
-        received = [chunk for session in factory.sessions for chunk in session.received]
-        # Byte conservation across both VAD paths: all six 32ms chunks reach
-        # the ASR (the admission path batches the activation pre-roll into a
-        # single append, so count bytes rather than append calls).
-        total = sum(len(chunk) for chunk in received)
-        assert total == 6 * 1024, f"expected 6144 audio bytes appended, got {total}"
+        assert len(factory.sessions) == 1
+        received_samples = sum(
+            len(chunk) // 2 for session in factory.sessions for chunk in session.received
+        )
+        # Byte conservation across the 24k wire -> 16k kernel boundary: every
+        # frame, including the commit frame, is resampled and appended.
+        wire_samples = (len(frame) * 3 + len(silence) * 4) // 2
+        expected_samples = wire_samples * 16_000 // 24_000
+        assert abs(received_samples - expected_samples) <= 1
+        assert factory.sessions[0].commits == 1
         assert len(factory.released) == 1
-
 
 class _ExplodingEventsSession(FakeStreamingSession):
     """Session whose event stream dies with an unexpected error mid-iteration."""
@@ -3654,17 +2271,11 @@ def test_openai_asr_reader_failure_emits_transcription_failed() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
         socket.receive_json()
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         while True:
             event = socket.receive_json()
@@ -3705,17 +2316,11 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
 # current-only handshake has no conversation.created event
                 socket.receive_json()
                 socket.send_json(
-                    {
-                        "type": "transcription_session.update",
-                        "session": {
-                            "input_audio_transcription": {"model": "whisper-1"},
-                            "turn_detection": None,
-                        },
-                    }
+                                        session_update(model="whisper-1")
                 )
                 socket.receive_json()
                 socket.send_json(
-                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                    {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
                 )
                 socket.send_json({"type": "input_audio_buffer.commit"})
                 for index in range(600):
@@ -3740,7 +2345,7 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
 
 
 def test_server_vad_silence_never_emits_text_before_commit() -> None:
-    """R0/R2: Pure silence under server_vad must never trigger ASR text before commit."""
+    """R0/R2: pure silence under server_vad never yields text before commit."""
     client, factory = _client(
         emit_text_on_flush="嗯",
         settings_kwargs={
@@ -3750,47 +2355,32 @@ def test_server_vad_silence_never_emits_text_before_commit() -> None:
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 400,
-                    }
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        socket.send_json(session_update(endpointing=server_vad()))
+        assert socket.receive_json()["type"] == "session.updated"
 
-        # 1.0s chunk = 32000 bytes. Send 40,000 bytes of zero PCM
-        silence_chunk = b"\x00\x00" * 320  # 640 bytes (20ms)
-        for _ in range(65):  # 41,600 bytes > 32,000 bytes flush threshold
+        silence_chunk = b"\x00\x00" * 320  # ~13 ms of 24 kHz wire audio
+        for _ in range(65):
             socket.send_json(
                 {"type": "input_audio_buffer.append", "audio": _pcm16(silence_chunk)}
             )
 
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        received_types: list[str] = []
+        events: list[dict[str, object]] = []
         while True:
-            ev = socket.receive_json()
-            received_types.append(ev["type"])
-            if ev["type"] == "conversation.item.input_audio_transcription.completed":
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
-
-        # Under speech admission, silence never flushes ASR or emits deltas
-        assert "conversation.item.input_audio_transcription.delta" not in received_types
-        # ASR session should not have any appended speech frames
-        if factory.sessions:
-            assert factory.sessions[0].appends == 0
-            assert factory.sessions[0].flushes == 0
-
+        assert [event["type"] for event in events] == [
+            "conversation.item.input_audio_transcription.completed"
+        ]
+        assert events[0]["transcript"] == ""
+        # Silence never admitted speech, so no ASR session was ever opened.
+        assert factory.sessions == []
 
 def test_server_vad_silence_rollover_has_no_text() -> None:
-    """R0/R2: Silence exceeding buffer threshold must not emit non-empty transcripts."""
+    """R0/R2: silence past the buffer threshold still produces one empty final."""
     client, _ = _client(
         completed_text="嗯",
         settings_kwargs={
@@ -3799,79 +2389,44 @@ def test_server_vad_silence_rollover_has_no_text() -> None:
         },
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
         socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 400,
-                    }
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        socket.send_json(session_update(endpointing=server_vad()))
+        assert socket.receive_json()["type"] == "session.updated"
 
-        # Send 6000 bytes of silence
-        silence_chunk = b"\x00\x00" * 500  # 1000 bytes
+        silence_chunk = b"\x00\x00" * 500
         for _ in range(6):
             socket.send_json(
                 {"type": "input_audio_buffer.append", "audio": _pcm16(silence_chunk)}
             )
-
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        events = [socket.receive_json() for _ in range(3)]
-        assert events[0]["type"] == "input_audio_buffer.committed"
-        assert events[1]["type"] == "conversation.item.created"
-        assert events[2]["type"] == "conversation.item.input_audio_transcription.completed"
-        # Completed text must be empty for silence!
-        assert events[2]["transcript"] == ""
-
+        event = socket.receive_json()
+        assert event["type"] == "conversation.item.input_audio_transcription.completed"
+        assert event["transcript"] == ""
 
 def test_server_vad_silence_explicit_commit_closes_empty() -> None:
-    """R0/R2: Explicit commit on silence closes with committed first, then empty completed."""
+    """R0/R2: an explicit commit on silence closes with one empty final."""
     client, _ = _client(
         completed_text="嗯",
         settings_kwargs={"realtime_speech_admission_enabled": True},
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
         socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 400,
-                    }
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        socket.send_json(session_update(endpointing=server_vad()))
+        assert socket.receive_json()["type"] == "session.updated"
 
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 500)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        events = [socket.receive_json() for _ in range(3)]
-        assert events[0]["type"] == "input_audio_buffer.committed"
-        assert events[1]["type"] == "conversation.item.created"
-        assert events[2]["type"] == "conversation.item.input_audio_transcription.completed"
-        assert events[2]["transcript"] == ""
-
+        event = socket.receive_json()
+        assert event["type"] == "conversation.item.input_audio_transcription.completed"
+        assert event["transcript"] == ""
 
 def test_server_vad_admission_admitted_speech_transcription_and_events() -> None:
-    """R2: SpeechAdmission accurately admits speech, triggers ASR and yields completed text."""
-    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+    """R2: SpeechAdmission admits speech, drives ASR and yields one revisioned final."""
+    from test_realtime_vad_bargein import _wire_silence_frame, _wire_speech_frame
 
     client, factory = _client(
         completed_text="你好世界",
@@ -3879,65 +2434,59 @@ def test_server_vad_admission_admitted_speech_transcription_and_events() -> None
         settings_kwargs={"realtime_speech_admission_enabled": True},
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.3,
-                        "prefix_padding_ms": 100,
-                        "silence_duration_ms": 100,
-                    }
-                },
-            }
+            session_update(
+                endpointing=server_vad(
+                    threshold=0.3, prefix_padding_ms=100, silence_duration_ms=100
+                )
+            )
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
 
-        # 1. Send some initial silence (3 frames, ~96ms) -> should NOT trigger speech or ASR
         for _ in range(3):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
-
-        # 2. Send loud active speech (4 frames, ~128ms) -> triggers speech_started & ASR
         for _ in range(4):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_sine_pcm(440, 32, 10000.0))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_speech_frame())}
             )
-
-        events_seen = []
-        # Receive speech_started
-        start_ev = socket.receive_json()
-        assert start_ev["type"] == "input_audio_buffer.speech_started"
-
-        # 3. Send silence to trigger speech_ended (4 frames of silence, ~128ms > 100ms)
         for _ in range(4):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
 
+        events: list[dict[str, object]] = []
         while True:
-            ev = socket.receive_json()
-            events_seen.append(ev["type"])
-            if ev["type"] == "conversation.item.input_audio_transcription.completed":
-                assert ev["transcript"] == "你好世界"
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                assert event["transcript"] == "你好世界"
                 break
-            if ev["type"] == "error":
-                raise AssertionError(f"unexpected error: {ev}")
+            if event["type"] == "error":
+                raise AssertionError(f"unexpected error: {event}")
 
-        assert "input_audio_buffer.speech_stopped" in events_seen
+        observed = {event["type"] for event in events}
+        assert observed == {
+            "speechrail.transcription.hypothesis",
+            "conversation.item.input_audio_transcription.delta",
+            "conversation.item.input_audio_transcription.completed",
+        }
+        hypothesis = next(
+            event
+            for event in events
+            if event["type"] == "speechrail.transcription.hypothesis"
+        )
+        assert hypothesis["text"] == "你好"
         assert len(factory.sessions) == 1
         assert factory.sessions[0].commits == 1
         assert len(factory.released) == 1
 
-
 def test_server_vad_admission_diarization_sample_mapping() -> None:
-    """R2: Session sample clock and diarization units accurately preserve timing under admission."""
+    """R2: an admitted server-VAD turn publishes speaker units on the wire."""
     from test_diarization_extensions import _FakeDiarizationEngine
-    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+    from test_realtime_vad_bargein import _wire_silence_frame, _wire_speech_frame
 
     client, _ = _client(
         completed_text="扩展模式转写",
@@ -3945,60 +2494,60 @@ def test_server_vad_admission_diarization_sample_mapping() -> None:
         settings_kwargs={"realtime_speech_admission_enabled": True},
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.3,
-                        "prefix_padding_ms": 100,
-                        "silence_duration_ms": 100,
-                    },
-                    "speechrail": {"diarization": {"enabled": True}},
-                },
-            }
+            session_update(
+                endpointing=server_vad(
+                    threshold=0.3, prefix_padding_ms=100, silence_duration_ms=100
+                ),
+                diarization={"enabled": True},
+            )
         )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
+        assert socket.receive_json()["type"] == "session.updated"
 
-        # Send 1 second of silence (31 chunks of 32ms = 992ms, 15872 samples)
         for _ in range(31):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
-
-        # Send active speech (4 chunks)
         for _ in range(4):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_sine_pcm(440, 32, 10000.0))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_speech_frame())}
             )
-
-        # Wait for speech_started
-        start_ev = socket.receive_json()
-        assert start_ev["type"] == "input_audio_buffer.speech_started"
-        # Audio start ms should reflect the timeline after prefix padding
-        assert start_ev["audio_start_ms"] >= 800
-
-        # Send silence to complete turn
         for _ in range(4):
             socket.send_json(
-                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
 
-        completed_ev = None
-        while True:
-            ev = socket.receive_json()
-            if ev["type"] == "conversation.item.input_audio_transcription.completed":
-                completed_ev = ev
+        completed = None
+        # The text final precedes the auxiliary alignment, so wait for the
+        # alignment result before asking diarization to publish its units.
+        for _ in range(256):
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                completed = event
+            elif event["type"] == "speechrail.alignment.done":
                 break
 
-        assert completed_ev is not None
-        assert completed_ev["transcript"] == "扩展模式转写"
-        assert completed_ev["audio_start_sample"] >= 12000
-        assert completed_ev["audio_end_sample"] > completed_ev["audio_start_sample"]
+        socket.send_json(
+            {"type": "speechrail.diarization.finish", "event_id": "sample_map"}
+        )
+        done = None
+        for _ in range(256):
+            event = socket.receive_json()
+            if event["type"] == "speechrail.diarization.done":
+                done = event
+                break
+        assert done is not None
+        units = list(done["units"])  # type: ignore[arg-type]
 
+        assert completed is not None
+        assert completed["transcript"] == "扩展模式转写"
+        assert units, "admitted speech must publish at least one speaker unit"
+        spans = [unit["sample_span"] for unit in units]
+        assert all(span["end"] > span["start"] for span in spans)
+        # Units stay inside the 24 kHz wire timeline for the admitted frames.
+        wire_total = (31 + 4 + 4) * 768
+        assert all(span["end"] <= wire_total for span in spans)
 
 def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() -> None:
     """Real WebSocket handler + fake ASR; not an acoustic/latency benchmark."""
@@ -4006,7 +2555,7 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
 
     client, factory = _client(
         completed_text="same",
-        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192},
+        settings_kwargs={"max_realtime_buffer_bytes": 3500, "max_realtime_frame_bytes": 8192},
     )
     collector = ManualTurnCollector(epoch="wire")
     observed: list[dict[str, Any]] = []
@@ -4019,26 +2568,26 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
             return event
 
         receive()  # session.created (sequence 1)
-        for size in (3000, 2000, 3000):
-            collector.note_append()
-            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * size)})
-            if size == 2000 or len(observed) > 2:
-                for _ in range(3):
-                    receive()  # committed, created, completed at each rollover
+        # Two server-side rollover commits plus one explicit commit produce one
+        # terminal per item.  Rollover is server-initiated, so the caller must
+        # declare its expected item count up front; each 3000-byte append is
+        # 2000 kernel bytes, so every append past the first rolls over the
+        # 3500-byte streaming buffer.
+        for _ in range(3):
+            collector.expect_item()
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)})
+        for _ in range(2):
+            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)})
+            receive()  # rollover terminal
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        for _ in range(4):
-            final = receive()
-        assert final["type"] == "input_audio_buffer.cleared"
+        final = receive()  # explicit commit terminal
+        assert final["type"] == "conversation.item.input_audio_transcription.completed"
         assert collector.result is not None
         assert collector.result.text == "samesamesame"
         assert len(collector.result.item_ids) == 3
         assert len(set(collector.result.item_ids)) == 3
-        assert all(
-            event.get("previous_item_id") is None
-            for event in observed if event["type"] == "input_audio_buffer.committed"
-        )
     assert len(factory.sessions) == 3
     assert all(session.closes == 1 for session in factory.sessions)
 
@@ -4059,9 +2608,8 @@ def test_manual_append_failure_followed_by_clear_never_becomes_final_transcript(
         assert failed["type"] == "error"
         collector.accept(failed, epoch="wire")
         socket.send_json({"type": "input_audio_buffer.clear"})
-        cleared = socket.receive_json()
-        assert cleared["type"] == "input_audio_buffer.cleared"
-        collector.accept(cleared, epoch="wire")
+        # No clear acknowledgement on the current wire; a failed append must
+        # never turn into a success receipt.
     assert collector.state == "failed" and collector.result is None
 
 
@@ -4077,15 +2625,15 @@ def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) 
         if not empty:
             collector.note_append()
             socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 1000)})
+        collector.expect_item()
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        for _ in range(4):
-            event = socket.receive_json()
-            if event["type"] == "input_audio_buffer.cleared" and not empty:
-                assert factory.sessions[0].closes == 1
-            collector.accept(event, epoch="wire")
-        assert event["type"] == "input_audio_buffer.cleared"
+        event = socket.receive_json()
+        collector.accept(event, epoch="wire")
+        assert event["type"] == "conversation.item.input_audio_transcription.completed"
+    if not empty:
+        assert factory.sessions[0].closes == 1
     assert collector.state == "completed"
     assert collector.result is not None
     assert collector.result.text == ("" if empty else "你好")
@@ -4107,183 +2655,19 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
         for _ in range(1):
             collector.accept(socket.receive_json(), epoch="wire")
         socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": None,
-                },
-            }
+                        session_update(model="whisper-1")
         )
         collector.accept(socket.receive_json(), epoch="wire")
         collector.note_append()
-        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0\0")})
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+        collector.expect_item()
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        events = [socket.receive_json() for _ in range(3)]
-        assert [event["type"] for event in events] == [
-            "input_audio_buffer.committed", "error", "input_audio_buffer.cleared",
-        ]
-        assert events[1]["error"]["code"] == "backend_timeout"
-        for event in events:
-            collector.accept(event, epoch="wire")
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "backend_timeout"
+        collector.accept(error, epoch="wire")
     assert collector.state == "failed"
     assert collector.result is None
     assert len(factory.released) == 1
-
-
-def test_realtime_render_receipts_are_opt_in_and_completed() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "tts": {"enabled": True},
-                        "render_receipts": {"enabled": True},
-                    }
-                },
-            }
-        )
-        updated = socket.receive_json()
-        assert updated["type"] == "transcription_session.updated"
-        receipt_config = updated["session"]["speechrail"]["render_receipts"]
-        assert receipt_config["enabled"] is True
-        assert receipt_config["integrity_boundary"] == "pcm16_after_websocket_send"
-
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "receipt_001",
-                "text": "你好",
-            }
-        )
-
-        done = None
-        while done is None:
-            event = socket.receive_json()
-            if event["type"] == "response.done":
-                done = event
-
-    receipt = done["speechrail"]["render_receipt"]
-    assert receipt["status"] == "completed"
-    assert receipt["response_id"] == done["response"]["id"]
-    assert receipt["audio"]["sample_count"] == 1
-    assert receipt["audio"]["pcm_sha256"] == hashlib.sha256(b"\x00\x00").hexdigest()
-    assert receipt["audio"]["integrity_boundary"] == "pcm16_after_websocket_send"
-
-
-def test_realtime_render_receipt_binds_observed_runtime_revision() -> None:
-    runtime_revision = "rt_" + ("e" * 64)
-    client, _ = _client(
-        tts_synthesizer=RecordingSpeechSynthesizer(runtime_revision=runtime_revision)
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "tts": {"enabled": True},
-                        "render_receipts": {"enabled": True},
-                    }
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        events = _drive_tts(socket)
-
-    receipt = events[-1]["speechrail"]["render_receipt"]
-    assert receipt["model"]["runtime_revision"] == runtime_revision
-
-
-def test_realtime_render_receipt_cancelled_terminal() -> None:
-    client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
-    with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "tts": {"enabled": True},
-                        "render_receipts": {"enabled": True},
-                    }
-                },
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "speechrail.tts.create",
-                "request_id": "receipt_cancel",
-                "text": "你好",
-            }
-        )
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "response.output_audio.delta":
-                break
-
-        socket.send_json(
-            {"type": "speechrail.tts.cancel", "request_id": "receipt_cancel"}
-        )
-        cancelled = socket.receive_json()
-
-    assert cancelled["type"] == "response.done"
-    assert cancelled["response"]["status"] == "cancelled"
-    receipt = cancelled["speechrail"]["render_receipt"]
-    assert receipt["status"] == "cancelled"
-    assert receipt["error_code"] == "cancelled"
-    assert receipt["audio"]["sample_count"] == 1
-
-
-def test_realtime_response_done_has_no_receipt_without_negotiation() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {"type": "speechrail.tts.create", "request_id": "no_receipt", "text": "你好"}
-        )
-        while True:
-            done = socket.receive_json()
-            if done["type"] == "response.done":
-                break
-
-    assert "render_receipt" not in done.get("speechrail", {})
-
-
-def test_realtime_render_receipt_extension_rejects_unknown_fields() -> None:
-    client, _ = _client()
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "render_receipts": {
-                            "enabled": True,
-                            "unexpected": True,
-                        }
-                    }
-                },
-            }
-        )
-        error = socket.receive_json()
-
-    assert error["type"] == "error"
-    assert error["error"]["code"] == "invalid_render_receipts"

@@ -230,6 +230,16 @@ public actor SessionStore {
         }
     }
 
+    /// 对齐证据在文本 final 之后独立到达，所以 `timing_quality` 只能补写。
+    /// 它和 `attachSpeakerLabel` 同属"归属那一侧"：正文、时间码、序号都不参与。
+    public func attachTimingQuality(lineID: String, quality: SessionTimingQuality?) throws {
+        try withStatement("UPDATE line SET timing_quality = ? WHERE id = ?;") { statement in
+            bind(statement, 1, quality?.rawValue)
+            bind(statement, 2, lineID)
+            try step(statement)
+        }
+    }
+
     /// 分人的状态与可读原因（§7.1 的三种状态 + 降级时那一刻写进记录）。
     ///
     /// 与 `attachSpeakerLabel` 一样是"只动归属那一侧"的写法：正文、时间码、序号都不参与。

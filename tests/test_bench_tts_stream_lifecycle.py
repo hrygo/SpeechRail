@@ -58,16 +58,31 @@ class ScriptedConnection:
         self.sent: list[dict[str, Any]] = []
         self._script = list(script)
         self._clock = clock
+        self._last_start_request_id: str | None = None
 
     def send(self, event: dict[str, Any]) -> None:
         self.sent.append(event)
+        if event.get("type") == "speechrail.tts.start":
+            request_id = event.get("request_id")
+            if isinstance(request_id, str):
+                self._last_start_request_id = request_id
 
     def recv(self) -> dict[str, Any]:
         if not self._script:
             raise AssertionError("the benchmark read past the end of the fake script")
         event = self._script.pop(0)
+        self._resolve_request_marker(event)
         self._clock.advance(0.001)
         return event
+
+    def _resolve_request_marker(self, event: dict[str, Any]) -> None:
+        """Bind a scripted ``@main`` / ``@probe`` frame to the live request ids."""
+
+        marker = event.get("request_id")
+        if marker == "@main" and self._last_start_request_id is not None:
+            event["request_id"] = self._last_start_request_id
+        elif marker == "@probe" and self._last_start_request_id is not None:
+            event["request_id"] = f"{self._last_start_request_id}_probe"
 
     def remaining(self) -> list[dict[str, Any]]:
         """Frames this connection never delivered to the turn under test."""
@@ -252,31 +267,24 @@ def test_cancel_turn_leaves_the_shared_connection_clean() -> None:
 
     ``--mode soak`` reuses one connection for complete / interrupt / idle-cancel
     cycles.  A release probe that stopped at ``speechrail.tts.started`` left its
-    own ``response.done`` queued, and the very next cycle then read that frame as
-    an answer to itself: the idle-cancel probe asserted, and the following
-    complete turn failed with ``RealtimeTurnError``.
+    own ``speechrail.tts.cancelled`` queued, and the very next cycle then read
+    that frame as an answer to itself: the idle-cancel probe asserted, and the
+    following complete turn failed with ``RealtimeTurnError``.
     """
 
     clock = FakeClock()
     connection = ScriptedConnection(
         [
-            {"type": "transcription_session.updated"},
-            {"type": "speechrail.tts.started", "response_id": "resp_cancel"},
+            {"type": "session.updated"},
+            {"type": "speechrail.tts.started", "request_id": "@main"},
             {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
             {
-                "type": "response.output_audio.delta",
+                "type": "speechrail.tts.audio.delta",
                 "delta": base64.b64encode(b"\x01\x00\x02\x00").decode("ascii"),
-                "speechrail": {"sample_rate": 24_000},
             },
-            {
-                "type": "response.done",
-                "response": {"id": "resp_cancel", "status": "cancelled"},
-            },
-            {"type": "speechrail.tts.started", "response_id": "resp_probe"},
-            {
-                "type": "response.done",
-                "response": {"id": "resp_probe", "status": "cancelled"},
-            },
+            {"type": "speechrail.tts.cancelled", "request_id": "@main"},
+            {"type": "speechrail.tts.started", "request_id": "@probe"},
+            {"type": "speechrail.tts.cancelled", "request_id": "@probe"},
         ],
         clock,
     )

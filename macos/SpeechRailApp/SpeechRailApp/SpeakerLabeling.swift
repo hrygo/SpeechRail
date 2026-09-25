@@ -59,7 +59,6 @@ public final class SpeakerLabeling {
     public private(set) var displayNames: [String: String] = [:]
     public private(set) var lineCounts: [String: Int] = [:]
     public private(set) var firstOrdinal: [String: Int] = [:]
-    public private(set) var suggestions: [RealtimeASRClient.SpeakerLink] = []
     public private(set) var state: State = .off
     /// 降级的可读原因（面板上原话显示，也是 `session.diarization_note` 的内容）。
     public private(set) var note: String?
@@ -84,7 +83,6 @@ public final class SpeakerLabeling {
         displayNames = [:]
         lineCounts = [:]
         firstOrdinal = [:]
-        suggestions = []
         lineByUnit = [:]
         appliedByUnit = [:]
         mergedInto = [:]
@@ -140,6 +138,8 @@ public final class SpeakerLabeling {
             guard let lineID = lineByUnit[unit.segmentUID] else { continue }
             let desired = unit.speaker
             if let applied = appliedByUnit[unit.segmentUID], applied == desired { continue }
+            // 没有任何归属可清除时（对齐单元本身不带说话人）不产生一次空写。
+            if desired == nil, appliedByUnit[unit.segmentUID] == nil { continue }
             do {
                 try await coordinator.attachSpeakerLabel(lineID: lineID, label: desired)
             } catch {
@@ -155,11 +155,6 @@ public final class SpeakerLabeling {
                 appliedByUnit.removeValue(forKey: unit.segmentUID)
             }
         }
-    }
-
-    /// 会话级声学建议。只登记，不自动合并——那会替用户做决定。
-    public func noteSuggestions(_ links: [RealtimeASRClient.SpeakerLink]) {
-        suggestions = links
     }
 
     /// 这一行当前归属到的标签（按 uid 反查）。
@@ -257,7 +252,8 @@ public final class SpeakerLabeling {
                 displayName: displayNames[label],
                 lineCount: lineCounts[label] ?? 0,
                 firstOrdinal: firstOrdinal[label],
-                suggestedMergeInto: suggestions.first { $0.from == label }?.to,
+                // 当前 wire 不再给会话级声学建议，所以这一栏永远是空的。
+                suggestedMergeInto: nil,
                 mergedLabels: Set(mergedInto.keys)
             )
         }

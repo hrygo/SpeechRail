@@ -10,31 +10,42 @@ final class RealtimeTTSStreamTests: XCTestCase {
     func testStartAppendFinishUseTheContractFieldNames() {
         let start = SpeechRailTTSStart(
             requestID: "caller-turn-42",
+            task: .conversation,
             voice: "serena",
             speed: 1.0,
-            expectedVoiceRevision: "vr_1",
-            expectedModelRevision: "deadbeef"
+            voiceRevision: "vr_1",
+            expectedModelRevision: "deadbeef",
+            eventID: "evt-tts-1"
         ).jsonObject
         XCTAssertEqual(start["type"] as? String, "speechrail.tts.start")
+        XCTAssertEqual(start["event_id"] as? String, "evt-tts-1")
         XCTAssertEqual(start["request_id"] as? String, "caller-turn-42")
+        XCTAssertEqual(start["task"] as? String, "conversation")
         XCTAssertEqual(start["voice"] as? String, "serena")
-        XCTAssertEqual(start["expected_voice_revision"] as? String, "vr_1")
+        XCTAssertEqual(start["voice_revision"] as? String, "vr_1")
         XCTAssertEqual(start["expected_model_revision"] as? String, "deadbeef")
         XCTAssertNil(start["limits"], "没要求收紧限额时不该带 limits")
+        XCTAssertNil(start["response_id"], "旧 response 身份已移除")
 
         let append = SpeechRailTTSAppendText(
             requestID: "caller-turn-42",
             sequence: 3,
             text: "这是调用方已经稳定的一小段文本。",
-            responseID: "resp_1"
+            eventID: "evt-tts-2"
         ).jsonObject
         XCTAssertEqual(append["type"] as? String, "speechrail.tts.append_text")
+        XCTAssertEqual(append["event_id"] as? String, "evt-tts-2")
         XCTAssertEqual(append["sequence"] as? Int, 3)
-        XCTAssertEqual(append["response_id"] as? String, "resp_1")
+        XCTAssertNil(append["response_id"])
 
-        let finish = SpeechRailTTSFinishText(requestID: "caller-turn-42", lastSequence: -1).jsonObject
+        let finish = SpeechRailTTSFinishText(
+            requestID: "caller-turn-42",
+            lastSequence: 3,
+            eventID: "evt-tts-3"
+        ).jsonObject
         XCTAssertEqual(finish["type"] as? String, "speechrail.tts.finish_text")
-        XCTAssertEqual(finish["last_sequence"] as? Int, -1)
+        XCTAssertEqual(finish["last_sequence"] as? Int, 3)
+        XCTAssertEqual(finish["event_id"] as? String, "evt-tts-3")
         XCTAssertNil(finish["response_id"])
     }
 
@@ -44,12 +55,9 @@ final class RealtimeTTSStreamTests: XCTestCase {
             {
               "type": "speechrail.tts.started",
               "request_id": "req-1",
-              "response_id": "resp-1",
-              "protocol_version": 1,
-              "implementation_version": "tts-stream-v1",
-              "voice": "serena",
-              "voice_variant": "custom_voice",
-              "voice_mode": "builtin",
+              "task_id": "task-1",
+              "plan_id": "plan-1",
+              "voice_revision": "vr_1",
               "limits": {
                 "max_append_codepoints": 512,
                 "max_total_codepoints": 4096,
@@ -59,16 +67,16 @@ final class RealtimeTTSStreamTests: XCTestCase {
                 "utterance_wall_clock_seconds": 120.0,
                 "slow_consumer_seconds": 2.0
               },
-              "output_format": {"type": "pcm16", "sample_rate": 24000, "channels": 1}
+              "output_format": {"type": "audio/pcm", "sample_rate": 24000, "channels": 1}
             }
             """)
         )
 
         let started = try XCTUnwrap(TTSSessionStarted(object: payload))
         XCTAssertEqual(started.requestID, "req-1")
-        XCTAssertEqual(started.responseID, "resp-1")
-        XCTAssertEqual(started.protocolVersion, 1)
-        XCTAssertEqual(started.voiceVariant, "custom_voice")
+        XCTAssertEqual(started.taskID, "task-1")
+        XCTAssertEqual(started.planID, "plan-1")
+        XCTAssertEqual(started.voiceRevision, "vr_1")
         XCTAssertEqual(started.sampleRate, 24_000)
         XCTAssertEqual(started.channels, 1)
         XCTAssertEqual(started.limits?.maxAppendCodepoints, 512)
@@ -82,7 +90,6 @@ final class RealtimeTTSStreamTests: XCTestCase {
             {
               "type": "speechrail.tts.text_accepted",
               "request_id": "req-1",
-              "response_id": "resp-1",
               "append_sequence": 2,
               "accepted_codepoints": 7,
               "total_codepoints": 19,
@@ -99,15 +106,15 @@ final class RealtimeTTSStreamTests: XCTestCase {
     }
 
     func testAudioPositionNamespacesChunkIndexAndSampleOffset() throws {
-        let speechrail = try XCTUnwrap(
-            jsonObject(#"{"kind":"tts","chunk_index":3,"sample_offset":4800,"sample_rate":24000,"channels":1}"#)
+        let payload = try XCTUnwrap(
+            jsonObject(#"{"type":"speechrail.tts.audio.delta","chunk_index":3,"sample_offset":4800}"#)
         )
-        let position = try XCTUnwrap(TTSAudioPosition(speechrail: speechrail))
+        let position = try XCTUnwrap(TTSAudioPosition(object: payload))
 
         XCTAssertEqual(position.chunkIndex, 3)
         XCTAssertEqual(position.sampleOffset, 4_800)
         XCTAssertEqual(position.nextSampleOffset(pcmBytes: 960), 5_280)
-        XCTAssertNil(TTSAudioPosition(speechrail: jsonObject(#"{"kind":"tts","chunk_index":0}"#)))
+        XCTAssertNil(TTSAudioPosition(object: jsonObject(#"{"chunk_index":0}"#) ?? [:]))
     }
 
     func testClientStreamsTextAndDropsMisplacedAudio() async throws {
@@ -122,99 +129,84 @@ final class RealtimeTTSStreamTests: XCTestCase {
         }
 
         try await client.startTTSStream(requestID: "req-1")
-        let startText = await transport.lastSentPayload()
-        let startPayload = try XCTUnwrap(jsonObject(startText))
+        let sentStart = await transport.lastSentPayload()
+        let startPayload = try XCTUnwrap(jsonObject(sentStart))
         XCTAssertEqual(startPayload["type"] as? String, "speechrail.tts.start")
         XCTAssertEqual(startPayload["voice"] as? String, "serena")
+        XCTAssertEqual(startPayload["task"] as? String, "conversation")
+        XCTAssertNotNil(startPayload["event_id"])
 
-        await transport.enqueue(.text(text(jsonObject("""
-        {
-          "type": "speechrail.tts.started",
-          "request_id": "req-1",
-          "response_id": "resp-1",
-          "protocol_version": 1,
-          "limits": {
-            "max_append_codepoints": 512, "max_total_codepoints": 4096,
-            "max_pending_codepoints": 2048, "max_pending_audio_bytes": 48000,
-            "input_wait_seconds": 15.0, "utterance_wall_clock_seconds": 120.0,
-            "slow_consumer_seconds": 2.0
-          },
-          "output_format": {"type": "pcm16", "sample_rate": 24000, "channels": 1}
-        }
-        """))))
+        await transport.enqueue(.text(text(started(requestID: "req-1"))))
 
-        let started = await events.next()
-        guard case .ttsStarted(let startedRequest, let startedResponse, let limits) = started?.payload else {
-            return XCTFail("expected started, got \(String(describing: started?.payload))")
+        let startedEvent = await events.next()
+        guard case .ttsStarted(let startedRequest, let startedTask, let limits) = startedEvent?.payload else {
+            return XCTFail("expected started, got \(String(describing: startedEvent?.payload))")
         }
         XCTAssertEqual(startedRequest, "req-1")
-        XCTAssertEqual(startedResponse, "resp-1")
+        XCTAssertEqual(startedTask, "task-1")
         XCTAssertEqual(limits?.maxAppendCodepoints, 512)
 
         try await client.appendTTSText("你好。", sequence: 0)
-        let appendText = await transport.lastSentPayload()
-        let appendPayload = try XCTUnwrap(jsonObject(appendText))
+        let sentAppend = await transport.lastSentPayload()
+        let appendPayload = try XCTUnwrap(jsonObject(sentAppend))
         XCTAssertEqual(appendPayload["type"] as? String, "speechrail.tts.append_text")
         XCTAssertEqual(appendPayload["sequence"] as? Int, 0)
-        XCTAssertEqual(appendPayload["response_id"] as? String, "resp-1")
+        XCTAssertNotNil(appendPayload["event_id"])
 
-        await transport.enqueue(.text(text(jsonObject("""
-        {
-          "type": "speechrail.tts.text_accepted",
-          "request_id": "req-1",
-          "response_id": "resp-1",
-          "append_sequence": 0,
-          "accepted_codepoints": 3,
-          "total_codepoints": 3
-        }
-        """))))
-        let accepted = await events.next()
-        guard case .ttsTextAccepted(_, _, let appendSequence, let totalCodepoints) = accepted?.payload else {
-            return XCTFail("expected text_accepted, got \(String(describing: accepted?.payload))")
+        await transport.enqueue(
+            .text(text(accepted(requestID: "req-1", appendSequence: 0, totalCodepoints: 3)))
+        )
+        let acceptedEvent = await events.next()
+        guard case .ttsTextAccepted(_, _, let appendSequence, let totalCodepoints) = acceptedEvent?.payload else {
+            return XCTFail("expected text_accepted, got \(String(describing: acceptedEvent?.payload))")
         }
         XCTAssertEqual(appendSequence, 0)
         XCTAssertEqual(totalCodepoints, 3)
 
-        await transport.enqueue(.text(text(audioDelta(responseID: "resp-1", pcm: Data([1, 2]), chunkIndex: 0, sampleOffset: 0))))
+        await transport.enqueue(
+            .text(text(audioDelta(requestID: "req-1", pcm: Data([1, 2]), chunkIndex: 0, sampleOffset: 0)))
+        )
         let audio = await events.next()
-        guard case .responseAudio(let audioRequest, let audioResponse, let pcm) = audio?.payload else {
+        guard case .ttsAudio(let audioRequest, let audioTask, let pcm) = audio?.payload else {
             return XCTFail("expected audio, got \(String(describing: audio?.payload))")
         }
         XCTAssertEqual(audioRequest, "req-1")
-        XCTAssertEqual(audioResponse, "resp-1")
+        XCTAssertEqual(audioTask, "task-1")
         XCTAssertEqual(pcm, Data([1, 2]))
 
-        // 乱序块 + 奇数字节 + 旧 response：三种都必须被丢掉。
-        await transport.enqueue(.text(text(audioDelta(responseID: "resp-1", pcm: Data([3, 4]), chunkIndex: 5, sampleOffset: 99))))
-        await transport.enqueue(.text(text(audioDelta(responseID: "resp-1", pcm: Data([5, 6, 7]), chunkIndex: 1, sampleOffset: 1))))
-        await transport.enqueue(.text(text(audioDelta(responseID: "resp-old", pcm: Data([8, 9]), chunkIndex: 1, sampleOffset: 1))))
-        await transport.enqueue(.text(#"{"type":"input_audio_buffer.speech_started"}"#))
+        // 乱序块 + 奇数字节 + 旧 request：三种都必须被丢掉。
+        await transport.enqueue(.text(text(audioDelta(requestID: "req-1", pcm: Data([3, 4]), chunkIndex: 5, sampleOffset: 99))))
+        await transport.enqueue(.text(text(audioDelta(requestID: "req-1", pcm: Data([5, 6, 7]), chunkIndex: 1, sampleOffset: 1))))
+        await transport.enqueue(.text(text(audioDelta(requestID: "req-old", pcm: Data([8, 9]), chunkIndex: 1, sampleOffset: 1))))
+        await transport.enqueue(
+            .text(text(accepted(requestID: "req-1", appendSequence: 1, totalCodepoints: 5)))
+        )
 
         let marker = await events.next()
-        guard case .speechStarted = marker?.payload else {
+        guard case .ttsTextAccepted = marker?.payload else {
             return XCTFail("错位音频不该进播放层，got \(String(describing: marker?.payload))")
         }
-        // 旧 response 的块属于"静默隔离"，不计入本轮的畸形计数；本轮真正畸形的有两块。
+        // 旧 request 的块属于"静默隔离"，不计入本轮的畸形计数；本轮真正畸形的有两块。
         let dropped = await client.droppedAudioChunks
         XCTAssertEqual(dropped, 2)
 
         // 补齐正确的下一块后，序号继续推进。
-        await transport.enqueue(.text(text(audioDelta(responseID: "resp-1", pcm: Data([10, 11]), chunkIndex: 1, sampleOffset: 1))))
-        await transport.enqueue(.text(text(finishedDone(requestID: "req-1", responseID: "resp-1"))))
-        try await client.finishTTSText(lastSequence: 0)
+        await transport.enqueue(.text(text(audioDelta(requestID: "req-1", pcm: Data([10, 11]), chunkIndex: 1, sampleOffset: 1))))
+        await transport.enqueue(.text(text(completed(requestID: "req-1"))))
+        try await client.finishTTSText(lastSequence: 1)
 
         let followUp = await events.next()
-        guard case .responseAudio(_, _, let secondPCM) = followUp?.payload else {
+        guard case .ttsAudio(_, _, let secondPCM) = followUp?.payload else {
             return XCTFail("expected audio, got \(String(describing: followUp?.payload))")
         }
         XCTAssertEqual(secondPCM, Data([10, 11]))
 
         let done = await events.next()
-        guard case .responseDone(let requestID, let responseID, let status, _) = done?.payload else {
-            return XCTFail("expected response.done, got \(String(describing: done?.payload))")
+        guard case .ttsEnded(let requestID, let taskID, let status, _, _) = done?.payload else {
+            return XCTFail("expected tts terminal, got \(String(describing: done?.payload))")
         }
         XCTAssertEqual(requestID, "req-1")
-        XCTAssertEqual(responseID, "resp-1")
+        XCTAssertEqual(taskID, "task-1")
         XCTAssertEqual(status, "completed")
         await client.close()
     }
@@ -232,30 +224,62 @@ final class RealtimeTTSStreamTests: XCTestCase {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func audioDelta(responseID: String, pcm: Data, chunkIndex: Int, sampleOffset: Int) -> [String: Any] {
+    private func started(requestID: String) -> [String: Any] {
         [
-            "type": "response.output_audio.delta",
-            "response_id": responseID,
-            "delta": pcm.base64EncodedString(),
-            "speechrail": [
-                "kind": "tts",
-                "chunk_index": chunkIndex,
-                "sample_offset": sampleOffset,
-                "sample_rate": 24_000,
-                "channels": 1
+            "type": "speechrail.tts.started",
+            "task_id": "task-1",
+            "plan_id": "plan-1",
+            "request_id": requestID,
+            "output_format": ["type": "audio/pcm", "sample_rate": 24_000, "channels": 1],
+            "limits": [
+                "max_append_codepoints": 512,
+                "max_total_codepoints": 4096,
+                "max_pending_codepoints": 2048,
+                "max_pending_audio_bytes": 48_000,
+                "input_wait_seconds": 15.0,
+                "utterance_wall_clock_seconds": 120.0,
+                "slow_consumer_seconds": 2.0
             ]
         ]
     }
 
-    private func finishedDone(requestID: String, responseID: String) -> [String: Any] {
+    private func accepted(
+        requestID: String,
+        appendSequence: Int,
+        totalCodepoints: Int
+    ) -> [String: Any] {
         [
-            "type": "response.done",
-            "response": ["id": responseID, "status": "completed"],
-            "speechrail": [
-                "kind": "tts",
-                "orchestration": "caller",
-                "request_id": requestID
-            ]
+            "type": "speechrail.tts.text_accepted",
+            "task_id": "task-1",
+            "request_id": requestID,
+            "append_sequence": appendSequence,
+            "accepted_codepoints": max(1, totalCodepoints),
+            "total_codepoints": max(1, totalCodepoints)
+        ]
+    }
+
+    private func audioDelta(
+        requestID: String,
+        pcm: Data,
+        chunkIndex: Int,
+        sampleOffset: Int
+    ) -> [String: Any] {
+        [
+            "type": "speechrail.tts.audio.delta",
+            "task_id": "task-1",
+            "request_id": requestID,
+            "chunk_index": chunkIndex,
+            "sample_offset": sampleOffset,
+            "delta": pcm.base64EncodedString()
+        ]
+    }
+
+    private func completed(requestID: String) -> [String: Any] {
+        [
+            "type": "speechrail.tts.completed",
+            "task_id": "task-1",
+            "request_id": requestID,
+            "generated_samples": 2
         ]
     }
 }
@@ -272,8 +296,8 @@ private actor TTSStreamTransport: RealtimeASRTransport {
 
     func send(_ text: String) async throws {
         sent.append(text)
-        if text.contains("transcription_session.update") {
-            enqueue(.text(#"{"type":"transcription_session.updated"}"#))
+        if text.contains("\"type\":\"session.update\"") {
+            enqueue(.text(#"{"type":"session.updated"}"#))
         }
     }
 

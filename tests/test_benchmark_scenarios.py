@@ -31,13 +31,11 @@ class _FakeRealtimeConnection:
 
     def send(self, event: dict[str, object]) -> None:
         event_type = event.get("type")
-        if event_type == "transcription_session.update":
-            self._events.put({"type": "transcription_session.updated"})
+        if event_type == "session.update":
+            self._events.put({"type": "session.updated"})
         elif event_type == "input_audio_buffer.append" and self._server_vad:
             if not self._vad_emitted:
                 self._vad_emitted = True
-                self._events.put({"type": "input_audio_buffer.speech_started"})
-                self._events.put({"type": "input_audio_buffer.speech_stopped"})
                 self._events.put(
                     {
                         "type": "conversation.item.input_audio_transcription.completed",
@@ -57,9 +55,11 @@ class _FakeRealtimeConnection:
                 self._events.put({"type": "speechrail.diarization.updated"})
         elif event_type == "speechrail.diarization.finish":
             self._events.put({"type": "speechrail.diarization.done"})
-        elif event_type == "speechrail.tts.create":
-            self._events.put({"type": "response.output_audio.delta", "delta": "AA=="})
-            self._events.put({"type": "response.done"})
+        elif event_type == "speechrail.tts.start":
+            self._events.put({"type": "speechrail.tts.started"})
+        elif event_type == "speechrail.tts.finish_text":
+            self._events.put({"type": "speechrail.tts.audio.delta", "delta": "AA=="})
+            self._events.put({"type": "speechrail.tts.completed"})
 
     def close(self) -> None:
         self._closed = True
@@ -79,11 +79,9 @@ def test_realtime_benchmark_records_server_vad_and_diarization_events() -> None:
     )
     connection.close()
 
-    assert result["vad_started"] is True
-    assert result["vad_stopped"] is True
     assert result["diarization_updated"] is True
     assert result["diarization_done"] is True
-    assert result["response_done"] is True
+    assert result["tts_completed"] is True
     assert "transcript" not in result
 
 

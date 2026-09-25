@@ -1687,9 +1687,7 @@ public final class TeleprompterSession {
                 port: port,
                 silenceDurationMilliseconds: 400,
                 diarizationEnabled: false,
-                apiKey: apiKey,
-                partialMode: .snapshot,
-                chunkDurationMilliseconds: 500
+                apiKey: apiKey
             )
         do {
             try await client.connect()
@@ -1796,16 +1794,6 @@ public final class TeleprompterSession {
             }
         }
         switch envelope.payload {
-        case .speechStarted:
-            guard !isResuming else { return }
-            _ = followAdapter.apply(
-                envelope.payload,
-                metadata: envelope.metadata,
-                segments: activeVersion?.segments ?? [],
-                to: &followController
-            )
-            if followController.mode == .following { hasHeardSpeech = true }
-            syncFollowState()
         case .partial(_, _), .partialSnapshot(_, _, _):
             guard !isResuming, let activeVersion else { return }
             _ = followAdapter.apply(
@@ -1814,9 +1802,11 @@ public final class TeleprompterSession {
                 segments: activeVersion.segments,
                 to: &followController
             )
+            // 当前 wire 没有 `speech_started`：第一次收到识别结果就是"听到了"。
+            if followController.mode == .following { hasHeardSpeech = true }
             syncFollowState()
             didAlign = true
-        case .completed(_, _, _):
+        case .completed(_, _):
             guard !isResuming, let activeVersion else { return }
             _ = followAdapter.apply(
                 envelope.payload,
@@ -1826,10 +1816,11 @@ public final class TeleprompterSession {
             )
             syncFollowState()
             if followController.mode == .following {
+                hasHeardSpeech = true
                 phase = uncertainty == nil ? .following : .uncertain
             }
             didAlign = true
-        case .serverError(let code, let message, _, _, _, _):
+        case .serverError(let code, let message, _):
             if code == "backend_busy" {
                 await enterManual(.serviceBusy(message))
             } else {

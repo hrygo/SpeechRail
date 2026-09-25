@@ -1,4 +1,4 @@
-"""Minimal SpeechRail Realtime transcription client for raw 16 kHz mono PCM."""
+"""Minimal SpeechRail Realtime transcription client for raw 24 kHz mono PCM16."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from websockets.asyncio.client import connect
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("pcm_file", type=Path, help="s16le/16 kHz/mono PCM file")
+    parser.add_argument("pcm_file", type=Path, help="s16le/24 kHz/mono PCM file")
     parser.add_argument(
         "--url", default=os.getenv("SPEECHRAIL_REALTIME_URL", "ws://127.0.0.1:8201/v1/realtime")
     )
@@ -33,19 +33,24 @@ async def run(options: argparse.Namespace) -> None:
         await websocket.send(
             json.dumps(
                 {
-                    "type": "transcription_session.update",
+                    "type": "session.update",
                     "session": {
-                        "input_audio_format": "pcm16",
-                        "input_audio_transcription": {
-                            "model": options.model,
-                            "language": options.language,
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {
+                                    "model": options.model,
+                                    "language": options.language,
+                                },
+                                "turn_detection": "manual",
+                            }
                         },
-                        "turn_detection": {"type": "manual"},
+                        "speechrail": {"task": "transcription"},
                     },
                 }
             )
         )
-        print(await websocket.recv())  # transcription_session.updated
+        print(await websocket.recv())  # session.updated
 
         with options.pcm_file.open("rb") as pcm_file:
             while chunk := pcm_file.read(6400):

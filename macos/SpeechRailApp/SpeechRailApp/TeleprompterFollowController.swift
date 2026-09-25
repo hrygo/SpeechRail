@@ -466,12 +466,9 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
         to controller: inout TeleprompterFollowController
     ) -> TeleprompterRealtimeFollowOutcome {
         switch event {
-        case .speechStarted:
-            let previousState = controller.followState
-            controller.noteSpeechStarted()
-            return controller.followState == previousState ? .ignored : .previewed
-
         case .partial(let itemID, let delta):
+            // 当前 wire 没有 `speech_started`：第一次收到识别结果就是"开始说话了"。
+            controller.noteSpeechStarted()
             let previousPosition = controller.position
             let previousPreview = controller.partialPreview
             controller.receivePartial(
@@ -484,6 +481,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 ? .previewed : .ignored
 
         case .partialSnapshot(let itemID, let revision, let text):
+            controller.noteSpeechStarted()
             let previousPosition = controller.position
             let previousPreview = controller.partialPreview
             controller.receiveSnapshot(
@@ -496,7 +494,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
             return controller.position != previousPosition || controller.partialPreview != previousPreview
                 ? .previewed : .ignored
 
-        case .completed(let itemID, let transcript, _):
+        case .completed(let itemID, let transcript):
             let previousPosition = controller.position
             let previousState = controller.followState
             let previousConfidence = controller.lastMatchConfidence

@@ -15,13 +15,22 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
+from realtime_wire import (
+    session_update,
+    tts_append_text,
+    tts_cancel,
+    tts_finish_text,
+    tts_start,
+)
 from speechrail.app import create_app
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
+from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamEvent,
@@ -168,61 +177,86 @@ class FakeIncrementalSynthesizer:
         return session
 
 
-def _preset_kwargs(preset_id: str) -> dict[str, Any]:
-    catalog = load_catalog()
-    preset = catalog.preset(preset_id)
-    kwargs: dict[str, Any] = {
-        "qwen3_model_dir": None,
-        "qwen3_python": None,
-        "qwen3_tts_model_dir": Path(preset.tts),
+_TERMINALS = frozenset(
+    {
+        "speechrail.tts.completed",
+        "speechrail.tts.cancelled",
+        "speechrail.tts.failed",
     }
-    if preset.tts_clone is not None:
-        kwargs["qwen3_tts_clone_model_dir"] = Path(preset.tts_clone)
-    return kwargs
+)
+
+
+def _tier_kwargs(tier: str = "quality") -> dict[str, Any]:
+    """Build one explicit v2 selection; directory names never imply identity."""
+
+    asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
+    custom_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
+    design_key = required_spec_artifact(tier, "voice_design")  # type: ignore[arg-type]
+    assert asr_key is not None and custom_key is not None and base_key is not None
+    return {
+        "qwen3_model_dir": Path(asr_key),
+        "qwen3_python": None,
+        "qwen3_tts_model_dir": Path(custom_key),
+        "qwen3_tts_clone_model_dir": Path(base_key),
+        "qwen3_tts_python": None,
+        "selection_schema_version": 2,
+        "selection_asr_spec": tier,
+        "selection_tts_spec": tier,
+        "asr_artifact_key": asr_key,
+        "tts_artifact_key": custom_key,
+        "tts_base_artifact_key": base_key,
+        "voice_design_artifact_key": design_key,
+    }
 
 
 def _client(
-    synthesizer: FakeIncrementalSynthesizer, *, preset: str = "balanced"
+    synthesizer: FakeIncrementalSynthesizer, *, tier: str = "quality"
 ) -> TestClient:
-    return TestClient(create_app(Settings(**_preset_kwargs(preset)), tts_synthesizer=synthesizer))
-
-
-def _channel(socket: Any, *, preset: str = "balanced") -> None:
-    socket.receive_json()  # session.created
-    socket.send_json(
-        {
-            "type": "transcription_session.update",
-            "session": {"speechrail": {"tts": {"enabled": True}}},
-        }
+    return TestClient(
+        create_app(Settings(**_tier_kwargs(tier)), tts_synthesizer=synthesizer)
     )
-    assert socket.receive_json()["type"] == "transcription_session.updated"
+
+
+def _channel(socket: Any) -> None:
+    """Negotiate caller-owned TTS on the single current session event."""
+
+    socket.receive_json()  # session.created
+    socket.send_json(session_update(tts={"enabled": True}))
+    assert socket.receive_json()["type"] == "session.updated"
 
 
 def _drain(socket: Any, *, limit: int = 40) -> list[dict[str, Any]]:
-    """Read events up to the single terminal.
+    """Read events up to the one namespaced terminal.
 
-    A namespaced ``error`` is not a terminal: an incremental utterance reports
-    its failure code and then its one ``response.done``, so draining stops only
-    on the terminal event.
+    A namespaced ``error`` is not a terminal: an utterance may report its
+    failure code and then its single ``speechrail.tts.failed``.
     """
 
     events: list[dict[str, Any]] = []
     for _ in range(limit):
         event = socket.receive_json()
         events.append(event)
-        if event["type"] == "response.done":
+        if event["type"] in _TERMINALS:
             return events
     return events
 
 
+def _until(socket: Any, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    """Read events until ``kind`` arrives, failing instead of blocking forever."""
+
+    events: list[dict[str, Any]] = []
+    for _ in range(limit):
+        event = socket.receive_json()
+        events.append(event)
+        if event["type"] == kind:
+            return events
+    raise AssertionError(f"never received {kind}: {[item['type'] for item in events]}")
+
+
 def _append(socket: Any, request_id: str, sequence: int, text: str) -> None:
     socket.send_json(
-        {
-            "type": "speechrail.tts.append_text",
-            "request_id": request_id,
-            "sequence": sequence,
-            "text": text,
-        }
+        tts_append_text(request_id=request_id, sequence=sequence, text=text)
     )
 
 
@@ -231,42 +265,27 @@ def test_incremental_stream_emits_one_terminal_with_audio_positions() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json(
-            {"type": "speechrail.tts.start", "request_id": "inc_001", "voice": "vivian"}
-        )
+        socket.send_json(tts_start(request_id="inc_001", voice="vivian"))
         _append(socket, "inc_001", 0, "你好，")
         _append(socket, "inc_001", 1, "世界。")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_001",
-                "last_sequence": 1,
-            }
-        )
+        socket.send_json(tts_finish_text(request_id="inc_001", last_sequence=1))
         events = _drain(socket)
 
     types = [event["type"] for event in events]
-    assert types == [
-        "response.created",
-        "response.output_item.added",
-        "response.content_part.added",
-        "speechrail.tts.started",
-        "speechrail.tts.text_accepted",
-        "response.output_audio_transcript.delta",
-        "speechrail.tts.text_accepted",
-        "response.output_audio_transcript.delta",
-        "response.output_audio.delta",
-        "response.output_audio.delta",
-        "response.output_audio_transcript.done",
-        "response.output_audio.done",
-        "response.content_part.done",
-        "response.output_item.done",
-        "response.done",
-    ]
-    started = events[3]
-    assert started["protocol_version"] == 1
+    assert types.count("speechrail.tts.started") == 1
+    assert types.count("speechrail.tts.completed") == 1
+    # Local TTS is never dressed up as an LLM response, and the render receipt
+    # stays on REST instead of the WebSocket envelope.
+    assert not [kind for kind in types if kind.startswith("response.")]
+    assert "render_receipt" not in json.dumps(events)
+
+    started = next(event for event in events if event["type"] == "speechrail.tts.started")
     assert started["limits"]["max_total_codepoints"] == 4096
-    assert started["voice_mode"] == "system"
+    assert started["output_format"] == {
+        "type": "audio/pcm",
+        "sample_rate": 24_000,
+        "channels": 1,
+    }
     accepted = [event for event in events if event["type"] == "speechrail.tts.text_accepted"]
     # ``sequence`` belongs to the transport; the append index travels as
     # ``append_sequence`` and must not collide with it.
@@ -274,12 +293,11 @@ def test_incremental_stream_emits_one_terminal_with_audio_positions() -> None:
     assert [event["total_codepoints"] for event in accepted] == [3, 6]
     sequences = [event["sequence"] for event in events]
     assert sequences == list(range(sequences[0], sequences[0] + len(events)))
-    deltas = [event for event in events if event["type"] == "response.output_audio.delta"]
-    assert [event["speechrail"]["chunk_index"] for event in deltas] == [0, 1]
-    assert [event["speechrail"]["sample_offset"] for event in deltas] == [0, 2]
+    deltas = [event for event in events if event["type"] == "speechrail.tts.audio.delta"]
+    assert [event["chunk_index"] for event in deltas] == [0, 1]
+    assert [event["sample_offset"] for event in deltas] == [0, 2]
     assert base64.b64decode(deltas[0]["delta"]) == b"\x01\x02\x03\x04"
-    assert events[-1]["response"]["status"] == "completed"
-    assert events[-1]["speechrail"]["kind"] == "tts"
+    assert events[-1]["generated_samples"] == 3
     assert synthesizer.sessions[0].appended == [(0, "你好，"), (1, "世界。")]
     assert synthesizer.sessions[0].finished == 1
     assert synthesizer.sessions[0].closed is True
@@ -290,26 +308,21 @@ def test_start_does_not_block_appends_during_admission() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_slow_open"})
+        socket.send_json(tts_start(request_id="inc_slow_open"))
         _append(socket, "inc_slow_open", 0, "第一段")
         _append(socket, "inc_slow_open", 1, "第二段")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_slow_open",
-                "last_sequence": 1,
-            }
-        )
+        socket.send_json(tts_finish_text(request_id="inc_slow_open", last_sequence=1))
         events = _drain(socket)
 
-    assert [event["type"] for event in events].count("speechrail.tts.started") == 1
+    types = [event["type"] for event in events]
+    assert types.count("speechrail.tts.started") == 1
     accepted = [
         event["append_sequence"]
         for event in events
         if event["type"] == "speechrail.tts.text_accepted"
     ]
     assert accepted == [0, 1]
-    assert events[-1]["response"]["status"] == "completed"
+    assert types[-1] == "speechrail.tts.completed"
     assert synthesizer.open_calls == 1
 
 
@@ -318,22 +331,16 @@ def test_cancel_emits_exactly_one_cancelled_terminal() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_cancel"})
+        socket.send_json(tts_start(request_id="inc_cancel"))
         _append(socket, "inc_cancel", 0, "不要说完")
-        socket.receive_json()  # response.created
-        socket.receive_json()  # response.output_item.added
-        socket.receive_json()  # response.content_part.added
-        socket.receive_json()  # speechrail.tts.started
-        socket.receive_json()  # speechrail.tts.text_accepted
-        socket.receive_json()  # response.output_audio_transcript.delta
-        socket.send_json({"type": "speechrail.tts.cancel", "request_id": "inc_cancel"})
+        _until(socket, "speechrail.tts.text_accepted")
+        socket.send_json(tts_cancel(request_id="inc_cancel"))
         events = _drain(socket)
 
     types = [event["type"] for event in events]
-    assert types == ["response.done"]
-    assert events[0]["response"]["status"] == "cancelled"
+    assert types == ["speechrail.tts.cancelled"]
     assert synthesizer.sessions[0].cancelled is True
-    assert not [event for event in events if event["type"] == "response.output_audio.delta"]
+    assert not [event for event in events if event["type"] == "speechrail.tts.audio.delta"]
 
 
 def test_finish_without_audio_still_reaches_one_terminal() -> None:
@@ -341,20 +348,15 @@ def test_finish_without_audio_still_reaches_one_terminal() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_silent"})
+        socket.send_json(tts_start(request_id="inc_silent"))
         _append(socket, "inc_silent", 0, "静音")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_silent",
-                "last_sequence": 0,
-            }
-        )
+        socket.send_json(tts_finish_text(request_id="inc_silent", last_sequence=0))
         events = _drain(socket)
 
-    assert [event["type"] for event in events].count("response.done") == 1
-    assert events[-1]["response"]["status"] == "completed"
-    assert not [event for event in events if event["type"] == "response.output_audio.delta"]
+    types = [event["type"] for event in events]
+    assert types.count("speechrail.tts.completed") == 1
+    assert types[-1] == "speechrail.tts.completed"
+    assert "speechrail.tts.audio.delta" not in types
 
 
 def test_backend_failure_reaches_one_failed_terminal() -> None:
@@ -362,22 +364,18 @@ def test_backend_failure_reaches_one_failed_terminal() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_fail"})
+        socket.send_json(tts_start(request_id="inc_fail"))
         _append(socket, "inc_fail", 0, "会失败")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_fail",
-                "last_sequence": 0,
-            }
-        )
+        socket.send_json(tts_finish_text(request_id="inc_fail", last_sequence=0))
         events = _drain(socket)
 
-    assert [event["type"] for event in events].count("response.done") == 1
+    types = [event["type"] for event in events]
+    assert types.count("speechrail.tts.failed") == 1
     terminal = events[-1]
-    assert terminal["response"]["status"] == "failed"
-    errors = [event for event in events if event["type"] == "error"]
-    assert [event["error"]["code"] for event in errors] == ["tts_backend_failed"]
+    assert terminal["type"] == "speechrail.tts.failed"
+    # The failure code rides on the single terminal instead of a second frame.
+    assert terminal["error"]["code"] == "tts_backend_failed"
+    assert not [event for event in events if event["type"] == "error"]
 
 
 def test_append_rejects_non_contiguous_sequence_and_unknown_field() -> None:
@@ -385,11 +383,8 @@ def test_append_rejects_non_contiguous_sequence_and_unknown_field() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_seq"})
-        socket.receive_json()  # response.created
-        socket.receive_json()  # response.output_item.added
-        socket.receive_json()  # response.content_part.added
-        socket.receive_json()  # speechrail.tts.started
+        socket.send_json(tts_start(request_id="inc_seq"))
+        _until(socket, "speechrail.tts.started")
         _append(socket, "inc_seq", 3, "跳号")
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -416,8 +411,8 @@ def test_append_rejects_non_contiguous_sequence_and_unknown_field() -> None:
         )
         error = socket.receive_json()
         assert error["error"]["code"] == "tts_sequence_invalid"
-        socket.send_json({"type": "speechrail.tts.cancel", "request_id": "inc_seq"})
-        assert socket.receive_json()["type"] == "response.done"
+        socket.send_json(tts_cancel(request_id="inc_seq"))
+        assert socket.receive_json()["type"] == "speechrail.tts.cancelled"
 
 
 def test_second_utterance_is_rejected_while_one_is_active() -> None:
@@ -425,36 +420,50 @@ def test_second_utterance_is_rejected_while_one_is_active() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_first"})
-        socket.receive_json()  # response.created
-        socket.receive_json()  # response.output_item.added
-        socket.receive_json()  # response.content_part.added
-        socket.receive_json()  # speechrail.tts.started
-        socket.send_json({"type": "speechrail.tts.create", "request_id": "inc_other", "text": "x"})
-        error = socket.receive_json()
-        assert error["error"]["code"] == "tts_in_progress"
-        # A second start shares the complete-text ordering: the activity check
-        # wins, then the per-connection request-id ledger.
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_first"})
-        error = socket.receive_json()
-        assert error["error"]["code"] == "tts_in_progress"
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_third"})
-        error = socket.receive_json()
-        assert error["error"]["code"] == "tts_in_progress"
-        socket.send_json({"type": "speechrail.tts.cancel", "request_id": "inc_first"})
-        assert socket.receive_json()["type"] == "response.done"
+        socket.send_json(tts_start(request_id="inc_first"))
+        _until(socket, "speechrail.tts.started")
+        # Only one utterance may be live per connection, whatever request id a
+        # second start carries.
+        for request_id in ("inc_other", "inc_first", "inc_third"):
+            socket.send_json(tts_start(request_id=request_id))
+            error = socket.receive_json()
+            assert error["error"]["code"] == "tts_in_progress"
+        socket.send_json(tts_cancel(request_id="inc_first"))
+        assert socket.receive_json()["type"] == "speechrail.tts.cancelled"
 
 
-def test_voice_design_voice_is_not_supported_on_the_quality_profile() -> None:
+def test_voice_design_voice_has_no_incremental_path_on_any_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An instruction voice stays design-only: every surface agrees on that."""
+
+    registry = VoiceRegistry(tmp_path / "custom_voices.json")
+    registry.create_custom_profile(
+        name="W8 design",
+        instruction="自然清晰的中文女声，用于设计任务。",
+        voice_id="w8_design_fixture",
+    )
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     synthesizer = FakeIncrementalSynthesizer()
-    client = _client(synthesizer, preset="quality")
+    client = _client(synthesizer)
+    voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
+    streaming = voices["w8_design_fixture"]["streaming"]
+    assert streaming["supported"] is False
+    assert streaming["reason"] == "voice_design_task_required"
+    assert streaming["hint"]
+    assert streaming["axes"]["variant_supported"] is False
+
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_design"})
+        socket.send_json(
+            tts_start(request_id="inc_design", voice="w8_design_fixture")
+        )
         error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "tts_streaming_unsupported"
-        assert "clone" in error["error"]["message"]
+    assert error["type"] == "error"
+    # A design-only profile has no runtime role, so the synthesis path refuses it
+    # before any weights are touched; the REST verdict explains why.
+    assert error["error"]["code"] == "voice_not_available"
+    assert synthesizer.open_calls == 0
 
 
 def test_start_rejects_a_widened_limit() -> None:
@@ -463,11 +472,9 @@ def test_start_rejects_a_widened_limit() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
         socket.send_json(
-            {
-                "type": "speechrail.tts.start",
-                "request_id": "inc_limit",
-                "limits": {"max_total_codepoints": 100_000},
-            }
+            tts_start(
+                request_id="inc_limit", limits={"max_total_codepoints": 100_000}
+            )
         )
         error = socket.receive_json()
         assert error["error"]["code"] == "tts_stream_limit_exceeded"
@@ -480,8 +487,10 @@ def test_legacy_realtime_events_stay_rejected() -> None:
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
         for payload in (
-            {"type": "session.update", "session": {}},
+            {"type": "transcription_session.update", "session": {}},
+            {"type": "speechrail.tts.create", "request_id": "legacy", "text": "x"},
             {"type": "response.create", "response": {}},
+            {"type": "response.done", "response": {}},
         ):
             socket.send_json(payload)
             error = socket.receive_json()
@@ -490,39 +499,49 @@ def test_legacy_realtime_events_stay_rejected() -> None:
 
 
 def test_render_receipt_tracks_only_sent_pcm() -> None:
-    synthesizer = FakeIncrementalSynthesizer(audio_chunks=(b"\x01\x02\x03\x04",))
-    client = _client(synthesizer)
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-        socket.send_json(
-            {
-                "type": "transcription_session.update",
-                "session": {
-                    "speechrail": {
-                        "tts": {"enabled": True},
-                        "render_receipts": {"enabled": True},
-                    }
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "transcription_session.updated"
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_receipt"})
-        _append(socket, "inc_receipt", 0, "收据")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_receipt",
-                "last_sequence": 0,
-            }
-        )
-        events = _drain(socket)
+    """A streamed utterance still books a REST receipt; the wire does not carry it."""
 
-    receipt = events[-1]["speechrail"]["render_receipt"]
+    async def scenario() -> tuple[list[dict[str, Any]], Any]:
+        synthesizer = FakeIncrementalSynthesizer(audio_chunks=(b"\x01\x02\x03\x04",))
+        services = build_app_services(
+            Settings(**_tier_kwargs()),
+            AppOverrides(tts_synthesizer=synthesizer),
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int | None:
+            events.append(event)
+            return None
+
+        session = OpenAIRealtimeSession(
+            services, session_id="realtime_receipt", send=send
+        )
+        await session.start()
+        await session.handle(session_update(tts={"enabled": True}))
+        await session.handle(tts_start(request_id="inc_receipt"))
+        await session.handle(
+            tts_append_text(request_id="inc_receipt", sequence=0, text="收据")
+        )
+        await session.handle(
+            tts_finish_text(request_id="inc_receipt", last_sequence=0)
+        )
+        for _ in range(200):
+            if any(
+                event.get("type") == "speechrail.tts.completed" for event in events
+            ):
+                break
+            await asyncio.sleep(0.01)
+        await session.close()
+        return events, services
+
+    events, services = asyncio.run(scenario())
+    receipt = services.render_receipts.find_by_request_id("inc_receipt")
     assert receipt["audio"]["integrity_boundary"] == "pcm16_after_transport_send"
     assert receipt["audio"]["sample_count"] == 2
     assert receipt["audio"]["pcm_sample_rate"] == 24_000
     assert receipt["status"] == "completed"
     assert receipt["voice"]["id"] == "serena"
+    assert "render_receipt" not in json.dumps(events)
 
 
 def test_capability_surfaces_agree_per_voice() -> None:
@@ -544,29 +563,13 @@ def test_capability_surfaces_agree_per_voice() -> None:
 
     with client.websocket_connect("/v1/realtime") as socket:
         created = socket.receive_json()
-        capability = created["session"]["speech_capabilities"]["streaming_tts"]
-    assert capability["supported"] is True
-    assert capability["axes"]["reference_ready"] is True
+        # Discovery lives on REST, so the session object advertises nothing.
+        assert "speech_capabilities" not in created["session"]
 
-
-def test_capability_surfaces_agree_when_the_voice_has_no_incremental_path() -> None:
-    """``/v1/voices`` and the handshake must not disagree about one voice."""
-
-    synthesizer = FakeIncrementalSynthesizer()
-    client = _client(synthesizer, preset="quality")
-    voices = client.get("/v1/voices").json()["data"]
-    serena = next(voice for voice in voices if voice["id"] == "serena")
-    assert serena["streaming"]["supported"] is False
-    assert serena["streaming"]["reason"] == "variant_not_supported"
-    assert serena["streaming"]["hint"]
-    assert serena["streaming"]["axes"]["variant_supported"] is False
-
-    with client.websocket_connect("/v1/realtime") as socket:
-        created = socket.receive_json()
-        capability = created["session"]["speech_capabilities"]["streaming_tts"]
-    assert capability["supported"] is False
-    assert capability["reason"] == "variant_not_supported"
-    assert capability["hint"]
+    snapshot = client.get("/v1/speechrail/capabilities").json()
+    snapshot_voice = next(voice for voice in snapshot["voices"] if voice["id"] == "serena")
+    assert snapshot_voice["variant"] == "custom_voice"
+    assert snapshot_voice["voice_revision"] == serena.get("revision")
 
 
 def test_negotiation_failure_is_reported_as_unsupported() -> None:
@@ -579,7 +582,7 @@ def test_negotiation_failure_is_reported_as_unsupported() -> None:
     assert serena["streaming"]["axes"]["protocol_negotiated"] is False
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_unnegotiated"})
+        socket.send_json(tts_start(request_id="inc_unnegotiated"))
         error = socket.receive_json()
     assert error["error"]["code"] == "tts_streaming_unsupported"
 
@@ -587,14 +590,14 @@ def test_negotiation_failure_is_reported_as_unsupported() -> None:
 def test_slow_consumer_fails_the_utterance_with_backpressure() -> None:
     async def scenario() -> list[dict[str, Any]]:
         synthesizer = FakeIncrementalSynthesizer()
-        settings = Settings(**_preset_kwargs("balanced"))
+        settings = Settings(**_tier_kwargs())
         services = build_app_services(
             settings, AppOverrides(tts_synthesizer=synthesizer)
         )
         events: list[dict[str, Any]] = []
 
         async def send(event: dict[str, Any]) -> int | None:
-            if event.get("type") == "response.output_audio.delta":
+            if event.get("type") == "speechrail.tts.audio.delta":
                 await asyncio.sleep(0.3)
             events.append(event)
             return None
@@ -603,51 +606,36 @@ def test_slow_consumer_fails_the_utterance_with_backpressure() -> None:
             services, session_id="realtime_slow_consumer", send=send
         )
         await session.start()
+        await session.handle(session_update(tts={"enabled": True}))
         await session.handle(
-            {
-                "type": "transcription_session.update",
-                "session": {"speechrail": {"tts": {"enabled": True}}},
-            }
+            tts_start(
+                request_id="inc_backpressure",
+                limits={"slow_consumer_seconds": 0.05},
+            )
         )
         await session.handle(
-            {
-                "type": "speechrail.tts.start",
-                "request_id": "inc_backpressure",
-                "limits": {"slow_consumer_seconds": 0.05},
-            }
+            tts_append_text(
+                request_id="inc_backpressure", sequence=0, text="慢消费者"
+            )
         )
         await session.handle(
-            {
-                "type": "speechrail.tts.append_text",
-                "request_id": "inc_backpressure",
-                "sequence": 0,
-                "text": "慢消费者",
-            }
-        )
-        await session.handle(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_backpressure",
-                "last_sequence": 0,
-            }
+            tts_finish_text(request_id="inc_backpressure", last_sequence=0)
         )
         for _ in range(200):
-            if any(event.get("type") == "response.done" for event in events):
+            if any(
+                event.get("type") == "speechrail.tts.failed" for event in events
+            ):
                 break
             await asyncio.sleep(0.01)
         await session.close()
         return events
 
     events = asyncio.run(scenario())
-    codes = [
-        event["error"]["code"]
-        for event in events
-        if event.get("type") == "error" and isinstance(event.get("error"), dict)
+    terminals = [
+        event for event in events if event.get("type") == "speechrail.tts.failed"
     ]
-    assert codes == ["tts_backpressure"]
-    terminals = [event for event in events if event.get("type") == "response.done"]
     assert len(terminals) == 1
-    assert terminals[0]["response"]["status"] == "failed"
+    assert terminals[0]["error"]["code"] == "tts_backpressure"
 
 
 def test_incremental_wire_round_trips_json_payloads() -> None:
@@ -657,15 +645,9 @@ def test_incremental_wire_round_trips_json_payloads() -> None:
     client = _client(synthesizer)
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json({"type": "speechrail.tts.start", "request_id": "inc_json"})
+        socket.send_json(tts_start(request_id="inc_json"))
         _append(socket, "inc_json", 0, "json")
-        socket.send_json(
-            {
-                "type": "speechrail.tts.finish_text",
-                "request_id": "inc_json",
-                "last_sequence": 0,
-            }
-        )
+        socket.send_json(tts_finish_text(request_id="inc_json", last_sequence=0))
         events = _drain(socket)
     for event in events:
         assert json.loads(json.dumps(event))["type"] == event["type"]

@@ -104,38 +104,39 @@ sequenceDiagram
 
     Client->>Host: WebSocket handshake（可选 Bearer）
     Host-->>Client: session.created（唯一握手事件）
-    Client->>Host: transcription_session.update（ASR、VAD、SpeechRail extensions）
-    Host-->>Client: transcription_session.updated
+    Client->>Host: session.update（session.type=transcription、24 kHz 输入、SpeechRail extensions）
+    Host-->>Client: session.updated
 
     loop 已接纳的输入音频
-        Client->>Host: input_audio_buffer.append（base64 PCM16）
+        Client->>Host: input_audio_buffer.append（base64 24 kHz PCM16）
         Host->>VAD: 帧级判定与样本时钟
-        opt server_vad 语音起止
+        opt server_vad endpointing
             VAD-->>Host: start / stop decision
-            Host-->>Client: speech_started / speech_stopped
+            Host-->>Client: speechrail.transcription.hypothesis（revision 递增）
         end
     end
     Client->>Host: input_audio_buffer.commit（manual；VAD 可自动提交）
     Host->>ASR: open / append / commit（private IPC）
     ASR-->>Host: partial 或 final transcript
-    Host-->>Client: committed → item.created → transcription.delta* → completed/failed
+    Host-->>Client: hypothesis* → conversation.item.input_audio_transcription.completed/failed
 
-    Client->>Host: speechrail.tts.create（caller 已决定的句子）
+    Client->>Host: speechrail.tts.start + append_text*（caller 已决定的稳定句子）
     Host->>TTS: streaming synthesis（private IPC）
     loop 输出音频
         TTS-->>Host: 24 kHz PCM16 chunks
-        Host-->>Client: response.output_audio.delta
+        Host-->>Client: speechrail.tts.audio.delta
     end
-    Host-->>Client: response.output_audio.done → response.done
+    Client->>Host: speechrail.tts.finish_text
+    Host-->>Client: speechrail.tts.completed
 
     opt 取消正在输出的 TTS
         Client->>Host: speechrail.tts.cancel（caller barge-in 决策）
         Host->>TTS: cancel task
-        Host-->>Client: response.done（status=cancelled）
+        Host-->>Client: speechrail.tts.cancelled
     end
 ```
 
-`server_vad` 的判定与 SpeechAdmission 位于主进程会话层，决定何时把音频推进 ASR，并向调用方发送 speech start/stop 事实。Barge-in 属于调用方：SpeechRail 不拥有播放队列，不因 VAD 自动取消 TTS；调用方如需打断，显式发送 `speechrail.tts.cancel`。客户端可在收到最终 transcript 后调用自己的 LLM、工具和历史系统，再把待播句子逐条提交给 SpeechRail。
+`server_vad` 的判定与 SpeechAdmission 位于主进程会话层，决定何时把音频推进 ASR，并向调用方发送 hypothesis 与 text final 事实；当前 wire 没有独立的 speech start/stop 事件。Barge-in 属于调用方：SpeechRail 不拥有播放队列，不因 VAD 自动取消 TTS；调用方如需打断，显式发送 `speechrail.tts.cancel`。客户端可在收到最终 transcript 后调用自己的 LLM、工具和历史系统，再把待播的稳定句子逐条 append 给 SpeechRail。
 
 ## 4. Diarization 边界
 

@@ -213,6 +213,11 @@ public final class MeetingSession {
     private var pendingItem: (start: Date, end: Date)?
     private var currentOrdinal = 0
     private var committedItemIDs: Set<String> = []
+    /// `utterance_id` → 已落库的行。对齐与分人结果随后按 item 找到那一行，
+    /// 因为文本 final 不再携带 `attribution_units`（契约 §5.2）。
+    private var lineByItem: [String: (lineID: String, ordinal: Int)] = [:]
+    /// 已经补写过 `timing_quality` 的行；同一行只写一次。
+    private var timingQualityApplied: Set<String> = []
     private var diarizationDrained = false
     private var isStoppingIntentionally = false
     /// 本场第几个 epoch（一次 WS 连接 = 一个 epoch，§5.2 账本规则 1）。
@@ -398,6 +403,8 @@ public final class MeetingSession {
             lines = []
             currentOrdinal = 0
             committedItemIDs = []
+            lineByItem = [:]
+            timingQualityApplied = []
             epoch = 0
             coordinator.sessionDidStartRecording(id: record.id)
         } else {
@@ -525,38 +532,29 @@ public final class MeetingSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .speechStarted, .speechStopped, .segment,
-             .responseAudio(_, _, _), .responseDone(_, _, _, _), .cleared,
-             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _):
+        case .ready, .configured, .alignmentFailed,
+             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _),
+             .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
             break
-        case .committed:
-            let now = Date()
-            pendingItem = (start: commitCursor ?? now, end: now)
-            commitCursor = now
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
         case .partialSnapshot(_, _, let text):
             partialText = text.isEmpty ? nil : text
-        case .completed(let itemID, let transcript, let units):
-            await commit(itemID: itemID, transcript: transcript, units: units)
+        case .completed(let itemID, let transcript):
+            // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
+            // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
+            let now = Date()
+            pendingItem = (start: commitCursor ?? now, end: now)
+            commitCursor = now
+            await commit(itemID: itemID, transcript: transcript)
         case .failed(_, let code, let message):
             lastFailure = "\(code)：\(message)"
             partialText = nil
-        case .attribution(_, let units, let links):
-            await labeling.apply(units: units)
-            labeling.noteSuggestions(links)
-            // 归属修订不改正文，所以它更新的是内存里的 chip，不新增行（§15.3 第 2 条）。
-            if !lines.isEmpty {
-                lines = lines.map { line in
-                    var updated = line
-                    if let label = labeling.attributedLabel(forLineID: line.id) {
-                        updated.speakerLabel = label
-                    }
-                    return updated
-                }
-            }
+        case .attribution(let itemID, let units, let isFinal):
+            await applyAttribution(itemID: itemID, units: units)
+            if isFinal { diarizationDrained = true }
         case .diarizationDegraded(let code, let message):
             labeling.markDegraded(code: code, message: message)
             if let sessionID, let note = labeling.note {
@@ -566,9 +564,7 @@ public final class MeetingSession {
                     note: note
                 )
             }
-        case .diarizationDone:
-            diarizationDrained = true
-        case .serverError(let code, let message, _, _, _, _):
+        case .serverError(let code, let message, _):
             lastFailure = Self.readableError(code: code, message: message)
             if code == "backend_busy" {
                 await enterInterruption(.serviceLost, note: lastFailure)
@@ -578,11 +574,41 @@ public final class MeetingSession {
         }
     }
 
+    /// 对齐（文本 → 采样区间）与分人（采样区间 → 匿名说话人）随后到达。
+    /// 先把 `segment_uid` → 行 记进账本，再按 uid 原位改归属；同时补写一次
+    /// `timing_quality`。正文与时间码一个字不动（§15.3 第 2 条）。
+    private func applyAttribution(
+        itemID: String,
+        units: [RealtimeASRClient.AttributionUnit]
+    ) async {
+        guard let entry = lineByItem[itemID], !units.isEmpty else { return }
+        labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
+        await labeling.apply(units: units)
+        if let quality = Self.timingQuality(from: units),
+           timingQualityApplied.insert(entry.lineID).inserted {
+            do {
+                try await coordinator.attachTimingQuality(lineID: entry.lineID, quality: quality)
+            } catch {
+                lastFailure = error.localizedDescription
+                timingQualityApplied.remove(entry.lineID)
+            }
+        }
+        // 归属修订不改正文，所以它更新的是内存里的 chip，不新增行（§15.3 第 2 条）。
+        if !lines.isEmpty {
+            lines = lines.map { line in
+                var updated = line
+                if let label = labeling.attributedLabel(forLineID: line.id) {
+                    updated.speakerLabel = label
+                }
+                return updated
+            }
+        }
+    }
+
     /// 定稿即落库。同一个 `item_id` 只落一行（幂等在能力层，不在库里，§15.7 R2 ①）。
     private func commit(
         itemID: String,
-        transcript: String,
-        units: [RealtimeASRClient.AttributionUnit]
+        transcript: String
     ) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         partialText = nil
@@ -593,11 +619,6 @@ public final class MeetingSession {
             committedItemIDs.insert(itemID)
         }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
-        // 归属先算：`LineDraft` 里就要带上它，否则修订事件到达之前这一行看起来是"未标注"。
-        let initialLabel = units.compactMap { unit -> String? in
-            guard let speaker = unit.speaker, !speaker.isEmpty else { return nil }
-            return speaker
-        }.first
         let isEpochStart = epoch > 1 && lines.isEmpty
         let lineID = UUID().uuidString
         let ordinal: Int
@@ -608,11 +629,10 @@ public final class MeetingSession {
                     role: .speaker,
                     text: text,
                     source: lineSource,
-                    speakerLabel: initialLabel,
+                    speakerLabel: nil,
                     tStart: window.start.timeIntervalSince(startedAt),
                     tEnd: window.end.timeIntervalSince(startedAt),
-                    isDeviceSwitch: isEpochStart,
-                    timingQuality: Self.timingQuality(from: units)
+                    isDeviceSwitch: isEpochStart
                 ),
                 id: lineID
             )
@@ -621,8 +641,10 @@ public final class MeetingSession {
             lastFailure = error.localizedDescription
             return
         }
-        // 行已经在了，这时候才把 `segment_uid` → 行 的对应关系记进账本。
-        labeling.register(units: units, lineID: lineID, ordinal: ordinal)
+        // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
+        if !itemID.isEmpty {
+            lineByItem[itemID] = (lineID: lineID, ordinal: ordinal)
+        }
         currentOrdinal = ordinal
         lines.append(
             Line(
@@ -631,7 +653,7 @@ public final class MeetingSession {
                 text: text,
                 start: window.start.timeIntervalSince(startedAt),
                 end: window.end.timeIntervalSince(startedAt),
-                speakerLabel: initialLabel,
+                speakerLabel: nil,
                 source: lineSource,
                 isDeviceSwitch: isEpochStart
             )

@@ -24,7 +24,7 @@ date: 2026-09-24
 10. 词级时间戳由 ASR 原生输出提供（`timestamp_granularities`），不依赖 aligner；aligner 仅为分人路径服务，不是通用 ASR 依赖。分人（含 aligner）由 `balanced`、`quality` 与候选 `extreme` 配置；能力按当前 readiness 声明。
 11. ASR∥TTS 重计算重叠是可配置策略（ADR-0016）：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）按声明常驻字节与 `max(4 GiB, host_memory // 2)` 预算 fail-closed 判定——任一启用组件未声明非零峰或总量超预算即串行；`true`/`false` 为运维强制。`quality` 与候选 `extreme` 的 VD∥Base 是额外允许的两条独立 TTS lane：不同 lane 可并发，同一 lane 串行；`balanced/light` 与未声明 lane 的 TTS 仍为单 worker 串行。ASR∥ASR 仍返回 `backend_busy`，不复制进程。现存 Quality A/B 只覆盖记录中声明的组件组合，不能直接作为双 TTS 或 Extreme 峰值证据。
 12. Realtime 并发会话的源码默认值由 `Settings.realtime_max_sessions` 唯一定义，当前为 **3**（环境变量 `SPEECHRAIL_REALTIME_MAX_SESSIONS` 可覆盖，校验范围 1–8）。历史文档中的默认值 2 已废弃；能力/运行时判断不得再复制第二套默认常量。
-13. Realtime 已切换为 current-only 无状态 Speech Plane：客户端只使用 `transcription_session.update`、音频 buffer 事件、`speechrail.tts.create/cancel` 和 diarization barrier。服务端只交付 ASR/VAD/匿名分人事实与显式 TTS 音频，不拥有 LLM、conversation history、memory、tools、播放或 barge-in 策略；`speech_started` 不自动取消 TTS。旧事件和旧字段明确拒绝，不做 alias、双 wire profile 或 `/v2` 迁移层。
+13. Realtime 已切换为 current-only 无状态 Speech Plane：客户端只使用 `session.update`、音频 buffer 事件、`speechrail.tts.start/append_text/finish_text/cancel` 和 diarization barrier。服务端只交付 ASR/VAD/匿名分人事实与显式 TTS 音频，不拥有 LLM、conversation history、memory、tools、播放或 barge-in 策略；新 hypothesis 不自动取消 TTS。旧事件和旧字段明确拒绝，不做 alias、双 wire profile 或 `/v2` 迁移层。
 14. 候选 `extreme` 使用 BF16 ASR、VoiceDesign、Base 与 aligner；代码和静态契约可以评审，但目前没有可引用的质量、资源峰值或延迟报告。正式启用和质量排名保持阻塞，未做性能/质量复测。
 
 ## 明确限制
@@ -32,7 +32,7 @@ date: 2026-09-24
 - `/v1/realtime` 是 current-only 的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、历史或持续
   会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件匿名分人使用
   `gpt-4o-transcribe-diarize` / `diarized_json`。调用方必须自己实现 LLM、历史、工具、播放
-  和 barge-in 编排，TTS 由 `speechrail.tts.create` 显式驱动。
+  和 barge-in 编排，TTS 由调用方显式的 `speechrail.tts.start`/`append_text`/`finish_text` 驱动。
 - `/health` 分别反映 ASR/TTS worker readiness，并以 `realtime_vad.ready/code/message` 单独报告 `server_vad` 子能力；`/readyz` 在至少一个 ASR/TTS 能力可接受请求时返回 200，同时返回 VAD 诊断；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
 - VAD 使用 512 samples/16kHz 的 32ms 帧；因此 Sona 的 `400ms/900ms` 停止配置实际量化为约 `416ms/928ms`。该量化属于帧时钟行为，不应被误读为两个 VAD 同时运行。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。

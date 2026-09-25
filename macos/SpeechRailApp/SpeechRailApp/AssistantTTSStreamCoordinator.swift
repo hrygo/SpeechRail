@@ -3,9 +3,8 @@ import SpeechRailControlKit
 
 /// 一轮增量 utterance 的状态机：**文本进、PCM 出、打断即作废**。
 ///
-/// 它拥有 `requestID` / `responseID`、append 序号、`inputClosed`、终态、
-/// 播放排空和 `generation`；`AssistantSession` 只负责 LLM、history 与落库，
-/// 不再自己切句、排队、逐句 `create`。
+/// 它拥有 `requestID`、append 序号、`inputClosed`、终态、播放排空和 `generation`；
+/// `AssistantSession` 只负责 LLM、history 与落库，不再自己切句、排队、逐句提交。
 ///
 /// 三条不许打折的规则：
 ///
@@ -86,7 +85,8 @@ final class AssistantTTSStreamCoordinator {
 
     private(set) var generation = -1
     private(set) var requestID: String?
-    private(set) var responseID: String?
+    /// `speechrail.tts.started.task_id`：服务端为这一轮分配的稳定身份，只用于诊断。
+    private(set) var taskID: String?
     private(set) var acceptedSequence = -1
     private(set) var acceptedCodepoints = 0
     private(set) var inputClosed = false
@@ -193,7 +193,7 @@ final class AssistantTTSStreamCoordinator {
     /// 只作废本地状态，不发网络命令（断线、设备重建时用）。
     func invalidate() {
         requestID = nil
-        responseID = nil
+        taskID = nil
         outcome = nil
         serverLimits = nil
         acceptedSequence = -1
@@ -212,10 +212,9 @@ final class AssistantTTSStreamCoordinator {
     // MARK: - 下行（由唯一的 receive loop 转发）
 
     @discardableResult
-    func handleStarted(requestID: String, responseID: String, limits: TTSStreamLimits?) -> Bool {
+    func handleStarted(requestID: String, taskID: String?, limits: TTSStreamLimits?) -> Bool {
         guard isActive, requestID == self.requestID else { return false }
-        if let current = self.responseID, current != responseID { return false }
-        self.responseID = responseID
+        self.taskID = taskID
         self.serverLimits = limits
         resolve(.started, .satisfied)
         return true
@@ -224,13 +223,11 @@ final class AssistantTTSStreamCoordinator {
     @discardableResult
     func handleTextAccepted(
         requestID: String,
-        responseID: String,
         appendSequence: Int,
         totalCodepoints: Int
     ) -> Bool {
         guard isActive,
               requestID == self.requestID,
-              responseID == self.responseID,
               appendSequence == acceptedSequence + 1
         else { return false }
         acceptedSequence = appendSequence
@@ -239,8 +236,8 @@ final class AssistantTTSStreamCoordinator {
         return true
     }
 
-    func handleAudio(requestID: String, responseID: String, pcm: Data) async {
-        guard isActive, requestID == self.requestID, responseID == self.responseID else { return }
+    func handleAudio(requestID: String, pcm: Data) async {
+        guard isActive, requestID == self.requestID else { return }
         let samples = pcm.count / MemoryLayout<Int16>.size
         guard samples > 0 else { return }
         guard await awaitPlaybackBudget(samples: samples) else { return }
@@ -252,8 +249,8 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
-    func handleTerminal(requestID: String, responseID: String, status: String) async {
-        guard isActive, requestID == self.requestID, responseID == self.responseID else { return }
+    func handleTerminal(requestID: String, status: String) async {
+        guard isActive, requestID == self.requestID else { return }
         releaseWaiters(.failed("服务端结束了这一轮。"))
         ledger.markServerTerminal(status: status, generation: generation)
         switch status {
@@ -368,6 +365,12 @@ final class AssistantTTSStreamCoordinator {
         finishSent = true
         inputClosed = true
         ledger.markInputClosed()
+        guard acceptedSequence >= 0 else {
+            // 没有任何文本被 ACK：服务端要求 `last_sequence` 非负且等于最后一次 ACK，
+            // 空输入没有可用的屏障，所以这一轮明确取消，而不是发一个必然被拒的 finish。
+            fail(Failure.server("这一轮没有可朗读的文本，已经取消。"))
+            return
+        }
         do {
             try await sendFinish(acceptedSequence)
         } catch {

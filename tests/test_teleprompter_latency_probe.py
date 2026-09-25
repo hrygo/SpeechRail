@@ -27,17 +27,17 @@ def test_percentile_and_timing_summary_are_deterministic() -> None:
     assert timing_summary([])["p95_ms"] is None
 
 
-def test_load_wave_fixture_requires_16khz_mono_pcm16(tmp_path: Path) -> None:
+def test_load_wave_fixture_requires_24khz_mono_pcm16(tmp_path: Path) -> None:
     path = tmp_path / "fixture.wav"
     with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
-        output.setframerate(16_000)
-        output.writeframes(b"\x00\x00" * 1_600)
+        output.setframerate(24_000)
+        output.writeframes(b"\x00\x00" * 2_400)
 
     fixture = load_wave_fixture(path)
     assert fixture.duration_seconds == 0.1
-    assert len(fixture.pcm) == 3_200
+    assert len(fixture.pcm) == 4_800
 
 
 def test_load_wave_fixture_rejects_wrong_format(tmp_path: Path) -> None:

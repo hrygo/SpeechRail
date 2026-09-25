@@ -12,7 +12,7 @@ import Foundation
 //
 // 三条硬约束：
 //
-//   1. **线上格式固定 16 kHz / 单声道 / PCM16**。原生层归一是结构性的：契约规定
+//   1. **线上格式固定 24 kHz / 单声道 / PCM16**。原生层归一是结构性的：契约规定
 //      "首个 PCM 之后不得改格式"，只要出口永远是这一种，客户端就不可能违反它。
 //   2. **实时回调里不做阻塞、不分配、不做 I/O**（§5.13）。回调只把转换后的字节写进
 //      预分配的环形缓冲；取数据由一条 drain 任务按 40 ms 拉走。
@@ -41,7 +41,7 @@ public enum AudioLevel {
     }
 }
 
-/// 一块下游要用的音频：16 kHz / 单声道 / PCM16，外加这一块的真实电平（0…1）。
+/// 一块下游要用的音频：24 kHz / 单声道 / PCM16，外加这一块的真实电平（0…1）。
 public struct AudioChunk: Sendable {
     public var pcm: Data
     public var level: Double
@@ -63,7 +63,7 @@ public struct AudioChunk: Sendable {
 /// 以及核对用的文件源，在会话层看起来是同一种东西（`TECHNICAL-DESIGN` §5.4
 /// `AudioSourceCoordinator` 的形状；阶段 3 只有麦克风与验证用的文件源）。
 ///
-/// 出口格式是接口的一部分：**永远 16 kHz / 单声道 / PCM16**。契约规定"首个 PCM 之后不得改
+/// 出口格式是接口的一部分：**永远 24 kHz / 单声道 / PCM16**。契约规定"首个 PCM 之后不得改
 /// 格式"，把归一放在来源这一侧，客户端就不可能违反它。
 public protocol AudioChunkSource: Sendable {
     func start() async throws -> AsyncStream<AudioChunk>
@@ -84,17 +84,17 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
             case .engineFailed(let message):
                 "麦克风没有开始采集：\(message)"
             case .converterUnavailable:
-                "这个输入设备的格式转不成 16 kHz 单声道。"
+                "这个输入设备的格式转不成 24 kHz 单声道。"
             }
         }
     }
 
-    /// 一块 100 ms：16 kHz × 0.1 s × 2 字节 = 3,200 字节。WebSocket 上按 100 ms 送，
+    /// 一块 100 ms：24 kHz × 0.1 s × 2 字节 = 4,800 字节。WebSocket 上按 100 ms 送，
     /// 端到端的延迟预算里这一项可以忽略，而事件数比 20 ms 一块少一个量级。
     public static let chunkDuration: TimeInterval = 0.1
 
     private let queue = DispatchQueue(label: "com.speechrail.app.session.capture", qos: .userInitiated)
-    /// 一秒的 16 kHz 单声道 PCM16 = 32,000 字节。**上限按字节算**，不是按采样点数：
+    /// 一秒的 24 kHz 单声道 PCM16 = 48,000 字节。**上限按字节算**，不是按采样点数：
     /// 写成 `Int(sampleRate)` 会得到半秒（一个采样两字节），与"容量上限就是 1 秒"对不上。
     private static let ringCapacityBytes = Int(sampleRate) * MemoryLayout<Int16>.size
     private let ring = PCMRing(capacity: MicrophoneCapture.ringCapacityBytes)
@@ -109,7 +109,8 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
 
     public init() {}
 
-    public static let sampleRate: Double = 16_000
+    /// 归一化出口就是 wire 的唯一采样率（`contracts/realtime-openai.md` §2）。
+    public static let sampleRate: Double = 24_000
 
     /// 与音色克隆同一处口径：`authorized` 才算有权限（`.notDetermined` 也还没拿到）。
     public static func authorizationStatus() -> AVAuthorizationStatus {
@@ -298,7 +299,7 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
 
     // MARK: - 格式转换
 
-    /// 输入格式 → 16 kHz 单声道 PCM16。转换器是有状态的，所以每个会话只建一个。
+    /// 输入格式 → 24 kHz 单声道 PCM16。转换器是有状态的，所以每个会话只建一个。
     nonisolated static func convert(
         _ buffer: AVAudioPCMBuffer,
         using converter: AVAudioConverter,

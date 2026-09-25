@@ -8,7 +8,7 @@ budget in §8.2:
   ``speechrail.tts.cancel``.  The contract promises no stale audio, so the byte
   counter after the cancel must stay at zero.
 * ``cancel_to_terminal_ms`` — how long the model keeps the utterance before the
-  single ``response.done`` with ``status="cancelled"`` (budget: P95 ≤ 500 ms).
+  single ``speechrail.tts.cancelled`` terminal (budget: P95 ≤ 500 ms).
 * ``next_start_accepted_ms`` — proof that the slot really was released: a fresh
   ``speechrail.tts.start`` on the same connection is accepted that fast after the
   cancel, which cannot happen if the previous utterance still held the stream.
@@ -48,17 +48,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench_tts_streaming import (
     _BYTES_PER_SAMPLE,
+    _DEFAULT_ASR_MODEL,
     DEFAULT_SAMPLE_RATE,
+    DEFAULT_VOICE,
     RealtimeTurnError,
     _decode_audio,
     _error_code,
+    _failure_code,
     _recv,
     _recv_until,
-    _response_id,
-    _response_status,
     _started_sample_rate,
     percentile,
     run_incremental_turn,
+    session_update_event,
 )
 
 from speechrail.config.auth import resolve_api_key
@@ -192,20 +194,18 @@ def summarise_cancel(traces: list[CancelTurnTrace]) -> CancelSummary:
     )
 
 
-def _session_ready(connection: Any, deadline: float, clock: Callable[[], float]) -> None:
-    connection.send(
-        {
-            "type": "transcription_session.update",
-            "session": {"speechrail": {"tts": {"enabled": True}}},
-        }
-    )
-    _recv_until(connection, deadline, clock, frozenset({"transcription_session.updated"}))
+def _session_ready(
+    connection: Any, deadline: float, clock: Callable[[], float], model: str
+) -> None:
+    connection.send(session_update_event(model))
+    _recv_until(connection, deadline, clock, frozenset({"session.updated"}))
 
 
 def run_cancel_turn(
     connection: Any,
     *,
     text: str,
+    model: str = _DEFAULT_ASR_MODEL,
     voice: str | None = None,
     cancel_trigger: str = "first_audio",
     timeout_seconds: float = 120.0,
@@ -229,12 +229,15 @@ def run_cancel_turn(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     deadline = clock() + timeout_seconds
-    _session_ready(connection, deadline, clock)
+    _session_ready(connection, deadline, clock, model)
 
     request_id = f"bench_cancel_{int(clock() * 1000)}"
-    start: dict[str, Any] = {"type": "speechrail.tts.start", "request_id": request_id}
-    if voice is not None:
-        start["voice"] = voice
+    start: dict[str, Any] = {
+        "type": "speechrail.tts.start",
+        "request_id": request_id,
+        "task": "conversation",
+        "voice": voice or DEFAULT_VOICE,
+    }
     connection.send(start)
 
     sample_rate = DEFAULT_SAMPLE_RATE
@@ -252,7 +255,6 @@ def run_cancel_turn(
     failure: str | None = None
     # One extra request id carries the release probe after the terminal.
     probe_request_id = f"{request_id}_probe"
-    probe_response_id: str | None = None
     probe_sent = False
 
     while True:
@@ -277,9 +279,9 @@ def run_cancel_turn(
             probe_start: dict[str, Any] = {
                 "type": "speechrail.tts.start",
                 "request_id": probe_request_id,
+                "task": "conversation",
+                "voice": voice or DEFAULT_VOICE,
             }
-            if voice is not None:
-                probe_start["voice"] = voice
             connection.send(probe_start)
 
         event = _recv(connection, deadline, clock)
@@ -289,8 +291,6 @@ def run_cancel_turn(
         if kind == "speechrail.tts.started":
             if probe_sent and next_start_accepted_at is None:
                 next_start_accepted_at = now
-                response = event.get("response_id")
-                probe_response_id = response if isinstance(response, str) else None
                 # The probe only measures re-admission, so stop it immediately --
                 # but its terminal still has to be read, or the next cycle on this
                 # shared connection would mistake it for an answer of its own.
@@ -303,7 +303,7 @@ def run_cancel_turn(
             sample_rate = _started_sample_rate(event) or sample_rate
         elif kind == "speechrail.tts.text_accepted":
             acknowledged = True
-        elif kind == "response.output_audio.delta":
+        elif kind == "speechrail.tts.audio.delta":
             chunk = _decode_audio(event.get("delta"))
             if chunk:
                 if first_audio_at is None:
@@ -317,18 +317,26 @@ def run_cancel_turn(
             if cancel_sent_at is None:
                 raise RealtimeTurnError(code)
             failure = failure or code
-        elif kind == "response.done":
-            status = _response_status(event)
-            if probe_response_id is not None and _response_id(event) == probe_response_id:
+        elif kind in (
+            "speechrail.tts.completed",
+            "speechrail.tts.cancelled",
+            "speechrail.tts.failed",
+        ):
+            if probe_sent and event.get("request_id") == probe_request_id:
                 # The release probe is retired, so this cycle owns no more frames.
                 break
             if terminal_at is None:
                 terminal_at = now
-                terminal_status = status
-                if status not in (None, "cancelled"):
-                    failure = failure or f"response_{status}"
-            elif next_start_accepted_at is None:
-                # Terminal of the probe utterance.
+                terminal_status = kind.removeprefix("speechrail.tts.")
+                if terminal_status == "failed":
+                    failure = failure or _failure_code(event)
+                elif terminal_status != "cancelled":
+                    failure = failure or f"cancel_turn_{terminal_status}"
+                if not release_probe:
+                    break
+            else:
+                # A stray terminal from a prior cycle: the release probe owns the
+                # next frame, so stop now rather than mis-attribute it.
                 break
 
     return CancelTurnTrace(
@@ -358,7 +366,12 @@ def probe_idle_cancel(
         kind = event.get("type")
         if kind == "error":
             return _error_code(event)
-        if kind in ("response.done", "speechrail.tts.started"):
+        if kind in (
+            "speechrail.tts.completed",
+            "speechrail.tts.cancelled",
+            "speechrail.tts.failed",
+            "speechrail.tts.started",
+        ):
             raise AssertionError(f"idle cancel answered with {kind}")
 
 
@@ -407,6 +420,7 @@ def run_soak(
     *,
     cycles: int,
     text: str,
+    model: str = _DEFAULT_ASR_MODEL,
     voice: str | None = None,
     sample: Callable[[], dict[str, float]] | None = None,
     timeout_seconds: float = 120.0,
@@ -422,6 +436,7 @@ def run_soak(
             trace = run_incremental_turn(
                 connection,
                 text=text,
+                model=model,
                 voice=voice,
                 slices=1,
                 timeout_seconds=timeout_seconds,
@@ -438,6 +453,7 @@ def run_soak(
             cancelled = run_cancel_turn(
                 connection,
                 text=text,
+                model=model,
                 voice=voice,
                 timeout_seconds=timeout_seconds,
                 clock=clock,
@@ -496,6 +512,7 @@ def main() -> None:
                 trace = run_cancel_turn(
                     connection,
                     text=args.text,
+                    model=args.model,
                     voice=args.voice,
                     timeout_seconds=args.timeout_seconds,
                 )
@@ -533,6 +550,7 @@ def main() -> None:
                 connection,
                 cycles=args.repeat,
                 text=args.text,
+                model=args.model,
                 voice=args.voice,
                 sample=sample,
                 timeout_seconds=args.timeout_seconds,

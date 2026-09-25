@@ -9,8 +9,8 @@ owners: [speechrail-core, sona-core]
 tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 ---
 
-> 本报告是历史分人验收证据，不定义当前 Realtime wire 或迁移策略。当前 `3.0.0` 使用
-> current-only `transcription_session.update` 与 `speechrail.*` 扩展，不保留旧事件兼容层。
+> 本报告是历史分人验收证据，不定义当前 Realtime wire 或迁移策略。当前 `4.0.0` 使用
+> current-only `session.update` 与 `speechrail.*` 扩展，不保留旧事件兼容层。
 
 # SpeechRail × Sona 讲话人分离端到端验收与发布就绪报告 (SPK-E2E-1)
 
@@ -87,6 +87,8 @@ git diff --check
 - **验证事实**：
   - 严格支持 `speechrail.diarization.v1` 协议协商。
   - 定义并冻结 `speechrail.diarization.update`、`speechrail.diarization.status`、`speechrail.diarization.finalize`、`speechrail.diarization.finalized` 的 JSON Schema 与确定性 fixtures。
+
+> 历史说明（2026-09-25）：上述 `speechrail.diarization.v1` 协商与 `update`/`status`/`finalize`/`finalized` 事件已被当前单栈协议取代。运行中的 wire 为 `session.update` 上的 `session.speechrail.diarization` 选项加 `speechrail.diarization.updated` / `.done` / `.failed`，契约以 `contracts/realtime-events.schema.json` 与 `contracts/realtime-openai.md` 为准；本节保留为当时记录。
 
 ### 3.4 R3：归属账本与声学证据仲裁
 - **实现文件**：`src/speechrail/realtime/attribution_ledger.py`
