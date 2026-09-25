@@ -36,6 +36,8 @@ final class PCMStreamPlayer: @unchecked Sendable {
 
     /// 队列播完（真正静音）时回调一次。界面用它把相位从"正在说话"退回"正在聆听"。
     var onDrained: (@MainActor () -> Void)?
+    /// 每一块真的播完时回调一次（帧数）。增量 TTS 用它逐块归还播放预算。
+    var onBufferRendered: (@MainActor (Int) -> Void)?
 
     func start() async throws {
         guard
@@ -65,13 +67,14 @@ final class PCMStreamPlayer: @unchecked Sendable {
         }
     }
 
-    /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了）。
-    func enqueue(_ pcm: Data) async {
-        guard !pcm.isEmpty else { return }
+    /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了），返回 `false`。
+    @discardableResult
+    func enqueue(_ pcm: Data) async -> Bool {
+        guard !pcm.isEmpty else { return false }
         let frames = pcm.count / MemoryLayout<Int16>.size
-        guard frames > 0, let format else { return }
+        guard frames > 0, let format else { return false }
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
-            return
+            return false
         }
         buffer.frameLength = AVAudioFrameCount(frames)
         if let destination = buffer.int16ChannelData?[0] {
@@ -85,17 +88,23 @@ final class PCMStreamPlayer: @unchecked Sendable {
             pendingBuffers += 1
             return true
         }
-        guard shouldSchedule else { return }
-        player.scheduleBuffer(buffer, completionCallbackType: .dataConsumed) { [weak self] _ in
+        guard shouldSchedule else { return false }
+        // `.dataRendered` = 真的播出去了；`.dataConsumed` 只表示播放器把数据拿走了，
+        // 在欠载或大缓冲下会明显早到，不能拿来当"用户听完了"。
+        player.scheduleBuffer(buffer, completionCallbackType: .dataRendered) { [weak self] _ in
             guard let self else { return }
-            let isLast = self.lock.withLock { () -> Bool in
+            let state = self.lock.withLock { () -> (isLast: Bool, rendered: (@MainActor (Int) -> Void)?) in
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
-                return self.pendingBuffers == 0
+                return (self.pendingBuffers == 0, self.onBufferRendered)
             }
-            if isLast {
+            if let rendered = state.rendered {
+                Task { @MainActor in rendered(frames) }
+            }
+            if state.isLast {
                 Task { @MainActor in self.onDrained?() }
             }
         }
+        return true
     }
 
     /// 立刻静音并丢掉还没播的部分（插话打断 / 结束会话）。

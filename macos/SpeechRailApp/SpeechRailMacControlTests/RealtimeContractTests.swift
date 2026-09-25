@@ -201,10 +201,10 @@ final class RealtimeContractTests: XCTestCase {
             status: "completed"
         ))))
         await transport.enqueue(
-            .text(jsonText(responseAudioDelta(responseID: "response-old", pcm: Data([4, 5, 6]))))
+            .text(jsonText(responseAudioDelta(responseID: "response-old", pcm: Data([4, 5, 6, 7]))))
         )
         await transport.enqueue(
-            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([1, 2, 3]))))
+            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([1, 2, 3, 4]))))
         )
         await transport.enqueue(.text(jsonText(["type": "input_audio_buffer.speech_started"])))
 
@@ -220,7 +220,7 @@ final class RealtimeContractTests: XCTestCase {
         }
         XCTAssertEqual(requestID, "request-new")
         XCTAssertEqual(responseID, "response-new")
-        XCTAssertEqual(pcm, Data([1, 2, 3]))
+        XCTAssertEqual(pcm, Data([1, 2, 3, 4]))
         guard let marker = await events.next() else {
             XCTFail("Expected the marker after active-request audio")
             await client.close()
@@ -250,7 +250,7 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(cancelObject?["response_id"] as? String, "response-new")
 
         await transport.enqueue(
-            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([9, 8, 7]))))
+            .text(jsonText(responseAudioDelta(responseID: "response-new", pcm: Data([9, 8, 7, 6]))))
         )
         await transport.enqueue(.text(jsonText(["type": "input_audio_buffer.speech_started"])))
         guard let afterCancel = await events.next() else {

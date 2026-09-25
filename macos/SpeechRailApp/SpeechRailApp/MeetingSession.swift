@@ -526,7 +526,9 @@ public final class MeetingSession {
     ) async {
         switch envelope.payload {
         case .ready, .configured, .speechStarted, .speechStopped, .segment,
-             .responseAudio(_, _, _), .responseDone(_, _, _, _), .cleared:
+             .responseAudio(_, _, _), .responseDone(_, _, _, _), .cleared,
+             .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _):
+            // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
             break
         case .committed:
             let now = Date()
