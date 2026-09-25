@@ -22,6 +22,7 @@ import contextlib
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Final, Literal, Protocol
@@ -531,9 +532,12 @@ class StreamPump:
         self._inbound: queue.Queue[dict[str, object]] = queue.Queue(
             maxsize=inbound_capacity
         )
-        self._outbound: queue.Queue[StreamFrame | None] = queue.Queue(
-            maxsize=outbound_capacity
-        )
+        self._outbound_capacity = outbound_capacity
+        # The writer drains this deque and every producer appends under the same
+        # condition, so a terminal can retire the stale PCM of its own request
+        # without reordering what a later utterance already queued.
+        self._condition = threading.Condition()
+        self._outbound: deque[StreamFrame] = deque()
         self._cancel = threading.Event()
         self._read_finished = threading.Event()
         self._closed = False
@@ -597,13 +601,43 @@ class StreamPump:
     def submit(self, frame: StreamFrame, *, timeout: float | None = None) -> bool:
         """Queue one outbound frame; ``False`` means the parent stopped reading."""
 
-        if self.write_error is not None:
-            return False
-        try:
-            self._outbound.put(frame, timeout=timeout)
-        except queue.Full:
-            return False
-        return True
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while len(self._outbound) >= self._outbound_capacity:
+                if self._closed or self.write_error is not None:
+                    return False
+                remaining = (
+                    _POLL_INTERVAL_SECONDS
+                    if deadline is None
+                    else deadline - time.monotonic()
+                )
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            if self._closed or self.write_error is not None:
+                return False
+            self._outbound.append(frame)
+            self._condition.notify_all()
+            return True
+
+    def submit_terminal(self, frame: StreamFrame) -> bool:
+        """Queue a cancel/failure terminal without waiting behind its own PCM.
+
+        A terminal is the last frame of its utterance, so it must never wait for
+        the bounded audio queue to drain behind PCM the caller has stopped
+        reading.  The queued PCM of *this* request is retired on the spot and the
+        terminal keeps submission order, which is what makes it the final frame
+        of its request instead of overtaking its own ``started`` or
+        ``text_accepted`` control frames.
+        """
+
+        with self._condition:
+            if self._closed or self.write_error is not None:
+                return False
+            self._retire_locked(request_id=_frame_request_id(frame))
+            self._outbound.append(frame)
+            self._condition.notify_all()
+            return True
 
     def acknowledge_cancel(self, request_id: str | None) -> None:
         """Retire the priority flag once the model has stopped for that stream."""
@@ -639,9 +673,9 @@ class StreamPump:
     def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
         """Stop both threads without ever waiting unbounded on a stuck pipe."""
 
-        self._closed = True
-        with contextlib.suppress(queue.Full):
-            self._outbound.put_nowait(None)
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
         for thread in (self._writer, self._reader):
             if thread is not None:
                 thread.join(timeout=join_timeout_seconds)
@@ -671,17 +705,70 @@ class StreamPump:
 
     def _write_loop(self) -> None:
         while True:
-            item = self._outbound.get()
-            if item is None:
+            frame = self._next_outbound()
+            if frame is None:
                 return
             try:
-                write_frame(self._output, item.payload, binary_payload=item.binary)
+                write_frame(
+                    self._output, frame.payload, binary_payload=frame.binary
+                )
             except BaseException as exc:
-                self.write_error = exc
+                with self._condition:
+                    self.write_error = exc
+                    self._condition.notify_all()
+                self._drop_pending()
                 return
-            if item.on_sent is not None:
+            if frame.on_sent is not None:
                 with contextlib.suppress(Exception):
-                    item.on_sent()
+                    frame.on_sent()
+
+    def _next_outbound(self) -> StreamFrame | None:
+        with self._condition:
+            while True:
+                if self._outbound:
+                    frame = self._outbound.popleft()
+                    self._condition.notify_all()
+                    return frame
+                if self._closed:
+                    return None
+                self._condition.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+    def _drop_pending(self) -> None:
+        with self._condition:
+            dropped = list(self._outbound)
+            self._outbound.clear()
+            self._retire(dropped)
+            self._condition.notify_all()
+
+    def _retire_locked(self, *, request_id: str | None) -> None:
+        """Retire this request's queued PCM; keep its ordered control frames."""
+
+        kept: deque[StreamFrame] = deque()
+        retired: list[StreamFrame] = []
+        for frame in self._outbound:
+            if frame.binary is not None and _frame_request_id(frame) == request_id:
+                retired.append(frame)
+            else:
+                kept.append(frame)
+        if not retired:
+            return
+        self._outbound.clear()
+        self._outbound.extend(kept)
+        self._retire(retired)
+
+    @staticmethod
+    def _retire(frames: list[StreamFrame]) -> None:
+        for frame in frames:
+            if frame.on_sent is not None:
+                with contextlib.suppress(Exception):
+                    frame.on_sent()
+
+
+def _frame_request_id(frame: StreamFrame) -> str | None:
+    """The utterance a frame belongs to, or ``None`` when it carries no identity."""
+
+    request_id = frame.payload.get("request_id")
+    return request_id if isinstance(request_id, str) else None
 
 
 

@@ -428,6 +428,41 @@ def _frame(frame_type: str, **extra: object) -> dict[str, object]:
     return base
 
 
+def test_audio_or_status_does_not_release_an_append_waiter() -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport([_frame(FRAME_STREAM_STARTED)])
+        session = await _open(transport)
+        append = asyncio.create_task(session.append_text(0, "abc"))
+        await asyncio.sleep(0.01)
+        assert not append.done()
+
+        transport.push(
+            _frame(
+                FRAME_STREAM_AUDIO,
+                chunk_index=0,
+                sample_offset=0,
+                _binary=_pcm(2),
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert not append.done()
+
+        transport.push(
+            _frame(
+                FRAME_STREAM_TEXT_ACCEPTED,
+                sequence=0,
+                accepted_codepoints=3,
+            )
+        )
+        await asyncio.wait_for(append, timeout=1.0)
+        await session.finish_text(0)
+        transport.push(_frame(FRAME_STREAM_DONE, terminal="completed"))
+        events = await _collect(session.events())
+        assert events[-1].kind is TtsStreamEventKind.COMPLETED
+
+    _run(scenario)
+
+
 def test_terminal_error_frame_becomes_a_failed_event() -> None:
     async def scenario() -> None:
         transport = ScriptedTransport(

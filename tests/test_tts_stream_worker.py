@@ -7,6 +7,7 @@ can be pinned exactly.
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ from speechrail.backends.qwen3_tts_stream_host import (
     TTS_STREAM_PROTOCOL_VERSION,
     ModelStepEvent,
     StreamFrame,
+    StreamPump,
     TtsStreamHost,
     parse_stream_command,
 )
@@ -34,7 +36,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamOptions,
     TtsStreamTerminal,
 )
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError, read_frame
 
 
 class FakeModelSession:
@@ -311,6 +313,158 @@ def test_audio_budget_is_released_only_after_the_writer_confirms_delivery() -> N
         produced.frames[0].on_sent()
 
 
+def test_cancel_terminal_bypasses_a_full_audio_queue_and_retires_dropped_pcm() -> None:
+    """A bounded audio queue must not delay or leak a cancellation terminal."""
+
+    output = io.BytesIO()
+    pump = StreamPump(io.BytesIO(), output, outbound_capacity=1)
+    retired = 0
+
+    def retire() -> None:
+        nonlocal retired
+        retired += 1
+
+    audio = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_AUDIO,
+            "request_id": "req_stream",
+        },
+        binary=_pcm(10),
+        on_sent=retire,
+    )
+    assert pump.submit(audio, timeout=0) is True
+    assert pump.submit(audio, timeout=0) is False
+
+    terminal = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_DONE,
+            "request_id": "req_stream",
+            "terminal": "cancelled",
+        }
+    )
+    assert pump.submit_terminal(terminal) is True
+    pump.start()
+    pump.stop()
+
+    output.seek(0)
+    written = read_frame(output)
+    assert written == terminal.payload
+    assert read_frame(output) is None
+    assert retired == 1
+
+
+def test_a_cancel_terminal_retires_only_its_own_utterance_and_keeps_serving() -> None:
+    """One pump serves many utterances, so a terminal must not end the writer."""
+
+    output = io.BytesIO()
+    pump = StreamPump(io.BytesIO(), output, outbound_capacity=4)
+    retired: list[str] = []
+    pcm = _pcm(4)
+
+    def retire_old() -> None:
+        retired.append("old")
+
+    def retire_new() -> None:
+        retired.append("new")
+
+    stale = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_AUDIO,
+            "request_id": "req_old",
+        },
+        binary=pcm,
+        on_sent=retire_old,
+    )
+    fresh = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_AUDIO,
+            "request_id": "req_new",
+        },
+        binary=pcm,
+        on_sent=retire_new,
+    )
+    terminal = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_DONE,
+            "request_id": "req_old",
+            "terminal": "cancelled",
+        }
+    )
+    assert pump.submit(stale, timeout=0) is True
+    assert pump.submit_terminal(terminal) is True
+    assert pump.submit(fresh, timeout=0) is True
+
+    pump.start()
+    pump.stop()
+
+    output.seek(0)
+    assert read_frame(output) == terminal.payload
+    # The next utterance is queued after the terminal: it stays in order and is
+    # never retired by the cancelled request's stale PCM.
+    next_frame = read_frame(output)
+    assert next_frame is not None
+    assert next_frame.pop("_binary") == pcm
+    assert next_frame == fresh.payload
+    assert read_frame(output) is None
+    assert retired == ["old", "new"]
+
+
+def test_a_cancel_terminal_stays_behind_its_own_control_frames() -> None:
+    """A terminal retires stale PCM but never overtakes started/text_accepted."""
+
+    output = io.BytesIO()
+    pump = StreamPump(io.BytesIO(), output, outbound_capacity=4)
+    started = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_STARTED,
+            "request_id": "req_old",
+        }
+    )
+    accepted = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_TEXT_ACCEPTED,
+            "request_id": "req_old",
+            "sequence": 0,
+        }
+    )
+    audio = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_AUDIO,
+            "request_id": "req_old",
+        },
+        binary=_pcm(4),
+    )
+    terminal = StreamFrame(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_DONE,
+            "request_id": "req_old",
+            "terminal": "cancelled",
+        }
+    )
+    assert pump.submit(started, timeout=0) is True
+    assert pump.submit(accepted, timeout=0) is True
+    assert pump.submit(audio, timeout=0) is True
+    assert pump.submit_terminal(terminal) is True
+
+    pump.start()
+    pump.stop()
+
+    output.seek(0)
+    assert read_frame(output) == started.payload
+    assert read_frame(output) == accepted.payload
+    assert read_frame(output) == terminal.payload
+    assert read_frame(output) is None
+
+
 class DeliveryPump:
     """Pump stand-in that retires every frame as soon as it is submitted.
 
@@ -355,6 +509,9 @@ class DeliveryPump:
         if frame.on_sent is not None:
             frame.on_sent()
         return True
+
+    def submit_terminal(self, frame: StreamFrame) -> bool:
+        return self.submit(frame)
 
     def acknowledge_cancel(self, request_id: str | None) -> None:
         self.cancel_request_id = None

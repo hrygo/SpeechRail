@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from typing import ClassVar
 
 import pytest
 
@@ -119,6 +120,15 @@ class _FakeSession:
 class _FakeSynthesizer:
     """One capability router stand-in exposing lane and identity hints."""
 
+    # A real router only ever hands the governor one of its declared role
+    # lanes; the retired ``lane:<voice>`` shape is rejected as an unknown key.
+    _LANES: ClassVar[dict[str, str]] = {
+        "serena": "tts_custom_voice",
+        "cloned": "tts_base",
+        "other": "tts_base",
+        "third": "tts_custom_voice",
+    }
+
     def __init__(self, *, failures: dict[str, BaseException] | None = None) -> None:
         self.failures = dict(failures or {})
         self.opened: list[TtsStreamOptions] = []
@@ -126,7 +136,7 @@ class _FakeSynthesizer:
         self.runtime_revision: str | None = None
 
     def resource_key_for_voice(self, voice: str) -> str:
-        return f"lane:{voice}"
+        return self._LANES.get(voice, "tts")
 
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         return self.runtime_revision

@@ -138,11 +138,15 @@ class CancelSummary:
     next_start_accepted_ms_p50: float | None
     next_start_accepted_ms_p95: float | None
     failures: tuple[str, ...] = ()
+    terminal_turns: int = 0
+    release_proven_turns: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "schema": "speechrail-perf/tts-stream-cancel/1",
             "samples": self.samples,
+            "terminal_turns": self.terminal_turns,
+            "release_proven_turns": self.release_proven_turns,
             "cancelled_turns": self.cancelled_turns,
             "stale_audio_turns": self.stale_audio_turns,
             "cancel_to_last_audio_ms": {
@@ -181,6 +185,10 @@ def summarise_cancel(traces: list[CancelTurnTrace]) -> CancelSummary:
         next_start_accepted_ms_p50=percentile(next_start, 0.50),
         next_start_accepted_ms_p95=percentile(next_start, 0.95),
         failures=tuple(trace.failure for trace in traces if trace.failure is not None),
+        terminal_turns=sum(1 for trace in traces if trace.terminal_status is not None),
+        release_proven_turns=sum(
+            1 for trace in traces if trace.next_start_accepted_at is not None
+        ),
     )
 
 

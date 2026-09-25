@@ -2,27 +2,44 @@
 
 The full-text REST path already has ``bench_tts.py``.  This entry point measures
 the *incremental* path instead: how long a real client waits from the moment it
-submits the first stabilised text to the first playable PCM, and how fast the
-model generates once it owns the utterance.
+sends the first stabilised text to the first playable PCM, and how long the
+utterance then takes to reach its terminal.
 
 Two numbers are deliberately kept apart, because one without the other is
 misleading:
 
-* ``append_to_first_pcm_ms`` covers everything the caller does before the first
-  byte of audio can be played, including the deliberate small-window wait that
+* ``append_to_first_pcm_ms`` is anchored at the first stable text *send* and
+  covers everything the caller does before the first byte of audio can be
+  played, including the deliberate small-window wait that
   ``--append-interval-ms`` emulates.
-* ``generation_rtf`` divides the window in which the model owned the utterance by
-  the audio it produced.  The wait the caller itself inserts between two slices is
-  subtracted as ``text_gap_ms``, because that gap is the caller's choice rather
-  than model speed.
+* ``generation_rtf`` divides ``terminal_time - first_stable_text_send_time`` by
+  the audio the model produced.  The window therefore includes the wait the
+  caller inserts between slices; that wait is reported separately as
+  ``text_gap_ms`` instead of being subtracted, so a client-side stall can never
+  be presented as a faster model.
+
+``playback_headroom_ms`` compares the audio already received against the elapsed
+time *before* adding the newly arrived packet, so a packet that lands after an
+underrun cannot hide the deficit.  A turn only enters the success distribution
+when its terminal is ``completed`` and its PCM is valid; a turn that produced
+audio and then failed or timed out is a failure, and an expected ``cancelled``
+terminal is counted on its own.
+
+The ``/2`` report schema replaces ``/1`` because those anchors changed:
+``append_to_first_pcm_ms``, ``generation_rtf``, ``playback_headroom_ms`` and the
+success denominator are not comparable with a ``/1`` summary.  Earlier
+incremental-TTS reports are left as written and are not re-certified under this
+strategy.
 
 The trace follows the public contract for one incremental utterance: ``start``,
-wait for ``speechrail.tts.started``, append one slice and wait for its
-``speechrail.tts.text_accepted``, repeat, then ``finish_text`` carrying the last
-acknowledged sequence.  It requires a running service with the TTS backend ready
-and a voice whose incremental capability is ``supported``; running it against a
-fake backend or an unsupported voice proves nothing.  Audio is counted and
-discarded, never retained or written to a file.
+wait for ``speechrail.tts.started``, append one slice and wait for the
+``speechrail.tts.text_accepted`` whose sequence matches that append, repeat, then
+``finish_text`` carrying the last acknowledged sequence.  A blocking ``recv``
+runs on a daemon reader with a monotonic deadline, so one silent transport can
+neither stall the sender loop nor outlive the turn.  It requires a running
+service with the TTS backend ready and a voice whose incremental capability is
+``supported``; running it against a fake backend or an unsupported voice proves
+nothing.  Audio is counted and discarded, never retained or written to a file.
 
 Results are evidence only when they carry the surrounding manifest: keep the JSON
 outside the repository and record the commit, profile, voice, variant and
@@ -36,6 +53,8 @@ import base64
 import contextlib
 import json
 import math
+import queue
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -70,12 +89,31 @@ class StreamingTurnTrace:
     text_gap_seconds: float = 0.0
     failure: str | None = None
     audio_arrivals: tuple[tuple[float, int], ...] = ()
+    started_at: float | None = None
+    first_stable_text_at: float | None = None
+    finish_sent_at: float | None = None
+    terminal_status: str | None = None
 
     @property
     def append_to_first_pcm_seconds(self) -> float | None:
+        """Compatibility alias for the first-stable-text to first-PCM measure."""
+
+        return self.first_pcm_seconds
+
+    @property
+    def first_pcm_seconds(self) -> float | None:
         if self.first_audio_at is None:
             return None
-        return self.first_audio_at - self.submitted_at
+        anchor = self.first_stable_text_at
+        if anchor is None:
+            anchor = self.submitted_at
+        return self.first_audio_at - anchor
+
+    @property
+    def start_to_started_seconds(self) -> float | None:
+        if self.started_at is None:
+            return None
+        return self.started_at - self.submitted_at
 
     @property
     def audio_seconds(self) -> float:
@@ -83,12 +121,17 @@ class StreamingTurnTrace:
 
     @property
     def generation_seconds(self) -> float | None:
-        """Wall clock the model owned the utterance, minus caller-inserted gaps."""
+        """Wall clock from the first stable text send through the terminal.
 
-        if self.first_audio_at is None:
+        This deliberately includes caller-inserted gaps and first-segment
+        overhead.  Sender gaps are reported separately instead of being
+        subtracted, so RTF cannot hide client-side starvation.
+        """
+
+        anchor = self.first_stable_text_at
+        if anchor is None:
             return None
-        generating = self.terminal_at - self.first_audio_at - self.text_gap_seconds
-        return max(0.0, generating)
+        return max(0.0, self.terminal_at - anchor)
 
     @property
     def generation_rtf(self) -> float | None:
@@ -101,12 +144,11 @@ class StreamingTurnTrace:
     def playback_headroom_seconds(self) -> float | None:
         """Smallest audio buffer the caller held while playing this turn.
 
-        A caller that starts playing on the first audio byte has, at every later
-        arrival, ``received - elapsed`` seconds of unplayed audio.  The minimum of
-        that value is the wire-level underrun margin: a negative number means a
-        real player would have run dry before that chunk arrived.  The first
-        arrival is excluded because playback has not started before it.  This is
-        a supply-cadence proxy, not a measurement of the audio device.
+        A caller that starts playing on the first audio byte has, before each
+        later arrival, the previously received audio minus elapsed time.  The
+        current packet is intentionally not added before checking: that would
+        let a packet arriving after an underrun hide the deficit.  This is a
+        supply-cadence proxy, not an audio-device measurement.
         """
 
         if len(self.audio_arrivals) < 2 or self.first_audio_at is None:
@@ -114,10 +156,21 @@ class StreamingTurnTrace:
         first_at, _ = self.audio_arrivals[0]
         bytes_per_second = self.sample_rate * _BYTES_PER_SAMPLE
         worst: float | None = None
-        for at, cumulative in self.audio_arrivals[1:]:
-            headroom = cumulative / bytes_per_second - (at - first_at)
+        for previous, current in zip(
+            self.audio_arrivals, self.audio_arrivals[1:], strict=False
+        ):
+            at, _ = current
+            headroom = previous[1] / bytes_per_second - (at - first_at)
             worst = headroom if worst is None else min(worst, headroom)
         return worst
+
+    @property
+    def first_pcm_before_finish(self) -> bool | None:
+        """Whether playable PCM arrived before the text input was finished."""
+
+        if self.first_audio_at is None or self.finish_sent_at is None:
+            return None
+        return self.first_audio_at < self.finish_sent_at
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
@@ -151,14 +204,25 @@ class StreamingTurnSummary:
     playback_headroom_ms_p50: float | None = None
     playback_headroom_ms_p95: float | None = None
     underrun_turns: int = 0
+    total_turns: int = 0
+    cancelled_turns: int = 0
+    start_to_started_ms_p50: float | None = None
+    start_to_started_ms_p95: float | None = None
+    first_pcm_before_finish_turns: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema": "speechrail-perf/tts-streaming/1",
+            "schema": "speechrail-perf/tts-streaming/2",
+            "total_turns": self.total_turns,
             "samples": self.samples,
             "completed_turns": self.completed_turns,
             "failed_turns": self.failed_turns,
+            "cancelled_turns": self.cancelled_turns,
             "failures": list(self.failures),
+            "start_to_started_ms": {
+                "p50": self.start_to_started_ms_p50,
+                "p95": self.start_to_started_ms_p95,
+            },
             "append_to_first_pcm_ms": {
                 "p50": self.append_to_first_pcm_ms_p50,
                 "p95": self.append_to_first_pcm_ms_p95,
@@ -176,27 +240,43 @@ class StreamingTurnSummary:
                 "p95": self.playback_headroom_ms_p95,
             },
             "underrun_turns": self.underrun_turns,
+            "first_pcm_before_finish_turns": self.first_pcm_before_finish_turns,
         }
 
 
 def summarise(traces: list[StreamingTurnTrace]) -> StreamingTurnSummary:
-    """Aggregate completed turns; incomplete turns are counted, never averaged in."""
+    """Aggregate protocol-complete turns; every other terminal is counted."""
+
+    completed = [
+        trace
+        for trace in traces
+        if trace.terminal_status == "completed" and trace.failure is None
+    ]
 
     first_pcm = [
         seconds * 1000
-        for trace in traces
-        if (seconds := trace.append_to_first_pcm_seconds) is not None
+        for trace in completed
+        if (seconds := trace.first_pcm_seconds) is not None
     ]
-    generation = [value for trace in traces if (value := trace.generation_rtf) is not None]
+    start_to_started = [
+        seconds * 1000
+        for trace in completed
+        if (seconds := trace.start_to_started_seconds) is not None
+    ]
+    generation = [
+        value for trace in completed if (value := trace.generation_rtf) is not None
+    ]
     text_gap = [
-        trace.text_gap_seconds * 1000 for trace in traces if trace.first_audio_at is not None
+        trace.text_gap_seconds * 1000
+        for trace in completed
+        if trace.first_audio_at is not None
     ]
     headroom = [
         seconds * 1000
-        for trace in traces
+        for trace in completed
         if (seconds := trace.playback_headroom_seconds) is not None
     ]
-    completed = sum(1 for trace in traces if trace.first_audio_at is not None)
+    cancelled = sum(1 for trace in traces if trace.terminal_status == "cancelled")
     return StreamingTurnSummary(
         samples=len(first_pcm),
         append_to_first_pcm_ms_p50=percentile(first_pcm, 0.50),
@@ -205,12 +285,19 @@ def summarise(traces: list[StreamingTurnTrace]) -> StreamingTurnSummary:
         generation_rtf_p95=percentile(generation, 0.95),
         text_gap_ms_p50=percentile(text_gap, 0.50),
         text_gap_ms_p95=percentile(text_gap, 0.95),
-        completed_turns=completed,
-        failed_turns=len(traces) - completed,
+        completed_turns=len(completed),
+        failed_turns=len(traces) - len(completed) - cancelled,
         failures=tuple(trace.failure for trace in traces if trace.failure is not None),
         playback_headroom_ms_p50=percentile(headroom, 0.50),
         playback_headroom_ms_p95=percentile(headroom, 0.95),
         underrun_turns=sum(1 for value in headroom if value < 0),
+        total_turns=len(traces),
+        cancelled_turns=cancelled,
+        start_to_started_ms_p50=percentile(start_to_started, 0.50),
+        start_to_started_ms_p95=percentile(start_to_started, 0.95),
+        first_pcm_before_finish_turns=sum(
+            1 for trace in completed if trace.first_pcm_before_finish is True
+        ),
     )
 
 
@@ -313,11 +400,149 @@ def _event_object(event: object) -> dict[str, Any]:
     raise ValueError("realtime event must be an object")
 
 
+@dataclass(frozen=True, slots=True)
+class _ReceivedEvent:
+    event: dict[str, Any]
+    received_at: float
+
+
+class _ReceiverFailure:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+
+class InterruptibleRealtimeReader:
+    """Read one realtime event at a time without blocking the sender loop.
+
+    A synchronous SDK connection has no portable ``recv(timeout=...)``.  The
+    reader therefore owns the blocking call on a daemon thread, while callers
+    request-at-most-one read and wait with a queue timeout.  Keeping one read
+    outstanding while the sender sleeps lets audio arrive during caller-side
+    pacing without leaving a reader parked on the shared connection after the
+    turn has been consumed.
+    """
+
+    def __init__(self, connection: Any, clock: Callable[[], float]) -> None:
+        self._connection = connection
+        self._clock = clock
+        self._requests: queue.Queue[None] = queue.Queue()
+        self._results: queue.Queue[_ReceivedEvent | _ReceiverFailure] = queue.Queue()
+        self._lock = threading.Lock()
+        self._outstanding = 0
+        self._closed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="bench-realtime-reader",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def request(self) -> None:
+        """Request one read if the reader is currently idle."""
+
+        if self._closed.is_set():
+            return
+        with self._lock:
+            if self._outstanding:
+                return
+            self._outstanding = 1
+        self._requests.put(None)
+
+    def receive(self, deadline: float) -> tuple[dict[str, Any], float]:
+        """Return the requested event or raise when the monotonic deadline passes."""
+
+        with self._lock:
+            if self._outstanding != 1:
+                raise RuntimeError("realtime reader has no outstanding request")
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            with self._lock:
+                self._outstanding = 0
+            self.interrupt()
+            raise TimeoutError("incremental TTS benchmark timed out")
+        try:
+            item = self._results.get(timeout=remaining)
+        except queue.Empty:
+            with self._lock:
+                self._outstanding = 0
+            self.interrupt()
+            raise TimeoutError("incremental TTS benchmark timed out") from None
+        with self._lock:
+            self._outstanding = 0
+        if isinstance(item, _ReceiverFailure):
+            raise item.error
+        return item.event, item.received_at
+
+    def close(self) -> None:
+        """Stop the idle helper without closing the caller-owned connection."""
+
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._requests.put(None)
+        self._thread.join(timeout=0.5)
+        if self._thread.is_alive():
+            # A receive was still outstanding; only this exceptional path
+            # interrupts the connection so a timed-out reader cannot survive
+            # into the next utterance.
+            self.interrupt()
+
+    def interrupt(self) -> None:
+        """Best-effort wake a blocked transport, then retire the helper."""
+
+        self._closed.set()
+        for name in ("close", "abort", "cancel"):
+            action = getattr(self._connection, name, None)
+            if callable(action):
+                with contextlib.suppress(Exception):
+                    action()
+        self._requests.put(None)
+        self._thread.join(timeout=0.5)
+
+    def _run(self) -> None:
+        while not self._closed.is_set():
+            try:
+                self._requests.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if self._closed.is_set():
+                return
+            try:
+                event = _event_object(self._connection.recv())
+                self._results.put(_ReceivedEvent(event, self._clock()))
+            except BaseException as exc:
+                self._results.put(_ReceiverFailure(exc))
+                return
+
+
+def _receive_event(
+    reader: InterruptibleRealtimeReader, deadline: float
+) -> tuple[dict[str, Any], float]:
+    return reader.receive(deadline)
+
+
 def _recv(connection: Any, deadline: float, clock: Callable[[], float]) -> dict[str, Any]:
-    event = connection.recv()
-    if clock() > deadline:
-        raise TimeoutError("incremental TTS benchmark timed out")
-    return _event_object(event)
+    reader = InterruptibleRealtimeReader(connection, clock)
+    try:
+        reader.request()
+        event, _ = _receive_event(reader, deadline)
+        return event
+    finally:
+        reader.close()
+
+
+def _recv_until_reader(
+    reader: InterruptibleRealtimeReader,
+    deadline: float,
+    wanted: frozenset[str],
+) -> dict[str, Any]:
+    while True:
+        reader.request()
+        event, _ = _receive_event(reader, deadline)
+        if event.get("type") in wanted:
+            return event
+        if event.get("type") == "error":
+            raise RealtimeTurnError(_error_code(event))
 
 
 def _recv_until(
@@ -326,12 +551,11 @@ def _recv_until(
     clock: Callable[[], float],
     wanted: frozenset[str],
 ) -> dict[str, Any]:
-    while True:
-        event = _recv(connection, deadline, clock)
-        if event.get("type") in wanted:
-            return event
-        if event.get("type") == "error":
-            raise RealtimeTurnError(_error_code(event))
+    reader = InterruptibleRealtimeReader(connection, clock)
+    try:
+        return _recv_until_reader(reader, deadline, wanted)
+    finally:
+        reader.close()
 
 
 def _error_code(event: dict[str, Any]) -> str:
@@ -365,114 +589,155 @@ def run_incremental_turn(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     deadline = clock() + timeout_seconds
+    reader = InterruptibleRealtimeReader(connection, clock)
+    try:
+        connection.send(
+            {
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"tts": {"enabled": True}}},
+            }
+        )
+        _recv_until_reader(
+            reader, deadline, frozenset({"transcription_session.updated"})
+        )
 
-    connection.send(
-        {
-            "type": "transcription_session.update",
-            "session": {"speechrail": {"tts": {"enabled": True}}},
+        request_id = f"bench_stream_{int(clock() * 1000)}"
+        start: dict[str, Any] = {
+            "type": "speechrail.tts.start",
+            "request_id": request_id,
         }
-    )
-    _recv_until(connection, deadline, clock, frozenset({"transcription_session.updated"}))
+        if voice is not None:
+            start["voice"] = voice
+        submitted_at = clock()
+        connection.send(start)
 
-    request_id = f"bench_stream_{int(clock() * 1000)}"
-    start: dict[str, Any] = {"type": "speechrail.tts.start", "request_id": request_id}
-    if voice is not None:
-        start["voice"] = voice
-    submitted_at = clock()
-    connection.send(start)
+        pieces: list[str] = []
+        gaps: list[tuple[float, float]] = []
+        first_audio_at: float | None = None
+        first_stable_text_at: float | None = None
+        started_at: float | None = None
+        finish_sent_at: float | None = None
+        response_id: str | None = None
+        arrivals: list[tuple[float, int]] = []
+        terminal_at = submitted_at
+        terminal_status: str | None = None
+        audio_bytes = 0
+        sample_rate = DEFAULT_SAMPLE_RATE
+        started = False
+        created = False
+        finish_sent = False
+        sent = 0
+        accepted_sequence = -1
+        acknowledged_at = submitted_at
+        failure: str | None = None
 
-    pieces: list[str] = []
-    gaps: list[tuple[float, float]] = []
-    first_audio_at: float | None = None
-    arrivals: list[tuple[float, int]] = []
-    terminal_at = submitted_at
-    audio_bytes = 0
-    sample_rate = DEFAULT_SAMPLE_RATE
-    started = False
-    created = False
-    finish_sent = False
-    sent = 0
-    accepted_sequence = -1
-    acknowledged_at = submitted_at
-    failure: str | None = None
-
-    while True:
-        if started and not finish_sent:
-            if sent < len(pieces):
-                if sent:
-                    if append_interval_seconds:
+        while True:
+            reader.request()
+            if started and not finish_sent:
+                if sent < len(pieces) and (sent == 0 or accepted_sequence >= sent - 1):
+                    if sent and append_interval_seconds:
                         sleep(append_interval_seconds)
                     sent_at = clock()
-                    gaps.append((acknowledged_at, sent_at))
-                connection.send(
-                    {
-                        "type": "speechrail.tts.append_text",
-                        "request_id": request_id,
-                        "sequence": sent,
-                        "text": pieces[sent],
-                    }
-                )
-                sent += 1
-            elif accepted_sequence == len(pieces) - 1:
-                connection.send(
-                    {
-                        "type": "speechrail.tts.finish_text",
-                        "request_id": request_id,
-                        "last_sequence": accepted_sequence,
-                    }
-                )
-                finish_sent = True
+                    if sent:
+                        gaps.append((acknowledged_at, sent_at))
+                    if first_stable_text_at is None:
+                        first_stable_text_at = sent_at
+                    connection.send(
+                        {
+                            "type": "speechrail.tts.append_text",
+                            "request_id": request_id,
+                            "sequence": sent,
+                            "text": pieces[sent],
+                        }
+                    )
+                    sent += 1
+                elif sent == len(pieces) and accepted_sequence == len(pieces) - 1:
+                    finish_sent_at = clock()
+                    connection.send(
+                        {
+                            "type": "speechrail.tts.finish_text",
+                            "request_id": request_id,
+                            "last_sequence": accepted_sequence,
+                        }
+                    )
+                    finish_sent = True
 
-        event = _recv(connection, deadline, clock)
-        now = clock()
-        kind = event.get("type")
+            event, now = _receive_event(reader, deadline)
+            kind = event.get("type")
 
-        if kind == "response.created":
-            created = True
-        elif kind == "speechrail.tts.started":
-            started = True
-            sample_rate = _started_sample_rate(event) or sample_rate
-            pieces = _append_schedule(text, slices, max_codepoints=_append_limit(event))
-        elif kind == "speechrail.tts.text_accepted":
-            sequence = event.get("append_sequence")
-            if isinstance(sequence, int) and not isinstance(sequence, bool):
+            if kind == "response.created":
+                created = True
+            elif kind == "speechrail.tts.started":
+                event_request_id = event.get("request_id")
+                if event_request_id is not None and event_request_id != request_id:
+                    raise ValueError("started event carried a foreign request_id")
+                raw_response_id = event.get("response_id")
+                if isinstance(raw_response_id, str):
+                    response_id = raw_response_id
+                started_at = now
+                started = True
+                sample_rate = _started_sample_rate(event) or sample_rate
+                pieces = _append_schedule(text, slices, max_codepoints=_append_limit(event))
+            elif kind == "speechrail.tts.text_accepted":
+                event_request_id = event.get("request_id")
+                if event_request_id is not None and event_request_id != request_id:
+                    raise ValueError("text_accepted event carried a foreign request_id")
+                event_response_id = event.get("response_id")
+                if (
+                    response_id is not None
+                    and event_response_id is not None
+                    and event_response_id != response_id
+                ):
+                    raise ValueError("text_accepted event carried a foreign response_id")
+                sequence = event.get("append_sequence")
+                if isinstance(sequence, bool) or not isinstance(sequence, int):
+                    raise ValueError("text_accepted event had no integer append_sequence")
+                expected = sent - 1
+                if sequence != expected:
+                    raise ValueError(
+                        f"text_accepted sequence {sequence} did not match {expected}"
+                    )
                 accepted_sequence = sequence
-            acknowledged_at = now
-        elif kind == "response.output_audio.delta":
-            chunk = _decode_audio(event.get("delta"))
-            sample_rate = _audio_sample_rate(event) or sample_rate
-            if chunk:
-                if first_audio_at is None:
-                    first_audio_at = now
-                audio_bytes += len(chunk)
-                arrivals.append((now, audio_bytes))
-        elif kind == "error":
-            code = _error_code(event)
-            if not created:
-                raise RealtimeTurnError(code)
-            failure = failure or code
-        elif kind == "response.done":
-            terminal_at = now
-            status = _response_status(event)
-            if status is not None and status != "completed":
-                failure = failure or f"response_{status}"
-            break
+                acknowledged_at = now
+            elif kind == "response.output_audio.delta":
+                chunk = _decode_audio(event.get("delta"))
+                sample_rate = _audio_sample_rate(event) or sample_rate
+                if chunk:
+                    if first_audio_at is None:
+                        first_audio_at = now
+                    audio_bytes += len(chunk)
+                    arrivals.append((now, audio_bytes))
+            elif kind == "error":
+                code = _error_code(event)
+                if not created:
+                    raise RealtimeTurnError(code)
+                failure = failure or code
+            elif kind == "response.done":
+                terminal_at = now
+                terminal_status = _response_status(event) or "unknown"
+                if terminal_status != "completed":
+                    failure = failure or f"response_{terminal_status}"
+                break
 
-    if audio_bytes % _BYTES_PER_SAMPLE:
-        raise ValueError("incremental TTS benchmark received truncated PCM16 audio")
-    text_gap_seconds = 0.0
-    if first_audio_at is not None:
-        text_gap_seconds = sum(max(0.0, end - max(start, first_audio_at)) for start, end in gaps)
-    return StreamingTurnTrace(
-        submitted_at=submitted_at,
-        first_audio_at=first_audio_at,
-        terminal_at=terminal_at,
-        audio_bytes=audio_bytes,
-        sample_rate=sample_rate,
-        text_gap_seconds=text_gap_seconds,
-        failure=failure,
-        audio_arrivals=tuple(arrivals),
-    )
+        if audio_bytes % _BYTES_PER_SAMPLE:
+            raise ValueError("incremental TTS benchmark received truncated PCM16 audio")
+        text_gap_seconds = sum(max(0.0, end - start) for start, end in gaps)
+        return StreamingTurnTrace(
+            submitted_at=submitted_at,
+            first_audio_at=first_audio_at,
+            terminal_at=terminal_at,
+            audio_bytes=audio_bytes,
+            sample_rate=sample_rate,
+            text_gap_seconds=text_gap_seconds,
+            failure=failure,
+            audio_arrivals=tuple(arrivals),
+            started_at=started_at,
+            first_stable_text_at=first_stable_text_at,
+            finish_sent_at=finish_sent_at,
+            terminal_status=terminal_status,
+        )
+    finally:
+        reader.close()
 
 
 def failed_trace(message: str) -> StreamingTurnTrace:

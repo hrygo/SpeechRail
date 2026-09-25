@@ -23,7 +23,8 @@ from examples.perf.bench_tts_stream_lifecycle import (
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from test_realtime_tts_incremental import FakeIncrementalSynthesizer, _preset_kwargs
+from speechrail.domain.model_spec import required_spec_artifact
+from test_realtime_tts_incremental import FakeIncrementalSynthesizer
 
 
 class _WebSocketBenchmarkAdapter:
@@ -72,6 +73,24 @@ class ScriptedConnection:
         """Frames this connection never delivered to the turn under test."""
 
         return list(self._script)
+
+
+def _selection_kwargs(tier: str = "quality") -> dict[str, Any]:
+    asr_key = required_spec_artifact(tier, "asr")
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")
+    base_key = required_spec_artifact(tier, "tts_base")
+    assert asr_key is not None and tts_key is not None and base_key is not None
+    return {
+        "qwen3_model_dir": Path(asr_key),
+        "qwen3_tts_model_dir": Path(tts_key),
+        "qwen3_tts_clone_model_dir": Path(base_key),
+        "selection_schema_version": 2,
+        "selection_asr_spec": tier,
+        "selection_tts_spec": tier,
+        "asr_artifact_key": asr_key,
+        "tts_artifact_key": tts_key,
+        "tts_base_artifact_key": base_key,
+    }
 
 
 def test_cancel_trace_separates_teardown_from_release() -> None:
@@ -130,11 +149,15 @@ def test_summarise_cancel_flags_stale_audio_and_missing_terminals() -> None:
 
     summary = summarise_cancel([clean, stale, wedged])
     assert summary.samples == 2  # the wedged turn is never averaged in
+    assert summary.terminal_turns == 2
+    assert summary.release_proven_turns == 2
     assert summary.cancelled_turns == 2
     assert summary.stale_audio_turns == 1
     assert summary.failures == ("tts_not_active",)
     assert summary.cancel_to_terminal_ms_p50 == pytest.approx(400.0)
     payload = summary.as_dict()
+    assert payload["terminal_turns"] == 2
+    assert payload["release_proven_turns"] == 2
     assert payload["stale_audio_turns"] == 1
     assert payload["cancel_to_terminal_ms"]["p95"] == pytest.approx(400.0)
 
@@ -155,7 +178,7 @@ def test_run_cancel_turn_drives_the_real_realtime_server() -> None:
 
     synthesizer = FakeIncrementalSynthesizer()
     client = TestClient(
-        create_app(Settings(**_preset_kwargs("balanced")), tts_synthesizer=synthesizer)
+        create_app(Settings(**_selection_kwargs("quality")), tts_synthesizer=synthesizer)
     )
 
     with client.websocket_connect("/v1/realtime") as socket:

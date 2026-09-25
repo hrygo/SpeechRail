@@ -17,6 +17,7 @@ from typing import Any, BinaryIO, Literal, Protocol
 from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_tts_stream_host import (
+    FRAME_STREAM_DONE,
     FRAME_STREAM_ERROR,
     FRAME_STREAM_START,
     STREAM_FRAME_TYPES,
@@ -932,10 +933,27 @@ def _emit(
     on_sent: Callable[[], None] | None = None,
     timeout: float = _OUTPUT_SUBMIT_TIMEOUT_SECONDS,
 ) -> None:
-    if not pump.submit(
-        StreamFrame(payload, binary=binary, on_sent=on_sent), timeout=timeout
-    ):
+    frame = StreamFrame(payload, binary=binary, on_sent=on_sent)
+    if _bypasses_audio_queue(payload):
+        submitted = pump.submit_terminal(frame)
+    else:
+        submitted = pump.submit(frame, timeout=timeout)
+    if not submitted:
         raise _OutputClosedError("the parent stopped reading worker output")
+
+
+def _bypasses_audio_queue(payload: dict[str, object]) -> bool:
+    """Whether one frame must not wait behind its own queued PCM.
+
+    Cancellation and unrecoverable failure end the utterance: their terminal has
+    to leave even when the caller stopped draining audio.  A normal ``completed``
+    terminal deliberately stays in order behind the tail PCM it still owns.
+    """
+
+    frame_type = payload.get("type")
+    if frame_type == FRAME_STREAM_ERROR and payload.get("terminal") is True:
+        return True
+    return frame_type == FRAME_STREAM_DONE and payload.get("terminal") == "cancelled"
 
 
 def _emit_frame(pump: StreamPump, frame: StreamFrame) -> None:
