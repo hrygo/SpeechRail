@@ -179,12 +179,12 @@ jobs:
           ```bash
           cd ~/Downloads
           shasum -a 256 -c SHA256SUMS
-          uvx --python 3.14.7 --from ./speechrail-*.whl speechrail install --preset balanced --yes --enable
+          uvx --python 3.14.7 --from ./speechrail-*.whl speechrail install --asr-spec quality --tts-spec quality --yes --enable
           ```
 
           升级用同一条命令，但必须先停掉旧实例：先用已安装 runtime 的
           `speechrail service stop --app-home "$HOME/Library/Application Support/SpeechRail"`，再执行上面的安装；
-          省略 `--preset` 会沿用当前档位。
+          省略 `--asr-spec`/`--tts-spec` 会沿用当前规格。
 
           服务与 App 是两个独立发布单元：先安装服务，再安装 App；只装 App 会显示「无法连接本机服务」。DMG 未签名也未公证（包内 App 只有 ad hoc 本地签名），首次打开时 macOS 可能要求在「隐私与安全性」中点击「仍要打开」。
 
