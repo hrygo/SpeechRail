@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.16"
+version: "1.17"
 date: 2026-09-25
 ---
 
@@ -706,3 +706,23 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **vendor fork 已不在磁盘：** 承载 `mlx_audio.tts.models.qwen3_tts.incremental` / `incremental_backend` / `incremental_probe` 的候选分支（`851f9567ecd27ad8f210cefc866c7d01525151e4`）在仓库、`~/Library/Application Support/SpeechRail/vendor/`、`~/.local/share/speechrail/`、uv 缓存（`archive-v0` 内 5 份 mlx_audio 归档：0.4.3 / 0.4.8 / 0.5.6×3 全部为上游版，无 `incremental*`）与任何本地 git 仓库中都不存在，也不是任何 GitHub fork；该分支从未进入 SpeechRail git 历史。**当前状态下真增量推理无法运行**，W11 真实门不能开始。
 - **恢复需要一项决定：** runtime lock 目前按 PyPI 校验 `mlx-audio==0.5.6`（`tts.txt` 双 sha256）。fork 只能二选一进入正式运行时：① 作为受控 wheel 替换锁中的 `mlx-audio` 条目并重新生成 `runtime-lock.json`；② 作为独立 overlay 制品单独固定来源与 hash。该选择决定 W11 的安装步骤、回滚单元与 §14 的成套回滚边界，未定前不安装、不切档。
 - **重建所需的接口面已在仓库内钉死，不依赖记忆：** worker 侧署名在 `src/speechrail/backends/qwen3_tts_incremental.py`（`Qwen3TtsIncrementalBackend` 构造参数、`IncrementalSessionDriver(backend, backend.encode_target_text, max_chars=)`、`generation_identity` / `sample_rate` / `prefill_target_tokens` / `peak_memory_bytes` / `append_text` / `finish_input` / `step(max_steps=)` / `cancel` / `close`）；探针侧署名在 `tools/probe_tts_incremental.py` 的 `VendorProbeExtension` / `ProbeSession` 协议与 `__speechrail_vendor_commit__`、`open_probe_session(...)` 参数表。重建必须以这两处为准，并重新跑 W4 门才能把结论从 `851f9567` 迁移到新 commit。
+
+→ **该 vendor 阻塞已于同日通过仓库内重建解除，证据见下节；“当前状态下真增量推理无法运行”只描述当时状态。**
+
+#### W11 vendor overlay 重建与 q8 门复验（2026-09-25，取代上节的 vendor 阻塞）
+
+- **恢复方式：** 原候选分支（`851f9567ecd27ad8f210cefc866c7d01525151e4`）确认不在任何本地仓库、运行时目录或 uv 缓存后，按“方案 B”在仓库内重建，落地 `d278c5e3`：`vendor/mlx-audio-incremental/` 含 `incremental.py`、`incremental_backend.py`、`incremental_probe.py` 与 README，并修正 `.gitignore` 中 `models/` 对 `.../qwen3_tts/models/` 的误命中，否则 overlay 进不了版本库。overlay 仍以内容哈希（`incremental.py` + `incremental_backend.py` 的 SHA-256 前 40 位）作身份，不引入 fork commit。
+- **重建中发现并修正的两处布局缺陷（关键）：**
+  1. **prefill 帧不得消费文本 token。** 上游从 prefill 的前向本身采样第一帧 codec，之后才开始读 trailing 文本队列。原重建版为 prefill 帧也取走一个 token，整段文本因此前移一帧：appended token 数 23（应为 24）、音频 7.0 s（应为 ~13.8 s）、ASR 只剩前 24 字。
+  2. **Base ICL 必须用官方流式布局。** 官方 `generate_icl_prompt(non_streaming_mode=False)` 把文本流 `[ref_text][target_text]` 与 `[codec_bos][ref_codec]` 逐位置相加；上游 `_prepare_icl_generation_inputs` 只实现非流式 overlay（整段文本与 codec 块拼接），该布局无法续接。改为逐位置相加后，`prefill_target_tokens` 自然等于 `codec_lens - ref_text_tokens`（本门 16），与 `851f9567` 的报告一致。
+- **确定性验证：** 新增 `tests/test_tts_incremental_vendor_state.py` 15 项（按路径加载 vendor 模块，不导入 MLX、不加载模型）固定上述规则；与既有 incremental 相关测试联跑 78 passed（2026-09-25，CPython 3.12.14 主仓 `.venv`）。
+- **真实模型门复验（2026-09-25，CPython 3.14.7 + mlx 0.32.2 + mlx-audio 0.5.6 + Metal，使用本机既有 q8 快照，未下载模型）：** vendor 内容身份 `956926b1f4d30a25dd65a455dbb75d02e74fead5`。
+
+| 路径 | 探针结构 | 独立 ASR 内容 | 延迟 / 资源 |
+|---|---|---|---|
+| CustomVoice 0.6B q8（`append-after-first-pcm-v1`） | pass；initial 2 token，prefill 1，appended 9 | 17 字一致，追加句包含 | first PCM 36.1 ms；append→next PCM 17.6 ms；3.92 s；peak 2.37 GB |
+| Base 1.7B q8 `aligned`（`base-trailing-after-first-pcm-v1`） | pass；initial 26 token，prefill 16，appended 24 | 68 字全部包含（“您/你”同音差异） | first PCM 70.1 ms；append→next PCM 19.9 ms；13.12 s；peak 3.51 GB |
+
+- **与原 W4 报告的对照：** appended token 数（9 / 24）与 `prefill_target_tokens`（1 / 16）逐项一致；首 PCM 与 append→next PCM 同数量级（原 45.1/23.5 ms、64.3/20.3 ms），Base 音频 13.84 s → 13.12 s 属采样差异。**W4 的 q8 结论可从 `851f9567` 迁移到 `956926b1`。**
+- **证据边界（not_run）：** 逐档（light/balanced/quality/extreme）真实门、Base bf16 实时门、§8.2 全部性能目标、真实 worker/协议端到端、App 可听验收与发布/回滚演练均未执行。ASR 只证明显式文本内容，不构成音色相似度、自然度或长稳验收。
+- **剩余阻塞：** 安装态 runtime（cp312）仍无增量 wire；增量 overlay 进入正式运行时的形式（替换锁中的 `mlx-audio` 条目，或作为独立 overlay 制品并入 `runtime-lock.json`）与 cp314 wheel 安装尚未执行。
