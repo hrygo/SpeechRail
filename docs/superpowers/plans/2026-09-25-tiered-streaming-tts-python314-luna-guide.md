@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.15"
+version: "1.16"
 date: 2026-09-25
 ---
 
@@ -699,3 +699,10 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **确定性证据：** 新增 `tests/test_bench_tts_streaming.py` 21 项（切分与限额、百分位、汇总、完整 wire 顺序、缺失/失败/截断路径），并把新客户端并入 `tests/test_profile_benchmark_contract.py` 的共享 API-key 发现契约。实测 `ruff check` 干净、两文件联跑 69 passed（2026-09-25，CPython 3.12.14 主仓 `.venv`；未加载模型、未连接服务、未启动 worker）。
 - **验证边界（如实标注）：** 本轮只有工具与假连接测试。§8.2 的“首批可提交文本→首个可播放 PCM P95≤500ms”、排除饥饿后的生成 RTF、真实播放欠载、用户打断→停旧音 P95≤100ms、cancel→状态释放 P95≤500ms 全部 **not_run**；逐档声学矩阵、Base bf16 实时门、extreme 是否转正式实时档，以及发布/回滚演练同样 **not_run**。
 - **下一步需要单独授权：** 服务启停与逐档切换、真实推理与资源采样（读 `speechrail-perf-benchmark` 与本指南 §7.3）、App 构建/安装与 UI 自动化（按 macOS UI 授权规则逐次确认）、发布与回滚。授权之前不安装、不切档、不 push、不改运行态。
+
+#### W11 阻塞与恢复前置（2026-09-25 复核实测）
+
+- **安装态仍无增量 wire：** `runtime/current -> speechrail-3.2.1-cp312-…-b6d3394c3dcd`，其 `speechrail/compatibility/openai_realtime.py` 中 `speechrail.tts.start` 出现 0 次。已构建的 `dist/speechrail-3.2.1-cp314-cp314-macosx_27_0_arm64.whl` 同文件出现 4 次（`speechrail.tts.started` 1 次）。安装该 wheel 等于服务安装/切换，未获授权前不动运行态。
+- **vendor fork 已不在磁盘：** 承载 `mlx_audio.tts.models.qwen3_tts.incremental` / `incremental_backend` / `incremental_probe` 的候选分支（`851f9567ecd27ad8f210cefc866c7d01525151e4`）在仓库、`~/Library/Application Support/SpeechRail/vendor/`、`~/.local/share/speechrail/`、uv 缓存（`archive-v0` 内 5 份 mlx_audio 归档：0.4.3 / 0.4.8 / 0.5.6×3 全部为上游版，无 `incremental*`）与任何本地 git 仓库中都不存在，也不是任何 GitHub fork；该分支从未进入 SpeechRail git 历史。**当前状态下真增量推理无法运行**，W11 真实门不能开始。
+- **恢复需要一项决定：** runtime lock 目前按 PyPI 校验 `mlx-audio==0.5.6`（`tts.txt` 双 sha256）。fork 只能二选一进入正式运行时：① 作为受控 wheel 替换锁中的 `mlx-audio` 条目并重新生成 `runtime-lock.json`；② 作为独立 overlay 制品单独固定来源与 hash。该选择决定 W11 的安装步骤、回滚单元与 §14 的成套回滚边界，未定前不安装、不切档。
+- **重建所需的接口面已在仓库内钉死，不依赖记忆：** worker 侧署名在 `src/speechrail/backends/qwen3_tts_incremental.py`（`Qwen3TtsIncrementalBackend` 构造参数、`IncrementalSessionDriver(backend, backend.encode_target_text, max_chars=)`、`generation_identity` / `sample_rate` / `prefill_target_tokens` / `peak_memory_bytes` / `append_text` / `finish_input` / `step(max_steps=)` / `cancel` / `close`）；探针侧署名在 `tools/probe_tts_incremental.py` 的 `VendorProbeExtension` / `ProbeSession` 协议与 `__speechrail_vendor_commit__`、`open_probe_session(...)` 参数表。重建必须以这两处为准，并重新跑 W4 门才能把结论从 `851f9567` 迁移到新 commit。
