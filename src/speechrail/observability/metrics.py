@@ -57,6 +57,9 @@ _REALTIME_PHASES = frozenset(
 _REALTIME_PARTIAL_OUTCOMES = frozenset(
     {"delta_sent", "snapshot_sent", "rewrite_withheld", "duplicate_suppressed"}
 )
+_REALTIME_FIRST_HYPOTHESIS_OUTCOMES = frozenset(
+    {"partial", "missing", "failed", "cancelled", "send_failed"}
+)
 _ALIGNMENT_EVENTS = frozenset(
     {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
 )
@@ -262,6 +265,18 @@ class Metrics:
         self._describe(
             "speechrail_realtime_phase_duration_seconds",
             "Realtime phase duration in seconds by a bounded phase label",
+        )
+        self._describe(
+            "speechrail_realtime_first_hypothesis_total",
+            "Realtime turns by the terminal outcome of their first visible hypothesis",
+        )
+        self._describe(
+            "speechrail_realtime_first_hypothesis_seconds",
+            "Realtime first-visible-hypothesis latency by bounded stage",
+        )
+        self._describe(
+            "speechrail_realtime_first_hypothesis_audio_seconds",
+            "Admitted audio accumulated before the first visible hypothesis",
         )
         self._describe(
             "speechrail_realtime_active_audio_samples_total",
@@ -491,6 +506,47 @@ class Metrics:
         if outcome not in _REALTIME_PARTIAL_OUTCOMES:
             raise ValueError(f"unsupported realtime partial outcome: {outcome}")
         self.inc("speechrail_realtime_partial_events_total", outcome=outcome)
+
+    def record_realtime_first_hypothesis(
+        self,
+        outcome: str,
+        *,
+        admitted_to_worker_seconds: float | None = None,
+        upstream_to_worker_seconds: float | None = None,
+        worker_to_socket_seconds: float | None = None,
+        admitted_to_socket_seconds: float | None = None,
+        admitted_audio_seconds: float | None = None,
+    ) -> None:
+        """Record one turn's first visible hypothesis exactly once.
+
+        ``missing`` means no visible partial preceded the final, so duration
+        fields are deliberately absent instead of being coerced to zero.
+        """
+
+        if outcome not in _REALTIME_FIRST_HYPOTHESIS_OUTCOMES:
+            raise ValueError(f"unsupported first hypothesis outcome: {outcome}")
+        self.inc("speechrail_realtime_first_hypothesis_total", outcome=outcome)
+        if outcome != "partial":
+            return
+        for stage, value in (
+            ("admitted_to_worker", admitted_to_worker_seconds),
+            ("upstream_to_worker", upstream_to_worker_seconds),
+            ("worker_to_socket", worker_to_socket_seconds),
+            ("admitted_to_socket", admitted_to_socket_seconds),
+        ):
+            if value is not None and value >= 0.0:
+                self.observe(
+                    "speechrail_realtime_first_hypothesis_seconds",
+                    value,
+                    REALTIME_PHASE_BUCKETS,
+                    stage=stage,
+                )
+        if admitted_audio_seconds is not None and admitted_audio_seconds >= 0.0:
+            self.observe(
+                "speechrail_realtime_first_hypothesis_audio_seconds",
+                admitted_audio_seconds,
+                REALTIME_TURN_DURATION_BUCKETS,
+            )
 
     def record_bargein(self) -> None:
         self.inc("speechrail_realtime_bargein_events_total")

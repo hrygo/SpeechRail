@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 安全与可观测性"
 status: active
-version: "3.1.3"
-date: 2026-09-21
+version: "3.1.4"
+date: 2026-09-25
 ---
 
 # SpeechRail 安全与可观测性
@@ -62,6 +62,25 @@ physical footprint、worker 状态与 ready 标志。它只包含上面已经允
 事实的时间序列，不是第二份监控系统。按天分文件、默认保留 30 天
 （`SPEECHRAIL_METRICS_ROLLUP_RETENTION_DAYS`），只对受管安装启用
 （`SPEECHRAIL_METRICS_ROLLUP_DIR` 可指定或关闭），写入失败只记一条 warning，不影响请求路径。
+
+### Realtime 首个可见 hypothesis
+
+`speechrail_realtime_first_hypothesis_total{outcome}` 每个输入 item 最多记录一次。
+`outcome=partial` 表示首个成功写入 WebSocket 发送缓冲的 hypothesis；`missing` 表示没有
+partial、直接进入 final（不是 0 ms）；`failed`、`cancelled`、`send_failed` 分别表示失败、
+取消和发送未完成。`speechrail_realtime_first_hypothesis_seconds{stage}` 在 `partial` 时记录：
+
+| stage | 起点 → 终点 | 用途 |
+|---|---|---|
+| `admitted_to_worker` | 服务端接纳首个语音样本 → 收到 worker partial | ASR 主链路首字延迟 |
+| `upstream_to_worker` | 首个上行 PCM 到达服务端 → 收到 worker partial | 含采集前的上行与分块积累 |
+| `worker_to_socket` | 收到 worker partial → `_send` 完成 | 服务端序列化与 socket 写入 |
+| `admitted_to_socket` | 服务端接纳首个语音样本 → `_send` 完成 | 服务端可见上限，不等于用户屏幕可见 |
+
+`speechrail_realtime_first_hypothesis_audio_seconds` 单独记录首个 partial 前累计接纳的音频
+秒数。客户端屏幕出现时刻必须由 App/调用方独立埋点，服务端 `_send` 完成不能冒充该事件；
+该指标不记录 session、request、文本或任何音频内容。冷/热模型、`chunk_duration_ms`、
+VAD/manual、排队时间与样本数必须在任何性能对比中并列说明。
 
 ## 容量与隔离
 
