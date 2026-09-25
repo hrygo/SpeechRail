@@ -247,13 +247,30 @@ def _response_status(event: dict[str, Any]) -> str | None:
     return status if isinstance(status, str) else None
 
 
+def _event_object(event: object) -> dict[str, Any]:
+    """Normalize one server event to a plain mapping.
+
+    The pinned openai SDK parses the events it knows into typed models and leaves
+    the ``speechrail.tts.*`` extensions as dicts, so a real connection yields
+    both shapes on the same stream.  Normalizing here keeps the trace logic on a
+    single representation without teaching it about SDK internals.
+    """
+
+    if isinstance(event, dict):
+        return event
+    dump = getattr(event, "model_dump", None)
+    if callable(dump):
+        payload = dump(mode="json")
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("realtime event must be an object")
+
+
 def _recv(connection: Any, deadline: float, clock: Callable[[], float]) -> dict[str, Any]:
     event = connection.recv()
     if clock() > deadline:
         raise TimeoutError("incremental TTS benchmark timed out")
-    if not isinstance(event, dict):
-        raise ValueError("realtime event must be an object")
-    return event
+    return _event_object(event)
 
 
 def _recv_until(

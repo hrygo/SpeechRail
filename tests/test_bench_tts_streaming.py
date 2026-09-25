@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from examples.perf.bench_tts_streaming import (
     StreamingTurnTrace,
     _append_schedule,
+    _recv,
     percentile,
     run_incremental_turn,
     summarise,
@@ -134,6 +135,21 @@ def test_append_schedule_splits_text_into_the_requested_slices() -> None:
     assert _append_schedule("whole reply", 1) == ["whole reply"]
     # More slices than codepoints degrades to one codepoint per slice.
     assert _append_schedule("ab", 5) == ["a", "b"]
+
+
+def test_recv_normalizes_typed_sdk_events() -> None:
+    class TypedEvent:
+        def model_dump(self, *, mode: str) -> dict[str, Any]:
+            assert mode == "json"
+            return {"type": "response.created"}
+
+    class Connection:
+        def recv(self) -> TypedEvent:
+            return TypedEvent()
+
+    assert _recv(Connection(), deadline=1.0, clock=lambda: 0.0) == {
+        "type": "response.created"
+    }
 
 
 def test_append_schedule_respects_the_server_append_budget() -> None:
