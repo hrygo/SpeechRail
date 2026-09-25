@@ -799,11 +799,27 @@ public struct AssistantView: View {
                             label: currentVoice.isSystem ? "预置" : "克隆"
                         )
                     }
+                    if let ready = currentVoiceStreamingIsReady {
+                        StatusPill(
+                            tone: ready ? .healthy : .attention,
+                            label: ready ? "边想边说" : "普通朗读"
+                        )
+                    }
                 }
-                Text(currentVoice?.description.isEmpty == false ? currentVoice!.description : "用于朗读回复的声音，下一句即可生效")
+                Text(voiceStreamingReadinessText)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .foregroundStyle(
+                        currentVoiceStreamingIsReady == false
+                            ? SpeechRailDesignTokens.Color.attention
+                            : SpeechRailDesignTokens.Color.inkTertiary
+                    )
                     .lineLimit(2)
+                if currentVoice?.description.isEmpty == false {
+                    Text(currentVoice?.description ?? "")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .lineLimit(2)
+                }
             }
             .padding(SpeechRailDesignTokens.Spacing.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -835,8 +851,9 @@ public struct AssistantView: View {
                         Button {
                             selectVoice(v)
                         } label: {
-                            HStack {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                 Text(v.name)
+                                voiceStreamingBadge(v)
                                 if v.id == effectiveVoiceID {
                                     Image(systemName: "checkmark")
                                 }
@@ -851,8 +868,9 @@ public struct AssistantView: View {
                     Button {
                         selectVoice(v)
                     } label: {
-                        HStack {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Text(v.name)
+                            voiceStreamingBadge(v)
                             if v.id == effectiveVoiceID {
                                 Image(systemName: "checkmark")
                             }
@@ -2135,6 +2153,63 @@ public struct AssistantView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .background(isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.08) : Color.clear)
         .accessibilityElement(children: .contain)
+    }
+
+    /// 下拉列表里的一行：用一个短标签说明这个音色能否边想边说。
+    ///
+    /// 状态不靠颜色单独表达（REDESIGN-SPEC §9），所以图标 + 文字都带上。
+    @ViewBuilder
+    private func voiceStreamingBadge(_ voice: CreatorVoice) -> some View {
+        if let streaming = voice.streaming {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.hairline) {
+                Image(
+                    systemName: streaming.supported
+                        ? "bolt.fill"
+                        : "clock.badge.exclamationmark"
+                )
+                Text(streaming.supported ? "可边想边说" : "普通朗读")
+            }
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(
+                streaming.supported
+                    ? SpeechRailDesignTokens.Color.ready
+                    : SpeechRailDesignTokens.Color.inkTertiary
+            )
+        }
+    }
+
+    /// 音色是否已具备“边想边说”的增量朗读条件。
+    ///
+    /// `nil` 表示服务端没声明（旧服务或尚未实现）：按未知处理，不推断为可用。
+    private var currentVoiceStreamingIsReady: Bool? {
+        currentVoice?.streaming?.supported
+    }
+
+    /// 用用户语言说明当前音色能否边想边说，并在不可用时给出下一步动作。
+    private var voiceStreamingReadinessText: String {
+        guard let voice = currentVoice else {
+            return "还没选音色：会用服务端默认声音朗读。"
+        }
+        guard let streaming = voice.streaming else {
+            return "当前服务没有报告这个音色能否边想边说；朗读会按普通方式开始。"
+        }
+        if streaming.supported {
+            return "可以边想边说：回复还在生成时就会开始朗读。"
+        }
+        switch streaming.reason {
+        case "reference_not_ready":
+            return "还在用创作出的声音，先把它固定成一个克隆音色，才能边想边说。"
+        case "variant_not_supported":
+            return "这一档不能边想边说：请换一个预置声音，或先固定一个克隆音色。"
+        case "artifact_unavailable":
+            return "这一档缺少对应的声音模型，换一个音色或先准备模型后才能边想边说。"
+        case "implementation_not_negotiated", "backend_not_ready":
+            return "朗读引擎现在还没准备好边想边说，稍后再试。"
+        case "voice_disabled":
+            return "这个音色现在用不了，先换一个可用音色。"
+        default:
+            return streaming.hint.map { "暂时不能边想边说：\($0)" } ?? "这个音色暂时不能边想边说。"
+        }
     }
 
     private func voiceSubtitle(_ voice: CreatorVoice) -> String {
