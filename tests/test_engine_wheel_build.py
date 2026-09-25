@@ -69,6 +69,11 @@ def _write_spec(
     (incremental / "incremental.py").write_text(
         "INCREMENTAL = True\n", encoding="utf-8"
     )
+    if initialize_git:
+        _git(root, "init", "-q")
+        _git(root, "config", "user.name", "SpeechRail Test")
+        _git(root, "config", "user.email", "speechrail-test@example.invalid")
+        _git(root, "add", "vendor/mlx-audio-incremental/src")
     spec = root / "vendor" / "engine-build" / "engine-build.json"
     spec.write_text(
         json.dumps(
@@ -233,3 +238,35 @@ def test_build_engine_wheel_stages_only_tracked_checkout_files(
         return _fake_builder(source_root, out_dir)
 
     build_engine_wheel(spec, root=tmp_path, builder=inspect_builder)
+
+
+def test_build_engine_wheel_stages_only_tracked_overlay_files(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+    untracked = spec.incremental_root / "mlx_audio" / "tts" / "models" / "qwen3_tts"
+    (untracked / "rogue.py").write_text("ROGUE = True\n", encoding="utf-8")
+
+    def inspect_builder(source_root: Path, out_dir: Path) -> Path:
+        assert not (
+            source_root
+            / "mlx_audio"
+            / "tts"
+            / "models"
+            / "qwen3_tts"
+            / "rogue.py"
+        ).exists()
+        return _fake_builder(source_root, out_dir)
+
+    build_engine_wheel(spec, root=tmp_path, builder=inspect_builder)
+
+
+def test_default_build_environment_pins_the_source_commit_timestamp(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+    expected_epoch = _git(spec.source_root, "show", "-s", "--format=%ct", "HEAD")
+
+    environment = TOOL["_engine_build_environment"](spec.source_root)
+
+    assert environment["SOURCE_DATE_EPOCH"] == expected_epoch

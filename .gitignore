@@ -11,6 +11,13 @@ dist/
 build/
 *.egg-info/
 
+# Controlled engine build: upstream checkout and rebuild output are local
+# inputs, while the pinned wheel and provenance are release artifacts.
+/vendor/engine-build/upstream/
+!/vendor/engine-build/dist/
+!/vendor/engine-build/dist/provenance.json
+!/vendor/engine-build/dist/*.whl
+
 # Local scratch files
 /tmp/
 

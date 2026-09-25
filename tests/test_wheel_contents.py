@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import os
 import subprocess
 import sys
@@ -13,18 +16,8 @@ _REQUIRED_WHEEL_FILES = {
     "speechrail/assets/runtime-lock.json",
     "speechrail/assets/runtime/asr.txt",
     "speechrail/assets/runtime/tts.txt",
-    (
-        "speechrail/assets/vendor/mlx-audio-incremental/src/"
-        "mlx_audio/tts/models/qwen3_tts/incremental.py"
-    ),
-    (
-        "speechrail/assets/vendor/mlx-audio-incremental/src/"
-        "mlx_audio/tts/models/qwen3_tts/incremental_backend.py"
-    ),
-    (
-        "speechrail/assets/vendor/mlx-audio-incremental/src/"
-        "mlx_audio/tts/models/qwen3_tts/incremental_probe.py"
-    ),
+    "speechrail/assets/vendor/engine/dist/mlx_audio-0.5.6-py3-none-any.whl",
+    "speechrail/assets/vendor/engine/dist/provenance.json",
     "speechrail/backends/qwen3_worker.py",
     "speechrail/backends/qwen3_tts_worker.py",
     "speechrail/config/model_catalog.py",
@@ -89,11 +82,12 @@ def assert_wheel_contents(wheel_path: Path) -> None:
     assert "speechrail/assets/runtime-lock.json" in names
     assert "speechrail/assets/runtime/asr.txt" in names
     assert "speechrail/assets/runtime/tts.txt" in names
-    overlay_prefix = "speechrail/assets/vendor/mlx-audio-incremental/src/"
-    overlay_directory = "mlx_audio/tts/models/qwen3_tts/"
-    assert f"{overlay_prefix}{overlay_directory}incremental.py" in names
-    assert f"{overlay_prefix}{overlay_directory}incremental_backend.py" in names
-    assert f"{overlay_prefix}{overlay_directory}incremental_probe.py" in names
+    assert (
+        "speechrail/assets/vendor/engine/dist/"
+        "mlx_audio-0.5.6-py3-none-any.whl"
+    ) in names
+    assert "speechrail/assets/vendor/engine/dist/provenance.json" in names
+    assert not any("mlx-audio-incremental/src/" in name for name in names)
     assert "speechrail/backends/qwen3_worker.py" in names
     assert "speechrail/backends/qwen3_tts_worker.py" in names
     assert "speechrail/service/managed_install.py" in names
@@ -109,6 +103,27 @@ def assert_wheel_contents(wheel_path: Path) -> None:
 
 def test_built_wheel_contains_runtime_only() -> None:
     assert_wheel_contents(_wheel_for_test())
+
+
+def test_built_wheel_embeds_the_pinned_controlled_engine() -> None:
+    wheel = _wheel_for_test()
+    engine_name = "mlx_audio-0.5.6-py3-none-any.whl"
+    engine_asset = f"speechrail/assets/vendor/engine/dist/{engine_name}"
+    provenance_asset = "speechrail/assets/vendor/engine/dist/provenance.json"
+
+    with ZipFile(wheel) as archive:
+        engine_bytes = archive.read(engine_asset)
+        provenance = json.loads(archive.read(provenance_asset))
+        lock = json.loads(archive.read("speechrail/assets/runtime-lock.json"))
+
+    assert hashlib.sha256(engine_bytes).hexdigest() == lock["engine_wheel"]["sha256"]
+    assert provenance == lock["engine_wheel"]
+    with ZipFile(io.BytesIO(engine_bytes)) as engine:
+        names = set(engine.namelist())
+    assert "mlx_audio/tts/models/qwen3_tts/incremental.py" in names
+    assert "mlx_audio/tts/models/qwen3_tts/incremental_backend.py" in names
+    assert "mlx_audio/tts/models/qwen3_tts/incremental_probe.py" in names
+    assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
 
 
 def test_wheel_imports_workers_and_runtime_modules_outside_checkout(tmp_path: Path) -> None:

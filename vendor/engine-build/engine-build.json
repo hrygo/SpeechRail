@@ -1,0 +1,11 @@
+{
+  "source_repository": "https://github.com/Blaizzy/mlx-audio",
+  "source_revision": "4ab7e6f7dedd69a136cfaa318c5dc8aed5119446",
+  "wheel_name": "mlx_audio-0.5.6-py3-none-any.whl",
+  "source_root": "vendor/engine-build/upstream",
+  "incremental_root": "vendor/mlx-audio-incremental/src",
+  "build_inputs": [
+    "vendor/engine-build/upstream",
+    "vendor/mlx-audio-incremental/src"
+  ]
+}
