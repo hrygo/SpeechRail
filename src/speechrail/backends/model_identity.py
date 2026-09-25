@@ -100,6 +100,25 @@ def observed_runtime_revision(identity: Mapping[str, object]) -> str | None:
     if quantization_bits is None and quantization_group_size is not None:
         return None
 
+    # Engine, compute and codec identity are optional in the handshake, but when
+    # the worker reports one it must be a plain non-empty string: an unknown or
+    # malformed value stays unknown instead of silently reusing a stale revision.
+    optional: dict[str, str | None] = {}
+    for name in (
+        "compute_dtype",
+        "compute_config",
+        "quantization_format",
+        "engine_revision",
+        "codec_dtype",
+    ):
+        raw = identity.get(name)
+        if raw is None:
+            optional[name] = None
+            continue
+        if not isinstance(raw, str) or not raw:
+            return None
+        optional[name] = raw
+
     payload = {
         "backend": values["backend"],
         "device": values["device"],
@@ -110,6 +129,7 @@ def observed_runtime_revision(identity: Mapping[str, object]) -> str | None:
         "quantization_bits": quantization_bits,
         "quantization_group_size": quantization_group_size,
         "weight_fingerprint": values["weight_fingerprint"],
+        **optional,
     }
     encoded = json.dumps(
         payload,

@@ -32,7 +32,13 @@ class _FragmentedReader:
 
 
 class _FakeEngine:
-    identity = WorkerIdentity(device="mps", dtype="float16")
+    identity = WorkerIdentity(
+        device="mps",
+        dtype="float16",
+        compute_dtype="float16",
+        compute_config="mps",
+        quantization_format="none",
+    )
 
     def transcribe(
         self,

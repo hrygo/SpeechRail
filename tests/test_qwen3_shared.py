@@ -99,6 +99,9 @@ def test_start_retains_observed_runtime_revision_until_worker_closes() -> None:
             "family": "qwen3_asr",
             "model_variant": "asr",
             "weight_fingerprint": "shape:" + ("a" * 64),
+            "compute_config": "cpu",
+            "compute_dtype": "float32",
+            "quantization_format": "none",
         }
     )
     assert expected is not None

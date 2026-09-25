@@ -32,6 +32,9 @@ def main() -> None:
                         "backend": "mlx-qwen3-asr",
                         "device": frame.get("device"),
                         "dtype": frame.get("dtype"),
+                        "compute_config": frame.get("device"),
+                        "compute_dtype": "float32",
+                        "quantization_format": "none",
                         "sample_rate": 16_000,
                         "family": "qwen3_asr",
                         "model_variant": "asr",
@@ -58,6 +61,7 @@ def main() -> None:
                         "model_loaded": True,
                         "device": frame.get("device"),
                         "dtype": frame.get("dtype"),
+                        "compute_config": frame.get("device"),
                     },
                 )
         elif frame.get("type") == "cancel":
