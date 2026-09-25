@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 from runpy import run_path
@@ -24,10 +25,36 @@ _WHEEL_NAME = "mlx_audio-0.4.8+speechrail.1-py3-none-any.whl"
 _REVISION = "b" * 40
 
 
-def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
-    source = root / "vendor" / "engine-build" / "upstream" / "mlx_audio"
+def _git(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ("git", "-C", str(root), *args),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _write_spec(
+    root: Path,
+    *,
+    revision: str | None = None,
+    initialize_git: bool = True,
+) -> Path:
+    upstream = root / "vendor" / "engine-build" / "upstream"
+    source = upstream / "mlx_audio"
     source.mkdir(parents=True)
     (source / "__init__.py").write_text("ENGINE = 1\n", encoding="utf-8")
+    if initialize_git:
+        _git(upstream, "init", "-q")
+        _git(upstream, "config", "user.name", "SpeechRail Test")
+        _git(upstream, "config", "user.email", "speechrail-test@example.invalid")
+        _git(upstream, "remote", "add", "origin", "https://github.com/Blaizzy/mlx-audio.git")
+        _git(upstream, "add", "mlx_audio")
+        _git(upstream, "commit", "-q", "-m", "fixture")
+        committed_revision = _git(upstream, "rev-parse", "HEAD")
+    else:
+        committed_revision = _REVISION
     incremental = (
         root
         / "vendor"
@@ -47,7 +74,7 @@ def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
         json.dumps(
             {
                 "source_repository": "https://github.com/Blaizzy/mlx-audio",
-                "source_revision": revision,
+                "source_revision": revision or committed_revision,
                 "wheel_name": _WHEEL_NAME,
                 "source_root": "vendor/engine-build/upstream",
                 "incremental_root": "vendor/mlx-audio-incremental/src",
@@ -63,6 +90,7 @@ def _write_spec(root: Path, *, revision: str = _REVISION) -> Path:
 
 
 def _fake_builder(source_root: Path, out_dir: Path) -> Path:
+    assert not (source_root / ".git").exists()
     overlay = (
         source_root
         / "mlx_audio"
@@ -107,7 +135,7 @@ def test_build_engine_wheel_writes_provenance_the_lock_generator_accepts(
     )
 
     assert build.wheel_path.name == _WHEEL_NAME
-    assert build.provenance["source_revision"] == _REVISION
+    assert build.provenance["source_revision"] == spec.source_revision
     assert build.provenance["source_repository"] == "https://github.com/Blaizzy/mlx-audio"
     assert build.sha256 == hashlib.sha256(build.wheel_path.read_bytes()).hexdigest()
     provenance_path = tmp_path / "vendor" / "engine-build" / "dist" / "provenance.json"
@@ -130,7 +158,10 @@ def test_build_engine_wheel_is_deterministic_for_the_same_inputs(tmp_path: Path)
 
 def test_build_spec_rejects_an_unpinned_revision(tmp_path: Path) -> None:
     with pytest.raises(EngineWheelBuildError, match="revision"):
-        load_build_spec(tmp_path, _write_spec(tmp_path, revision="main"))
+        load_build_spec(
+            tmp_path,
+            _write_spec(tmp_path, revision="main", initialize_git=False),
+        )
 
 
 def test_build_engine_wheel_rejects_missing_inputs(tmp_path: Path) -> None:
@@ -170,3 +201,35 @@ def test_build_engine_wheel_rejects_an_archive_without_the_incremental_overlay(
 
     with pytest.raises(EngineWheelBuildError, match="incremental"):
         build_engine_wheel(spec, root=tmp_path, builder=broken_builder)
+
+
+def test_build_engine_wheel_rejects_a_checkout_at_a_different_revision(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path, revision=_REVISION))
+
+    with pytest.raises(EngineWheelBuildError, match="revision"):
+        build_engine_wheel(spec, root=tmp_path, builder=_fake_builder)
+
+
+def test_build_engine_wheel_rejects_a_dirty_checkout(tmp_path: Path) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+    (spec.source_root / "mlx_audio" / "__init__.py").write_text(
+        "ENGINE = 2\n", encoding="utf-8"
+    )
+
+    with pytest.raises(EngineWheelBuildError, match="dirty"):
+        build_engine_wheel(spec, root=tmp_path, builder=_fake_builder)
+
+
+def test_build_engine_wheel_stages_only_tracked_checkout_files(
+    tmp_path: Path,
+) -> None:
+    spec = load_build_spec(tmp_path, _write_spec(tmp_path))
+    (spec.source_root / "untracked.txt").write_text("do not ship\n", encoding="utf-8")
+
+    def inspect_builder(source_root: Path, out_dir: Path) -> Path:
+        assert not (source_root / "untracked.txt").exists()
+        return _fake_builder(source_root, out_dir)
+
+    build_engine_wheel(spec, root=tmp_path, builder=inspect_builder)

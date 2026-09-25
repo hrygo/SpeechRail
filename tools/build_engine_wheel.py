@@ -21,7 +21,6 @@ import hashlib
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -90,6 +89,81 @@ def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
+def _run_git_bytes(source_root: Path, *arguments: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(source_root), *arguments),
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:  # pragma: no cover - depends on the local toolchain
+        raise EngineWheelBuildError("engine source checkout requires git") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise EngineWheelBuildError(
+            "engine source checkout command failed: "
+            + (detail[-1] if detail else "unknown error")
+        )
+    return completed.stdout
+
+
+def _run_git(source_root: Path, *arguments: str) -> str:
+    return _run_git_bytes(source_root, *arguments).decode("utf-8").strip()
+
+
+def _normalize_repository(repository: str) -> str:
+    normalized = repository.strip().rstrip("/")
+    return normalized[:-4] if normalized.endswith(".git") else normalized
+
+
+def _verify_source_checkout(spec: EngineBuildSpec) -> None:
+    """Require a clean checkout of the exact pinned upstream revision."""
+
+    source_root = spec.source_root
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise EngineWheelBuildError("pinned engine source checkout is missing")
+    head = _run_git(source_root, "rev-parse", "HEAD").lower()
+    if head != spec.source_revision.lower():
+        raise EngineWheelBuildError(
+            "engine source checkout revision does not match the pinned revision"
+        )
+    status = _run_git(source_root, "status", "--porcelain", "--untracked-files=no")
+    if status:
+        raise EngineWheelBuildError("engine source checkout has tracked modifications (dirty)")
+    repository = _normalize_repository(
+        _run_git(source_root, "remote", "get-url", "origin")
+    )
+    if repository != _normalize_repository(spec.source_repository):
+        raise EngineWheelBuildError(
+            "engine source checkout origin does not match the pinned repository"
+        )
+
+
+def _tracked_source_files(source_root: Path) -> tuple[Path, ...]:
+    """Return the files committed at the pinned revision, never ``.git`` or untracked input."""
+
+    names = _run_git_bytes(source_root, "ls-files", "-z").split(b"\0")
+    files: list[Path] = []
+    for raw_name in names:
+        if not raw_name:
+            continue
+        try:
+            relative = raw_name.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise EngineWheelBuildError("engine source checkout has a non-UTF-8 path") from exc
+        path = source_root / relative
+        if path.is_symlink() or not path.is_file():
+            raise EngineWheelBuildError("engine source checkout contains an unsupported file")
+        try:
+            path.resolve().relative_to(source_root.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise EngineWheelBuildError("engine source checkout path escapes its root") from exc
+        files.append(path)
+    if not files:
+        raise EngineWheelBuildError("engine source checkout has no tracked files")
+    return tuple(sorted(files, key=lambda item: item.relative_to(source_root).as_posix()))
+
+
 def _overlay_files(incremental_root: Path) -> tuple[Path, ...]:
     """Return the additive overlay files that must reach the built wheel."""
 
@@ -136,6 +210,7 @@ def _apply_patch(patch_path: Path, source_root: Path) -> None:
 @contextmanager
 def _staged_source(
     source_root: Path,
+    source_files: tuple[Path, ...],
     incremental_root: Path,
     patch_path: Path | None,
 ) -> Iterator[Path]:
@@ -143,13 +218,23 @@ def _staged_source(
 
     with tempfile.TemporaryDirectory(prefix="speechrail-engine-build-") as temporary:
         staged = Path(temporary) / "source"
-        shutil.copytree(source_root, staged)
+        staged.mkdir()
+        for source in source_files:
+            relative = source.relative_to(source_root)
+            destination = staged / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         if patch_path is not None:
             _apply_patch(patch_path, staged)
         for overlay in _overlay_files(incremental_root):
             relative = overlay.relative_to(incremental_root)
             destination = staged / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                raise EngineWheelBuildError(
+                    "engine incremental overlay collides with upstream source: "
+                    + relative.as_posix()
+                )
             shutil.copy2(overlay, destination)
         yield staged
 
@@ -163,7 +248,10 @@ def hash_tree(paths: Iterable[Path], *, root: Path) -> str:
         if path.is_symlink():
             raise EngineWheelBuildError("engine build inputs must not be symlinks")
         if path.is_dir():
-            files = sorted(item for item in path.rglob("*") if item.is_file())
+            if (path / ".git").exists() or (path / ".git").is_file():
+                files = list(_tracked_source_files(path))
+            else:
+                files = sorted(item for item in path.rglob("*") if item.is_file())
         elif path.is_file():
             files = [path]
         else:
@@ -233,17 +321,15 @@ def load_build_spec(root: Path, spec_path: Path) -> EngineBuildSpec:
 
 
 def _default_builder(source_root: Path, out_dir: Path) -> Path:
-    """Build with ``python -m build`` from the pinned source checkout."""
+    """Build with uv's isolated PEP 517 frontend from the pinned source checkout."""
 
     try:
         completed = subprocess.run(
             (
-                sys.executable,
-                "-m",
+                "uv",
                 "build",
                 "--wheel",
-                "--no-isolation",
-                "--outdir",
+                "--out-dir",
                 str(out_dir),
                 str(source_root),
             ),
@@ -253,9 +339,10 @@ def _default_builder(source_root: Path, out_dir: Path) -> Path:
     except OSError as exc:  # pragma: no cover - depends on the local toolchain
         raise EngineWheelBuildError("engine wheel build could not start") from exc
     if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().splitlines()
         raise EngineWheelBuildError(
             "engine wheel build failed: "
-            + completed.stderr.decode("utf-8", "replace").strip().splitlines()[-1]
+            + (detail[-1] if detail else "unknown error")
         )
     wheels = sorted(out_dir.glob("*.whl"))
     if not wheels:
@@ -274,8 +361,8 @@ def build_engine_wheel(
 
     resolved_root = root.resolve()
     destination = (out_dir or (resolved_root / "vendor" / "engine-build" / "dist")).resolve()
-    if not spec.source_root.is_dir():
-        raise EngineWheelBuildError("pinned engine source checkout is missing")
+    _verify_source_checkout(spec)
+    source_files = _tracked_source_files(spec.source_root)
     if spec.patch_path is not None and not spec.patch_path.is_file():
         raise EngineWheelBuildError("engine build patch is missing")
     overlay_files = _overlay_files(spec.incremental_root)
@@ -286,17 +373,25 @@ def build_engine_wheel(
         root=resolved_root,
     )
     build = builder or _default_builder
-    with _staged_source(spec.source_root, spec.incremental_root, spec.patch_path) as staged:
-        built = build(staged, destination)
     wheel_path = destination / spec.wheel_name
-    if built.resolve() != wheel_path.resolve():
-        if not built.exists():
+    with tempfile.TemporaryDirectory(
+        prefix=".engine-wheel-", dir=destination
+    ) as build_directory:
+        with _staged_source(
+            spec.source_root,
+            source_files,
+            spec.incremental_root,
+            spec.patch_path,
+        ) as staged:
+            built = build(staged, Path(build_directory))
+        if not built.is_file():
             raise EngineWheelBuildError("engine wheel build produced no wheel")
-        built.replace(wheel_path)
-    if not zipfile.is_zipfile(wheel_path):
-        raise EngineWheelBuildError("engine wheel is not a valid archive")
-    with zipfile.ZipFile(wheel_path) as archive:
-        members = set(archive.namelist())
+        if not zipfile.is_zipfile(built):
+            raise EngineWheelBuildError("engine wheel is not a valid archive")
+        with zipfile.ZipFile(built) as archive:
+            members = set(archive.namelist())
+        if built.resolve() != wheel_path.resolve():
+            shutil.copy2(built, wheel_path)
     missing_overlay = sorted(
         path.relative_to(spec.incremental_root).as_posix()
         for path in overlay_files
