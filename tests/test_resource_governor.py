@@ -7,6 +7,7 @@ import pytest
 from speechrail.config import Settings
 from speechrail.domain.resource_limits import GovernorLimits as DomainGovernorLimits
 from speechrail.runtime.resource_governor import (
+    GovernorBudgetError,
     GovernorLimits,
     GovernorQueueFullError,
     ResourceGovernor,
@@ -910,3 +911,30 @@ def test_governor_rejects_unbounded_purpose_strings() -> None:
         assert governor.snapshot().pending_batch == 0
 
     asyncio.run(scenario())
+
+
+def test_declared_infeasible_budget_rejects_heavy_compute() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=4),
+            reject_heavy_compute=True,
+            budget_reason="Single-task footprint exceeds available budget; refusing heavy compute",
+        )
+        assert governor.snapshot().reject_heavy_compute is True
+        assert governor.lane_available(WorkClass.REALTIME_ASR) is False
+
+        ran = False
+
+        async def work() -> None:
+            nonlocal ran
+            ran = True
+
+        with pytest.raises(GovernorBudgetError):
+            await governor.run(work, WorkClass.BATCH_ASR)
+        assert ran is False
+
+    asyncio.run(scenario())
+
+
+def test_budget_rejection_error_is_a_queue_full_error() -> None:
+    assert issubclass(GovernorBudgetError, GovernorQueueFullError)

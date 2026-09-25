@@ -531,6 +531,44 @@ def test_composition_serializes_when_declared_footprints_exceed_budget(
     assert "exceeds" in snapshot.policy_reason.lower()
 
 
+def test_composition_refuses_heavy_compute_when_single_task_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 8 GiB hardware -> 4 GiB budget. A declared 5 GiB ASR peak cannot fit even
+    # alone, so the governor must refuse rather than load it serially.
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 8 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=5 * 1024**3,
+        tts_resident_bytes=0,
+    )
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object()),
+    )
+    snapshot = services.governor.snapshot()
+    assert snapshot.reject_heavy_compute is True
+    assert "refusing heavy compute" in snapshot.budget_reason.lower()
+
+
+def test_composition_rejects_declaring_shared_bytes_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 32 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=2 * 1024**3,
+        shared_resident_bytes=1 * 1024**3,
+        resident_declaration_includes_shared=True,
+    )
+    with pytest.raises(ValueError, match="shared"):
+        build_app_services(settings, AppOverrides(batch_transcriber=object()))
+
+
 def test_composition_force_allows_overlap_regardless_of_unknown_footprints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
