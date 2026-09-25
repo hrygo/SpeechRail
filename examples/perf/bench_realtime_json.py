@@ -109,7 +109,11 @@ def run_realtime_benchmark(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pcm_file", type=Path, help="16 kHz mono PCM16 fixture")
-    parser.add_argument("--profile", required=True, choices=("quality", "balanced", "light"))
+    parser.add_argument(
+        "--profile",
+        required=True,
+        choices=("fast", "quality", "reference"),
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--sessions", type=int, default=3)
     parser.add_argument("--warmup", dest="warmup", action="store_true", default=True)

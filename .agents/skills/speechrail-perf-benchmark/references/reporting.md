@@ -11,7 +11,7 @@
 按实际测量与可比基线选择视图，不为填满模板补跑未授权基准：
 
 - **纵向版本变化**：当前版本与上一份同机器、同 profile、同 fixture、同 benchmark schema 的版本比较。
-- **横向档位对比**：同一版本、同一机器、同一 fixture 下 `quality`/`balanced`/`light` 比较。
+- **横向档位对比**：同一版本、同一机器、同一 fixture 下 `quality`/`fast`/`reference` 比较。
 
 变化公式：`delta = current - baseline`，`delta_pct = delta / baseline × 100%`。延迟、RTF、CER/WER、
 内存下降为改善；吞吐、成功率和相似度上升为改善。表中同时显示绝对值与百分比，并用
@@ -41,7 +41,7 @@
 
 | 结论 | 结果 | 证据 |
 |---|---|---|
-| 发布档位 | quality / balanced / light | active profile + artifact identity |
+| 发布档位 | fast / quality / reference | active profile + artifact identity |
 | 最大同时物理占用 | ... MB | 同一 tick `phys_footprint` |
 | ASR / TTS 关键 RTF | ... / ... | warm N=... |
 | 质量与音色稳定性 | 通过 / 未验证 | CER/WER、embedding、ABX |
@@ -70,7 +70,7 @@
 
 ## 横向：三档对比
 
-| 指标 | quality | balanced | light | 最优 / 代价 |
+| 指标 | fast | quality | reference | 最优 / 代价 |
 |---|---:|---:|---:|---|
 | ASR CER / WER ↓ | ... | ... | ... | ... |
 | ASR warm p50 / p95 RTF ↓ | ... | ... | ... | ... |

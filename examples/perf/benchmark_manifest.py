@@ -13,21 +13,21 @@ from urllib import parse as urllib_parse
 PHASES = frozenset({"baseline", "quality", "cold", "warm", "soak", "switch"})
 PROFILE_DEVICE_PHASES: Mapping[str, str] = MappingProxyType(
     {
-        "light": "m1_air_8gb",
-        "balanced": "device_12gb",
+        "fast": "local_fast",
         "quality": "local_quality",
+        "reference": "local_reference",
     }
 )
 _PROFILE_REQUIRED_PHASES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "light": frozenset(
-            {"m1_air_8gb", "quality", "cold", "warm", "soak", "switch"}
-        ),
-        "balanced": frozenset(
-            {"device_12gb", "quality", "cold", "warm", "switch"}
+        "fast": frozenset(
+            {"local_fast", "quality", "cold", "warm", "soak", "switch"}
         ),
         "quality": frozenset(
-            {"local_quality", "quality", "cold", "warm", "switch"}
+            {"local_quality", "quality", "cold", "warm", "soak", "switch"}
+        ),
+        "reference": frozenset(
+            {"local_reference", "quality", "cold", "warm", "soak", "switch"}
         ),
     }
 )

@@ -47,7 +47,7 @@ description: >-
 | 发布类型 | 发布基准覆盖建议 | 切换规则 |
 |---|---|---|
 | PATCH | 当前部署 profile | 不为基准切档；与同机同口径版本纵向比较 |
-| MINOR | `quality`、`balanced`、`light` | active → 其余档 → active，逐档恢复 |
+| MINOR | `quality`、`fast`、`reference` | active → 其余档 → active，逐档恢复 |
 | MAJOR | 三档完整套件 | 另加当前公共契约、消费者 smoke 与回退验证；不把旧数据迁移视为默认测试项 |
 
 若改动影响未覆盖的 profile、模型、共同 runtime 或 benchmark 工具，说明扩大覆盖的理由；只有授权包含
@@ -77,7 +77,7 @@ CURRENT_PYTHON="$APP_HOME/runtime/current/.venv/bin/python"
   --base-url http://127.0.0.1:8201 \
   --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}" \
   --manifest <repo-external-manifest.json> \
-  --profile <quality|balanced|light> \
+  --profile <quality|fast|reference> \
   --phase warm \
   --output <repo-external-result.json>
 ```
@@ -89,7 +89,7 @@ Realtime 正式证据使用：
 
 ```bash
 "$CURRENT_PYTHON" examples/perf/bench_realtime_json.py <external-16khz-pcm> \
-  --profile <quality|balanced|light> \
+  --profile <quality|fast|reference> \
   --output <repo-external-realtime.json> \
   --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 ```
