@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.7"
+version: "1.8"
 date: 2026-09-25
 ---
 
@@ -611,12 +611,12 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 |---|---|---|---|
 | CustomVoice 0.6B q8（`append-after-first-pcm-v1`） | pass；initial 2 token，prefill 1，appended 9 token | 16/16 字符一致，追加句包含 | first PCM 45.1 ms；append→next PCM 23.5 ms；peak 2.37 GB |
 | Base 1.7B q8 `aligned`（`base-trailing-after-first-pcm-v1`） | pass；initial 26 token，prefill 16，appended 24 token | 62/62 字符一致，追加句包含 | first PCM 64.3 ms；append→next PCM 20.3 ms；peak 3.51 GB |
-| Base 1.7B bf16 | catalog 门未过（仅 `README.md` 大小/哈希不符） | 非 catalog 诊断：追加句包含，字符 LCS 0.984 | 非正式门证据，不能宣称 extreme 已验收 |
+| Base 1.7B bf16 | catalog 门已过（恢复 pinned README 快照后 13/13 文件复验） | 恢复前非 catalog 诊断：追加句包含，字符 LCS 0.984 | catalog 通过不等于实时门；extreme 仍需 W11 独立验证 |
 | Base 1.7B q8 `overlay` | 不适用 | — | 该布局无 trailing 队列，不用于增量门 |
 
 - **未改变的证据：** 长 reference + 2 token 初始文本仍只发声首段；overlay 布局仍在文本尾部未完成时命中 `codec_eos_before_text_eos`；永久或长期抑制 codec EOS 仍是退化重复。三者都不能作为真增量路径。
-- **bf16 catalog 差异（2026-09-25 只读核对）：** `tts-1.7b-base-bf16` 与 `tts-1.7b-design-bf16` 只有 `README.md` 不符（本地 1026 B vs catalog 1645 B；本地 1068 B vs catalog 1203 B），其余权重、配置与 tokenizer 文件全部匹配；本地 README 是合法的对应 bf16 模型卡（design-bf16 与 design-q8 仅模型名不同）。处理方式需用户选择：恢复 pinned 快照、修订清单，或把 README 从承载性清单移出；在决定前不放宽校验，也不把 bf16 记为已验收。
-- **Ruling：** W4 关键门通过，W5–W10 继续实施。Base 真增量成立的条件是“短 reference + 初始文本跨过 prefill 槽位 + 剩余与新追加文本逐帧投喂同一 generation”，而不是全文本预填后追加。ASR 只证明显式文本内容，人耳 A/B、说话人相似度、自然度、RTF 长稳、真实 worker/协议与取消/重连仍未验收。
+- **bf16 catalog 差异已解决（2026-09-25 用户确认 + 只读复验）：** 原始差异仅限 `README.md`（本地 1026 B vs catalog 1645 B；本地 1068 B vs catalog 1203 B），权重、配置与 tokenizer 全部匹配。用户恢复 pinned README 快照后，用仓库自带 `verify_artifact_files` 复验 `tts-1.7b-base-bf16` 与 `tts-1.7b-design-bf16`：各 13/13 文件尺寸与 sha256 全部匹配（base README 1645 B `63ff68f3…`、design README 1203 B `9a7ca18a…`）。校验未放宽，catalog 门按原规则通过。**该结论只覆盖制品完整性，不构成 bf16 模型/实时门验收**；bf16 的模型层增量、声学、性能与资源结论仍待 W11。
+- **Ruling：** W4 关键门通过（q8 已证明；bf16 catalog 完整性已通过，实时门待 W11），W5–W10 继续实施。Base 真增量成立的条件是“短 reference + 初始文本跨过 prefill 槽位 + 剩余与新追加文本逐帧投喂同一 generation”，而不是全文本预填后追加。ASR 只证明显式文本内容，人耳 A/B、说话人相似度、自然度、RTF 长稳、真实 worker/协议与取消/重连仍未验收。
 
 ### W5 实施与验收记录（2026-09-25）
 
