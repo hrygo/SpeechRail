@@ -929,10 +929,25 @@ def _emit(
     payload: dict[str, object],
     binary: bytes | None = None,
     *,
+    on_sent: Callable[[], None] | None = None,
     timeout: float = _OUTPUT_SUBMIT_TIMEOUT_SECONDS,
 ) -> None:
-    if not pump.submit(StreamFrame(payload, binary=binary), timeout=timeout):
+    if not pump.submit(
+        StreamFrame(payload, binary=binary, on_sent=on_sent), timeout=timeout
+    ):
         raise _OutputClosedError("the parent stopped reading worker output")
+
+
+def _emit_frame(pump: StreamPump, frame: StreamFrame) -> None:
+    """Forward a host frame verbatim, keeping its delivery callback.
+
+    Audio frames retire the pending-audio budget through ``on_sent`` once the
+    writer really put them on the wire.  Rebuilding the frame without that
+    callback leaks the budget and turns a healthy stream into
+    ``tts_backpressure``.
+    """
+
+    _emit(pump, frame.payload, frame.binary, on_sent=frame.on_sent)
 
 
 def _emit_best_effort(
@@ -940,6 +955,11 @@ def _emit_best_effort(
 ) -> None:
     with contextlib.suppress(_OutputClosedError):
         _emit(pump, payload, binary)
+
+
+def _emit_frame_best_effort(pump: StreamPump, frame: StreamFrame) -> None:
+    with contextlib.suppress(_OutputClosedError):
+        _emit_frame(pump, frame)
 
 
 def _worker_error_frame(
@@ -1124,12 +1144,12 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
     """Interleave bounded model steps with control frames from the parent."""
 
     for outbound in host.started_frames():
-        _emit(pump, outbound.payload, outbound.binary)
+        _emit_frame(pump, outbound)
     request_id = host.options.request_id
     while True:
         if pump.cancel_pending and pump.cancel_request_id == request_id:
             for outbound in host.cancel():
-                _emit(pump, outbound.payload, outbound.binary)
+                _emit_frame(pump, outbound)
             pump.acknowledge_cancel(request_id)
             return
         if _drain_stream_commands(pump, host):
@@ -1138,7 +1158,7 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
             return
         result = host.step()
         for outbound in result.frames:
-            _emit(pump, outbound.payload, outbound.binary)
+            _emit_frame(pump, outbound)
         if result.terminal or host.terminal is not None:
             return
         if not result.waiting_for_text:
@@ -1151,10 +1171,10 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
                 or pump.write_error is not None
             ):
                 for outbound in host.cancel():
-                    _emit_best_effort(pump, outbound.payload, outbound.binary)
+                    _emit_frame_best_effort(pump, outbound)
                 return
             for outbound in host.expire():
-                _emit(pump, outbound.payload, outbound.binary)
+                _emit_frame(pump, outbound)
             return
         if _apply_stream_frame(pump, host, frame):
             return
@@ -1193,17 +1213,17 @@ def _apply_stream_frame(
         return False
     if command.kind == "cancel":
         for outbound in host.cancel():
-            _emit(pump, outbound.payload, outbound.binary)
+            _emit_frame(pump, outbound)
         pump.acknowledge_cancel(request_id)
         return True
     if command.kind == "finish":
         assert command.last_sequence is not None
         for outbound in host.finish_input(command.last_sequence):
-            _emit(pump, outbound.payload, outbound.binary)
+            _emit_frame(pump, outbound)
     elif command.kind == "text":
         assert command.sequence is not None and command.text is not None
         for outbound in host.accept_text(command.sequence, command.text):
-            _emit(pump, outbound.payload, outbound.binary)
+            _emit_frame(pump, outbound)
     else:
         _emit(
             pump,

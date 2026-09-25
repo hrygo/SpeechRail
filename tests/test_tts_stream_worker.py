@@ -22,9 +22,11 @@ from speechrail.backends.qwen3_tts_stream_host import (
     FRAME_STREAM_TEXT_ACCEPTED,
     TTS_STREAM_PROTOCOL_VERSION,
     ModelStepEvent,
+    StreamFrame,
     TtsStreamHost,
     parse_stream_command,
 )
+from speechrail.backends.qwen3_tts_worker import _drive_stream
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamLimits,
@@ -306,6 +308,67 @@ def test_audio_budget_is_released_only_after_the_writer_confirms_delivery() -> N
         assert produced.frames[0].payload["type"] == FRAME_STREAM_AUDIO
         assert callable(produced.frames[0].on_sent)
         produced.frames[0].on_sent()
+
+
+class DeliveryPump:
+    """Pump stand-in that retires every frame as soon as it is submitted.
+
+    The real ``StreamPump`` runs ``on_sent`` on its writer thread once the frame
+    is on the wire; doing it synchronously here keeps the worker forwarding
+    contract deterministic.
+    """
+
+    def __init__(self) -> None:
+        self.frames: list[StreamFrame] = []
+        self.at_eof = False
+        self.read_error: BaseException | None = None
+        self.write_error: BaseException | None = None
+        self.cancel_request_id: str | None = None
+        self._inbound: list[dict[str, object]] = []
+
+    @property
+    def cancel_pending(self) -> bool:
+        return False
+
+    def enqueue(self, *frames: dict[str, object]) -> None:
+        self._inbound.extend(frames)
+
+    def poll(self, timeout: float | None = None) -> dict[str, object] | None:
+        return self._inbound.pop(0) if self._inbound else None
+
+    def submit(self, frame: StreamFrame, *, timeout: float | None = None) -> bool:
+        self.frames.append(frame)
+        if frame.on_sent is not None:
+            frame.on_sent()
+        return True
+
+    def acknowledge_cancel(self, request_id: str | None) -> None:
+        self.cancel_request_id = None
+
+
+def test_worker_retires_the_audio_budget_once_frames_are_delivered() -> None:
+    limits = TtsStreamLimits(max_pending_audio_bytes=24)
+    session = FakeModelSession(
+        events=[ModelStepEvent(kind="pcm", pcm16=_pcm(4)) for _ in range(10)]
+    )
+    host = _host(session, limits=limits)
+    host.accept_text(0, "abc")
+    host.finish_input(0)
+
+    pump = DeliveryPump()
+    _drive_stream(pump, host)  # type: ignore[arg-type]
+
+    audio = [item for item in pump.frames if item.payload["type"] == FRAME_STREAM_AUDIO]
+    # Every chunk fits the budget only because delivery retires it again.
+    assert [item.payload["chunk_index"] for item in audio] == list(range(10))
+    assert [item.payload["sample_offset"] for item in audio] == [
+        index * 4 for index in range(10)
+    ]
+    errors = [item.payload["code"] for item in pump.frames if item.payload.get("code")]
+    assert errors == []
+    (done,) = [item for item in pump.frames if item.payload["type"] == FRAME_STREAM_DONE]
+    assert done.payload["terminal"] == "completed"
+    assert host.terminal is TtsStreamTerminal.COMPLETED
 
 
 def test_invalid_pcm_is_rejected_as_a_backend_failure() -> None:
