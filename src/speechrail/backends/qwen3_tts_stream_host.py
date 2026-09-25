@@ -612,6 +612,30 @@ class StreamPump:
             self.cancel_request_id = None
             self._cancel.clear()
 
+    def discard_ended_stream(self, request_id: str) -> None:
+        """Drop queued frames that belong to a stream the worker already ended.
+
+        The reader thread queues every inbound frame, including the cancel that
+        the model loop observes through the priority flag instead of through the
+        queue.  A frame left behind would be answered for a request the worker
+        no longer serves, so the next utterance would read a foreign
+        ``request_id`` and fail before it ever reached the model.
+        """
+
+        if not request_id:
+            return
+        while True:
+            try:
+                head = self._inbound.queue[0]
+            except IndexError:
+                return
+            if not isinstance(head, dict) or head.get("request_id") != request_id:
+                return
+            try:
+                self._inbound.get_nowait()
+            except queue.Empty:  # pragma: no cover - single consumer
+                return
+
     def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
         """Stop both threads without ever waiting unbounded on a stuck pipe."""
 

@@ -17,6 +17,7 @@ from speechrail.backends.qwen3_tts_stream_host import (
     FRAME_STREAM_DONE,
     FRAME_STREAM_ERROR,
     FRAME_STREAM_FINISH,
+    FRAME_STREAM_START,
     FRAME_STREAM_STARTED,
     FRAME_STREAM_TEXT,
     FRAME_STREAM_TEXT_ACCEPTED,
@@ -318,20 +319,33 @@ class DeliveryPump:
     contract deterministic.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, cancel_pending: bool = False) -> None:
         self.frames: list[StreamFrame] = []
         self.at_eof = False
         self.read_error: BaseException | None = None
         self.write_error: BaseException | None = None
         self.cancel_request_id: str | None = None
         self._inbound: list[dict[str, object]] = []
+        self._cancel_pending = cancel_pending
 
     @property
     def cancel_pending(self) -> bool:
-        return False
+        return self._cancel_pending
+
+    def discard_ended_stream(self, request_id: str) -> None:
+        while self._inbound and self._inbound[0].get("request_id") == request_id:
+            self._inbound.pop(0)
 
     def enqueue(self, *frames: dict[str, object]) -> None:
-        self._inbound.extend(frames)
+        """Mirror the reader thread: a cancel both raises the flag and queues."""
+
+        for frame in frames:
+            if frame.get("type") == FRAME_STREAM_CANCEL:
+                request_id = frame.get("request_id")
+                if isinstance(request_id, str) and request_id:
+                    self.cancel_request_id = request_id
+                    self._cancel_pending = True
+            self._inbound.append(frame)
 
     def poll(self, timeout: float | None = None) -> dict[str, object] | None:
         return self._inbound.pop(0) if self._inbound else None
@@ -369,6 +383,73 @@ def test_worker_retires_the_audio_budget_once_frames_are_delivered() -> None:
     (done,) = [item for item in pump.frames if item.payload["type"] == FRAME_STREAM_DONE]
     assert done.payload["terminal"] == "completed"
     assert host.terminal is TtsStreamTerminal.COMPLETED
+
+
+def test_a_cancel_seen_through_the_priority_flag_leaves_no_stale_frame() -> None:
+    """The frame that woke the model loop must never answer the next utterance.
+
+    The reader thread queues the cancel it also raises as a priority flag, and
+    the model loop acts on the flag without dequeuing.  A frame left behind used
+    to reach the next stream serve, which answered it for a request that worker
+    had already finished; the parent then rejected the *new* utterance with
+    "incremental frame carried a foreign request_id".
+    """
+
+    session = FakeModelSession()
+    host = _host(session)
+    pump = DeliveryPump(cancel_pending=True)
+    pump.enqueue(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_CANCEL,
+            "request_id": host.options.request_id,
+        }
+    )
+
+    _drive_stream(pump, host)  # type: ignore[arg-type]
+
+    assert [item.payload["type"] for item in pump.frames] == [
+        FRAME_STREAM_STARTED,
+        FRAME_STREAM_DONE,
+    ]
+    assert pump.poll(timeout=0) is None
+
+
+def test_an_append_queued_behind_a_cancel_does_not_reach_the_next_utterance() -> None:
+    """Text for a finished stream is dropped instead of being answered later."""
+
+    session = FakeModelSession()
+    host = _host(session)
+    pump = DeliveryPump()
+    request_id = host.options.request_id
+    pump.enqueue(
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_CANCEL,
+            "request_id": request_id,
+        },
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_TEXT,
+            "request_id": request_id,
+            "sequence": 5,
+            "text": "late",
+        },
+        {
+            "version": PROTOCOL_VERSION,
+            "type": FRAME_STREAM_START,
+            "request_id": "req_next",
+            "response_id": "resp_next",
+        },
+    )
+
+    _drive_stream(pump, host)  # type: ignore[arg-type]
+
+    # The late append is gone, while the next utterance's start stays queued.
+    remaining = []
+    while (frame := pump.poll(timeout=0)) is not None:
+        remaining.append(frame)
+    assert [frame["request_id"] for frame in remaining] == ["req_next"]
 
 
 def test_invalid_pcm_is_rejected_as_a_backend_failure() -> None:

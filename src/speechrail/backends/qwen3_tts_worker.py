@@ -1146,38 +1146,44 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
     for outbound in host.started_frames():
         _emit_frame(pump, outbound)
     request_id = host.options.request_id
-    while True:
-        if pump.cancel_pending and pump.cancel_request_id == request_id:
-            for outbound in host.cancel():
-                _emit_frame(pump, outbound)
-            pump.acknowledge_cancel(request_id)
-            return
-        if _drain_stream_commands(pump, host):
-            return
-        if host.terminal is not None:
-            return
-        result = host.step()
-        for outbound in result.frames:
-            _emit_frame(pump, outbound)
-        if result.terminal or host.terminal is not None:
-            return
-        if not result.waiting_for_text:
-            continue
-        frame = pump.poll(timeout=host.timeout_remaining())
-        if frame is None:
-            if (
-                pump.at_eof
-                or pump.read_error is not None
-                or pump.write_error is not None
-            ):
+    try:
+        while True:
+            if pump.cancel_pending and pump.cancel_request_id == request_id:
                 for outbound in host.cancel():
-                    _emit_frame_best_effort(pump, outbound)
+                    _emit_frame(pump, outbound)
+                pump.acknowledge_cancel(request_id)
                 return
-            for outbound in host.expire():
+            if _drain_stream_commands(pump, host):
+                return
+            if host.terminal is not None:
+                return
+            result = host.step()
+            for outbound in result.frames:
                 _emit_frame(pump, outbound)
-            return
-        if _apply_stream_frame(pump, host, frame):
-            return
+            if result.terminal or host.terminal is not None:
+                return
+            if not result.waiting_for_text:
+                continue
+            frame = pump.poll(timeout=host.timeout_remaining())
+            if frame is None:
+                if (
+                    pump.at_eof
+                    or pump.read_error is not None
+                    or pump.write_error is not None
+                ):
+                    for outbound in host.cancel():
+                        _emit_frame_best_effort(pump, outbound)
+                    return
+                for outbound in host.expire():
+                    _emit_frame(pump, outbound)
+                return
+            if _apply_stream_frame(pump, host, frame):
+                return
+    finally:
+        # A cancel that the priority flag observed is still sitting in the
+        # inbound queue; leaving it there would answer the next utterance for a
+        # request this worker already finished.
+        pump.discard_ended_stream(request_id)
 
 
 def _drain_stream_commands(pump: StreamPump, host: TtsStreamHost) -> bool:
