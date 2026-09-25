@@ -172,6 +172,7 @@ jobs:
 
       - name: Build and test unsigned App
         run: |
+          # UI tests take over the foreground and require explicit per-run authorization.
           xcodebuild \
             -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
             -scheme SpeechRailApp \
@@ -181,7 +182,8 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             ARCHS=arm64 \
             test \
-            -testPlan SpeechRailApp
+            -testPlan SpeechRailApp \
+            -skip-testing:SpeechRailAppUITests
 
       - name: Lint macOS bundle metadata
         run: |
