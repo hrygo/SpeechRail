@@ -14,7 +14,7 @@
   },
   "codepoint_span": {
     "start": 0,
-    "end": 4
+    "end": 2
   },
   "units": [
     {
@@ -23,17 +23,7 @@
       "text_end": 2,
       "audio_start_sample": 0,
       "audio_end_sample": 12000,
-      "timing_quality": "aligned",
-      "granularity": "segment"
-    },
-    {
-      "segment_uid": "seg_0000000000a2",
-      "text_start": 2,
-      "text_end": 4,
-      "audio_start_sample": 12000,
-      "audio_end_sample": 24000,
-      "timing_quality": "aligned",
-      "granularity": "segment"
+      "timing_quality": "aligned"
     }
   ]
 }

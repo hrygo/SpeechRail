@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from speechrail.application.diarization.alignment import FixedTextAligner
+from speechrail.application.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.application.tts_stream import TtsStreamService
 from speechrail.application.tts_timings import TtsTimingRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
 from speechrail.backends.model_identity import inspect_model, is_observed_runtime_revision
+from speechrail.backends.qwen3_alignment import Qwen3AlignmentConfig, Qwen3AlignmentWorker
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -35,9 +36,9 @@ from speechrail.backends.qwen3_tts import (
 )
 from speechrail.config import Settings
 from speechrail.config.selection import active_model_catalog
+from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
-from speechrail.domain.diarization.ports import AlignTextPort
 from speechrail.domain.ports import (
     BatchTranscriber,
     DiarizationEngine,
@@ -564,7 +565,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             repository_root=_package_root(),
             python_executable=settings.qwen3_python,
             model_dir=settings.qwen3_model_dir,
-            aligner_model_dir=settings.qwen3_aligner_model_dir,
             device=settings.device,
             dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
             cache_limit_mb=settings.mlx_cache_limit_mb,
@@ -677,7 +677,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             repository_root=_package_root(),
             python_executable=settings.qwen3_python,
             model_dir=settings.qwen3_model_dir,
-            aligner_model_dir=settings.qwen3_aligner_model_dir,
             device=settings.device,
             dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
             cache_limit_mb=settings.mlx_cache_limit_mb,
@@ -788,12 +787,29 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     text_aligner = overrides.text_aligner
+    alignment_worker: Qwen3AlignmentWorker | None = None
     if (
         text_aligner is None
-        and asr_worker is not None
         and settings.qwen3_aligner_model_dir is not None
+        and settings.qwen3_python is not None
     ):
-        text_aligner = FixedTextAligner(asr_worker)
+        # Alignment is its own owner: it must never borrow ASR identity, ASR
+        # sessions, or ASR's mode gate.
+        alignment_worker = Qwen3AlignmentWorker(
+            Qwen3AlignmentConfig(
+                repository_root=_package_root(),
+                python_executable=settings.qwen3_python,
+                model_dir=settings.qwen3_aligner_model_dir,
+                device=settings.device,
+                dtype=resolve_backend_dtype(
+                    settings.qwen3_aligner_model_dir, settings.dtype
+                ),
+                cache_limit_mb=settings.mlx_cache_limit_mb,
+                memory_limit_mb=settings.mlx_memory_limit_mb,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+        )
+        text_aligner = FixedTextAligner(alignment_worker)
 
     render_receipts = RenderReceiptRegistry()
 
@@ -803,7 +819,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         # child is closed at finish/cancel. It is not a long-lived evictable
         # worker, so only persistent ASR/TTS owners belong in this list.
         evictable: list[EvictableWorker] = [
-            w for w in (shared_owner, tts_worker) if w is not None
+            w for w in (shared_owner, tts_worker, alignment_worker) if w is not None
         ]
         if evictable:
             evictor = WorkerIdleEvictor(

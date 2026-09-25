@@ -168,31 +168,6 @@ def test_session_open_forwards_task_streaming_policy() -> None:
         assert opened["chunk_duration_ms"] == 500
         assert opened["max_context_sec"] == 8.82
         assert opened["max_new_tokens"] == 128
-        assert opened["capture_alignment"] is False
-        await session.close()
-
-    asyncio.run(scenario())
-
-
-def test_session_open_can_opt_into_alignment_capture() -> None:
-    async def scenario() -> None:
-        worker = FakeStreamingWorker()
-        session = Qwen3StreamingSession(
-            worker=worker,  # type: ignore[arg-type]
-            language="zh",
-            prompt="",
-            session_id="sess_test",
-        )
-        session.enable_alignment()
-        connect = asyncio.create_task(session.connect())
-        await asyncio.sleep(0)
-        worker.push(
-            "sess_test",
-            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
-        )
-        await connect
-        opened = next(frame for frame in worker.sent if frame.get("type") == "session.open")
-        assert opened["capture_alignment"] is True
         await session.close()
 
     asyncio.run(scenario())
@@ -649,26 +624,6 @@ def test_streaming_command_passes_dtype_and_metal_limits(tmp_path: Path) -> None
     assert cmd[cmd.index("--cache-limit-mb") + 1] == "256"
     assert "--memory-limit-mb" not in cmd  # only added when memory_limit_mb > 0
     assert "--worker-role" in cmd and cmd[cmd.index("--worker-role") + 1] == "streaming"
-
-
-def test_streaming_command_passes_only_a_validated_local_forced_aligner(tmp_path: Path) -> None:
-    model = tmp_path / "asr"
-    model.mkdir()
-    aligner = tmp_path.parent / "external-forced-aligner"
-    aligner.mkdir()
-    (aligner / "config.json").write_text("{}", encoding="utf-8")
-    (aligner / "model.safetensors").touch()
-
-    cfg = Qwen3StreamingBackendConfig(
-        repository_root=tmp_path,
-        python_executable=Path("/usr/bin/python3"),
-        model_dir=model,
-        aligner_model_dir=aligner,
-        device="mps",
-    )
-
-    cmd = cfg.command()
-    assert cmd[cmd.index("--aligner-model-dir") + 1] == str(aligner.resolve())
 
 
 def test_backend_config_rejects_invalid_dtype_for_device(tmp_path: Path) -> None:

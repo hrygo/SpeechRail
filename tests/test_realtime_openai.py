@@ -26,15 +26,17 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.alignment import (
+    AlignmentRequest,
+    AlignmentResult,
+    AlignmentUnit,
+)
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     ActivityFrame,
     ActivityUpdate,
-    AlignmentRequest,
-    AlignmentResult,
     DiarizationError,
-    Span,
-    TextUnit,
+    SampleSpan,
 )
 from speechrail.domain.ports import (
     AudioChunk,
@@ -334,9 +336,11 @@ class FakeDiarizationSession:
             ActivityUpdate(
                 epoch=self.epoch,
                 step_id=self._step,
-                replace_span=Span(start_sample, end),
+                replace_span=SampleSpan(start_sample, end),
                 frames=(
-                    ActivityFrame(Span(start_sample, end), (0.95, 0.0, 0.0, 0.0), frozenset({0})),
+                    ActivityFrame(
+                        SampleSpan(start_sample, end), (0.95, 0.0, 0.0, 0.0), frozenset({0})
+                    ),
                 ),
                 processed_through=end,
                 stable_through=end,
@@ -368,7 +372,7 @@ class _NoEvidenceDiarizationSession(FakeDiarizationSession):
             ActivityUpdate(
                 epoch=self.epoch,
                 step_id=self._step,
-                replace_span=Span(start_sample, end),
+                replace_span=SampleSpan(start_sample, end),
                 frames=(),
                 processed_through=end,
                 stable_through=0,
@@ -400,9 +404,13 @@ class _NoEvidenceDiarizationEngine(FakeDiarizationEngine):
 class FakeTextAligner:
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
         return AlignmentResult(
-            request.epoch,
-            request.item_id,
-            (TextUnit("fixed", 0, len(request.text), request.span),),
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(
+                AlignmentUnit("fixed", 0, len(request.text), request.span, "segment"),
+            ),
         )
 
 
@@ -2064,9 +2072,13 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
         async def align(self, request: AlignmentRequest) -> AlignmentResult:
             self.request = request
             return AlignmentResult(
-                request.epoch,
-                request.item_id,
-                (TextUnit("direct", 0, len(request.text), request.span),),
+                task_id=request.task_id,
+                epoch=request.epoch,
+                utterance_id=request.utterance_id,
+                transcript_revision=request.transcript_revision,
+                units=(
+                    AlignmentUnit("direct", 0, len(request.text), request.span, "segment"),
+                ),
             )
 
     aligner = RecordingAligner()
@@ -2113,9 +2125,13 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
             alignment_started.set()
             await asyncio.to_thread(release.wait)
             return AlignmentResult(
-                request.epoch,
-                request.item_id,
-                (TextUnit("slow", 0, len(request.text), request.span),),
+                task_id=request.task_id,
+                epoch=request.epoch,
+                utterance_id=request.utterance_id,
+                transcript_revision=request.transcript_revision,
+                units=(
+                    AlignmentUnit("slow", 0, len(request.text), request.span, "segment"),
+                ),
             )
 
     client, _ = _client(
@@ -2156,7 +2172,14 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
 def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
     class FailingAligner:
         async def align(self, request: AlignmentRequest) -> AlignmentResult:
-            return AlignmentResult(request.epoch, request.item_id, (), "text_mismatch")
+            return AlignmentResult(
+                task_id=request.task_id,
+                epoch=request.epoch,
+                utterance_id=request.utterance_id,
+                transcript_revision=request.transcript_revision,
+                units=(),
+                failure="text_mismatch",
+            )
 
     client, _ = _client(
         diarization_engine=FakeDiarizationEngine(),
@@ -2194,9 +2217,13 @@ def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> 
         async def align(self, request: AlignmentRequest) -> AlignmentResult:
             self.calls += 1
             return AlignmentResult(
-                request.epoch,
-                request.item_id,
-                (TextUnit("unexpected", 0, len(request.text), request.span),),
+                task_id=request.task_id,
+                epoch=request.epoch,
+                utterance_id=request.utterance_id,
+                transcript_revision=request.transcript_revision,
+                units=(
+                    AlignmentUnit("unexpected", 0, len(request.text), request.span, "segment"),
+                ),
             )
 
     aligner = CountingAligner()

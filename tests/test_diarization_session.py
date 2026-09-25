@@ -15,7 +15,7 @@ from speechrail.domain.diarization.types import (
     ActivityFrame,
     ActivityUpdate,
     Attribution,
-    Span,
+    SampleSpan,
     TextUnit,
 )
 
@@ -43,10 +43,10 @@ class _FakeActivitySession:
             ActivityUpdate(
                 epoch="epoch_1",
                 step_id=1,
-                replace_span=Span(0, through_sample),
+                replace_span=SampleSpan(0, through_sample),
                 frames=(
                     ActivityFrame(
-                        span=Span(0, through_sample),
+                        span=SampleSpan(0, through_sample),
                         scores=(0.9, 0.0, 0.0, 0.0),
                         active_slots=frozenset({0}),
                     ),
@@ -74,7 +74,7 @@ def test_session_keeps_text_fixed_then_publishes_final_attribution_before_done()
     async def scenario() -> None:
         session, activity = _session()
         await session.append(b"\x00\x00" * 800)
-        await session.register_completed("item_1", (TextUnit("unit_1", 0, 2, Span(0, 800)),))
+        await session.register_completed("item_1", (TextUnit("unit_1", 0, 2, SampleSpan(0, 800)),))
         done = await session.finish("finish_1")
         events = [event async for event in session.events()]
 
@@ -155,7 +155,7 @@ def test_session_rejects_more_than_4096_completed_units() -> None:
 def test_session_rejects_completed_units_outside_the_30_second_window() -> None:
     async def scenario() -> None:
         session, _ = _session()
-        units = (TextUnit("unit", 0, 1, Span(0, 30 * 16_000 + 1)),)
+        units = (TextUnit("unit", 0, 1, SampleSpan(0, 30 * 16_000 + 1)),)
         with pytest.raises(ValueError, match="pending window"):
             await session.register_completed("item_1", units)
 
@@ -198,12 +198,12 @@ def test_activity_failure_finalizes_pending_unknown_and_emits_one_status() -> No
     async def scenario() -> None:
         session, activity = _session()
         await session.append(b"\x00\x00" * 800)
-        await session.register_completed("item_1", (TextUnit("unit_1", 0, 2, Span(0, 800)),))
+        await session.register_completed("item_1", (TextUnit("unit_1", 0, 2, SampleSpan(0, 800)),))
         await activity.queue.put(
             ActivityUpdate(
                 epoch="epoch_1",
                 step_id=0,
-                replace_span=Span(0, 800),
+                replace_span=SampleSpan(0, 800),
                 frames=(),
                 processed_through=800,
                 stable_through=0,
@@ -214,7 +214,7 @@ def test_activity_failure_finalizes_pending_unknown_and_emits_one_status() -> No
             ActivityUpdate(
                 epoch="wrong_epoch",
                 step_id=1,
-                replace_span=Span(0, 800),
+                replace_span=SampleSpan(0, 800),
                 frames=(),
                 processed_through=800,
                 stable_through=0,

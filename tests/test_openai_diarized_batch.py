@@ -11,15 +11,13 @@ from fastapi.testclient import TestClient
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
 from speechrail.config import Settings
+from speechrail.domain.alignment import AlignmentRequest, AlignmentResult, AlignmentUnit
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     ActivityFrame,
     ActivityUpdate,
-    AlignmentRequest,
-    AlignmentResult,
     DiarizationError,
-    Span,
-    TextUnit,
+    SampleSpan,
 )
 from speechrail.http.errors import RequestIdMiddleware
 from speechrail.http.routes.audio import create_audio_router
@@ -88,11 +86,11 @@ class FakeActivitySession:
             ActivityUpdate(
                 epoch=self._epoch,
                 step_id=0,
-                replace_span=Span(0, through_sample),
+                replace_span=SampleSpan(0, through_sample),
                 frames=(
-                    ActivityFrame(Span(0, halfway), (0.9, 0.0, 0.0, 0.0), frozenset({0})),
+                    ActivityFrame(SampleSpan(0, halfway), (0.9, 0.0, 0.0, 0.0), frozenset({0})),
                     ActivityFrame(
-                        Span(halfway, through_sample),
+                        SampleSpan(halfway, through_sample),
                         (0.0, 0.9, 0.0, 0.0),
                         frozenset({1}),
                     ),
@@ -129,11 +127,15 @@ class FailingDiarizationEngine(FakeDiarizationEngine):
 class FakeFixedTextAligner:
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
         return AlignmentResult(
-            request.epoch,
-            request.item_id,
-            (
-                TextUnit("batch-0", 0, 2, Span(0, 12_800)),
-                TextUnit("batch-1", 2, len(request.text), Span(12_800, 25_600)),
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(
+                AlignmentUnit("batch-0", 0, 2, SampleSpan(0, 12_800), "segment"),
+                AlignmentUnit(
+                    "batch-1", 2, len(request.text), SampleSpan(12_800, 25_600), "segment"
+                ),
             ),
         )
 

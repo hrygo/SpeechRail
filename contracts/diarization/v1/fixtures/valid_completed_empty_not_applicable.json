@@ -1,0 +1,14 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "event_version": 1,
+  "item_id": "item_example_3",
+  "content_index": 0,
+  "transcript": "",
+  "audio_start_sample": 56000,
+  "audio_end_sample": 56000,
+  "attribution_units": [],
+  "diagnostics": {
+    "alignment": {"status": "not_applicable", "reason": "empty_transcript"},
+    "unit_count": 0
+  }
+}

@@ -39,6 +39,7 @@ class AttributionUnit:
     start_sample: int
     end_sample: int
     timing_quality: str
+    granularity: str = "segment"
 
     def __post_init__(self) -> None:
         if not 0 < len(self.segment_uid) <= 128:
@@ -49,3 +50,5 @@ class AttributionUnit:
             raise ValueError("invalid session sample range")
         if self.timing_quality not in {"aligned", "unavailable"}:
             raise ValueError("timing_quality must be aligned or unavailable")
+        if self.granularity not in {"segment", "word", "character"}:
+            raise ValueError("granularity must be segment, word or character")

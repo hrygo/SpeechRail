@@ -16,6 +16,7 @@ from typing import BinaryIO, Final, Protocol
 
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.runtime.limits import MAX_PCM_BYTES
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -27,7 +28,6 @@ from speechrail.runtime.worker_protocol import (
 ASR_BACKEND_ID = "mlx-qwen3-asr"
 ASR_SAMPLE_RATE = 16_000
 
-MAX_PCM_BYTES = 40 * 1024 * 1024
 # Batch requests are bounded by the shared framed IPC payload; keep a small
 # margin for the JSON header and length prefix.
 MAX_BATCH_PCM_BYTES = MAX_FRAME_BYTES - 4096
@@ -241,10 +241,6 @@ class WorkerEngine(Protocol):
         include_timestamps: bool = False,
     ) -> tuple[str, str, list[dict[str, object]]]: ...
 
-    def align_text(
-        self, audio: bytes, *, text: str, language: str
-    ) -> list[dict[str, object]]: ...
-
     def open_session(
         self,
         *,
@@ -254,7 +250,6 @@ class WorkerEngine(Protocol):
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
-        capture_alignment: bool = True,
     ) -> None: ...
 
     def append_audio(self, session_id: str, audio: bytes) -> str: ...
@@ -262,10 +257,6 @@ class WorkerEngine(Protocol):
     def partial_text(self, session_id: str) -> str: ...
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
-
-    def align_session_audio(
-        self, session_id: str, canonical_text: str, language: str
-    ) -> list[dict[str, object]]: ...
 
     def close_session(self, session_id: str) -> None: ...
 
@@ -361,50 +352,6 @@ def _handle_transcribe(
         )
 
 
-def _handle_align_text(
-    frame: dict[str, object], output_stream: BinaryIO, engine: WorkerEngine
-) -> None:
-    request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
-    try:
-        request_id, pcm, language, _prompt, _timestamps = _decode_request(
-            {**frame, "prompt": "", "include_timestamps": False}
-        )
-        text = frame.get("text")
-        if not isinstance(text, str) or not text:
-            raise ProtocolError("invalid fixed text alignment request")
-        tokens = engine.align_text(pcm, text=text, language=language)
-        write_frame(
-            output_stream,
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "align_result",
-                "request_id": request_id,
-                "tokens": tokens,
-            },
-        )
-    except ProtocolError:
-        write_frame(
-            output_stream,
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "error",
-                "code": "worker_invalid_request",
-                "request_id": request_id,
-            },
-        )
-    except Exception:
-        traceback.print_exc(file=sys.stderr)
-        write_frame(
-            output_stream,
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "error",
-                "code": "worker_inference_error",
-                "request_id": request_id,
-            },
-        )
-
-
 def _session_id_of(frame: dict[str, object]) -> str | None:
     raw = frame.get("session_id")
     return raw if isinstance(raw, str) and raw else None
@@ -468,11 +415,8 @@ def _handle_session_open(
         chunk_duration_ms = _coerce_session_int(frame.get("chunk_duration_ms", 1_000))
         max_context_sec = _coerce_session_float(frame.get("max_context_sec", 12.64))
         max_new_tokens = _coerce_session_int(frame.get("max_new_tokens", 256))
-        capture_alignment = frame.get("capture_alignment", False)
         if chunk_duration_ms <= 0 or max_context_sec <= 0 or max_new_tokens <= 0:
             raise ValueError("invalid session option")
-        if not isinstance(capture_alignment, bool):
-            raise ValueError("invalid capture_alignment")
     except (OverflowError, TypeError, ValueError):
         _write_error(output_stream, "session_open_failed", session_id=session_id)
         return
@@ -487,7 +431,6 @@ def _handle_session_open(
             chunk_duration_ms=chunk_duration_ms,
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
-            capture_alignment=capture_alignment,
         )
     except Exception:
         traceback.print_exc(file=sys.stderr)
@@ -587,12 +530,8 @@ def _handle_commit(
     if session_id is None or not engine.has_session(session_id):
         _write_error(output_stream, "session_invalid", session_id=session_id)
         return
-    want_segments = bool(frame.get("want_segments", False))
     try:
         text, language = engine.finish_streaming(session_id)
-        segments: list[dict[str, object]] = []
-        if want_segments and text:
-            segments = engine.align_session_audio(session_id, text, language)
         if text:
             write_frame(
                 output_stream,
@@ -603,7 +542,6 @@ def _handle_commit(
                     "kind": "completed",
                     "text": text,
                     "language": language or None,
-                    "segments": segments,
                 },
             )
         write_frame(
@@ -818,7 +756,6 @@ def serve(
     device: str,
     dtype: str = "float16",
     max_new_tokens: int = 512,
-    aligner_model_dir: Path | None = None,
     engine_factory: EngineFactory | None = None,
 ) -> None:
     if engine_factory is None:
@@ -843,13 +780,7 @@ def serve(
     try:
         engine: WorkerEngine
         if engine_factory is Qwen3Engine:
-            engine = Qwen3Engine(
-                model_dir,
-                device,
-                dtype,
-                max_new_tokens,
-                aligner_model_dir=aligner_model_dir,
-            )
+            engine = Qwen3Engine(model_dir, device, dtype, max_new_tokens)
         else:
             engine = engine_factory(model_dir, device, dtype, max_new_tokens)
     except Exception:
@@ -898,9 +829,6 @@ def serve(
         kind = frame.get("type")
         if kind == "transcribe":
             _handle_transcribe(frame, output_stream, engine, identity)
-            _clear_metal_cache()
-        elif kind == "align_text":
-            _handle_align_text(frame, output_stream, engine)
             _clear_metal_cache()
         elif kind == "session.open":
             _handle_session_open(frame, output_stream, engine)
@@ -968,91 +896,6 @@ def _segments(result: object) -> list[dict[str, object]]:
     return segments
 
 
-_SENTENCE_ENDINGS = frozenset("。？！；…!?;")
-
-
-def _should_separate_words(prev: str, next_s: str) -> bool:
-    if not prev or not next_s:
-        return False
-    return (
-        prev[-1].isascii()
-        and prev[-1].isalnum()
-        and next_s[0].isascii()
-        and next_s[0].isalnum()
-    )
-
-
-def _to_streaming_segments(raw: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Convert batch seconds to consolidated streaming millisecond segments.
-
-    Consolidates contiguous short tokens (such as character-level tokens emitted by
-    MLX alignment), ensures every segment lasts at least 20 ms, and splits on pauses
-    over 500 ms, sentence punctuation, or a 40-character clause limit.
-    """
-    if not raw:
-        return []
-
-    streaming: list[dict[str, object]] = []
-    current_text: str | None = None
-    current_start_ms = 0
-    current_end_ms = 0
-
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        raw_text = item.get("text")
-        if not isinstance(raw_text, str):
-            continue
-        text = raw_text.strip()
-        if not text:
-            continue
-        start_s = _timestamp_seconds(item.get("start"))
-        end_s = _timestamp_seconds(item.get("end"))
-        if start_s is None or end_s is None:
-            continue
-
-        try:
-            start_ms = round(start_s * 1000)
-            end_ms = round(end_s * 1000)
-        except (OverflowError, ValueError):
-            continue
-        if end_ms - start_ms < 20:
-            end_ms = start_ms + 20
-
-        if current_text is None:
-            current_text = text
-            current_start_ms = start_ms
-            current_end_ms = end_ms
-            continue
-
-        gap_ms = start_ms - current_end_ms
-        is_pause = gap_ms > 500
-        ends_sentence = current_text[-1] in _SENTENCE_ENDINGS
-        sep = " " if _should_separate_words(current_text, text) else ""
-        is_too_long = (
-            len(current_text) + len(sep) + len(text) > 40
-            or end_ms - current_start_ms > 10_000
-        )
-
-        if not is_pause and not ends_sentence and not is_too_long:
-            current_text = f"{current_text}{sep}{text}"
-            current_end_ms = max(current_end_ms, end_ms)
-        else:
-            streaming.append(
-                {"text": current_text, "start_ms": current_start_ms, "end_ms": current_end_ms}
-            )
-            current_text = text
-            current_start_ms = start_ms
-            current_end_ms = end_ms
-
-    if current_text is not None:
-        streaming.append(
-            {"text": current_text, "start_ms": current_start_ms, "end_ms": current_end_ms}
-        )
-
-    return streaming
-
-
 class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and isolated runtime.
     """Unified native MLX Qwen3-ASR engine for batch & streaming via ``mlx_qwen3_asr.Session``."""
 
@@ -1062,8 +905,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         device: str,
         dtype: str = "float16",
         max_new_tokens: int = 512,
-        *,
-        aligner_model_dir: Path | None = None,
     ) -> None:
         expected = inspect_model(model_dir)
         if expected.family != "qwen3_asr" or expected.variant != "asr":
@@ -1095,8 +936,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             or resolved_dtype
         )
         self._max_new_tokens = max_new_tokens
-        self._aligner_model_dir = aligner_model_dir
-        self._forced_aligner: object | None = None
         self.identity = WorkerIdentity(
             device=device,
             dtype=resolved_dtype,
@@ -1112,7 +951,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             weight_fingerprint=expected.weight_fingerprint,
         )
         self._streaming_states: dict[str, object] = {}
-        self._align_buffers: dict[str, bytearray] = {}
         self._session_contexts: dict[str, tuple[str, str]] = {}
         _clear_metal_cache()
 
@@ -1150,7 +988,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
-        capture_alignment: bool = True,
     ) -> None:
         if not session_id:
             raise ValueError("session_id is required")
@@ -1169,8 +1006,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
         )
-        if capture_alignment:
-            self._align_buffers[session_id] = bytearray()
 
     def append_audio(self, session_id: str, audio: bytes) -> str:
         import numpy as np
@@ -1178,11 +1013,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         state = self._streaming_states.get(session_id)
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
-        align = self._align_buffers.get(session_id)
-        if align is not None:
-            if len(align) + len(audio) > MAX_PCM_BYTES:
-                raise ValueError("align buffer limit exceeded")
-            align.extend(audio)
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
         state = self._session.feed_audio(waveform, state)
         self._streaming_states[session_id] = state
@@ -1208,69 +1038,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             language if isinstance(language, str) else ""
         )
 
-    def align_session_audio(
-        self, session_id: str, canonical_text: str, language: str
-    ) -> list[dict[str, object]]:
-        """Forced-align already decoded text; never invoke ASR a second time."""
-        audio = self._align_buffers.pop(session_id, None)
-        if not audio or not canonical_text or self._aligner_model_dir is None:
-            return []
-        return _to_streaming_segments(
-            self._align_fixed_text(bytes(audio), canonical_text, language)
-        )
-
-    def align_text(
-        self, audio: bytes, *, text: str, language: str
-    ) -> list[dict[str, object]]:
-        """Return raw fixed-text tokens for the application alignment adapter."""
-        if not audio or not text or self._aligner_model_dir is None:
-            return []
-        return self._align_fixed_text(audio, text, language)
-
-    def _align_fixed_text(
-        self, audio: bytes, text: str, language: str
-    ) -> list[dict[str, object]]:
-        try:
-            if self._forced_aligner is None:
-                from mlx_qwen3_asr import ForcedAligner  # type: ignore[import-not-found]
-
-                self._forced_aligner = ForcedAligner(model_path=str(self._aligner_model_dir))
-            import numpy as np
-
-            waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
-            aligned = self._forced_aligner.align(  # type: ignore[union-attr]
-                waveform, text, language=language or "auto"
-            )
-        except Exception:
-            traceback.print_exc(file=sys.stderr)
-            return []
-        raw: list[dict[str, object]] = []
-        for item in aligned:
-            token = getattr(item, "text", None)
-            start = getattr(item, "start_time", None)
-            end = getattr(item, "end_time", None)
-            if (
-                not isinstance(token, str)
-                or isinstance(start, bool)
-                or not isinstance(start, (int, float))
-                or isinstance(end, bool)
-                or not isinstance(end, (int, float))
-            ):
-                return []
-            # Qwen3-ForcedAligner uses a coarse timestamp grid for some
-            # character-level tokens.  A token can consequently collapse to
-            # ``start == end`` even when the surrounding alignment is valid.
-            # FixedTextAligner preserves that token's text gap on the next
-            # valid token; forwarding a zero-duration token would invalidate
-            # the entire otherwise usable alignment.
-            if end <= start:
-                continue
-            raw.append({"text": token, "start": start, "end": end})
-        return raw
-
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
-        self._align_buffers.pop(session_id, None)
         self._session_contexts.pop(session_id, None)
 
     def active_session_count(self) -> int:
@@ -1292,7 +1061,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--cache-limit-mb", type=int, default=256)
     parser.add_argument("--memory-limit-mb", type=int, default=0)
-    parser.add_argument("--aligner-model-dir")
     # process self-description tag; serve() ignores it, tooling reads it
     parser.add_argument(
         "--worker-role", choices=("batch", "streaming"), default="batch"
@@ -1318,11 +1086,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
             device=args.device,
             dtype=args.dtype,
             max_new_tokens=args.max_new_tokens,
-            aligner_model_dir=(
-                Path(args.aligner_model_dir).resolve(strict=True)
-                if args.aligner_model_dir is not None
-                else None
-            ),
             engine_factory=Qwen3Engine,
         )
     finally:

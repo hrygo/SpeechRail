@@ -120,6 +120,8 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
 只有可证明的稳定前缀才能映射到官方 append-only delta；无法证明稳定时只发 hypothesis，
 最终统一发 completed。一个 utterance 恰好一个 text final，重复 commit 不产生双 final。
+opt-in Diarization 下的 completed 只承载文本与 sample 边界（`attribution_units` 为空、
+`diagnostics.alignment.status = "pending"`），对齐结果随后以独立事件到达。
 
 ### 5.2 Alignment 与 Diarization
 
@@ -130,6 +132,41 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `task_id`、`epoch`、`utterance_id`、`transcript_revision`、`metadata_revision`、sample/codepoint
 span 或匿名 speaker units。旧 epoch、旧 revision 或不完整降级的回包必须丢弃。Diarization 只输出
 session 内匿名 label，不保存声纹、embedding 或跨会话身份。
+
+`speechrail.alignment.done` 的 `units[]` 必须与冻结文本 revision 一一对应，`text_start`/`text_end`
+是**原始文本的 codepoint `[start, end)`**（不正规化后沿用旧偏移），`granularity` 必须是对齐器
+实际给出边界证据的粒度：
+
+```json
+{
+  "type": "speechrail.alignment.done",
+  "task_id": "task_1",
+  "epoch": 0,
+  "utterance_id": "utt_1",
+  "transcript_revision": 3,
+  "metadata_revision": 1,
+  "sample_span": {"start": 0, "end": 24000},
+  "codepoint_span": {"start": 0, "end": 4},
+  "units": [
+    {
+      "segment_uid": "seg_0000000000a1",
+      "text_start": 0,
+      "text_end": 2,
+      "audio_start_sample": 0,
+      "audio_end_sample": 12000,
+      "timing_quality": "aligned",
+      "granularity": "segment"
+    }
+  ],
+  "event_id": "evt_7",
+  "session_id": "sess_1",
+  "sequence": 7
+}
+```
+
+`granularity` 取 `segment` / `word` / `character`：中文按对齐器返回的汉字边界、英文按词边界；
+没有对应粒度证据时必须报 `unsupported` 而不是把 phrase 均分伪装成 character。对齐失败发
+`speechrail.alignment.failed`（独立状态，绝不用空 units 冒充成功）；ASR final 仍成功。
 
 ### 5.3 TTS
 

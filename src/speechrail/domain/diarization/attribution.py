@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from .types import ActivityFrame, ActivityUpdate, Attribution, Span, TextUnit
+from .types import ActivityFrame, ActivityUpdate, Attribution, SampleSpan, TextUnit
 
 
-def union_support(unit: Span, activities: Iterable[Span]) -> float:
+def union_support(unit: SampleSpan, activities: Iterable[SampleSpan]) -> float:
     """Return the fraction of ``unit`` covered by the union of activity spans."""
 
     if unit.end == unit.start:
