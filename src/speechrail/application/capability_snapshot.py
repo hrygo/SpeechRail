@@ -171,13 +171,18 @@ def _validation_state(
             elif binding_required and runtime_identity_status != "observed":
                 stale_reason = "model_runtime_identity_unknown"
             elif binding_required and validation_binding is not None:
-                for key in (
+                compared_keys = [
                     "model_runtime_revision",
                     "runtime_fingerprint",
                     "preprocess_version",
                     "generation_recipe_revision",
                     "policy_version",
-                ):
+                ]
+                if validation_binding.get("capability_key") is not None:
+                    # A scoped evidence record names the exact tier/mode it was
+                    # observed for; an unscoped lookup must not borrow it.
+                    compared_keys.append("capability_key")
+                for key in compared_keys:
                     if raw.get(key) != validation_binding.get(key):
                         stale_reason = "validation_binding_changed"
                         break
@@ -278,7 +283,7 @@ def _voice_entry(
     validation_binding: Mapping[str, Any] | None = None,
     binding_required: bool = False,
 ) -> dict[str, Any]:
-    artifact = active.tts_clone if profile.mode == "clone" else active.tts
+    artifact = active.artifact_for_voice_mode(profile.mode)
     variant = artifact.variant if artifact is not None else None
     validation_state = _validation_state(
         profile,
@@ -642,7 +647,8 @@ def build_capability_snapshot(
             "tts_text_planner": planner_policy,
             "voice_preview": {
                 "status": "supported"
-                if active.tts is not None and active.tts.variant == "voice_design"
+                if active.voice_design is not None
+                and active.voice_design.variant == "voice_design"
                 else "unsupported",
                 "instruction": parameter("supported", required=True, maximum_length=10_000),
                 "seed": parameter("supported", minimum=0, maximum=2**32 - 1),

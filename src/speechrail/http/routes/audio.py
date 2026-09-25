@@ -61,6 +61,7 @@ from speechrail.domain.tts_pronunciation import (
     get_pronunciation_registry,
 )
 from speechrail.domain.tts_request import TtsParameterError, validate_tts_parameters
+from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.tts_text_planner import TtsTextPlanner
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
@@ -77,6 +78,7 @@ from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
+from speechrail.runtime.registry import engine_variant_for_role
 from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
     WorkClass,
@@ -821,7 +823,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
     router = APIRouter()
     resolved = services.settings
     active = active_model_catalog(resolved)
-    tts_variant = active.tts.variant if active.tts is not None else None
     diarization_engine = services.diarization_engine
     text_aligner = services.text_aligner
 
@@ -1369,7 +1370,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
-        if tts_variant != "voice_design":
+        if active.voice_design is None or active.voice_design.variant != "voice_design":
             return error_response(
                 400,
                 request_id,
@@ -1583,6 +1584,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
+        if services.tts_synthesizer is None or not services.tts_ready:
+            return error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail TTS backend is not ready",
+                retryable=True,
+            )
         requested_voice = body.voice.id if isinstance(body.voice, _SpeechVoiceID) else body.voice
         preset_voice = resolve_voice(requested_voice)
         from speechrail.domain.tts import get_voice_profile
@@ -1614,16 +1623,53 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Requested voice revision has been revoked",
                 param="voice",
             )
-        binding_variant = (
-            active.tts_clone.variant
-            if profile.mode == "clone" and active.tts_clone is not None
-            else tts_variant
+        runtime_role = profile.runtime_role
+        if runtime_role is None:
+            return error_response(
+                400,
+                request_id,
+                "voice_design_task_required",
+                (
+                    "instruction voices are served by the voice_design task, "
+                    "not by speech synthesis"
+                ),
+                param="voice",
+            )
+        # A programmatically injected synthesizer is the explicit backend
+        # authority, so tests and embedders may exercise the transport without a
+        # managed catalog selection. Production workers still require the active
+        # artifact below and never infer identity from a directory name.
+        injected_backend = (
+            active.tts is None
+            and active.tts_clone is None
+            and services.tts_synthesizer is not None
         )
-        tts_artifact = (
-            active.tts_clone
-            if profile.mode == "clone" and active.tts_clone is not None
-            else active.tts
-        )
+        tts_artifact = active.artifact_for_role(runtime_role)
+        if tts_artifact is not None and tts_artifact.variant != engine_variant_for_role(
+            runtime_role
+        ):
+            return error_response(
+                400,
+                request_id,
+                "voice_not_available",
+                (
+                    f"Voice {requested_voice[:200]} is unavailable for the active "
+                    "TTS weights; use an available system voice from /v1/voices"
+                ),
+                param="voice",
+            )
+        if tts_artifact is None and not injected_backend:
+            return error_response(
+                400,
+                request_id,
+                "voice_not_available",
+                (
+                    f"Voice {requested_voice[:200]} is unavailable for the active "
+                    "TTS weights; use an available system voice from /v1/voices"
+                ),
+                param="voice",
+            )
+        binding_role = runtime_role
         if expected_model_revision is not None and (
             tts_artifact is None or tts_artifact.revision != expected_model_revision
         ):
@@ -1635,23 +1681,24 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 param="model",
             )
         validated_tts = None
-        validation_variant = binding_variant or "voice_design"
-        if body.instructions is not None and profile.mode != "clone" and (
-            active.tts is None
-            or active.tts.variant != "voice_design"
-            or validation_variant != "voice_design"
-        ):
+        validation_variant = (
+            tts_artifact.variant
+            if tts_artifact is not None
+            else "base"
+            if runtime_role == "tts_base"
+            else "custom_voice"
+        )
+        if body.instructions is not None and profile.mode != "clone":
             return error_response(
                 400,
                 request_id,
                 "instructions_unsupported",
-                "instructions require an active VoiceDesign TTS model",
+                "instructions are reserved for the voice_design task",
                 param="instructions",
             )
         if validation_variant in {"voice_design", "custom_voice", "base"}:
             try:
-                if binding_variant is not None:
-                    resolve_binding(binding_variant, preset_voice)
+                resolve_binding(binding_role, preset_voice)
                 validated_tts = validate_tts_parameters(
                     model_variant=validation_variant,
                     is_clone=profile.mode == "clone",
@@ -1688,13 +1735,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     param="voice",
                 )
         if validated_tts is None:
-            validated_tts = validate_tts_parameters(
-                model_variant="voice_design",
-                is_clone=profile.mode == "clone",
-                speed=body.speed,
-                language=body.language,
-                instruction=body.instructions,
-                seed=body.seed,
+            return error_response(
+                400,
+                request_id,
+                "voice_not_available",
+                (
+                    f"Voice {requested_voice[:200]} is unavailable for the active TTS weights; "
+                    "use an available system voice from /v1/voices"
+                ),
+                param="voice",
             )
         synthesizer = services.tts_synthesizer
         if synthesizer is None or not services.tts_ready:
@@ -1713,6 +1762,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     get_voice_registry().validation_store,
                     synthesizer,
                     require_current_binding=True,
+                    capability_key=(
+                        tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
+                        if active.tts_spec is not None
+                        else None
+                    ),
                 )
             except VoiceValidationStoreUnavailableError:
                 return error_response(

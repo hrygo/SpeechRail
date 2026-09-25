@@ -400,7 +400,8 @@ def test_batch_synthesis_waits_for_the_active_incremental_stream(tmp_path: Path)
 
 
 class _RecordingStreamWorker:
-    def __init__(self) -> None:
+    def __init__(self, variant: str) -> None:
+        self.model_variant = variant
         self.calls: list[TtsStreamOptions] = []
         self.session = object()
 
@@ -420,19 +421,21 @@ class _ModeRegistry:
 def test_router_routes_incremental_streams_by_voice_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = _ModeRegistry({"designed": "instruction", "cloned": "clone"})
+    registry = _ModeRegistry({"serena": "system", "cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    primary = _RecordingStreamWorker()
-    clone = _RecordingStreamWorker()
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    custom = _RecordingStreamWorker("custom_voice")
+    base = _RecordingStreamWorker("base")
+    router = Qwen3TtsCapabilityRouter(
+        {"tts_custom_voice": custom, "tts_base": base}  # type: ignore[arg-type]
+    )
 
     async def run() -> None:
         clone_options = _options("cloned")
-        design_options = _options("designed")
-        assert await router.open_incremental_stream(clone_options) is clone.session
-        assert await router.open_incremental_stream(design_options) is primary.session
-        assert clone.calls == [clone_options]
-        assert primary.calls == [design_options]
+        builtin_options = _options("serena")
+        assert await router.open_incremental_stream(clone_options) is base.session
+        assert await router.open_incremental_stream(builtin_options) is custom.session
+        assert base.calls == [clone_options]
+        assert custom.calls == [builtin_options]
 
     asyncio.run(run())
 
@@ -442,7 +445,9 @@ def test_router_fails_closed_when_the_clone_lane_is_absent(
 ) -> None:
     registry = _ModeRegistry({"cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    router = Qwen3TtsCapabilityRouter(_RecordingStreamWorker())  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter(
+        {"tts_custom_voice": _RecordingStreamWorker("custom_voice")}  # type: ignore[arg-type]
+    )
 
     async def run() -> None:
         with pytest.raises(TtsStreamError) as raised:

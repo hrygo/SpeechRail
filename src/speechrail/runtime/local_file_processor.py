@@ -95,6 +95,7 @@ class LocalFileJobProcessor:
         ffmpeg_path: Path | None = None,
         clone_model_artifact: str | None = None,
         clone_model_catalog_revision: str | None = None,
+        tts_capability_key: str | None = None,
         allowed_roots: Sequence[Path] | None = None,
     ) -> None:
         if not spool_dir.is_absolute():
@@ -113,6 +114,7 @@ class LocalFileJobProcessor:
         self._ffmpeg_path = ffmpeg_path
         self._clone_model_artifact = clone_model_artifact
         self._clone_model_catalog_revision = clone_model_catalog_revision
+        self._tts_capability_key = tts_capability_key
 
     def resource_key_for_job(self, job: JobRecord) -> str | None:
         """Return the TTS worker lane for a durable speech job when it is known."""
@@ -241,6 +243,7 @@ class LocalFileJobProcessor:
                         get_voice_registry().validation_store,
                         synthesizer,
                         require_current_binding=True,
+                        capability_key=self._tts_capability_key,
                     )
                     if validation_state["production_ready"] is not True:
                         raise JobProcessingError("voice_not_production_ready")

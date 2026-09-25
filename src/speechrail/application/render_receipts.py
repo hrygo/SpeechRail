@@ -31,6 +31,9 @@ class _ReceiptState:
     model_variant: str | None
     model_catalog_revision: str | None
     model_runtime_revision: str | None
+    plan_id: str | None
+    window_index: int | None
+    checkpoint_id: str | None
     output_format: str
     sample_rate: int
     channels: int
@@ -83,6 +86,9 @@ class RenderReceiptRegistry:
         model_variant: str | None,
         model_catalog_revision: str | None,
         model_runtime_revision: str | None,
+        plan_id: str | None = None,
+        window_index: int | None = None,
+        checkpoint_id: str | None = None,
         output_format: str,
         sample_rate: int,
         channels: int = 1,
@@ -92,6 +98,10 @@ class RenderReceiptRegistry:
     ) -> str:
         if sample_rate <= 0 or channels <= 0:
             raise ValueError("invalid audio format")
+        if window_index is not None and (type(window_index) is not int or window_index < 0):
+            raise ValueError("render window index must be a non-negative integer")
+        if checkpoint_id is not None and not checkpoint_id.strip():
+            raise ValueError("render checkpoint id must not be blank")
         receipt_id = f"rr_{uuid4().hex}"
         state = _ReceiptState(
             receipt_id=receipt_id,
@@ -104,6 +114,9 @@ class RenderReceiptRegistry:
             model_variant=model_variant,
             model_catalog_revision=model_catalog_revision,
             model_runtime_revision=model_runtime_revision,
+            plan_id=plan_id,
+            window_index=window_index,
+            checkpoint_id=checkpoint_id,
             output_format=output_format,
             sample_rate=sample_rate,
             channels=channels,
@@ -213,6 +226,14 @@ class RenderReceiptRegistry:
                     "variant": state.model_variant,
                     "catalog_revision": state.model_catalog_revision,
                     "runtime_revision": state.model_runtime_revision,
+                },
+                # A render fixes one plan, one voice revision, and one bounded
+                # paragraph window.  Receipts keep only these identities and a
+                # PCM digest: raw audio is never persisted here.
+                "plan": {
+                    "plan_id": state.plan_id,
+                    "window_index": state.window_index,
+                    "checkpoint_id": state.checkpoint_id,
                 },
                 "audio": {
                     "format": state.output_format,

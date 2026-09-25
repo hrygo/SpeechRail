@@ -16,7 +16,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Final, Protocol
 
-PREPARED_REFERENCE_SCHEMA = "prepared_reference_condition_v1"
+PREPARED_REFERENCE_SCHEMA = "prepared_reference_condition_v2"
 _CONTENT_IDENTITY_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _REVISION_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -31,16 +31,19 @@ class PreparedReferenceKey:
     """Everything one reusable Base reference condition depends on.
 
     The key is the only cache namespace for prepared conditions. Because it
-    binds the material identity, preprocessing, model/quantization/tokenizer
-    revision and implementation version together, two precisions (for example
-    q8 and bf16) can never share one cached tensor by accident.
+    binds the material identity, preprocessing, artifact/engine/quantization,
+    text tokenizer, speech codec and implementation version together, two
+    precisions (for example q8 and bf16) -- or two engines serving the same
+    voice id -- can never share one cached tensor by accident.
     """
 
     content_identity: str
     preprocessing_version: str
     model_revision: str
+    engine_revision: str
     quantization: str
     tokenizer_revision: str
+    codec_revision: str
     implementation_version: str
     conditioning_mode: str = "icl"
     schema_version: str = PREPARED_REFERENCE_SCHEMA
@@ -53,6 +56,8 @@ class PreparedReferenceKey:
                 raise ValueError(f"{name} must be a 40-character hex revision")
         for name in (
             "preprocessing_version",
+            "engine_revision",
+            "codec_revision",
             "implementation_version",
             "conditioning_mode",
             "schema_version",

@@ -57,6 +57,7 @@ _ALLOWED_KEYS = frozenset(
         "runtime_fingerprint",
         "preprocess_version",
         "generation_recipe_revision",
+        "capability_key",
         "probe_set",
         "repetitions",
         "failure_codes",
@@ -143,6 +144,7 @@ class VoiceValidationRepository:
             "runtime_fingerprint",
             "preprocess_version",
             "generation_recipe_revision",
+            "capability_key",
             "probe_set",
         ):
             item = record.get(key)
@@ -184,6 +186,7 @@ class VoiceValidationRepository:
             record.get("preprocess_version"),
             record.get("generation_recipe_revision"),
             record.get("policy_version"),
+            record.get("capability_key"),
         )
 
     def get(
@@ -198,6 +201,7 @@ class VoiceValidationRepository:
         preprocess_version: str | None = None,
         generation_recipe_revision: str | None = None,
         policy_version: str | None = None,
+        capability_key: str | None = None,
         require_current_binding: bool = False,
     ) -> dict[str, Any] | None:
         """Return evidence matching the requested acoustic/runtime binding.
@@ -256,6 +260,7 @@ class VoiceValidationRepository:
                 or item.get("generation_recipe_revision") == generation_recipe_revision
             )
             and (policy_version is None or item.get("policy_version") == policy_version)
+            and (capability_key is None or item.get("capability_key") == capability_key)
         ]
         if not matches:
             return None

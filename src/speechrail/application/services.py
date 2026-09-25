@@ -35,6 +35,7 @@ from speechrail.backends.qwen3_tts import (
     TtsModelVariant,
 )
 from speechrail.config import Settings
+from speechrail.config.model_catalog import ModelRole
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.contracts import TranscriptResult
@@ -46,6 +47,7 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
+from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
 from speechrail.runtime.alignment_admission import AlignmentAdmission
@@ -59,6 +61,7 @@ from speechrail.runtime.model_budget import (
     can_overlap_heavy_compute,
     detect_system_memory_bytes,
 )
+from speechrail.runtime.registry import engine_variant_for_role
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.resource_observability import service_physical_footprint
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
@@ -598,19 +601,24 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         def make_tts_worker(
             model_dir: Path,
             *,
+            role: ModelRole,
             warmup: bool,
-            catalog_variant: str | None,
-            expected_variant: TtsModelVariant | None = None,
         ) -> Qwen3TtsWorker:
-            raw_variant = catalog_variant or inspect_model(model_dir).variant
-            if raw_variant not in {"voice_design", "custom_voice", "base"}:
-                raise RuntimeError("backend_identity_mismatch: unsupported TTS model variant")
-            if expected_variant is not None and raw_variant != expected_variant:
+            expected_variant = engine_variant_for_role(role)
+            artifact = active_tts_catalog.artifact_for_role(role)
+            if artifact is not None and artifact.variant != expected_variant:
                 raise RuntimeError(
-                    f"backend_identity_mismatch: expected {expected_variant} TTS variant, "
-                    f"got {raw_variant}"
+                    "backend_identity_mismatch: plan role "
+                    f"{role} is bound to the {artifact.variant} artifact"
                 )
-            variant = cast(TtsModelVariant, raw_variant)
+            observed_variant = inspect_model(model_dir).variant
+            if observed_variant != expected_variant:
+                raise RuntimeError(
+                    "backend_identity_mismatch: plan role "
+                    f"{role} requires the {expected_variant} TTS variant, "
+                    f"got {observed_variant}"
+                )
+            variant = cast(TtsModelVariant, expected_variant)
             return Qwen3TtsWorker(
                 Qwen3TtsBackendConfig(
                     repository_root=_package_root(),
@@ -637,31 +645,20 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 ),
             )
 
-        primary_tts_worker = make_tts_worker(
-            settings.qwen3_tts_model_dir,
-            warmup=settings.tts_warmup_on_start,
-            catalog_variant=(
-                active_tts_catalog.tts.variant if active_tts_catalog.tts is not None else None
-            ),
-        )
-        clone_tts_worker = (
-            make_tts_worker(
-                settings.qwen3_tts_clone_model_dir,
+        tts_workers: dict[str, Qwen3TtsWorker] = {
+            "tts_custom_voice": make_tts_worker(
+                settings.qwen3_tts_model_dir,
+                role="tts_custom_voice",
                 warmup=settings.tts_warmup_on_start,
-                catalog_variant=(
-                    active_tts_catalog.tts_clone.variant
-                    if active_tts_catalog.tts_clone is not None
-                    else None
-                ),
-                expected_variant="base",
             )
-            if settings.qwen3_tts_clone_model_dir is not None
-            else None
-        )
-        tts_worker = Qwen3TtsCapabilityRouter(
-            primary_tts_worker,
-            clone=clone_tts_worker,
-        )
+        }
+        if settings.qwen3_tts_clone_model_dir is not None:
+            tts_workers["tts_base"] = make_tts_worker(
+                settings.qwen3_tts_clone_model_dir,
+                role="tts_base",
+                warmup=settings.tts_warmup_on_start,
+            )
+        tts_worker = Qwen3TtsCapabilityRouter(tts_workers)
         tts_synthesizer = tts_worker
 
     realtime_asr_factory = overrides.realtime_asr_factory
@@ -758,7 +755,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     )
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
-    job_clone_artifact = active_model_catalog(settings).tts_clone
+    job_active_tts = active_model_catalog(settings)
+    job_clone_artifact = job_active_tts.tts_clone
+    job_tts_spec = job_active_tts.tts_spec
     job_runner: JobRunner | None = None
     if job_repository is not None:
         processor = overrides.job_processor
@@ -776,6 +775,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 ),
                 clone_model_catalog_revision=(
                     job_clone_artifact.revision if job_clone_artifact is not None else None
+                ),
+                tts_capability_key=(
+                    tts_capability_key(job_tts_spec, TtsExecutionMode.RENDER)
+                    if job_tts_spec is not None
+                    else None
                 ),
             )
         job_runner = JobRunner(

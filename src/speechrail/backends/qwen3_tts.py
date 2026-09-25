@@ -13,8 +13,8 @@ import contextlib
 import os
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
-from contextlib import ExitStack
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import ExitStack, aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -38,6 +38,7 @@ from speechrail.domain.tts_stream import (
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.busy import BusyReason
+from speechrail.runtime.registry import TTS_RUNTIME_ROLES, engine_variant_for_role
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -47,6 +48,7 @@ from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 if TYPE_CHECKING:
     from speechrail.backends.qwen3_voice_binding import VoiceBinding
+    from speechrail.config.model_catalog import ModelRole
 
 DeliveryEventRecorder = Callable[[str, int], None]
 TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
@@ -763,93 +765,112 @@ class _LeasedTtsStreamSession:
 
 
 class Qwen3TtsCapabilityRouter:
-    """Route TTS capabilities through independent, lifecycle-owned workers.
+    """Route TTS by plan role through independent, lifecycle-owned workers.
 
-    Normal synthesis uses the preset's primary VoiceDesign/CustomVoice worker.
-    Registered clone voices use the active Base worker when that capability is
-    configured.  Each worker owns
-    its request lock, so VoiceDesign and Base can remain resident and synthesize
-    concurrently without allowing two requests onto the same worker.  The
-    router only serializes lifecycle operations such as startup and eviction.
+    Workers are keyed by the plan role they serve (``tts_custom_voice`` or
+    ``tts_base``); a worker whose vendor variant does not match its role is
+    rejected at construction so a role can never silently serve another model's
+    weights.  VoiceDesign is deliberately absent from the runtime routes: the
+    design studio owns that model on a separate path, and ordinary synthesis
+    and the incremental stream must never reach it.  Each worker owns its
+    request lock, so the roles may stay resident and synthesize concurrently
+    while lifecycle operations stay serialized.
     """
 
-    def __init__(
-        self,
-        primary: Qwen3TtsWorker,
-        *,
-        clone: Qwen3TtsWorker | None = None,
-    ) -> None:
-        self.primary = primary
-        self.clone = clone
+    def __init__(self, workers: Mapping[str, Qwen3TtsWorker]) -> None:
+        resolved: dict[str, Qwen3TtsWorker] = {}
+        for role, worker in workers.items():
+            try:
+                expected_variant = engine_variant_for_role(cast("ModelRole", role))
+            except ValueError as exc:
+                raise ValueError(f"unsupported TTS plan role: {role}") from exc
+            if worker.model_variant != expected_variant:
+                raise ValueError(
+                    "backend_identity_mismatch: plan role "
+                    f"{role} requires the {expected_variant} TTS variant, "
+                    f"got {worker.model_variant}"
+                )
+            resolved[role] = worker
+        self._workers = resolved
         self._capability_lock = asyncio.Lock()
+
+    @property
+    def _worker_list(self) -> tuple[Qwen3TtsWorker, ...]:
+        return tuple(self._workers.values())
 
     @property
     def resident_worker_count(self) -> int:
         """Return the maximum number of TTS workers this router may keep warm."""
-        return 1 + (1 if self.clone is not None else 0)
+
+        return len(self._workers)
 
     @property
     def active_incremental_streams(self) -> int:
         """Return how many utterances currently hold a worker, waiting text included."""
 
-        count = 0
-        for worker in (self.primary,) + ((self.clone,) if self.clone is not None else ()):
-            if getattr(worker, "active_incremental_stream", False):
-                count += 1
-        return count
+        return sum(
+            1
+            for worker in self._worker_list
+            if getattr(worker, "active_incremental_stream", False)
+        )
 
     @property
     def alive(self) -> bool:
-        return self.primary.alive or bool(self.clone is not None and self.clone.alive)
+        return any(worker.alive for worker in self._worker_list)
 
     @property
     def ready(self) -> bool:
-        return self.primary.ready or bool(self.clone is not None and self.clone.ready)
+        return any(worker.ready for worker in self._worker_list)
 
     @property
     def last_active(self) -> float:
-        values = [self.primary.last_active]
-        if self.clone is not None:
-            values.append(self.clone.last_active)
-        return max(values)
+        if not self._workers:
+            return 0.0
+        return max(worker.last_active for worker in self._worker_list)
 
     @property
     def model_variant(self) -> str | None:
-        return self.primary.model_variant
+        for role in TTS_RUNTIME_ROLES:
+            worker = self._workers.get(role)
+            if worker is not None and worker.ready:
+                return worker.model_variant
+        return None
+
+    @property
+    def warm_roles(self) -> tuple[str, ...]:
+        """Return the plan roles whose workers are resident and ready."""
+
+        return tuple(
+            role for role, worker in self._workers.items() if worker.ready
+        )
 
     @property
     def warm_capabilities(self) -> tuple[str, ...]:
-        """Return resident capabilities without loading either model."""
-        capabilities: list[str] = []
-        if self.primary.ready:
-            capabilities.append(
-                "voice_design" if self.primary.model_variant == "voice_design" else "tts"
-            )
-        if self.clone is not None and self.clone.ready:
-            capabilities.append("voice_clone")
-        return tuple(capabilities)
+        """Return resident plan roles without loading any model."""
+
+        return self.warm_roles
 
     @property
     def warm_capability(self) -> str | None:
         """Return a compact resident-capability summary for health diagnostics."""
-        capabilities = self.warm_capabilities
+
+        capabilities = self.warm_roles
         if len(capabilities) > 1:
             return "both"
         return capabilities[0] if capabilities else None
 
     @property
     def lifecycle_stats(self) -> dict[str, object]:
-        primary = self.primary.lifecycle_stats
-        clone = self.clone.lifecycle_stats if self.clone is not None else None
+        stats = [worker.lifecycle_stats for worker in self._worker_list]
         return {
             "cooperative_cancel_supported": bool(
-                primary["cooperative_cancel_supported"]
-                and (clone is None or clone["cooperative_cancel_supported"])
+                stats
+                and all(item["cooperative_cancel_supported"] for item in stats)
             ),
-            "fallback_abort_count": int(primary["fallback_abort_count"])
-            + (int(clone["fallback_abort_count"]) if clone is not None else 0),
-            "reload_count": int(primary["reload_count"])
-            + (int(clone["reload_count"]) if clone is not None else 0),
+            "fallback_abort_count": sum(
+                int(item["fallback_abort_count"]) for item in stats
+            ),
+            "reload_count": sum(int(item["reload_count"]) for item in stats),
             "warm_capability": self.warm_capability,
             "warm_capabilities": list(self.warm_capabilities),
         }
@@ -857,7 +878,7 @@ class Qwen3TtsCapabilityRouter:
     async def start(self) -> None:
         """Start every configured capability, leaving already-warm workers intact."""
         async with self._capability_lock:
-            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
+            workers = self._worker_list
             if all(worker.ready for worker in workers):
                 return
             try:
@@ -874,41 +895,62 @@ class Qwen3TtsCapabilityRouter:
                 raise
 
     def resource_key_for_voice(self, voice: str) -> str:
-        """Map a validated public voice to the worker lane that serves it."""
+        """Map a validated public voice to the plan-role lane that serves it.
+
+        A design-only voice has no runtime lane; it keeps the conservative
+        wildcard ``tts`` key because the request itself is rejected before it
+        reaches a worker.
+        """
+
         from speechrail.domain.tts import get_voice_registry
 
         profile = get_voice_registry().get_profile(voice)
         if profile.mode == "clone":
-            return "voice_clone" if self.clone is not None else "tts"
-        return "voice_design" if self.clone is not None else "tts"
+            return "tts_base"
+        if profile.mode == "system":
+            return "tts_custom_voice"
+        return "tts"
 
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         """Return the ready worker identity for the voice's selected lane."""
         from speechrail.domain.tts import get_voice_registry
 
         profile = get_voice_registry().get_profile(voice)
-        if profile.mode == "clone":
-            return self.clone.runtime_revision if self.clone is not None else None
-        return self.primary.runtime_revision
+        role = profile.runtime_role
+        if role is None:
+            return None
+        worker = self._workers.get(role)
+        return worker.runtime_revision if worker is not None else None
+
+    def _require_runtime_worker(self, voice: str) -> tuple[str, Qwen3TtsWorker]:
+        """Resolve one voice to its plan role and resident worker, or fail closed."""
+
+        from speechrail.domain.tts import get_voice_registry
+        from speechrail.domain.tts_routing import TtsRouteError, route_role_for_voice
+
+        profile = get_voice_registry().get_profile(voice)
+        try:
+            role = route_role_for_voice(profile)
+        except TtsRouteError as exc:
+            raise RuntimeError(exc.code) from None
+        worker = self._workers.get(role)
+        if worker is None:
+            if role == "tts_base":
+                raise RuntimeError("voice_clone_base_model_unavailable")
+            raise RuntimeError("tts_custom_voice_model_unavailable")
+        return role, worker
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
-        from speechrail.domain.tts import get_voice_registry
+        async def stream() -> AsyncIterator[AudioChunk]:
+            _, worker = self._require_runtime_worker(request.voice)
+            # Closing the router's iterator must also close the owning worker's
+            # iterator, so the worker slot is released by the caller's teardown
+            # instead of waiting for garbage collection.
+            async with aclosing(worker.synthesize(request)) as source:
+                async for chunk in source:
+                    yield chunk
 
-        profile = get_voice_registry().get_profile(request.voice)
-        clone_worker = self.clone
-        selected: Qwen3TtsWorker
-        if profile.mode == "clone":
-            if clone_worker is None:
-
-                async def unavailable() -> AsyncIterator[AudioChunk]:
-                    raise RuntimeError("voice_clone_base_model_unavailable")
-                    yield  # pragma: no cover
-
-                return unavailable()
-            selected = clone_worker
-        else:
-            selected = self.primary
-        return selected.synthesize(request)
+        return stream()
 
     async def open_incremental_stream(
         self,
@@ -916,26 +958,19 @@ class Qwen3TtsCapabilityRouter:
     ) -> IncrementalSpeechSession:
         """Route one incremental utterance to the lane that owns its voice."""
 
-        from speechrail.domain.tts import get_voice_registry
-
-        profile = get_voice_registry().get_profile(options.voice)
-        if profile.mode == "clone":
-            if self.clone is None:
-                raise TtsStreamError(
-                    "tts_streaming_unsupported",
-                    "the voice clone base model is not resident",
-                )
-            return await self.clone.open_incremental_stream(options)
-        return await self.primary.open_incremental_stream(options)
+        try:
+            _, worker = self._require_runtime_worker(options.voice)
+        except RuntimeError as exc:
+            raise TtsStreamError("tts_streaming_unsupported", str(exc)) from None
+        return await worker.open_incremental_stream(options)
 
     def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
         """Consume timing metadata from whichever worker served the response."""
 
-        sidecar = self.primary.take_timing_sidecar(response_id)
-        if sidecar is not None:
-            return sidecar
-        if self.clone is not None:
-            return self.clone.take_timing_sidecar(response_id)
+        for worker in self._worker_list:
+            sidecar = worker.take_timing_sidecar(response_id)
+            if sidecar is not None:
+                return sidecar
         return None
 
     async def evict_warm_capability(self) -> None:
@@ -948,21 +983,18 @@ class Qwen3TtsCapabilityRouter:
         if self.active_incremental_streams:
             raise TtsWorkerBusyError("an incremental TTS utterance still owns a worker")
         async with self._capability_lock:
-            workers = (self.clone, self.primary) if self.clone is not None else (self.primary,)
-            for worker in workers:
+            for worker in self._worker_list:
                 if worker.alive or worker.ready:
                     await worker.close()
 
     async def trim_memory(self) -> None:
-        await self.primary.trim_memory()
-        if self.clone is not None:
-            await self.clone.trim_memory()
+        for worker in self._worker_list:
+            await worker.trim_memory()
 
     async def close(self) -> None:
         async with self._capability_lock:
-            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
             first_error: BaseException | None = None
-            for worker in workers:
+            for worker in self._worker_list:
                 try:
                     await worker.close()
                 except BaseException as exc:

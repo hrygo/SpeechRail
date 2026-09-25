@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import resolve_voice
 
@@ -26,17 +26,28 @@ class CapturingSpeechSynthesizer:
         return chunks()
 
 
-def _managed_voice_client(tmp_path: Path, preset_id: str) -> TestClient:
-    preset = load_catalog().preset(preset_id)
+def _managed_voice_client(tmp_path: Path, tier: str) -> TestClient:
+    asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
+    design_key = required_spec_artifact(tier, "voice_design")  # type: ignore[arg-type]
+    assert asr_key is not None and tts_key is not None and base_key is not None
     return TestClient(
         create_app(
             Settings(
-                qwen3_model_dir=tmp_path / preset.asr,
+                qwen3_model_dir=tmp_path / asr_key,
                 asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
-                qwen3_tts_model_dir=tmp_path / preset.tts,
+                qwen3_tts_model_dir=tmp_path / tts_key,
                 tts_resident_bytes=1 * 1024**3,
                 qwen3_tts_python=None,
+                selection_schema_version=2,
+                selection_asr_spec=tier,
+                selection_tts_spec=tier,
+                asr_artifact_key=asr_key,
+                tts_artifact_key=tts_key,
+                tts_base_artifact_key=base_key,
+                voice_design_artifact_key=design_key,
             ),
             tts_synthesizer=CapturingSpeechSynthesizer(),
         )
@@ -130,29 +141,24 @@ def test_standard_voice_alias_remains_stable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("preset_id", "variant", "supports_speaker", "supports_instruction"),
-    [
-        ("quality", "voice_design", False, True),
-        ("balanced", "custom_voice", True, False),
-        ("light", "custom_voice", True, False),
-    ],
+    "tier",
+    ["fast", "quality", "reference"],
 )
 def test_managed_voice_catalog_reports_active_tier_capabilities(
     tmp_path: Path,
-    preset_id: str,
-    variant: str,
-    supports_speaker: bool,
-    supports_instruction: bool,
+    tier: str,
 ) -> None:
-    voices = _managed_voice_client(tmp_path, preset_id).get("/v1/voices").json()["data"]
+    voices = _managed_voice_client(tmp_path, tier).get("/v1/voices").json()["data"]
 
-    assert {voice["variant"] for voice in voices if voice["is_system"]} == {variant}
+    assert {voice["variant"] for voice in voices if voice["is_system"]} == {
+        "custom_voice"
+    }
     assert all(voice["available"] for voice in voices if voice["is_system"])
     assert all(
         voice["capabilities"]
         == {
-            "supports_speaker": supports_speaker,
-            "supports_instruction": supports_instruction,
+            "supports_speaker": True,
+            "supports_instruction": False,
             "supports_clone": False,
         }
         for voice in voices
@@ -161,7 +167,7 @@ def test_managed_voice_catalog_reports_active_tier_capabilities(
 
 
 def test_custom_voice_is_unavailable_under_custom_voice_weights(tmp_path: Path) -> None:
-    client = _managed_voice_client(tmp_path, "balanced")
+    client = _managed_voice_client(tmp_path, "fast")
     voice_id = "test_custom_voice_capability"
     try:
         created = client.post(
@@ -172,7 +178,7 @@ def test_custom_voice_is_unavailable_under_custom_voice_weights(tmp_path: Path) 
                 "id": voice_id,
             },
         ).json()
-        assert created["variant"] == "custom_voice"
+        assert created["variant"] is None
         assert created["available"] is False
         assert created["capabilities"] == {
             "supports_speaker": False,

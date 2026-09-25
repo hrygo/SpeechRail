@@ -63,6 +63,24 @@ class VoiceProfile:
         """Expose the same stable text for API clients and model adapters."""
         return self.instruction or self.ref_text or ""
 
+    @property
+    def runtime_role(self) -> str | None:
+        """Return the plan role that owns this voice, or None when design-only.
+
+        ``system`` voices are built-in fixed speakers and therefore CustomVoice
+        weights; ``clone`` voices (including published design revisions) are
+        Base weights.  ``instruction`` voices are design candidates: they are
+        served by the voice_design task and have no runtime synthesis role.
+        Discovery must read this instead of inferring a role from a model
+        directory or an active tier.
+        """
+
+        if self.mode == "clone":
+            return "tts_base"
+        if self.mode == "system":
+            return "tts_custom_voice"
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.id,

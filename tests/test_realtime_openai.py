@@ -38,6 +38,7 @@ from speechrail.domain.diarization import (
     DiarizationError,
     SampleSpan,
 )
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import (
     AudioChunk,
     RealtimeAsrSession,
@@ -532,13 +533,9 @@ def test_session_created_advertises_stable_clone_loudness_profile() -> None:
 
 
 def test_realtime_quality_session_repeats_stable_clone_loudness_profile() -> None:
-    preset = load_catalog().preset("quality")
+    settings_kwargs, _revision = _quality_model_settings()
     client, _ = _client(
-        settings_kwargs={
-            "qwen3_model_dir": Path(preset.asr),
-            "qwen3_tts_model_dir": Path(preset.tts),
-            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
-        }
+        settings_kwargs=settings_kwargs
     )
     with client.websocket_connect("/v1/realtime") as socket:
         created = socket.receive_json()
@@ -2832,14 +2829,22 @@ def _drive_tts(
 
 def _quality_model_settings() -> tuple[dict[str, Any], str]:
     catalog = load_catalog()
-    preset = catalog.preset("quality")
-    assert preset.tts_clone is not None
-    artifact = next(item for item in catalog.artifacts if item.key == preset.tts)
+    asr_key = required_spec_artifact("quality", "asr")
+    tts_key = required_spec_artifact("quality", "tts_custom_voice")
+    base_key = required_spec_artifact("quality", "tts_base")
+    assert asr_key is not None and tts_key is not None and base_key is not None
+    artifact = next(item for item in catalog.artifacts if item.key == tts_key)
     return (
         {
-            "qwen3_model_dir": Path(preset.asr),
-            "qwen3_tts_model_dir": Path(preset.tts),
-            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
+            "qwen3_model_dir": Path(asr_key),
+            "qwen3_tts_model_dir": Path(tts_key),
+            "qwen3_tts_clone_model_dir": Path(base_key),
+            "selection_schema_version": 2,
+            "selection_asr_spec": "quality",
+            "selection_tts_spec": "quality",
+            "asr_artifact_key": asr_key,
+            "tts_artifact_key": tts_key,
+            "tts_base_artifact_key": base_key,
         },
         artifact.revision,
     )
@@ -3100,11 +3105,18 @@ def test_realtime_tts_rejects_unknown_voice_and_session_survives() -> None:
 def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
     tmp_path: Path,
 ) -> None:
-    preset = load_catalog().preset("light")
+    asr_key = required_spec_artifact("fast", "asr")
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    assert asr_key is not None and tts_key is not None
     client, _ = _client(
         settings_kwargs={
-            "qwen3_model_dir": tmp_path / preset.asr,
-            "qwen3_tts_model_dir": tmp_path / preset.tts,
+            "qwen3_model_dir": tmp_path / asr_key,
+            "qwen3_tts_model_dir": tmp_path / tts_key,
+            "selection_schema_version": 2,
+            "selection_asr_spec": "fast",
+            "selection_tts_spec": "fast",
+            "asr_artifact_key": asr_key,
+            "tts_artifact_key": tts_key,
         }
     )
     registry = get_voice_registry()
@@ -3149,16 +3161,11 @@ def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
 
 
 def test_realtime_quality_accepts_clone_voice_with_base_capability() -> None:
-    preset = load_catalog().preset("quality")
-    assert preset.tts_clone is not None
+    settings_kwargs, _revision = _quality_model_settings()
     synthesizer = FakeSpeechSynthesizer()
     client, _ = _client(
         tts_synthesizer=synthesizer,
-        settings_kwargs={
-            "qwen3_model_dir": Path(preset.asr),
-            "qwen3_tts_model_dir": Path(preset.tts),
-            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
-        },
+        settings_kwargs=settings_kwargs,
     )
     registry = get_voice_registry()
     voice_id = "test_realtime_base_clone"
@@ -3173,7 +3180,7 @@ def test_realtime_quality_accepts_clone_voice_with_base_capability() -> None:
         with client.websocket_connect("/v1/realtime") as socket:
             created = socket.receive_json()
             assert created["session"]["speech_capabilities"]["supports_clone"] is True
-            assert created["session"]["speech_capabilities"]["variant"] == "voice_design"
+            assert created["session"]["speech_capabilities"]["variant"] == "custom_voice"
             events = _drive_tts(socket, {"voice": voice_id})
             assert events[-1]["type"] == "response.done"
     finally:

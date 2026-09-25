@@ -1,3 +1,5 @@
+"""Router lifecycle: independent plan roles, never a silent re-route."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -16,7 +18,18 @@ class _Registry:
         self._modes = modes
 
     def get_profile(self, voice: str) -> SimpleNamespace:
-        return SimpleNamespace(mode=self._modes[voice])
+        mode = self._modes[voice]
+        return SimpleNamespace(
+            mode=mode,
+            revision=None,
+            runtime_role=(
+                "tts_base"
+                if mode == "clone"
+                else "tts_custom_voice"
+                if mode == "system"
+                else None
+            ),
+        )
 
 
 class _Worker:
@@ -99,85 +112,96 @@ class _FailOnceWorker(_Worker):
         return stream()
 
 
+def _router(
+    *,
+    custom: _Worker | None = None,
+    base: _Worker | None = None,
+) -> Qwen3TtsCapabilityRouter:
+    workers = {
+        "tts_custom_voice": custom if custom is not None else _Worker("custom_voice"),
+    }
+    if base is not None:
+        workers["tts_base"] = base
+    return Qwen3TtsCapabilityRouter(workers)
+
+
 @pytest.mark.anyio
-async def test_router_allows_voice_design_and_clone_streams_concurrently(
+async def test_router_allows_custom_and_clone_roles_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = _Registry({"designed": "instruction", "cloned": "clone"})
+    registry = _Registry({"serena": "system", "cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     entered = anyio.Event()
     release = anyio.Event()
-    primary = _Worker("voice_design")
-    clone = _BlockingWorker("base", entered, release)
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    custom = _Worker("custom_voice")
+    base = _BlockingWorker("base", entered, release)
+    router = _router(custom=custom, base=base)
     assert router.warm_capability is None
     await router.start()
     assert router.warm_capability == "both"
-    assert router.warm_capabilities == ("voice_design", "voice_clone")
+    assert router.warm_capabilities == ("tts_custom_voice", "tts_base")
     assert router.lifecycle_stats["warm_capability"] == "both"
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
-    design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
+    builtin_request = SpeechRequest(text="hi", voice="serena", output_format="pcm16")
     results: list[str] = []
 
     async def run_clone() -> None:
         _ = [chunk async for chunk in router.synthesize(clone_request)]
         results.append("clone")
 
-    async def run_design() -> None:
-        _ = [chunk async for chunk in router.synthesize(design_request)]
-        results.append("design")
+    async def run_builtin() -> None:
+        _ = [chunk async for chunk in router.synthesize(builtin_request)]
+        results.append("builtin")
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_clone)
         await entered.wait()
         assert router.warm_capability == "both"
-        tg.start_soon(run_design)
+        tg.start_soon(run_builtin)
         await anyio.lowlevel.checkpoint()
-        assert clone.alive is True
-        assert primary.alive is True
-        assert primary.requests == [design_request]
+        assert base.alive is True
+        assert custom.alive is True
+        assert custom.requests == [builtin_request]
         release.set()
 
-    assert set(results) == {"clone", "design"}
-    assert clone.alive is True
-    assert primary.alive is True
-    assert router.warm_capability == "both"
-    assert primary.requests == [design_request]
+    assert set(results) == {"clone", "builtin"}
+    assert base.alive is True
+    assert custom.alive is True
 
 
 @pytest.mark.anyio
 async def test_router_releases_capability_lock_after_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = _Registry({"designed": "instruction", "cloned": "clone"})
+    registry = _Registry({"serena": "system", "cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    primary = _Worker("voice_design")
-    clone = _FailOnceWorker("base")
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    custom = _Worker("custom_voice")
+    base = _FailOnceWorker("base")
+    router = _router(custom=custom, base=base)
     await router.start()
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
     with pytest.raises(RuntimeError, match="synthetic worker failure"):
         _ = [chunk async for chunk in router.synthesize(clone_request)]
 
-    design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
-    chunks = [chunk async for chunk in router.synthesize(design_request)]
+    builtin_request = SpeechRequest(text="hi", voice="serena", output_format="pcm16")
+    chunks = [chunk async for chunk in router.synthesize(builtin_request)]
     assert chunks
-    assert clone.alive is True
-    assert primary.alive is True
-    assert primary.requests == [design_request]
+    assert base.alive is True
+    assert custom.alive is True
+    assert custom.requests == [builtin_request]
 
 
 @pytest.mark.anyio
-async def test_router_can_evict_current_capability_without_loading_another(
+async def test_router_can_evict_every_plan_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = _Registry({"designed": "instruction", "cloned": "clone"})
+    registry = _Registry({"serena": "system", "cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    primary = _Worker("voice_design")
-    clone = _Worker("base")
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    custom = _Worker("custom_voice")
+    base = _Worker("base")
+    router = _router(custom=custom, base=base)
     await router.start()
 
     request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
@@ -187,8 +211,8 @@ async def test_router_can_evict_current_capability_without_loading_another(
     await router.evict_warm_capability()
 
     assert router.warm_capability is None
-    assert primary.alive is False
-    assert clone.alive is False
+    assert custom.alive is False
+    assert base.alive is False
 
 
 @pytest.mark.anyio
@@ -214,13 +238,12 @@ async def test_router_closes_child_stream_before_releasing_model_slot(
             self.source = stream()
             return self.source
 
-    primary = _Worker("voice_design")
-    clone = RetainedStreamWorker("base")
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    base = RetainedStreamWorker("base")
+    router = _router(base=base)
     request = SpeechRequest(text="test", voice="cloned")
     async with aclosing(router.synthesize(request)) as source:
         await anext(source)
-    assert clone.finalized
+    assert base.finalized
     assert not router._capability_lock.locked()
 
 
@@ -230,16 +253,16 @@ async def test_start_preserves_already_warm_clone_capability(
 ) -> None:
     registry = _Registry({"cloned": "clone"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    primary = _Worker("voice_design")
-    clone = _Worker("base")
-    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    custom = _Worker("custom_voice")
+    base = _Worker("base")
+    router = _router(custom=custom, base=base)
     request = SpeechRequest(text="test", voice="cloned")
     assert [chunk async for chunk in router.synthesize(request)]
     await router.start()
     assert router.warm_capability == "both"
-    assert primary.started == 1
-    assert clone.started == 1
-    assert clone.alive
+    assert custom.started == 1
+    assert base.started == 1
+    assert base.alive
 
 
 @pytest.mark.anyio
@@ -248,12 +271,12 @@ async def test_router_reports_busy_instead_of_evicting_an_active_utterance(
 ) -> None:
     """A group-level evict must never cut off an utterance that still owns a worker."""
 
-    registry = _Registry({"designed": "instruction"})
+    registry = _Registry({"serena": "system"})
     monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    primary = _Worker("voice_design")
-    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
+    custom = _Worker("custom_voice")
+    router = _router(custom=custom)
     await router.start()
-    primary.active_incremental_stream = True  # type: ignore[attr-defined]
+    custom.active_incremental_stream = True  # type: ignore[attr-defined]
 
     assert router.active_incremental_streams == 1
     with pytest.raises(TtsWorkerBusyError) as raised:
@@ -261,8 +284,8 @@ async def test_router_reports_busy_instead_of_evicting_an_active_utterance(
 
     assert raised.value.code == "backend_busy"
     assert raised.value.busy_reason == BusyReason.BACKEND_TRANSITION
-    assert primary.alive is True
+    assert custom.alive is True
 
-    primary.active_incremental_stream = False  # type: ignore[attr-defined]
+    custom.active_incremental_stream = False  # type: ignore[attr-defined]
     await router.evict_warm_capability()
-    assert primary.alive is False
+    assert custom.alive is False

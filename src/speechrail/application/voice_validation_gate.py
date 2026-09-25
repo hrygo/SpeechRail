@@ -77,6 +77,7 @@ class VoiceValidationBinding:
     generation_recipe_revision: str
     policy_version: str
     runtime_identity_status: RuntimeIdentityStatus
+    capability_key: str | None = None
 
     def as_mapping(self) -> dict[str, object]:
         return {
@@ -90,6 +91,7 @@ class VoiceValidationBinding:
             "generation_recipe_revision": self.generation_recipe_revision,
             "policy_version": self.policy_version,
             "runtime_identity_status": self.runtime_identity_status,
+            "capability_key": self.capability_key,
         }
 
 
@@ -100,8 +102,15 @@ def build_validation_binding(
     *,
     require_current_binding: bool = False,
     observed_runtime_revision: str | None = None,
+    capability_key: str | None = None,
 ) -> VoiceValidationBinding:
-    """Build the current binding without loading a worker or model."""
+    """Build the current binding without loading a worker or model.
+
+    ``capability_key`` names the exact tier/mode combination the evidence must
+    cover (for example ``quality.render``).  One validated combination never
+    proves another, so a digest for a different scope can never satisfy this
+    binding.
+    """
 
     runtime_revision = (
         observed_runtime_revision
@@ -147,6 +156,7 @@ def build_validation_binding(
         generation_recipe_revision=generation_recipe_revision,
         policy_version=POLICY_VERSION,
         runtime_identity_status=runtime_status,
+        capability_key=capability_key,
     )
 
 
@@ -168,6 +178,7 @@ def load_validation_evidence(
         preprocess_version=binding.preprocess_version,
         generation_recipe_revision=binding.generation_recipe_revision,
         policy_version=binding.policy_version,
+        capability_key=binding.capability_key,
         require_current_binding=require_current_binding,
     )
 
@@ -179,6 +190,7 @@ def validation_state_for_voice(
     synthesizer: object | None = None,
     *,
     require_current_binding: bool,
+    capability_key: str | None = None,
 ) -> tuple[dict[str, object], dict[str, Any] | None, VoiceValidationBinding]:
     """Return the evidence, binding, and shared projected validation state."""
 
@@ -187,6 +199,7 @@ def validation_state_for_voice(
         artifact,
         synthesizer,
         require_current_binding=require_current_binding,
+        capability_key=capability_key,
     )
     evidence = load_validation_evidence(
         repository,

@@ -23,7 +23,8 @@ from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_tts_worker import MlxVoiceDesignEngine
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config import Settings
-from speechrail.config.model_catalog import QuantizationSpec, load_catalog
+from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import (
     VoiceInUseError,
@@ -95,21 +96,37 @@ class CapturingSpeechSynthesizer:
 
 
 def _make_test_client(
-    tmp_path: Path, preset_id: str = "quality"
+    tmp_path: Path,
+    tier: str = "quality",
+    *,
+    include_base: bool = True,
 ) -> tuple[TestClient, VoiceRegistry, CapturingSpeechSynthesizer]:
-    preset = load_catalog().preset(preset_id)
+    asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
+    assert asr_key is not None and tts_key is not None
+    if include_base:
+        assert base_key is not None
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
     registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
 
     settings = Settings(
-        qwen3_model_dir=tmp_path / preset.asr,
+        qwen3_model_dir=tmp_path / asr_key,
         asr_resident_bytes=1 * 1024**3,
         qwen3_python=None,
-        qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_model_dir=tmp_path / tts_key,
         tts_resident_bytes=1 * 1024**3,
-        qwen3_tts_clone_model_dir=(tmp_path / preset.tts_clone if preset.tts_clone else None),
+        qwen3_tts_clone_model_dir=(
+            tmp_path / base_key if include_base and base_key is not None else None
+        ),
         qwen3_tts_python=None,
+        selection_schema_version=2,
+        selection_asr_spec=tier,
+        selection_tts_spec=tier,
+        asr_artifact_key=asr_key,
+        tts_artifact_key=tts_key,
+        tts_base_artifact_key=base_key if include_base else None,
     )
     synthesizer = CapturingSpeechSynthesizer()
     app = create_app(settings, tts_synthesizer=synthesizer)
@@ -1129,8 +1146,10 @@ def test_api_voices_clone_success_in_quality_tier(
     assert cloned_entry["available"] is True
 
 
-def test_api_voices_clone_rejected_in_balanced_tier(tmp_path: Path) -> None:
-    client, _reg, _synthesizer = _make_test_client(tmp_path, "balanced")
+def test_api_voices_clone_rejected_without_base_selection(tmp_path: Path) -> None:
+    client, _reg, _synthesizer = _make_test_client(
+        tmp_path, "fast", include_base=False
+    )
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
 
     resp = client.post(
@@ -1261,7 +1280,7 @@ def test_audio_speech_with_cloned_voice_across_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 1. Quality tier: clone is available, /v1/audio/speech accepts it
-    client_q, reg_q, synth_q = _make_test_client(tmp_path / "q", "quality")
+    client_q, reg_q, _ = _make_test_client(tmp_path / "q", "quality")
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_q)
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_q)
     monkeypatch.setattr(
@@ -1308,8 +1327,8 @@ def test_audio_speech_with_cloned_voice_across_tiers(
             "instructions": "清晰自然的中文女声。",
         },
     )
-    assert resp_instruction.status_code == 200
-    assert synth_q.requests[-1].instruction == "清晰自然的中文女声。"
+    assert resp_instruction.status_code == 400
+    assert resp_instruction.json()["error"]["code"] == "instructions_unsupported"
 
     resp_speed = client_q.post(
         "/v1/audio/speech",
@@ -1335,8 +1354,8 @@ def test_audio_speech_with_cloned_voice_across_tiers(
     assert resp_clone_instruction.status_code == 400
     assert resp_clone_instruction.json()["error"]["code"] == "clone_instruction_unsupported"
 
-    # 2. Balanced tier: clone is unavailable, /v1/audio/speech rejects it with 400
-    client_b, reg_b, _synth_b = _make_test_client(tmp_path / "b", "balanced")
+    # 2. Fast tier: Base is still the clone owner, so the same voice routes there.
+    client_b, reg_b, _synth_b = _make_test_client(tmp_path / "b", "fast")
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_b)
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_b)
     monkeypatch.setattr(
@@ -1359,6 +1378,4 @@ def test_audio_speech_with_cloned_voice_across_tiers(
             "voice": "balanced_clone_voice",
         },
     )
-    assert resp_b.status_code == 400
-    err_b = resp_b.json()["error"]
-    assert err_b["code"] == "voice_not_available"
+    assert resp_b.status_code == 200

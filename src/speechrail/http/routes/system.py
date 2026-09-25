@@ -248,9 +248,25 @@ def _voice_entry(
     include_streaming: bool = False,
     stream_service: TtsStreamService | None = None,
 ) -> dict[str, Any]:
-    variant = active.tts.variant if active.tts is not None else None
-    available = tts_ready and enabled and not profile.revoked
-    artifact = active.tts_clone if profile.mode == "clone" else active.tts
+    artifact = active.artifact_for_voice_mode(profile.mode)
+    variant = artifact.variant if artifact is not None else None
+    injected_backend = (
+        active.tts is None
+        and active.tts_clone is None
+        and active.voice_design is None
+        and synthesizer is not None
+    )
+    if artifact is None and injected_backend:
+        variant = {
+            "system": "custom_voice",
+            "clone": "base",
+        }.get(profile.mode)
+    available = (
+        tts_ready
+        and enabled
+        and not profile.revoked
+        and (artifact is not None or variant is not None)
+    )
     validation: dict[str, Any] | None = None
     validation_state: dict[str, object]
     if profile.mode == "clone":
@@ -283,11 +299,7 @@ def _voice_entry(
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
-    binding_variant = (
-        active.tts_clone.variant
-        if profile.mode == "clone" and active.tts_clone is not None
-        else variant
-    )
+    binding_variant = variant
     if binding_variant in {"voice_design", "custom_voice", "base"}:
         try:
             binding = resolve_binding(binding_variant, profile.id)
@@ -849,12 +861,12 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "created": 0,
                     "resolves_to": target,
                     "capabilities": {
-                        "supports_preview": active.tts is not None
-                        and active.tts.variant == "voice_design",
+                        "supports_preview": active.voice_design is not None
+                        and active.voice_design.variant == "voice_design",
                         "supports_clone": active.tts_clone is not None
                         and active.tts_clone.variant == "base",
-                        "supports_instruction": active.tts is not None
-                        and active.tts.variant == "voice_design",
+                        "supports_instruction": active.voice_design is not None
+                        and active.voice_design.variant == "voice_design",
                         "streaming_input": tts_stream_model_payload(
                             services.tts_synthesizer
                         ),
