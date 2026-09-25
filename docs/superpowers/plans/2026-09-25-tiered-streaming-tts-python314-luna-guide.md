@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.10"
+version: "1.11"
 date: 2026-09-25
 ---
 
@@ -509,7 +509,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W1｜Realtime导入与采样契约**：移除不可达 `audioop`/24→16 kHz converter 与影子 sample-rate 配置；保留固定 16 kHz PCM16 wire。验收：`tests/test_realtime_openai.py` + `tests/test_realtime_caller_wire.py` 137 passed；定向 Ruff、mypy 及 diff check 通过。当前运行解释器是 3.12.14；缺失 audioop 导入由测试注入模拟，尚未证明 CPython 3.14 全依赖运行。
 - [x] **W2｜统一Python/runtime锁**：项目目标与 runtime lock 统一为 CPython 3.14；bootstrap/installer/CI 与锁工具一致；合并依赖、hash、失败保留 current 测试通过。候选运行时验收见下方 W2 记录。
 - [x] **W3｜App协议与测试基线**：保持当前wire，建立fake transport seam并关联TTS request/response；`RealtimeContractTests` 12 passed。App module typecheck、App构建、真实服务/音频/UI均未验收。
-- [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
+- [x] **W4｜模型门（Ruling: 两路径真增量成立，继续 W5）**：CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本，ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线加长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 的 catalog `README.md` 差异已由恢复 pinned 快照解决（两件 bf16 制品各 13/13 文件尺寸与 sha256 匹配，未放宽校验），catalog 门按原规则通过；简单永久抑制 EOS 仍会产生退化重复，不能作为替代。
 - [x] **W5｜领域与身份**：新增 `domain/tts_stream.py`（options/双轴 state/limits/事件/port）与 `PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间）；`VoiceBinding.supports_incremental_stream` 只对 CustomVoice speaker 与 Base clone 为真。验收：`tests/test_tts_stream_state.py` 15 passed、`tests/test_tts_reference_condition.py` 6 passed、`tests/test_voice_bindings.py` 44 passed；另修正 W2 遗留的 `tests/test_profile_selection.py` 旧 runtime lock fixture（23 passed）。
 - [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
 - [x] **W7｜应用资源与终态**：`application/tts_stream.py` 收束 governor reserve、worker 租约与 vendor session 的整个 utterance；终态同步认领且只有控制器 task 写 sink，cancel/finish/超时竞态只有一个胜者；等待文本不释放租约、组级 evict 返回 busy；receipt 只计已发送 PCM。验收：定向 114 passed，主仓全量 2308 passed / 7 skipped，ruff/mypy/diff check 通过（详见下方 W7 记录）。
@@ -596,7 +596,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
   1. 产品退坡（仅当修正后的 Base 门在真实服务/音质验收中再次失败）：light/balanced 使用 CustomVoice q8 真增量；quality/extreme 继续使用 Base 固定 reference 的**完整语义段一次性生成**，保证身份但放弃跨段韵律连续，即原始“Base clone + 每轮单次 TTS”路线。
   2. 后端替换：寻找或实现能把完整文本条件增量预填到既有 talker KV、再由新文本延续同一生成状态的新模型/运行时；必须重新执行独立模型门，不能只以 API 名称宣称支持。
   3. 重启/拼接：当前探针明确不允许把它当成同一 generation 的真增量；若产品接受，必须另建声学验收（接缝、韵律、身份和打断），不能复用本门结论。
-- **证据边界：** ASR 能证明显式文本内容缺失，不能替代人耳 A/B、说话人相似度、自然度、RTF 长稳或 bf16 性能验收；这些未执行。bf16 catalog 的 `README.md` 差异需用户决定恢复快照、修订清单还是隔离该文件，当前不放宽完整性检查。
+- **证据边界：** ASR 能证明显式文本内容缺失，不能替代人耳 A/B、说话人相似度、自然度、RTF 长稳或 bf16 性能验收；这些未执行。bf16 catalog 的 `README.md` 差异当时待决（恢复快照/修订清单/隔离），未放宽完整性检查；该差异已按恢复 pinned 快照解决，见下方“W4 假阴性修正与最终模型门”。
 
 #### W4 假阴性修正与最终模型门（2026-09-25，取代上一节 Ruling）
 
