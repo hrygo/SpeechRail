@@ -2,7 +2,7 @@
 title: "分档音色一致性、双向流式 TTS 与 Python 3.14 升级设计"
 status: accepted
 audience: "SpeechRail 服务与原生 App 架构师、实施者、验收负责人"
-version: "1.10"
+version: "1.11"
 date: 2026-09-25
 ---
 
@@ -280,7 +280,7 @@ A/B 均为早期门，不等 UI/协议全部完成才验证底层。可以逐档
 | W1 Realtime / audioop | complete | 移除不可达转换器；137 项 Realtime/caller-wire 回归、定向 Ruff、mypy通过；该阶段验证时使用3.12.14，后续 W2 已独立验证3.14.7候选环境 |
 | W2 Python/runtime | complete | 3.14.7候选 runtime `--only-binary` 安装47个锁定包；MLX/ASR模块导入通过；`uv lock --check`、runtime-lock `--check`、zero-setup语法检查通过；9个定向测试文件352 passed、Ruff与130-file mypy通过。1个既有 Pydantic `mappingproxy` warning；未加载模型或切换正式服务 |
 | W3 App 协议基线 | complete | 保持当前完整文本 wire；生产 transport 仍用 `URLSessionWebSocketTask`，新增 fake-transport seam；TTS 事件关联 request/response identity，隔离旧终态/旧音频并抑制取消后迟到音频。按当前服务端序列化结构构造 fixture；`RealtimeContractTests` 12 passed，三处 App session 文件 `swiftc -frontend -parse` 通过，`git diff --check` 通过。SwiftPM 未 typecheck App session 文件、未做 App 构建/真实服务/音频/UI 验收；输出有 23 个非 target 文件未显式声明警告 |
-| W4 模型层真增量门 | complete（q8）；bf16 catalog 门已过 | CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线 + 长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 仅因 catalog `README.md` 大小/哈希不符未过门，待用户决定；vendor HEAD `851f9567ecd27ad8f210cefc866c7d01525151e4` |
+| W4 模型层真增量门 | complete（q8）；bf16 catalog 门已过 | CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、ASR 内容全文一致；Base 需短 reference 与跨过 prefill 槽位的初始文本（`base-trailing-after-first-pcm-v1`，探针 fail-closed 校验 `prefill_target_tokens < initial_text_token_count`）。早期 Base 失败是 `--schedule` 未接线 + 长 reference 全文本预填造成的假阴性，已修正并保留原始记录。Base bf16 的 catalog `README.md` 差异已由恢复 pinned 快照解决（两件制品各 13/13 文件尺寸与 sha256 匹配，未放宽校验），模型/实时门留待 W11；vendor HEAD `851f9567ecd27ad8f210cefc866c7d01525151e4` |
 | W5 领域与身份 | complete | `domain/tts_stream.py`（options/双轴 state/limits/事件/port 与集中错误码）、`PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间，跨精度不共享）、`VoiceBinding.supports_incremental_stream`（仅 CustomVoice speaker 与 Base clone）；15+6+44 项定向测试通过，主仓全量 2111 passed/144 skipped、coverage 81.77%、`mypy src` 131 文件通过 |
 | W6 worker 双向控制与父进程 session | complete | 私有 `tts_stream_protocol=1` 协商；`StreamPump` 双线程 + 有界队列、单模型线程；`TtsStreamHost`/client 单父端 dispatcher；新增 `qwen3_tts_incremental.py` adapter（CustomVoice speaker、Base clone、VoiceDesign fail-closed）；`Qwen3TtsWorker.open_incremental_stream` 全程持 voice lease 与独占 slot，完整文本 synthesize 与 stream 串行，router 按 clone lane 路由；`tests/test_qwen3_tts_incremental_bridge.py` 10 项、`test_qwen3_tts_worker.py` 增真实 `BytesIO` pipe 端到端，联合回归 188 passed，ruff/mypy/`git diff --check` 通过。仅 fake IPC，未加载模型 |
 | W7 application 资源治理与输出生命周期 | complete | `application/tts_stream.py`：`TtsStreamService.open` 按 voice lane 进入 `governor.reserve`，持 worker 租约与 vendor session（独占 worker slot + voice lease）；终态同 loop 同步认领且只有控制器 task 写 sink，终态后不投递音频、receipt 只收束一次；等待文本期间不被 idle 驱逐，`evict_warm_capability` 遇活跃 utterance 返回 `backend_busy` 而不强卸载；receipt 只在发送成功后 `accept_pcm` 并绑定实际 runtime revision；输入饥饿/墙钟/慢消费者分别以 `tts_input_timeout`/`tts_backend_failed`/`tts_backpressure` 收束。新增 11 项 application 测试，定向 114 passed、主仓全量 2308 passed/7 skipped、ruff/mypy/diff check 通过。仅 fake session，未加载模型 |
