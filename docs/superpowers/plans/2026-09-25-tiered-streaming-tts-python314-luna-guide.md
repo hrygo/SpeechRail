@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.21"
+version: "1.22"
 date: 2026-09-25
 ---
 
@@ -516,7 +516,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
 - [x] **W7｜应用资源与终态**：`application/tts_stream.py` 收束 governor reserve、worker 租约与 vendor session 的整个 utterance；终态同步认领且只有控制器 task 写 sink，cancel/finish/超时竞态只有一个胜者；等待文本不释放租约、组级 evict 返回 busy；receipt 只计已发送 PCM。验收：定向 114 passed，主仓全量 2308 passed / 7 skipped，ruff/mypy/diff check 通过（详见下方 W7 记录）。
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
-- [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
+- [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）；**App 构建已于 2026-09-25 验收**（Xcode 27.0 / Swift 6.4，`scripts/macos_app_build.sh --configuration Debug` → `BUILD SUCCEEDED`，见下方「W11 App 构建与确定性验收」）。App 安装、真实服务/模型、可听延迟与 UI 自动化仍未验收。
 - [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
 - [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 真机运行共暴露三层缺陷——已完成 utterance 的残留帧污染下一轮、open 失败后 worker 仍标记 started、父端未读完终态却继续复用同一 wire——均已源码修复并加确定性回归，带修复的 wheel（`dc83d911…`）装机后 `--mode cancel --repeat 5` 连跑 5 轮 25/25 全部取消成功（见下方「W11 cancel 状态释放缺陷」与「W11 cancel 父端残留帧缺陷与真机复测」）；长稳 soak 已在 quality 档跑通 40 轮（`failures: []`、足迹预热后持平，见下方「W11 长稳 soak」）；仍缺真实播放欠载/打断→停旧音时延、light/balanced/extreme 的 soak、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
 
@@ -692,7 +692,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **App 能力 DTO：** `CreatorServiceClient.swift` 新增 `VoiceStreamingCapability` / `VoiceStreamingAxes`，`CreatorVoice.streaming` 缺失即为 `nil`（旧服务按未知处理），未声明的轴一律 `false`/`nil`；`ServiceModelCapabilities` 增加 `supportsStreamingInput` 与 `streamingProtocolNegotiated`，`/v1/models` 的 `capabilities.streaming_input` 只映射实现轴。纯映射测试 `StreamingTtsCapabilitiesTests.swift` 7 项通过。
 - **分档呈现：** `AssistantView` 的声音卡新增「边想边说 / 普通朗读」状态与按 reason 分支的用户语言说明；下拉列表每个音色带可/不可增量标签。quality/extreme 遇 instruction-only 声音时提示“先固定成克隆音色”，light/balanced 遇 clone 提示换预置声音，均不静默替换音色。
 - **切换保护：** `ModelManagementView` 在 `assistant.phase.isLive`（听/想/说）期间禁用「应用此档位」并说明“先结束这一轮或点停止”，确认对话框的动作入口也再挡一次，避免排队确认跨过助手开始说话的瞬间；切档不后台热切，用户显式停止后仍走既有受控流程。
-- **验证边界：** 确定性证据为 `swift test`（XCTest 214 passed，含新增 7 项；Swift Testing 135 passed）与主仓定向 pytest 55 passed、新增文件 13 passed；App 全量 `swiftc -typecheck` 通过（仅既有 `maxTokens` deprecation warning）。未做：App 构建/安装、真实服务、真实模型、可听延迟、UI 自动化（均未授权）。
+- **验证边界：** 确定性证据为 `swift test`（XCTest 214 passed，含新增 7 项；Swift Testing 135 passed）与主仓定向 pytest 55 passed、新增文件 13 passed；App 全量 `swiftc -typecheck` 通过（仅既有 `maxTokens` deprecation warning）。本节当时未做 App 构建/安装、真实服务、真实模型、可听延迟与 UI 自动化；其中 **App 构建**已由下方「W11 App 构建与确定性验收」补上。
 
 ### W11 实施记录（2026-09-25，仅基准工具就绪）
 
@@ -700,7 +700,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **两个数字分开报：** `append_to_first_pcm_ms` 覆盖调用方把文本交给服务之前的全部等待（含 `--append-interval-ms` 的小窗口），`generation_rtf` 只除模型真正持有 utterance 的窗口，调用方自己插入的供给间隙记为 `text_gap_ms` 并从该窗口扣除。P50/P95 用向上取的最近秩，样本少时只会偏保守，不会低于真实秩。
 - **确定性证据：** 新增 `tests/test_bench_tts_streaming.py` 21 项（切分与限额、百分位、汇总、完整 wire 顺序、缺失/失败/截断路径），并把新客户端并入 `tests/test_profile_benchmark_contract.py` 的共享 API-key 发现契约。实测 `ruff check` 干净、两文件联跑 69 passed（2026-09-25，CPython 3.12.14 主仓 `.venv`；未加载模型、未连接服务、未启动 worker）。
 - **验证边界（如实标注）：** 本轮只有工具与假连接测试。§8.2 的“首批可提交文本→首个可播放 PCM P95≤500ms”、排除饥饿后的生成 RTF、真实播放欠载、用户打断→停旧音 P95≤100ms、cancel→状态释放 P95≤500ms 全部 **not_run**；逐档声学矩阵、Base bf16 实时门、extreme 是否转正式实时档，以及发布/回滚演练同样 **not_run**。
-- **下一步需要单独授权：** 服务启停与逐档切换、真实推理与资源采样（读 `speechrail-perf-benchmark` 与本指南 §7.3）、App 构建/安装与 UI 自动化（按 macOS UI 授权规则逐次确认）、发布与回滚。授权之前不安装、不切档、不 push、不改运行态。
+- **下一步需要单独授权：** 服务启停与逐档切换、真实推理与资源采样（读 `speechrail-perf-benchmark` 与本指南 §7.3）、App 安装与 UI 自动化（按 macOS UI 授权规则逐次确认）、发布与回滚。App 构建已用仓库包装脚本完成且不接管前台；授权之前不安装 App、不切档、不 push、不改运行态。
 
 #### W11 阻塞与恢复前置（2026-09-25 复核实测）
 
@@ -780,3 +780,11 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
   - **活跃状态不增长**：`speechrail_governor_active_requests{class="realtime"}` 全程峰值 0；`speechrail_realtime_active_sessions` 峰值为 1，就是 soak 自己的那条连接；`speechrail_resource_footprint_process_count` 恒为 2（父进程 + 一个 worker 子进程），没有堆积子进程。
   - **缓存驻留与泄漏分开**：观测足迹来自服务自身的 `footprint` 口径（`speechrail_resource_physical_footprint_bytes`，`..._footprint_complete` 每次都为 1，即所有服务自有进程都被采到），不是 MLX allocator 的 cached 计数。第 0 轮后足迹从 3506.7 MB 升到 3662.8 MB（模型/参考/缓冲预热），之后 39 轮只在 3661.1–3663.1 MB 之间波动，跨度 2.0 MB 且不单调上升。
   - **证据边界：** 这是约 2.6 分钟、40 轮的窗口，只覆盖 quality 档（`extreme`/`light`/`balanced` 的 soak 未跑）。它支持“该窗口内活跃状态与常驻足迹不持续增长”，**不等于**已完成内存安全证明；按计划口径，`footprint` 不归零本身不作为泄漏依据，本结论也不以“活跃对象为零”单独成立——两项是分开观测、分别陈述的。
+
+#### W11 App 构建与确定性验收（2026-09-25）
+
+- **背景：** 计划此前把「App 构建」列为未验收项。原生 App 是本任务唯一目标客户端，若它不能编译，W9/W10 的确定性结论就都停在源码层，因此先补这一格。
+- **构建（用仓库包装脚本，不裸跑 `xcodebuild`）：** `scripts/macos_app_build.sh --configuration Debug` → `BUILD SUCCEEDED`（2026-09-25 13:46–13:47 CST，29.6 s 墙钟）。工具链 `Xcode 27.0 (27A266a)` / `Apple Swift 6.4`，目标 `arm64-apple-macosx27.0.0`。包装脚本在临时 derived data 里构建并在退出时 `lsregister -u` 注销自己产出的 `SpeechRail.app`；事后核对 LaunchServices 中没有 `speechrail-macos-build.*` 残留条目，只有既有的 `~/Applications/SpeechRail.app` 与一个历史 `/private/tmp/SpeechRail.app.previous-phase1.7bmsMb`，也就是**这次构建没有新增可被 LaunchServices 识别的副本**。
+- **构建告警（7 条，全部为既有/良性，未修改）：** 3 条 `appintentsmetadataprocessor: Metadata extraction skipped, no AppIntents.framework dependency found`；2 条 `not stripping binary because it is signed`；1 条既有 `LLMProvider.swift:863` 的 `'maxTokens' is deprecated ... in favor of max_completion_tokens`（属于 LLM provider，不在本任务写集内，未顺手改）。
+- **确定性测试：** `swift test`（SwiftPM 纯逻辑层，不接管前台窗口/焦点/输入）→ **XCTest 214 个用例 0 失败**（`SpeechRailMacControlTests.xctest`，21 个 suite）、**Swift Testing 135 个用例 / 15 个 suite 全通过**。含本任务的 `RealtimeContractTests`、`RealtimeTTSStreamTests`、`StreamingTtsCapabilitiesTests`、`AssistantSpeechTextBufferTests`、`AssistantPlaybackLedgerTests`、`AssistantTTSStreamCoordinatorTests`。`scripts/macos_app_test.sh` 属于 XCTest/UI test（会接管前台），本轮**未运行**。
+- **证据边界：** 本小节证明的是"App 能在目标工具链上编译、其纯逻辑层测试通过"。**不**证明 App 已安装、能连真实服务、可听延迟达标，也不构成任何 UI 自动化验收——这些仍为 not_run。
