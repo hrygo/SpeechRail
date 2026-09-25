@@ -11,12 +11,12 @@ from speechrail.domain.ports import AudioChunk, SpeechRequest
 
 class _Registry:
     def get_profile(self, voice: str) -> SimpleNamespace:
-        mode = "clone" if voice == "cloned" else "instruction"
+        mode = "clone" if voice == "cloned" else "system"
         return SimpleNamespace(mode=mode)
 
 
 class _PrimaryWorker:
-    model_variant = "voice_design"
+    model_variant = "custom_voice"
     alive = False
     ready = False
     last_active = 0.0
@@ -56,7 +56,7 @@ async def test_clone_request_reports_explicit_error_without_base_worker(
         lambda: _Registry(),
     )
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
     request = SpeechRequest(text="test", voice="cloned", output_format="pcm16")
 
     with pytest.raises(RuntimeError, match="voice_clone_base_model_unavailable"):
@@ -64,7 +64,7 @@ async def test_clone_request_reports_explicit_error_without_base_worker(
 
 
 @pytest.mark.anyio
-async def test_non_clone_request_still_uses_primary_without_base_worker(
+async def test_builtin_speaker_uses_custom_voice_without_base_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -72,8 +72,8 @@ async def test_non_clone_request_still_uses_primary_without_base_worker(
         lambda: _Registry(),
     )
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
-    request = SpeechRequest(text="test", voice="designed", output_format="pcm16")
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
+    request = SpeechRequest(text="test", voice="serena", output_format="pcm16")
 
     chunks = [chunk async for chunk in router.synthesize(request)]
     assert [chunk.response_id for chunk in chunks] == ["primary"]
@@ -82,7 +82,7 @@ async def test_non_clone_request_still_uses_primary_without_base_worker(
 @pytest.mark.anyio
 async def test_close_is_safe_without_optional_clone_worker() -> None:
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
     await router.start()
     assert primary.alive is True
 

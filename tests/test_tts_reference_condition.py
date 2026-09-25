@@ -23,8 +23,10 @@ def _key(**overrides: object) -> PreparedReferenceKey:
         ),
         "preprocessing_version": "audio_prep_v1",
         "model_revision": MODEL_REVISION,
+        "engine_revision": "mlx_audio_0.5.6_engine_rev_7",
         "quantization": "q8",
         "tokenizer_revision": TOKENIZER_REVISION,
+        "codec_revision": "speech_tokenizer_rev_3",
         "implementation_version": "mlx_audio_0.5.6_stream_v1",
     }
     values.update(overrides)
@@ -80,6 +82,8 @@ def test_prepared_key_rejects_incomplete_or_unpinned_identity() -> None:
         {"content_identity": "not-a-digest"},
         {"model_revision": "short"},
         {"tokenizer_revision": ""},
+        {"engine_revision": ""},
+        {"codec_revision": "has space"},
         {"quantization": ""},
         {"preprocessing_version": "has space"},
         {"implementation_version": ""},
@@ -94,7 +98,9 @@ def test_prepared_key_digest_isolates_precision_and_revisions() -> None:
     bf16 = _key(quantization="bf16")
     other_impl = _key(implementation_version="mlx_audio_0.6.0_stream_v1")
     other_tokenizer = _key(tokenizer_revision="3" * 40)
+    other_codec = _key(codec_revision="speech_tokenizer_rev_4")
     other_model = _key(model_revision="4" * 40)
+    other_engine = _key(engine_revision="mlx_audio_0.5.7_engine_rev_8")
     other_preprocessing = _key(preprocessing_version="audio_prep_v2")
     other_mode = _key(conditioning_mode="icl_streaming")
 
@@ -103,15 +109,37 @@ def test_prepared_key_digest_isolates_precision_and_revisions() -> None:
         bf16.digest,
         other_impl.digest,
         other_tokenizer.digest,
+        other_codec.digest,
         other_model.digest,
+        other_engine.digest,
         other_preprocessing.digest,
         other_mode.digest,
     }
 
     # Cross-precision reuse is impossible: every dimension changes the namespace.
-    assert len(digests) == 7
+    assert len(digests) == 9
     assert q8.digest == _key().digest
     assert len(q8.digest) == 64
+
+
+def test_same_voice_id_cannot_share_a_cache_across_precision_or_engine() -> None:
+    """One voice revision on q8 and bf16 (or two engines) is two cache entries."""
+
+    voice_revision = "vr_" + "a" * 32
+    q8_engine_a = _key()
+    bf16_engine_a = _key(quantization="bf16")
+    q8_engine_b = _key(engine_revision="mlx_audio_0.5.7_engine_rev_8")
+
+    # The voice revision is identical; only the runtime identity differs.
+    conditions = [
+        (voice_revision, q8_engine_a),
+        (voice_revision, bf16_engine_a),
+        (voice_revision, q8_engine_b),
+    ]
+    keys = {key.digest for _revision, key in conditions}
+
+    assert len(keys) == 3
+    assert q8_engine_a.schema_version == "prepared_reference_condition_v2"
 
 
 def test_material_verification_fails_closed_on_a_mismatched_key() -> None:

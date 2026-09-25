@@ -297,7 +297,7 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     monkeypatch.setattr(
         services_module,
         "inspect_model",
-        lambda _: SimpleNamespace(variant="voice_design"),
+        lambda _: SimpleNamespace(variant="custom_voice"),
     )
 
     def spy_worker(config: object, *, on_delivery_event: object | None = None) -> object:
@@ -313,7 +313,7 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     tts_snapshot = tmp_path / "tts"
     tts_snapshot.mkdir()
     (tts_snapshot / "config.json").write_text(
-        '{"tts_model_type": "voice_design", "quantization": {"bits": 8, "group_size": 64}}',
+        '{"tts_model_type": "custom_voice", "quantization": {"bits": 8, "group_size": 64}}',
         encoding="utf-8",
     )
     settings = Settings(

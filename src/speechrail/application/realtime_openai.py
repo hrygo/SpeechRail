@@ -168,6 +168,7 @@ class OpenAIRealtimeSession:
         self._diarization_engine = services.diarization_engine
         self._tts = services.tts_synthesizer
         active = active_model_catalog(self._settings)
+        self._active_model_catalog = active
         self._tts_artifact = active.tts
         self._tts_clone_artifact = active.tts_clone
         self._tts_variant = active.tts.variant if active.tts is not None else None
@@ -175,15 +176,27 @@ class OpenAIRealtimeSession:
             active.tts_clone.variant if active.tts_clone is not None else None
         )
         tts_available = services.tts_ready
-        clone_available = tts_available and self._tts_clone_variant == "base"
+        speaker_available = (
+            tts_available
+            and self._tts_artifact is not None
+            and self._tts_variant == "custom_voice"
+        )
+        clone_available = (
+            tts_available
+            and self._tts_clone_artifact is not None
+            and self._tts_clone_variant == "base"
+        )
         self._tts_loudness_profile = (
             "stable_loudness_v1" if clone_available else None
         )
         self._speech_capabilities: dict[str, object] = {
             "available": tts_available,
             "variant": self._tts_variant,
-            "supports_speaker": tts_available and self._tts_variant == "custom_voice",
-            "supports_instruction": tts_available and self._tts_variant == "voice_design",
+            "supports_speaker": speaker_available,
+            # VoiceDesign artifacts are design-task inputs. Ordinary synthesis
+            # never advertises direct instruction synthesis, and CustomVoice
+            # instructions stay closed until the engine negotiates that path.
+            "supports_instruction": False,
             "supports_clone": clone_available,
         }
         if self._tts_loudness_profile is not None:
@@ -1407,9 +1420,7 @@ class OpenAIRealtimeSession:
         )
 
     def _tts_artifact_for_mode(self, voice_mode: str) -> ModelArtifact | None:
-        if voice_mode == "clone" and self._tts_clone_artifact is not None:
-            return self._tts_clone_artifact
-        return self._tts_artifact
+        return self._active_model_catalog.artifact_for_voice_mode(voice_mode)
 
     def _tts_artifact_for_voice(self, voice: str) -> ModelArtifact | None:
         from speechrail.domain.tts import get_voice_profile
@@ -1445,14 +1456,14 @@ class OpenAIRealtimeSession:
                 "voice_revoked",
                 f"voice {voice[:200]} is revoked",
             )
-        variant = self._tts_clone_variant if profile.mode == "clone" else self._tts_variant
-        if variant not in {"voice_design", "custom_voice", "base"}:
+        role = profile.runtime_role
+        if role is None:
             raise RealtimeAdapterError(
                 "voice_not_available",
                 f"voice {voice[:200]} is unavailable for the active TTS capabilities",
             )
         try:
-            resolve_binding(variant, voice)
+            resolve_binding(role, voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"

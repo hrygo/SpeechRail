@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import get_voice_registry
 
@@ -191,21 +191,33 @@ class PreviewCapturingSpeechSynthesizer:
 
 
 def _preview_client(
-    tmp_path: Path, preset_id: str = "quality"
+    tmp_path: Path, tier: str = "reference"
 ) -> tuple[TestClient, PreviewCapturingSpeechSynthesizer, Path]:
-    preset = load_catalog().preset(preset_id)
+    asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
+    design_key = required_spec_artifact(tier, "voice_design")  # type: ignore[arg-type]
+    assert asr_key is not None and tts_key is not None and base_key is not None
     synthesizer = PreviewCapturingSpeechSynthesizer()
     custom_voices = tmp_path / "custom_voices.json"
     client = TestClient(
         create_app(
             Settings(
                 api_key=None,
-                qwen3_model_dir=tmp_path / preset.asr,
+                qwen3_model_dir=tmp_path / asr_key,
                 asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
-                qwen3_tts_model_dir=tmp_path / preset.tts,
+                qwen3_tts_model_dir=tmp_path / tts_key,
                 tts_resident_bytes=1 * 1024**3,
+                qwen3_tts_clone_model_dir=tmp_path / base_key,
                 qwen3_tts_python=None,
+                selection_schema_version=2,
+                selection_asr_spec=tier,
+                selection_tts_spec=tier,
+                asr_artifact_key=asr_key,
+                tts_artifact_key=tts_key,
+                tts_base_artifact_key=base_key,
+                voice_design_artifact_key=design_key,
             ),
             tts_synthesizer=synthesizer,
         )
@@ -213,7 +225,7 @@ def _preview_client(
     return client, synthesizer, custom_voices
 
 
-@pytest.mark.parametrize("tier", ["quality", "extreme"])
+@pytest.mark.parametrize("tier", ["reference"])
 def test_voice_preview_returns_audio_without_creating_voice_profile(
     tmp_path: Path, tier: str
 ) -> None:
@@ -240,7 +252,7 @@ def test_voice_preview_returns_audio_without_creating_voice_profile(
 
 
 def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None:
-    client, _synthesizer, _custom_voices = _preview_client(tmp_path, "balanced")
+    client, _synthesizer, _custom_voices = _preview_client(tmp_path, "fast")
 
     response = client.post(
         "/v1/voices/previews",
@@ -256,7 +268,7 @@ def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None
     assert "quality" not in response.json()["error"]["message"].lower()
 
 
-def test_quality_speech_accepts_instructions_and_passes_them_to_backend(
+def test_runtime_speech_rejects_instructions_reserved_for_voice_design(
     tmp_path: Path,
 ) -> None:
     client, synthesizer, _custom_voices = _preview_client(tmp_path)
@@ -276,10 +288,9 @@ def test_quality_speech_accepts_instructions_and_passes_them_to_backend(
         },
     )
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("audio/wav")
-    assert synthesizer.requests[0].text == text
-    assert synthesizer.requests[0].instruction == instruction
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "instructions_unsupported"
+    assert synthesizer.requests == []
 
 
 def test_speech_endpoint_caps_input_at_openai_limit() -> None:
@@ -521,7 +532,9 @@ def test_speech_endpoint_rejects_voice_outside_server_registry() -> None:
 
 
 def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path) -> None:
-    preset = load_catalog().preset("balanced")
+    asr_key = required_spec_artifact("fast", "asr")
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    assert asr_key is not None and tts_key is not None
 
     class FailIfCalled:
         def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
@@ -530,10 +543,10 @@ def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path
     client = TestClient(
         create_app(
             Settings(
-                qwen3_model_dir=tmp_path / preset.asr,
+                qwen3_model_dir=tmp_path / asr_key,
                 asr_resident_bytes=1 * 1024**3,
                 qwen3_python=None,
-                qwen3_tts_model_dir=tmp_path / preset.tts,
+                qwen3_tts_model_dir=tmp_path / tts_key,
                 tts_resident_bytes=1 * 1024**3,
                 qwen3_tts_python=None,
             ),
@@ -562,7 +575,7 @@ def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path
 
     assert response.status_code == 400
     error = response.json()["error"]
-    assert error["code"] == "voice_not_available"
+    assert error["code"] == "voice_design_task_required"
     assert error["param"] == "voice"
     assert error["retryable"] is False
 
@@ -576,6 +589,8 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
     instances: list[object] = []
 
     class FakeConfiguredWorker:
+        model_variant = "custom_voice"
+
         @property
         def ready(self) -> bool:
             return self.started and not self.closed
@@ -603,8 +618,10 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
     monkeypatch.setattr(
         services_module,
         "inspect_model",
-        lambda _: SimpleNamespace(variant="voice_design"),
+        lambda _: SimpleNamespace(variant="custom_voice"),
     )
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    assert tts_key is not None
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,
@@ -612,6 +629,9 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
         tts_resident_bytes=1 * 1024**3,
         qwen3_tts_python=Path(executable),
         worker_lazy_load=False,
+        selection_schema_version=2,
+        selection_tts_spec="fast",
+        tts_artifact_key=tts_key,
     )
 
     with TestClient(create_app(settings)) as client:

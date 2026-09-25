@@ -29,13 +29,18 @@ from speechrail.compatibility.openai_realtime import (
     tts_stream_limits_payload,
 )
 from speechrail.config.model_catalog import ModelArtifact
+from speechrail.domain.tts_routing import TtsRouteError, route_role_for_mode
 from speechrail.domain.tts_stream import DEFAULT_TTS_STREAM_LIMITS, TtsStreamLimits
+from speechrail.runtime.registry import TTS_RUNTIME_ROLES, engine_variant_for_role
 from speechrail.runtime.resource_governor import WorkClass
 
-# Only these variants have a verified append-only generation path.  A
+# Only the runtime plan roles have a verified append-only generation path.  A
 # ``voice_design`` voice is a complete-text/instruction voice and must never be
 # promoted into the stable-role incremental path.
 _INCREMENTAL_VARIANTS: Final[frozenset[str]] = frozenset({"custom_voice", "base"})
+_DESIGN_ONLY_HINT: Final[str] = (
+    "register the design as a Base clone revision before using incremental TTS"
+)
 
 _CLONE_HINT: Final[str] = (
     "register a stable clone of this voice and select it to use incremental TTS"
@@ -92,11 +97,26 @@ def resolve_tts_stream_capability(
 
     artifact_available = artifact is not None
     variant = artifact.variant if artifact is not None else None
-    variant_supported = variant in _INCREMENTAL_VARIANTS
+    role_error: TtsRouteError | None = None
+    try:
+        role: str | None = route_role_for_mode(voice_mode)
+    except TtsRouteError as exc:
+        # Design candidates have no runtime plan role: they are auditions and
+        # must be published as a Base clone revision before they can stream.
+        role = None
+        role_error = exc
+    variant_supported = (
+        role is not None
+        and role in TTS_RUNTIME_ROLES
+        and variant == engine_variant_for_role(role)
+        and variant in _INCREMENTAL_VARIANTS
+    )
     reference_ready = False
-    if variant is not None and variant_supported:
+    if role is not None and variant_supported:
         try:
-            reference_ready = resolve_binding(variant, voice_id).supports_incremental_stream
+            reference_ready = resolve_binding(
+                role, voice_id
+            ).supports_incremental_stream
         except ValueError:
             reference_ready = False
     negotiated = _protocol_negotiated(synthesizer)
@@ -117,7 +137,14 @@ def resolve_tts_stream_capability(
 
     reason: str | None = None
     hint: str | None = None
-    if not voice_enabled:
+    if role_error is not None:
+        reason = role_error.code
+        hint = (
+            _DESIGN_ONLY_HINT
+            if role_error.code == "voice_design_task_required"
+            else None
+        )
+    elif not voice_enabled:
         reason = "voice_disabled"
     elif not tts_ready:
         reason = "backend_not_ready"

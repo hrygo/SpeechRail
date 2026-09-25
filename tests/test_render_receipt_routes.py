@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceRegistry
 
@@ -47,16 +47,20 @@ def _client(
     fail: bool = False,
     runtime_revision: str | None = None,
 ) -> tuple[TestClient, ReceiptSynthesizer, str]:
-    preset = load_catalog().preset("quality")
+    asr_key = required_spec_artifact("quality", "asr")
+    tts_key = required_spec_artifact("quality", "tts_custom_voice")
+    base_key = required_spec_artifact("quality", "tts_base")
+    assert asr_key is not None and tts_key is not None and base_key is not None
     registry = VoiceRegistry(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
-    profile = registry.create_custom_profile(
+    profile = registry.create_cloned_profile(
         name="Narrator",
-        instruction="stable narrator",
+        ref_text="参考文本。",
+        audio_bytes=b"RIFF-test-reference",
         voice_id="narrator",
-        seed=7,
+        duration_seconds=3.0,
     )
     assert profile.revision is not None
     monkeypatch.setattr(
@@ -66,17 +70,19 @@ def _client(
     synth = ReceiptSynthesizer(fail=fail, runtime_revision=runtime_revision)
     app = create_app(
         Settings(
-            qwen3_model_dir=tmp_path / preset.asr,
+            qwen3_model_dir=tmp_path / asr_key,
             asr_resident_bytes=1 * 1024**3,
             qwen3_python=None,
-            qwen3_tts_model_dir=tmp_path / preset.tts,
+            qwen3_tts_model_dir=tmp_path / tts_key,
             tts_resident_bytes=1 * 1024**3,
-            qwen3_tts_clone_model_dir=(
-                tmp_path / preset.tts_clone
-                if preset.tts_clone is not None
-                else None
-            ),
+            qwen3_tts_clone_model_dir=tmp_path / base_key,
             qwen3_tts_python=None,
+            selection_schema_version=2,
+            selection_asr_spec="quality",
+            selection_tts_spec="quality",
+            asr_artifact_key=asr_key,
+            tts_artifact_key=tts_key,
+            tts_base_artifact_key=base_key,
         ),
         tts_synthesizer=synth,
     )
@@ -93,9 +99,11 @@ def _payload() -> dict[str, object]:
 
 
 def _quality_tts_revision() -> str:
-    catalog = load_catalog()
-    artifact_key = catalog.preset("quality").tts
-    artifact = next(item for item in catalog.artifacts if item.key == artifact_key)
+    from speechrail.config.model_catalog import load_catalog
+
+    artifact_key = required_spec_artifact("quality", "tts_base")
+    assert artifact_key is not None
+    artifact = next(item for item in load_catalog().artifacts if item.key == artifact_key)
     return artifact.revision
 
 

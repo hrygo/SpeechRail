@@ -171,7 +171,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
-        design, clone = active.tts, active.tts_clone
+        design, clone = active.voice_design, active.tts_clone
         if (
             design is None
             or design.variant != "voice_design"

@@ -38,6 +38,35 @@ class ActiveModelCatalog:
     generation: int | None = None
     voice_design: ModelArtifact | None = None
 
+    def artifact_for_role(self, role: ModelRole) -> ModelArtifact | None:
+        """Return the artifact explicitly bound to one plan role, if any.
+
+        The mapping never infers a role from a directory name: a role the active
+        selection does not publish resolves to ``None`` and the caller must fail
+        closed instead of substituting another artifact.
+        """
+
+        return {
+            "tts_custom_voice": self.tts,
+            "tts_base": self.tts_clone,
+            "voice_design": self.voice_design,
+        }.get(role)
+
+    def artifact_for_voice_mode(self, mode: str) -> ModelArtifact | None:
+        """Return the artifact selected by one public voice mode.
+
+        ``instruction`` profiles are design candidates.  They resolve to the
+        VoiceDesign artifact for design-task discovery, but not to a runtime
+        route; callers that synthesize ordinary speech must reject them rather
+        than selecting the design artifact.
+        """
+
+        return {
+            "system": self.tts,
+            "clone": self.tts_clone,
+            "instruction": self.voice_design,
+        }.get(mode)
+
 
 def _artifact_for_spec(
     catalog: ModelCatalog,

@@ -27,7 +27,20 @@ _CUSTOM_VOICE_SPEAKERS: Final[Mapping[str, str]] = MappingProxyType(
         "sohee": "Sohee",
     }
 )
-_SUPPORTED_VARIANTS: Final[frozenset[str]] = frozenset({"voice_design", "custom_voice", "base"})
+# Public callers name the plan role; worker adapters pass the vendor variant.
+# Both names resolve to the same route so routing can never drift between them.
+_ROUTE_BY_NAME: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "tts_custom_voice": "custom_voice",
+        "custom_voice": "custom_voice",
+        "tts_base": "base",
+        "base": "base",
+        "voice_design": "voice_design",
+    }
+)
+_VOICE_DESIGN_TASK_REQUIRED: Final[str] = (
+    "instruction voices are served by the voice_design task, not by speech synthesis"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +83,21 @@ class VoiceBinding:
 
 
 def resolve_binding(
-    variant: str, voice: str, *, profile: VoiceProfile | None = None
+    role: str, voice: str, *, profile: VoiceProfile | None = None
 ) -> VoiceBinding:
-    """Resolve a public voice for a model variant while preserving alias casing."""
+    """Resolve a public voice for one plan role while preserving alias casing.
 
-    if variant not in _SUPPORTED_VARIANTS:
-        raise ValueError(f"unsupported voice variant: {variant}")
+    A built-in fixed speaker resolves only for the CustomVoice role, a clone
+    revision resolves only for the Base role, and the VoiceDesign role is
+    restricted to design candidates.  No role falls back to another: a missing
+    Base clone capability is an explicit rejection, never a silent re-route to
+    a built-in speaker or to the VoiceDesign model.
+    """
+
+    try:
+        variant = _ROUTE_BY_NAME[role]
+    except KeyError:
+        raise ValueError(f"unsupported voice role: {role}") from None
     if not isinstance(voice, str):
         raise ValueError(f"unknown preset voice: {voice}")
 
@@ -114,8 +136,12 @@ def resolve_binding(
     if profile.mode == "clone":
         raise ValueError(
             f"voice {voice} requires an active Base clone capability; "
-            "custom_voice variant does not support voice cloning"
+            "custom_voice variant does not synthesize cloned references"
         )
+    if profile.mode != "system":
+        # Instruction profiles are design candidates.  Routing them here would
+        # hide an unsupported engine capability behind a built-in speaker.
+        raise ValueError(_VOICE_DESIGN_TASK_REQUIRED)
 
     try:
         speaker = _CUSTOM_VOICE_SPEAKERS[preset_voice]

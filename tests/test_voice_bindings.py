@@ -60,7 +60,7 @@ def test_voice_lookup_keeps_existing_case_sensitive_behavior() -> None:
 def test_unknown_voice_and_variant_fail_closed() -> None:
     with pytest.raises(ValueError, match="unknown preset voice"):
         resolve_binding("custom_voice", "not-registered")
-    with pytest.raises(ValueError, match="unsupported voice variant"):
+    with pytest.raises(ValueError, match="unsupported voice role"):
         resolve_binding("unknown", "serena")
 
 
@@ -149,3 +149,44 @@ def test_voice_design_never_declares_incremental_stream(voice: str) -> None:
 
     assert binding.instruction
     assert binding.supports_incremental_stream is False
+
+
+@pytest.mark.parametrize("role", ("tts_custom_voice", "custom_voice"))
+def test_plan_role_and_engine_variant_resolve_the_same_route(role: str) -> None:
+    binding = resolve_binding(role, "serena")
+
+    assert binding.variant == "custom_voice"
+    assert binding.speaker == "Serena"
+
+
+def test_base_role_never_accepts_a_builtin_speaker() -> None:
+    with pytest.raises(ValueError, match="not a clone voice"):
+        resolve_binding("tts_base", "serena")
+
+
+def test_custom_voice_role_never_accepts_a_clone_revision(monkeypatch) -> None:
+    import speechrail.backends.qwen3_voice_binding as binding_module
+    from speechrail.domain.tts import VoiceProfile
+
+    monkeypatch.setattr(
+        binding_module,
+        "get_voice_profile",
+        lambda _voice: VoiceProfile(id="user_voice", mode="clone", ref_text="参考文本"),
+    )
+
+    with pytest.raises(ValueError, match="requires an active Base clone capability"):
+        resolve_binding("tts_custom_voice", "user_voice")
+
+
+def test_instruction_voices_are_design_candidates_not_runtime_voices(monkeypatch) -> None:
+    import speechrail.backends.qwen3_voice_binding as binding_module
+    from speechrail.domain.tts import VoiceProfile
+
+    monkeypatch.setattr(
+        binding_module,
+        "get_voice_profile",
+        lambda _voice: VoiceProfile(id="user_voice", mode="instruction", instruction="温柔"),
+    )
+
+    with pytest.raises(ValueError, match="voice_design task"):
+        resolve_binding("tts_custom_voice", "user_voice")

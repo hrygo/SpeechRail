@@ -1,13 +1,10 @@
-"""W10: the four-tier incremental-TTS capability matrix.
+"""T07: one role-aware incremental-TTS capability matrix.
 
-One profile-independent resolver must publish the same verdict on ``/v1/models``,
-``/v1/voices`` and the Realtime handshake.  These tests pin that agreement for
-every shipped profile and for the two voice shapes that actually reach the
-incremental path (a CustomVoice system speaker and a Base clone reference), plus
-the VoiceDesign instruction voice that must never be promoted.
-
-Everything here is deterministic: a fake incremental synthesizer stands in for
-the vendor adapter, so no model, MLX, download or real audio is involved.
+``/v1/models``, ``/v1/voices`` and the Realtime handshake must agree about what
+the active spec can do.  System speakers resolve to CustomVoice, clone
+references resolve to Base, and instruction voices stay design-only on every
+tier.  The fake synthesizer keeps this deterministic: no model, MLX, download or
+real audio is involved.
 """
 
 from __future__ import annotations
@@ -23,18 +20,11 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.tts import VoiceRegistry
 from test_realtime_tts_incremental import FakeIncrementalSynthesizer
 
-# Preset -> (system voice, clone voice, design voice) incremental expectation.
-_PROFILE_MATRIX: dict[str, tuple[bool, bool, bool]] = {
-    "light": (True, False, False),
-    "balanced": (True, False, False),
-    "quality": (False, True, False),
-    "extreme": (False, True, False),
-}
-
+_TIERS = ("fast", "quality", "reference")
 _CLONE_ID = "w10_clone_fixture"
 
 
@@ -54,7 +44,7 @@ def _wav_bytes(duration_seconds: float = 1.0, sample_rate: int = 24_000) -> byte
     return buffer.getvalue()
 
 
-def _register_clone(tmp_path: Path) -> VoiceRegistry:
+def _register_voices(tmp_path: Path) -> VoiceRegistry:
     registry = VoiceRegistry(tmp_path / "custom_voices.json")
     registry.create_cloned_profile(
         name="W10 clone",
@@ -63,108 +53,104 @@ def _register_clone(tmp_path: Path) -> VoiceRegistry:
         voice_id=_CLONE_ID,
         duration_seconds=1.0,
     )
+    registry.create_custom_profile(
+        name="W10 design",
+        instruction="自然清晰的中文女声，用于设计任务。",
+        voice_id="w10_design_fixture",
+    )
     return registry
 
 
-def _preset_kwargs(preset_id: str, tmp_path: Path) -> dict[str, Any]:
-    """Resolve the active catalog from the managed directory *names* only.
+def _tier_kwargs(tier: str, tmp_path: Path) -> dict[str, Any]:
+    """Build one explicit v2 selection; directory names never imply identity."""
 
-    ``active_model_catalog`` matches on ``Path.name``, so the directories never
-    have to exist; they only have to carry the packaged artifact key.
-    """
-
-    catalog = load_catalog()
-    preset = catalog.preset(preset_id)
-    kwargs: dict[str, Any] = {
-        "qwen3_model_dir": tmp_path / preset.asr,
+    asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
+    design_key = required_spec_artifact(tier, "voice_design")  # type: ignore[arg-type]
+    assert asr_key is not None and tts_key is not None and base_key is not None
+    return {
+        "qwen3_model_dir": tmp_path / asr_key,
         "qwen3_python": None,
-        "qwen3_tts_model_dir": tmp_path / preset.tts,
+        "qwen3_tts_model_dir": tmp_path / tts_key,
+        "qwen3_tts_clone_model_dir": tmp_path / base_key,
+        "qwen3_tts_python": None,
+        "selection_schema_version": 2,
+        "selection_asr_spec": tier,
+        "selection_tts_spec": tier,
+        "asr_artifact_key": asr_key,
+        "tts_artifact_key": tts_key,
+        "tts_base_artifact_key": base_key,
+        "voice_design_artifact_key": design_key,
     }
-    if preset.tts_clone is not None:
-        kwargs["qwen3_tts_clone_model_dir"] = tmp_path / preset.tts_clone
-    return kwargs
 
 
-@pytest.mark.parametrize("preset", sorted(_PROFILE_MATRIX))
-def test_realtime_handshake_reports_the_tier_matrix(
-    preset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("tier", _TIERS)
+def test_realtime_handshake_reports_the_runtime_role_matrix(
+    tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The handshake verdict must match the tier, not the profile name."""
-
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_clone(tmp_path))
-    synthesizer = FakeIncrementalSynthesizer()
-    client = TestClient(
-        create_app(Settings(**_preset_kwargs(preset, tmp_path)), tts_synthesizer=synthesizer)
+    monkeypatch.setattr(
+        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
     )
-    system_supported, _, _ = _PROFILE_MATRIX[preset]
+    client = TestClient(
+        create_app(
+            Settings(**_tier_kwargs(tier, tmp_path)),
+            tts_synthesizer=FakeIncrementalSynthesizer(),
+        )
+    )
 
     with client.websocket_connect("/v1/realtime") as socket:
         created = socket.receive_json()
         handshake = created["session"]["speech_capabilities"]["streaming_tts"]
 
-    # The handshake answers for the default voice, so it tracks the system voice.
-    assert handshake["supported"] is system_supported
+    # The handshake answers for the default system voice, which always has the
+    # CustomVoice role on every target tier.
+    assert handshake["supported"] is True
+    assert handshake["voice_mode"] == "system"
+    assert handshake["voice_variant"] == "custom_voice"
 
 
-@pytest.mark.parametrize("preset", sorted(_PROFILE_MATRIX))
-def test_public_voice_list_reports_each_voice_shape_for_the_tier(
-    preset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("tier", _TIERS)
+def test_public_voice_list_reports_each_runtime_role_for_the_tier(
+    tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``light``/``balanced`` bind CustomVoice; ``quality``/``extreme`` bind Base."""
-
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_clone(tmp_path))
+    monkeypatch.setattr(
+        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
+    )
     client = TestClient(
         create_app(
-            Settings(**_preset_kwargs(preset, tmp_path)),
+            Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
         )
     )
     voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
-    system_supported, clone_supported, _ = _PROFILE_MATRIX[preset]
 
     system = voices["serena"]["streaming"]
-    if system_supported:
-        assert system["supported"] is True
-        assert system["reason"] is None
-        assert system["voice_variant"] == "custom_voice"
-        assert system["axes"]["variant_supported"] is True
-        assert system["axes"]["reference_ready"] is True
-        assert system["limits"]["max_total_codepoints"] == 4096
-    else:
-        assert system["supported"] is False
-        assert system["reason"] == "variant_not_supported"
-        assert system["voice_variant"] == "voice_design"
-        assert system["axes"]["variant_supported"] is False
-        assert system["limits"] is None
+    assert system["supported"] is True
+    assert system["reason"] is None
+    assert system["voice_variant"] == "custom_voice"
+    assert system["axes"]["variant_supported"] is True
+    assert system["axes"]["reference_ready"] is True
+    assert system["limits"]["max_total_codepoints"] == 4096
 
     clone = voices[_CLONE_ID]["streaming"]
-    assert clone["supported"] is clone_supported
-    if clone_supported:
-        # quality/extreme carry the Base artifact, so a clone reference is the
-        # only incremental identity available on those tiers.
-        assert clone["voice_variant"] == "base"
-        assert clone["axes"]["artifact_available"] is True
-        assert clone["axes"]["reference_ready"] is True
-        assert clone["reason"] is None
-    else:
-        # light/balanced ship no Base artifact at all; the clone asset is kept
-        # but this tier must refuse rather than map it onto a CustomVoice speaker.
-        assert clone["voice_variant"] is None
-        assert clone["axes"]["artifact_available"] is False
-        assert clone["reason"] == "voice_disabled"
-        assert clone["limits"] is None
+    assert clone["supported"] is True
+    assert clone["voice_variant"] == "base"
+    assert clone["axes"]["artifact_available"] is True
+    assert clone["axes"]["reference_ready"] is True
+    assert clone["reason"] is None
 
 
-@pytest.mark.parametrize("preset", sorted(_PROFILE_MATRIX))
+@pytest.mark.parametrize("tier", _TIERS)
 def test_model_scope_never_claims_every_voice_streams(
-    preset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The model surface only reports the voice-independent implementation axis."""
-
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_clone(tmp_path))
+    monkeypatch.setattr(
+        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
+    )
     client = TestClient(
         create_app(
-            Settings(**_preset_kwargs(preset, tmp_path)),
+            Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
         )
     )
@@ -178,22 +164,25 @@ def test_model_scope_never_claims_every_voice_streams(
     assert streaming_input["axes"]["protocol_negotiated"] is True
 
 
+@pytest.mark.parametrize("tier", _TIERS)
 def test_voice_design_is_never_advertised_as_an_incremental_role(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A VoiceDesign instruction voice stays complete-text only on every tier."""
+    """A VoiceDesign instruction voice stays complete-text/design-task only."""
 
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_clone(tmp_path))
-    for preset in sorted(_PROFILE_MATRIX):
-        client = TestClient(
-            create_app(
-                Settings(**_preset_kwargs(preset, tmp_path)),
-                tts_synthesizer=FakeIncrementalSynthesizer(),
-            )
+    monkeypatch.setattr(
+        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
+    )
+    client = TestClient(
+        create_app(
+            Settings(**_tier_kwargs(tier, tmp_path)),
+            tts_synthesizer=FakeIncrementalSynthesizer(),
         )
-        voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
-        # ``serena`` is a VoiceDesign instruction on quality/extreme and a
-        # CustomVoice speaker on light/balanced; only the former may never stream.
-        variant = voices["serena"]["streaming"]["voice_variant"]
-        if variant == "voice_design":
-            assert voices["serena"]["streaming"]["supported"] is False
+    )
+    voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
+    streaming = voices["w10_design_fixture"]["streaming"]
+
+    assert streaming["supported"] is False
+    assert streaming["reason"] == "voice_design_task_required"
+    assert streaming["axes"]["variant_supported"] is False
+    assert streaming["limits"] is None
