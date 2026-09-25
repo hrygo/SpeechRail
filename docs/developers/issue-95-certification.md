@@ -2,7 +2,7 @@
 title: "Issue #95 交付认证方案与证据索引"
 status: draft
 audience: "SpeechRail 维护者与验收人"
-version: "0.1.0"
+version: "0.2.0"
 date: 2026-09-26
 ---
 
@@ -11,6 +11,9 @@ date: 2026-09-26
 > **状态：待评审 / 待专项授权。** 本文是 T12（P5 交付认证）的入口条件：语料分层、盲听规则
 > 与各项阈值的**建议稿**。计划要求这些数值经评审确认后才可执行；本文不自行把建议值当成通过标准，
 > 也不代表任何真实模型、性能、质量或长时稳定性已验证。授权与阈值确认前不部署、不基准、不做 UI 自动化。
+>
+> 非运行态门（代码 / 契约 / 编译 / 文档静态门）已于 2026-09-26 完成并登记在 §7.1；运行态认证
+> 仍未开始（§7.2、§8），P5 保持未勾选。
 
 ## 1. 认证目标与边界
 
@@ -130,6 +133,20 @@ date: 2026-09-26
 
 ## 7. 证据登记与结果索引
 
+### 7.1 非运行态证据（2026-09-26 Asia/Shanghai，本机实测）
+
+实现范围：分支 `codex/issue-95-target-architecture` 的 `cedbb19d..e95586a8`（本文所在提交为其后继）。
+以下均为 fake / 静态 / 编译证据，**不证明**真实 dtype 加载、音质、字符对齐质量、实时并发或长时稳定性。
+
+| 门 | 结果 | 证据位置 |
+|---|---|---|
+| 静态 / 契约 / 编译 | 通过：计划 §8.1 四组定向验收合计 **571 passed**（207 / 82 / 123 / 159）；`ruff` 全绿；`mypy src` 148 文件无错；Realtime 契约 41 fixtures / 32 tracked fields；文档与版本一致性 ok；`swift test` 144 tests / 15 suites；`scripts/macos_app_build.sh` **BUILD SUCCEEDED** | 账本 `.superpowers/sdd/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide/progress.md` |
+| 供应链（受控引擎 wheel） | 通过：固定上游 revision + overlay/patch 摘要校验，连续两次重建 byte-identical；`runtime-lock.json` 写入 `engine_wheel` pin。**未在本机安装该 wheel** | `vendor/engine-build/engine-build.json`、`src/speechrail/assets/runtime-lock.json` |
+| 制品 | 通过：catalog 装载时 `assert_target_spec_bindings()` 对 13 个 `(tier, role)` 绑定精确匹配；缺失制品按授权异步准备完成并逐文件 size / SHA-256 校验为 `verified`（准备记录与制品在仓库外） | 同上；`src/speechrail/assets/model-catalog.json` |
+| 交付范围 | 未运行完整 pytest 套件（仓库 addopts 强制 ≥80% 覆盖率门，计划列为需明确授权项）；未部署、未切档、未加载真实模型 | 同上 |
+
+### 7.2 运行态登记（待授权，尚未开始）
+
 每次运行在下方登记一行摘要（详细报告留在仓库外或 `docs/archive/performance/`）：
 
 | 日期 | commit | 阶段 | 组合 | 结果 | 报告位置（相对/仓库外） | digest |
@@ -140,11 +157,11 @@ date: 2026-09-26
 
 以下在取得专项授权前**不执行**，且当前均未验证：
 
-- 部署、安装、发布、切档、回滚等运行态变更。
+- 部署、安装、发布、切档、回滚等运行态变更（含把 §7.1 的受控 engine wheel 装进本机运行态）。
 - 真实模型加载、真实音频、真实 worker smoke、真实 LLM 端到端。
 - 延迟 / 质量 / 长稳 / 播放器基准。
 - `scripts/macos_app_test.sh`（含 XCUITest / UI 自动化，需逐次明确授权，会接管前台窗口与输入）。
-- 真实 engine wheel 构建。
+- 完整 pytest 套件（`uv run --extra dev pytest`，仓库 addopts 强制 ≥80% 覆盖率门）。
 
 ## 9. 需用户确认的决策点
 
