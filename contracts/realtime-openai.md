@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`3.0.2`；生效日期：2026-09-20。当前版本是一次直接切换：SpeechRail 没有外部用户，因此不提供旧事件、旧字段、旧 wire profile、旧 alias 或 `/v2` 兼容层。旧设计只在 `docs/archive/` 与历史审计中保留，不构成当前承诺。
+> 契约版本：`3.1.0`；生效日期：2026-09-25。当前版本是一次直接切换：SpeechRail 没有外部用户，因此不提供旧事件、旧字段、旧 wire profile、旧 alias 或 `/v2` 兼容层。旧设计只在 `docs/archive/` 与历史审计中保留，不构成当前承诺。
 
 ## 1. 定位与责任边界
 
@@ -8,7 +8,7 @@
 
 - 16 kHz mono PCM16 音频接收、VAD/endpointing 事实、ASR partial/final；
 - 可选的 session-scoped 匿名分人事实；
-- 调用方显式提交文本后的无状态 TTS 流式渲染；
+- 调用方显式提交文本后的无状态 TTS 流式渲染，以及调用方持续追加文本的增量 TTS utterance；
 - 资源准入、worker 生命周期、稳定错误 envelope 和可选渲染回执。
 
 调用方负责麦克风、播放、AEC、回声抑制、LLM、prompt/persona、对话历史、memory、tool calling、业务状态、sentence queue、barge-in 决策和最终用户体验。服务端不创建 conversation，不保存跨请求历史，不执行 LLM，不执行工具，不播放音频。
@@ -122,6 +122,56 @@ ws://127.0.0.1:8201/v1/realtime
 
 取消必须匹配当前 request（可选匹配 response）；服务端在取消时发一次 `response.done`，`status` 为 `cancelled`。没有活动 response 时返回 `tts_not_active`。调用方自己决定何时因 VAD、用户按键或业务状态调用 cancel。
 
+#### 3.3.1 增量 TTS utterance
+
+增量模式让调用方把 LLM 的流式文本持续追加到**同一个生成状态**，从而在保持跨句韵律的同时获得低首音延迟。它与 `speechrail.tts.create` 互斥：两者共享同一个「连接内只允许一个活动 TTS」判定和同一个 `request_id` 账本，因此 `create` 与 `start` 的拒绝顺序一致（先 `tts_in_progress`，空闲时才报 `tts_request_invalid`）。
+
+```json
+{
+  "type": "speechrail.tts.start",
+  "request_id": "caller-turn-42",
+  "voice": "serena",
+  "speed": 1.0,
+  "expected_voice_revision": "vr_...",
+  "expected_model_revision": "<40-char-hex>",
+  "limits": {"slow_consumer_seconds": 2.0}
+}
+```
+
+```json
+{
+  "type": "speechrail.tts.append_text",
+  "request_id": "caller-turn-42",
+  "response_id": "resp_...",
+  "sequence": 0,
+  "text": "这是调用方已经稳定的一小段文本。"
+}
+```
+
+```json
+{
+  "type": "speechrail.tts.finish_text",
+  "request_id": "caller-turn-42",
+  "response_id": "resp_...",
+  "last_sequence": 0
+}
+```
+
+| 事件 | 规则 |
+|---|---|
+| `speechrail.tts.start` | 绑定一个增量 utterance；已知字段仅 `request_id`、`voice`、`speed`、`expected_voice_revision`、`expected_model_revision`、`limits`。未知字段返回 `tts_request_invalid`。 |
+| `speechrail.tts.append_text` | 追加不可修改文本；`sequence` 从 `0` 起且必须严格连续递增，重复或跳号返回 `tts_sequence_invalid` 且不消费文本。 |
+| `speechrail.tts.finish_text` | 关闭文本输入并继续生成尾音；`last_sequence` 必须等于最后一次 ACK 的 `append_sequence`，空输入为 `-1`。重复 finish 或 finish 后 append 返回 `tts_input_closed`。 |
+| `speechrail.tts.cancel` | 与完整文本模式相同的取消命令；取消后不再投递旧音频。 |
+
+规则：
+
+- `start` 通过校验后才创建 response；失败发生在 `response.created` 之前时只发 `error`，不伪造 `response.done`。`response.created` 之后任何失败都收敛为一次 `failed` 终态。
+- `start` 成功即异步建立生成状态，服务端不会因为等待整轮文本而阻塞后续 `append_text`；客户端必须等到 `speechrail.tts.started` 才追加文本。
+- 每一段提交文本计入 Unicode codepoint 预算：单次 append、utterance 总量、待模型消费队列各有上限；文本与音频队列分别计量。超限返回 `tts_stream_limit_exceeded`，队列背压返回 `tts_backpressure`。
+- 请求可以收紧 `limits`（只能小于等于服务端默认值），放宽返回 `tts_stream_limit_exceeded`。生效值在 `speechrail.tts.started.limits` 中回显。
+- 增量能力按 voice 解析，不是全档统一开关：`voice_design`（VoiceDesign instruction 音色）当前明确不支持增量，必须先在服务端注册固定音色 clone 再使用；`custom_voice` 与 `base` clone 支持。详见 §4 的能力协商。
+
 ## 4. 服务端事件
 
 所有事件带连接内唯一的 `event_id`、`session_id` 和单调 `sequence`。
@@ -142,7 +192,9 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.output_item.added/done` | TTS message/audio item 生命周期。 |
 | `response.content_part.added/done` | 音频 content part 生命周期。 |
 | `response.output_audio_transcript.delta/done` | 对已提交 TTS 文本的回显，不是 ASR 结果。 |
-| `response.output_audio.delta/done` | 统一的当前 TTS PCM16 Base64 音频流。 |
+| `response.output_audio.delta/done` | 统一的当前 TTS PCM16 Base64 音频流。增量 utterance 的每个 delta 额外携带 `speechrail.{kind:"tts",chunk_index,sample_offset,sample_rate,channels}`，`sample_offset` 以 mono 样本计（`+= len(pcm)//2`）。音频事件不会被拆成第二条通道。 |
+| `speechrail.tts.started` | 增量 utterance 已取得准入并开始生成；携带 `protocol_version`、`implementation_version`、`voice_variant`、`voice_mode`、`output_format` 和生效 `limits`。客户端在此之前不得追加文本，服务端在此之前不得发送 PCM。 |
+| `speechrail.tts.text_accepted` | 确认一次 append：携带 `append_sequence`、`accepted_codepoints` 和累计 `total_codepoints`。ACK 失败不推进 `append_sequence`。注意 `append_sequence` 是调用方的追加序号，与所有事件都有的传输层 `sequence` 不是同一字段。 |
 | `response.done` | TTS 终态：`completed`、`failed` 或 `cancelled`；包含 caller `request_id` 和 `speechrail.kind=tts`。 |
 | `error` | 稳定错误 envelope；请求级错误在 `error.request_id` 回显触发请求 ID，事件级错误在 `error.event_id` 回显客户端事件 ID。 |
 
@@ -161,7 +213,55 @@ response.created
 → response.done(status=completed)
 ```
 
-取消/失败仍以一次 `response.done` 结束；已发送音频不会回滚，调用方负责停止播放并丢弃本地播放队列。
+增量 utterance 的正常序列是：
+
+```text
+response.created
+→ response.output_item.added
+→ response.content_part.added
+→ speechrail.tts.started
+→ (speechrail.tts.text_accepted → response.output_audio_transcript.delta)*
+→ response.output_audio.delta*
+→ response.output_audio_transcript.done
+→ response.output_audio.done
+→ response.content_part.done
+→ response.output_item.done
+→ response.done(status=completed)
+```
+
+音频与 append 的交错顺序由模型实际生成速度决定，服务端不保证「先收完文本再出声」。取消/失败仍以一次 `response.done` 结束；已发送音频不会回滚，调用方负责停止播放并丢弃本地播放队列。失败时先发一次 `error`（携带稳定错误码），再发一次 `response.done(status=failed)`；`error` 本身不是终态。
+
+### 4.1 增量能力协商
+
+`session.created` 与 `transcription_session.updated` 的 `session.speech_capabilities.streaming_tts` 按当前 voice 解析增量能力，各轴独立，不做「模型支持就等于所有 voice 支持」的推断：
+
+```json
+{
+  "supported": true,
+  "reason": null,
+  "hint": null,
+  "protocol_version": 1,
+  "implementation_version": "qwen3-tts-incremental-v1",
+  "voice_mode": "system",
+  "voice_variant": "custom_voice",
+  "limits": {"max_append_codepoints": 512, "max_total_codepoints": 4096},
+  "axes": {
+    "variant_supported": true,
+    "artifact_available": true,
+    "profile_enabled": true,
+    "reference_ready": true,
+    "implementation_supported": true,
+    "protocol_negotiated": true,
+    "ready": true,
+    "budget_available": true
+  }
+}
+```
+
+- `supported` 是 `axes` 中除 `budget_available` 外的合取；`ready` 是同一判定在当前 `tts_ready` 下的瞬时结果。
+- `budget_available` 只是瞬时预算信号，不参与 `supported`，避免「暂时忙」被误报为「不支持」。
+- `supported=false` 时 `reason` 为 `voice_disabled`、`backend_not_ready`、`artifact_unavailable`、`variant_not_supported`、`reference_not_ready` 或 `implementation_not_negotiated`，`hint` 给出下一步动作。
+- `/v1/voices[].streaming` 使用同一 resolver，`/v1/models[].capabilities.streaming_input` 只声明 `scope="per_voice"` 与实现轴，不声称覆盖全部 voice。
 
 ## 5. VAD、barge-in 与调用方编排
 
@@ -189,6 +289,8 @@ response.created
 ```
 
 主要错误码：`invalid_event`、`unsupported_operation`、`model_not_found`、`invalid_audio`、`unsupported_audio_format`、`language_not_supported`、`prompt_too_long`、`backend_busy`、`backend_timeout`、`backend_not_ready`、`tts_not_enabled`、`tts_request_invalid`、`tts_in_progress`、`tts_not_active`、`voice_not_found`、`voice_not_available`、`voice_revision_conflict`、`model_revision_conflict`、`diarization_not_available`、`invalid_state`。
+
+增量 TTS 追加错误码：`tts_streaming_unsupported`（当前 voice/实现/档位没有增量路径，fail closed，不静默降级为等待全文）、`tts_sequence_invalid`、`tts_input_closed`、`tts_input_timeout`、`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_backend_failed`。可恢复的错序/错字段不消费输入；超限、输入饥饿超时、慢消费者和后端失败终止当前 response。
 
 以下事件和字段是明确拒绝项，不会翻译为当前事件：`session.update`、`session.updated`、`conversation.created`、`conversation.item.create`、`conversation.item.delete`、`conversation.item.truncate`、`response.create`、`response.cancel`、`response.audio.*`、`response.audio_transcript.*`、旧根级 `model`/`language`/`audio_format`、LLM `tools`/`modalities`/`instructions`。
 

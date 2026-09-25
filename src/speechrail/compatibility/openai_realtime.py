@@ -17,6 +17,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
+    TtsStreamLimits,
+)
 from speechrail.runtime.busy import busy_retry_policy
 
 _PROTOCOL_VERSION = "realtime=v1"
@@ -45,6 +49,40 @@ _PCM16_FORMAT: dict[str, object] = {
 _SUPPORTED_TURN_DETECTION: frozenset[str | None] = frozenset({None, "manual", "server_vad"})
 _SUPPORTED_PARTIAL_MODES: frozenset[str] = frozenset({"delta", "snapshot"})
 _SUPPORTED_TRANSCRIPTION_CHUNKS_MS: frozenset[int] = frozenset({500, 1_000, 2_000})
+
+# The incremental TTS extension is negotiated on its own version axis so a
+# vendor protocol change never silently reuses the shared realtime=v1 envelope.
+TTS_STREAM_PROTOCOL_VERSION: int = 1
+TTS_STREAM_IMPLEMENTATION: str = "qwen3-tts-incremental-v1"
+_TTS_STREAM_EVENT_PREFIX = "speechrail.tts."
+_MAX_STREAM_APPEND_CODEPOINTS: int = DEFAULT_TTS_STREAM_LIMITS.max_append_codepoints
+_STREAM_LIMIT_FIELDS: tuple[str, ...] = (
+    "max_append_codepoints",
+    "max_total_codepoints",
+    "max_pending_codepoints",
+    "max_pending_audio_bytes",
+    "input_wait_seconds",
+    "utterance_wall_clock_seconds",
+    "slow_consumer_seconds",
+)
+_TTS_START_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "event_id",
+        "request_id",
+        "voice",
+        "speed",
+        "expected_voice_revision",
+        "expected_model_revision",
+        "limits",
+    }
+)
+_TTS_APPEND_TEXT_FIELDS: frozenset[str] = frozenset(
+    {"type", "event_id", "request_id", "response_id", "sequence", "text"}
+)
+_TTS_FINISH_TEXT_FIELDS: frozenset[str] = frozenset(
+    {"type", "event_id", "request_id", "response_id", "last_sequence"}
+)
 
 _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
     {
@@ -87,6 +125,9 @@ EventKind = Literal[
     "clear",
     "diarization_finish",
     "tts_create",
+    "tts_start",
+    "tts_append_text",
+    "tts_finish_text",
     "tts_cancel",
 ]
 
@@ -111,6 +152,33 @@ class TTSCancelRequest:
     response_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class TTSStartRequest:
+    """One incremental utterance request, including its tightened limits."""
+
+    request_id: str
+    voice: str | None
+    speed: float
+    expected_voice_revision: str | None
+    expected_model_revision: str | None
+    limits: TtsStreamLimits
+
+
+@dataclass(frozen=True, slots=True)
+class TTSAppendTextRequest:
+    request_id: str
+    response_id: str | None
+    sequence: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class TTSFinishTextRequest:
+    request_id: str
+    response_id: str | None
+    last_sequence: int
+
+
 def parse_client_event(event: dict[str, Any]) -> ParsedClientEvent:
     """Classify the one current-only client event vocabulary.
 
@@ -127,6 +195,9 @@ def parse_client_event(event: dict[str, Any]) -> ParsedClientEvent:
         "input_audio_buffer.clear": "clear",
         "speechrail.diarization.finish": "diarization_finish",
         "speechrail.tts.create": "tts_create",
+        "speechrail.tts.start": "tts_start",
+        "speechrail.tts.append_text": "tts_append_text",
+        "speechrail.tts.finish_text": "tts_finish_text",
         "speechrail.tts.cancel": "tts_cancel",
     }
     if event_type in kinds:
@@ -160,6 +231,21 @@ def _bounded_string(
     return value
 
 
+def _tts_speed(value: object) -> float:
+    """Validate the bounded playback speed shared by create and start."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0.25 <= float(value) <= 4.0
+    ):
+        raise RealtimeAdapterError(
+            "tts_request_invalid", "speed must be between 0.25 and 4.0"
+        )
+    return float(value)
+
+
 def parse_tts_create(event: dict[str, Any]) -> TTSCreateRequest:
     """Validate a caller-owned, stateless TTS render request."""
     request_id = _bounded_string(
@@ -170,16 +256,7 @@ def parse_tts_create(event: dict[str, Any]) -> TTSCreateRequest:
     voice = None if voice_value is None else _bounded_string(
         voice_value, field="voice", max_length=128
     )
-    speed_value = event.get("speed", 1.0)
-    if (
-        isinstance(speed_value, bool)
-        or not isinstance(speed_value, (int, float))
-        or not math.isfinite(float(speed_value))
-        or not 0.25 <= float(speed_value) <= 4.0
-    ):
-        raise RealtimeAdapterError(
-            "tts_request_invalid", "speed must be between 0.25 and 4.0"
-        )
+    speed = _tts_speed(event.get("speed", 1.0))
     revision_value = event.get("expected_voice_revision")
     revision = None if revision_value is None else _bounded_string(
         revision_value, field="expected_voice_revision", max_length=128
@@ -188,7 +265,7 @@ def parse_tts_create(event: dict[str, Any]) -> TTSCreateRequest:
         request_id=request_id,
         text=text,
         voice=voice,
-        speed=float(speed_value),
+        speed=speed,
         expected_voice_revision=revision,
     )
 
@@ -203,6 +280,151 @@ def parse_tts_cancel(event: dict[str, Any]) -> TTSCancelRequest:
         response_value, field="response_id", max_length=128
     )
     return TTSCancelRequest(request_id=request_id, response_id=response_id)
+
+
+def _reject_unknown_fields(
+    event: Mapping[str, Any], allowed: frozenset[str], *, event_type: str
+) -> None:
+    """Reject a field the incremental extension does not define.
+
+    Unknown-field rejection is what keeps this namespaced extension from growing
+    accidental aliases: an unrecognised key fails closed instead of being
+    silently ignored by a newer server or an older client.
+    """
+
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise RealtimeAdapterError(
+            "tts_request_invalid", f"{event_type} does not accept field: {unknown[0]}"
+        )
+
+
+def _stream_sequence(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RealtimeAdapterError(
+            "tts_sequence_invalid", f"{field} must be a non-negative integer"
+        )
+    return value
+
+
+def _stream_limits(value: object) -> TtsStreamLimits:
+    """Accept only limits that tighten, never widen, the server safety budget."""
+
+    if value is None:
+        return DEFAULT_TTS_STREAM_LIMITS
+    if not isinstance(value, dict):
+        raise RealtimeAdapterError("tts_request_invalid", "limits must be an object")
+    unknown = sorted(set(value) - set(_STREAM_LIMIT_FIELDS))
+    if unknown:
+        raise RealtimeAdapterError(
+            "tts_request_invalid", f"limits does not accept field: {unknown[0]}"
+        )
+    overrides: dict[str, float] = {}
+    for field in _STREAM_LIMIT_FIELDS:
+        if field not in value:
+            continue
+        raw = value[field]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise RealtimeAdapterError("tts_request_invalid", f"limits.{field} must be a number")
+        if float(raw) > float(getattr(DEFAULT_TTS_STREAM_LIMITS, field)):
+            raise RealtimeAdapterError(
+                "tts_stream_limit_exceeded",
+                f"limits.{field} must not exceed the server limit",
+            )
+        overrides[field] = raw
+    try:
+        return TtsStreamLimits(**overrides)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise RealtimeAdapterError("tts_request_invalid", str(exc)) from exc
+
+
+def parse_tts_start(event: dict[str, Any]) -> TTSStartRequest:
+    """Validate one incremental utterance start.
+
+    The start event carries the same voice/model identity pins as ``create`` plus
+    an optional limits object.  Only request identity, identity pins and budgets
+    live here; text arrives through ``append_text`` so the two axes stay
+    independent.
+    """
+
+    _reject_unknown_fields(event, _TTS_START_FIELDS, event_type="speechrail.tts.start")
+    request_id = _bounded_string(event.get("request_id"), field="request_id", max_length=128)
+    voice_value = event.get("voice")
+    voice = (
+        None
+        if voice_value is None
+        else _bounded_string(voice_value, field="voice", max_length=128)
+    )
+    revision_value = event.get("expected_voice_revision")
+    revision = (
+        None
+        if revision_value is None
+        else _bounded_string(revision_value, field="expected_voice_revision", max_length=128)
+    )
+    model_revision_value = event.get("expected_model_revision")
+    model_revision = (
+        None
+        if model_revision_value is None
+        else _bounded_string(
+            model_revision_value, field="expected_model_revision", max_length=128
+        )
+    )
+    return TTSStartRequest(
+        request_id=request_id,
+        voice=voice,
+        speed=_tts_speed(event.get("speed", 1.0)),
+        expected_voice_revision=revision,
+        expected_model_revision=model_revision,
+        limits=_stream_limits(event.get("limits")),
+    )
+
+
+def parse_tts_append_text(event: dict[str, Any]) -> TTSAppendTextRequest:
+    """Validate one append of immutable text for an open utterance."""
+
+    _reject_unknown_fields(
+        event, _TTS_APPEND_TEXT_FIELDS, event_type="speechrail.tts.append_text"
+    )
+    request_id = _bounded_string(event.get("request_id"), field="request_id", max_length=128)
+    response_value = event.get("response_id")
+    response_id = (
+        None
+        if response_value is None
+        else _bounded_string(response_value, field="response_id", max_length=128)
+    )
+    text = event.get("text")
+    if not isinstance(text, str) or not text:
+        raise RealtimeAdapterError("tts_request_invalid", "text must be a non-empty string")
+    if len(text) > _MAX_STREAM_APPEND_CODEPOINTS:
+        raise RealtimeAdapterError(
+            "tts_stream_limit_exceeded", "text exceeds the per-append codepoint limit"
+        )
+    return TTSAppendTextRequest(
+        request_id=request_id,
+        response_id=response_id,
+        sequence=_stream_sequence(event.get("sequence"), field="sequence"),
+        text=text,
+    )
+
+
+def parse_tts_finish_text(event: dict[str, Any]) -> TTSFinishTextRequest:
+    """Validate the close of the text side of one open utterance."""
+
+    _reject_unknown_fields(
+        event, _TTS_FINISH_TEXT_FIELDS, event_type="speechrail.tts.finish_text"
+    )
+    request_id = _bounded_string(event.get("request_id"), field="request_id", max_length=128)
+    response_value = event.get("response_id")
+    response_id = (
+        None
+        if response_value is None
+        else _bounded_string(response_value, field="response_id", max_length=128)
+    )
+    return TTSFinishTextRequest(
+        request_id=request_id,
+        response_id=response_id,
+        last_sequence=_stream_sequence(event.get("last_sequence"), field="last_sequence"),
+    )
 
 
 def canonical_asr_model(model: str, *, registered: frozenset[str]) -> str | None:
@@ -621,14 +843,94 @@ def response_audio_delta(
     response_id: str,
     item_id: str,
     delta: str,
+    speechrail: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    event: dict[str, object] = {
         "type": "response.output_audio.delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
         "content_index": 0,
         "delta": delta,
+    }
+    if speechrail is not None:
+        event["speechrail"] = speechrail
+    return event
+
+
+def tts_stream_limits_payload(limits: TtsStreamLimits) -> dict[str, object]:
+    """Render the effective incremental limits for one utterance."""
+
+    return {field: getattr(limits, field) for field in _STREAM_LIMIT_FIELDS}
+
+
+def tts_stream_started(
+    *,
+    session_id: str,
+    request_id: str,
+    response_id: str,
+    item_id: str,
+    voice: str,
+    voice_revision: str | None,
+    voice_variant: str | None,
+    voice_mode: str | None,
+    limits: TtsStreamLimits,
+) -> dict[str, object]:
+    """Acknowledge ``speechrail.tts.start`` once the utterance is live."""
+
+    return {
+        "type": "speechrail.tts.started",
+        "request_id": request_id,
+        "response_id": response_id,
+        "item_id": item_id,
+        "voice": voice,
+        "voice_revision": voice_revision,
+        "voice_variant": voice_variant,
+        "voice_mode": voice_mode,
+        "protocol_version": TTS_STREAM_PROTOCOL_VERSION,
+        "implementation_version": TTS_STREAM_IMPLEMENTATION,
+        "output_format": {"type": "pcm16", "sample_rate": 24_000, "channels": 1},
+        "limits": tts_stream_limits_payload(limits),
+    }
+
+
+def tts_text_accepted(
+    *,
+    session_id: str,
+    request_id: str,
+    response_id: str,
+    append_sequence: int,
+    accepted_codepoints: int,
+    total_codepoints: int,
+) -> dict[str, object]:
+    """Acknowledge one append that the model accepted into its queue.
+
+    ``append_sequence`` is deliberately not named ``sequence``: the transport
+    stamps every event with its own connection-scoped ``sequence``, so the
+    caller's append index needs its own unambiguous field name.
+    """
+
+    return {
+        "type": "speechrail.tts.text_accepted",
+        "request_id": request_id,
+        "response_id": response_id,
+        "append_sequence": append_sequence,
+        "accepted_codepoints": accepted_codepoints,
+        "total_codepoints": total_codepoints,
+    }
+
+
+def tts_audio_position(
+    *, chunk_index: int, sample_offset: int, sample_rate: int = 24_000, channels: int = 1
+) -> dict[str, object]:
+    """Namespace the byte-exact position of one streamed audio chunk."""
+
+    return {
+        "kind": "tts",
+        "chunk_index": chunk_index,
+        "sample_offset": sample_offset,
+        "sample_rate": sample_rate,
+        "channels": channels,
     }
 
 

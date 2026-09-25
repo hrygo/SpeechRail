@@ -158,7 +158,22 @@ def test_managed_profile_publishes_active_model_identity(
         "variant": asr.variant,
         "quantization": asr.quantization.model_dump(mode="json"),
     }
-    assert by_id[settings.tts_model_id] == {
+    tts_entry = by_id[settings.tts_model_id]
+    assert {
+        key: tts_entry[key]
+        for key in (
+            "id",
+            "object",
+            "owned_by",
+            "created",
+            "profile",
+            "artifact",
+            "source_model",
+            "family",
+            "variant",
+            "quantization",
+        )
+    } == {
         "id": settings.tts_model_id,
         "object": "model",
         "owned_by": "speechrail",
@@ -169,11 +184,24 @@ def test_managed_profile_publishes_active_model_identity(
         "family": tts.family,
         "variant": tts.variant,
         "quantization": tts.quantization.model_dump(mode="json"),
-        "capabilities": {
-            "supports_preview": tts.variant == "voice_design",
-            "supports_clone": preset.tts_clone is not None,
-            "supports_instruction": tts.variant == "voice_design",
-        },
+    }
+    capabilities = tts_entry["capabilities"]
+    assert {
+        key: capabilities[key]
+        for key in ("supports_preview", "supports_clone", "supports_instruction")
+    } == {
+        "supports_preview": tts.variant == "voice_design",
+        "supports_clone": preset.tts_clone is not None,
+        "supports_instruction": tts.variant == "voice_design",
+    }
+    # W8 adds the voice-independent incremental axis at model scope. It must
+    # never claim that every voice of this model can stream.
+    streaming_input = capabilities["streaming_input"]
+    assert streaming_input["scope"] == "per_voice"
+    assert "supported" not in streaming_input
+    assert set(streaming_input["axes"]) == {
+        "implementation_supported",
+        "protocol_negotiated",
     }
 
 

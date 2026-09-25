@@ -2083,6 +2083,35 @@ components:
         supports_instruction:
           type: boolean
           description: Whether natural-language voice instructions are supported by the model.
+        streaming_input:
+          $ref: '#/components/schemas/StreamingInputCapability'
+    StreamingInputCapability:
+      type: object
+      description: |
+        Model-scope view of incremental (append-only) TTS text input. A model
+        exposes many voices, so this never claims that every voice can stream:
+        it reports only the voice-independent implementation axis and points at
+        the per-voice verdict on `/v1/voices[].streaming`.
+      required: [scope, protocol_version, implementation_version, axes, note]
+      properties:
+        scope:
+          type: string
+          const: per_voice
+        protocol_version:
+          type: [integer, 'null']
+          description: Wire protocol version the negotiated backend implements, else null.
+        implementation_version:
+          type: [string, 'null']
+        axes:
+          type: object
+          required: [implementation_supported, protocol_negotiated]
+          properties:
+            implementation_supported:
+              type: boolean
+            protocol_negotiated:
+              type: [boolean, 'null']
+        note:
+          type: string
     Quantization:
       type: object
       required: [bits, group_size, format, dtype]
@@ -2172,6 +2201,8 @@ components:
         availability_reason:
           type: string
           description: Stable reason when the voice is not routable.
+        streaming:
+          $ref: '#/components/schemas/VoiceStreamingCapability'
         validation_state:
           type: object
           additionalProperties: true
@@ -2257,6 +2288,62 @@ components:
         preprocessing_version:
           type: string
           const: energy_v1
+    VoiceStreamingCapability:
+      type: object
+      description: |
+        Per-voice incremental TTS verdict. Every axis is resolved separately, so
+        a client can never read "the model supports streaming" as "every voice
+        supports streaming". `budget_available` is transient and is excluded
+        from `supported`.
+      required:
+        [supported, reason, hint, protocol_version, implementation_version, voice_mode, voice_variant, limits, axes]
+      properties:
+        supported:
+          type: boolean
+        reason:
+          type: [string, 'null']
+          description: |
+            One of voice_disabled, backend_not_ready, artifact_unavailable,
+            variant_not_supported, reference_not_ready,
+            implementation_not_negotiated, voice_unresolved.
+          enum: [voice_disabled, backend_not_ready, artifact_unavailable, variant_not_supported, reference_not_ready, implementation_not_negotiated, voice_unresolved, null]
+        hint:
+          type: [string, 'null']
+          description: Actionable next step, for example registering a stable clone.
+        protocol_version:
+          type: [integer, 'null']
+        implementation_version:
+          type: [string, 'null']
+        voice_mode:
+          type: string
+        voice_variant:
+          type: [string, 'null']
+        limits:
+          type: [object, 'null']
+          description: Effective per-utterance limits; null when the voice cannot stream.
+          additionalProperties:
+            type: number
+        axes:
+          type: object
+          required:
+            [variant_supported, artifact_available, profile_enabled, reference_ready, implementation_supported, protocol_negotiated, ready, budget_available]
+          properties:
+            variant_supported:
+              type: boolean
+            artifact_available:
+              type: boolean
+            profile_enabled:
+              type: boolean
+            reference_ready:
+              type: boolean
+            implementation_supported:
+              type: boolean
+            protocol_negotiated:
+              type: [boolean, 'null']
+            ready:
+              type: boolean
+            budget_available:
+              type: [boolean, 'null']
     VoiceCapabilities:
       type: object
       required: [supports_speaker, supports_instruction]

@@ -198,6 +198,20 @@ class ResourceGovernor:
             policy_reason=self._policy_reason,
         )
 
+    def lane_available(
+        self, work_class: WorkClass, resource_key: str | None = None
+    ) -> bool:
+        """Report whether one more reservation could be admitted right now.
+
+        This is a point-in-time diagnostic for capability reporting, not an
+        admission decision: it reserves nothing, so a later ``reserve`` may
+        still queue behind work that arrives first.
+        """
+
+        if self._active_realtime + self._active_batch >= self._limits.total_capacity:
+            return False
+        return not (self._is_tts(work_class) and self._tts_lane_busy(resource_key))
+
     async def _acquire(
         self,
         work_class: WorkClass,
