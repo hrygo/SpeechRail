@@ -581,6 +581,32 @@ def transcription_snapshot(
     }
 
 
+def transcription_hypothesis(
+    *,
+    task_id: str,
+    epoch: int,
+    utterance_id: str,
+    revision: int,
+    text: str,
+    sample_span: tuple[int, int],
+    stable_prefix_codepoints: int,
+) -> dict[str, object]:
+    """Render one explicitly mutable, revisioned Realtime transcript hypothesis."""
+    return {
+        "type": "speechrail.transcription.hypothesis",
+        "task_id": task_id,
+        "epoch": epoch,
+        "utterance_id": utterance_id,
+        "revision": revision,
+        "text": text,
+        "sample_span": {
+            "start": max(0, sample_span[0]),
+            "end": max(0, sample_span[1]),
+        },
+        "stable_prefix_codepoints": max(0, stable_prefix_codepoints),
+    }
+
+
 def transcription_completed(*, item_id: str, transcript: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.completed",
@@ -619,6 +645,63 @@ def transcription_completed_extension(
     if diagnostics is not None:
         payload["diagnostics"] = diagnostics
     return payload
+
+
+def alignment_done(
+    *,
+    task_id: str,
+    epoch: int,
+    utterance_id: str,
+    transcript_revision: int,
+    metadata_revision: int,
+    sample_span: tuple[int, int],
+    codepoint_span: tuple[int, int],
+    units: list[dict[str, object]],
+) -> dict[str, object]:
+    """Render an auxiliary fixed-text alignment result independent of the ASR final."""
+    return {
+        "type": "speechrail.alignment.done",
+        "task_id": task_id,
+        "epoch": epoch,
+        "utterance_id": utterance_id,
+        "transcript_revision": max(0, transcript_revision),
+        "metadata_revision": max(0, metadata_revision),
+        "sample_span": {
+            "start": max(0, sample_span[0]),
+            "end": max(0, sample_span[1]),
+        },
+        "codepoint_span": {
+            "start": max(0, codepoint_span[0]),
+            "end": max(0, codepoint_span[1]),
+        },
+        "units": units,
+    }
+
+
+def alignment_failed(
+    *,
+    task_id: str,
+    epoch: int,
+    utterance_id: str,
+    transcript_revision: int,
+    metadata_revision: int,
+    code: str,
+    message: str,
+) -> dict[str, object]:
+    """Render an auxiliary alignment failure without rewriting the ASR final."""
+    return {
+        "type": "speechrail.alignment.failed",
+        "task_id": task_id,
+        "epoch": epoch,
+        "utterance_id": utterance_id,
+        "transcript_revision": max(0, transcript_revision),
+        "metadata_revision": max(0, metadata_revision),
+        "error": {
+            "type": "server_error",
+            "code": code,
+            "message": message,
+        },
+    }
 
 
 def diarization_update_item(

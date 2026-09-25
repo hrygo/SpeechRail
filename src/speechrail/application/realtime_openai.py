@@ -40,6 +40,8 @@ from speechrail.application.tts_stream_capability import (
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
+    alignment_done,
+    alignment_failed,
     conversation_item_created,
     diarization_done_event,
     diarization_status_event,
@@ -70,6 +72,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_completed_extension,
     transcription_delta,
     transcription_failed,
+    transcription_hypothesis,
     transcription_segment,
     transcription_snapshot,
     tts_audio_position,
@@ -190,10 +193,28 @@ class OpenAIRealtimeSession:
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
         self._asr_resources: AsyncExitStack | None = None
+        self._commit_lock = asyncio.Lock()
+        self._commit_owner: str | None = None
+        self._input_generation = 0
+        self._committed_input_generation = -1
         # Set only while the current ASR item is being committed.  The reader
         # uses this monotonic anchor to record commit-tail latency without
         # putting a session/request identifier into metrics labels.
         self._asr_commit_started_at: float | None = None
+        # First-hypothesis observability keeps distinct origins separate.  The
+        # App remains responsible for the true "visible on screen" timestamp.
+        self._first_upstream_received_at: float | None = None
+        self._admitted_started_at: float | None = None
+        self._latest_append_received_at: float | None = None
+        self._first_partial_received_at: float | None = None
+        self._first_hypothesis_recorded = False
+        self._hypothesis_revision = 0
+        self._stable_prefix_codepoints = 0
+        self._last_hypothesis_text = ""
+        self._task_id = f"task_{uuid4().hex[:12]}"
+        self._wire_epoch = 0
+        self._current_transcript_revision = 0
+        self._metadata_revision = 0
         self._tts_task: asyncio.Task[None] | None = None
         # Request ids are connection-scoped idempotency keys. Keep a bounded,
         # non-evicting ledger: evicting an old id would make a duplicate valid
@@ -227,6 +248,7 @@ class OpenAIRealtimeSession:
         # 30 seconds, independently of generic WebSocket buffering.
         self._alignment_pcm = bytearray()
         self._alignment_overflow = False
+        self._alignment_tasks: set[asyncio.Task[None]] = set()
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
@@ -283,6 +305,17 @@ class OpenAIRealtimeSession:
         """Return an opaque id for exactly one input-audio transcription turn."""
         return f"item_{uuid4().hex[:12]}"
 
+    @staticmethod
+    def _common_prefix_codepoints(left: str, right: str) -> int:
+        """Return a conservative stable-prefix count in Python codepoint units."""
+
+        count = 0
+        for left_char, right_char in zip(left, right, strict=False):
+            if left_char != right_char:
+                break
+            count += 1
+        return count
+
     def _transcription_chunk_seconds(self) -> float:
         """Return the effective per-session ASR flush duration."""
         return int(
@@ -291,6 +324,87 @@ class OpenAIRealtimeSession:
                 self._settings.qwen3_streaming_chunk_duration_ms,
             )
         ) / 1_000
+
+    def _mark_upstream_received(self, received_at: float) -> None:
+        """Anchor the first upstream PCM packet for this input item."""
+
+        self._latest_append_received_at = received_at
+        if self._first_upstream_received_at is None:
+            self._first_upstream_received_at = received_at
+
+    def _mark_admitted_started(self, start_sample: int) -> None:
+        """Anchor the first admitted speech sample without zero-filling unknowns."""
+
+        if self._admitted_started_at is not None:
+            return
+        received_at = self._latest_append_received_at
+        if received_at is None:
+            received_at = time.monotonic()
+        lag_seconds = max(0.0, (self._item_end_sample - start_sample) / 16_000)
+        self._admitted_started_at = max(0.0, received_at - lag_seconds)
+
+    def _reset_turn_observability(self) -> None:
+        self._first_upstream_received_at = None
+        self._admitted_started_at = None
+        self._latest_append_received_at = None
+        self._first_partial_received_at = None
+        self._first_hypothesis_recorded = False
+        self._hypothesis_revision = 0
+        self._stable_prefix_codepoints = 0
+        self._last_hypothesis_text = ""
+        self._current_transcript_revision = 0
+
+    def _record_first_hypothesis(self, outcome: str) -> None:
+        """Record one terminal first-hypothesis observation per input item."""
+
+        if self._first_hypothesis_recorded:
+            return
+        self._first_hypothesis_recorded = True
+        worker_received_at = self._first_partial_received_at
+        now = time.monotonic()
+        admitted_to_worker = (
+            max(0.0, worker_received_at - self._admitted_started_at)
+            if worker_received_at is not None and self._admitted_started_at is not None
+            else None
+        )
+        upstream_to_worker = (
+            max(0.0, worker_received_at - self._first_upstream_received_at)
+            if worker_received_at is not None and self._first_upstream_received_at is not None
+            else None
+        )
+        worker_to_socket = (
+            max(0.0, now - worker_received_at) if worker_received_at is not None else None
+        )
+        admitted_to_socket = (
+            max(0.0, now - self._admitted_started_at)
+            if self._admitted_started_at is not None
+            else None
+        )
+        admitted_audio_seconds = (
+            max(0.0, (self._item_end_sample - self._item_start_sample) / 16_000)
+            if outcome == "partial"
+            else None
+        )
+        self._services.metrics.record_realtime_first_hypothesis(
+            outcome,
+            admitted_to_worker_seconds=admitted_to_worker,
+            upstream_to_worker_seconds=upstream_to_worker,
+            worker_to_socket_seconds=worker_to_socket,
+            admitted_to_socket_seconds=admitted_to_socket,
+            admitted_audio_seconds=admitted_audio_seconds,
+        )
+
+    async def _cancel_alignment_tasks(self) -> None:
+        """Cancel auxiliary work before releasing the session's model owner."""
+
+        tasks = tuple(self._alignment_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._alignment_tasks.clear()
 
     async def start(self) -> None:
         await self._send(
@@ -333,6 +447,9 @@ class OpenAIRealtimeSession:
 
     async def close(self) -> None:
         self._closing = True
+        if self._first_upstream_received_at is not None:
+            self._record_first_hypothesis("cancelled")
+        await self._cancel_alignment_tasks()
         await self._close_tts_stream()
         await self._stop_asr_reader()
         await self._close_asr_session()
@@ -352,6 +469,7 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
+        self._reset_turn_observability()
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
@@ -747,6 +865,7 @@ class OpenAIRealtimeSession:
             self._admitted_end_sample = dec.end_sample
             self._item_start_sample = dec.start_sample
             self._item_end_sample = dec.end_sample
+            self._mark_admitted_started(dec.start_sample)
             self._buffered_audio_bytes = 0
             self._unflushed_bytes = 0
 
@@ -768,6 +887,7 @@ class OpenAIRealtimeSession:
                 self._turn_has_admitted_speech = True
                 self._admitted_start_sample = dec.start_sample
                 self._item_start_sample = dec.start_sample
+                self._mark_admitted_started(dec.start_sample)
 
             max_item_bytes = (
                 256_000
@@ -778,6 +898,7 @@ class OpenAIRealtimeSession:
                 self._buffered_audio_bytes + len(dec.pcm) > max_item_bytes
             ):
                 await self._commit_audio(reason="rollover")
+                self._input_generation += 1
                 self._turn_generation += 1
                 self._turn_has_admitted_speech = True
                 self._admitted_start_sample = dec.start_sample
@@ -832,6 +953,8 @@ class OpenAIRealtimeSession:
             buffered_bytes=0,
             max_buffer_bytes=None,
         )
+        self._mark_upstream_received(time.monotonic())
+        self._input_generation += 1
         max_buf = self._settings.max_realtime_buffer_bytes
         if max_buf is not None and len(audio) > max_buf:
             raise RealtimeAdapterError(
@@ -882,6 +1005,9 @@ class OpenAIRealtimeSession:
             for v_event in vad_events:
                 if v_event.speech_started:
                     self._services.metrics.record_vad("started")
+                    self._mark_admitted_started(
+                        int(float(v_event.audio_start_ms) * 16)
+                    )
                     await self._send(
                         input_audio_buffer_speech_started(
                             session_id=self._session_id,
@@ -928,10 +1054,12 @@ class OpenAIRealtimeSession:
         ):
             # Auto-commit rollover for long streaming sessions
             await self._commit_audio()
+            self._input_generation += 1
 
         if self._asr is None:
             await self._ensure_asr_for_turn()
             self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
+            self._mark_admitted_started(self._item_start_sample)
             if self._bargein_pending_audio and self._asr is not None:
                 for pending_chunk in self._bargein_pending_audio:
                     await self._append_asr_audio(pending_chunk)
@@ -957,6 +1085,20 @@ class OpenAIRealtimeSession:
                 )
 
     async def _commit_audio(self, reason: str = "client") -> None:
+        """Run at most one commit owner for the current input item."""
+
+        async with self._commit_lock:
+            item_id = self._current_item_id
+            if (
+                self._commit_owner == item_id
+                or self._committed_input_generation == self._input_generation
+            ):
+                return
+            self._commit_owner = item_id
+            self._committed_input_generation = self._input_generation
+            await self._commit_audio_once(reason)
+
+    async def _commit_audio_once(self, reason: str) -> None:
         # If speech admission is active, flush any remaining sub-frame leftover.
         # The remainder is always below one 512-sample frame (append drains full
         # frames), so it never forms a VAD decision here: admission parks it in
@@ -1003,6 +1145,8 @@ class OpenAIRealtimeSession:
                 characters=0,
                 active_samples=0,
             )
+            self._record_first_hypothesis("missing")
+            self._reset_turn_observability()
             self._current_item_id = self._new_item_id()
             return
 
@@ -1031,6 +1175,8 @@ class OpenAIRealtimeSession:
                 characters=0,
                 active_samples=0,
             )
+            self._record_first_hypothesis("missing")
+            self._reset_turn_observability()
             self._current_item_id = self._new_item_id()
             return
 
@@ -1078,6 +1224,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0
+        self._record_first_hypothesis("missing")
+        self._reset_turn_observability()
         self._current_item_id = self._new_item_id()
 
     async def _discard_failed_commit(self) -> None:
@@ -1098,10 +1246,16 @@ class OpenAIRealtimeSession:
         self._unflushed_bytes = 0
         self._item_start_sample = self._timeline.accepted_samples
         self._item_end_sample = self._timeline.accepted_samples
+        self._record_first_hypothesis("failed")
+        self._reset_turn_observability()
+        self._committed_input_generation = self._input_generation
         self._current_item_id = self._new_item_id()
 
     async def _clear_audio(self) -> None:
+        if self._first_upstream_received_at is not None:
+            self._record_first_hypothesis("cancelled")
         self._turn_generation += 1
+        self._input_generation += 1
         self._turn_has_admitted_speech = False
         if self._speech_admission is not None:
             self._speech_admission.reset(next_sample=self._timeline.accepted_samples)
@@ -1122,6 +1276,7 @@ class OpenAIRealtimeSession:
         self._last_partial_text = ""
         self._item_start_sample = self._timeline.accepted_samples
         self._item_end_sample = self._timeline.accepted_samples
+        self._reset_turn_observability()
         self._current_item_id = self._new_item_id()
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
@@ -1889,50 +2044,183 @@ class OpenAIRealtimeSession:
             )
         return transcription_completed(item_id=self._current_item_id, transcript=transcript)
 
-    async def _build_units(self, canonical: str) -> tuple[AttributionUnit, ...]:
-        """Directly align the frozen completed text; never reuse ASR segments."""
-        item_start = self._item_start_sample
-        item_end = max(self._item_end_sample, self._item_start_sample)
-        item_samples = item_end - item_start
-        if not canonical:
-            return ()
-        if self._degraded_reason is not None:
-            return (self._unavailable_unit(canonical, item_start, item_end),)
+    def _start_alignment_task(
+        self,
+        *,
+        task_id: str,
+        epoch: int,
+        item_id: str,
+        transcript: str,
+        transcript_revision: int,
+        item_start: int,
+        item_end: int,
+        pcm16: bytes,
+        overflow: bool,
+        degraded_reason: str | None,
+    ) -> None:
+        """Run optional alignment after the text final has already been sent."""
+
+        task = asyncio.create_task(
+            self._finish_alignment(
+                task_id=task_id,
+                epoch=epoch,
+                item_id=item_id,
+                transcript=transcript,
+                transcript_revision=transcript_revision,
+                item_start=item_start,
+                item_end=item_end,
+                pcm16=pcm16,
+                overflow=overflow,
+                degraded_reason=degraded_reason,
+            )
+        )
+        self._alignment_tasks.add(task)
+        task.add_done_callback(self._alignment_tasks.discard)
+
+    async def _finish_alignment(
+        self,
+        *,
+        task_id: str,
+        epoch: int,
+        item_id: str,
+        transcript: str,
+        transcript_revision: int,
+        item_start: int,
+        item_end: int,
+        pcm16: bytes,
+        overflow: bool,
+        degraded_reason: str | None,
+    ) -> None:
+        try:
+            units, failure = await self._build_alignment_units(
+                item_id=item_id,
+                transcript=transcript,
+                item_start=item_start,
+                item_end=item_end,
+                pcm16=pcm16,
+                overflow=overflow,
+                degraded_reason=degraded_reason,
+            )
+            aligned = bool(units) and all(
+                unit.timing_quality == "aligned" for unit in units
+            )
+            if not transcript or aligned:
+                self._services.metrics.record_alignment_event("fixed_text_completed")
+                await self._send(
+                    alignment_done(
+                        task_id=task_id,
+                        epoch=epoch,
+                        utterance_id=item_id,
+                        transcript_revision=transcript_revision,
+                        metadata_revision=self._metadata_revision,
+                        sample_span=(item_start, item_end),
+                        codepoint_span=(0, len(transcript)),
+                        units=self._render_units(units),
+                    )
+                )
+            else:
+                self._services.metrics.record_alignment_event("fixed_text_unavailable")
+                await self._send(
+                    alignment_failed(
+                        task_id=task_id,
+                        epoch=epoch,
+                        utterance_id=item_id,
+                        transcript_revision=transcript_revision,
+                        metadata_revision=self._metadata_revision,
+                        code=failure or "alignment_unavailable",
+                        message="fixed-text alignment failed",
+                    )
+                )
+            await self._register_units(item_id, units)
+            if units:
+                self._metadata_revision += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("realtime alignment task failed")
+            with contextlib.suppress(Exception):
+                await self._send(
+                    alignment_failed(
+                        task_id=task_id,
+                        epoch=epoch,
+                        utterance_id=item_id,
+                        transcript_revision=transcript_revision,
+                        metadata_revision=self._metadata_revision,
+                        code="alignment_failed",
+                        message="fixed-text alignment failed",
+                    )
+                )
+
+    async def _build_alignment_units(
+        self,
+        *,
+        item_id: str,
+        transcript: str,
+        item_start: int,
+        item_end: int,
+        pcm16: bytes,
+        overflow: bool,
+        degraded_reason: str | None,
+    ) -> tuple[tuple[AttributionUnit, ...], str | None]:
+        """Align frozen text without ever replacing the ASR final."""
+
+        if not transcript:
+            return (), None
+
+        def unavailable(reason: str) -> tuple[tuple[AttributionUnit, ...], str]:
+            return (
+                (self._unavailable_unit(transcript, item_start, item_end),),
+                reason,
+            )
+
+        if degraded_reason is not None:
+            return unavailable(degraded_reason)
         aligner = self._services.text_aligner
+        item_samples = item_end - item_start
         if (
             aligner is None
             or self._diarization_epoch is None
-            or self._alignment_overflow
-            or len(self._alignment_pcm) // 2 != item_samples
+            or overflow
+            or len(pcm16) // 2 != item_samples
         ):
-            return (self._unavailable_unit(canonical, item_start, item_end),)
+            return unavailable("alignment_unavailable")
         try:
             async with self._services.alignment_admission.reserve():
-                result = await aligner.align(
-                    AlignmentRequest(
-                        epoch=self._diarization_epoch,
-                        item_id=self._current_item_id,
-                        pcm16=bytes(self._alignment_pcm),
-                        span=Span(item_start, item_end),
-                        text=canonical,
-                        language=self._config.get("language"),
+                async with asyncio.timeout(self._settings.request_timeout_seconds):
+                    result = await aligner.align(
+                        AlignmentRequest(
+                            epoch=self._diarization_epoch,
+                            item_id=item_id,
+                            pcm16=pcm16,
+                            span=Span(item_start, item_end),
+                            text=transcript,
+                            language=self._config.get("language"),
+                        )
                     )
-                )
         except AlignmentAdmissionFullError:
             self._services.metrics.record_alignment_event("fixed_text_overflow")
-            return (self._unavailable_unit(canonical, item_start, item_end),)
+            return unavailable("alignment_overloaded")
+        except TimeoutError:
+            return unavailable("alignment_timeout")
         if result.failure is not None:
-            return (self._unavailable_unit(canonical, item_start, item_end),)
-        return tuple(
-            AttributionUnit(
-                segment_uid=f"seg_{uuid4().hex[:12]}",
-                text_start=unit.text_start,
-                text_end=unit.text_end,
-                start_sample=unit.audio_span.start if unit.audio_span is not None else item_start,
-                end_sample=unit.audio_span.end if unit.audio_span is not None else item_end,
-                timing_quality="aligned",
-            )
-            for unit in result.units
+            return unavailable(result.failure)
+        return (
+            tuple(
+                AttributionUnit(
+                    segment_uid=f"seg_{uuid4().hex[:12]}",
+                    text_start=unit.text_start,
+                    text_end=unit.text_end,
+                    start_sample=(
+                        unit.audio_span.start if unit.audio_span is not None else item_start
+                    ),
+                    end_sample=(
+                        unit.audio_span.end if unit.audio_span is not None else item_end
+                    ),
+                    timing_quality="aligned",
+                )
+                for unit in result.units
+            ),
+            None,
         )
 
     def _unavailable_unit(self, canonical: str, item_start: int, item_end: int) -> AttributionUnit:
@@ -1959,13 +2247,15 @@ class OpenAIRealtimeSession:
             for unit in units
         ]
 
-    async def _register_units(self, units: tuple[AttributionUnit, ...]) -> None:
+    async def _register_units(
+        self, item_id: str, units: tuple[AttributionUnit, ...]
+    ) -> None:
         """Register immutable text units; actor events carry only speaker revisions."""
         if self._diarization is None or not units:
             return
         try:
             await self._diarization.register_completed(
-                self._current_item_id,
+                item_id,
                 tuple(
                     TextUnit(
                         id=unit.segment_uid,
@@ -2116,24 +2406,46 @@ class OpenAIRealtimeSession:
                 if event.kind == "partial":
                     if self._speech_admission is not None and not self._turn_has_admitted_speech:
                         continue
-                    current_text = event.text
+                    current_text = apply_light_itn(event.text)
+                    if not current_text:
+                        continue
+                    if self._first_partial_received_at is None:
+                        self._first_partial_received_at = time.monotonic()
+                    self._stable_prefix_codepoints = self._common_prefix_codepoints(
+                        self._last_hypothesis_text, current_text
+                    )
+                    self._hypothesis_revision += 1
+                    hypothesis_sequence = await self._send(
+                        transcription_hypothesis(
+                            task_id=self._task_id,
+                            epoch=self._wire_epoch,
+                            utterance_id=self._current_item_id,
+                            revision=self._hypothesis_revision,
+                            text=current_text,
+                            sample_span=(self._item_start_sample, self._item_end_sample),
+                            stable_prefix_codepoints=self._stable_prefix_codepoints,
+                        )
+                    )
+                    self._last_hypothesis_text = current_text
+                    if hypothesis_sequence is None:
+                        self._record_first_hypothesis("send_failed")
+                    else:
+                        self._record_first_hypothesis("partial")
                     if self._config.get("transcription_partial_mode", "delta") == "snapshot":
                         if snapshot_text == current_text:
                             self._services.metrics.record_realtime_partial("duplicate_suppressed")
-                            continue
-                        snapshot_revision += 1
-                        snapshot_text = current_text
-                        self._services.metrics.record_realtime_partial("snapshot_sent")
-                        await self._send(
-                            transcription_snapshot(
-                                item_id=self._current_item_id,
-                                revision=snapshot_revision,
-                                text=current_text,
+                        else:
+                            snapshot_revision += 1
+                            snapshot_text = current_text
+                            self._services.metrics.record_realtime_partial("snapshot_sent")
+                            await self._send(
+                                transcription_snapshot(
+                                    item_id=self._current_item_id,
+                                    revision=snapshot_revision,
+                                    text=current_text,
+                                )
                             )
-                        )
                     else:
-                        if not current_text:
-                            continue
                         if not current_text.startswith(self._last_partial_text):
                             # This wire event is append-only. Keep a changed suffix
                             # private until the terminal completed event can replace
@@ -2151,10 +2463,15 @@ class OpenAIRealtimeSession:
                     if self._asr is not asr:
                         break
                     self._last_partial_text = ""
+                    self._last_hypothesis_text = ""
                     snapshot_text = None
                     snapshot_revision = 0
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
+                    self._current_transcript_revision = max(
+                        1, self._hypothesis_revision + 1
+                    )
+                    self._record_first_hypothesis("missing")
                     self._services.metrics.record_realtime_turn(
                         mode="server_vad" if self._vad is not None else "manual",
                         commit_reason="vad_stop" if self._vad is not None else "client",
@@ -2168,60 +2485,53 @@ class OpenAIRealtimeSession:
                         ),
                     )
                     if self._diarization_enabled:
-                        # Extension mode: unique item, session-sample bounds and
-                        # immutable units; legacy .segment events are never sent
-                        # alongside the negotiated contract.
+                        item_id = self._current_item_id
+                        item_start = self._item_start_sample
+                        item_end = max(self._item_end_sample, self._item_start_sample)
                         await self._send(
                             conversation_item_created(
                                 session_id=self._session_id,
                                 transcript=norm_text,
-                                item_id=self._current_item_id,
+                                item_id=item_id,
                             )
                         )
-                        wait_finalized = getattr(asr, "wait_finalized", None)
-                        if callable(wait_finalized):
-                            await wait_finalized()
-                        units = await self._build_units(norm_text)
-                        self._services.metrics.record_alignment_event(
-                            "fixed_text_completed"
-                            if all(unit.timing_quality == "aligned" for unit in units)
-                            else "fixed_text_unavailable"
-                        )
+                        # Text final is deliberately independent from the slow
+                        # auxiliary aligner.  It carries no provisional units;
+                        # alignment.done/failed follows on its own lifecycle.
                         await self._send(
                             transcription_completed_extension(
-                                item_id=self._current_item_id,
+                                item_id=item_id,
                                 transcript=norm_text,
-                                audio_start_sample=self._item_start_sample,
-                                audio_end_sample=max(
-                                    self._item_end_sample, self._item_start_sample
-                                ),
-                                attribution_units=self._render_units(units),
+                                audio_start_sample=item_start,
+                                audio_end_sample=item_end,
+                                attribution_units=[],
                                 diagnostics={
                                     "alignment": {
                                         "status": (
-                                            "aligned"
-                                            if units
-                                            and all(
-                                                unit.timing_quality == "aligned"
-                                                for unit in units
-                                            )
-                                            else "unavailable"
+                                            "not_applicable"
+                                            if not norm_text
+                                            else "pending"
                                         ),
-                                        "reason": (
-                                            None
-                                            if units
-                                            and all(
-                                                unit.timing_quality == "aligned"
-                                                for unit in units
-                                            )
-                                            else self._degraded_reason or "alignment_unavailable"
-                                        ),
+                                        "reason": None if norm_text else "empty_transcript",
                                     },
-                                    "unit_count": len(units),
+                                    "unit_count": 0,
                                 },
                             )
                         )
-                        await self._register_units(units)
+                        self._start_alignment_task(
+                            task_id=self._task_id,
+                            epoch=self._wire_epoch,
+                            item_id=item_id,
+                            transcript=norm_text,
+                            transcript_revision=self._current_transcript_revision,
+                            item_start=item_start,
+                            item_end=item_end,
+                            pcm16=bytes(self._alignment_pcm),
+                            overflow=self._alignment_overflow,
+                            degraded_reason=self._degraded_reason,
+                        )
+                        self._alignment_pcm.clear()
+                        self._alignment_overflow = False
                         continue
                     await self._send(
                         conversation_item_created(
@@ -2254,6 +2564,7 @@ class OpenAIRealtimeSession:
                 elif event.kind == "error":
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
+                    self._record_first_hypothesis("failed")
                     await self._send(
                         transcription_failed(
                             item_id=self._current_item_id,

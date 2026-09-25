@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -49,6 +50,7 @@ from speechrail.http.routes.realtime_openai import (
     _send_json_with_deadline,
     create_openai_realtime_router,
 )
+from speechrail.realtime.speech_admission import AdmissionDecision
 
 
 class FakeTranscriber:
@@ -296,6 +298,24 @@ class _EarlyCompletionSession(FakeStreamingSession):
 class EarlyCompletionStreamingFactory(FakeStreamingFactory):
     def session_class(self) -> type[FakeStreamingSession]:
         return _EarlyCompletionSession
+
+
+class FailingStreamingSession(FakeStreamingSession):
+    """Emit a terminal worker error instead of a completed transcript."""
+
+    async def commit(self, want_segments: bool = False) -> None:
+        self.commits += 1
+        self.want_segments = want_segments
+        await self.events_queue.put(
+            StreamingAsrEvent(kind="error", error_code="backend_error")
+        )
+        await self.events_queue.put(None)
+        self._finished.set()
+
+
+class FailingStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[FakeStreamingSession]:
+        return FailingStreamingSession
 
 
 class FakeDiarizationSession:
@@ -620,6 +640,124 @@ def test_realtime_completed_turn_records_commit_tail_duration() -> None:
     reading = next(iter(duration.values()))
     assert reading["count"] == 1
     assert reading["avg"] > 0.0
+
+
+def test_realtime_first_hypothesis_metrics_distinguish_partial_missing_and_send_failure() -> None:
+    async def scenario(
+        partials: tuple[str, ...], *, fail_partial_send: bool
+    ) -> dict[str, object]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(partials=partials),
+            ),
+        )
+
+        async def send(event: dict[str, object]) -> int | None:
+            if fail_partial_send and event.get("type") == (
+                "speechrail.transcription.hypothesis"
+            ):
+                return None
+            return 1
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_first_hypothesis_metrics",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return services.metrics.render_json()
+
+    partial_metrics = asyncio.run(scenario(("abc",), fail_partial_send=False))
+    partial_counters = partial_metrics["counters"]
+    assert isinstance(partial_counters, dict)
+    assert partial_counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="partial"}'
+    ] == 1
+    partial_histograms = partial_metrics["histograms"]
+    assert isinstance(partial_histograms, dict)
+    latency = partial_histograms["speechrail_realtime_first_hypothesis_seconds"]
+    assert isinstance(latency, dict)
+    assert all(reading["count"] == 1 for reading in latency.values())
+    audio = partial_histograms["speechrail_realtime_first_hypothesis_audio_seconds"]
+    assert isinstance(audio, dict)
+    assert next(iter(audio.values()))["count"] == 1
+
+    missing_metrics = asyncio.run(scenario((), fail_partial_send=False))
+    missing_counters = missing_metrics["counters"]
+    assert isinstance(missing_counters, dict)
+    assert missing_counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="missing"}'
+    ] == 1
+    missing_histograms = missing_metrics["histograms"]
+    assert isinstance(missing_histograms, dict)
+    assert "speechrail_realtime_first_hypothesis_seconds" not in missing_histograms
+
+    failed_send_metrics = asyncio.run(scenario(("abc",), fail_partial_send=True))
+    failed_send_counters = failed_send_metrics["counters"]
+    assert isinstance(failed_send_counters, dict)
+    assert failed_send_counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="send_failed"}'
+    ] == 1
+
+
+def test_realtime_first_hypothesis_metrics_record_cancelled_and_failed() -> None:
+    async def scenario(*, cancel: bool) -> dict[str, object]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        factory = FakeStreamingFactory() if cancel else FailingStreamingFactory()
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=factory),
+        )
+
+        async def send(event: dict[str, object]) -> int:
+            return 1
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_terminal_metrics",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        if cancel:
+            await session.handle({"type": "input_audio_buffer.clear"})
+        else:
+            await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return services.metrics.render_json()
+
+    cancelled = asyncio.run(scenario(cancel=True))
+    cancelled_counters = cancelled["counters"]
+    assert isinstance(cancelled_counters, dict)
+    assert cancelled_counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="cancelled"}'
+    ] == 1
+
+    failed = asyncio.run(scenario(cancel=False))
+    failed_counters = failed["counters"]
+    assert isinstance(failed_counters, dict)
+    assert failed_counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="failed"}'
+    ] == 1
 
 
 def test_realtime_tts_records_complete_phase() -> None:
@@ -1529,6 +1667,37 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
     assert "".join(deltas) == "你好啊"
 
 
+def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> None:
+    client, factory = _client(partials=("你好", "你好啊"), completed_text="你好啊")
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events: list[dict[str, object]] = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    hypotheses = [
+        event
+        for event in events
+        if event["type"] == "speechrail.transcription.hypothesis"
+    ]
+    completed = events[-1]
+    assert [(event["revision"], event["text"]) for event in hypotheses] == [
+        (1, "你好"),
+        (2, "你好啊"),
+    ]
+    assert [event["stable_prefix_codepoints"] for event in hypotheses] == [0, 2]
+    assert {event["utterance_id"] for event in hypotheses} == {completed["item_id"]}
+    assert hypotheses[-1]["text"] == completed["transcript"]
+    assert len(factory.sessions) == 1
+
+
 def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
     """A non-append partial must not corrupt append-only SDK consumers."""
     client, _ = _client(partials=("abc", "adc"), completed_text="adc")
@@ -1624,10 +1793,7 @@ def test_realtime_snapshot_mode_emits_empty_rewrite_once_and_suppresses_duplicat
                 break
 
     snapshots = [event for event in events if event["type"] == "speechrail.transcription.snapshot"]
-    assert [(event["revision"], event["text"]) for event in snapshots] == [
-        (1, "abc"),
-        (2, ""),
-    ]
+    assert [(event["revision"], event["text"]) for event in snapshots] == [(1, "abc")]
 
 
 def test_realtime_snapshot_mode_rejects_changes_after_audio_started() -> None:
@@ -1677,6 +1843,8 @@ def test_realtime_snapshot_chunk_duration_drives_flush_threshold() -> None:
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
         )
+        hypothesis = socket.receive_json()
+        assert hypothesis["type"] == "speechrail.transcription.hypothesis"
         snapshot = socket.receive_json()
         assert snapshot["type"] == "speechrail.transcription.snapshot"
         assert snapshot["text"] == "今天我们"
@@ -1707,6 +1875,63 @@ def test_realtime_consecutive_commits_have_distinct_item_ids() -> None:
 
     assert len(set(committed_ids)) == 2
     assert committed_ids == created_ids == completed_ids
+
+
+def test_realtime_duplicate_commit_and_endpoint_emit_one_final() -> None:
+    async def scenario(*, use_vad_endpoint: bool) -> list[dict[str, object]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=FakeStreamingFactory()),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            return len(events)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_duplicate_commit",
+            send=send,
+        )
+        await session.start()
+        if use_vad_endpoint:
+            await session._ensure_asr_for_turn()
+            await session._handle_admission_decision(
+                AdmissionDecision(
+                    kind="start",
+                    start_sample=0,
+                    end_sample=800,
+                    pcm=b"\x00\x00" * 800,
+                )
+            )
+            decision = AdmissionDecision(kind="end", start_sample=0, end_sample=800)
+            await session._handle_admission_decision(decision)
+            await session._handle_admission_decision(decision)
+        else:
+            await session.handle(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            )
+            await session.handle({"type": "input_audio_buffer.commit"})
+            await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return events
+
+    for use_vad_endpoint in (False, True):
+        events = asyncio.run(scenario(use_vad_endpoint=use_vad_endpoint))
+        assert sum(
+            event["type"] == "input_audio_buffer.committed" for event in events
+        ) == 1
+        assert sum(
+            event["type"] == "conversation.item.input_audio_transcription.completed"
+            for event in events
+        ) == 1
 
 
 def test_realtime_session_update_preserves_effective_turn_detection() -> None:
@@ -1869,10 +2094,97 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
         ):
             pass
 
+        assert completed["attribution_units"] == []
+        alignment = socket.receive_json()
+    assert alignment["type"] == "speechrail.alignment.done"
+    assert alignment["utterance_id"] == completed["item_id"]
+    assert alignment["units"][0]["timing_quality"] == "aligned"
     assert aligner.request is not None
     assert aligner.request.text == "你好"
     assert len(aligner.request.pcm16) == 1600
-    assert completed["attribution_units"][0]["timing_quality"] == "aligned"
+
+
+def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
+    release = threading.Event()
+    alignment_started = threading.Event()
+
+    class SlowAligner:
+        async def align(self, request: AlignmentRequest) -> AlignmentResult:
+            alignment_started.set()
+            await asyncio.to_thread(release.wait)
+            return AlignmentResult(
+                request.epoch,
+                request.item_id,
+                (TextUnit("slow", 0, len(request.text), request.span),),
+            )
+
+    client, _ = _client(
+        diarization_engine=FakeDiarizationEngine(),
+        text_aligner=SlowAligner(),
+    )
+    try:
+        with client.websocket_connect("/v1/realtime") as socket:
+            socket.receive_json()
+            socket.send_json(
+                {
+                    "type": "transcription_session.update",
+                    "session": {"speechrail": {"diarization": {"enabled": True}}},
+                }
+            )
+            assert socket.receive_json()["type"] == "transcription_session.updated"
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
+            )
+            socket.send_json({"type": "input_audio_buffer.commit"})
+            while (completed := socket.receive_json())["type"] != (
+                "conversation.item.input_audio_transcription.completed"
+            ):
+                pass
+
+            assert completed["transcript"] == "你好"
+            assert completed["attribution_units"] == []
+            assert alignment_started.wait(1.0)
+            assert not release.is_set()
+            release.set()
+            alignment = socket.receive_json()
+            assert alignment["type"] == "speechrail.alignment.done"
+            assert alignment["units"][0]["timing_quality"] == "aligned"
+    finally:
+        release.set()
+
+
+def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
+    class FailingAligner:
+        async def align(self, request: AlignmentRequest) -> AlignmentResult:
+            return AlignmentResult(request.epoch, request.item_id, (), "text_mismatch")
+
+    client, _ = _client(
+        diarization_engine=FakeDiarizationEngine(),
+        text_aligner=FailingAligner(),
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "transcription_session.updated"
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (completed := socket.receive_json())["type"] != (
+            "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+        assert completed["transcript"] == "你好"
+        failed = socket.receive_json()
+
+    assert failed["type"] == "speechrail.alignment.failed"
+    assert failed["utterance_id"] == completed["item_id"]
+    assert failed["error"]["code"] == "text_mismatch"
 
 
 def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> None:
@@ -2997,6 +3309,8 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
         )
+        hypothesis1 = socket.receive_json()
+        assert hypothesis1["type"] == "speechrail.transcription.hypothesis"
         delta1 = socket.receive_json()
         assert delta1["type"] == "conversation.item.input_audio_transcription.delta"
         assert delta1["delta"] == "Hello"
@@ -3005,6 +3319,8 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
         )
+        hypothesis2 = socket.receive_json()
+        assert hypothesis2["type"] == "speechrail.transcription.hypothesis"
         delta2 = socket.receive_json()
         assert delta2["type"] == "conversation.item.input_audio_transcription.delta"
         # Must be incremental diff " world", NOT full "Hello world"!
