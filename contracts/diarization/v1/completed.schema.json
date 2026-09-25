@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://speechrail.local/contracts/diarization/v1/completed.schema.json",
   "title": "SpeechRail extension-mode transcription completed event (SPK-E2E-1, version 1)",
-  "description": "conversation.item.input_audio_transcription.completed as sent after speechrail.diarization.v1 negotiation: unique item_id, session-sample audio bounds and immutable attribution units. Sample ranges are 16 kHz integer sample indexes in the SpeechRail session-global domain. Attribution units must partition transcript with no gaps or overlaps (semantic rule; see contracts/realtime-openai.md).",
+  "description": "conversation.item.input_audio_transcription.completed as sent after speechrail.diarization.v1 negotiation: unique item_id, session-sample audio bounds, and NOT the attribution units. The text final is delivered before the slow aligner runs, so it carries status=pending (or not_applicable for an empty transcript) and an empty attribution_units array. Aligned units follow on a separate speechrail.alignment.done event and are then revised in place by speechrail.diarization.updated. Sample ranges are 16 kHz integer sample indexes in the SpeechRail session-global domain; text offsets are codepoint [start,end) ranges into the frozen transcript revision. Alignment units must partition the transcript with no gaps or overlaps (semantic rule; see contracts/realtime-openai.md).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -26,8 +26,8 @@
     "audio_end_sample": {"$ref": "#/$defs/sample"},
     "attribution_units": {
       "type": "array",
-      "maxItems": 4096,
-      "items": {"$ref": "#/$defs/unit"}
+      "maxItems": 0,
+      "description": "Always empty on the text final; the aligned units arrive on speechrail.alignment.done."
     },
     "diagnostics": {
       "type": "object",
@@ -39,7 +39,7 @@
           "additionalProperties": false,
           "required": ["status", "reason"],
           "properties": {
-            "status": {"enum": ["aligned", "unavailable", "not_applicable"]},
+            "status": {"enum": ["pending", "not_applicable"]},
             "reason": {"type": ["string", "null"], "minLength": 1}
           }
         },
@@ -48,32 +48,6 @@
     }
   },
   "$defs": {
-    "sample": {"type": "integer", "minimum": 0},
-    "segment_uid": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[ -~]+$"
-    },
-    "unit": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "segment_uid",
-        "text_start",
-        "text_end",
-        "audio_start_sample",
-        "audio_end_sample",
-        "timing_quality"
-      ],
-      "properties": {
-        "segment_uid": {"$ref": "#/$defs/segment_uid"},
-        "text_start": {"type": "integer", "minimum": 0},
-        "text_end": {"type": "integer", "minimum": 0},
-        "audio_start_sample": {"$ref": "#/$defs/sample"},
-        "audio_end_sample": {"$ref": "#/$defs/sample"},
-        "timing_quality": {"enum": ["aligned", "unavailable"]}
-      }
-    }
+    "sample": {"type": "integer", "minimum": 0}
   }
 }

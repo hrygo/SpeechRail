@@ -17,7 +17,7 @@ from speechrail.domain.diarization import (
     DiarizationReadiness,
 )
 from speechrail.domain.diarization.ports import ActivitySession
-from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, Span
+from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, SampleSpan
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
 
 MODEL_REVISION = "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
@@ -330,7 +330,7 @@ def _update_from_response(
             )
         frames.append(
             ActivityFrame(
-                span=Span(start, min(end, accepted)),
+                span=SampleSpan(start, min(end, accepted)),
                 scores=tuple(float(score) for score in scores),  # type: ignore[arg-type]
                 active_slots=frozenset(
                     slot for slot, score in enumerate(scores) if float(score) >= _ACTIVITY_THRESHOLD
@@ -340,7 +340,7 @@ def _update_from_response(
     return ActivityUpdate(
         epoch=epoch,
         step_id=step_id,
-        replace_span=Span(replace_start, processed),
+        replace_span=SampleSpan(replace_start, processed),
         frames=tuple(frames),
         processed_through=processed,
         stable_through=stable,

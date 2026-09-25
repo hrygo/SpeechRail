@@ -15,7 +15,6 @@ from speechrail.backends.qwen3_worker import (
     Qwen3Engine,
     WorkerIdentity,
     _segments,
-    _to_streaming_segments,
     serve,
 )
 from speechrail.config.model_catalog import QuantizationSpec
@@ -336,7 +335,6 @@ def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
         chunk_duration_ms=2_000,
         max_context_sec=9.5,
         max_new_tokens=128,
-        capture_alignment=False,
     )
 
     assert init_kwargs == [
@@ -357,7 +355,6 @@ class _FakeEngine:
         del model_dir, dtype, max_new_tokens
         self.identity = type("Identity", (), {"device": device, "dtype": "float16"})()
         self.sessions: dict[str, list[bytes]] = {}
-        self.align_canonical: list[str] = []
 
     def transcribe(
         self,
@@ -370,12 +367,6 @@ class _FakeEngine:
         del audio, language, prompt, include_timestamps
         return "ok", "zh", []
 
-    def align_text(
-        self, audio: bytes, *, text: str, language: str
-    ) -> list[dict[str, object]]:
-        del audio, text, language
-        return [{"text": "你好", "start": 0.0, "end": 0.5}]
-
     def open_session(
         self,
         *,
@@ -385,10 +376,9 @@ class _FakeEngine:
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
-        capture_alignment: bool = True,
     ) -> None:
         del language, context, chunk_duration_ms, max_context_sec
-        del max_new_tokens, capture_alignment
+        del max_new_tokens
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []
@@ -409,13 +399,6 @@ class _FakeEngine:
             raise RuntimeError(f"no active session: {session_id}")
         chunks = self.sessions.pop(session_id)
         return f"text:{len(chunks)}", "zh"
-
-    def align_session_audio(
-        self, session_id: str, canonical_text: str = "", language: str = ""
-    ) -> list[dict[str, object]]:
-        self.align_canonical.append(canonical_text)
-        del session_id, language
-        return [{"text": "你好", "start_ms": 0, "end_ms": 500}]
 
     def close_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
@@ -577,7 +560,6 @@ def test_worker_forwards_task_streaming_policy_to_engine() -> None:
             "chunk_duration_ms": 500,
             "max_context_sec": 6.5,
             "max_new_tokens": 96,
-            "capture_alignment": False,
         },
     ]
     responses = _run_serve(frames, engine=engine)
@@ -591,7 +573,6 @@ def test_worker_forwards_task_streaming_policy_to_engine() -> None:
             "chunk_duration_ms": 500,
             "max_context_sec": 6.5,
             "max_new_tokens": 96,
-            "capture_alignment": False,
         }
     ]
 
@@ -624,7 +605,7 @@ def test_worker_commit_uses_only_that_sessions_audio() -> None:
     assert list(engine.sessions) == ["b"]
 
 
-def test_worker_commit_want_segments_produces_segments() -> None:
+def test_worker_commit_emits_no_segments_and_leaves_alignment_out() -> None:
     engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
     frames = [
         _start_frame(),
@@ -640,240 +621,9 @@ def test_worker_commit_want_segments_produces_segments() -> None:
     responses = _run_serve(frames, engine=engine)
     completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
     assert len(completed) == 1
-    assert completed[0]["segments"] == [{"text": "你好", "start_ms": 0, "end_ms": 500}]
-
-
-def test_worker_align_text_returns_raw_forced_alignment_tokens() -> None:
-    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
-    frames = [
-        _start_frame(),
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "align_text",
-            "request_id": "align-1",
-            "sample_rate": 16_000,
-            "channels": 1,
-            "sample_width_bytes": 2,
-            "language": "zh",
-            "text": "你好",
-            "pcm_b64": "AAA=",
-        },
-    ]
-
-    responses = _run_serve(frames, engine=engine)
-
-    assert responses[-1] == {
-        "version": PROTOCOL_VERSION,
-        "type": "align_result",
-        "request_id": "align-1",
-        "tokens": [{"text": "你好", "start": 0.0, "end": 0.5}],
-    }
-
-
-def test_worker_commit_without_want_segments_keeps_empty() -> None:
-    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
-    frames = [
-        _start_frame(),
-        {"version": PROTOCOL_VERSION, "type": "session.open", "session_id": "a", "language": "zh"},
-        {"version": PROTOCOL_VERSION, "type": "audio.append", "session_id": "a", "pcm_b64": "AAA="},
-        {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "a"},
-    ]
-    responses = _run_serve(frames, engine=engine)
-    completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
-    assert len(completed) == 1
-    assert completed[0]["segments"] == []
-
-
-class _RecordingAlignEngine(_FakeEngine):
-    def __init__(self, model_dir: Path, device: str, dtype: str, max_new_tokens: int) -> None:
-        super().__init__(model_dir, device, dtype, max_new_tokens)
-        self.recorded_language: str | None = None
-        self.recorded_context: str | None = None
-
-    def open_session(
-        self,
-        *,
-        session_id: str,
-        language: str,
-        context: str,
-        chunk_duration_ms: int = 1_000,
-        max_context_sec: float = 12.64,
-        max_new_tokens: int = 256,
-        capture_alignment: bool = True,
-    ) -> None:
-        super().open_session(
-            session_id=session_id,
-            language=language,
-            context=context,
-            chunk_duration_ms=chunk_duration_ms,
-            max_context_sec=max_context_sec,
-            max_new_tokens=max_new_tokens,
-            capture_alignment=capture_alignment,
-        )
-        self.recorded_language = language
-        self.recorded_context = context
-
-
-def test_worker_commit_passes_canonical_text_to_align() -> None:
-    engine = _RecordingAlignEngine(Path("/tmp"), "mps", "float16", 512)
-    frames = [
-        _start_frame(),
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "session.open",
-            "session_id": "a",
-            "language": "zh",
-            "context": "热词",
-        },
-        {"version": PROTOCOL_VERSION, "type": "audio.append", "session_id": "a", "pcm_b64": "AAA="},
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "commit",
-            "session_id": "a",
-            "want_segments": True,
-        },
-    ]
-    responses = _run_serve(frames, engine=engine)
-    completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
-    assert len(completed) == 1
-    assert engine.align_canonical == [completed[0]["text"]]
-
-
-def _align_engine(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    raw_words: list[tuple[str, float, float]],
-) -> tuple[Qwen3Engine, list[tuple[object, ...]]]:
-    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
-    align_calls: list[tuple[object, ...]] = []
-
-    class FakeAlignSession:
-        def __init__(self, *, model: str) -> None:
-            del model
-            self.model = SimpleNamespace()
-            self.model_info = {
-                "dtype": "float16",
-                "model_type": "qwen3_asr",
-                "variant": "asr",
-            }
-            self._state = SimpleNamespace(text="")
-
-        def init_streaming(self, **kwargs: object) -> SimpleNamespace:
-            del kwargs
-            return self._state
-
-        def feed_audio(self, wave: object, state: SimpleNamespace) -> SimpleNamespace:
-            del wave
-            return state
-
-        def transcribe(self, audio: object, **kwargs: object) -> SimpleNamespace:
-            del audio, kwargs
-            raise AssertionError("forced alignment must not invoke ASR transcribe")
-
-    class FakeForcedAligner:
-        def __init__(self, *, model_path: str) -> None:
-            align_calls.append(("init", model_path))
-
-        def align(
-            self, waveform: object, text: str, *, language: str
-        ) -> list[SimpleNamespace]:
-            align_calls.append(("align", waveform, text, language))
-            return [
-                SimpleNamespace(text=token, start_time=start, end_time=end)
-                for token, start, end in raw_words
-            ]
-
-    runtime = ModuleType("mlx_qwen3_asr")
-    runtime.Session = FakeAlignSession  # type: ignore[attr-defined]
-    runtime.ForcedAligner = FakeForcedAligner  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
-    engine = Qwen3Engine(
-        Path("/tmp"), "mps", "float16", aligner_model_dir=Path("/tmp/aligner")
-    )
-    return engine, align_calls
-
-
-def test_align_session_audio_uses_fixed_text_forced_aligner_without_second_asr(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine, calls = _align_engine(
-        monkeypatch,
-        raw_words=[("同意", 0.0, 1.0)],
-    )
-    engine.open_session(session_id="s", language="zh", context="热词")
-    engine.append_audio("s", b"\x00\x00" * 1600)
-
-    segments = engine.align_session_audio("s", canonical_text="同意。", language="zh")
-
-    assert calls[0] == ("init", "/tmp/aligner")
-    assert calls[1][0] == "align"
-    assert calls[1][2:] == ("同意。", "zh")
-    assert segments == [{"text": "同意", "start_ms": 0, "end_ms": 1000}]
-
-
-def test_align_session_audio_is_unavailable_when_no_local_aligner_is_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine, calls = _align_engine(
-        monkeypatch,
-        raw_words=[("同意", 0.0, 1.0)],
-    )
-    engine._aligner_model_dir = None  # type: ignore[attr-defined]
-    engine.open_session(session_id="s", language="auto", context="热词")
-    engine.append_audio("s", b"\x00\x00" * 1600)
-
-    assert engine.align_session_audio("s", canonical_text="同意。", language="auto") == []
-    assert calls == []
-
-
-def test_fixed_text_alignment_drops_zero_duration_quantized_tokens(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine, _ = _align_engine(
-        monkeypatch,
-        raw_words=[("你", 0.0, 0.5), ("好", 0.5, 0.5), ("。", 0.5, 1.0)],
-    )
-
-    aligned = engine.align_text(b"\x00\x00" * 1600, text="你好。", language="zh")
-
-    assert aligned == [
-        {"text": "你", "start": 0.0, "end": 0.5},
-        {"text": "。", "start": 0.5, "end": 1.0},
-    ]
-
-
-def test_align_session_audio_rejects_malformed_forced_aligner_items(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine, _ = _align_engine(
-        monkeypatch,
-        raw_words=[("同意", 0.0, 1.0)],
-    )
-    engine.open_session(session_id="s", language="zh", context="热词")
-    engine.append_audio("s", b"\x00\x00" * 1600)
-    engine._forced_aligner = object()  # type: ignore[attr-defined]
-
-    assert engine.align_session_audio("s", canonical_text="不同意。", language="zh") == []
-
-
-def test_to_streaming_segments_converts_seconds_to_milliseconds() -> None:
-    raw = [
-        {"text": "你好", "start": 0.0, "end": 0.5},
-        {"text": "   ", "start": 0.5, "end": 1.0},
-        {"text": "世界", "start": 1.5, "end": 2.75},
-    ]
-    assert _to_streaming_segments(raw) == [
-        {"text": "你好", "start_ms": 0, "end_ms": 500},
-        {"text": "世界", "start_ms": 1500, "end_ms": 2750},
-    ]
-
-
-def test_to_streaming_segments_drops_missing_or_empty_text() -> None:
-    raw = [
-        {"text": "", "start": 0.0, "end": 0.5},
-        {"text": "ok", "start": 0.5, "end": 1.0},
-    ]
-    assert _to_streaming_segments(raw) == [{"text": "ok", "start_ms": 500, "end_ms": 1000}]
+    # 对齐责任已迁至独立 alignment worker. ASR 不再就地返回 segments.
+    assert "segments" not in completed[0]
+    assert "align_result" not in {f.get("type") for f in responses}
 
 
 def test_segments_skips_invalid_items_and_defaults_missing_timestamps() -> None:
@@ -889,87 +639,6 @@ def test_segments_skips_invalid_items_and_defaults_missing_timestamps() -> None:
             ]
 
     assert _segments(_Result()) == [{"text": "ok", "start": 0.0, "end": 1.5}]
-
-
-def test_to_streaming_segments_skips_invalid_timestamps_and_non_string_text() -> None:
-    raw = [
-        {"text": "nan", "start": float("nan"), "end": 0.5},
-        {"text": "inf", "start": 0.5, "end": float("inf")},
-        {"text": "negative", "start": -0.5, "end": 0.5},
-        {"text": "object", "start": object(), "end": 0.5},
-        {"text": 123, "start": 0.5, "end": 1.0},
-        {"text": "ok", "end": 1.5},
-    ]
-
-    assert _to_streaming_segments(raw) == [{"text": "ok", "start_ms": 0, "end_ms": 1500}]
-
-
-def test_to_streaming_segments_enforces_twenty_millisecond_minimum_duration() -> None:
-    raw = [{"text": "x", "start": 0.0, "end": 0.001}]
-
-    assert _to_streaming_segments(raw) == [{"text": "x", "start_ms": 0, "end_ms": 20}]
-
-
-def test_to_streaming_segments_counts_word_separator_in_clause_limit() -> None:
-    raw = [
-        {"text": "a" * 20, "start": 0.0, "end": 0.1},
-        {"text": "b" * 20, "start": 0.1, "end": 0.2},
-    ]
-
-    assert _to_streaming_segments(raw) == [
-        {"text": "a" * 20, "start_ms": 0, "end_ms": 100},
-        {"text": "b" * 20, "start_ms": 100, "end_ms": 200},
-    ]
-
-
-def test_to_streaming_segments_merges_at_pause_and_duration_boundaries() -> None:
-    raw = [
-        {"text": "a", "start": 0.0, "end": 0.1},
-        {"text": "b", "start": 0.6, "end": 10.0},
-    ]
-
-    assert _to_streaming_segments(raw) == [{"text": "a b", "start_ms": 0, "end_ms": 10000}]
-
-
-def test_to_streaming_segments_splits_after_pause_over_five_hundred_ms() -> None:
-    raw = [
-        {"text": "a", "start": 0.0, "end": 0.1},
-        {"text": "b", "start": 0.601, "end": 0.7},
-    ]
-
-    assert _to_streaming_segments(raw) == [
-        {"text": "a", "start_ms": 0, "end_ms": 100},
-        {"text": "b", "start_ms": 601, "end_ms": 700},
-    ]
-
-
-def test_to_streaming_segments_merges_contiguous_chinese_tokens_and_handles_zero_duration() -> None:
-    raw = [
-        {"text": "啥", "start": 187.63, "end": 187.63},  # zero duration
-        {"text": "鸡", "start": 187.64, "end": 187.72},
-        {"text": "巴", "start": 187.73, "end": 187.85},
-        {"text": "玩", "start": 187.86, "end": 187.95},
-        {"text": "意", "start": 187.96, "end": 188.08},
-        {"text": "儿", "start": 188.09, "end": 188.20},
-    ]
-    result = _to_streaming_segments(raw)
-    assert len(result) == 1
-    assert result[0] == {
-        "text": "啥鸡巴玩意儿",
-        "start_ms": 187630,
-        "end_ms": 188200,
-    }
-
-
-def test_to_streaming_segments_splits_on_sentence_punctuation() -> None:
-    raw = [
-        {"text": "好的。", "start": 0.0, "end": 0.5},
-        {"text": "没问题！", "start": 0.6, "end": 1.2},
-    ]
-    result = _to_streaming_segments(raw)
-    assert len(result) == 2
-    assert result[0] == {"text": "好的。", "start_ms": 0, "end_ms": 500}
-    assert result[1] == {"text": "没问题！", "start_ms": 600, "end_ms": 1200}
 
 
 def test_worker_cancel_closes_only_that_session() -> None:

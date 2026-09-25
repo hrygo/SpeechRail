@@ -176,7 +176,6 @@ class Qwen3BackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
-    aligner_model_dir: Path | None = None
     dtype: Literal["float16", "float32", "int8"] = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
@@ -202,14 +201,6 @@ class Qwen3BackendConfig:
         object.__setattr__(
             self, "model_dir", validate_snapshot(self.model_dir, repository_root=repository_root)
         )
-        if self.aligner_model_dir is not None:
-            object.__setattr__(
-                self,
-                "aligner_model_dir",
-                validate_forced_aligner_snapshot(
-                    self.aligner_model_dir, repository_root=repository_root
-                ),
-            )
 
     def command(self) -> list[str]:
         cmd = [
@@ -231,8 +222,6 @@ class Qwen3BackendConfig:
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
-        if self.aligner_model_dir is not None:
-            cmd.extend(["--aligner-model-dir", str(self.aligner_model_dir)])
         return cmd
 
     def worker_spec(self) -> WorkerProcessSpec:
@@ -376,51 +365,6 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 include_timestamps,
                 resolved_request_id,
             )
-
-    async def align_text(
-        self, pcm: bytes, *, text: str, language: str | None
-    ) -> tuple[tuple[str, float, float], ...]:
-        """Ask the already-running worker to align immutable text to PCM16."""
-
-        if not pcm or len(pcm) % 2 or not text:
-            raise ValueError("fixed-text alignment requires non-empty PCM16 and text")
-        request_id = f"align_{uuid4().hex}"
-        ticket = self._new_batch_ticket()
-        async with self._batch_window(ticket):
-            await self.start()
-            result = await self._shared_owner.request(
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "align_text",
-                    "request_id": request_id,
-                    "sample_rate": 16_000,
-                    "channels": 1,
-                    "sample_width_bytes": 2,
-                    "language": language or "auto",
-                    "text": text,
-                },
-                binary=pcm,
-            )
-        if result.get("type") != "align_result" or result.get("request_id") != request_id:
-            raise RuntimeError(error_frame_message(result, "worker_alignment_failed"))
-        raw_tokens = result.get("tokens")
-        if not isinstance(raw_tokens, list):
-            raise RuntimeError("worker_alignment_invalid")
-        tokens: list[tuple[str, float, float]] = []
-        for item in raw_tokens:
-            if not isinstance(item, Mapping):
-                raise RuntimeError("worker_alignment_invalid")
-            token, start, end = item.get("text"), item.get("start"), item.get("end")
-            if (
-                not isinstance(token, str)
-                or isinstance(start, bool)
-                or not isinstance(start, (int, float))
-                or isinstance(end, bool)
-                or not isinstance(end, (int, float))
-            ):
-                raise RuntimeError("worker_alignment_invalid")
-            tokens.append((token, float(start), float(end)))
-        return tuple(tokens)
 
     async def transcribe_stream(
         self,

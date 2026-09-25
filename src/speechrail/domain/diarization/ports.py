@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Protocol
 
-from .types import ActivityUpdate, AlignmentRequest, AlignmentResult
+from .types import ActivityUpdate
 
 
 class ActivitySession(Protocol):
@@ -20,7 +20,3 @@ class ActivitySession(Protocol):
 
 class StreamingActivityPort(Protocol):
     def open(self, *, epoch: str) -> ActivitySession: ...
-
-
-class AlignTextPort(Protocol):
-    async def align(self, request: AlignmentRequest) -> AlignmentResult: ...

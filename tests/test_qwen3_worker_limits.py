@@ -5,6 +5,7 @@ import base64
 import pytest
 
 import speechrail.backends.qwen3_worker as worker
+from speechrail.runtime import limits
 from speechrail.runtime.worker_protocol import ProtocolError
 
 
@@ -55,5 +56,7 @@ def test_decode_request_rejects_batch_pcm_over_limit(
 
 
 def test_batch_limit_covers_configured_default_audio_without_allocating_pcm() -> None:
-    assert worker.MAX_PCM_BYTES == 40 * 1024 * 1024
+    # 全局共享 40 MiB 上限 (非每角色各占一份)
+    assert worker.MAX_PCM_BYTES is limits.MAX_PCM_BYTES
+    assert limits.MAX_PCM_BYTES == 40 * 1024 * 1024
     assert worker.MAX_BATCH_PCM_BYTES >= 3_600 * 32_000

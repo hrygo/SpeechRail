@@ -23,17 +23,14 @@ class _IsolationEngine:
         max_new_tokens: int,
         *,
         fail_finish: set[str] | None = None,
-        fail_align: set[str] | None = None,
         empty_text: set[str] | None = None,
     ) -> None:
         del model_dir, max_new_tokens
         self.identity = SimpleNamespace(device=device, dtype=dtype)
         self.sessions: dict[str, list[bytes]] = {}
-        self.align_buffers: dict[str, bytearray] = {}
         self.open_args: dict[str, tuple[float, float, int, int]] = {}
         self.close_calls: list[str] = []
         self.fail_finish = fail_finish or set()
-        self.fail_align = fail_align or set()
         self.empty_text = empty_text or set()
 
     def open_session(
@@ -45,13 +42,11 @@ class _IsolationEngine:
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
-        capture_alignment: bool = True,
     ) -> None:
-        del language, context, capture_alignment
+        del language, context
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []
-        self.align_buffers[session_id] = bytearray()
         self.open_args[session_id] = (
             chunk_duration_ms,
             max_context_sec,
@@ -62,7 +57,6 @@ class _IsolationEngine:
         if session_id not in self.sessions:
             raise RuntimeError(f"no active session: {session_id}")
         self.sessions[session_id].append(audio)
-        self.align_buffers[session_id].extend(audio)
         return f"partial:{len(self.sessions[session_id])}"
 
     def partial_text(self, session_id: str) -> str:
@@ -79,15 +73,9 @@ class _IsolationEngine:
             return "", "zh"
         return f"text:{len(self.sessions[session_id])}", "zh"
 
-    def align_session_audio(self, session_id: str) -> list[dict[str, object]]:
-        if session_id in self.fail_align:
-            raise RuntimeError(f"alignment failed: {session_id}")
-        return [{"text": "aligned", "start_ms": 0, "end_ms": 20}]
-
     def close_session(self, session_id: str) -> None:
         self.close_calls.append(session_id)
         self.sessions.pop(session_id, None)
-        self.align_buffers.pop(session_id, None)
 
     def active_session_count(self) -> int:
         return len(self.sessions)
@@ -265,65 +253,17 @@ def test_commit_finish_failure_closes_only_failed_session_and_allows_next_commit
         if frame.get("type") == "finished" and frame.get("session_id") == "b"
     ]
     assert engine.active_session_count() == 0
-    assert engine.align_buffers == {}
+    assert engine.sessions == {}
     assert engine.close_calls == ["a", "b"]
 
-
-def test_commit_alignment_failure_closes_session_without_pseudo_success() -> None:
-    engine = _IsolationEngine(Path("/tmp"), "mps", "float16", 512, fail_align={"a"})
-    responses = _run_serve(
-        [
-            _start_frame(),
-            _open_frame("a"),
-            _open_frame("b"),
-            _append_frame("a"),
-            _append_frame("b"),
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "commit",
-                "session_id": "a",
-                "want_segments": True,
-            },
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "b"},
-        ],
-        engine,
-    )
-
-    assert [
-        frame
-        for frame in responses
-        if frame.get("type") == "error" and frame.get("session_id") == "a"
-    ] == [
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "error",
-            "code": "worker_inference_error",
-            "session_id": "a",
-        }
-    ]
-    assert not [
-        frame
-        for frame in responses
-        if frame.get("session_id") == "a" and frame.get("type") == "finished"
-    ]
-    assert engine.active_session_count() == 0
-    assert engine.align_buffers == {}
-    assert engine.close_calls == ["a", "b"]
-
-
-def test_empty_commit_finishes_and_releases_alignment_buffer() -> None:
+def test_empty_commit_finishes_and_releases_session() -> None:
     engine = _IsolationEngine(Path("/tmp"), "mps", "float16", 512, empty_text={"a"})
     responses = _run_serve(
         [
             _start_frame(),
             _open_frame("a"),
             _append_frame("a"),
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "commit",
-                "session_id": "a",
-                "want_segments": True,
-            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "a"},
         ],
         engine,
     )
@@ -343,10 +283,10 @@ def test_empty_commit_finishes_and_releases_alignment_buffer() -> None:
         }
     ]
     assert engine.active_session_count() == 0
-    assert engine.align_buffers == {}
+    assert engine.sessions == {}
 
 
-def test_commit_without_segments_releases_alignment_buffer() -> None:
+def test_commit_releases_session_resources() -> None:
     engine = _IsolationEngine(Path("/tmp"), "mps", "float16", 512)
     responses = _run_serve(
         [
@@ -360,7 +300,7 @@ def test_commit_without_segments_releases_alignment_buffer() -> None:
 
     assert not [frame for frame in responses if frame.get("type") == "error"]
     assert engine.active_session_count() == 0
-    assert engine.align_buffers == {}
+    assert engine.sessions == {}
 
 
 def test_malformed_start_returns_invalid_start_without_constructing_engine() -> None:

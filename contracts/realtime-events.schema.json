@@ -894,7 +894,7 @@
             "units": {
               "type": "array",
               "items": {
-                "type": "object"
+                "$ref": "#/$defs/alignment_unit"
               }
             }
           },
@@ -955,6 +955,54 @@
         }
       ],
       "unevaluatedProperties": false
+    },
+    "alignment_unit": {
+      "description": "One fixed-text unit on the session sample axis. text_start/text_end are codepoint offsets into the frozen transcript revision; granularity states which boundary the aligner actually evidenced (never phrase-split character).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_uid",
+        "text_start",
+        "text_end",
+        "audio_start_sample",
+        "audio_end_sample",
+        "timing_quality",
+        "granularity"
+      ],
+      "properties": {
+        "segment_uid": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "audio_start_sample": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "audio_end_sample": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timing_quality": {
+          "enum": [
+            "aligned",
+            "unavailable"
+          ]
+        },
+        "granularity": {
+          "enum": [
+            "segment",
+            "word",
+            "character"
+          ]
+        }
+      }
     },
     "speaker_unit": {
       "type": "object",

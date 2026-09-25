@@ -82,11 +82,11 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import active_model_catalog
+from speechrail.domain.alignment import AlignmentGranularity, AlignmentRequest
 from speechrail.domain.diarization import (
-    AlignmentRequest,
     Attribution,
     DiarizationError,
-    Span,
+    SampleSpan,
     TextUnit,
 )
 from speechrail.domain.diarization.attribution import AttributionLedger
@@ -121,6 +121,8 @@ from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmiss
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
+from speechrail.runtime.limits import MAX_ALIGNMENT_PCM_BYTES
+from speechrail.runtime.pcm_buffer import BoundedPcmBuffer, PcmBufferOverflowError
 from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
     WorkClass,
@@ -131,7 +133,6 @@ SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
 _MAX_UPDATES_PER_EVENT = 256
 _MAX_TTS_REQUEST_IDS = 256
-_MAX_ALIGNMENT_PCM_BYTES = 30 * 32_000
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 # Each append awaiting the model's acceptance keeps its bounded packet so the
 # transcript can be echoed after - never before - that acceptance.
@@ -244,9 +245,9 @@ class OpenAIRealtimeSession:
         self._diarization_resources: AsyncExitStack | None = None
         self._diarization_epoch: str | None = None
         # Fixed-text alignment owns only the current ASR item's normalized PCM.
-        # It is never retained after that item completes and is hard-capped at
-        # 30 seconds, independently of generic WebSocket buffering.
-        self._alignment_pcm = bytearray()
+        # It is a short-term pin: bounded, released on commit/failure/cancel, and
+        # never written to disk, independently of generic WebSocket buffering.
+        self._alignment_pcm = BoundedPcmBuffer(MAX_ALIGNMENT_PCM_BYTES)
         self._alignment_overflow = False
         self._alignment_tasks: set[asyncio.Task[None]] = set()
         self._buffered_audio_bytes = 0
@@ -324,6 +325,20 @@ class OpenAIRealtimeSession:
                 self._settings.qwen3_streaming_chunk_duration_ms,
             )
         ) / 1_000
+
+    def _alignment_granularity(self) -> AlignmentGranularity:
+        """Return the requested alignment granularity, defaulting to segments.
+
+        The wire field is a list; the finest requested granularity wins, and an
+        empty or unknown request degrades to segment-level units.
+        """
+
+        requested = self._config.get("timestamp_granularities")
+        if isinstance(requested, (list, tuple)) and "character" in requested:
+            return "character"
+        if isinstance(requested, (list, tuple)) and "word" in requested:
+            return "word"
+        return "segment"
 
     def _mark_upstream_received(self, received_at: float) -> None:
         """Anchor the first upstream PCM packet for this input item."""
@@ -843,12 +858,14 @@ class OpenAIRealtimeSession:
         await self._asr.append_audio(audio)
         if not self._diarization_enabled:
             return
-        if len(self._alignment_pcm) + len(audio) > _MAX_ALIGNMENT_PCM_BYTES:
+        try:
+            self._alignment_pcm.append(audio)
+        except PcmBufferOverflowError:
+            # Surface the overflow explicitly instead of retaining a partial span:
+            # the committed item is marked so alignment fails with a reason.
             if not self._alignment_overflow:
                 self._services.metrics.record_alignment_event("fixed_text_overflow")
             self._alignment_overflow = True
-            return
-        self._alignment_pcm.extend(audio)
 
     async def _handle_admission_decision(
         self, dec: AdmissionDecision, *, in_commit: bool = False
@@ -2092,9 +2109,21 @@ class OpenAIRealtimeSession:
         degraded_reason: str | None,
     ) -> None:
         try:
+            # Auxiliary results never cross an epoch or utterance boundary: a
+            # reconnect, a newer turn, or a newer transcript revision makes this
+            # request stale, and stale metadata must never reach the caller.
+            if (
+                task_id != self._task_id
+                or epoch != self._wire_epoch
+                or item_id != self._current_item_id
+                or transcript_revision != self._current_transcript_revision
+            ):
+                self._services.metrics.record_alignment_event("fixed_text_stale")
+                return
             units, failure = await self._build_alignment_units(
                 item_id=item_id,
                 transcript=transcript,
+                transcript_revision=transcript_revision,
                 item_start=item_start,
                 item_end=item_end,
                 pcm16=pcm16,
@@ -2156,6 +2185,7 @@ class OpenAIRealtimeSession:
         *,
         item_id: str,
         transcript: str,
+        transcript_revision: int,
         item_start: int,
         item_end: int,
         pcm16: bytes,
@@ -2177,10 +2207,13 @@ class OpenAIRealtimeSession:
             return unavailable(degraded_reason)
         aligner = self._services.text_aligner
         item_samples = item_end - item_start
+        if overflow:
+            # The retained pin is bounded; overflow fails loudly instead of
+            # aligning a truncated span and pretending the timestamps are exact.
+            return unavailable("alignment_pcm_overflow")
         if (
             aligner is None
             or self._diarization_epoch is None
-            or overflow
             or len(pcm16) // 2 != item_samples
         ):
             return unavailable("alignment_unavailable")
@@ -2189,12 +2222,15 @@ class OpenAIRealtimeSession:
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     result = await aligner.align(
                         AlignmentRequest(
+                            task_id=self._task_id,
                             epoch=self._diarization_epoch,
-                            item_id=item_id,
+                            utterance_id=item_id,
+                            transcript_revision=transcript_revision,
                             pcm16=pcm16,
-                            span=Span(item_start, item_end),
+                            span=SampleSpan(item_start, item_end),
                             text=transcript,
                             language=self._config.get("language"),
+                            granularity=self._alignment_granularity(),
                         )
                     )
         except AlignmentAdmissionFullError:
@@ -2217,6 +2253,7 @@ class OpenAIRealtimeSession:
                         unit.audio_span.end if unit.audio_span is not None else item_end
                     ),
                     timing_quality="aligned",
+                    granularity=unit.granularity,
                 )
                 for unit in result.units
             ),
@@ -2231,6 +2268,7 @@ class OpenAIRealtimeSession:
             start_sample=item_start,
             end_sample=item_end,
             timing_quality="unavailable",
+            granularity=self._alignment_granularity(),
         )
 
     @staticmethod
@@ -2243,6 +2281,7 @@ class OpenAIRealtimeSession:
                 "audio_start_sample": unit.start_sample,
                 "audio_end_sample": unit.end_sample,
                 "timing_quality": unit.timing_quality,
+                "granularity": unit.granularity,
             }
             for unit in units
         ]
@@ -2264,7 +2303,7 @@ class OpenAIRealtimeSession:
                         audio_span=(
                             None
                             if unit.timing_quality == "unavailable"
-                            else Span(unit.start_sample, unit.end_sample)
+                            else SampleSpan(unit.start_sample, unit.end_sample)
                         ),
                     )
                     for unit in units
@@ -2526,7 +2565,7 @@ class OpenAIRealtimeSession:
                             transcript_revision=self._current_transcript_revision,
                             item_start=item_start,
                             item_end=item_end,
-                            pcm16=bytes(self._alignment_pcm),
+                            pcm16=self._alignment_pcm.pin(),
                             overflow=self._alignment_overflow,
                             degraded_reason=self._degraded_reason,
                         )

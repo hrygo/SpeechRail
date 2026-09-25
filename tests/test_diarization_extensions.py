@@ -28,14 +28,16 @@ from speechrail.compatibility.openai_realtime import (
     diarization_update_event,
 )
 from speechrail.config import Settings
+from speechrail.domain.alignment import (
+    AlignmentRequest,
+    AlignmentResult,
+    AlignmentUnit,
+)
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import (
     ActivityFrame,
     ActivityUpdate,
-    AlignmentRequest,
-    AlignmentResult,
-    Span,
-    TextUnit,
+    SampleSpan,
 )
 from speechrail.domain.ports import RealtimeTranscriptionOptions, StreamingAsrEvent
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
@@ -107,6 +109,19 @@ def test_finish_request_matches_v1_schema() -> None:
     event = {"type": "speechrail.diarization.finish", "event_id": "finish-1"}
     errors = list(
         Draft202012Validator(_schema("finalize-request.schema.json")).iter_errors(event)
+    )
+    assert not errors, [error.message for error in errors]
+
+
+def test_negotiated_session_contract_matches_v1_schema() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        updated = _negotiate(socket)
+
+    contract = updated["session"]["speechrail"]["diarization"]
+    errors = list(
+        Draft202012Validator(_schema("session.schema.json")).iter_errors(contract)
     )
     assert not errors, [error.message for error in errors]
 
@@ -300,9 +315,11 @@ class _FakeActivitySession:
             ActivityUpdate(
                 epoch=self._epoch,
                 step_id=self._step,
-                replace_span=Span(start_sample, end),
+                replace_span=SampleSpan(start_sample, end),
                 frames=(
-                    ActivityFrame(Span(start_sample, end), (0.9, 0.0, 0.0, 0.0), frozenset({0})),
+                    ActivityFrame(
+                        SampleSpan(start_sample, end), (0.9, 0.0, 0.0, 0.0), frozenset({0})
+                    ),
                 )
                 if end > start_sample
                 else (),
@@ -350,15 +367,26 @@ class _FakeDiarizationEngine:
 class _FakeTextAligner:
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
         return AlignmentResult(
-            request.epoch,
-            request.item_id,
-            (TextUnit("fixed", 0, len(request.text), request.span),),
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(
+                AlignmentUnit("fixed", 0, len(request.text), request.span, "segment"),
+            ),
         )
 
 
 class _UnavailableTextAligner:
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
-        return AlignmentResult(request.epoch, request.item_id, (), "alignment_unavailable")
+        return AlignmentResult(
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(),
+            failure="alignment_unavailable",
+        )
 
 
 def _client(*, supports_stream: bool) -> tuple[TestClient, _FakeStreamingFactory]:
@@ -545,12 +573,23 @@ def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None
         assert not committed1["item_id"].endswith("_input")
         assert completed1["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed1["event_version"] == 1
-        assert completed1["diagnostics"]["alignment"]["status"] == "aligned"
-        assert completed1["diagnostics"]["unit_count"] == len(completed1["attribution_units"])
+        # 对齐在新架构里异步运行. 文本 final 先到且只带 pending,
+        # 归属单元随后由 alignment.done 与 diarization.updated 承载.
+        assert completed1["diagnostics"]["alignment"]["status"] == "pending"
+        assert completed1["diagnostics"]["unit_count"] == 0
+        assert completed1["attribution_units"] == []
         assert completed1["audio_start_sample"] == 0
         assert completed1["audio_end_sample"] == 8000
-        units = completed1["attribution_units"]
         transcript = completed1["transcript"]
+        assert not any(
+            event["type"] == "conversation.item.input_audio_transcription.segment"
+            for event in first
+        )
+        assert not any(event["type"].startswith("speechrail.") for event in first)
+
+        alignment = _collect_until(socket, "speechrail.alignment.done")[-1]
+        assert alignment["utterance_id"] == completed1["item_id"]
+        units = alignment["units"]
         assert units
         assert "".join(
             transcript[unit["text_start"] : unit["text_end"]] for unit in units
@@ -560,11 +599,6 @@ def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None
             unit["audio_start_sample"] >= 0 and unit["audio_end_sample"] <= 8000
             for unit in units
         )
-        assert not any(
-            event["type"] == "conversation.item.input_audio_transcription.segment"
-            for event in first
-        )
-        assert not any(event["type"].startswith("speechrail.") for event in first)
 
         second = _append_and_commit(socket, 4000)
         committed2 = next(
@@ -905,14 +939,19 @@ def test_unavailable_alignment_emits_unknown_update() -> None:
         completed = events[-1]
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "不同意。"
-        units = completed["attribution_units"]
-        assert len(units) == 1
-        assert units[0]["timing_quality"] == "unavailable"
+        assert completed["attribution_units"] == []
+        assert completed["diagnostics"]["alignment"]["status"] == "pending"
 
         update_events = _collect_until(socket, "speechrail.diarization.updated")
+        failed = [
+            event
+            for event in update_events
+            if event["type"] == "speechrail.alignment.failed"
+        ]
+        assert failed
+        assert failed[-1]["error"]["code"] == "alignment_unavailable"
         update = update_events[-1]
         assert len(update["updates"]) == 1
-        assert update["updates"][0]["segment_uid"] == units[0]["segment_uid"]
         assert update["updates"][0]["status"] == "unknown"
         assert update["updates"][0]["speaker"] is None
         assert update["updates"][0]["revision"] == 1

@@ -7,14 +7,14 @@ import contextlib
 from collections.abc import Callable
 
 from speechrail.application.diarization.session import DiarizationSession, SessionEvent
+from speechrail.domain.alignment import AlignmentRequest, AlignTextPort
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization.attribution import AttributionLedger
-from speechrail.domain.diarization.ports import AlignTextPort, StreamingActivityPort
+from speechrail.domain.diarization.ports import StreamingActivityPort
 from speechrail.domain.diarization.types import (
-    AlignmentRequest,
     Attribution,
     DiarizationError,
-    Span,
     TextUnit,
 )
 
@@ -55,10 +55,12 @@ async def diarize_transcript(
         await session.append(audio)
         alignment = await aligner.align(
             AlignmentRequest(
+                task_id="diarized-batch",
                 epoch=epoch,
-                item_id="batch",
+                utterance_id="batch",
+                transcript_revision=1,
                 pcm16=audio,
-                span=Span(0, len(audio) // 2),
+                span=SampleSpan(0, len(audio) // 2),
                 text=result.text,
                 language=result.language or None,
             )
