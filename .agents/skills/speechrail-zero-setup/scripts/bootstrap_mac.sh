@@ -15,7 +15,8 @@ if [[ ! -f "$REPO_ROOT/pyproject.toml" ]]; then
   exit 2
 fi
 if [[ "${1:-}" != "--yes" ]]; then
-  echo "用法: $0 --yes [--preset quality|balanced|light] [--app-home PATH] [--install-video-podcast-skill]" >&2
+  echo "用法: $0 --yes [--asr-spec fast|quality|reference] [--tts-spec fast|quality|reference]" >&2
+  echo "         [--diarization-aligner aligner-q8|aligner-bf16] [--app-home PATH] [--install-video-podcast-skill]" >&2
   echo "该命令会安装系统依赖、下载模型并注册用户级 LaunchAgent；必须显式传入 --yes。" >&2
   exit 2
 fi
