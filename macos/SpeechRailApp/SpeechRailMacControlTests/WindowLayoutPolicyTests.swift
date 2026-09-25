@@ -1,4 +1,6 @@
+#if SWIFT_PACKAGE
 import SpeechRailAppSupport
+#endif
 import XCTest
 
 final class WindowLayoutPolicyTests: XCTestCase {

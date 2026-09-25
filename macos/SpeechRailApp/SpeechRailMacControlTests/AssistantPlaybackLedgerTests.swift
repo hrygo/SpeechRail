@@ -1,5 +1,7 @@
 import XCTest
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 /// 播放预算与"整轮结束"判定的纯状态测试：不启动音频设备，不涉及可听延迟。
 final class AssistantPlaybackLedgerTests: XCTestCase {

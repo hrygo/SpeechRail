@@ -1,6 +1,8 @@
 import XCTest
 @testable import SpeechRailControlKit
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 final class RealtimeContractTests: XCTestCase {
     func testSequenceValidatorReportsGapAndRegression() {
