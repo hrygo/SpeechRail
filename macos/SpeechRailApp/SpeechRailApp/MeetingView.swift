@@ -1115,7 +1115,7 @@ public struct MeetingView: View {
         case .off: "不标"
         case .active: "会标出"
         case .degraded: "中途停了"
-        case .unavailable: "这一档不支持"
+        case .unavailable: "没能标"
         }
     }
 

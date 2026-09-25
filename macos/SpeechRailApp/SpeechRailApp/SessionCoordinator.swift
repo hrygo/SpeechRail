@@ -103,8 +103,8 @@ public final class SessionCoordinator {
     public private(set) var elapsed: TimeInterval = 0
     /// 当前 epoch 内已经落库的行数水位（中断区间与「提问时的转录水位」都用它）。
     public private(set) var lineWatermark = 0
-    /// 最近一次读到的服务档位。分人的档位门禁（`light` 不给分人）要一个共同的事实来源，
-    /// 而档位是**服务的事实**：它由每场会话开始时那一次 `/health` 读回，记在这里。
+    /// 最近一次读到的服务规格组合。它是**服务的事实**：由每场会话开始时那一次 `/health` 读回，
+    /// 记在这里，并写进会话记录，供事后核对当时跑的是哪一组规格。
     public private(set) var lastKnownProfile: String?
     /// 刚刚**封存进库**的那一段。页面用它把"结束"这件事做成一次落地：语音助手结束之后
     /// 落到刚结束的那一段上（`AssistantView.landOnFinalized`），而不是回一个空白的"未开始"。

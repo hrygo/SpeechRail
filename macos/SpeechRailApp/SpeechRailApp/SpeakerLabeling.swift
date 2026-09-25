@@ -174,7 +174,8 @@ public final class SpeakerLabeling {
         note = message.isEmpty ? "说话人编号停止更新了（\(code)），正文照常记录。" : message
     }
 
-    /// 档位不支持（`light`）：**不给一个永远点不动的开关**，只给一句说明（§6.2.1 的降级形状）。
+    /// 服务或历史记录说这场标不了说话人：**不给一个永远点不动的开关**，只给一句说明
+    /// （§6.2.1 的降级形状）。分人是任务级 opt-in，因此这不是档位属性。
     public func markUnavailable(note: String) {
         state = .unavailable
         self.note = note
