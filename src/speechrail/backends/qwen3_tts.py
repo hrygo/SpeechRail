@@ -12,6 +12,7 @@ import base64
 import contextlib
 import os
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -182,6 +183,11 @@ class Qwen3TtsWorker:
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
         self._timing_sidecars: dict[str, TtsTimingSidecar] = {}
+        # Utterances this parent already opened on this worker.  A stream can be
+        # torn down before its terminal is read (client disconnect, cancelled
+        # teardown), so the frames of a *known* utterance are stale by
+        # definition and must never fail the next one.
+        self._known_stream_ids: deque[str] = deque(maxlen=8)
         self.last_active: float = time.monotonic()
         self.model_variant: str = config.model_variant
         self._runtime_revision: str | None = None
@@ -535,7 +541,12 @@ class Qwen3TtsWorker:
                     self._transport,
                     stream_protocol=self._stream_protocol,
                 )
-                inner = await synthesizer.open_stream(options, start_fields=start_fields)
+                stale_request_ids = self._remember_stream_id(options.request_id)
+                inner = await synthesizer.open_stream(
+                    options,
+                    start_fields=start_fields,
+                    stale_request_ids=stale_request_ids,
+                )
                 session = _LeasedTtsStreamSession(self, inner, stack, epoch=epoch)
                 self.last_active = time.monotonic()
                 return session
@@ -589,6 +600,17 @@ class Qwen3TtsWorker:
             self._runtime_revision = None
             self._fallback_abort_count += 1
             self._record_delivery_event("abort_fallback")
+
+    def _remember_stream_id(self, request_id: str) -> frozenset[str]:
+        """Record one utterance and return every other one already seen here."""
+
+        stale = frozenset(
+            identifier for identifier in self._known_stream_ids if identifier != request_id
+        )
+        while request_id in self._known_stream_ids:
+            self._known_stream_ids.remove(request_id)
+        self._known_stream_ids.append(request_id)
+        return stale
 
     def _release_incremental_slot(self) -> None:
         """Return the single incremental slot; exactly one holder releases it."""
