@@ -658,6 +658,12 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 role="tts_base",
                 warmup=settings.tts_warmup_on_start,
             )
+        if settings.qwen3_tts_design_model_dir is not None:
+            tts_workers["voice_design"] = make_tts_worker(
+                settings.qwen3_tts_design_model_dir,
+                role="voice_design",
+                warmup=False,
+            )
         tts_worker = Qwen3TtsCapabilityRouter(tts_workers)
         tts_synthesizer = tts_worker
 

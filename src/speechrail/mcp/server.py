@@ -38,6 +38,8 @@ from speechrail.mcp.models import (
     JobRecord,
     JobResultArtifact,
     TranscribeResult,
+    VoiceDesignCandidateRecord,
+    VoiceDesignPublishResult,
     VoiceRecord,
     VoiceValidationResult,
 )
@@ -76,13 +78,15 @@ _INSTRUCTIONS = (
     "effective_capabilities_v1 contract and reports the active profile, profile "
     "consistency, readiness, available voices and validation state. The proxy "
     "never changes profiles; missing capabilities are reported from the current "
-    "snapshot. `available=true` means "
-    "the voice can be routed; for clone voices it does not mean "
-    "`production_ready=true`. After design_voice or clone_voice, call "
-    "validate_voice and require a persisted synthesis output pass before a "
-    "production render. VoiceDesign preview/create_voice produces an "
-    "instruction voice; design_voice first generates a reference and registers "
-    "a Base clone, so reference-gate success is not output-gate success. Do "
+    "snapshot. `available=true` means the voice can be routed; for clone voices "
+    "it does not mean `production_ready=true`. VoiceDesign preview/create_voice "
+    "produces an instruction voice. design_voice creates a private candidate; "
+    "then call confirm_voice_design, validate_voice_design with a different "
+    "test text, attach explicit identity/naturalness review only after human "
+    "audition, and finally publish_voice_design. Candidate generation and "
+    "machine validation never substitute for human review. After clone_voice, "
+    "call validate_voice and require a persisted synthesis output pass before a "
+    "production render. Reference-gate success is not output-gate success. Do "
     "not retry `clone_speed_unsupported` by forcing a speed: Base clone is "
     "fixed at speed=1.0 and the error is a capability mismatch. Pass audio as "
     "a local file path or file:// URI and never inline base64. Prefer the "
@@ -505,9 +509,9 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         )
 
     @mcp.tool(
-        title="Design and register a Base voice",
+        title="Create a VoiceDesign candidate",
         annotations=_tool_annotations(
-            "Design and register a Base voice",
+            "Create a VoiceDesign candidate",
             read_only=False,
             destructive=False,
             idempotent=False,
@@ -530,9 +534,9 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             str | None,
             Field(description="Optional key for safe retry of the same registration payload."),
         ] = None,
-    ) -> VoiceRecord:
-        """Generate a reference with VoiceDesign, then register it for Base clone."""
-        return VoiceRecord.model_validate(
+    ) -> VoiceDesignCandidateRecord:
+        """Generate a private candidate; nothing is published until validation."""
+        return VoiceDesignCandidateRecord.model_validate(
             await _map_errors(
                 tools.design_voice(
                     client,
@@ -543,6 +547,126 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
                     seed=seed,
                     language=language,
                     idempotency_key=idempotency_key,
+                )
+            )
+        )
+
+    @mcp.tool(
+        title="Confirm a VoiceDesign candidate",
+        annotations=_tool_annotations(
+            "Confirm a VoiceDesign candidate",
+            read_only=False,
+            destructive=False,
+            idempotent=True,
+        ),
+    )
+    async def confirm_voice_design(
+        candidate_id: Annotated[
+            str,
+            Field(description="VoiceDesign candidate id matching ^vd_[0-9a-f]{24}$."),
+        ],
+        reference_text: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional corrected transcript aligned to the generated "
+                    "reference; editing it revokes earlier validation."
+                )
+            ),
+        ] = None,
+    ) -> VoiceDesignCandidateRecord:
+        """Confirm the reference transcript before Base validation."""
+        return VoiceDesignCandidateRecord.model_validate(
+            await _map_errors(
+                tools.confirm_voice_design(
+                    client,
+                    candidate_id=candidate_id,
+                    reference_text=reference_text,
+                )
+            )
+        )
+
+    @mcp.tool(
+        title="Validate a VoiceDesign candidate",
+        annotations=_tool_annotations(
+            "Validate a VoiceDesign candidate",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
+    async def validate_voice_design(
+        candidate_id: Annotated[
+            str,
+            Field(description="VoiceDesign candidate id matching ^vd_[0-9a-f]{24}$."),
+        ],
+        test_text: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Base validation text different from the reference; "
+                    "omit to use a server-controlled text."
+                )
+            ),
+        ] = None,
+        capability_key: Annotated[
+            str | None,
+            Field(description="Optional render capability key: fast/quality/reference."),
+        ] = None,
+        validation_id: Annotated[
+            str | None,
+            Field(description="Machine validation id to attach a human review."),
+        ] = None,
+        identity_review: Annotated[
+            str | None,
+            Field(description="Human audition identity review: pass/warn/reject."),
+        ] = None,
+        naturalness_review: Annotated[
+            str | None,
+            Field(description="Human audition naturalness review: pass/warn/reject."),
+        ] = None,
+    ) -> VoiceDesignCandidateRecord:
+        """Run Base new-text validation or attach an explicit human audition."""
+        return VoiceDesignCandidateRecord.model_validate(
+            await _map_errors(
+                tools.validate_voice_design(
+                    client,
+                    candidate_id=candidate_id,
+                    test_text=test_text,
+                    capability_key=capability_key,
+                    validation_id=validation_id,
+                    identity_review=identity_review,
+                    naturalness_review=naturalness_review,
+                )
+            )
+        )
+
+    @mcp.tool(
+        title="Publish a VoiceDesign candidate",
+        annotations=_tool_annotations(
+            "Publish a VoiceDesign candidate",
+            read_only=False,
+            destructive=False,
+            idempotent=True,
+        ),
+    )
+    async def publish_voice_design(
+        candidate_id: Annotated[
+            str,
+            Field(description="VoiceDesign candidate id matching ^vd_[0-9a-f]{24}$."),
+        ],
+        expected_candidate_revision: Annotated[
+            str | None,
+            Field(description="Optional exact candidate revision CAS guard."),
+        ] = None,
+    ) -> VoiceDesignPublishResult:
+        """Publish one validated candidate as an immutable Base voice."""
+        return VoiceDesignPublishResult.model_validate(
+            await _map_errors(
+                tools.publish_voice_design(
+                    client,
+                    candidate_id=candidate_id,
+                    expected_candidate_revision=expected_candidate_revision,
                 )
             )
         )

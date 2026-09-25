@@ -1,4 +1,10 @@
-"""Prompt -> canonical reference -> Base binding, without real model downloads."""
+"""VoiceDesign reference generation creates a private candidate, not a voice.
+
+These tests cover the generation stage: the canonical reference asset, the
+quality/ASR self-check, store safety, and the guarantees that nothing is
+published and no existing voice is touched. The confirm/validate/publish
+lifecycle is covered by ``test_voice_design_workflow.py``.
+"""
 
 from __future__ import annotations
 
@@ -14,38 +20,53 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
-from speechrail.backends.qwen3_voice_binding import resolve_binding
+from speechrail.application import voice_design as voice_design_application
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.contracts import TranscriptResult
-from speechrail.domain.idempotency import DurableIdempotencyJournal
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 from speechrail.domain.tts import VoiceRegistry
+from speechrail.http.routes import voice_designs as voice_designs_module
 
 TEXT = "这是用于音色注册的测试语句，请保持自然清晰的表达。"
+VOICE_ID = "designed_base"
+
+
+def speech_like_pcm(seconds: float = 4.0, sample_rate: int = 24_000) -> bytes:
+    timeline = np.arange(int(seconds * sample_rate), dtype=np.float32) / sample_rate
+    amplitude = np.where((timeline % 0.5) < 0.16, 0.002, 0.4)
+    samples = np.round(amplitude * np.sin(2 * np.pi * 220 * timeline) * 32767)
+    return samples.astype("<i2").tobytes()
 
 
 class DesignSynth:
+    """Fake VoiceDesign/Base backend recording every synthesis request."""
+
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
         self.events: list[str] = []
-        t = np.arange(4 * 24_000, dtype=np.float32) / 24_000
-        amplitude = np.where((t % 0.5) < 0.16, 0.002, 0.4)
-        self.pcm = np.round(amplitude * np.sin(2 * np.pi * 220 * t) * 32767).astype("<i2").tobytes()
+        self.pcm = speech_like_pcm()
         self.closed = 0
 
-    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+    def _stream(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
+        payload = self.pcm
 
         async def stream() -> AsyncIterator[AudioChunk]:
             self.events.append("tts")
             try:
-                yield AudioChunk(response_id="design", chunk_index=0, audio=self.pcm)
+                yield AudioChunk(response_id="design", chunk_index=0, audio=payload)
             finally:
                 self.closed += 1
                 self.events.append("tts.closed")
 
         return stream()
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        return self._stream(request)
+
+    def synthesize_design(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        return self._stream(request)
 
     async def evict_warm_capability(self) -> None:
         self.events.append("tts.evicted")
@@ -61,14 +82,13 @@ class DesignAsr:
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
         self.requests.append(request)
         self.synth.events.append("asr")
-        assert self.synth.events[-2] == "tts.evicted"
         if self.fail:
             raise RuntimeError("private-backend-payload-must-not-leak")
         return TranscriptResult(
             request_id=request.request_id,
             model_id="fake-asr",
             text=self.text,
-            duration_ms=len(request.audio) * 1000 // 32_000,
+            duration_ms=0,
         )
 
 
@@ -76,148 +96,148 @@ def make_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    tier: str = "quality",
+    tier: str = "reference",
     with_asr: bool = True,
-    with_clone: bool = True,
+    with_base: bool = True,
     api_key: str | None = None,
 ) -> tuple[TestClient, VoiceRegistry, DesignSynth, DesignAsr]:
-    preset = load_catalog().preset(tier)
-    registry = VoiceRegistry(tmp_path / "voices.json", tmp_path / "voices")
+    asr_key = required_spec_artifact(tier, "asr")
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")
+    base_key = required_spec_artifact(tier, "tts_base")
+    design_key = required_spec_artifact(tier, "voice_design")
+    assert asr_key is not None and tts_key is not None
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "voices.json",
+        voices_dir=tmp_path / "voices",
+    )
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     synth = DesignSynth()
     asr = DesignAsr(synth)
-    app = create_app(
-        Settings(
-            qwen3_model_dir=tmp_path / preset.asr,
-            asr_resident_bytes=1 * 1024**3,
-            qwen3_python=None,
-            qwen3_tts_model_dir=tmp_path / preset.tts,
-            tts_resident_bytes=1 * 1024**3,
-            qwen3_tts_python=None,
-            qwen3_tts_clone_model_dir=(
-                tmp_path / preset.tts_clone
-                if with_clone and preset.tts_clone
-                else None
-            ),
-            api_key=api_key,
+    settings = Settings(
+        qwen3_model_dir=tmp_path / asr_key,
+        asr_resident_bytes=1 * 1024**3,
+        qwen3_python=None,
+        qwen3_tts_model_dir=tmp_path / tts_key,
+        tts_resident_bytes=1 * 1024**3,
+        qwen3_tts_clone_model_dir=(
+            tmp_path / base_key if with_base and base_key is not None else None
         ),
+        qwen3_tts_design_model_dir=tmp_path / design_key if design_key else None,
+        qwen3_tts_python=None,
+        selection_schema_version=2,
+        selection_asr_spec=tier,
+        selection_tts_spec=tier,
+        asr_artifact_key=asr_key,
+        tts_artifact_key=tts_key,
+        tts_base_artifact_key=base_key if with_base else None,
+        voice_design_artifact_key=design_key,
+        api_key=api_key,
+    )
+    app = create_app(
+        settings,
         tts_synthesizer=synth,
         batch_transcriber=asr if with_asr else None,
     )
     return TestClient(app), registry, synth, asr
 
 
-def payload() -> dict[str, object]:
-    return {
-        "id": "designed_base",
+def payload(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "voice_id": VOICE_ID,
         "name": "Test voice",
         "instruction": "清晰自然的中文声音",
         "reference_text": TEXT,
         "seed": 123,
     }
+    body.update(overrides)
+    return body
 
 
-@pytest.mark.parametrize("tier", ["quality", "extreme"])
-def test_design_registers_base_voice_with_verified_reference(
+def candidate_assets(registry: VoiceRegistry) -> Path:
+    return registry.storage_path.with_name("voice_design_candidates")
+
+
+def test_create_candidate_keeps_reference_private_and_unpublished(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tier: str,
 ) -> None:
-    client, registry, synth, asr = make_client(tmp_path, monkeypatch, tier=tier)
+    client, registry, synth, asr = make_client(tmp_path, monkeypatch)
     original = registry.create_custom_profile("Original", "原始音色描述", "original")
     before = original.to_dict()
-    response = client.post("/v1/voices/designs", json=payload())
+
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code == 201, response.text
-    data = response.json()
-    assert data["synthesis_validation"] == "unevaluated"
-    voice = data["voice"]
-    assert voice["mode"] == "clone" and voice["variant"] == "base"
-    assert voice["quality"]["reference"]["transcript_match"] == 1.0
-    assert voice["quality"]["synthesis"]["probe_count"] == 0
-    assert "audio_path" not in voice
-    health = client.get("/health").json()
-    models = {
-        entry["id"]: entry for entry in client.get("/v1/models").json()["data"]
+    candidate = response.json()["candidate"]
+    assert candidate["state"] == "generated"
+    assert candidate["publishable"] is False
+    assert candidate["reference"]["quality"]["transcript_match"] == 1.0
+    assert candidate["reference"]["quality"]["synthesis"]["probe_count"] == 0
+    assert VOICE_ID not in {
+        entry["id"] for entry in client.get("/v1/voices").json()["data"]
     }
-    voices = {
-        entry["id"]: entry for entry in client.get("/v1/voices").json()["data"]
-    }
-    snapshot = client.get("/v1/speechrail/capabilities").json()
-    assert health["profile"] == tier
-    assert models["speechrail/qwen3-tts"]["profile"] == tier
-    assert models["speechrail/qwen3-tts"]["artifact"] == load_catalog().preset(tier).tts
-    assert models["speechrail/qwen3-tts"]["variant"] == "voice_design"
-    assert models["speechrail/qwen3-tts"]["capabilities"]["supports_clone"] is True
-    assert voices["serena"]["variant"] == "voice_design"
-    assert voices["serena"]["capabilities"]["supports_instruction"] is True
-    assert snapshot["profile"] == tier
-    assert snapshot["models"]["tts"]["artifact"] == load_catalog().preset(tier).tts
-    assert snapshot["models"]["tts_clone"]["artifact"] == load_catalog().preset(tier).tts_clone
-    assert synth.events == ["tts", "tts.closed", "tts.evicted", "asr"]
-    assert synth.requests[0].instruction == payload()["instruction"]
-    assert synth.requests[0].seed == 123
-    assert asr.requests[0].prompt == ""
-    profile = registry.get_profile("designed_base")
-    binding = resolve_binding("base", profile.id, profile=profile)
-    assert binding.is_clone and binding.ref_text == TEXT
-    reference = Path(binding.ref_audio_path or "")
-    assert reference.stat().st_mode & 0o777 == 0o600
-    assert (
-        voice["creation"]["reference_audio_sha256"]
-        == hashlib.sha256(reference.read_bytes()).hexdigest()
-    )
-    assert voice["creation"]["origin"] == "generated"
-    assert voice["creation"]["seed"] == 123
-    with wave.open(io.BytesIO(reference.read_bytes()), "rb") as wav:
-        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 24_000)
-    reloaded = VoiceRegistry(tmp_path / "voices.json", tmp_path / "voices")
-    assert reloaded.get_profile(profile.id).to_dict() == profile.to_dict()
     assert registry.get_profile("original").to_dict() == before
 
+    # Only safe metadata is projected: no text, no private paths.
+    assert TEXT not in response.text
+    assert str(tmp_path) not in response.text
 
-@pytest.mark.parametrize("tier", ["balanced", "light"])
-def test_design_requires_voice_design_and_base_before_any_work(
+    asset = candidate_assets(registry) / f"{candidate['id']}.wav"
+    assert asset.is_file()
+    assert asset.stat().st_mode & 0o777 == 0o600
+    assert (
+        candidate["reference"]["audio_sha256"]
+        == hashlib.sha256(asset.read_bytes()).hexdigest()
+    )
+    with wave.open(io.BytesIO(asset.read_bytes()), "rb") as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (
+            1,
+            2,
+            24_000,
+        )
+
+    assert synth.events == ["tts", "tts.closed", "tts.evicted", "asr"]
+    assert synth.requests[0].instruction == "清晰自然的中文声音"
+    assert synth.requests[0].seed == 123
+    assert asr.requests[0].prompt == ""
+
+    reloaded = voice_designs_module._repository().get(candidate["id"])
+    assert reloaded.target_voice_id == VOICE_ID
+    assert reloaded.reference_text == TEXT
+    assert reloaded.revision == candidate["revision"]
+
+
+@pytest.mark.parametrize("tier", ["fast", "quality"])
+def test_create_requires_voice_design_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tier: str,
 ) -> None:
-    client, registry, synth, _ = make_client(tmp_path, monkeypatch, tier=tier)
-    response = client.post("/v1/voices/designs", json=payload())
+    client, registry, synth, _asr = make_client(tmp_path, monkeypatch, tier=tier)
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "voice_design_registration_unsupported"
-    assert "quality" not in response.json()["error"]["message"].lower()
+    assert response.json()["error"]["code"] == "voice_design_unsupported"
     assert not synth.requests
-    assert all(p.is_system for p in registry.list_profiles())
+    assert all(profile.is_system for profile in registry.list_profiles())
+    assert not candidate_assets(registry).exists()
 
 
-def test_design_rejects_missing_base_before_any_work(
+def test_create_requires_batch_asr_before_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, registry, synth, _ = make_client(
-        tmp_path, monkeypatch, tier="quality", with_clone=False
-    )
-
-    response = client.post("/v1/voices/designs", json=payload())
-
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "voice_design_registration_unsupported"
+    client, registry, synth, _asr = make_client(tmp_path, monkeypatch, with_asr=False)
+    response = client.post("/v1/voice-designs", json=payload())
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "transcription_unavailable"
     assert not synth.requests
     assert all(profile.is_system for profile in registry.list_profiles())
 
 
-def test_design_requires_asr_before_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    client, _, synth, _ = make_client(tmp_path, monkeypatch, with_asr=False)
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "transcription_unavailable"
-    assert not synth.requests
-
-
-@pytest.mark.parametrize("kind", ["silence", "clipping", "short", "oversize", "malformed"])
-def test_design_invalid_audio_does_not_publish(
+@pytest.mark.parametrize(
+    "kind",
+    ["silence", "clipping", "short", "oversize", "malformed"],
+)
+def test_create_invalid_audio_stores_no_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
@@ -230,62 +250,36 @@ def test_design_invalid_audio_does_not_publish(
         "oversize": synth.pcm * 8,
         "malformed": b"\0\0\0",
     }[kind]
-    response = client.post("/v1/voices/designs", json=payload())
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code in (400, 502), response.text
-    assert all(p.is_system for p in registry.list_profiles())
+    assert all(profile.is_system for profile in registry.list_profiles())
     assert not asr.requests
     assert synth.closed == 1
+    assert not list(candidate_assets(registry).glob("*.wav"))
     assert not list((tmp_path / "voices").glob("*.wav"))
 
 
-@pytest.mark.parametrize("text", ["", "完全错误的内容"])
-def test_design_transcript_mismatch_does_not_publish(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    text: str,
-) -> None:
-    client, registry, _, asr = make_client(tmp_path, monkeypatch)
-    asr.text = text
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "transcript_mismatch"
-    assert all(p.is_system for p in registry.list_profiles())
-    assert not list((tmp_path / "voices").glob("*.wav"))
-
-
-def test_design_asr_failure_private_and_no_partial_voice(
+def test_create_asr_failure_is_private_and_stores_no_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client, registry, _, asr = make_client(tmp_path, monkeypatch)
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
     asr.fail = True
-    response = client.post("/v1/voices/designs", json=payload())
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "transcription_unavailable"
     assert "private-backend-payload" not in response.text + caplog.text
-    assert all(p.is_system for p in registry.list_profiles())
-
-
-def test_design_conflict_preserves_existing_voice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    client, registry, synth, _ = make_client(tmp_path, monkeypatch)
-    original = registry.create_custom_profile("Keep", "Keep", "designed_base")
-    stored = (tmp_path / "voices.json").read_bytes()
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "voice_already_exists"
-    assert registry.get_profile(original.id) == original
-    assert (tmp_path / "voices.json").read_bytes() == stored
-    assert not synth.requests
+    assert all(profile.is_system for profile in registry.list_profiles())
+    assert not list(candidate_assets(registry).glob("*.wav"))
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        {"id": "../escape"},
-        {"id": "alloy"},
+        {"voice_id": "../escape"},
+        {"voice_id": "alloy"},
+        {"voice_id": "serena"},
         {"seed": True},
         {"seed": -1},
         {"seed": 2**32},
@@ -294,243 +288,142 @@ def test_design_conflict_preserves_existing_voice(
         {"reference_text": "a" * 241},
         {"audio_url": "https://invalid.example/audio"},
         {"language": "en"},
+        {"name": ""},
     ],
 )
-def test_design_request_rejects_invalid_fields(
+def test_create_rejects_invalid_fields_before_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     change: dict[str, object],
 ) -> None:
-    client, _, synth, _ = make_client(tmp_path, monkeypatch)
-    response = client.post("/v1/voices/designs", json=payload() | change)
-    assert response.status_code in (400, 409, 422)
+    client, _registry, synth, _asr = make_client(tmp_path, monkeypatch)
+    response = client.post("/v1/voice-designs", json=payload(**change))
+    assert response.status_code in (400, 409, 422), response.text
     assert not synth.requests
 
 
-def test_design_authentication_precedes_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("text", ["*" * 20, "a" * 240])
+def test_create_rejects_out_of_bounds_normalized_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
 ) -> None:
-    client, _, synth, _ = make_client(tmp_path, monkeypatch, api_key="test-key-only")
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 401
+    client, _registry, synth, _asr = make_client(tmp_path, monkeypatch)
+    response = client.post("/v1/voice-designs", json=payload(reference_text=text))
+    assert response.status_code == 422
     assert not synth.requests
 
 
-def test_design_concurrent_target_creation_cannot_overwrite(
+def test_create_conflict_preserves_existing_voice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, registry, _, asr = make_client(tmp_path, monkeypatch)
+    client, registry, synth, _asr = make_client(tmp_path, monkeypatch)
+    original = registry.create_custom_profile("Keep", "Keep", VOICE_ID)
+    stored = (tmp_path / "voices.json").read_bytes()
+
+    response = client.post("/v1/voice-designs", json=payload())
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "voice_already_exists"
+    assert registry.get_profile(original.id) == original
+    assert (tmp_path / "voices.json").read_bytes() == stored
+    assert not synth.requests
+
+
+def test_create_that_loses_a_race_stays_private_and_keeps_the_competitor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
     original_transcribe = asr.transcribe
 
     async def competing_registration(request: TranscriptionRequest) -> TranscriptResult:
         result = await original_transcribe(request)
-        registry.create_custom_profile("Concurrent", "Keep this", "designed_base")
+        registry.create_custom_profile("Concurrent", "Keep this", VOICE_ID)
         return result
 
     monkeypatch.setattr(asr, "transcribe", competing_registration)
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 409
-    assert registry.get_profile("designed_base").instruction == "Keep this"
-    assert not list((tmp_path / "voices").glob("*.wav"))
+    response = client.post("/v1/voice-designs", json=payload())
+
+    # Generation never takes the publication lock, so the concurrent voice is
+    # never overwritten and the candidate stays private until an explicit
+    # publish that will refuse the revision mismatch.
+    assert response.status_code == 201, response.text
+    candidate_id = response.json()["candidate"]["id"]
+    assert registry.get_profile(VOICE_ID).instruction == "Keep this"
+    stored = voice_designs_module._repository().get(candidate_id)
+    assert stored.target_voice_id == VOICE_ID
+    assert stored.state == "generated"
 
 
-def test_design_failed_commit_removes_candidate_audio(
+def test_create_store_failure_removes_candidate_audio(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, registry, _, _ = make_client(tmp_path, monkeypatch)
+    client, registry, _synth, _asr = make_client(tmp_path, monkeypatch)
 
-    def fail_save() -> None:
+    def fail_write(_path: object, _payload: object) -> None:
         raise OSError("private-write-path")
 
-    monkeypatch.setattr(registry, "_save_custom_voices", fail_save)
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "voice_store_unavailable"
-    assert "private-write-path" not in response.text
-    assert not list((tmp_path / "voices").glob("*.wav"))
-    assert all(p.is_system for p in registry.list_profiles())
-
-
-@pytest.mark.anyio
-async def test_design_cancelled_generation_closes_source() -> None:
-    import asyncio
-
-    from speechrail.http.routes.voice_designs import _generate_reference
-
-    entered = asyncio.Event()
-    finished = asyncio.Event()
-
-    class BlockingSynth(DesignSynth):
-        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
-            async def stream() -> AsyncIterator[AudioChunk]:
-                try:
-                    entered.set()
-                    await asyncio.sleep(5)
-                    yield AudioChunk(response_id="blocked", chunk_index=0, audio=self.pcm)
-                finally:
-                    finished.set()
-
-            return stream()
-
-    task = asyncio.create_task(
-        _generate_reference(
-            BlockingSynth(),
-            SpeechRequest(text=TEXT, voice="serena"),
-            expires_at=asyncio.get_running_loop().time() + 10,
-        )
+    monkeypatch.setattr(
+        voice_design_application, "_atomic_write_json", fail_write
     )
-    await asyncio.wait_for(entered.wait(), 1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert finished.is_set()
-
-
-def test_design_eviction_deadline_prevents_asr_and_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import asyncio
-
-    client, registry, synth, asr = make_client(tmp_path, monkeypatch)
-    # Leave ample budget for reference generation to reach the wildcard
-    # maintenance handoff. The eviction then outlives the request deadline.
-    client.app.state.settings.request_timeout_seconds = 10.0
-    cancelled = []
-
-    async def slow_eviction() -> None:
-        try:
-            await asyncio.sleep(30)
-        finally:
-            cancelled.append(True)
-
-    monkeypatch.setattr(synth, "evict_warm_capability", slow_eviction)
-    response = client.post("/v1/voices/designs", json=payload())
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "backend_timeout"
-    assert cancelled
-    assert not asr.requests
-    assert all(p.is_system for p in registry.list_profiles())
+    assert response.json()["error"]["code"] == "voice_design_store_unavailable"
+    assert "private-write-path" not in response.text
+    assert not list(candidate_assets(registry).glob("*.wav"))
+    assert all(profile.is_system for profile in registry.list_profiles())
 
 
-def test_design_queue_rejection_does_not_start_work(
+def test_create_authentication_precedes_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from contextlib import asynccontextmanager
-
-    from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor
-
-    @asynccontextmanager
-    async def full(*args: object, **kwargs: object) -> AsyncIterator[None]:
-        raise GovernorQueueFullError
-        yield  # pragma: no cover - makes this an async context manager.
-
-    client, registry, synth, _ = make_client(tmp_path, monkeypatch)
-    monkeypatch.setattr(ResourceGovernor, "reserve", full)
-    response = client.post("/v1/voices/designs", json=payload())
-    assert response.status_code == 429
-    assert response.headers["Retry-After"] == "1"
+    client, _registry, synth, _asr = make_client(
+        tmp_path, monkeypatch, api_key="test-key-only"
+    )
+    response = client.post("/v1/voice-designs", json=payload())
+    assert response.status_code == 401
     assert not synth.requests
-    assert all(p.is_system for p in registry.list_profiles())
 
 
-def test_design_provenance_tampering_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    from speechrail.domain.tts import VoiceStoreUnavailableError
-
-    client, registry, _, _ = make_client(tmp_path, monkeypatch)
-    assert client.post("/v1/voices/designs", json=payload()).status_code == 201
-    file = tmp_path / "voices.json"
-    data = json.loads(file.read_text())
-    data[0]["creation"]["reference_audio_sha256"] = "not-a-sha256"
-    file.write_text(json.dumps(data))
-    with pytest.raises(VoiceStoreUnavailableError):
-        registry.get_profile("designed_base")
-
-
-def test_design_provenance_rejects_reference_mismatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, registry, _, _ = make_client(tmp_path, monkeypatch)
-    assert client.post("/v1/voices/designs", json=payload()).status_code == 201
-    source = registry.get_profile("designed_base")
-    with pytest.raises(ValueError, match="provenance"):
-        registry.create_cloned_profile(
-            name="Mismatch",
-            ref_text=TEXT,
-            audio_bytes=b"not-the-reference",
-            voice_id="other",
-            duration_seconds=4.0,
-            creation=source.creation,
-            create_only=True,
-        )
-    assert len(list((tmp_path / "voices").glob("*.wav"))) == 1
-
-
-def test_design_openapi_response_matches_published_schema(
+def test_create_openapi_response_matches_published_schema(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import jsonschema
     import yaml
 
-    client, _, _, _ = make_client(tmp_path, monkeypatch)
-    contract = yaml.safe_load((Path(__file__).parents[1] / "contracts/openapi.yaml").read_text())
-    path = contract["paths"]["/v1/voices/designs"]["post"]
+    client, _registry, _synth, _asr = make_client(tmp_path, monkeypatch)
+    contract = yaml.safe_load(
+        (Path(__file__).parents[1] / "contracts/openapi.yaml").read_text()
+    )
+    path = contract["paths"]["/v1/voice-designs"]["post"]
     response_ref = path["responses"]["201"]["content"]["application/json"]["schema"]
     schema = {**response_ref, "components": contract["components"]}
     jsonschema.Draft202012Validator.check_schema(schema)
-    response = client.post("/v1/voices/designs", json=payload())
+
+    response = client.post("/v1/voice-designs", json=payload())
     assert response.status_code == 201
     jsonschema.Draft202012Validator(schema).validate(response.json())
-    assert "201" in client.app.openapi()["paths"]["/v1/voices/designs"]["post"]["responses"]
+    assert "201" in client.app.openapi()["paths"]["/v1/voice-designs"]["post"]["responses"]
 
 
-@pytest.mark.parametrize("text", ["*" * 20, "a" * 240])
-def test_design_rejects_out_of_bounds_normalized_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    text: str,
-) -> None:
-    client, _, synth, _ = make_client(tmp_path, monkeypatch)
-    response = client.post("/v1/voices/designs", json=payload() | {"reference_text": text})
-    assert response.status_code == 422
-    assert not synth.requests
-
-
-def test_design_new_voice_works_through_existing_tts_api(
+def test_design_store_projection_hides_reference_assets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, _, synth, _ = make_client(tmp_path, monkeypatch)
-    assert client.post("/v1/voices/designs", json=payload()).status_code == 201
-    response = client.post(
-        "/v1/audio/speech",
-        json={
-            "model": "tts-1",
-            "voice": "designed_base",
-            "input": "正常朗读。",
-            "response_format": "wav",
-        },
-    )
-    assert response.status_code == 200
-    assert synth.requests[-1].voice == "designed_base"
-    assert synth.requests[-1].instruction is None
-    voices = client.get("/v1/voices").json()["data"]
-    listed = next(v for v in voices if v["id"] == "designed_base")
-    assert listed["capabilities"]["supports_clone"] is True
-    assert listed["capabilities"]["supports_instruction"] is False
-    assert "creation" not in listed
-    detail = client.get("/v1/voices/designed_base")
-    assert detail.status_code == 200
-    assert detail.json()["creation"]["origin"] == "generated"
+    client, _registry, _synth, _asr = make_client(tmp_path, monkeypatch)
+    assert client.post("/v1/voice-designs", json=payload()).status_code == 201
+
+    listed = client.get("/v1/voice-designs")
+    assert listed.status_code == 200
+    rendered = json.dumps(listed.json(), ensure_ascii=False)
+    assert TEXT not in rendered
+    assert "reference_audio_path" not in rendered
+    assert "instruction_sha256" not in rendered
 
 
 def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> None:
@@ -538,7 +431,10 @@ def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> N
 
     from speechrail.domain.tts import VoiceAlreadyExistsError
 
-    registry = VoiceRegistry(tmp_path / "voices.json", tmp_path / "voices")
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "voices.json",
+        voices_dir=tmp_path / "voices",
+    )
 
     def create(index: int) -> bool:
         try:
@@ -558,138 +454,3 @@ def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> N
         results = list(executor.map(create, [1, 2]))
     assert sum(results) == 1
     assert len(list((tmp_path / "voices").glob("*.wav"))) == 1
-
-
-
-def test_design_idempotency_replays_without_duplicate_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal = DurableIdempotencyJournal(tmp_path / "design-idempotency.json")
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        journal,
-    )
-    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
-    headers = {"Idempotency-Key": "design-replay-key"}
-
-    first = client.post("/v1/voices/designs", headers=headers, json=payload())
-    second = client.post("/v1/voices/designs", headers=headers, json=payload())
-
-    assert first.status_code == 201, first.text
-    assert second.status_code == 201, second.text
-    assert second.json()["voice"]["id"] == "designed_base"
-    assert len(synth.requests) == 1
-    assert len(asr.requests) == 1
-
-
-def test_design_idempotency_rejects_payload_conflict_before_side_effect(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal = DurableIdempotencyJournal(tmp_path / "design-idempotency.json")
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        journal,
-    )
-    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
-    headers = {"Idempotency-Key": "design-conflict-key"}
-
-    first = client.post("/v1/voices/designs", headers=headers, json=payload())
-    changed = payload()
-    changed["name"] = "Different name"
-    second = client.post("/v1/voices/designs", headers=headers, json=changed)
-
-    assert first.status_code == 201
-    assert second.status_code == 409
-    assert second.json()["error"]["code"] == "idempotency_conflict"
-    assert len(synth.requests) == 1
-    assert len(asr.requests) == 1
-
-
-def test_design_idempotency_recovers_pending_after_restart_without_regeneration(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal_path = tmp_path / "design-idempotency.json"
-    journal = DurableIdempotencyJournal(journal_path)
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        journal,
-    )
-    first_client, _registry, first_synth, first_asr = make_client(tmp_path, monkeypatch)
-    headers = {"Idempotency-Key": "design-recovery-key"}
-
-    first = first_client.post("/v1/voices/designs", headers=headers, json=payload())
-    assert first.status_code == 201
-    assert len(first_synth.requests) == 1
-    assert len(first_asr.requests) == 1
-
-    records = json.loads(journal_path.read_text(encoding="utf-8"))
-    assert len(records) == 1
-    records[0]["state"] = "pending"
-    records[0].pop("completed_at", None)
-    journal_path.write_text(json.dumps(records), encoding="utf-8")
-
-    restarted = DurableIdempotencyJournal(journal_path)
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        restarted,
-    )
-    second_client, _registry, second_synth, second_asr = make_client(tmp_path, monkeypatch)
-
-    replay = second_client.post("/v1/voices/designs", headers=headers, json=payload())
-
-    assert replay.status_code == 201, replay.text
-    assert replay.json()["voice"]["id"] == "designed_base"
-    assert second_synth.requests == []
-    assert second_asr.requests == []
-    decision = restarted.lookup(
-        owner="speechrail-local",
-        operation="voice.design",
-        key="design-recovery-key",
-    )
-    assert decision is not None
-    assert decision.state == "completed"
-    assert decision.result_id == "designed_base"
-
-
-def test_design_write_outcome_unknown_preserves_pending_without_duplicate_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal_path = tmp_path / "design-idempotency.json"
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        DurableIdempotencyJournal(journal_path),
-    )
-    client, registry, first_synth, first_asr = make_client(tmp_path, monkeypatch)
-    original_save = registry._save_custom_voices
-
-    def write_then_fail() -> None:
-        original_save()
-        raise OSError("write outcome unknown")
-
-    monkeypatch.setattr(registry, "_save_custom_voices", write_then_fail)
-    headers = {"Idempotency-Key": "design-uncertain-write"}
-
-    first = client.post("/v1/voices/designs", headers=headers, json=payload())
-    assert first.status_code == 503
-    assert len(first_synth.requests) == 1
-    assert len(first_asr.requests) == 1
-
-    restarted_journal = DurableIdempotencyJournal(journal_path)
-    monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._design_idempotency_journal",
-        restarted_journal,
-    )
-    second_client, _restarted_registry, second_synth, second_asr = make_client(
-        tmp_path,
-        monkeypatch,
-    )
-    second = second_client.post("/v1/voices/designs", headers=headers, json=payload())
-
-    assert second.status_code == 201, second.text
-    assert second.json()["voice"]["id"] == "designed_base"
-    assert second_synth.requests == []
-    assert second_asr.requests == []

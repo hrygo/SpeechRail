@@ -20,6 +20,7 @@ import wave
 from array import array
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -638,6 +639,44 @@ def _voice_revision(
     return "vr_" + hashlib.sha256(canonical).hexdigest()[:32]
 
 
+def voice_revision_for_clone(
+    *,
+    ref_text: str,
+    audio_bytes: bytes,
+    creation: VoiceCreation | None,
+) -> str:
+    """Return the immutable revision a published clone profile will receive."""
+
+    return _voice_revision(
+        mode="clone",
+        instruction="",
+        seed=42,
+        temperature=0.1,
+        ref_text=ref_text.strip(),
+        reference_audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+        creation=creation,
+    )
+
+
+_EPHEMERAL_VOICE_PROFILES: ContextVar[Mapping[str, VoiceProfile]] = ContextVar(
+    "speechrail_ephemeral_voice_profiles",
+    default=MappingProxyType({}),
+)
+
+
+@contextmanager
+def use_voice_profile(profile: VoiceProfile) -> Iterator[None]:
+    """Expose one candidate profile to internal synthesis without publishing it."""
+
+    current = dict(_EPHEMERAL_VOICE_PROFILES.get())
+    current[profile.id] = profile
+    token = _EPHEMERAL_VOICE_PROFILES.set(MappingProxyType(current))
+    try:
+        yield
+    finally:
+        _EPHEMERAL_VOICE_PROFILES.reset(token)
+
+
 class VoiceRegistry:
     """Thread-safe registry with atomic metadata commits and reader leases."""
 
@@ -1073,6 +1112,18 @@ class VoiceRegistry:
                 *SYSTEM_VOICE_PROFILES.values(), *self._custom_voices.values(),
             ))
 
+    @property
+    def storage_path(self) -> Path:
+        """Return the private metadata path used to derive sibling stores."""
+
+        return self._storage_path
+
+    @property
+    def voices_dir(self) -> Path:
+        """Return the private publication asset directory."""
+
+        return self._voices_dir
+
     def list_profiles(self) -> list[VoiceProfile]:
         with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
@@ -1101,6 +1152,14 @@ class VoiceRegistry:
         if expected_revision is not None and not VOICE_REVISION_RE.fullmatch(expected_revision):
             raise ValueError("invalid expected voice revision")
         resolved = resolve_voice(voice)
+        ephemeral = _EPHEMERAL_VOICE_PROFILES.get().get(resolved)
+        if ephemeral is not None:
+            if expected_revision is not None and ephemeral.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {ephemeral.id}"
+                )
+            yield ephemeral
+            return
         audio_path: Path | None = None
         with self._lock, self._process_lock():
             if resolved in SYSTEM_VOICE_PROFILES:
@@ -1263,13 +1322,9 @@ class VoiceRegistry:
                 duration_seconds=round(float(duration_seconds), 2),
                 quality=quality,
                 creation=creation,
-                revision=_voice_revision(
-                    mode="clone",
-                    instruction="",
-                    seed=42,
-                    temperature=0.1,
-                    ref_text=ref_text.strip(),
-                    reference_audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+                revision=voice_revision_for_clone(
+                    ref_text=ref_text,
+                    audio_bytes=audio_bytes,
                     creation=creation,
                 ),
             )
@@ -1580,7 +1635,11 @@ def get_voice_registry() -> VoiceRegistry:
 
 def get_voice_profile(voice: str) -> VoiceProfile:
     """Return a registered preset or custom profile, or raise a stable lookup error."""
-    return _GLOBAL_VOICE_REGISTRY.get_profile(voice)
+    resolved = resolve_voice(voice)
+    ephemeral = _EPHEMERAL_VOICE_PROFILES.get().get(resolved)
+    if ephemeral is not None:
+        return ephemeral
+    return _GLOBAL_VOICE_REGISTRY.get_profile(resolved)
 
 
 _ABBREVIATIONS = frozenset(
@@ -1897,4 +1956,6 @@ __all__ = [
     "resolve_voice",
     "transcode_and_validate_clone_audio",
     "tts_voice_class",
+    "use_voice_profile",
+    "voice_revision_for_clone",
 ]

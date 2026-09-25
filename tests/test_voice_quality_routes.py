@@ -25,6 +25,7 @@ from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
 from speechrail.domain import voice_quality as vq
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import (
     AudioChunk,
     BatchTranscriber,
@@ -307,21 +308,29 @@ def _make_client(
     *,
     batch_transcriber: BatchTranscriber | object | None = _DEFAULT_TRANSCRIBER,
 ) -> tuple[TestClient, VoiceRegistry, SineSynthesizer, Path]:
-    preset = load_catalog().preset("quality")
+    tier = "quality"
+    asr_key = required_spec_artifact(tier, "asr")
+    tts_key = required_spec_artifact(tier, "tts_custom_voice")
+    base_key = required_spec_artifact(tier, "tts_base")
+    assert asr_key is not None and tts_key is not None and base_key is not None
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
     registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
 
     settings = Settings(
-        qwen3_model_dir=tmp_path / preset.asr,
+        qwen3_model_dir=tmp_path / asr_key,
         asr_resident_bytes=1 * 1024**3,
         qwen3_python=None,
-        qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_model_dir=tmp_path / tts_key,
         tts_resident_bytes=1 * 1024**3,
-        qwen3_tts_clone_model_dir=(
-            tmp_path / preset.tts_clone if preset.tts_clone is not None else None
-        ),
+        qwen3_tts_clone_model_dir=tmp_path / base_key,
         qwen3_tts_python=None,
+        selection_schema_version=2,
+        selection_asr_spec=tier,
+        selection_tts_spec=tier,
+        asr_artifact_key=asr_key,
+        tts_artifact_key=tts_key,
+        tts_base_artifact_key=base_key,
     )
     if synthesizer is None:
         synthesizer = SineSynthesizer()
@@ -937,8 +946,13 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
     )
     assert response.status_code == 200
     persisted = registry.get_profile(profile.id)
-    preset = load_catalog().preset("quality")
-    artifact = next(item for item in load_catalog().artifacts if item.key == preset.tts_clone)
+    base_key = required_spec_artifact("quality", "tts_base")
+    assert base_key is not None
+    artifact = next(
+        item
+        for item in load_catalog().artifacts
+        if item.key == base_key
+    )
     validation = registry.validation_store.get(
         voice_id=profile.id,
         voice_revision=profile.revision,

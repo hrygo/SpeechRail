@@ -38,7 +38,11 @@ from speechrail.domain.tts_stream import (
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.busy import BusyReason
-from speechrail.runtime.registry import TTS_RUNTIME_ROLES, engine_variant_for_role
+from speechrail.runtime.registry import (
+    TTS_RUNTIME_ROLES,
+    VOICE_DESIGN_ROLE,
+    engine_variant_for_role,
+)
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -876,9 +880,13 @@ class Qwen3TtsCapabilityRouter:
         }
 
     async def start(self) -> None:
-        """Start every configured capability, leaving already-warm workers intact."""
+        """Start ordinary runtime roles; VoiceDesign stays lazy for design jobs."""
         async with self._capability_lock:
-            workers = self._worker_list
+            workers = tuple(
+                self._workers[role]
+                for role in TTS_RUNTIME_ROLES
+                if role in self._workers
+            )
             if all(worker.ready for worker in workers):
                 return
             try:
@@ -893,6 +901,13 @@ class Qwen3TtsCapabilityRouter:
                         if worker.alive or worker.ready:
                             await worker.close()
                 raise
+
+    @property
+    def design_ready(self) -> bool:
+        """Return whether the lazy VoiceDesign worker is already resident."""
+
+        worker = self._workers.get(VOICE_DESIGN_ROLE)
+        return worker is not None and worker.ready
 
     def resource_key_for_voice(self, voice: str) -> str:
         """Map a validated public voice to the plan-role lane that serves it.
@@ -946,6 +961,19 @@ class Qwen3TtsCapabilityRouter:
             # Closing the router's iterator must also close the owning worker's
             # iterator, so the worker slot is released by the caller's teardown
             # instead of waiting for garbage collection.
+            async with aclosing(worker.synthesize(request)) as source:
+                async for chunk in source:
+                    yield chunk
+
+        return stream()
+
+    def synthesize_design(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        """Run one VoiceDesign candidate task; never used by normal synthesis."""
+
+        async def stream() -> AsyncIterator[AudioChunk]:
+            worker = self._workers.get(VOICE_DESIGN_ROLE)
+            if worker is None:
+                raise RuntimeError("voice_design_model_unavailable")
             async with aclosing(worker.synthesize(request)) as source:
                 async for chunk in source:
                     yield chunk

@@ -93,7 +93,11 @@ def _effective_capabilities(
         "profile": profile,
         "models": {
             "tts": {"variant": variant},
-            "tts_clone": {"variant": "base"} if profile in {"quality", "extreme"} else {},
+            "tts_clone": (
+                {"variant": "base"}
+                if profile in {"fast", "quality", "reference", "extreme"}
+                else {}
+            ),
         },
         "voices": voices,
     }
@@ -977,7 +981,7 @@ def test_create_voice_rejects_missing_voice_design_before_rest_mutation(
     ]
 
 
-def test_design_voice_rejects_missing_base_before_rest_mutation(
+def test_design_voice_creates_candidate_without_base(
     make_client: Any, run_async: Any
 ) -> None:
     voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
@@ -985,41 +989,66 @@ def test_design_voice_rejects_missing_base_before_rest_mutation(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/speechrail/capabilities":
             return _ok(_effective_capabilities("custom_voice", "voice_design", voices))
+        if request.method == "POST" and request.url.path == "/v1/voice-designs":
+            body = _json_body(request)
+            assert body["voice_id"] == "design"
+            assert body["reference_text"] == "这是一个用于测试生成参考的示例句子，足够长。"
+            return _ok(
+                {
+                    "candidate": {
+                        "id": "vd_" + "a" * 24,
+                        "target_voice_id": "design",
+                        "name": "voice",
+                        "state": "generated",
+                        "revision": "vr_" + "b" * 32,
+                        "publishable": False,
+                    }
+                },
+                status=201,
+            )
         raise AssertionError(f"unexpected request {request.method} {request.url.path}")
 
     client, requests = make_client(handler)
 
-    with pytest.raises(ToolCallError) as excinfo:
-        run_async(
-            tools.design_voice(
-                client,
-                voice_id="design",
-                name="voice",
-                instruction="warm",
-                reference_text="这是一个用于测试生成参考的示例句子，足够长。",
-            )
+    result = run_async(
+        tools.design_voice(
+            client,
+            voice_id="design",
+            name="voice",
+            instruction="warm",
+            reference_text="这是一个用于测试生成参考的示例句子，足够长。",
         )
+    )
 
-    assert excinfo.value.code == "capability_not_available"
+    assert result["state"] == "generated"
+    assert result["publishable"] is False
     assert [request.url.path for request in requests] == [
-        "/v1/speechrail/capabilities"
+        "/v1/speechrail/capabilities",
+        "/v1/voice-designs",
     ]
 
 
-def test_design_voice_uses_extreme_voice_design_and_base_capabilities(
+def test_design_voice_uses_reference_voice_design_capability(
     make_client: Any, run_async: Any
 ) -> None:
-    voice = {"id": "new_design", "mode": "clone", "available": True}
+    candidate = {
+        "id": "vd_" + "c" * 24,
+        "target_voice_id": "new_design",
+        "name": "A voice",
+        "state": "generated",
+        "revision": "vr_" + "d" * 32,
+        "publishable": False,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
-            return _ok(_effective_capabilities("extreme", "voice_design", []))
-        if request.method == "POST" and request.url.path == "/v1/voices/designs":
+            return _ok(_effective_capabilities("reference", "voice_design", []))
+        if request.method == "POST" and request.url.path == "/v1/voice-designs":
             body = _json_body(request)
-            assert body["id"] == "new_design"
+            assert body["voice_id"] == "new_design"
             assert body["name"] == "A voice"
             assert body["reference_text"] == "这是一个用于测试生成参考的完整示例句子。"
-            return _ok({"voice": voice, "synthesis_validation": "unevaluated"}, status=201)
+            return _ok({"candidate": candidate}, status=201)
         raise AssertionError(f"unexpected request {request.method} {request.url.path}")
 
     client, requests = make_client(handler)
@@ -1034,10 +1063,124 @@ def test_design_voice_uses_extreme_voice_design_and_base_capabilities(
         )
     )
 
-    assert result["id"] == "new_design"
+    assert result["id"] == candidate["id"]
     assert [request.url.path for request in requests] == [
         "/v1/speechrail/capabilities",
-        "/v1/voices/designs",
+        "/v1/voice-designs",
+    ]
+
+
+def test_voice_design_confirm_validate_review_and_publish_flow(
+    make_client: Any, run_async: Any
+) -> None:
+    candidate_id = "vd_" + "e" * 24
+    revision = "vr_" + "f" * 32
+    candidate = {
+        "id": candidate_id,
+        "target_voice_id": "new_design",
+        "name": "A voice",
+        "state": "generated",
+        "revision": revision,
+        "publishable": False,
+    }
+    validation_id = "vv_" + "1" * 24
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(_effective_capabilities("reference", "voice_design", []))
+        if request.url.path == f"/v1/voice-designs/{candidate_id}/confirm":
+            assert _json_body(request) == {
+                "reference_text": "编辑后的参考文本，长度足够并且表达自然。"
+            }
+            return _ok({"candidate": {**candidate, "state": "confirmed"}})
+        if request.url.path == f"/v1/voice-designs/{candidate_id}/validate":
+            body = _json_body(request)
+            if "human_review" in body:
+                assert body["human_review"] == {
+                    "validation_id": validation_id,
+                    "identity": "pass",
+                    "naturalness": "pass",
+                }
+                return _ok(
+                    {
+                        "candidate": {
+                            **candidate,
+                            "state": "publishable",
+                            "publishable": True,
+                        }
+                    }
+                )
+            assert body["test_text"] == "这是不同于参考文本的 Base 测试文本，长度足够。"
+            return _ok(
+                {
+                    "candidate": {
+                        **candidate,
+                        "state": "validating",
+                        "validations": [{"validation_id": validation_id, "machine_status": "pass"}],
+                    }
+                }
+            )
+        if request.url.path == f"/v1/voice-designs/{candidate_id}/publish":
+            assert _json_body(request) == {"expected_candidate_revision": revision}
+            return _ok(
+                {
+                    "candidate": {
+                        **candidate,
+                        "state": "published",
+                        "publishable": True,
+                        "published_voice_revision": revision,
+                    },
+                    "voice": {"id": "new_design", "mode": "clone", "available": True},
+                },
+                status=201,
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+
+    confirmed = run_async(
+        tools.confirm_voice_design(
+            client,
+            candidate_id=candidate_id,
+            reference_text="编辑后的参考文本，长度足够并且表达自然。",
+        )
+    )
+    validated = run_async(
+        tools.validate_voice_design(
+            client,
+            candidate_id=candidate_id,
+            test_text="这是不同于参考文本的 Base 测试文本，长度足够。",
+        )
+    )
+    reviewed = run_async(
+        tools.validate_voice_design(
+            client,
+            candidate_id=candidate_id,
+            validation_id=validation_id,
+            identity_review="pass",
+            naturalness_review="pass",
+        )
+    )
+    published = run_async(
+        tools.publish_voice_design(
+            client,
+            candidate_id=candidate_id,
+            expected_candidate_revision=revision,
+        )
+    )
+
+    assert confirmed["state"] == "confirmed"
+    assert validated["state"] == "validating"
+    assert reviewed["publishable"] is True
+    assert published["voice"]["id"] == "new_design"
+    assert [request.url.path for request in requests] == [
+        f"/v1/voice-designs/{candidate_id}/confirm",
+        "/v1/speechrail/capabilities",
+        f"/v1/voice-designs/{candidate_id}/validate",
+        "/v1/speechrail/capabilities",
+        f"/v1/voice-designs/{candidate_id}/validate",
+        "/v1/speechrail/capabilities",
+        f"/v1/voice-designs/{candidate_id}/publish",
     ]
 
 

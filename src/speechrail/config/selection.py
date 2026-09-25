@@ -200,6 +200,11 @@ def resolve_selection(
         if tts_base is not None
         else None
     )
+    design_dir = (
+        _require_directory(models_dir / voice_design.key, label="TTS design model")
+        if voice_design is not None
+        else None
+    )
     vendor_current = resolved_app_home / "vendor" / "current"
     vendor_python = vendor_current / "bin" / "python"
     vendor_ffmpeg = vendor_current / "ffmpeg" / "bin" / "ffmpeg"
@@ -208,6 +213,7 @@ def resolve_selection(
         "qwen3_model_dir": asr_dir,
         "qwen3_tts_model_dir": tts_dir,
         "qwen3_tts_clone_model_dir": clone_dir,
+        "qwen3_tts_design_model_dir": design_dir,
         "qwen3_python": vendor_python,
         "qwen3_tts_python": vendor_python,
         "ffmpeg_path": vendor_ffmpeg,

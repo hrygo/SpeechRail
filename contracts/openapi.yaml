@@ -295,21 +295,23 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
-  /v1/voices/designs:
+  /v1/voice-designs:
     post:
-      operationId: registerDesignedReferenceVoice
+      operationId: createVoiceDesignCandidate
       tags: [speech]
-      summary: Generate and validate a reference for a new Base-bound voice
+      summary: Generate a private VoiceDesign candidate reference
       description: |
-        Explicit registration when the active runtime provides both VoiceDesign
-        and Base capabilities. VoiceDesign generates a 2-30 second reference,
-        followed by canonicalization and local Batch ASR validation.
-        The expected text is never supplied as an ASR prompt. Publication is
-        create-only: existing voice IDs and aliases cannot be overwritten.
-        Existing /v1/voices prompt metadata registration is unchanged.
-        Only language=zh is currently accepted. This request does not execute
-        Base synthesis; the returned synthesis_validation remains unevaluated.
-        Use normal TTS and quality-runs to validate the newly registered voice.
+        Creates a durable, private design candidate when the active selection
+        resolves the VoiceDesign role (currently the reference spec) and local
+        Batch ASR. VoiceDesign generates a 2-30 second reference which is
+        canonicalized and graded, then transcribed for a reference self-check.
+        The expected text is never supplied as an ASR prompt.
+
+        The candidate is never registered as a routable voice. Confirmation,
+        Base re-validation with a different test text, an explicit human
+        audition and publication are separate calls. Existing voice IDs,
+        aliases and system voices cannot be reserved or overwritten. Only
+        language=zh is accepted.
       security:
         - BearerAuth: []
         - {}
@@ -322,27 +324,34 @@ paths:
             minLength: 1
             maxLength: 256
           description: >-
-            Optional durable idempotency key. A matching retry can replay the
-            original result across process restarts; a different payload under
-            the same key is rejected with idempotency_conflict.
+            Optional durable idempotency key. A matching retry replays the
+            original candidate, including across process restarts, without
+            regenerating audio; a different payload under the same key is
+            rejected with idempotency_conflict.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/VoiceDesignRegistrationRequest'
+              $ref: '#/components/schemas/VoiceDesignCandidateRequest'
       responses:
         '201':
-          description: New Base-bound voice; reference accepted, Base output not yet evaluated
+          description: New private candidate; no voice was registered
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VoiceDesignRegistrationResponse'
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '200':
+          description: Idempotent replay of an existing candidate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
         '400':
           description: >-
-            Invalid request; includes the stable code
-            voice_design_registration_unsupported when the active runtime does
-            not provide both VoiceDesign and Base capabilities
+            Invalid request; includes the stable code voice_design_unsupported
+            when the active selection does not provide the VoiceDesign role, or
+            voice_quality_reject when the generated reference fails the gate
           content:
             application/json:
               schema:
@@ -350,7 +359,9 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          description: Target ID already exists; no voice was overwritten
+          description: >-
+            Target ID already exists or is reserved by another candidate, or
+            the idempotency key was reused with a different payload
           content:
             application/json:
               schema:
@@ -363,6 +374,279 @@ paths:
           $ref: '#/components/responses/BackendDeliveryInvalid'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+    get:
+      operationId: listVoiceDesignCandidates
+      tags: [speech]
+      summary: List private VoiceDesign candidates
+      description: >-
+        Safe candidate metadata only. Reference text, reference text hashes and
+        private filesystem paths are never exposed.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Candidates, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+        description: Candidate identifier returned by the create call.
+    get:
+      operationId: getVoiceDesignCandidate
+      tags: [speech]
+      summary: Read one private VoiceDesign candidate
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Safe candidate metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/confirm:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+    post:
+      operationId: confirmVoiceDesignCandidate
+      tags: [speech]
+      summary: Confirm the candidate reference transcript
+      description: |
+        Fixes the candidate and its transcript revision. The stored reference
+        audio is re-transcribed and must match the (optionally edited) reference
+        text; a mismatch returns transcript_mismatch and nothing is confirmed.
+
+        Editing the reference text produces a new candidate revision and clears
+        every earlier validation: text may never be changed while reusing old
+        evidence.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceDesignConfirmRequest'
+      responses:
+        '200':
+          description: Confirmed candidate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '400':
+          description: Stable code transcript_mismatch when the transcript does not match
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Candidate state or revision changed while confirming
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+  /v1/voice-designs/{candidate_id}/validate:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+    post:
+      operationId: validateVoiceDesignCandidate
+      tags: [speech]
+      summary: Re-create the candidate with Base, or record a human audition
+      description: |
+        Two mutually exclusive modes.
+
+        Machine mode (`test_text`) synthesizes brand-new text through the Base
+        role with the private candidate reference and adds acoustic, transcript
+        and runtime-identity evidence. The test text must differ from the
+        reference text; when it is omitted the server substitutes a controlled
+        test text. Machine metrics never mark identity or naturalness as
+        reviewed.
+
+        Human mode (`human_review`) attaches an explicit audition verdict to an
+        existing machine result. It is refused unless that result already passed
+        the machine gate for the current candidate revision.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceDesignValidateRequest'
+      responses:
+        '200':
+          description: Candidate with the new validation evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Candidate state/revision conflict, or a human review without a
+            passing machine validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          description: >-
+            Invalid request; includes test_text_matches_reference when the test
+            text is not distinct from the reference text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+  /v1/voice-designs/{candidate_id}/publish:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+    post:
+      operationId: publishVoiceDesignCandidate
+      tags: [speech]
+      summary: Publish a validated candidate as an immutable voice revision
+      description: |
+        Requires a confirmed reference plus at least one complete pass for the
+        current candidate revision: machine acoustic/transcript/runtime gate and
+        an explicit human identity and naturalness pass.
+
+        Publication is create-only inside the voice store lock. A duplicate
+        publish of the same candidate returns the existing voice, and a target
+        ID that changed underneath the candidate is refused with a stable
+        conflict instead of being overwritten.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceDesignPublishRequest'
+      responses:
+        '201':
+          description: Published voice revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignPublishResponse'
+        '200':
+          description: The candidate was already published; no second revision was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignPublishResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Stable codes voice_design_validation_required,
+            voice_design_state_conflict, voice_design_revision_conflict or
+            voice_design_publish_conflict; the private candidate is preserved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/cancel:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+    post:
+      operationId: cancelVoiceDesignCandidate
+      tags: [speech]
+      summary: Cancel a private candidate that has not been published
+      description: >-
+        Marks the candidate cancelled. Reference assets are retained for audit,
+        the target ID becomes available again, and already published voices are
+        never affected.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Cancelled candidate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A published candidate cannot be cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voices/clone/prompts:
     get:
       operationId: listClonePrompts
@@ -2215,15 +2499,17 @@ components:
           type: boolean
         production_ready_reason:
           type: string
-    VoiceDesignRegistrationRequest:
+    VoiceDesignCandidateRequest:
       type: object
       additionalProperties: false
-      required: [id, name, instruction, reference_text]
+      required: [voice_id, name, instruction, reference_text]
       properties:
-        id:
+        voice_id:
           type: string
           pattern: '^[a-z0-9_-]{1,64}$'
-          description: New target ID; system IDs, aliases and occupied IDs are rejected.
+          description: >-
+            Lowercase target ID for a future voice. System IDs, aliases and
+            occupied IDs are rejected; the candidate itself is never routable.
         name:
           type: string
           minLength: 1
@@ -2245,17 +2531,279 @@ components:
           type: string
           const: zh
           default: zh
-    VoiceDesignRegistrationResponse:
+    VoiceDesignConfirmRequest:
       type: object
       additionalProperties: false
-      required: [voice, synthesis_validation]
       properties:
+        reference_text:
+          type: [string, 'null']
+          minLength: 20
+          maxLength: 240
+          description: >-
+            Optional edited reference text. Omitting it confirms the stored
+            transcript; changing it always yields a new candidate revision and
+            clears earlier validation.
+    VoiceDesignReview:
+      type: string
+      enum: [pass, warn, reject, not_reviewed]
+    VoiceDesignHumanReview:
+      type: object
+      additionalProperties: false
+      required: [validation_id, identity, naturalness]
+      properties:
+        validation_id:
+          type: string
+          pattern: '^vv_[0-9a-f]{24}$'
+          description: Machine validation result this audition reviews.
+        identity:
+          $ref: '#/components/schemas/VoiceDesignReview'
+        naturalness:
+          $ref: '#/components/schemas/VoiceDesignReview'
+    VoiceDesignValidateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        test_text:
+          type: [string, 'null']
+          minLength: 20
+          maxLength: 240
+          description: >-
+            New text for the Base re-validation. It must differ from the
+            reference text; when omitted the server substitutes a controlled
+            test text.
+        capability_key:
+          type: [string, 'null']
+          pattern: '^(fast|quality|reference)\.render$'
+          description: Exact tier/mode the evidence must cover; defaults to the active TTS spec.
+        human_review:
+          oneOf:
+            - $ref: '#/components/schemas/VoiceDesignHumanReview'
+            - type: 'null'
+    VoiceDesignPublishRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_candidate_revision:
+          type: [string, 'null']
+          pattern: '^vr_[0-9a-f]{32}$'
+          description: Optional compare-and-publish guard for the candidate revision.
+    VoiceDesignValidationProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - validation_id
+        - candidate_revision
+        - status
+        - machine_status
+        - identity_status
+        - naturalness_status
+        - failure_codes
+        - capability_key
+        - model_artifact
+        - model_catalog_revision
+        - transcript_match
+        - created_at
+        - updated_at
+      properties:
+        validation_id:
+          type: string
+          pattern: '^vv_[0-9a-f]{24}$'
+        candidate_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        status:
+          type: string
+          enum: [pass, warn, reject]
+          description: >-
+            Overall verdict. It can only become pass when the machine gate and
+            the explicit human identity/naturalness review both pass.
+        machine_status:
+          type: string
+          enum: [pass, warn, reject]
+        identity_status:
+          $ref: '#/components/schemas/VoiceDesignReview'
+        naturalness_status:
+          $ref: '#/components/schemas/VoiceDesignReview'
+        failure_codes:
+          type: array
+          items:
+            type: string
+        capability_key:
+          type: string
+          description: The exact tier/mode the evidence covers, for example quality.render.
+        model_artifact:
+          type: string
+        model_catalog_revision:
+          type: string
+          pattern: '^[0-9a-f]{40}$'
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+        created_at:
+          type: number
+        updated_at:
+          type: number
+    VoiceDesignReferenceProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - audio_sha256
+        - text_sha256
+        - transcript_sha256
+        - duration_seconds
+        - quality
+      properties:
+        audio_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        text_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        transcript_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        duration_seconds:
+          type: number
+          minimum: 0
+        quality:
+          type: [object, 'null']
+          additionalProperties: false
+          description: Reference-stage quality subset; the reference text itself is never returned.
+          properties:
+            status:
+              type: string
+            duration_seconds:
+              type: number
+            sample_rate:
+              type: integer
+            channels:
+              type: integer
+            speech_active_ratio:
+              type: number
+            clipping_ratio:
+              type: number
+            transcript_match:
+              type: [number, 'null']
+            synthesis:
+              type: object
+              additionalProperties: false
+              properties:
+                probe_count:
+                  type: integer
+                successful_probe_count:
+                  type: integer
+                deterministic:
+                  type: boolean
+                transcript_match:
+                  type: [number, 'null']
+    VoiceDesignCandidateProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - target_voice_id
+        - name
+        - language
+        - state
+        - revision
+        - created_at
+        - updated_at
+        - confirmed_at
+        - published_at
+        - published_voice_revision
+        - error_code
+        - source_model
+        - reference
+        - validations
+        - publishable
+      properties:
+        id:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+        target_voice_id:
+          type: string
+          pattern: '^[a-z0-9_-]{1,64}$'
+        name:
+          type: string
+        language:
+          type: string
+          const: zh
+        state:
+          type: string
+          enum:
+            - generated
+            - confirmed
+            - validating
+            - publishable
+            - published
+            - cancelled
+            - failed
+        revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        created_at:
+          type: number
+        updated_at:
+          type: number
+        confirmed_at:
+          type: [number, 'null']
+        published_at:
+          type: [number, 'null']
+        published_voice_revision:
+          type: [string, 'null']
+          pattern: '^vr_[0-9a-f]{32}$'
+        error_code:
+          type: [string, 'null']
+        source_model:
+          type: object
+          additionalProperties: false
+          required: [artifact, revision]
+          properties:
+            artifact:
+              type: string
+            revision:
+              type: string
+              pattern: '^[0-9a-f]{40}$'
+        reference:
+          $ref: '#/components/schemas/VoiceDesignReferenceProjection'
+        validations:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceDesignValidationProjection'
+        publishable:
+          type: boolean
+          description: >-
+            True only when the current candidate revision already has one
+            complete pass, so publication cannot fail for missing evidence.
+    VoiceDesignCandidateEnvelope:
+      type: object
+      additionalProperties: false
+      required: [candidate]
+      properties:
+        candidate:
+          $ref: '#/components/schemas/VoiceDesignCandidateProjection'
+    VoiceDesignCandidateList:
+      type: object
+      additionalProperties: false
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceDesignCandidateProjection'
+    VoiceDesignPublishResponse:
+      type: object
+      additionalProperties: false
+      required: [candidate, voice]
+      properties:
+        candidate:
+          $ref: '#/components/schemas/VoiceDesignCandidateProjection'
         voice:
           $ref: '#/components/schemas/VoiceProfile'
-        synthesis_validation:
-          type: string
-          const: unevaluated
-          description: Reference registration does not execute Base output or speaker-identity validation.
     VoiceCreation:
       type: object
       additionalProperties: false

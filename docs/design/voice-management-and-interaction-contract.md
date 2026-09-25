@@ -62,7 +62,8 @@ if let apiKey = apiKey {
 
 - `GET /v1/voices`：读取当前服务端音色列表；
 - `GET /v1/voices/{voice_id}`：返回单个服务端音色的完整安全 metadata；
-- `POST /v1/voices/designs`：通过 VoiceDesign 生成并注册 clone 音色；
+- `POST /v1/voice-designs`：创建 VoiceDesign 候选；随后通过
+  `confirm`、`validate`、`publish` 子资源完成确认、Base 复验、人工听审和发布；
 - `PATCH /v1/voices/{voice_id}`：兼容的无条件 metadata 更新；
 - `DELETE /v1/voices/{voice_id}`：删除自定义音色，系统音色和 alias 受保护。
 

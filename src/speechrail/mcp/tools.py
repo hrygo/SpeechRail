@@ -48,6 +48,8 @@ _MAX_VOICE_NAME = 200
 _MAX_VOICE_INSTRUCTION = 10_000
 _MAX_VOICE_SEED = 2**32 - 1
 _VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_VOICE_DESIGN_CANDIDATE_ID_RE = re.compile(r"^vd_[0-9a-f]{24}$")
+_VOICE_DESIGN_VALIDATION_ID_RE = re.compile(r"^vv_[0-9a-f]{24}$")
 _VOICE_REVISION_RE = re.compile(r"^vr_[0-9a-f]{32}$")
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_JOB_REF = 1_000
@@ -341,6 +343,57 @@ def _safe_voice_record(raw: object) -> dict[str, Any]:
             code="invalid_response", message="SpeechRail returned no voice identifier"
         )
     return safe
+
+
+def _safe_voice_design_candidate(raw: object) -> dict[str, Any]:
+    """Keep reference text and private paths out of the MCP candidate output."""
+
+    if not isinstance(raw, dict):
+        raise ToolCallError(
+            code="invalid_response",
+            message="SpeechRail returned no voice-design candidate",
+        )
+    source = raw.get("candidate")
+    if not isinstance(source, dict):
+        raise ToolCallError(
+            code="invalid_response",
+            message="SpeechRail returned no voice-design candidate",
+        )
+    allowed = {
+        "id",
+        "target_voice_id",
+        "name",
+        "language",
+        "state",
+        "revision",
+        "created_at",
+        "updated_at",
+        "confirmed_at",
+        "published_at",
+        "published_voice_revision",
+        "error_code",
+        "source_model",
+        "reference",
+        "validations",
+        "publishable",
+    }
+    safe = {key: value for key, value in source.items() if key in allowed}
+    if not isinstance(safe.get("id"), str):
+        raise ToolCallError(
+            code="invalid_response",
+            message="SpeechRail returned no voice-design candidate identifier",
+        )
+    return safe
+
+
+def _require_candidate_id(value: str) -> str:
+    stripped = value.strip()
+    if not _VOICE_DESIGN_CANDIDATE_ID_RE.fullmatch(stripped):
+        raise ToolCallError(
+            code="invalid_candidate_id",
+            message="candidate_id must match ^vd_[0-9a-f]{24}$",
+        )
+    return stripped
 
 
 def _validate_revision_pin(
@@ -931,7 +984,7 @@ async def design_voice(
     language: str = "zh",
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a reference when VoiceDesign and Base are both active."""
+    """Create a private VoiceDesign candidate without publishing a voice."""
     normalized_id = voice_id.strip().lower()
     if not _VOICE_ID_RE.fullmatch(normalized_id):
         raise ToolCallError(
@@ -969,12 +1022,6 @@ async def design_voice(
         expected_variant="voice_design",
         capability="Generated-reference design",
     )
-    _require_model_variant(
-        effective,
-        model_name="tts_clone",
-        expected_variant="base",
-        capability="Generated-reference registration",
-    )
     raw = await client.design_voice(
         voice_id=normalized_id,
         name=stripped_name,
@@ -984,7 +1031,163 @@ async def design_voice(
         language="zh",
         idempotency_key=idempotency_key,
     )
-    return _safe_voice_record(raw)
+    return _safe_voice_design_candidate(raw)
+
+
+async def confirm_voice_design(
+    client: SpeechRailClient,
+    *,
+    candidate_id: str,
+    reference_text: str | None = None,
+) -> dict[str, Any]:
+    """Confirm a candidate reference, optionally replacing its transcript."""
+
+    candidate = _require_candidate_id(candidate_id)
+    normalized_reference: str | None = None
+    if reference_text is not None:
+        normalized_reference = reference_text.strip()
+        if not 20 <= len(normalized_reference) <= 240:
+            raise ToolCallError(
+                code="invalid_ref_text",
+                message="reference_text must contain 20 to 240 characters",
+            )
+    raw = await client.confirm_voice_design(
+        candidate_id=candidate,
+        reference_text=normalized_reference,
+    )
+    return _safe_voice_design_candidate(raw)
+
+
+async def validate_voice_design(
+    client: SpeechRailClient,
+    *,
+    candidate_id: str,
+    test_text: str | None = None,
+    capability_key: str | None = None,
+    validation_id: str | None = None,
+    identity_review: str | None = None,
+    naturalness_review: str | None = None,
+) -> dict[str, Any]:
+    """Run Base new-text validation or attach an explicit human review."""
+
+    candidate = _require_candidate_id(candidate_id)
+    human_fields = (validation_id, identity_review, naturalness_review)
+    human_requested = any(value is not None for value in human_fields)
+    if human_requested and not all(value is not None for value in human_fields):
+        raise ToolCallError(
+            code="invalid_human_review",
+            message=(
+                "validation_id, identity_review and naturalness_review must be "
+                "provided together"
+            ),
+        )
+    if human_requested and (test_text is not None or capability_key is not None):
+        raise ToolCallError(
+            code="invalid_human_review",
+            message="human review cannot be combined with Base validation arguments",
+        )
+    if not human_requested and all(value is None for value in human_fields):
+        if test_text is not None and not 20 <= len(test_text.strip()) <= 240:
+            raise ToolCallError(
+                code="invalid_test_text",
+                message="test_text must contain 20 to 240 characters",
+            )
+        if capability_key is not None and capability_key not in {
+            "fast.render",
+            "quality.render",
+            "reference.render",
+        }:
+            raise ToolCallError(
+                code="invalid_capability_key",
+                message="capability_key must be a render capability",
+            )
+
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts",
+        expected_variant="voice_design",
+        capability="Voice-design candidate validation",
+    )
+    human_review: dict[str, str] | None = None
+    if human_requested:
+        assert validation_id is not None
+        assert identity_review is not None
+        assert naturalness_review is not None
+        if not _VOICE_DESIGN_VALIDATION_ID_RE.fullmatch(validation_id):
+            raise ToolCallError(
+                code="invalid_validation_id",
+                message="validation_id must match ^vv_[0-9a-f]{24}$",
+            )
+        allowed_reviews = {"pass", "warn", "reject", "not_reviewed"}
+        if (
+            identity_review not in allowed_reviews
+            or naturalness_review not in allowed_reviews
+        ):
+            raise ToolCallError(
+                code="invalid_human_review",
+                message="identity_review and naturalness_review must be valid review values",
+            )
+        human_review = {
+            "validation_id": validation_id,
+            "identity": identity_review,
+            "naturalness": naturalness_review,
+        }
+    else:
+        _require_model_variant(
+            effective,
+            model_name="tts_clone",
+            expected_variant="base",
+            capability="Voice-design Base validation",
+        )
+
+    raw = await client.validate_voice_design(
+        candidate_id=candidate,
+        test_text=test_text.strip() if test_text is not None else None,
+        capability_key=capability_key,
+        human_review=human_review,
+    )
+    return _safe_voice_design_candidate(raw)
+
+
+async def publish_voice_design(
+    client: SpeechRailClient,
+    *,
+    candidate_id: str,
+    expected_candidate_revision: str | None = None,
+) -> dict[str, Any]:
+    """Publish one validated candidate as an immutable Base voice."""
+
+    candidate = _require_candidate_id(candidate_id)
+    if (
+        expected_candidate_revision is not None
+        and not _VOICE_REVISION_RE.fullmatch(expected_candidate_revision)
+    ):
+        raise ToolCallError(
+            code="invalid_candidate_revision",
+            message="expected_candidate_revision has an invalid format",
+        )
+    effective = await client.fetch_capabilities()
+    _require_model_variant(
+        effective,
+        model_name="tts",
+        expected_variant="voice_design",
+        capability="Voice-design publication",
+    )
+    _require_model_variant(
+        effective,
+        model_name="tts_clone",
+        expected_variant="base",
+        capability="Voice-design publication",
+    )
+    raw = await client.publish_voice_design(
+        candidate_id=candidate,
+        expected_candidate_revision=expected_candidate_revision,
+    )
+    return {
+        "candidate": _safe_voice_design_candidate(raw),
+        "voice": _safe_voice_record(raw),
+    }
 
 
 async def clone_voice(

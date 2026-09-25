@@ -132,7 +132,7 @@ Sona 保留两个明确入口：
 1. **描述声音** → 当前快照声明可用的 VoiceDesign；
 2. **克隆我的声音** → 当前快照声明可用的 Base reference clone。
 
-Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建后都进入统一“我的音色”资产体验。Prompt-created voice 现可通过显式 `/v1/voices/designs` 生成并核验规范参考，注册为新的 Base-bound clone；原 `/v1/voices` 与 `/v1/voices/clone` 行为不变。注册不执行 Base 输出验收，也不自动迁移旧音色，详见[生成式音色注册](generated-voice-registration.md)。
+Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建后都进入统一“我的音色”资产体验。Prompt-created voice 现可通过显式 `/v1/voice-designs` 生成候选，确认后用不同文本执行 Base 复验，完成人工听审后发布为新的 Base-bound clone；原 `/v1/voices` 与 `/v1/voices/clone` 行为不变。候选或参考核验本身不发布生产音色，也不自动迁移旧音色，详见[生成式音色注册](generated-voice-registration.md)。
 
 ## 10. 回归门
 

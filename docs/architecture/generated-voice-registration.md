@@ -2,35 +2,38 @@
 title: "生成式音色注册：VoiceDesign 参考到 Base 音色"
 status: active
 audience: "SpeechRail / Sona 维护者与客户端工程师"
-version: "1.2"
-date: 2026-09-23
+version: "1.3"
+date: 2026-09-26
 ---
 
 # 生成式音色注册
 
 ## 当前范围
 
-`POST /v1/voices/designs` 在当前 VoiceDesign 与 Base capability 同时可用时提供显式、create-only 的生成参考注册；当前 catalog 在 `quality` 与候选 `extreme` 配置该能力。
-它根据新的描述生成参考，将合格参考保存为 `mode=clone` 的新音色，后续正常 TTS
-经现有 capability router 路由到 Base。注册请求本身不执行 Base 合成，也没有独立声纹
-验收，响应因此固定包含 `synthesis_validation: unevaluated`。
+`/v1/voice-designs` 将 VoiceDesign 生成、参考确认、Base 新文本复验和人工听审拆成显式步骤。
+候选先保存在私有存储中，只有通过当前 revision 的完整验证并显式
+`publish` 后，才 create-only 地创建 `mode=clone` 生产音色；后续正常 TTS 经现有
+capability router 路由到 Base。候选不会出现在 `/v1/voices`。
 
-这不是旧音色的原地迁移。已有 `/v1/voices` 仅保存 instruction 的契约、预览接口、
-参考上传接口及 MCP 旧工具均不改变；客户端必须显式选择新入口，不得静默降级。
+这不是旧音色的原地迁移。已有 `/v1/voices` 仅保存 instruction 的契约、预览接口和
+参考上传接口保持独立；MCP 也使用候选、确认、验证、发布四步工具，不后台代替用户确认。
 
 ## 流水线与发布时点
 
 ```text
 描述 + reference_text + seed + 未使用的目标 ID
-→ 当前 VoiceDesign / Base catalog capability 检查（当前 catalog 为 quality 与候选 extreme 配置）
+→ 当前 VoiceDesign capability 检查（当前 catalog 由 reference spec 提供）
   → 确认本地 TTS 与 Batch ASR 已配置，目标 ID 未占用
   → BATCH_TTS reservation：VoiceDesign 生成有界 PCM
   → 完成并关闭流；校验原始信号，再执行一次参考规范化
   → 在原请求 deadline 内释放 TTS 模型槽
   → BATCH_ASR reservation + admission：回转录规范参考（prompt 为空）
   → 规范化文本相似度达标
-  → 原子 create-only 保存规范 WAV、参考报告及来源信息
-  → 新 voice ID 供 Base TTS 使用；单独执行 quality-runs 验收输出
+  → 原子保存私有 WAV、参考报告及来源信息（generated）
+  → confirm：固定参考文本与 transcript revision（confirmed）
+  → validate：目标 Base 使用不同文本合成、质检、转写和 runtime identity 绑定
+  → human review：用户实际听审后写入 identity/naturalness 证据（publishable）
+  → publish：锁内复核 revision 后 create-only 注册生产 voice（published）
 ```
 
 候选参考仅在内存中保留。生成或 ASR 未完成时，不创建临时可见 voice、不写参考文件，
@@ -53,18 +56,26 @@ date: 2026-09-23
 该阈值、中文覆盖和参考能量/噪声指标均需真实模型校准；ASR 可能误识别或幻觉，
 通过门禁不是任意噪声拒绝、专业韵律或跨文本身份稳定性的证明。
 
-成功为 201，返回 `voice` 与 `synthesis_validation=unevaluated`。
-`voice.quality` 的参考部分有 ASR 分数，合成部分 `probe_count=0`、`deterministic=false`。
-不得将该参考报告的 pass/warn 显示成“Base 输出质量通过”。
+创建成功为 201，返回安全的 `candidate` 元数据，不返回参考文本、私有路径或生产 `voice`。
+`candidate.reference.quality` 的 ASR 分数只代表参考自检，合成部分
+`probe_count=0`；不得把创建成功显示成“Base 输出质量通过”。
 
-ID 冲突为 409 `voice_already_exists`。目标 ID 检查会在 registry 提交锁内再次执行，
-所以两个并发请求最多一个能创建该 ID；另一个不能覆盖先完成的结果。
-没有声称提供持久化 Idempotency-Key：网络重试使用相同目标 ID，出现 409 后通过
-`/v1/voices` 核实已有资产，或由用户选择另一个新 ID。
+`validate` 必须使用不同于参考文本的测试文本。机器结果只写
+`machine_status`；`identity_status` 与 `naturalness_status` 初始为
+`not_reviewed`。只有机器通过后才能附加人工听审，机器数值不能填充人工结论。
+发布成功为 201，返回已发布 `candidate` 与不可变 `voice`；重复发布同一
+candidate 返回 200 且不创建第二个 revision。
+
+ID 冲突为 409 `voice_already_exists`。候选创建支持持久化
+`Idempotency-Key`；同一 payload 的重试返回原候选且不重复生成，不同 payload
+复用同一 key 返回 409。目标 ID 被其他未终结候选占用时返回
+`voice_design_target_in_use`。发布在 registry 提交锁内再次核对 revision，
+并发发布最多一个能创建该 ID，另一个不能覆盖先完成的结果。
 
 队列满或 ASR 模式冲突为 429；统一请求超时为 503 `backend_timeout`；
-参考不合格为 400 `voice_quality_reject`，内容不匹配为 400 `transcript_mismatch`，
+参考不合格为 400 `voice_quality_reject`，确认内容不匹配为 400 `transcript_mismatch`，
 畸形或超限输出为 502 `output_invalid`。异常响应不带 vendor 原始正文或路径。
+未确认或未通过机器/人工验证时发布返回 409，候选和参考资产保留以供审计。
 
 ## 来源记录与 revision 状态
 
@@ -84,19 +95,20 @@ registry 在写入前核对参考音频及文本 hash。旧记录可缺省 creat
 
 ## Sona 对接与回退
 
-保留“描述声音”和“录制/上传参考”两个入口。描述声音新增“生成并注册 Base 音色”动作，
-请求本接口；参考音频仍调用 `/v1/voices/clone`。本轮没有修改 Sona UI，不能宣称客户端
-已经自动调用新接口。旧提示词流程仍可保留供兼容，但不要把旧流程响应标记为已固化。
+保留“描述声音”和“录制/上传参考”两个入口。描述声音使用候选创建、确认、验证和发布；
+参考音频仍调用 `/v1/voices/clone`。客户端必须显式展示机器验证和人工听审结果，
+不能因为候选创建成功就宣称生产音色已注册。
 
-注册后应提示“参考已核验，输出待验证”，允许实际试听并执行 quality-runs。
-不满意时删除新 ID、继续使用旧 ID，不需要回滚或覆盖旧参考。降级到缺少 Base 的档位时，
-新音色应按现有 capability 规则不可用，不回退到 VoiceDesign 私有 ICL。
+发布后正式成片仍按当前 output validation 与 production-ready 规则判断；用户不满意时
+取消候选、继续使用旧 ID，不需要覆盖旧参考。降级到缺少 Base 的档位时，已发布音色按
+现有 capability 规则不可用，不回退到 VoiceDesign 私有 ICL。
 
 ## 软件回归与目标机验收
 
-代码回归覆盖：201 + Base binding、来源落盘与重载、无绝对路径泄露、参数与档位拒绝、
-ASR 缺失/失败/空转写/不匹配、静音/削波/畸形/短/超长输出、取消关闭、eviction deadline、
-队列拒绝、并发占用目标 ID、持久化失败清理、metadata 篡改拒绝和旧资产不变。
+代码回归覆盖：候选生命周期、不同文本约束、机器验证不能代替人工审听、失败不发布、
+幂等重试不重复生成/发布、revision 编辑隔离、来源落盘与重载、无绝对路径泄露、
+参数与档位拒绝、ASR 缺失/失败/空转写/不匹配、静音/削波/畸形/短/超长输出、
+取消、队列拒绝、并发占用目标 ID、持久化失败清理、metadata 篡改拒绝和旧资产不变。
 
 仍需 Apple Silicon 真实 VoiceDesign / Base / ASR 连续测试，包含规范参考试听、
 Base 跨文本声纹、数字/单位/标点误识别、冷启动与峰值内存；软件 CI 不能替代这些结果。

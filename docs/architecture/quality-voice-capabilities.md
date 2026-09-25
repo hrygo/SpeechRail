@@ -47,7 +47,11 @@ flowchart LR
 
 1. prompt-created voice 继续由 VoiceDesign 合成；
 2. VoiceDesign 不再被允许承接 reference clone；
-3. 新增显式 `POST /v1/voices/designs`：输入描述、参考文本、seed 和一个未占用的目标 ID，生成并核验规范参考，再保存为 Base-bound clone；已有 `/v1/voices` metadata-only 创建行为不变。生成与 ASR 阶段结束前不发布候选音色；旧音色不自动迁移。该注册操作不执行 Base 合成，响应明确为 `synthesis_validation=unevaluated`，后续通过普通 TTS 与 `quality-runs` 验收。当前仅开放中文实验门。详见[生成式音色注册](generated-voice-registration.md)。
+3. 新增显式 `/v1/voice-designs` 候选流程：输入描述、参考文本、seed 和一个未占用的目标 ID，
+   生成私有规范参考，再依次确认、执行不同文本的 Base 复验、附加人工听审并原子发布
+   Base-bound clone；已有 `/v1/voices` metadata-only 创建行为不变。未确认或未通过验证的
+   候选不出现在生产音色列表；旧音色不自动迁移。当前仅开放中文实验门。详见
+   [生成式音色注册](generated-voice-registration.md)。
 
 长期目标是“VoiceDesign 负责创造，Base 负责稳定复现”：设计成功后生成一段经过质量门的 canonical reference，再由 Base 建立稳定 clone revision；后续目标文本不再每次重新进行开放式音色设计。
 
@@ -228,7 +232,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 
 ### Phase C — Prompt voice 稳定化
 
-- 已实现显式 `/v1/voices/designs` 生成/验证 canonical reference，并创建新的 Base-bound clone（不覆盖旧 ID）；
+- 已实现显式 `/v1/voice-designs` 候选、确认、Base 新文本复验、人工听审和原子发布（不覆盖旧 ID）；
 - VoiceRevision 历史、CAS update、rollback、revoke 与 delete 已由 registry 提供；
 - 已有旧音色不提供自动迁移或跨模型兼容；需要重新注册或显式重新验收；
 - 跨文本 speaker similarity 与 ABX 门仍是独立的声学验收，不由 revision metadata 代替。
