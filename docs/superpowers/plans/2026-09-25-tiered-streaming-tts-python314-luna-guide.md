@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.19"
+version: "1.20"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付；W11 已在 cp314 managed runtime 安装态跑通四档真实增量门（light/balanced/quality/extreme 的短句、长句与多段追加基准 `failures: []`），仍缺真实播放欠载、打断/cancel 时延、长稳内存与 App 可听验收。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W10 已交付；W11 已在 cp314 managed runtime 安装态跑通四档真实增量门（light/balanced/quality/extreme 的短句、长句与多段追加基准 `failures: []`）；cancel 状态释放经两轮真机定位后以 25/25 连续取消复测通过（`failures: []`、`stale_audio_turns: 0`、无 abort/reload），仍缺真实播放欠载、打断→停旧音时延、长稳内存与 App 可听验收。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -518,7 +518,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
 - [x] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。验收：`swift test` 复验 XCTest 214 passed、Swift Testing 135 passed（2026-09-25，含新增纯状态测试）。App构建/安装、真实服务/模型、可听延迟与UI自动化均未验收。
 - [x] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。验收：`tests/test_tts_stream_capability_matrix.py` 及其联跑 35 passed（2026-09-25）；App 能力映射测试随 `swift test` 通过。
-- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 首次真机运行暴露“已完成 utterance 的残留帧污染下一轮 + open 失败后 worker 仍标记 started”两处缺陷，已在源码修复并加确定性回归，真机复测待下一轮 wheel 安装（见下方「W11 cancel 状态释放缺陷」）；仍缺真实播放欠载/打断/cancel 时延/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
+- [ ] **W11｜授权后逐档实测与发布**：cp314 wheel 已装成 managed runtime，四档真实增量基准通过（见下方「W11 逐档真实增量门」）；cancel 真机运行共暴露三层缺陷——已完成 utterance 的残留帧污染下一轮、open 失败后 worker 仍标记 started、父端未读完终态却继续复用同一 wire——均已源码修复并加确定性回归，带修复的 wheel（`dc83d911…`）装机后 `--mode cancel --repeat 5` 连跑 5 轮 25/25 全部取消成功（见下方「W11 cancel 状态释放缺陷」与「W11 cancel 父端残留帧缺陷与真机复测」）；仍缺真实播放欠载/打断→停旧音时延/长稳内存、App 可听与发布回滚演练，extreme 不因基准通过自动转正式实时档。
 
 ### W2 实施与验收记录（2026-09-24）
 
@@ -748,10 +748,25 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **Base 参考音频需 ~2.4 s 级（新增结论）：** 8.4 s 参考会在 Base ICL 布局下触发 `prefill_did_not_enter_trailing_region`（探针 fail-closed）；本次 quality/extreme 门统一使用 2.4 s（57600 帧 @ 24 kHz）参考，四档全部通过。
 - **证据边界（not_run）：** 真实播放欠载、用户打断→停旧音、cancel→状态释放时延、跨文本盲听身份 A/B、长稳内存与缓存驻留趋势、light/balanced 的 ASR 端到端与分人、extreme 的资源峰值预算、App 可听验收与 UI 自动化、发布/签名/notarization 与远端 push。ASR 与基准只证明“文本被完整朗读且延迟达标”，不构成音色相似度、自然度或长稳验收；extreme 仍按候选档呈现。
 
-#### W11 cancel 状态释放缺陷（2026-09-25，已定位并修复；真机复测待下一轮）
+#### W11 cancel 状态释放缺陷（2026-09-25，第一轮：两处缺陷）
 
 - **真机症状：** quality 档 `bench_tts_stream_lifecycle.py --mode cancel --repeat 5` 第 1 轮 `cancel_to_terminal_ms=71 ms` 正常，第 2–5 轮全部 `tts_backend_failed`；此后同档普通增量基准（不含 cancel）也持续失败，`/health` 仍报 `tts_ready=true`，`tts_lifecycle.warm_capability` 由 `both` 退成单一 lane。安装态 `~/Library/Logs/SpeechRail/speechrail.log`（2026-09-25T12:43:32）给出直接原因：新一轮 open 读到 `ProtocolError: incremental frame carried a foreign request_id`。
 - **根因一（worker，触发点）：** `StreamPump` 是进程级单 reader，`_read_loop` 对取消帧既置优先级标志又入 `_inbound`；`_drive_stream` 走优先级分支时只发终态、不入队消费，该帧因此留在队列里，被下一次 `_serve_frames` 当作“没有活动 utterance 的控制帧”答复，产生携带**旧 request_id** 的错误帧；新 utterance 的 dispatcher 判定外来帧并 fail-closed。
 - **根因二（父端，放大成“必须重启服务”）：** open 失败时客户端走 abort 兜底杀死子进程，而 `Qwen3TtsWorker.open_incremental_stream` 的异常路径既没有像 batch 路径那样失效 worker，也没有重置 `_started`，于是之后每个请求都往死管道写。
 - **修复：** 新增 `StreamPump.discard_ended_stream(request_id)`，`_drive_stream` 结束时只丢弃队首属于该已结束 request 的帧（后续 `stream.start` 保留）；`open_incremental_stream` 在失败且 `transport` 已死时调用 `_invalidate_after_abort(epoch)`，下一个请求自愈重启。新增 3 项确定性回归，其中把 `discard` 置空即可复现旧帧残留（可复现红灯），把 invalidation 置空即可复现 `_started=true` + 死 transport。定向联跑 121 passed、`ruff check` 干净（2026-09-25，CPython 3.12.14 主仓 `.venv`；未加载模型、未连接服务）。
-- **证据边界：** 本节只有代码级根因、修复与确定性回归。真机 `--mode cancel/soak` 复测需要重新构建并安装 wheel（运行态变更），本轮未执行；§8.2 的 cancel→状态释放与打断条目仍为 **not_run**。
+- **证据边界：** 本节只有代码级根因、修复与确定性回归。装上这批修复后真机复测仍然交替失败，因此缺陷没有到此结束，第三层根因见下一节；本节自身不构成 cancel 验收。
+
+#### W11 cancel 父端残留帧缺陷与真机复测（2026-09-25，第二轮：第三层根因）
+
+- **运行态前置（用户指令「不要继续使用 cp312」）：** 本机服务与仓库开发环境已统一到 CPython 3.14。`runtime/current -> ...-py3147`（3.14.7）、`vendor/current` 3.14.7、LaunchAgent `ProgramArguments` 只指向 `runtime/current/.venv/bin/python`；仓库 `.venv` 由 3.12.14 重建为 3.14.7（`uv venv --python 3.14.7 --clear .venv` + `uv sync --extra dev`），本轮之后的 pytest / ruff / mypy 全部在 cp314 下执行。回退点保留 cp314 `2b0eb8ff…` / `99bb218a…` 与 cp312 `b6d3394c…`。
+- **第一轮修复仍不足（真机复测）：** 装入只带 `discard_ended_stream` + `_invalidate_after_abort` 的 wheel 后，quality 档 `--mode cancel --repeat 5` 仍交替失败（1、3 成功，2、4 `tts_backend_failed`）。安装态日志给出新的直接证据：`ProtocolError: incremental frame carried a foreign request_id (type='tts_stream_done' request_id='bench_cancel_…_probe' expected='bench_cancel_…')`，即上一轮 cancel 探针的 `tts_stream_done` 迟到，落在下一轮的 open 窗口里。第一轮修的残留帧是**已在 worker 队列里**的那一份，这一份是**父端从未读走**的那一份。
+- **根因三（父端）：** 两处收尾逻辑都按“终态已知”处理，却把帧留在了共享 wire 上：① `Qwen3TtsIncrementalSession._await_dispatcher` 用 `contextlib.suppress(TimeoutError)` 吞掉超时且不返回结果，`cancel()` 因此无法判断 worker 是否真的在宽限内退出了该 utterance；② `close()` 只在 `self._fatal is not None` 时 abort，utterance 在**没有拿到 worker 终态**的情况下被关掉时不 abort，于是那份终态帧没有读者、又被下一轮当成外来帧 fail-closed。
+- **修复（父端三处 + 一条防御）：**
+  1. `_await_dispatcher` 改为返回 `bool`；`cancel()` 拿不到 drain 结果时 `_abort()`，让“读不干净”变成显式断连而不是静默泄漏。
+  2. `close()` 的条件改为 `self._fatal is not None or self._state.terminal is None`——没有终态就视 wire 状态未知并 abort，下一轮自愈重启。
+  3. `Qwen3TtsWorker` 用 `deque(maxlen=8)` 记住本进程在该 worker 上开过的增量 `request_id`，`open_incremental_stream` 把**除自己以外**的全部已知 id 作为 `stale_request_ids` 传给新 session。
+  4. 客户端 `_handle_frame` 对命中 `stale_request_ids` 的帧记 `_note` 后丢弃并继续读；对**未知**外来 id 仍 fail-closed，且错误信息改为携带 `type/request_id/expected`，避免下次只能靠猜。
+- **确定性回归（cp314，未加载模型）：** 新增 3 项客户端回归（已结束 utterance 的帧被丢弃、未知外来帧仍 fail-closed、worker 不退休 utterance 时 `close()` 必回收）与 1 项桥接回归（把泄漏终态塞进队列后，下一轮必须仍然跑完自己的终态，而不是报 `ProtocolError`）。桥接回归在不传 `stale_request_ids` 时可复现红灯，报错串与真机日志逐字一致（`request_id='req-first' expected='req-second'`）。定向联跑 56 passed；`-k "tts or realtime or stream"` 786 passed / 1626 deselected（69.7 s）；改动文件 `ruff check` 干净、`mypy --strict` 无问题。
+- **真机复测（已执行，运行态变更已获授权）：** 带本轮修复的 `speechrail-3.2.1-cp314-cp314-macosx_27_0_arm64.whl`（sha256 `dc83d91149fafc8d430bd6da072a62266b88a42a035033aa99d8bd34d834a57d`）装成 managed runtime（`runtime/current -> ...-dc83d91149fa-py3147`，`status=committed`、`readyz=true`、`downloaded_bytes=0`）。`--mode cancel --repeat 5` 连跑 5 轮：**25/25 全部 `cancelled_turns`，`failures: []`，`stale_audio_turns: 0`**；`cancel→terminal` p50 4.1–21.5 ms、p95 6.3–24.9 ms（预算 500 ms）；`next_start_accepted` p50 8.8–26.9 ms、p95 12.7–31.0 ms（证明槽位真的释放）。整段复测期间 `/health` 的 `fallback_abort_count=0`、`reload_count=0`——修复后走的是协作取消，不再靠杀子进程兜底；安装后日志中 `foreign request_id` 与 `tts_backend_failed` 均为 0 次。
+- **证据边界：** 上述 25 轮里 `dropped stale frame` 计数为 0，即泄漏已在源头消除，`stale_request_ids` 只是“帧已被读走、但归属上一轮”的纵深防御，本轮没有被触发。§8.2 中「打断→停旧音 P95 ≤ 100 ms」「cancel 后长稳 / soak」「真实播放欠载」与 App 可听验收仍为 **not_run**；本节只钉住 cancel→状态释放这条路径。
+- **顺带观测（不是缺陷结论，不阻塞）：** `/health` 的 `tts_lifecycle.cooperative_cancel_supported` 是 router 对 primary 与 clone 的 AND。quality 档 primary 是 VoiceDesign 变体、按设计永不协商增量协议，所以该字段为 `false`，而 clone lane（Base）本身支持协作取消（本轮 25 轮即走该 lane）。该字段只是诊断信号，不代表“正在用的音色不支持”；system voice（如 `serena`）走 primary 时 `speechrail.tts.start` 会按预期 fail-closed 成 `tts_streaming_unsupported`。
