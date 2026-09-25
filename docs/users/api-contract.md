@@ -522,11 +522,38 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `input_audio_buffer.clear` | 客户端 → 服务端 | 清空未提交缓冲 |
 | `input_audio_buffer.speech_started/stopped` | 服务端 → 客户端 | VAD 事实；不会自动取消 TTS |
 | `speechrail.tts.create` | 客户端 → 服务端 | 提交调用方已决定播放的文本，开始无状态 TTS |
-| `speechrail.tts.cancel` | 客户端 → 服务端 | 按 `request_id` 显式取消当前 TTS |
-| `response.output_audio.delta` / `done` | 服务端 → 客户端 | 当前唯一的流式 PCM16 音频事件 |
+| `speechrail.tts.start` | 客户端 → 服务端 | 开始一个增量 TTS utterance（LLM 边生成、调用方边追加文本） |
+| `speechrail.tts.append_text` | 客户端 → 服务端 | 向活动 utterance 追加一段已经稳定的文本；`sequence` 从 `0` 起严格连续 |
+| `speechrail.tts.finish_text` | 客户端 → 服务端 | 关闭文本输入并继续生成尾音；`last_sequence` 必须等于最后一次 ACK |
+| `speechrail.tts.cancel` | 客户端 → 服务端 | 按 `request_id` 显式取消当前 TTS（完整文本与增量模式共用） |
+| `speechrail.tts.started` | 服务端 → 客户端 | 增量 utterance 已取得准入并开始生成，携带 `protocol_version`、implementation、voice 与生效 `limits` |
+| `speechrail.tts.text_accepted` | 服务端 → 客户端 | 确认一次 append，携带 `append_sequence`、`accepted_codepoints`、`total_codepoints` |
+| `response.output_audio.delta` / `done` | 服务端 → 客户端 | 当前唯一的流式 PCM16 音频事件；增量模式下 `delta` 事件额外携带 `speechrail.{chunk_index,sample_offset,...}` |
 | `response.done` | 服务端 → 客户端 | TTS `completed` / `failed` / `cancelled` 终态 |
 
-### 6.1 多人会议讲话人分离扩展
+### 6.1 增量 TTS（低延迟流式文本输入）
+
+完整文本 `speechrail.tts.create` 每次都是一次独立 render：跨句身份靠固定音色保证，但每段之间会重新开始生成状态，长回复被 planner 分块时韵律仍可能断开。增量模式把一轮回复的多个文本片段送进**同一个生成状态**，因此同时改善首音延迟与跨句韵律连续性。
+
+```text
+speechrail.tts.start        → speechrail.tts.started
+speechrail.tts.append_text* → speechrail.tts.text_accepted* + response.output_audio_transcript.delta*
+response.output_audio.delta*
+speechrail.tts.finish_text  → response.output_audio_transcript.done / response.output_audio.done / response.done
+```
+
+要点：
+
+- **互斥**：`create` 与 `start` 共享「连接内只允许一个活动 TTS」判定和同一个 `request_id` 账本。活动期间两者都返回 `tts_in_progress`；空闲时重复 `request_id` 返回 `tts_request_invalid`。
+- **能力按 voice 解析**：`session.created` / `transcription_session.updated` 的 `speech_capabilities.streaming_tts`、`GET /v1/voices[].streaming` 和 `GET /v1/models[].capabilities.streaming_input` 消费同一个 resolver。模型级只声明 `scope="per_voice"` 的实现轴，不声称所有音色都能增量；`supported=false` 时读 `reason` 与 `hint`，不要自行降级成等待全文。
+- **当前支持范围**：`custom_voice`（内置 speaker）与 `base` clone 支持增量；VoiceDesign `instruction` 音色明确不支持，需要先在服务端注册固定音色 clone 再选择。
+- **配额**：单次 append、utterance 总量、待消费队列分别限制 Unicode codepoint，音频队列单独按字节限制。请求只能收紧 `limits`，放宽返回 `tts_stream_limit_exceeded`。
+- **错误码**：`tts_streaming_unsupported`、`tts_sequence_invalid`、`tts_input_closed`、`tts_input_timeout`、`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_backend_failed`。失败先发一次 `error`，再以一次 `response.done(status=failed)` 收敛；`error` 不是终态。
+- **字段提醒**：`speechrail.tts.text_accepted.append_sequence` 是调用方的追加序号；每个事件上都有的 `sequence` 是传输层连接序号，两者不同名也不同义。
+
+完整的字段、序列与状态机以 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md) 为准。
+
+### 6.2 多人会议讲话人分离扩展
 Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 只增加一个 opt-in 字段：`transcription_session.update.session.speechrail.diarization.enabled=true`。必须在首个 PCM 前设置，`transcription_session.updated` 回显 `enabled/version/max_speakers`。旧的根级或 `input_audio_transcription.diarization` 形状固定返回 `invalid_diarization`。未开启的会话不接收分人事件，也不会创建分人会话。开启后，已完成正文通过本地固定文本对齐获得时间边界，绝不为分人再次识别或替换正文。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
 
 | 扩展事件名称 (Type) | 方向 | 说明 |

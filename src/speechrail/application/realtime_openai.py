@@ -26,6 +26,17 @@ from speechrail.application.render_receipts import bind_observed_runtime_revisio
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.application.tts_stream import (
+    StreamController,
+    TtsStreamAdmissionError,
+    TtsStreamReceipt,
+)
+from speechrail.application.tts_stream_capability import (
+    TtsStreamCapability,
+    resolve_tts_stream_capability,
+    tts_stream_capability_payload,
+    unresolved_tts_stream_capability,
+)
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -39,8 +50,11 @@ from speechrail.compatibility.openai_realtime import (
     input_audio_buffer_committed,
     parse_client_event,
     parse_finish_request,
+    parse_tts_append_text,
     parse_tts_cancel,
     parse_tts_create,
+    parse_tts_finish_text,
+    parse_tts_start,
     response_audio_delta,
     response_audio_done,
     response_audio_transcript_delta,
@@ -58,6 +72,9 @@ from speechrail.compatibility.openai_realtime import (
     transcription_failed,
     transcription_segment,
     transcription_snapshot,
+    tts_audio_position,
+    tts_stream_started,
+    tts_text_accepted,
     validate_append,
 )
 from speechrail.config.model_catalog import ModelArtifact
@@ -82,12 +99,21 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    VoiceProfile,
     VoiceRevisionConflictError,
     VoiceRevokedError,
     VoiceStoreUnavailableError,
     resolve_voice,
 )
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.domain.tts_stream import (
+    TtsStreamError,
+    TtsStreamEvent,
+    TtsStreamEventKind,
+    TtsStreamLimits,
+    TtsStreamOptions,
+    TtsStreamTerminal,
+)
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
@@ -104,6 +130,9 @@ _MAX_UPDATES_PER_EVENT = 256
 _MAX_TTS_REQUEST_IDS = 256
 _MAX_ALIGNMENT_PCM_BYTES = 30 * 32_000
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+# Each append awaiting the model's acceptance keeps its bounded packet so the
+# transcript can be echoed after - never before - that acceptance.
+_MAX_PENDING_STREAM_APPENDS = 128
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +208,16 @@ class OpenAIRealtimeSession:
         self._tts_voice_revision: str | None = None
         self._tts_receipt_id: str | None = None
         self._render_receipts_enabled = False
+        # Incremental utterance state. ``_tts_stream`` only becomes non-None
+        # after the vendor session is open, so appends that arrive during
+        # admission wait on ``_tts_stream_ready`` instead of failing.
+        self._tts_stream: StreamController | None = None
+        self._tts_stream_ready: asyncio.Event | None = None
+        self._tts_stream_mode = False
+        self._tts_stream_pending: dict[int, str] = {}
+        self._tts_stream_accepted = 0
+        self._tts_stream_limits: TtsStreamLimits | None = None
+        self._closing = False
         self._diarization: DiarizationSession | None = None
         self._diarization_events: asyncio.Task[None] | None = None
         self._diarization_resources: AsyncExitStack | None = None
@@ -279,6 +318,12 @@ class OpenAIRealtimeSession:
             await self._clear_audio()
         elif parsed.kind == "tts_create":
             await self._create_tts(event)
+        elif parsed.kind == "tts_start":
+            await self._start_tts_stream(event)
+        elif parsed.kind == "tts_append_text":
+            await self._append_tts_stream(event)
+        elif parsed.kind == "tts_finish_text":
+            await self._finish_tts_stream(event)
         elif parsed.kind == "tts_cancel":
             await self._cancel_response(event)
         else:
@@ -287,6 +332,8 @@ class OpenAIRealtimeSession:
             )
 
     async def close(self) -> None:
+        self._closing = True
+        await self._close_tts_stream()
         await self._stop_asr_reader()
         await self._close_asr_session()
         await self._release_asr()
@@ -612,7 +659,11 @@ class OpenAIRealtimeSession:
     ) -> dict[str, object]:
         session = event.get("session")
         if isinstance(session, dict):
-            session["speech_capabilities"] = dict(self._speech_capabilities)
+            capabilities = dict(self._speech_capabilities)
+            streaming = self._session_stream_capability()
+            if streaming is not None:
+                capabilities["streaming_tts"] = streaming
+            session["speech_capabilities"] = capabilities
         return event
 
     async def _ensure_asr_for_turn(self) -> None:
@@ -1074,20 +1125,25 @@ class OpenAIRealtimeSession:
         self._current_item_id = self._new_item_id()
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
-    async def _create_tts(self, event: dict[str, Any]) -> None:
-        request = parse_tts_create(event)
-        if not bool(self._config.get("tts_enabled", False)):
-            raise RealtimeAdapterError(
-                "tts_not_enabled",
-                "caller TTS must be enabled in the transcription session",
-            )
-        if not self._services.tts_ready or self._tts is None:
-            raise RealtimeAdapterError("backend_not_ready", "TTS backend is not ready")
+    @staticmethod
+    def _stream_request_id_fallback(response_id: str) -> str:
+        return response_id
+
+    def _claim_tts_request(self, request_id: str) -> None:
+        """Apply the shared activity/ledger gate for both TTS entry points.
+
+        ``speechrail.tts.create`` and ``speechrail.tts.start`` accept the same
+        per-connection request ids, so they must reject in the same order:
+        an utterance that is still live is ``tts_in_progress``, and only an
+        idle connection reports the duplicate/full ledger as
+        ``tts_request_invalid``.
+        """
+
         if self._tts_task is not None and not self._tts_task.done():
             raise RealtimeAdapterError(
                 "tts_in_progress", "a TTS response is already in progress"
             )
-        if request.request_id in self._tts_request_ids:
+        if request_id in self._tts_request_ids:
             raise RealtimeAdapterError(
                 "tts_request_invalid",
                 "request_id must be unique within this WebSocket connection",
@@ -1098,13 +1154,11 @@ class OpenAIRealtimeSession:
                 "TTS request id ledger is full; start a new WebSocket connection",
             )
 
-        selected_voice = resolve_voice(
-            request.voice or str(self._config.get("voice") or DEFAULT_VOICE_ID)
-        )
+    def _resolve_voice_profile(self, selected_voice: str) -> VoiceProfile:
         from speechrail.domain.tts import get_voice_profile
 
         try:
-            selected_profile = get_voice_profile(selected_voice)
+            return get_voice_profile(selected_voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"
@@ -1113,6 +1167,26 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "voice_not_found", f"unknown voice: {selected_voice[:200]}"
             ) from None
+
+    def _expected_model_revision(self) -> str | None:
+        value = self._config.get("expected_model_revision")
+        return value if isinstance(value, str) else None
+
+    async def _create_tts(self, event: dict[str, Any]) -> None:
+        request = parse_tts_create(event)
+        if not bool(self._config.get("tts_enabled", False)):
+            raise RealtimeAdapterError(
+                "tts_not_enabled",
+                "caller TTS must be enabled in the transcription session",
+            )
+        if not self._services.tts_ready or self._tts is None:
+            raise RealtimeAdapterError("backend_not_ready", "TTS backend is not ready")
+        self._claim_tts_request(request.request_id)
+
+        selected_voice = resolve_voice(
+            request.voice or str(self._config.get("voice") or DEFAULT_VOICE_ID)
+        )
+        selected_profile = self._resolve_voice_profile(selected_voice)
         if selected_profile.revoked:
             raise RealtimeAdapterError(
                 "voice_revoked", f"voice {selected_voice[:200]} is revoked"
@@ -1126,8 +1200,8 @@ class OpenAIRealtimeSession:
                 "voice_revision_conflict",
                 "Requested voice revision is not active",
             )
-        expected_model_revision = self._config.get("expected_model_revision")
-        if isinstance(expected_model_revision, str):
+        expected_model_revision = self._expected_model_revision()
+        if expected_model_revision is not None:
             artifact = self._tts_artifact_for_mode(selected_profile.mode)
             if artifact is None or artifact.revision != expected_model_revision:
                 raise RealtimeAdapterError(
@@ -1145,6 +1219,7 @@ class OpenAIRealtimeSession:
         self._tts_receipt_id = None
         self._tts_request_ids.add(request.request_id)
         self._tts_terminal_sent = False
+        self._tts_stream_mode = False
         self._tts_task = asyncio.create_task(
             self._run_tts(
                 request.text,
@@ -1219,6 +1294,520 @@ class OpenAIRealtimeSession:
                 ),
             ) from None
 
+    # ------------------------------------------------------------------
+    # Incremental TTS: start / append_text / finish_text
+    #
+    # The incremental path owns its terminal through ``StreamController``: this
+    # class only translates the controller's events onto the wire, so a
+    # complete/cancel/failure race still produces exactly one ``response.done``.
+    # ------------------------------------------------------------------
+
+    def _stream_capability(self, voice: str, mode: str) -> TtsStreamCapability:
+        return resolve_tts_stream_capability(
+            voice_id=voice,
+            voice_mode=mode,
+            artifact=self._tts_artifact_for_mode(mode),
+            tts_ready=self._services.tts_ready,
+            voice_enabled=True,
+            synthesizer=self._tts,
+            stream_service=self._services.tts_streams,
+        )
+
+    def _session_stream_capability(self) -> dict[str, object] | None:
+        """Resolve the selected voice's incremental capability for the handshake."""
+
+        if self._services.tts_streams is None:
+            return None
+        requested = str(self._config.get("voice") or DEFAULT_VOICE_ID)
+        try:
+            voice = resolve_voice(requested)
+            profile = self._resolve_voice_profile(voice)
+        except (VoiceStoreUnavailableError, ValueError):
+            return tts_stream_capability_payload(
+                unresolved_tts_stream_capability(
+                    voice_id=requested, voice_mode="unknown", reason="voice_unresolved"
+                )
+            )
+        capability = resolve_tts_stream_capability(
+            voice_id=voice,
+            voice_mode=profile.mode,
+            artifact=self._tts_artifact_for_mode(profile.mode),
+            tts_ready=self._services.tts_ready,
+            voice_enabled=not profile.revoked,
+            synthesizer=self._tts,
+            stream_service=self._services.tts_streams,
+        )
+        return tts_stream_capability_payload(capability)
+
+    async def _start_tts_stream(self, event: dict[str, Any]) -> None:
+        """Validate and schedule one incremental utterance without blocking on it."""
+
+        request = parse_tts_start(event)
+        if not bool(self._config.get("tts_enabled", False)):
+            raise RealtimeAdapterError(
+                "tts_not_enabled",
+                "caller TTS must be enabled in the transcription session",
+            )
+        if self._services.tts_streams is None:
+            raise RealtimeAdapterError(
+                "tts_streaming_unsupported",
+                "this service exposes no incremental TTS stream",
+            )
+        if not self._services.tts_ready or self._tts is None:
+            raise RealtimeAdapterError("backend_not_ready", "TTS backend is not ready")
+        self._claim_tts_request(request.request_id)
+
+        selected_voice = resolve_voice(
+            request.voice or str(self._config.get("voice") or DEFAULT_VOICE_ID)
+        )
+        selected_profile = self._resolve_voice_profile(selected_voice)
+        if selected_profile.revoked:
+            raise RealtimeAdapterError(
+                "voice_revoked", f"voice {selected_voice[:200]} is revoked"
+            )
+        self._require_voice_available(selected_voice)
+        if (
+            request.expected_voice_revision is not None
+            and request.expected_voice_revision != selected_profile.revision
+        ):
+            raise RealtimeAdapterError(
+                "voice_revision_conflict", "Requested voice revision is not active"
+            )
+        expected_model_revision = (
+            request.expected_model_revision or self._expected_model_revision()
+        )
+        artifact = self._tts_artifact_for_mode(selected_profile.mode)
+        if expected_model_revision is not None and (
+            artifact is None or artifact.revision != expected_model_revision
+        ):
+            raise RealtimeAdapterError(
+                "model_revision_conflict",
+                "Requested model revision is not the active TTS artifact",
+            )
+        capability = self._stream_capability(selected_voice, selected_profile.mode)
+        if not capability.supported:
+            detail = capability.reason or "unsupported"
+            hint = f"; {capability.hint}" if capability.hint else ""
+            raise RealtimeAdapterError(
+                "tts_streaming_unsupported",
+                f"voice {selected_voice[:200]} has no incremental TTS path: {detail}{hint}",
+            )
+
+        response_id = f"resp_{uuid4().hex[:12]}"
+        item_id = f"item_{uuid4().hex[:12]}"
+        options = TtsStreamOptions(
+            request_id=request.request_id,
+            response_id=response_id,
+            voice=selected_voice,
+            language=str(self._config.get("language") or "auto"),
+            speed=request.speed,
+            expected_voice_revision=selected_profile.revision,
+            expected_model_revision=expected_model_revision,
+        )
+        receipt = TtsStreamReceipt(
+            voice_revision=selected_profile.revision,
+            model_artifact=artifact.key if artifact is not None else None,
+            model_source=artifact.model_id if artifact is not None else None,
+            model_variant=artifact.variant if artifact is not None else None,
+            model_catalog_revision=artifact.revision if artifact is not None else None,
+        )
+        self._tts_request_id = request.request_id
+        self._tts_response_id = response_id
+        self._tts_item_id = item_id
+        self._tts_text = ""
+        self._tts_voice_revision = selected_profile.revision
+        self._tts_receipt_id = None
+        self._tts_request_ids.add(request.request_id)
+        self._tts_terminal_sent = False
+        self._tts_stream_mode = True
+        self._tts_stream_pending.clear()
+        self._tts_stream_accepted = 0
+        self._tts_stream_limits = request.limits
+        self._tts_stream_ready = asyncio.Event()
+        self._tts_task = asyncio.create_task(
+            self._run_tts_stream(
+                options=options,
+                receipt=receipt,
+                limits=request.limits,
+                voice_mode=selected_profile.mode,
+                voice_variant=artifact.variant if artifact is not None else None,
+            )
+        )
+
+    async def _append_tts_stream(self, event: dict[str, Any]) -> None:
+        request = parse_tts_append_text(event)
+        limits = self._tts_stream_limits
+        if limits is not None:
+            # The wire advertised these limits at start, so the wire must
+            # enforce them: the worker only ever sees the server defaults.
+            pending_codepoints = sum(
+                len(text) for text in self._tts_stream_pending.values()
+            )
+            if len(request.text) > limits.max_append_codepoints:
+                raise RealtimeAdapterError(
+                    "tts_stream_limit_exceeded",
+                    "appended text exceeds the per-append codepoint limit",
+                )
+            if (
+                self._tts_stream_accepted + pending_codepoints + len(request.text)
+                > limits.max_total_codepoints
+            ):
+                raise RealtimeAdapterError(
+                    "tts_stream_limit_exceeded",
+                    "utterance exceeds the total codepoint limit",
+                )
+        controller = await self._await_stream_controller(
+            request.request_id, request.response_id
+        )
+        if len(self._tts_stream_pending) >= _MAX_PENDING_STREAM_APPENDS:
+            raise RealtimeAdapterError(
+                "tts_backpressure",
+                "too many appends are still awaiting model acceptance",
+            )
+        # Remember the bounded packet before awaiting the model, so an
+        # acceptance that lands first still finds its transcript text.
+        self._tts_stream_pending[request.sequence] = request.text
+        try:
+            await controller.append_text(request.sequence, request.text)
+        except BaseException as exc:
+            self._tts_stream_pending.pop(request.sequence, None)
+            if isinstance(exc, TtsStreamError):
+                raise RealtimeAdapterError(exc.code, str(exc)) from None
+            raise
+
+    async def _finish_tts_stream(self, event: dict[str, Any]) -> None:
+        request = parse_tts_finish_text(event)
+        controller = await self._await_stream_controller(
+            request.request_id, request.response_id
+        )
+        try:
+            await controller.finish_text(request.last_sequence)
+        except TtsStreamError as exc:
+            raise RealtimeAdapterError(exc.code, str(exc)) from None
+
+    async def _await_stream_controller(
+        self, request_id: str, response_id: str | None
+    ) -> StreamController:
+        """Return the live controller, waiting only for bounded admission."""
+
+        if self._tts_request_id != request_id or (
+            response_id is not None and response_id != self._tts_response_id
+        ):
+            raise RealtimeAdapterError(
+                "tts_not_active", "the requested incremental utterance is not active"
+            )
+        controller = self._tts_stream
+        if controller is not None:
+            return controller
+        ready = self._tts_stream_ready
+        if ready is None:
+            raise RealtimeAdapterError(
+                "tts_not_active", "the requested incremental utterance is not active"
+            )
+        try:
+            await asyncio.wait_for(
+                ready.wait(), timeout=self._settings.request_timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise RealtimeAdapterError(
+                "backend_timeout", "the incremental utterance did not start in time"
+            ) from exc
+        controller = self._tts_stream
+        if controller is None:
+            raise RealtimeAdapterError(
+                "tts_not_active", "the requested incremental utterance is not active"
+            )
+        return controller
+
+    async def _run_tts_stream(
+        self,
+        *,
+        options: TtsStreamOptions,
+        receipt: TtsStreamReceipt,
+        limits: TtsStreamLimits,
+        voice_mode: str,
+        voice_variant: str | None,
+    ) -> None:
+        service = self._services.tts_streams
+        try:
+            if service is None:
+                raise TtsStreamAdmissionError(
+                    "tts_streaming_unsupported",
+                    "this service exposes no incremental TTS stream",
+                )
+            controller = await service.open(
+                options=options,
+                sink=self._on_stream_event,
+                receipt=receipt,
+                limits=limits,
+            )
+        except asyncio.CancelledError:
+            self._release_stream_state(response_id=options.response_id)
+            raise
+        except TtsStreamAdmissionError as exc:
+            await self._fail_stream_open(
+                response_id=options.response_id,
+                code=exc.code,
+                busy_reason=getattr(exc, "busy_reason", None),
+            )
+            return
+        except TtsStreamError as exc:
+            await self._fail_stream_open(
+                response_id=options.response_id, code=exc.code, busy_reason=None
+            )
+            return
+        except Exception:
+            logger.exception("incremental TTS stream failed to open")
+            await self._fail_stream_open(
+                response_id=options.response_id,
+                code="tts_backend_failed",
+                busy_reason=None,
+            )
+            return
+        self._tts_stream = controller
+        self._tts_receipt_id = controller.receipt_id
+        item_id = self._tts_item_id or options.response_id
+        try:
+            await self._send(
+                response_created(session_id=self._session_id, response_id=options.response_id)
+            )
+            await self._send(
+                response_output_item_added(
+                    session_id=self._session_id,
+                    response_id=options.response_id,
+                    item_id=item_id,
+                )
+            )
+            await self._send(
+                response_content_part_added(
+                    session_id=self._session_id,
+                    response_id=options.response_id,
+                    item_id=item_id,
+                )
+            )
+            await self._send(
+                tts_stream_started(
+                    session_id=self._session_id,
+                    request_id=options.request_id,
+                    response_id=options.response_id,
+                    item_id=item_id,
+                    voice=options.voice,
+                    voice_revision=self._tts_voice_revision,
+                    voice_variant=voice_variant,
+                    voice_mode=voice_mode,
+                    limits=controller.limits,
+                )
+            )
+            if self._tts_stream_ready is not None:
+                self._tts_stream_ready.set()
+            await controller.wait_closed()
+        finally:
+            try:
+                with contextlib.suppress(Exception):
+                    await controller.aclose(
+                        reason="client_disconnected" if self._closing else "cancelled"
+                    )
+            finally:
+                self._release_stream_state(response_id=options.response_id)
+
+    async def _on_stream_event(self, event: TtsStreamEvent) -> None:
+        """Translate one controller event onto the public wire."""
+
+        if event.terminal is not None:
+            await self._settle_stream_terminal(event)
+            return
+        response_id = event.response_id
+        item_id = self._tts_item_id or response_id
+        if event.kind is TtsStreamEventKind.AUDIO:
+            await self._send(
+                response_audio_delta(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    delta=base64.b64encode(event.pcm16).decode("ascii"),
+                    speechrail=tts_audio_position(
+                        chunk_index=int(event.chunk_index or 0),
+                        sample_offset=int(event.sample_offset or 0),
+                    ),
+                )
+            )
+            return
+        if event.kind is not TtsStreamEventKind.TEXT_ACCEPTED:
+            return
+        sequence = event.sequence
+        if sequence is None:
+            return
+        text = self._tts_stream_pending.pop(sequence, None)
+        self._tts_stream_accepted += event.accepted_codepoints
+        # The acceptance ACK leads its own transcript delta: a client that only
+        # tracks the protocol can correlate the append before it renders text.
+        await self._send(
+            tts_text_accepted(
+                session_id=self._session_id,
+                request_id=self._tts_request_id
+                or self._stream_request_id_fallback(response_id),
+                response_id=response_id,
+                append_sequence=sequence,
+                accepted_codepoints=event.accepted_codepoints,
+                total_codepoints=self._tts_stream_accepted,
+            )
+        )
+        if text is not None:
+            self._tts_text = f"{self._tts_text or ''}{text}"
+            await self._send(
+                response_audio_transcript_delta(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    delta=text,
+                )
+            )
+
+    async def _settle_stream_terminal(self, event: TtsStreamEvent) -> None:
+        """Project the controller's single terminal onto one ``response.done``."""
+
+        if self._closing:
+            return
+        response_id = event.response_id
+        item_id = self._tts_item_id or response_id
+        transcript = self._tts_text or ""
+        if event.terminal is TtsStreamTerminal.COMPLETED:
+            await self._send(
+                response_audio_transcript_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=transcript,
+                )
+            )
+            await self._send(
+                response_audio_done(
+                    session_id=self._session_id, response_id=response_id, item_id=item_id
+                )
+            )
+            await self._send(
+                response_content_part_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=transcript,
+                )
+            )
+            await self._send(
+                response_output_item_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=transcript,
+                )
+            )
+            await self._finalize_tts(
+                response_id=response_id,
+                status="completed",
+                receipt_id=self._tts_receipt_id,
+                request_id=self._tts_request_id,
+                item_id=item_id,
+                text=transcript,
+                voice_revision=self._tts_voice_revision,
+            )
+            return
+        if event.terminal is TtsStreamTerminal.CANCELLED:
+            await self._finalize_tts(
+                response_id=response_id,
+                status="cancelled",
+                receipt_id=self._tts_receipt_id,
+                request_id=self._tts_request_id,
+                item_id=item_id,
+                text=None,
+                voice_revision=self._tts_voice_revision,
+            )
+            return
+        await self._send(
+            error_event(
+                code=event.error_code or "tts_backend_failed",
+                message="incremental TTS response failed",
+                request_id=self._tts_request_id,
+            )
+        )
+        await self._finalize_tts(
+            response_id=response_id,
+            status="failed",
+            receipt_id=self._tts_receipt_id,
+            request_id=self._tts_request_id,
+            item_id=item_id,
+            text=None,
+            voice_revision=self._tts_voice_revision,
+        )
+
+    async def _fail_stream_open(
+        self, *, response_id: str, code: str, busy_reason: object
+    ) -> None:
+        request_id = self._tts_request_id
+        item_id = self._tts_item_id
+        voice_revision = self._tts_voice_revision
+        self._release_stream_state(response_id=response_id)
+        if self._closing or self._tts_terminal_sent:
+            return
+        await self._send(
+            error_event(
+                code=code,
+                message="incremental TTS could not start",
+                request_id=request_id,
+                busy_reason=busy_reason if isinstance(busy_reason, str) else None,
+            )
+        )
+        await self._finalize_tts(
+            response_id=response_id,
+            status="failed",
+            receipt_id=None,
+            request_id=request_id,
+            item_id=item_id,
+            text=None,
+            voice_revision=voice_revision,
+        )
+
+    async def _cancel_tts_stream(self) -> None:
+        """Cancel the active incremental utterance; the controller owns the terminal."""
+
+        controller = self._tts_stream
+        if controller is not None:
+            await controller.cancel()
+            return
+        task = self._tts_task
+        response_id = self._tts_response_id
+        request_id = self._tts_request_id
+        item_id = self._tts_item_id
+        voice_revision = self._tts_voice_revision
+        self._release_stream_state(response_id=response_id)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._closing or response_id is None:
+            return
+        await self._finalize_tts(
+            response_id=response_id,
+            status="cancelled",
+            receipt_id=None,
+            request_id=request_id,
+            item_id=item_id,
+            text=None,
+            voice_revision=voice_revision,
+        )
+
+    async def _close_tts_stream(self) -> None:
+        controller = self._tts_stream
+        if controller is None:
+            return
+        with contextlib.suppress(Exception):
+            await controller.aclose(reason="client_disconnected")
+
+    def _release_stream_state(self, *, response_id: str | None) -> None:
+        ready = self._tts_stream_ready
+        if ready is not None:
+            ready.set()
+        self._clear_tts_state(response_id=response_id)
+
     async def _cancel_response(self, event: dict[str, Any]) -> None:
         request = parse_tts_cancel(event)
         if (
@@ -1231,6 +1820,9 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "tts_not_active", "the requested TTS response is not active"
             )
+        if self._tts_stream_mode:
+            await self._cancel_tts_stream()
+            return
         response_id = self._tts_response_id
         request_id = self._tts_request_id
         item_id = self._tts_item_id
@@ -1257,14 +1849,26 @@ class OpenAIRealtimeSession:
         try:
             await self._synthesize_tts(text, **kwargs)
         finally:
-            if self._tts_response_id == response_id:
-                self._tts_task = None
-                self._tts_request_id = None
-                self._tts_response_id = None
-                self._tts_item_id = None
-                self._tts_text = None
-                self._tts_voice_revision = None
-                self._tts_receipt_id = None
+            self._clear_tts_state(response_id=response_id)
+
+    def _clear_tts_state(self, *, response_id: str | None = None) -> None:
+        """Release one utterance's identity once it is no longer current."""
+
+        if response_id is not None and self._tts_response_id != response_id:
+            return
+        self._tts_task = None
+        self._tts_request_id = None
+        self._tts_response_id = None
+        self._tts_item_id = None
+        self._tts_text = None
+        self._tts_voice_revision = None
+        self._tts_receipt_id = None
+        self._tts_stream = None
+        self._tts_stream_ready = None
+        self._tts_stream_mode = False
+        self._tts_stream_pending.clear()
+        self._tts_stream_accepted = 0
+        self._tts_stream_limits = None
 
     def _completed_event(self, *, transcript: str) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""

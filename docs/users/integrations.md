@@ -206,6 +206,13 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 `SpeechRail-Expected-Model-Revision`。Realtime 的 `speechrail.tts.create` 使用同样的
 `expected_voice_revision`；revision 不可用时省略 pin，不要从 voice 名称推断版本。
 
+需要低延迟播报时改用增量模式：先发 `speechrail.tts.start`，再随 LLM 文本到达持续
+`speechrail.tts.append_text`，最后 `speechrail.tts.finish_text`。该模式要求当前 voice
+具备增量路径，先读 `GET /v1/voices` 的 `streaming`（或握手的
+`speech_capabilities.streaming_tts`）并以 `supported` 为准；`instruction`
+（VoiceDesign）音色当前不支持，需要先注册固定音色 clone。`supported=false` 时按其
+`reason`/`hint` 处理，不要静默退化为等待全文再合成。
+
 ## 5. 文件、播报与实时字幕的自检和恢复
 
 发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。分人能力另查 `diarization_ready`：`balanced`、`quality` 与候选 `extreme` 配置分人制品，但仍须以当前 readiness 为准；`light` 不声明。

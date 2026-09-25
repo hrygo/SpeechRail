@@ -28,6 +28,12 @@ from speechrail.application.tts_delivery import (
     iter_until,
     iter_validated_audio,
 )
+from speechrail.application.tts_stream import TtsStreamService
+from speechrail.application.tts_stream_capability import (
+    resolve_tts_stream_capability,
+    tts_stream_capability_payload,
+    tts_stream_model_payload,
+)
 from speechrail.application.voice_validation_gate import (
     build_validation_binding,
     validation_state_for_voice,
@@ -196,6 +202,8 @@ def _model_entry(
     model_id: str,
     active: ActiveModelCatalog,
     artifact: ModelArtifact | None,
+    *,
+    streaming_input: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "id": model_id,
@@ -224,6 +232,8 @@ def _model_entry(
                 "supports_clone": supports_clone,
                 "supports_instruction": supports_voice_design,
             }
+            if streaming_input is not None:
+                entry["capabilities"]["streaming_input"] = streaming_input
     return entry
 
 
@@ -235,6 +245,8 @@ def _voice_entry(
     enabled: bool = True,
     synthesizer: object | None = None,
     strict_validation: bool = False,
+    include_streaming: bool = False,
+    stream_service: TtsStreamService | None = None,
 ) -> dict[str, Any]:
     variant = active.tts.variant if active.tts is not None else None
     available = tts_ready and enabled and not profile.revoked
@@ -337,6 +349,18 @@ def _voice_entry(
         entry["revision"] = profile.revision
     if profile.revoked:
         entry["revoked"] = True
+    if include_streaming:
+        entry["streaming"] = tts_stream_capability_payload(
+            resolve_tts_stream_capability(
+                voice_id=profile.id,
+                voice_mode=profile.mode,
+                artifact=artifact,
+                tts_ready=tts_ready,
+                voice_enabled=available,
+                synthesizer=synthesizer,
+                stream_service=stream_service,
+            )
+        )
     return entry
 
 
@@ -348,6 +372,8 @@ def _voice_list_entry(
     enabled: bool = True,
     synthesizer: object | None = None,
     strict_validation: bool = False,
+    include_streaming: bool = False,
+    stream_service: TtsStreamService | None = None,
 ) -> dict[str, Any]:
     """Project only routing-safe discovery fields for the public voice list."""
 
@@ -358,6 +384,8 @@ def _voice_list_entry(
         enabled=enabled,
         synthesizer=synthesizer,
         strict_validation=strict_validation,
+        include_streaming=include_streaming,
+        stream_service=stream_service,
     )
     safe_fields = (
         "id",
@@ -377,6 +405,7 @@ def _voice_list_entry(
         "validated_for",
         "production_ready",
         "production_ready_reason",
+        "streaming",
     )
     return {
         key: detailed[key]
@@ -792,7 +821,12 @@ def create_system_router(services: AppServices) -> APIRouter:
         tts_target = resolved.tts_model_id
         data: list[dict[str, Any]] = [
             _model_entry(asr_target, active, active.asr),
-            _model_entry(tts_target, active, active.tts),
+            _model_entry(
+                tts_target,
+                active,
+                active.tts,
+                streaming_input=tts_stream_model_payload(services.tts_synthesizer),
+            ),
         ]
         for alias, target in sorted(asr_model_aliases().items()):
             if alias in diarization_model_aliases() and not services.diarization_ready:
@@ -821,6 +855,9 @@ def create_system_router(services: AppServices) -> APIRouter:
                         and active.tts_clone.variant == "base",
                         "supports_instruction": active.tts is not None
                         and active.tts.variant == "voice_design",
+                        "streaming_input": tts_stream_model_payload(
+                            services.tts_synthesizer
+                        ),
                     },
                 }
             )
@@ -866,6 +903,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                     enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
                     synthesizer=services.tts_synthesizer,
                     strict_validation=True,
+                    include_streaming=True,
+                    stream_service=services.tts_streams,
                 )
                 for profile in profiles
             ],
@@ -903,6 +942,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                 enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
                 synthesizer=services.tts_synthesizer,
                 strict_validation=True,
+                include_streaming=True,
+                stream_service=services.tts_streams,
             ),
         )
 

@@ -2778,13 +2778,27 @@ def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
     try:
         with client.websocket_connect("/v1/realtime") as socket:
             created = socket.receive_json()
-            assert created["session"]["speech_capabilities"] == {
+            speech = created["session"]["speech_capabilities"]
+            assert {
+                key: speech[key]
+                for key in (
+                    "available",
+                    "variant",
+                    "supports_speaker",
+                    "supports_instruction",
+                    "supports_clone",
+                )
+            } == {
                 "available": True,
                 "variant": "custom_voice",
                 "supports_speaker": True,
                 "supports_instruction": False,
                 "supports_clone": False,
             }
+            # W8 publishes the per-voice incremental verdict next to the
+            # complete-text capability fields.
+            assert speech["streaming_tts"]["supported"] is False
+            assert speech["streaming_tts"]["reason"] == "implementation_not_negotiated"
             unavailable = _drive_tts(socket, {"voice": voice_id})
             assert unavailable[-1]["type"] == "error"
             assert unavailable[-1]["error"]["code"] == "voice_not_available"

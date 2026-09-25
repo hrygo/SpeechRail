@@ -2,7 +2,7 @@
 title: "Luna 实施指南：分档稳定音色、真双向流式与 Python 3.14"
 status: in_progress
 audience: "Luna / SpeechRail 服务与原生 App 实施者、验收负责人"
-version: "1.11"
+version: "1.12"
 date: 2026-09-25
 ---
 
@@ -12,7 +12,7 @@ date: 2026-09-25
 
 **设计依据：** `docs/superpowers/specs/2026-09-25-tiered-streaming-tts-python314-design.md`。本文在该设计基础上补齐实现符号、协议细节、前置缺陷和测试安排。现行 `contracts/` 在实现落地前仍是当前接口事实，本文拟新增接口不是已存在能力。
 
-**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5/W6/W7 已交付，继续 W8–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
+**可执行性状态：W4 模型门于 2026-09-25 通过（Base 结论当日修正），W5–W8 已交付，继续 W9–W11。** CustomVoice q8 与 Base q8 都在同一 generation 内首 PCM 后追加文本、被 ASR 复核为全文一致；早期“Base 只能全文本预填”是本探针 schedule 未生效加长 reference 造成的假阴性。Base 门要求短 reference 且初始文本跨过 prefill 槽位（`base-trailing-after-first-pcm-v1`），否则探针 fail-closed。Base bf16 catalog 门已通过（用户恢复 pinned README 快照后复验 13/13 文件），其模型/实时门留待 W11；永久抑制 EOS 仍不可用。W1–W3 的 Python 3.14、Realtime 与 App 协议基线已独立交付。SpeechRail 三处既有 macOS 修改必须保留；需要写入同处时先确认来源和可分离范围，不能覆盖他人版本。
 
 用户已明确 Sona 废弃，相关功能已集成至 SpeechRail App；不分析、修复、测试、迁移或依赖 Sona，也不把其工作区状态作为本任务阻塞。本文 v1.1 撤回 v1.0 的 Sona 客户端前置任务，改为已核实的原生 App 路径。
 
@@ -320,14 +320,14 @@ Base继续复用validate_tts_parameters的speed/instruction/seed限制，不因�
 
 ```json
 {"type":"speechrail.tts.start","request_id":"r1","voice":"serena","speed":1.0}
-{"type":"speechrail.tts.started","request_id":"r1","response_id":"resp_1","limits":{"max_append_chars":512,"max_total_chars":4096}}
+{"type":"speechrail.tts.started","request_id":"r1","response_id":"resp_1","protocol_version":1,"limits":{"max_append_codepoints":512,"max_total_codepoints":4096,"max_pending_codepoints":2048,"max_pending_audio_bytes":48000,"input_wait_seconds":15.0,"utterance_wall_clock_seconds":120.0,"slow_consumer_seconds":2.0}}
 {"type":"speechrail.tts.append_text","request_id":"r1","response_id":"resp_1","sequence":0,"text":"你好。"}
-{"type":"speechrail.tts.text_accepted","request_id":"r1","response_id":"resp_1","sequence":0,"accepted_chars":3}
+{"type":"speechrail.tts.text_accepted","request_id":"r1","response_id":"resp_1","append_sequence":0,"accepted_codepoints":3,"total_codepoints":3}
 {"type":"speechrail.tts.finish_text","request_id":"r1","response_id":"resp_1","last_sequence":0}
 {"type":"speechrail.tts.cancel","request_id":"r1","response_id":"resp_1"}
 ```
 
-示例finish与cancel是不同操作示例，不要求顺序全部发送。start允许expected_voice_revision/expected_model_revision，未提供时由服务端冻结并在started返回实际revision；model/language从协商会话取值，禁止同时出现矛盾来源。
+示例finish与cancel是不同操作示例，不要求顺序全部发送。ACK 的追加序号定名 `append_sequence`：传输层已给每个事件打上连接级 `sequence`，沿用同名会被静默覆盖（W8 实际实现，见下方 W8 记录）。start允许expected_voice_revision/expected_model_revision，未提供时由服务端冻结并在started返回实际revision；model/language从协商会话取值，禁止同时出现矛盾来源。
 
 成功start先发当前`response.created`，再发namespaced started（已取得lease且worker接受后）；客户端等started才append。失败发生在创建response之前只发error，不伪造done；response已创建后任何失败都发一次failed终态。PCM在started之后才能发出。
 
@@ -513,7 +513,7 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - [x] **W5｜领域与身份**：新增 `domain/tts_stream.py`（options/双轴 state/limits/事件/port）与 `PreparedReferenceKey`（内容身份+预处理+模型/量化/tokenizer/实现版本，digest 即缓存命名空间）；`VoiceBinding.supports_incremental_stream` 只对 CustomVoice speaker 与 Base clone 为真。验收：`tests/test_tts_stream_state.py` 15 passed、`tests/test_tts_reference_condition.py` 6 passed、`tests/test_voice_bindings.py` 44 passed；另修正 W2 遗留的 `tests/test_profile_selection.py` 旧 runtime lock fixture（23 passed）。
 - [x] **W6｜worker全双工**：单模型 owner、单父端 reader、有界队列与协作取消；fake IPC 与旧 ASR/TTS 回归通过（详见下方 W6 记录）。
 - [x] **W7｜应用资源与终态**：`application/tts_stream.py` 收束 governor reserve、worker 租约与 vendor session 的整个 utterance；终态同步认领且只有控制器 task 写 sink，cancel/finish/超时竞态只有一个胜者；等待文本不释放租约、组级 evict 返回 busy；receipt 只计已发送 PCM。验收：定向 114 passed，主仓全量 2308 passed / 7 skipped，ruff/mypy/diff check 通过（详见下方 W7 记录）。
-- [ ] **W8｜公共协议与能力**：严格parser、current音频事件、voice级支持；四档/错误/断线矩阵通过。
+- [x] **W8｜公共协议与能力**：严格 parser、current 音频事件、voice 级支持；四档/错误矩阵按确定性测试通过（详见下方 W8 记录）。
 - [ ] **W9｜App单轮文本流与播放取消**：AssistantSession接协调器、buffer和playback ledger；单start/finish、旧包隔离和drain状态fake测试通过。
 - [ ] **W10｜分档展示与切换**：不支持声音明确阻止，活跃utterance不热切；Mac非UI能力映射与profile测试通过。
 - [ ] **W11｜授权后逐档实测与发布**：质量/性能矩阵与完整回滚记录；未达标档不宣称完成；安装/提交/远端发布分别核对授权。
@@ -654,5 +654,21 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeTTSStreamTests
 - **未纳入/未验证：** 本轮只用 fake session 与确定性状态；未加载模型、未接 public wire、未改 Realtime/HTTP 契约、未做真实 worker/音频/取消超期/长稳/内存峰值验收；W8–W11 未开始。
 - **有意未改：** `runtime/resource_governor.py` 无需扩展——既有 keyed lane、`total_capacity` 与 realtime/batch 规则已足以表达“跨 lane 超预算 fail-closed”，本阶段不为其增加未被消费的参数或分支。
 - **环境差异记录：** W5 记录的全量为 2255 收集 / 2111 passed / 144 skipped，本轮同机同解释器为 2314 收集 / 2307 passed / 7 skipped；测试跳过数差异来自收集范围与环境，不是本阶段引入的功能差异，发布前应按 release 流程重新核对。
+
+### W8 实施与验收记录（2026-09-25）
+
+- **wire 入口：** `compatibility/openai_realtime.py` 新增 `speechrail.tts.start/append_text/finish_text` 三类客户端事件与严格 parser（未知字段 → `tts_request_invalid`、负数/bool 序号 → `tts_sequence_invalid`、`limits` 只允许收紧，放宽 → `tts_stream_limit_exceeded`）；`speechrail.tts.create/cancel` 的形状与错误码不变。
+- **`append_sequence` 取代 `sequence`：** 传输层已经给每个事件打上连接级 `sequence`，ACK 若继续叫 `sequence` 会被静默覆盖，客户端的追加序号就永久丢失。`speechrail.tts.text_accepted` 因此改发 `append_sequence`，并在契约中写明两者不是同一字段。这是 W8 对设计第 6.2 节示例的**有意修订**，不是笔误。
+- **ACK 先于回显：** 本段文本的 `speechrail.tts.text_accepted` 先发，随后才是对应的 `response.output_audio_transcript.delta`，客户端可以“先确认收到、再渲染文本”。
+- **入口判定共享：** 新增 `_claim_tts_request`，`create` 与 `start` 走同一顺序——活动期间都返回 `tts_in_progress`，空闲时才由 `request_id` 账本返回 `tts_request_invalid`。两个入口不再各写一份判定。
+- **异步创建，不阻塞 append：** `start` 只做校验并 `asyncio.create_task` 调 `TtsStreamService.open`；`append_text` 在准入期间用 `_tts_stream_ready` 事件有界等待（上限 `request_timeout_seconds`），因此 `handle` 不会因为等待整轮生成而卡住。准入失败走 `_fail_stream_open`，`response.created` 之前只发 `error`，之后一律收敛为一次 `response.done(status=failed)`。
+- **唯一终态复用：** 终态仍由 `_finalize_tts` 认领，控制器只把 `completed/cancelled/failed` 投影成一次 `response.done`；增量失败先发一次带稳定 code 的 `error`，但 `error` 本身不是终态。
+- **音频沿用 current 事件：** PCM 仍是 `response.output_audio.delta`，只在 `speechrail` 扩展对象里带 `chunk_index/sample_offset/sample_rate/channels`，不新增第二条音频通道；`sample_offset` 按 mono 样本累加。
+- **能力 resolver：** 新增 `application/tts_stream_capability.py`，`/v1/models[].capabilities.streaming_input`（`scope=per_voice`，只有实现轴）、`/v1/voices[].streaming` 与握手 `speech_capabilities.streaming_tts` 消费同一个 resolver。`variant_supported`/`artifact_available`/`profile_enabled`/`reference_ready`/`implementation_supported`/`protocol_negotiated`/`ready` 分轴暴露；`budget_available` 是瞬时信号，明确不参与 `supported`，避免“暂时忙”被读成“不支持”。quality/extreme 的 VoiceDesign 音色返回 `variant_not_supported` 并提示先注册 clone，完整文本 VoiceDesign 路径不变。
+- **测试隔离修正：** 新测试原先用机器本地的自定义音色断言“clone-only 不支持”，会读取开发者 `~/.speechrail` 的真实音色库且换机即失败。改为只用系统音色 + quality/balanced 两档断言同一结论，测试不再依赖本机用户数据。
+- **测试与验收（CPython 3.12.14 `.venv`，2026-09-25）：** 新增 `tests/test_realtime_tts_incremental.py` 16 项（一次终态 + 音频位置、准入期间 append 不被阻塞、取消只发一次 `cancelled`、无音频 finish、后端失败单一 `failed`、非连续/未知字段/负序号拒绝、活动期间第二 utterance 被拒、VoiceDesign 在 quality 档 not-supported、放宽 limits 被拒、legacy 事件仍被拒、receipt 只计已发送 PCM、`/v1/models` 与 `/v1/voices` 与握手按 voice 一致、协议未协商 fail-closed、慢消费者 `tts_backpressure`、JSON 可序列化）。因 W8 新增字段同步更新 `tests/test_realtime_openai.py` 与 `tests/test_app_contract.py` 的精确断言。定向 252 passed；主仓全量 2324 passed / 7 skipped / 0 failed；`ruff check src tests`、`mypy src`（136 文件）、`git diff --check` 通过。
+- **契约与文档同步：** `contracts/realtime-openai.md` 提到 `3.1.0`（新增 §3.3.1 增量事件、§4 服务端事件与 §4.1 能力协商、§6 增量错误码）；`contracts/openapi.yaml` 新增 `ModelCapabilities.streaming_input` 与 `VoiceProfile.streaming` 两个 schema（`info.version` 仍跟随 release 3.2.1，不受契约内容版本影响）；`docs/users/api-contract.md` §6 补增量事件表与 §6.1，`docs/users/integrations.md` 补接入前置条件。
+- **未纳入/未验证：** 本轮全部是 fake session 与确定性测试；未加载模型、未产生真实 PCM、未做真实 worker/断线重连/长稳/内存峰值验收，未测四档端到端声学与延迟。App（W9）、分档 UI/切换保护（W10）、逐档实测与发布（W11）未开始。真实模型与逐档结论仍以 W4/W11 为准。
+- **有意未改：** `runtime/resource_governor.py` 只为能力 resolver 增加一个只读的 `lane_available(work_class, resource_key)` 瞬时查询，不预留、不改既有准入规则；`_tts_artifact_for_mode` 的既有 clone fallback 与完整文本路径保持原样，不在本阶段顺带重构。
 
 交接报告必须区分“已改代码”“确定性已通过”“真实模型已通过”“逐档性能已通过”“尚未授权/尚未执行”。不要用一项总完成勾选掩盖模型门、App并行改动或extreme未验收。
