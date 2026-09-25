@@ -242,7 +242,9 @@ def resolve_selection(
         "tts_artifact_key": tts.key,
         "tts_base_artifact_key": tts_base.key if tts_base is not None else None,
         "voice_design_artifact_key": (
-            voice_design.key if design_dir is not None else None
+            voice_design.key
+            if voice_design is not None and design_dir is not None
+            else None
         ),
         "alignment_artifact_key": None,
     }
