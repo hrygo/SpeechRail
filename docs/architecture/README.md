@@ -2,15 +2,23 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.1.3"
-date: 2026-09-23
+version: "3.1.4"
+date: 2026-09-25
 ---
 
 # 🏛️ SpeechRail 架构文档
 
 本目录是面向系统架构评审、边界设计、协议设计与长期演进的正式技术参考。它详细规定了 SpeechRail 的系统分层、进程模型、状态机拓扑、资源调度机制及不可逆的架构决策 (ADR)。
 
-## 四档模型关系总览
+## ASR + TTS 后续目标方案（已确认，待实施）
+
+[ASR + TTS 目标架构定稿（无历史兼容）](2026-09-25-asr-tts-target-architecture-no-legacy.md) 是 PR #94 后续研发的目标依据；实施及验收由 [Issue #95](https://github.com/hrygo/SpeechRail/issues/95) 跟踪。
+
+目标采用 `fast / quality / reference` 三种规格、独立 ASR/TTS 选择、Base/CustomVoice 运行、仅 BF16 VoiceDesign 设计、独立对齐/分人及统一执行计划；不做历史兼容，Q4 不进入支持集合。`accepted` 仅表示目标已确认，**不表示当前代码、模型或真实交互已经完成验收**。
+
+下面的四档图及现有 W0–W11 文档保留为当前实现/阶段证据，不再作为后续目标约束；在实际代码与契约切换前，不把目标方案描述成已经生效的运行行为。
+
+## 当前实现基线：四档模型关系总览
 
 ![四档模型与 TTS capability 关系图](diagrams/four-tier-model-architecture.svg)
 
