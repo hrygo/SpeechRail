@@ -616,6 +616,34 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(options?.expectedModelRevision, "clone-model-revision")
     }
 
+    /// 系统音色没有 voice_revision（legacy），但普通合成不需要它：只带模型版本即可。
+    func testCreatorRequestOptionsAllowSystemVoiceWithoutVoiceRevision() {
+        let voice = SafeVoiceEntry(
+            id: "eric",
+            name: "System",
+            mode: "system",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: nil,
+            voiceIdentityAssurance: .legacy,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                catalogRevision: "model-cat-1"
+            ),
+            descriptors: Self.testDescriptor,
+            operations: ["http_speech": JSONValue(.string("supported"))]
+        )
+        let snapshot = makeRevisionSnapshot(voice: voice)
+
+        let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "eric",
+            in: snapshot
+        )
+
+        XCTAssertNil(options?.expectedVoiceRevision)
+        XCTAssertEqual(options?.expectedModelRevision, "model-cat-1")
+    }
+
     func testCreatorRequestOptionsDoNotBorrowRevisionFromRichVoiceFallback() {
         let voice = SafeVoiceEntry(
             id: "legacy-voice",

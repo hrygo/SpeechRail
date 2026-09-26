@@ -1961,14 +1961,13 @@ public enum SpeechRailCapabilityRevisionSelector {
             let voice = matchingVoice(voiceID, in: snapshot),
             voice.available,
             voice.operations["http_speech"] != nil,
-            let voiceRevision = nonEmpty(voice.voiceRevision),
             let modelRevision = nonEmpty(voice.model.catalogRevision)
         else {
             return nil
         }
 
         return SpeechRailRequestOptions(
-            expectedVoiceRevision: voiceRevision,
+            expectedVoiceRevision: nonEmpty(voice.voiceRevision),
             expectedModelRevision: modelRevision
         )
     }

@@ -233,8 +233,17 @@ public struct AppCapabilityFacade: Equatable, Sendable {
 }
 
 private struct SpeechBindingUnavailableError: LocalizedError {
+    let unauthorized: Bool
+
+    init(unauthorized: Bool = false) {
+        self.unauthorized = unauthorized
+    }
+
     var errorDescription: String? {
-        "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
+        if unauthorized {
+            return "本机服务凭据不可用，请检查服务配置后重试。"
+        }
+        return "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
     }
 }
 
@@ -687,7 +696,7 @@ public final class AppModel {
 
         await refreshDiscovery()
         guard let options = capabilityFacade.speechRequestOptions(for: voiceID) else {
-            throw SpeechBindingUnavailableError()
+            throw SpeechBindingUnavailableError(unauthorized: discoveryState == .unauthorized)
         }
         return options
     }
@@ -3465,8 +3474,8 @@ public final class AppModel {
                 "服务没有返回可保存音频，请检查服务状态后重试"
             }
         }
-        if error is SpeechBindingUnavailableError {
-            return "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
+        if let error = error as? SpeechBindingUnavailableError {
+            return error.errorDescription ?? "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
         }
         guard let error = error as? ServiceAPIClientError else {
             return "创作服务暂时不可用"

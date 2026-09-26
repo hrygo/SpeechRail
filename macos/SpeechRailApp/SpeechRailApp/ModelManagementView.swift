@@ -127,9 +127,9 @@ public struct ModelManagementView: View {
                 message: model.message.map { SpeechRailOperationMessagePresentation.text($0) }
                     ?? "重新读取模型目录，或打开诊断查看阻塞原因。",
                 tone: .critical,
-                actionTitle: "重新读取"
+                actionTitle: "打开诊断"
             ) {
-                Task { await model.refreshModels() }
+                navigation.request(.diagnostics)
             }
         }
     }

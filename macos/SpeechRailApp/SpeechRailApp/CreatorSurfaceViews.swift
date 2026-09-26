@@ -1326,15 +1326,8 @@ public struct VoiceDesignView: View {
                 tone: .critical,
                 title: "音色操作未完成",
                 message: message,
-                actionTitle: needsCapabilityRefresh ? "重新读取能力" : nil,
-                action: needsCapabilityRefresh
-                    ? {
-                        Task {
-                            await model.refresh()
-                            await model.refreshCreatorVoices()
-                        }
-                    }
-                    : nil
+                actionTitle: capabilityFailureActionTitle,
+                action: capabilityFailureAction
             )
         } else if let successMessage = model.voiceDesignSuccessMessage {
             StatusBanner(
@@ -1371,6 +1364,30 @@ public struct VoiceDesignView: View {
 
     /// 音色列表与能力声明任一读失败，都给同一个重试入口：能力结论不再依赖列表，
     /// 但两个读取都是这一页的事实来源。
+    private var isCredentialFailure: Bool {
+        model.discoveryState == .unauthorized
+    }
+
+    private var capabilityFailureActionTitle: String? {
+        if isCredentialFailure {
+            return "打开诊断"
+        }
+        return needsCapabilityRefresh ? "重新读取能力" : nil
+    }
+
+    private var capabilityFailureAction: (() -> Void)? {
+        if isCredentialFailure {
+            return { navigation.request(.diagnostics) }
+        }
+        guard needsCapabilityRefresh else { return nil }
+        return {
+            Task {
+                await model.refresh()
+                await model.refreshCreatorVoices()
+            }
+        }
+    }
+
     private var needsCapabilityRefresh: Bool {
         model.creatorVoicesLoadState == .failed
             || model.discoveryState == .failed
@@ -2259,10 +2276,8 @@ public struct VoiceLibraryView: View {
                 tone: .critical,
                 title: "音色操作未完成",
                 message: message,
-                actionTitle: model.creatorVoicesLoadState == .failed ? "重新加载音色" : nil,
-                action: model.creatorVoicesLoadState == .failed
-                    ? { Task { await model.refreshCreatorVoices() } }
-                    : nil
+                actionTitle: voiceLibraryFailureActionTitle,
+                action: voiceLibraryFailureAction
             )
         }
         if let deletionMessage {
@@ -2272,6 +2287,21 @@ public struct VoiceLibraryView: View {
                 message: deletionMessage
             )
         }
+    }
+
+    private var voiceLibraryFailureActionTitle: String? {
+        if model.discoveryState == .unauthorized {
+            return "打开诊断"
+        }
+        return model.creatorVoicesLoadState == .failed ? "重新加载音色" : nil
+    }
+
+    private var voiceLibraryFailureAction: (() -> Void)? {
+        if model.discoveryState == .unauthorized {
+            return { navigation.request(.diagnostics) }
+        }
+        guard model.creatorVoicesLoadState == .failed else { return nil }
+        return { Task { await model.refreshCreatorVoices() } }
     }
 
     private var emptyVoicesCard: some View {
