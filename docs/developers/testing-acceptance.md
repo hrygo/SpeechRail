@@ -17,6 +17,7 @@ uv run --extra dev pytest
 uv run --extra dev ruff check src tests
 uv run --extra dev mypy src
 npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
+uv run python scripts/check_openapi_contract.py
 git diff --check
 ```
 

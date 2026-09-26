@@ -1682,6 +1682,272 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/speechrail/pronunciation-sets:
+    get:
+      operationId: listPronunciationSets
+      tags: [speech]
+      summary: Enumerate safe pronunciation-set identity
+      description: |
+        Returns set id, current revision, revocation flag and entry count only.
+        Raw-to-spoken entries remain management data reachable through the
+        explicit revision endpoint.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Pronunciation set identities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PronunciationSetList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/PronunciationStoreUnavailable'
+  /v1/speechrail/pronunciation-sets/{set_id}:
+    put:
+      operationId: putPronunciationSet
+      tags: [speech]
+      summary: Create or CAS-update a pronunciation set
+      description: |
+        Each accepted write appends a new immutable revision. `expected_revision`
+        must match the current revision (`null` only when creating a new set);
+        a mismatch is rejected with `409 pronunciation_conflict`.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: set_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PronunciationSetWriteRequest'
+      responses:
+        '200':
+          description: Newly created pronunciation-set revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PronunciationSetMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Conditional update conflict (`pronunciation_conflict`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/PronunciationStoreUnavailable'
+    delete:
+      operationId: deletePronunciationSet
+      tags: [speech]
+      summary: Delete a pronunciation set
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: set_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,64}$'
+      responses:
+        '200':
+          description: Deleted pronunciation set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PronunciationSetDeleteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Pronunciation set not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/PronunciationStoreUnavailable'
+  /v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}:
+    get:
+      operationId: getPronunciationRevision
+      tags: [speech]
+      summary: Read one explicit pronunciation revision
+      description: Returns the full raw-to-spoken entries of one immutable revision.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: set_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        - name: revision
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^pr_[0-9a-f]{32}$'
+      responses:
+        '200':
+          description: Pronunciation set revision including entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PronunciationSet'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Pronunciation set or revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: Pronunciation revision is revoked (`pronunciation_revoked`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/PronunciationStoreUnavailable'
+  /v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke:
+    post:
+      operationId: revokePronunciationRevision
+      tags: [speech]
+      summary: Revoke one exact pronunciation revision
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: set_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        - name: revision
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^pr_[0-9a-f]{32}$'
+      responses:
+        '200':
+          description: Revoked pronunciation revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PronunciationRevisionRevoked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Pronunciation set or revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/PronunciationStoreUnavailable'
+  /v1/speechrail/voices/clone/idempotency:
+    get:
+      operationId: cloneIdempotencyStatus
+      tags: [speech]
+      summary: Read durable clone operation state by key
+      description: |
+        Proves possession of a clone `Idempotency-Key`; returns the recorded
+        operation state and, when settled, the resulting voice id.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Recorded clone operation state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloneIdempotencyStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No clone operation is recorded for this key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/IdempotencyStoreUnavailable'
+  /v1/speechrail/voices/{voice_id}/quality-runs:
+    post:
+      operationId: runSpeechrailVoiceQuality
+      tags: [speech]
+      summary: Run quality probes with explicit evidence projection
+      description: |
+        SpeechRail-namespaced variant of `/v1/voices/{voice_id}/quality-runs`.
+        Returns `legacy_report`, independent `evidence` dimensions and
+        `validation_persisted`.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceQualityRunRequest'
+      responses:
+        '200':
+          description: Namespaced voice quality evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceQualityRunResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice not found
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '503':
+          description: TTS runtime not ready (`backend_not_ready`) or the custom
+            voice registry is unreadable (`voice_store_unavailable`); both are
+            retryable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
 components:
   securitySchemes:
     BearerAuth:
@@ -3100,6 +3366,137 @@ components:
           description: |
             Reserved for inline audio probes; not implemented. Sending
             `include_audio=true` is rejected with `422 include_audio_unsupported`.
+    PronunciationEntry:
+      type: object
+      required: [id, surface, spoken, language, case_sensitive, word_boundary, source]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        surface:
+          type: string
+          maxLength: 256
+          description: Raw surface text matched in the input.
+        spoken:
+          type: string
+          maxLength: 256
+          description: Replacement text sent to the synthesizer.
+        language:
+          type: string
+          default: auto
+        case_sensitive:
+          type: boolean
+          default: true
+        word_boundary:
+          type: boolean
+          default: false
+        source:
+          type: string
+          enum: [system, user]
+          default: user
+    PronunciationSet:
+      type: object
+      required: [id, revision, revoked, entries]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        revision:
+          type: string
+          pattern: '^pr_[0-9a-f]{32}$'
+        revoked:
+          type: boolean
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/PronunciationEntry'
+    PronunciationSetSummary:
+      type: object
+      required: [id, revision, revoked, entry_count]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        revision:
+          type: string
+          pattern: '^pr_[0-9a-f]{32}$'
+        revoked:
+          type: boolean
+        entry_count:
+          type: integer
+          minimum: 0
+    PronunciationSetList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PronunciationSetSummary'
+    PronunciationSetWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, entries]
+      properties:
+        expected_revision:
+          type: [string, 'null']
+          pattern: '^pr_[0-9a-f]{32}$'
+          description: Current revision for CAS updates, or null when creating a set.
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/PronunciationEntry'
+    PronunciationSetMutation:
+      type: object
+      required: [id, revision, revoked, entry_count]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        revision:
+          type: string
+          pattern: '^pr_[0-9a-f]{32}$'
+        revoked:
+          type: boolean
+        entry_count:
+          type: integer
+          minimum: 0
+    PronunciationRevisionRevoked:
+      type: object
+      required: [id, revision, revoked]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+        revision:
+          type: string
+          pattern: '^pr_[0-9a-f]{32}$'
+        revoked:
+          type: boolean
+          const: true
+    PronunciationSetDeleteResponse:
+      type: object
+      required: [status, id]
+      properties:
+        status:
+          type: string
+          const: deleted
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+    CloneIdempotencyStatus:
+      type: object
+      required: [state, result_id]
+      properties:
+        state:
+          type: string
+          enum: [new, pending, completed]
+        result_id:
+          type: [string, 'null']
+          description: Voice id once the recorded clone operation has settled.
     ClonePromptItem:
       type: object
       required: [id, category, title, script, tips]
@@ -3723,6 +4120,18 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     JobNotReady:
       description: Job is not yet completed; result is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    PronunciationStoreUnavailable:
+      description: Local pronunciation registry is unavailable (`pronunciation_store_unavailable`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    IdempotencyStoreUnavailable:
+      description: Durable idempotency state is unavailable (`idempotency_store_unavailable`)
       content:
         application/json:
           schema:
