@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import speechrail.backends.qwen3_alignment_worker as alignment_worker_module
+from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_alignment import (
     AlignmentQueueFullError,
     Qwen3AlignmentConfig,
@@ -13,8 +17,10 @@ from speechrail.backends.qwen3_alignment import (
 )
 from speechrail.backends.qwen3_alignment_worker import (
     AlignmentIdentity,
+    Qwen3AlignerEngine,
     serve,
 )
+from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, encode_frame, read_frame
 
 
@@ -153,6 +159,107 @@ def test_alignment_worker_refuses_to_report_a_different_identity(tmp_path: Path)
 
     frame = read_frame(output)
     assert frame is not None and frame["code"] == "backend_identity_mismatch"
+
+
+def _aligner_snapshot(
+    *, bits: int | None = None, group_size: int | None = None
+) -> SnapshotIdentity:
+    return SnapshotIdentity(
+        family="qwen3_aligner",
+        variant="aligner",
+        quantization=QuantizationSpec(
+            bits=bits,
+            group_size=group_size,
+            format="mlx" if bits is not None else "none",
+        ),
+        weight_fingerprint="shape:" + ("b" * 64),
+    )
+
+
+def _install_fake_aligner_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reported_dtype: object = None,
+) -> list[dict[str, object]]:
+    """Register fake ``mlx``/``mlx_qwen3_asr`` modules and record load calls."""
+
+    calls: list[dict[str, object]] = []
+    core = ModuleType("mlx.core")
+    for name in ("float16", "float32", "bfloat16", "int8"):
+        setattr(core, name, SimpleNamespace(name=name))
+    package = ModuleType("mlx")
+    package.core = core  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+
+    class FakeAligner:
+        def __init__(self, *, model_path: str, dtype: object = None) -> None:
+            calls.append({"model_path": model_path, "dtype": dtype})
+            self.dtype = dtype if reported_dtype is None else reported_dtype
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.ForcedAligner = FakeAligner  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+    return calls
+
+
+def test_aligner_engine_loads_the_bfloat16_snapshot_at_its_own_precision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The aligner must not silently fall back to the vendor float16 default."""
+
+    calls = _install_fake_aligner_runtime(monkeypatch, reported_dtype="mlx.core.bfloat16")
+    monkeypatch.setattr(alignment_worker_module, "inspect_model", lambda _: _aligner_snapshot())
+    fake_mlx = sys.modules["mlx.core"]
+
+    engine = Qwen3AlignerEngine(tmp_path, "mps", "bfloat16")
+
+    assert [call["model_path"] for call in calls] == [str(tmp_path)]
+    assert [call["dtype"] for call in calls] == [fake_mlx.bfloat16]
+    assert engine.identity.dtype == "bfloat16"
+    assert engine.identity.quantization_format == "none"
+
+
+def test_aligner_engine_keeps_float16_compute_for_a_quantized_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-quantized aligner keeps its int8 identity without int8 activations."""
+
+    calls = _install_fake_aligner_runtime(monkeypatch)
+    monkeypatch.setattr(
+        alignment_worker_module,
+        "inspect_model",
+        lambda _: _aligner_snapshot(bits=8, group_size=64),
+    )
+    fake_mlx = sys.modules["mlx.core"]
+
+    engine = Qwen3AlignerEngine(tmp_path, "mps", "int8")
+
+    assert [call["dtype"] for call in calls] == [fake_mlx.float16]
+    assert engine.identity.dtype == "int8"
+    assert engine.identity.quantization_format == "mlx"
+
+
+def test_aligner_engine_refuses_a_loader_dtype_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_aligner_runtime(monkeypatch, reported_dtype="mlx.core.float16")
+    monkeypatch.setattr(alignment_worker_module, "inspect_model", lambda _: _aligner_snapshot())
+
+    with pytest.raises(RuntimeError, match="aligner reported"):
+        Qwen3AlignerEngine(tmp_path, "mps", "bfloat16")
+
+
+def test_aligner_engine_refuses_int8_on_a_non_quantized_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _install_fake_aligner_runtime(monkeypatch)
+    monkeypatch.setattr(alignment_worker_module, "inspect_model", lambda _: _aligner_snapshot())
+
+    with pytest.raises(RuntimeError, match="backend_quantization_unavailable"):
+        Qwen3AlignerEngine(tmp_path, "mps", "int8")
+
+    assert calls == []
 
 
 def _config(tmp_path: Path) -> Qwen3AlignmentConfig:

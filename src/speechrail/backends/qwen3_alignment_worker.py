@@ -13,8 +13,9 @@ import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Final, Protocol
 
+from speechrail.backends.mlx_precision import mlx_dtype, resolve_load_dtype
 from speechrail.backends.model_identity import inspect_model
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
@@ -25,6 +26,26 @@ from speechrail.runtime.worker_protocol import (
 
 ALIGNMENT_BACKEND_ID = "mlx-qwen3-forced-aligner"
 ALIGNMENT_SAMPLE_RATE = 16_000
+
+_DTYPE_ALIASES: Final = {
+    "float16": "float16",
+    "fp16": "float16",
+    "f16": "float16",
+    "float32": "float32",
+    "fp32": "float32",
+    "f32": "float32",
+    "bfloat16": "bfloat16",
+    "bf16": "bfloat16",
+    "int8": "int8",
+}
+
+
+def _normalize_dtype(value: object) -> str | None:
+    """把 aligner 自报的 dtype 规范化为 SpeechRail 精度名。缺失时返回 ``None``。"""
+
+    if not isinstance(value, str):
+        return None
+    return _DTYPE_ALIASES.get(value.removeprefix("mlx.core.").strip().lower())
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,10 +248,31 @@ class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner sna
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         snapshot = inspect_model(model_dir)
-        self._aligner = mlx_qwen3_asr.ForcedAligner(model_path=str(model_dir))
+        quantized = snapshot.quantization.bits is not None
+        if dtype == "int8" and not quantized:
+            raise RuntimeError(
+                "backend_quantization_unavailable: non-quantized snapshot cannot be int8"
+            )
+        # Never leave the precision implicit: the vendor default is float16, which
+        # would silently downgrade a bf16 aligner while still reporting bfloat16.
+        self._aligner = mlx_qwen3_asr.ForcedAligner(
+            model_path=str(model_dir),
+            dtype=mlx_dtype(resolve_load_dtype(dtype, snapshot_quantized=quantized)),
+        )
+        observed_dtype = _normalize_dtype(getattr(self._aligner, "dtype", None))
+        if quantized:
+            effective_dtype = "int8"
+        elif observed_dtype is None:
+            raise RuntimeError("backend_identity_mismatch: aligner reported no dtype")
+        elif observed_dtype != dtype:
+            raise RuntimeError(
+                f"backend_identity_mismatch: aligner reported {observed_dtype}, requested {dtype}"
+            )
+        else:
+            effective_dtype = observed_dtype
         self.identity = AlignmentIdentity(
             device=device,
-            dtype=dtype,
+            dtype=effective_dtype,
             quantization_format=snapshot.quantization.format,
             engine_revision=_engine_revision(),
             family=snapshot.family,
