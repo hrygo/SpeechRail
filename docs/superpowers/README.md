@@ -1,6 +1,8 @@
 # Superpowers 过程目录
 
-本目录保存近期设计规格与实施计划。当前 Speech Plane 契约仍以 2026-09-20 的无状态 Speech Plane 方案为准；Extreme 是候选 profile 工作项。标记为
+本目录保存近期设计规格与实施计划。当前 Speech Plane 契约仍以 2026-09-20 的无状态 Speech Plane 方案为准；
+旧的 preset / 四档体系（含 `extreme`）已由 [Issue #95 目标架构](plans/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide.md)
+移除，档位只选择 ASR / TTS 两项独立 spec（`fast` / `quality` / `reference`）。标记为
 `superseded` 的旧方案只用于历史追溯，不得作为当前契约、兼容策略或实施入口。
 
 ## 设计规格
@@ -16,7 +18,7 @@
 - [Clone frozen-gain 边界修复候选](specs/2026-09-12-clone-loudness-boundaries.md)（`draft`）
 - [无状态 Speech Plane 与调用方编排设计](specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)（`approved`）
 - [macOS App 音色 revision 一致性与文档一致性收敛](specs/2026-09-20-macos-app-voice-revision-consistency-design.md)（`approved`）
-- [Extreme BF16 第四档设计](specs/2026-09-23-extreme-tier-bf16-design.md)（候选代码已实施；质量/资源/启用门待补证）
+- [Extreme BF16 第四档设计](specs/2026-09-23-extreme-tier-bf16-design.md)（`superseded`；preset/四档体系已被目标架构移除，仅历史追溯）
 
 ## 实施计划
 
@@ -40,7 +42,8 @@
 - [三档用户定位重排与按档位精度策略](plans/2026-09-11-tier-user-repositioning-and-precision-policy.md)
 - [无状态 Speech Plane 与调用方编排实施计划](plans/2026-09-20-stateless-speech-plane-caller-orchestration.md)（`ready`）
 - [macOS App 音色 revision 一致性与文档一致性收敛](plans/2026-09-20-macos-app-voice-revision-consistency.md)（`completed`）
-- [Extreme BF16 候选档实施计划](plans/2026-09-23-extreme-tier-bf16.md)（静态候选实施；R2–R4 阻塞）
+- [Extreme BF16 候选档实施计划](plans/2026-09-23-extreme-tier-bf16.md)（`superseded`；preset/四档体系已被目标架构移除，仅历史追溯）
+- [Issue #95 ASR/TTS 目标架构与验收指导](plans/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide.md)（`active`；本轮实施与验收）
 - [macOS App 契约对齐旧计划](plans/2026-09-20-macos-app-contract-alignment-plan.md)（`superseded`；已被 current-only 方案取代）
 
 ## 当前正式架构文档

@@ -6,6 +6,12 @@ date: 2026-09-11
 
 # ADR-0015：三档用户定位与按档位精度策略
 
+> **状态：Superseded（2026-09-26）。** 本 ADR 描述的 `light`/`balanced`/`quality` 三档体系与按档位
+> `precision_policy` 已退役：当前模型改为 ASR / TTS 两项独立 spec（`fast` / `quality` / `reference`），
+> 档位名、`PresetId`、`ModelPreset`、`precision_policy` 已从代码与 catalog 删除，旧档位名在 API / CLI /
+> MCP / App 上明确拒绝。见[目标架构](../architecture/2026-09-25-asr-tts-target-architecture-no-legacy.md)。
+> 下方原文与修订只作为历史决策记录保留，不再是现行契约。
+
 ## 修订（2026-09-11，E1 之后）
 
 本 ADR 的 light 4-bit 决策在验收门 E1 未通过后回退。本节记录修订后的事实，**不重写原决策历史**；

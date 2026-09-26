@@ -26,8 +26,8 @@ def _prepared() -> PreparedModelSet:
         )
 
     return PreparedModelSet(
-        prepared_id="prepared-light",
-        preset="light",
+        prepared_id="prepared-fast",
+        selection="fast/fast",
         runtime_lock_id="runtime-v1",
         asr=artifact("asr", "qwen3_asr", "asr"),
         tts=artifact("tts", "qwen3_tts", "custom_voice"),
@@ -36,7 +36,7 @@ def _prepared() -> PreparedModelSet:
 
 def _health_payload(
     *,
-    profile: str = "light",
+    profile: str = "fast/fast",
     asr_ready: bool = True,
     tts_ready: bool = True,
 ) -> dict[str, object]:
@@ -54,14 +54,14 @@ def _models_payload(prepared: PreparedModelSet) -> dict[str, object]:
         "data": [
             {
                 "id": "asr-model",
-                "profile": prepared.preset,
+                "profile": prepared.selection,
                 "artifact": prepared.asr.key,
                 "variant": prepared.asr.variant,
                 "quantization": dict(prepared.asr.quantization),
             },
             {
                 "id": "tts-model",
-                "profile": prepared.preset,
+                "profile": prepared.selection,
                 "artifact": prepared.tts.key,
                 "variant": prepared.tts.variant,
                 "quantization": dict(prepared.tts.quantization),

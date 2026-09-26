@@ -965,62 +965,6 @@
       "variant": "voice_design"
     }
   ],
-  "precision_policy": {
-    "balanced": {
-      "aligner": 8,
-      "asr": 8,
-      "tts": 8
-    },
-    "extreme": {
-      "aligner": "bf16",
-      "asr": "bf16",
-      "tts": "bf16"
-    },
-    "light": {
-      "aligner": null,
-      "asr": 8,
-      "tts": 8
-    },
-    "quality": {
-      "aligner": "bf16",
-      "asr": 8,
-      "tts": 8
-    }
-  },
-  "presets": [
-    {
-      "aligner": "aligner-q8",
-      "asr": "asr-1.7b-q8",
-      "diarization": true,
-      "id": "balanced",
-      "tts": "tts-0.6b-custom-q8",
-      "tts_clone": null
-    },
-    {
-      "aligner": "aligner-bf16",
-      "asr": "asr-1.7b-bf16",
-      "diarization": true,
-      "id": "extreme",
-      "tts": "tts-1.7b-custom-bf16",
-      "tts_clone": "tts-1.7b-base-bf16"
-    },
-    {
-      "aligner": null,
-      "asr": "asr-0.6b-q8",
-      "diarization": false,
-      "id": "light",
-      "tts": "tts-0.6b-custom-q8",
-      "tts_clone": null
-    },
-    {
-      "aligner": "aligner-bf16",
-      "asr": "asr-1.7b-q8",
-      "diarization": true,
-      "id": "quality",
-      "tts": "tts-1.7b-custom-q8",
-      "tts_clone": "tts-1.7b-base-q8"
-    }
-  ],
   "schema_version": 2,
   "specs": [
     {

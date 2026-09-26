@@ -19,7 +19,6 @@ from typing import Final
 _IMMUTABLE_REVISION: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{40}")
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{64}")
 _SCHEMA_VERSION: Final[int] = 2
-_PRESET_IDS: Final[frozenset[str]] = frozenset({"extreme", "quality", "balanced", "light"})
 _ARTIFACT_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "key",
@@ -43,10 +42,6 @@ _QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset({"bits", "group_size", "
 _QUANTIZATION_ALLOWED_FIELDS: Final[frozenset[str]] = _QUANTIZATION_FIELDS | frozenset(
     {"dtype"}
 )
-_PRESET_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
-    {"id", "asr", "tts", "aligner", "diarization"}
-)
-_PRESET_ALLOWED_FIELDS: Final[frozenset[str]] = _PRESET_REQUIRED_FIELDS | frozenset({"tts_clone"})
 _SPEC_TIERS: Final[frozenset[str]] = frozenset({"fast", "quality", "reference"})
 _SPEC_FIELDS: Final[frozenset[str]] = frozenset({"tier", "role", "artifact_key"})
 _SPEC_ROLE_VARIANTS: Final[dict[str, tuple[str, str]]] = {
@@ -335,49 +330,6 @@ def _normalise_artifact(value: object, *, index: int) -> dict[str, object]:
     }
 
 
-def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> dict[str, object]:
-    context = f"preset {index}"
-    data = _mapping(value, context=context)
-    missing = sorted(_PRESET_REQUIRED_FIELDS.difference(data))
-    if missing:
-        raise ValueError(f"{context} is missing required field(s): {', '.join(missing)}")
-    unexpected = sorted(set(data).difference(_PRESET_ALLOWED_FIELDS))
-    if unexpected:
-        raise ValueError(f"{context} has unsupported field(s): {', '.join(unexpected)}")
-    preset_id = _required_string(data, "id", context=context)
-    if preset_id not in _PRESET_IDS:
-        raise ValueError(f"{context}.id must be one of extreme, quality, balanced, light")
-    asr = _required_string(data, "asr", context=context)
-    tts = _required_string(data, "tts", context=context)
-    if asr not in artifact_keys:
-        raise ValueError(f"{context}.asr references unknown artifact: {asr}")
-    if tts not in artifact_keys:
-        raise ValueError(f"{context}.tts references unknown artifact: {tts}")
-    tts_clone = data.get("tts_clone")
-    if tts_clone is not None:
-        if not isinstance(tts_clone, str) or not tts_clone:
-            raise ValueError(f"{context}.tts_clone must be null or a non-empty string")
-        if tts_clone not in artifact_keys:
-            raise ValueError(f"{context}.tts_clone references unknown artifact: {tts_clone}")
-    aligner = data["aligner"]
-    if aligner is not None:
-        if not isinstance(aligner, str) or not aligner:
-            raise ValueError(f"{context}.aligner must be null or a non-empty string")
-        if aligner not in artifact_keys:
-            raise ValueError(f"{context}.aligner references unknown artifact: {aligner}")
-    diarization = data["diarization"]
-    if not isinstance(diarization, bool):
-        raise ValueError(f"{context}.diarization must be a boolean")
-    return {
-        "id": preset_id,
-        "asr": asr,
-        "tts": tts,
-        "tts_clone": tts_clone,
-        "aligner": aligner,
-        "diarization": diarization,
-    }
-
-
 def _normalise_spec(value: object, *, index: int) -> dict[str, object]:
     context = f"spec {index}"
     data = _mapping(value, context=context)
@@ -392,60 +344,6 @@ def _normalise_spec(value: object, *, index: int) -> dict[str, object]:
     return {"tier": tier, "role": role, "artifact_key": artifact_key}
 
 
-def _normalise_precision(
-    value: object, *, preset_id: str, context: str
-) -> dict[str, object]:
-    tier = _mapping(value, context=f"{context}.{preset_id}")
-    _check_fields(
-        tier, frozenset({"asr", "tts", "aligner"}), context=f"{context}.{preset_id}"
-    )
-    asr = tier["asr"]
-    tts = tier["tts"]
-    if not (
-        asr == "bf16"
-        or (isinstance(asr, int) and not isinstance(asr, bool) and asr > 0)
-    ):
-        raise ValueError(f"{context}.{preset_id}.asr must be 'bf16' or a positive integer")
-    if not (
-        tts == "bf16"
-        or (isinstance(tts, int) and not isinstance(tts, bool) and tts > 0)
-    ):
-        raise ValueError(f"{context}.{preset_id}.tts must be 'bf16' or a positive integer")
-    aligner = tier["aligner"]
-    if (
-        aligner is not None
-        and aligner != "bf16"
-        and (not isinstance(aligner, int) or isinstance(aligner, bool) or aligner <= 0)
-    ):
-        raise ValueError(
-            f"{context}.{preset_id}.aligner must be null, 'bf16', or a positive integer"
-        )
-    return {"asr": asr, "tts": tts, "aligner": aligner}
-
-
-def _normalise_precision_policy(value: object) -> dict[str, dict[str, object]]:
-    context = "catalog.precision_policy"
-    data = _mapping(value, context=context)
-    _check_fields(data, _PRESET_IDS, context=context)
-    return {
-        preset_id: _normalise_precision(data[preset_id], preset_id=preset_id, context=context)
-        for preset_id in sorted(data)
-    }
-
-
-def _precision_matches(quantization: object, policy: object) -> bool:
-    if not isinstance(quantization, Mapping):
-        return False
-    if policy == "bf16":
-        return quantization.get("bits") is None and quantization.get("dtype") == "bf16"
-    return (
-        isinstance(policy, int)
-        and not isinstance(policy, bool)
-        and quantization.get("bits") == policy
-        and quantization.get("dtype") is None
-    )
-
-
 def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
     """校验离线字典并返回规范化的模型清单。
 
@@ -455,9 +353,7 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
 
     if not isinstance(entries, Mapping):
         raise ValueError("catalog input must be an object")
-    expected_top_level = frozenset(
-        {"schema_version", "artifacts", "specs", "presets", "precision_policy"}
-    )
+    expected_top_level = frozenset({"schema_version", "artifacts", "specs"})
     _check_fields(entries, expected_top_level, context="catalog")
     schema_version = entries["schema_version"]
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
@@ -512,63 +408,10 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
                 f"catalog spec {binding[0]}/{binding[1]} references an incompatible artifact"
             )
 
-    presets: list[dict[str, object]] = []
-    seen_preset_ids: set[str] = set()
-    for preset_index, raw_preset in enumerate(
-        _list(entries["presets"], context="catalog.presets")
-    ):
-        preset = _normalise_preset(raw_preset, index=preset_index, artifact_keys=seen_keys)
-        preset_id = str(preset["id"])
-        if preset_id in seen_preset_ids:
-            raise ValueError(f"catalog has duplicate preset id: {preset_id}")
-        seen_preset_ids.add(preset_id)
-        presets.append(preset)
-    if seen_preset_ids != _PRESET_IDS:
-        missing = sorted(_PRESET_IDS.difference(seen_preset_ids))
-        extra = sorted(seen_preset_ids.difference(_PRESET_IDS))
-        raise ValueError(
-            "catalog.presets must contain exactly extreme, quality, balanced, and light"
-            f" (missing={missing}, extra={extra})"
-        )
-
-    precision_policy = _normalise_precision_policy(entries["precision_policy"])
-    for preset in presets:
-        preset_id = str(preset["id"])
-        policy = precision_policy[preset_id]
-        for field in ("asr", "tts"):
-            artifact = artifacts_by_key[str(preset[field])]
-            if not _precision_matches(artifact["quantization"], policy[field]):
-                raise ValueError(
-                    f"preset {preset_id} {field} precision does not match precision_policy"
-                )
-
-        clone_key = preset["tts_clone"]
-        if clone_key is not None:
-            clone = artifacts_by_key[str(clone_key)]
-            if not _precision_matches(clone["quantization"], policy["tts"]):
-                raise ValueError(
-                    f"preset {preset_id} clone precision does not match precision_policy.tts"
-                )
-
-        aligner_key = preset["aligner"]
-        aligner_precision = policy["aligner"]
-        if (aligner_key is None) != (aligner_precision is None):
-            raise ValueError(
-                f"preset {preset_id} aligner reference does not match precision_policy"
-            )
-        if aligner_key is not None:
-            aligner = artifacts_by_key[str(aligner_key)]
-            if not _precision_matches(aligner["quantization"], aligner_precision):
-                raise ValueError(
-                    f"preset {preset_id} aligner precision does not match precision_policy"
-                )
-
     return {
         "schema_version": _SCHEMA_VERSION,
         "artifacts": sorted(artifacts, key=lambda item: str(item["key"])),
         "specs": sorted(specs, key=lambda item: (str(item["tier"]), str(item["role"]))),
-        "presets": sorted(presets, key=lambda item: str(item["id"])),
-        "precision_policy": precision_policy,
     }
 
 

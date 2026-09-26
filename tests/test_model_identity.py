@@ -450,7 +450,7 @@ def _aligner_artifact(*, bits: int | None = 8) -> ModelArtifact:
             "bits": bits,
             "group_size": 64 if bits is not None else None,
             "format": "mlx" if bits is not None else "none",
-            # 未量化的制品要写明权重本身的数值格式 (与 precision_policy 的 bf16 一致)。
+            # 未量化的制品要写明权重本身的数值格式 (如 bf16), 与量化制品的 bits 互斥。
             "dtype": None if bits is not None else "bf16",
         },
         files=files,

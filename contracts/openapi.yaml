@@ -2709,7 +2709,7 @@ components:
       properties:
         id:
           type: string
-          description: System preset or user-created voice identifier.
+          description: System voice or user-created voice identifier.
         name:
           type: string
         description:
@@ -2723,7 +2723,7 @@ components:
           description: Optional deterministic sampling seed for reproducible voice recipes.
         aliases:
           type: array
-          description: OpenAI standard and legacy SpeechRail voice names accepted for this preset.
+          description: OpenAI standard and legacy SpeechRail voice names accepted for this voice profile.
           items:
             type: string
         is_default:

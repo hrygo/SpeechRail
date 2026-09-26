@@ -211,9 +211,9 @@ DEFAULT_VOICE_ID = "serena"
 
 VOICE_ALIASES: Mapping[str, str] = MappingProxyType(
     {
-        # Legacy SpeechRail preset IDs remain accepted but are not listed as
+        # Legacy SpeechRail voice IDs remain accepted but are not listed as
         # canonical voices. Every canonical ID maps one-to-one to one Qwen
-        # CustomVoice speaker across balanced/light.
+        # CustomVoice speaker across the fast and quality selections.
         "default": "serena",
         "warm": "serena",
         "bright": "vivian",

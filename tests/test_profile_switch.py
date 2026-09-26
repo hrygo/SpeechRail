@@ -9,11 +9,11 @@ from speechrail.service.model_store import PreparedArtifact, PreparedModelSet
 from speechrail.service.profile_store import ProfileStore
 from speechrail.service.profile_switch import ApplyResult, apply_prepared_profile
 
-_SPEC_PAIRS = {"quality": "quality/quality", "light": "fast/fast"}
+_SPEC_PAIRS = {"quality": "quality/quality", "fast": "fast/fast"}
 
 
 def _prepared(name: str, *, with_clone: bool = False) -> PreparedModelSet:
-    asr_key = "asr-small" if name == "light" else "asr-large"
+    asr_key = "asr-small" if name == "fast" else "asr-large"
     tts_key = "tts-design" if name == "quality" else "tts-custom"
     asr = PreparedArtifact(
         key=asr_key,
@@ -57,7 +57,7 @@ def _prepared(name: str, *, with_clone: bool = False) -> PreparedModelSet:
     )
     return PreparedModelSet(
         prepared_id=f"prepared-{name}",
-        preset=_SPEC_PAIRS[name],
+        selection=_SPEC_PAIRS[name],
         runtime_lock_id="runtime-v1",
         asr=asr,
         tts=tts,
@@ -66,7 +66,7 @@ def _prepared(name: str, *, with_clone: bool = False) -> PreparedModelSet:
 
 
 def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]:
-    asr_spec, tts_spec = prepared.preset.split("/")
+    asr_spec, tts_spec = prepared.selection.split("/")
     return {
         "schema_version": 2,
         "asr_spec": asr_spec,
@@ -106,17 +106,17 @@ class FakeService:
 
 class FakeSmoke:
     def __init__(
-        self, events: list[str], *, fail_presets: set[str] | None = None, interrupt: bool = False
+        self, events: list[str], *, fail_selections: set[str] | None = None, interrupt: bool = False
     ) -> None:
         self.events = events
-        self.fail_presets = fail_presets or set()
+        self.fail_selections = fail_selections or set()
         self.interrupt = interrupt
 
     def run(self, prepared: PreparedModelSet) -> None:
-        self.events.append(f"smoke:{prepared.preset}")
+        self.events.append(f"smoke:{prepared.selection}")
         if self.interrupt:
             raise KeyboardInterrupt
-        if prepared.preset in self.fail_presets:
+        if prepared.selection in self.fail_selections:
             raise RuntimeError("smoke failed")
 
 
@@ -126,7 +126,7 @@ def _id_resolver(
     def resolve(prepared_id: str, app_home: Path) -> PreparedModelSet:
         assert prepared_id == prepared.prepared_id
         assert app_home.is_absolute()
-        events.append(f"resolve:{prepared.preset}")
+        events.append(f"resolve:{prepared.selection}")
         return prepared
 
     return resolve
@@ -146,7 +146,7 @@ def _selection_resolver(
 
 def test_success_stops_before_staging_and_commits_only_after_smoke(tmp_path: Path) -> None:
     events: list[str] = []
-    old, candidate = _prepared("quality"), _prepared("light")
+    old, candidate = _prepared("quality"), _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -192,7 +192,7 @@ def test_unresolvable_candidate_never_stops_service(tmp_path: Path) -> None:
 
 def test_failed_candidate_smoke_restores_and_smokes_previous_once(tmp_path: Path) -> None:
     events: list[str] = []
-    old, candidate = _prepared("quality"), _prepared("light")
+    old, candidate = _prepared("quality"), _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -200,7 +200,7 @@ def test_failed_candidate_smoke_restores_and_smokes_previous_once(tmp_path: Path
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events),
-        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
+        smoke=FakeSmoke(events, fail_selections={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
         selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
@@ -223,7 +223,7 @@ def test_failed_candidate_smoke_restores_and_smokes_previous_once(tmp_path: Path
 
 def test_failed_rollback_is_not_ready_and_does_not_retry(tmp_path: Path) -> None:
     events: list[str] = []
-    old, candidate = _prepared("quality"), _prepared("light")
+    old, candidate = _prepared("quality"), _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -231,7 +231,7 @@ def test_failed_rollback_is_not_ready_and_does_not_retry(tmp_path: Path) -> None
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events, fail_start_at=2),
-        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
+        smoke=FakeSmoke(events, fail_selections={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
         selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
@@ -245,7 +245,7 @@ def test_failed_rollback_is_not_ready_and_does_not_retry(tmp_path: Path) -> None
 
 def test_same_complete_selection_is_idempotent(tmp_path: Path) -> None:
     events: list[str] = []
-    current = _prepared("light")
+    current = _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(current, 3))
 
@@ -256,7 +256,7 @@ def test_same_complete_selection_is_idempotent(tmp_path: Path) -> None:
         smoke=FakeSmoke(events),
         store=store,
         prepared_resolver=_id_resolver(current, events),
-        selection_resolver=_selection_resolver({_SPEC_PAIRS["light"]: current}, events),
+        selection_resolver=_selection_resolver({_SPEC_PAIRS["fast"]: current}, events),
     )
 
     assert result == ApplyResult(status="unchanged", operation_id=None, error_code=None)
@@ -268,7 +268,7 @@ def test_a_different_spec_pair_reapplies_an_existing_selection(
 ) -> None:
     events: list[str] = []
     old = _prepared("quality", with_clone=True)
-    candidate = _prepared("light")
+    candidate = _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -295,7 +295,7 @@ def test_a_different_spec_pair_reapplies_an_existing_selection(
 
 def test_recovery_continues_when_second_stop_reports_failure(tmp_path: Path) -> None:
     events: list[str] = []
-    old, candidate = _prepared("quality"), _prepared("light")
+    old, candidate = _prepared("quality"), _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -303,7 +303,7 @@ def test_recovery_continues_when_second_stop_reports_failure(tmp_path: Path) -> 
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events, fail_stop_at=2),
-        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
+        smoke=FakeSmoke(events, fail_selections={"fast/fast"}),
         store=store,
         prepared_resolver=_id_resolver(candidate, events),
         selection_resolver=_selection_resolver({_SPEC_PAIRS["quality"]: old}, events),
@@ -316,7 +316,7 @@ def test_recovery_continues_when_second_stop_reports_failure(tmp_path: Path) -> 
 
 def test_interrupt_rolls_back_before_propagating(tmp_path: Path) -> None:
     events: list[str] = []
-    old, candidate = _prepared("quality"), _prepared("light")
+    old, candidate = _prepared("quality"), _prepared("fast")
     store = ProfileStore(tmp_path)
     store.initialize(_selection(old, 1))
 
@@ -337,12 +337,12 @@ def test_interrupt_rolls_back_before_propagating(tmp_path: Path) -> None:
 
 def test_failed_first_install_stays_stopped_and_unconfigured(tmp_path: Path) -> None:
     events: list[str] = []
-    candidate = _prepared("light")
+    candidate = _prepared("fast")
     result = apply_prepared_profile(
         candidate.prepared_id,
         app_home=tmp_path,
         service=FakeService(events),
-        smoke=FakeSmoke(events, fail_presets={"fast/fast"}),
+        smoke=FakeSmoke(events, fail_selections={"fast/fast"}),
         prepared_resolver=_id_resolver(candidate, events),
     )
 

@@ -1320,44 +1320,6 @@ def _b2_catalog() -> ModelCatalog:
                     "artifact_key": "aligner-bf16",
                 },
             ],
-            "presets": [
-                {
-                    "id": "light",
-                    "asr": "asr-06b-q8",
-                    "tts": "tts-06b-custom-q8",
-                    "aligner": None,
-                    "diarization": False,
-                },
-                {
-                    "id": "balanced",
-                    "asr": "asr-17b-q8",
-                    "tts": "tts-06b-custom-q8",
-                    "aligner": "aligner-q8",
-                    "diarization": True,
-                },
-                {
-                    "id": "quality",
-                    "asr": "asr-17b-q8",
-                    "tts": "tts-06b-custom-q8",
-                    "tts_clone": "tts-17b-base-q8",
-                    "aligner": "aligner-bf16",
-                    "diarization": True,
-                },
-                {
-                    "id": "extreme",
-                    "asr": "asr-17b-bf16",
-                    "tts": "tts-17b-custom-bf16",
-                    "tts_clone": "tts-17b-base-bf16",
-                    "aligner": "aligner-bf16",
-                    "diarization": True,
-                },
-            ],
-            "precision_policy": {
-                "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-                "light": {"asr": 8, "tts": 8, "aligner": None},
-                "balanced": {"asr": 8, "tts": 8, "aligner": 8},
-                "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
-            },
         }
     )
 

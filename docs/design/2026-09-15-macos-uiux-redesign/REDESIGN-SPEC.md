@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App UI/UX 重设计规格（macOS 26 原生）"
 status: accepted
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "1.8.1"
-date: 2026-09-20
+version: "1.8.2"
+date: 2026-09-26
 ---
 
 # SpeechRail macOS App UI/UX 重设计规格
@@ -78,7 +78,7 @@ SpeechRail 服务是单人 Apple Silicon Mac 上的本地共享语音引擎，�
 
 | 内部 / 制品名 | 页面上说 | 出现在 |
 |---|---|---|
-| `quality` / `balanced` / `light` | 精准 / 均衡 / 轻量 | 侧栏状态行、档位卡、会话右栏、设置里换档的提示 |
+| `quality` / `fast` / `reference`（ASR 与 TTS 各自独立） | 品质 / 轻快 / 参考 | 侧栏状态行、规格卡、会话右栏、设置里换档的提示 |
 | `VoiceDesign` / `Base` | 语音设计 / 内置音色 | 服务状态能力行、档位卡、音色创作页 |
 | 「复刻」（能力声明里的 `supports_clone`） | 音色克隆 | 服务状态能力行、音色克隆页、诊断标题（与侧栏那一项同名） |
 | 分人 / 匿名分人 | 说话人区分；开关与列头叫「说话人标签」 | 服务、会议、字幕、设置 |

@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 _catalog_builder = import_module("tools.build_model_catalog")
 build_catalog = _catalog_builder.build_catalog
 require_immutable_revision = _catalog_builder.require_immutable_revision
-_normalise_precision = _catalog_builder._normalise_precision
 _normalise_quantization = _catalog_builder._normalise_quantization
 _REQUIRED_SPEC_BINDINGS = _catalog_builder._REQUIRED_SPEC_BINDINGS
 
@@ -129,54 +128,9 @@ def _canonical_specs() -> list[dict[str, Any]]:
     ]
 
 
-def _canonical_presets() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": "balanced",
-            "asr": "asr-1.7b-q8",
-            "tts": "tts-0.6b-custom-q8",
-            "tts_clone": None,
-            "aligner": "aligner-q8",
-            "diarization": True,
-        },
-        {
-            "id": "extreme",
-            "asr": "asr-1.7b-bf16",
-            "tts": "tts-1.7b-custom-bf16",
-            "tts_clone": "tts-1.7b-base-bf16",
-            "aligner": "aligner-bf16",
-            "diarization": True,
-        },
-        {
-            "id": "light",
-            "asr": "asr-0.6b-q8",
-            "tts": "tts-0.6b-custom-q8",
-            "tts_clone": None,
-            "aligner": None,
-            "diarization": False,
-        },
-        {
-            "id": "quality",
-            "asr": "asr-1.7b-q8",
-            "tts": "tts-1.7b-custom-q8",
-            "tts_clone": "tts-1.7b-base-q8",
-            "aligner": "aligner-bf16",
-            "diarization": True,
-        },
-    ]
-
-
-_CANONICAL_PRECISION_POLICY: dict[str, Any] = {
-    "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-    "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
-    "balanced": {"asr": 8, "tts": 8, "aligner": 8},
-    "light": {"asr": 8, "tts": 8, "aligner": None},
-}
-
 
 def _catalog(
     *artifacts: dict[str, Any],
-    precision_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a legal 12-artifact catalog, replacing canonical artifacts by key."""
 
@@ -187,21 +141,12 @@ def _catalog(
         "schema_version": 2,
         "artifacts": list(by_key.values()),
         "specs": _canonical_specs(),
-        "presets": _canonical_presets(),
-        "precision_policy": precision_policy or _CANONICAL_PRECISION_POLICY,
     }
 
 
 def _legal_metadata() -> dict[str, Any]:
     return _catalog()
 
-
-def _preset(entries: dict[str, Any], preset_id: str) -> dict[str, Any]:
-    presets = entries["presets"]
-    assert isinstance(presets, list)
-    entry = next(item for item in presets if item["id"] == preset_id)
-    assert isinstance(entry, dict)
-    return entry
 
 
 def _artifact_by_key(catalog: dict[str, Any], key: str) -> dict[str, Any]:
@@ -349,56 +294,13 @@ def test_cli_writes_only_to_an_explicit_output_path(
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
 
 
-def test_preset_without_aligner_or_diarization_is_rejected() -> None:
-    entries = _catalog(_artifact())
-    presets = entries["presets"]
-    assert isinstance(presets, list)
-    presets[0] = {"id": "balanced", "asr": "asr-1.7b-q8", "tts": "tts-0.6b-custom-q8"}
-
-    with pytest.raises(ValueError, match=r"aligner|diarization"):
-        build_catalog(entries)
-
-
-def test_preset_diarization_must_be_a_real_bool() -> None:
-    entries = _catalog(_artifact())
-    presets = entries["presets"]
-    assert isinstance(presets, list)
-    preset = presets[0]
-    assert isinstance(preset, dict)
-    preset["diarization"] = 1
-
-    with pytest.raises(ValueError, match="bool"):
-        build_catalog(entries)
-
-
-def test_preset_aligner_must_reference_a_known_artifact() -> None:
-    entries = _catalog(_artifact())
-    presets = entries["presets"]
-    assert isinstance(presets, list)
-    preset = presets[0]
-    assert isinstance(preset, dict)
-    preset["aligner"] = "aligner-missing"
-
-    with pytest.raises(ValueError, match="unknown artifact"):
-        build_catalog(entries)
-
-
-def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
+def test_legal_metadata_produces_schema_v2_catalog() -> None:
     catalog = build_catalog(_legal_metadata())
 
     assert catalog["schema_version"] == 2
-    policy = catalog["precision_policy"]
-    assert isinstance(policy, dict)
-    assert set(policy) == {"quality", "balanced", "light", "extreme"}
-    assert policy["light"]["aligner"] is None
-    assert policy["quality"]["aligner"] == "bf16"
-    assert policy["extreme"] == {"asr": "bf16", "tts": "bf16", "aligner": "bf16"}
-    assert {preset["id"] for preset in catalog["presets"]} == {
-        "quality",
-        "balanced",
-        "light",
-        "extreme",
-    }
+    assert set(catalog) == {"schema_version", "artifacts", "specs"}
+    bindings = {(item["tier"], item["role"]): item["artifact_key"] for item in catalog["specs"]}
+    assert bindings == dict(_REQUIRED_SPEC_BINDINGS)
     for key in (
         "asr-1.7b-bf16",
         "tts-1.7b-custom-bf16",
@@ -414,14 +316,6 @@ def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
         }
 
 
-def test_precision_normalization_accepts_bf16_for_asr_tts_and_aligner() -> None:
-    assert _normalise_precision(
-        {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-        preset_id="extreme",
-        context="catalog.precision_policy",
-    ) == {"asr": "bf16", "tts": "bf16", "aligner": "bf16"}
-
-
 @pytest.mark.parametrize(
     "quantization",
     [
@@ -433,68 +327,3 @@ def test_precision_normalization_accepts_bf16_for_asr_tts_and_aligner() -> None:
 def test_quantization_rejects_mixed_or_missing_precision(quantization: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match=r"bits|dtype|precision"):
         _normalise_quantization(quantization, artifact_key="fixture")
-
-
-def test_catalog_builder_requires_all_four_presets() -> None:
-    entries = _legal_metadata()
-    entries["presets"] = entries["presets"][:-1]
-
-    with pytest.raises(ValueError, match="preset"):
-        build_catalog(entries)
-
-
-@pytest.mark.parametrize(
-    ("preset_id", "field", "replacement"),
-    [
-        ("extreme", "asr", "asr-1.7b-q8"),
-        ("extreme", "tts", "asr-1.7b-q8"),
-        ("extreme", "tts_clone", "asr-1.7b-q8"),
-        ("extreme", "aligner", "aligner-q8"),
-    ],
-)
-def test_builder_rejects_preset_artifacts_that_disagree_with_precision_policy(
-    preset_id: str, field: str, replacement: str
-) -> None:
-    entries = _legal_metadata()
-    preset = next(item for item in entries["presets"] if item["id"] == preset_id)
-    preset[field] = replacement
-
-    with pytest.raises(ValueError, match=r"precision|preset"):
-        build_catalog(entries)
-
-
-@pytest.mark.parametrize(
-    "precision_policy",
-    [
-        {
-            "quality": {"asr": 8, "tts": 8, "aligner": None},
-            "balanced": {"asr": 8, "tts": 8, "aligner": None},
-        },
-        {
-            "quality": {"asr": 8, "tts": 8},
-            "balanced": {"asr": 8, "tts": 8, "aligner": None},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
-        {
-            "quality": {"asr": 0, "tts": 8, "aligner": None},
-            "balanced": {"asr": 8, "tts": 8, "aligner": None},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
-        {
-            "quality": {"asr": True, "tts": 8, "aligner": None},
-            "balanced": {"asr": 8, "tts": 8, "aligner": None},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
-        {
-            "quality": {"asr": 8, "tts": 8, "aligner": "q8"},
-            "balanced": {"asr": 8, "tts": 8, "aligner": None},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
-    ],
-    ids=["missing-tier", "missing-inner-key", "non-positive", "bool", "bad-aligner"],
-)
-def test_illegal_precision_policy_is_rejected(precision_policy: dict[str, Any]) -> None:
-    entries = _catalog(_artifact(), precision_policy=precision_policy)
-
-    with pytest.raises(ValueError, match=r"precision_policy|aligner|asr|tts|missing|unsupported"):
-        build_catalog(entries)

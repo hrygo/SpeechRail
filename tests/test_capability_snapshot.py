@@ -59,27 +59,36 @@ def test_capability_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) 
     )
 
 
-def _active(tier: str):
+_ACTIVE_SELECTIONS = [
+    ("fast", "fast"),
+    ("quality", "fast"),
+    ("quality", "quality"),
+    ("reference", "reference"),
+]
+
+
+def _active(asr_spec: str, tts_spec: str):
     from speechrail.config.model_catalog import load_catalog
     from speechrail.config.selection import ActiveModelCatalog
 
     catalog = load_catalog()
-    preset = catalog.preset(tier)
     artifacts = {item.key: item for item in catalog.artifacts}
     return ActiveModelCatalog(
-        profile=tier,
-        asr=artifacts[preset.asr],
-        tts=artifacts[preset.tts],
-        tts_clone=artifacts.get(preset.tts_clone),
-        aligner=preset.aligner,
-        diarization=preset.diarization,
+        profile=f"{asr_spec}/{tts_spec}",
+        asr=artifacts[catalog.binding(asr_spec, "asr")],
+        tts=artifacts[catalog.binding(tts_spec, "tts_custom_voice")],
+        tts_clone=artifacts[catalog.binding(tts_spec, "tts_base")],
+        aligner=None,
+        diarization=False,
+        asr_spec=asr_spec,
+        tts_spec=tts_spec,
     )
 
 
-@pytest.mark.parametrize("tier", ["light", "balanced", "quality", "extreme"])
+@pytest.mark.parametrize(("asr_spec", "tts_spec"), _ACTIVE_SELECTIONS)
 @pytest.mark.parametrize("mode", ["system", "instruction", "clone"])
 def test_effective_matrix_uses_captured_voice_and_base_lane(
-    tier: str, mode: str, monkeypatch
+    asr_spec: str, tts_spec: str, mode: str, monkeypatch
 ) -> None:
     from speechrail.application.capability_snapshot import build_capability_snapshot
 
@@ -103,7 +112,7 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     monkeypatch.setattr("speechrail.backends.qwen3_voice_binding.get_voice_profile", forbidden)
     data = build_capability_snapshot(
         (profile,),
-        _active(tier),
+        _active(asr_spec, tts_spec),
         epoch="epoch",
         ready=True,
         enabled_voices=frozenset({"serena"}),
@@ -116,14 +125,12 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     # tier's primary TTS is CustomVoice (built-in speakers) and the clone lane
     # is Base. Only those two roles resolve; an unpublished instruction draft
     # stays unavailable until it is published as a Base-served revision.
-    assert entry["available"] is (
-        mode == "system" or (mode == "clone" and tier in {"quality", "extreme"})
-    )
+    assert entry["available"] is (mode in {"system", "clone"})
     encoded = str(data)
     for secret in ["PRIVATE_INSTRUCTION", "PRIVATE_REFERENCE", "/private/", "PRIVATE_QUALITY"]:
         assert secret not in encoded
     if mode == "clone":
-        assert entry["variant"] == ("base" if tier in {"quality", "extreme"} else None)
+        assert entry["variant"] == "base"
         assert entry["operations"]["http_speech"]["parameters"]["speed"]["values"] == [1.0]
     # Instructions are a VoiceDesign-only parameter; no tier's primary TTS is
     # VoiceDesign, so both built-in speakers and the Base clone lane reject them.
@@ -206,7 +213,7 @@ def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> N
     def snap(profile, *, ready=True):
         return build_capability_snapshot(
             (profile,),
-            _active("quality"),
+            _active("quality", "quality"),
             epoch="epoch",
             ready=ready,
             enabled_voices=frozenset(),
@@ -251,15 +258,15 @@ def test_discovery_handles_untrusted_quality_status_without_disclosure() -> None
 
     profile = voices.VoiceProfile(id="v", mode="instruction", quality={"status": ["PRIVATE"]})
     data = build_capability_snapshot(
-        (profile,), _active("quality"), epoch="e", ready=True,
+        (profile,), _active("quality", "quality"), epoch="e", ready=True,
         enabled_voices=frozenset(), sample_rate=24_000,
     )
     assert data["voices"][0]["quality_summary"]["status"] == "unevaluated"
     assert "PRIVATE" not in str(data)
 
 
-@pytest.mark.parametrize("tier", ["light", "balanced", "quality", "extreme"])
-def test_snapshot_matches_documented_openapi_schema(tier: str) -> None:
+@pytest.mark.parametrize(("asr_spec", "tts_spec"), _ACTIVE_SELECTIONS)
+def test_snapshot_matches_documented_openapi_schema(asr_spec: str, tts_spec: str) -> None:
     import jsonschema
     import yaml
 
@@ -270,10 +277,16 @@ def test_snapshot_matches_documented_openapi_schema(tier: str) -> None:
         "$ref": "#/components/schemas/EffectiveCapabilitySnapshot",
         "components": spec["components"],
     }
-    jsonschema.Draft202012Validator(schema).validate(build_capability_snapshot(
-        tuple(voices.SYSTEM_VOICE_PROFILES.values()), _active(tier), epoch="e", ready=True,
-        enabled_voices=frozenset(voices.SYSTEM_VOICE_PROFILES), sample_rate=24_000,
-    ))
+    jsonschema.Draft202012Validator(schema).validate(
+        build_capability_snapshot(
+            tuple(voices.SYSTEM_VOICE_PROFILES.values()),
+            _active(asr_spec, tts_spec),
+            epoch="e",
+            ready=True,
+            enabled_voices=frozenset(voices.SYSTEM_VOICE_PROFILES),
+            sample_rate=24_000,
+        )
+    )
 
 
 def test_snapshot_tracks_the_actual_planner_policy(monkeypatch) -> None:
@@ -282,7 +295,7 @@ def test_snapshot_tracks_the_actual_planner_policy(monkeypatch) -> None:
 
     def snapshot():
         return discovery.build_capability_snapshot(
-            (), _active("quality"), epoch="same", ready=True,
+            (), _active("quality", "quality"), epoch="same", ready=True,
             enabled_voices=frozenset(), sample_rate=24_000,
         )
 
@@ -314,7 +327,7 @@ def test_content_addressed_voice_revision_enables_conditional_synthesis() -> Non
     )
     data = build_capability_snapshot(
         (profile,),
-        _active("quality"),
+        _active("quality", "quality"),
         epoch="epoch",
         ready=True,
         enabled_voices=frozenset({"serena"}),
@@ -332,7 +345,7 @@ def test_content_addressed_voice_revision_enables_conditional_synthesis() -> Non
 def test_clone_reference_pass_does_not_imply_production_ready_without_output_pass() -> None:
     from speechrail.application.capability_snapshot import build_capability_snapshot
 
-    active = _active("quality")
+    active = _active("quality", "quality")
     revision = "vr_" + "b" * 32
     profile = voices.VoiceProfile(
         id="clone_ready_reference",
@@ -405,7 +418,7 @@ def test_clone_reference_pass_does_not_imply_production_ready_without_output_pas
 def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
     from speechrail.application.capability_snapshot import _validation_state
 
-    active = _active("quality")
+    active = _active("quality", "quality")
     revision = "vr_" + "d" * 32
     profile = voices.VoiceProfile(
         id="runtime_bound_clone",
@@ -457,7 +470,7 @@ def _snapshot(**overrides):
         "sample_rate": 24_000,
     }
     kwargs.update(overrides)
-    return build_capability_snapshot((), _active("quality"), **kwargs)
+    return build_capability_snapshot((), _active("quality", "quality"), **kwargs)
 
 
 def test_asr_operations_are_conservative_without_declared_facts() -> None:
@@ -530,7 +543,7 @@ def test_busy_state_does_not_deform_supported_capability_enumeration() -> None:
     facts = {"available": True, "ready": True}
     snapshot = build_capability_snapshot(
         (),
-        _active("quality"),
+        _active("quality", "quality"),
         epoch="e",
         ready=True,
         enabled_voices=frozenset(),

@@ -9,23 +9,20 @@ from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Literal, Self, override
+from typing import Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictBool,
     StrictInt,
     StrictStr,
-    field_serializer,
     field_validator,
     model_validator,
 )
 
 Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
 Variant = Literal["asr", "voice_design", "custom_voice", "base", "aligner"]
-PresetId = Literal["extreme", "quality", "balanced", "light"]
 SpecTier = Literal["fast", "quality", "reference"]
 ModelRole = Literal[
     "asr",
@@ -270,51 +267,6 @@ class ModelSpecBinding(BaseModel):
     artifact_key: StrictStr = Field(min_length=1)
 
 
-class ModelPreset(BaseModel):
-    """只引用 ASR、TTS 与可选 aligner 制品的预设。"""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    id: PresetId
-    asr: StrictStr = Field(min_length=1)
-    tts: StrictStr = Field(min_length=1)
-    tts_clone: StrictStr | None = None
-    aligner: StrictStr | None
-    diarization: StrictBool
-
-
-class TierPrecision(BaseModel):
-    """单个档位的 ASR/TTS/aligner 量化精度约束。"""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    asr: StrictInt | Literal["bf16"]
-    tts: StrictInt | Literal["bf16"]
-    aligner: StrictInt | Literal["bf16"] | None
-
-    @field_validator("asr", "tts")
-    @classmethod
-    def validate_model_precision(cls, value: int | Literal["bf16"]) -> int | Literal["bf16"]:
-        if isinstance(value, int) and value <= 0:
-            raise ValueError("ASR/TTS precision must be positive or 'bf16'")
-        return value
-
-    @field_validator("aligner")
-    @classmethod
-    def validate_aligner(
-        cls, value: int | Literal["bf16"] | None
-    ) -> int | Literal["bf16"] | None:
-        if isinstance(value, int) and value <= 0:
-            raise ValueError("aligner precision must be positive, 'bf16', or null")
-        return value
-
-
-def _precision_matches(quantization: QuantizationSpec, precision: int | Literal["bf16"]) -> bool:
-    if precision == "bf16":
-        return quantization.bits is None and quantization.dtype == "bf16"
-    return quantization.bits == precision and quantization.dtype is None
-
-
 class EngineWheelPin(BaseModel):
     """受控引擎 wheel 的构建 provenance.
 
@@ -412,41 +364,13 @@ def runtime_wheel_source(filename: str) -> Path:
 
 
 class ModelCatalog(BaseModel):
-    """完整不可变的四档模型目录。"""
+    """完整不可变的模型目录。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: StrictInt
     artifacts: tuple[ModelArtifact, ...] = Field(min_length=1)
     specs: tuple[ModelSpecBinding, ...] = Field(min_length=1)
-    presets: tuple[ModelPreset, ...] = Field(min_length=4)
-    precision_policy: Mapping[PresetId, TierPrecision]
-
-    @field_validator("precision_policy")
-    @classmethod
-    def freeze_precision_policy(
-        cls, value: Mapping[PresetId, TierPrecision]
-    ) -> Mapping[PresetId, TierPrecision]:
-        return MappingProxyType(dict(value))
-
-    @field_serializer("precision_policy")
-    def serialize_precision_policy(
-        self, value: Mapping[PresetId, TierPrecision]
-    ) -> dict[PresetId, TierPrecision]:
-        """Emit a plain mapping so the catalog stays JSON-serializable while frozen."""
-        return dict(value)
-
-    @override
-    def __deepcopy__(self, memo: dict[int, object] | None = None) -> ModelCatalog:
-        """Rebuild the catalog instead of pickling the frozen policy mapping.
-
-        ``precision_policy`` is a ``MappingProxyType`` to keep the catalog
-        read-only, but that proxy cannot be pickled and therefore breaks the
-        default ``copy.deepcopy``/``model_copy(deep=True)`` path. Re-validating
-        the serialized payload yields a fully independent, JSON-shaped copy and
-        keeps the read-only, round-trip behavior unchanged.
-        """
-        return ModelCatalog.model_validate(self.model_dump())
 
     @model_validator(mode="after")
     def validate_catalog(self) -> Self:
@@ -486,101 +410,7 @@ class ModelCatalog(BaseModel):
             ):
                 raise ValueError(f"spec {tier}/{role} references an incompatible artifact")
 
-        presets: dict[PresetId, ModelPreset] = {}
-        for item in self.presets:
-            if item.id in presets:
-                raise ValueError(f"duplicate preset id: {item.id}")
-            presets[item.id] = item
-        expected_ids = {"extreme", "quality", "balanced", "light"}
-        if set(presets) != expected_ids:
-            raise ValueError(
-                "catalog must contain exactly extreme, quality, balanced, and light presets"
-            )
-        if set(self.precision_policy) != expected_ids:
-            raise ValueError(
-                "precision_policy must define exactly extreme, quality, balanced, and light"
-            )
-
-        for preset_id, item in presets.items():
-            asr = artifacts.get(item.asr)
-            tts = artifacts.get(item.tts)
-            if asr is None:
-                raise ValueError(f"preset {preset_id} references unknown ASR artifact")
-            if tts is None:
-                raise ValueError(f"preset {preset_id} references unknown TTS artifact")
-            if asr.family != "qwen3_asr" or asr.variant != "asr":
-                raise ValueError(f"preset {preset_id} ASR reference has invalid variant")
-            if tts.family != "qwen3_tts" or tts.variant == "asr":
-                raise ValueError(f"preset {preset_id} TTS reference has invalid variant")
-
-            policy = self.precision_policy[preset_id]
-            if not _precision_matches(asr.quantization, policy.asr):
-                raise ValueError(
-                    f"preset {preset_id} ASR precision does not match precision_policy"
-                )
-            if not _precision_matches(tts.quantization, policy.tts):
-                raise ValueError(
-                    f"preset {preset_id} TTS precision does not match precision_policy"
-                )
-
-            if policy.aligner is None:
-                if item.aligner is not None:
-                    raise ValueError(
-                        f"preset {preset_id} declares an aligner but precision_policy has none"
-                    )
-                continue
-            if item.aligner is None:
-                raise ValueError(f"preset {preset_id} is missing its aligner artifact")
-            aligner = artifacts.get(item.aligner)
-            if aligner is None:
-                raise ValueError(f"preset {preset_id} references unknown aligner artifact")
-            if aligner.family != "qwen3_forced_aligner" or aligner.variant != "aligner":
-                raise ValueError(f"preset {preset_id} aligner reference has invalid variant")
-            if not _precision_matches(aligner.quantization, policy.aligner):
-                raise ValueError(
-                    f"preset {preset_id} aligner precision does not match precision_policy"
-                )
-
-        quality = presets["quality"]
-        balanced = presets["balanced"]
-        light = presets["light"]
-        extreme = presets["extreme"]
-        if quality.asr != balanced.asr:
-            raise ValueError("quality and balanced presets must share the ASR artifact")
-        for preset_id, item in (("quality", quality), ("extreme", extreme)):
-            if artifacts[item.tts].variant != "custom_voice":
-                raise ValueError(f"{preset_id} preset must use a custom_voice artifact")
-            if item.tts_clone is None:
-                raise ValueError(f"{preset_id} preset must declare a base clone artifact")
-            clone_artifact = artifacts.get(item.tts_clone)
-            if (
-                clone_artifact is None
-                or clone_artifact.family != "qwen3_tts"
-                or clone_artifact.variant != "base"
-            ):
-                raise ValueError(
-                    f"{preset_id} preset clone artifact must use qwen3_tts variant=base"
-                )
-            if not _precision_matches(
-                clone_artifact.quantization, self.precision_policy[preset_id].tts
-            ):
-                raise ValueError(
-                    f"preset {preset_id} clone precision does not match precision_policy.tts"
-                )
-        if balanced.tts_clone is not None or light.tts_clone is not None:
-            raise ValueError("balanced/light presets must not declare clone artifacts")
-        if artifacts[balanced.tts].variant != "custom_voice":
-            raise ValueError("balanced preset must use a custom_voice artifact")
-        if artifacts[light.tts].variant != "custom_voice":
-            raise ValueError("light preset must use a custom_voice artifact")
         return self
-
-    def preset(self, preset_id: str) -> ModelPreset:
-        """按 ID 返回模型预设。"""
-        for item in self.presets:
-            if item.id == preset_id:
-                return item
-        raise KeyError(preset_id)
 
     def binding(self, tier: SpecTier, role: ModelRole) -> str:
         """按档位与角色返回显式制品 key。"""
@@ -640,11 +470,6 @@ def assert_target_spec_bindings(catalog: ModelCatalog) -> None:
         )
 
 
-def preset(preset_id: str) -> ModelPreset:
-    """读取并返回指定模型预设。"""
-    return load_catalog().preset(preset_id)
-
-
 def load_runtime_lock() -> RuntimeLock:
     """读取并校验全档共享 runtime lock。"""
     lock = RuntimeLock.model_validate(_load_json(_RUNTIME_LOCK_PATH))
@@ -679,17 +504,13 @@ __all__ = [
     "Family",
     "ModelArtifact",
     "ModelCatalog",
-    "ModelPreset",
     "ModelSpecBinding",
-    "PresetId",
     "QuantizationSpec",
     "RuntimeLock",
     "SourceLocation",
-    "TierPrecision",
     "Variant",
     "assert_target_spec_bindings",
     "load_catalog",
     "load_runtime_lock",
-    "preset",
     "runtime_wheel_source",
 ]

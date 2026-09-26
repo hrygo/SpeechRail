@@ -1,4 +1,4 @@
-"""模型目录、四档 preset 与 runtime lock 的契约测试。"""
+"""模型目录、档位/角色绑定与 runtime lock 的契约测试。"""
 
 from __future__ import annotations
 
@@ -17,13 +17,10 @@ from speechrail.config.model_catalog import (
     ArtifactFile,
     ModelArtifact,
     ModelCatalog,
-    ModelPreset,
     RuntimeLock,
     SourceLocation,
-    TierPrecision,
     load_catalog,
     load_runtime_lock,
-    preset,
 )
 
 REVISION = "a" * 40
@@ -111,128 +108,12 @@ def _catalog_payload() -> dict[str, object]:
             {"tier": tier, "role": role, "artifact_key": artifact_key}
             for (tier, role), artifact_key in REQUIRED_SPEC_BINDINGS.items()
         ],
-        "presets": [
-            {
-                "id": "balanced",
-                "asr": "asr-1.7b-q8",
-                "tts": "tts-0.6b-custom-q8",
-                "tts_clone": None,
-                "aligner": "aligner-q8",
-                "diarization": True,
-            },
-            {
-                "id": "light",
-                "asr": "asr-0.6b-q8",
-                "tts": "tts-0.6b-custom-q8",
-                "tts_clone": None,
-                "aligner": None,
-                "diarization": False,
-            },
-            {
-                "id": "quality",
-                "asr": "asr-1.7b-q8",
-                "tts": "tts-1.7b-custom-q8",
-                "tts_clone": "tts-1.7b-base-q8",
-                "aligner": "aligner-bf16",
-                "diarization": True,
-            },
-            {
-                "id": "extreme",
-                "asr": "asr-1.7b-bf16",
-                "tts": "tts-1.7b-custom-bf16",
-                "tts_clone": "tts-1.7b-base-bf16",
-                "aligner": "aligner-bf16",
-                "diarization": True,
-            },
-        ],
-        "precision_policy": {
-            "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-            "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
-            "balanced": {"asr": 8, "tts": 8, "aligner": 8},
-            "light": {"asr": 8, "tts": 8, "aligner": None},
-        },
     }
 
-
-def _preset_entry(payload: dict[str, object], preset_id: str) -> dict[str, object]:
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    entry = next(item for item in presets if item["id"] == preset_id)
-    assert isinstance(entry, dict)
-    return entry
 
 
 def _hashed_requirement(name: str) -> str:
     return f"{name}==1.0 --hash=sha256:{SHA256}"
-
-
-def test_preset_cannot_override_execution_policy() -> None:
-    with pytest.raises(ValidationError):
-        ModelPreset(
-            id="light",
-            asr="asr-small-q8",
-            tts="tts-small-q8",
-            aligner=None,
-            diarization=False,
-            chunk_ms=50,
-        )
-
-
-def test_load_catalog_matches_tier_precision_policy() -> None:
-    catalog = load_catalog()
-    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
-
-    assert catalog.schema_version == 2
-    assert len(catalog.artifacts) == 12
-    assert len(catalog.specs) == len(REQUIRED_SPEC_BINDINGS)
-    assert {item.id for item in catalog.presets} == {"quality", "balanced", "light", "extreme"}
-    assert catalog.preset("quality") == preset("quality")
-
-    by_id = {item.id: item for item in catalog.presets}
-    for preset_id in ("light", "balanced", "quality", "extreme"):
-        item = by_id[preset_id]
-        tier = catalog.precision_policy[preset_id]
-        for artifact, precision in (
-            (artifacts[item.asr], tier.asr),
-            (artifacts[item.tts], tier.tts),
-        ):
-            if precision == "bf16":
-                assert artifact.quantization.bits is None
-                assert artifact.quantization.dtype == "bf16"
-            else:
-                assert artifact.quantization.bits == precision
-                assert artifact.quantization.dtype is None
-        if tier.aligner is None:
-            assert item.aligner is None
-        else:
-            assert item.aligner is not None
-            aligner = artifacts[item.aligner].quantization
-            if tier.aligner == "bf16":
-                assert aligner.bits is None
-                assert aligner.dtype == "bf16"
-            else:
-                assert aligner.bits == tier.aligner
-                assert aligner.dtype is None
-
-    assert by_id["light"].asr == "asr-0.6b-q8"
-    assert by_id["light"].tts == "tts-0.6b-custom-q8"
-    assert by_id["light"].aligner is None
-    assert by_id["light"].diarization is False
-    assert by_id["balanced"].asr == "asr-1.7b-q8"
-    assert by_id["balanced"].tts == "tts-0.6b-custom-q8"
-    assert by_id["balanced"].aligner == "aligner-q8"
-    assert by_id["balanced"].diarization is True
-    assert by_id["quality"].asr == "asr-1.7b-q8"
-    assert by_id["quality"].tts == "tts-1.7b-custom-q8"
-    assert by_id["quality"].tts_clone == "tts-1.7b-base-q8"
-    assert artifacts[by_id["quality"].tts_clone].variant == "base"
-    assert by_id["quality"].aligner == "aligner-bf16"
-    assert by_id["quality"].diarization is True
-    assert by_id["extreme"].asr == "asr-1.7b-bf16"
-    assert by_id["extreme"].tts == "tts-1.7b-custom-bf16"
-    assert by_id["extreme"].tts_clone == "tts-1.7b-base-bf16"
-    assert by_id["extreme"].aligner == "aligner-bf16"
-    assert by_id["extreme"].diarization is True
 
 
 def test_catalog_specs_match_the_required_role_matrix() -> None:
@@ -244,68 +125,6 @@ def test_catalog_specs_match_the_required_role_matrix() -> None:
     assert catalog.binding("quality", "tts_custom_voice") == "tts-1.7b-custom-q8"
     assert catalog.artifact_for("reference", "tts_base") is not None
     assert catalog.artifact_for("fast", "voice_design") is None
-
-
-def test_tier_precision_accepts_bf16_asr_tts_and_aligner() -> None:
-    precision = TierPrecision(asr="bf16", tts="bf16", aligner="bf16")
-
-    assert precision.asr == "bf16"
-    assert precision.tts == "bf16"
-    assert precision.aligner == "bf16"
-
-
-@pytest.mark.parametrize(
-    ("policy_field", "message"),
-    [("asr", "ASR precision"), ("tts", "TTS precision")],
-)
-def test_catalog_rejects_extreme_precision_policy_mismatch(
-    policy_field: str, message: str
-) -> None:
-    payload = _catalog_payload()
-    policy = payload["precision_policy"]
-    assert isinstance(policy, dict)
-    extreme_policy = policy["extreme"]
-    assert isinstance(extreme_policy, dict)
-    extreme_policy[policy_field] = 8
-
-    with pytest.raises(ValidationError, match=message):
-        ModelCatalog.model_validate(payload)
-
-
-def test_extreme_preset_requires_custom_voice_and_base_clone() -> None:
-    payload = _catalog_payload()
-    extreme = _preset_entry(payload, "extreme")
-    extreme["tts_clone"] = None
-
-    with pytest.raises(ValidationError, match="must declare a base clone"):
-        ModelCatalog.model_validate(payload)
-
-
-def test_extreme_clone_rejects_non_base_tts_artifact() -> None:
-    payload = _catalog_payload()
-    extreme = _preset_entry(payload, "extreme")
-    extreme["tts_clone"] = "tts-1.7b-custom-q8"
-
-    with pytest.raises(ValidationError, match="variant=base"):
-        ModelCatalog.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    ("preset_id", "clone_key"),
-    [
-        ("extreme", "tts-1.7b-base-q8"),
-        ("quality", "tts-1.7b-base-bf16"),
-    ],
-)
-def test_catalog_clone_precision_matches_preset_tts_policy(
-    preset_id: str, clone_key: str
-) -> None:
-    payload = _catalog_payload()
-    selected = _preset_entry(payload, preset_id)
-    selected["tts_clone"] = clone_key
-
-    with pytest.raises(ValidationError, match=r"clone.*precision|precision.*clone"):
-        ModelCatalog.model_validate(payload)
 
 
 def test_quantization_rejects_bits_and_dtype_together() -> None:
@@ -336,22 +155,13 @@ def test_catalog_rejects_unquantized_artifact_without_dtype() -> None:
 def test_quality_clone_source_is_pinned_to_modelscope() -> None:
     catalog = load_catalog()
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
-    clone = artifacts[catalog.preset("quality").tts_clone or ""]
+    clone = artifacts[catalog.binding("quality", "tts_base")]
     source = clone.sources[0]
 
     assert clone.variant == "base"
     assert clone.revision == "73ae2cb59832ed1eb13c249e378b854cfc643131"
     assert source.provider == "modelscope"
     assert source.revision == clone.revision
-
-
-def test_preset_relationships_keep_weight_changes_only() -> None:
-    catalog = ModelCatalog.model_validate(_catalog_payload())
-    by_id = {item.id: item for item in catalog.presets}
-
-    assert by_id["quality"].asr == by_id["balanced"].asr
-    assert by_id["quality"].tts != by_id["balanced"].tts
-    assert by_id["balanced"].tts == by_id["light"].tts
 
 
 def test_catalog_and_nested_models_are_immutable() -> None:
@@ -363,25 +173,20 @@ def test_catalog_and_nested_models_are_immutable() -> None:
         catalog.artifacts[0].key = "changed"
     with pytest.raises(TypeError):
         catalog.artifacts[0] = catalog.artifacts[0]  # type: ignore[index]
-    with pytest.raises(TypeError):
-        catalog.precision_policy["light"] = catalog.precision_policy["light"]  # type: ignore[index]
 
 
 def test_catalog_deep_copy_is_independent_and_json_stable() -> None:
     catalog = load_catalog()
-    expected_policy = json.loads(catalog.model_dump_json())["precision_policy"]
+    expected_specs = json.loads(catalog.model_dump_json())["specs"]
 
     for clone in (copy.deepcopy(catalog), catalog.model_copy(deep=True)):
         assert clone == catalog
         assert clone is not catalog
-        assert isinstance(clone.precision_policy["light"], TierPrecision)
-        assert json.loads(clone.model_dump_json())["precision_policy"] == expected_policy
-        with pytest.raises(TypeError):
-            clone.precision_policy["light"] = clone.precision_policy["light"]  # type: ignore[index]
+        assert json.loads(clone.model_dump_json())["specs"] == expected_specs
 
     restored = ModelCatalog.model_validate_json(catalog.model_dump_json())
-    assert restored.precision_policy == catalog.precision_policy
-    assert json.loads(restored.model_dump_json())["precision_policy"] == expected_policy
+    assert restored == catalog
+    assert json.loads(restored.model_dump_json())["specs"] == expected_specs
 
 
 def test_unknown_catalog_and_artifact_keys_fail_closed() -> None:
@@ -517,10 +322,12 @@ def test_artifact_rejects_unsupported_family_variant(family: str, variant: str) 
 
 def test_catalog_rejects_bad_reference() -> None:
     payload = _catalog_payload()
-    quality = _preset_entry(payload, "quality")
-    quality["asr"] = "missing"
+    specs = payload["specs"]
+    assert isinstance(specs, list)
+    quality = next(item for item in specs if item["tier"] == "quality" and item["role"] == "asr")
+    quality["artifact_key"] = "missing"
 
-    with pytest.raises(ValidationError, match=r"artifact|reference|asr"):
+    with pytest.raises(ValidationError, match=r"artifact|reference"):
         ModelCatalog.model_validate(payload)
 
 
@@ -548,70 +355,6 @@ def test_at_least_one_source_revision_must_match_artifact() -> None:
 
     with pytest.raises(ValidationError, match=r"canonical|revision"):
         ModelArtifact.model_validate(artifact)
-
-
-def test_catalog_rejects_precision_policy_bits_mismatch() -> None:
-    payload = _catalog_payload()
-    policy = payload["precision_policy"]
-    assert isinstance(policy, dict)
-    light = policy["light"]
-    assert isinstance(light, dict)
-    light["asr"] = 4
-
-    with pytest.raises(ValidationError, match=r"precision_policy|bits"):
-        ModelCatalog.model_validate(payload)
-
-
-def test_catalog_rejects_aligner_policy_mismatch() -> None:
-    payload = _catalog_payload()
-    light = _preset_entry(payload, "light")
-    light["aligner"] = "aligner-q8"
-
-    with pytest.raises(ValidationError, match=r"aligner|precision_policy"):
-        ModelCatalog.model_validate(payload)
-
-
-def test_catalog_rejects_aligner_dtype_mismatch() -> None:
-    """档位说 bf16、制品写 fp16: 同一件事两种说法, 必须报错。"""
-    payload = _catalog_payload()
-    artifacts = payload["artifacts"]
-    assert isinstance(artifacts, list)
-    aligner = next(
-        item for item in artifacts if isinstance(item, dict) and item["key"] == "aligner-bf16"
-    )
-    quantization = aligner["quantization"]
-    assert isinstance(quantization, dict)
-    quantization["dtype"] = "fp16"
-
-    with pytest.raises(ValidationError, match=r"dtype|precision_policy"):
-        ModelCatalog.model_validate(payload)
-
-
-def test_catalog_rejects_aligner_reference_with_wrong_identity() -> None:
-    payload = _catalog_payload()
-    artifacts = payload["artifacts"]
-    assert isinstance(artifacts, list)
-    artifacts.append(_artifact(key="fake-aligner", family="qwen3_asr", variant="asr", bits=8))
-    policy = payload["precision_policy"]
-    assert isinstance(policy, dict)
-    assert isinstance(policy["light"], dict)
-    policy["light"]["aligner"] = 8
-    light = _preset_entry(payload, "light")
-    light["asr"] = "asr-0.6b-q8"
-    light["tts"] = "tts-0.6b-custom-q8"
-    light["aligner"] = "fake-aligner"
-    light["diarization"] = True
-
-    with pytest.raises(ValidationError, match=r"aligner|variant|family"):
-        ModelCatalog.model_validate(payload)
-
-
-def test_light_tier_uses_q8_quantization_under_schema_v2() -> None:
-    catalog = ModelCatalog.model_validate(_catalog_payload())
-    by_id = {item.id: item for item in catalog.presets}
-
-    assert by_id["light"].asr == "asr-0.6b-q8"
-    assert by_id["light"].tts == "tts-0.6b-custom-q8"
 
 
 def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> None:

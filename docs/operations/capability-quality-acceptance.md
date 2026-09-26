@@ -2,7 +2,7 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "3.2.0"
+version: "3.2.1"
 date: 2026-09-26
 ---
 
@@ -145,9 +145,9 @@ uv run python tools/evaluate_diarization_e2e.py \
 | E1 | ASR 精度 | 固定 fixture 上 `asr-0.6b-q4` vs `asr-0.6b-q8` 的 CER/WER 绝对增幅 ≤ 0.5pp；命令与报告路径写入记录 |
 | E2 | TTS 质量 | 用既有 `voice_quality_v1` 客观指标（与 `tests/test_voice_quality_metrics.py` 同源）比较 `tts-0.6b-custom-q4` vs `q8`，不劣化超过既定阈值；不使用未实测的 MOS/ABX |
 | E3 | 分人/对齐 | `tools/evaluate_diarization_e2e.py` 上 `aligner-q8` vs `aligner-bf16` 的 DER/SACER 不劣化（阈值写入记录）|
-| E4 | 资源包络 | 三档实测 `phys_footprint` 分别 ≤ light 8GB / balanced 16GB / quality 32GB 目标包络 |
-| E5 | 切换闭环 | `quality → balanced → light → quality` 热切换，每步 `/health` 正确、分人状态正确 |
-| E6 | 能力诚实 | `light` 的 `/v1/models` 不含 `gpt-4o-transcribe-diarize`；`balanced`/`quality` 含且可用 |
+| E4 | 资源包络 | 三档实测 `phys_footprint` 分别 ≤ fast 8GB / quality 16GB / reference 32GB 目标包络 |
+| E5 | 切换闭环 | `quality → fast → reference → quality` 双 spec 热切换，每步 `/health` 正确、分人状态正确 |
+| E6 | 能力诚实 | 未 opt-in 分人的组合其 `/v1/models` 不含 `gpt-4o-transcribe-diarize`；显式供给 Sortformer + aligner 的组合含且可用 |
 | E7 | 记录 | 聚合证据写入 `docs/operations/<日期>-tier-repositioning-acceptance.md`，不落原始媒体/文本 |
 
 E1–E7 的历史报告只适用于当时记录的三档组合。`reference` 档不能沿用 `quality` 数字，也不能用 BF16 权重精度

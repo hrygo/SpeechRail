@@ -106,7 +106,7 @@ SRE 教义要求 worker-dead 用可区分的「未就绪不可重试」语义。
 **E7｜idle eviction 收窄。** `[一手]`+`[实测]`
 128 GiB 下驱逐省内存≈0，却付 Metal pipeline 冷编译+页错误税。约束：
 ① 不改全局默认——README 已公开「Configurable Idle Eviction，默认 300 秒」为产品契约；
-② 保留 `light` 8 GB 档的驱逐语义；③ 先实测 idle→active reload wall-clock；
+② 保留最小档（原 `light`，现 `fast`）的驱逐语义；③ 先实测 idle→active reload wall-clock；
 ④ 用 **`MTLBinaryArchive`**（Apple Metal 持久化编译缓存，WWDC 实测 86 s→3 s `[一手]`）消除冷编译税，
 而非关闭驱逐。可选：仅 ≥64 GB 档启用 `idle_timeout=0` 或内存压力感知。
 *文件*：`config/__init__.py`、`services.py`、`qwen3_worker.py`。

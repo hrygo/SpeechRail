@@ -959,7 +959,7 @@ def _install_download_plan(
         covered = set(
             registered_prepared_artifacts(
                 app_home,
-                preset_id=f"{asr_spec}/{tts_spec}",
+                selection_id=f"{asr_spec}/{tts_spec}",
                 catalog=catalog,
                 runtime_lock=runtime_lock,
             )

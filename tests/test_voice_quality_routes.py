@@ -1156,12 +1156,14 @@ def test_quality_runs_runs_every_fixed_probe_category(
 
 
 def test_quality_runs_returns_503_when_tts_not_ready(tmp_path: Path) -> None:
-    preset = load_catalog().preset("quality")
+    catalog = load_catalog()
+    asr_key = catalog.binding("quality", "asr")
+    tts_key = catalog.binding("quality", "tts_custom_voice")
     settings = Settings(
-        qwen3_model_dir=tmp_path / preset.asr,
+        qwen3_model_dir=tmp_path / asr_key,
         asr_resident_bytes=1 * 1024**3,
         qwen3_python=None,
-        qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_model_dir=tmp_path / tts_key,
         tts_resident_bytes=1 * 1024**3,
         qwen3_tts_python=None,
     )
