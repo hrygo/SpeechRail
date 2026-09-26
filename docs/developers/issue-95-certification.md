@@ -2,7 +2,7 @@
 title: "Issue #95 交付认证方案与证据索引"
 status: active
 audience: "SpeechRail 维护者与验收人"
-version: "0.8.0"
+version: "0.8.1"
 date: 2026-09-26
 ---
 
@@ -38,7 +38,7 @@ date: 2026-09-26
 | P1 | ModelSpec/Artifact 与 ResolvedPlan/资源治理；固定制品、精度校验、角色路由、预算与拒绝语义闭合 | catalog 13 绑定 `assert_target_spec_bindings`；`tests/test_spec_selection.py`、`test_model_store.py`、`test_resource_governor.py`、`test_model_budget.py`（含在 §7.1 的 2470 passed 套件） | ✅ 有证据 |
 | P2 | ASR 主链路与独立 Alignment/Diarization；唯一 final、统一时间轴、无隐式模型 | `tests/test_asr_mode.py`、`test_alignment_worker.py`、`test_diarization_*.py`、`test_openai_diarized_batch.py`；运行态 `/readyz` 与 `diarization_ready=true`（§7.2） | ✅ 有证据 |
 | P3 | Base/CustomVoice 运行与 BF16 Design 工作室；真增量、音色复验、缓存隔离 | `tests/test_qwen3_tts_custom_voice.py`、`test_qwen3_tts_voice_design.py`、`test_voice_design_workflow.py`、`test_tts_voice_clone.py`、`test_voice_bindings.py`；reference BF16 真实推理（§7.2） | ✅ 有证据 |
-| P4 | App/协议、播放、打断、组合调度；当前协议单实现、迟到包隔离、切档原子、组合准入 | `swift test`（XCTest 227 + swift-testing 144）；`test_realtime_current_schema.py`、`test_realtime_vad_bargein.py`、`test_profile_switch.py`；App Debug 构建通过；真实声卡停音 p95 21ms（§7.2） | ✅ 有证据 |
+| P4 | App/协议、播放、打断、组合调度；当前协议单实现、迟到包隔离、切档原子、组合准入 | `swift test`（XCTest 229 + swift-testing 144）；`test_realtime_current_schema.py`、`test_realtime_vad_bargein.py`、`test_profile_switch.py`；App Debug 构建通过；真实声卡停音 p95 21ms（§7.2） | ✅ 有证据 |
 | P5 | 引擎受控制品与真实性能/质量验收；可重建安装、真实模型/播放器证据、声明与实测一致 | 受控 wheel 构建与复装（§7.1、§7.2）；三档 warm/cold/cancel、真实声卡、公开语料、≥2h soak（§7.2）。**未通过**：数字/单位 90%（<95%）、soak 1/5200 stale audio 与 footprint 12.5% | ⛔ 未通过（裁定项见 §8.2） |
 
 ## 2. 测量身份（每次运行必须登记）
@@ -172,7 +172,7 @@ date: 2026-09-26
 | 完整回归套件 | 通过：`uv run --extra dev pytest`（含 `--extra mcp`）→ **2496 passed / 1 skipped / 0 failed**，覆盖率 81.41%（≥80 门通过）；新包含 OpenAPI 路径对齐门 | 同上；`tests/test_openapi_contract.py` |
 | 完整回归套件（旧档位清理后复跑） | 通过：**2470 passed / 1 skipped / 0 failed**，覆盖率 **81.45%**；计数下降来自删除 20 个旧 preset / precision 用例（`test_model_catalog_contract.py`、`test_model_catalog_builder.py`）与重写 `test_model_store.py`，净增 3 个 MCP 工具面用例 | `tests/test_mcp_tool_contract.py` |
 | MCP 工具面对齐门（新增） | 通过：新增 `scripts/check_mcp_tool_contract.py`，校验 `tools/list`（18）与 `resources/list`（3）同时等于用户指南、Proxy 契约文档与 `skill-manifest.json`；已接入 CI `quality` job 与 `docs/developers/testing-acceptance.md` 门禁清单；stdio 真实联调 18 tools / 3 resources | `scripts/check_mcp_tool_contract.py`、`tests/test_mcp_tool_contract.py` |
-| App 管理界面（档位组合适配） | 通过：`ModelManagementView` 新增「分别调整识别与配音」高级项，下载 / 应用统一提交一对 `SpecSelection`（`asr_spec`/`tts_spec`），混合组合按两档制品并集显示「组合总大小」；`SpeechRailControlKit` 新增 `ModelCatalogSnapshot.artifacts(for:)` 与 `remainingDownloadUpperBound(for: SpecSelection)`，**新增 3 条 `ControlKitTests` 单测**；`swift test` XCTest 227 / 0 failures + swift-testing 144 tests / 15 suites，`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED** | `macos/SpeechRailApp/SpeechRailApp/ModelManagementView.swift`、`macos/SpeechRailApp/SpeechRailControlKit/ServiceDiagnosticsTypes.swift`、`macos/SpeechRailApp/SpeechRailMacControlTests/ControlKitTests.swift` |
+| App 管理界面（档位组合适配） | 通过：`ModelManagementView` 新增「分别调整识别与配音」高级项，下载 / 应用统一提交一对 `SpecSelection`（`asr_spec`/`tts_spec`），混合组合按两档制品并集显示「组合总大小」；`SpeechRailControlKit` 新增 `ModelCatalogSnapshot.artifacts(for:)` 与 `remainingDownloadUpperBound(for: SpecSelection)`；控制面端到端证据——`ControlRequest.validate()` 只要求两项可选（不强制同档），`AgentCommandRunner` 原样转发 `--asr-spec`/`--tts-spec`（`ControlKitTests` **新增 5 条单测**，含 profileApply/modelPrepare 的混合转发）；`swift test` XCTest 229 / 0 failures + swift-testing 144 tests / 15 suites，`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED** | `macos/SpeechRailApp/SpeechRailApp/ModelManagementView.swift`、`macos/SpeechRailApp/SpeechRailControlKit/ServiceDiagnosticsTypes.swift`、`macos/SpeechRailApp/SpeechRailControlAgentCore/AgentCommandRunner.swift`、`macos/SpeechRailApp/SpeechRailMacControlTests/ControlKitTests.swift` |
 | 交付范围（本节时点） | 此行为本节撰写时的状态：当时未部署、未切档、未加载真实模型。其后已由用户“全部授权”覆盖并实际执行：managed 轮换、真实模型加载、切档、真实声卡与开放语料质量门见 §7.2，UI 自动化结果见 §8.1 | 同上；§7.2、§8 |
 
 ### 7.2 运行态登记（2026-09-26，本机实测；证据在仓库外）
@@ -273,7 +273,8 @@ generation 11，复测期间多次 `profile apply` 单调递增），`runtime/cu
   （采样 `ui-test-stuck-sample-20260926-*` 留证），故未产生任何 UI 断言结果。
 - 静态一致性：完整 pytest（2496 passed / 1 skipped）、Swift 测试（144）、OpenAPI 路径对齐门、MCP 测试。
 - App 管理界面适配新档位组合架构：`ModelManagementView` 从「单一快捷档位」扩到「快捷组合 + 分别调整 ASR/TTS」，
-  下载 / 应用提交同一对 `asr_spec`/`tts_spec`；ControlKit helper 与 3 条单测随附。App 侧为编译 / 单测证据，
+  下载 / 应用提交同一对 `asr_spec`/`tts_spec`；ControlKit helper 与 5 条单测随附（含 `profileApply` /
+  `modelPrepare` 的混合 ASR/TTS 参数转发）。App 侧为编译 / 单测证据，
   **未做桌面 UI 自动化**（自动化模式不可用，见下），实际观感仍需人工走查（§8.2）。
 
 ### 8.2 仍未执行（需人工验收或更长窗口，P5 未勾选）
