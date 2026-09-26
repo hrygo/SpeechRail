@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol
 
+from speechrail.backends.mlx_precision import mlx_dtype, resolve_load_dtype
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.limits import MAX_PCM_BYTES
@@ -920,7 +921,13 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             )
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
-        self._session = mlx_qwen3_asr.Session(model=str(model_dir))
+        # The session must be constructed at the requested precision: the vendor
+        # default is float16, so an implicit load would silently rewrite a bf16
+        # request and then be reported (and rejected) as an identity mismatch.
+        self._session = mlx_qwen3_asr.Session(
+            model=str(model_dir),
+            dtype=mlx_dtype(resolve_load_dtype(dtype, snapshot_quantized=snapshot_quantized)),
+        )
         loader_sources = _check_loader_identity(self._session, expected)
 
         info_dtype = _loader_value(loader_sources, ("dtype",))

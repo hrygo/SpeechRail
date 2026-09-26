@@ -86,6 +86,19 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
     assert "boom-model-load" in capsys.readouterr().err
 
 
+def _install_fake_mlx(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Register a minimal ``mlx.core`` so dtype objects can be resolved."""
+
+    core = ModuleType("mlx.core")
+    for name in ("float16", "float32", "bfloat16", "int8"):
+        setattr(core, name, SimpleNamespace(name=name))
+    package = ModuleType("mlx")
+    package.core = core  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    return core
+
+
 def _install_fake_asr_runtime(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -93,10 +106,11 @@ def _install_fake_asr_runtime(
     quantize_fn: object | None = None,
 ) -> list[dict[str, object]]:
     calls: list[dict[str, object]] = []
+    _install_fake_mlx(monkeypatch)
 
     class FakeSession:
-        def __init__(self, *, model: str) -> None:
-            calls.append({"model": model})
+        def __init__(self, *, model: str, dtype: object = None) -> None:
+            calls.append({"model": model, "dtype": dtype})
             self.model = SimpleNamespace()
             self.model_info = model_info
 
@@ -115,6 +129,7 @@ def test_qwen3_engine_inspects_snapshot_before_vendor_load(
 ) -> None:
     order: list[str] = []
     expected = _snapshot_identity()
+    _install_fake_mlx(monkeypatch)
     monkeypatch.setattr(
         worker_module,
         "inspect_model",
@@ -122,8 +137,8 @@ def test_qwen3_engine_inspects_snapshot_before_vendor_load(
     )
 
     class FakeSession:
-        def __init__(self, *, model: str) -> None:
-            del model
+        def __init__(self, *, model: str, dtype: object = None) -> None:
+            del model, dtype
             order.append("load")
             self.model = SimpleNamespace()
             self.model_info = {
@@ -253,6 +268,54 @@ def test_qwen3_engine_maps_bfloat16_request_to_loader_report(
     assert engine.identity.quantization_bits is None
 
 
+def test_qwen3_engine_loads_the_snapshot_precision_the_request_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bf16 request reaches the vendor loader instead of its float16 default."""
+
+    core = _install_fake_mlx(monkeypatch)
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    calls = _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "mlx.core.bfloat16",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+        },
+    )
+
+    engine = Qwen3Engine(tmp_path, "mps", "bfloat16")
+
+    assert calls == [{"model": str(tmp_path), "dtype": core.bfloat16}]
+    assert engine.identity.dtype == "bfloat16"
+
+
+def test_qwen3_engine_keeps_float16_compute_for_a_quantized_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """int8 stays the artifact identity and is never handed over as activations."""
+
+    core = _install_fake_mlx(monkeypatch)
+    monkeypatch.setattr(
+        worker_module, "inspect_model", lambda _: _snapshot_identity(bits=8, group_size=64)
+    )
+    calls = _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "int8",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+            "quantization_bits": 8,
+            "quantization_group_size": 64,
+        },
+    )
+
+    engine = Qwen3Engine(tmp_path, "mps", "int8")
+
+    assert calls == [{"model": str(tmp_path), "dtype": core.float16}]
+    assert engine.identity.dtype == "int8"
+
+
 def test_qwen3_engine_requires_a_loader_dtype_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,11 +370,12 @@ def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    _install_fake_mlx(monkeypatch)
     init_kwargs: list[dict[str, object]] = []
 
     class FakeSession:
-        def __init__(self, *, model: str) -> None:
-            del model
+        def __init__(self, *, model: str, dtype: object = None) -> None:
+            del model, dtype
             self.model = SimpleNamespace()
             self.model_info = {
                 "dtype": "float16",
