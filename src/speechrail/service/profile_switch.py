@@ -58,7 +58,7 @@ def _selection_specs(prepared_id: str) -> tuple[str, str]:
 
 
 def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]:
-    asr_spec, tts_spec = _selection_specs(prepared.preset)
+    asr_spec, tts_spec = _selection_specs(prepared.selection)
     return {
         "schema_version": 2,
         "asr_spec": asr_spec,
@@ -70,7 +70,7 @@ def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]
 
 
 def _matches(selection: Mapping[str, object], prepared: PreparedModelSet) -> bool:
-    asr_spec, tts_spec = _selection_specs(prepared.preset)
+    asr_spec, tts_spec = _selection_specs(prepared.selection)
     return (
         selection.get("schema_version") == 2
         and selection.get("asr_spec") == asr_spec

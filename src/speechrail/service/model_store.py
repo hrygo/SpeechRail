@@ -130,7 +130,7 @@ class PreparedModelSet:
     """
 
     prepared_id: str
-    preset: str
+    selection: str
     runtime_lock_id: str
     asr: PreparedArtifact
     tts: PreparedArtifact
@@ -157,7 +157,7 @@ class PreparedModelSet:
         return _freeze_public_mapping(
             {
                 "prepared_id": self.prepared_id,
-                "preset": self.preset,
+                "selection": self.selection,
                 "runtime_lock_id": self.runtime_lock_id,
                 "asr": self.asr.identity,
                 "tts": self.tts.identity,
@@ -296,9 +296,9 @@ def _lock_manifest(lock: RuntimeLock) -> dict[str, object]:
     }
 
 
-def _prepared_id(preset_id: str, lock: RuntimeLock, artifacts: tuple[ModelArtifact, ...]) -> str:
+def _prepared_id(selection_id: str, lock: RuntimeLock, artifacts: tuple[ModelArtifact, ...]) -> str:
     payload = {
-        "preset": preset_id,
+        "selection": selection_id,
         "runtime_lock": _lock_manifest(lock),
         "artifacts": [
             {
@@ -759,11 +759,11 @@ def inspect_prepared_artifacts(
 def registered_prepared_artifacts(
     app_home: Path,
     *,
-    preset_id: str,
+    selection_id: str,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
 ) -> tuple[str, ...]:
-    """Return the preset's artifact keys a registered snapshot already covers.
+    """Return the selection's artifact keys a registered snapshot already covers.
 
     This reads the registry and does one directory check per artifact, so a
     caller can tell a first-time download apart from an upgrade that only
@@ -774,9 +774,9 @@ def registered_prepared_artifacts(
         app_home, catalog, runtime_lock
     )
     try:
-        resolved_artifacts = _resolver_artifacts(selected_catalog, preset_id)
+        resolved_artifacts = _resolver_artifacts(selected_catalog, selection_id)
     except ModelStoreError as exc:
-        raise ModelStoreError(f"unknown preset: {preset_id}") from exc
+        raise ModelStoreError(f"unknown selection: {selection_id}") from exc
     artifacts_by_key = {artifact.key: artifact for artifact in resolved_artifacts}
     keys = [artifact.key for artifact in resolved_artifacts]
     registry = _read_registry(_registry_path(resolved_app_home))
@@ -789,7 +789,9 @@ def registered_prepared_artifacts(
         try:
             artifact = artifacts_by_key[key]
         except KeyError as exc:
-            raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
+            raise ModelStoreError(
+                f"selection {selection_id} references an unknown artifact"
+            ) from exc
         destination = models_root / artifact.key
         if destination.is_symlink() or not destination.is_dir():
             continue
@@ -861,7 +863,7 @@ def _prepared_entry_is_complete(
     app_home: Path,
     artifacts: tuple[ModelArtifact, ...],
     lock: RuntimeLock,
-    preset_id: str,
+    selection_id: str,
 ) -> bool:
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
@@ -869,7 +871,7 @@ def _prepared_entry_is_complete(
     candidate = prepared.get(prepared_id)
     if not isinstance(candidate, dict):
         return False
-    if candidate.get("preset") != preset_id or candidate.get("runtime_lock_id") != lock.id:
+    if candidate.get("selection") != selection_id or candidate.get("runtime_lock_id") != lock.id:
         return False
     candidate_artifacts = candidate.get("artifacts")
     if not isinstance(candidate_artifacts, dict):
@@ -915,43 +917,13 @@ def _resolver_registry_path(app_home: Path) -> Path:
 
 
 def _resolver_artifacts(
-    catalog: ModelCatalog, preset_id: str
+    catalog: ModelCatalog, selection_id: str
 ) -> tuple[ModelArtifact, ...]:
     """Return every catalog artifact required by one prepared selection."""
-    specs = _parse_spec_selection_id(preset_id)
-    if specs is not None:
-        return _selection_artifacts(catalog, specs[0], specs[1])
-    try:
-        selected_preset = catalog.preset(preset_id)
-        artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
-        asr = artifacts_by_key[selected_preset.asr]
-        tts = artifacts_by_key[selected_preset.tts]
-        clone = (
-            artifacts_by_key[selected_preset.tts_clone]
-            if selected_preset.tts_clone is not None
-            else None
-        )
-    except (KeyError, TypeError) as exc:
-        raise ModelStoreError("prepared model identity is invalid") from exc
-
-    if (
-        asr.key == tts.key
-        or asr.family != "qwen3_asr"
-        or asr.variant != "asr"
-        or tts.family != "qwen3_tts"
-        or tts.variant not in {"voice_design", "custom_voice"}
-    ):
+    specs = _parse_spec_selection_id(selection_id)
+    if specs is None:
         raise ModelStoreError("prepared model identity is invalid")
-    artifacts: tuple[ModelArtifact, ...] = (asr, tts)
-    if clone is not None:
-        if (
-            clone.key in {asr.key, tts.key}
-            or clone.family != "qwen3_tts"
-            or clone.variant != "base"
-        ):
-            raise ModelStoreError("prepared clone model identity is invalid")
-        artifacts += (clone,)
-    return artifacts
+    return _selection_artifacts(catalog, specs[0], specs[1])
 
 
 def _spec_selection_id(asr_spec: SpecTier, tts_spec: SpecTier) -> str:
@@ -1115,19 +1087,19 @@ def _resolve_prepared_candidate(
         raise ModelStoreError("prepared model identity is invalid")
     candidate = prepared.get(prepared_id)
     if not isinstance(candidate, dict) or set(candidate) != {
-        "preset",
+        "selection",
         "runtime_lock_id",
         "artifacts",
     }:
         raise ModelStoreError("prepared model identity is invalid")
-    preset_id = candidate.get("preset")
-    if not isinstance(preset_id, str) or not preset_id:
+    selection_id = candidate.get("selection")
+    if not isinstance(selection_id, str) or not selection_id:
         raise ModelStoreError("prepared model identity is invalid")
     if candidate.get("runtime_lock_id") != runtime_lock.id:
         raise ModelStoreError("prepared model identity is invalid")
 
-    artifacts = _resolver_artifacts(catalog, preset_id)
-    if _prepared_id(preset_id, runtime_lock, artifacts) != prepared_id:
+    artifacts = _resolver_artifacts(catalog, selection_id)
+    if _prepared_id(selection_id, runtime_lock, artifacts) != prepared_id:
         raise ModelStoreError("prepared model identity is invalid")
     candidate_artifacts = candidate.get("artifacts")
     if not isinstance(candidate_artifacts, dict) or set(candidate_artifacts) != {
@@ -1146,11 +1118,11 @@ def _resolve_prepared_candidate(
         entries.append(entry)
 
     if not _prepared_entry_is_complete(
-        registry, prepared_id, app_home, artifacts, runtime_lock, preset_id
+        registry, prepared_id, app_home, artifacts, runtime_lock, selection_id
     ):
         raise ModelStoreError("prepared model snapshot is not verified")
     return (
-        preset_id,
+        selection_id,
         tuple(
             _prepared_artifact_public(artifact, entry, path)
             for artifact, entry, path in zip(artifacts, entries, paths, strict=True)
@@ -1173,7 +1145,7 @@ def resolve_prepared_models(
     )
     try:
         registry = _read_registry(_resolver_registry_path(resolved_app_home))
-        preset_id, artifacts = _resolve_prepared_candidate(
+        selection_id, artifacts = _resolve_prepared_candidate(
             prepared_id,
             registry=registry,
             app_home=resolved_app_home,
@@ -1186,7 +1158,7 @@ def resolve_prepared_models(
         raise ModelStoreError("prepared model set is unavailable") from exc
     return PreparedModelSet(
         prepared_id=prepared_id,
-        preset=preset_id,
+        selection=selection_id,
         runtime_lock_id=resolved_runtime_lock.id,
         asr=artifacts[0],
         tts=artifacts[1],
@@ -1518,9 +1490,9 @@ def _update_moved_registry_paths(
 
 
 async def _prepare_models_impl(
-    preset_id: str,
+    selection_id: str,
     *,
-    artifacts: tuple[ModelArtifact, ...] | None,
+    artifacts: tuple[ModelArtifact, ...],
     app_home: Path,
     progress: ProgressCallback | None = None,
     downloader: Downloader,
@@ -1531,8 +1503,8 @@ async def _prepare_models_impl(
     disk_usage: DiskUsage | None = None,
 ) -> str:
     """Download one explicit artifact set into verified snapshots."""
-    if not isinstance(preset_id, str) or not preset_id:
-        raise ModelStoreError("preset must be a non-empty string")
+    if not isinstance(selection_id, str) or not selection_id:
+        raise ModelStoreError("selection must be a non-empty string")
     if (
         not isinstance(max_retries, int)
         or isinstance(max_retries, bool)
@@ -1550,23 +1522,9 @@ async def _prepare_models_impl(
     elif not isinstance(runtime_lock, RuntimeLock):
         raise ModelStoreError("runtime_lock must be a RuntimeLock")
 
-    if artifacts is None:
-        try:
-            selected_preset = catalog.preset(preset_id)
-        except KeyError as exc:
-            raise ModelStoreError(f"unknown preset: {preset_id}") from exc
-        artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
-        try:
-            artifact_keys = [selected_preset.asr, selected_preset.tts]
-            if selected_preset.tts_clone is not None:
-                artifact_keys.append(selected_preset.tts_clone)
-            artifacts = tuple(artifacts_by_key[key] for key in artifact_keys)
-        except KeyError as exc:
-            raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
-    else:
-        artifacts = tuple(artifacts)
-        if not artifacts or len({artifact.key for artifact in artifacts}) != len(artifacts):
-            raise ModelStoreError("explicit artifact set is invalid")
+    artifacts = tuple(artifacts)
+    if not artifacts or len({artifact.key for artifact in artifacts}) != len(artifacts):
+        raise ModelStoreError("explicit artifact set is invalid")
 
     for artifact in artifacts:
         if not artifact.sources or not artifact.files:
@@ -1574,12 +1532,12 @@ async def _prepare_models_impl(
 
     resolved_app_home = _resolve_app_home(app_home)
 
-    prepared_id = _prepared_id(preset_id, runtime_lock, artifacts)
+    prepared_id = _prepared_id(selection_id, runtime_lock, artifacts)
     models_root = model_store_root(resolved_app_home)
     registry_path = _registry_path(resolved_app_home)
     registry = _read_registry(registry_path)
     if _prepared_entry_is_complete(
-        registry, prepared_id, resolved_app_home, artifacts, runtime_lock, preset_id
+        registry, prepared_id, resolved_app_home, artifacts, runtime_lock, selection_id
     ):
         return prepared_id
 
@@ -1647,7 +1605,7 @@ async def _prepare_models_impl(
         _check_cancel(cancel_event)
         _emit(
             progress,
-            {"phase": "publishing", "prepared_id": prepared_id, "preset": preset_id},
+            {"phase": "publishing", "prepared_id": prepared_id, "selection": selection_id},
         )
         publication_started = True
         next_registry = copy.deepcopy(registry)
@@ -1692,7 +1650,7 @@ async def _prepare_models_impl(
 
             _update_moved_registry_paths(next_registry, moved_paths)
             next_prepared[prepared_id] = {
-                "preset": preset_id,
+                "selection": selection_id,
                 "runtime_lock_id": runtime_lock.id,
                 "artifacts": entries,
             }
@@ -1701,7 +1659,10 @@ async def _prepare_models_impl(
             _rollback_publication(published, backups)
             raise
 
-        _emit(progress, {"phase": "verified", "prepared_id": prepared_id, "preset": preset_id})
+        _emit(
+            progress,
+            {"phase": "verified", "prepared_id": prepared_id, "selection": selection_id},
+        )
         return prepared_id
     except BaseException:
         if not publication_started:
@@ -1711,34 +1672,6 @@ async def _prepare_models_impl(
         _remove_tree(operation_root)
         if staging_root.exists() and not any(staging_root.iterdir()):
             staging_root.rmdir()
-
-
-async def prepare_models(
-    preset_id: str,
-    *,
-    app_home: Path,
-    progress: ProgressCallback | None = None,
-    downloader: Downloader,
-    catalog: ModelCatalog | None = None,
-    runtime_lock: RuntimeLock | None = None,
-    cancel_event: asyncio.Event | None = None,
-    max_retries: int = 2,
-    disk_usage: DiskUsage | None = None,
-) -> str:
-    """Download a legacy preset artifact group into verified snapshots."""
-
-    return await _prepare_models_impl(
-        preset_id,
-        artifacts=None,
-        app_home=app_home,
-        progress=progress,
-        downloader=downloader,
-        catalog=catalog,
-        runtime_lock=runtime_lock,
-        cancel_event=cancel_event,
-        max_retries=max_retries,
-        disk_usage=disk_usage,
-    )
 
 
 async def prepare_spec_models(
@@ -1815,7 +1748,6 @@ __all__ = [
     "PreparedModelSet",
     "inspect_prepared_artifacts",
     "model_store_root",
-    "prepare_models",
     "prepare_selection_models",
     "prepare_spec_models",
     "registered_prepared_artifacts",

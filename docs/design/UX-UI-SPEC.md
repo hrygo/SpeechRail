@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App · UX/UI 统一规范（全 App）"
 status: active
 audience: "设计与实现（Figma 稿 + macOS App）"
-version: "1.0.0"
-date: 2026-09-18
+version: "1.0.1"
+date: 2026-09-26
 ---
 
 # SpeechRail macOS App · UX/UI 统一规范
@@ -195,7 +195,7 @@ SpeechRail 是一个窗口里的**一台本地语音机器**，不是三个 App�
 | 大模型在哪配 | 设置 · 会话；要求实现 **Responses API**（不是 Chat Completions）；密钥进钥匙串 | 设置窗口第 4 页签；`closureSettingsBoard` |
 | 记录落在哪 | 本机 SQLite（`~/Library/Application Support/SpeechRail/sessions.sqlite3`），长期保留；原始音频不存 | 三屏的结论条与页脚一致陈述 |
 | 谁在用麦克风 | 侧栏常驻所有权行 + 菜单栏状态项；后到的会话以受阻态出现，只给两个出口 | `SESSION_STATES`；会话占用板 |
-| 能不能分人 | 按档位如实发布：`light` 无分人、`balanced/quality` 可匿名分人；只有匿名 label | 档位卡、字幕/会议状态带、受阻行 |
+| 能不能分人 | 按服务声明如实发布：分人与档位无关，只有显式供给 Sortformer + aligner 且 readiness 成功时才可用；只有匿名 label | 服务状态能力行、字幕/会议状态带、受阻行 |
 | 资产与存储 | 记录 = 资产（长期）；音频 = 用完即弃；换档位不迁移数据、重装不丢库 | 设置 · 数据、归档页、用户旅程 J0 |
 
 ## 10. 覆盖矩阵（13 路由 + 非路由界面）

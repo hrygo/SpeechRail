@@ -1,4 +1,4 @@
-"""Prepare one reproducible, lock-pinned vendor runtime for all model presets."""
+"""Prepare one reproducible, lock-pinned vendor runtime for every model selection."""
 
 from __future__ import annotations
 

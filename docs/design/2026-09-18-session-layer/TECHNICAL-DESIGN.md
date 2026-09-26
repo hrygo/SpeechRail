@@ -720,7 +720,7 @@ Sona 是这套能力的**经验来源**，不是代码来源：借它的判断�
 | 8 | 系统睡眠 / 合盖 | 醒来即中断态 | 麦克风与 tap 都要重拿，**不自动续** | `session_interruption(sleep)` | 同上 |
 | 9 | 被 tap 的来源 App 退出 | 无打扰，仅一条区间 | **唯一自动接回**：按 bundle id 接回 | `session_interruption(source_lost)` + `resumed_at` | — |
 | 10 | App 退出 / 崩溃 | 下次启动看到「上次会议没有正常结束」 | 把 `recording`/`processing` 封存为 `archived` | `end_reason='unexpected_exit'` | 记录库可回看可导出 |
-| 11 | 分人不可用（`light` 档 / profile 未就绪） | 开关置灰 + 原因（两侧说法一致） | 正文照常，不分人 | `session.diarization='unavailable'` | 换档位后新会话 |
+| 11 | 分人不可用（profile 未就绪） | 开关置灰 + 原因（两侧说法一致） | 正文照常，不分人 | `session.diarization='unavailable'` | 换档位后新会话 |
 | 12 | 分人运行中降级 | 标签停更，已给出的保留 | 继续转写 | `diarization='degraded'` + `diarization_note` | 结束后可人工标注 |
 | 13 | 换输入设备（配置变化通知） | 当前这一轮标「换设备」 | 引擎重建；线上格式不变（恒 16k） | 新行 `device_switch=1` | — |
 | 14 | TTS 音色被拒（`voice_not_found` / `voice_not_available`） | 一句可读原因 + 可用音色列表 | **这一句仍用旧音色说**，会话继续 | 不落 `session_change` | 换一个音色 |

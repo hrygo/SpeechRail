@@ -1,12 +1,19 @@
 ---
 title: "SpeechRail macOS App 管理、运行监控与模型下载文字原型"
-status: proposed
+status: superseded
 audience: "普通用户、音色创作者、SpeechRail 开发者与本机运行维护者"
 version: "0.1.0"
 date: 2026-09-13
 ---
 
 # SpeechRail macOS App 管理、运行监控与模型下载文字原型
+
+> **状态：superseded（2026-09-26）。** 本文写于旧的三档 preset 体系（`light`/`balanced`/`quality`
+> 作为单一 profile 选择）时期，其中的“当前档位”“按 profile 查看模型”“切换档位”等章节描述的是
+> 已退役的档位模型。当前 App 与服务以 **ASR / TTS 两项独立 spec（`fast` / `quality` / `reference`）**
+> 与按制品的模型准备为准，界面规格见 [`UX-UI-SPEC.md`](UX-UI-SPEC.md) 与
+> [`2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md)；
+> 旧档位名不再出现在当前产品路径中。本文只作为历史设计记录保留，不作为现行契约。
 
 ## 1. 原型目标
 

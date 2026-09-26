@@ -20,13 +20,14 @@ from speechrail.config.model_catalog import (
     RuntimeLock,
     SourceLocation,
 )
+from speechrail.domain.model_spec import required_spec_bindings
 from speechrail.service import model_store
 from speechrail.service.model_store import (
     ModelStoreError,
     PreparedModelSet,
     inspect_prepared_artifacts,
     model_store_root,
-    prepare_models,
+    prepare_spec_models,
     registered_prepared_artifacts,
     resolve_prepared_models,
     resolve_prepared_selection,
@@ -35,14 +36,17 @@ from speechrail.service.model_store import (
 
 _HASH = "b" * 64
 _REVISIONS = {
-    "asr": "a" * 40,
-    "design": "c" * 40,
-    "custom": "d" * 40,
-    "base": "f" * 40,
-    "asr-bf16": "1" * 40,
-    "design-bf16": "2" * 40,
-    "custom-bf16": "5" * 40,
-    "base-bf16": "3" * 40,
+    "asr-0.6b-q8": "a" * 40,
+    "asr-1.7b-q8": "b" * 40,
+    "asr-1.7b-bf16": "1" * 40,
+    "tts-0.6b-custom-q8": "c" * 40,
+    "tts-1.7b-custom-q8": "d" * 40,
+    "tts-1.7b-custom-bf16": "5" * 40,
+    "tts-0.6b-base-q8": "e" * 40,
+    "tts-1.7b-base-q8": "f" * 40,
+    "tts-1.7b-base-bf16": "3" * 40,
+    "tts-1.7b-design-bf16": "2" * 40,
+    "aligner-q8": "6" * 40,
     "aligner-bf16": "4" * 40,
 }
 
@@ -93,16 +97,17 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
     ModelCatalog, dict[tuple[str, str], bytes]
 ]:
     definitions = (
-        ("asr", "qwen3_asr", "asr", 8, None),
-        # Quality's primary TTS is a CustomVoice artifact in the target
-        # architecture; the fixture keeps its legacy key but not the variant.
-        ("design", "qwen3_tts", "custom_voice", 8, None),
-        ("custom", "qwen3_tts", "custom_voice", 8, None),
-        ("base", "qwen3_tts", "base", 8, None),
-        ("asr-bf16", "qwen3_asr", "asr", None, "bf16"),
-        ("design-bf16", "qwen3_tts", "voice_design", None, "bf16"),
-        ("custom-bf16", "qwen3_tts", "custom_voice", None, "bf16"),
-        ("base-bf16", "qwen3_tts", "base", None, "bf16"),
+        ("asr-0.6b-q8", "qwen3_asr", "asr", 8, None),
+        ("asr-1.7b-q8", "qwen3_asr", "asr", 8, None),
+        ("asr-1.7b-bf16", "qwen3_asr", "asr", None, "bf16"),
+        ("tts-0.6b-custom-q8", "qwen3_tts", "custom_voice", 8, None),
+        ("tts-1.7b-custom-q8", "qwen3_tts", "custom_voice", 8, None),
+        ("tts-1.7b-custom-bf16", "qwen3_tts", "custom_voice", None, "bf16"),
+        ("tts-0.6b-base-q8", "qwen3_tts", "base", 8, None),
+        ("tts-1.7b-base-q8", "qwen3_tts", "base", 8, None),
+        ("tts-1.7b-base-bf16", "qwen3_tts", "base", None, "bf16"),
+        ("tts-1.7b-design-bf16", "qwen3_tts", "voice_design", None, "bf16"),
+        ("aligner-q8", "qwen3_forced_aligner", "aligner", 8, None),
         ("aligner-bf16", "qwen3_forced_aligner", "aligner", None, "bf16"),
     )
     artifacts: list[dict[str, object]] = []
@@ -151,76 +156,12 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
         {
             "schema_version": 2,
             "artifacts": artifacts,
-            # Synthetic bindings: this fixture exercises download/registry
-            # mechanics, so it keeps its own small artifact keys while still
-            # covering every tier x role the catalog schema requires.
+            # Synthetic fixture: it keeps its own artifact inventory but binds
+            # the frozen target matrix the loader enforces on the shipped file.
             "specs": [
-                {"tier": "fast", "role": "asr", "artifact_key": "asr"},
-                {"tier": "quality", "role": "asr", "artifact_key": "asr"},
-                {"tier": "reference", "role": "asr", "artifact_key": "asr-bf16"},
-                {"tier": "fast", "role": "tts_custom_voice", "artifact_key": "custom"},
-                {"tier": "quality", "role": "tts_custom_voice", "artifact_key": "custom"},
-                {
-                    "tier": "reference",
-                    "role": "tts_custom_voice",
-                    "artifact_key": "custom-bf16",
-                },
-                {"tier": "fast", "role": "tts_base", "artifact_key": "base"},
-                {"tier": "quality", "role": "tts_base", "artifact_key": "base"},
-                {"tier": "reference", "role": "tts_base", "artifact_key": "base-bf16"},
-                {
-                    "tier": "reference",
-                    "role": "voice_design",
-                    "artifact_key": "design-bf16",
-                },
-                {"tier": "fast", "role": "alignment", "artifact_key": "aligner-bf16"},
-                {"tier": "quality", "role": "alignment", "artifact_key": "aligner-bf16"},
-                {
-                    "tier": "reference",
-                    "role": "alignment",
-                    "artifact_key": "aligner-bf16",
-                },
+                {"tier": tier, "role": role, "artifact_key": key}
+                for tier, role, key in required_spec_bindings()
             ],
-            "presets": [
-                {
-                    "id": "quality",
-                    "asr": "asr",
-                    "tts": "design",
-                    "tts_clone": "base",
-                    "aligner": None,
-                    "diarization": False,
-                },
-                {
-                    "id": "balanced",
-                    "asr": "asr",
-                    "tts": "custom",
-                    "tts_clone": None,
-                    "aligner": None,
-                    "diarization": False,
-                },
-                {
-                    "id": "light",
-                    "asr": "asr",
-                    "tts": "custom",
-                    "tts_clone": None,
-                    "aligner": None,
-                    "diarization": False,
-                },
-                {
-                    "id": "extreme",
-                    "asr": "asr-bf16",
-                    "tts": "custom-bf16",
-                    "tts_clone": "base-bf16",
-                    "aligner": "aligner-bf16",
-                    "diarization": False,
-                },
-            ],
-            "precision_policy": {
-                "extreme": {"asr": "bf16", "tts": "bf16", "aligner": "bf16"},
-                "quality": {"asr": 8, "tts": 8, "aligner": None},
-                "balanced": {"asr": 8, "tts": 8, "aligner": None},
-                "light": {"asr": 8, "tts": 8, "aligner": None},
-            },
         }
     )
     return catalog, payloads
@@ -239,7 +180,7 @@ def _catalog_with_document(
     )
     artifacts = tuple(
         item.model_copy(update={"files": (document, *item.files)})
-        if item.key == "design"
+        if item.key == "tts-1.7b-custom-q8"
         else item
         for item in catalog.artifacts
     )
@@ -250,7 +191,7 @@ def _catalog_with_document(
                 "artifacts": [item.model_dump() for item in artifacts],
             }
         ),
-        {**payloads, ("fixture/design", path): payload},
+        {**payloads, ("fixture/tts-1.7b-custom-q8", path): payload},
     )
 
 
@@ -369,11 +310,13 @@ async def _prepare(
     lock: RuntimeLock,
     downloader: object,
     *,
-    preset: str = "quality",
+    selection: str = "quality/quality",
     **kwargs: object,
 ) -> str:
-    return await prepare_models(
-        preset,
+    asr_spec, tts_spec = selection.split("/")
+    return await prepare_spec_models(
+        asr_spec,
+        tts_spec,
         app_home=tmp_path,
         catalog=catalog,
         runtime_lock=lock,
@@ -437,7 +380,7 @@ async def test_prepare_streams_locked_files_and_publishes_atomic_registry(tmp_pa
     )
 
     assert prepared_id.startswith("prepared_")
-    for key in ("asr", "design"):
+    for key in ("asr-1.7b-q8", "tts-1.7b-custom-q8"):
         artifact = next(item for item in catalog.artifacts if item.key == key)
         for item in artifact.files:
             assert (tmp_path / "models" / key / item.path).read_bytes() == payloads[
@@ -445,7 +388,7 @@ async def test_prepare_streams_locked_files_and_publishes_atomic_registry(tmp_pa
             ]
     registry_path = tmp_path / "state" / "model-preparations.json"
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert registry["prepared"][prepared_id]["preset"] == "quality"
+    assert registry["prepared"][prepared_id]["selection"] == "quality/quality"
     assert registry["prepared"][prepared_id]["runtime_lock_id"] == "fixture-lock"
     assert not (tmp_path / "models" / ".staging").exists()
     assert any(event.get("phase") == "verified" for event in progress)
@@ -457,18 +400,18 @@ async def test_inspector_distinguishes_verified_invalid_and_missing_artifacts(
 ) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="quality")
-    (tmp_path / "models" / "design" / "config.json").write_bytes(b"corrupt")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/quality")
+    (tmp_path / "models" / "tts-1.7b-custom-q8" / "config.json").write_bytes(b"corrupt")
 
     statuses = inspect_prepared_artifacts(tmp_path, catalog=catalog, runtime_lock=lock)
     by_key = {item.key: item for item in statuses}
 
-    assert by_key["asr"].state == "verified"
-    assert by_key["asr"].integrity == "verified"
-    assert by_key["design"].state == "invalid"
-    assert by_key["design"].integrity == "mismatch"
-    assert by_key["custom"].state == "not_downloaded"
-    assert by_key["custom"].integrity == "not_checked"
+    assert by_key["asr-1.7b-q8"].state == "verified"
+    assert by_key["asr-1.7b-q8"].integrity == "verified"
+    assert by_key["tts-1.7b-custom-q8"].state == "invalid"
+    assert by_key["tts-1.7b-custom-q8"].integrity == "mismatch"
+    assert by_key["tts-0.6b-custom-q8"].state == "not_downloaded"
+    assert by_key["tts-0.6b-custom-q8"].integrity == "not_checked"
 
 
 @pytest.mark.anyio
@@ -490,8 +433,8 @@ async def test_registry_parent_fsync_failure_keeps_committed_models_reusable(
     registry_path = tmp_path / "state" / "model-preparations.json"
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     assert prepared_id in registry["prepared"]
-    assert (tmp_path / "models" / "asr").is_dir()
-    assert (tmp_path / "models" / "design").is_dir()
+    assert (tmp_path / "models" / "asr-1.7b-q8").is_dir()
+    assert (tmp_path / "models" / "tts-1.7b-custom-q8").is_dir()
 
     second_downloader = FakeDownloader(payloads)
     assert await _prepare(tmp_path, catalog, _runtime_lock(), second_downloader) == prepared_id
@@ -510,7 +453,7 @@ async def test_download_async_streams_close_once_on_success_and_hash_failure(
     assert all(stream.close_calls == 1 for stream in downloader.streams)
 
     failed_catalog, failed_payloads = _catalog(revision_suffix="f")
-    failed_payloads["fixture/asr", "config.json"] = b"wrong"
+    failed_payloads["fixture/asr-1.7b-q8", "config.json"] = b"wrong"
     failed_downloader = TrackingDownloader(failed_payloads)
     with pytest.raises(ModelStoreError):
         await _prepare(
@@ -612,7 +555,7 @@ async def test_metadata_change_gets_new_identity_and_reuses_verified_files(tmp_p
     catalog, payloads = _catalog()
     changed_payload = catalog.model_dump(mode="json")
     for artifact in changed_payload["artifacts"]:
-        if artifact["key"] == "asr":
+        if artifact["key"] == "asr-1.7b-q8":
             artifact["model_id"] = "fixture/asr-renamed"
             artifact["quantization"]["group_size"] = 32
     changed_catalog = ModelCatalog.model_validate(changed_payload)
@@ -627,7 +570,7 @@ async def test_metadata_change_gets_new_identity_and_reuses_verified_files(tmp_p
     registry = json.loads(
         (tmp_path / "state" / "model-preparations.json").read_text(encoding="utf-8")
     )
-    entry = registry["prepared"][second_id]["artifacts"]["asr"]
+    entry = registry["prepared"][second_id]["artifacts"]["asr-1.7b-q8"]
     assert entry["model_id"] == "fixture/asr-renamed"
     assert entry["quantization"] == {
         "bits": 8,
@@ -653,14 +596,14 @@ async def test_registry_without_explicit_null_dtype_reuses_verified_q8_files(
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
 
     reused = registered_prepared_artifacts(
-        tmp_path, preset_id="quality", catalog=catalog, runtime_lock=lock
+        tmp_path, selection_id="quality/quality", catalog=catalog, runtime_lock=lock
     )
     downloader = FakeDownloader(payloads)
     second_id = await _prepare(
-        tmp_path, catalog, lock, downloader, preset="quality"
+        tmp_path, catalog, lock, downloader, selection="quality/quality"
     )
 
-    assert set(reused) == {"asr", "design", "base"}
+    assert set(reused) == {"asr-1.7b-q8", "tts-1.7b-custom-q8", "tts-1.7b-base-q8"}
     assert second_id == prepared_id
     assert downloader.calls == []
 
@@ -706,7 +649,7 @@ async def test_prepare_adopts_mismatched_top_level_readme_without_download(
     lock = _runtime_lock()
     prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
 
-    readme = tmp_path / "models" / "design" / "README.md"
+    readme = tmp_path / "models" / "tts-1.7b-custom-q8" / "README.md"
     readme.write_bytes(b"locally changed documentation")
     (tmp_path / "state" / "model-preparations.json").unlink()
 
@@ -721,10 +664,10 @@ async def test_prepare_adopts_mismatched_top_level_readme_without_download(
             tmp_path, catalog=catalog, runtime_lock=lock
         )
     }
-    assert statuses["design"].state == "verified"
-    assert statuses["design"].integrity == "verified"
-    assert statuses["design"].verified_file_count == 7
-    assert statuses["design"].total_file_count == 7
+    assert statuses["tts-1.7b-custom-q8"].state == "verified"
+    assert statuses["tts-1.7b-custom-q8"].integrity == "verified"
+    assert statuses["tts-1.7b-custom-q8"].verified_file_count == 7
+    assert statuses["tts-1.7b-custom-q8"].total_file_count == 7
 
 
 @pytest.mark.anyio
@@ -735,15 +678,15 @@ async def test_prepare_rejects_mismatched_runtime_file_when_readme_is_exempt(
     lock = _runtime_lock()
     await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
 
-    (tmp_path / "models" / "design" / "config.json").write_bytes(b"corrupt")
+    (tmp_path / "models" / "tts-1.7b-custom-q8" / "config.json").write_bytes(b"corrupt")
     (tmp_path / "state" / "model-preparations.json").unlink()
     downloader = FakeDownloader(payloads)
-    downloader.queue("fixture/design", "config.json", b"corrupt download")
+    downloader.queue("fixture/tts-1.7b-custom-q8", "config.json", b"corrupt download")
 
     with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
         await _prepare(tmp_path, catalog, lock, downloader, max_retries=0)
 
-    assert ("fixture", "fixture/design", "config.json") in downloader.calls
+    assert ("fixture", "fixture/tts-1.7b-custom-q8", "config.json") in downloader.calls
 
 
 @pytest.mark.anyio
@@ -752,50 +695,50 @@ async def test_nested_readme_remains_part_of_integrity(tmp_path: Path) -> None:
     lock = _runtime_lock()
     await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
 
-    (tmp_path / "models" / "design" / "docs" / "README.md").write_bytes(b"corrupt")
+    (tmp_path / "models" / "tts-1.7b-custom-q8" / "docs" / "README.md").write_bytes(b"corrupt")
     (tmp_path / "state" / "model-preparations.json").unlink()
     downloader = FakeDownloader(payloads)
     downloader.queue(
-        "fixture/design", "docs/README.md", b"corrupt nested documentation"
+        "fixture/tts-1.7b-custom-q8", "docs/README.md", b"corrupt nested documentation"
     )
 
     with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
         await _prepare(tmp_path, catalog, lock, downloader, max_retries=0)
 
-    assert ("fixture", "fixture/design", "docs/README.md") in downloader.calls
+    assert ("fixture", "fixture/tts-1.7b-custom-q8", "docs/README.md") in downloader.calls
 
 
 @pytest.mark.anyio
-async def test_extreme_prepare_reuses_verified_bf16_artifacts_without_download(
+async def test_reference_prepare_reuses_verified_bf16_artifacts_without_download(
     tmp_path: Path,
 ) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
     first_downloader = FakeDownloader(payloads)
     first = await _prepare(
-        tmp_path, catalog, lock, first_downloader, preset="extreme"
+        tmp_path, catalog, lock, first_downloader, selection="reference/reference"
     )
     calls_after_first = len(first_downloader.calls)
 
     second_downloader = FakeDownloader(payloads)
     second = await _prepare(
-        tmp_path, catalog, lock, second_downloader, preset="extreme"
+        tmp_path, catalog, lock, second_downloader, selection="reference/reference"
     )
 
     assert second == first
     assert len(first_downloader.calls) == calls_after_first
     assert second_downloader.calls == []
     assert set(registered_prepared_artifacts(
-        tmp_path, preset_id="extreme", catalog=catalog, runtime_lock=lock
-    )) == {"asr-bf16", "custom-bf16", "base-bf16"}
+        tmp_path, selection_id="reference/reference", catalog=catalog, runtime_lock=lock
+    )) == {"asr-1.7b-bf16", "tts-1.7b-custom-bf16", "tts-1.7b-base-bf16"}
 
 
 @pytest.mark.anyio
-async def test_extreme_prepare_rejects_a_corrupt_bf16_file_before_registration(
+async def test_reference_prepare_rejects_a_corrupt_bf16_file_before_registration(
     tmp_path: Path,
 ) -> None:
     catalog, payloads = _catalog()
-    payloads[("fixture/asr-bf16", "model.safetensors")] = b"corrupt"
+    payloads[("fixture/asr-1.7b-bf16", "model.safetensors")] = b"corrupt"
     downloader = FakeDownloader(payloads)
 
     with pytest.raises(ModelStoreError, match=r"hash|size|integrity"):
@@ -804,7 +747,7 @@ async def test_extreme_prepare_rejects_a_corrupt_bf16_file_before_registration(
             catalog,
             _runtime_lock(),
             downloader,
-            preset="extreme",
+            selection="reference/reference",
             max_retries=0,
         )
 
@@ -813,24 +756,26 @@ async def test_extreme_prepare_rejects_a_corrupt_bf16_file_before_registration(
 
 
 @pytest.mark.anyio
-async def test_prepare_reuses_shared_asr_cache_across_presets(tmp_path: Path) -> None:
+async def test_prepare_reuses_shared_asr_cache_across_selections(tmp_path: Path) -> None:
     catalog, payloads = _catalog()
     downloader = FakeDownloader(payloads)
     lock = _runtime_lock()
 
-    await _prepare(tmp_path, catalog, lock, downloader, preset="quality")
+    await _prepare(tmp_path, catalog, lock, downloader, selection="quality/quality")
     calls_after_quality = len(downloader.calls)
-    await _prepare(tmp_path, catalog, lock, downloader, preset="balanced")
+    await _prepare(tmp_path, catalog, lock, downloader, selection="quality/fast")
 
     new_calls = downloader.calls[calls_after_quality:]
     assert new_calls
+    assert {repository for _, repository, _ in new_calls} == {
+        "fixture/tts-0.6b-custom-q8",
+        "fixture/tts-0.6b-base-q8",
+    }
     assert all(
         path.startswith(("config", "model", "speech"))
         or path in {"tokenizer_config.json", "vocab.json", "merges.txt"}
-        for _, repository, path in new_calls
-        if repository == "fixture/custom"
+        for _, _, path in new_calls
     )
-    assert all(repository == "fixture/custom" for _, repository, _ in new_calls)
 
 
 @pytest.mark.anyio
@@ -839,7 +784,7 @@ async def test_cache_snapshot_hashes_each_reused_artifact_file_once(
 ) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="quality")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/quality")
 
     counts: Counter[str] = Counter()
     original_hash = model_store._snapshot_file_hash
@@ -849,11 +794,11 @@ async def test_cache_snapshot_hashes_each_reused_artifact_file_once(
         return original_hash(path)
 
     monkeypatch.setattr(model_store, "_snapshot_file_hash", counted_hash)
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/fast")
 
-    asr = next(item for item in catalog.artifacts if item.key == "asr")
+    asr = next(item for item in catalog.artifacts if item.key == "asr-1.7b-q8")
     for item in asr.files:
-        assert counts[f"models/asr/{item.path}"] == 1
+        assert counts[f"models/asr-1.7b-q8/{item.path}"] == 1
 
 
 @pytest.mark.anyio
@@ -861,17 +806,17 @@ async def test_registered_artifacts_separate_reuse_from_download(tmp_path: Path)
     """The install plan must not promise a download the registry already covers."""
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/fast")
 
     balanced = registered_prepared_artifacts(
-        tmp_path, preset_id="balanced", catalog=catalog, runtime_lock=lock
+        tmp_path, selection_id="quality/fast", catalog=catalog, runtime_lock=lock
     )
-    assert set(balanced) == {"asr", "custom"}
+    assert set(balanced) == {"asr-1.7b-q8", "tts-0.6b-custom-q8", "tts-0.6b-base-q8"}
 
     quality = registered_prepared_artifacts(
-        tmp_path, preset_id="quality", catalog=catalog, runtime_lock=lock
+        tmp_path, selection_id="quality/quality", catalog=catalog, runtime_lock=lock
     )
-    assert set(quality) == {"asr"}
+    assert set(quality) == {"asr-1.7b-q8"}
 
 
 @pytest.mark.anyio
@@ -879,19 +824,19 @@ async def test_registered_artifacts_ignore_a_stale_catalog_or_runtime(tmp_path: 
     """A changed revision or runtime lock means the local bytes are re-fetched."""
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/fast")
 
     changed_catalog, _ = _catalog(revision_suffix="0")
     assert (
         registered_prepared_artifacts(
-            tmp_path, preset_id="balanced", catalog=changed_catalog, runtime_lock=lock
+            tmp_path, selection_id="quality/fast", catalog=changed_catalog, runtime_lock=lock
         )
         == ()
     )
     assert (
         registered_prepared_artifacts(
             tmp_path,
-            preset_id="balanced",
+            selection_id="quality/fast",
             catalog=catalog,
             runtime_lock=_runtime_lock("other-lock"),
         )
@@ -904,14 +849,14 @@ async def test_registered_artifacts_ignore_a_missing_local_directory(tmp_path: P
     """Registry evidence alone is not reuse: the snapshot directory must exist."""
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/fast")
 
-    shutil.rmtree(tmp_path / "models" / "custom")
+    shutil.rmtree(tmp_path / "models" / "tts-0.6b-custom-q8")
 
     covered = registered_prepared_artifacts(
-        tmp_path, preset_id="balanced", catalog=catalog, runtime_lock=lock
+        tmp_path, selection_id="quality/fast", catalog=catalog, runtime_lock=lock
     )
-    assert set(covered) == {"asr"}
+    assert set(covered) == {"asr-1.7b-q8", "tts-0.6b-base-q8"}
 
 
 @pytest.mark.anyio
@@ -929,7 +874,7 @@ async def test_downloaded_snapshot_has_single_post_write_hash_validation(
     monkeypatch.setattr(model_store, "_snapshot_file_hash", counted_hash)
     await _prepare(tmp_path, catalog, _runtime_lock(), FakeDownloader(payloads))
 
-    for key in ("asr", "design"):
+    for key in ("asr-1.7b-q8", "tts-1.7b-custom-q8"):
         artifact = next(item for item in catalog.artifacts if item.key == key)
         for item in artifact.files:
             suffix = f"/{key}/{item.path}"
@@ -944,7 +889,7 @@ async def test_hash_mismatch_does_not_register_or_remove_existing_valid_cache(
     lock = _runtime_lock()
     initial_downloader = FakeDownloader(payloads)
     await _prepare(tmp_path, catalog, lock, initial_downloader)
-    original = (tmp_path / "models" / "asr" / "model.safetensors").read_bytes()
+    original = (tmp_path / "models" / "asr-1.7b-q8" / "model.safetensors").read_bytes()
 
     changed_catalog, changed_payloads = _catalog(revision_suffix="f")
     observed_destinations: list[bool] = []
@@ -953,8 +898,8 @@ async def test_hash_mismatch_does_not_register_or_remove_existing_valid_cache(
         async def download(
             self, source: SourceLocation, relative_path: str
         ) -> AsyncIterator[bytes]:
-            if source.repository == "fixture/asr":
-                destination = tmp_path / "models" / "asr"
+            if source.repository == "fixture/asr-1.7b-q8":
+                destination = tmp_path / "models" / "asr-1.7b-q8"
                 observed_destinations.append(destination.exists())
                 assert not destination.exists()
                 backups = list((tmp_path / "models" / ".releases").glob("*/asr"))
@@ -963,13 +908,13 @@ async def test_hash_mismatch_does_not_register_or_remove_existing_valid_cache(
             return await super().download(source, relative_path)
 
     changed_downloader = DestinationCheckingDownloader(changed_payloads)
-    changed_downloader.queue("fixture/asr", "model.safetensors", b"wrong")
+    changed_downloader.queue("fixture/asr-1.7b-q8", "model.safetensors", b"wrong")
 
     with pytest.raises(ModelStoreError, match=r"hash|size|download"):
         await _prepare(tmp_path, changed_catalog, lock, changed_downloader, max_retries=0)
 
     assert observed_destinations and not any(observed_destinations)
-    assert (tmp_path / "models" / "asr" / "model.safetensors").read_bytes() == original
+    assert (tmp_path / "models" / "asr-1.7b-q8" / "model.safetensors").read_bytes() == original
     assert not list((tmp_path / "models" / ".staging").glob("**/*"))
 
 
@@ -982,7 +927,7 @@ async def test_registry_failure_rolls_back_publish_and_preserves_previous_snapsh
     await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
     registry_path = tmp_path / "state" / "model-preparations.json"
     original_registry = registry_path.read_bytes()
-    original_snapshot = (tmp_path / "models" / "asr" / "config.json").read_bytes()
+    original_snapshot = (tmp_path / "models" / "asr-1.7b-q8" / "config.json").read_bytes()
 
     changed_catalog, changed_payloads = _catalog(revision_suffix="f")
 
@@ -994,7 +939,7 @@ async def test_registry_failure_rolls_back_publish_and_preserves_previous_snapsh
         await _prepare(tmp_path, changed_catalog, lock, FakeDownloader(changed_payloads))
 
     assert registry_path.read_bytes() == original_registry
-    assert (tmp_path / "models" / "asr" / "config.json").read_bytes() == original_snapshot
+    assert (tmp_path / "models" / "asr-1.7b-q8" / "config.json").read_bytes() == original_snapshot
 
 
 @pytest.mark.anyio
@@ -1002,16 +947,18 @@ async def test_transient_download_failure_is_retried_within_bound(tmp_path: Path
     catalog, payloads = _catalog()
     downloader = FakeDownloader(payloads)
     downloader.queue(
-        "fixture/asr",
+        "fixture/asr-1.7b-q8",
         "config.json",
         OSError("temporary"),
-        payloads[("fixture/asr", "config.json")],
+        payloads[("fixture/asr-1.7b-q8", "config.json")],
     )
 
     await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=1)
 
     config_calls = [
-        call for call in downloader.calls if call[1] == "fixture/asr" and call[2] == "config.json"
+        call
+        for call in downloader.calls
+        if call[1] == "fixture/asr-1.7b-q8" and call[2] == "config.json"
     ]
     assert len(config_calls) == 2
 
@@ -1022,18 +969,21 @@ async def test_mirror_with_non_equivalent_content_fails_over_to_matching_source(
 ) -> None:
     catalog, payloads = _catalog(mirror=True)
     downloader = FakeDownloader(payloads)
-    downloader.queue("fixture/asr", "config.json", b"mirror-does-not-match")
+    downloader.queue("fixture/asr-1.7b-q8", "config.json", b"mirror-does-not-match")
 
     await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=0)
 
     config_calls = [
         call
         for call in downloader.calls
-        if call[2] == "config.json" and call[1] in {"fixture/asr", "mirror/asr"}
+        if call[2] == "config.json" and call[1] in {"fixture/asr-1.7b-q8", "mirror/asr-1.7b-q8"}
     ]
-    assert [repository for _, repository, _ in config_calls] == ["fixture/asr", "mirror/asr"]
-    assert (tmp_path / "models" / "asr" / "config.json").read_bytes() == payloads[
-        ("fixture/asr", "config.json")
+    assert [repository for _, repository, _ in config_calls] == [
+        "fixture/asr-1.7b-q8",
+        "mirror/asr-1.7b-q8",
+    ]
+    assert (tmp_path / "models" / "asr-1.7b-q8" / "config.json").read_bytes() == payloads[
+        ("fixture/asr-1.7b-q8", "config.json")
     ]
 
 
@@ -1041,26 +991,26 @@ async def test_mirror_with_non_equivalent_content_fails_over_to_matching_source(
 async def test_all_non_equivalent_mirrors_fail_closed(tmp_path: Path) -> None:
     catalog, payloads = _catalog(mirror=True)
     downloader = FakeDownloader(payloads)
-    downloader.queue("fixture/asr", "config.json", b"wrong-canonical")
-    downloader.queue("mirror/asr", "config.json", b"wrong-mirror")
+    downloader.queue("fixture/asr-1.7b-q8", "config.json", b"wrong-canonical")
+    downloader.queue("mirror/asr-1.7b-q8", "config.json", b"wrong-mirror")
 
     with pytest.raises(ModelStoreError, match=r"hash|size|download"):
         await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=0)
 
-    assert not (tmp_path / "models" / "asr").exists()
+    assert not (tmp_path / "models" / "asr-1.7b-q8").exists()
     assert not (tmp_path / "state" / "model-preparations.json").exists()
 
 
 @pytest.mark.anyio
 async def test_missing_tts_codec_file_is_not_published(tmp_path: Path) -> None:
     catalog, payloads = _catalog()
-    payloads.pop(("fixture/design", "speech_tokenizer/model.safetensors"))
+    payloads.pop(("fixture/tts-1.7b-custom-q8", "speech_tokenizer/model.safetensors"))
     downloader = FakeDownloader(payloads)
 
     with pytest.raises(ModelStoreError, match=r"download|missing|hash|size"):
         await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=0)
 
-    assert not (tmp_path / "models" / "design").exists()
+    assert not (tmp_path / "models" / "tts-1.7b-custom-q8").exists()
     assert not (tmp_path / "state" / "model-preparations.json").exists()
 
 
@@ -1068,12 +1018,12 @@ async def test_missing_tts_codec_file_is_not_published(tmp_path: Path) -> None:
 async def test_oversized_stream_is_aborted_before_publish(tmp_path: Path) -> None:
     catalog, payloads = _catalog()
     downloader = FakeDownloader(payloads)
-    downloader.queue("fixture/asr", "model.safetensors", b"x" * 10_000)
+    downloader.queue("fixture/asr-1.7b-q8", "model.safetensors", b"x" * 10_000)
 
     with pytest.raises(ModelStoreError, match=r"size"):
         await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=0)
 
-    assert not (tmp_path / "models" / "asr").exists()
+    assert not (tmp_path / "models" / "asr-1.7b-q8").exists()
     assert not (tmp_path / "state" / "model-preparations.json").exists()
 
 
@@ -1090,7 +1040,7 @@ async def test_cancellation_cleans_staging_and_leaves_registry_untouched(tmp_pat
 
     assert not (tmp_path / "models" / ".staging").exists()
     assert not (tmp_path / "state" / "model-preparations.json").exists()
-    assert not (tmp_path / "models" / "asr").exists()
+    assert not (tmp_path / "models" / "asr-1.7b-q8").exists()
 
 
 @pytest.mark.anyio
@@ -1114,23 +1064,25 @@ async def test_old_cache_is_not_double_counted_in_disk_preflight(
 ) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="quality")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/quality")
 
-    old_cache = tmp_path / "models" / ".releases" / "old" / "asr"
+    old_cache = tmp_path / "models" / ".releases" / "old" / "asr-1.7b-q8"
     old_cache.mkdir(parents=True)
     (old_cache / "large.bin").write_bytes(b"x" * 10_000)
 
     downloader = FakeDownloader(payloads)
-    missing_tts_bytes = _artifact_size(catalog, "custom")
+    missing_tts_bytes = _artifact_size(catalog, "tts-0.6b-custom-q8") + _artifact_size(
+        catalog, "tts-0.6b-base-q8"
+    )
     monkeypatch.setattr(
         model_store.shutil,
         "disk_usage",
         lambda _: SimpleNamespace(free=missing_tts_bytes),
     )
 
-    await _prepare(tmp_path, catalog, lock, downloader, preset="balanced")
+    await _prepare(tmp_path, catalog, lock, downloader, selection="quality/fast")
 
-    assert all(repository == "fixture/custom" for _, repository, _ in downloader.calls)
+    assert all(repository.startswith("fixture/tts-0.6b-") for _, repository, _ in downloader.calls)
 
 
 @pytest.mark.anyio
@@ -1139,19 +1091,22 @@ async def test_shared_asr_cache_hit_is_excluded_from_staging_requirement(
 ) -> None:
     catalog, payloads = _catalog()
     lock = _runtime_lock()
-    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="quality")
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), selection="quality/quality")
 
     downloader = FakeDownloader(payloads)
     monkeypatch.setattr(
         model_store.shutil,
         "disk_usage",
-        lambda _: SimpleNamespace(free=_artifact_size(catalog, "custom")),
+        lambda _: SimpleNamespace(
+            free=_artifact_size(catalog, "tts-0.6b-custom-q8")
+            + _artifact_size(catalog, "tts-0.6b-base-q8")
+        ),
     )
 
-    await _prepare(tmp_path, catalog, lock, downloader, preset="balanced")
+    await _prepare(tmp_path, catalog, lock, downloader, selection="quality/fast")
 
     assert downloader.calls
-    assert all(repository == "fixture/custom" for _, repository, _ in downloader.calls)
+    assert all(repository.startswith("fixture/tts-0.6b-") for _, repository, _ in downloader.calls)
 
 
 @pytest.mark.anyio
@@ -1160,7 +1115,11 @@ async def test_disk_space_shortfall_is_rejected_before_any_download(
 ) -> None:
     catalog, payloads = _catalog()
     downloader = FakeDownloader(payloads)
-    missing_bytes = _artifact_size(catalog, "asr") + _artifact_size(catalog, "design")
+    missing_bytes = (
+        _artifact_size(catalog, "asr-1.7b-q8")
+        + _artifact_size(catalog, "tts-1.7b-custom-q8")
+        + _artifact_size(catalog, "tts-1.7b-base-q8")
+    )
     monkeypatch.setattr(
         model_store.shutil,
         "disk_usage",
@@ -1174,12 +1133,12 @@ async def test_disk_space_shortfall_is_rejected_before_any_download(
 
 
 @pytest.mark.anyio
-async def test_unknown_preset_is_rejected_without_download(tmp_path: Path) -> None:
+async def test_unknown_selection_is_rejected_without_download(tmp_path: Path) -> None:
     catalog, payloads = _catalog()
     downloader = FakeDownloader(payloads)
 
-    with pytest.raises(ModelStoreError, match="preset"):
-        await _prepare(tmp_path, catalog, _runtime_lock(), downloader, preset="unknown")
+    with pytest.raises(ModelStoreError, match="selection"):
+        await _prepare(tmp_path, catalog, _runtime_lock(), downloader, selection="unknown/unknown")
 
     assert not downloader.calls
     assert not (tmp_path / "models").exists()
@@ -1193,7 +1152,13 @@ async def test_external_catalog_paths_are_never_requested(tmp_path: Path) -> Non
     await _prepare(tmp_path, catalog, _runtime_lock(), downloader)
 
     requested = {path for _, _, path in downloader.calls}
-    expected = {item.path for artifact in catalog.artifacts[:2] for item in artifact.files}
+    selected_keys = {"asr-1.7b-q8", "tts-1.7b-custom-q8", "tts-1.7b-base-q8"}
+    expected = {
+        item.path
+        for artifact in catalog.artifacts
+        if artifact.key in selected_keys
+        for item in artifact.files
+    }
     assert requested == expected
     assert all(not Path(path).is_absolute() and ".." not in Path(path).parts for path in requested)
 
@@ -1215,11 +1180,11 @@ async def test_resolve_prepared_models_returns_verified_immutable_identity(
 
     assert isinstance(result, PreparedModelSet)
     assert result.prepared_id == prepared_id
-    assert result.preset == "quality"
+    assert result.selection == "quality/quality"
     assert result.runtime_lock_id == lock.id
-    assert result.asr.path == (tmp_path / "models" / "asr").resolve()
-    assert result.tts.path == (tmp_path / "models" / "design").resolve()
-    assert result.asr.model_id == "fixture/asr"
+    assert result.asr.path == (tmp_path / "models" / "asr-1.7b-q8").resolve()
+    assert result.tts.path == (tmp_path / "models" / "tts-1.7b-custom-q8").resolve()
+    assert result.asr.model_id == "fixture/asr-1.7b-q8"
     assert result.asr.family == "qwen3_asr"
     assert result.asr.variant == "asr"
     assert result.asr.files[0]["path"] == "config.json"
@@ -1266,7 +1231,7 @@ async def test_resolve_prepared_models_rejects_unknown_id_without_path_leak(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("field", ["preset", "runtime_lock_id", "artifacts"])
+@pytest.mark.parametrize("field", ["selection", "runtime_lock_id", "artifacts"])
 async def test_resolve_prepared_models_rejects_inconsistent_registry_entry(
     tmp_path: Path, field: str
 ) -> None:
@@ -1276,12 +1241,12 @@ async def test_resolve_prepared_models_rejects_inconsistent_registry_entry(
     registry_path = tmp_path / "state" / "model-preparations.json"
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     candidate = registry["prepared"][prepared_id]
-    if field == "preset":
-        candidate[field] = "balanced"
+    if field == "selection":
+        candidate[field] = "quality/fast"
     elif field == "runtime_lock_id":
         candidate[field] = "other-lock"
     else:
-        candidate[field]["unexpected"] = candidate[field]["asr"]
+        candidate[field]["unexpected"] = candidate[field]["asr-1.7b-q8"]
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
 
     with pytest.raises(ModelStoreError):
@@ -1300,7 +1265,7 @@ async def test_resolve_prepared_models_rejects_corrupt_snapshot_and_symlink_esca
     catalog, payloads = _catalog()
     lock = _runtime_lock()
     prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
-    corrupt = tmp_path / "models" / "asr" / "config.json"
+    corrupt = tmp_path / "models" / "asr-1.7b-q8" / "config.json"
     corrupt.write_bytes(b"corrupt")
     with pytest.raises(ModelStoreError):
         resolve_prepared_models(
@@ -1326,13 +1291,11 @@ async def test_resolve_prepared_models_rejects_corrupt_snapshot_and_symlink_esca
 def test_resolve_prepared_selection_rejects_missing_registry(tmp_path: Path) -> None:
     catalog, _ = _catalog()
     lock = _runtime_lock()
-    selected = catalog.preset("quality")
     selection = {
-        "schema_version": 1,
-        "preset": "quality",
+        "schema_version": 2,
+        "asr_spec": "quality",
+        "tts_spec": "quality",
         "generation": 1,
-        "asr": selected.asr,
-        "tts": selected.tts,
         "runtime_lock_id": lock.id,
     }
 

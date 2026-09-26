@@ -10,7 +10,7 @@ date: 2026-09-13
 
 ## 1. 目标与范围
 
-本设计准备 SpeechRail 的首个原生 macOS App 开发、测试和直接分发环境，并为 App 首期从 UI 启停服务、执行 `preflight`、切换 `light` / `balanced` / `quality` profile 建立安全边界。
+本设计准备 SpeechRail 的首个原生 macOS App 开发、测试和直接分发环境，并为 App 首期从 UI 启停服务、执行 `preflight`、切换档位（`fast` / `quality` / `reference`）建立安全边界。
 
 首期 App 是本机控制面，不是新的语音运行时。ASR/TTS 模型、Python managed runtime、CoreML bundle、音频采集与会议业务继续由现有 SpeechRail 服务和调用方负责。App 不复制服务生命周期、profile journal、资源调度或推理逻辑。
 

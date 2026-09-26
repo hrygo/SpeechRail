@@ -8,7 +8,12 @@ date: 2026-09-23
 
 ## 状态
 
-Accepted for candidate implementation. Formal activation remains blocked until the release gates below pass.
+Superseded（2026-09-26）。`extreme` 候选档从未启用；当前目标架构已移除档位体系，改为 ASR / TTS 两项
+独立 spec（`fast` / `quality` / `reference`），`extreme`、`PresetId`、`ModelPreset` 与
+`precision_policy` 均已从代码与 catalog 删除，本 ADR 只作为历史决策记录保留，见
+[目标架构](../architecture/2026-09-25-asr-tts-target-architecture-no-legacy.md)。
+
+原状态：Accepted for candidate implementation. Formal activation remains blocked until the release gates below pass.
 
 ## 背景
 

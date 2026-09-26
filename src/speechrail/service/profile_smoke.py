@@ -74,10 +74,10 @@ class PublicApiSmokeProbe:
                 reported_profile = health_payload.get("profile")
                 if not isinstance(reported_profile, str) or not reported_profile:
                     raise SmokeProbeError("public smoke profile identity is missing")
-                if reported_profile != prepared.preset:
+                if reported_profile != prepared.selection:
                     raise SmokeProbeError(
                         "public smoke profile mismatch; "
-                        f"expected {prepared.preset}, got {reported_profile}"
+                        f"expected {prepared.selection}, got {reported_profile}"
                     )
                 capabilities_ready = (
                     health_payload.get("asr_ready") is True
@@ -126,7 +126,7 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public model aliases are unavailable")
         for artifact in (prepared.asr, prepared.tts):
             if not any(
-                item.get("profile") == prepared.preset
+                item.get("profile") == prepared.selection
                 and item.get("artifact") == artifact.key
                 and item.get("variant") == artifact.variant
                 and item.get("quantization") == dict(artifact.quantization)

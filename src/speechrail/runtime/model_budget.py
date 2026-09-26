@@ -173,7 +173,7 @@ class ComponentFootprint:
 def budget_for_hardware(total_bytes: int) -> int:
     """Calculate the base service memory budget from host physical memory.
 
-    Accepts total_bytes without preset_id. Requires at least 8 GiB physical memory.
+    Accepts total_bytes only. Requires at least 8 GiB physical memory.
     """
     if total_bytes < MIN_SYSTEM_MEMORY_BYTES:
         raise ValueError(
