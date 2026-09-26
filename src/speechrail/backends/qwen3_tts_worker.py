@@ -254,6 +254,24 @@ def _identity_quantization(identity: object) -> tuple[int | None, int | None]:
     return bits, group_size
 
 
+def _expected_tts_dtype(model_dir: Path, device: str) -> str:
+    """Return the dtype actually represented by the local TTS snapshot."""
+
+    try:
+        quantization = inspect_model(model_dir).quantization
+    except Exception:
+        return (
+            "int8"
+            if snapshot_is_quantized(model_dir)
+            else ("float16" if device == "mps" else "float32")
+        )
+    if quantization.bits is not None:
+        return "int8"
+    if quantization.dtype in {"bf16", "bfloat16"}:
+        return "bfloat16"
+    return "float16" if device == "mps" else "float32"
+
+
 def _identity_matches_tts(
     identity: object, *, device: str, sample_rate: int, model_dir: Path
 ) -> bool:
@@ -267,8 +285,8 @@ def _identity_matches_tts(
         return False
     if variant is not None and variant not in {"voice_design", "custom_voice", "base"}:
         return False
-    expected_dtype = "int8" if bits is not None or snapshot_is_quantized(model_dir) else (
-        "float16" if device == "mps" else "float32"
+    expected_dtype = (
+        "int8" if bits is not None else _expected_tts_dtype(model_dir, device)
     )
     return (
         getattr(identity, "device", None) == device
@@ -395,9 +413,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
-            dtype="int8" if expected.quantization.bits is not None else (
-                "float16" if device == "mps" else "float32"
-            ),
+            dtype=_expected_tts_dtype(model_dir, device),
             sample_rate=sample_rate,
             family=expected.family,
             model_variant=expected.variant,

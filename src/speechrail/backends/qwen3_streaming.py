@@ -74,7 +74,7 @@ class Qwen3StreamingBackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
-    dtype: Literal["float16", "float32", "int8"] = "float16"
+    dtype: Literal["float16", "float32", "bfloat16", "int8"] = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
     max_context_sec: float = 12.64
@@ -98,8 +98,8 @@ class Qwen3StreamingBackendConfig:
             raise ValueError("model_dir must be an existing local directory") from exc
         if not resolved_model.is_dir():
             raise ValueError("model_dir must be an existing local directory")
-        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
-            raise ValueError("MPS requires float16 or int8")
+        if self.device == "mps" and self.dtype not in {"float16", "bfloat16", "int8"}:
+            raise ValueError("MPS requires float16, bfloat16 or int8")
         if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
             raise ValueError("CPU requires float32 or int8")
         object.__setattr__(self, "repository_root", root)

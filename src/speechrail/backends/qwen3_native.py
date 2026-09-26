@@ -10,11 +10,12 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 from uuid import uuid4
 
 from speechrail.application.audio_stream import PcmBlock, PcmWindowBuffer, split_pcm
 from speechrail.application.transcript_merge import TranscriptMerger
+from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker, WorkerTransportError
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
@@ -25,6 +26,19 @@ from speechrail.runtime.worker_process import (
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
+
+EngineDtype = Literal["float16", "float32", "bfloat16", "int8"]
+
+# The worker speaks the same canonical dtype names the loader reports, so a
+# declared snapshot precision maps straight onto the requested precision.
+_DECLARED_DTYPE_ALIASES: Final[Mapping[str, EngineDtype]] = {
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp16": "float16",
+    "float16": "float16",
+    "fp32": "float32",
+    "float32": "float32",
+}
 
 MODEL_FILES = (
     "config.json",
@@ -68,23 +82,53 @@ def snapshot_is_quantized(model_dir: Path) -> bool:
     return bool(config.get("quantization") or config.get("quantization_config"))
 
 
+def declared_snapshot_dtype(model_dir: Path) -> EngineDtype | None:
+    """Return the precision a snapshot declares for its own weights, if any.
+
+    The snapshot is the authority for a non-quantized artifact: a ``bf16``
+    snapshot must be requested and reported as ``bfloat16``, never downgraded to
+    ``float16`` or re-quantized to ``int8``, or the loaded weights stop matching
+    the artifact identity published by the catalog.
+    """
+
+    try:
+        identity = inspect_model(model_dir)
+    except Exception:
+        return None
+    declared = identity.quantization.dtype
+    if isinstance(declared, str):
+        resolved = _DECLARED_DTYPE_ALIASES.get(declared.strip().lower())
+        if resolved is not None:
+            return resolved
+    for _, tensor_dtype in identity.mixed_precision:
+        resolved = _DECLARED_DTYPE_ALIASES.get(str(tensor_dtype).strip().lower())
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def resolve_backend_dtype(
-    model_dir: Path, configured_dtype: Literal["float16", "float32", "int8"]
-) -> Literal["float16", "float32", "int8"]:
-    """Resolve the driver dtype for a backend from its snapshot state.
+    model_dir: Path,
+    configured_dtype: Literal["float16", "float32", "int8"],
+) -> EngineDtype:
+    """Resolve the requested dtype for a backend from its snapshot state.
 
     A pre-quantized ``-8bit`` snapshot already carries int8 weights and is loaded
     directly: it is never re-quantized at load time, which would re-quantize
     already-quantized weights and trigger a transient ``bf16 -> fp16 -> int8`` peak
-    for no benefit. A non-quantized snapshot honors ``configured_dtype``, which may
-    request in-memory int8 quantization.
+    for no benefit. A non-quantized snapshot is requested at the precision it
+    declares, so the loaded identity always matches the artifact.
+    ``configured_dtype`` is only the fallback for a snapshot that declares no
+    precision at all; it can never override a declared one.
 
     Shared by the ASR/TTS/streaming wiring so a pre-quantized snapshot resolves to
     an int8 identity consistently, independent of the configured default.
     """
+
     if snapshot_is_quantized(model_dir):
         return "int8"
-    return configured_dtype
+    declared = declared_snapshot_dtype(model_dir)
+    return declared if declared is not None else configured_dtype
 
 
 def _build_timed_result(
@@ -176,7 +220,7 @@ class Qwen3BackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
-    dtype: Literal["float16", "float32", "int8"] = "float16"
+    dtype: EngineDtype = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
     timeout_seconds: float = 120.0
@@ -188,8 +232,10 @@ class Qwen3BackendConfig:
         python_executable = self.python_executable.absolute()
         if not python_executable.is_file() or not os.access(python_executable, os.X_OK):
             raise ValueError("python_executable must be an executable local file")
-        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
-            raise ValueError("MPS requires float16 or int8; CPU fallback is not allowed")
+        if self.device == "mps" and self.dtype not in {"float16", "bfloat16", "int8"}:
+            raise ValueError(
+                "MPS requires float16, bfloat16 or int8; CPU fallback is not allowed"
+            )
         if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
             raise ValueError("CPU requires float32 or int8")
         if self.timeout_seconds <= 0 or not 32 <= self.max_new_tokens <= 2048:

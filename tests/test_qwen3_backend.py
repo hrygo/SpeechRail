@@ -1,3 +1,5 @@
+import json
+import struct
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -8,6 +10,7 @@ from speechrail.backends.qwen3_native import (
     MODEL_FILES,
     Qwen3BackendConfig,
     Qwen3Worker,
+    resolve_backend_dtype,
     validate_snapshot,
     weight_files,
 )
@@ -433,3 +436,83 @@ def test_batch_config_command_self_describes_worker_role(tmp_path: Path) -> None
     )
     cmd = config.command()
     assert "--worker-role" in cmd and cmd[cmd.index("--worker-role") + 1] == "batch"
+
+
+def _write_safetensors(path: Path, tensors: list[tuple[str, str, list[int]]]) -> None:
+    dtype_sizes = {"BF16": 2, "F16": 2, "F32": 4, "U32": 4}
+    header: dict[str, object] = {}
+    offset = 0
+    for name, dtype, shape in tensors:
+        size = dtype_sizes[dtype]
+        for dimension in shape:
+            size *= dimension
+        header[name] = {
+            "dtype": dtype,
+            "shape": shape,
+            "data_offsets": [offset, offset + size],
+        }
+        offset += size
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    path.write_bytes(
+        struct.pack("<Q", len(header_bytes)) + header_bytes + (b"\0" * (offset + 16))
+    )
+
+
+def _declared_snapshot(
+    root: Path,
+    tensors: list[tuple[str, str, list[int]]],
+    *,
+    quantization: dict[str, object] | None = None,
+) -> Path:
+    """Build a minimal snapshot whose weight headers declare their own precision."""
+
+    root.mkdir(parents=True)
+    config: dict[str, object] = {"model_type": "qwen3_asr"}
+    if quantization is not None:
+        config["quantization"] = quantization
+    (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    _write_safetensors(root / "model.safetensors", tensors)
+    return root
+
+
+def test_resolve_backend_dtype_requests_the_precision_the_snapshot_declares(
+    tmp_path: Path,
+) -> None:
+    """A certified bf16 artifact must never be requested as int8 or float16."""
+
+    snapshot = _declared_snapshot(
+        tmp_path / "external-qwen3-asr-bf16",
+        [("model.embed_tokens.weight", "BF16", [2, 4])],
+    )
+
+    assert resolve_backend_dtype(snapshot, "int8") == "bfloat16"
+    assert resolve_backend_dtype(snapshot, "float16") == "bfloat16"
+
+
+def test_resolve_backend_dtype_keeps_configured_dtype_when_nothing_is_declared(
+    tmp_path: Path,
+) -> None:
+    """Without a declared precision the configured default still applies."""
+
+    snapshot = tmp_path / "external-qwen3-asr-undeclared"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+
+    assert resolve_backend_dtype(snapshot, "float16") == "float16"
+
+
+def test_resolve_backend_dtype_stays_int8_for_pre_quantized_snapshots(
+    tmp_path: Path,
+) -> None:
+    """A pre-quantized snapshot keeps its int8 identity regardless of the request."""
+
+    snapshot = _declared_snapshot(
+        tmp_path / "external-qwen3-asr-8bit",
+        [
+            ("model.embed_tokens.weight", "U32", [2, 8]),
+            ("model.embed_tokens.scales", "BF16", [2, 1]),
+        ],
+        quantization={"bits": 8, "group_size": 64, "mode": "affine"},
+    )
+
+    assert resolve_backend_dtype(snapshot, "float16") == "int8"
