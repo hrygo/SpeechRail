@@ -42,17 +42,28 @@ def _snapshot_identity(
     *,
     bits: int | None = None,
     group_size: int | None = None,
+    dtype: str | None = None,
 ) -> SnapshotIdentity:
     return SnapshotIdentity(
         family="qwen3_tts",
         variant="voice_design",
         quantization=QuantizationSpec(
             bits=bits,
+            dtype=dtype,
             group_size=group_size,
             format="mlx" if bits is not None else "none",
         ),
         weight_fingerprint="shape:" + ("c" * 64),
     )
+
+
+def test_expected_tts_dtype_uses_the_declared_bfloat16_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity(dtype="bf16")
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+
+    assert worker_module._expected_tts_dtype(tmp_path, "mps") == "bfloat16"
 
 
 class FakeEngine:

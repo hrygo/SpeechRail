@@ -74,7 +74,7 @@ class Qwen3TtsBackendConfig:
     model_dir: Path
     model_variant: TtsModelVariant
     device: Literal["mps", "cpu"]
-    dtype: Literal["float16", "float32", "int8"] = "float16"
+    dtype: Literal["float16", "float32", "bfloat16", "int8"] = "float16"
     sample_rate: int = 24_000
     timeout_seconds: float = 120.0
     chunk_ms: int = 100
@@ -97,8 +97,8 @@ class Qwen3TtsBackendConfig:
             raise ValueError("model snapshot must be outside repository")
         if not model_dir.is_dir() or not (model_dir / "config.json").is_file():
             raise ValueError("model snapshot is incomplete")
-        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
-            raise ValueError("MPS requires float16 or int8")
+        if self.device == "mps" and self.dtype not in {"float16", "bfloat16", "int8"}:
+            raise ValueError("MPS requires float16, bfloat16 or int8")
         if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
             raise ValueError("CPU requires float32 or int8")
         if self.sample_rate != 24_000:
