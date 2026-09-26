@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from speechrail.config.model_catalog import load_catalog
+from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY, load_catalog
 from speechrail.domain.model_spec import required_spec_bindings
 from speechrail.service.diarization_assets import inspect_diarization_assets
 from speechrail.service.model_commands import model_catalog_payload, model_status_payload
@@ -29,7 +29,7 @@ def test_model_catalog_payload_has_required_by_and_no_local_path() -> None:
     assert row["tts_base"] == "tts-0.6b-base-q8"
 
 
-def test_model_catalog_lists_only_spec_bound_artifacts() -> None:
+def test_model_catalog_lists_spec_bound_and_on_demand_artifacts() -> None:
     payload = model_catalog_payload(catalog=load_catalog())
     bound = {
         artifact_key for _tier, _role, artifact_key in required_spec_bindings()
@@ -40,10 +40,14 @@ def test_model_catalog_lists_only_spec_bound_artifacts() -> None:
         for item in payload["artifacts"]
         if item["key"] != "diarization-coreml"
     }
-    assert listed <= bound
-    # The retired Design Q8 artifact is not bound to any spec tier any more.
-    assert "tts-1.7b-design-q8" not in listed
+    # 目录列出的是「档位绑定制品」加上「与档位无关的按需设计制品」。
+    assert listed <= bound | {VOICE_DESIGN_ARTIFACT_KEY}
     rows = {item["key"]: item for item in payload["artifacts"]}
+    # 设计制品用 required_by=["voice_design"] 标记, 不属于任何档位。
+    assert VOICE_DESIGN_ARTIFACT_KEY in listed
+    assert rows[VOICE_DESIGN_ARTIFACT_KEY]["required_by"] == ["voice_design"]
+    # The retired Design Q8 artifact is not listed.
+    assert "tts-1.7b-design-q8" not in listed
     assert rows["asr-0.6b-q8"]["required_by"] == ["fast"]
     assert rows["asr-1.7b-bf16"]["required_by"] == ["reference"]
 

@@ -2,7 +2,7 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "3.2.0"
+version: "3.2.1"
 date: 2026-09-26
 ---
 
@@ -65,8 +65,9 @@ flowchart TD
 
 ### 三档组成、制品绑定与精度策略
 
-模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`specs` 是唯一绑定真相（13 个
-`(tier, role)` 映射到 12 个制品），装载时由 `assert_target_spec_bindings()` 强制精确匹配；catalog 不再
+模型目录（`src/speechrail/assets/model-catalog.json`）为 schema v2：`specs` 是唯一绑定真相（12 个
+`(tier, role)` 映射到 11 个档位制品），装载时由 `assert_target_spec_bindings()` 强制精确匹配；另有
+**1 份不与档位绑定**的按需 VoiceDesign 制品（`tts-1.7b-design-bf16`，合计 12 个制品）。catalog 不再
 保存旧的 `presets` / `precision_policy` 块，也不再有按名字解析档位的遗留入口，档位只选择权重与
 量化精度。每份制品只用**一个**维度说精度：量化制品写 `quantization.bits`，未量化的制品写
 `quantization.dtype`（如 `bf16`），两者互斥——所以界面能对每一份权重给出同一维度的读数。ASR 与 TTS 可分别

@@ -199,9 +199,9 @@ def resolve_selection(
         catalog, record.tts_spec, "tts_custom_voice", required=True
     )
     tts_base = _artifact_for_spec(catalog, record.tts_spec, "tts_base", required=False)
-    voice_design = _artifact_for_spec(
-        catalog, record.tts_spec, "voice_design", required=False
-    )
+    # VoiceDesign 是与档位无关的按需辅助制品: 目录声明了它, 任何 tts_spec 都能
+    # 进入设计作业 (架构 §2.2)。它只由设计任务加载, 不参与普通合成路由。
+    voice_design = catalog.voice_design_artifact()
     assert asr is not None and tts is not None
 
     resolved_app_home = Path(app_home).resolve()

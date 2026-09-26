@@ -43,7 +43,6 @@ def _profile_summaries() -> tuple[object, ...]:
             "tts-reference",
             4 * 1024**3,
             tts_base="tts-base-reference",
-            voice_design="tts-design-reference",
             aligner="aligner-bf16",
         ),
     )
@@ -78,7 +77,6 @@ def test_profile_list_json_is_stable_and_path_free(
                 "id": "fast",
                 "tts": "tts-fast",
                 "tts_base": "tts-base-fast",
-                "voice_design": None,
             },
             {
                 "aligner": "aligner-bf16",
@@ -87,7 +85,6 @@ def test_profile_list_json_is_stable_and_path_free(
                 "id": "quality",
                 "tts": "tts-quality",
                 "tts_base": "tts-base-quality",
-                "voice_design": None,
             },
             {
                 "aligner": "aligner-bf16",
@@ -96,7 +93,6 @@ def test_profile_list_json_is_stable_and_path_free(
                 "id": "reference",
                 "tts": "tts-reference",
                 "tts_base": "tts-base-reference",
-                "voice_design": "tts-design-reference",
             },
         ],
         "status": "ok",

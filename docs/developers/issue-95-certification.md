@@ -2,7 +2,7 @@
 title: "Issue #95 交付认证方案与证据索引"
 status: active
 audience: "SpeechRail 维护者与验收人"
-version: "0.8.1"
+version: "0.9.0"
 date: 2026-09-26
 ---
 
@@ -35,7 +35,7 @@ date: 2026-09-26
 | 门 | 通过标准（摘要） | 证据 | 状态 |
 |---|---|---|---|
 | P0 | ADR、契约、核心类型与规格职责冻结；无多余 preset 真相、旧 alias 或不映射的参数 | `check_openapi_contract`(37/45) / `check_realtime_contract`(41/32) / `check_mcp_tool_contract`(18/3) / `check_macos_route_contract`(14×4)；旧 preset 与 alias 删除（§8.3） | ✅ 有证据 |
-| P1 | ModelSpec/Artifact 与 ResolvedPlan/资源治理；固定制品、精度校验、角色路由、预算与拒绝语义闭合 | catalog 13 绑定 `assert_target_spec_bindings`；`tests/test_spec_selection.py`、`test_model_store.py`、`test_resource_governor.py`、`test_model_budget.py`（含在 §7.1 的 2470 passed 套件） | ✅ 有证据 |
+| P1 | ModelSpec/Artifact 与 ResolvedPlan/资源治理；固定制品、精度校验、角色路由、预算与拒绝语义闭合 | catalog 12 档位绑定 + 1 份不绑档的按需 VoiceDesign 制品，由 `assert_target_spec_bindings` 校验；`tests/test_spec_selection.py`、`test_model_store.py`、`test_resource_governor.py`、`test_model_budget.py`（含在 §7.1 套件） | ✅ 有证据 |
 | P2 | ASR 主链路与独立 Alignment/Diarization；唯一 final、统一时间轴、无隐式模型 | `tests/test_asr_mode.py`、`test_alignment_worker.py`、`test_diarization_*.py`、`test_openai_diarized_batch.py`；运行态 `/readyz` 与 `diarization_ready=true`（§7.2） | ✅ 有证据 |
 | P3 | Base/CustomVoice 运行与 BF16 Design 工作室；真增量、音色复验、缓存隔离 | `tests/test_qwen3_tts_custom_voice.py`、`test_qwen3_tts_voice_design.py`、`test_voice_design_workflow.py`、`test_tts_voice_clone.py`、`test_voice_bindings.py`；reference BF16 真实推理（§7.2） | ✅ 有证据 |
 | P4 | App/协议、播放、打断、组合调度；当前协议单实现、迟到包隔离、切档原子、组合准入 | `swift test`（XCTest 229 + swift-testing 144）；`test_realtime_current_schema.py`、`test_realtime_vad_bargein.py`、`test_profile_switch.py`；App Debug 构建通过；真实声卡停音 p95 21ms（§7.2） | ✅ 有证据 |
@@ -167,7 +167,7 @@ date: 2026-09-26
 | 静态 / 契约 / 编译 | 通过：计划 §8.1 四组定向验收合计 **571 passed**（207 / 82 / 123 / 159）；`ruff` 全绿；`mypy src` 148 文件无错；Realtime 契约 41 fixtures / 32 tracked fields；文档与版本一致性 ok；`swift test` 144 tests / 15 suites；`scripts/macos_app_build.sh` **BUILD SUCCEEDED** | 账本 `.superpowers/sdd/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide/progress.md` |
 | OpenAPI 路径对齐 | 通过：新增 `scripts/check_openapi_contract.py` 校验运行时路由与 `contracts/openapi.yaml` 路径/方法一一对应；补齐 6 条此前未文档化路径（`/v1/speechrail/pronunciation-sets` 系列、`/v1/speechrail/voices/clone/idempotency`、`/v1/speechrail/voices/{voice_id}/quality-runs`）。运行时 37 路径 / 45 操作全部有契约，`@redocly/cli` lint 有效 | `scripts/check_openapi_contract.py`、`tests/test_openapi_contract.py`、`contracts/openapi.yaml` |
 | 供应链（受控引擎 wheel） | 通过：固定上游 revision + overlay/patch 摘要校验，连续两次重建 byte-identical；`runtime-lock.json` 写入 `engine_wheel` pin。**未在本机安装该 wheel** | `vendor/engine-build/engine-build.json`、`src/speechrail/assets/runtime-lock.json` |
-| 制品 | 通过：catalog 装载时 `assert_target_spec_bindings()` 对 13 个 `(tier, role)` 绑定精确匹配；缺失制品按授权异步准备完成并逐文件 size / SHA-256 校验为 `verified`（准备记录与制品在仓库外） | 同上；`src/speechrail/assets/model-catalog.json` |
+| 制品 | 通过：catalog 装载时 `assert_target_spec_bindings()` 对 12 个 `(tier, role)` 绑定精确匹配，并校验唯一按需 VoiceDesign 制品；缺失制品按授权异步准备完成并逐文件 size / SHA-256 校验为 `verified`（准备记录与制品在仓库外） | 同上；`src/speechrail/assets/model-catalog.json` |
 | T04 owner 抽象 | `runtime/model_owner.py` 与 `tests/test_model_owner.py`（13 passed）是 T04 规格产出的 owner / lease 抽象与其 fake 验证面；生产侧「唯一 owner」由按 plan role 绑定的 TTS capability router + 进程级 drain 承担，**未接入** `application/services.py`（不做 live hot-swap） | 账本「2026-09-26 T04 收口复核 Ruling」 |
 | 完整回归套件 | 通过：`uv run --extra dev pytest`（含 `--extra mcp`）→ **2496 passed / 1 skipped / 0 failed**，覆盖率 81.41%（≥80 门通过）；新包含 OpenAPI 路径对齐门 | 同上；`tests/test_openapi_contract.py` |
 | 完整回归套件（旧档位清理后复跑） | 通过：**2470 passed / 1 skipped / 0 failed**，覆盖率 **81.45%**；计数下降来自删除 20 个旧 preset / precision 用例（`test_model_catalog_contract.py`、`test_model_catalog_builder.py`）与重写 `test_model_store.py`，净增 3 个 MCP 工具面用例 | `tests/test_mcp_tool_contract.py` |
@@ -304,6 +304,15 @@ generation 11，复测期间多次 `profile apply` 单调递增），`runtime/cu
   legacy `prepare_models()` 与 `preset` 字段也一并删除，registry 字段改为 `selection`。运行时选择路径本就
   按 `asr_spec`/`tts_spec` 解析，CLI / REST / MCP / App 不接受旧档位名。因该删除改变了 catalog 内容，
   受控 wheel 已重建（`…-bb54128ed0de…`）并重跑 §7.2 的整轮运行态认证。
+- **VoiceDesign 档位绑定修正（2026-09-26）**：先前 `REQUIRED_SPEC_BINDINGS` 把
+  `("reference", "voice_design")` 当成一个档位角色，`resolve_selection` 又按 `record.tts_spec` 解析它，
+  于是音色设计只在 TTS=`reference` 时可用；App 侧还误按「该档 tts 制品是否 `voice_design` 变体」判定，
+  恒显示「不支持」。这与目标架构 §2.2（音色工作室属「按需辅助模块」，与分人同级）和计划 §95
+  （Design 仅 1.7B BF16、仅设计作业）冲突。已改为：`specs` 只保留 **12** 个档位绑定；VoiceDesign 由
+  `ModelCatalog.voice_design_artifact()` 作为**唯一、与档位无关**的按需制品解析，任何 `tts_spec` 都可用；
+  `ModelCatalogSnapshot.hasVoiceDesignArtifact` 成为 App 的唯一判据；档位行、CLI payload 与 per-tier 摘要
+  不再携带 `voice_design` 字段。**该变更改变了 wheel 内的能力声明与目录契约，§7.2 的运行态证据针对修改前
+  的绑定，需按新 wheel 重新核验 VoiceDesign 可用性。**
 
 ## 9. 需用户确认的决策点
 

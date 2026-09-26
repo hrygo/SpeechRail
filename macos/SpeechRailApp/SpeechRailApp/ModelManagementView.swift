@@ -277,15 +277,14 @@ public struct ModelManagementView: View {
 
     private func voiceCreationSupport(for summary: ProfileSummary?) -> String {
         guard let summary else { return "未读取" }
+        // VoiceDesign 与档位无关: 目录里那份按需设计制品存在即可用。
         guard let catalog = model.modelCatalog,
-              catalog.artifacts.contains(where: {
-                  $0.key == summary.tts && $0.variant == "voice_design"
-              })
+              catalog.hasVoiceDesignArtifact
         else {
             return "不支持"
         }
         let supportsClone = summary.ttsClone.flatMap { cloneKey in
-            model.modelCatalog?.artifacts.first(where: { $0.key == cloneKey && $0.variant == "base" })
+            catalog.artifacts.first(where: { $0.key == cloneKey && $0.variant == "base" })
         } != nil
         return supportsClone ? "支持（含克隆）" : "支持"
     }
@@ -378,7 +377,7 @@ public struct ModelManagementView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             // 这一行的三格是「这一档要用哪几个模型」（取值是制品 key），标题就用页面上
             // 的名字；`VoiceDesign` 只留在开发者详情里（用户 2026-09-19）。
-            fact("语音设计", value: voiceDesignCapability(for: targetSelection.ttsSpec))
+            fact("语音设计", value: voiceDesignCapabilityText)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
     }
@@ -686,8 +685,8 @@ public struct ModelManagementView: View {
                 // 这一行说的是目标档位的声明，不是当前服务：它紧挨「当前服务档位」，
                 // 不写清作用域会被读成服务现在的能力。
                 LabeledContent(
-                    "VoiceDesign 能力（目标档位）",
-                    value: voiceDesignCapability(for: targetSelection.ttsSpec)
+                    "VoiceDesign 能力（按需模块）",
+                    value: voiceDesignCapabilityText
                 )
                 LabeledContent(
                     "当前服务档位",
@@ -1000,15 +999,10 @@ public struct ModelManagementView: View {
         model.modelCatalog?.profiles.first(where: { $0.id == profile })
     }
 
-    private func voiceDesignCapability(for profile: SpeechRailProfile) -> String {
-        guard let profileSummary = summary(for: profile),
-              let artifact = model.modelCatalog?.artifacts.first(where: {
-                  $0.key == profileSummary.tts
-              })
-        else {
-            return "未读取"
-        }
-        return artifact.variant == "voice_design" ? "支持候选预览" : "不支持候选预览"
+    /// VoiceDesign 与档位无关: 目录里那份按需设计制品决定能力, 不随所选档位变化。
+    private var voiceDesignCapabilityText: String {
+        guard let catalog = model.modelCatalog else { return "未读取" }
+        return catalog.hasVoiceDesignArtifact ? "支持候选预览" : "不支持候选预览"
     }
 
     private func status(for artifact: ModelArtifactSnapshot) -> ModelArtifactStatusSnapshot? {

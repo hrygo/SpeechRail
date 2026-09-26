@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from speechrail.app import create_app
 from speechrail.application import voice_design as voice_design_application
 from speechrail.config import Settings
+from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
@@ -99,12 +100,14 @@ def make_client(
     tier: str = "reference",
     with_asr: bool = True,
     with_base: bool = True,
+    with_design: bool = True,
     api_key: str | None = None,
 ) -> tuple[TestClient, VoiceRegistry, DesignSynth, DesignAsr]:
     asr_key = required_spec_artifact(tier, "asr")
     tts_key = required_spec_artifact(tier, "tts_custom_voice")
     base_key = required_spec_artifact(tier, "tts_base")
-    design_key = required_spec_artifact(tier, "voice_design")
+    # VoiceDesign 是与档位无关的按需制品: 任何 tier 都用同一份设计权重。
+    design_key = VOICE_DESIGN_ARTIFACT_KEY if with_design else None
     assert asr_key is not None and tts_key is not None
     registry = VoiceRegistry(
         storage_path=tmp_path / "voices.json",
@@ -206,17 +209,26 @@ def test_create_candidate_keeps_reference_private_and_unpublished(
     assert reloaded.revision == candidate["revision"]
 
 
-@pytest.mark.parametrize("tier", ["fast", "quality"])
-def test_create_requires_voice_design_selection(
+@pytest.mark.parametrize("tier", ["fast", "quality", "reference"])
+def test_create_designs_on_every_tier_and_only_needs_a_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tier: str,
 ) -> None:
-    client, registry, synth, _asr = make_client(tmp_path, monkeypatch, tier=tier)
+    # VoiceDesign 不绑定档位: 三档都能进入设计作业 (修复 tier 绑定缺陷)。
+    client, _registry, synth, _asr = make_client(tmp_path / tier, monkeypatch, tier=tier)
     response = client.post("/v1/voice-designs", json=payload())
+    assert response.status_code == 201
+    assert synth.requests
+
+    # 只有设计供货快照缺失时才是 unsupported —— 与用的是哪一档无关。
+    unsupported, registry, no_synth, _asr = make_client(
+        tmp_path / f"{tier}-no-design", monkeypatch, tier=tier, with_design=False
+    )
+    response = unsupported.post("/v1/voice-designs", json=payload())
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_design_unsupported"
-    assert not synth.requests
+    assert not no_synth.requests
     assert all(profile.is_system for profile in registry.list_profiles())
     assert not candidate_assets(registry).exists()
 

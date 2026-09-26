@@ -282,6 +282,43 @@ final class ControlKitTests: XCTestCase {
         )
     }
 
+    /// VoiceDesign 与档位无关: 目录里有那份按需设计制品就算可用, 不看档位。
+    func testVoiceDesignArtifactIsTierIndependent() {
+        func artifact(_ key: String, variant: String) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen3_tts",
+                variant: variant,
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: 1,
+                fileCount: 1,
+                requiredBy: []
+            )
+        }
+
+        let withDesign = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("tts-1.7b-custom-q8", variant: "custom_voice"),
+                artifact("tts-1.7b-design-bf16", variant: "voice_design"),
+            ],
+            profiles: []
+        )
+        XCTAssertTrue(withDesign.hasVoiceDesignArtifact)
+        // 设计制品不绑定档位, 因此不会出现在任何档位的文件清单里。
+        XCTAssertTrue(withDesign.artifacts(for: .quick(.fast)).isEmpty)
+        XCTAssertTrue(withDesign.artifacts(for: .quick(.quality)).isEmpty)
+
+        let withoutDesign = ModelCatalogSnapshot(
+            artifacts: [artifact("tts-1.7b-custom-q8", variant: "custom_voice")],
+            profiles: []
+        )
+        XCTAssertFalse(withoutDesign.hasVoiceDesignArtifact)
+    }
+
     /// 混合组合的下载量只能从两个规格各自的制品并集推导——目录没有第三份「组合摘要」。
     func testArtifactsForSelectionUnionsAsrAndTtsSpecsInCatalogOrder() {
         func artifact(_ key: String, sizeBytes: Int64, requiredBy: [SpeechRailProfile]) -> ModelArtifactSnapshot {

@@ -1198,13 +1198,6 @@ def _b2_catalog() -> ModelCatalog:
                 _b2_artifact("asr-06b-q8", "qwen3_asr", "asr", 8, _b2_asr_variant(b"a06")),
                 _b2_artifact("asr-06b-q4", "qwen3_asr", "asr", 4, _b2_asr_variant(b"a06")),
                 _b2_artifact(
-                    "tts-17b-design-q8",
-                    "qwen3_tts",
-                    "voice_design",
-                    8,
-                    _b2_tts_variant(b"d17"),
-                ),
-                _b2_artifact(
                     "tts-17b-base-q8",
                     "qwen3_tts",
                     "base",
@@ -1302,11 +1295,6 @@ def _b2_catalog() -> ModelCatalog:
                     "tier": "reference",
                     "role": "tts_custom_voice",
                     "artifact_key": "tts-06b-custom-q8",
-                },
-                {
-                    "tier": "reference",
-                    "role": "voice_design",
-                    "artifact_key": "tts-17b-design-bf16",
                 },
                 {"tier": "fast", "role": "alignment", "artifact_key": "aligner-q8"},
                 {

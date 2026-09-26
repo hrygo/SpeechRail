@@ -50,7 +50,6 @@ _SUMMARY_ROLES: tuple[tuple[str, ModelRole], ...] = (
     ("asr", "asr"),
     ("tts", "tts_custom_voice"),
     ("tts_base", "tts_base"),
-    ("voice_design", "voice_design"),
     ("aligner", "alignment"),
 )
 _DIARIZATION_ENV_KEYS = (
@@ -75,13 +74,12 @@ class ProfileSummary:
     tts: str | None
     download_bytes: int
     tts_base: str | None = None
-    voice_design: str | None = None
     aligner: str | None = None
 
     def required_keys(self) -> tuple[str, ...]:
         return tuple(
             key
-            for key in (self.asr, self.tts, self.tts_base, self.voice_design, self.aligner)
+            for key in (self.asr, self.tts, self.tts_base, self.aligner)
             if key is not None
         )
 
@@ -128,7 +126,6 @@ def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, 
                 tts=bindings["tts"],
                 download_bytes=download_bytes,
                 tts_base=bindings["tts_base"],
-                voice_design=bindings["voice_design"],
                 aligner=bindings["aligner"],
             )
         )
@@ -149,7 +146,7 @@ def model_changes(
 
     return frozenset(
         name
-        for name in ("asr", "tts", "tts_base", "voice_design", "aligner")
+        for name in ("asr", "tts", "tts_base", "aligner")
         if _spec_value(old, name) != _spec_value(new, name)
     )
 

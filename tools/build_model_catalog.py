@@ -62,7 +62,6 @@ _REQUIRED_SPEC_BINDINGS: Final[dict[tuple[str, str], str]] = {
     ("fast", "tts_custom_voice"): "tts-0.6b-custom-q8",
     ("quality", "tts_custom_voice"): "tts-1.7b-custom-q8",
     ("reference", "tts_custom_voice"): "tts-1.7b-custom-bf16",
-    ("reference", "voice_design"): "tts-1.7b-design-bf16",
     ("fast", "alignment"): "aligner-q8",
     ("quality", "alignment"): "aligner-bf16",
     ("reference", "alignment"): "aligner-bf16",
