@@ -1032,6 +1032,40 @@ final class ControlKitTests: XCTestCase {
         XCTAssertFalse(arguments.contains("--url"))
     }
 
+    /// 管理界面允许 ASR / TTS 分别选档；混合组合必须把两项各自原样转发，
+    /// 不能被折叠成其中一项的「快捷档位」。
+    func testProfileApplyArgumentsForwardMixedAsrAndTtsSpecs() {
+        let home = URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
+        let arguments = ManagedCommand
+            .profileApply(SpecSelection(asrSpec: .quality, ttsSpec: .fast))
+            .arguments(appHome: home)
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "-m", "speechrail", "profile", "apply", "--asr-spec", "quality",
+                "--tts-spec", "fast", "--yes", "--app-home", "/tmp/SpeechRail Test Home",
+                "--json",
+            ]
+        )
+    }
+
+    func testModelPrepareArgumentsForwardMixedAsrAndTtsSpecs() {
+        let home = URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
+        let arguments = ManagedCommand
+            .modelPrepare(SpecSelection(asrSpec: .fast, ttsSpec: .reference))
+            .arguments(appHome: home)
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "-m", "speechrail", "model", "prepare", "--asr-spec", "fast",
+                "--tts-spec", "reference", "--yes", "--app-home", "/tmp/SpeechRail Test Home",
+                "--json",
+            ]
+        )
+    }
+
     func testUnavailableXPCServiceTimesOutInsteadOfHanging() async {
         let transport = NSXPCControlTransport(
             machServiceName: "com.speechrail.test.unavailable.\(UUID().uuidString)",
