@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- macOS 模型管理界面支持混合档位组合：三张快捷组合卡之外新增「分别调整识别与配音」，下载 / 应用统一提交一对 `asr_spec`/`tts_spec`，混合组合按两档制品并集显示总量。
+- 新增 MCP 工具面对齐门 `scripts/check_mcp_tool_contract.py`，校验 `tools/list` / `resources/list` 与用户指南、Proxy 契约文档、`skill-manifest.json` 一致，并接入 CI 与验收清单。
+
+### Removed
+
+- 移除旧档位（`extreme`/`balanced`/`light`）体系：删除 `PresetId`、`ModelPreset`、`TierPrecision`、
+  `ModelCatalog.preset()`、`precision_policy`、legacy `prepare_models()` 及 catalog / 元数据中的
+  `presets` 块；模型选择统一为 ASR / TTS 两项独立 spec（`fast`/`quality`/`reference`），旧档位名在
+  API / CLI / MCP / App 上明确拒绝。
+
 ### Fixed
 
 - 模型完整性校验将制品根目录 `README.md` 视为非运行时文档；已有匹配的权重、配置与 tokenizer 可直接登记复用，不再因文档差异触发重新下载。

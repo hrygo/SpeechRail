@@ -2,7 +2,7 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.2.2"
+version: "3.3.0"
 date: 2026-09-26
 ---
 
@@ -89,16 +89,24 @@ namespaced capability 响应，`voices` 只使用其安全投影，不再输出
 ### 认证状态（2026-09-26）
 
 `fast`/`quality` 的制品有本机准备与逐文件 size/SHA-256 校验证据；`reference` 的 bf16 制品继承
-同族 8-bit 档位已通过的门禁证据。2026-09-26 已在本机真实运行态补测三档：
+同族 8-bit 档位已通过的门禁证据。2026-09-26 已在本机真实运行态补测：
 
 - 三档 warm bench（各 30 fixture）0 失败；`reference` 的 `asr_runtime_revision` 非空，
   证明 BF16 档真实可推理（修复前为 `null`）。
-- 三档冷启动、参考档反复取消 ×100、短时 soak ×30 轮通过；详见
-  [Issue #95 交付认证](../developers/issue-95-certification.md) §7.2。
+- 三档冷启动、参考档反复取消 ×100、短时 soak ×30 轮通过。
+- 真实声卡停音：30 trials，p95 21ms（阈值 200ms）通过。
+- 公开语料质量门（FLEURS zh/en + 自合成，100 条 × 3）：clean-zh CER 6.47% ≤ 8%、clean-en WER
+  4.36% ≤ 12% 通过；**数字/单位层 54/60 = 90%，未达 95% 口径**，反例见下。
+- 旧档位清理后已重建 wheel 并整轮复测（2026-09-26 下午）：三档 warm / cold、参考档取消 ×100、
+  quality 公开语料质量门结果与首轮一致；**≥2h 长稳 soak（5200 循环 / 2h09m）判定未通过**——
+  5200 次中断出现 1 次 stale audio（0.019%），footprint 采样区间占峰值 12.5%（趋势门通过）。
 
-即便如此，本页的 `available=true` 仍只表示配置允许按需服务，**不表示**语音质量、克隆身份相似度、
-自然度或 ≥2h 长稳已认证。人工听审、真实声卡播放器、CER/WER 语料分层、联合实时全双工仍需按该文档
-§8.2 执行，并登记 commit、engine revision、制品 revision、设备与样本数。
+详见 [Issue #95 交付认证](../developers/issue-95-certification.md) §7.2。
+
+即便如此，本页的 `available=true` 只表示配置允许按需服务，**不表示**语音质量整体达标：数字/单位读法
+已有实测反例（如 11 位号码漏位、时刻 `7点40分` 被读成 `7.410分`），克隆身份相似度与自然度盲听仍待
+目标用户听审，联合实时全双工亦未认证。剩余人工项与明细见该文档 §7.2 与 §8.2，并登记 commit、
+engine revision、制品 revision、设备与样本数。
 
 ## 分句规划版本
 
