@@ -865,7 +865,7 @@ final class ControlKitTests: XCTestCase {
     /// 用户口径的用量只数语音接口：App 自己每 5 秒的轮询（`/health`、`/metrics`、
     /// `/v1/models`、`/v1/voices`）不能算成「请求」——本机实测它们占累计请求的 97.6%，
     /// 混进来这个数字就既不跟用户的行为走，也不反映工作量（REDESIGN-SPEC §7.6）。
-    func testUsageTotalsCountOnlySpeechEndpointsAndTakeWindowIncrease() {
+    func testUsageTotalsSplitSpeechAndPreviewEndpointsAndTakeWindowIncrease() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         func counters(tts: Double, previews: Double, asr: Double, health: Double) -> [String: Double] {
             [
@@ -888,7 +888,7 @@ final class ControlKitTests: XCTestCase {
         )
         let second = RuntimeMetricsSampler.makeSample(
             from: RuntimeMetricsSnapshot(
-                counters: counters(tts: 3, previews: 1, asr: 1, health: 412).merging([
+                counters: counters(tts: 3, previews: 2, asr: 1, health: 412).merging([
                     "speechrail_tts_generated_audio_seconds_total{voice_class=\"system\"}": 10.0,
                     "speechrail_tts_generated_audio_seconds_total{voice_class=\"custom\"}": 3.5,
                     "speechrail_asr_processed_audio_seconds_total": 8.0,
@@ -899,21 +899,24 @@ final class ControlKitTests: XCTestCase {
             previous: first
         )
 
-        // 第一个点只有累计量，窗口增量要等第二个点。
-        // 试听走同一条 record_tts，所以它算「合成」的一次。
+        // TTS 时长与耗时仍按同一条 lane；请求数按 speech / previews endpoint 分列。
         XCTAssertEqual(first.usage.ttsRequests, 3)
+        XCTAssertEqual(first.usage.ttsSpeechRequests, 2)
+        XCTAssertEqual(first.usage.voicePreviewRequests, 1)
         XCTAssertEqual(first.usage.asrRequests, 1)
         XCTAssertTrue(RuntimeMonitoringWindow(samples: [first]).usageIncrease.isEmpty)
 
         let window = RuntimeMonitoringWindow(samples: [first, second])
-        XCTAssertEqual(window.usageIncrease.ttsRequests, 1)
+        XCTAssertEqual(window.usageIncrease.ttsRequests, 2)
+        XCTAssertEqual(window.usageIncrease.ttsSpeechRequests, 1)
+        XCTAssertEqual(window.usageIncrease.voicePreviewRequests, 1)
         // 窗内没有识别请求：是 0 次，不是「没有数据」。
         XCTAssertEqual(window.usageIncrease.asrRequests, 0)
         XCTAssertEqual(window.usageIncrease.ttsAudioSeconds ?? 0, 7.5, accuracy: 0.000_1)
         XCTAssertEqual(window.usageIncrease.asrAudioSeconds, 0)
         XCTAssertEqual(window.usageIncrease.realtimeSessions, 1)
         // 12 次轮询发生在同一个窗口里，但它们不进 usage。
-        XCTAssertEqual(window.requestIncrease, 13)
+        XCTAssertEqual(window.requestIncrease, 14)
     }
 
     /// 服务重启会让计数器回退。那是无数据，不是 0——首屏不能把「刚重启」讲成
@@ -1157,6 +1160,7 @@ final class MetricsHistoryTests: XCTestCase {
                 ttsAudio: 3.5,
                 asrAudio: 0,
                 ttsLatency: (count: 1, averageMilliseconds: 1_000, p95Milliseconds: 1_200),
+                endpointCounts: ["/v1/voices/previews": 1],
                 footprint: 6_000_000_000,
                 activePeak: 1
             ),
@@ -1169,6 +1173,7 @@ final class MetricsHistoryTests: XCTestCase {
                 ttsAudio: 0,
                 asrAudio: 8,
                 asrLatency: (count: 9, averageMilliseconds: 2_000, p95Milliseconds: 2_400),
+                endpointCounts: [:],
                 footprint: 5_000_000_000,
                 activePeak: 2
             ),
@@ -1186,6 +1191,8 @@ final class MetricsHistoryTests: XCTestCase {
         XCTAssertEqual(history.recordCount, 2)
         XCTAssertEqual(history.skippedLines, 0)
         XCTAssertEqual(history.totals.ttsRequests, 1)
+        XCTAssertEqual(history.totals.ttsSpeechRequests, 0)
+        XCTAssertEqual(history.totals.voicePreviewRequests, 1)
         XCTAssertEqual(history.totals.asrRequests, 2)
         XCTAssertEqual(history.totals.ttsAudioSeconds, 3.5, accuracy: 0.000_1)
         XCTAssertEqual(history.totals.asrAudioSeconds, 8, accuracy: 0.000_1)
@@ -1203,7 +1210,30 @@ final class MetricsHistoryTests: XCTestCase {
         XCTAssertEqual(history.bucketSeconds, 60)
         XCTAssertEqual(history.points.count, 2)
         XCTAssertEqual(history.points.first?.ttsRequests, 1)
+        XCTAssertEqual(history.points.first?.ttsSpeechRequests, 0)
+        XCTAssertEqual(history.points.first?.voicePreviewRequests, 1)
         XCTAssertEqual(history.points.last?.asrRequests, 2)
+    }
+
+    func testLoaderDoesNotInferEndpointSplitFromHistoricalTtsAggregate() throws {
+        let row = rollupRow(
+            start: "2026-09-16T10:00:00.000Z",
+            end: "2026-09-16T10:01:00.000Z",
+            pid: 100,
+            tts: 2
+        )
+        try write(row, named: "2026-09-16.jsonl")
+
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-16T10:30:00Z"))
+        let history = MetricsHistoryLoader.load(
+            directory: workspace,
+            now: now,
+            windowSeconds: 3_600
+        )
+
+        XCTAssertEqual(history.totals.ttsRequests, 2)
+        XCTAssertNil(history.totals.ttsSpeechRequests)
+        XCTAssertNil(history.totals.voicePreviewRequests)
     }
 
     func testLoaderWeightsLatencyByObservationsInsteadOfAveragingAverages() throws {
@@ -1394,16 +1424,23 @@ final class MetricsHistoryTests: XCTestCase {
         asrAudio: Double = 0,
         ttsLatency: (count: Double, averageMilliseconds: Double, p95Milliseconds: Double)? = nil,
         asrLatency: (count: Double, averageMilliseconds: Double, p95Milliseconds: Double)? = nil,
+        endpointCounts: [String: Double]? = nil,
         footprint: Double? = nil,
         activePeak: Double = 0
     ) -> String {
         let memory = footprint.map {
             "{\"physical_footprint_bytes\":\(Int($0)),\"footprint_complete\":true,\"footprint_process_count\":4}"
         } ?? "{\"physical_footprint_bytes\":null,\"footprint_complete\":false,\"footprint_process_count\":5}"
+        let endpointCountsJSON = endpointCounts.map { counts in
+            let entries = counts.keys.sorted().map { endpoint in
+                "\"\(endpoint)\":\(counts[endpoint] ?? 0)"
+            }
+            return ",\"by_endpoint\":{\(entries.joined(separator: ","))}"
+        } ?? ""
         return """
         {"schema_version":1,"kind":"metrics_rollup","service_version":"2.6.5","profile":"quality",\
         "pid":\(pid),"interval_start":"\(start)","interval_end":"\(end)","interval_seconds":60.0,\
-        "requests":{"http_total":10,"speech_total":3,"tts":\(tts),"asr":\(asr),"failed":0,"client_errors":0},\
+        "requests":{"http_total":10,"speech_total":3,"tts":\(tts),"asr":\(asr),"failed":0,"client_errors":0\(endpointCountsJSON)},\
         "audio_seconds":{"tts":\(ttsAudio),"asr":\(asrAudio)},\
         "latency_ms":{"tts":\(latencyEntry(ttsLatency)),"asr":\(latencyEntry(asrLatency))},\
         "capacity":{"queue_rejections":0,"active":0,"pending":0,"active_peak":\(activePeak),"pending_peak":0,"total_capacity":4},\

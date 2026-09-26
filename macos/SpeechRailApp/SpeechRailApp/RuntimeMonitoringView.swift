@@ -226,12 +226,15 @@ public struct RuntimeMonitoringView: View {
             ),
             MetricValue(
                 id: "tts-usage",
-                title: "语音合成",
-                value: requestCountText(usage.ttsRequests),
+                title: "合成 / 音色试听",
+                value: requestPairCountText(
+                    speech: usage.ttsSpeechRequests,
+                    preview: usage.voicePreviewRequests
+                ),
                 detail: usageDetail(
                     requestCount: usage.ttsRequests,
                     audioSeconds: usage.ttsAudioSeconds,
-                    action: "合成"
+                    action: "合成与试听"
                 )
             ),
             MetricValue(
@@ -284,6 +287,13 @@ public struct RuntimeMonitoringView: View {
     private func requestCountText(_ value: Double?) -> String {
         if let value { return "\(formatCount(value)) 次" }
         return model.metrics == nil ? "—" : "0 次"
+    }
+
+    /// 保留 endpoint 维度；没有对应 label 时显示未提供，不从 TTS lane 合计拆算。
+    private func requestPairCountText(speech: Double?, preview: Double?) -> String {
+        let speechCount = speech.map(formatCount) ?? "—"
+        let previewCount = preview.map(formatCount) ?? "—"
+        return "\(speechCount) / \(previewCount) 次"
     }
 
     /// 用量副行：把「做了几次」和「一共多少音频」放在一起——次数相等时，音频长短
@@ -1301,12 +1311,15 @@ public struct RuntimeMonitoringView: View {
             ),
             MetricValue(
                 id: "tts-usage",
-                title: "语音合成",
-                value: historyRequestCountText(totals?.ttsRequests),
+                title: "合成 / 音色试听",
+                value: historyRequestPairCountText(
+                    speech: totals?.ttsSpeechRequests,
+                    preview: totals?.voicePreviewRequests
+                ),
                 detail: historyUsageDetail(
                     requests: totals?.ttsRequests,
                     audioSeconds: totals?.ttsAudioSeconds,
-                    action: "合成"
+                    action: "合成与试听"
                 )
             ),
             MetricValue(
@@ -1353,6 +1366,12 @@ public struct RuntimeMonitoringView: View {
     private func historyRequestCountText(_ value: Double?) -> String {
         guard let value else { return history == nil ? "—" : "0 次" }
         return "\(formatCount(value)) 次"
+    }
+
+    private func historyRequestPairCountText(speech: Double?, preview: Double?) -> String {
+        let speechCount = speech.map(formatCount) ?? "—"
+        let previewCount = preview.map(formatCount) ?? "—"
+        return "\(speechCount) / \(previewCount) 次"
     }
 
     private func historyUsageDetail(
@@ -1466,7 +1485,7 @@ public struct RuntimeMonitoringView: View {
                     x: .value("时间", bucketCenter(point)),
                     y: .value("请求次数", point.ttsRequests)
                 )
-                .foregroundStyle(by: .value("类别", "语音合成"))
+                .foregroundStyle(by: .value("类别", "合成与试听"))
                 .opacity(Self.usageAreaOpacity)
                 .interpolationMethod(.monotone)
 
@@ -1513,7 +1532,7 @@ public struct RuntimeMonitoringView: View {
             }
         }
         .chartForegroundStyleScale([
-            "语音合成": SpeechRailDesignTokens.Color.voice,
+            "合成与试听": SpeechRailDesignTokens.Color.voice,
             "语音识别": SpeechRailDesignTokens.Color.info,
         ])
         .chartLegend(position: .bottom, alignment: .leading)
@@ -1540,7 +1559,7 @@ public struct RuntimeMonitoringView: View {
                         ttsSeconds: $0.ttsSeconds
                     )
                 },
-                seriesNames: ["语音合成", "语音识别"],
+                seriesNames: ["合成与试听", "语音识别"],
                 latencyCaption: "折线是每个统计桶的加权平均耗时（ms），读右侧刻度。"
             )
         )
@@ -1680,7 +1699,7 @@ public struct RuntimeMonitoringView: View {
             // 图上是「一个坐标系、两套刻度」，哪根轴读什么由图上那行图例说（`usageLegendNote`）。
             // 这里只说数据源与粒度，不再重复讲图（2026-09-16 用户复核）。
             detail: isHistoryWindow
-                ? "数据来自服务落盘的历史，服务重启后仍然连续；每个点是一个统计桶。"
+                ? "历史请求量合并普通合成与音色试听；服务重启后仍连续，每个点是一个统计桶。"
                 : "每 5 秒记录一次，只覆盖 App 打开期间。"
         )
     }
@@ -1909,7 +1928,9 @@ public struct RuntimeMonitoringView: View {
             "- skipped_lines: \(history.skippedLines)",
             "- directory: \(history.directoryPath)",
             "- service_versions: \(history.serviceVersions.isEmpty ? "未记录" : history.serviceVersions.joined(separator: "→"))",
-            "- tts_requests: \(formatCount(history.totals.ttsRequests))",
+            "- tts_lane_requests: \(formatCount(history.totals.ttsRequests))",
+            "- tts_speech_requests: \(history.totals.ttsSpeechRequests.map(formatCount) ?? "未提供")",
+            "- voice_preview_requests: \(history.totals.voicePreviewRequests.map(formatCount) ?? "未提供")",
             "- asr_requests: \(formatCount(history.totals.asrRequests))",
             "- failed_requests: \(formatCount(history.totals.failedRequests))",
             "- tts_audio_seconds: \(String(format: "%.1f", history.totals.ttsAudioSeconds))",
@@ -1947,7 +1968,9 @@ public struct RuntimeMonitoringView: View {
         summary: \(activitySummary)
 
         usage（用户口径：只含语音接口，不含本 App 的轮询）:
-        - tts_requests: \(window.usageIncrease.ttsRequests.map(formatCount) ?? "未提供")
+        - tts_lane_requests: \(window.usageIncrease.ttsRequests.map(formatCount) ?? "未提供")
+        - tts_speech_requests: \(window.usageIncrease.ttsSpeechRequests.map(formatCount) ?? "未提供")
+        - voice_preview_requests: \(window.usageIncrease.voicePreviewRequests.map(formatCount) ?? "未提供")
         - asr_requests: \(window.usageIncrease.asrRequests.map(formatCount) ?? "未提供")
         - tts_audio_seconds: \(window.usageIncrease.ttsAudioSeconds.map { String(format: "%.1f", $0) } ?? "未提供")
         - asr_audio_seconds: \(window.usageIncrease.asrAudioSeconds.map { String(format: "%.1f", $0) } ?? "未提供")
@@ -2094,11 +2117,14 @@ public struct RuntimeMonitoringView: View {
         guard !history.isEmpty else {
             return "\(timeWindow.phrase)：服务没有写过历史指标。"
         }
-        let actions = [
-            history.totals.ttsRequests > 0 ? "合成 \(formatCount(history.totals.ttsRequests)) 次" : nil,
-            history.totals.asrRequests > 0 ? "识别 \(formatCount(history.totals.asrRequests)) 次" : nil,
-        ]
-        .compactMap { $0 }
+        var actions = ttsActivityDescriptions(
+            speech: history.totals.ttsSpeechRequests,
+            preview: history.totals.voicePreviewRequests,
+            laneTotal: history.totals.ttsRequests
+        )
+        if history.totals.asrRequests > 0 {
+            actions.append("识别 \(formatCount(history.totals.asrRequests)) 次")
+        }
         guard !actions.isEmpty else {
             return "\(timeWindow.phrase)：没有语音请求，服务空闲可用。"
         }
@@ -2112,12 +2138,18 @@ public struct RuntimeMonitoringView: View {
     /// 实时档的结论句：数据来自 App 这次的采样，随 App 退出重置。
     private var liveActivitySummary: String {
         let usage = window.usageIncrease
-        let actions = [
-            (usage.ttsRequests ?? 0) > 0 ? "合成 \(formatCount(usage.ttsRequests ?? 0)) 次" : nil,
-            (usage.asrRequests ?? 0) > 0 ? "识别 \(formatCount(usage.asrRequests ?? 0)) 次" : nil,
-        ]
-        .compactMap { $0 }
+        var actions = ttsActivityDescriptions(
+            speech: usage.ttsSpeechRequests,
+            preview: usage.voicePreviewRequests,
+            laneTotal: usage.ttsRequests
+        )
+        if let requests = usage.asrRequests, requests > 0 {
+            actions.append("识别 \(formatCount(requests)) 次")
+        }
         guard !actions.isEmpty else {
+            if usage.ttsRequests == nil, usage.asrRequests == nil {
+                return "\(timeWindow.phrase)：没有可读取的语音请求计数。"
+            }
             return "\(timeWindow.phrase)：没有语音请求，服务空闲可用。"
         }
         let activity = actions.joined(separator: "、")
@@ -2129,6 +2161,23 @@ public struct RuntimeMonitoringView: View {
             return "\(timeWindow.phrase)：\(activity)。"
         }
         return "\(timeWindow.phrase)：\(activity)，都正常。"
+    }
+
+    /// 有 endpoint label 时按接口分别陈述；只有 lane 总数时保留合并口径。
+    private func ttsActivityDescriptions(
+        speech: Double?,
+        preview: Double?,
+        laneTotal: Double?
+    ) -> [String] {
+        if let speech, let preview {
+            return [
+                speech > 0 ? "普通合成 \(formatCount(speech)) 次" : nil,
+                preview > 0 ? "音色试听 \(formatCount(preview)) 次" : nil,
+            ]
+            .compactMap { $0 }
+        }
+        guard let laneTotal, laneTotal > 0 else { return [] }
+        return ["合成与试听 \(formatCount(laneTotal)) 次（未区分）"]
     }
 }
 

@@ -79,7 +79,6 @@ struct SpeechRailApp: App {
         }
 #endif
         let diagnosticsClient: any ServiceDiagnosticsClient
-        let capabilityClient: any ServiceModelCapabilityClient
         let discoveryClient: any ServiceCapabilityDiscoveryClient
         let creatorClient: (any SpeechRailCreatorClient)?
 #if DEBUG
@@ -90,20 +89,17 @@ struct SpeechRailApp: App {
                 )
             )
             diagnosticsClient = fixtureClient
-            capabilityClient = fixtureClient
             discoveryClient = fixtureClient
             creatorClient = UITestCreatorClient()
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
-            capabilityClient = liveServiceClient
             discoveryClient = liveServiceClient
             creatorClient = liveServiceClient
         }
 #else
         let liveServiceClient = ServiceAPIClient()
         diagnosticsClient = liveServiceClient
-        capabilityClient = liveServiceClient
         discoveryClient = liveServiceClient
         creatorClient = liveServiceClient
 #endif
@@ -130,7 +126,6 @@ struct SpeechRailApp: App {
         let appModel = AppModel(
             transport: transport,
             apiClient: diagnosticsClient,
-            capabilityClient: capabilityClient,
             discoveryClient: discoveryClient,
             creatorClient: creatorClient,
             workStore: workStore,
@@ -241,26 +236,8 @@ struct SpeechRailApp: App {
         }
         let assistantSession = AssistantSession(coordinator: coordinator)
         assistantSession.preferences = { sessionPreferences }
-        assistantSession.realtimeVoiceRevision = { [weak appModel] voiceID in
-            SpeechRailCapabilityRevisionSelector.voiceRevision(
-                for: voiceID,
-                in: appModel?.effectiveCapabilities,
-                operation: "realtime_speech"
-            )
-        }
-        assistantSession.realtimeModelRevision = { [weak appModel] voiceID in
-            guard
-                let snapshot = appModel?.effectiveCapabilities,
-                let revision = snapshot.models["tts"]?.catalogRevision,
-                snapshot.voices.contains(where: { voice in
-                    guard voice.available, voice.operations["realtime_speech"] != nil else {
-                        return false
-                    }
-                    guard let voiceID else { return true }
-                    return voice.id == voiceID || voice.aliases.contains(voiceID)
-                })
-            else { return nil }
-            return revision
+        assistantSession.realtimeCapabilityBindingProvider = { [weak appModel] voiceID in
+            await appModel?.realtimeCapabilityBinding(for: voiceID)
         }
         assistantSession.serviceReadiness = { [weak appModel] in
             do {
@@ -291,9 +268,8 @@ struct SpeechRailApp: App {
         captionSession.presentBand = { visible in
             band.setVisible(visible)
         }
-        // 「就绪」要在**按下的那一刻**判定，不是读一轮缓存的健康快照：`⌘⇧L` 是全局键，
-        // 按下时很可能这一轮刷新还没跑完，拿旧结论会把可用说成不可用。loopback 上一次
-        // `/health` 就是毫秒级的事。
+        // `/readyz` 在这里仅提供运行诊断；会话准入仍以同一份 capability binding 为准。
+        // `⌘⇧L` 启动时仍直接读取诊断端点，避免把过期的 profile 展示成当前读数。
         captionSession.serviceReadiness = { [weak appModel] in
             do {
                 let readiness = try await discoveryClient.fetchReadiness()
@@ -306,6 +282,9 @@ struct SpeechRailApp: App {
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
+        }
+        captionSession.realtimeCapabilityBindingProvider = { [weak appModel] in
+            await appModel?.realtimeCapabilityBinding()
         }
         teleprompterSession.serviceReadiness = { [weak appModel] in
             do {
@@ -320,15 +299,21 @@ struct SpeechRailApp: App {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
         }
+        teleprompterSession.realtimeCapabilityBindingProvider = { [weak appModel] in
+            await appModel?.realtimeCapabilityBinding()
+        }
         let teleprompterSettings = TeleprompterStageSettings()
         let teleprompterStage = TeleprompterStageWindowController(
             session: teleprompterSession,
             settings: teleprompterSettings
         )
         // 会议助手的接线（§12 阶段 6）。它与字幕共用分人那条链路，差别在来源与纪要，
-        // 所以这里只接三件它自己不认识的事：服务就绪判定、新会话预填值、来源断了的出口。
+        // 所以这里只接 operation binding、服务运行诊断、新会话预填值和来源中断出口。
         let meetingSession = MeetingSession(coordinator: coordinator)
         meetingSession.preferences = { sessionPreferences }
+        meetingSession.realtimeCapabilityBindingProvider = { [weak appModel] in
+            await appModel?.realtimeCapabilityBinding()
+        }
         meetingSession.serviceReadiness = { [weak appModel] in
             do {
                 let readiness = try await discoveryClient.fetchReadiness()
@@ -724,22 +709,11 @@ struct SpeechRailCommands: Commands {
 #if DEBUG
 private struct UITestServiceDiagnosticsClient:
     ServiceDiagnosticsClient,
-    ServiceModelCapabilityClient,
     ServiceCapabilityDiscoveryClient
 {
     let metricsUnavailable: Bool
 
     var port: Int? { 8201 }
-
-    /// 与下面的健康快照一致：fixture 档位是 quality，VoiceDesign 与 Base 两个
-    /// capability 都在。能力结论读这里，不读音色列表。
-    func fetchModelCapabilities() async throws -> ServiceModelCapabilities {
-        ServiceModelCapabilities(
-            supportsPreview: true,
-            supportsClone: true,
-            supportsInstruction: true
-        )
-    }
 
     func fetchHealthSnapshot() async throws -> HealthSnapshot {
         HealthSnapshot(
@@ -1000,6 +974,40 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         )
     }
 
+    func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] {
+        await voiceDesignStore.list()
+    }
+
+    func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        try await voiceDesignStore.get(id: id)
+    }
+
+    func fetchVoiceDesignReferenceAudio(
+        id: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        try await voiceDesignStore.referenceAudio(
+            id: id,
+            expectedRevision: expectedRevision
+        )
+    }
+
+    func fetchVoiceDesignValidationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        try await voiceDesignStore.validationAudio(
+            id: id,
+            validationID: validationID,
+            expectedRevision: expectedRevision
+        )
+    }
+
+    func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        try await voiceDesignStore.cancel(id: id)
+    }
+
     func confirmVoiceDesignCandidate(
         id: String,
         referenceText: String?
@@ -1038,6 +1046,12 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         )
         _ = await store.insert(voice)
         return VoiceDesignPublishResult(candidate: candidate, voice: voice)
+    }
+
+    func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        await store.cloneIdempotencyStatus(for: idempotencyKey)
     }
 
     func fetchClonePrompts() async throws -> [ClonePrompt] {
@@ -1100,15 +1114,16 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
             refText: referenceText,
             durationSeconds: 11
         )
-        return await store.insert(voice)
+        return await store.registerClone(voice, idempotencyKey: idempotencyKey)
     }
 
     func updateVoice(
         id: String,
         name: String?,
         instruction: String?,
-        seed: Int?
-    ) async throws -> CreatorVoice {
+        seed: Int?,
+        expectedRevision: String
+    ) async throws -> VoiceRevisionMutation {
         guard let voice = await store.update(
             id: id,
             name: name,
@@ -1117,7 +1132,12 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         ) else {
             throw ServiceAPIClientError.requestFailed
         }
-        return voice
+        return VoiceRevisionMutation(
+            id: voice.id,
+            voiceRevision: voice.revision,
+            mode: voice.mode,
+            revoked: voice.revoked
+        )
     }
 
     func deleteVoice(id: String) async throws {
@@ -1154,6 +1174,7 @@ private actor UITestVoiceStore {
             mode: "instruction"
         ),
     ]
+    private var cloneResultIDsByIdempotencyKey: [String: String] = [:]
 
     func list() -> [CreatorVoice] {
         voices
@@ -1165,6 +1186,27 @@ private actor UITestVoiceStore {
 
     func insert(_ voice: CreatorVoice) -> CreatorVoice {
         voices.append(voice)
+        return voice
+    }
+
+    func cloneIdempotencyStatus(for key: String) -> CloneIdempotencyStatus {
+        guard let resultID = cloneResultIDsByIdempotencyKey[key] else {
+            return CloneIdempotencyStatus(state: .new, resultID: nil)
+        }
+        return CloneIdempotencyStatus(state: .completed, resultID: resultID)
+    }
+
+    func registerClone(_ voice: CreatorVoice, idempotencyKey: String?) -> CreatorVoice {
+        if let idempotencyKey,
+           let existingID = cloneResultIDsByIdempotencyKey[idempotencyKey],
+           let existingVoice = voices.first(where: { $0.id == existingID })
+        {
+            return existingVoice
+        }
+        voices.append(voice)
+        if let idempotencyKey {
+            cloneResultIDsByIdempotencyKey[idempotencyKey] = voice.id
+        }
         return voice
     }
 
@@ -1219,6 +1261,53 @@ private actor UITestVoiceDesignStore {
     private var entries: [String: Entry] = [:]
     private var nextID = 1
 
+    func list() -> [VoiceDesignCandidate] {
+        entries.keys.sorted().map(candidate(for:))
+    }
+
+    func get(id: String) throws -> VoiceDesignCandidate {
+        guard entries[id] != nil else { throw ServiceAPIClientError.invalidResponse }
+        return candidate(for: id)
+    }
+
+    func referenceAudio(id: String, expectedRevision: String) throws -> Data {
+        guard let entry = entries[id],
+              entry.revision == expectedRevision,
+              entry.state != "cancelled",
+              entry.state != "failed"
+        else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return UITestAudioFactory.silentWAV
+    }
+
+    func validationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) throws -> Data {
+        guard let entry = entries[id],
+              entry.revision == expectedRevision,
+              entry.validations.contains(where: {
+                  $0.validationID == validationID
+                      && $0.candidateRevision == expectedRevision
+              })
+        else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return UITestAudioFactory.silentWAV
+    }
+
+    func cancel(id: String) throws -> VoiceDesignCandidate {
+        guard var entry = entries[id], entry.state != "published" else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        entry.state = "cancelled"
+        entry.publishable = false
+        entries[id] = entry
+        return candidate(for: id)
+    }
+
     func create(
         voiceID: String,
         name: String,
@@ -1272,12 +1361,16 @@ private actor UITestVoiceDesignStore {
             naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
             failureCodes: [],
             capabilityKey: "reference.render",
-            transcriptMatch: 0.99
+            modelArtifact: "tts-1.7b-base-bf16",
+            modelCatalogRevision: String(repeating: "a", count: 40),
+            transcriptMatch: 0.99,
+            createdAt: 1,
+            updatedAt: 1
         )
         nextID += 1
         entry.validations = [validation]
         entry.publishable = reviewed
-        entry.state = reviewed ? "publishable" : "confirmed"
+        entry.state = reviewed ? "publishable" : "validating"
         entries[id] = entry
         return candidate(for: id)
     }

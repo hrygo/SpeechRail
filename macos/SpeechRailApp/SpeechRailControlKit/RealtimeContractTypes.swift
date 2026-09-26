@@ -206,19 +206,211 @@ public struct RealtimeEventEnvelope<Payload: Sendable>: Sendable {
     }
 }
 
+/// A single-consumer event stream with explicit count and decoded-audio budgets.
+///
+/// Terminal events are stored separately from the bounded data queue so a
+/// caller can always report why the stream ended after discarding an
+/// overflowing queue.
+public struct RealtimeEventStream<Payload: Sendable>: AsyncSequence, Sendable {
+    public typealias Element = RealtimeEventEnvelope<Payload>
+
+    public struct Limits: Equatable, Sendable {
+        public static var `default`: Limits { Limits() }
+
+        public let maxBufferedEvents: Int
+        public let maxBufferedAudioBytes: Int
+
+        public init(
+            maxBufferedEvents: Int = 256,
+            maxBufferedAudioBytes: Int = 4 * 1024 * 1024
+        ) {
+            self.maxBufferedEvents = Swift.max(1, maxBufferedEvents)
+            self.maxBufferedAudioBytes = Swift.max(0, maxBufferedAudioBytes)
+        }
+    }
+
+    public enum YieldResult: Equatable, Sendable {
+        case enqueued
+        case overflow
+        case terminated
+    }
+
+    private let channel: RealtimeEventChannel<Payload>
+
+    public init(limits: Limits = .default) {
+        channel = RealtimeEventChannel(limits: limits)
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private let channel: RealtimeEventChannel<Payload>
+        private let iteratorID = UUID()
+
+        fileprivate init(channel: RealtimeEventChannel<Payload>) {
+            self.channel = channel
+        }
+
+        public mutating func next() async -> Element? {
+            let channel = self.channel
+            let iteratorID = self.iteratorID
+            return await withTaskCancellationHandler {
+                await channel.next(iteratorID: iteratorID)
+            } onCancel: {
+                Task {
+                    await channel.cancelNext(iteratorID: iteratorID)
+                }
+            }
+        }
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(channel: channel)
+    }
+
+    @discardableResult
+    public func yield(
+        _ element: Element,
+        decodedAudioBytes: Int = 0
+    ) async -> YieldResult {
+        await channel.yield(element, decodedAudioBytes: decodedAudioBytes)
+    }
+
+    /// Finish the stream. At most two terminal events are retained out of
+    /// band; normal finish drains queued events first, while overflow can
+    /// discard them and deliver its terminal immediately.
+    public func finish(
+        terminalEvents: [Element] = [],
+        discardPending: Bool = false
+    ) async {
+        await channel.finish(
+            terminalEvents: Array(terminalEvents.prefix(2)),
+            discardPending: discardPending
+        )
+    }
+}
+
+private actor RealtimeEventChannel<Payload: Sendable> {
+    typealias Element = RealtimeEventEnvelope<Payload>
+
+    private struct BufferedEvent: Sendable {
+        let element: Element
+        let decodedAudioBytes: Int
+    }
+
+    private struct Waiter {
+        let iteratorID: UUID
+        let continuation: CheckedContinuation<Element?, Never>
+    }
+
+    private let limits: RealtimeEventStream<Payload>.Limits
+    private var bufferedEvents: [BufferedEvent] = []
+    private var bufferedAudioBytes = 0
+    private var terminalEvents: [Element] = []
+    private var waiters: [Waiter] = []
+    private var isFinished = false
+
+    init(limits: RealtimeEventStream<Payload>.Limits) {
+        self.limits = limits
+    }
+
+    func yield(
+        _ element: Element,
+        decodedAudioBytes: Int
+    ) -> RealtimeEventStream<Payload>.YieldResult {
+        guard !isFinished else { return .terminated }
+        guard
+            decodedAudioBytes >= 0,
+            decodedAudioBytes <= limits.maxBufferedAudioBytes,
+            bufferedEvents.count < limits.maxBufferedEvents,
+            bufferedAudioBytes <= limits.maxBufferedAudioBytes - decodedAudioBytes
+        else {
+            return .overflow
+        }
+
+        bufferedEvents.append(
+            BufferedEvent(element: element, decodedAudioBytes: decodedAudioBytes)
+        )
+        bufferedAudioBytes += decodedAudioBytes
+        wakeWaiters()
+        return .enqueued
+    }
+
+    func next(iteratorID: UUID) async -> Element? {
+        if Task.isCancelled { return nil }
+        if let element = takeNext() { return element }
+        guard !isFinished else { return nil }
+        return await withCheckedContinuation { continuation in
+            waiters.append(Waiter(iteratorID: iteratorID, continuation: continuation))
+        }
+    }
+
+    func cancelNext(iteratorID: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.iteratorID == iteratorID }) else {
+            return
+        }
+        waiters.remove(at: index).continuation.resume(returning: nil)
+    }
+
+    func finish(terminalEvents: [Element], discardPending: Bool) {
+        guard !isFinished else { return }
+        if discardPending {
+            bufferedEvents.removeAll(keepingCapacity: false)
+            bufferedAudioBytes = 0
+        }
+        self.terminalEvents = terminalEvents
+        isFinished = true
+        wakeWaiters()
+    }
+
+    private func takeNext() -> Element? {
+        if !bufferedEvents.isEmpty {
+            let buffered = bufferedEvents.removeFirst()
+            bufferedAudioBytes -= buffered.decodedAudioBytes
+            return buffered.element
+        }
+        guard !terminalEvents.isEmpty else { return nil }
+        return terminalEvents.removeFirst()
+    }
+
+    private func wakeWaiters() {
+        while !waiters.isEmpty {
+            guard let element = takeNext() else {
+                guard isFinished else { return }
+                let waiter = waiters.removeFirst()
+                waiter.continuation.resume(returning: nil)
+                continue
+            }
+            let waiter = waiters.removeFirst()
+            waiter.continuation.resume(returning: element)
+        }
+    }
+}
+
 public enum RealtimeSequenceStatus: Equatable, Sendable {
     case first
     case contiguous
     case gap(expected: Int, received: Int)
     case regression(last: Int, received: Int)
     case sessionChanged(expected: String?, received: String?)
+    case duplicateEventID(String)
     case missing
+
+    public var isAccepted: Bool {
+        switch self {
+        case .first, .contiguous:
+            true
+        case .gap, .regression, .sessionChanged, .duplicateEventID, .missing:
+            false
+        }
+    }
 }
 
 /// Stateful sequence/session validation for one WebSocket connection.
 public struct RealtimeSequenceValidator: Sendable {
+    public static let eventIDWindow = 64
+
     public private(set) var sessionID: String?
     public private(set) var lastSequence: Int?
+    public private(set) var recentEventIDs: [String] = []
 
     public init(sessionID: String? = nil, lastSequence: Int? = nil) {
         self.sessionID = sessionID
@@ -226,31 +418,45 @@ public struct RealtimeSequenceValidator: Sendable {
     }
 
     public mutating func accept(_ metadata: RealtimeEventMetadata) -> RealtimeSequenceStatus {
-        if let expectedSession = sessionID, expectedSession != metadata.sessionID {
-            let status = RealtimeSequenceStatus.sessionChanged(
-                expected: expectedSession,
-                received: metadata.sessionID
-            )
-            sessionID = metadata.sessionID
-            lastSequence = metadata.sequence
-            return status
-        }
-
-        if sessionID == nil {
-            sessionID = metadata.sessionID
-        }
-
-        guard let sequence = metadata.sequence else {
+        guard
+            let eventID = metadata.eventID,
+            !eventID.isEmpty,
+            let receivedSessionID = metadata.sessionID,
+            !receivedSessionID.isEmpty,
+            let sequence = metadata.sequence,
+            sequence >= 0
+        else {
             return .missing
         }
 
-        guard let lastSequence else {
+        guard !recentEventIDs.contains(eventID) else {
+            return .duplicateEventID(eventID)
+        }
+
+        if let expectedSession = sessionID, expectedSession != receivedSessionID {
+            return .sessionChanged(
+                expected: expectedSession,
+                received: receivedSessionID
+            )
+        }
+
+        if sessionID == nil, lastSequence == nil {
+            guard sequence == 0 else {
+                return .gap(expected: 0, received: sequence)
+            }
+            sessionID = receivedSessionID
             self.lastSequence = sequence
+            remember(eventID)
             return .first
         }
 
-        if sequence == lastSequence + 1 {
+        guard let lastSequence else {
+            return .missing
+        }
+
+        if lastSequence < Int.max, sequence == lastSequence + 1 {
             self.lastSequence = sequence
+            remember(eventID)
             return .contiguous
         }
 
@@ -264,9 +470,17 @@ public struct RealtimeSequenceValidator: Sendable {
         return .gap(expected: lastSequence + 1, received: sequence)
     }
 
+    private mutating func remember(_ eventID: String) {
+        recentEventIDs.append(eventID)
+        if recentEventIDs.count > Self.eventIDWindow {
+            recentEventIDs.removeFirst(recentEventIDs.count - Self.eventIDWindow)
+        }
+    }
+
     public mutating func reset() {
         sessionID = nil
         lastSequence = nil
+        recentEventIDs.removeAll(keepingCapacity: true)
     }
 }
 

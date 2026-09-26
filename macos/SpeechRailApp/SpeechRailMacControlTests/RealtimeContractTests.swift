@@ -88,16 +88,16 @@ final class RealtimeContractTests: XCTestCase {
         var validator = RealtimeSequenceValidator()
 
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(eventID: "e1", sessionID: "s1", sequence: 1)),
+            validator.accept(RealtimeEventMetadata(eventID: "e1", sessionID: "s1", sequence: 0)),
             .first
         )
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(eventID: "e2", sessionID: "s1", sequence: 3)),
-            .gap(expected: 2, received: 3)
+            validator.accept(RealtimeEventMetadata(eventID: "e2", sessionID: "s1", sequence: 2)),
+            .gap(expected: 1, received: 2)
         )
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(eventID: "e3", sessionID: "s1", sequence: 2)),
-            .regression(last: 3, received: 2)
+            validator.accept(RealtimeEventMetadata(eventID: "e3", sessionID: "s1", sequence: 1)),
+            .regression(last: 2, received: 1)
         )
     }
 
@@ -105,17 +105,976 @@ final class RealtimeContractTests: XCTestCase {
         var validator = RealtimeSequenceValidator()
 
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(sessionID: "s1", sequence: 1)),
+            validator.accept(RealtimeEventMetadata(eventID: "e1", sessionID: "s1", sequence: 0)),
             .first
         )
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(sessionID: "s1")),
+            validator.accept(RealtimeEventMetadata(eventID: "e2", sessionID: "s1")),
             .missing
         )
         XCTAssertEqual(
-            validator.accept(RealtimeEventMetadata(sessionID: "s2", sequence: 1)),
+            validator.accept(RealtimeEventMetadata(eventID: "e3", sessionID: "s2", sequence: 1)),
             .sessionChanged(expected: "s1", received: "s2")
         )
+        XCTAssertEqual(validator.sessionID, "s1", "被拒绝的新 session 不得覆盖连接身份")
+    }
+
+    func testSequenceValidatorRejectsMissingIdentityAndNonzeroInitialSequence() {
+        var validator = RealtimeSequenceValidator()
+
+        XCTAssertEqual(
+            validator.accept(RealtimeEventMetadata(sessionID: "s1", sequence: 0)),
+            .missing,
+            "基础事件缺 event_id 时必须拒绝"
+        )
+        XCTAssertEqual(
+            validator.accept(RealtimeEventMetadata(eventID: "e1", sequence: 0)),
+            .missing,
+            "基础事件缺 session_id 时必须拒绝"
+        )
+        XCTAssertEqual(
+            validator.accept(RealtimeEventMetadata(eventID: "e2", sessionID: "s1", sequence: 1)),
+            .gap(expected: 0, received: 1),
+            "首个服务事件必须使用 sequence 0"
+        )
+        XCTAssertNil(validator.sessionID, "无效首个事件不得绑定 session")
+        XCTAssertNil(validator.lastSequence, "无效首个事件不得推进 sequence")
+    }
+
+    func testSequenceValidatorRejectsDuplicateEventID() {
+        var validator = RealtimeSequenceValidator()
+        XCTAssertEqual(
+            validator.accept(RealtimeEventMetadata(eventID: "e1", sessionID: "s1", sequence: 0)),
+            .first
+        )
+
+        let duplicate = validator.accept(
+            RealtimeEventMetadata(eventID: "e1", sessionID: "s1", sequence: 1)
+        )
+        XCTAssertFalse(
+            duplicate == .first || duplicate == .contiguous,
+            "重复 event_id 不能进入业务事件流"
+        )
+        XCTAssertEqual(validator.lastSequence, 0, "重复事件不得推进 sequence")
+    }
+
+    func testRealtimeEventStreamDiscardsOverflowedQueueAndPreservesTerminal() async {
+        let stream = RealtimeEventStream<Int>(
+            limits: .init(maxBufferedEvents: 1, maxBufferedAudioBytes: 4)
+        )
+        let first = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 1)
+        let overflow = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 2)
+
+        let firstResult = await stream.yield(first)
+        let overflowResult = await stream.yield(overflow)
+        XCTAssertEqual(firstResult, .enqueued)
+        XCTAssertEqual(overflowResult, .overflow)
+
+        let terminal = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 99)
+        await stream.finish(terminalEvents: [terminal], discardPending: true)
+        var iterator = stream.makeAsyncIterator()
+        let delivered = await iterator.next()
+        let ended = await iterator.next()
+        XCTAssertEqual(delivered?.payload, 99)
+        XCTAssertNil(ended)
+    }
+
+    func testRealtimeEventStreamReleasesDecodedAudioBudgetWhenConsumed() async {
+        let stream = RealtimeEventStream<Int>(
+            limits: .init(maxBufferedEvents: 3, maxBufferedAudioBytes: 4)
+        )
+        let first = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 1)
+        let blocked = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 2)
+        let next = RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: 3)
+
+        let firstResult = await stream.yield(first, decodedAudioBytes: 3)
+        let blockedResult = await stream.yield(blocked, decodedAudioBytes: 2)
+        XCTAssertEqual(firstResult, .enqueued)
+        XCTAssertEqual(blockedResult, .overflow)
+
+        var iterator = stream.makeAsyncIterator()
+        let consumed = await iterator.next()
+        XCTAssertEqual(consumed?.payload, 1)
+        let nextResult = await stream.yield(next, decodedAudioBytes: 2)
+        XCTAssertEqual(nextResult, .enqueued)
+
+        await stream.finish()
+        let buffered = await iterator.next()
+        let ended = await iterator.next()
+        XCTAssertEqual(buffered?.payload, 3)
+        XCTAssertNil(ended)
+    }
+
+    #if SWIFT_PACKAGE
+    func testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let generation = UUID()
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+        let transcript = "A🦜e\u{301}"
+        XCTAssertEqual(transcript.unicodeScalars.count, 4)
+        XCTAssertTrue(
+            state.complete(
+                itemID: "item-1",
+                transcript: transcript,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+
+        let invalidSpan = RealtimeEventState.Range(start: 0, end: 5)
+        let firstUnit = RealtimeASRClient.AttributionUnit(
+            segmentUID: "segment-1",
+            textStart: 1,
+            textEnd: 3,
+            audioStartSample: 0,
+            audioEndSample: 4,
+            timingQuality: "aligned",
+            granularity: "word"
+        )
+        XCTAssertFalse(
+            state.applyAlignment(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: invalidSpan,
+                units: [firstUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "UTF-16/Character lengths must not admit an out-of-range codepoint span"
+        )
+
+        let fullSpan = RealtimeEventState.Range(start: 0, end: 4)
+        XCTAssertTrue(
+            state.applyAlignment(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: fullSpan,
+                units: [firstUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        let secondUnit = RealtimeASRClient.AttributionUnit(
+            segmentUID: "segment-2",
+            textStart: 3,
+            textEnd: 4,
+            audioStartSample: 4,
+            audioEndSample: 8,
+            timingQuality: "aligned",
+            granularity: "character"
+        )
+        XCTAssertTrue(
+            state.applyAlignment(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: fullSpan,
+                units: [secondUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "multiple chunks sharing one metadata revision must accumulate"
+        )
+        XCTAssertEqual(state.snapshot(itemID: "item-1")?.alignmentUnits.map(\.segmentUID), [
+            "segment-1", "segment-2"
+        ])
+        XCTAssertFalse(
+            state.applyAlignment(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 16,
+                metadataRevision: 2,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: fullSpan,
+                units: [secondUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "stale transcript revision must not replace current alignment"
+        )
+        XCTAssertFalse(
+            state.applyAlignment(
+                itemID: "item-1",
+                taskID: "old-task",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 2,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: fullSpan,
+                units: [secondUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "a stale task must not alter the current item"
+        )
+        let firstSpeakerSpan = RealtimeASRClient.DiarizationSpan(
+            speaker: "speaker_1",
+            startSample: 0,
+            endSample: 4
+        )
+        let secondSpeakerSpan = RealtimeASRClient.DiarizationSpan(
+            speaker: "speaker_2",
+            startSample: 4,
+            endSample: 8
+        )
+        XCTAssertFalse(
+            state.applyDiarization(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 16,
+                metadataRevision: 3,
+                spans: [firstSpeakerSpan],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "diarization from a different transcript revision must not mix with alignment"
+        )
+        XCTAssertTrue(
+            state.applyDiarization(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 3,
+                spans: [firstSpeakerSpan],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            state.applyDiarization(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 3,
+                spans: [secondSpeakerSpan],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(state.snapshot(itemID: "item-1")?.diarizationSpans.count, 2)
+        XCTAssertFalse(
+            state.applyDiarization(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 2,
+                spans: [firstSpeakerSpan],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "older diarization metadata revisions must be ignored independently"
+        )
+
+        var reverse = RealtimeEventState()
+        reverse.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            reverse.complete(
+                itemID: "item-2",
+                transcript: transcript,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            reverse.applyDiarization(
+                itemID: "item-2",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 1,
+                spans: [firstSpeakerSpan],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            reverse.applyAlignment(
+                itemID: "item-2",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 16,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 8),
+                codepointSpan: fullSpan,
+                units: [firstUnit],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "alignment from a different transcript revision must not mix with diarization"
+        )
+        XCTAssertTrue(
+            state.acceptSessionEvent(
+                taskID: "task-1",
+                epoch: 1,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            state.applyDiarization(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 17,
+                metadataRevision: 4,
+                spans: [],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "late results from an earlier epoch must not modify retained items"
+        )
+    }
+
+    func testRealtimeItemStateBoundsTranscriptBytesAndRejectsOversizedUpdates() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let generation = UUID()
+        let maximumTranscriptBytes = 64 * 1024
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+        let oversizedTranscript = String(repeating: "x", count: maximumTranscriptBytes + 1)
+
+        XCTAssertFalse(
+            state.complete(
+                itemID: "oversized-final",
+                transcript: oversizedTranscript,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(state.takeLimitViolation(), .transcript)
+        XCTAssertNil(state.snapshot(itemID: "oversized-final"))
+
+        XCTAssertTrue(
+            state.observeDelta(
+                itemID: "delta-overflow",
+                delta: String(repeating: "x", count: maximumTranscriptBytes),
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            state.observeDelta(
+                itemID: "delta-overflow",
+                delta: "5",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(state.takeLimitViolation(), .transcript)
+        XCTAssertEqual(
+            state.snapshot(itemID: "delta-overflow")?.transcript?.utf8.count,
+            maximumTranscriptBytes
+        )
+
+        XCTAssertFalse(
+            state.acceptHypothesis(
+                itemID: "oversized-hypothesis",
+                taskID: "task-1",
+                epoch: 0,
+                revision: 1,
+                text: oversizedTranscript,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(state.takeLimitViolation(), .transcript)
+        XCTAssertNil(state.snapshot(itemID: "oversized-hypothesis"))
+    }
+
+    func testRealtimeItemStateBoundsCumulativeAlignmentCountAndBytes() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let generation = UUID()
+        let maximumUnits = 1_024
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            state.complete(
+                itemID: "alignment-count",
+                transcript: "x",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+
+        func unitWithID(_ id: String) -> RealtimeASRClient.AttributionUnit {
+            RealtimeASRClient.AttributionUnit(
+                segmentUID: id,
+                textStart: 0,
+                textEnd: 1,
+                audioStartSample: 0,
+                audioEndSample: 1,
+                timingQuality: "aligned",
+                granularity: "character"
+            )
+        }
+        func unit(_ index: Int) -> RealtimeASRClient.AttributionUnit {
+            unitWithID("segment-\(index)")
+        }
+        func applyAlignment(
+            _ units: [RealtimeASRClient.AttributionUnit],
+            state: inout RealtimeEventState
+        ) -> Bool {
+            state.applyAlignment(
+                itemID: "alignment-count",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 1,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 1),
+                codepointSpan: .init(start: 0, end: 1),
+                units: units,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        }
+
+        XCTAssertTrue(applyAlignment((0..<512).map(unit), state: &state))
+        XCTAssertFalse(
+            applyAlignment((512..<(maximumUnits + 1)).map(unit), state: &state)
+        )
+        XCTAssertEqual(state.takeLimitViolation(), .alignment)
+        XCTAssertEqual(
+            state.snapshot(itemID: "alignment-count")?.alignmentUnits.count,
+            512,
+            "an over-budget shard must be rejected atomically"
+        )
+
+        var byteBounded = RealtimeEventState()
+        byteBounded.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            byteBounded.complete(
+                itemID: "alignment-bytes",
+                transcript: "x",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        let oversizedSegmentID = String(repeating: "u", count: 300 * 1024)
+        XCTAssertFalse(
+            byteBounded.applyAlignment(
+                itemID: "alignment-bytes",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 1,
+                metadataRevision: 1,
+                sampleSpan: .init(start: 0, end: 1),
+                codepointSpan: .init(start: 0, end: 1),
+                units: [unitWithID(oversizedSegmentID)],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(byteBounded.takeLimitViolation(), .alignment)
+        XCTAssertTrue(byteBounded.snapshot(itemID: "alignment-bytes")?.alignmentUnits.isEmpty == true)
+    }
+
+    func testRealtimeItemStateBoundsCumulativeDiarizationCountAndBytes() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let generation = UUID()
+        let maximumSpans = 1_024
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            state.complete(
+                itemID: "diarization-count",
+                transcript: "x",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+
+        func applyDiarization(
+            _ spans: [RealtimeASRClient.DiarizationSpan],
+            state: inout RealtimeEventState
+        ) -> Bool {
+            state.applyDiarization(
+                itemID: "diarization-count",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 1,
+                metadataRevision: 1,
+                spans: spans,
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        }
+
+        let firstShard = (0..<512).map {
+            RealtimeASRClient.DiarizationSpan(
+                speaker: "speaker-\($0)",
+                startSample: $0,
+                endSample: $0 + 1
+            )
+        }
+        let secondShard = (512..<(maximumSpans + 1)).map {
+            RealtimeASRClient.DiarizationSpan(
+                speaker: "speaker-\($0)",
+                startSample: $0,
+                endSample: $0 + 1
+            )
+        }
+        XCTAssertTrue(applyDiarization(firstShard, state: &state))
+        XCTAssertFalse(applyDiarization(secondShard, state: &state))
+        XCTAssertEqual(state.takeLimitViolation(), .diarization)
+        XCTAssertEqual(
+            state.snapshot(itemID: "diarization-count")?.diarizationSpans.count,
+            512,
+            "an over-budget shard must be rejected atomically"
+        )
+
+        var byteBounded = RealtimeEventState()
+        byteBounded.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            byteBounded.complete(
+                itemID: "diarization-bytes",
+                transcript: "x",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        let oversizedSpeaker = String(repeating: "s", count: 300 * 1024)
+        XCTAssertFalse(
+            byteBounded.applyDiarization(
+                itemID: "diarization-bytes",
+                taskID: "task-1",
+                epoch: 0,
+                transcriptRevision: 1,
+                metadataRevision: 1,
+                spans: [.init(speaker: oversizedSpeaker, startSample: 0, endSample: 1)],
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+        XCTAssertEqual(byteBounded.takeLimitViolation(), .diarization)
+        XCTAssertTrue(byteBounded.snapshot(itemID: "diarization-bytes")?.diarizationSpans.isEmpty == true)
+    }
+
+    func testRealtimeItemStateExpiresAfterThirtySecondsAndCapsAt128Items() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let generation = UUID()
+        var timed = RealtimeEventState()
+        timed.reset(generation: generation, auxiliaryExpected: true)
+        XCTAssertTrue(
+            timed.complete(
+                itemID: "expired-item",
+                transcript: "保留正文",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            )
+        )
+
+        timed.prune(now: now.advanced(by: .seconds(31)))
+        let expired = timed.takeExpired()
+        XCTAssertEqual(expired.map(\.itemID), ["expired-item"])
+        XCTAssertEqual(expired.first?.snapshot.transcript, "保留正文")
+        XCTAssertFalse(
+            timed.observeDelta(
+                itemID: "expired-item",
+                delta: "迟到",
+                sessionID: "session-1",
+                generation: generation,
+                now: now.advanced(by: .seconds(32))
+            ),
+            "retired item IDs must not recreate an expired metadata entry"
+        )
+
+        var bounded = RealtimeEventState()
+        bounded.reset(generation: generation, auxiliaryExpected: true)
+        for index in 0...RealtimeEventState.maxItems {
+            XCTAssertTrue(
+                bounded.complete(
+                    itemID: "item-\(index)",
+                    transcript: "text",
+                    sessionID: "session-1",
+                    generation: generation,
+                    now: now
+                )
+            )
+        }
+        XCTAssertNil(bounded.snapshot(itemID: "item-0"))
+        XCTAssertNotNil(bounded.snapshot(itemID: "item-\(RealtimeEventState.maxItems)"))
+        XCTAssertEqual(bounded.takeExpired().first?.itemID, "item-0")
+    }
+    #endif
+
+    func testClientClosesBeforeDeliveringEventAfterSequenceGap() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next() else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+        guard case .configured = configured.payload else {
+            XCTFail("Expected configured before sending the gap event")
+            return
+        }
+
+        await transport.enqueueRaw(
+            .text(
+                #"{"type":"conversation.item.input_audio_transcription.delta","event_id":"gap-event","session_id":"test-session","sequence":2,"item_id":"utt-1","delta":"must not be delivered"}"#
+            )
+        )
+
+        guard let failure = await events.next() else {
+            XCTFail("Expected a client protocol error")
+            await client.close()
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            XCTFail("Gap event reached the business stream: \(failure.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(code, "realtime_protocol_violation")
+        let acceptedSessionID = await client.serverSessionID
+        XCTAssertEqual(acceptedSessionID, "test-session")
+
+        guard let closed = await events.next() else {
+            XCTFail("Expected an independent close notification")
+            return
+        }
+        guard case .closed = closed.payload else {
+            XCTFail("Expected closed after protocol failure, got \(closed.payload)")
+            return
+        }
+    }
+
+    func testClientClosesWithExplicitErrorForOversizedTranscript() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next() else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+        guard case .configured = configured.payload else {
+            XCTFail("Expected configured before sending the oversized transcript")
+            return
+        }
+
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "utt-1",
+                    "transcript": String(
+                        repeating: "x",
+                        count: RealtimeEventState.maxTranscriptUTF8Bytes + 1
+                    ),
+                ])
+            )
+        )
+
+        guard let failure = await events.next() else {
+            XCTFail("Expected an explicit local item-state limit error")
+            await client.close()
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            XCTFail("Oversized transcript reached the business stream: \(failure.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(code, "realtime_item_state_overflow")
+
+        guard let closed = await events.next() else {
+            XCTFail("Expected an independent close notification")
+            return
+        }
+        guard case .closed = closed.payload else {
+            XCTFail("Expected closed after item-state overflow, got \(closed.payload)")
+            return
+        }
+    }
+
+    func testClientClosesAndReportsOverflowOutsideTheBoundedQueue() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(
+            voice: "serena",
+            apiKey: "",
+            callerTTSEnabled: true,
+            eventStreamLimits: .init(maxBufferedEvents: 4, maxBufferedAudioBytes: 1)
+        )
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next(),
+              case .configured = configured.payload else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+
+        try await client.startTTSStream(requestID: "overflow-request")
+        await transport.enqueue(.text(jsonText(ttsStarted(requestID: "overflow-request"))))
+        guard let started = await events.next(),
+              case .ttsStarted(let requestID, _, _) = started.payload else {
+            XCTFail("Expected the active TTS request before sending audio")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(requestID, "overflow-request")
+
+        await transport.enqueue(
+            .text(
+                jsonText(
+                    ttsAudioDelta(
+                        requestID: "overflow-request",
+                        chunkIndex: 0,
+                        sampleOffset: 0,
+                        pcm: Data([1, 2])
+                    )
+                )
+            )
+        )
+
+        guard let failure = await events.next() else {
+            XCTFail("Expected an out-of-band overflow terminal")
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            XCTFail("Expected overflow error, got \(failure.payload)")
+            return
+        }
+        XCTAssertEqual(code, "realtime_event_stream_overflow")
+
+        guard let closed = await events.next(),
+              case .closed = closed.payload else {
+            XCTFail("Expected close notification after overflow")
+            return
+        }
+        let transportClosed = await transport.isClosed()
+        XCTAssertTrue(transportClosed, "overflow must cancel the WebSocket transport")
+    }
+
+    func testClientDropsStaleAndOutOfRangeAlignmentButMergesCurrentShards() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next(),
+              case .configured = configured.payload else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+
+        let transcript = "A🦜e\u{301}"
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.transcription.hypothesis",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "utterance-1",
+                    "revision": 1,
+                    "text": transcript,
+                    "sample_span": ["start": 0, "end": 8]
+                ])
+            )
+        )
+        guard let hypothesis = await events.next(),
+              case .partialSnapshot(let hypothesisItemID, _, _) = hypothesis.payload else {
+            XCTFail("Expected the current task to establish item identity")
+            return
+        }
+        XCTAssertEqual(hypothesisItemID, "utterance-1")
+
+        await transport.enqueue(
+            .text(jsonText([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "utterance-1",
+                "transcript": transcript
+            ]))
+        )
+        guard let completed = await events.next(),
+              case .completed(let itemID, let deliveredText) = completed.payload else {
+            XCTFail("Expected the completed Unicode transcript")
+            return
+        }
+        XCTAssertEqual(itemID, "utterance-1")
+        XCTAssertEqual(deliveredText, transcript)
+
+        let unitOne: [String: Any] = [
+            "segment_uid": "segment-1",
+            "text_start": 1,
+            "text_end": 3,
+            "audio_start_sample": 0,
+            "audio_end_sample": 4,
+            "timing_quality": "aligned",
+            "granularity": "word"
+        ]
+        let unitTwo: [String: Any] = [
+            "segment_uid": "segment-2",
+            "text_start": 3,
+            "text_end": 4,
+            "audio_start_sample": 4,
+            "audio_end_sample": 8,
+            "timing_quality": "aligned",
+            "granularity": "character"
+        ]
+
+        await transport.enqueue(
+            .text(
+                jsonText(
+                    alignmentDoneEvent(
+                        taskID: "task-1",
+                        transcriptRevision: 17,
+                        metadataRevision: 2,
+                        itemID: "utterance-1",
+                        codepointEnd: 5,
+                        units: [unitOne]
+                    )
+                )
+            )
+        )
+        await transport.enqueue(
+            .text(
+                jsonText(
+                    alignmentDoneEvent(
+                        taskID: "old-task",
+                        transcriptRevision: 17,
+                        metadataRevision: 2,
+                        itemID: "utterance-1",
+                        codepointEnd: 4,
+                        units: [unitOne]
+                    )
+                )
+            )
+        )
+        await transport.enqueue(
+            .text(
+                jsonText(
+                    alignmentDoneEvent(
+                        taskID: "task-1",
+                        transcriptRevision: 17,
+                        metadataRevision: 2,
+                        itemID: "utterance-1",
+                        codepointEnd: 4,
+                        units: [unitOne]
+                    )
+                )
+            )
+        )
+
+        guard let firstAlignment = await events.next(),
+              case .attribution(_, let firstUnits, _) = firstAlignment.payload else {
+            XCTFail("Expected the valid current alignment shard")
+            return
+        }
+        XCTAssertEqual(firstUnits.map { $0.segmentUID }, ["segment-1"])
+
+        await transport.enqueue(
+            .text(
+                jsonText(
+                    alignmentDoneEvent(
+                        taskID: "task-1",
+                        transcriptRevision: 17,
+                        metadataRevision: 2,
+                        itemID: "utterance-1",
+                        codepointEnd: 4,
+                        units: [unitTwo]
+                    )
+                )
+            )
+        )
+        guard let secondAlignment = await events.next(),
+              case .attribution(_, let mergedUnits, _) = secondAlignment.payload else {
+            XCTFail("Expected the second shard at the same metadata revision")
+            return
+        }
+        XCTAssertEqual(mergedUnits.map { $0.segmentUID }, ["segment-1", "segment-2"])
+        await client.close()
+    }
+
+    func testDiarizationDoneEmitsSessionBarrierWithoutCreatingUnknownItem() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next(),
+              case .configured = configured.payload else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+        try await client.finishDiarization()
+
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.diarization.done",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "unknown-item",
+                    "transcript_revision": 0,
+                    "metadata_revision": 0,
+                    "units": []
+                ])
+            )
+        )
+
+        guard let barrier = await events.next(),
+              case .diarizationFinished = barrier.payload else {
+            XCTFail("Expected the session finish barrier independently of item state")
+            await client.close()
+            return
+        }
+        await client.close()
     }
 
     func testCloseBarrierOnlyAllowsClearAfterEveryCommittedItemIsTerminal() {
@@ -399,6 +1358,7 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
     private var receiver: CheckedContinuation<RealtimeASRSocketFrame, Error>?
     private var sent: [String] = []
     private var closed = false
+    private var nextSequence = 0
 
     func resume() async {}
 
@@ -431,6 +1391,21 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
     }
 
     func enqueue(_ frame: RealtimeASRSocketFrame) {
+        let stamped = stampServerEvent(
+            frame,
+            defaultSessionID: "test-session",
+            defaultEventID: "server-event-\(nextSequence)",
+            defaultSequence: nextSequence
+        )
+        nextSequence += 1
+        deliver(stamped)
+    }
+
+    func enqueueRaw(_ frame: RealtimeASRSocketFrame) {
+        deliver(frame)
+    }
+
+    private func deliver(_ frame: RealtimeASRSocketFrame) {
         if let receiver {
             self.receiver = nil
             receiver.resume(returning: frame)
@@ -440,6 +1415,35 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
     }
 
     func sentMessages() -> [String] { sent }
+
+    func isClosed() -> Bool { closed }
+}
+
+func stampServerEvent(
+    _ frame: RealtimeASRSocketFrame,
+    defaultSessionID: String,
+    defaultEventID: String,
+    defaultSequence: Int
+) -> RealtimeASRSocketFrame {
+    let data: Data
+    switch frame {
+    case .text(let text):
+        data = Data(text.utf8)
+    case .data(let raw):
+        data = raw
+    case .unsupported:
+        return frame
+    }
+    guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return frame
+    }
+    if object["event_id"] == nil { object["event_id"] = defaultEventID }
+    if object["session_id"] == nil { object["session_id"] = defaultSessionID }
+    if object["sequence"] == nil { object["sequence"] = defaultSequence }
+    guard let stamped = try? JSONSerialization.data(withJSONObject: object) else {
+        return frame
+    }
+    return .text(String(decoding: stamped, as: UTF8.self))
 }
 
 private func jsonText(_ object: [String: Any]) -> String {
@@ -463,6 +1467,27 @@ private func ttsStarted(requestID: String) -> [String: Any] {
             "utterance_wall_clock_seconds": 120.0,
             "slow_consumer_seconds": 2.0
         ]
+    ]
+}
+
+private func alignmentDoneEvent(
+    taskID: String,
+    transcriptRevision: Int,
+    metadataRevision: Int,
+    itemID: String,
+    codepointEnd: Int,
+    units: [[String: Any]]
+) -> [String: Any] {
+    [
+        "type": "speechrail.alignment.done",
+        "task_id": taskID,
+        "epoch": 0,
+        "utterance_id": itemID,
+        "transcript_revision": transcriptRevision,
+        "metadata_revision": metadataRevision,
+        "sample_span": ["start": 0, "end": 8],
+        "codepoint_span": ["start": 0, "end": codepointEnd],
+        "units": units
     ]
 }
 

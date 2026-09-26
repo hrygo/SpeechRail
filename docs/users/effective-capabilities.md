@@ -2,7 +2,7 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.3.1"
+version: "3.3.2"
 date: 2026-09-26
 ---
 
@@ -21,10 +21,12 @@ date: 2026-09-26
 与当前 availability。三个入口支持私有 ETag、If-None-Match 和 304；鉴权先于缓存判定。
 修改音色配方、启用列表、ASR/TTS 独立规格、配置制品或 TTS planner 策略会改变相关内容标识。
 
-**这些标识不是推理版本锁。** 当前已有音色的 `voice_revision=null`、
-`voice_identity_assurance=legacy`。模型的 `assurance=configured_catalog` 只表示配置
-匹配目录，`runtime_revision=null` 不伪装成已观测的 worker 制品身份。执行条件合成、
-不可变历史版本和实际渲染回执仍需各自的能力；本接口明确报告
+**这些标识不代表当前 worker 的推理版本。** `voice_revision` 按单条音色的身份状态解释：
+`legacy` 音色可以为 null，内容寻址音色则带有 `vr_…` revision；不能把某个旧快照中的取值
+推广为全目录状态。内容 revision 固定音色身份，不证明模型或已加载 worker 身份。需要跨请求
+固定音色时，客户端可将它与该音色 `model.catalog_revision` 一并作为请求 pin，详见下文。
+模型的 `assurance=configured_catalog` 只表示配置匹配目录，`runtime_revision=null` 不伪装成
+已观测的 worker 制品身份。本快照自身不创建推理 pin 或准入预留，明确报告
 `inference_version_pin=false`、`admission_reserved=false`。
 
 ## 用 revision pin 固定跨请求音色

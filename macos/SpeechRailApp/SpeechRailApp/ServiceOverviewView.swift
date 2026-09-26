@@ -345,7 +345,7 @@ public struct ServiceOverviewView: View {
             case .notReady: "未就绪"
             case .unsupported: "当前档位不支持"
             case .checking: "检查中"
-            case .undeclared: "未发布"
+            case .undeclared: "未能确认"
             case .unavailable: "读取失败"
             }
         }
@@ -371,7 +371,7 @@ public struct ServiceOverviewView: View {
                 : "健康检查未返回结果，无法确认这一项。"
             return [
                 ServiceCapability(title: "语音识别", status: .notReady, reason: reason),
-                ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
+                ServiceCapability(title: "音色创作（按需）", status: .unavailable, reason: reason),
                 ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
                 ServiceCapability(title: "实时语音断句", status: .notReady, reason: reason),
@@ -383,30 +383,19 @@ public struct ServiceOverviewView: View {
         let asrState = health.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 ASR 运行状态。"
         let ttsReady = health.ttsReady == true
         let ttsState = health.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 TTS 运行状态。"
-        // 能力结论只读服务声明（`/v1/models.capabilities`）：音色列表是用户数据，
-        // 可以为空，而 capability 由当前档位与制品解析决定。拿“列表里有没有某一类
-        // 音色”当能力依据，会在服务已经发布能力时报出假的“未就绪”。
-        let declaredCapabilities = model.serviceCapabilitiesLoadState == .loaded
-            ? model.serviceCapabilities
-            : nil
         let voiceDesign = capabilityVerdict(
-            // 页面上不摆内部名：`VoiceDesign` / `Base` 是制品名，用户看到的是"两种合成各能做什么"。
-            title: "语音合成 · 语音设计",
-            capability: "语音设计",
-            declared: declaredCapabilities?.supportsInstruction,
-            supportedByProfile: false,
-            missingReason: "这一档没有发布「语音设计」。",
-            unsupportedReason: "当前服务没有发布「语音设计」能力。"
+            title: "音色创作（按需）",
+            availability: model.capabilityFacade.voiceDesignCreationAvailability,
+            availableReason: "生成候选时按需使用；普通语音合成不依赖这项能力。",
+            unsupportedReason: "当前服务没有同时开放候选生成和参考文案识别。",
+            unknownReason: "服务能力信息不完整，暂时无法确认音色创作。"
         )
         let voiceClone = capabilityVerdict(
-            // 名字跟着侧栏那一项走：用户点的、看到的、读到的都是「音色克隆」。
-            // `复刻` 是能力声明里的措辞，留在开发者文档里（用户 2026-09-19）。
             title: "音色克隆",
-            capability: "音色克隆",
-            declared: declaredCapabilities?.supportsClone,
-            supportedByProfile: false,
-            missingReason: "这一档没有发布音色克隆（需要的模型还没就位）。",
-            unsupportedReason: "当前服务没有发布音色克隆能力。"
+            availability: model.capabilityFacade.voiceCloneAvailability,
+            availableReason: "当前服务已配置参考音色制品。",
+            unsupportedReason: "当前服务没有配置可用的参考音色制品。",
+            unknownReason: "服务未提供足够的参考音色版本信息。"
         )
         let diarization = diarizationCapability(for: health)
 
@@ -477,42 +466,23 @@ public struct ServiceOverviewView: View {
     /// 这类音色」当成「服务没有这项能力」。
     private func capabilityVerdict(
         title: String,
-        capability: String,
-        declared: Bool?,
-        supportedByProfile: Bool,
-        missingReason: String,
-        unsupportedReason: String
+        availability: AppCapabilityAvailability,
+        availableReason: String,
+        unsupportedReason: String,
+        unknownReason: String
     ) -> ServiceCapability {
-        if declared == nil, model.serviceCapabilitiesLoadState == .loading {
-            return ServiceCapability(
-                title: title,
-                status: .checking,
-                reason: "正在读取服务能力，暂不能确认这一项。"
-            )
-        }
-
-        switch ServiceCapabilityPresentation.resolve(
-            declared: declared,
-            discoveryState: model.discoveryState,
-            supportedByProfile: supportedByProfile
-        ) {
-        case .ready:
+        switch availability {
+        case .available:
             return ServiceCapability(
                 title: title,
                 status: .ready,
-                reason: "服务声明「\(capability)」已经可用。"
+                reason: availableReason
             )
-        case .notReady, .unsupported:
+        case .unsupported:
             return ServiceCapability(
                 title: title,
-                status: supportedByProfile ? .notReady : .unsupported,
-                reason: supportedByProfile ? missingReason : unsupportedReason
-            )
-        case .undeclared:
-            return ServiceCapability(
-                title: title,
-                status: .undeclared,
-                reason: "服务没有发布「\(capability)」这项能力。"
+                status: .unsupported,
+                reason: unsupportedReason
             )
         case .checking:
             return ServiceCapability(
@@ -520,25 +490,17 @@ public struct ServiceOverviewView: View {
                 status: .checking,
                 reason: "正在读取服务能力，暂不能确认这一项。"
             )
+        case .unknown:
+            return ServiceCapability(
+                title: title,
+                status: .undeclared,
+                reason: unknownReason
+            )
         case .unavailable:
-            let reason = switch model.discoveryState {
-            case .unauthorized:
-                "无法验证本机服务。按 ⌘R 重新读取；若仍失败，请退出并重新打开 App。"
-            case .notReady:
-                "服务暂时未准备好。稍后按 ⌘R 重新读取。"
-            case .invalidContract:
-                "服务返回的能力信息无法识别。请更新 App 或服务后重试。"
-            case .notSupported:
-                "当前服务版本不支持读取能力信息。请更新服务后重试。"
-            case .failed:
-                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
-            case .idle, .loading, .loaded:
-                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
-            }
             return ServiceCapability(
                 title: title,
                 status: .unavailable,
-                reason: reason
+                reason: "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
             )
         }
     }

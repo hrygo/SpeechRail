@@ -39,8 +39,12 @@ public struct RuntimeHistogramTotals: Equatable, Sendable {
 /// 时数字在动，用户真的在合成时它又几乎不动。所以这里只数语音接口，
 /// 并且把「次数」与「音频秒数」分开。
 public struct RuntimeUsageTotals: Equatable, Sendable {
-    /// `/v1/audio/speech` 的累计请求数（含失败，失败数另有口径）。
+    /// TTS lane 的累计请求总数（含普通合成与音色试听；耗时和音频时长沿用此 lane）。
     public let ttsRequests: Double?
+    /// `/v1/audio/speech` 的累计请求数（含失败，失败数另有口径）。
+    public let ttsSpeechRequests: Double?
+    /// `/v1/voices/previews` 的累计请求数。
+    public let voicePreviewRequests: Double?
     /// `/v1/audio/transcriptions` 的累计请求数。
     public let asrRequests: Double?
     /// 已合成音频的总时长（秒）。
@@ -52,12 +56,16 @@ public struct RuntimeUsageTotals: Equatable, Sendable {
 
     public init(
         ttsRequests: Double? = nil,
+        ttsSpeechRequests: Double? = nil,
+        voicePreviewRequests: Double? = nil,
         asrRequests: Double? = nil,
         ttsAudioSeconds: Double? = nil,
         asrAudioSeconds: Double? = nil,
         realtimeSessions: Double? = nil
     ) {
         self.ttsRequests = ttsRequests
+        self.ttsSpeechRequests = ttsSpeechRequests
+        self.voicePreviewRequests = voicePreviewRequests
         self.asrRequests = asrRequests
         self.ttsAudioSeconds = ttsAudioSeconds
         self.asrAudioSeconds = asrAudioSeconds
@@ -66,6 +74,8 @@ public struct RuntimeUsageTotals: Equatable, Sendable {
 
     public var isEmpty: Bool {
         ttsRequests == nil
+            && ttsSpeechRequests == nil
+            && voicePreviewRequests == nil
             && asrRequests == nil
             && ttsAudioSeconds == nil
             && asrAudioSeconds == nil
@@ -81,6 +91,8 @@ public struct RuntimeUsageTotals: Equatable, Sendable {
         }
         return RuntimeUsageTotals(
             ttsRequests: increment(ttsRequests, earlier?.ttsRequests),
+            ttsSpeechRequests: increment(ttsSpeechRequests, earlier?.ttsSpeechRequests),
+            voicePreviewRequests: increment(voicePreviewRequests, earlier?.voicePreviewRequests),
             asrRequests: increment(asrRequests, earlier?.asrRequests),
             ttsAudioSeconds: increment(ttsAudioSeconds, earlier?.ttsAudioSeconds),
             asrAudioSeconds: increment(asrAudioSeconds, earlier?.asrAudioSeconds),
@@ -236,6 +248,8 @@ public enum RuntimeMetricsSampler {
                 metrics,
                 endpoints: [ttsEndpoint, voicePreviewEndpoint]
             ),
+            ttsSpeechRequests: speechRequestCount(metrics, endpoints: [ttsEndpoint]),
+            voicePreviewRequests: speechRequestCount(metrics, endpoints: [voicePreviewEndpoint]),
             asrRequests: speechRequestCount(metrics, endpoints: [asrEndpoint]),
             ttsAudioSeconds: sumValues(
                 metrics.counters,
@@ -695,6 +709,8 @@ public struct MetricsHistoryRecord: Decodable, Sendable {
         public let asr: Double?
         public let failed: Double?
         public let clientErrors: Double?
+        /// 服务端在该区间内观察到的完整 endpoint 计数。缺失时不能从 `tts` 总数反推拆分。
+        public let byEndpoint: [String: Double]?
     }
 
     public struct AudioSeconds: Decodable, Sendable {
@@ -771,6 +787,9 @@ public struct MetricsHistoryPoint: Identifiable, Equatable, Sendable {
     public let end: Date
     public let coveredSeconds: Double
     public let ttsRequests: Double
+    /// 从 `requests.by_endpoint` 读取；旧记录缺少 label 时为 nil，不从 lane 合计推算。
+    public let ttsSpeechRequests: Double?
+    public let voicePreviewRequests: Double?
     public let asrRequests: Double
     public let failedRequests: Double
     public let ttsAudioSeconds: Double
@@ -789,6 +808,8 @@ public struct MetricsHistoryPoint: Identifiable, Equatable, Sendable {
 /// 整个跨度上的合计。耗时是按时长样本量加权的窗口均值，`p95` 取区间内最大值。
 public struct MetricsHistoryTotals: Equatable, Sendable {
     public let ttsRequests: Double
+    public let ttsSpeechRequests: Double?
+    public let voicePreviewRequests: Double?
     public let asrRequests: Double
     public let failedRequests: Double
     public let clientErrors: Double
@@ -806,6 +827,8 @@ public struct MetricsHistoryTotals: Equatable, Sendable {
 
     public static let empty = MetricsHistoryTotals(
         ttsRequests: 0,
+        ttsSpeechRequests: nil,
+        voicePreviewRequests: nil,
         asrRequests: 0,
         failedRequests: 0,
         clientErrors: 0,
@@ -1191,6 +1214,9 @@ private struct MetricsHistoryAccumulator {
     var coveredSeconds = 0.0
     var records = 0
     var ttsRequests = 0.0
+    var ttsSpeechRequests = 0.0
+    var voicePreviewRequests = 0.0
+    var endpointBreakdownAvailable = true
     var asrRequests = 0.0
     var failedRequests = 0.0
     var clientErrors = 0.0
@@ -1224,6 +1250,14 @@ private struct MetricsHistoryAccumulator {
             asrRequests += requests.asr ?? 0
             failedRequests += requests.failed ?? 0
             clientErrors += requests.clientErrors ?? 0
+            if let byEndpoint = requests.byEndpoint {
+                ttsSpeechRequests += byEndpoint[RuntimeMetricsSampler.ttsEndpoint] ?? 0
+                voicePreviewRequests += byEndpoint[RuntimeMetricsSampler.voicePreviewEndpoint] ?? 0
+            } else {
+                endpointBreakdownAvailable = false
+            }
+        } else {
+            endpointBreakdownAvailable = false
         }
         if let audio = record.audioSeconds {
             ttsAudioSeconds += audio.tts ?? 0
@@ -1275,6 +1309,8 @@ private struct MetricsHistoryAccumulator {
     var totals: MetricsHistoryTotals {
         MetricsHistoryTotals(
             ttsRequests: ttsRequests,
+            ttsSpeechRequests: endpointBreakdownAvailable ? ttsSpeechRequests : nil,
+            voicePreviewRequests: endpointBreakdownAvailable ? voicePreviewRequests : nil,
             asrRequests: asrRequests,
             failedRequests: failedRequests,
             clientErrors: clientErrors,
@@ -1299,6 +1335,8 @@ private struct MetricsHistoryAccumulator {
             end: end,
             coveredSeconds: coveredSeconds,
             ttsRequests: ttsRequests,
+            ttsSpeechRequests: endpointBreakdownAvailable ? ttsSpeechRequests : nil,
+            voicePreviewRequests: endpointBreakdownAvailable ? voicePreviewRequests : nil,
             asrRequests: asrRequests,
             failedRequests: failedRequests,
             ttsAudioSeconds: ttsAudioSeconds,

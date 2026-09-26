@@ -41,64 +41,6 @@ public extension ServiceDiagnosticsClient {
     var connectionHost: String? { nil }
 }
 
-/// 服务公开的 TTS 能力快照。
-///
-/// 取值只来自 `GET /v1/models` 的 `capabilities`：服务只有在对应 capability
-/// 真的解析成功时才把它置为 `true`（`docs/users/api-contract.md`）。界面的能力
-/// 结论必须读这里，不能拿“音色列表里有没有某一类音色”反推——音色是用户数据，可以
-/// 为空；capability 由当前档位与制品解析决定，两者不是一件事。
-public struct ServiceModelCapabilities: Equatable, Sendable {
-    public let supportsPreview: Bool
-    public let supportsClone: Bool
-    public let supportsInstruction: Bool
-    /// 模型级增量输入实现轴（`capabilities.streaming_input`）。
-    ///
-    /// 它只说明**实现**是否协商成功，绝不代表每个音色都能增量合成；
-    /// 具体音色要读 `CreatorVoice.streaming`。旧服务未声明时为 `false`。
-    public let supportsStreamingInput: Bool
-    public let streamingProtocolNegotiated: Bool?
-
-    public init(
-        supportsPreview: Bool = false,
-        supportsClone: Bool = false,
-        supportsInstruction: Bool = false,
-        supportsStreamingInput: Bool = false,
-        streamingProtocolNegotiated: Bool? = nil
-    ) {
-        self.supportsPreview = supportsPreview
-        self.supportsClone = supportsClone
-        self.supportsInstruction = supportsInstruction
-        self.supportsStreamingInput = supportsStreamingInput
-        self.streamingProtocolNegotiated = streamingProtocolNegotiated
-    }
-
-    /// 合并同一份快照里的多个模型条目。规范条目与兼容 alias 由同一份 active
-    /// catalog 派生，取并集既不必猜哪个 id 是当前档位，也不会放宽服务声明。
-    func union(_ other: ServiceModelCapabilities) -> ServiceModelCapabilities {
-        ServiceModelCapabilities(
-            supportsPreview: supportsPreview || other.supportsPreview,
-            supportsClone: supportsClone || other.supportsClone,
-            supportsInstruction: supportsInstruction || other.supportsInstruction,
-            supportsStreamingInput: supportsStreamingInput || other.supportsStreamingInput,
-            // 任一模型条目协商成功即可视为实现可用；全为 nil 才保持 nil。
-            streamingProtocolNegotiated: streamingProtocolNegotiated
-                ?? other.streamingProtocolNegotiated
-        )
-    }
-}
-
-/// 读取服务级能力声明（`GET /v1/models`）。
-public protocol ServiceModelCapabilityClient: Sendable {
-    func fetchModelCapabilities() async throws -> ServiceModelCapabilities
-}
-
-/// 没有本机服务连接时的能力读取端：读取失败，界面据此报“未读取”，不预报结论。
-struct UnavailableModelCapabilityClient: ServiceModelCapabilityClient {
-    func fetchModelCapabilities() async throws -> ServiceModelCapabilities {
-        throw ServiceAPIClientError.requestFailed
-    }
-}
-
 public final class ServiceAPIClient: @unchecked Sendable {
     private static let longRunningRequestTimeout: TimeInterval = 180
     private let baseURL: URL
@@ -206,18 +148,6 @@ public final class ServiceAPIClient: @unchecked Sendable {
             headers: response.metadata.headers,
             cachedValue: cachedValue
         )
-    }
-
-    /// 读取服务公开的 TTS 能力声明。这是能力的唯一事实来源：`supports_clone`
-    /// 只有在独立 Base capability 解析成功时才为 true。
-    public func fetchModelCapabilities() async throws -> ServiceModelCapabilities {
-        let response: ServiceModelListResponse = try await get(path: "/v1/models")
-        guard response.object == "list" else {
-            throw ServiceAPIClientError.invalidResponse
-        }
-        return response.data
-            .map(\.capabilitySnapshot)
-            .reduce(ServiceModelCapabilities()) { $0.union($1) }
     }
 
     public func fetchVoices() async throws -> [CreatorVoice] {
@@ -489,6 +419,53 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return response.candidate
     }
 
+    public func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] {
+        let response: VoiceDesignCandidateListResponse = try await get(path: "/v1/voice-designs")
+        guard response.object == "list" else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return response.data
+    }
+
+    public func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        let response: VoiceDesignCandidateEnvelope = try await get(
+            path: try voiceDesignPath(id: id)
+        )
+        return response.candidate
+    }
+
+    public func fetchVoiceDesignReferenceAudio(
+        id: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        try await getWAV(
+            path: try voiceDesignPath(id: id) + "/audio",
+            expectedRevision: expectedRevision
+        )
+    }
+
+    public func fetchVoiceDesignValidationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        try await getWAV(
+            path: try voiceDesignValidationAudioPath(
+                candidateID: id,
+                validationID: validationID
+            ),
+            expectedRevision: expectedRevision
+        )
+    }
+
+    public func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        let response: VoiceDesignCandidateEnvelope = try await postJSON(
+            path: try voiceDesignPath(id: id) + "/cancel",
+            body: EmptyJSONBody()
+        )
+        return response.candidate
+    }
+
     public func confirmVoiceDesignCandidate(
         id: String,
         referenceText: String?
@@ -533,51 +510,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
         id: String,
         name: String?,
         instruction: String?,
-        seed: Int?
-    ) async throws -> CreatorVoice {
-        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
-            throw ServiceAPIClientError.invalidURL
-        }
-        var request = try makeRequest(
-            path: "/v1/voices/\(id)",
-            method: "PATCH",
-            accept: "application/json"
-        )
-        request.httpBody = try JSONEncoder().encode(
-            UpdateVoiceRequestBody(name: name, instruction: instruction, seed: seed)
-        )
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let response = try await execute(request)
-        do {
-            return try JSONDecoder().decode(CreatorVoice.self, from: response.data)
-        } catch {
-            throw ServiceAPIClientError.invalidResponse
-        }
-    }
-
-    public func updateVoice(
-        id: String,
-        name: String?,
-        instruction: String?,
         seed: Int?,
-        expectedRevision: String?
+        expectedRevision: String
     ) async throws -> VoiceRevisionMutation {
         guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
             throw ServiceAPIClientError.invalidURL
         }
-        guard let expectedRevision else {
-            let voice = try await updateVoice(
-                id: id,
-                name: name,
-                instruction: instruction,
-                seed: seed
-            )
-            return VoiceRevisionMutation(
-                id: voice.id,
-                voiceRevision: voice.revision,
-                mode: voice.mode,
-                revoked: voice.revoked
-            )
+        guard !expectedRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ServiceAPIClientError.invalidContract("missing expected voice revision")
         }
         return try await postJSON(
             path: "/v1/speechrail/voices/\(id)",
@@ -625,6 +565,16 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return try await get(
             path: "/v1/speechrail/pronunciation-sets/\(id)/revisions/\(revision)"
         )
+    }
+
+    public func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary] {
+        let response: PronunciationSetListResponse = try await get(
+            path: "/v1/speechrail/pronunciation-sets"
+        )
+        guard response.object == "list" else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return response.data
     }
 
     public func upsertPronunciationSet(
@@ -678,20 +628,10 @@ public final class ServiceAPIClient: @unchecked Sendable {
         guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
             throw ServiceAPIClientError.invalidURL
         }
-        do {
-            return try await postJSON(
-                path: "/v1/speechrail/voices/\(id)/quality-runs",
-                body: request
-            )
-        } catch let error as ServiceAPIClientError
-            where error.statusCode == 404 || error.statusCode == 405 {
-            // Only route absence permits the historical endpoint. Auth,
-            // validation, conflict and backend errors remain visible.
-            return try await postJSON(
-                path: "/v1/voices/\(id)/quality-runs",
-                body: request
-            )
-        }
+        return try await postJSON(
+            path: "/v1/speechrail/voices/\(id)/quality-runs",
+            body: request
+        )
     }
 
     /// `GET /v1/voices/clone/prompts`：官方提词稿。列表为空不是失败——服务端在资产缺失时
@@ -752,6 +692,20 @@ public final class ServiceAPIClient: @unchecked Sendable {
         } catch {
             throw ServiceAPIClientError.invalidResponse
         }
+    }
+
+    public func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        guard !idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              idempotencyKey.count <= 256
+        else {
+            throw ServiceAPIClientError.invalidContract("invalid clone idempotency key")
+        }
+        return try await get(
+            path: "/v1/speechrail/voices/clone/idempotency",
+            headers: ["Idempotency-Key": idempotencyKey]
+        )
     }
 
     /// `POST /v1/voices/clone` 与 `…/validate` 共用一份 multipart 正文：
@@ -829,12 +783,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
 
     private func get<Value: Decodable & Sendable>(
         path: String,
-        query: [(String, String)] = []
+        query: [(String, String)] = [],
+        headers: [String: String] = [:]
     ) async throws -> Value {
         let request = try makeRequest(
             path: path,
             method: "GET",
             accept: "application/json",
+            headers: headers,
             query: query
         )
         let response = try await execute(request)
@@ -1001,6 +957,48 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return "/v1/voice-designs/\(id)"
     }
 
+    private func voiceDesignValidationAudioPath(
+        candidateID: String,
+        validationID: String
+    ) throws -> String {
+        guard validationID.range(
+            of: "^vv_[0-9a-f]{24}$",
+            options: .regularExpression
+        ) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try voiceDesignPath(id: candidateID)
+            + "/validations/\(validationID)/audio"
+    }
+
+    private func getWAV(
+        path: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        guard expectedRevision.range(
+            of: "^vr_[0-9a-f]{32}$",
+            options: .regularExpression
+        ) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        let request = try makeRequest(
+            path: path,
+            method: "GET",
+            accept: "audio/wav",
+            headers: [
+                "SpeechRail-Expected-Candidate-Revision": expectedRevision,
+            ]
+        )
+        let response = try await execute(request)
+        guard response.data.count >= 12,
+              response.data.prefix(4) == Data("RIFF".utf8),
+              response.data.dropFirst(8).prefix(4) == Data("WAVE".utf8)
+        else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return response.data
+    }
+
     private func decodeJSON<Value: Decodable & Sendable>(
         _ type: Value.Type,
         from response: ServiceRawHTTPResponse
@@ -1062,7 +1060,6 @@ public final class ServiceAPIClient: @unchecked Sendable {
 extension ServiceAPIClient:
     ServiceDiagnosticsClient,
     SpeechRailCreatorClient,
-    ServiceModelCapabilityClient,
     ServiceCapabilityDiscoveryClient
 {}
 
@@ -1077,63 +1074,18 @@ private struct ClonePromptListResponse: Decodable {
     let data: [ClonePrompt]
 }
 
-private struct ServiceModelListResponse: Decodable {
+private struct PronunciationSetListResponse: Decodable {
     let object: String
-    let data: [ServiceModelEntry]
-}
-
-private struct ServiceModelEntry: Decodable {
-    /// 只有 TTS 条目公开 `capabilities`；ASR 与兼容 alias 条目没有这一段。
-    let capabilities: DeclaredCapabilities?
-
-    var capabilitySnapshot: ServiceModelCapabilities {
-        ServiceModelCapabilities(
-            supportsPreview: capabilities?.supportsPreview == true,
-            supportsClone: capabilities?.supportsClone == true,
-            supportsInstruction: capabilities?.supportsInstruction == true,
-            supportsStreamingInput: capabilities?.streamingInput?.implementationSupported == true,
-            streamingProtocolNegotiated: capabilities?.streamingInput?.protocolNegotiated
-        )
-    }
-
-    struct DeclaredCapabilities: Decodable {
-        let supportsPreview: Bool?
-        let supportsClone: Bool?
-        let supportsInstruction: Bool?
-        let streamingInput: DeclaredStreamingInput?
-
-        enum CodingKeys: String, CodingKey {
-            case supportsPreview = "supports_preview"
-            case supportsClone = "supports_clone"
-            case supportsInstruction = "supports_instruction"
-            case streamingInput = "streaming_input"
-        }
-    }
-
-    /// `capabilities.streaming_input` 只报告与音色无关的实现轴。
-    struct DeclaredStreamingInput: Decodable {
-        let implementationSupported: Bool?
-        let protocolNegotiated: Bool?
-
-        enum CodingKeys: String, CodingKey {
-            case implementationSupported = "implementation_supported"
-            case protocolNegotiated = "protocol_negotiated"
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            implementationSupported = try container.decodeIfPresent(
-                Bool.self, forKey: .implementationSupported
-            )
-            protocolNegotiated = try container.decodeIfPresent(
-                Bool.self, forKey: .protocolNegotiated
-            )
-        }
-    }
+    let data: [PronunciationSetSummary]
 }
 
 private struct VoiceDesignCandidateEnvelope: Decodable {
     let candidate: VoiceDesignCandidate
+}
+
+private struct VoiceDesignCandidateListResponse: Decodable {
+    let object: String
+    let data: [VoiceDesignCandidate]
 }
 
 private struct VoicePreviewRequestBody: Encodable {
@@ -1233,22 +1185,3 @@ private struct VoiceRollbackRequestBody: Encodable {
 }
 
 private struct EmptyJSONBody: Encodable {}
-
-private struct UpdateVoiceRequestBody: Encodable {
-    let name: String?
-    let instruction: String?
-    let seed: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case instruction
-        case seed
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(name, forKey: .name)
-        try container.encodeIfPresent(instruction, forKey: .instruction)
-        try container.encodeIfPresent(seed, forKey: .seed)
-    }
-}

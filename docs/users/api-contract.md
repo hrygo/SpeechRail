@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.3.2"
+version: "3.3.3"
 date: 2026-09-26
 ---
 
@@ -69,6 +69,8 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
 | `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
+| `GET` | `/v1/voice-designs/{candidate_id}/audio` | 读取候选的当前参考 WAV | 必须固定 candidate revision；不重新合成 |
+| `GET` | `/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 读取指定复验的原始 Base WAV | 必须固定 candidate revision；不重新合成 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `GET` | `/v1/speechrail/voices/clone/idempotency` | 克隆幂等状态查询 | 凭 `Idempotency-Key` 读取 durable 状态与 `result_id`，不重传素材 |
 | `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
@@ -702,9 +704,36 @@ seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不
 机器模式必须使用不同于参考文本的 `test_text`（省略时服务选择受控文本），并由目标
 Base 角色重新合成、质检、转写且绑定 runtime identity。机器数值不会把
 identity/naturalness 标为通过。人工模式在机器通过后通过 `human_review` 附加实际听审结论；
-不能由自动指标代替。
+不能由自动指标代替。人工复核必须把 `human_review.validation_id` 绑定到刚刚试听的机器复验；
+只提交与当前 candidate revision 匹配的验证 ID，不能把另一轮输出的听审结果挪用过来。
 
-### 4. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
+### 4. 读取候选试听音频
+
+客户端分别使用以下只读资源播放服务端已保存的音频：
+
+| 用途 | 请求路径 | 返回内容 |
+|---|---|---|
+| 复核参考音频 | `GET /v1/voice-designs/{candidate_id}/audio` | 当前 candidate revision 的 reference WAV |
+| 复核机器输出 | `GET /v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 指定 validation 生成的原始 Base WAV |
+
+两个请求都必须携带当前 candidate DTO 中的 `revision`，不得省略或从旧缓存取值：
+
+```http
+GET /v1/voice-designs/vd_0123456789abcdef01234567/validations/vv_0123456789abcdef01234567/audio
+SpeechRail-Expected-Candidate-Revision: vr_0123456789abcdef0123456789abcdef
+```
+
+成功响应为 `audio/wav`，并带 `Cache-Control: no-store`。validation 音频是该 validation
+实际产出的文件；GET 只读取和校验已保存资产，不重新运行模型。缺少 revision header 返回
+`428 expected_candidate_revision_required`；candidate revision 已变化返回
+`409 voice_design_revision_conflict`；candidate 或 validation 不存在返回相应 `404`；
+已取消/失效 candidate 返回 `409 voice_design_candidate_unavailable`；音频缺失或与记录中的
+身份/hash 不匹配返回 `409 reference_audio_unavailable` 或
+`409 validation_audio_unavailable`。存储不可读返回 `503 voice_design_store_unavailable`。
+接口沿用常规 API 鉴权和错误 envelope，不暴露本机文件路径。历史 validation 没有对应 WAV
+时客户端应要求重新复验，不能用新合成结果冒充旧 validation。
+
+### 5. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
 
 只有当前 revision 同时具备完整机器通过和人工 identity/naturalness 通过时才能发布。
 201 响应包含已发布 `candidate` 与标准 `voice`（mode=clone、variant=base）；重复发布同一

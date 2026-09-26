@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
@@ -31,7 +31,9 @@ from speechrail.application.tts_delivery import (
 )
 from speechrail.application.voice_design import (
     VoiceDesignActionError,
+    VoiceDesignAssetUnavailableError,
     VoiceDesignCandidate,
+    VoiceDesignCandidateUnavailableError,
     VoiceDesignConflictError,
     VoiceDesignNotFoundError,
     VoiceDesignRepository,
@@ -90,6 +92,8 @@ from speechrail.runtime.resource_governor import (
 _SAMPLE_RATE = 24_000
 _MAX_REFERENCE_PCM_BYTES = 30 * _SAMPLE_RATE * 2
 _MAX_VALIDATION_PCM_BYTES = 30 * _SAMPLE_RATE * 2
+_MAX_REFERENCE_WAV_BYTES = _MAX_REFERENCE_PCM_BYTES + 44
+_MAX_VALIDATION_WAV_BYTES = _MAX_VALIDATION_PCM_BYTES + 44
 # Server-controlled audition texts. Clients may always pass their own test_text,
 # but a simple client cannot silently re-use the reference text as its own
 # evidence: the server substitutes a distinct controlled text when it is absent.
@@ -333,6 +337,21 @@ def _action_error(request_id: str, exc: VoiceDesignActionError) -> JSONResponse:
     )
 
 
+def _required_candidate_revision(
+    request: Request,
+    request_id: str,
+) -> str | JSONResponse:
+    revision = request.headers.get("SpeechRail-Expected-Candidate-Revision")
+    if revision is None or not revision.strip():
+        return error_response(
+            428,
+            request_id,
+            "expected_candidate_revision_required",
+            "SpeechRail-Expected-Candidate-Revision is required",
+        )
+    return revision
+
+
 def _selected_capability_key(services: AppServices) -> str:
     tier = services.settings.selection_tts_spec or "quality"
     return tts_capability_key(tier, TtsExecutionMode.RENDER)
@@ -347,6 +366,14 @@ def _validation_id(
     candidate_revision: str,
     capability_key: str,
     test_text_sha256: str,
+    output_audio_sha256: str,
+    model_artifact: str,
+    model_catalog_revision: str,
+    model_runtime_revision: str | None,
+    runtime_fingerprint: str | None,
+    preprocess_version: str,
+    generation_recipe_revision: str,
+    policy_version: str,
 ) -> str:
     digest = hashlib.sha256(
         json.dumps(
@@ -354,6 +381,14 @@ def _validation_id(
                 "candidate_revision": candidate_revision,
                 "capability_key": capability_key,
                 "test_text_sha256": test_text_sha256,
+                "output_audio_sha256": output_audio_sha256,
+                "model_artifact": model_artifact,
+                "model_catalog_revision": model_catalog_revision,
+                "model_runtime_revision": model_runtime_revision,
+                "runtime_fingerprint": runtime_fingerprint,
+                "preprocess_version": preprocess_version,
+                "generation_recipe_revision": generation_recipe_revision,
+                "policy_version": policy_version,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -371,6 +406,7 @@ def _candidate_validation(
     quality: vq.VoiceQualityReport,
     transcript: str | None,
     transcript_match: float | None,
+    output_wav_sha256: str,
     model_artifact: str,
     model_catalog_revision: str,
     model_runtime_revision: str | None,
@@ -384,6 +420,14 @@ def _candidate_validation(
         candidate_revision=candidate.revision,
         capability_key=capability_key,
         test_text_sha256=test_text_sha256,
+        output_audio_sha256=hashlib.sha256(output_pcm).hexdigest(),
+        model_artifact=model_artifact,
+        model_catalog_revision=model_catalog_revision,
+        model_runtime_revision=model_runtime_revision,
+        runtime_fingerprint=runtime_fingerprint,
+        preprocess_version=preprocess_version,
+        generation_recipe_revision=generation_recipe_revision,
+        policy_version=policy_version,
     )
     failures: list[str] = []
     machine_status: Literal["pass", "warn", "reject"]
@@ -421,6 +465,7 @@ def _candidate_validation(
         policy_version=policy_version,
         test_text_sha256=test_text_sha256,
         output_audio_sha256=hashlib.sha256(output_pcm).hexdigest(),
+        output_wav_sha256=output_wav_sha256,
         transcript_text_sha256=(
             _hash_text(transcript) if transcript is not None else None
         ),
@@ -861,6 +906,123 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             content={"candidate": _safe_candidate(repository, candidate)},
         )
 
+    @router.get("/{candidate_id}/audio")
+    async def get_candidate_reference_audio(
+        candidate_id: str,
+        request: Request,
+    ) -> Response:
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, services.settings)) is not None:
+            return auth_error
+        expected_revision = _required_candidate_revision(request, request_id)
+        if isinstance(expected_revision, JSONResponse):
+            return expected_revision
+        try:
+            _candidate, audio_bytes = _repository().read_reference_audio(
+                candidate_id,
+                expected_revision=expected_revision,
+                max_bytes=_MAX_REFERENCE_WAV_BYTES,
+            )
+            return Response(
+                content=audio_bytes,
+                media_type="audio/wav",
+                headers={"Cache-Control": "no-store"},
+            )
+        except VoiceDesignNotFoundError:
+            return _not_found(request_id, candidate_id)
+        except VoiceDesignCandidateUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "voice_design_candidate_unavailable",
+                "Candidate is cancelled or invalid and can no longer be reviewed",
+            )
+        except VoiceDesignConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_design_revision_conflict",
+                "Candidate revision changed or its reference is no longer available",
+            )
+        except VoiceDesignAssetUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "reference_audio_unavailable",
+                "The candidate reference audio is unavailable or does not match its record",
+            )
+        except VoiceDesignStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_design_store_unavailable",
+                "Voice design store is unavailable",
+                retryable=True,
+            )
+
+    @router.get("/{candidate_id}/validations/{validation_id}/audio")
+    async def get_candidate_validation_audio(
+        candidate_id: str,
+        validation_id: str,
+        request: Request,
+    ) -> Response:
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, services.settings)) is not None:
+            return auth_error
+        expected_revision = _required_candidate_revision(request, request_id)
+        if isinstance(expected_revision, JSONResponse):
+            return expected_revision
+        try:
+            _candidate, audio_bytes = _repository().read_validation_audio(
+                candidate_id,
+                validation_id,
+                expected_revision=expected_revision,
+                max_bytes=_MAX_VALIDATION_WAV_BYTES,
+            )
+            return Response(
+                content=audio_bytes,
+                media_type="audio/wav",
+                headers={"Cache-Control": "no-store"},
+            )
+        except VoiceDesignNotFoundError as exc:
+            if str(exc) == candidate_id:
+                return _not_found(request_id, candidate_id)
+            return error_response(
+                404,
+                request_id,
+                "voice_design_validation_not_found",
+                "Validation result was not found for this candidate",
+            )
+        except VoiceDesignCandidateUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "voice_design_candidate_unavailable",
+                "Candidate is cancelled or invalid and can no longer be reviewed",
+            )
+        except VoiceDesignConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_design_revision_conflict",
+                "Candidate revision changed",
+            )
+        except VoiceDesignAssetUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "validation_audio_unavailable",
+                "This validation WAV is unavailable or does not match its record",
+            )
+        except VoiceDesignStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_design_store_unavailable",
+                "Voice design store is unavailable",
+                retryable=True,
+            )
+
     @router.post("/{candidate_id}/confirm")
     async def confirm_candidate(
         candidate_id: str,
@@ -892,9 +1054,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     "invalid_ref_text",
                     "Normalized reference text must contain 20 to 240 characters",
                 )
-            audio_bytes = await asyncio.to_thread(
-                Path(candidate.reference_audio_path).read_bytes
+            expected_state = candidate.state
+            candidate, audio_bytes = await asyncio.to_thread(
+                repository.read_reference_audio,
+                candidate_id,
+                expected_revision=candidate.revision,
+                max_bytes=_MAX_REFERENCE_WAV_BYTES,
             )
+            if candidate.state != expected_state:
+                raise VoiceDesignConflictError("candidate state changed")
             with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
                 pcm = wav.readframes(wav.getnframes())
             expires_at = (
@@ -934,8 +1102,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             now = time.time()
 
             def confirm(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
-                if current.revision != candidate.revision:
-                    raise VoiceDesignConflictError("candidate revision changed")
+                if (
+                    current.revision != candidate.revision
+                    or current.state != candidate.state
+                ):
+                    raise VoiceDesignConflictError(
+                        "candidate revision or state changed"
+                    )
                 return current.model_copy(
                     update={
                         "reference_text": text,
@@ -967,6 +1140,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             )
         except VoiceDesignActionError as exc:
             return _action_error(request_id, exc)
+        except VoiceDesignAssetUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "reference_audio_unavailable",
+                "The candidate reference audio is unavailable or does not match its record",
+            )
         except VoiceDesignStoreUnavailableError:
             return error_response(
                 503,
@@ -1221,6 +1401,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 quality=quality,
                 transcript=transcript,
                 transcript_match=transcript_match,
+                output_wav_sha256=hashlib.sha256(output_wav).hexdigest(),
                 model_artifact=base.key,
                 model_catalog_revision=base.revision,
                 model_runtime_revision=binding.model_runtime_revision,
@@ -1254,9 +1435,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     }
                 )
 
-            updated = repository.update(
+            updated = repository.update_with_validation_audio(
                 candidate_id,
-                store_validation,
+                expected_revision=candidate.revision,
+                updated_candidate=store_validation(candidate),
+                validation=validation,
+                audio_bytes=output_wav,
+                max_bytes=_MAX_VALIDATION_WAV_BYTES,
             )
             return JSONResponse(
                 status_code=200,
@@ -1355,6 +1540,32 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     "Publication requires a complete Base and human validation pass",
                 )
 
+            expected_state = candidate.state
+            candidate, audio_bytes = await asyncio.to_thread(
+                repository.read_reference_audio,
+                candidate_id,
+                expected_revision=candidate.revision,
+                max_bytes=_MAX_REFERENCE_WAV_BYTES,
+            )
+            if candidate.state == "published":
+                profile = get_voice_registry().get_profile(candidate.target_voice_id)
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "candidate": _safe_candidate(repository, candidate),
+                        "voice": _voice_entry(profile, active, services.tts_ready),
+                    },
+                )
+            current_validation = candidate.passing_validation()
+            if (
+                candidate.state != expected_state
+                or current_validation is None
+                or current_validation.validation_id != validation.validation_id
+            ):
+                raise VoiceDesignConflictError(
+                    "candidate state or validation changed"
+                )
+
             registry = get_voice_registry()
             validation_record = {
                 "voice_id": candidate.target_voice_id,
@@ -1378,14 +1589,19 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "validated_for": [validation.capability_key],
             }
             registry.validation_store.put(validation_record)
-            audio_bytes = await asyncio.to_thread(
-                Path(candidate.reference_audio_path).read_bytes
-            )
             profile_holder: list[Any] = []
 
             def publish(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
-                if current.revision != candidate.revision:
-                    raise VoiceDesignConflictError("candidate revision changed")
+                current_validation = current.passing_validation()
+                if (
+                    current.revision != candidate.revision
+                    or current.state != candidate.state
+                    or current_validation is None
+                    or current_validation.validation_id != validation.validation_id
+                ):
+                    raise VoiceDesignConflictError(
+                        "candidate revision, state, or validation changed"
+                    )
                 try:
                     profile = registry.create_cloned_profile(
                         name=current.name,
@@ -1435,6 +1651,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 request_id,
                 "voice_design_publish_conflict",
                 "Candidate or target voice changed before publication",
+            )
+        except VoiceDesignAssetUnavailableError:
+            return error_response(
+                409,
+                request_id,
+                "reference_audio_unavailable",
+                "The candidate reference audio is unavailable or does not match its record",
             )
         except (
             VoiceStoreUnavailableError,

@@ -487,10 +487,10 @@ public struct VoiceCloneView: View {
     /// 试听位置（`isPlayingTake`）与电平表/计时（`recording.discard()`）则必须回到零，
     /// 否则卡片会一边说「还没开始」、一边停在上一段的读数上。
     private func deleteTake() {
+        guard model.discardCloneRecording() else { return }
         model.stopAudio()
         isPlayingTake = false
         model.clearCloneMessage()
-        model.discardCloneRecording()
         model.recording.discard()
     }
 
@@ -648,29 +648,32 @@ public struct VoiceCloneView: View {
     }
 
     private var cloneCapabilityConfirmed: Bool {
-        model.serviceCapabilitiesLoadState == .loaded
-            && model.serviceCapabilities?.supportsClone == true
+        model.capabilityFacade.voiceCloneAvailability == .available
     }
 
     private var cloneCapabilityTitle: String {
-        switch model.serviceCapabilitiesLoadState {
-        case .unknown, .loading:
+        switch model.capabilityFacade.voiceCloneAvailability {
+        case .checking:
             "正在确认音色克隆能力"
-        case .failed:
-            "暂时无法读取服务能力"
-        case .loaded:
+        case .unavailable, .unknown:
+            "暂时无法确认音色克隆"
+        case .unsupported:
             "当前服务没有开放音色克隆"
+        case .available:
+            "音色克隆已就绪"
         }
     }
 
     private var cloneCapabilityMessage: String {
-        switch model.serviceCapabilitiesLoadState {
-        case .unknown, .loading:
+        switch model.capabilityFacade.voiceCloneAvailability {
+        case .checking:
             "正在确认服务是否开放音色克隆；确认前暂不能注册。"
-        case .failed:
-            "暂时无法读取服务能力，音色克隆是否可用尚未确认。"
-        case .loaded:
+        case .unavailable, .unknown:
+            "暂时无法确认音色克隆；请重新读取服务信息后重试。"
+        case .unsupported:
             "当前服务没有发布音色克隆能力；可在「模型」页查看当前档位与所需模型。"
+        case .available:
+            "当前服务已开放音色克隆。"
         }
     }
 
@@ -874,9 +877,9 @@ public struct VoiceCloneView: View {
     }
 
     private func startRecording() {
+        guard model.discardCloneRecording() else { return }
         model.stopAudio()
         model.clearCloneMessage()
-        model.discardCloneRecording()
         didAdoptScriptForSpokenText = false
         adoptionIfEmpty()
         Task {
@@ -915,8 +918,10 @@ public struct VoiceCloneView: View {
 
     private func register() async {
         if cloneIsGated {
-            if model.serviceCapabilitiesLoadState == .loaded {
+            if model.capabilityFacade.voiceCloneAvailability == .unsupported {
                 navigation.request(.models)
+            } else {
+                Task { await model.refresh() }
             }
             return
         }
@@ -931,23 +936,23 @@ public struct VoiceCloneView: View {
     }
 
     private var cloneCapabilityActionTitle: String? {
-        switch model.serviceCapabilitiesLoadState {
-        case .unknown, .loading:
+        switch model.capabilityFacade.voiceCloneAvailability {
+        case .checking, .available:
             nil
-        case .failed:
+        case .unknown, .unavailable:
             "重新读取"
-        case .loaded:
+        case .unsupported:
             "查看模型"
         }
     }
 
     private func handleCloneCapabilityAction() {
-        switch model.serviceCapabilitiesLoadState {
-        case .failed:
+        switch model.capabilityFacade.voiceCloneAvailability {
+        case .unknown, .unavailable:
             Task { await model.refresh() }
-        case .loaded:
+        case .unsupported:
             navigation.request(.models)
-        case .unknown, .loading:
+        case .checking, .available:
             break
         }
     }

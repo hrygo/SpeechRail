@@ -1037,6 +1037,61 @@ public struct PronunciationSet: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct PronunciationSetSummary: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let revision: String
+    public let revoked: Bool
+    public let entryCount: Int
+
+    public init(id: String, revision: String, revoked: Bool, entryCount: Int) {
+        self.id = id
+        self.revision = revision
+        self.revoked = revoked
+        self.entryCount = entryCount
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case revision
+        case revoked
+        case entryCount = "entry_count"
+    }
+}
+
+public enum CloneIdempotencyState: Equatable, Sendable {
+    case new
+    case pending
+    case completed
+    case unknown(String)
+}
+
+public struct CloneIdempotencyStatus: Decodable, Equatable, Sendable {
+    public let state: CloneIdempotencyState
+    public let resultID: String?
+
+    public init(state: CloneIdempotencyState, resultID: String?) {
+        self.state = state
+        self.resultID = resultID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case resultID = "result_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawState = try container.decode(String.self, forKey: .state)
+        resultID = try container.decode(String?.self, forKey: .resultID)
+        switch rawState {
+        case "new": state = .new
+        case "pending": state = .pending
+        case "completed": state = .completed
+        default: state = .unknown(rawState)
+        }
+    }
+}
+
 public struct PronunciationSetUpdate: Codable, Equatable, Sendable {
     public let id: String
     public let expectedRevision: String?
@@ -1792,41 +1847,6 @@ public enum CapabilityDiscoveryState: Equatable, Sendable {
     }
 }
 
-/// Presentation-level distinction for a capability declaration.
-///
-/// Readiness of the ASR/TTS workers and publication of optional TTS
-/// capabilities are separate facts. A missing declaration while discovery is
-/// still running is therefore not the same as a declared-but-unavailable
-/// capability.
-public enum ServiceCapabilityPresentationStatus: Equatable, Sendable {
-    case ready
-    case notReady
-    case unsupported
-    case checking
-    case undeclared
-    case unavailable
-}
-
-public enum ServiceCapabilityPresentation {
-    public static func resolve(
-        declared: Bool?,
-        discoveryState: CapabilityDiscoveryState,
-        supportedByProfile: Bool
-    ) -> ServiceCapabilityPresentationStatus {
-        if declared == true { return .ready }
-        if declared == false { return supportedByProfile ? .notReady : .unsupported }
-
-        switch discoveryState {
-        case .idle, .loading:
-            return .checking
-        case .loaded:
-            return supportedByProfile ? .undeclared : .unsupported
-        case .notSupported, .notReady, .unauthorized, .invalidContract, .failed:
-            return .unavailable
-        }
-    }
-}
-
 public struct CapabilitySnapshotStore: Equatable, Sendable {
     public private(set) var snapshot: EffectiveCapabilitySnapshot?
     public private(set) var etag: String?
@@ -1934,21 +1954,22 @@ public enum SpeechRailCapabilityRevisionSelector {
 
     public static func creatorRequestOptions(
         voiceID: String,
-        fallbackVoiceRevision: String?,
         in snapshot: EffectiveCapabilitySnapshot?
-    ) -> SpeechRailRequestOptions {
+    ) -> SpeechRailRequestOptions? {
         guard
             let snapshot,
             let voice = matchingVoice(voiceID, in: snapshot),
             voice.available,
-            voice.operations["http_speech"] != nil
+            voice.operations["http_speech"] != nil,
+            let voiceRevision = nonEmpty(voice.voiceRevision),
+            let modelRevision = nonEmpty(voice.model.catalogRevision)
         else {
-            return SpeechRailRequestOptions()
+            return nil
         }
 
         return SpeechRailRequestOptions(
-            expectedVoiceRevision: nonEmpty(voice.voiceRevision) ?? nonEmpty(fallbackVoiceRevision),
-            expectedModelRevision: nonEmpty(snapshot.models["tts"]?.catalogRevision)
+            expectedVoiceRevision: voiceRevision,
+            expectedModelRevision: modelRevision
         )
     }
 
@@ -1956,9 +1977,11 @@ public enum SpeechRailCapabilityRevisionSelector {
         _ voiceID: String,
         in snapshot: EffectiveCapabilitySnapshot
     ) -> SafeVoiceEntry? {
-        snapshot.voices.first { voice in
+        let matches = snapshot.voices.filter { voice in
             voice.id == voiceID || voice.aliases.contains(voiceID)
         }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

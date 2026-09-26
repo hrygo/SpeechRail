@@ -302,8 +302,8 @@ paths:
       summary: Generate a private VoiceDesign candidate reference
       description: |
         Creates a durable, private design candidate when the active selection
-        resolves the VoiceDesign role (currently the reference spec) and local
-        Batch ASR. VoiceDesign generates a 2-30 second reference which is
+        resolves the VoiceDesign role and local Batch ASR. VoiceDesign generates
+        a 2-30 second reference which is
         canonicalized and graded, then transcribed for a reference self-check.
         The expected text is never supplied as an ASR prompt.
 
@@ -422,6 +422,134 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/audio:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+      - name: SpeechRail-Expected-Candidate-Revision
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        description: Required current candidate revision; stale reads return 409.
+    get:
+      operationId: getVoiceDesignCandidateReferenceAudio
+      tags: [speech]
+      summary: Read the exact stored reference WAV for a candidate revision
+      description: >-
+        Returns the candidate's persisted reference WAV without exposing its
+        filesystem path. The response is not cached and is available only for
+        the exact candidate revision supplied in the required header.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Stored reference WAV
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Candidate revision changed, the candidate is cancelled or invalid,
+            or its reference audio is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '428':
+          description: Expected candidate revision header is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/validations/{validation_id}/audio:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+      - name: validation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vv_[0-9a-f]{24}$'
+      - name: SpeechRail-Expected-Candidate-Revision
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        description: Required current candidate revision; stale reads return 409.
+    get:
+      operationId: getVoiceDesignValidationAudio
+      tags: [speech]
+      summary: Read the exact Base WAV produced by one validation
+      description: >-
+        Returns the persisted WAV for this validation without re-synthesizing.
+        The validation must belong to the current candidate revision. Responses
+        are not cached; unavailable legacy assets return validation_audio_unavailable.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Stored validation WAV
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Candidate or validation was not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: >-
+            Candidate revision changed, the candidate is cancelled or invalid,
+            or validation audio is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '428':
+          description: Expected candidate revision header is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voice-designs/{candidate_id}/confirm:

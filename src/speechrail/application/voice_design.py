@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import re
 import tempfile
 import threading
+import wave
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,8 +46,16 @@ class VoiceDesignNotFoundError(ValueError):
     """The requested candidate does not exist."""
 
 
+class VoiceDesignAssetUnavailableError(RuntimeError):
+    """A candidate audio asset is absent, unsafe, or no longer matches its record."""
+
+
 class VoiceDesignConflictError(ValueError):
     """The candidate changed or the requested transition is not allowed."""
+
+
+class VoiceDesignCandidateUnavailableError(VoiceDesignConflictError):
+    """The candidate is terminal and its audio is no longer reviewable."""
 
 
 class VoiceDesignActionError(RuntimeError):
@@ -85,6 +98,7 @@ class VoiceDesignValidation(BaseModel):
     policy_version: str
     test_text_sha256: str = Field(pattern=_SHA256_RE)
     output_audio_sha256: str | None = Field(default=None, pattern=_SHA256_RE)
+    output_wav_sha256: str | None = Field(default=None, pattern=_SHA256_RE)
     transcript_text_sha256: str | None = Field(default=None, pattern=_SHA256_RE)
     transcript_match: float | None = Field(default=None, ge=0.0, le=1.0)
     created_at: float = Field(ge=0.0)
@@ -296,11 +310,245 @@ class VoiceDesignRepository:
     def _audio_path(self, candidate_id: str, revision: str) -> Path:
         if not candidate_id.startswith("vd_") or not VOICE_REVISION_RE.fullmatch(revision):
             raise ValueError("invalid voice design asset identity")
+        if self._assets_dir.is_symlink():
+            raise ValueError("voice design asset directory must not be a symlink")
         candidate = (self._assets_dir / f"{candidate_id}.wav").resolve()
         root = self._assets_dir.resolve()
         if candidate.parent != root:
             raise ValueError("voice design asset escaped its private directory")
         return candidate
+
+    def _validation_audio_path(self, candidate_id: str, validation_id: str) -> Path:
+        if (
+            not candidate_id.startswith("vd_")
+            or re.fullmatch(_CANDIDATE_ID_RE, candidate_id) is None
+            or re.fullmatch(_VALIDATION_ID_RE, validation_id) is None
+        ):
+            raise ValueError("invalid voice design validation asset identity")
+        if self._assets_dir.is_symlink():
+            raise ValueError("voice design asset directory must not be a symlink")
+        root = self._assets_dir.resolve()
+        directory = self._assets_dir / candidate_id
+        if directory.is_symlink():
+            raise ValueError("voice design validation directory must not be a symlink")
+        resolved_directory = directory.resolve()
+        if resolved_directory.parent != root:
+            raise ValueError("voice design validation asset escaped its private directory")
+        return resolved_directory / f"{validation_id}.wav"
+
+    @staticmethod
+    def _read_audio_asset(path: Path, *, max_bytes: int) -> bytes:
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise VoiceDesignAssetUnavailableError("voice design audio is unavailable")
+            size = path.stat().st_size
+            if size <= 0 or size > max_bytes:
+                raise VoiceDesignAssetUnavailableError("voice design audio is unavailable")
+            payload = path.read_bytes()
+        except VoiceDesignAssetUnavailableError:
+            raise
+        except OSError as exc:
+            raise VoiceDesignAssetUnavailableError(
+                "voice design audio is unavailable"
+            ) from exc
+        if len(payload) != size or len(payload) > max_bytes:
+            raise VoiceDesignAssetUnavailableError("voice design audio is unavailable")
+        return payload
+
+    @staticmethod
+    def _pcm_sha256_from_wav(payload: bytes) -> str:
+        try:
+            with wave.open(io.BytesIO(payload), "rb") as audio:
+                if (
+                    audio.getcomptype() != "NONE"
+                    or audio.getnchannels() != 1
+                    or audio.getsampwidth() != 2
+                ):
+                    raise VoiceDesignAssetUnavailableError(
+                        "voice design validation audio is unavailable"
+                    )
+                pcm = audio.readframes(audio.getnframes())
+        except VoiceDesignAssetUnavailableError:
+            raise
+        except (EOFError, OSError, wave.Error) as exc:
+            raise VoiceDesignAssetUnavailableError(
+                "voice design validation audio is unavailable"
+            ) from exc
+        return hashlib.sha256(pcm).hexdigest()
+
+    def read_reference_audio(
+        self,
+        candidate_id: str,
+        *,
+        expected_revision: str,
+        max_bytes: int,
+    ) -> tuple[VoiceDesignCandidate, bytes]:
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=VoiceDesignStoreUnavailableError,
+        ):
+            candidate = self._load_locked().get(candidate_id)
+            if candidate is None:
+                raise VoiceDesignNotFoundError(candidate_id)
+            if candidate.revision != expected_revision:
+                raise VoiceDesignConflictError("candidate revision changed")
+            if candidate.state in {"cancelled", "failed"}:
+                raise VoiceDesignCandidateUnavailableError(
+                    "candidate audio is no longer reviewable"
+                )
+            try:
+                expected_path = self._audio_path(candidate_id, candidate.revision)
+            except ValueError as exc:
+                raise VoiceDesignAssetUnavailableError(
+                    "candidate reference audio path is unsafe"
+                ) from exc
+            if Path(candidate.reference_audio_path) != expected_path:
+                raise VoiceDesignAssetUnavailableError(
+                    "candidate reference audio identity is unavailable"
+                )
+            payload = self._read_audio_asset(expected_path, max_bytes=max_bytes)
+        if hashlib.sha256(payload).hexdigest() != candidate.reference_audio_sha256:
+            raise VoiceDesignAssetUnavailableError(
+                "candidate reference audio does not match its record"
+            )
+        return candidate, payload
+
+    def read_validation_audio(
+        self,
+        candidate_id: str,
+        validation_id: str,
+        *,
+        expected_revision: str,
+        max_bytes: int,
+    ) -> tuple[VoiceDesignCandidate, bytes]:
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=VoiceDesignStoreUnavailableError,
+        ):
+            candidate = self._load_locked().get(candidate_id)
+            if candidate is None:
+                raise VoiceDesignNotFoundError(candidate_id)
+            if candidate.revision != expected_revision:
+                raise VoiceDesignConflictError("candidate revision changed")
+            if candidate.state in {"cancelled", "failed"}:
+                raise VoiceDesignCandidateUnavailableError(
+                    "candidate audio is no longer reviewable"
+                )
+            validation = next(
+                (
+                    item
+                    for item in candidate.validations
+                    if item.validation_id == validation_id
+                    and item.candidate_revision == candidate.revision
+                ),
+                None,
+            )
+            if validation is None:
+                raise VoiceDesignNotFoundError(validation_id)
+            if (
+                validation.output_audio_sha256 is None
+                or validation.output_wav_sha256 is None
+            ):
+                raise VoiceDesignAssetUnavailableError(
+                    "validation audio identity is unavailable"
+                )
+            try:
+                path = self._validation_audio_path(candidate_id, validation_id)
+            except ValueError as exc:
+                raise VoiceDesignAssetUnavailableError(
+                    "validation audio path is unsafe"
+                ) from exc
+            payload = self._read_audio_asset(path, max_bytes=max_bytes)
+        if hashlib.sha256(payload).hexdigest() != validation.output_wav_sha256:
+            raise VoiceDesignAssetUnavailableError(
+                "validation WAV does not match its record"
+            )
+        if self._pcm_sha256_from_wav(payload) != validation.output_audio_sha256:
+            raise VoiceDesignAssetUnavailableError(
+                "validation PCM does not match its record"
+            )
+        return candidate, payload
+
+    def update_with_validation_audio(
+        self,
+        candidate_id: str,
+        *,
+        expected_revision: str,
+        updated_candidate: VoiceDesignCandidate,
+        validation: VoiceDesignValidation,
+        audio_bytes: bytes,
+        max_bytes: int,
+    ) -> VoiceDesignCandidate:
+        """Persist one validation WAV and its candidate record under one lock."""
+
+        if (
+            updated_candidate.candidate_id != candidate_id
+            or updated_candidate.revision != expected_revision
+            or validation.candidate_revision != expected_revision
+            or validation.output_audio_sha256 is None
+            or validation.output_wav_sha256 is None
+            or len(audio_bytes) <= 0
+            or len(audio_bytes) > max_bytes
+            or hashlib.sha256(audio_bytes).hexdigest() != validation.output_wav_sha256
+            or self._pcm_sha256_from_wav(audio_bytes) != validation.output_audio_sha256
+            or not any(
+                item.validation_id == validation.validation_id
+                for item in updated_candidate.validations
+            )
+        ):
+            raise VoiceDesignAssetUnavailableError(
+                "validation audio does not match its record"
+            )
+
+        asset_path = self._validation_audio_path(candidate_id, validation.validation_id)
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=VoiceDesignStoreUnavailableError,
+        ):
+            records = self._load_locked()
+            current = records.get(candidate_id)
+            if current is None:
+                raise VoiceDesignNotFoundError(candidate_id)
+            if (
+                current.revision != expected_revision
+                or current.state not in {"confirmed", "validating"}
+            ):
+                raise VoiceDesignConflictError("candidate revision or state changed")
+
+            created_asset = False
+            try:
+                if asset_path.exists() or asset_path.is_symlink():
+                    existing = self._read_audio_asset(asset_path, max_bytes=max_bytes)
+                    if hashlib.sha256(existing).hexdigest() != validation.output_wav_sha256:
+                        raise VoiceDesignAssetUnavailableError(
+                            "validation asset identity already exists"
+                        )
+                else:
+                    _atomic_write_audio(asset_path, audio_bytes)
+                    created_asset = True
+                records[candidate_id] = updated_candidate
+                self._save_locked(records)
+            except BaseException as exc:
+                if created_asset:
+                    asset_path.unlink(missing_ok=True)
+                    with suppress(OSError):
+                        asset_path.parent.rmdir()
+                if isinstance(
+                    exc,
+                    (
+                        VoiceDesignAssetUnavailableError,
+                        VoiceDesignConflictError,
+                        VoiceDesignNotFoundError,
+                        VoiceDesignStoreUnavailableError,
+                    ),
+                ):
+                    raise
+                if isinstance(exc, OSError):
+                    raise VoiceDesignStoreUnavailableError(
+                        "voice design validation asset cannot be persisted"
+                    ) from exc
+                raise
+        return updated_candidate
 
     def create(
         self,
@@ -337,6 +585,18 @@ class VoiceDesignRepository:
                     self._audio_path(
                         stale.candidate_id, stale.revision
                     ).unlink(missing_ok=True)
+                    for validation in stale.validations:
+                        if validation.validation_id and re.fullmatch(
+                            _VALIDATION_ID_RE,
+                            validation.validation_id,
+                        ):
+                            validation_path = self._validation_audio_path(
+                                stale.candidate_id,
+                                validation.validation_id,
+                            )
+                            validation_path.unlink(missing_ok=True)
+                    with suppress(OSError):
+                        (self._assets_dir / stale.candidate_id).rmdir()
             try:
                 _atomic_write_audio(expected, audio_bytes)
             except OSError as exc:
@@ -475,7 +735,9 @@ class VoiceDesignRepository:
 
 __all__ = [
     "VoiceDesignActionError",
+    "VoiceDesignAssetUnavailableError",
     "VoiceDesignCandidate",
+    "VoiceDesignCandidateUnavailableError",
     "VoiceDesignConflictError",
     "VoiceDesignNotFoundError",
     "VoiceDesignRepository",

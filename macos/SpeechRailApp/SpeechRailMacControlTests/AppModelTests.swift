@@ -12,6 +12,446 @@ import SpeechRailControlKit
 /// 满足 `AppModel.init` 的必填依赖（这些用例根本不走服务 HTTP）。
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testCapabilityFacadeFailsClosedWhenSnapshotIsStale() {
+        let facade = AppCapabilityFacade(
+            snapshot: Self.capabilitySnapshot(
+                previewStatus: "supported",
+                transcriptionStatus: "supported"
+            ),
+            discoveryState: .failed
+        )
+
+        XCTAssertEqual(facade.voiceDesignCreationAvailability, .unavailable)
+        XCTAssertEqual(facade.voiceCloneAvailability, .unavailable)
+        XCTAssertNil(facade.speechRequestOptions(for: "voice-1"))
+    }
+
+    func testCapabilityFacadeDistinguishesUnknownFromUnsupportedOperations() {
+        let unsupported = AppCapabilityFacade(
+            snapshot: Self.capabilitySnapshot(
+                previewStatus: "unsupported",
+                transcriptionStatus: "supported"
+            ),
+            discoveryState: .loaded
+        )
+        let unknown = AppCapabilityFacade(
+            snapshot: Self.capabilitySnapshot(
+                previewStatus: nil,
+                transcriptionStatus: "supported"
+            ),
+            discoveryState: .loaded
+        )
+
+        XCTAssertEqual(unsupported.voiceDesignCreationAvailability, .unsupported)
+        XCTAssertEqual(unknown.voiceDesignCreationAvailability, .unknown)
+    }
+
+    func testRealtimeBindingUsesASRAndSelectedVoiceModelRevisions() {
+        let voice = SafeVoiceEntry(
+            id: "voice-1",
+            name: "测试音色",
+            aliases: ["test-voice"],
+            mode: "design",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_11111111111111111111111111111111",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "voice-base",
+                catalogRevision: "voice-model-catalog"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "instruction",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "instruction_profile",
+                metadataMethod: "declared_only"
+            ),
+            operations: [
+                "realtime_speech": JSONValue(.object([
+                    "parameters": JSONValue(.object([
+                        "instructions": JSONValue(.object([
+                            "status": JSONValue(.string("unsupported"))
+                        ]))
+                    ])),
+                    "output": JSONValue(.object([
+                        "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                        "pcm_sample_rate": JSONValue(.integer(24_000)),
+                        "channels": JSONValue(.integer(1))
+                    ])),
+                    "scheduling_class": JSONValue(.string("realtime_tts")),
+                    "terminal_evidence": JSONValue(.string("speechrail.tts.completed"))
+                ]))
+            ]
+        )
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "global-tts-catalog"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+        let facade = AppCapabilityFacade(snapshot: snapshot, discoveryState: .loaded)
+
+        XCTAssertEqual(
+            facade.availability(ofVoiceOperation: "realtime_speech", voiceID: "test-voice"),
+            .available
+        )
+        XCTAssertEqual(
+            facade.realtimeBinding(for: "test-voice"),
+            RealtimeCapabilityBinding(
+                asrModelRevision: "asr-model-catalog",
+                canonicalVoiceID: "voice-1",
+                voiceRevision: "vr_11111111111111111111111111111111",
+                ttsModelRevision: "voice-model-catalog"
+            )
+        )
+        XCTAssertEqual(
+            facade.realtimeBinding(),
+            RealtimeCapabilityBinding(asrModelRevision: "asr-model-catalog")
+        )
+    }
+
+    func testPendingCloneRegistrationKeepsOriginalPayloadAndBlocksRerecording() async throws {
+        let creator = PendingCloneRegistrationClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let firstAudio = Data([1, 2, 3, 4])
+        let firstRecording = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try firstAudio.write(to: firstRecording)
+
+        await model.acceptCloneRecording(fileAt: firstRecording)
+        let originalRegistrationID = try XCTUnwrap(model.cloneRegistrationID)
+        let originalIdempotencyKey = try XCTUnwrap(model.cloneIdempotencyKey)
+
+        let result = await model.registerCloneVoice(
+            referenceText: "这是一段用于注册音色的测试朗读文本。",
+            name: "测试音色"
+        )
+
+        XCTAssertNil(result)
+        let queriedKeys = await creator.statusKeys()
+        let registrationCount = await creator.registrationCount()
+        XCTAssertEqual(queriedKeys, [originalIdempotencyKey])
+        XCTAssertEqual(registrationCount, 0)
+
+        let replacementRecording = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data([9, 8, 7, 6]).write(to: replacementRecording)
+        await model.acceptCloneRecording(fileAt: replacementRecording)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: replacementRecording.path))
+        XCTAssertEqual(model.cloneRecordingAudio, firstAudio)
+        XCTAssertEqual(model.cloneRegistrationID, originalRegistrationID)
+        XCTAssertEqual(model.cloneIdempotencyKey, originalIdempotencyKey)
+        XCTAssertFalse(model.discardCloneRecording())
+    }
+
+    func testVoiceDesignCannotReviewOrPublishBeforeHearingDurableAudio() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于耐久候选复核的测试参考文案。",
+            status: .ready,
+            audioData: Data([0, 1, 2])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "测试音色")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+
+        var events = await creator.events()
+        XCTAssertEqual(events, ["create", "candidate.get", "reference.audio"])
+        model.confirmVoiceDesignReference()
+        events = await creator.events()
+        XCTAssertEqual(events, ["create", "candidate.get", "reference.audio"])
+
+        model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        model.confirmVoiceDesignReference()
+        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+
+        events = await creator.events()
+        XCTAssertEqual(
+            events,
+            [
+                "create",
+                "candidate.get",
+                "reference.audio",
+                "confirm",
+                "candidate.get",
+                "validate",
+                "candidate.get",
+                "validation.audio",
+            ]
+        )
+        model.publishVoiceDesignPublication(
+            identityConfirmed: true,
+            naturalnessConfirmed: true
+        )
+        events = await creator.events()
+        XCTAssertFalse(events.contains("review"))
+        XCTAssertFalse(events.contains("publish"))
+
+        model.markVoiceDesignValidationAudioPlaybackFinished(successfully: true)
+        model.publishVoiceDesignPublication(
+            identityConfirmed: true,
+            naturalnessConfirmed: true
+        )
+        await waitForVoiceDesignPhase(.published, model: model)
+        events = await creator.events()
+        XCTAssertEqual(events.suffix(3), ["review", "candidate.get", "publish"])
+    }
+
+    func testFailedVoiceDesignCancellationRetainsCandidateForRetry() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于验证取消重试的测试参考文案。",
+            status: .ready,
+            audioData: Data([1, 2, 3])
+        )
+        model.startVoiceDesignPublication(preview, name: "可重试取消")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        let candidateID = model.voiceDesignPublication.candidateID
+        await creator.failNextCandidateCancel()
+
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.failed, model: model)
+
+        XCTAssertEqual(model.voiceDesignPublication.candidateID, candidateID)
+        var events = await creator.events()
+        XCTAssertEqual(events.filter { $0 == "cancel" }.count, 1)
+
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.idle, model: model)
+
+        XCTAssertNil(model.voiceDesignPublication.candidateID)
+        events = await creator.events()
+        XCTAssertEqual(events.filter { $0 == "cancel" }.count, 2)
+    }
+
+    func testUnknownVoiceDesignCandidateStateBlocksReviewOperations() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        await creator.setNextCandidateState("future_state")
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于验证未知候选状态的测试参考文案。",
+            status: .ready,
+            audioData: Data([1, 2, 3])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "未知状态")
+        await waitForVoiceDesignPhase(.failed, model: model)
+
+        XCTAssertEqual(model.voiceDesignPublication.candidateID, "vd_0123456789abcdef01234567")
+        let events = await creator.events()
+        XCTAssertFalse(events.contains("reference.audio"))
+        XCTAssertFalse(events.contains("validate"))
+    }
+
+    func testLatePublishedResultDoesNotOverwriteNewPublicationGeneration() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let firstPreview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于检查迟到发布结果的测试参考文案。",
+            status: .ready,
+            audioData: Data([0, 1, 2])
+        )
+        model.startVoiceDesignPublication(firstPreview, name: "第一版音色")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        model.confirmVoiceDesignReference()
+        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+        model.markVoiceDesignValidationAudioPlaybackFinished(successfully: true)
+
+        await creator.holdNextPublication()
+        model.publishVoiceDesignPublication(
+            identityConfirmed: true,
+            naturalnessConfirmed: true
+        )
+        await waitForCreatorEvent("publish", creator: creator)
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.published, model: model)
+        for _ in 0..<200 where model.isRegisteringVoice {
+            await Task.yield()
+        }
+
+        let secondPreview = VoiceDesignCandidateSnapshot(
+            slot: "2",
+            seed: 202,
+            title: "候选 2",
+            instructionSnapshot: "稳重、明亮、自然",
+            referenceTextSnapshot: "这是一段用于检查新发布流程仍可继续的测试参考文案。",
+            status: .ready,
+            audioData: Data([3, 4, 5])
+        )
+        model.startVoiceDesignPublication(secondPreview, name: "第二版音色")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+
+        await creator.releaseHeldPublication()
+        for _ in 0..<200 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.voiceDesignPublication.phase, .awaitingReferenceReview)
+        XCTAssertEqual(model.voiceDesignPublication.candidateID, "vd_0123456789abcdef01234567")
+        XCTAssertEqual(model.voiceDesignSavingSlot, "2")
+        XCTAssertTrue(model.voiceDesignSavedSlots.contains("1"))
+        XCTAssertNil(model.voiceDesignSuccessMessage)
+
+        model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        model.confirmVoiceDesignReference()
+        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+    }
+
+    private func waitForVoiceDesignPhase(
+        _ expected: VoiceDesignPublicationPhase,
+        model: AppModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<200 {
+            if model.voiceDesignPublication.phase == expected {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail(
+            "音色发布阶段未到达 \(expected)，当前为 \(model.voiceDesignPublication.phase)",
+            file: file,
+            line: line
+        )
+    }
+
+    private func waitForCreatorEvent(
+        _ expected: String,
+        creator: VoiceDesignWorkflowCreatorClient,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<200 {
+            if await creator.events().contains(expected) {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail("服务端 fake 没有收到 \(expected)", file: file, line: line)
+    }
+
+    private static func capabilitySnapshot(
+        previewStatus: String?,
+        transcriptionStatus: String?
+    ) -> EffectiveCapabilitySnapshot {
+        var operations: [String: JSONValue] = [:]
+        if let previewStatus {
+            operations["voice_preview"] = JSONValue(.object([
+                "status": JSONValue(.string(previewStatus))
+            ]))
+        }
+        if let transcriptionStatus {
+            operations["transcription"] = JSONValue(.object([
+                "status": JSONValue(.string(transcriptionStatus))
+            ]))
+        }
+        return EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "tts_clone": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "clone-base",
+                    catalogRevision: "clone-model-revision"
+                )
+            ],
+            voices: [],
+            operations: operations,
+            guarantees: [:]
+        )
+    }
 
     // MARK: - (i) 过期 cancel→refresh 链不得覆盖更新的终态
 
@@ -181,8 +621,15 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func makeModel(transport: any SpeechRailControlTransport) -> AppModel {
-        AppModel(transport: transport, apiClient: UnavailableDiagnosticsClient())
+    private func makeModel(
+        transport: any SpeechRailControlTransport,
+        creatorClient: any SpeechRailCreatorClient = UnavailableCreatorClient()
+    ) -> AppModel {
+        AppModel(
+            transport: transport,
+            apiClient: UnavailableDiagnosticsClient(),
+            creatorClient: creatorClient
+        )
     }
 
     nonisolated private static func modelCatalogResponse(for request: ControlRequest) -> ControlResponse {
@@ -239,6 +686,356 @@ private struct UnavailableDiagnosticsClient: ServiceDiagnosticsClient {
 
     func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
         throw ServiceAPIClientError.requestFailed
+    }
+}
+
+private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
+    private var queriedKeys: [String] = []
+    private var registrations = 0
+
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        queriedKeys.append(idempotencyKey)
+        return CloneIdempotencyStatus(state: .pending, resultID: nil)
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        registrations += 1
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func deleteVoice(id: String) async throws {}
+
+    func statusKeys() -> [String] { queriedKeys }
+
+    func registrationCount() -> Int { registrations }
+}
+
+private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
+    private var currentCandidate: VoiceDesignCandidate?
+    private var recordedEvents: [String] = []
+    private let candidateID = "vd_0123456789abcdef01234567"
+    private let candidateRevision = "vr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    private let validationID = "vv_0123456789abcdef01234567"
+    private var shouldHoldNextPublication = false
+    private var shouldFailNextCandidateCancel = false
+    private var heldPublication: CheckedContinuation<VoiceDesignPublishResult, Error>?
+    private var heldPublicationResult: VoiceDesignPublishResult?
+    private var nextCandidateState = "generated"
+
+    func events() -> [String] { recordedEvents }
+
+    func holdNextPublication() {
+        shouldHoldNextPublication = true
+    }
+
+    func failNextCandidateCancel() {
+        shouldFailNextCandidateCancel = true
+    }
+
+    func setNextCandidateState(_ state: String) {
+        nextCandidateState = state
+    }
+
+    func releaseHeldPublication() {
+        guard let heldPublication, let heldPublicationResult else { return }
+        self.heldPublication = nil
+        self.heldPublicationResult = nil
+        heldPublication.resume(returning: heldPublicationResult)
+    }
+
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        CreatorVoice(
+            id: id,
+            name: "测试音色",
+            available: true,
+            revision: candidateRevision
+        )
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createVoiceDesignCandidate(
+        voiceID: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate {
+        recordedEvents.append("create")
+        let candidate = makeCandidate(
+            voiceID: voiceID,
+            name: name,
+            state: nextCandidateState,
+            validations: [],
+            publishable: false
+        )
+        nextCandidateState = "generated"
+        currentCandidate = candidate
+        return candidate
+    }
+
+    func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        recordedEvents.append("candidate.get")
+        guard let currentCandidate, currentCandidate.id == id else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        return currentCandidate
+    }
+
+    func fetchVoiceDesignReferenceAudio(
+        id: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        recordedEvents.append("reference.audio")
+        guard let currentCandidate,
+              currentCandidate.id == id,
+              currentCandidate.revision == expectedRevision
+        else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        return Data([4, 5, 6])
+    }
+
+    func fetchVoiceDesignValidationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        recordedEvents.append("validation.audio")
+        guard let currentCandidate,
+              currentCandidate.id == id,
+              currentCandidate.revision == expectedRevision,
+              currentCandidate.latestValidation?.validationID == validationID
+        else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        return Data([7, 8, 9])
+    }
+
+    func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate {
+        recordedEvents.append("confirm")
+        guard let existingCandidate = currentCandidate else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        let confirmed = makeCandidate(
+            voiceID: existingCandidate.targetVoiceID,
+            name: existingCandidate.name,
+            state: "confirmed",
+            validations: [],
+            publishable: false
+        )
+        currentCandidate = confirmed
+        return confirmed
+    }
+
+    func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate {
+        if humanReview == nil {
+            recordedEvents.append("validate")
+        } else {
+            recordedEvents.append("review")
+        }
+        guard let existingCandidate = currentCandidate else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        let validation = VoiceDesignValidation(
+            validationID: validationID,
+            candidateRevision: candidateRevision,
+            status: humanReview == nil ? "warn" : "pass",
+            machineStatus: "pass",
+            identityStatus: humanReview?.identity ?? .notReviewed,
+            naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
+            failureCodes: [],
+            capabilityKey: "reference.render",
+            modelArtifact: "tts-1.7b-base-bf16",
+            modelCatalogRevision: String(repeating: "a", count: 40),
+            transcriptMatch: 1.0,
+            createdAt: 1,
+            updatedAt: 1
+        )
+        let updated = makeCandidate(
+            voiceID: existingCandidate.targetVoiceID,
+            name: existingCandidate.name,
+            state: humanReview == nil ? "validating" : "publishable",
+            validations: [validation],
+            publishable: humanReview != nil
+        )
+        currentCandidate = updated
+        return updated
+    }
+
+    func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult {
+        recordedEvents.append("publish")
+        guard let existingCandidate = currentCandidate else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        let voice = CreatorVoice(
+            id: existingCandidate.targetVoiceID,
+            name: existingCandidate.name,
+            available: true,
+            revision: candidateRevision
+        )
+        let published = makeCandidate(
+            voiceID: existingCandidate.targetVoiceID,
+            name: existingCandidate.name,
+            state: "published",
+            validations: existingCandidate.validations,
+            publishable: true
+        )
+        currentCandidate = published
+        let result = VoiceDesignPublishResult(candidate: published, voice: voice)
+        guard shouldHoldNextPublication else { return result }
+        shouldHoldNextPublication = false
+        return try await withCheckedThrowingContinuation { continuation in
+            heldPublication = continuation
+            heldPublicationResult = result
+        }
+    }
+
+    func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        guard let currentCandidate, currentCandidate.id == id else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        recordedEvents.append("cancel")
+        if shouldFailNextCandidateCancel {
+            shouldFailNextCandidateCancel = false
+            throw ServiceAPIClientError.requestFailed
+        }
+        let cancelled = makeCandidate(
+            voiceID: currentCandidate.targetVoiceID,
+            name: currentCandidate.name,
+            state: "cancelled",
+            validations: currentCandidate.validations,
+            publishable: false
+        )
+        self.currentCandidate = cancelled
+        return cancelled
+    }
+
+    func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        CloneIdempotencyStatus(state: .new, resultID: nil)
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func deleteVoice(id: String) async throws {}
+
+    private func makeCandidate(
+        voiceID: String,
+        name: String,
+        state: String,
+        validations: [VoiceDesignValidation],
+        publishable: Bool
+    ) -> VoiceDesignCandidate {
+        VoiceDesignCandidate(
+            id: candidateID,
+            targetVoiceID: voiceID,
+            name: name,
+            state: state,
+            revision: candidateRevision,
+            publishedVoiceRevision: state == "published" ? candidateRevision : nil,
+            reference: VoiceDesignReference(
+                audioSHA256: String(repeating: "a", count: 64),
+                textSHA256: String(repeating: "b", count: 64),
+                transcriptSHA256: String(repeating: "c", count: 64),
+                durationSeconds: 3
+            ),
+            validations: validations,
+            publishable: publishable
+        )
     }
 }
 

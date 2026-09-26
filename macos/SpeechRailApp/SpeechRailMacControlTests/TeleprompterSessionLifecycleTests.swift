@@ -92,19 +92,14 @@ private actor FakeTeleprompterRealtimeClient: TeleprompterRealtimeClientProtocol
         var closeCount = 0
     }
 
-    private let stream: AsyncStream<RealtimeEventEnvelope<RealtimeASRClient.Event>>
-    private let continuation: AsyncStream<RealtimeEventEnvelope<RealtimeASRClient.Event>>.Continuation
+    private let stream: RealtimeEventStream<RealtimeASRClient.Event>
     private let connectGate: TestGate?
     private let drainGate: TestGate?
     private let drainFails: Bool
     private var counters = Counters()
 
     init(connectGate: TestGate? = nil, drainGate: TestGate? = nil, drainFails: Bool = false) {
-        var capturedContinuation: AsyncStream<RealtimeEventEnvelope<RealtimeASRClient.Event>>.Continuation?
-        self.stream = AsyncStream { continuation in
-            capturedContinuation = continuation
-        }
-        self.continuation = capturedContinuation!
+        self.stream = RealtimeEventStream()
         self.connectGate = connectGate
         self.drainGate = drainGate
         self.drainFails = drainFails
@@ -115,7 +110,7 @@ private actor FakeTeleprompterRealtimeClient: TeleprompterRealtimeClientProtocol
         await connectGate?.wait()
     }
 
-    func events() async -> AsyncStream<RealtimeEventEnvelope<RealtimeASRClient.Event>> {
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
         stream
     }
 
@@ -133,11 +128,11 @@ private actor FakeTeleprompterRealtimeClient: TeleprompterRealtimeClientProtocol
 
     func close() async {
         counters.closeCount += 1
-        continuation.finish()
+        await stream.finish()
     }
 
-    func emit(_ payload: RealtimeASRClient.Event, eventID: String = UUID().uuidString) {
-        continuation.yield(
+    func emit(_ payload: RealtimeASRClient.Event, eventID: String = UUID().uuidString) async {
+        _ = await stream.yield(
             RealtimeEventEnvelope(
                 metadata: RealtimeEventMetadata(eventID: eventID, sessionID: "test", sequence: nil),
                 payload: payload
@@ -277,7 +272,14 @@ struct TeleprompterSessionLifecycleTests {
         harness.session.moveToReadingPosition(
             TeleprompterAligner.Position(segmentIndex: 1, utf16Offset: 3)
         )
-        await waitFor { await client.currentCounters().closeCount == 1 }
+        await waitFor {
+            guard harness.session.voiceAssistState == .pausedByUser,
+                  harness.coordinator.occupancy == nil,
+                  harness.sourceFactory.sources.first?.stopCount == 1 else {
+                return false
+            }
+            return await client.currentCounters().closeCount == 1
+        }
 
         #expect(harness.session.currentSegmentIndex == 1)
         #expect(harness.session.readingOffset == 3)
@@ -308,6 +310,31 @@ struct TeleprompterSessionLifecycleTests {
         await connectGate.open()
         await startTask.value
         await harness.session.closeStage()
+    }
+
+    @Test("readyz diagnostics do not override a valid realtime capability binding")
+    func realtimeBindingWinsOverReadinessDiagnostic() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        harness.session.realtimeCapabilityBindingProvider = {
+            RealtimeCapabilityBinding(asrModelRevision: "asr-revision")
+        }
+        harness.session.serviceReadiness = {
+            .notReady("readyz reports a diagnostic failure")
+        }
+
+        await harness.session.enableVoiceAssist()
+
+        #expect(harness.session.phase == .following)
+        #expect(harness.clientFactory.clients.count == 1)
+        if let client = harness.clientFactory.clients.first {
+            #expect(await client.currentCounters().connectCount == 1)
+        } else {
+            Issue.record("the valid capability binding should create a Realtime client")
+        }
+        await harness.session.disableVoiceAssist()
     }
 
     @Test("manual open rejects during close and succeeds after cleanup")

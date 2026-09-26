@@ -8,7 +8,7 @@ import SpeechRailControlKit
 /// capture owner behind.
 public protocol TeleprompterRealtimeClientProtocol: Sendable {
     func connect() async throws
-    func events() async -> AsyncStream<RealtimeEventEnvelope<RealtimeASRClient.Event>>
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event>
     func append(_ pcm: Data) async throws
     func drainAndClear(timeout: Duration) async throws
     func close() async

@@ -141,9 +141,10 @@ public final class CaptionSession {
 
     /// 浮层呈现口：`true` 出现、`false` 隐藏。会话层不认识窗口。
     public var presentBand: (@MainActor (Bool) -> Void)?
-    /// 读服务就绪情况。`notReady` 时字幕带以受阻态出现，且**不建会话记录**。
-    /// 读的是 `AppModel.health`，所以它在主 actor 上。
+    /// `/readyz` 只作为诊断来源；Realtime capability binding 才决定能否启动。
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
+    public var realtimeCapabilityBindingProvider:
+        (@MainActor () async -> RealtimeCapabilityBinding?)?
     /// 音频来源。默认麦克风；核对时换成文件源，链路其余部分完全不变。
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
     /// 这一场要不要开分人。**每场一次**：契约规定只能在首个 PCM 之前协商。
@@ -288,13 +289,19 @@ public final class CaptionSession {
     /// 每一步失败都把已经拿到的资源还回去（来源、连接），不留给下一个人收拾；
     /// 库里那一行只在采集与服务都起来之后才建（§5.3.1：不留空记录）。
     private func startPipeline() async throws {
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(.serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
+        }
         // 档位是**服务的事实**，不是会话的选择：写进记录的是本次读到的那一个，
         // 读不到写 `unknown`（不为了一个标签去阻塞会话启动）。
         var profile = "unknown"
         if let serviceReadiness {
             switch await serviceReadiness() {
-            case .notReady(let message):
-                throw Blocked(.serviceNotReady(message))
+            case .notReady:
+                // Readiness can lag operation capability; connection admission
+                // and the Realtime handshake provide the actionable result.
+                break
             case .ready(let reported):
                 profile = reported ?? "unknown"
             }
@@ -321,7 +328,8 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationEnabled,
-            apiKey: apiKey
+            apiKey: apiKey,
+            expectedASRRevision: binding?.asrModelRevision
         )
         do {
             try await client.connect()
@@ -494,6 +502,10 @@ public final class CaptionSession {
         // 否则旧的引擎会一直被持着（用户裁决：功能离开就释放）。
         source?.stop()
         source = nil
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(.serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
+        }
         let source = audioSourceFactory()
         self.source = source
         let stream: AsyncStream<AudioChunk>
@@ -509,7 +521,8 @@ public final class CaptionSession {
             port: port,
             silenceDurationMilliseconds: 400,
             diarizationEnabled: diarizationActive,
-            apiKey: apiKey
+            apiKey: apiKey,
+            expectedASRRevision: binding?.asrModelRevision
         )
         do {
             try await client.connect()
@@ -589,9 +602,27 @@ public final class CaptionSession {
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
             partialText = nil
-        case .attribution(let itemID, let units, let isFinal):
+        case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units)
-            if isFinal { diarizationDrained = true }
+        case .diarizationFinished:
+            diarizationDrained = true
+        case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
+            if diarizationMissing, diarizationActive {
+                labeling.markDegraded(
+                    code: "auxiliary_window_expired",
+                    message: "部分说话人归属未能及时到达，正文已经保留。"
+                )
+                if let sessionID, let note = labeling.note {
+                    await coordinator.updateSessionDiarization(
+                        id: sessionID,
+                        state: .degraded,
+                        note: note
+                    )
+                }
+            }
+            if alignmentMissing || diarizationMissing {
+                lastFailure = "部分辅助信息未能及时到达，已保留转写内容。"
+            }
         case .diarizationDegraded(let code, let message):
             labeling.markDegraded(code: code, message: message)
             if let sessionID, let note = labeling.note {
