@@ -70,6 +70,9 @@ jobs:
       - name: Check OpenAPI path parity
         run: uv run python scripts/check_openapi_contract.py
 
+      - name: Check MCP tool surface parity
+        run: uv run python scripts/check_mcp_tool_contract.py
+
       - name: Run explicit diarization contract regression tests
         run: uv run pytest --no-cov tests/test_diarization_extensions.py tests/test_diarization_sdk.py
 

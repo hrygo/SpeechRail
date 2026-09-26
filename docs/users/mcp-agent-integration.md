@@ -2,7 +2,7 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.7.1"
+version: "2.8.0"
 date: 2026-09-26
 ---
 
@@ -70,7 +70,7 @@ flowchart LR
   `conversation_state=false`。
 - **不切换档位**：MCP 不注册 profile apply/setup/prepare 工具，不经 REST 或 CLI 隐式更改活动档位，也不会建议 Agent 自动切档。`describe()` 只报告当前档位与当前有效能力；缺失或快照矛盾时明确返回未知/不一致状态。
 
-### 1.1 工具集（15 个）
+### 1.1 工具集（18 个）
 
 | 工具 | 作用 | 关键点 |
 |---|---|---|
@@ -80,7 +80,10 @@ flowchart LR
 | `preview_voice` | 试听 VoiceDesign 指令 | 仅当当前快照声明 VoiceDesign 可用时 |
 | `create_voice` / `delete_voice` | 注册/删除持久音色 | `delete_voice` 是破坏性操作 |
 | `get_voice` | 查询安全音色详情 | 包含 reference/output validation 状态 |
-| `design_voice` | VoiceDesign 生成参考并注册 Base clone | 注册后仍需 output validation |
+| `design_voice` | 创建私有 VoiceDesign 候选（不注册生产音色） | 候选需按 §1.2 顺序确认、复验后才能发布 |
+| `confirm_voice_design` | 确认候选参考文本 | 编辑文本会生成新 revision 并清除旧验证 |
+| `validate_voice_design` | Base 新文本复验 / 人类听感证据 | 机器验证不能替代身份与自然度听审 |
+| `publish_voice_design` | 原子发布已验证候选 | 需要当前 revision 的完整机器与人工通过记录 |
 | `clone_voice` | 本地 reference 音频注册 Base clone | 只接受本地 path/file URI |
 | `validate_voice` | 对当前 voice revision 执行输出验收 | 需要 TTS 计算资源 |
 | `create_job` / `get_job` / `list_jobs` / `get_job_result` / `cancel_job` | 长任务句柄与产物恢复 | create retry 使用 Idempotency-Key |
@@ -176,7 +179,7 @@ MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 
 
 ### 2.2 一键安装 Codex 配套 skill 与 MCP 配置
 
-受管 release 同时提供 `speechrail` skill。它不是单独的业务实现，而是把当前 MCP 的 15 个
+受管 release 同时提供 `speechrail` skill。它不是单独的业务实现，而是把当前 MCP 的 18 个
 tools、3 个 resources、Base/VoiceDesign 语义、错误码、幂等和产物处理规则以渐进式参考文档
 交给 Agent。安装器只针对当前用户的 Codex 配置工作，不启动主服务、不加载模型、不重启客户端。
 
@@ -397,7 +400,7 @@ claude mcp add --scope user speechrail \
 
 - 确保 `speechrail-mcp` 可执行文件在 Antigravity 启动环境的 `PATH` 中。
 - **架构适配**：Antigravity 支持标准 Stdio 协议与 Lazy MCP 按需加载机制。
-- **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`；客户端刷新后应看到当前 15 个工具与 server instructions。
+- **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`；客户端刷新后应看到当前 18 个工具与 server instructions。
 - **全局调用准则**：在 `~/.gemini/config/rules/speechrail.md` 中约束统一调用契约（统一使用 `call_mcp_tool(ServerName="speechrail", ...)` 调用；音频一律传本地绝对路径，严禁传 base64）。
 
 ---
@@ -456,7 +459,7 @@ claude mcp add --scope user speechrail \
 - **ChatGPT 连接必须走 HTTPS 隧道或网关**：不要把本机 `8202` 直接端口转发到公网；MCP endpoint 的认证由 tunnel/gateway 负责，SpeechRail API key 只留在本机 proxy 环境。
 - **主服务 LAN 化时**：主服务已要求 `SPEECHRAIL_API_KEY`；proxy 会自动从 `config/.env` 读取并携带 Bearer。
 - **谨慎暴露破坏性工具**：`delete_voice` 标记为 destructive，建议在客户端侧限制其自动执行。
-- **`preview_voice` 会消耗当前 TTS 推理资源**：Agent 侧建议加节流；实际成本取决于当前 capability，Extreme 的资源与延迟尚未验证。
+- **`preview_voice` 会消耗当前 TTS 推理资源**：Agent 侧建议加节流；实际成本取决于当前 TTS spec 与 capability，`reference` 的资源与延迟尚未单独验证。
 
 ---
 
