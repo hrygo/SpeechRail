@@ -1398,7 +1398,7 @@ public struct VoiceDesignView: View {
                 actionTitle: "查看模型",
                 route: .models
             )
-        case .unknown, .serviceUnavailable:
+        case .unknown:
             AvailabilityBanner(
                 title: "暂时无法确认音色创作",
                 message: "请重新读取服务状态；能力确认前不能生成候选音频。",
