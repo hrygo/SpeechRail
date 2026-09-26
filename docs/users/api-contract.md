@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.3.1"
+version: "3.3.2"
 date: 2026-09-26
 ---
 
@@ -70,6 +70,9 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
+| `GET` | `/v1/speechrail/voices/clone/idempotency` | 克隆幂等状态查询 | 凭 `Idempotency-Key` 读取 durable 状态与 `result_id`，不重传素材 |
+| `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
+| `POST` | `/v1/speechrail/voices/{voice_id}/quality-runs` | 音色质量探针（带 evidence） | 同 `/v1/voices/{voice_id}/quality-runs`，另返回 `evidence` 命名空间 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
 
 `GET /health` 的 `asr_runtime_revision` 只在 ASR worker 已完成 ready handshake 且身份字段完整时
@@ -181,6 +184,12 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 - `SpeechRail-Purpose: prefetch`：保持 `batch_tts`，用于可延后预取；
 - `SpeechRail-Latency-Budget-Ms: 50..120000`：相对服务预算，最终取该值与
   `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 的较小值。
+
+需要为特定文本强制 raw→spoken 映射时，可提供
+`SpeechRail-Pronunciation-Set: <set_id>@<pr_revision>`；服务在首个 PCM 前解析并校验该
+不可变 revision，未知返回 `404 pronunciation_revision_not_found`，已撤销返回
+`409 pronunciation_revoked`，registry 不可读返回 `503 pronunciation_store_unavailable`。
+可选的 set/revision 由 §5.8 管理，服务不会自动套用最新 revision。
 
 需要把合成绑定到发现快照时，可同时提供 `SpeechRail-Expected-Voice-Revision: vr_...`
 和 `SpeechRail-Expected-Model-Revision: <40-char-hex>`。两者均在首个 PCM 前校验；
@@ -497,6 +506,40 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
 **字段语义**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及未执行质量评估的记录可能不携带该字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
+
+#### 5.7.5 克隆幂等状态查询 (`GET /v1/speechrail/voices/clone/idempotency`)
+
+携带与 `POST /v1/voices/clone` 相同的 `Idempotency-Key` 请求头即可读取该 key 的 durable
+状态，无需重传音频或参考正文。响应为
+`{"state": "new|pending|completed", "result_id": <voice_id|null>}`：`completed` 且
+`result_id` 非空表示已存在可直接回放的音色；`pending` 表示结果尚不可用，客户端应等待或重试。
+缺少 header 返回 `400 idempotency_key_required`；未知 key 返回 `404 idempotency_not_found`；
+journal 不可读返回 `503 idempotency_store_unavailable`（可重试）。该只读查询不创建音色、不
+触发推理，也不暴露 journal 内的 key、payload 指纹或参考正文。
+
+### 5.8 发音映射集管理 (`/v1/speechrail/pronunciation-sets`)
+
+发音映射集把原始文本中的固定片段映射为合成器实际朗读的文本（raw→spoken），用于纠正多音字、
+缩写或专有名词读音。每套 set 以 `set_id` 标识，每次成功写入生成一个不可变 revision
+（`pr_<32 hex>`）；合成只在调用方通过 §4.1 的 `SpeechRail-Pronunciation-Set` 头显式固定
+`set_id@revision` 时生效，服务不会自动套用最新 revision。
+
+| 请求方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/v1/speechrail/pronunciation-sets` | 只列出安全身份：`id`、当前 `revision`、`revoked`、`entry_count`，不含条目正文 |
+| `GET` | `/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}` | 读取某一不可变 revision 的完整条目 |
+| `PUT` | `/v1/speechrail/pronunciation-sets/{set_id}` | 创建或 CAS 更新：请求体 `{"expected_revision": <pr_...|null>, "entries": [...]}`，每次成功写入追加新 revision |
+| `POST` | `/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke` | 撤销某一 revision，使其不能再被合成引用 |
+| `DELETE` | `/v1/speechrail/pronunciation-sets/{set_id}` | 从本地 registry 删除整套 set（所有 revision） |
+
+条目字段：`id`（匹配 `^[a-zA-Z0-9_-]{1,64}$`）、`surface`（被匹配的原文，≤256 字符）、
+`spoken`（替换后的朗读文本，≤256 字符）、`language`（默认 `auto`）、`case_sensitive`
+（默认 `true`）、`word_boundary`（默认 `false`）、`source`（`system` 或 `user`）。
+
+错误语义：`expected_revision` 与当前 revision 不一致返回 `409 pronunciation_conflict`；
+读取已撤销 revision 返回 `409 pronunciation_revoked`；set 或 revision 不存在返回
+`404 pronunciation_revision_not_found`（删除不存在 set 时为 `404 pronunciation_set_not_found`）；
+registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 
 ---
 
