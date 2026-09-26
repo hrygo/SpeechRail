@@ -495,6 +495,166 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// 一次人工听审的结论。机器验证不能替用户填写 `pass`。
+public enum VoiceDesignReview: String, Codable, Equatable, Sendable {
+    case pass
+    case warn
+    case reject
+    case notReviewed = "not_reviewed"
+}
+
+public struct VoiceDesignHumanReview: Codable, Equatable, Sendable {
+    public let validationID: String
+    public let identity: VoiceDesignReview
+    public let naturalness: VoiceDesignReview
+
+    public init(
+        validationID: String,
+        identity: VoiceDesignReview,
+        naturalness: VoiceDesignReview
+    ) {
+        self.validationID = validationID
+        self.identity = identity
+        self.naturalness = naturalness
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case validationID = "validation_id"
+        case identity
+        case naturalness
+    }
+}
+
+public struct VoiceDesignReference: Codable, Equatable, Sendable {
+    public let audioSHA256: String
+    public let textSHA256: String
+    public let transcriptSHA256: String
+    public let durationSeconds: Double
+
+    public init(
+        audioSHA256: String,
+        textSHA256: String,
+        transcriptSHA256: String,
+        durationSeconds: Double
+    ) {
+        self.audioSHA256 = audioSHA256
+        self.textSHA256 = textSHA256
+        self.transcriptSHA256 = transcriptSHA256
+        self.durationSeconds = durationSeconds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case audioSHA256 = "audio_sha256"
+        case textSHA256 = "text_sha256"
+        case transcriptSHA256 = "transcript_sha256"
+        case durationSeconds = "duration_seconds"
+    }
+}
+
+public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable {
+    public let validationID: String
+    public let candidateRevision: String
+    public let status: String
+    public let machineStatus: String
+    public let identityStatus: VoiceDesignReview
+    public let naturalnessStatus: VoiceDesignReview
+    public let failureCodes: [String]
+    public let capabilityKey: String
+    public let transcriptMatch: Double?
+
+    public var id: String { validationID }
+
+    public init(
+        validationID: String,
+        candidateRevision: String,
+        status: String,
+        machineStatus: String,
+        identityStatus: VoiceDesignReview,
+        naturalnessStatus: VoiceDesignReview,
+        failureCodes: [String],
+        capabilityKey: String,
+        transcriptMatch: Double?
+    ) {
+        self.validationID = validationID
+        self.candidateRevision = candidateRevision
+        self.status = status
+        self.machineStatus = machineStatus
+        self.identityStatus = identityStatus
+        self.naturalnessStatus = naturalnessStatus
+        self.failureCodes = failureCodes
+        self.capabilityKey = capabilityKey
+        self.transcriptMatch = transcriptMatch
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case validationID = "validation_id"
+        case candidateRevision = "candidate_revision"
+        case status
+        case machineStatus = "machine_status"
+        case identityStatus = "identity_status"
+        case naturalnessStatus = "naturalness_status"
+        case failureCodes = "failure_codes"
+        case capabilityKey = "capability_key"
+        case transcriptMatch = "transcript_match"
+    }
+}
+
+public struct VoiceDesignCandidate: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let targetVoiceID: String
+    public let name: String
+    public let state: String
+    public let revision: String
+    public let publishedVoiceRevision: String?
+    public let reference: VoiceDesignReference
+    public let validations: [VoiceDesignValidation]
+    public let publishable: Bool
+
+    public init(
+        id: String,
+        targetVoiceID: String,
+        name: String,
+        state: String,
+        revision: String,
+        publishedVoiceRevision: String?,
+        reference: VoiceDesignReference,
+        validations: [VoiceDesignValidation],
+        publishable: Bool
+    ) {
+        self.id = id
+        self.targetVoiceID = targetVoiceID
+        self.name = name
+        self.state = state
+        self.revision = revision
+        self.publishedVoiceRevision = publishedVoiceRevision
+        self.reference = reference
+        self.validations = validations
+        self.publishable = publishable
+    }
+
+    /// 当前 revision 上最近一次完成的验证；没有验证时为 nil。
+    public var latestValidation: VoiceDesignValidation? {
+        validations.last
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case targetVoiceID = "target_voice_id"
+        case name
+        case state
+        case revision
+        case publishedVoiceRevision = "published_voice_revision"
+        case reference
+        case validations
+        case publishable
+    }
+}
+
+public struct VoiceDesignPublishResult: Codable, Equatable, Sendable {
+    public let candidate: VoiceDesignCandidate
+    public let voice: CreatorVoice
+}
+
 /// 一次正式制作（render）的结果：音频 + 这一次渲染的身份。
 ///
 /// 制作项目要把"用哪一版音色、在哪一份 plan 下渲出来的"记进自己的档案，
@@ -536,13 +696,28 @@ public protocol SpeechRailCreatorClient: Sendable {
         speed: Double,
         seed: Int?
     ) async throws -> Data
-    func registerVoiceDesign(
-        id: String,
+    func createVoiceDesignCandidate(
+        voiceID: String,
         name: String,
         instruction: String,
         referenceText: String,
-        seed: Int
-    ) async throws -> CreatorVoice
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate
+    func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate
+    func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate
+    func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult
     func fetchClonePrompts() async throws -> [ClonePrompt]
     func validateVoiceClone(
         audio: Data,
@@ -616,6 +791,64 @@ public extension SpeechRailCreatorClient {
             ),
             planID: nil,
             voiceRevision: nil
+        )
+    }
+
+    func createVoiceDesignCandidate(
+        voiceID: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design candidates are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design confirmation is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design validation is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design publication is unsupported by this client",
+            requestID: nil,
+            retryable: false
         )
     }
 
@@ -769,13 +1002,37 @@ struct UnavailableCreatorClient: SpeechRailCreatorClient {
         throw ServiceAPIClientError.requestFailed
     }
 
-    func registerVoiceDesign(
-        id: String,
+    func createVoiceDesignCandidate(
+        voiceID: String,
         name: String,
         instruction: String,
         referenceText: String,
-        seed: Int
-    ) async throws -> CreatorVoice {
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult {
         throw ServiceAPIClientError.requestFailed
     }
 

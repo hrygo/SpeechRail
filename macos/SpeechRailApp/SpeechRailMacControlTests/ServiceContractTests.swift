@@ -674,6 +674,65 @@ final class ServiceContractTests: XCTestCase {
         }
     }
 
+    func testVoiceDesignCandidateDecodesThePublishedLifecycleProjection() throws {
+        let data = Data(
+            """
+            {
+              "id": "vd_0123456789abcdef01234567",
+              "target_voice_id": "voice_design_demo",
+              "name": "夜航主持",
+              "language": "zh",
+              "state": "publishable",
+              "revision": "vr_0123456789abcdef0123456789abcdef",
+              "created_at": 1,
+              "updated_at": 2,
+              "confirmed_at": 2,
+              "published_at": null,
+              "published_voice_revision": null,
+              "error_code": null,
+              "source_model": {
+                "artifact": "tts-1.7b-design-bf16",
+                "revision": "0123456789abcdef0123456789abcdef01234567"
+              },
+              "reference": {
+                "audio_sha256": "\(String(repeating: "a", count: 64))",
+                "text_sha256": "\(String(repeating: "b", count: 64))",
+                "transcript_sha256": "\(String(repeating: "c", count: 64))",
+                "duration_seconds": 3.2,
+                "quality": null
+              },
+              "validations": [{
+                "validation_id": "vv_0123456789abcdef01234567",
+                "candidate_revision": "vr_0123456789abcdef0123456789abcdef",
+                "status": "pass",
+                "machine_status": "pass",
+                "identity_status": "pass",
+                "naturalness_status": "pass",
+                "failure_codes": [],
+                "capability_key": "reference.render",
+                "model_artifact": "tts-1.7b-base-bf16",
+                "model_catalog_revision": "0123456789abcdef0123456789abcdef01234567",
+                "transcript_match": 0.99,
+                "created_at": 3,
+                "updated_at": 3
+              }],
+              "publishable": true
+            }
+            """.utf8
+        )
+
+        let candidate = try JSONDecoder().decode(VoiceDesignCandidate.self, from: data)
+
+        XCTAssertEqual(candidate.id, "vd_0123456789abcdef01234567")
+        XCTAssertEqual(candidate.targetVoiceID, "voice_design_demo")
+        XCTAssertEqual(candidate.state, "publishable")
+        XCTAssertTrue(candidate.publishable)
+        XCTAssertEqual(candidate.latestValidation?.validationID, "vv_0123456789abcdef01234567")
+        XCTAssertEqual(candidate.latestValidation?.identityStatus, .pass)
+        XCTAssertEqual(candidate.latestValidation?.naturalnessStatus, .pass)
+        XCTAssertEqual(candidate.latestValidation?.machineStatus, "pass")
+    }
+
     /// 契约把 `pitch_band` / `timbre_family` / `baseline_pace` 固定为 `unknown`、
     /// `metadata_method` 固定为 `declared_only`：这些是声明式元数据，不是实测推断。
     private static let testDescriptor = SafeVoiceDescriptor(

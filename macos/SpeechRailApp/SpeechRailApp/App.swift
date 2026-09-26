@@ -934,9 +934,14 @@ private struct UITestServiceDiagnosticsClient:
 /// free of user audio or model assets.
 private struct UITestCreatorClient: SpeechRailCreatorClient {
     private let store: UITestVoiceStore
+    private let voiceDesignStore: UITestVoiceDesignStore
 
-    init(store: UITestVoiceStore = UITestVoiceStore()) {
+    init(
+        store: UITestVoiceStore = UITestVoiceStore(),
+        voiceDesignStore: UITestVoiceDesignStore = UITestVoiceDesignStore()
+    ) {
         self.store = store
+        self.voiceDesignStore = voiceDesignStore
     }
 
     func fetchVoices() async throws -> [CreatorVoice] {
@@ -977,28 +982,62 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         UITestAudioFactory.silentWAV
     }
 
-    func registerVoiceDesign(
-        id: String,
+    func createVoiceDesignCandidate(
+        voiceID: String,
         name: String,
         instruction: String,
         referenceText: String,
-        seed: Int
-    ) async throws -> CreatorVoice {
-        let voice = CreatorVoice(
-            id: id,
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate {
+        await voiceDesignStore.create(
+            voiceID: voiceID,
             name: name,
-            description: instruction,
             instruction: instruction,
+            referenceText: referenceText,
             seed: seed,
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate {
+        try await voiceDesignStore.confirm(id: id)
+    }
+
+    func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate {
+        try await voiceDesignStore.validate(id: id, humanReview: humanReview)
+    }
+
+    func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult {
+        let candidate = try await voiceDesignStore.publishedCandidate(id: id)
+        let voice = CreatorVoice(
+            id: candidate.targetVoiceID,
+            name: candidate.name,
+            description: "由 UI 测试候选发布的音色",
+            instruction: candidate.name,
+            seed: 0,
             isSystem: false,
             createdAt: 0,
             available: true,
             variant: "custom_voice",
             mode: "clone",
-            refText: referenceText,
-            durationSeconds: 3
+            refText: candidate.reference.textSHA256,
+            durationSeconds: candidate.reference.durationSeconds,
+            revision: candidate.revision
         )
-        return await store.insert(voice)
+        _ = await store.insert(voice)
+        return VoiceDesignPublishResult(candidate: candidate, voice: voice)
     }
 
     func fetchClonePrompts() async throws -> [ClonePrompt] {
@@ -1162,6 +1201,110 @@ private actor UITestVoiceStore {
 
     func delete(id: String) {
         voices.removeAll { $0.id == id }
+    }
+}
+
+private actor UITestVoiceDesignStore {
+    private struct Entry {
+        let targetVoiceID: String
+        let name: String
+        let revision: String
+        let reference: VoiceDesignReference
+        var validations: [VoiceDesignValidation]
+        var publishable: Bool
+        var state: String
+        var publishedVoiceRevision: String?
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var nextID = 1
+
+    func create(
+        voiceID: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int,
+        idempotencyKey: String?
+    ) -> VoiceDesignCandidate {
+        let suffix = String(format: "%024x", nextID)
+        nextID += 1
+        let id = "vd_" + suffix
+        let revision = "vr_" + String(repeating: "a", count: 32)
+        let reference = VoiceDesignReference(
+            audioSHA256: String(repeating: "a", count: 64),
+            textSHA256: String(repeating: "b", count: 64),
+            transcriptSHA256: String(repeating: "c", count: 64),
+            durationSeconds: 3
+        )
+        entries[id] = Entry(
+            targetVoiceID: voiceID,
+            name: name,
+            revision: revision,
+            reference: reference,
+            validations: [],
+            publishable: false,
+            state: "generated",
+            publishedVoiceRevision: nil
+        )
+        return candidate(for: id)
+    }
+
+    func confirm(id: String) throws -> VoiceDesignCandidate {
+        guard var entry = entries[id] else { throw ServiceAPIClientError.invalidResponse }
+        entry.state = "confirmed"
+        entries[id] = entry
+        return candidate(for: id)
+    }
+
+    func validate(
+        id: String,
+        humanReview: VoiceDesignHumanReview?
+    ) throws -> VoiceDesignCandidate {
+        guard var entry = entries[id] else { throw ServiceAPIClientError.invalidResponse }
+        let reviewed = humanReview != nil
+        let validation = VoiceDesignValidation(
+            validationID: "vv_" + String(format: "%024x", nextID),
+            candidateRevision: entry.revision,
+            status: reviewed ? "pass" : "warn",
+            machineStatus: "pass",
+            identityStatus: humanReview?.identity ?? .notReviewed,
+            naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
+            failureCodes: [],
+            capabilityKey: "reference.render",
+            transcriptMatch: 0.99
+        )
+        nextID += 1
+        entry.validations = [validation]
+        entry.publishable = reviewed
+        entry.state = reviewed ? "publishable" : "confirmed"
+        entries[id] = entry
+        return candidate(for: id)
+    }
+
+    func publishedCandidate(id: String) throws -> VoiceDesignCandidate {
+        guard var entry = entries[id] else { throw ServiceAPIClientError.invalidResponse }
+        entry.state = "published"
+        entry.publishedVoiceRevision = entry.revision
+        entries[id] = entry
+        return candidate(for: id)
+    }
+
+    private func candidate(for id: String) -> VoiceDesignCandidate {
+        guard let entry = entries[id] else {
+            preconditionFailure("voice design entry disappeared")
+        }
+        return VoiceDesignCandidate(
+            id: id,
+            targetVoiceID: entry.targetVoiceID,
+            name: entry.name,
+            state: entry.state,
+            revision: entry.revision,
+            publishedVoiceRevision: entry.publishedVoiceRevision,
+            reference: entry.reference,
+            validations: entry.validations,
+            publishable: entry.publishable
+        )
     }
 }
 
