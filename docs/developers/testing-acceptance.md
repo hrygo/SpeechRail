@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.2.0"
+version: "3.2.1"
 date: 2026-09-26
 ---
 
@@ -14,7 +14,7 @@ date: 2026-09-26
 ```bash
 cd <path-to-SpeechRail>
 uv run --extra dev pytest
-uv run --extra dev ruff check src tests
+uv run --extra dev ruff check src tests scripts hatch_build.py
 uv run --extra dev mypy src
 npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
 uv run python scripts/check_openapi_contract.py
