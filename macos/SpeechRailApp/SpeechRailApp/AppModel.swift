@@ -491,10 +491,16 @@ public final class AppModel {
 
     public func saveVoiceDesignCandidate(
         _ candidate: VoiceDesignCandidateSnapshot,
-        name: String
+        name: String,
+        humanIdentityConfirmed: Bool,
+        humanNaturalnessConfirmed: Bool
     ) {
         guard voiceDesignSaveTask == nil, voiceDesignSavingSlot == nil else { return }
         guard case .ready = candidate.status, candidate.audioData != nil else { return }
+        guard humanIdentityConfirmed, humanNaturalnessConfirmed else {
+            voiceDesignErrorMessage = "请先试听并确认音色身份与自然度，再保存到音色库。"
+            return
+        }
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
@@ -511,13 +517,15 @@ public final class AppModel {
                 name: trimmedName,
                 instruction: candidate.instructionSnapshot,
                 referenceText: candidate.referenceTextSnapshot,
-                seed: candidate.seed
+                seed: candidate.seed,
+                humanIdentityConfirmed: humanIdentityConfirmed,
+                humanNaturalnessConfirmed: humanNaturalnessConfirmed
             )
             if let voice {
                 self.voiceDesignSavedSlots.insert(candidate.slot)
-                self.voiceDesignSuccessMessage = "“\(voice.name)” 已按候选 \(candidate.slot) 的 seed 注册，可在音色库中复用。"
+                self.voiceDesignSuccessMessage = "“\(voice.name)” 已完成复验并保存到音色库，可以开始使用。"
             } else if !Task.isCancelled {
-                self.voiceDesignErrorMessage = self.creatorMessage ?? "候选音色注册未完成，请重试"
+                self.voiceDesignErrorMessage = self.creatorMessage ?? "音色保存未完成，请重试"
             }
             self.voiceDesignSavingSlot = nil
             self.voiceDesignSaveTask = nil
@@ -640,7 +648,9 @@ public final class AppModel {
         name: String,
         instruction: String,
         referenceText: String,
-        seed: Int
+        seed: Int,
+        humanIdentityConfirmed: Bool,
+        humanNaturalnessConfirmed: Bool
     ) async -> CreatorVoice? {
         guard !isRegisteringVoice else { return nil }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -669,22 +679,63 @@ public final class AppModel {
         creatorMessage = nil
         defer { isRegisteringVoice = false }
         do {
-            let id = "voice_design_" + UUID().uuidString
+            let voiceID = "voice_design_" + UUID().uuidString
                 .replacingOccurrences(of: "-", with: "")
                 .lowercased()
-            let voice = try await creatorClient.registerVoiceDesign(
-                id: id,
+            let idempotencyKey = "voice-design-" + UUID().uuidString.lowercased()
+            let generated = try await creatorClient.createVoiceDesignCandidate(
+                voiceID: voiceID,
                 name: trimmedName,
                 instruction: trimmedInstruction,
                 referenceText: trimmedReferenceText,
-                seed: max(0, seed)
+                seed: max(0, seed),
+                idempotencyKey: idempotencyKey
+            )
+            let confirmed = try await creatorClient.confirmVoiceDesignCandidate(
+                id: generated.id,
+                referenceText: nil
+            )
+            let machineValidation = try await creatorClient.validateVoiceDesignCandidate(
+                id: confirmed.id,
+                testText: nil,
+                capabilityKey: nil,
+                humanReview: nil
+            )
+            guard let validation = machineValidation.latestValidation,
+                  validation.candidateRevision == machineValidation.revision
+            else {
+                creatorMessage = "服务端没有返回这次音色的复验结果，请重试。"
+                return nil
+            }
+            guard validation.machineStatus == VoiceDesignReview.pass.rawValue else {
+                creatorMessage = Self.voiceDesignValidationMessage(validation)
+                return nil
+            }
+            let review = VoiceDesignHumanReview(
+                validationID: validation.validationID,
+                identity: humanIdentityConfirmed ? .pass : .notReviewed,
+                naturalness: humanNaturalnessConfirmed ? .pass : .notReviewed
+            )
+            let reviewed = try await creatorClient.validateVoiceDesignCandidate(
+                id: confirmed.id,
+                testText: nil,
+                capabilityKey: nil,
+                humanReview: review
+            )
+            guard reviewed.publishable, reviewed.revision == machineValidation.revision else {
+                creatorMessage = "人工试听确认还没有形成完整通过记录，请重新保存并完成两项确认。"
+                return nil
+            }
+            let published = try await creatorClient.publishVoiceDesignCandidate(
+                id: reviewed.id,
+                expectedCandidateRevision: reviewed.revision
             )
             let refreshed = await refreshCreatorVoices()
             if !refreshed {
                 let refreshMessage = creatorMessage ?? "请重新读取音色列表"
                 creatorMessage = "音色已保存，但列表刷新失败：" + refreshMessage
             }
-            return voice
+            return published.voice
         } catch is CancellationError {
             return nil
         } catch {
@@ -1045,22 +1096,6 @@ public final class AppModel {
         voicePreviewTask?.cancel()
         voicePreviewTask = nil
         stopAudio()
-    }
-
-    public func registerVoiceDesign(
-        id: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int
-    ) async throws -> CreatorVoice {
-        try await creatorClient.registerVoiceDesign(
-            id: id,
-            name: name,
-            instruction: instruction,
-            referenceText: referenceText,
-            seed: seed
-        )
     }
 
     public func playAudio(data: Data) throws {
@@ -2220,14 +2255,37 @@ public final class AppModel {
                 return "语音处理超时，请重试"
             case "audio_encode_failed", "backend_error":
                 return "音频生成失败，请重试"
-            case "voice_design_registration_unsupported":
-                return "当前档位不支持音色保存"
-            case "voice_already_exists":
+            case "voice_design_unsupported":
+                return "当前档位未提供音色创作能力，请到模型页核对当前档位"
+            case "voice_design_unavailable":
+                return "音色创作服务尚未就绪，请检查服务状态后重试"
+            case "voice_design_validation_required", "voice_design_machine_validation_required":
+                return "这次音色还没有完成复验，请重新保存并完成两项试听确认"
+            case "voice_design_state_conflict", "voice_design_revision_conflict", "voice_design_publish_conflict":
+                return "音色状态已经变化，请重新生成候选后再保存"
+            case "voice_design_validation_not_found", "voice_design_candidate_not_found":
+                return "候选音色已经过期，请重新生成候选"
+            case "voice_design_target_in_use", "voice_already_exists":
                 return "音色标识已存在，请换一个名称"
             default:
                 return "创作服务暂时不可用"
             }
         }
+    }
+
+    private static func voiceDesignValidationMessage(_ validation: VoiceDesignValidation) -> String {
+        if validation.failureCodes.contains("transcript_mismatch") {
+            return "服务端复验发现读出的内容和参考文案不一致，请调整描述或参考文案后重新生成。"
+        }
+        if validation.failureCodes.contains("output_invalid") {
+            return "生成的声音没有通过质量检查，请调整描述后重新生成。"
+        }
+        if validation.failureCodes.contains("transcription_unavailable")
+            || validation.failureCodes.contains("model_runtime_identity_unknown")
+        {
+            return "服务端复验没有完成，请确认当前档位所需能力可用后重试。"
+        }
+        return "这次音色没有通过服务端复验，请调整描述或参考文案后重新生成。"
     }
 
     private static func healthFailureKind(for error: Error) -> ServiceHealthFailureKind {

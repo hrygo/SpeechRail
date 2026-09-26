@@ -463,24 +463,70 @@ public final class ServiceAPIClient: @unchecked Sendable {
         )
     }
 
-    public func registerVoiceDesign(
-        id: String,
+    public func createVoiceDesignCandidate(
+        voiceID: String,
         name: String,
         instruction: String,
         referenceText: String,
-        seed: Int
-    ) async throws -> CreatorVoice {
-        let response: VoiceDesignRegistrationResponse = try await postJSON(
-            path: "/v1/voices/designs",
-            body: VoiceDesignRegistrationRequestBody(
-                id: id,
+        seed: Int,
+        idempotencyKey: String?
+    ) async throws -> VoiceDesignCandidate {
+        var headers: [String: String] = [:]
+        if let idempotencyKey, !idempotencyKey.isEmpty {
+            headers["Idempotency-Key"] = idempotencyKey
+        }
+        let response: VoiceDesignCandidateEnvelope = try await postJSON(
+            path: "/v1/voice-designs",
+            body: VoiceDesignCreateRequestBody(
+                voiceID: voiceID,
                 name: name,
                 instruction: instruction,
                 referenceText: referenceText,
                 seed: seed
+            ),
+            headers: headers
+        )
+        return response.candidate
+    }
+
+    public func confirmVoiceDesignCandidate(
+        id: String,
+        referenceText: String?
+    ) async throws -> VoiceDesignCandidate {
+        let response: VoiceDesignCandidateEnvelope = try await postJSON(
+            path: try voiceDesignPath(id: id) + "/confirm",
+            body: VoiceDesignConfirmRequestBody(referenceText: referenceText)
+        )
+        return response.candidate
+    }
+
+    public func validateVoiceDesignCandidate(
+        id: String,
+        testText: String?,
+        capabilityKey: String?,
+        humanReview: VoiceDesignHumanReview?
+    ) async throws -> VoiceDesignCandidate {
+        let response: VoiceDesignCandidateEnvelope = try await postJSON(
+            path: try voiceDesignPath(id: id) + "/validate",
+            body: VoiceDesignValidateRequestBody(
+                testText: testText,
+                capabilityKey: capabilityKey,
+                humanReview: humanReview
             )
         )
-        return response.voice
+        return response.candidate
+    }
+
+    public func publishVoiceDesignCandidate(
+        id: String,
+        expectedCandidateRevision: String?
+    ) async throws -> VoiceDesignPublishResult {
+        try await postJSON(
+            path: try voiceDesignPath(id: id) + "/publish",
+            body: VoiceDesignPublishRequestBody(
+                expectedCandidateRevision: expectedCandidateRevision
+            )
+        )
     }
 
     public func updateVoice(
@@ -816,12 +862,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
     private func postJSON<Body: Encodable, Value: Decodable & Sendable>(
         path: String,
         body: Body,
-        method: String = "POST"
+        method: String = "POST",
+        headers: [String: String] = [:]
     ) async throws -> Value {
         var request = try makeRequest(
             path: path,
             method: method,
-            accept: "application/json"
+            accept: "application/json",
+            headers: headers
         )
         request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
@@ -944,6 +992,13 @@ public final class ServiceAPIClient: @unchecked Sendable {
             throw ServiceAPIClientError.invalidURL
         }
         return "/v1/jobs/\(id)"
+    }
+
+    private func voiceDesignPath(id: String) throws -> String {
+        guard id.range(of: "^vd_[0-9a-f]{24}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return "/v1/voice-designs/\(id)"
     }
 
     private func decodeJSON<Value: Decodable & Sendable>(
@@ -1077,8 +1132,8 @@ private struct ServiceModelEntry: Decodable {
     }
 }
 
-private struct VoiceDesignRegistrationResponse: Decodable {
-    let voice: CreatorVoice
+private struct VoiceDesignCandidateEnvelope: Decodable {
+    let candidate: VoiceDesignCandidate
 }
 
 private struct VoicePreviewRequestBody: Encodable {
@@ -1101,8 +1156,8 @@ private struct VoicePreviewRequestBody: Encodable {
     }
 }
 
-private struct VoiceDesignRegistrationRequestBody: Encodable {
-    let id: String
+private struct VoiceDesignCreateRequestBody: Encodable {
+    let voiceID: String
     let name: String
     let instruction: String
     let referenceText: String
@@ -1110,12 +1165,40 @@ private struct VoiceDesignRegistrationRequestBody: Encodable {
     let language = "zh"
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case voiceID = "voice_id"
         case name
         case instruction
         case referenceText = "reference_text"
         case seed
         case language
+    }
+}
+
+private struct VoiceDesignConfirmRequestBody: Encodable {
+    let referenceText: String?
+
+    enum CodingKeys: String, CodingKey {
+        case referenceText = "reference_text"
+    }
+}
+
+private struct VoiceDesignValidateRequestBody: Encodable {
+    let testText: String?
+    let capabilityKey: String?
+    let humanReview: VoiceDesignHumanReview?
+
+    enum CodingKeys: String, CodingKey {
+        case testText = "test_text"
+        case capabilityKey = "capability_key"
+        case humanReview = "human_review"
+    }
+}
+
+private struct VoiceDesignPublishRequestBody: Encodable {
+    let expectedCandidateRevision: String?
+
+    enum CodingKeys: String, CodingKey {
+        case expectedCandidateRevision = "expected_candidate_revision"
     }
 }
 

@@ -753,6 +753,8 @@ public struct VoiceDesignView: View {
     @State private var playingSlot: String? = nil
     @State private var selectedSlot: String? = nil
     @State private var pendingSave: VoiceDesignCandidateSnapshot? = nil
+    @State private var identityConfirmed = false
+    @State private var naturalnessConfirmed = false
     @State private var errorMessage: String? = nil
     @State private var showsAdvanced = false
 
@@ -816,6 +818,8 @@ public struct VoiceDesignView: View {
             VoiceCandidateSaveSheet(
                 candidate: candidate,
                 voiceName: $voiceName,
+                identityConfirmed: $identityConfirmed,
+                naturalnessConfirmed: $naturalnessConfirmed,
                 onSave: {
                     save(candidate)
                     pendingSave = nil
@@ -1089,7 +1093,11 @@ public struct VoiceDesignView: View {
                     isRegistering: model.isRegisteringVoice,
                     isSelected: selectedSlot == candidate.slot,
                     onPlayToggle: { play(candidate) },
-                    onSave: { pendingSave = candidate },
+                    onSave: {
+                        identityConfirmed = false
+                        naturalnessConfirmed = false
+                        pendingSave = candidate
+                    },
                     onOpenLibrary: { navigation.request(.voiceLibrary) },
                     onRetry: { model.retryVoiceDesignCandidate(slot: candidate.slot) }
                 )
@@ -1418,7 +1426,12 @@ public struct VoiceDesignView: View {
             return
         }
         errorMessage = nil
-        model.saveVoiceDesignCandidate(candidate, name: name)
+        model.saveVoiceDesignCandidate(
+            candidate,
+            name: name,
+            humanIdentityConfirmed: identityConfirmed,
+            humanNaturalnessConfirmed: naturalnessConfirmed
+        )
     }
 }
 
@@ -1664,6 +1677,8 @@ private struct VoiceCandidateCard: View {
 private struct VoiceCandidateSaveSheet: View {
     let candidate: VoiceDesignCandidateSnapshot
     @Binding var voiceName: String
+    @Binding var identityConfirmed: Bool
+    @Binding var naturalnessConfirmed: Bool
     let onSave: () -> Void
     let onCancel: () -> Void
 
@@ -1674,7 +1689,7 @@ private struct VoiceCandidateSaveSheet: View {
             Text("保存候选 \(candidate.slot) 为音色")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
 
-            Text("服务端会按下面的描述、参考文案和 seed 重新生成参考音频并注册。")
+            Text("保存前，服务会用另一段文字复验这个音色。你的试听结论会作为最终发布依据。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1695,15 +1710,26 @@ private struct VoiceCandidateSaveSheet: View {
             summaryRow("Seed", value: String(candidate.seed))
             summaryRow("时长", value: durationText)
 
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Toggle("我已经试听：声音与描述一致", isOn: $identityConfirmed)
+                    .accessibilityLabel("确认音色身份与描述一致")
+                Toggle("我已经试听：听起来自然、没有异常", isOn: $naturalnessConfirmed)
+                    .accessibilityLabel("确认音色自然度")
+            }
+
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Spacer(minLength: 0)
                 Button("取消", action: onCancel)
                     .speechRailButton(.secondary)
                     .keyboardShortcut(.cancelAction)
-                Button("保存到音色库", action: onSave)
+                Button("复核并保存", action: onSave)
                     .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || !identityConfirmed
+                            || !naturalnessConfirmed
+                    )
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
