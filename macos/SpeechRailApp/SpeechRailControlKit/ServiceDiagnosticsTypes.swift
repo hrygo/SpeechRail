@@ -586,6 +586,46 @@ public extension ModelCatalogSnapshot {
     }
 }
 
+public extension ModelCatalogSnapshot {
+    /// Artifacts required by either spec of a selection, in catalog order.
+    func artifacts(for selection: SpecSelection) -> [ModelArtifactSnapshot] {
+        artifacts.filter {
+            $0.requiredBy.contains(selection.asrSpec) || $0.requiredBy.contains(selection.ttsSpec)
+        }
+    }
+
+    /// Upper bound of bytes still needed for a selection.
+    ///
+    /// A quick combo reuses the profile-summary math (the summary knows the
+    /// separately-installed CoreML bundle). A mixed selection has no single
+    /// summary, so the bound is computed from the union of catalog artifacts;
+    /// a missing status keeps the estimate unknown instead of guessing.
+    func remainingDownloadUpperBound(
+        for selection: SpecSelection,
+        statuses: ModelStatusSnapshot?
+    ) -> Int64? {
+        if let quick = selection.quickTier {
+            return remainingDownloadUpperBound(for: quick, statuses: statuses)
+        }
+        guard let statuses else { return nil }
+        let requiredArtifacts = artifacts(for: selection)
+        guard !requiredArtifacts.isEmpty,
+              requiredArtifacts.allSatisfy({ statuses.status(for: $0.key) != nil })
+        else {
+            return nil
+        }
+        return requiredArtifacts.reduce(Int64.zero) { remaining, artifact in
+            guard let status = statuses.status(for: artifact.key),
+                  status.state == .verified,
+                  status.integrity == .verified
+            else {
+                return remaining + artifact.sizeBytes
+            }
+            return remaining
+        }
+    }
+}
+
 public struct OperationProgressSnapshot: Codable, Equatable, Sendable {
     public let phase: String?
     public let artifactKey: String?

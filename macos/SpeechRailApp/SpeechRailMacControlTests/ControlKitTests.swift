@@ -282,6 +282,172 @@ final class ControlKitTests: XCTestCase {
         )
     }
 
+    /// 混合组合的下载量只能从两个规格各自的制品并集推导——目录没有第三份「组合摘要」。
+    func testArtifactsForSelectionUnionsAsrAndTtsSpecsInCatalogOrder() {
+        func artifact(_ key: String, sizeBytes: Int64, requiredBy: [SpeechRailProfile]) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen",
+                variant: "base",
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: sizeBytes,
+                fileCount: 1,
+                requiredBy: requiredBy
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr", sizeBytes: 100, requiredBy: [.fast, .quality]),
+                artifact("tts", sizeBytes: 200, requiredBy: [.quality, .reference]),
+                artifact("clone", sizeBytes: 300, requiredBy: [.reference]),
+            ],
+            profiles: []
+        )
+
+        XCTAssertEqual(
+            catalog.artifacts(for: .quick(.quality)).map(\.key),
+            ["asr", "tts"]
+        )
+        // 并集按目录顺序返回，不受 asr/tts 提交顺序影响。
+        XCTAssertEqual(
+            catalog.artifacts(for: SpecSelection(asrSpec: .quality, ttsSpec: .reference)).map(\.key),
+            ["asr", "tts", "clone"]
+        )
+        XCTAssertEqual(
+            catalog.artifacts(for: SpecSelection(asrSpec: .reference, ttsSpec: .quality)).map(\.key),
+            ["asr", "tts", "clone"]
+        )
+    }
+
+    func testRemainingDownloadUpperBoundForQuickSelectionMatchesProfileMath() {
+        func artifact(_ key: String, sizeBytes: Int64, requiredBy: [SpeechRailProfile]) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen",
+                variant: "base",
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: sizeBytes,
+                fileCount: 1,
+                requiredBy: requiredBy
+            )
+        }
+
+        func status(_ key: String, verified: Bool) -> ModelArtifactStatusSnapshot {
+            ModelArtifactStatusSnapshot(
+                key: key,
+                state: verified ? .verified : .notDownloaded,
+                integrity: verified ? .verified : .notChecked,
+                verifiedFileCount: verified ? 1 : 0,
+                totalFileCount: 1
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr", sizeBytes: 100, requiredBy: [.quality]),
+                artifact("tts", sizeBytes: 200, requiredBy: [.quality]),
+            ],
+            profiles: [
+                ProfileSummary(id: .quality, asr: "asr", tts: "tts", downloadBytes: 300),
+            ]
+        )
+        let statuses = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", verified: true),
+                status("tts", verified: false),
+            ],
+            disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 1_000)
+        )
+
+        // 快捷组合没有混合项，必须复用整档摘要的算法。
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .quick(.quality), statuses: statuses),
+            catalog.remainingDownloadUpperBound(for: .quality, statuses: statuses)
+        )
+        XCTAssertEqual(
+            catalog.remainingDownloadUpperBound(for: .quick(.quality), statuses: statuses),
+            200
+        )
+    }
+
+    func testRemainingDownloadUpperBoundForMixedSelectionUnionsArtifacts() {
+        func artifact(_ key: String, sizeBytes: Int64, requiredBy: [SpeechRailProfile]) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen",
+                variant: "base",
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: sizeBytes,
+                fileCount: 1,
+                requiredBy: requiredBy
+            )
+        }
+
+        func status(_ key: String, verified: Bool) -> ModelArtifactStatusSnapshot {
+            ModelArtifactStatusSnapshot(
+                key: key,
+                state: verified ? .verified : .notDownloaded,
+                integrity: verified ? .verified : .notChecked,
+                verifiedFileCount: verified ? 1 : 0,
+                totalFileCount: 1
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr", sizeBytes: 100, requiredBy: [.quality]),
+                artifact("tts", sizeBytes: 200, requiredBy: [.quality, .reference]),
+                artifact("clone", sizeBytes: 300, requiredBy: [.reference]),
+            ],
+            profiles: []
+        )
+        let mixed = SpecSelection(asrSpec: .quality, ttsSpec: .reference)
+        let disk = ModelDiskSnapshot(modelBytes: 0, freeBytes: 10_000)
+
+        // 缺失任一制品状态时保持未知，不猜一个偏小的下载量。
+        let partial = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", verified: true),
+                status("tts", verified: false),
+            ],
+            disk: disk
+        )
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: mixed, statuses: partial))
+        XCTAssertNil(catalog.remainingDownloadUpperBound(for: mixed, statuses: nil))
+
+        // 完整状态：未校验的制品按全量计入上界。
+        let complete = ModelStatusSnapshot(
+            artifacts: [
+                status("asr", verified: true),
+                status("tts", verified: false),
+                status("clone", verified: true),
+            ],
+            disk: disk
+        )
+        XCTAssertEqual(catalog.remainingDownloadUpperBound(for: mixed, statuses: complete), 200)
+
+        // 混合组合里两个规格都没有制品时，不返回一个「0 字节」的假结论。
+        XCTAssertNil(
+            catalog.remainingDownloadUpperBound(
+                for: SpecSelection(asrSpec: .fast, ttsSpec: .unrecognized("future")),
+                statuses: complete
+            )
+        )
+    }
+
     func testRequestValidationRejectsMissingConfirmationAndPayload() {
         XCTAssertThrowsError(try ControlRequest(command: .profileApply).validate()) { error in
             XCTAssertEqual(error as? ControlProtocolError, .confirmationRequired)

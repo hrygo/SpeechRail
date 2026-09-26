@@ -196,8 +196,8 @@ enum DeveloperDocsCatalog {
                 .bullets([
                     "stdio 是默认传输，不监听任何端口；streamable-http 用 --transport streamable-http "
                     + "--host 127.0.0.1 --port 8202 启动，供同机客户端连接 http://127.0.0.1:8202/mcp。",
-                    "describe() 保留 legacy models/voices/readiness 字段，同时尽力附带一次 "
-                    + "effective_capabilities_v1；旧服务只有在 404/405 或未知 schema 时才回退为空。",
+                    "describe() 读取必需的 effective_capabilities_v1 能力快照：该路由缺失、schema 未知或读取失败时 "
+                    + "MCP 直接失败，不回退到 /v1/models + /v1/voices，也不伪造能力快照。",
                     "Realtime 不经代理：流式会话仍直接连 /v1/realtime。"
                 ]),
                 .note(
