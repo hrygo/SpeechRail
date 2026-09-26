@@ -2,7 +2,7 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.2.1"
+version: "3.2.2"
 date: 2026-09-26
 ---
 
@@ -89,10 +89,16 @@ namespaced capability 响应，`voices` 只使用其安全投影，不再输出
 ### 认证状态（2026-09-26）
 
 `fast`/`quality` 的制品有本机准备与逐文件 size/SHA-256 校验证据；`reference` 的 bf16 制品继承
-同族 8-bit 档位已通过的门禁证据，**未在本机单独复测**。因此本页的 `available=true` 只表示
-配置允许按需服务，不表示质量、音质、资源或长稳已认证。真实设备/播放器、长稳、联合实时全双工
-与基准阈值仍须按 [Issue #95 交付认证](../developers/issue-95-certification.md) 的专项授权执行，
-并登记 commit、engine revision、制品 revision、设备与样本数。
+同族 8-bit 档位已通过的门禁证据。2026-09-26 已在本机真实运行态补测三档：
+
+- 三档 warm bench（各 30 fixture）0 失败；`reference` 的 `asr_runtime_revision` 非空，
+  证明 BF16 档真实可推理（修复前为 `null`）。
+- 三档冷启动、参考档反复取消 ×100、短时 soak ×30 轮通过；详见
+  [Issue #95 交付认证](../developers/issue-95-certification.md) §7.2。
+
+即便如此，本页的 `available=true` 仍只表示配置允许按需服务，**不表示**语音质量、克隆身份相似度、
+自然度或 ≥2h 长稳已认证。人工听审、真实声卡播放器、CER/WER 语料分层、联合实时全双工仍需按该文档
+§8.2 执行，并登记 commit、engine revision、制品 revision、设备与样本数。
 
 ## 分句规划版本
 
