@@ -1011,11 +1011,6 @@
       "tier": "reference"
     },
     {
-      "artifact_key": "tts-1.7b-design-bf16",
-      "role": "voice_design",
-      "tier": "reference"
-    },
-    {
       "artifact_key": "aligner-q8",
       "role": "alignment",
       "tier": "fast"

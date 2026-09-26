@@ -37,6 +37,8 @@ ModelRole = Literal[
 WeightDtype = Literal["bf16", "fp16", "fp32"]
 
 # 目标三档与角色的唯一绑定表。缺失的制品绝不能由规格名字推断补齐。
+# 注意: 音色设计 (VoiceDesign) 不在这张表里 —— 它是**按需辅助制品**, 只有一份,
+# 进入设计作业才加载, 不与 ASR/TTS 档位绑定 (架构 §2.2, 计划 §95)。
 REQUIRED_SPEC_BINDINGS: Mapping[tuple[SpecTier, ModelRole], str] = MappingProxyType(
     {
         ("fast", "asr"): "asr-0.6b-q8",
@@ -48,12 +50,15 @@ REQUIRED_SPEC_BINDINGS: Mapping[tuple[SpecTier, ModelRole], str] = MappingProxyT
         ("fast", "tts_custom_voice"): "tts-0.6b-custom-q8",
         ("quality", "tts_custom_voice"): "tts-1.7b-custom-q8",
         ("reference", "tts_custom_voice"): "tts-1.7b-custom-bf16",
-        ("reference", "voice_design"): "tts-1.7b-design-bf16",
         ("fast", "alignment"): "aligner-q8",
         ("quality", "alignment"): "aligner-bf16",
         ("reference", "alignment"): "aligner-bf16",
     }
 )
+
+# 唯一的音色设计制品。它不是任何档位的角色, 而是所有档位共享的按需模块; 供货
+# 快照存在即可用, 缺失则只降级 VoiceDesign 能力, 不影响 ASR/TTS/Base 激活。
+VOICE_DESIGN_ARTIFACT_KEY = "tts-1.7b-design-bf16"
 
 _ROLE_VARIANTS: Mapping[ModelRole, tuple[Family, Variant]] = MappingProxyType(
     {
@@ -410,6 +415,13 @@ class ModelCatalog(BaseModel):
             ):
                 raise ValueError(f"spec {tier}/{role} references an incompatible artifact")
 
+        # 音色设计不与档位绑定, 只允许存在一份; 多于一份就是目录自相矛盾。
+        design_artifacts = [
+            artifact for artifact in self.artifacts if artifact.variant == "voice_design"
+        ]
+        if len(design_artifacts) > 1:
+            raise ValueError("catalog must not declare more than one voice_design artifact")
+
         return self
 
     def binding(self, tier: SpecTier, role: ModelRole) -> str:
@@ -418,6 +430,17 @@ class ModelCatalog(BaseModel):
             if item.tier == tier and item.role == role:
                 return item.artifact_key
         raise KeyError(f"{tier}/{role}")
+
+    def voice_design_artifact(self) -> ModelArtifact | None:
+        """返回与档位无关的那一份音色设计制品; 没有则返回 None。
+
+        VoiceDesign 是按需辅助模块, 不是任何档位的角色, 所以它不参与
+        tier/role 绑定。供货快照存在即可用; 缺失时只降级 VoiceDesign 能力。
+        """
+        for artifact in self.artifacts:
+            if artifact.variant == "voice_design":
+                return artifact
+        return None
 
     def artifact_for(self, tier: SpecTier, role: ModelRole) -> ModelArtifact | None:
         """返回绑定的制品; 未绑定或缺失时返回 None, 绝不按名字推断。"""
@@ -469,6 +492,13 @@ def assert_target_spec_bindings(catalog: ModelCatalog) -> None:
             f"mismatched={mismatched}"
         )
 
+    design = catalog.voice_design_artifact()
+    if design is None or design.key != VOICE_DESIGN_ARTIFACT_KEY:
+        raise ValueError(
+            "shipped catalog must declare the pinned voice_design artifact: "
+            f"expected={VOICE_DESIGN_ARTIFACT_KEY}"
+        )
+
 
 def load_runtime_lock() -> RuntimeLock:
     """读取并校验全档共享 runtime lock。"""
@@ -499,6 +529,7 @@ def load_runtime_lock() -> RuntimeLock:
 
 __all__ = [
     "REQUIRED_SPEC_BINDINGS",
+    "VOICE_DESIGN_ARTIFACT_KEY",
     "ArtifactFile",
     "EngineWheelPin",
     "Family",

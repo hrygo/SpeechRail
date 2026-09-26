@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import get_voice_registry
@@ -191,12 +192,13 @@ class PreviewCapturingSpeechSynthesizer:
 
 
 def _preview_client(
-    tmp_path: Path, tier: str = "reference"
+    tmp_path: Path, tier: str = "reference", *, with_design: bool = True
 ) -> tuple[TestClient, PreviewCapturingSpeechSynthesizer, Path]:
     asr_key = required_spec_artifact(tier, "asr")  # type: ignore[arg-type]
     tts_key = required_spec_artifact(tier, "tts_custom_voice")  # type: ignore[arg-type]
     base_key = required_spec_artifact(tier, "tts_base")  # type: ignore[arg-type]
-    design_key = required_spec_artifact(tier, "voice_design")  # type: ignore[arg-type]
+    # VoiceDesign 与档位无关: 三档共用同一份设计制品; 快照缺失才 unsupported。
+    design_key = VOICE_DESIGN_ARTIFACT_KEY if with_design else None
     assert asr_key is not None and tts_key is not None and base_key is not None
     synthesizer = PreviewCapturingSpeechSynthesizer()
     custom_voices = tmp_path / "custom_voices.json"
@@ -251,8 +253,29 @@ def test_voice_preview_returns_audio_without_creating_voice_profile(
     assert not custom_voices.exists()
 
 
-def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None:
-    client, _synthesizer, _custom_voices = _preview_client(tmp_path, "fast")
+@pytest.mark.parametrize("tier", ["fast", "quality", "reference"])
+def test_voice_preview_works_on_every_tier_with_a_design_snapshot(
+    tmp_path: Path, tier: str
+) -> None:
+    # VoiceDesign 不绑定档位: 三档都能做设计试听。
+    client, _synthesizer, _custom_voices = _preview_client(tmp_path / tier, tier)
+
+    response = client.post(
+        "/v1/voices/previews",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "试听这一句。",
+            "instruction": "自然的中文女声。",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_voice_preview_is_rejected_without_a_design_snapshot(tmp_path: Path) -> None:
+    client, _synthesizer, _custom_voices = _preview_client(
+        tmp_path, "fast", with_design=False
+    )
 
     response = client.post(
         "/v1/voices/previews",
@@ -265,7 +288,6 @@ def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_preview_unsupported"
-    assert "quality" not in response.json()["error"]["message"].lower()
 
 
 def test_runtime_speech_rejects_instructions_reserved_for_voice_design(

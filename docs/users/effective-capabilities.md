@@ -2,7 +2,7 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.3.0"
+version: "3.3.1"
 date: 2026-09-26
 ---
 
@@ -48,7 +48,7 @@ date: 2026-09-26
 
 ## 参数按操作区分
 
-`fast`、`quality` 与 `reference` 分别解析 ASR、固定自定义音色 Base 与内置 speaker CustomVoice 角色；实际可用性以当前有效快照为准。VoiceDesign 只在 `voice_design` 任务中运行，普通 Base clone 与 CustomVoice 路由不接受 Design 音色。
+`fast`、`quality` 与 `reference` 分别解析 ASR、固定自定义音色 Base 与内置 speaker CustomVoice 角色；实际可用性以当前有效快照为准。VoiceDesign 只在 `voice_design` 任务中运行，普通 Base clone 与 CustomVoice 路由不接受 Design 音色；它是**与档位无关**的按需制品（唯一 1.7B BF16 设计权重），只要供货快照存在，任何 `tts_spec` 都能进入设计作业。
 普通 HTTP speech 支持 seed。语言完整取值域尚未在固定 vendor 上验证，因此报告 unknown。
 
 ASR 侧操作在 `operations` 中按 `transcription`、`alignment_transcription`、

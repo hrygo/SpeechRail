@@ -587,6 +587,12 @@ public extension ModelCatalogSnapshot {
 }
 
 public extension ModelCatalogSnapshot {
+    /// VoiceDesign 是与 ASR/TTS 档位无关的按需制品: 目录里声明的是一份设计权重,
+    /// 任何档位都能进入设计作业; 它缺失时只降级设计能力。
+    var hasVoiceDesignArtifact: Bool {
+        artifacts.contains { $0.variant == "voice_design" }
+    }
+
     /// Artifacts required by either spec of a selection, in catalog order.
     func artifacts(for selection: SpecSelection) -> [ModelArtifactSnapshot] {
         artifacts.filter {

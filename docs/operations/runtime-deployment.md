@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-version: "3.2.0"
+version: "3.2.1"
 date: 2026-09-26
 ---
 
@@ -42,9 +42,10 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
 
 ## 三档规格与制品组成（catalog specs）
 
-`catalog schema_version=2` 的 `specs` 是唯一绑定真相：13 个 `(tier, role)` 映射到 12 个制品，
-装载时由 `assert_target_spec_bindings()` 强制精确匹配。档位只选择权重与量化，公共 API payload 结构、
-worker 协议、调度与进程隔离保持不变；ASR 与 TTS 可分别选档（`asr_spec` / `tts_spec`）。
+`catalog schema_version=2` 的 `specs` 是唯一绑定真相：12 个 `(tier, role)` 映射到 11 个档位制品，
+装载时由 `assert_target_spec_bindings()` 强制精确匹配。VoiceDesign（`tts-1.7b-design-bf16`）是
+**不与档位绑定**的按需制品，任何 `tts_spec` 都能进入设计作业（合计 12 个制品）。档位只选择权重与量化，
+公共 API payload 结构、worker 协议、调度与进程隔离保持不变；ASR 与 TTS 可分别选档（`asr_spec` / `tts_spec`）。
 
 | spec | ASR | 系统声音 `tts_custom_voice` | 参考克隆 `tts_base` | 提示词设计 `voice_design` | aligner（分人专用） |
 |---|---|---|---|---|---|

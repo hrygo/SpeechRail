@@ -1026,11 +1026,6 @@
       "artifact_key": "tts-1.7b-custom-bf16",
       "role": "tts_custom_voice",
       "tier": "reference"
-    },
-    {
-      "artifact_key": "tts-1.7b-design-bf16",
-      "role": "voice_design",
-      "tier": "reference"
     }
   ]
 }

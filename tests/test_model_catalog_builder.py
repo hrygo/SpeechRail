@@ -181,7 +181,7 @@ def test_build_catalog_normalizes_artifacts_and_sorts_files() -> None:
 
     assert catalog["schema_version"] == 2
     assert len(catalog["artifacts"]) == 12
-    assert len(catalog["specs"]) == 13
+    assert len(catalog["specs"]) == 12
     assert [item["path"] for item in _artifact_by_key(catalog, "asr-0.6b-q8")["files"]] == [
         "config.json",
         "model.safetensors",

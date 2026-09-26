@@ -50,7 +50,6 @@ _SUMMARY_ROLES: tuple[tuple[str, ModelRole], ...] = (
     ("asr", "asr"),
     ("tts", "tts_custom_voice"),
     ("tts_base", "tts_base"),
-    ("voice_design", "voice_design"),
     ("aligner", "alignment"),
 )
 
@@ -75,10 +74,18 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
     artifacts_by_key = {artifact.key: artifact for artifact in selected.artifacts}
     artifacts: list[dict[str, object]] = []
     bound_keys = {artifact_key for _tier, _role, artifact_key in required_spec_bindings()}
+    # 音色设计不与档位绑定: 它单独挂 required_by=["voice_design"], 任何档位共享。
+    design_artifact = selected.voice_design_artifact()
+    if design_artifact is not None:
+        bound_keys.add(design_artifact.key)
     for artifact in selected.artifacts:
         if artifact.key not in bound_keys:
             continue
-        required_by = _artifact_required_by(selected, artifact.key)
+        required_by = (
+            ["voice_design"]
+            if design_artifact is not None and artifact.key == design_artifact.key
+            else _artifact_required_by(selected, artifact.key)
+        )
         if not required_by:
             continue
         source = _canonical_source(artifact)
@@ -137,7 +144,6 @@ def _profile_payload(
         "asr": bindings["asr"],
         "tts": bindings["tts"],
         "tts_base": bindings["tts_base"],
-        "voice_design": bindings["voice_design"],
         "aligner": bindings["aligner"],
         "download_bytes": download_bytes,
     }

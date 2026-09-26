@@ -481,7 +481,6 @@ def _profile_row(item: ProfileSummary) -> dict[str, object]:
         "id": getattr(item, "id", None),
         "tts": getattr(item, "tts", None),
         "tts_base": getattr(item, "tts_base", None),
-        "voice_design": getattr(item, "voice_design", None),
     }
 
 

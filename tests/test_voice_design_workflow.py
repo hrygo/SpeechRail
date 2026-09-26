@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.idempotency import (
     DurableIdempotencyJournal,
@@ -107,12 +108,14 @@ def make_client(
     tier: str = "reference",
     with_asr: bool = True,
     with_base: bool = True,
+    with_design: bool = True,
     api_key: str | None = None,
 ) -> tuple[TestClient, VoiceRegistry, DesignSynth, DesignAsr]:
     asr_key = required_spec_artifact(tier, "asr")
     tts_key = required_spec_artifact(tier, "tts_custom_voice")
     base_key = required_spec_artifact(tier, "tts_base")
-    design_key = required_spec_artifact(tier, "voice_design")
+    # VoiceDesign 是与档位无关的按需制品: 任何 tier 都用同一份设计权重。
+    design_key = VOICE_DESIGN_ARTIFACT_KEY if with_design else None
     assert asr_key is not None and tts_key is not None
     registry = VoiceRegistry(
         storage_path=tmp_path / "voices.json",
@@ -576,17 +579,26 @@ def test_candidate_replay_survives_completion_failure(
     assert len(asr.requests) == 1
 
 
-def test_candidate_requires_reference_tier_and_batch_asr(
+def test_candidate_works_on_any_tier_and_only_needs_design_and_batch_asr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unsupported, _registry, synth, _asr = make_client(
+    # quality 档也应支持音色设计: VoiceDesign 不绑定档位 (修复 tier 绑定缺陷)。
+    supported, _registry, supported_synth, _asr = make_client(
         tmp_path / "quality", monkeypatch, tier="quality"
     )
-    response = unsupported.post("/v1/voice-designs", json=payload())
+    response = supported.post("/v1/voice-designs", json=payload())
+    assert response.status_code == 201
+    assert supported_synth.requests
+
+    # 设计供货快照缺失才是 unsupported。
+    no_design, _registry, design_synth, _asr = make_client(
+        tmp_path / "no_design", monkeypatch, with_design=False
+    )
+    response = no_design.post("/v1/voice-designs", json=payload())
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_design_unsupported"
-    assert not synth.requests
+    assert not design_synth.requests
 
     no_asr, _registry, synth, _asr = make_client(
         tmp_path / "no_asr", monkeypatch, with_asr=False

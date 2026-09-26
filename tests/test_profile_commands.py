@@ -56,15 +56,14 @@ def test_catalog_lists_three_spec_tiers_with_explicit_bindings() -> None:
     assert reference.asr == "asr-1.7b-bf16"
     assert reference.tts == "tts-1.7b-custom-bf16"
     assert reference.tts_base == "tts-1.7b-base-bf16"
-    assert reference.voice_design == "tts-1.7b-design-bf16"
-    assert fast.voice_design is None
-    assert quality.voice_design is None
+    # VoiceDesign 是与档位无关的按需制品, 不出现在任何档位行里 (与分人一致)。
+    assert all(not hasattr(profile, "voice_design") for profile in profiles)
 
     assert model_changes(fast, quality) == frozenset(
         {"asr", "tts", "tts_base", "aligner"}
     )
     assert model_changes(quality, reference) == frozenset(
-        {"asr", "tts", "tts_base", "voice_design"}
+        {"asr", "tts", "tts_base"}
     )
 
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
@@ -72,8 +71,10 @@ def test_catalog_lists_three_spec_tiers_with_explicit_bindings() -> None:
     def artifact_bytes(key: str) -> int:
         return sum(file.size for file in artifacts[key].files)
 
-    # ``download_bytes`` is the total size of every role a tier binds, including
-    # the Base clone TTS weights and the reference-only design weights.
+    # ``download_bytes`` is the total size of every role a tier binds: ASR, the
+    # CustomVoice TTS weights, the Base clone weights and the aligner. VoiceDesign
+    # is an on-demand auxiliary artifact shared by every tier, so it is not part
+    # of any single tier's download set.
     assert fast.download_bytes == (
         artifact_bytes("asr-0.6b-q8")
         + artifact_bytes("tts-0.6b-custom-q8")
@@ -90,7 +91,6 @@ def test_catalog_lists_three_spec_tiers_with_explicit_bindings() -> None:
         artifact_bytes("asr-1.7b-bf16")
         + artifact_bytes("tts-1.7b-custom-bf16")
         + artifact_bytes("tts-1.7b-base-bf16")
-        + artifact_bytes("tts-1.7b-design-bf16")
         + artifact_bytes("aligner-bf16")
     )
 
