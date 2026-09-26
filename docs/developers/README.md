@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.2.0"
-date: 2026-09-21
+version: "2.3.0"
+date: 2026-09-26
 ---
 
 # 🛠️ SpeechRail 开发者文档
@@ -34,6 +34,10 @@ graph TD
 9. **[🧩 macOS App 会话层技术方案](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md)**：语音助手、会议助手、实时字幕的
    资源边界、音频来源、记录存储、失败出口与尚未完成的真机验收。
 10. **[📝 macOS App AI 提词器](macos-app-teleprompter.md)**：直播准备稿件、AI 审阅、Realtime 自动跟读、独立舞台窗口、隐私边界与验收矩阵。
+11. **[🧱 ASR/TTS 目标架构（accepted）](../architecture/2026-09-25-asr-tts-target-architecture-no-legacy.md)**：
+    当前规格绑定、任务/计划解析、打断与终态、无 legacy 的公共边界；改公共契约前先读它。
+12. **[✅ Issue #95 交付认证与证据索引](issue-95-certification.md)**：本轮运行态认证的实测结果、反例、
+    未通过门与仍需人工裁定的决策点（关闭 Issue 前的事实来源）。
 
 ---
 
