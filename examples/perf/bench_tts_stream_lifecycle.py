@@ -425,16 +425,40 @@ def run_soak(
     sample: Callable[[], dict[str, float]] | None = None,
     timeout_seconds: float = 120.0,
     clock: Callable[[], float] = time.monotonic,
+    connection_factory: Callable[[], Any] | None = None,
+    reconnect_every: int = 0,
 ) -> SoakSummary:
-    """Repeat complete / interrupt / idle-cancel cycles on one connection."""
+    """Repeat complete / interrupt / idle-cancel cycles.
 
+    The server keeps a bounded, per-connection ledger of distinct TTS request
+    ids (``_MAX_TTS_REQUEST_IDS``); once it is full an idle ``tts.start`` is
+    rejected with ``tts_request_invalid`` until the client opens a new
+    WebSocket.  A real long-lived client must therefore reconnect, so a soak
+    that wants to run for hours passes ``connection_factory`` plus
+    ``reconnect_every`` and this loop reopens the socket on that cadence.  When
+    ``connection_factory`` is ``None`` the single ``connection`` is reused for
+    every cycle, which is only valid for short runs.
+    """
+
+    if reconnect_every < 0:
+        raise ValueError("reconnect_every must not be negative")
     summary = SoakSummary(cycles=cycles, completed_turns=0, interrupted_turns=0)
     if sample is not None:
         summary.gauges["before"] = sample()
+    active = connection
     for index in range(cycles):
+        if (
+            index
+            and connection_factory is not None
+            and reconnect_every > 0
+            and index % reconnect_every == 0
+        ):
+            with contextlib.suppress(Exception):
+                active.close()
+            active = connection_factory()
         try:
             trace = run_incremental_turn(
-                connection,
+                active,
                 text=text,
                 model=model,
                 voice=voice,
@@ -451,7 +475,7 @@ def run_soak(
                 summary.failures.append(f"cycle{index}_complete:{trace.failure}")
         try:
             cancelled = run_cancel_turn(
-                connection,
+                active,
                 text=text,
                 model=model,
                 voice=voice,
@@ -470,7 +494,7 @@ def run_soak(
             if cancelled.audio_bytes_after_cancel:
                 summary.failures.append(f"cycle{index}_stale_audio")
         try:
-            code = probe_idle_cancel(connection, clock=clock)
+            code = probe_idle_cancel(active, clock=clock)
         except Exception as exc:
             summary.failures.append(f"cycle{index}_idle:{type(exc).__name__}")
         else:
@@ -494,6 +518,15 @@ def main() -> None:
     parser.add_argument("--voice", default=None, help="registered voice id")
     parser.add_argument("--mode", choices=("cancel", "soak"), default="cancel")
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument(
+        "--reconnect-every",
+        type=int,
+        default=50,
+        help=(
+            "soak: reopen the WebSocket every N cycles; the server's per-connection "
+            "TTS request-id ledger is bounded, so long soaks must reconnect (0 = never)"
+        ),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
     parser.add_argument(
         "--output", type=Path, help="write the summary JSON to this path (keep it outside the repo)"
@@ -541,23 +574,31 @@ def main() -> None:
             )
         payload = summarise_cancel(traces).as_dict()
     else:
-        connection = client.realtime.connect(model=args.model).enter()
+        sample = lambda: fetch_gauges(  # noqa: E731 - small local closure
+            metrics_url=args.metrics_url, api_key=api_key
+        )
+        active_connection: dict[str, Any] = {}
+
+        def _connect() -> Any:
+            connection = client.realtime.connect(model=args.model).enter()
+            active_connection["current"] = connection
+            return connection
+
         try:
-            sample = lambda: fetch_gauges(  # noqa: E731 - small local closure
-                metrics_url=args.metrics_url, api_key=api_key
-            )
             summary = run_soak(
-                connection,
+                _connect(),
                 cycles=args.repeat,
                 text=args.text,
                 model=args.model,
                 voice=args.voice,
                 sample=sample,
                 timeout_seconds=args.timeout_seconds,
+                connection_factory=_connect,
+                reconnect_every=args.reconnect_every,
             )
         finally:
             with contextlib.suppress(Exception):
-                connection.close()
+                active_connection["current"].close()
         payload = summary.as_dict()
 
     text = json.dumps(payload, ensure_ascii=False, indent=2)
