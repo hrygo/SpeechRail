@@ -9,10 +9,22 @@ public struct ModelManagementView: View {
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedProfile: SpeechRailProfile = .quality
+    /// 高级路径：识别与配音各自选档；`false` 时只用三张快捷组合卡。
+    @State private var usesAdvancedSpecs = false
+    @State private var advancedAsrSpec: SpeechRailProfile = .quality
+    @State private var advancedTtsSpec: SpeechRailProfile = .quality
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
 
     public init() {}
+
+    /// 下载与应用只认这一对 `asr_spec`/`tts_spec`：快捷卡写两项相同值，
+    /// 高级项按各自的选择独立提交，wire 上不产生第三份 preset 真相。
+    private var targetSelection: SpecSelection {
+        usesAdvancedSpecs
+            ? SpecSelection(asrSpec: advancedAsrSpec, ttsSpec: advancedTtsSpec)
+            : .quick(selectedProfile)
+    }
 
     public var body: some View {
         PageScaffold(route: .models) {
@@ -44,11 +56,11 @@ public struct ModelManagementView: View {
                     Task {
                         switch action {
                         case .download:
-                            await model.prepareModels(.quick(selectedProfile))
+                            await model.prepareModels(targetSelection)
                         case .apply:
                             // 确认对话框可能在助手开始说话后才被按下；这里再挡一次。
                             guard !assistant.phase.isLive else { return }
-                            await model.execute(.profileApply, selection: .quick(selectedProfile))
+                            await model.execute(.profileApply, selection: targetSelection)
                         }
                     }
                 }
@@ -61,19 +73,17 @@ public struct ModelManagementView: View {
             model.refreshControlAgentStatus()
             await model.refreshModelsAndHealth()
             if let active = model.operation?.selection ?? model.profile?.selection {
-                selectedProfile = active.quickTier ?? active.ttsSpec
+                adopt(active)
             }
             selectFirstArtifactIfNeeded()
         }
         .onChange(of: model.profile?.selection) { _, value in
-            if let value { selectedProfile = value.quickTier ?? value.ttsSpec }
+            if let value { adopt(value) }
         }
         .onChange(of: model.operation?.selection) { _, value in
-            if let quick = value?.quickTier, availableProfiles.contains(quick) {
-                selectedProfile = quick
-            }
+            if let value { adopt(value) }
         }
-        .onChange(of: selectedProfile) { _, _ in
+        .onChange(of: targetSelection) { _, _ in
             selectFirstArtifactIfNeeded()
         }
         .onChange(of: model.modelCatalog) { _, _ in
@@ -143,9 +153,51 @@ public struct ModelManagementView: View {
     private var modelWorkspace: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             profileCards
+            advancedSpecs
             actionSection
             selectedProfilePanel
         }
+    }
+
+    /// 三张快捷卡只写「两项同档」。需要混合组合（例如识别品质 + 配音轻快）时在这里
+    /// 分别选择；下载与应用都按同一对 `asr_spec`/`tts_spec` 执行，不产生第三份 preset 真相。
+    @ViewBuilder
+    private var advancedSpecs: some View {
+        let profiles = availableProfiles
+        DisclosureGroup("分别调整识别与配音", isExpanded: $usesAdvancedSpecs) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                if profiles.isEmpty {
+                    Text("服务目录尚未返回可选择的档位。")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                } else {
+                    Picker("识别档位", selection: $advancedAsrSpec) {
+                        ForEach(profiles, id: \.self) { profile in
+                            Text(SpeechRailProfilePresentation.shortTitle(profile))
+                                .tag(profile)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .speechRailPointerCursor()
+                    Picker("配音档位", selection: $advancedTtsSpec) {
+                        ForEach(profiles, id: \.self) { profile in
+                            Text(SpeechRailProfilePresentation.shortTitle(profile))
+                                .tag(profile)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .speechRailPointerCursor()
+                    Text("当前选择：\(profileTitle(for: targetSelection))")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        }
+        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+        .speechRailPointerCursor()
+        .accessibilityIdentifier("models-advanced-specs")
     }
 
     /// 只显示服务目录实际发布的档位；宽度允许时单行展示，空间不足时改为两列。
@@ -198,10 +250,13 @@ public struct ModelManagementView: View {
                     "该档模型总大小 \(formatBytes($0.downloadBytes))"
                 },
                 specs: profileSpecs(for: profile),
-                isSelected: selectedProfile == profile,
+                isSelected: targetSelection == .quick(profile),
                 isRunning: currentServiceProfile == .quick(profile)
             ) {
                 selectedProfile = profile
+                advancedAsrSpec = profile
+                advancedTtsSpec = profile
+                usesAdvancedSpecs = false
             }
             .frame(minWidth: minimumWidth, maxWidth: .infinity, alignment: .leading)
         }
@@ -259,7 +314,7 @@ public struct ModelManagementView: View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             profileContextValue(
                 title: "目标档位",
-                value: profileTitle(for: selectedProfile),
+                value: profileTitle(for: targetSelection),
                 tone: .neutral
             )
             Divider()
@@ -267,14 +322,14 @@ public struct ModelManagementView: View {
             profileContextValue(
                 title: "当前服务",
                 value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取",
-                tone: currentServiceProfile == .quick(selectedProfile) ? .healthy : .attention
+                tone: currentServiceProfile == targetSelection ? .healthy : .attention
             )
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
             profileContextValue(
                 title: "配置档位",
                 value: configuredProfile.map { profileTitle(for: $0) } ?? "未配置",
-                tone: configuredProfile == .quick(selectedProfile) ? .healthy : .attention
+                tone: configuredProfile == targetSelection ? .healthy : .attention
             )
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
@@ -300,26 +355,30 @@ public struct ModelManagementView: View {
         }
     }
 
+    @ViewBuilder
     private var profileFacts: some View {
+        let totalBytes = usesAdvancedSpecs
+            ? targetSelectionCatalogBytes
+            : summary(for: selectedProfile).map(\.downloadBytes)
         HStack(spacing: 0) {
             fact(
-                "档位总大小",
-                value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取"
+                usesAdvancedSpecs ? "组合总大小" : "档位总大小",
+                value: totalBytes.map(formatBytes) ?? "未读取"
             )
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            fact("识别", value: summary(for: selectedProfile)?.asr ?? "未读取")
+            fact("识别", value: summary(for: targetSelection.asrSpec)?.asr ?? "未读取")
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            fact("合成", value: summary(for: selectedProfile)?.tts ?? "未读取")
+            fact("合成", value: summary(for: targetSelection.ttsSpec)?.tts ?? "未读取")
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             // 这一行的三格是「这一档要用哪几个模型」（取值是制品 key），标题就用页面上
             // 的名字；`VoiceDesign` 只留在开发者详情里（用户 2026-09-19）。
-            fact("语音设计", value: voiceDesignCapability(for: selectedProfile))
+            fact("语音设计", value: voiceDesignCapability(for: targetSelection.ttsSpec))
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
     }
@@ -628,7 +687,7 @@ public struct ModelManagementView: View {
                 // 不写清作用域会被读成服务现在的能力。
                 LabeledContent(
                     "VoiceDesign 能力（目标档位）",
-                    value: voiceDesignCapability(for: selectedProfile)
+                    value: voiceDesignCapability(for: targetSelection.ttsSpec)
                 )
                 LabeledContent(
                     "当前服务档位",
@@ -653,7 +712,7 @@ public struct ModelManagementView: View {
                     title: "模型运行信息",
                     detail: "选中一个模型文件，看它的来源、锁定版本和本机校验结果。"
                 )
-                LabeledContent("目标档位", value: profileTitle(for: selectedProfile))
+                LabeledContent("目标档位", value: profileTitle(for: targetSelection))
                 LabeledContent(
                     "当前服务档位",
                     value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
@@ -691,12 +750,58 @@ public struct ModelManagementView: View {
         model.modelCatalog?.selectableProfiles ?? []
     }
 
+    /// 两项规格都必须由当前服务目录发布，组合才可下载/应用。
+    private var targetSelectionIsPublished: Bool {
+        availableProfiles.contains(targetSelection.asrSpec)
+            && availableProfiles.contains(targetSelection.ttsSpec)
+    }
+
+    /// 两个规格各自的目录摘要；任一项缺失都只能报「映射未读取」。
+    private var targetSummaries: [ProfileSummary]? {
+        let asr = summary(for: targetSelection.asrSpec)
+        let tts = summary(for: targetSelection.ttsSpec)
+        guard let asr, let tts else { return nil }
+        return [asr, tts]
+    }
+
+    /// 混合组合没有单一整档总量，用目录里两个规格的制品并集求和。
+    private var targetSelectionCatalogBytes: Int64? {
+        guard let artifacts = model.modelCatalog?.artifacts(for: targetSelection),
+              !artifacts.isEmpty
+        else {
+            return nil
+        }
+        return artifacts.reduce(Int64.zero) { $0 + $1.sizeBytes }
+    }
+
+    /// 把服务端的当前/配置选择回填到两套控件：快捷组合收回卡片，混合组合自动展开高级项，
+    /// 否则界面会把混合组合显示成其中一档。
+    private func adopt(_ selection: SpecSelection) {
+        guard selection.isSelectable,
+              availableProfiles.contains(selection.asrSpec),
+              availableProfiles.contains(selection.ttsSpec)
+        else {
+            return
+        }
+        advancedAsrSpec = selection.asrSpec
+        advancedTtsSpec = selection.ttsSpec
+        if let quick = selection.quickTier {
+            selectedProfile = quick
+            usesAdvancedSpecs = false
+        } else {
+            usesAdvancedSpecs = true
+            if !availableProfiles.contains(selectedProfile), let first = availableProfiles.first {
+                selectedProfile = first
+            }
+        }
+    }
+
     private var configuredProfile: SpecSelection? {
         model.profile?.selection
     }
 
     private var profileContextAccessibilityValue: String {
-        let target = "目标档位：\(profileTitle(for: selectedProfile))"
+        let target = "目标档位：\(profileTitle(for: targetSelection))"
         let current = currentServiceProfile.map { "当前服务：\(profileTitle(for: $0))" }
             ?? "当前服务：运行态未读取"
         let consistency: String
@@ -714,22 +819,20 @@ public struct ModelManagementView: View {
     }
 
     private var visibleArtifacts: [ModelArtifactSnapshot] {
-        model.modelCatalog?.artifacts.filter {
-            $0.requiredBy.contains(selectedProfile)
-        } ?? []
+        model.modelCatalog?.artifacts(for: targetSelection) ?? []
     }
 
     /// The catalog reports total bytes per profile; this is only an upper bound
     /// because any artifact without a verified status is counted in full.
-    private func remainingDownloadUpperBound(for profile: SpeechRailProfile) -> Int64? {
+    private func remainingDownloadUpperBound(for selection: SpecSelection) -> Int64? {
         model.modelCatalog?.remainingDownloadUpperBound(
-            for: profile,
+            for: selection,
             statuses: model.modelStatus
         )
     }
 
-    private func remainingDownloadText(for profile: SpeechRailProfile) -> String {
-        guard let remainingBytes = remainingDownloadUpperBound(for: profile) else {
+    private func remainingDownloadText(for selection: SpecSelection) -> String {
+        guard let remainingBytes = remainingDownloadUpperBound(for: selection) else {
             return "需下载量待确认"
         }
         if remainingBytes == 0 {
@@ -774,10 +877,10 @@ public struct ModelManagementView: View {
     }
 
     private var requiredDiarizationKeys: [String] {
-        guard let summary = summary(for: selectedProfile), summary.diarization else {
-            return []
-        }
-        return ["diarization-coreml", summary.aligner].compactMap { $0 }
+        let keys = targetSummaries?.flatMap { summary -> [String] in
+            summary.diarization ? ["diarization-coreml", summary.aligner].compactMap { $0 } : []
+        } ?? []
+        return Array(Set(keys)).sorted()
     }
 
     private var canPrepareModels: Bool {
@@ -785,7 +888,8 @@ public struct ModelManagementView: View {
             && !model.isBusy
             && !model.hasActiveMutation
             && !model.isRefreshingModels
-            && summary(for: selectedProfile) != nil
+            && targetSummaries != nil
+            && targetSelectionIsPublished
             && !visibleArtifacts.isEmpty
             && model.controlAgentStatus.allowsMutation
             && model.controlPlaneMessage == nil
@@ -805,7 +909,7 @@ public struct ModelManagementView: View {
     }
 
     private var profileArtifactsVerified: Bool {
-        summary(for: selectedProfile) != nil
+        targetSummaries != nil
             && !visibleArtifacts.isEmpty
             && visibleArtifacts.allSatisfy { isVerified(status(for: $0)) }
             && profileDiarizationVerified
@@ -816,7 +920,7 @@ public struct ModelManagementView: View {
     }
 
     private var modelReadinessPresentation: ModelReadinessPresentation {
-        guard summary(for: selectedProfile) != nil else {
+        guard targetSummaries != nil else {
             return ModelReadinessPresentation(
                 systemImage: "questionmark.circle",
                 tone: .neutral,
@@ -857,8 +961,8 @@ public struct ModelManagementView: View {
             )
         }
 
-        if currentServiceProfile == .quick(selectedProfile),
-           configuredProfile == .quick(selectedProfile)
+        if currentServiceProfile == targetSelection,
+           configuredProfile == targetSelection
         {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.seal.fill",
@@ -867,7 +971,7 @@ public struct ModelManagementView: View {
                 detail: "配置与运行是同一档；模型按需加载，空闲后自动释放内存。"
             )
         }
-        if currentServiceProfile == .quick(selectedProfile) {
+        if currentServiceProfile == targetSelection {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.circle",
                 tone: .healthy,
@@ -1145,11 +1249,17 @@ public struct ModelManagementView: View {
     }
 
     private func selectAvailableProfileIfNeeded() {
-        guard !availableProfiles.contains(selectedProfile) else { return }
-        if availableProfiles.contains(.quality) {
-            selectedProfile = .quality
-        } else if let first = availableProfiles.first {
-            selectedProfile = first
+        if !availableProfiles.contains(selectedProfile) {
+            if availableProfiles.contains(.quality) {
+                selectedProfile = .quality
+            } else if let first = availableProfiles.first {
+                selectedProfile = first
+            }
+        }
+        // 高级项同样只能落在服务目录实际发布的档位上，否则回到第一个可用项。
+        if let first = availableProfiles.first {
+            if !availableProfiles.contains(advancedAsrSpec) { advancedAsrSpec = first }
+            if !availableProfiles.contains(advancedTtsSpec) { advancedTtsSpec = first }
         }
     }
 
@@ -1175,30 +1285,36 @@ public struct ModelManagementView: View {
     private var applyConfirmationTitle: String {
         let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
         var details: [String] = []
-        if let summary = summary(for: selectedProfile) {
-            details.append("该档模型总大小 \(formatBytes(summary.downloadBytes))")
+        let sizeBytes = usesAdvancedSpecs
+            ? targetSelectionCatalogBytes
+            : summary(for: selectedProfile).map(\.downloadBytes)
+        if let sizeBytes {
+            details.append("\(usesAdvancedSpecs ? "组合" : "该档")模型总大小 \(formatBytes(sizeBytes))")
         }
         if let freeBytes = model.modelStatus?.disk.freeBytes {
             details.append("当前可用磁盘空间 \(formatBytes(freeBytes))")
         }
         details.append("已校验的模型文件不会重下，首次加载可能更久，其他档位模型不会删除")
-        if selectedProfile == .reference {
+        if targetSelection.asrSpec == .reference || targetSelection.ttsSpec == .reference {
             details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
         }
-        return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。"
+        return "确认应用 \(profileTitle(for: targetSelection))？当前服务为 \(current)。"
             + "这会更新服务配置、重新加载语音模型并重新读取状态。"
             + details.joined(separator: "；")
             + "。"
     }
 
     private var downloadConfirmationTitle: String {
-        let profile = profileTitle(for: selectedProfile)
-        let size = summary(for: selectedProfile).map { formatBytes($0.downloadBytes) }
-        let remaining = remainingDownloadText(for: selectedProfile)
+        let target = profileTitle(for: targetSelection)
+        let sizeBytes = usesAdvancedSpecs
+            ? targetSelectionCatalogBytes
+            : summary(for: selectedProfile).map(\.downloadBytes)
+        let size = sizeBytes.map(formatBytes)
+        let remaining = remainingDownloadText(for: targetSelection)
         let free = model.modelStatus.map { formatBytes($0.disk.freeBytes) }
         var details: [String] = []
         if let size {
-            details.append("该档模型总大小 \(size)")
+            details.append("\(usesAdvancedSpecs ? "组合" : "该档")模型总大小 \(size)")
         }
         details.append(remaining)
         if let free {
@@ -1206,7 +1322,7 @@ public struct ModelManagementView: View {
         }
         details.append("已校验文件不会重下，首次加载可能更久，其他档位模型不会删除")
         details.append("只下载并校验，不会重启服务或切换档位，也不会上传音频或作品")
-        return "确认下载并校验 \(profile) 模型？\(details.joined(separator: "；"))。"
+        return "确认下载并校验 \(target) 模型？\(details.joined(separator: "；"))。"
     }
 
     private func actionTitle(for action: ModelAction) -> String {
