@@ -38,9 +38,15 @@ public struct RealtimeCapabilityBinding: Equatable, Sendable {
     public let voiceRevision: String?
     public let ttsModelRevision: String?
 
+    /// Whether this binding covers a full speech round trip (ASR + spoken reply).
+    ///
+    /// `voiceRevision` is deliberately **not** part of this: OpenAPI declares
+    /// `voice_revision` nullable ("legacy voices remain null"), and the HTTP
+    /// synthesis path already treats it as optional
+    /// (`SpeechRailCapabilityRevisionSelector.creatorRequestOptions`). A missing
+    /// revision only means the pin is omitted, not that the voice is unusable.
     public var includesSpeech: Bool {
         canonicalVoiceID != nil
-            && voiceRevision != nil
             && ttsModelRevision != nil
     }
 
@@ -148,7 +154,6 @@ public struct AppCapabilityFacade: Equatable, Sendable {
               voice.available,
               let realtimeSpeech = voice.operations["realtime_speech"],
               Self.declaredVoiceOperationStatus(realtimeSpeech) == .available,
-              let voiceRevision = Self.nonEmpty(voice.voiceRevision),
               let ttsModelRevision = Self.nonEmpty(voice.model.catalogRevision)
         else {
             return nil
@@ -156,7 +161,9 @@ public struct AppCapabilityFacade: Equatable, Sendable {
         return RealtimeCapabilityBinding(
             asrModelRevision: asrRevision,
             canonicalVoiceID: voice.id,
-            voiceRevision: voiceRevision,
+            // Legacy system voices legitimately publish no acoustic revision;
+            // the pin is then omitted rather than blocking admission.
+            voiceRevision: Self.nonEmpty(voice.voiceRevision),
             ttsModelRevision: ttsModelRevision
         )
     }
@@ -207,9 +214,12 @@ public struct AppCapabilityFacade: Equatable, Sendable {
     private static func declaredVoiceOperationStatus(
         _ value: JSONValue
     ) -> AppCapabilityAvailability {
-        guard case let .object(fields) = value.storage,
-              case .object? = fields["parameters"]?.storage
-        else {
+        // 音色级 operation 在契约里**没有** `status` 字段：服务把某个 operation 列进
+        // `voices[].operations` 本身就是「这个音色支持它」的声明，`parameters` 是可选的
+        // 参数说明。HTTP 合成路径读的一直是这个键（`creatorRequestOptions` 的
+        // `voice.operations["http_speech"] != nil`）；这里曾额外要求 `parameters`
+        // 子对象，于是服务少列一项参数就把整个音色判成「无法确认」。
+        guard case .object = value.storage else {
             return .unknown
         }
         return .available

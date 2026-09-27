@@ -134,6 +134,176 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    /// 契约里 `voice_revision` 可空（"legacy voices remain null"），所以系统预置音色
+    /// 仍然要能进入实时对讲：缺版本号只是**不带 pin**，不是不可用。
+    /// 回归这个缺陷——它曾让所有系统预置音色一律报「语音服务未就绪」。
+    func testRealtimeBindingAcceptsLegacyVoiceWithoutRevision() {
+        let binding = AppCapabilityFacade(
+            snapshot: Self.snapshot(voice: Self.voice(voiceRevision: nil)),
+            discoveryState: .loaded
+        ).realtimeBinding(for: "legacy-voice")
+
+        XCTAssertEqual(
+            binding,
+            RealtimeCapabilityBinding(
+                asrModelRevision: "asr-model-catalog",
+                canonicalVoiceID: "voice-1",
+                voiceRevision: nil,
+                ttsModelRevision: "voice-model-catalog"
+            )
+        )
+        XCTAssertEqual(binding?.includesSpeech, true)
+    }
+
+    /// 放宽的是**音色版本号**这一个可空字段。模型 catalog pin 缺失仍然 fail-closed：
+    /// 那说明服务没有发布这个音色用的模型身份，不能靠猜。
+    func testRealtimeBindingStillRequiresVoiceModelCatalogRevision() {
+        var voice = Self.voice(voiceRevision: nil)
+        voice = SafeVoiceEntry(
+            id: voice.id,
+            name: voice.name,
+            aliases: voice.aliases,
+            mode: voice.mode,
+            available: voice.available,
+            availabilityReason: voice.availabilityReason,
+            variant: voice.variant,
+            voiceRevision: voice.voiceRevision,
+            voiceIdentityAssurance: voice.voiceIdentityAssurance,
+            model: ConfiguredModelIdentity(
+                assurance: .unknown,
+                artifact: nil
+            ),
+            descriptors: voice.descriptors,
+            operations: voice.operations
+        )
+
+        XCTAssertNil(
+            AppCapabilityFacade(
+                snapshot: Self.snapshot(voice: voice),
+                discoveryState: .loaded
+            ).realtimeBinding(for: "legacy-voice")
+        )
+    }
+
+    /// 音色级 operation 的声明就是「列了这个键」，`parameters` 只是可选的参数说明。
+    /// 少列参数说明不该把整个音色判成不可用。
+    func testRealtimeBindingAcceptsDeclaredOperationWithoutParameterList() {
+        let facade = AppCapabilityFacade(
+            snapshot: Self.snapshot(
+                voice: Self.voice(voiceRevision: nil, declaresParameters: false)
+            ),
+            discoveryState: .loaded
+        )
+
+        XCTAssertEqual(
+            facade.availability(ofVoiceOperation: "realtime_speech", voiceID: "legacy-voice"),
+            .available
+        )
+        XCTAssertEqual(facade.realtimeBinding(for: "legacy-voice")?.includesSpeech, true)
+    }
+
+    /// 反过来：服务**没有**为这个音色声明实时朗读时，仍然必须拦住。
+    func testRealtimeBindingRejectsVoiceWithoutDeclaredRealtimeSpeech() {
+        let facade = AppCapabilityFacade(
+            snapshot: Self.snapshot(
+                voice: Self.voice(
+                    voiceRevision: nil,
+                    declaresParameters: true,
+                    declaresRealtimeSpeech: false
+                )
+            ),
+            discoveryState: .loaded
+        )
+
+        XCTAssertEqual(
+            facade.availability(ofVoiceOperation: "realtime_speech", voiceID: "legacy-voice"),
+            .unsupported
+        )
+        XCTAssertNil(facade.realtimeBinding(for: "legacy-voice"))
+    }
+
+    private static func voice(voiceRevision: String?) -> SafeVoiceEntry {
+        voice(voiceRevision: voiceRevision, declaresParameters: true)
+    }
+
+    /// - Parameter declaresParameters: 契约里 `operations.*.parameters` 是可选的；
+    ///   置 false 复现「服务声明了该 operation 但没列参数说明」的服务端形状。
+    /// - Parameter declaresRealtimeSpeech: 置 false 复现「服务没给这个音色声明
+    ///   实时朗读」——这一条必须继续 fail-closed。
+    private static func voice(
+        voiceRevision: String?,
+        declaresParameters: Bool,
+        declaresRealtimeSpeech: Bool = true
+    ) -> SafeVoiceEntry {
+        var operationFields: [String: JSONValue] = [
+            "output": JSONValue(.object([
+                "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                "pcm_sample_rate": JSONValue(.integer(24_000)),
+                "channels": JSONValue(.integer(1))
+            ])),
+            "scheduling_class": JSONValue(.string("realtime_tts")),
+            "terminal_evidence": JSONValue(.string("speechrail.tts.completed")),
+        ]
+        if declaresParameters {
+            operationFields["parameters"] = JSONValue(.object([
+                "instructions": JSONValue(.object([
+                    "status": JSONValue(.string("unsupported"))
+                ]))
+            ]))
+        }
+        return SafeVoiceEntry(
+            id: "voice-1",
+            name: "测试音色",
+            aliases: ["legacy-voice"],
+            mode: "system",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: voiceRevision,
+            voiceIdentityAssurance: voiceRevision == nil ? .legacy : .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "voice-base",
+                catalogRevision: "voice-model-catalog"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "system",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "system_preset",
+                metadataMethod: "declared_only"
+            ),
+            operations: declaresRealtimeSpeech
+                ? ["realtime_speech": JSONValue(.object(operationFields))]
+                : [:]
+        )
+    }
+
+    private static func snapshot(voice: SafeVoiceEntry) -> EffectiveCapabilitySnapshot {
+        EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+    }
+
     func testPreviewLanguageMapsVoicesToServiceLanguageNames() {
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "ryan"), .english)
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "aiden"), .english)
