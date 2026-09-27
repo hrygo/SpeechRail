@@ -195,6 +195,14 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         )
                         continue
                     event_type = event.get("type")
+                    if not isinstance(event_type, str):
+                        await send_event(
+                            error_event(
+                                code="invalid_event",
+                                message="event type must be a string",
+                            )
+                        )
+                        continue
                     append_dispatch: asyncio.Future[None] | None = None
                     if event_type == "input_audio_buffer.append":
                         append_dispatch = asyncio.get_running_loop().create_future()
@@ -316,17 +324,23 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 {recv_task, handle_task, control_task}, return_when=asyncio.FIRST_COMPLETED
             )
         finally:
-            recv_task.cancel()
-            handle_task.cancel()
-            control_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await recv_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await handle_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await control_task
-            await session.close()
-            services.metrics.record_realtime_session_end()
+            tasks = (recv_task, handle_task, control_task)
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    continue
+                except Exception as task_error:
+                    logger.warning(
+                        "realtime loop ended with an error: type=%s",
+                        type(task_error).__name__,
+                    )
+            try:
+                await session.close()
+            finally:
+                services.metrics.record_realtime_session_end()
 
     return router
 

@@ -1084,6 +1084,31 @@ def test_openai_realtime_bad_json_is_recoverable() -> None:
             pass
 
 
+def test_openai_non_string_event_type_is_recoverable_and_releases_asr() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        socket.send_json({"type": []})
+
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_event"
+
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert len(factory.sessions) == 1
+    assert factory.sessions[0].closes == 1
+    assert factory.released == factory.sessions
+
+
 def test_openai_removed_response_create_is_rejected() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
