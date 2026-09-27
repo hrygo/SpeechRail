@@ -61,7 +61,15 @@ _REALTIME_FIRST_HYPOTHESIS_OUTCOMES = frozenset(
     {"partial", "missing", "failed", "cancelled", "send_failed"}
 )
 _ALIGNMENT_EVENTS = frozenset(
-    {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
+    {
+        "fixed_text_completed",
+        "fixed_text_unavailable",
+        "fixed_text_overflow",
+        # 过期对齐结果在 epoch / turn / transcript 边界被丢弃时记录。
+        # dd041b35 引入该调用点时漏了登记, 让 record_alignment_event 抛
+        # ValueError, 错误处理自身失败并连带下发 alignment.failed。
+        "fixed_text_stale",
+    }
 )
 _TTS_DELIVERY_EVENTS = frozenset(
     {

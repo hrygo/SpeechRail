@@ -236,6 +236,8 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
 
     metrics.record_alignment_event("fixed_text_completed")
     metrics.record_alignment_event("fixed_text_unavailable")
+    metrics.record_alignment_event("fixed_text_overflow")
+    metrics.record_alignment_event("fixed_text_stale")
     metrics.record_tts_delivery_event("planner_chunk", amount=2)
     metrics.record_tts_delivery_event("reference_cache_hit")
     metrics.record_tts_delivery_event("clone_loudness_request")
@@ -256,6 +258,30 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
     assert 'speechrail_tts_delivery_events_total{event="float_overrange"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="abort_fallback"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="reload"} 1' in text
+
+
+def test_every_alignment_event_call_site_label_is_registered() -> None:
+    """新增对齐事件调用点时, 标签必须同步登记进有界集合。
+
+    ``dd041b35`` 加了 ``fixed_text_stale`` 调用点却没改 ``metrics.py``, 于是
+    ``record_alignment_event`` 在**错误处理路径**上抛 ``ValueError``, 连带把
+    本可降级的对齐失败变成异常。这条守卫让同类漏改在测试期就暴露。
+    """
+    import re
+
+    source_root = Path(__file__).resolve().parents[1] / "src" / "speechrail"
+    pattern = re.compile(r'record_alignment_event\(\s*"([a-z0-9_]+)"')
+    labels = {
+        match
+        for path in source_root.rglob("*.py")
+        for match in pattern.findall(path.read_text(encoding="utf-8"))
+    }
+    assert labels, "未扫描到任何 record_alignment_event 调用点, 扫描规则需同步更新"
+
+    metrics = Metrics()
+    for label in sorted(labels):
+        # 未登记的标签会在这里抛 ValueError, 并把标签名带进失败信息。
+        metrics.record_alignment_event(label)
 
 
 def test_metrics_escapes_label_values() -> None:
