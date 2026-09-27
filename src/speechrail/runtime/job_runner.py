@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from speechrail.runtime.job_artifacts import delete_job_result_artifact
 from speechrail.runtime.jobs import JobKind, JobRecord, JobRepository
 from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 
@@ -17,6 +19,10 @@ _PATH_PATTERN = re.compile(r"(?<![\w])/(?:[^\s/]+/)*[^\s/]+")
 _EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+logger = logging.getLogger(__name__)
+_ARTIFACT_CLEANUP_BATCH_SIZE = 100
+_ARTIFACT_RETRY_BASE_SECONDS = 5
+_ARTIFACT_RETRY_MAX_SECONDS = 300
 
 
 def sanitize_error_message(text: str, *, limit: int = 256) -> str:
@@ -138,8 +144,55 @@ class JobRunner:
     def _expire_completed_results(self) -> None:
         if self._result_ttl_seconds is None:
             return
-        before = (self._clock() - timedelta(seconds=self._result_ttl_seconds)).isoformat()
-        self._repository.expire_completed(before=before)
+        now = self._clock()
+        before = (now - timedelta(seconds=self._result_ttl_seconds)).isoformat()
+        try:
+            candidates = self._repository.pending_artifact_cleanup(
+                before=before,
+                now=now.isoformat(),
+                limit=_ARTIFACT_CLEANUP_BATCH_SIZE,
+            )
+        except Exception as exc:
+            logger.warning(
+                "job artifact cleanup scan failed: type=%s",
+                type(exc).__name__,
+            )
+            return
+        for job in candidates:
+            try:
+                if job.result_ref is not None:
+                    delete_job_result_artifact(
+                        spool_dir=self._repository.spool_dir,
+                        job_id=job.id,
+                        result_ref=job.result_ref,
+                    )
+            except Exception as exc:
+                delay = min(
+                    _ARTIFACT_RETRY_MAX_SECONDS,
+                    _ARTIFACT_RETRY_BASE_SECONDS * (2 ** min(job.attempts, 6)),
+                )
+                try:
+                    self._repository.defer_artifact_cleanup(
+                        job.id,
+                        retry_after=(now + timedelta(seconds=delay)).isoformat(),
+                    )
+                except Exception as defer_error:
+                    logger.warning(
+                        "job artifact cleanup backoff failed: type=%s",
+                        type(defer_error).__name__,
+                    )
+                logger.warning(
+                    "job result cleanup failed; TTL release deferred: type=%s",
+                    type(exc).__name__,
+                )
+                continue
+            try:
+                self._repository.expire_completed(job.id, result_ref=job.result_ref)
+            except Exception as exc:
+                logger.warning(
+                    "job artifact cleanup state release failed: type=%s",
+                    type(exc).__name__,
+                )
 
 
 def _other_kind(kind: JobKind | None) -> JobKind | None:

@@ -35,7 +35,7 @@ def test_job_repository_claim_is_atomic_and_restart_marks_running_work_failed(
     assert recovered.error_message == _INTERRUPTED_EXHAUSTED_MESSAGE
 
 
-def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
+def test_job_repository_completes_releases_result_and_expires_by_completion_time(
     tmp_path: Path,
 ) -> None:
     repository = JobRepository(tmp_path / "speechrail-job-spool")
@@ -47,11 +47,19 @@ def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
     assert completed.state == "completed"
     assert completed.result_ref == "result.wav"
 
-    deleted = repository.delete_result(job.id, owner="owner-a")
-    assert deleted is not None
-    assert deleted.result_ref is None
+    released = repository.cancel(job.id, owner="owner-a")
+    assert released is not None
+    assert released.result_ref is None
 
-    assert repository.expire_completed(before="9999-01-01T00:00:00+00:00") == 1
+    candidates = repository.pending_artifact_cleanup(
+        before="9999-01-01T00:00:00+00:00",
+        now="9999-01-01T00:00:00+00:00",
+        limit=10,
+    )
+    assert len(candidates) == 1
+    assert repository.expire_completed(
+        candidates[0].id, result_ref=candidates[0].result_ref
+    )
     expired = repository.get(job.id, owner="owner-a")
     assert expired is not None
     assert expired.state == "expired"
@@ -70,6 +78,85 @@ def test_cancelling_a_completed_job_releases_its_result_without_rewriting_state(
     assert deleted is not None
     assert deleted.state == "completed"
     assert deleted.result_ref is None
+
+
+def test_artifact_cleanup_candidates_are_bounded_and_respect_retry_deadline(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
+    jobs = [
+        repository.create(
+            kind="transcription", owner="owner-a", request={"input_ref": str(index)}
+        )
+        for index in range(3)
+    ]
+    for job in jobs:
+        assert repository.claim_next() is not None
+        repository.complete(job.id, result_ref="result://speech/1")
+    repository.defer_artifact_cleanup(jobs[0].id, retry_after="2098-12-31T00:00:00+00:00")
+
+    due = repository.pending_artifact_cleanup(
+        before="2099-01-01T00:00:00+00:00",
+        now="2098-01-01T00:00:00+00:00",
+        limit=1,
+    )
+    assert [job.id for job in due] == [jobs[1].id]
+    assert due[0].attempts == 0
+
+    later = repository.pending_artifact_cleanup(
+        before="2099-01-01T00:00:00+00:00",
+        now="2099-01-01T00:00:00+00:00",
+        limit=10,
+    )
+    assert [job.id for job in later] == [job.id for job in jobs]
+    assert later[0].attempts == 1
+
+
+def test_job_repository_migrates_older_cleanup_schema(tmp_path: Path) -> None:
+    spool = tmp_path / "speechrail-job-spool"
+    spool.mkdir()
+    database = spool / "jobs.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                error_code TEXT,
+                result_ref TEXT,
+                completed_at TEXT,
+                error_message TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                id, kind, state, owner, request_json, result_ref,
+                completed_at, updated_at
+            ) VALUES (
+                'job_legacy', 'speech', 'completed', 'owner-a', '{}',
+                'result://legacy', '2020-01-01T00:00:00+00:00',
+                '2020-01-01T00:00:00+00:00'
+            )
+            """
+        )
+
+    repository = JobRepository(spool)
+    candidates = repository.pending_artifact_cleanup(
+        before="2021-01-01T00:00:00+00:00",
+        now="2021-01-01T00:00:00+00:00",
+        limit=10,
+    )
+
+    assert [(job.id, job.result_ref) for job in candidates] == [
+        ("job_legacy", "result://legacy")
+    ]
 
 
 def test_job_repository_claim_increments_attempts_and_bounds_restart_retries(

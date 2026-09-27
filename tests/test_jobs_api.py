@@ -10,6 +10,10 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.domain.idempotency import (
+    DurableIdempotencyJournal,
+    IdempotencyStoreUnavailableError,
+)
 from speechrail.runtime.jobs import JobRepository
 
 
@@ -71,6 +75,77 @@ def test_jobs_api_idempotency_replays_same_job_and_rejects_payload_conflict(tmp_
     )
     assert distinct.status_code == 202
     assert distinct.json()["id"] != first.json()["id"]
+
+
+def test_jobs_api_idempotency_replays_key_after_journal_eviction(tmp_path) -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                job_spool_dir=tmp_path / "speechrail-job-spool",
+                qwen3_model_dir=None,
+                qwen3_python=None,
+            ),
+        )
+    )
+    first = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/input.txt"},
+        headers={"Idempotency-Key": "evicted-key"},
+    )
+    assert first.status_code == 202
+
+    for index in range(256):
+        response = client.post(
+            "/v1/jobs",
+            json={"kind": "speech", "input_ref": f"external/{index}.txt"},
+            headers={"Idempotency-Key": f"filler-{index}"},
+        )
+        assert response.status_code == 202
+
+    replay = client.post(
+        "/v1/jobs",
+        json={"kind": "speech", "input_ref": "external/input.txt"},
+        headers={"Idempotency-Key": "evicted-key"},
+    )
+
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+
+
+def test_jobs_api_idempotency_retry_heals_pending_journal(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                job_spool_dir=tmp_path / "speechrail-job-spool",
+                qwen3_model_dir=None,
+                qwen3_python=None,
+            ),
+        )
+    )
+    original = DurableIdempotencyJournal.complete
+    failures = 1
+
+    def fail_first_completion(self, **kwargs):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise IdempotencyStoreUnavailableError("temporary journal failure")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(DurableIdempotencyJournal, "complete", fail_first_completion)
+    payload = {"kind": "speech", "input_ref": "external/input.txt"}
+    headers = {"Idempotency-Key": "healing-key"}
+
+    first = client.post("/v1/jobs", json=payload, headers=headers)
+    retry = client.post("/v1/jobs", json=payload, headers=headers)
+    listed = client.get("/v1/jobs")
+
+    assert first.status_code == 503
+    assert retry.status_code == 202
+    assert len(listed.json()["data"]) == 1
+    assert retry.json()["id"] == listed.json()["data"][0]["id"]
 
 
 def test_jobs_api_requires_bearer_key_when_configured(tmp_path) -> None:
@@ -329,6 +404,51 @@ def test_jobs_api_delete_running_job_returns_409(tmp_path) -> None:
     assert response.json()["error"]["code"] == "job_not_cancellable"
 
 
+def test_jobs_api_delete_retains_reference_when_artifact_cleanup_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool_dir = tmp_path / "speechrail-job-spool"
+    repository = JobRepository(spool_dir)
+    job = repository.create(
+        kind="speech", owner="loopback", request={"input_ref": "external/input"}
+    )
+    assert repository.claim_next() is not None
+    artifact_dir = spool_dir / "results" / job.id
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "speech.pcm"
+    artifact.write_bytes(b"\x00\x00")
+    result_ref = f"results/{job.id}/speech.pcm"
+    repository.complete(job.id, result_ref=result_ref)
+
+    def fail_cleanup(**_: object) -> bool:
+        raise OSError("artifact is busy")
+
+    monkeypatch.setattr(
+        "speechrail.http.routes.jobs.delete_job_result_artifact", fail_cleanup
+    )
+    client = TestClient(
+        create_app(
+            Settings(
+                job_spool_dir=spool_dir,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+            ),
+            job_repository=repository,
+        )
+    )
+
+    response = client.delete(f"/v1/jobs/{job.id}")
+    record = repository.get(job.id, owner="loopback")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "job_result_cleanup_failed"
+    assert response.json()["error"]["retryable"] is True
+    assert record is not None
+    assert record.state == "completed"
+    assert record.result_ref == result_ref
+    assert artifact.exists()
+
+
 def test_jobs_api_delete_failed_job_returns_409(tmp_path) -> None:
     repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(
@@ -454,7 +574,15 @@ def test_jobs_api_expire_completed_job_clears_result(tmp_path) -> None:
             (job.id,),
         )
 
-    repository.expire_completed(before="2025-01-01T00:00:00+00:00")
+    candidates = repository.pending_artifact_cleanup(
+        before="2025-01-01T00:00:00+00:00",
+        now="2025-01-01T00:00:00+00:00",
+        limit=10,
+    )
+    assert len(candidates) == 1
+    assert repository.expire_completed(
+        candidates[0].id, result_ref=candidates[0].result_ref
+    )
 
     client = TestClient(
         create_app(

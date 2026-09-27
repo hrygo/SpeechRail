@@ -82,7 +82,7 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `GET` | `/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 读取指定复验的原始 Base WAV | 必须固定 candidate revision；不重新合成 |
 | `POST/GET` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据（可选 `Idempotency-Key`）与分页列出任务 |
 | `GET` | `/v1/jobs/{job_id}` | 查询单个异步任务 | 只返回同一 owner 范围的任务元数据 |
-| `DELETE` | `/v1/jobs/{job_id}` | 取消任务或释放已完成结果引用 | 排队中任务被取消；已完成任务的产物引用被释放 |
+| `DELETE` | `/v1/jobs/{job_id}` | 取消任务或释放已完成结果 | 排队中任务被取消；已完成任务先删除本地产物再释放引用，删除失败返回可重试的 `503 job_result_cleanup_failed` 并保留引用供下次重试 |
 | `GET` | `/v1/jobs/{job_id}/result` | 读取已完成任务的产物 | 返回音频或 JSON 结果引用，仍受 owner 范围约束 |
 | `GET` | `/v1/speechrail/voices` | 最小披露的安全音色目录 | 不含参考正文、私有 instruction 与本机路径；支持 ETag 与 `304` |
 | `GET/PATCH` | `/v1/speechrail/voices/{voice_id}` | 安全音色详情与 CAS 更新 | `PATCH` 必须带 `expected_revision`，成功后追加不可变 revision |

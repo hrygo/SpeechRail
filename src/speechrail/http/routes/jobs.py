@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -20,8 +21,11 @@ from speechrail.domain.idempotency import (
 from speechrail.domain.job_request import JobParamsValidationError, validate_job_params
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
+from speechrail.runtime.job_artifacts import (
+    delete_job_result_artifact,
+    resolve_result_artifact,
+)
 from speechrail.runtime.jobs import JobRecord, JobRepository
-from speechrail.runtime.local_file_processor import resolve_result_artifact
 
 _JOB_SPOOL_HINT = "SpeechRail job spool is not ready; configure SPEECHRAIL_JOB_SPOOL_DIR"
 _JOB_NOT_FOUND_MESSAGE = "Unknown job; jobs are owner-scoped and may have expired"
@@ -199,6 +203,24 @@ def create_jobs_router(services: AppServices) -> APIRouter:
                     else None
                 )
                 if existing is not None:
+                    if decision.state == "pending":
+                        try:
+                            assert job_idempotency is not None
+                            job_idempotency.complete(
+                                owner=owner,
+                                operation="job.create",
+                                key=idempotency_key,
+                                fingerprint=fingerprint,
+                                result_id=existing.id,
+                            )
+                        except IdempotencyStoreUnavailableError:
+                            return error_response(
+                                503,
+                                request.state.request_id,
+                                "idempotency_store_unavailable",
+                                "The job exists but durable idempotency completion is unavailable",
+                                retryable=True,
+                            )
                     return JSONResponse(status_code=202, content=_job_response(existing))
                 return error_response(
                     409 if decision.state == "pending" else 503,
@@ -209,12 +231,26 @@ def create_jobs_router(services: AppServices) -> APIRouter:
                     "The original idempotent job is not currently recoverable",
                     retryable=decision.state == "pending",
                 )
-        job = job_repository.create(
-            kind=body.kind,
-            owner=owner,
-            request=job_request,
-            job_id=provisional_id,
-        )
+        try:
+            job = job_repository.create(
+                kind=body.kind,
+                owner=owner,
+                request=job_request,
+                job_id=provisional_id,
+            )
+        except sqlite3.IntegrityError:
+            existing = (
+                job_repository.get(provisional_id, owner=owner)
+                if provisional_id is not None
+                else None
+            )
+            if (
+                existing is None
+                or existing.kind != body.kind
+                or existing.request != job_request
+            ):
+                raise
+            job = existing
         if idempotency_key is not None:
             try:
                 assert job_idempotency is not None
@@ -310,7 +346,28 @@ def create_jobs_router(services: AppServices) -> APIRouter:
                 _JOB_SPOOL_HINT,
                 retryable=True,
             )
-        job = job_repository.cancel(job_id, owner=job_owner(request))
+        owner = job_owner(request)
+        existing = job_repository.get(job_id, owner=owner)
+        if existing is None:
+            return error_response(
+                404, request.state.request_id, "job_not_found", _JOB_NOT_FOUND_MESSAGE
+            )
+        if existing.state == "completed" and existing.result_ref is not None:
+            try:
+                delete_job_result_artifact(
+                    spool_dir=job_repository.spool_dir,
+                    job_id=existing.id,
+                    result_ref=existing.result_ref,
+                )
+            except OSError:
+                return error_response(
+                    503,
+                    request.state.request_id,
+                    "job_result_cleanup_failed",
+                    "The completed result artifact could not be released; retry the delete",
+                    retryable=True,
+                )
+        job = job_repository.cancel(job_id, owner=owner)
         if job is None:
             return error_response(
                 404, request.state.request_id, "job_not_found", _JOB_NOT_FOUND_MESSAGE

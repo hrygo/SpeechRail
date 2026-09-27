@@ -31,6 +31,15 @@ class JobRecord:
     attempts: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactCleanupCandidate:
+    """One completed job whose TTL artifact release is currently due."""
+
+    id: str
+    result_ref: str | None
+    attempts: int
+
+
 class JobRepository:
     """SQLite WAL repository that never stores credentials or raw audio."""
 
@@ -244,6 +253,8 @@ class JobRepository:
                 SET
                     state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END,
                     result_ref = CASE WHEN state = 'completed' THEN NULL ELSE result_ref END,
+                    cleanup_after = NULL,
+                    cleanup_attempts = 0,
                     updated_at = ?
                 WHERE id = ? AND owner = ? AND state IN ('queued', 'completed')
                 """,
@@ -278,24 +289,63 @@ class JobRepository:
             )
         return requeued.rowcount + exhausted.rowcount
 
-    def delete_result(self, job_id: str, *, owner: str) -> JobRecord | None:
+    def pending_artifact_cleanup(
+        self, *, before: str, now: str, limit: int
+    ) -> tuple[ArtifactCleanupCandidate, ...]:
+        """Return a bounded batch of completed jobs whose TTL release is due."""
+
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, result_ref, cleanup_attempts
+                FROM jobs
+                WHERE state = 'completed' AND completed_at IS NOT NULL
+                  AND completed_at < ?
+                  AND (cleanup_after IS NULL OR cleanup_after <= ?)
+                ORDER BY completed_at, id
+                LIMIT ?
+                """,
+                (before, now, limit),
+            ).fetchall()
+        return tuple(
+            ArtifactCleanupCandidate(
+                id=str(row["id"]),
+                result_ref=(
+                    str(row["result_ref"]) if row["result_ref"] is not None else None
+                ),
+                attempts=int(row["cleanup_attempts"]),
+            )
+            for row in rows
+        )
+
+    def defer_artifact_cleanup(self, job_id: str, *, retry_after: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE jobs SET result_ref = NULL, updated_at = ? WHERE id = ? AND owner = ?",
-                (_now(), job_id, owner),
+                """
+                UPDATE jobs
+                SET cleanup_after = ?, cleanup_attempts = cleanup_attempts + 1,
+                    updated_at = ?
+                WHERE id = ? AND state = 'completed'
+                """,
+                (retry_after, _now(), job_id),
             )
-        return self.get(job_id, owner=owner)
 
-    def expire_completed(self, *, before: str) -> int:
+    def expire_completed(self, job_id: str, *, result_ref: str | None) -> bool:
+        """Release a completed reference only after its artifact cleanup."""
+
         with self._connect() as connection:
             updated = connection.execute(
                 """
-                UPDATE jobs SET state = 'expired', result_ref = NULL, updated_at = ?
-                WHERE state = 'completed' AND completed_at IS NOT NULL AND completed_at < ?
+                UPDATE jobs
+                SET state = 'expired', result_ref = NULL, cleanup_after = NULL,
+                    cleanup_attempts = 0, updated_at = ?
+                WHERE id = ? AND state = 'completed' AND result_ref IS ?
                 """,
-                (_now(), before),
+                (_now(), job_id, result_ref),
             )
-        return updated.rowcount
+        return updated.rowcount == 1
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -313,6 +363,8 @@ class JobRepository:
                     completed_at TEXT,
                     error_message TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
+                    cleanup_after TEXT,
+                    cleanup_attempts INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -327,9 +379,20 @@ class JobRepository:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            if "cleanup_after" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN cleanup_after TEXT")
+            if "cleanup_attempts" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs "
+                    "ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_state_updated "
                 "ON jobs(state, updated_at, id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_artifact_cleanup "
+                "ON jobs(state, cleanup_after, completed_at, id)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_owner_updated "

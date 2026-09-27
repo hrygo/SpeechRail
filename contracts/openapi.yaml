@@ -1471,7 +1471,10 @@ paths:
       operationId: cancelSpeechJob
       tags: [jobs]
       summary: Cancel an asynchronous speech job
-      description: Cancels queued work or releases a completed result reference when available.
+      description: |
+        Cancels queued work or releases a completed result artifact and its
+        reference. Artifact cleanup happens before the reference is cleared so
+        a failed deletion remains retryable.
       security:
         - BearerAuth: []
         - {}
@@ -1489,7 +1492,14 @@ paths:
         '409':
           $ref: '#/components/responses/JobNotCancellable'
         '503':
-          $ref: '#/components/responses/BackendNotReady'
+          description: |
+            Job metadata is unavailable, or a completed artifact could not be
+            released. The `job_result_cleanup_failed` error is retryable and
+            leaves the completed reference in place.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/jobs/{job_id}/result:
     parameters:
       - name: job_id

@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import VoiceProfile
 from speechrail.domain.voice_validation import VoiceValidationArtifact, VoiceValidationRepository
+from speechrail.runtime.job_artifacts import delete_job_result_artifact
 from speechrail.runtime.job_runner import JobProcessingError, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.local_file_processor import (
@@ -81,6 +83,40 @@ def test_resolve_result_artifact_rejects_empty_ref(tmp_path: Path) -> None:
     assert resolve_result_artifact(spool_dir=tmp_path, job_id="job_1", result_ref="") is None
 
 
+def test_delete_result_artifact_rejects_symlinked_results_root(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    outside = tmp_path / "outside"
+    spool.mkdir()
+    outside.mkdir()
+    (spool / RESULTS_SUBDIR).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError, match="symlinked results directory"):
+        delete_job_result_artifact(
+            spool_dir=spool,
+            job_id="job_1",
+            result_ref=f"{RESULTS_SUBDIR}/job_1/speech.pcm",
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_delete_result_artifact_rejects_symlinked_job_directory(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    results = spool / RESULTS_SUBDIR
+    results.mkdir(parents=True)
+    job_root = results / "job_1"
+    loop = results / "loop"
+    job_root.symlink_to(loop)
+    loop.symlink_to(job_root)
+
+    with pytest.raises(OSError, match="symlinked job artifact directory"):
+        delete_job_result_artifact(
+            spool_dir=spool,
+            job_id="job_1",
+            result_ref=f"{RESULTS_SUBDIR}/job_1/speech.pcm",
+        )
+
+
 def test_resolve_result_artifact_fallback_octet_stream_unknown_suffix(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     spool.mkdir()
@@ -92,6 +128,53 @@ def test_resolve_result_artifact_fallback_octet_stream_unknown_suffix(tmp_path: 
     assert result is not None
     _, media_type = result
     assert media_type == "application/octet-stream"
+
+
+def test_read_text_uses_a_bounded_file_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = tmp_path / "spool"
+    processor = LocalFileJobProcessor(spool_dir=spool)
+    text_path = tmp_path / "input.txt"
+    text_path.write_text("你好", encoding="utf-8")
+    real_open = Path.open
+    requested_sizes: list[int] = []
+
+    class GuardedFile:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._handle.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            requested_sizes.append(size)
+            if size < 0 or size > 400_001:
+                raise AssertionError("text input read must be explicitly bounded")
+            return self._handle.read(size)
+
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda self, mode: GuardedFile(real_open(self, mode)),
+    )
+    assert processor._read_text(text_path) == "你好"
+    assert requested_sizes == [400_001]
+
+
+def test_read_text_rejects_oversized_input_after_bounded_read(tmp_path: Path) -> None:
+    processor = LocalFileJobProcessor(spool_dir=tmp_path / "spool")
+    text_path = tmp_path / "input.txt"
+    text_path.write_bytes(b"a" * (100_000 * 4 + 1))
+
+    with pytest.raises(JobProcessingError) as exc_info:
+        processor._read_text(text_path)
+
+    assert exc_info.value.error_code == "job_input_too_large"
 
 
 # ---------------------------------------------------------------------------
@@ -623,10 +706,19 @@ def test_auto_built_runner_executes_queued_job_to_completed(tmp_path: Path) -> N
 
 
 def test_job_runner_expires_completed_results_via_ttl(tmp_path: Path) -> None:
-    repository = JobRepository(tmp_path / "speechrail-job-spool")
-    job = repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"})
+    spool = tmp_path / "speechrail-job-spool"
+    repository = JobRepository(spool)
+    job = repository.create(
+        kind="transcription", owner="owner-a", request={"input_ref": "opaque"}
+    )
     assert repository.claim_next() is not None
-    repository.complete(job.id, result_ref="result://speech/1")
+    artifact_dir = spool / RESULTS_SUBDIR / job.id
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "transcript.json"
+    artifact.write_text('{"text": "expired"}', encoding="utf-8")
+    repository.complete(
+        job.id, result_ref=f"{RESULTS_SUBDIR}/{job.id}/transcript.json"
+    )
 
     # Backdate completed_at so the TTL expiry triggers immediately.
     with repository._connect() as connection:
@@ -650,6 +742,7 @@ def test_job_runner_expires_completed_results_via_ttl(tmp_path: Path) -> None:
     assert expired is not None
     assert expired.state == "expired"
     assert expired.result_ref is None
+    assert not artifact_dir.exists()
 
 
 def test_job_runner_ttl_does_not_expire_recent_result(tmp_path: Path) -> None:
@@ -672,6 +765,119 @@ def test_job_runner_ttl_does_not_expire_recent_result(tmp_path: Path) -> None:
     assert still_completed is not None
     assert still_completed.state == "completed"
     assert still_completed.result_ref == "result://speech/1"
+
+
+def test_job_runner_retries_ttl_release_after_artifact_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = tmp_path / "speechrail-job-spool"
+    repository = JobRepository(spool)
+    job = repository.create(
+        kind="transcription", owner="owner-a", request={"input_ref": "opaque"}
+    )
+    assert repository.claim_next() is not None
+    artifact_dir = spool / RESULTS_SUBDIR / job.id
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "transcript.json"
+    artifact.write_text('{"text": "retry"}', encoding="utf-8")
+    result_ref = f"{RESULTS_SUBDIR}/{job.id}/transcript.json"
+    repository.complete(job.id, result_ref=result_ref)
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE jobs SET completed_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (job.id,),
+        )
+
+    cleanup_calls = 0
+    current = [datetime(2026, 1, 2, tzinfo=UTC)]
+
+    def fail_cleanup(**_: object) -> bool:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        raise OSError("artifact is temporarily busy")
+
+    monkeypatch.setattr(
+        "speechrail.runtime.job_runner.delete_job_result_artifact", fail_cleanup
+    )
+    runner = JobRunner(
+        repository=repository,
+        governor=ResourceGovernor(GovernorLimits(2, 1, 1)),
+        processor=_NeverCalledProcessor(),
+        deadline_seconds=1,
+        result_ttl_seconds=86400,
+        clock=lambda: current[0],
+    )
+
+    asyncio.run(runner.run_once())
+    still_completed = repository.get(job.id, owner="owner-a")
+    assert still_completed is not None
+    assert still_completed.state == "completed"
+    assert still_completed.result_ref == result_ref
+    assert artifact.exists()
+    assert cleanup_calls == 1
+
+    asyncio.run(runner.run_once())
+    assert cleanup_calls == 1
+
+    current[0] += timedelta(seconds=5)
+    asyncio.run(runner.run_once())
+    assert cleanup_calls == 2
+
+    current[0] += timedelta(seconds=10)
+    monkeypatch.undo()
+    asyncio.run(runner.run_once())
+
+    expired = repository.get(job.id, owner="owner-a")
+    assert expired is not None
+    assert expired.state == "expired"
+    assert expired.result_ref is None
+    assert not artifact_dir.exists()
+
+
+def test_job_runner_claims_work_after_housekeeping_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
+
+    def fail_cleanup(**_: object) -> bool:
+        raise RuntimeError("unexpected path resolution failure")
+
+    monkeypatch.setattr(
+        "speechrail.runtime.job_runner.delete_job_result_artifact", fail_cleanup
+    )
+    expired = repository.create(
+        kind="transcription", owner="owner-a", request={"input_ref": "expired"}
+    )
+    assert repository.claim_next() is not None
+    repository.complete(expired.id, result_ref="result://expired")
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE jobs SET completed_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (expired.id,),
+        )
+
+    class SuccessfulProcessor:
+        async def process(self, job: JobRecord) -> str:
+            return "result://queued-work"
+
+    queued = repository.create(
+        kind="speech", owner="owner-a", request={"input_ref": "queued"}
+    )
+    runner = JobRunner(
+        repository=repository,
+        governor=ResourceGovernor(GovernorLimits(2, 1, 1)),
+        processor=SuccessfulProcessor(),
+        deadline_seconds=1,
+        result_ttl_seconds=86400,
+        clock=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert asyncio.run(runner.run_once()) is True
+
+    completed = repository.get(queued.id, owner="owner-a")
+    assert completed is not None
+    assert completed.state == "completed"
+    assert completed.result_ref == "result://queued-work"
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +948,7 @@ def test_e2e_job_lifecycle_with_artifact_bytes(tmp_path: Path) -> None:
         assert deleted.status_code == 200
         assert deleted.json()["state"] == "completed"
         assert deleted.json()["result_ref"] is None
+        assert not (spool / RESULTS_SUBDIR / job_id).exists()
 
 
 def test_e2e_job_lifecycle_speech_artifact(tmp_path: Path) -> None:

@@ -36,10 +36,13 @@ from speechrail.domain.voice_validation import (
     VoiceValidationArtifact,
     VoiceValidationStoreUnavailableError,
 )
+from speechrail.runtime.job_artifacts import (
+    RESULTS_SUBDIR,
+    resolve_result_artifact,
+)
 from speechrail.runtime.job_runner import JobProcessingError
 from speechrail.runtime.jobs import JobRecord
 
-RESULTS_SUBDIR = "results"
 _TRANSCRIPT_FILENAME = "transcript.json"
 _SPEECH_FILENAME = "speech.pcm"
 # Mirrors TranscriptionRequest.audio max_length so the decoded payload can
@@ -48,38 +51,6 @@ _MAX_BATCH_PCM_BYTES = 40 * 1024 * 1024
 # Mirrors SpeechRequest.text max_length.
 _MAX_TEXT_CHARS = 100_000
 _MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
-_CONTENT_TYPES: dict[str, str] = {
-    ".json": "application/json",
-    ".pcm": "audio/x-pcm",
-    ".wav": "audio/wav",
-    ".mp3": "audio/mpeg",
-}
-
-
-def resolve_result_artifact(
-    *, spool_dir: Path, job_id: str, result_ref: str
-) -> tuple[Path, str] | None:
-    """Resolve a completed job's relative ref to a streamable artifact.
-
-    Returns ``(path, media_type)`` only when ``result_ref`` is a relative path
-    that stays inside ``<spool_dir>/results/<job_id>/`` and points at a regular
-    file. Anything else (opaque non-file refs, absolute paths, traversal, a ref
-    bound to another job) returns ``None`` so the caller keeps the JSON shape.
-    """
-    if not result_ref or "/" in job_id or "\\" in job_id or job_id in {"", ".", ".."}:
-        return None
-    reference = Path(result_ref)
-    if reference.is_absolute() or ".." in reference.parts:
-        return None
-    results_root = (spool_dir / RESULTS_SUBDIR).resolve()
-    job_root = results_root / job_id
-    candidate = (spool_dir / reference).resolve()
-    if candidate.parent != job_root or not candidate.is_file():
-        return None
-    media_type = _CONTENT_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
-    return candidate, media_type
-
-
 class LocalFileJobProcessor:
     """Resolve local ``input_ref`` files and produce spooled result artifacts."""
 
@@ -306,10 +277,12 @@ class LocalFileJobProcessor:
 
     def _read_text(self, input_path: Path) -> str:
         try:
-            data = input_path.read_bytes()
+            max_bytes = _MAX_TEXT_CHARS * 4
+            with input_path.open("rb") as handle:
+                data = handle.read(max_bytes + 1)
         except OSError:
             raise JobProcessingError("job_input_not_found") from None
-        if len(data) > _MAX_TEXT_CHARS * 4:
+        if len(data) > max_bytes:
             raise JobProcessingError("job_input_too_large")
         try:
             text = data.decode("utf-8")
