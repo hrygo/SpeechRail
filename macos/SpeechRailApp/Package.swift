@@ -82,6 +82,7 @@ let package = Package(
                 "CreatorServiceClient.swift",
                 "CreativeWorkStore.swift",
                 "AudioPlaybackController.swift",
+                "VoicePreviewCache.swift",
                 "VoiceRecordingController.swift",
                 "AudioReferenceCheck.swift",
                 "AudioEnvelope.swift",

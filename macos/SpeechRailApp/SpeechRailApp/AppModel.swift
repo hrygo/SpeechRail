@@ -644,11 +644,52 @@ public final class AppModel {
     /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
     /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11.6 第五十七轮）。
     private var waveformEnvelopes: [String: [CGFloat]] = [:]
-    /// 试听音频内存缓存（key = `\(voiceID):\(speed):\(text)`），同音色试听即点即播，0 延迟
-    private var previewAudioCache: [String: Data] = [:]
+    /// 试听音频内存缓存，同音色试听即点即播，0 延迟。
+    ///
+    /// 键包含音色与模型的**版本**：只用 `voiceID + speed + text` 时，音色被撤销
+    /// 或服务换用另一份模型之后仍会命中并播放旧音频。
+    private var previewAudioCache = VoicePreviewAudioCache(
+        byteLimit: VoicePreviewCacheLimits.byteLimit
+    )
+    /// 单调递增的试听请求代号。取消、切换或开始新请求都会推进它，迟到的成功 /
+    /// 失败 / defer 因此无法覆盖新请求的状态、播放句柄或缓存。
+    private var voicePreviewToken: UInt64 = 0
+    /// 拥有 `voicePreviewTask` 句柄的那一代任务。取消或重新开始都会推进它，
+    /// 使旧任务的收尾无法清空新任务的句柄。
+    private var voicePreviewTaskGeneration: UInt64 = 0
     private var voicePreviewTask: Task<Void, Never>?
     private var voiceDesignGenerationTask: Task<Void, Never>?
     private var voiceDesignSaveTask: Task<Void, Never>?
+
+    /// 推进试听请求代号，使此前所有在途请求的迟到回包失效。
+    private func invalidateVoicePreview() {
+        voicePreviewToken &+= 1
+    }
+
+    /// 构造试听缓存身份。
+    ///
+    /// 声学音色有 revision 时用它；系统 / legacy 音色没有 revision，改用模型
+    /// catalog revision 作为 epoch 隔离，**不制造假 revision**。`planID` 与
+    /// receipt 是生成之后才拿到的，只用于结果校验，不参与前置键。
+    static func previewCacheKey(
+        voice: CreatorVoice,
+        options: SpeechRailRequestOptions,
+        catalogRevision: String?,
+        input: String,
+        languageOverride: String?,
+        speed: Double
+    ) -> VoicePreviewCacheKey {
+        VoicePreviewCacheKey(
+            canonicalVoiceID: voice.id,
+            voiceRevision: options.expectedVoiceRevision ?? voice.revision,
+            catalogEpoch: options.expectedModelRevision ?? catalogRevision,
+            runtimeEpoch: nil,
+            input: input,
+            languageOverride: languageOverride,
+            speed: speed,
+            responseFormat: "wav"
+        )
+    }
 
     /// 槽位编号与 Figma `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
     private static let voiceDesignCandidateSpecs: [(slot: String, seed: Int, title: String)] = [
@@ -2299,12 +2340,14 @@ public final class AppModel {
     ) async {
         // 如果当前正在播放该音色，再次点击即为停止
         if isAudioPlaying && playingVoiceID == voice.id {
+            invalidateVoicePreview()
             stopAudio()
             return
         }
         guard !isCreatingSpeech else {
             // 如果正在生成该音色，再次点击取消
             if previewingVoiceID == voice.id {
+                invalidateVoicePreview()
                 voicePreviewTask?.cancel()
                 voicePreviewTask = nil
                 isCreatingSpeech = false
@@ -2329,10 +2372,34 @@ public final class AppModel {
 
         stopAudio()
         let previewLanguage = Self.previewLanguage(for: voice)
-        let cacheKey = "\(voice.id):\(speed):\(previewLanguage):\(previewText)"
+
+        // 先解析当前有效版本，再谈缓存：音色被撤销或服务换用另一份模型之后，
+        // 不应该复用旧音频。
+        let options: SpeechRailRequestOptions
+        do {
+            options = try await speechRequestOptions(for: voice.id)
+        } catch {
+            creatorMessage = Self.creatorErrorMessage(for: error)
+            return
+        }
+        guard !Task.isCancelled else { return }
+
+        let cacheKey = Self.previewCacheKey(
+            voice: voice,
+            options: options,
+            catalogRevision: capabilityFacade.snapshot?.catalogRevision,
+            input: previewText,
+            languageOverride: previewLanguage,
+            speed: speed
+        )
+
+        // 本次请求的代号。此后任何状态写入都必须先确认自己仍是最新请求，
+        // 否则迟到的成功 / 失败 / defer 会覆盖新请求的进度与播放句柄。
+        invalidateVoicePreview()
+        let token = voicePreviewToken
 
         // 优先命中本地内存缓存：0 毫秒即点即播，彻底免除反复生成延迟
-        if let cachedData = previewAudioCache[cacheKey] {
+        if let cachedData = previewAudioCache.data(for: cacheKey) {
             do {
                 try audioPlaybackController.play(data: cachedData)
                 isAudioPlaying = audioPlaybackController.isPlaying
@@ -2352,11 +2419,13 @@ public final class AppModel {
         previewingVoiceID = voice.id
         creatorMessage = nil
         defer {
-            isCreatingSpeech = false
-            previewingVoiceID = nil
+            // 只有仍是最新请求时才允许清理共享状态。
+            if token == voicePreviewToken {
+                isCreatingSpeech = false
+                previewingVoiceID = nil
+            }
         }
         do {
-            let options = try await speechRequestOptions(for: voice.id)
             let data = try await creatorClient.createSpeech(
                 text: previewText,
                 voiceID: voice.id,
@@ -2364,8 +2433,9 @@ public final class AppModel {
                 options: options.with(languageOverride: previewLanguage)
             )
             try Task.checkCancellation()
-            // 写入本地内存缓存
-            previewAudioCache[cacheKey] = data
+            guard token == voicePreviewToken else { return }
+            // 只缓存解码通过、非空的完整结果；空音频不入缓存。
+            previewAudioCache.insert(data, for: cacheKey)
             do {
                 try audioPlaybackController.play(data: data)
             } catch {
@@ -2382,6 +2452,8 @@ public final class AppModel {
         } catch is CancellationError {
             return
         } catch {
+            // 迟到的失败同样不能覆盖新请求的提示。
+            guard token == voicePreviewToken else { return }
             creatorMessage = Self.creatorErrorMessage(for: error)
         }
     }
@@ -2395,21 +2467,37 @@ public final class AppModel {
         speed: Double = 1.0
     ) {
         if isAudioPlaying && playingVoiceID == voice.id {
+            invalidateVoicePreview()
             stopAudio()
             return
         }
         guard voicePreviewTask == nil, !isCreatingSpeech else { return }
+        voicePreviewTaskGeneration &+= 1
+        let generation = voicePreviewTaskGeneration
         voicePreviewTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.previewVoice(voice, text: text, speed: speed)
-            self.voicePreviewTask = nil
+            // 期间若已取消并开启新任务，旧任务的收尾无权清空新句柄。
+            if self.voicePreviewTaskGeneration == generation {
+                self.voicePreviewTask = nil
+            }
         }
     }
 
     public func cancelVoicePreview() {
-        guard voicePreviewTask != nil || isAudioPlaying else { return }
+        // `isCreatingSpeech` 也要纳入判断：助手等入口直接 `await previewVoice`，
+        // 不经过 `startVoicePreview`，此时没有 task 句柄，但请求确实在途。
+        guard voicePreviewTask != nil || isCreatingSpeech || isAudioPlaying else { return }
+        invalidateVoicePreview()
+        voicePreviewTaskGeneration &+= 1
         voicePreviewTask?.cancel()
         voicePreviewTask = nil
+        // 被取消的请求其 defer 已因代号失效而不再清理，这里由取消方负责收尾；
+        // 只在确实是试听在途时清，避免踩到并行的正式合成。
+        if previewingVoiceID != nil {
+            previewingVoiceID = nil
+            isCreatingSpeech = false
+        }
         stopAudio()
     }
 

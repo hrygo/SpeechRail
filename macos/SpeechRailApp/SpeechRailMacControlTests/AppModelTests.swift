@@ -1266,3 +1266,368 @@ private actor ConcurrentRefreshRace {
         )
     }
 }
+
+// MARK: - (k) 试听缓存身份与迟到回包隔离
+
+extension AppModelTests {
+    private static func previewKey(
+        voiceID: String = "ryan",
+        voiceRevision: String? = "vr_0123456789abcdef0123456789abcdef",
+        catalogEpoch: String? = "catalog-1",
+        input: String = "试听文本",
+        language: String? = "en",
+        speed: Double = 1.0
+    ) -> VoicePreviewCacheKey {
+        VoicePreviewCacheKey(
+            canonicalVoiceID: voiceID,
+            voiceRevision: voiceRevision,
+            catalogEpoch: catalogEpoch,
+            input: input,
+            languageOverride: language,
+            speed: speed
+        )
+    }
+
+    /// 同身份可命中；文本 / 语言 / 音色 revision / 模型 epoch 任一变化都不误命中。
+    func testPreviewCacheKeySeparatesEveryIdentityDimension() {
+        let base = Self.previewKey()
+
+        XCTAssertEqual(base, Self.previewKey(), "同一次请求应当命中")
+
+        XCTAssertNotEqual(base, Self.previewKey(input: "另一段文本"))
+        XCTAssertNotEqual(base, Self.previewKey(language: "zh"))
+        XCTAssertNotEqual(base, Self.previewKey(language: nil), "auto 与显式语言不是同一次生成")
+        XCTAssertNotEqual(base, Self.previewKey(speed: 1.1))
+        XCTAssertNotEqual(base, Self.previewKey(voiceID: "aiden"))
+        XCTAssertNotEqual(
+            base,
+            Self.previewKey(voiceRevision: "vr_ffffffffffffffffffffffffffffffff"),
+            "音色重新生成后不能复用旧音频"
+        )
+        XCTAssertNotEqual(
+            base,
+            Self.previewKey(catalogEpoch: "catalog-2"),
+            "换用另一份模型后不能复用旧音频"
+        )
+    }
+
+    /// 系统音色没有 revision 时用 catalog epoch 隔离，而不是编一个假 revision。
+    func testPreviewCacheKeyUsesCatalogEpochForSystemVoices() {
+        let key = AppModel.previewCacheKey(
+            voice: CreatorVoice(id: "ryan", name: "动感英语男声", available: true),
+            options: SpeechRailRequestOptions(),
+            catalogRevision: "snapshot-catalog",
+            input: "试听文本",
+            languageOverride: "en",
+            speed: 1.0
+        )
+
+        XCTAssertNil(key.voiceRevision, "系统音色不应被赋予假 revision")
+        XCTAssertEqual(key.catalogEpoch, "snapshot-catalog")
+    }
+
+    /// 已撤销音色换版后，即使文案与语速相同也不是同一次请求。
+    func testPreviewCacheKeyTracksTheRevisionTheServerWillPin() {
+        let voice = CreatorVoice(
+            id: "clone_voice",
+            name: "克隆音色",
+            available: true,
+            revision: "vr_0123456789abcdef0123456789abcdef"
+        )
+        let pinned = AppModel.previewCacheKey(
+            voice: voice,
+            options: SpeechRailRequestOptions(
+                expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                expectedModelRevision: "model-1"
+            ),
+            catalogRevision: "snapshot-catalog",
+            input: "试听文本",
+            languageOverride: nil,
+            speed: 1.0
+        )
+        let repinned = AppModel.previewCacheKey(
+            voice: voice,
+            options: SpeechRailRequestOptions(
+                expectedVoiceRevision: "vr_ffffffffffffffffffffffffffffffff",
+                expectedModelRevision: "model-1"
+            ),
+            catalogRevision: "snapshot-catalog",
+            input: "试听文本",
+            languageOverride: nil,
+            speed: 1.0
+        )
+
+        XCTAssertNotEqual(pinned, repinned)
+    }
+
+    /// 只缓存非空结果；超出上限时按写入顺序淘汰最旧条目。
+    func testPreviewAudioCacheRejectsEmptyAndEvictsOldest() {
+        var cache = VoicePreviewAudioCache(byteLimit: 10)
+        let first = Self.previewKey(input: "一")
+        let second = Self.previewKey(input: "二")
+        let third = Self.previewKey(input: "三")
+
+        XCTAssertFalse(cache.insert(Data(), for: first), "空音频不入缓存")
+        XCTAssertNil(cache.data(for: first))
+
+        XCTAssertTrue(cache.insert(Data(repeating: 1, count: 6), for: first))
+        XCTAssertTrue(cache.insert(Data(repeating: 2, count: 6), for: second))
+        XCTAssertEqual(cache.count, 1, "超出上限后只保留最新条目")
+        XCTAssertNil(cache.data(for: first))
+        XCTAssertNotNil(cache.data(for: second))
+        XCTAssertLessThanOrEqual(cache.totalBytes, cache.byteLimit)
+
+        XCTAssertFalse(
+            cache.insert(Data(repeating: 3, count: 11), for: third),
+            "单条超过上限直接拒绝，不清空已有缓存"
+        )
+        XCTAssertNotNil(cache.data(for: second))
+    }
+}
+
+// MARK: - (l) 迟到回包不得污染新请求
+
+/// `AVAudioPlayer` 只接受合法容器，测试必须给真实可解码的 WAV 而不是任意字节。
+private func silentPreviewWAV(marker: UInt8, frames: Int = 2_400) -> Data {
+    let bytesPerFrame = 2
+    let dataSize = frames * bytesPerFrame
+    var wav = Data("RIFF".utf8)
+    wav.append(contentsOf: withUnsafeBytes(of: UInt32(36 + dataSize).littleEndian) {
+        Array($0)
+    })
+    wav.append(contentsOf: Data("WAVEfmt ".utf8))
+    wav.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+    wav.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })  // PCM
+    wav.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })  // mono
+    wav.append(contentsOf: withUnsafeBytes(of: UInt32(24_000).littleEndian) { Array($0) })
+    wav.append(contentsOf: withUnsafeBytes(of: UInt32(24_000 * UInt32(bytesPerFrame)).littleEndian) {
+        Array($0)
+    })
+    wav.append(contentsOf: withUnsafeBytes(of: UInt16(bytesPerFrame).littleEndian) { Array($0) })
+    wav.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Array($0) })
+    wav.append(contentsOf: Data("data".utf8))
+    wav.append(contentsOf: withUnsafeBytes(of: UInt32(dataSize).littleEndian) { Array($0) })
+    for _ in 0..<frames {
+        wav.append(contentsOf: withUnsafeBytes(of: Int16(truncatingIfNeeded: Int(marker)).littleEndian) {
+            Array($0)
+        })
+    }
+    return wav
+}
+
+/// 只在第一次合成上挂起，让"取消 → 重新开始 → 迟到返回"这条交错可复现。
+private actor HeldPreviewCreatorClient: SpeechRailCreatorClient {
+    private(set) var requestedInputs: [String] = []
+    private var heldContinuation: CheckedContinuation<Data, Error>?
+    private var pendingInput: String?
+    private var callCount = 0
+
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func waitUntilHeld() async {
+        while heldContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func releaseHeld(with data: Data) {
+        guard let heldContinuation else { return }
+        self.heldContinuation = nil
+        heldContinuation.resume(returning: data)
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        requestedInputs.append(text)
+        callCount += 1
+        // 第一次挂起，模拟"取消之后网络才返回"。
+        if callCount == 1, heldContinuation == nil {
+            pendingInput = text
+            return try await withCheckedThrowingContinuation { continuation in
+                heldContinuation = continuation
+            }
+        }
+        return silentPreviewWAV(marker: 0xB2)
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func deleteVoice(id: String) async throws {}
+
+    func createVoiceDesignCandidate(
+        voiceID: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int
+    ) async throws -> VoiceQualityReportSnapshotV2 {
+        throw ServiceAPIClientError.requestFailed
+    }
+}
+
+private struct PreviewDiscoveryClient: ServiceCapabilityDiscoveryClient {
+    let snapshot: EffectiveCapabilitySnapshot
+
+    func fetchEffectiveCapabilities(
+        ifNoneMatch: String?,
+        cachedValue: EffectiveCapabilitySnapshot?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        ServiceConditionalResponse(
+            value: snapshot,
+            metadata: ServiceResponseMetadata(statusCode: 200, requestID: "req-1")
+        )
+    }
+
+    func fetchSafeVoices(
+        ifNoneMatch: String?,
+        cachedValue: SafeVoiceList?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        ServiceConditionalResponse(
+            value: SafeVoiceList(
+                snapshotID: "voices-1",
+                catalogRevision: "voices-catalog",
+                data: []
+            ),
+            metadata: ServiceResponseMetadata(statusCode: 200, requestID: "req-2")
+        )
+    }
+
+    func fetchReadiness() async throws -> ReadySnapshot {
+        ReadySnapshot(ready: true)
+    }
+}
+
+extension AppModelTests {
+    private static func previewSnapshot() -> EffectiveCapabilitySnapshot {
+        EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [:],
+            voices: [
+                SafeVoiceEntry(
+                    id: "ryan",
+                    name: "动感英语男声",
+                    aliases: [],
+                    mode: "system",
+                    available: true,
+                    availabilityReason: .available,
+                    variant: "custom_voice",
+                    voiceIdentityAssurance: .legacy,
+                    model: ConfiguredModelIdentity(
+                        assurance: .configuredCatalog,
+                        catalogRevision: "tts-model-revision"
+                    ),
+                    descriptors: SafeVoiceDescriptor(
+                        voiceMode: "system",
+                        locales: [],
+                        styleTags: [],
+                        pitchBand: "unknown",
+                        timbreFamily: "unknown",
+                        baselinePace: "unknown",
+                        sourceType: "system_preset",
+                        metadataMethod: "declared_only"
+                    ),
+                    operations: ["http_speech": JSONValue(.string("supported"))]
+                )
+            ],
+            operations: [:],
+            guarantees: [:]
+        )
+    }
+
+    /// A 取消 → B 开始 → A 迟到：A 的音频既不能播放、也不能进缓存，更不能把
+    /// B 的进度与提示抹掉。
+    func testLatePreviewResponseCannotPolluteTheNewerRequest() async {
+        let creator = HeldPreviewCreatorClient()
+        let model = AppModel(
+            transport: ClosureControlTransport { request in
+                Self.modelCatalogResponse(for: request)
+            },
+            apiClient: UnavailableDiagnosticsClient(),
+            discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
+            creatorClient: creator
+        )
+        await model.refreshDiscovery()
+
+        let voice = CreatorVoice(
+            id: "ryan",
+            name: "动感英语男声",
+            available: true,
+            preview: VoicePreviewSample(locale: "en", text: "server sample")
+        )
+
+        // A：在途挂起。
+        let first = Task { @MainActor in await model.previewVoice(voice) }
+        await creator.waitUntilHeld()
+        XCTAssertTrue(model.isCreatingSpeech)
+        XCTAssertEqual(model.previewingVoiceID, "ryan")
+
+        // 取消 A，再让 B 走完整条链路。
+        model.cancelVoicePreview()
+        XCTAssertFalse(model.isCreatingSpeech, "取消方负责收尾，不等迟到请求的 defer")
+        XCTAssertNil(model.previewingVoiceID)
+
+        await model.previewVoice(voice, text: "第二次试听的文案")
+        XCTAssertFalse(model.isCreatingSpeech)
+        XCTAssertNil(model.previewingVoiceID)
+        XCTAssertNil(model.creatorMessage, "B 成功收尾时不应残留 A 的提示")
+
+        // A 现在才迟到。
+        await creator.releaseHeld(with: silentPreviewWAV(marker: 0xA1))
+        _ = await first.value
+
+        XCTAssertFalse(model.isCreatingSpeech, "迟到的 defer 不得清空新请求的状态")
+        XCTAssertNil(model.previewingVoiceID)
+        XCTAssertNil(model.creatorMessage)
+
+        // 迟到的音频没有进缓存：先停播（否则会命中"再次点击同一音色＝停止"），
+        // 再用 A 的文案重放一次，必须重新发起合成。
+        model.stopAudio()
+        let callsBeforeReplay = await creator.requestedInputs.count
+        await model.previewVoice(voice, text: "server sample")
+        let callsAfterReplay = await creator.requestedInputs.count
+        XCTAssertEqual(
+            callsAfterReplay,
+            callsBeforeReplay + 1,
+            "被取消请求的迟到音频不得留在缓存里"
+        )
+    }
+}
