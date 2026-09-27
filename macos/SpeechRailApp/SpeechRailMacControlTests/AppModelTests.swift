@@ -181,6 +181,52 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    /// 服务端声明的示例文案是唯一事实源，本地映射只是缺失时的兜底。
+    func testServerDeclaredPreviewWinsOverTheLocalFallback() {
+        // serena 本地兜底是中文；服务端声明英文时必须用服务端文案，
+        // 否则又会退回"按音色 ID 猜语种"的老路。
+        let voice = CreatorVoice(
+            id: "serena",
+            name: "温柔中文女声",
+            preview: VoicePreviewSample(
+                locale: "en",
+                text: "This is a voice preview. The speech should be clear and natural."
+            )
+        )
+
+        XCTAssertEqual(
+            AppModel.resolvedPreviewText(for: voice, text: nil),
+            "This is a voice preview. The speech should be clear and natural."
+        )
+        XCTAssertEqual(AppModel.previewLanguage(for: voice), "en")
+    }
+
+    /// 用户改过文案时既不覆盖文案，也不继承 preset 的语言。
+    func testUserWordingBeatsServerPreviewText() {
+        let voice = CreatorVoice(
+            id: "ryan",
+            name: "动感英语男声",
+            preview: VoicePreviewSample(locale: "en", text: "Server sample text.")
+        )
+        let custom = "  用户自己写的试听文案  "
+
+        XCTAssertEqual(
+            AppModel.resolvedPreviewText(for: voice, text: custom),
+            "用户自己写的试听文案"
+        )
+    }
+
+    /// 服务端没有声明示例时退回本地兜底，而不是不显示任何文案。
+    func testMissingServerPreviewFallsBackLocally() {
+        let voice = CreatorVoice(id: "ono_anna", name: "轻快日语女声")
+
+        XCTAssertEqual(
+            AppModel.resolvedPreviewText(for: voice, text: nil),
+            AppModel.defaultPreviewText(forVoiceID: "ono_anna")
+        )
+        XCTAssertEqual(AppModel.previewLanguage(for: voice), "japanese")
+    }
+
     func testPendingCloneRegistrationKeepsOriginalPayloadAndBlocksRerecording() async throws {
         let creator = PendingCloneRegistrationClient()
         let model = makeModel(

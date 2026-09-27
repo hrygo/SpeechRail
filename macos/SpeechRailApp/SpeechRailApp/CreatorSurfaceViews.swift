@@ -2346,7 +2346,10 @@ public struct VoiceLibraryView: View {
         .task(id: selectedVoiceID) {
             guard let selectedVoiceID else { return }
             if !sampleTextEdited {
-                sampleText = AppModel.defaultPreviewText(forVoiceID: selectedVoiceID)
+                // 服务端声明的示例文案优先；用户改过的文案不覆盖。
+                sampleText = selectedVoice.map {
+                    AppModel.resolvedPreviewText(for: $0, text: nil)
+                } ?? AppModel.defaultPreviewText(forVoiceID: selectedVoiceID)
             }
             await model.refreshCreatorVoiceDetail(id: selectedVoiceID)
         }

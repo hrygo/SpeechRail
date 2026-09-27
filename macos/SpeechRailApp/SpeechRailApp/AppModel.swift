@@ -2316,8 +2316,8 @@ public final class AppModel {
             creatorMessage = "当前音色暂不可用于试听"
             return
         }
-        // 未显式给文案时按音色语种取默认：英语/日语/韩语音色不该被中文文案硬读。
-        let previewText = Self.resolvedPreviewText(forVoiceID: voice.id, text: text)
+        // 未显式给文案时用服务端声明的默认示例：英语/日语/韩语音色不该被中文文案硬读。
+        let previewText = Self.resolvedPreviewText(for: voice, text: text)
         guard !previewText.isEmpty else {
             creatorMessage = "试听文案不能为空"
             return
@@ -2328,7 +2328,7 @@ public final class AppModel {
         }
 
         stopAudio()
-        let previewLanguage = Self.previewLanguage(forVoiceID: voice.id).rawValue
+        let previewLanguage = Self.previewLanguage(for: voice)
         let cacheKey = "\(voice.id):\(speed):\(previewLanguage):\(previewText)"
 
         // 优先命中本地内存缓存：0 毫秒即点即播，彻底免除反复生成延迟
@@ -2741,6 +2741,27 @@ public final class AppModel {
     public static func resolvedPreviewText(forVoiceID voiceID: String, text: String?) -> String {
         let candidate = text ?? defaultPreviewText(forVoiceID: voiceID)
         return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 服务端下发的试听文案是唯一事实源；只有它缺失时才退回本地兜底。
+    ///
+    /// 兜底文案只用于填充界面，不写回元数据，也不因为它存在就断言音色只能
+    /// 读这一种语言。
+    public static func resolvedPreviewText(for voice: CreatorVoice, text: String?) -> String {
+        let candidate =
+            text ?? voice.preview?.text ?? defaultPreviewText(forVoiceID: voice.id)
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 这次试听要发送的目标语言。
+    ///
+    /// 服务端已声明 `preview.locale` 时直接用它，缺失时退回本地映射。注意这里
+    /// 选的是**本次生成的目标语言**，不是音色的母语，也不会翻译用户文案。
+    public static func previewLanguage(for voice: CreatorVoice) -> String {
+        if let locale = voice.preview?.locale, !locale.isEmpty {
+            return locale
+        }
+        return previewLanguage(forVoiceID: voice.id).rawValue
     }
 
     public static func defaultPreviewText(forVoiceID voiceID: String) -> String {

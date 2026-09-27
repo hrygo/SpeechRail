@@ -596,6 +596,21 @@ public struct SafeVoiceQualitySummary: Codable, Equatable, Sendable {
     }
 }
 
+/// A voice's maintained default audition text, as declared by the service.
+///
+/// `locale` describes `text` only. It is not a claim about which languages the
+/// voice can speak, so a client must not derive an output language from it
+/// unless the user explicitly asked for that language.
+public struct VoicePreviewSample: Codable, Equatable, Sendable {
+    public let locale: String
+    public let text: String
+
+    public init(locale: String, text: String) {
+        self.locale = locale
+        self.text = text
+    }
+}
+
 public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String
@@ -614,6 +629,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let operations: [String: JSONValue]
     public let qualitySummary: SafeVoiceQualitySummary?
     public let snapshotID: String?
+    /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
+    public let preview: VoicePreviewSample?
 
     public init(
         id: String,
@@ -629,7 +646,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         descriptors: SafeVoiceDescriptor,
         operations: [String: JSONValue],
         qualitySummary: SafeVoiceQualitySummary? = nil,
-        snapshotID: String? = nil
+        snapshotID: String? = nil,
+        preview: VoicePreviewSample? = nil
     ) {
         self.id = id
         self.name = name
@@ -645,6 +663,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         self.operations = operations
         self.qualitySummary = qualitySummary
         self.snapshotID = snapshotID
+        self.preview = preview
     }
 
     enum CodingKeys: String, CodingKey {
@@ -662,6 +681,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         case operations
         case qualitySummary = "quality_summary"
         case snapshotID = "snapshot_id"
+        case preview
     }
 
     public init(from decoder: Decoder) throws {

@@ -392,6 +392,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     public let creation: VoiceCreationSnapshot?
     /// `nil` 表示服务端未声明增量能力（旧服务或未实现）：按“不可用/未知”处理。
     public let streaming: VoiceStreamingCapability?
+    /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
+    public let preview: VoicePreviewSample?
 
     public init(
         id: String,
@@ -414,7 +416,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         availabilityReason: SafeVoiceAvailabilityReason? = nil,
         quality: VoiceQualityReportSnapshotV2? = nil,
         creation: VoiceCreationSnapshot? = nil,
-        streaming: VoiceStreamingCapability? = nil
+        streaming: VoiceStreamingCapability? = nil,
+        preview: VoicePreviewSample? = nil
     ) {
         self.id = id
         self.name = name
@@ -437,6 +440,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         self.quality = quality
         self.creation = creation
         self.streaming = streaming
+        self.preview = preview
     }
 
     public init(from decoder: Decoder) throws {
@@ -468,6 +472,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         quality = try container.decodeIfPresent(VoiceQualityReportSnapshotV2.self, forKey: .quality)
         creation = try container.decodeIfPresent(VoiceCreationSnapshot.self, forKey: .creation)
         streaming = try container.decodeIfPresent(VoiceStreamingCapability.self, forKey: .streaming)
+        preview = try container.decodeIfPresent(VoicePreviewSample.self, forKey: .preview)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -492,6 +497,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case quality
         case creation
         case streaming
+        case preview
     }
 }
 
