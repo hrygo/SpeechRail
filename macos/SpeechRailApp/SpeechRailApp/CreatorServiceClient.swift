@@ -735,16 +735,14 @@ public protocol SpeechRailCreatorClient: Sendable {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String?
+        options: SpeechRailRequestOptions
     ) async throws -> Data
     /// 正式制作：在 `createSpeech` 之外再把这次渲染的身份带回来（服务端支持时）。
     func createSpeechRender(
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String?
+        options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult
     func createVoicePreview(
         text: String,
@@ -844,16 +842,14 @@ public extension SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult {
         SpeechRenderResult(
             audioData: try await createSpeech(
                 text: text,
                 voiceID: voiceID,
                 speed: speed,
-                options: options,
-                language: language
+                options: options
             ),
             planID: nil,
             voiceRevision: nil
@@ -1131,8 +1127,7 @@ struct UnavailableCreatorClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }

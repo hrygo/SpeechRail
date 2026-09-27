@@ -750,8 +750,7 @@ private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
@@ -849,8 +848,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }

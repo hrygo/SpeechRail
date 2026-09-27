@@ -1153,7 +1153,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
     public let input: String
     public let voice: SpeechVoice
     public let responseFormat: String?
-    public let language: String?
     public let instructions: String?
     public let streamFormat: String?
     public let speed: Double?
@@ -1163,7 +1162,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         voice: SpeechVoice,
         model: String,
         responseFormat: String? = nil,
-        language: String? = nil,
         instructions: String? = nil,
         streamFormat: String? = nil,
         speed: Double? = nil
@@ -1172,7 +1170,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         self.voice = voice
         self.model = model
         self.responseFormat = responseFormat
-        self.language = language
         self.instructions = instructions
         self.streamFormat = streamFormat
         self.speed = speed
@@ -1183,7 +1180,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         case input
         case voice
         case responseFormat = "response_format"
-        case language
         case instructions
         case streamFormat = "stream_format"
         case speed
@@ -1198,6 +1194,11 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     public let timingMode: String?
     public let purpose: String?
     public let latencyBudgetMs: Int?
+    /// Target language for this generation, as a short code (`en`, `zh`, ...).
+    /// SpeechRail-only: the OpenAI-compatible body has no `language` field, so
+    /// omitting this leaves the backend on `auto`.
+    public let languageOverride: String?
+    public let validationPolicy: String?
 
     public init(
         expectedVoiceRevision: String? = nil,
@@ -1206,7 +1207,9 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         receiptMode: String? = nil,
         timingMode: String? = nil,
         purpose: String? = nil,
-        latencyBudgetMs: Int? = nil
+        latencyBudgetMs: Int? = nil,
+        languageOverride: String? = nil,
+        validationPolicy: String? = nil
     ) {
         self.expectedVoiceRevision = expectedVoiceRevision
         self.expectedModelRevision = expectedModelRevision
@@ -1215,6 +1218,8 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         self.timingMode = timingMode
         self.purpose = purpose
         self.latencyBudgetMs = latencyBudgetMs
+        self.languageOverride = languageOverride
+        self.validationPolicy = validationPolicy
     }
 
     public var headers: [String: String] {
@@ -1240,7 +1245,31 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         if let latencyBudgetMs {
             result["SpeechRail-Latency-Budget-Ms"] = String(latencyBudgetMs)
         }
+        if let languageOverride {
+            result["SpeechRail-Language"] = languageOverride
+        }
+        if let validationPolicy {
+            result["SpeechRail-Validation-Policy"] = validationPolicy
+        }
         return result
+    }
+
+    /// Derive a copy with one option replaced.
+    ///
+    /// Prefer this over rebuilding the options by hand: a hand-written copy is
+    /// how a SpeechRail extension silently disappears from one call path.
+    public func with(languageOverride: String? = nil) -> SpeechRailRequestOptions {
+        SpeechRailRequestOptions(
+            expectedVoiceRevision: expectedVoiceRevision,
+            expectedModelRevision: expectedModelRevision,
+            pronunciationSet: pronunciationSet,
+            receiptMode: receiptMode,
+            timingMode: timingMode,
+            purpose: purpose,
+            latencyBudgetMs: latencyBudgetMs,
+            languageOverride: languageOverride ?? self.languageOverride,
+            validationPolicy: validationPolicy
+        )
     }
 }
 

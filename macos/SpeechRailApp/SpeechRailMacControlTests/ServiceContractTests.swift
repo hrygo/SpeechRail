@@ -350,7 +350,6 @@ final class ServiceContractTests: XCTestCase {
             voice: .id("voice_demo"),
             model: "tts-1.7b-base",
             responseFormat: "mp3",
-            language: "en",
             speed: 1.0
         )
 
@@ -358,6 +357,72 @@ final class ServiceContractTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         XCTAssertEqual((object?["voice"] as? [String: String])?["id"], "voice_demo")
         XCTAssertEqual(object?["response_format"] as? String, "mp3")
+    }
+
+    func testSpeechRequestBodyCarriesNoSpeechrailExtension() throws {
+        let request = SpeechRequest(
+            input: "hello",
+            voice: .name("ryan"),
+            model: "speechrail/qwen3-tts",
+            responseFormat: "wav",
+            speed: 1.0
+        )
+
+        let body = try JSONEncoder().encode(request)
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+
+        // The server rejects `language` in this body, so the client must not
+        // be able to encode it even by accident.
+        XCTAssertNil(object?["language"])
+        XCTAssertEqual(
+            Set(object?.keys.map { String($0) } ?? []),
+            ["model", "input", "voice", "response_format", "speed"]
+        )
+    }
+
+    func testPlainOptionsSendNoSpeechrailExtensionHeaders() {
+        let headers = SpeechRailRequestOptions().headers
+
+        XCTAssertNil(headers["SpeechRail-Language"])
+        XCTAssertNil(headers["SpeechRail-Validation-Policy"])
+        XCTAssertTrue(headers.isEmpty)
+    }
+
+    func testLanguageAndPolicyTravelAsSpeechrailHeaders() {
+        let options = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            languageOverride: "en",
+            validationPolicy: "require_output_pass"
+        )
+
+        let headers = options.headers
+
+        XCTAssertEqual(headers["SpeechRail-Language"], "en")
+        XCTAssertEqual(headers["SpeechRail-Validation-Policy"], "require_output_pass")
+        XCTAssertEqual(headers["SpeechRail-Expected-Voice-Revision"], "vr_0123456789abcdef0123456789abcdef")
+    }
+
+    func testWithLanguageOverrideKeepsEveryOtherOption() {
+        let original = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40),
+            pronunciationSet: "story@pr_0123456789abcdef0123456789abcdef",
+            receiptMode: "integrity",
+            timingMode: "chunk",
+            purpose: "interactive",
+            latencyBudgetMs: 1_500,
+            validationPolicy: "require_output_pass"
+        )
+
+        let updated = original.with(languageOverride: "ja")
+
+        XCTAssertEqual(updated.languageOverride, "ja")
+        XCTAssertEqual(updated.headers["SpeechRail-Language"], "ja")
+        XCTAssertEqual(updated.headers["SpeechRail-Validation-Policy"], "require_output_pass")
+        // The render path rebuilds options; a derived copy must not drop fields.
+        for (key, value) in original.headers where key != "SpeechRail-Language" {
+            XCTAssertEqual(updated.headers[key], value, key)
+        }
     }
 
     func testJobDecodingKeepsRequiredNullFieldsAndOptionalMetadata() throws {

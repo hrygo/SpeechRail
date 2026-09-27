@@ -211,8 +211,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> Data {
         try await synthesize(
             SpeechRequest(
@@ -220,7 +219,6 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 voice: .name(voiceID),
                 model: "speechrail/qwen3-tts",
                 responseFormat: "wav",
-                language: language ?? "auto",
                 speed: speed
             ),
             options: options
@@ -235,8 +233,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions,
-        language: String? = nil
+        options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult {
         let response = try await synthesize(
             SpeechRequest(
@@ -244,9 +241,11 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 voice: .name(voiceID),
                 model: "speechrail/qwen3-tts",
                 responseFormat: "wav",
-                language: language ?? "auto",
                 speed: speed
             ),
+            // Rebuilt by hand, so every option must be carried over — a
+            // dropped field silently disables that SpeechRail extension on
+            // the render path.
             options: SpeechRailRequestOptions(
                 expectedVoiceRevision: options.expectedVoiceRevision,
                 expectedModelRevision: options.expectedModelRevision,
@@ -254,7 +253,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 receiptMode: "integrity",
                 timingMode: options.timingMode,
                 purpose: options.purpose,
-                latencyBudgetMs: options.latencyBudgetMs
+                latencyBudgetMs: options.latencyBudgetMs,
+                languageOverride: options.languageOverride,
+                validationPolicy: options.validationPolicy
             )
         )
         var voiceRevision = options.expectedVoiceRevision

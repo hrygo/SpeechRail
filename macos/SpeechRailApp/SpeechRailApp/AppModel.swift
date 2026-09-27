@@ -738,8 +738,7 @@ public final class AppModel {
             text: text,
             voiceID: voiceID,
             speed: speed,
-            options: options,
-            language: language
+            options: language.map { options.with(languageOverride: $0) } ?? options
         )
     }
 
@@ -2362,8 +2361,7 @@ public final class AppModel {
                 text: previewText,
                 voiceID: voice.id,
                 speed: speed,
-                options: options,
-                language: previewLanguage
+                options: options.with(languageOverride: previewLanguage)
             )
             try Task.checkCancellation()
             // 写入本地内存缓存
