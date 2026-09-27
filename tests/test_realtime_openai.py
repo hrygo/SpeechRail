@@ -1704,6 +1704,79 @@ def test_realtime_diarization_finish_waits_for_pending_alignment() -> None:
     assert order == ["speechrail.alignment.done", "speechrail.diarization.done"]
 
 
+def test_realtime_diarization_finish_degrades_when_alignment_never_returns() -> None:
+    """Waiting for frozen text is bounded: a stuck aligner degrades, not hangs."""
+
+    async def scenario() -> list[dict[str, object]]:
+        release = asyncio.Event()
+
+        class HangingAligner:
+            async def align(self, request: AlignmentRequest) -> AlignmentResult:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    raise
+                raise AssertionError("a cancelled aligner must not return a result")
+
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+            realtime_diarization_drain_deadline_seconds=0.2,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                diarization_engine=FakeDiarizationEngine(),
+                text_aligner=HangingAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            return len(events)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_finish_alignment_hang",
+            send=send,
+        )
+        await session.start()
+        try:
+            await session.handle(session_update(diarization={"enabled": True}))
+            await session.handle(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+            )
+            await session.handle({"type": "input_audio_buffer.commit"})
+            await asyncio.wait_for(
+                session.handle(
+                    {
+                        "type": "speechrail.diarization.finish",
+                        "event_id": "finish-hanging-alignment",
+                    }
+                ),
+                timeout=2.0,
+            )
+        finally:
+            release.set()
+            await session.close()
+        return events
+
+    events = asyncio.run(scenario())
+    failed = next(
+        event
+        for event in events
+        if event["type"] == "speechrail.diarization.failed"
+    )
+    assert failed["error"]["code"] == "finalization_timeout"
+    assert not any(
+        event["type"] == "speechrail.diarization.done" for event in events
+    ), "a degraded finalization must not also report done"
+
+
 def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
     class FailingAligner:
         async def align(self, request: AlignmentRequest) -> AlignmentResult:
