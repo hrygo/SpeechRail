@@ -55,7 +55,6 @@ _SUPPORTED_TTS_TASKS: frozenset[str] = frozenset({"conversation", "render"})
 _SUPPORTED_ALIGNMENT_GRANULARITIES: frozenset[str] = frozenset(
     {"segment", "word", "character"}
 )
-_SUPPORTED_ALIGNMENT_PRECISIONS: frozenset[str] = frozenset({"q8", "bf16"})
 
 # The incremental TTS extension is negotiated on its own version axis so a
 # vendor protocol change never silently reuses the shared realtime=v1 envelope.
@@ -1150,7 +1149,6 @@ def apply_session_update(
         if not isinstance(raw_alignment, dict) or set(raw_alignment) - {
             "enabled",
             "granularity",
-            "precision",
         }:
             raise RealtimeAdapterError(
                 "invalid_event", "session.speechrail.alignment has an unsupported shape"
@@ -1167,11 +1165,6 @@ def apply_session_update(
             raise RealtimeAdapterError(
                 "unsupported_operation",
                 "alignment.granularity must be segment, word, or character",
-            )
-        precision = raw_alignment.get("precision")
-        if precision is not None and precision not in _SUPPORTED_ALIGNMENT_PRECISIONS:
-            raise RealtimeAdapterError(
-                "unsupported_operation", "alignment.precision must be q8 or bf16"
             )
         config["alignment_enabled"] = enabled
         config["alignment_granularity"] = granularity

@@ -148,6 +148,9 @@ diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开�
 归属账本，因此已 frozen 的文本不会出现“有 final 无归属”的封存结果；等待超过
 `realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
 
+对齐只有 `granularity` 一个会话级旋钮。对齐器精度由 active profile 在进程启动时固定，
+不提供会话级 `precision`：单服务单 worker 的边界不允许按连接重建模型进程。
+
 `speechrail.alignment.done` 的 `units[]` 必须与冻结文本 revision 一一对应，`text_start`/`text_end`
 是**原始文本的 codepoint `[start, end)`**（不正规化后沿用旧偏移），`granularity` 必须是对齐器
 实际给出边界证据的粒度：

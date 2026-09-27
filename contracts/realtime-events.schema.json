@@ -249,12 +249,6 @@
             "word",
             "character"
           ]
-        },
-        "precision": {
-          "enum": [
-            "q8",
-            "bf16"
-          ]
         }
       }
     },

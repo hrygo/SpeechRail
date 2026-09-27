@@ -1786,6 +1786,17 @@ def test_openai_session_update_rejects_non_string_language_hints() -> None:
         )
 
 
+def test_openai_session_update_rejects_per_session_alignment_precision() -> None:
+    """Precision is a profile-level model property, not a session knob."""
+    with pytest.raises(RealtimeAdapterError, match="unsupported shape"):
+        apply_session_update(
+            session_update(alignment={"enabled": True, "precision": "q8"}),  # type: ignore[typeddict-unknown-key]
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+        )
+
+
 def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
     with pytest.raises(RealtimeAdapterError, match="timestamp_granularities"):
         apply_session_update(
