@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-09-27
+
 ### Added
 
 - macOS 模型管理界面支持混合档位组合：三张快捷组合卡之外新增「分别调整识别与配音」，下载 / 应用统一提交一对 `asr_spec`/`tts_spec`，混合组合按两档制品并集显示总量。
@@ -13,6 +15,7 @@
 
 - 服务在 `GET /openapi.json`、`/docs` 与 `/redoc` 提供 `contracts/openapi.yaml` 本身，不再发布 FastAPI 生成的近似契约；生成结果缺少错误响应、Bearer 方案与 SpeechRail 扩展，客户端据此生成的客户端会与真实行为不符。契约随 wheel 一同发布（`speechrail/assets/openapi.yaml`），为此新增运行时依赖 `pyyaml`。
 - `POST /v1/voices`、`POST /v1/voices/clone`、`POST /v1/voice-designs` 与 `POST /v1/voice-designs/{candidate_id}/publish` 的路由装饰器补齐 `status_code`，使生成视图与契约一致。
+- macOS App 与服务版本统一升级到 3.3.0，App build 升至 35。
 
 ### Removed
 
