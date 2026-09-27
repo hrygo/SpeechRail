@@ -39,14 +39,15 @@ runtime_validation: not_run
 | 2 — TTS HTTP 请求边界 | `bc7e8a68` | done |
 | 3 — Swift 协议层对齐 | `22c09a65` | done |
 | 4a — App 消费服务端 preview | `7b5552e6` | done |
-| 4b — 版本化缓存 / 迟到回包隔离（§5 步骤 4.3、4.4） | — | **未开始** |
-| 4c — 显式保存幂等（§5 步骤 4.5、4.6、4.7 的 W 系列） | — | **未开始** |
+| 4b — 版本化缓存 / 迟到回包隔离（§5 步骤 4.3、4.4） | `3986fe2b` | done |
+| 4c — 显式保存幂等（§5 步骤 4.5、4.6、4.7 的 W 系列） | `8294fd09` | done |
 
 已执行的验证（2026-09-27）：
 
 - `uv run --extra dev ruff check src tests` — 通过。
 - `uv run --extra dev pytest tests/ --no-cov` — 全量通过（`--no-cov` 仅用于定向/全量快速回归；仓库的 80% 覆盖率 gate 属于完整 gate，未在本次运行）。
-- `swift test --package-path macos/SpeechRailApp` — 266 XCTest + 145 swift-testing，0 失败。
+- `swift test --package-path macos/SpeechRailApp` — 275 XCTest + 145 swift-testing，0 失败。
+- `scripts/macos_app_build.sh --configuration Debug` — BUILD SUCCEEDED（覆盖 SPM 包外的 `CreatorSurfaceViews.swift` / `App.swift`；Debug 不安装、不改运行态）。
 - `uv run python scripts/check_version_consistency.py` — 通过（3.2.1）。
 
 **未执行**（需单独授权）：真机合成与人工听审、官方 SDK smoke、性能/质量基准、UI 自动化、Release 构建与安装、完整覆盖率 gate。
@@ -1018,7 +1019,7 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 - [ ] `swift test --filter ServiceContractTests` 通过
 - [ ] 提交并推送到 PR #99
 
-## 增量 4 — App 试听闭环与显式保存（4a 已完成 `7b5552e6`；4b/4c 未开始）
+## 增量 4 — App 试听闭环与显式保存（4a/4b/4c 已完成 `7b5552e6`/`3986fe2b`/`8294fd09`）
 
 - [ ] 新增 `VoicePreviewTextOrigin` / `VoicePreviewDraft` / `VoicePreviewRequest` / `VoicePreviewRequestBuilder`
 - [ ] `AppModel` 消费服务端 `preview`；`defaultPreviewText` 降级为缺失时的界面回退
