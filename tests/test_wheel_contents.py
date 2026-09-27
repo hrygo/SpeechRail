@@ -13,6 +13,7 @@ import pytest
 
 _REQUIRED_WHEEL_FILES = {
     "speechrail/assets/model-catalog.json",
+    "speechrail/assets/openapi.yaml",
     "speechrail/assets/runtime-lock.json",
     "speechrail/assets/runtime/asr.txt",
     "speechrail/assets/runtime/tts.txt",

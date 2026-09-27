@@ -1541,7 +1541,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.post("/v1/voices")
+    @router.post("/v1/voices", status_code=201)
     async def create_voice(request: Request) -> JSONResponse:
         """Create a persistent custom voice using natural language instruction."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
@@ -1640,7 +1640,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         """List official curated scripts for zero-shot voice cloning."""
         return {"object": "list", "data": _CACHED_CLONE_PROMPTS}
 
-    @router.post("/v1/voices/clone")
+    @router.post("/v1/voices/clone", status_code=201)
     async def clone_voice(
         request: Request,
         audio: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.

@@ -574,3 +574,36 @@ def test_api_key_and_model_errors_are_distinct() -> None:
     assert unknown_model.status_code == 400
     assert unknown_model.json()["error"]["code"] == "model_not_found"
     assert unknown_model.json()["error"]["param"] == "model"
+
+
+def test_openapi_endpoint_serves_the_reviewed_contract() -> None:
+    """``/openapi.json`` must publish the reviewed contract, not a generated one.
+
+    The generated document cannot describe error responses, the optional
+    Bearer scheme or the SpeechRail extensions, so serving it would hand
+    clients a materially weaker contract than ``contracts/openapi.yaml``.
+    """
+
+    import yaml
+
+    from speechrail.http.openapi_document import contract_path
+
+    client = _client()
+
+    served = client.get("/openapi.json")
+    reviewed = yaml.safe_load(
+        Path(__file__).parents[1].joinpath("contracts", "openapi.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert served.status_code == 200
+    assert served.json() == reviewed
+    assert contract_path().name == "openapi.yaml"
+    assert "BearerAuth" in served.json()["components"]["securitySchemes"]
+    assert set(served.json()["paths"]["/v1/voices"]["post"]["responses"]) >= {
+        "201",
+        "400",
+        "401",
+    }
+    assert client.get("/docs").status_code == 200

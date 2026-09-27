@@ -3791,7 +3791,11 @@ components:
           type: string
           enum: [json, verbose_json, diarized_json, text, srt, vtt]
           default: json
-          description: Use diarized_json only with model=gpt-4o-transcribe-diarize.
+          description: >-
+            Use diarized_json only with model=gpt-4o-transcribe-diarize. OpenAI
+            restricts gpt-4o-transcribe and gpt-4o-mini-transcribe to `json`;
+            SpeechRail deliberately serves the full format set for every alias
+            because all of them resolve to the same local ASR runtime.
         temperature:
           type: number
           minimum: 0
@@ -3814,11 +3818,18 @@ components:
           description: |
             Standard OpenAI bracketed multipart field. When both this field and
             timestamp_granularities are supplied, their values are merged. Only
-            meaningful with response_format=verbose_json.
+            meaningful with response_format=verbose_json. Omitting the field
+            returns both segment and word timestamps, where OpenAI defaults to
+            segment only.
         stream:
           type: boolean
           default: false
-          description: For diarized_json, emits transcript.text.delta, transcript.text.segment and transcript.text.done SSE events.
+          description: >-
+            Only accepted together with anonymous diarization (`diarized_json`
+            or model=gpt-4o-transcribe-diarize), where it emits
+            transcript.text.delta, transcript.text.segment and
+            transcript.text.done SSE events. Any other transcription request
+            with `stream=true` is refused with 400 stream_unsupported.
         chunking_strategy:
           type: string
           enum: [auto, server_vad]
@@ -3827,22 +3838,35 @@ components:
           type: array
           items:
             type: string
-          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+          description: >-
+            Accepted and ignored. SpeechRail never returns logprobs or
+            known-speaker identification, so there is nothing to include.
         keywords:
           type: array
           items:
             type: string
-          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+          description: >-
+            Composed into the transcription prompt as a `Key terms: ...`
+            prefix in front of `prompt`, deduplicated and bounded to 2000
+            characters. Not a known-speaker mechanism.
         known_speaker_names:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: >-
+            Accepted and ignored for ordinary transcription. A request that
+            also asks for anonymous diarization is refused with
+            400 unsupported_parameter, because SpeechRail never maps anonymous
+            labels to real speakers.
         known_speaker_references:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: >-
+            Accepted and ignored for ordinary transcription. A request that
+            also asks for anonymous diarization is refused with
+            400 unsupported_parameter, because SpeechRail never maps anonymous
+            labels to real speakers.
     SpeechRequest:
       type: object
       additionalProperties: false

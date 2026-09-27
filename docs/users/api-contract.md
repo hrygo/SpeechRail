@@ -2,13 +2,14 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.3.3"
-date: 2026-09-26
+version: "3.7.0"
+date: 2026-09-27
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
 
 > 机器可读的 OpenAPI 3.1 规范位于 [`contracts/openapi.yaml`](../../contracts/openapi.yaml)；WebSocket 全双工事件规范位于 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
+> 运行中的服务在 `GET /openapi.json` 与 `/docs`（Swagger UI）、`/redoc` 提供**同一份文件**，因此客户端从服务读到的契约与本手册引用的契约逐字一致，不存在“生成版”契约。
 
 ---
 
@@ -107,12 +108,15 @@ Content-Type: multipart/form-data
 | `language` | String | 否 | `auto` | 语言代码（如 `zh`, `en`, `ja`, `auto` 等） |
 | `prompt` | String | 否 | - | 专有名词提示文本（最长 2000 字符） |
 | `response_format` | String | 否 | `json` | 响应格式：`json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json`；后者仅与 `gpt-4o-transcribe-diarize` 配对 |
-| `timestamp_granularities[]` | Array | 否 | `["segment", "word"]` | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
+| `timestamp_granularities[]` | Array | 否 | 省略（等价于同时请求 `segment` + `word`） | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
 
 标准 multipart 数组使用重复字段，例如 `timestamp_granularities[]=word`。
 旧 `timestamp_granularities` 字段仍可使用；两种写法混用时合并后验证，任一字段中的非法值都会返回
 `422 invalid_timestamp_granularities`。只请求 `word` 时返回 `words`，只请求 `segment` 时返回
-`segments`；省略粒度时保持同时返回两者。
+`segments`；省略粒度时保持同时返回两者。OpenAI 的 `timestamp_granularities` 默认值是
+`["segment"]`，SpeechRail 有意在省略时同时返回两套时间戳。
+
+其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式。
 
 上传大小仍受 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制；解码输出另受 128 MiB 和
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 约束。WAV fastpath 在重采样前检查预计输出，其他容器在
@@ -172,6 +176,9 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
 `400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
 音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
+
+请求体与 OpenAI 一致接受 `stream_format`，但 SpeechRail 只实现完整音频响应：省略或传
+`audio` 正常返回，传 `sse` 返回 `400 stream_format_unsupported`，不会退化成 SSE 分片。
 
 `seed` 仅用于 VoiceDesign preview 的确定性采样；系统 VoiceDesign 音色使用其
 固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的

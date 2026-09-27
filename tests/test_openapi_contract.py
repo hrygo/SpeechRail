@@ -30,6 +30,68 @@ def test_checker_reports_undocumented_paths() -> None:
     assert operations == {"/v1/only-in-app": {"get", "post"}}
 
 
+def test_success_status_codes_match_between_runtime_and_contract() -> None:
+    """Every route's declared success code must be published by the contract."""
+
+    module = _checker()
+    assert module._status_drift() == []  # type: ignore[attr-defined]
+
+
+def test_security_requirements_name_a_declared_scheme() -> None:
+    """Every ``security`` entry must resolve to a declared securityScheme."""
+
+    module = _checker()
+    assert module._security_drift() == []  # type: ignore[attr-defined]
+
+
+def test_route_walker_unwraps_included_routers() -> None:
+    """FastAPI nests included routers; the walker must still see every route."""
+
+    from fastapi import APIRouter, FastAPI
+    from fastapi.routing import APIRoute
+
+    module = _checker()
+    router = APIRouter(prefix="/v1/example")
+
+    @router.get("/thing")
+    async def thing() -> dict[str, bool]:
+        return {"ok": True}
+
+    app = FastAPI()
+    app.include_router(router)
+    walked = module._walk_routes(app.routes)  # type: ignore[attr-defined]
+
+    assert [route.path for route in walked if isinstance(route, APIRoute)] == [
+        "/v1/example/thing"
+    ]
+
+
+def test_status_drift_is_detected_for_a_synthetic_pair() -> None:
+    """A success-code difference must be reported instead of tolerated."""
+
+    module = _checker()
+    runtime = {
+        "paths": {
+            "/v1/example": {
+                "post": {"responses": {"200": {"description": "ok"}}},
+            }
+        }
+    }
+    contract = {
+        "paths": {
+            "/v1/example": {
+                "post": {
+                    "responses": {
+                        "200": {"description": "ok"},
+                        "201": {"description": "created"},
+                    }
+                },
+            }
+        }
+    }
+    assert module._success_codes(runtime) != module._success_codes(contract)  # type: ignore[attr-defined]
+
+
 def _contract() -> dict:
     import yaml
 

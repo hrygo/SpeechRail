@@ -537,7 +537,17 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
     router = APIRouter(prefix="/v1/voice-designs", tags=["voice-design"])
     active = active_model_catalog(services.settings)
 
-    @router.post("", status_code=201)
+    @router.post(
+        "",
+        status_code=201,
+        responses={
+            200: {
+                "description": (
+                    "Idempotent replay of an already created candidate"
+                )
+            }
+        },
+    )
     async def create_candidate(
         request: Request,
         body: VoiceDesignCreateRequest,
@@ -1514,7 +1524,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Base validation output was invalid",
             )
 
-    @router.post("/{candidate_id}/publish")
+    @router.post(
+        "/{candidate_id}/publish",
+        status_code=201,
+        responses={
+            200: {
+                "description": "The candidate was already published"
+            }
+        },
+    )
     async def publish_candidate(
         candidate_id: str,
         request: Request,
