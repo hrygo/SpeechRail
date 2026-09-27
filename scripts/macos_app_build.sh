@@ -8,6 +8,7 @@ ACTION="build"
 EXPORT_OPTIONS=""
 EXPORT_PATH=""
 ARCHIVE_PATH=""
+TIMEOUT_SECONDS="1800"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 
 while (($# > 0)); do
@@ -20,6 +21,15 @@ while (($# > 0)); do
     --archive)
       ACTION="archive"
       shift
+      ;;
+    --test-unit)
+      ACTION="test-unit"
+      shift
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || { echo "--timeout requires a value" >&2; exit 2; }
+      TIMEOUT_SECONDS="$2"
+      shift 2
       ;;
     --export-options)
       [[ $# -ge 2 ]] || { echo "--export-options requires a value" >&2; exit 2; }
@@ -94,6 +104,80 @@ if [[ "$ACTION" == "archive" ]]; then
       -exportPath "$EXPORT_PATH"
     echo "exported distribution: $EXPORT_PATH"
   fi
+elif [[ "$ACTION" == "test-unit" ]]; then
+  # 单元测试和 build/archive 是不同的产物：这里不导出、不归档任何 bundle，
+  # 只在隔离 DerivedData 里跑 SpeechRailAppTests（UI tests 明确跳过，见下），
+  # 因此 --archive-path/--export-* 都不适用。
+  [[ -z "$ARCHIVE_PATH" ]] || { echo "--archive-path is not supported with --test-unit" >&2; exit 2; }
+  [[ -z "$EXPORT_OPTIONS" ]] || { echo "--export-options is not supported with --test-unit" >&2; exit 2; }
+  [[ -z "$EXPORT_PATH" ]] || { echo "--export-path is not supported with --test-unit" >&2; exit 2; }
+  [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( TIMEOUT_SECONDS > 0 )) || {
+    echo "--timeout must be a positive integer number of seconds" >&2
+    exit 2
+  }
+
+  DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/speechrail-macos-test.XXXXXX")"
+  PRODUCT="$DERIVED_DATA/Build/Products/$CONFIGURATION/SpeechRail.app"
+  # 先打印路径：测试挂死时需要靠它定位测试宿主并采样，输出顺序比"好看"重要。
+  echo "derived data: $DERIVED_DATA"
+
+  cleanup_test_artifacts() {
+    "$LSREGISTER" -u "$PRODUCT" >/dev/null 2>&1 || true
+    # 超时或中断时测试宿主可能还活着。只按本次唯一的临时目录精确定位本脚本
+    # 拉起的进程，不做按进程名的模糊匹配，也不碰仓库外的其他 App。
+    local pids
+    pids="$(pgrep -f "$DERIVED_DATA" 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      kill -TERM $pids 2>/dev/null || true
+      sleep 1
+      kill -KILL $pids 2>/dev/null || true
+    fi
+    /bin/rm -rf "$DERIVED_DATA"
+  }
+
+  trap cleanup_test_artifacts EXIT
+
+  # 与 CI 的 "Build and test unsigned App" 步骤保持同一条命令，只多一个隔离
+  # DerivedData。UI tests 会接管前台窗口与输入，默认不跑。
+  xcodebuild \
+    -project "$PROJECT" \
+    -scheme SpeechRailApp \
+    -configuration "$CONFIGURATION" \
+    -destination 'platform=macOS' \
+    -derivedDataPath "$DERIVED_DATA" \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    ARCHS=arm64 \
+    test \
+    -testPlan SpeechRailApp \
+    -skip-testing:SpeechRailAppUITests &
+  XCODEBUILD_PID=$!
+
+  # 挂死是这个入口必须自己兜住的风险：xcodebuild 不退出时 EXIT trap 永远不会跑，
+  # DerivedData 里的 SpeechRail.app 就会被 LaunchServices 当成第二个已安装 App。
+  # 所以给一层硬上限，超时后按上面的清理路径收尾。
+  waited=0
+  while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
+    if ((waited >= TIMEOUT_SECONDS)); then
+      echo "test-unit: timed out after ${TIMEOUT_SECONDS}s, stopping xcodebuild" >&2
+      kill -TERM "$XCODEBUILD_PID" 2>/dev/null || true
+      sleep 5
+      kill -KILL "$XCODEBUILD_PID" 2>/dev/null || true
+      exit 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  set +e
+  wait "$XCODEBUILD_PID"
+  status=$?
+  set -e
+  if ((status != 0)); then
+    echo "test-unit: FAILED (xcodebuild exit $status)" >&2
+    exit "$status"
+  fi
+  echo "test-unit: passed"
 else
   if [[ -n "$ARCHIVE_PATH" ]]; then
     echo "--archive-path requires --archive" >&2
