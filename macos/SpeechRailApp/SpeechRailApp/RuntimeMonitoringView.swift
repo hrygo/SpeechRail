@@ -111,12 +111,15 @@ public struct RuntimeMonitoringView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.ready)
                         .transition(reduceMotion ? .identity : .opacity)
                 }
-                if isHistoryWindow {
-                    historyMetricStrip
-                } else {
-                    metricStrip
-                }
+                // 首屏常驻实时：指标条与趋势图固定读 App 每 5 秒的采样，不随时间窗
+                // 换源。选历史档时这两块仍然是「现在」，历史回看另起一块放在下面——
+                // 否则一切到历史档，整页只剩回看、没有当下的读数了
+                // （2026-09-28 用户复核：完全没有实时指标展示）。
+                metricStrip
                 monitoringMainColumns
+                if isHistoryWindow {
+                    historyReviewSection
+                }
                 // 首屏只留黄金信号与趋势；逐指标表、资源明细和能力状态收进一个
                 // 默认收起的明细区（用户全局指令：不堆密集信息，渐进式披露）。
                 metricsDetailSection
@@ -436,12 +439,10 @@ public struct RuntimeMonitoringView: View {
         }
     }
 
-    /// 新鲜度槽的副行：历史档说「最后一条历史记录是什么时候」，实时档说「最近一次采样」。
-    /// 两句话回答的是同一个问题——这些数字有多新——但数据源不同，不能混用。
+    /// 新鲜度槽的副行：只说实时采样。首屏已经常驻实时，历史档的「最后一条记录」
+    /// 由历史区块页脚自己交代（`historyCoverageNote`），两处不再各说一次
+    /// （2026-09-28 用户复核：同一时间在页面上出现两遍）。
     private var monitoringFreshnessDetail: String {
-        if let history, let last = history.lastRecordedAt {
-            return "最后一条历史 · \(relativeTime(last))"
-        }
         return latestSample.map { "最近样本 · \(relativeTime($0.capturedAt))" } ?? "等待样本"
     }
 
@@ -548,46 +549,41 @@ public struct RuntimeMonitoringView: View {
         window.ttsLatencyByVoiceClass
     }
 
-    /// 趋势与运行组件的双栏：同是首屏主对象，纵向堆叠会把整页撑出最小窗口、
-    /// 在默认高度下直接出现纵向滚动条。宽窗口并排省约一张卡的高度，窄窗口
-    /// 回落到堆叠（外层滚动容器兜底）。两栏宽度只用既有 token。
+    /// 趋势整宽置顶、运行组件在其下方：设计系统 §6 要求「时间序列占满整宽并位于
+    /// 首位」。此前把运行组件并排钉在 320pt，宽窗口下就是一条挤压的窄边栏，
+    /// 两卡底边也永远对不齐（2026-09-28 用户复核：布局不对仗）。
+    ///
+    /// 组件表按实际可用宽度自己决定用「组件 / 状态」两列还是竖排，不再由
+    /// `ViewThatFits` 在整页层面二选一。
     private var monitoringMainColumns: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                monitoringTrendPanel
-                    .frame(
-                        minWidth: SpeechRailDesignTokens.Layout.monitoringChartMinimumWidth,
-                        maxWidth: .infinity,
-                        alignment: .topLeading
-                    )
-                runtimeComponentsCard(compact: true)
-                    .frame(
-                        minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
-                        idealWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
-                        maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
-                        alignment: .topLeading
-                    )
-            }
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                monitoringTrendPanel
-                runtimeComponentsCard(compact: false)
-            }
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            monitoringTrendPanel
+            runtimeComponentsCard
         }
     }
 
+    /// 趋势图是首屏主对象，任何时间档下都画「当下」的曲线：实时档读 App 每 5 秒的
+    /// 采样，历史档改由下方 `historyReviewSection` 单独画服务落盘的区间增量。
     private var monitoringTrendPanel: some View {
-        Group {
-            if isHistoryWindow {
-                historyChartPanel
-            } else {
-                chartPanel
-            }
+        chartPanel
+    }
+
+    /// 历史回看：只有选中历史档时才出现的独立区块，明确标注它不是当下的读数。
+    /// 首屏的实时指标条与趋势图不受时间窗影响，这一块才是时间窗选中的那一份数据。
+    private var historyReviewSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            SectionHeading(
+                title: "历史回看 · \(timeWindow.title)",
+                detail: "这一段是服务落盘的区间汇总，不是此刻的读数；「现在」始终看上面的实时指标与趋势图。"
+            )
+            historyMetricStrip
+            historyChartPanel
         }
     }
 
     /// 稿 `workers`：标题带 + worker 表 + 说明带。「运行组件」在原实现里和
     /// 能力状态共用一张卡，矩阵与表叠在一起，看不出这是两组不同的数据。
-    private func runtimeComponentsCard(compact: Bool) -> some View {
+    private var runtimeComponentsCard: some View {
         CardSurface {
             CardHead(
                 title: "运行组件",
@@ -610,23 +606,10 @@ public struct RuntimeMonitoringView: View {
             } else {
                 // 表体自己画，不用系统 `Table`：系统那张表的底色、隔行底纹与列分隔线
                 // 都不在 token 里，且它不透明地盖住卡面（§11 第六十八轮）。
-                VStack(spacing: 0) {
-                    if compact {
-                        workerCompactHeader
-                    } else {
-                        workerColumnsHeader
-                    }
-                    Divider()
-                    ForEach(Array(workerRows.enumerated()), id: \.element.id) { index, row in
-                        if index > 0 {
-                            Divider()
-                        }
-                        if compact {
-                            workerCompactRow(row)
-                        } else {
-                            workerRow(row)
-                        }
-                    }
+                // 整宽时用「组件 / 状态」两列表；窄到放不下第一列定宽时回落到竖排。
+                ViewThatFits(in: .horizontal) {
+                    workerTable(compact: false)
+                    workerTable(compact: true)
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("运行组件状态表")
@@ -640,6 +623,27 @@ public struct RuntimeMonitoringView: View {
                 }
                 .speechRailButton(.secondary)
                 .disabled(model.isRefreshingMonitoring)
+            }
+        }
+    }
+
+    private func workerTable(compact: Bool) -> some View {
+        VStack(spacing: 0) {
+            if compact {
+                workerCompactHeader
+            } else {
+                workerColumnsHeader
+            }
+            Divider()
+            ForEach(Array(workerRows.enumerated()), id: \.element.id) { index, row in
+                if index > 0 {
+                    Divider()
+                }
+                if compact {
+                    workerCompactRow(row)
+                } else {
+                    workerRow(row)
+                }
             }
         }
     }
@@ -1300,15 +1304,12 @@ public struct RuntimeMonitoringView: View {
 
     /// 历史档的首屏六个数字，答的是同一批问题，但口径变成「这段跨度里一共」：
     /// 做了多少、快不快、失败几次。`0 次`（真的没有）与 `—`（读不到）依然分开。
+    ///
+    /// 「正在处理」是当下的瞬时量、不是这段跨度的汇总，所以只留在首屏实时指标条里，
+    /// 不在这里重复（否则一个历史块里混着一个实时数字，更难分清哪行是「现在」）。
     private var historyMetricStrip: some View {
         let totals = history?.totals
         return MetricStrip(metrics: [
-            MetricValue(
-                id: "in-flight",
-                title: "正在处理",
-                value: latestSample.map { "\($0.activeRequests) 个" } ?? "—",
-                detail: inFlightDetail
-            ),
             MetricValue(
                 id: "tts-usage",
                 title: "合成 / 音色试听",
@@ -1425,7 +1426,6 @@ public struct RuntimeMonitoringView: View {
     private var historyChartPanel: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                chartHeading
                 if let history, !history.points.isEmpty {
                     historyUsageChart(points: history.points)
                     usageLegendNote("面积读左轴（次） · 折线读右轴（ms）")
@@ -1660,11 +1660,11 @@ public struct RuntimeMonitoringView: View {
 
     /// 稿 `foot`：样本数与「上次读取多久前」是判断这些数字还新不新的唯一本机事实。
     /// 说法从「采样窗口 60」改成人话——「窗口」是 Grafana 的读法，不是用户读法。
+    ///
+    /// 只报实时采样：运行组件卡现在和趋势图同属首屏实时区，历史记录条数与最后写入
+    /// 时间由历史回看区块的覆盖说明负责，同一个时间不在页面上出现两遍
+    /// （2026-09-28 用户复核）。
     private var sampleWindowNote: String {
-        if let history {
-            guard let last = history.lastRecordedAt else { return "还没有历史记录" }
-            return "已记录 \(history.recordCount) 条服务历史 · 最后写入 \(relativeTime(last))"
-        }
         guard let latestSample else { return "还没有数据点" }
         let age = max(0, Int(Date().timeIntervalSince(latestSample.capturedAt).rounded()))
         let ageText = age < 60 ? "\(age) 秒前" : "\(age / 60) 分钟前"
@@ -1697,10 +1697,10 @@ public struct RuntimeMonitoringView: View {
         SectionHeading(
             title: "使用趋势",
             // 图上是「一个坐标系、两套刻度」，哪根轴读什么由图上那行图例说（`usageLegendNote`）。
-            // 这里只说数据源与粒度，不再重复讲图（2026-09-16 用户复核）。
-            detail: isHistoryWindow
-                ? "历史请求量合并普通合成与音色试听；服务重启后仍连续，每个点是一个统计桶。"
-                : "每 5 秒记录一次，只覆盖 App 打开期间。"
+            // 这里只说数据源与粒度，不再重复讲图（2026-09-16 用户复核）。顶部这张图
+            // 任何时间档下都是实时的，历史序列由下方「历史回看」区块自己交代
+            // （2026-09-28 用户复核：首屏必须能看到当下）。
+            detail: "每 5 秒记录一次，只覆盖 App 打开期间；这里始终是「现在」。"
         )
     }
 
