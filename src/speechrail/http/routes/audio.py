@@ -1413,6 +1413,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
             instruction=body.instruction,
             seed=body.seed,
         )
+        design_entrypoint = getattr(synthesizer, "synthesize_design", None)
+        if not callable(design_entrypoint):
+            return error_response(
+                400,
+                request_id,
+                "voice_preview_unsupported",
+                "Voice previews require an active VoiceDesign TTS capability",
+            )
         pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
         pcm = bytearray()
         preview_t0 = _time.monotonic()
@@ -1425,7 +1433,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 purpose=WorkPurpose.VOICE_CREATION,
             ):
                 async for chunk in iter_until(
-                    iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
+                    iter_validated_audio(design_entrypoint(synthesis)), expires_at
                 ):
                     pcm_counter.accept(len(chunk.audio))
                     pcm.extend(chunk.audio)
@@ -1473,7 +1481,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
             if (response := _tts_backend_error_response(request_id, exc)) is not None:
                 return response
             raise
-        except (RuntimeError, ValueError):
+        except RuntimeError as exc:
+            if str(exc) == "voice_design_model_unavailable":
+                return error_response(
+                    400,
+                    request_id,
+                    "voice_preview_unsupported",
+                    "Voice previews require an active VoiceDesign TTS capability",
+                )
+            return error_response(
+                502,
+                request_id,
+                "backend_error",
+                "TTS backend failed to generate the preview",
+                retryable=True,
+            )
+        except ValueError:
             return error_response(
                 502,
                 request_id,

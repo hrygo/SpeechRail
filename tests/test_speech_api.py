@@ -181,14 +181,22 @@ def test_speech_endpoint_defaults_to_mp3_for_openai_parity() -> None:
 class PreviewCapturingSpeechSynthesizer:
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
+        self.design_requests: list[SpeechRequest] = []
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
-        self.requests.append(request)
+        raise AssertionError("voice previews must not use the ordinary synthesis route")
+
+    def synthesize_design(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.design_requests.append(request)
 
         async def chunks() -> AsyncIterator[AudioChunk]:
             yield AudioChunk(response_id="preview", chunk_index=0, audio=b"\x00\x00\x01\x00")
 
         return chunks()
+
+
+class OrdinaryRouteOnlySynthesizer(PreviewCapturingSpeechSynthesizer):
+    synthesize_design = None  # type: ignore[assignment]
 
 
 def _preview_client(
@@ -247,9 +255,10 @@ def test_voice_preview_returns_audio_without_creating_voice_profile(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("audio/wav")
     assert response.content[:4] == b"RIFF"
-    assert synthesizer.requests[0].voice == "serena"
-    assert synthesizer.requests[0].instruction == "温暖自然的中文女声。"
-    assert synthesizer.requests[0].seed == 12345
+    assert synthesizer.design_requests[0].voice == "serena"
+    assert synthesizer.design_requests[0].instruction == "温暖自然的中文女声。"
+    assert synthesizer.design_requests[0].seed == 12345
+    assert synthesizer.requests == []
     assert not custom_voices.exists()
 
 
@@ -312,6 +321,51 @@ def test_runtime_speech_rejects_instructions_reserved_for_voice_design(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "instructions_unsupported"
+    assert synthesizer.requests == []
+
+
+def test_voice_preview_is_rejected_without_a_design_entrypoint(
+    tmp_path: Path,
+) -> None:
+    asr_key = required_spec_artifact("reference", "asr")  # type: ignore[arg-type]
+    tts_key = required_spec_artifact("reference", "tts_custom_voice")  # type: ignore[arg-type]
+    base_key = required_spec_artifact("reference", "tts_base")  # type: ignore[arg-type]
+    synthesizer = OrdinaryRouteOnlySynthesizer()
+    client = TestClient(
+        create_app(
+            Settings(
+                api_key=None,
+                qwen3_model_dir=tmp_path / asr_key,
+                asr_resident_bytes=1 * 1024**3,
+                qwen3_python=None,
+                qwen3_tts_model_dir=tmp_path / tts_key,
+                tts_resident_bytes=1 * 1024**3,
+                qwen3_tts_clone_model_dir=tmp_path / base_key,
+                qwen3_tts_python=None,
+                selection_schema_version=2,
+                selection_asr_spec="reference",
+                selection_tts_spec="reference",
+                asr_artifact_key=asr_key,
+                tts_artifact_key=tts_key,
+                tts_base_artifact_key=base_key,
+                voice_design_artifact_key=VOICE_DESIGN_ARTIFACT_KEY,
+            ),
+            tts_synthesizer=synthesizer,
+        )
+    )
+
+    response = client.post(
+        "/v1/voices/previews",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "试听这一句。",
+            "instruction": "自然的中文女声。",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_preview_unsupported"
+    assert synthesizer.design_requests == []
     assert synthesizer.requests == []
 
 
