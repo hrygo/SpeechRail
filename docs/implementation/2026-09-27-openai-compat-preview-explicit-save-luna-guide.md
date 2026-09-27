@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail OpenAI 契约兼容、试听语言与显式保存 — Luna 实施方案"
-status: ready
+status: in_progress
 created: 2026-09-27
 repository: hrygo/SpeechRail
 branch: codex/app-service-integration
@@ -26,7 +26,37 @@ runtime_validation: not_run
 
 处置：保留，不回退、不改写。增量 4 在该提交之上继续。后续若再次出现同类并行提交，同样先只读核实来源与范围再写入。
 
-本方案是**设计与实施指引**，不是执行结果。所有测试、构建、真机试听在本文件写成时均为 `not_run`。
+本方案是**设计与实施指引**。实施进度见 §0.2。
+
+## 0.2 实施进度（截至 2026-09-27）
+
+分支 `codex/app-service-integration`，PR #99。已完成并推送的增量：
+
+| 增量 | 提交 | 状态 |
+|---|---|---|
+| 方案文档 | `e7c2227b` | done |
+| 1 — 服务端音色试听元数据 | `47d19cb4` | done |
+| 2 — TTS HTTP 请求边界 | `bc7e8a68` | done |
+| 3 — Swift 协议层对齐 | `22c09a65` | done |
+| 4a — App 消费服务端 preview | `7b5552e6` | done |
+| 4b — 版本化缓存 / 迟到回包隔离（§5 步骤 4.3、4.4） | — | **未开始** |
+| 4c — 显式保存幂等（§5 步骤 4.5、4.6、4.7 的 W 系列） | — | **未开始** |
+
+已执行的验证（2026-09-27）：
+
+- `uv run --extra dev ruff check src tests` — 通过。
+- `uv run --extra dev pytest tests/ --no-cov` — 全量通过（`--no-cov` 仅用于定向/全量快速回归；仓库的 80% 覆盖率 gate 属于完整 gate，未在本次运行）。
+- `swift test --package-path macos/SpeechRailApp` — 266 XCTest + 145 swift-testing，0 失败。
+- `uv run python scripts/check_version_consistency.py` — 通过（3.2.1）。
+
+**未执行**（需单独授权）：真机合成与人工听审、官方 SDK smoke、性能/质量基准、UI 自动化、Release 构建与安装、完整覆盖率 gate。
+
+### 破坏性变更提示
+
+增量 2 是破坏性的：向 `POST /v1/audio/speech` 的 body 发送 `language` / `seed` /
+`validation_policy` 或任意未知字段，由「200 且静默忽略」变为 `400`。增量 3 已让
+macOS 客户端改走 `SpeechRail-*` 请求头，但 **App 与 service 必须配套发布**，
+只升级其中一侧会导致试听/正式制作被拒绝。
 
 ---
 
@@ -946,7 +976,7 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 - [ ] 确认并行提交 `89f54185`（`AppModel.swift`、`CreatorSurfaceViews.swift`）仍在，未被覆盖
 - [ ] 确认 `reviewed_ref` 未漂移；漂移则先核实差异再继续
 
-## 增量 1 — 服务端试听元数据
+## 增量 1 — 服务端试听元数据（已完成 `47d19cb4`）
 
 - [ ] 新增 `src/speechrail/domain/voice_preview.py`（模板表 + `preview_for_profile`）
 - [ ] `VoiceProfile` 加 `preview_locale` 字段（末尾，默认 `None`）
@@ -959,7 +989,7 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 - [ ] `ruff check` + 定向 `pytest` 通过
 - [ ] 提交并推送到 PR #99
 
-## 增量 2 — TTS HTTP 边界
+## 增量 2 — TTS HTTP 边界（已完成 `bc7e8a68`）
 
 - [ ] 契约先行：`SpeechRequest` 删三字段、加 `additionalProperties: false`、`instructions` 改 4096
 - [ ] 契约先行：新增 `SpeechRail-Language`、`SpeechRail-Validation-Policy` 两个头参数
@@ -976,7 +1006,7 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 - [ ] `ruff check` + 定向 `pytest` 通过
 - [ ] 提交并推送到 PR #99
 
-## 增量 3 — Swift 协议层
+## 增量 3 — Swift 协议层（已完成 `22c09a65`）
 
 - [ ] `SpeechRequest` 删 `language`（属性 / init / CodingKeys）
 - [ ] `SpeechRailRequestOptions` 加 `languageOverride` / `validationPolicy`（参数追加在末尾）+ `headers`
@@ -988,7 +1018,7 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 - [ ] `swift test --filter ServiceContractTests` 通过
 - [ ] 提交并推送到 PR #99
 
-## 增量 4 — App 试听闭环与显式保存
+## 增量 4 — App 试听闭环与显式保存（4a 已完成 `7b5552e6`；4b/4c 未开始）
 
 - [ ] 新增 `VoicePreviewTextOrigin` / `VoicePreviewDraft` / `VoicePreviewRequest` / `VoicePreviewRequestBuilder`
 - [ ] `AppModel` 消费服务端 `preview`；`defaultPreviewText` 降级为缺失时的界面回退
