@@ -43,6 +43,7 @@ from speechrail.compatibility.openai_realtime import (
     diarization_failed,
     diarization_updated,
     parse_client_event,
+    parse_commit_request,
     parse_finish_request,
     parse_tts_append_text,
     parse_tts_cancel,
@@ -180,6 +181,10 @@ class OpenAIRealtimeSession:
         # uses this monotonic anchor to record commit-tail latency without
         # putting a session/request identifier into metrics labels.
         self._asr_commit_started_at: float | None = None
+        # Client commit id for the item currently inside the commit owner.  It
+        # is echoed on the terminal so callers can distinguish their own
+        # barrier terminal from an older VAD commit still in flight.
+        self._active_commit_event_id: str | None = None
         # First-hypothesis observability keeps distinct origins separate.  The
         # App remains responsible for the true "visible on screen" timestamp.
         self._first_upstream_received_at: float | None = None
@@ -267,6 +272,7 @@ class OpenAIRealtimeSession:
         self._item_end_sample = 0
         self._item_start_kernel = 0
         self._item_end_kernel = 0
+        self._alignment_enabled = False
         self._diarization_enabled = False
         # SPK-E2E-1 finalization state: attribution bookkeeping lives in the
         # ledger, phase guards the append barrier, and the degraded fields are
@@ -460,7 +466,7 @@ class OpenAIRealtimeSession:
         elif parsed.kind == "append":
             await self._append_audio(event)
         elif parsed.kind == "commit":
-            await self._commit_audio()
+            await self._commit_audio(commit_event_id=parse_commit_request(event))
         elif parsed.kind == "diarization_finish":
             await self._handle_finish(event)
         elif parsed.kind == "clear":
@@ -576,6 +582,21 @@ class OpenAIRealtimeSession:
                         "invalid_state",
                         "transcription options cannot change after the first audio frame",
                     )
+
+        if candidate.get("alignment_explicit"):
+            requested_alignment = bool(candidate.get("alignment_enabled", False))
+            if requested_alignment != self._alignment_enabled:
+                if self._wire_timeline.accepted_samples > 0:
+                    raise RealtimeAdapterError(
+                        "invalid_state",
+                        "alignment can only be enabled before the first audio",
+                    )
+                if requested_alignment and self._services.text_aligner is None:
+                    raise RealtimeAdapterError(
+                        "backend_not_ready",
+                        "fixed-text alignment is not available",
+                    )
+                self._alignment_enabled = requested_alignment
 
         previous_enabled = self._diarization_enabled
         if candidate.get("diarization_explicit"):
@@ -764,7 +785,7 @@ class OpenAIRealtimeSession:
 
         assert self._asr is not None
         await self._asr.append_audio(audio)
-        if not self._diarization_enabled:
+        if not (self._alignment_enabled or self._diarization_enabled):
             return
         try:
             self._alignment_pcm.append(audio)
@@ -997,7 +1018,9 @@ class OpenAIRealtimeSession:
                     "asr_flush", time.monotonic() - flush_started
                 )
 
-    async def _commit_audio(self, reason: str = "client") -> None:
+    async def _commit_audio(
+        self, reason: str = "client", *, commit_event_id: str | None = None
+    ) -> None:
         """Run at most one commit owner for the current input item."""
 
         async with self._commit_lock:
@@ -1009,7 +1032,11 @@ class OpenAIRealtimeSession:
                 return
             self._commit_owner = item_id
             self._committed_input_generation = self._input_generation
-            await self._commit_audio_once(reason)
+            self._active_commit_event_id = commit_event_id
+            try:
+                await self._commit_audio_once(reason)
+            finally:
+                self._active_commit_event_id = None
 
     async def _commit_audio_once(self, reason: str) -> None:
         tail = self._resampler.flush()
@@ -1045,7 +1072,10 @@ class OpenAIRealtimeSession:
 
         if self._speech_admission is not None and not self._turn_has_admitted_speech:
             await self._send(
-                self._completed_event(transcript="")
+                self._completed_event(
+                    transcript="",
+                    commit_event_id=self._active_commit_event_id,
+                )
             )
             self._last_partial_text = ""
             self._unflushed_bytes = 0
@@ -1064,7 +1094,10 @@ class OpenAIRealtimeSession:
 
         if self._asr is None:
             await self._send(
-                self._completed_event(transcript="")
+                self._completed_event(
+                    transcript="",
+                    commit_event_id=self._active_commit_event_id,
+                )
             )
             self._last_partial_text = ""
             self._unflushed_bytes = 0
@@ -1694,9 +1727,15 @@ class OpenAIRealtimeSession:
         self._tts_generated_samples = 0
         self._tts_failure_code = None
 
-    def _completed_event(self, *, transcript: str) -> dict[str, object]:
+    def _completed_event(
+        self, *, transcript: str, commit_event_id: str | None = None
+    ) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""
-        return transcription_completed(item_id=self._current_item_id, transcript=transcript)
+        return transcription_completed(
+            item_id=self._current_item_id,
+            transcript=transcript,
+            commit_event_id=commit_event_id,
+        )
 
     def _start_alignment_task(
         self,
@@ -1856,17 +1895,19 @@ class OpenAIRealtimeSession:
             return unavailable("alignment_pcm_overflow")
         if (
             aligner is None
-            or self._diarization_epoch is None
             or len(pcm16) // 2 != item_samples
         ):
             return unavailable("alignment_unavailable")
+        alignment_epoch = (
+            self._diarization_epoch or f"{self._session_id}:{self._wire_epoch}"
+        )
         try:
             async with self._services.alignment_admission.reserve():
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     result = await aligner.align(
                         AlignmentRequest(
                             task_id=self._task_id,
-                            epoch=self._diarization_epoch,
+                            epoch=alignment_epoch,
                             utterance_id=item_id,
                             transcript_revision=transcript_revision,
                             pcm16=pcm16,
@@ -2062,12 +2103,13 @@ class OpenAIRealtimeSession:
         await self._drain_and_finalize()
 
     async def _drain_and_finalize(self) -> None:
-        """Ask the actor to close its append barrier and drain its activity port."""
+        """Close the append barrier only after frozen text has registered."""
         deadline = self._settings.realtime_diarization_drain_deadline_seconds
         assert self._finalization_id is not None
         done: SessionDone | None = None
         try:
             async with asyncio.timeout(deadline):
+                await self._wait_for_pending_alignment()
                 if self._diarization is not None:
                     done = await self._diarization.finish(self._finalization_id)
         except TimeoutError:
@@ -2109,6 +2151,14 @@ class OpenAIRealtimeSession:
         self._finalized_payload = payload
         self._diarization_phase = "finalized"
         await self._send(payload)
+
+    async def _wait_for_pending_alignment(self) -> None:
+        """Drain every frozen-text alignment task before closing the ledger."""
+        while True:
+            tasks = tuple(self._alignment_tasks)
+            if not tasks:
+                return
+            await asyncio.gather(*tasks)
 
     async def _drain_asr_events(self) -> None:
         asr = self._asr
@@ -2194,7 +2244,7 @@ class OpenAIRealtimeSession:
                             else 0.0
                         ),
                     )
-                    if self._diarization_enabled:
+                    if self._alignment_enabled or self._diarization_enabled:
                         item_id = self._current_item_id
                         item_start_sample = self._item_start_sample
                         item_end_sample = max(
@@ -2209,7 +2259,9 @@ class OpenAIRealtimeSession:
                         # their own SpeechRail events.
                         await self._send(
                             transcription_completed(
-                                item_id=item_id, transcript=norm_text
+                                item_id=item_id,
+                                transcript=norm_text,
+                                commit_event_id=self._active_commit_event_id,
                             )
                         )
                         self._start_alignment_task(
@@ -2231,7 +2283,9 @@ class OpenAIRealtimeSession:
                         continue
                     await self._send(
                         transcription_completed(
-                            item_id=self._current_item_id, transcript=norm_text
+                            item_id=self._current_item_id,
+                            transcript=norm_text,
+                            commit_event_id=self._active_commit_event_id,
                         )
                     )
                 elif event.kind == "error":
@@ -2243,6 +2297,7 @@ class OpenAIRealtimeSession:
                             item_id=self._current_item_id,
                             code=event.error_code or "backend_error",
                             message="streaming transcription failed",
+                            commit_event_id=self._active_commit_event_id,
                         )
                     )
         except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
@@ -2257,6 +2312,7 @@ class OpenAIRealtimeSession:
                         item_id=self._current_item_id,
                         code="backend_error",
                         message="streaming transcription failed",
+                        commit_event_id=self._active_commit_event_id,
                     )
                 )
 

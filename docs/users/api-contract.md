@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.7.0"
-date: 2026-09-27
+version: "3.8.0"
+date: 2026-09-28
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -611,7 +611,7 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 | 事件名称 | 方向 | 说明 |
 |---|---|---|
 | `input_audio_buffer.append` | 客户端 → 服务端 | 追加 Base64 24 kHz PCM16 |
-| `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final |
+| `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final；`event_id` 在对应终态回显 |
 | `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
 | `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits |
 | `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
@@ -631,6 +631,15 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 `revision` 递增，只有已证明稳定前缀才能映射到官方 delta。Alignment 和 Diarization 携带
 `task_id`、`epoch`、`utterance_id`、`transcript_revision` 与 `metadata_revision`；迟到、旧 epoch、
 旧 revision 或取消后的结果必须丢弃。辅助失败不会把已发出的 final 改成失败。
+
+客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
+`completed` / `failed` 会回显 `commit_event_id`；结束录音时必须等待该关联终态，不能用
+更早的在途终态判定尾句已经完成。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
+再把对应 delta 追加到同一段临时文本。
+
+`session.speechrail.alignment.enabled` 与 `session.speechrail.diarization.enabled` 相互独立：
+只开启 alignment 时同样会保留受界限 PCM 并在 ASR final 之后发出
+`speechrail.alignment.done/failed`，不必同时开启分人。
 
 ### 6.4 增量 TTS
 

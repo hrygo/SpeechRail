@@ -770,6 +770,9 @@
             },
             "transcript": {
               "type": "string"
+            },
+            "commit_event_id": {
+              "$ref": "#/$defs/identifier"
             }
           },
           "required": [
@@ -799,6 +802,9 @@
             },
             "error": {
               "$ref": "#/$defs/error_object"
+            },
+            "commit_event_id": {
+              "$ref": "#/$defs/identifier"
             }
           },
           "required": [

@@ -69,10 +69,24 @@ delta, but must never append after a rewrite it did not receive; wait for the
 terminal `completed` event instead. When stability cannot be proven the server
 sends only a hypothesis, never a guessed delta.
 
+If a client has already accepted a hypothesis for one `utterance_id`, it must
+treat that full-text snapshot as the display source and suppress later deltas
+for the same item; otherwise a rewrite plus append produces duplicated text.
+
 The hypothesis is provisional recognition, not a final reading fact. A
 teleprompter should apply its own bounded matching and monotonic-position
 policy; it should not infer the reading position from text length or ask an LLM
 to make every realtime position update.
 
-`completed`/`failed` close the ASR turn. The extension changes partial delivery
-only; it does not add server-side LLM, conversation, TTS playback, or MCP state.
+`completed`/`failed` close the ASR turn. A terminal produced by an explicit
+client `input_audio_buffer.commit` echoes the commit `event_id` as
+`commit_event_id`. When ending a recording, wait for the terminal with the
+matching id so an older in-flight terminal cannot satisfy the tail barrier.
+The extension changes partial delivery only; it does not add server-side LLM,
+conversation, TTS playback, or MCP state.
+
+`alignment.enabled` and `diarization.enabled` are independent opt-ins. Alignment
+alone retains the bounded PCM and emits `speechrail.alignment.done/failed`
+after each ASR final; it does not require diarization. Diarization finalization
+waits for in-flight alignment of frozen text before sealing the ledger, so a
+final never lands in a sealed session without its attribution.

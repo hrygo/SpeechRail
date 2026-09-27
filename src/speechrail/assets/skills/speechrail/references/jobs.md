@@ -7,6 +7,11 @@ read; this is not a remote URL and speech input is not the text itself.
 Use only the params accepted by the job kind and the live capability schema.
 Do not put arbitrary payloads or audio bytes into params.
 
+Transcription jobs may set `diarize`; this runs the same fixed-text alignment and
+anonymous speaker projection as the synchronous API. It fails with
+`diarization_not_available` when the active profile cannot provide both the
+continuous diarization engine and the fixed-text aligner.
+
 Speech jobs may set `validation_policy` to `allow_unverified` or
 `require_output_pass`; use the latter for formal production and let the
 service re-check the current clone binding. The binding includes the observed

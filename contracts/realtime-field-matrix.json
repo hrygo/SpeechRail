@@ -139,6 +139,14 @@
       "reject_case": null
     },
     {
+      "path": "commit_event_id",
+      "validator": "schema:transcription_completed.commit_event_id",
+      "task_request": "TaskRequest.commit_barrier",
+      "adapter": "client commit correlation",
+      "positive_case": "server_transcription_completed",
+      "reject_case": null
+    },
+    {
       "path": "task_id",
       "validator": "schema:hypothesis.task_id",
       "task_request": "ResolvedPlan.task_id",

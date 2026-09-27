@@ -533,13 +533,18 @@ def transcription_hypothesis(
     }
 
 
-def transcription_completed(*, item_id: str, transcript: str) -> dict[str, object]:
-    return {
+def transcription_completed(
+    *, item_id: str, transcript: str, commit_event_id: str | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "type": "conversation.item.input_audio_transcription.completed",
         "item_id": item_id,
         "content_index": 0,
         "transcript": transcript,
     }
+    if commit_event_id is not None:
+        payload["commit_event_id"] = commit_event_id
+    return payload
 
 
 def alignment_done(
@@ -677,13 +682,30 @@ def parse_finish_request(event: dict[str, Any]) -> str:
     return event_id
 
 
-def transcription_failed(*, item_id: str, code: str, message: str) -> dict[str, object]:
-    return {
+def parse_commit_request(event: dict[str, Any]) -> str | None:
+    """Return the caller's commit correlation id when one was supplied."""
+    event_id = event.get("event_id")
+    if event_id is None:
+        return None
+    if not isinstance(event_id, str) or not 1 <= len(event_id) <= 128:
+        raise RealtimeAdapterError(
+            "invalid_argument", "event_id must be a 1-128 character string"
+        )
+    return event_id
+
+
+def transcription_failed(
+    *, item_id: str, code: str, message: str, commit_event_id: str | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "type": "conversation.item.input_audio_transcription.failed",
         "item_id": item_id,
         "content_index": 0,
         "error": {"type": "server_error", "code": code, "message": message},
     }
+    if commit_event_id is not None:
+        payload["commit_event_id"] = commit_event_id
+    return payload
 
 
 def tts_stream_limits_payload(limits: TtsStreamLimits) -> dict[str, object]:

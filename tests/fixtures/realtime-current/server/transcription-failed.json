@@ -5,6 +5,7 @@
   "sequence": 5,
   "item_id": "utt-1",
   "content_index": 0,
+  "commit_event_id": "evt-commit-1",
   "error": {
     "type": "server_error",
     "code": "backend_failed",

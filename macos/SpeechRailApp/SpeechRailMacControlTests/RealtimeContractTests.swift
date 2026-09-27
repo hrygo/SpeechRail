@@ -1343,6 +1343,143 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(status, "cancelled")
         await client.close()
     }
+
+    func testDrainWaitsForTheTerminalCorrelatedWithItsCommit() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        try await client.append(Data([0, 0]))
+
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        var commitEventID: String?
+        for _ in 0..<100 {
+            let sent = await transport.sentMessages()
+            if let commit = sent.compactMap({ message -> [String: Any]? in
+                let data = Data(message.utf8)
+                guard
+                    let object = try? JSONSerialization.jsonObject(with: data)
+                        as? [String: Any],
+                    object["type"] as? String == "input_audio_buffer.commit"
+                else { return nil }
+                return object
+            }).first {
+                commitEventID = commit["event_id"] as? String
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let expectedCommitEventID = try XCTUnwrap(commitEventID)
+
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "older-item",
+                    "transcript": "上一句",
+                    "commit_event_id": "unrelated-commit",
+                ])
+            )
+        )
+        for _ in 0..<10 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let afterStale = await sentEventTypes(transport)
+        XCTAssertFalse(
+            afterStale.contains("input_audio_buffer.clear"),
+            "A stale terminal must not satisfy the drain barrier"
+        )
+
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "tail-item",
+                    "transcript": "最后一句",
+                    "commit_event_id": expectedCommitEventID,
+                ])
+            )
+        )
+        try await drain.value
+        let finalTypes = await sentEventTypes(transport)
+        XCTAssertTrue(finalTypes.contains("input_audio_buffer.clear"))
+        await client.close()
+    }
+
+    func testHypothesisSnapshotSuppressesTheSameItemsDelta() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.transcription.hypothesis",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "item-1",
+                    "revision": 1,
+                    "text": "你好",
+                    "sample_span": ["start": 0, "end": 2400],
+                    "stable_prefix_codepoints": 0,
+                ])
+            )
+        )
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item-1",
+                    "delta": "你好",
+                ])
+            )
+        )
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item-1",
+                    "transcript": "你好",
+                ])
+            )
+        )
+
+        guard let snapshot = await events.next() else {
+            XCTFail("Expected a hypothesis snapshot")
+            await client.close()
+            return
+        }
+        guard case .partialSnapshot("item-1", 1, "你好") = snapshot.payload else {
+            XCTFail("Expected a hypothesis snapshot, got \(snapshot.payload)")
+            await client.close()
+            return
+        }
+        guard let terminal = await events.next() else {
+            XCTFail("Expected the transcription terminal")
+            await client.close()
+            return
+        }
+        guard case .completed("item-1", "你好") = terminal.payload else {
+            XCTFail("Delta was displayed twice for a snapshot-backed item: \(terminal.payload)")
+            await client.close()
+            return
+        }
+        await client.close()
+    }
+
+    private func sentEventTypes(_ transport: TestRealtimeASRTransport) async -> [String] {
+        await transport.sentMessages().compactMap { message in
+            let data = Data(message.utf8)
+            guard
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+            return object["type"] as? String
+        }
+    }
 }
 
 private enum RealtimeASRClientModelFixture {

@@ -580,11 +580,14 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
-        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json(
+            {"type": "input_audio_buffer.commit", "event_id": "commit-tail-1"}
+        )
 
         completed = socket.receive_json()
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "你好"
+        assert completed["commit_event_id"] == "commit-tail-1"
         assert len(factory.sessions) == 1
         assert factory.sessions[0].language is None
         assert len(factory.released) == 1
@@ -1528,6 +1531,179 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
         release.set()
 
 
+def test_realtime_alignment_opt_in_without_aligner_fails_closed() -> None:
+    """Accepting alignment must not echo readiness the profile cannot back."""
+
+    async def scenario() -> None:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=FakeStreamingFactory()),
+        )
+
+        async def send(_event: dict[str, object]) -> int:
+            return 0
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_alignment_missing",
+            send=send,
+        )
+        await session.start()
+        try:
+            with pytest.raises(RealtimeAdapterError, match="alignment"):
+                await session.handle(session_update(alignment={"enabled": True}))
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_realtime_alignment_runs_without_diarization() -> None:
+    async def scenario() -> list[dict[str, object]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                text_aligner=FakeTextAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+        alignment_done = asyncio.Event()
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event.get("type") == "speechrail.alignment.done":
+                alignment_done.set()
+            return len(events)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_alignment_only",
+            send=send,
+        )
+        await session.start()
+        await session.handle(session_update(alignment={"enabled": True}))
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        await session.handle(
+            {"type": "input_audio_buffer.commit", "event_id": "align-only-commit"}
+        )
+        await asyncio.wait_for(alignment_done.wait(), timeout=0.5)
+        await session.close()
+        return events
+
+    events = asyncio.run(scenario())
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    )
+    alignment = next(
+        event for event in events if event["type"] == "speechrail.alignment.done"
+    )
+    assert completed["commit_event_id"] == "align-only-commit"
+    assert alignment["utterance_id"] == completed["item_id"]
+    assert alignment["units"][0]["timing_quality"] == "aligned"
+
+
+def test_realtime_diarization_finish_waits_for_pending_alignment() -> None:
+    async def scenario() -> list[dict[str, object]]:
+        release = asyncio.Event()
+        alignment_registered = asyncio.Event()
+
+        class BlockingAligner:
+            async def align(self, request: AlignmentRequest) -> AlignmentResult:
+                await release.wait()
+                alignment_registered.set()
+                return AlignmentResult(
+                    task_id=request.task_id,
+                    epoch=request.epoch,
+                    utterance_id=request.utterance_id,
+                    transcript_revision=request.transcript_revision,
+                    units=(
+                        AlignmentUnit(
+                            "blocked", 0, len(request.text), request.span, "segment"
+                        ),
+                    ),
+                )
+
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                diarization_engine=FakeDiarizationEngine(),
+                text_aligner=BlockingAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+        diarization_done = asyncio.Event()
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event.get("type") == "speechrail.diarization.done":
+                diarization_done.set()
+            return len(events)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_finish_alignment",
+            send=send,
+        )
+        await session.start()
+        await session.handle(session_update(diarization={"enabled": True}))
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        await session.handle({"type": "input_audio_buffer.commit"})
+        finish = asyncio.create_task(
+            session.handle(
+                {
+                    "type": "speechrail.diarization.finish",
+                    "event_id": "finish-after-alignment",
+                }
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert not diarization_done.is_set()
+        release.set()
+        await asyncio.wait_for(alignment_registered.wait(), timeout=0.5)
+        await asyncio.wait_for(finish, timeout=0.5)
+        assert diarization_done.is_set()
+        await session.close()
+        return events
+
+    events = asyncio.run(scenario())
+    order = [
+        event["type"]
+        for event in events
+        if event["type"]
+        in {
+            "speechrail.alignment.done",
+            "speechrail.diarization.done",
+        }
+    ]
+    assert order == ["speechrail.alignment.done", "speechrail.diarization.done"]
+
+
 def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
     class FailingAligner:
         async def align(self, request: AlignmentRequest) -> AlignmentResult:
@@ -2095,12 +2271,18 @@ def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
         # First segment auto-commits cleanly.
         completed = socket.receive_json()
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        # A rollover is not a client commit, so it carries no correlation id and
+        # must never be mistaken for the caller's own commit barrier.
+        assert "commit_event_id" not in completed
 
         # The second append started a new turn, verify we can commit it
         assert len(factory.sessions) == 2
-        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json(
+            {"type": "input_audio_buffer.commit", "event_id": "rollover-tail"}
+        )
         completed2 = socket.receive_json()
         assert completed2["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed2["commit_event_id"] == "rollover-tail"
 
 
 def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:

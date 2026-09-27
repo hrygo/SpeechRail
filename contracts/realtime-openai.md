@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`4.0.0`；生效日期：2026-09-25。唯一机器 schema 是
+> 契约版本：`4.1.0`；生效日期：2026-09-28。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -75,7 +75,7 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 | 事件 | 必需字段 | 语义 |
 |---|---|---|
 | `input_audio_buffer.append` | `event_id`, `audio` | 追加 24 kHz PCM16 |
-| `input_audio_buffer.commit` | `event_id` | 结束当前输入 turn，最多产生一个 ASR final |
+| `input_audio_buffer.commit` | `event_id` | 结束当前输入 turn，最多产生一个 ASR final；`event_id` 会在对应终态原样回显 |
 | `input_audio_buffer.clear` | `event_id` | 清空未提交输入；不产生 final |
 | `speechrail.diarization.finish` | `event_id` | 关闭已 opt-in 的 diarization 会话；同 `event_id` 可重放，异 `event_id` 拒绝 |
 | `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice` | 开始一个增量 TTS utterance |
@@ -100,8 +100,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - `conversation.item.input_audio_transcription.failed`
 
 服务端没有 `input_audio_buffer.speech_started` / `speech_stopped`，也没有
-`input_audio_buffer.committed` / `cleared` 回执：`commit` 的可观察屏障就是随后的
-transcription 事件，`clear` 是本地丢弃语义（其后的一次 commit 产生空 final）。
+`input_audio_buffer.committed` / `cleared` 回执：`commit` 的可观察屏障是与该
+`event_id` 关联的随后 transcription 终态。`clear` 是本地丢弃语义（其后的一次 commit
+产生空 final）。
 
 hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
@@ -123,8 +124,12 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
 只有可证明的稳定前缀才能映射到官方 append-only delta；无法证明稳定时只发 hypothesis，
 最终统一发 completed。一个 utterance 恰好一个 text final，重复 commit 不产生双 final。
-`completed` 只承载 `type`、`item_id`、`content_index` 与 `transcript`；对齐与匿名 speaker
-归属随后以独立的 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
+由客户端 `commit` 触发的 `completed` / `failed` 会带 `commit_event_id`；VAD 或 rollover
+产生的终态不带该字段。调用方结束录音时必须等待与本次
+`input_audio_buffer.commit.event_id` 相同的终态，不能用更早的在途终态判定尾句完成。
+`completed` 只承载 `type`、`item_id`、`content_index`、`transcript` 与可选的
+`commit_event_id`；对齐与匿名 speaker 归属随后以独立的
+`speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
 
 ### 5.2 Alignment 与 Diarization
 
@@ -135,6 +140,13 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `task_id`、`epoch`、`utterance_id`、`transcript_revision`、`metadata_revision`、sample/codepoint
 span 或匿名 speaker units。旧 epoch、旧 revision 或不完整降级的回包必须丢弃。Diarization 只输出
 session 内匿名 label，不保存声纹、embedding 或跨会话身份。
+
+`session.speechrail.alignment.enabled` 与 `session.speechrail.diarization.enabled` 各自独立生效：
+开启 alignment 即为本连接保留受界限的 PCM 并在每个 ASR final 后运行固定文本对齐，即使
+diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开启。两者都只能在首个音频
+帧之前改变。`speechrail.diarization.finish` 必须先等齐当前 item 尚在进行的对齐任务，再封存
+归属账本，因此已 frozen 的文本不会出现“有 final 无归属”的封存结果；等待超过
+`realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
 
 `speechrail.alignment.done` 的 `units[]` 必须与冻结文本 revision 一一对应，`text_start`/`text_end`
 是**原始文本的 codepoint `[start, end)`**（不正规化后沿用旧偏移），`granularity` 必须是对齐器

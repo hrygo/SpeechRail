@@ -201,6 +201,10 @@ struct RealtimeEventState: Sendable {
         return snapshot(item)
     }
 
+    func hasHypothesis(itemID: String) -> Bool {
+        items[itemID]?.latestHypothesisRevision != nil
+    }
+
     func nextExpiryDelay(now: ContinuousClock.Instant) -> Duration? {
         guard let oldest = items.values.min(by: {
             $0.lastActivity < $1.lastActivity
@@ -985,6 +989,7 @@ public actor RealtimeASRClient {
     /// 待终结的输入 item（当前 wire 没有 `input_audio_buffer.committed` 回执）。
     private var appendedBytesSinceTerminal = 0
     private var closeBarrier = RealtimeCloseBarrier()
+    private var expectedDrainCommitEventID: String?
     private var diarizationAcknowledged = false
     /// Per-connection item identity, revisions, and bounded auxiliary snapshots.
     private var eventState = RealtimeEventState()
@@ -1111,8 +1116,10 @@ public actor RealtimeASRClient {
 
     /// 手动触发终态。`endpointing` 打开时服务端自己会在静音处提交，这一条是给
     /// "用户按了结束"用的：它保证最后半句也走完一次提交，而不是留在缓冲区里丢掉。
-    public func commit() async throws {
-        try await send(["type": "input_audio_buffer.commit", "event_id": UUID().uuidString])
+    @discardableResult
+    public func commit(eventID: String = UUID().uuidString) async throws -> String {
+        try await send(["type": "input_audio_buffer.commit", "event_id": eventID])
+        return eventID
     }
 
     /// Discards the uncommitted input buffer. Repeating the operation on one
@@ -1130,16 +1137,34 @@ public actor RealtimeASRClient {
     /// The single current wire has no `input_audio_buffer.committed` or
     /// `cleared` acknowledgement: an item becomes observable only through its
     /// transcription terminal, and `clear` is a local discard. When PCM has
-    /// been uploaded since the last terminal the caller declares one input item
-    /// and waits for **its** terminal (whichever commit owner produced it);
-    /// otherwise the server has already finalized the last turn.
+    /// been uploaded since the last terminal the caller declares one input item,
+    /// tags its commit with a fresh `event_id`, and waits for the terminal that
+    /// echoes that id — a terminal still in flight from an earlier server-side
+    /// commit must not be mistaken for this barrier. Otherwise the server has
+    /// already finalized the last turn.
     public func drainAndClear(timeout: Duration = .seconds(8)) async throws {
         let hasOutstandingInput = appendedBytesSinceTerminal > 0
+        var drainCommitEventID: String?
         if hasOutstandingInput {
+            drainCommitEventID = UUID().uuidString
             closeBarrier.expectItem()
+            expectedDrainCommitEventID = drainCommitEventID
         }
-        try await withStageTimeout(stage: .commit, timeout: timeout) {
-            try await self.commit()
+        // Scoped to the whole call: a throwing commit must not leave the
+        // correlation id armed for a later, unrelated terminal.
+        defer {
+            if hasOutstandingInput {
+                expectedDrainCommitEventID = nil
+            }
+        }
+        if let drainCommitEventID {
+            try await withStageTimeout(stage: .commit, timeout: timeout) {
+                try await self.commit(eventID: drainCommitEventID)
+            }
+        } else {
+            try await withStageTimeout(stage: .commit, timeout: timeout) {
+                try await self.commit()
+            }
         }
         if hasOutstandingInput {
             try await waitForDeclaredItems(timeout: timeout)
@@ -1455,6 +1480,9 @@ public actor RealtimeASRClient {
                 if await rejectItemStateLimitIfNeeded() { return }
                 break
             }
+            if eventState.hasHypothesis(itemID: itemID) {
+                break
+            }
             await flushExpiredItems()
             await emit(
                 .partial(
@@ -1503,7 +1531,10 @@ public actor RealtimeASRClient {
                 if await rejectItemStateLimitIfNeeded() { return }
                 break
             }
-            settleDeclaredItem(failed: false)
+            settleDeclaredItem(
+                failed: false,
+                commitEventID: object["commit_event_id"] as? String
+            )
             await flushExpiredItems()
             await emit(.completed(itemID: itemID, transcript: transcript))
         case "conversation.item.input_audio_transcription.failed":
@@ -1517,7 +1548,10 @@ public actor RealtimeASRClient {
                   )
             else { break }
             let error = object["error"] as? [String: Any]
-            settleDeclaredItem(failed: true)
+            settleDeclaredItem(
+                failed: true,
+                commitEventID: object["commit_event_id"] as? String
+            )
             await flushExpiredItems()
             await emit(
                 .failed(
@@ -1834,9 +1868,11 @@ public actor RealtimeASRClient {
     /// 一个转写终态把"自上次终态以来上行过 PCM"的计数归零，并让**已声明**的
     /// 输入 item 到达终态。服务端自己按静音提交时我们没有声明过 item，
     /// 那就只清计数、不动屏障。
-    private func settleDeclaredItem(failed: Bool) {
+    private func settleDeclaredItem(failed: Bool, commitEventID: String?) {
         appendedBytesSinceTerminal = 0
         guard closeBarrier.pendingItems > 0 else { return }
+        guard let expectedDrainCommitEventID,
+              commitEventID == expectedDrainCommitEventID else { return }
         if failed {
             closeBarrier.failed()
         } else {
