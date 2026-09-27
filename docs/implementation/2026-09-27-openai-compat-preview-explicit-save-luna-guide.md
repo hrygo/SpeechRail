@@ -7,7 +7,7 @@ branch: codex/app-service-integration
 pull_request: 99
 reviewed_ref: 3763eb01e486cc191921ec5184d466c793df69a4
 source_plan: docs/implementation/SpeechRail_OpenAI_Compatibility_Implementation_Plan_2026-09-27.md
-runtime_validation: not_run
+runtime_validation: partial_combined_smoke_done
 ---
 
 # SpeechRail OpenAI 契约兼容、试听语言与显式保存 — Luna 实施方案
@@ -80,7 +80,15 @@ PR #99 OPEN / MERGEABLE，base `main`。`origin/main` 无领先提交（merge-ba
 
 对照源方案 §8 验收矩阵：确定性项 **C01–C07、M01–M03、U01–U04、W01–W04** 均有对应自动化测试并通过；**Q01/Q02**（真实样例内容一致性、跨语言对照，需真实合成 + 人工听审）与 **R01**（App/service 联合发布）属运行时/人工项，**未执行**。
 
-**结论边界**：以上仅覆盖可由确定性测试证明的行为。真机合成内容正确性与人工听审、官方 SDK 互操作、性能/质量、UI 自动化与 combined release（§8.5）均**未执行**，不据此声明质量、性能或长时稳定性通过。
+**运行时 combined 验证（2026-09-27，本机 App-only 安装 + combined 服务替换）**
+
+- **App**：Release `--archive` 构建并替换 `~/Applications/SpeechRail.app`（3.2.1 build 32，ad-hoc）；唯一 LaunchServices 登记验证通过；回滚点 ZIP `SpeechRail-3.2.1-build32-pre-openai-compat-save-20260927-101153.zip`（SHA-256 `3109c524…`）。**未启动，待用户人工验收**。
+- **服务替换**：wheel `dist/speechrail-3.2.1-cp314-cp314-macosx_27_0_arm64.whl`（SHA-256 `76fc4db89cff…`）；preflight 全 OK（模型复用、下载禁用）；无 ESTABLISHED 客户端、`governor_active_requests` batch/realtime=0；`speechrail install` `status=committed`，新 runtime `…-76fc4db89cff-py3147`（与 wheel 摘要前缀一致，可溯源），档位保持 `quality/quality`。
+- **就绪与身份**：`runtime/current` 指向新 runtime；8201 单 listener（PID 由 `runtime/current/.venv/bin/python -m speechrail serve` 提供）；`/health`、`/readyz=200`、`tts_ready=true`。
+- **新服务行为已生效**：`/v1/voices` 返回 `preview.locale`（zh×5 / en×2 / ja×1 / ko×1，`dylan`/`eric` 为 zh）→ 证明运行的是本 PR 新代码。
+- **真实 TTS smoke**：C01 零扩展合成 200/合法 WAV/可听；C04 旧字段（`language`/`seed`/`validation_policy`）→ 400 `unsupported_parameter`（`param` 指向字段）、未知字段 → 400；C05 语言头缺省 → 200、非法值 → 400 `unsupported_language`；Q02 `ryan`+`SpeechRail-Language: zh`+中文 → 200/可听 WAV（语言头真实透传）。音频机械检查：非静音、时长合理。
+
+**结论边界**：确定性行为与运行时契约/身份/可听性均已验证。真机合成**内容正确性**（是否无漏句/增句/重复/错误文本）仍需**人工听审**（Q01/Q02），本方案不据音频字节与 HTTP 200 宣称内容正确；官方 SDK 互操作、性能/质量基准、UI 自动化与正式签名发布（R01）均**未执行**，不据此声明质量、性能或长时稳定性通过。
 
 ### 破坏性变更提示
 
