@@ -522,6 +522,26 @@ def test_openai_session_created_and_updated() -> None:
         assert audio_input["transcription"]["language"] == "zh"
 
 
+def test_server_event_sequence_starts_at_zero_and_stays_contiguous() -> None:
+    """契约 §5: 基础事件的 sequence 从 0 连续递增。
+
+    首个事件不是 0 时, 严格的客户端会把连接判成缺口并直接关闭——这正是
+    macOS App 启动失败的根因, 所以 numbering 必须由服务端测试钉住。
+    """
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        created = socket.receive_json()
+        assert created["type"] == "session.created"
+        assert created["sequence"] == 0
+        assert created["session_id"].startswith("realtime_")
+
+        socket.send_json(session_update(model="whisper-1"))
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        assert updated["sequence"] == 1
+        assert updated["session_id"] == created["session_id"]
+
+
 def test_realtime_send_timeout_closes_slow_consumer() -> None:
     class SlowWebSocket:
         def __init__(self) -> None:
@@ -2567,7 +2587,7 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
             assert collector.state != "failed", collector.failure_reason
             return event
 
-        receive()  # session.created (sequence 1)
+        receive()  # session.created (sequence 0)
         # Two server-side rollover commits plus one explicit commit produce one
         # terminal per item.  Rollover is server-initiated, so the caller must
         # declare its expected item count up front; each 3000-byte append is

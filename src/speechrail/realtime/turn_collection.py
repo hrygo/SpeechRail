@@ -35,10 +35,13 @@ class ManualTurnCollector:
     """Collect rollover items exactly once without mistaking cleared for success."""
 
     def __init__(
-        self, *, epoch: str, start_sequence: int = 0, max_events: int = 16_384,
+        self, *, epoch: str, start_sequence: int = -1, max_events: int = 16_384,
         max_items: int = 1024, max_text_chars: int = 100_000,
     ) -> None:
-        if not epoch or start_sequence < 0 or min(max_events, max_items, max_text_chars) < 1:
+        # ``start_sequence`` 是**已消费**的最后一个序号, 下一个事件必须是
+        # ``start_sequence + 1``。契约 §5 的 wire 从 0 起, 所以「尚未消费任何
+        # 事件」的默认哨兵是 -1, 而不是 0。
+        if not epoch or start_sequence < -1 or min(max_events, max_items, max_text_chars) < 1:
             raise ValueError("invalid_collection_limits")
         self.epoch = epoch
         self.state: Literal["collecting", "closing", "completed", "failed", "cancelled"] = (

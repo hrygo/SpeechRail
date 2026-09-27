@@ -91,11 +91,14 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             async with send_lock:
                 if disconnected:
                     return None
-                sequence += 1
                 payload = dict(event)
                 payload["event_id"] = f"event_{uuid4().hex}"
                 payload["session_id"] = session_id
+                # 契约 §5: sequence 从 0 连续递增。先打戳再自增, 首个事件才是 0;
+                # 反过来会让客户端的首事件校验 (sequence == 0) 判定为缺口。
                 payload["sequence"] = sequence
+                sent_sequence = sequence
+                sequence += 1
                 send_started = time.monotonic()
                 sent = await _send_json_with_deadline(
                     websocket,
@@ -106,7 +109,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     disconnected = True
                     return None
                 services.metrics.record_realtime_phase("send", time.monotonic() - send_started)
-                return sequence
+                return sent_sequence
 
         registered_asr = frozenset({settings.model_id, *settings.compatibility_model_ids})
         try:
