@@ -5,6 +5,7 @@ import struct
 from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,6 +23,8 @@ from speechrail.domain.diarization import (
 from speechrail.http.errors import RequestIdMiddleware
 from speechrail.http.routes.audio import create_audio_router
 from speechrail.http.routes.system import create_system_router
+from speechrail.mcp import tools
+from speechrail.mcp.client import SpeechRailClient
 
 
 def _backend(
@@ -140,13 +143,13 @@ class FakeFixedTextAligner:
         )
 
 
-def _client(
+def _app(
     *,
     diarization_engine=None,
     include_system: bool = False,
     transcribe=_backend,
     batch_transcriber=None,
-) -> TestClient:
+) -> FastAPI:
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,
@@ -167,6 +170,22 @@ def _client(
     app.include_router(create_audio_router(services))
     if include_system:
         app.include_router(create_system_router(services))
+    return app
+
+
+def _client(
+    *,
+    diarization_engine=None,
+    include_system: bool = False,
+    transcribe=_backend,
+    batch_transcriber=None,
+) -> TestClient:
+    app = _app(
+        diarization_engine=diarization_engine,
+        include_system=include_system,
+        transcribe=transcribe,
+        batch_transcriber=batch_transcriber,
+    )
     return TestClient(app)
 
 
@@ -204,6 +223,30 @@ def test_batch_diarized_json_emits_anonymous_speakers() -> None:
     assert [segment["id"] for segment in payload["segments"]] == ["seg_0", "seg_1"]
     assert all(segment["type"] == "transcript.text.segment" for segment in payload["segments"])
     assert "words" not in payload
+
+
+def test_mcp_diarize_transcription_reaches_the_real_rest_route(tmp_path: Path) -> None:
+    audio = tmp_path / "meeting.wav"
+    audio.write_bytes(_pcm16_wav(2))
+    app = _app(
+        diarization_engine=FakeDiarizationEngine(),
+        include_system=True,
+    )
+
+    async def scenario() -> dict[str, object]:
+        client = SpeechRailClient(
+            base_url="http://rail.test",
+            transport=httpx.ASGITransport(app=app),
+        )
+        try:
+            return await tools.transcribe(client, audio_ref=str(audio), diarize=True)
+        finally:
+            await client.aclose()
+
+    result = asyncio.run(scenario())
+    segments = result["segments"]
+    assert isinstance(segments, list)
+    assert [segment["speaker"] for segment in segments] == ["A", "B"]
 
 
 def test_batch_diarized_json_fails_closed_without_profile() -> None:

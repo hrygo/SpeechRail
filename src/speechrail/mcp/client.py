@@ -353,6 +353,8 @@ class SpeechRailClient:
         filename: str,
         response_format: str,
         language: str | None = None,
+        model: str | None = None,
+        chunking_strategy: str | None = None,
     ) -> dict[str, Any]:
         """POST /v1/audio/transcriptions as multipart and return the JSON body.
 
@@ -363,6 +365,10 @@ class SpeechRailClient:
         data: dict[str, str] = {"response_format": response_format}
         if language:
             data["language"] = language
+        if model:
+            data["model"] = model
+        if chunking_strategy:
+            data["chunking_strategy"] = chunking_strategy
         response = await self._request(
             "POST", "audio/transcriptions", files=files, data=data
         )

@@ -669,6 +669,8 @@ async def transcribe(
         filename=filename,
         response_format=response_format,
         language=language,
+        model="gpt-4o-transcribe-diarize" if diarize else None,
+        chunking_strategy="auto" if diarize else None,
     )
 
 

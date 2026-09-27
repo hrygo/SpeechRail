@@ -353,7 +353,9 @@ def test_transcribe_diarize_preflights_health_then_posts_diarized_json(
         if request.method == "GET" and request.url.path == "/health":
             return _ok(health)
         if request.url.path == "/v1/audio/transcriptions":
+            assert _multipart_field(request, "model") == "gpt-4o-transcribe-diarize"
             assert _multipart_field(request, "response_format") == "diarized_json"
+            assert _multipart_field(request, "chunking_strategy") == "auto"
             return _ok(
                 {
                     "task": "transcribe",
