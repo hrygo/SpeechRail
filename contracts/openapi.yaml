@@ -1158,6 +1158,35 @@ paths:
             Relative service budget in milliseconds, capped by the configured
             server request timeout. It is not a client-supplied absolute deadline
             and cannot create an arbitrary priority class.
+        - in: header
+          name: SpeechRail-Language
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+          description: |
+            Optional target language for this generation, given as an ISO-ish
+            short code (`zh`, `en`, `ja`, `ko`, ...) or `auto`. Omission means
+            `auto`, which is what a plain OpenAI SDK request gets.
+
+            It selects the output language only: it does not translate or
+            rewrite `input`, and it does not assert the speaker's native
+            language. A value the active backend does not support is refused
+            with `400 unsupported_language`. This replaced the non-standard
+            `language` body field, which is now rejected.
+        - in: header
+          name: SpeechRail-Validation-Policy
+          required: false
+          schema:
+            type: string
+            enum: [allow_unverified, require_output_pass]
+          description: |
+            Optional SpeechRail admission policy for the requested voice.
+            `allow_unverified` (the default) suits audition and diagnosis;
+            `require_output_pass` makes the service check the current
+            voice/model binding at admission time. This replaced the
+            non-standard `validation_policy` body field, which is now rejected.
       requestBody:
         required: true
         content:
@@ -3816,6 +3845,13 @@ components:
           description: Accepted and ignored for OpenAI SDK parity.
     SpeechRequest:
       type: object
+      additionalProperties: false
+      description: >-
+        The OpenAI-compatible subset of `/v1/audio/speech`. SpeechRail-specific
+        options travel in `SpeechRail-*` request headers, never in this body:
+        sending `language`, `seed` or `validation_policy` here — or any other
+        unknown field — is refused with `400 unsupported_parameter` instead of
+        being silently ignored.
       required: [model, input, voice]
       properties:
         model:
@@ -3853,28 +3889,10 @@ components:
           minimum: 0.25
           maximum: 4
           default: 1
-        language:
-          type: string
-          minLength: 1
-          maxLength: 64
-          default: auto
         instructions:
           type: string
-          maxLength: 10000
+          maxLength: 4096
           description: VoiceDesign instruction when the active TTS capability supports it. CustomVoice and clone voices reject it with a stable 400 error.
-        seed:
-          type: integer
-          minimum: 0
-          maximum: 4294967295
-          description: Optional caller seed; clone voices reject it with clone_seed_unsupported.
-        validation_policy:
-          type: string
-          enum: [allow_unverified, require_output_pass]
-          default: allow_unverified
-          description: |
-            `allow_unverified` is suitable for audition/diagnosis. Formal
-            production may require `require_output_pass`; the service checks
-            the current voice/model binding at admission time.
         stream_format:
           type: string
           enum: [audio]

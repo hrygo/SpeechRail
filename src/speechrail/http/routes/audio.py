@@ -188,17 +188,22 @@ class _SpeechVoiceID(BaseModel):
 
 
 class _SpeechHTTPBody(BaseModel):
-    """OpenAI-compatible subset for the public sentence TTS endpoint."""
+    """OpenAI-compatible subset for the public sentence TTS endpoint.
+
+    SpeechRail-only options (language, admission policy) travel in
+    ``SpeechRail-*`` request headers.  ``extra="forbid"`` keeps a removed or
+    misspelled field from looking like a successful request; the validation
+    handler turns it into ``400 unsupported_parameter``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     model: str = Field(min_length=1, max_length=200)
     input: str = Field(min_length=1, max_length=4_096)
     voice: str | _SpeechVoiceID
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
-    language: str = Field(default="auto", min_length=1, max_length=64)
-    instructions: str | None = Field(default=None, max_length=10_000)
-    seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
-    validation_policy: Literal["allow_unverified", "require_output_pass"] = "allow_unverified"
+    instructions: str | None = Field(default=None, max_length=4_096)
     stream_format: str | None = Field(default=None, max_length=16)
 
     @field_validator("input")
@@ -218,14 +223,6 @@ class _SpeechHTTPBody(BaseModel):
                 raise ValueError("must not be blank")
             return normalized
         return value
-
-    @field_validator("language")
-    @classmethod
-    def normalize_language(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("must not be blank")
-        return normalized
 
 
 class _VoicePreviewHTTPBody(BaseModel):
@@ -1593,8 +1590,20 @@ def create_audio_router(services: AppServices) -> APIRouter:
             default=None,
             alias="SpeechRail-Timing-Mode",
         ),
+        language: str | None = Header(
+            default=None,
+            alias="SpeechRail-Language",
+        ),
+        validation_policy: Literal["allow_unverified", "require_output_pass"] | None = Header(
+            default=None,
+            alias="SpeechRail-Validation-Policy",
+        ),
     ) -> Response:
         request_id = request.state.request_id
+        # SpeechRail-only request headers. A blank header means "not sent",
+        # so an empty value behaves exactly like omitting it.
+        effective_language = (language or "").strip() or "auto"
+        effective_validation_policy = validation_policy or "allow_unverified"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         if canonical_tts_model(
@@ -1726,9 +1735,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     model_variant=validation_variant,
                     is_clone=profile.mode == "clone",
                     speed=body.speed,
-                    language=body.language,
+                    language=effective_language,
                     instruction=body.instructions,
-                    seed=body.seed,
+                    seed=None,
                 )
             except VoiceStoreUnavailableError:
                 return error_response(
@@ -1777,7 +1786,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail TTS backend is not ready",
                 retryable=True,
             )
-        if body.validation_policy == "require_output_pass" and profile.mode == "clone":
+        if (
+            effective_validation_policy == "require_output_pass"
+            and profile.mode == "clone"
+        ):
             try:
                 validation_state, _evidence, _binding = validation_state_for_voice(
                     profile,
@@ -1851,7 +1863,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             spoken = apply_pronunciation(
                 body.input,
                 selected_set,
-                language=body.language,
+                language=effective_language,
             )
             synthesis_text = spoken.text
             text_summary = spoken.summary()
@@ -1953,10 +1965,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
             voice=preset_voice,
             output_format="pcm16",
             speed=validated_tts.speed,
-            language=body.language,
+            language=effective_language,
             instruction=body.instructions,
-            seed=body.seed,
-            validation_policy=body.validation_policy,
+            seed=None,
+            validation_policy=effective_validation_policy,
             expected_voice_revision=effective_revision,
             expected_model_revision=expected_model_revision,
             timing_mode=timing_mode,

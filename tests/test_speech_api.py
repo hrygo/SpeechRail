@@ -308,13 +308,13 @@ def test_runtime_speech_rejects_instructions_reserved_for_voice_design(
 
     response = client.post(
         "/v1/audio/speech",
+        headers={"SpeechRail-Language": "zh"},
         json={
             "model": "speechrail/qwen3-tts",
             "input": text,
             "voice": "uncle_fu",
             "response_format": "wav",
             "speed": 0.94,
-            "language": "zh",
             "instructions": instruction,
         },
     )
@@ -392,7 +392,8 @@ def test_speech_endpoint_caps_input_at_openai_limit() -> None:
     )
 
     assert ok.status_code == 200
-    assert too_long.status_code == 422
+    # The TTS route reports schema failures as 400, not the surface-wide 422.
+    assert too_long.status_code == 400
     assert too_long.json()["error"]["code"] == "validation_error"
     assert too_long.json()["error"]["param"] == "input"
 
@@ -404,13 +405,13 @@ def test_speech_endpoint_accepts_unicode_input_below_public_limit(length: int) -
 
     response = _speech_client().post(
         "/v1/audio/speech",
+        headers={"SpeechRail-Language": "zh"},
         json={
             "model": "speechrail/qwen3-tts",
             "input": text,
             "voice": "uncle_fu",
             "response_format": "wav",
             "speed": 0.94,
-            "language": "zh",
         },
     )
 
@@ -582,7 +583,7 @@ def test_speech_endpoint_validates_speed_at_the_public_boundary() -> None:
         },
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert response.json()["error"]["code"] == "validation_error"
 
 
@@ -919,5 +920,151 @@ def test_speechrail_purpose_rejects_arbitrary_priority_strings() -> None:
             "response_format": "pcm",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert response.json()["error"]["code"] == "validation_error"
+
+
+class _CapturingSpeechSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(response_id="resp-test", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+def _capturing_speech_client() -> tuple[TestClient, _CapturingSpeechSynthesizer]:
+    synthesizer = _CapturingSpeechSynthesizer()
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=synthesizer,
+        )
+    )
+    return client, synthesizer
+
+
+def _plain_speech_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "model": "speechrail/qwen3-tts",
+        "input": "这是一段兼容性验证文本。",
+        "voice": "default",
+        "response_format": "pcm",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_plain_openai_request_needs_no_speechrail_extension() -> None:
+    """A stock OpenAI SDK call must work with zero SpeechRail-specific input."""
+
+    response = _speech_client().post("/v1/audio/speech", json=_plain_speech_body())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "replacement"),
+    [
+        ("language", "en", "SpeechRail-Language"),
+        ("validation_policy", "require_output_pass", "SpeechRail-Validation-Policy"),
+        ("seed", 42, None),
+    ],
+)
+def test_removed_body_fields_are_refused_with_migration_guidance(
+    field: str, value: object, replacement: str | None
+) -> None:
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post(
+        "/v1/audio/speech", json=_plain_speech_body(**{field: value})
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_parameter"
+    assert error["param"] == field
+    if replacement is not None:
+        assert replacement in error["message"]
+    assert synthesizer.requests == []
+
+
+def test_unknown_body_field_is_refused_instead_of_silently_ignored() -> None:
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post(
+        "/v1/audio/speech", json=_plain_speech_body(languge="en")
+    )
+
+    # A typo is not a migration case, but it must never look like success.
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "validation_error"
+    assert synthesizer.requests == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, "auto"),
+        ({"SpeechRail-Language": "auto"}, "auto"),
+        # A blank header means "not sent" rather than "reject".
+        ({"SpeechRail-Language": "  "}, "auto"),
+        ({"SpeechRail-Language": "en"}, "en"),
+        ({"SpeechRail-Language": "zh-CN"}, "zh-CN"),
+    ],
+)
+def test_language_header_reaches_the_domain_request(
+    headers: dict[str, str], expected: str
+) -> None:
+    """The short code is carried through; the adapter maps it per backend."""
+
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post(
+        "/v1/audio/speech", headers=headers, json=_plain_speech_body()
+    )
+
+    assert response.status_code == 200, response.text
+    assert synthesizer.requests[-1].language == expected
+
+
+def test_unsupported_language_header_is_refused() -> None:
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Language": "klingon"},
+        json=_plain_speech_body(),
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_language"
+    assert error["param"] == "language"
+    assert synthesizer.requests == []
+
+
+def test_validation_policy_header_defaults_to_allow_unverified() -> None:
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post("/v1/audio/speech", json=_plain_speech_body())
+
+    assert response.status_code == 200
+    assert synthesizer.requests[-1].validation_policy == "allow_unverified"
+
+
+def test_only_the_speech_route_moved_to_400() -> None:
+    """The 400 mapping is scoped: other routes keep the surface-wide 422."""
+
+    client = _speech_client()
+
+    speech = client.post("/v1/audio/speech", json=_plain_speech_body(unknown_field=1))
+    transcription = client.post("/v1/audio/transcriptions", json={"model": "whisper-1"})
+
+    assert speech.status_code == 400
+    assert transcription.status_code == 422

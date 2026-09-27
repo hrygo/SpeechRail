@@ -107,13 +107,13 @@ def test_v1_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
         headers={
             "SpeechRail-Pronunciation-Set": f"story@{revision}",
             "SpeechRail-Receipt-Mode": "integrity",
+            "SpeechRail-Language": "zh",
         },
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
             "voice": _VOICE_ID,
             "response_format": "wav",
-            "language": "zh",
         },
     )
     assert response.status_code == 200
@@ -184,13 +184,13 @@ def test_timing_mapping_downgrades_when_a_pronunciation_span_is_split(
         headers={
             "SpeechRail-Pronunciation-Set": f"long@{revision}",
             "SpeechRail-Timing-Mode": "chunk",
+            "SpeechRail-Language": "zh",
         },
         json={
             "model": "speechrail/qwen3-tts",
             "input": "长",
             "voice": _VOICE_ID,
             "response_format": "pcm",
-            "language": "zh",
         },
     )
     assert speech.status_code == 200

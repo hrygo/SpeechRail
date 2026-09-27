@@ -1308,11 +1308,11 @@ def test_audio_speech_with_cloned_voice_across_tiers(
 
     resp_formal = client_q.post(
         "/v1/audio/speech",
+        headers={"SpeechRail-Validation-Policy": "require_output_pass"},
         json={
             "model": "speechrail/qwen3-tts",
             "input": "正式制作前检查",
             "voice": "quality_clone_voice",
-            "validation_policy": "require_output_pass",
         },
     )
     assert resp_formal.status_code == 409

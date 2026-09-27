@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from speechrail.http.speech_contract import SPEECH_ROUTE_PATH, speech_validation_error
+
 
 def error(
     *,
@@ -98,9 +100,17 @@ def install_error_handlers(app: FastAPI) -> None:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
+        # The TTS route refuses removed/unknown body fields with a migration
+        # hint, and reports every other schema failure as 400.  This is scoped
+        # to that one path on purpose: ASR and the rest of the surface keep
+        # their existing 422 behaviour.
+        if request.scope.get("path") == SPEECH_ROUTE_PATH:
+            code, message, param = speech_validation_error(exc)
+            return error_response(400, request_id, code, message, param=param)
         return error_response(
             422,
-            getattr(request.state, "request_id", f"req_{uuid4().hex}"),
+            request_id,
             "validation_error",
             "Request validation failed",
             param=_single_validation_param(exc),

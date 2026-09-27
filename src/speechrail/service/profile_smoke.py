@@ -154,7 +154,6 @@ class PublicApiSmokeProbe:
                     "model": "tts-1",
                     "input": _SMOKE_TTS_TEXT,
                     "voice": DEFAULT_VOICE_ID,
-                    "language": "zh",
                     "response_format": "wav",
                 },
             ) as response:
