@@ -104,6 +104,24 @@ def test_model_status_marks_missing_artifacts_without_exposing_paths(tmp_path: P
     assert all("path" not in item for item in payload["artifacts"])
 
 
+def test_model_payloads_leave_the_envelope_version_to_the_cli(tmp_path: Path) -> None:
+    """Payloads must not carry `schema_version`; the machine envelope owns it.
+
+    `model.catalog` used to report the ModelCatalog document version (2) under
+    the envelope key, so the macOS control agent rejected the reply and the
+    model page lost every tier and model row.
+    """
+    catalog = model_catalog_payload(catalog=load_catalog())
+    status = model_status_payload(
+        tmp_path,
+        catalog=load_catalog(),
+        disk_usage=lambda _: SimpleNamespace(free=1234),
+    )
+
+    assert "schema_version" not in catalog
+    assert "schema_version" not in status
+
+
 def test_model_status_counts_files_under_canonical_model_root(tmp_path: Path) -> None:
     app_home = tmp_path / "SpeechRail Home"
     model_root = model_store_root(app_home)

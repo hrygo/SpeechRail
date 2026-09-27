@@ -588,6 +588,51 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertEqual(recorder.first?.expectedBytes, 128)
     }
 
+    func testProcessRunnerDecodesModelCatalogTiersAndArtifacts() async throws {
+        // The model page is only useful when the agent can decode `model.catalog`:
+        // a reply whose envelope version is not the control schema is rejected as
+        // invalid output, and the page falls back to a failure banner with no
+        // tiers and no model rows.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-catalog-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root
+            .appendingPathComponent("runtime/current/.venv/bin", isDirectory: true)
+            .appendingPathComponent("python")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(
+            """
+            #!/bin/sh
+            printf '%s\\n' '{"schema_version":1,"command":"model.catalog","status":"ok","artifacts":[{"key":"asr-0.6b-q8","model_id":"mlx-community/Qwen3-ASR-0.6B-8bit","family":"qwen3_asr","variant":"asr","revision":"54e4c713","provider":"modelscope","repository":"mlx-community/Qwen3-ASR-0.6B-8bit","quantization":{"format":"mlx","bits":8,"group_size":64,"dtype":null},"size_bytes":1010772242,"file_count":10,"required_by":["fast"]},{"key":"tts-0.6b-base-q8","model_id":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit","family":"qwen3_tts","variant":"base","revision":"191c7e69","provider":"modelscope","repository":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit","quantization":{"format":"mlx","bits":8,"group_size":64,"dtype":null},"size_bytes":1991297619,"file_count":13,"required_by":["fast"]},{"key":"diarization-coreml","model_id":"coreml-sortformer-fp16","family":"coreml_sortformer","variant":"diarization","revision":"fp16","provider":"builtin","repository":"builtin","quantization":{"format":"none","bits":null,"group_size":null,"dtype":"fp16"},"size_bytes":1000,"file_count":1,"required_by":["diarization"]}],"profiles":[{"id":"fast","asr":"asr-0.6b-q8","tts":"tts-0.6b-custom-q8","tts_base":"tts-0.6b-base-q8","aligner":"aligner-q8","download_bytes":6252118190}]}'
+            """.utf8
+        ).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: executable.path
+        )
+
+        let result = try await ProcessManagedCommandRunner(
+            locator: ManagedRuntimeLocator(appHome: root)
+        ).run(.modelCatalog)
+
+        XCTAssertEqual(result.exitCode, 0)
+        let catalog = try XCTUnwrap(result.response?.modelCatalog)
+        XCTAssertEqual(catalog.selectableProfiles, [.fast])
+        XCTAssertEqual(catalog.artifacts.count, 3)
+        // The service reports the cloning Base weight as `tts_base`.
+        XCTAssertEqual(catalog.profiles.first?.ttsBase, "tts-0.6b-base-q8")
+        // A task-level asset decodes without becoming selectable, and stays out
+        // of the tier table so the page can list it on its own.
+        XCTAssertEqual(catalog.diarizationArtifacts.map(\.key), ["diarization-coreml"])
+        XCTAssertEqual(
+            catalog.artifacts(for: .quick(.fast)).map(\.key),
+            ["asr-0.6b-q8", "tts-0.6b-base-q8"]
+        )
+    }
+
     func testPeerPolicyFailsClosedForMissingTeamIdentifier() {
         let policy = XPCPeerPolicy(teamIdentifier: "", appIdentifier: "com.speechrail.desktop")
         XCTAssertFalse(policy.isConfigured)

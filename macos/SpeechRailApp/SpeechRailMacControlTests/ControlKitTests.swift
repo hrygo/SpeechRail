@@ -158,7 +158,7 @@ final class ControlKitTests: XCTestCase {
                     id: .reference,
                     asr: "asr",
                     tts: "design",
-                    ttsClone: "base",
+                    ttsBase: "base",
                     downloadBytes: 600
                 ),
             ]
@@ -243,7 +243,7 @@ final class ControlKitTests: XCTestCase {
                     id: .reference,
                     asr: "asr",
                     tts: "design",
-                    ttsClone: "base",
+                    ttsBase: "base",
                     diarization: true,
                     downloadBytes: 900
                 ),
@@ -317,6 +317,47 @@ final class ControlKitTests: XCTestCase {
             profiles: []
         )
         XCTAssertFalse(withoutDesign.hasVoiceDesignArtifact)
+    }
+
+    /// 分人与音色创作都不绑定档位：目录用 `required_by` 的非档位标记声明它们，
+    /// 它们必须能被单独取出来展示，且不会混进任何档位的模型文件表。
+    func testTaskLevelOnDemandArtifactsAreSeparateFromTierTables() {
+        func artifact(_ key: String, requiredBy: [SpeechRailProfile]) -> ModelArtifactSnapshot {
+            ModelArtifactSnapshot(
+                key: key,
+                modelID: key,
+                family: "qwen3",
+                variant: key,
+                revision: "revision",
+                provider: "modelscope",
+                repository: "repo",
+                quantization: ModelQuantizationSnapshot(format: "none"),
+                sizeBytes: 1,
+                fileCount: 1,
+                requiredBy: requiredBy
+            )
+        }
+
+        let catalog = ModelCatalogSnapshot(
+            artifacts: [
+                artifact("asr-0.6b-q8", requiredBy: [.fast]),
+                artifact("aligner-q8", requiredBy: [.fast]),
+                artifact("diarization-coreml", requiredBy: [.diarizationMarker]),
+                artifact("tts-0.6b-design-bf16", requiredBy: [.voiceDesignMarker]),
+            ],
+            profiles: []
+        )
+
+        XCTAssertEqual(catalog.diarizationArtifacts.map(\.key), ["diarization-coreml"])
+        XCTAssertEqual(
+            catalog.onDemandArtifacts.map(\.key),
+            ["diarization-coreml", "tts-0.6b-design-bf16"]
+        )
+        XCTAssertTrue(catalog.artifacts(for: .quick(.fast)).allSatisfy {
+            $0.key == "asr-0.6b-q8" || $0.key == "aligner-q8"
+        })
+        XCTAssertTrue(catalog.diarizationArtifacts[0].isDiarizationAsset)
+        XCTAssertTrue(catalog.onDemandArtifacts.allSatisfy(\.isOnDemandAsset))
     }
 
     /// 混合组合的下载量只能从两个规格各自的制品并集推导——目录没有第三份「组合摘要」。

@@ -436,6 +436,24 @@ public struct ModelArtifactSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public extension ModelArtifactSnapshot {
+    /// 目录用 `required_by: ["diarization"]` 标记分人资产: 它是任务级 opt-in,
+    /// 请求里要说话人标签才准备, 不随任何档位走。
+    var isDiarizationAsset: Bool {
+        requiredBy.contains(.diarizationMarker)
+    }
+
+    /// 同理, 音色创作的设计权重标记为 `required_by: ["voice_design"]`。
+    var isVoiceDesignAsset: Bool {
+        requiredBy.contains(.voiceDesignMarker)
+    }
+
+    /// 不绑定任何 ASR/TTS 档位的按需制品。
+    var isOnDemandAsset: Bool {
+        isDiarizationAsset || isVoiceDesignAsset
+    }
+}
+
 public struct ModelArtifactStatusSnapshot: Codable, Equatable, Sendable {
     public let key: String
     public let state: ModelArtifactState
@@ -591,6 +609,18 @@ public extension ModelCatalogSnapshot {
     /// 任何档位都能进入设计作业; 它缺失时只降级设计能力。
     var hasVoiceDesignArtifact: Bool {
         artifacts.contains { $0.variant == "voice_design" }
+    }
+
+    /// 目录声明的任务级按需制品。它们不属于任何档位, 所以 `artifacts(for:)`
+    /// 永远不会返回它们, 页面必须单独列出, 否则这些模型在界面上完全不可见。
+    var onDemandArtifacts: [ModelArtifactSnapshot] {
+        artifacts.filter(\.isOnDemandAsset)
+    }
+
+    /// 分人那一组按需制品 (说话人模型)。对齐用的 aligner 同时也绑定档位,
+    /// 因此由 `artifacts(for:)` 覆盖, 不在这里重复。
+    var diarizationArtifacts: [ModelArtifactSnapshot] {
+        artifacts.filter(\.isDiarizationAsset)
     }
 
     /// Artifacts required by either spec of a selection, in catalog order.

@@ -268,11 +268,18 @@ public struct ModelManagementView: View {
         return [
             ProfileSpec(
                 label: "谁在说话",
-                value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"
+                value: diarizationReadinessText
             ),
             ProfileSpec(label: "音色创作", value: voiceCreationSupport(for: summary)),
             ProfileSpec(label: "识别与配音", value: profile == .reference ? "效果待验证" : "已有档位"),
         ]
+    }
+
+    /// 分人是任务级按需能力, 不随档位变化: 三张卡上这一行说的是同一件事, 逐项状态
+    /// 在下面的「谁在说话」小节里列。这里只回答「现在能不能用」。
+    private var diarizationReadinessText: String {
+        guard model.modelCatalog != nil else { return "未读取" }
+        return missingDiarizationKeys.isEmpty ? "可用" : "需补齐模型"
     }
 
     private func voiceCreationSupport(for summary: ProfileSummary?) -> String {
@@ -283,8 +290,8 @@ public struct ModelManagementView: View {
         else {
             return "不支持"
         }
-        let supportsClone = summary.ttsClone.flatMap { cloneKey in
-            catalog.artifacts.first(where: { $0.key == cloneKey && $0.variant == "base" })
+        let supportsClone = summary.ttsBase.flatMap { baseKey in
+            catalog.artifacts.first(where: { $0.key == baseKey && $0.variant == "base" })
         } != nil
         return supportsClone ? "支持（含克隆）" : "支持"
     }
@@ -300,9 +307,17 @@ public struct ModelManagementView: View {
                 Divider()
                 unmanagedArtifactSection
             }
-            if !independentDiarizationKeys.isEmpty {
+            if showsDiarizationSection {
                 Divider()
                 diarizationSection
+            }
+            if !voiceDesignArtifacts.isEmpty {
+                Divider()
+                voiceDesignSection
+            }
+            if model.health?.realtimeVAD != nil {
+                Divider()
+                vadSection
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
@@ -510,20 +525,67 @@ public struct ModelManagementView: View {
     private var diarizationSection: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
-                title: "谁在说话要用的模型",
-                // 这一节只在服务没把分人资产列进 catalog payload 时才出现（新服务里
-                // 它们已经在上面的模型文件表里，这里就不再重复）。因此不再说
-                // 「它们也列在……模型文件里」——那在前一种情况下并不成立。
-                detail: "这一档要标出每句话是谁说的，还得再下载几个小模型。"
+                title: "谁在说话",
+                // 分人资产不在上面的档位表里：目录用 `required_by: ["diarization"]`
+                // 声明它们是任务级按需制品，服务另开一条通道检查。对齐用的 aligner
+                // 同时也绑定档位，已经在上面那张表里，所以这里只补说话人模型。
+                detail: "标出每句话是谁说的。对齐用的模型跟档位走，已经在上面那张表里；说话人模型不绑定档位，需要时单独下载。"
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
-                    DiarizationStatusRow(
+                    CapabilityArtifactRow(
+                        title: assetTitle(for: key),
                         key: key,
                         status: status(forKey: key),
                         usage: usage(forKey: key)
                     )
                 }
+                if let runtime = diarizationRuntime {
+                    Divider()
+                    RuntimeCapabilityRow(
+                        title: "当前状态",
+                        value: runtime.text,
+                        tone: runtime.tone
+                    )
+                }
+            }
+        }
+    }
+
+    /// 音色创作的设计权重同样不绑定档位, 目录里也不在任何一张档位表上, 必须单列。
+    private var voiceDesignSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "音色创作",
+                detail: "用来试听和设计新音色。它不绑定档位, 任何档位都能用, 需要时单独下载。"
+            )
+            VStack(spacing: 0) {
+                ForEach(voiceDesignArtifacts, id: \.key) { artifact in
+                    CapabilityArtifactRow(
+                        title: "设计用的模型",
+                        key: artifact.key,
+                        status: status(for: artifact),
+                        usage: usage(for: artifact)
+                    )
+                }
+            }
+        }
+    }
+
+    /// 语音活动检测只判断「什么时候算有人在说话」, 不产出文字, 因此既没有目录制品
+    /// 也不随档位变化: 它只出现在运行状态里。
+    private var vadSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "语音活动检测",
+                detail: "实时模式靠它判断一句话从什么时候开始、什么时候结束。它不出文字, 也不占档位模型。"
+            )
+            VStack(spacing: 0) {
+                RuntimeCapabilityRow(
+                    title: "检测引擎 · \(vadEngineLabel)",
+                    value: vadRuntime?.text ?? "运行状态未读取",
+                    tone: vadRuntime?.tone ?? .neutral
+                )
             }
         }
     }
@@ -875,11 +937,49 @@ public struct ModelManagementView: View {
             .filter { !visibleKeys.contains($0) }
     }
 
+    /// 目录里标为按需、且没被当前档位表覆盖的分人制品。
+    private var showsDiarizationSection: Bool {
+        !independentDiarizationKeys.isEmpty || model.health?.diarization != nil
+    }
+
+    /// 目录里标为按需、且没被当前档位表覆盖的音色创作制品。
+    private var voiceDesignArtifacts: [ModelArtifactSnapshot] {
+        let visibleKeys = Set(visibleArtifacts.map(\.key))
+        return (model.modelCatalog?.artifacts ?? [])
+            .filter { $0.isVoiceDesignAsset && !visibleKeys.contains($0.key) }
+    }
+
+    /// 分人的运行态来自 `/health`: 目录只说文件在不在, 说不了服务加载了没有。
+    private var diarizationRuntime: (text: String, tone: StatusTone)? {
+        guard model.healthFailure == nil, let health = model.health else {
+            return (text: "运行状态未读取", tone: .neutral)
+        }
+        if let status = health.diarization {
+            return (text: status.message, tone: status.ready ? .healthy : .attention)
+        }
+        guard let ready = health.diarizationReady else { return nil }
+        return (text: ready ? "已就绪" : "未就绪", tone: ready ? .healthy : .attention)
+    }
+
+    /// VAD 的运行态同样只来自 `/health`。
+    private var vadRuntime: (text: String, tone: StatusTone)? {
+        guard model.healthFailure == nil, let status = model.health?.realtimeVAD else {
+            return nil
+        }
+        return (text: status.message, tone: status.ready ? .healthy : .attention)
+    }
+
+    private var vadEngineLabel: String {
+        guard let status = model.health?.realtimeVAD else { return "未读取" }
+        let resolved = status.resolvedEngine.isEmpty ? status.configuredEngine : status.resolvedEngine
+        return resolved.isEmpty ? "未读取" : resolved
+    }
+
     private var requiredDiarizationKeys: [String] {
-        let keys = targetSummaries?.flatMap { summary -> [String] in
-            summary.diarization ? ["diarization-coreml", summary.aligner].compactMap { $0 } : []
-        } ?? []
-        return Array(Set(keys)).sorted()
+        // 分人不再绑定档位: 目录用 `required_by: ["diarization"]` 声明这组按需制品,
+        // 服务对它们另开一条检查通道。缺哪几个按目录算, 不再读档位摘要里那个
+        // 服务早已不再下发的标志位——它恒为 false, 曾让这一节永远不出现。
+        (model.modelCatalog?.diarizationArtifacts.map(\.key) ?? []).sorted()
     }
 
     private var canPrepareModels: Bool {
@@ -1046,7 +1146,7 @@ public struct ModelManagementView: View {
         let ttsSummary = summary(for: runtimeSelection.ttsSpec)
         let asrBinding = asrSummary?.asr
         let ttsBinding = ttsSummary?.tts
-        let cloneBinding = ttsSummary?.ttsClone
+        let cloneBinding = ttsSummary?.ttsBase
         let alignerBinding = asrSummary?.aligner ?? ttsSummary?.aligner
         let diarizationConfigured = (asrSummary?.diarization ?? false)
             || (ttsSummary?.diarization ?? false)
@@ -1732,7 +1832,10 @@ private struct ArtifactChoiceRow: View {
     }
 }
 
-private struct DiarizationStatusRow: View {
+/// 目录里标为「任务级按需」的模型行。行名说**这一份文件是干什么的**；机器 key
+/// 留给开发者详情, 对不上名字时还能拿去比对诊断输出。
+private struct CapabilityArtifactRow: View {
+    let title: String
     let key: String
     let status: ModelArtifactStatusSnapshot?
     let usage: ModelArtifactUsagePresentation
@@ -1743,9 +1846,7 @@ private struct DiarizationStatusRow: View {
                 .foregroundStyle(statusPresentation.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                // 行的名字说**这一份文件是干什么的**；`aligner-bf16` 这类机器名留在后面，
-                // 它对不上名字时还能拿去比对诊断输出（用户 2026-09-19：去掉行话）。
-                Text(key == "diarization-coreml" ? "谁在说话用的模型" : "配套模型 · \(key)")
+                Text(title)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
@@ -1773,6 +1874,49 @@ private struct DiarizationStatusRow: View {
 
     private var statusPresentation: ModelArtifactStatusPresentation {
         ModelArtifactStatusPresentation(status: status)
+    }
+}
+
+/// 只在运行状态里出现、没有目录制品的能力行（分人运行态、VAD 引擎）。
+private struct RuntimeCapabilityRow: View {
+    let title: String
+    let value: String
+    let tone: StatusTone
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: iconName)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(value)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(tone.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+    }
+
+    private var iconName: String {
+        switch tone {
+        case .healthy: "checkmark.circle.fill"
+        case .attention: "exclamationmark.circle.fill"
+        case .critical: "xmark.octagon.fill"
+        case .neutral: "questionmark.circle"
+        }
     }
 }
 

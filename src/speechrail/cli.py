@@ -331,7 +331,13 @@ def _confirm(assume_yes: bool) -> bool:
 
 
 def _print_machine(payload: dict[str, object]) -> None:
-    envelope = {"schema_version": _MACHINE_SCHEMA_VERSION, **payload}
+    # The envelope version belongs to the CLI, not to the payload: the managed
+    # CLI contract is that every machine command answers with `schema_version=1`
+    # and the macOS control agent rejects anything else. Spreading the payload
+    # first keeps that guarantee structural — a payload key of the same name can
+    # no longer redefine the envelope (`model.catalog` used to ship the
+    # ModelCatalog document version here, which made its whole reply undecodable).
+    envelope = {**payload, "schema_version": _MACHINE_SCHEMA_VERSION}
     print(json.dumps(envelope, sort_keys=True))
 
 
@@ -626,7 +632,7 @@ def _run_model(args: argparse.Namespace) -> int:
     if args.model_command == "catalog":
         payload = model_commands.model_catalog_payload(catalog=load_catalog())
         if machine_output:
-            print(json.dumps(payload, sort_keys=True))
+            _print_machine(payload)
             return 0
         artifacts = payload.get("artifacts")
         if not isinstance(artifacts, list):
@@ -642,7 +648,7 @@ def _run_model(args: argparse.Namespace) -> int:
     if args.model_command == "status":
         payload = model_commands.model_status_payload(app_home, catalog=load_catalog())
         if machine_output:
-            print(json.dumps(payload, sort_keys=True))
+            _print_machine(payload)
             return 0
         disk = payload.get("disk")
         if not isinstance(disk, dict):
