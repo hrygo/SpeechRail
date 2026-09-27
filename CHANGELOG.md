@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [3.3.2] - 2026-09-28
+
+### Fixed
+
+- 修复客户端结束录音后可能拿不到尾句终态：Realtime 的 `input_audio_buffer.commit` 与后续
+  `transcription.completed` / `failed` 之间没有可观察的关联，调用方只能凭到达顺序猜测，
+  一次在途的 VAD 终态就会被误判成自己那次提交的终态。服务端在终态上回显提交方的
+  `event_id`（`commit_event_id`），契约升到 `4.1.0`；VAD 或 rollover 产生的终态不带该字段。
+- 修复词级对齐与分人耦合：`session.speechrail.alignment.enabled` 此前必须同时开启
+  diarization 才生效（PCM 缓冲与对齐 epoch 都挂在分人开关下），单独开启对齐静默无效。
+  两者现在各自独立生效，且都只能在首个音频帧之前改变。
+- 移除 `session.speechrail.alignment.precision`（`q8` / `bf16`）：单服务单 worker 的边界不允许
+  按连接重建对齐模型，这个开关此前接受了却无法兑现。对齐精度改由 active profile 在进程启动时固定。
+- 修复 `speechrail.diarization.finish` 的封存竞态：封存前会先等齐当前 item 尚在进行的对齐任务，
+  已 frozen 的文本不再出现「有 ASR final、无归属」的结果；等待超过
+  `realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
+- 修复非法 Realtime 事件之后会话资源不释放：事件解析失败时直接抛出，会话的 PCM 缓冲、
+  对齐任务与准入名额都留在原处。
+- 修复持久化转写任务不执行分人：`POST /v1/jobs` 的分人参数此前只写进任务元数据，
+  执行器既没有分人引擎也没有对齐器，转写悄悄退化成单人单轨。执行器现在真正挂载分人引擎、
+  固定文本对齐器与独立的 `DiarizationAdmission`；MCP 的分人转写工具同步对齐真实 REST 契约。
+- 修复分人能力缺失时的失败时机：请求要等到转写跑完、产出已落盘后才因缺分人能力失败。
+  现在在转写开始前就以 `diarization_unavailable` 拒绝，不浪费一次推理。
+- 修复异步任务产物释放不可恢复也不受界：`DELETE /v1/jobs/{job_id}` 与 TTL 过期此前先把
+  `result_ref` 置空再谈清理，删除失败或进程中断就留下无人认领的产物目录。新增
+  `runtime/job_artifacts.py` 统一判定产物归属：先删本地产物树、成功后才释放引用，失败按
+  `cleanup_after` 退避重试并有批次上限；解析拒绝绝对路径、`..`、跨 job 引用与符号链接目录。
+- 修复幂等重放时 durable 幂等键未完成的问题：`POST /v1/jobs` 带 `Idempotency-Key` 重放命中
+  已存在的任务时不再直接返回，幂等记录会补写完成；补写不可用时返回可重试的
+  `503 idempotency_store_unavailable`，而不是让调用方拿不到键状态。
+- 修复 macOS App 运行监控页在宽窗口下的布局：趋势图与运行组件改为并排且两张卡等高，
+  组件行吸收剩余高度向下铺开；窄窗口仍回退到趋势整宽、组件落到下方的竖排。
+
 ## [3.3.1] - 2026-09-28
 
 ### Fixed
