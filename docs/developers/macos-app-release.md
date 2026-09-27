@@ -97,11 +97,12 @@ Team ID、证书名称、Apple ID、app-specific password、API key 和 Keychain
 
 ## Archive / export / verify
 
-准备好签名身份后，在仓库根目录执行；用 `--export-path` 指向仓库外的显式目录。脚本生成的 `build/SpeechRail.xcarchive` 是仓库内的临时构建产物，验收后必须清理或移到证据目录，避免被 Finder/LaunchServices 当成已安装 App：
+准备好签名身份后，在仓库根目录执行；用 `--export-path` 指向仓库外的显式目录。`--archive-path` 可把 `.xcarchive` 也放到仓库外（默认仍是仓库内的 `build/SpeechRail.xcarchive`）。archive 里的 `Products/Applications/SpeechRail.app` 是中间产物，脚本在归档完成后即从 LaunchServices 注销，交付物只有 `--export-path` 那一份；仓库内 archive 验收后仍须清理或移到证据目录：
 
 ```bash
 export SPEECHRAIL_TEAM_ID="<your-team-id>"
 scripts/macos_app_archive.sh \
+  --archive-path "/path/outside/repository/SpeechRail.xcarchive" \
   --export-options "/path/outside/repository/ExportOptions.plist" \
   --export-path "/path/outside/repository/macos-export"
 scripts/macos_app_verify_distribution.sh \
@@ -151,8 +152,16 @@ shasum -a 256 "/path/outside/repository/SpeechRail-<version>.zip"
 适用于已授权的本机 Debug/Release App-only 替换，且用户明确自行验收；不适用于 Distribution、服务替换或联合发布。
 完成条件是正确产物已安装、静态校验通过且旧版可恢复，不包含 UI、控制链路或语音质量验收。
 
-1. **定位一次。**核对目标路径（默认 `~/Applications/SpeechRail.app`）、现存候选 bundle 和来源证据。有对应最后一次源码改动的成功构建记录且产物仍在时复用；仅“文件较新”不够。源码变化、产物缺失或来源不明时才构建一次，不重跑已有且仍有效的测试。`macos_app_build.sh` 的普通 build 会清理临时 DerivedData，不能把已清理的验证产物当成可安装包。
-2. **准备并校验。**核对候选显示名、bundle identifier、version/build、目标平台，并执行 `scripts/macos_app_verify_local_xpc.sh <候选 SpeechRail.app>`。旧安装归档到仓库外 ZIP，检查归档完整性并记录哈希；新候选已有 bundle 时无需为了本机替换额外压缩再解压。将候选准备到安装目录同一文件系统的唯一临时父目录，子目录始终叫 `SpeechRail.app`，例如 `<临时父目录>/SpeechRail.app`；验证脚本拒绝其他 bundle 名称。所有暂存路径先确认不覆盖既有内容，失败清理/恢复处理在创建暂存产物前就绪。
+1. **定位一次。**核对目标路径（默认 `~/Applications/SpeechRail.app`）、现存候选 bundle 和来源证据。有对应最后一次源码改动的成功构建记录且产物仍在时复用；仅“文件较新”不够。源码变化、产物缺失或来源不明时才构建一次，不重跑已有且仍有效的测试。候选包一律由包装脚本显式导出，不裸跑 `xcodebuild`（见下）；不带 `--export-path` 的普通 build 会清理临时 DerivedData，不能把已清理的验证产物当成可安装包。
+
+   ```bash
+   scripts/macos_app_build.sh \
+     --configuration Debug \
+     --export-path "/path/outside/repository/app-export"
+   ```
+
+   脚本把 `SpeechRail.app` 复制到该目录、就地跑 `macos_app_verify_local_xpc.sh`、打印产物路径，并注销临时 DerivedData 与导出副本的 LaunchServices 记录（正式路径由安装那一步登记）。`--export-path` 必须在仓库外、且不能是已存在的 `.app` 路径，目标已存在时脚本拒绝覆盖。
+2. **准备并校验。**核对候选显示名、bundle identifier、version/build、目标平台，并执行 `scripts/macos_app_verify_local_xpc.sh <候选 SpeechRail.app>`（经 `--export-path` 导出的候选这一步已由脚本跑过，仍需复核结论）。旧安装归档到仓库外 ZIP，检查归档完整性并记录哈希；新候选已有 bundle 时无需为了本机替换额外压缩再解压。将候选准备到安装目录同一文件系统的唯一临时父目录，子目录始终叫 `SpeechRail.app`，例如 `<临时父目录>/SpeechRail.app`；验证脚本拒绝其他 bundle 名称。所有暂存路径先确认不覆盖既有内容，失败清理/恢复处理在创建暂存产物前就绪。
 3. **退出并替换。**核实运行中 App 与随包 helper 的实际路径/身份，正常退出旧 App 并有界等待；不能只凭进程名判断归属，也不自动强杀。退出失败则保持旧安装并报告，不循环重试。将旧 bundle 暂存到同文件系统的唯一目录，再把新 bundle 重命名到安装路径；安装或静态校验失败则恢复旧 bundle。始终不触碰服务 runtime、selection、模型或登录项。
 4. **验证并交还。**核对安装路径的身份/version/build、签名与内嵌 XPC，并确认安装内容对应已验证候选；归档后源包未变时不重复计算同一归档哈希。成功后清理本次事务创建的暂存副本，保留旧版 ZIP 回退点；运行 `scripts/macos_app_verify_single_install.sh <安装路径>`，确认 LaunchServices 仅登记该正式 App 且无 UI test runner 登记。若检查失败，只在任务授权覆盖时清理经确认归属、无进程使用的 SpeechRail 生成副本：对精确路径执行 LaunchServices 注销后直接删除，避免移入废纸篓造成再次发现；不清空整个废纸篓或触碰无关 App。未授权清理时报告重复路径并停止。不启动新 App，不查 `/health`、`/readyz`、服务 PID/端口或执行 UI `status`/`preflight`；检查通过后立即报告“已安装、未启动、待用户验收”、安装路径、版本和回退点，然后停止。
 

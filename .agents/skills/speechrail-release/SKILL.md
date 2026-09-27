@@ -41,6 +41,7 @@ description: >-
 - App 实际安装只保留一个 bundle，默认路径为 `~/Applications/SpeechRail.app`。上一版本保留为 ZIP/归档回退点，
   不能作为第二个 Applications/DerivedData 可执行副本；Xcode build/test 临时 bundle 不得残留或进入 LaunchServices。
 - 会产出 App/test bundle 的构建必须通过仓库包装脚本：普通 build 用 `scripts/macos_app_build.sh`，UI test 仅在当次获准后用 `scripts/macos_app_test.sh`，archive/export 用对应发布脚本；禁止裸跑 `xcodebuild` 将 `.app` 留在长期 DerivedData 或临时目录。只读 `-showBuildSettings` 等查询除外。包装脚本使用隔离 DerivedData，在退出时注销本次 bundle 并直接清理，不把副本移入废纸篓。
+- 本机替换的候选包用 `scripts/macos_app_build.sh --export-path <仓库外目录>` 导出：脚本复制 `SpeechRail.app`、就地跑 local XPC 门禁、打印产物路径，并注销临时 DerivedData 与导出副本的 LaunchServices 记录。不要为拿候选包绕开包装脚本直接调 `xcodebuild`——那正是仓库 `build/` 里留下第二个可被启动副本的来源。
 
 ## 平台基线
 
