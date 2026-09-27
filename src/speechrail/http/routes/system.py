@@ -78,6 +78,7 @@ from speechrail.domain.tts_pronunciation import (
     PronunciationStoreUnavailableError,
     get_pronunciation_registry,
 )
+from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
@@ -351,6 +352,9 @@ def _voice_entry(
     }
     if profile.ref_text is not None:
         entry["ref_text"] = profile.ref_text
+    preview = preview_for_profile(profile)
+    if preview is not None:
+        entry["preview"] = preview
     if profile.duration_seconds > 0:
         entry["duration_seconds"] = profile.duration_seconds
     if profile.quality is not None:
@@ -410,6 +414,7 @@ def _voice_list_entry(
         "variant",
         "capabilities",
         "mode",
+        "preview",
         "revision",
         "revoked",
         "availability_reason",

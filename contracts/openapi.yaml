@@ -2179,6 +2179,25 @@ components:
           type: [string, 'null']
           pattern: '^vr_[0-9a-f]{32}$'
           description: Verified content-addressed acoustic revision when available; legacy voices remain null.
+        preview:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [locale, text]
+          description: >-
+            Maintained default audition text, identical to the one the voice
+            catalog returns for the same voice. Null when the source of the
+            sample is unknown.
+          properties:
+            locale:
+              type: string
+              enum: [zh, en, ja, ko]
+              description: >-
+                Base language tag of `text`. It describes the sample only and
+                does not constrain which languages the voice can speak.
+            text:
+              type: string
+              minLength: 1
+              description: Default preview text clients may send unchanged.
         voice_identity_assurance:
           type: string
           enum: [legacy, content_addressed]
@@ -2872,6 +2891,25 @@ components:
           type: string
           enum: [system, instruction, clone]
           default: system
+        preview:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [locale, text]
+          description: >-
+            Maintained default audition text for this voice. Present only when
+            the source of the sample is known; clients must not infer a
+            language from the voice name, description or reference text.
+          properties:
+            locale:
+              type: string
+              enum: [zh, en, ja, ko]
+              description: >-
+                Base language tag of `text`. It describes the sample only and
+                does not constrain which languages the voice can speak.
+            text:
+              type: string
+              minLength: 1
+              description: Default preview text clients may send unchanged.
         ref_text:
           type: [string, 'null']
         duration_seconds:

@@ -21,6 +21,7 @@ from speechrail.domain.tts_reference_condition import (
     MLX_AUDIO_0_4_8_QWEN3_TTS_SUPPORT,
 )
 from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
+from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_validation import VoiceValidationArtifact
 
 SCHEMA_VERSION = "effective_capabilities_v1"
@@ -356,6 +357,9 @@ def _voice_entry(
         "availability_reason": reason,
         "variant": variant,
         "voice_revision": profile.revision,
+        # Same projection the voice catalog uses, so a client never sees a
+        # default audition text in one surface and nothing in the other.
+        "preview": preview_for_profile(profile),
         "voice_identity_assurance": (
             "content_addressed" if profile.revision is not None else "legacy"
         ),
