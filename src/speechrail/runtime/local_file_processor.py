@@ -166,6 +166,11 @@ class LocalFileJobProcessor:
         transcriber = self._batch_transcriber
         if transcriber is None:
             raise JobProcessingError("job_backend_not_ready")
+        diarize = params.get("diarize") is True
+        # Fail closed before decoding and transcribing: an unavailable
+        # capability must not burn a full ASR pass only to reject the job.
+        if diarize and (self._diarization_engine is None or self._text_aligner is None):
+            raise JobProcessingError("diarization_not_available")
         pcm = await self._decode_audio(input_path)
         try:
             request = TranscriptionRequest(
@@ -178,9 +183,9 @@ class LocalFileJobProcessor:
         except ValueError:
             raise JobProcessingError("job_input_invalid") from None
         result = await transcriber.transcribe(request)
-        if params.get("diarize") is True:
-            if self._diarization_engine is None or self._text_aligner is None:
-                raise JobProcessingError("diarization_not_available")
+        if diarize:
+            assert self._diarization_engine is not None
+            assert self._text_aligner is not None
             try:
                 async with self._diarization_admission.reserve():
                     result = await diarize_transcript(

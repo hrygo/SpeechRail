@@ -151,9 +151,14 @@ def test_transcription_job_rejects_diarize_when_capability_is_missing(
     tmp_path: Path,
 ) -> None:
     spool, _repository, job = _job(tmp_path)
+
+    class _ForbiddenTranscriber:
+        async def transcribe(self, request):  # type: ignore[no-untyped-def]
+            raise AssertionError("ASR must not run when diarization cannot be served")
+
     processor = LocalFileJobProcessor(
         spool_dir=spool,
-        batch_transcriber=_BatchTranscriber(),
+        batch_transcriber=_ForbiddenTranscriber(),
     )
 
     with pytest.raises(JobProcessingError, match="diarization_not_available"):
