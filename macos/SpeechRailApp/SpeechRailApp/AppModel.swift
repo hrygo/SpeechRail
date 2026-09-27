@@ -452,16 +452,55 @@ public enum ClonePromptLoadState: Equatable, Sendable {
 @Observable
 public final class AppModel {
     /// 一次配音生成的待保存结果：音频只在内存，身份已固定。
-    /// 只有用户显式保存后才写入作品库；取消、失败或离开页面即丢弃。
-    public struct PendingDubbingRender: Equatable, Sendable {
+    /// 只有用户显式保存后才写入作品库。
+    ///
+    /// 这里的每一个字段都在**生成结束的那一刻**定下来。保存时不得回头读取 UI
+    /// 当前的语速、音色或文稿去重写身份——那样存下来的作品会描述一次根本没发生
+    /// 过的生成。
+    public struct PendingDubbingRender: Hashable, Sendable {
+        /// 本次生成的轻量代号。UI 的比较与动画只看它，不深比较音频字节。
+        public let renderID: String
+        /// 幂等键：同一次生成无论保存多少次重试，都落到同一个作品 ID。
+        public let workID: String
         public let scriptText: String
         public let voiceID: String
         public let voiceName: String
         public let voiceRevision: String?
         public let planID: String?
         public let speed: Double
+        public let responseFormat: String
+        /// 同文稿同音色的第几次渲染，生成时定下，不在保存时重算。
+        public let renderRevision: Int
         public let durationSeconds: Double?
         public let audioData: Data
+
+        public init(
+            renderID: String,
+            workID: String,
+            scriptText: String,
+            voiceID: String,
+            voiceName: String,
+            voiceRevision: String?,
+            planID: String?,
+            speed: Double,
+            responseFormat: String = "wav",
+            renderRevision: Int,
+            durationSeconds: Double?,
+            audioData: Data
+        ) {
+            self.renderID = renderID
+            self.workID = workID
+            self.scriptText = scriptText
+            self.voiceID = voiceID
+            self.voiceName = voiceName
+            self.voiceRevision = voiceRevision
+            self.planID = planID
+            self.speed = speed
+            self.responseFormat = responseFormat
+            self.renderRevision = renderRevision
+            self.durationSeconds = durationSeconds
+            self.audioData = audioData
+        }
 
         public var generatedTitle: String {
             CreativeWork.generatedTitle(fromScript: scriptText)
@@ -471,6 +510,15 @@ public final class AppModel {
             guard let durationSeconds else { return nil }
             let totalSeconds = max(0, Int(durationSeconds.rounded()))
             return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+        }
+
+        /// 身份相同即视为同一次生成：比较 `renderID` 而不是整段音频。
+        public static func == (lhs: PendingDubbingRender, rhs: PendingDubbingRender) -> Bool {
+            lhs.renderID == rhs.renderID
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(renderID)
         }
     }
 
@@ -2873,7 +2921,11 @@ public final class AppModel {
         speed: Double
     ) {
         guard synthesisTask == nil, !isCreatingSpeech else { return }
-        pendingDubbing = nil
+        // 已完成但未保存的结果不能被新一次生成静默顶掉：用户要先保存或明确放弃。
+        guard pendingDubbing == nil else {
+            creatorMessage = "当前还有一段未保存的配音，请先保存或放弃后再重新生成。"
+            return
+        }
         workPlaybackMessage = nil
         synthesisTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2882,30 +2934,36 @@ public final class AppModel {
         }
     }
 
+    /// 取消进行中的生成。已经生成完成、只是还没保存的结果不受影响——那是用户
+    /// 的数据，不该因为取消另一次生成而被顺带丢掉。
     public func cancelSynthesis() {
         synthesisTask?.cancel()
+    }
+
+    /// 显式放弃未保存的配音。只有用户点了"放弃"才会走到这里。
+    public func discardPendingDubbing() {
         pendingDubbing = nil
+        workPlaybackMessage = nil
     }
 
     /// 把已生成的待保存配音写入作品库。返回 nil 表示没有待保存内容或保存失败。
+    ///
+    /// 幂等：`workID` 在生成时就冻结了，所以双击、重试、以及"写入成功但列表刷新
+    /// 失败后再点一次"都只会得到同一条作品，而不是每次多一条。
     @discardableResult
     public func savePendingDubbing() -> CreativeWork? {
         guard let pending = pendingDubbing else { return nil }
-        let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let work = CreativeWork(
-            id: workID,
+            id: pending.workID,
             title: pending.generatedTitle,
             scriptText: pending.scriptText,
             voiceID: pending.voiceID,
             voiceName: pending.voiceName,
             voiceRevision: pending.voiceRevision,
             planID: pending.planID,
-            renderRevision: (try? workStore.nextRenderRevision(
-                scriptText: pending.scriptText,
-                voiceID: pending.voiceID
-            )) ?? 1,
+            renderRevision: pending.renderRevision,
             durationSeconds: pending.durationSeconds,
-            audioFileName: "\(workID).wav"
+            audioFileName: "\(pending.workID).wav"
         )
         do {
             try workStore.save(work, audioData: pending.audioData)
@@ -2979,14 +3037,26 @@ public final class AppModel {
             )
             let data = render.audioData
             try Task.checkCancellation()
-            // 生成结果只放内存：用户显式保存后才进入作品库。
+            // 生成结果只放内存：用户显式保存后才进入作品库。身份在此刻定下，
+            // 之后无论 UI 怎么改，保存的元数据都描述这一次真实的生成。
+            let workID = "work_" + UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
             let pending = PendingDubbingRender(
+                renderID: "render_" + UUID().uuidString
+                    .replacingOccurrences(of: "-", with: "")
+                    .lowercased(),
+                workID: workID,
                 scriptText: scriptText,
                 voiceID: voice.id,
                 voiceName: voice.name,
                 voiceRevision: render.voiceRevision,
                 planID: render.planID,
                 speed: speed,
+                renderRevision: (try? workStore.nextRenderRevision(
+                    scriptText: scriptText,
+                    voiceID: voice.id
+                )) ?? 1,
                 durationSeconds: audioPlaybackController.duration(for: data),
                 audioData: data
             )

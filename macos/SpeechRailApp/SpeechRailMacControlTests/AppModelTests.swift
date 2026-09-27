@@ -1631,3 +1631,280 @@ extension AppModelTests {
         )
     }
 }
+
+// MARK: - (m) 显式保存：只保存一次、身份冻结、不静默丢弃
+
+/// 正式制作路径的可控替身：返回合法 WAV，并记录每次 render 的身份参数。
+private actor ScriptedRenderClient: SpeechRailCreatorClient {
+    private(set) var renderCalls: [(text: String, voiceID: String, speed: Double)] = []
+    private let audio: Data
+
+    init(audio: Data) {
+        self.audio = audio
+    }
+
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        audio
+    }
+
+    func createSpeechRender(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> SpeechRenderResult {
+        renderCalls.append((text, voiceID, speed))
+        return SpeechRenderResult(
+            audioData: audio,
+            planID: "plan_frozen_at_generation",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef"
+        )
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func deleteVoice(id: String) async throws {}
+
+    func createVoiceDesignCandidate(
+        voiceID: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int
+    ) async throws -> VoiceQualityReportSnapshotV2 {
+        throw ServiceAPIClientError.requestFailed
+    }
+}
+
+/// 写盘失败的 FileManager，用来验证"保存失败仍保留 pending、可重试"。
+private final class FailingWriteFileManager: FileManager {
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+}
+
+extension AppModelTests {
+    private static func renderVoice() -> CreatorVoice {
+        CreatorVoice(id: "ryan", name: "动感英语男声", available: true, mode: "system")
+    }
+
+    private func makeRenderModel(
+        store: CreativeWorkStore,
+        creator: any SpeechRailCreatorClient
+    ) -> AppModel {
+        AppModel(
+            transport: ClosureControlTransport { request in
+                Self.modelCatalogResponse(for: request)
+            },
+            apiClient: UnavailableDiagnosticsClient(),
+            discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
+            creatorClient: creator,
+            workStore: store
+        )
+    }
+
+    /// 生成、播放、导出不入库；显式保存只增加一条；重复保存仍是同一条。
+    func testExplicitSaveAddsExactlyOneWorkAndIsIdempotent() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let audio = silentPreviewWAV(marker: 0x20)
+        let creator = ScriptedRenderClient(audio: audio)
+        let model = makeRenderModel(store: store, creator: creator)
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "  这是一段用于验证显式保存的文稿。  ",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let pending = try XCTUnwrap(model.pendingDubbing)
+
+        // 生成本身不写库；播放与导出也只读内存。
+        XCTAssertEqual(try store.list().count, 0, "生成不自动入库")
+        model.playPendingDubbing()
+        XCTAssertEqual(try store.list().count, 0, "播放不自动入库")
+
+        // 显式保存：恰好一条。
+        let saved = try XCTUnwrap(model.savePendingDubbing())
+        XCTAssertEqual(try store.list().count, 1)
+        XCTAssertNil(model.pendingDubbing, "保存成功后清空待保存状态")
+        XCTAssertEqual(saved.id, pending.workID, "作品 ID 必须是生成时冻结的幂等键")
+
+        // 再次点击保存（双击）：待保存状态已清空，因此是空操作，不新增作品。
+        XCTAssertNil(model.savePendingDubbing())
+        XCTAssertEqual(try store.list().count, 1)
+
+        // 存储层按 id 去重：同一个 workID 重复写入仍是同一条，不会变成两份。
+        try store.save(saved, audioData: audio)
+        let works = try store.list()
+        XCTAssertEqual(works.count, 1, "同一次生成重复保存只应有一条作品")
+        XCTAssertEqual(works.first?.id, saved.id, "幂等键必须落在同一条作品上")
+    }
+
+    /// 保存的字节就是试听的那段，元数据取自冻结的 pending，而不是当前 UI 选项。
+    func testSavedWorkCarriesTheFrozenGenerationIdentity() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-identity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let audio = silentPreviewWAV(marker: 0x40)
+        let model = makeRenderModel(store: store, creator: ScriptedRenderClient(audio: audio))
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "身份冻结验证文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let pending = try XCTUnwrap(model.pendingDubbing)
+        let work = try XCTUnwrap(model.savePendingDubbing())
+
+        XCTAssertEqual(work.id, pending.workID)
+        XCTAssertEqual(work.voiceID, pending.voiceID)
+        XCTAssertEqual(work.voiceName, pending.voiceName)
+        XCTAssertEqual(work.voiceRevision, pending.voiceRevision)
+        XCTAssertEqual(work.planID, pending.planID)
+        XCTAssertEqual(work.renderRevision, pending.renderRevision)
+        XCTAssertEqual(work.scriptText, pending.scriptText, "文稿两端空白应已归一")
+
+        let written = try store.loadAudio(for: work)
+        XCTAssertEqual(written, pending.audioData, "保存的字节必须就是试听的那段")
+        XCTAssertEqual(written, audio)
+
+        // 同文稿同音色再次生成：renderRevision 递增，但仍是新的一次生成。
+        _ = await model.synthesizeAndSave(
+            text: "身份冻结验证文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let second = try XCTUnwrap(model.pendingDubbing)
+        XCTAssertEqual(second.renderRevision, 2)
+        XCTAssertNotEqual(second.workID, pending.workID, "新一次生成是新的作品")
+        XCTAssertNotEqual(second.renderID, pending.renderID, "新一次生成是新的 render 身份")
+        XCTAssertTrue(second.renderID.hasPrefix("render_"))
+    }
+
+    /// 保存失败必须保留 pending 以便重试，且不得留下半条作品。
+    func testFailedSaveKeepsPendingAndAllowsRetry() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-fail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let failing = CreativeWorkStore(
+            directory: directory,
+            fileManager: FailingWriteFileManager()
+        )
+        let audio = silentPreviewWAV(marker: 0x60)
+        let model = makeRenderModel(store: failing, creator: ScriptedRenderClient(audio: audio))
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "保存失败应当保留待保存结果。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let pending = try XCTUnwrap(model.pendingDubbing)
+
+        XCTAssertNil(model.savePendingDubbing(), "写盘失败时返回 nil")
+        XCTAssertEqual(model.pendingDubbing, pending, "失败后必须还能重试")
+        XCTAssertNotNil(model.creatorMessage)
+
+        // 换一个可写的 store 重试：同一次生成仍然只落一条。
+        let good = CreativeWorkStore(directory: directory)
+        let healthy = makeRenderModel(store: good, creator: ScriptedRenderClient(audio: audio))
+        await healthy.refreshDiscovery()
+        _ = await healthy.synthesizeAndSave(
+            text: "保存失败应当保留待保存结果。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        _ = healthy.savePendingDubbing()
+        XCTAssertEqual(try good.list().count, 1)
+    }
+
+    /// 未保存的结果不会被下一次生成静默顶掉；只有显式放弃才会丢弃。
+    func testUnsavedPendingIsNotSilentlyDiscardedByANewGeneration() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-pending-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let creator = ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x10))
+        let model = makeRenderModel(store: store, creator: creator)
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "第一段未保存的文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let first = try XCTUnwrap(model.pendingDubbing)
+
+        model.startSynthesisAndSave(
+            text: "第二段文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        XCTAssertEqual(model.pendingDubbing, first, "未保存的结果不能被静默丢弃")
+        XCTAssertNotNil(model.creatorMessage)
+
+        // 显式放弃之后才可以重新生成。
+        model.discardPendingDubbing()
+        XCTAssertNil(model.pendingDubbing)
+        model.startSynthesisAndSave(
+            text: "第二段文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.pendingDubbing?.scriptText, "第二段文稿。")
+
+        // 取消进行中的生成不影响已完成但未保存的结果。
+        let second = try XCTUnwrap(model.pendingDubbing)
+        model.cancelSynthesis()
+        XCTAssertEqual(model.pendingDubbing, second)
+    }
+}

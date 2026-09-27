@@ -674,9 +674,17 @@ public struct DubbingDeskView: View {
                 }
                 .accessibilityLabel("保存到作品库")
                 .disabled(model.isCreatingSpeech)
+
+                Button {
+                    model.discardPendingDubbing()
+                } label: {
+                    SpeechRailButtonLabel("放弃", icon: .delete)
+                }
+                .accessibilityLabel("放弃这段未保存的配音")
+                .disabled(model.isCreatingSpeech)
             }
 
-            Text("试听通过后再保存：保存前作品库不会新增。")
+            Text("试听通过后再保存：保存前作品库不会新增。放弃后无法找回这段音频。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
