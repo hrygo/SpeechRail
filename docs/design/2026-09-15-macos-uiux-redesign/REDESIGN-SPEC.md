@@ -127,7 +127,7 @@ Logo 的工业声学基因继续作为**色彩与比例**语言存在，不再�
 | 侧边栏 | `NavigationSplitView` 系统侧边栏（自动获得 macOS 26 玻璃） | 自绘 `.background` |
 | 工具栏 | 系统 unified compact 工具栏（保留现有 `.unifiedCompact(showsTitle: false)` 与 `ToolbarSpacer`） | `.toolbarBackground` / `.toolbarBackgroundVisibility` 覆盖 |
 | 内容面板 | `Color(nsColor: .controlBackgroundColor)` 或 `.regularMaterial` | 自绘渐变 + 0.5px 描边的 `speechRailContentSurface()` |
-| 可编辑表面 | 两档，都带 1pt `Color.borderStrong` 边界 + 系统焦点环：表单字段 = 稿值 `Color.inputField`（`surface/field`）；编辑卡 = 稿值 `Color.field`（`surface/content`），边界圈**整张卡**（§11.6 第五十一 / 五十三轮） | `speechRailRecessedSlot()` 的内阴影/反光双描边；`.textBackgroundColor`（本机与卡片逐位同色，等于没有边界）；页面级编辑卡曾被当成表单字段，页脚也飘在卡外 |
+| 可编辑表面 | 两档，都带 1pt `Color.borderStrong` 边界 + 系统焦点环：表单字段 = 稿值 `Color.inputField`（`surface/field`）；编辑卡 = 稿值 `Color.field`（`surface/content`），边界圈**整张卡**（§11 第五十一 / 五十三轮） | `speechRailRecessedSlot()` 的内阴影/反光双描边；`.textBackgroundColor`（本机与卡片逐位同色，等于没有边界）；页面级编辑卡曾被当成表单字段，页脚也飘在卡外 |
 | 分隔 | 系统 `Divider()` 与滚动边缘效果 | `speechRailSleeperDivider()`、`milledBevel` 描边 |
 | 浮起层 | 仅窗口级浮层（浮动的播放/生成结果条）使用系统材质或 `glassEffect` | 静态卡片上的 `ambientShadow` |
 
@@ -143,7 +143,7 @@ Logo 的工业声学基因继续作为**色彩与比例**语言存在，不再�
   自绘视图默认不提供，于是「全部交给同心几何」在真实渲染里退化成方角。现在**容器声明一次
   （`Corner.container = 12`，稿 `radius/container`）、叶面同心推导**（`Corner.nested = 8` 只在
   容器给不出半径时兜底）：仍然只有两个数值、不回到「逐处手挑」，但渲染结果确定。
-  量测与决策见 §11.6 第四十六轮与 §12.4 决定 5。
+  量测与决策见 §11 第四十六轮与 §12.4 决定 5。
 
 ### 5.4 颜色
 
@@ -176,7 +176,7 @@ Logo 的工业声学基因继续作为**色彩与比例**语言存在，不再�
 （实测：注意 `systemOrange×0.14` = `#FFF0DB` vs 稿 `#FBEEDA`；成功 `#E2F7E7` vs `#E1F2E8`；
 危险 `#FFE3E2` vs `#FBE4E4`；信息 `#DBECFF` vs `#E1EBFB`），而系统色会随外观、
 Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音台的生成结果条**：§5.2 点名要求
-它用系统材质（见 §11.6 第三十五轮 ②），这条冲突**第五十九轮已裁决：维持规范**，见 §12.4 决定 13。
+它用系统材质（见 §11 第三十五轮 ②），这条冲突**第五十九轮已裁决：维持规范**，见 §12.4 决定 13。
 
 **例外最终是两处，判据是同一条：能用系统自适应的就用系统；只有当系统那一档「同时偏离稿与本 App」
 时才取稿值。**
@@ -267,7 +267,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
 第五十五轮补一条**落点规则**：身份槽是**详情列的 leading 项**（SwiftUI `.navigation` 槽），
 槽内左对齐；`Action` 与系统搜索框在右侧。这条不是审美选择，是「身份必须恒定」的直接推论——
 `.principal` 的落点是左侧组与右侧动作之间剩余空间的中点，只要有工具栏搜索框就整体左移
-135pt，详见 §11.6 第五十五轮。系统侧栏切换入口保留为原生 toolbar 控件；其位置由系统管理，
+135pt，详见 §11 第五十五轮。系统侧栏切换入口保留为原生 toolbar 控件；其位置由系统管理，
 应用不在身份槽内另画一颗重复按钮。
 
 - **身份只有一处**：`PageIdentityToolbarItem(route)` 在窗口组合根（`ControlCenterView` 的
@@ -350,7 +350,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
    因此下限收到 160pt；同日第六度校准（同一句「可接受滚动条、优先原生组件，但大小高度等需要优化」）
    再收到 144pt——160 本来就不是「一行文稿的高度」，而是画板上 3 行示例文稿自然长出来的高度，
    滚动条既已可接受，下限只需保证静止状态看得见 3 行写作区（3 × 20 + 83 → 4pt 网格 144），
-   1–2 行文稿因此变矮、3 行及以上完全不动。见 §11.6 第五、六、十七、二十七、三十二、三十八轮。）
+   1–2 行文稿因此变矮、3 行及以上完全不动。见 §11 第五、六、十七、二十七、三十二、三十八轮。）
 2. 编辑器卡片页脚：分隔线之内、卡片底部**一条固定高度的带**（`Layout.composerMetaRowHeight` = 42pt，
    稿实测 42.5pt），内容在带内竖直居中 —— 字数 `n / 上限 字`（超限时 `.red` + 图标）在左，「清空」为
    `.borderless` 次要动作（橡皮擦图标 + 文字，与稿的 `editor/meta` 一致）在右。计数属于它计数的那个
@@ -395,7 +395,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
    不依赖编辑器内部报告的理想高度。区间同样套在整张卡（正文 + 引导行 + 分割线 + 页脚）上。
    描述框下方一行 tertiary 引导（稿的 `promptField/hint`：「继续描述场景、听众或情绪，候选之间的差异会更明显。」）；
    卡片页脚左为字数（`n / 上限 字`）、右为保存门禁说明（稿的 `promptCard/meta`：「真实预览未返回前不可保存」），
-   竖直方向按 `Control.compactHeight`（28pt）居中——这一档比配音台的 42pt 紧，整卡 160pt 才算得过来（§11.6 第十九轮）；
+   竖直方向按 `Control.compactHeight`（28pt）居中——这一档比配音台的 42pt 紧，整卡 160pt 才算得过来（§11 第十九轮）；
    再下方一行声学特征 chips（横向滚动，点击追加）。chips 使用系统胶囊样式 + 琥珀语义色。
 2. **参考文案与保存名称**：折叠进「更多设置：参考文案与保存名称」（稿的 `promptCard/foot` 标签，把折叠区
    装了什么写在标签上），默认展开时填入合理默认值（参考文案、由描述派生的名称）。
@@ -445,7 +445,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
 
 这一页的第一版把 Prometheus / Grafana 的读法直接当成界面文案（「请求速率 0.42 /s」「窗内均值」
 「直方图摘要 · 累计口径」「资源脉冲」），用户的原话是「我现在都看不懂监控的啥」。
-2026-09-16 用户复核后按下面重写（过程见 §11.6 第六十三轮）。
+2026-09-16 用户复核后按下面重写（过程见 §11 第六十三轮）。
 
 - 页首一句话说明这一页看什么：**「服务最近在做什么、快不快、占多少内存」**。
   原先的「最近 n 个样本 · 刷新间隔 5 秒」讲的是采样机制，没有一个字在说这一页看什么。
@@ -479,7 +479,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
   那是无数据，不是 0。**但单调计数器缺失的序列按 0 处理**：序列只在第一次自增时出现，
   「没有失败过、没有请求被拒绝过」的真相是序列根本不存在，此时显示「— 等待样本」
   会把「一次都没有」讲成「读不到」，恰好是这一页最该避免的读法。
-- 主图**一张卡、一个坐标系、两套刻度**（2026-09-16 用户复核「为何搞俩坐标系？」「合并到一个坐标系」后改定，过程见 §11.6 第六十五轮）：
+- 主图**一张卡、一个坐标系、两套刻度**（2026-09-16 用户复核「为何搞俩坐标系？」「合并到一个坐标系」后改定，过程见 §11 第六十五轮）：
   面积读**左轴**（请求量，整数刻度），折线读**右轴**（耗时毫秒，刻度取 1 / 2 / 2.5 / 5 × 10ⁿ 整档），
   两者用一个线性比例对齐——单位不同不能共用一根刻度，但也不需要两张图。
   实时档的面积是「实时语音会话 + 单次请求」，历史档的面积是「每个统计桶的合成 / 识别次数」；
@@ -497,7 +497,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
   表体**不再交给系统 `Table`**：那张表自带不透明底色（深色 `#1E1E1E`）、**隔行底纹**
   （`usesAlternatingRowBackgroundColors`，第二行铺一层 5% 白）与表头列分隔线，
   三样都不在 token 里；在 `Color.field` 卡面里它读起来像「贴上来的一块别的表面」，
-  隔行底纹还会被误读成选中行（§11.6 第六十八轮）。
+  隔行底纹还会被误读成选中行（§11 第六十八轮）。
   组件名一律用用户语言：服务的 `workers` 键里有 `streaming`，映射表缺它时表里会直接露出英文。
   **时延不按 worker 拆分**：服务端只在 `speechrail_tts_inference_duration_seconds` 上带
   `voice_class`（`system` / `custom` / `clone`）这一个维度，所以「不同音色类型的合成耗时」
@@ -506,7 +506,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
   不同音色类型的耗时、累计统计收进一张默认收起的「更多细节」卡内。
   累计统计的表头必须写明「累计平均」，副行说明「当下的快慢看页面顶部的数字」，
   平均值带单位（耗时毫秒 / 倍率不带单位），指标名翻成用户语言、原文留在开发者详情里。
-- **耗时一律按毫秒读**（2026-09-17 用户指令「时间单位改 ms」，过程见 §11.6 第六十九轮）：
+- **耗时一律按毫秒读**（2026-09-17 用户指令「时间单位改 ms」，过程见 §11 第六十九轮）：
   首屏的合成 / 识别耗时、直方图累计平均、右轴刻度、折叠详情、复制摘要、无障碍描述符
   都走同一处换算（`RuntimeLatencyPresentation`）；**音频时长**（「12.34 秒音频」）与
   **历史跨度**（「每 5 分钟」）是另一种量，仍按秒 / 分钟说人话。
@@ -555,7 +555,7 @@ Increase Contrast 与用户选择的强调色自适应。**唯一例外是配音
    动作行下方，不沉到制品卡后面（第二十六轮）。
    按钮下方只保留**一条**会改变判断的说明，按「服务消息 → 助手占用 → 待补齐」取最急的一条，
    用 `NoticeBar` 承载；此前四条同色同字号小字叠在一起，读不出哪条更急。
-4. **模型文件列表**：每个文件显示 key、来源（脱敏 model ID）、精度、文件数、校验状态。页面上这一节叫「模型文件」，不叫「制品」；行头的机器名（`aligner-bf16` 等）保留，因为它是与诊断输出对照的锚点。这一节列的是**这一档要用的全部文件**（含不在目录里的锁定分人资产），精度列只有一套说法：一律读位数（`8-bit` / `16-bit`），未量化的制品由权重数值格式换算，读不出来时写「未读取」（§4.2、§11.6 第七十一轮）。卡头右端给这一张表自己的进度（`已就绪 3/5`），与结论面板的整页差口口径不同，分开写。
+4. **模型文件列表**：每个文件显示 key、来源（脱敏 model ID）、精度、文件数、校验状态。页面上这一节叫「模型文件」，不叫「制品」；行头的机器名（`aligner-bf16` 等）保留，因为它是与诊断输出对照的锚点。这一节列的是**这一档要用的全部文件**（含不在目录里的锁定分人资产），精度列只有一套说法：一律读位数（`8-bit` / `16-bit`），未量化的制品由权重数值格式换算，读不出来时写「未读取」（§4.2、§11 第七十一轮）。卡头右端给这一张表自己的进度（`已就绪 3/5`），与结论面板的整页差口口径不同，分开写。
 5. **按需能力**（2026-09-27 第七十二轮新增）：说话人区分、音色创作、实时语音断句合并为**一张卡**，
    每行是「这一项是干什么的 + 一个状态胶囊 + 一行服务自己的运行态」。三项都不随档位变化，
    合在一张卡里之后「它们和上面的档位模型不是一回事」才看得出来——上面那张表随档位换，
@@ -603,7 +603,7 @@ SpeechRail · 服务已就绪 · 精准      (不可点状态行)
 
 菜单行下限 **26pt**（稿 `menuRow`；系统菜单项本身约 22pt）——`Menu.rowHeight` 不用
 `Interaction.minimumHitTarget`(44)：那会让面板与每个页面的工具栏动作菜单都变成两倍高的列表行，
-而菜单项的整行本来就是可点区域（REDESIGN-SPEC §11.6 第三十三轮；离屏实测行标签固有高度
+而菜单项的整行本来就是可点区域（REDESIGN-SPEC §11 第三十三轮；离屏实测行标签固有高度
 288 × 44 → 288 × 26）。
 
 ### 7.10 设置 (Settings)
@@ -613,7 +613,7 @@ SpeechRail · 服务已就绪 · 精准      (不可点状态行)
 **尺寸**：窗口 640 宽（稿 `settingsWindow`），高度按三个页签里最高的一页锁定（稿
 `buildMenuAndSettings` 把三个窗口拉平，切页签不跳）。应用取值 640 × 454
 （`Layout.settingsWindowMinimumWidth` / `settingsWindowMinimumHeight`，454 含系统 `TabView`
-的 33pt 页签条；§11.6 第三十三轮实测）。
+的 33pt 页签条；§11 第三十三轮实测）。
 
 **行结构**：每一行是「标题 + 行内副标题」（稿 `controlRow` 的 `labels` 列，`gap: 3`），
 说明文字**不另起一行**——独立成行会被 grouped `Form` 加分隔线，读起来像两个设置项。
@@ -648,7 +648,7 @@ SpeechRail · 服务已就绪 · 精准      (不可点状态行)
 | Increase Contrast | 不使用纯装饰描边，对比由系统语义色保证 |
 | 键盘 | §6.3 全部命令可达；焦点环使用系统焦点样式 |
 
-**「动态字体」一行的 macOS 口径**（2026-09-16 实测，见 §11.6 第三十七轮）：`.dynamicTypeSize(_:)`
+**「动态字体」一行的 macOS 口径**（2026-09-16 实测，见 §11 第三十七轮）：`.dynamicTypeSize(_:)`
 对 macOS 的 SwiftUI 系统文本样式**不生效**（`body` 22px、`title` 38px、`caption` 18px 在
 `large → accessibility5` 之间逐像素相同）。所以这项要求的落地方式是两条代码属性——**全部文本走系统
 文本样式**、**容器用 `minHeight` 而不是 `height`**——加上一次真机走查：把系统「辅助功能 → 显示 →
@@ -677,7 +677,7 @@ VoiceOver 实测、UI 自动化测试（AGENTS.md 硬约束），因此本文不
 进程稳定且无崩溃日志。**注意**：macOS 不会替换运行中 App 的代码，安装后必须退出并重开
 才能看到新 UI——否则会误判为「装了没生效」。视觉与无障碍结论仍待人工走查。
 
-第三轮（2026-09-15 20:5x）：改以 Figma 生成器 `figma-kit/main.js` 的结构定义（节点、布局、
+第三轮（2026-09-15 20:5x）：改以 Figma 生成器的结构定义（节点、布局、
 文本样式、变量绑定）为对照基准，而不是只看导出的 PNG。据此发现候选卡头部与设计不一致：
 设计稿 `Candidate Tile`（组件定义与页面实例一致）是三段头部——槽位名 `候选 1`（Body / Medium、
 主文本色）→ 状态胶囊 → 右对齐 `seed 101`（Caption / tertiary），实现却多画了一个 32pt 琥珀方块、
@@ -759,108 +759,15 @@ legacy 机架代码删除（6 个枚举 + 5 个类型 + `Corner` 枚举 + `Speec
 状态：**已完成**（2026-09-15）。八页均按 §7 各自规格重建，`docs/developers/macos-app-design-system.md`
 已同步到 v0.8.0（含 §3.1 token 表与 §4.2 页面规则的 v2 语义），不再与新旧两套规范并行。
 
-## 11. Figma 构建规格
+## 11. 交付台账（2026-09-15 起逐轮标定）
 
-> 本节给出可直接在 Figma 中重建的精确规格；由于它是设计交付的一部分，数值即为设计事实来源。
+> Figma 生成器链路已于 2026-09-27 移除（脚本、插件包与交接文档一并删除）。本节保留的是**每轮
+> 标定的结论与理由**，不再是可重放的构建流程。
+> 台账里出现的 `§11.1`–`§11.5`（页面结构 / Frames / Variables / 组件清单 / 原型连线）指的都是
+> **已删除的 Figma 构建目标规格**，相关行只作历史记录；现在的设计事实来源是 §5–§9 与
+> `docs/developers/macos-app-design-system.md`。
 
-### 11.1 页面结构
-
-> 下表是目标结构；7 页现已全部生成，实际产物、原型连线与自检结论见 §11.6。
-
-| Figma Page | 内容 |
-|---|---|
-| `00 Cover` | 命名、版本、日期、状态（Proposed） |
-| `01 Foundations` | 颜色变量、文本样式、间距、圆角、图标、动效说明 |
-| `02 Components` | 组件与变体（见 §11.4） |
-| `03 Flows` | 三条主流程连线图 |
-| `04 Screens` | 8 个页面 × 深/浅 × 关键状态 |
-| `05 Menu & Settings` | 菜单栏菜单、设置窗口 |
-| `06 Archive` | 旧版机架视觉，仅作历史对照 |
-
-### 11.2 Frames
-
-| Frame | 尺寸 | 说明 |
-|---|---|---|
-| 主窗口 | 1440 × 900 | 默认设计尺寸 |
-| 主窗口（最小） | 1120 × 720 | 窄窗口回归 |
-| 主窗口（宽） | 1920 × 1080 | 宽屏回归 |
-| 设置窗口 | 640 × 内容撑高 | 宽固定 640；高按内容取高，三个标签页对齐到最高面板（见 §11.6） |
-| 菜单栏菜单 | 288 宽 | 自适应高 |
-
-侧边栏固定 240pt（最小 220 / 最大 280），内容区随窗口伸展。
-
-### 11.3 变量（Variables）
-
-颜色（`color` 集合，含 Light / Dark 两种 mode）：
-
-```
-accent/rail            #2A4E57 / #4FA4BA
-accent/voice           #D97706 / #F59E0B
-status/ready           #059669 / #10B981
-status/attention       #D97706 / #F59E0B
-status/critical        #DC2626 / #EF4444
-status/info            #2563EB / #38BDF8
-surface/content        (系统 controlBackgroundColor 等价)
-surface/field          (系统 textBackgroundColor 等价)
-surface/divider        (系统 separatorColor 等价)
-text/primary           (系统 labelColor 等价)
-text/secondary         (系统 secondaryLabelColor 等价)
-```
-
-数值（`number` 集合）：
-
-```
-space/2 4 8 12 16 20 24 32 48
-radius/concentric      12   （容器，嵌套时由外层推导）
-radius/field            8
-stroke/hairline         0.5  （仅系统无法表达时）
-control/height         28 34 40
-hit/min                44
-sidebar/width         220 240 280
-```
-
-文本样式（`text` 集合）：`LargeTitle`、`Title2`、`Headline`、`Body`、`Callout`、`Subheadline`、`Caption`、`Caption2`，外加 `Mono/Numeric`（系统文本样式 + tabular figures）。
-
-### 11.4 组件清单
-
-每个组件标注变体轴与关键尺寸；所有可交互组件必须有 `hover` / `focused` / `disabled` 变体。
-
-| 组件 | 变体轴 | 说明 |
-|---|---|---|
-| `SidebarItem` | state(默认/选中/hover)、group(创作/引擎) | 16pt 图标 + 标签，选中由系统强调色承担 |
-| `SidebarStatus` | tone(ready/attention/critical/neutral) | 状态点 + 文本 + chevron |
-| `ToolbarTitle` | — | 单行固定槽位，尾截断 |
-| `ToolbarActions` | — | 图标按钮组 + 溢出 |
-| `StatusConclusion` | tone(4) | 图标 + 结论 + 影响 + 主动作 |
-| `StatusBanner` | tone(4) | 页面内联条，含可选动作 |
-| `VoicePickerCapsule` | state(默认/展开/禁用) | 波形图标 + 名称 + 徽标 |
-| `VoicePickerRow` | state(默认/hover/播放中/不可用) | 名称 + 描述 + 试听按钮 |
-| `VoiceBadge` | source(系统/我的) | 琥珀语义徽标 |
-| `SpeedControl` | state(可用/锁定) | Slider + Stepper + 数值 |
-| `PrimaryAction` | state(默认/进行中/禁用) | 40pt 高，含 `⌘⏎` 提示 |
-| `ResultBar` | state(成功/失败) | 波形 + 播放 + 次要动作 |
-| `CandidateTile` | state(生成中/可试听/已保存/失败) | 2×2 网格单元 |
-| `WorkRow` | state(默认/hover/播放中) | 标题 + 音色 + 时间 + 时长 + 播放 |
-| `EmptyState` | kind(无数据/无结果/能力缺失) | 图标 + 标题 + 说明 + 动作 |
-| `MetricRow` | — | 标签 + 等宽数值 + 单位 |
-| `ChartPanel` | — | 折线图标题 + 时间窗 + 图例 |
-| `ProfileCard` | state(选中/可用/未准备) | 档位名 + 适用场景 + 差异 + 动作 |
-| `ArtifactRow` | state(已校验/缺失/校验失败) | 制品 key + 量化 + 文件数 + 状态 |
-| `DiagnosticRow` | state(通过/注意/失败) | 图标 + 名称 + 一句话 |
-
-### 11.5 原型连线
-
-1. **配音主流程**：配音台输入文稿 → 选择音色（popover 试听）→ 生成 → 结果条播放/导出。
-2. **音色创作流程**：描述 → 生成候选 → 试听 A/B → 保存 → 音色库出现。
-3. **受阻恢复流程**：配音台能力缺失 → 去模型页切档 → 返回配音台重试。
-
-工具写入的原型连线只覆盖**同一页内的顶层 frame**：Figma 插件 API 在目标节点跨页或嵌在画板内部时会拒绝这条反应。
-因此 `04 Screens` 内 16 帧之间的侧边栏导航与状态行入口已自动连好（126/126 生效），而上面三条流程的连线、
-以及设置窗口内的跳转需要在 Figma 里手动补。
-
-### 11.6 实际交付（2026-09-15）
-
-本节记录**已经生成并核对过的** Figma 产物，与上面的目标规格区分开。
+本节的第一份记录是 2026-09-15 的实际交付。
 
 | 项 | 事实 |
 |---|---|
@@ -873,11 +780,6 @@ sidebar/width         220 240 280
 | 文档页 | `03 Flows` 1688 × 861（三条主流程 + 步骤箭头）；`05 Menu & Settings` 2144 × 1529（菜单面板 ×3：默认 / 控制受限 / 深色，菜单栏状态项 ×2，设置窗口 ×3：通用 / 创作 / 服务）；`06 Archive` 1688 × 897（迁移前机架 vs 迁移后系统材质，另有「保留的 DNA」「移除的部分」两栏清单） |
 | 画板总数 | 22 帧 = Cover 1 + Foundations 1 + Components 1 + Flows 1 + Screens 16 + Menu & Settings 1 + Archive 1；每个文档页只有 1 个顶层 frame，多出来的顶层节点会被自检报为 stray |
 | 原型连线 | 126/126 生效：`04 Screens` 内 8 × 8 的侧边栏导航（跳过指向自身的那一格）+ 每帧状态行 → 服务状态；跨页与画板内部的连线不由插件写入，见 §11.5 |
-| 生成器 | [`figma-kit/`](figma-kit/)：本机 Figma **开发插件**（`manifest.json` + `main.js` + `icons.js` + `build.js`），不是 Figma 官方插件 |
-
-运行方式：`node figma-kit/build.js` 生成 `code.js` 并同步到 `~/Downloads/SpeechRail-figma-kit/`，然后在 Figma
-**Plugins → Development → SpeechRail Design Kit** 执行（`⌥⌘P` 可重跑上一个插件）。生成是幂等的：重跑会清空并重建这 7 页，
-不新增页面；页面重命名（`03 Screens` → `04 Screens`）在清空之前执行，避免上一轮的旧页名留成一张带内容的游离页。
 
 #### 逐页精修（第二轮）
 
@@ -955,7 +857,6 @@ sidebar/width         220 240 280
 - `AUDIT VERDICT · 22 frames · all clean (overflow / inner / unbound-gray / dark-binding / stray)`：22 帧全部通过五项检查。
 - `prototype links: 126/126`、`bind errors: 0`、`no errors`；生成耗时约 4.3 ~ 4.6 s。
 - 审查用 PNG（0.5x）已从最终构建导出：`~/Downloads/Flows.png`、`~/Downloads/Menu & Settings.png`、`~/Downloads/Archive.png`。
-  导出由 `figma-kit/main.js` 顶部的 `EXPORT_PNGS` / `EXPORT_PAGES` 开关控制，默认关闭（构建不应该写文件）。
 
 #### 第四轮：与 App 逐页对齐（仲裁规则 + 改动）
 
@@ -998,7 +899,7 @@ sidebar/width         220 240 280
 | `CreatorSurfaceViews.swift` | 音色创作计数行补上单位，与配音台统一为 `n/上限 字` |
 
 验证状态：`./scripts/macos_app_build.sh --configuration Debug` 与 `xcodebuild … build-for-testing` 均通过（App 与测试目标都编译），
-稿侧只做了 `node --check` 与 `node build.js`；两者的**目视对照需要重跑插件并重新导出**，本轮未执行 UI 自动化，也未做人工矩阵走查。
+稿侧只做了 `node --check` 与；两者的**目视对照需要重跑插件并重新导出**，本轮未执行 UI 自动化，也未做人工矩阵走查。
 
 静态画板与滚动页面的关系（对照时的判据）：8 张屏幕是 **1440 × 900 窗口的首屏**，按「页面主对象 + 主要动作」绘制。
 应用页面比画板长的部分（例如模型页的「目标档位 / 当前服务 / 配置档位 / 模型运行信息」细分卡、运行监控的「直方图摘要」表）在画板上不出现，
@@ -1034,9 +935,6 @@ sidebar/width         220 240 280
 但**本轮未运行测试**（AGENTS.md：自动化验收需当次明确授权）。视觉与滚动条行为需要人工走查确认——
 滚动条策略依赖 `TextEditor` 底层 `NSScrollView` 对 `scrollIndicators` 的响应，本机未做 UI 验证。
 
-**本轮未生成新的 Figma 产物**：`figma-kit` 仍停在第四轮，画板与本文件的 §7.1 / §7.2 / §7.6
-已不一致。要恢复稿与 App 的一致，需要按本节更新 `main.js` 后重跑插件并重新导出。
-
 #### 第六轮：输入区改判（滚动条回归原生）
 
 用户在同日复核后修正了第五轮的第一条实现方向：**滚动条可以接受，优先使用原生组件，只优化大小高度**。
@@ -1063,7 +961,7 @@ sidebar/width         220 240 280
 
 | 条文 | 判据 | 当前证据 | 结论 |
 |---|---|---|---|
-| §5.2 材质 | 面板/输入/浮层只用系统填充，不再自绘渐变与描边 | `SpeechRailSystemSurfaceModifier`：control/panel/inspector = `Color.field` + `containerShape`；elevated = `.regularMaterial` + shadow；`SpeechRailSlotModifier` 三个 case 各取一级稿值（`inputField` / `field` / `recessedField`）。旧的渐变+0.5pt 描边实现已不存在。（第五十 / 五十一 / 五十二 / 五十三轮更新了这条证据：四个中性面改为稿的显式取值，可编辑表面另加 1pt `borderStrong` 边界并分「表单字段 / 编辑卡」两档——见 §11.6 那四轮） | 符合 |
+| §5.2 材质 | 面板/输入/浮层只用系统填充，不再自绘渐变与描边 | `SpeechRailSystemSurfaceModifier`：control/panel/inspector = `Color.field` + `containerShape`；elevated = `.regularMaterial` + shadow；`SpeechRailSlotModifier` 三个 case 各取一级稿值（`inputField` / `field` / `recessedField`）。旧的渐变+0.5pt 描边实现已不存在。（第五十 / 五十一 / 五十二 / 五十三轮更新了这条证据：四个中性面改为稿的显式取值，可编辑表面另加 1pt `borderStrong` 边界并分「表单字段 / 编辑卡」两档——见 §11 那四轮） | 符合 |
 | §5.3 圆角 | 不用手挑的 6/8/14/18 | 全仓无 `.cornerRadius(`；`RoundedRectangle` 只出现在 token 侧（`Waveform.barRadius`，第四十二轮由 `Control.waveformBarRadius` 更名、值 2 → 1 按稿；`Corner.containerShape` 的 12；第四十八轮的 `Corner.controlShape` 的 8）。第四十六轮起改为「容器声明一次 + 叶面同心推导」，并**有意偏离**「不使用手挑半径」：显式声明 `Corner.container = 12` / `Corner.nested = 8`，离屏实测容器就是 12pt `.continuous`、叶面 = 容器半径 − 内缩。第四十八轮把**控件**从推导里摘出来（内缩 ≥ 12 时推导值 ≤ 0，会退化成方角），固定取 `nested`。偏离已记为决策，见 §12.4 决定 5 / 决定 6 | 符合（有记录的有意偏离） |
 | §5.4 颜色 | 双品牌色 + 系统语义色；琥珀只标记声音对象 | `ink*` 已映射 `labelColor/secondaryLabelColor/tertiaryLabelColor`；`rail = Color.accentColor`；`voice` 为琥珀动态色且仅出现在音色徽标、波形、候选卡、音色行与 TTS 序列。**发现 1 处不合**：菜单栏「服务操作进行中」状态点用了琥珀（声音语义），改为 `Color.attention` | 已修 |
 | §5.5 字体 | 只用系统文本样式；除 SF Symbol 尺寸外不出现固定 `size:` | 全仓仅 2 处 `.font(.system(size:`：`SurfaceHeaderView` 的 SF Symbol 尺寸、运行监控图表 12pt 轴标签（§7.6 明确要求）。`.rounded` 设计已删除 | 符合 |
@@ -1114,7 +1012,7 @@ sidebar/width         220 240 280
 
 #### 第十轮：§11 稿侧规格静态核对
 
-§11.1–§11.5 是**目标**规格，§11.6 记录**实际交付**。两者差额此前只在 §11.6 里零散出现，
+§11.1–§11.5 是**目标**规格，§11 记录**实际交付**。两者差额此前只在 §11 里零散出现，
 这一轮按条目对完并把差额写明，避免再出现「规范说 A、产物是 B、没人说清」的情况。
 
 | 条文 | 目标 | 生成器里的实际实现 | 差额 |
@@ -1123,7 +1021,7 @@ sidebar/width         220 240 280
 | §11.2 Frames | 主窗口 1440×900、最小 1120×720、宽 1920×1080、设置 640 宽撑高、菜单面板 288 宽 | `buildShell` 固定 1440×900；菜单面板 `size(panel, 288, …)`；设置窗口 `size(win, 640, …)` | **最小与宽屏回归画板未绘制**：只留下 `size/windowMinW=1120` / `size/windowMinH=720` 两个数值变量。8 张画板都是 1440×900 首屏（第四轮已定判据） |
 | §11.3 Variables | 颜色 + 数值 + 文本样式三组 | 颜色 23、数值 20（含窗口最小尺寸）、文本样式 9 个 | 文本样式用的是应用实际在用的 9 级（`Title / Large`…`Caption / Medium`），不是 §11.3 列的 `LargeTitle/Title2/Headline/…+Mono/Numeric` 命名；两套是命名差异，不是层级差异 |
 | §11.4 组件清单 | 20 个组件，含 hover/focused/disabled 变体 | 11 个 component set（Status Pill、Nav Item、Button/Primary、Button/Secondary、Card、List Row、Candidate Tile、Empty State、TextField、VoiceBadge、Icon Button） | 差额是「页面级结构」与「组件」的分界：§11.4 里像 `ResultBar` / `ChartPanel` / `ProfileCard` / `DiagnosticRow` 这些在稿上是画板内的结构块，没有做成 component set |
-| §11.5 原型连线 | 三条主流程；同页顶层帧之间的导航自动连 | `wirePrototype` 对浅色与深色两组各写 8 帧 × 7 条同页导航 + 7 条状态行 → 服务状态 = 每组 63 条，**合计 126 条**，与 §11.6 的「126/126」在算术上一致；跨页与画板内部连线按插件 API 限制保持手动 | 无（条数可核对；生效与否要重跑插件才能确认） |
+| §11.5 原型连线 | 三条主流程；同页顶层帧之间的导航自动连 | `wirePrototype` 对浅色与深色两组各写 8 帧 × 7 条同页导航 + 7 条状态行 → 服务状态 = 每组 63 条，**合计 126 条**，与 §11 的「126/126」在算术上一致；跨页与画板内部连线按插件 API 限制保持手动 | 无（条数可核对；生效与否要重跑插件才能确认） |
 
 **最小 / 宽屏画板为什么没画**：`buildShell` 的整套外壳（标题栏、侧边栏 240、内容区）按 1440×900 排版，
 要再出 1120×720 与 1920×1080 两版就得为八个页面各排一次，而 1120×720 下的内容必然需要重排
@@ -1162,10 +1060,8 @@ sidebar/width         220 240 280
 再把「样本数据」与「界面文案」分开判断——样本（音色名、作品标题、时间、计数）本来就该不同，
 界面文案必须对得上。
 
-**证据来源更正（用户 2026-09-16 指出）**：`figma-kit/main.js` 不是设计来源，它只是喂给 Figma
-生成稿的脚本；稿的权威证据是用户导出的帧图（`~/Downloads/speechrail-screens-4x/`，16 帧，4x）。
-本轮的逐字比对因此以帧图为准，脚本只作为「下一次生成的输入」。上一批基于脚本做的两处改动
-（能力卡说明、候选 3 保存态）只影响下一次生成，已生成的稿不会自动变。
+**证据来源更正（用户 2026-09-16 指出）**：生成稿的脚本不是设计来源；稿的权威证据是用户导出的帧图
+（`~/Downloads/speechrail-screens-4x/`，16 帧，4x）。本轮的逐字比对因此以帧图为准。
 
 按帧图修掉的差异：
 
@@ -1273,7 +1169,7 @@ sidebar/width         220 240 280
 
 #### 第十五轮：帧的出处、代次判定与剩余五页核对
 
-用户在 2026-09-16 指出 `figma-kit/main.js` 只是喂给 Figma 的生成脚本，不是设计来源。
+用户在 2026-09-16 指出喂给 Figma 的生成脚本不是设计来源。
 本轮的稿侧证据因此固定为**用户导出的帧图**，并把「这批帧是哪一次生成的」查清楚——否则会拿旧一代
 的帧去改新一代的应用。
 
@@ -1711,7 +1607,7 @@ RGB 级差。
 应用此前只有 `List` 默认内边距 + 行内 4pt，行高不可控。三处统一改成行自己给
 `padding(.horizontal, md=16) + padding(.vertical, sm=12)`，并 `listRowInsets(EdgeInsets())` 清零；
 行高因此变成确定的 35 + 24 = 59（残差 4–5，余量来自系统分隔线与行密度）。
-**侧栏不受影响**：稿的侧栏项是 padX 8（`main.js` navItem padX 8 / padY 7），
+**侧栏不受影响**：稿的侧栏项是 padX 8（navItem padX 8 / padY 7），
 `List.rowHorizontalPadding` 仍是 8，留给侧栏那一处。
 
 **④ 同轮核对、不改的两处**：服务状态 · 能力行帧实测 44（`▸ 服务状态.png` y=310..353.75 等六条
@@ -1791,7 +1687,7 @@ RGB 级差。
 
 **先交代口径**：`~/Downloads/speechrail-screens-4x/` 的 16 帧导出于 2026-09-15 22:04，第十五轮
 已判定它在被第四轮改过的页面上是**旧一代**。所以本轮每一处都拿**当前生成脚本**复核一次：
-`figma-kit/main.js:1883-1933`（模型页）与帧完全一致——`profiles` → `actions`（`primaryButton
+（模型页）与帧完全一致——`profiles` → `actions`（`primaryButton
 ("下载并校验", "download", 148)` + `secondaryButton("应用此档位")` 无图标 + 右端磁盘）→ `artifacts`，
 页面栈 `gap: 20`；诊断页两代不一致（见下表），以脚本为准。
 
@@ -1813,7 +1709,7 @@ RGB 级差。
 
 **同轮续做：§7.8 诊断详情卡的动作位置与顺序**。这一页同样做了对账，但**先说清用的是哪一代稿**：
 `▸ 诊断.png`（2026-09-15 22:04 导出）属于第十五轮判定的**旧一代**，上面写的是「技术上下文」、
-「模型校验未完成」、`artifact_key / verify_status`；**当前生成脚本**（`figma-kit/main.js:1979-2090`）
+「模型校验未完成」、`artifact_key / verify_status`；**当前生成脚本**
 已经按第四轮的决定改成应用的真实文案。所以这一页以**当前脚本**为准，不以那张旧帧为准。
 
 | 条目 | 当前脚本 | 改前 | 改后 |
@@ -1946,7 +1842,7 @@ segmented 392.5 → 538.5，差值来自应用多一个 `Stepper` 与系统 segm
 （稿本身是这套脚本生成的，脚本这一处没有兑现它自己的规范），没有改代码。
 
 **本轮验证**：`swiftc -typecheck` 0 error、`git diff --check` 干净；浅色离屏渲染 + 像素扫描见上表。
-同轮把静态自检收进仓库：`figma-kit/audit.js`（`node audit.js`，不需要打开 Figma）实跑结果
+同轮把静态自检收进仓库：（不需要打开 Figma）实跑结果
 **颜色变量 23/23、图标 24/30、文本样式 9/9 全部解析，数字 token 按字面量写、无可解析引用**，
 只有 6 个未用图标（pause / refresh-cw / trash-2 / pencil / copy / x）作为信息项列出，结论 `audit: clean`。
 它检查的是「改动 kit 时有没有留下悬空引用」，与插件在 Figma 里跑的运行时 audit 互补。
@@ -1979,7 +1875,7 @@ segmented 392.5 → 538.5，差值来自应用多一个 `Stepper` 与系统 segm
 所以这不是量测 bug，而是首轮提案；加「宽度过滤」也拦不住（那一刻宽度真的就是 272）。
 最终值在渲染前已经收敛，本轮实测的取图与走查所见都是收敛后的状态。
 
-**结论**：`.contentDriven` 的高度阶梯与 §7.1 / §11.6 第二十七轮的记录一致，代码不变。
+**结论**：`.contentDriven` 的高度阶梯与 §7.1 / §11 第二十七轮的记录一致，代码不变。
 **未构建**（Xcode 许可仍未接受）、**未运行单元测试与 UI 自动化**、**未桌面走查**。
 
 #### 第三十轮：页头副标题把整页最小高度撑到声明的最小窗口之上（真修复）
@@ -2092,7 +1988,7 @@ SwiftUI 认定的页面最小高度；宿主比它矮时内容按底对齐、顶
 **脚本同步**：`size(editor, null, 200)` → `160`（画板只画得到一种状态，取最常见的静止那一档），
 `node --check main.js && node build.js` 通过，`code.js` 142938 bytes，
 SHA-256 `69b9b6b744a70cc470e4c4d3bc35d552a9c9c88a6b6308233a4fabba66329149`，
-已落到 `~/Downloads/SpeechRail-figma-kit/`；`node audit.js` 仍为 `audit: clean`
+已落到 `~/Downloads/SpeechRail-figma-kit/`；仍为 `audit: clean`
 （颜色 23/23、图标 24/30、文本样式 9/9）。
 
 **考虑过、没有采用的写法**：把 `TextEditor` 换成 `TextField(..., axis: .vertical)` +
@@ -2167,7 +2063,7 @@ grouped `Form` 会给它单独一行并画分隔线。改前的离屏渲染证�
 
 **② 声学特征芯片。** 稿与应用的差异比间距大得多：稿是**琥珀底 + 琥珀描边的标注胶囊**，
 应用此前是**灰底、无描边**——在浅色页面里读起来像「禁用 / 占位」控件，语义完全不同
-（§7 早就写着「chips 使用系统胶囊样式 + 琥珀语义色」，一直没落地）。口径：`figma-kit/main.js`
+（§7 早就写着「chips 使用系统胶囊样式 + 琥珀语义色」，一直没落地）。口径：
 是当前一代（`componentSet("Voice Chip", …)`：`gap 4 / padX 10 / padY 3 / radius 999`、
 `surface/attentionTint` 底、1pt `accent/voice` 描边、`Subheadline` 标签），
 `▸ 音色创作.svg` 作矢量尺子（chip rect 82 × 22 @ 281,344；plus 线长 7.58 + 1.08 描边
@@ -2212,7 +2108,7 @@ grouped `Form` 会给它单独一行并画分隔线。改前的离屏渲染证�
 离屏 A/B：300–700pt 空档里的分隔线由 y=158 上移到 **y=154**（上下各收 2pt），与预测一致。
 
 **② 记一条「规范 ↔ 稿」的正面冲突（不改代码）。** 配音台的生成结果条：稿的
-`resultBar`（`main.js` 1367–1370 与 4x 帧 `▸ 配音台.svg` 第 129–130 行）画的是
+`resultBar`（1367–1370 与 4x 帧 `▸ 配音台.svg` 第 129–130 行）画的是
 `fill: surface/railTint`（`#DCE9EE`）+ 1pt `#2A4E57` 描边 + radius 11.5；应用用的是
 `.speechRailSurface(.elevated)`（`.regularMaterial` + 窗口级阴影）。**这一处不是漏做，
 而是规范点名要求的一处**：§5.2 的「浮起层」一行写的正是「仅窗口级浮层（浮动的播放/
@@ -2250,7 +2146,7 @@ ABI 兼容（未做真机启动验证）；（b）`ControlAgentRegistration.ensu
 
 #### 第三十六轮：全量文案核对（稿上的每一句界面文案 vs 应用）
 
-**方法**：把 `figma-kit/main.js` 里所有 `text(id, "…")` 与按钮 / 分段 / 搜索 / 页头辅助函数的
+**方法**：把里所有 `text(id, "…")` 与按钮 / 分段 / 搜索 / 页头辅助函数的
 字符串抽出来（101 + 32 条），逐条在 App 源码里查找。找不到的再人工分类——绝大多数落在两类：
 **画板自身的样张内容**（「星际航行 · 夜航主持」「8 个作品 · 共 11:05」「seed 101」
 「检查标识 diarization_aligner_snapshot」「磁盘：模型已用 6.4 GB · 可用 182 GB」）与
@@ -2262,8 +2158,8 @@ ABI 兼容（未做真机启动验证）；（b）`ControlAgentRegistration.ensu
 | 位置 | 稿 | 应用（改前） | 处置 |
 |---|---|---|---|
 | 侧栏搜索占位符 | 「搜索」（4x 帧 `▸ 配音台.png` 侧栏顶部就是这两个字） | 「搜索创作和服务」 | 改成稿的「搜索」 |
-| 运行监控 · 运行组件说明带（`main.js` 1837） | 「worker 生命周期状态；ASR、双 TTS lane 与分人各自独立常驻。」 | 「指标为最近样本的平均值；…」 | 改回稿的句子——那张卡的表列就是「组件 / 状态」，原句讲的是上面的窗口指标 |
-| 配音失败条标题（`main.js` 912） | 「生成未完成：服务端没有返回音频」 | 「配音未完成」 | 标题取稿的前半句「生成未完成」；原因仍由服务端的真实文案单独成行（稿的示例句不能钉死） |
+| 运行监控 · 运行组件说明带（1837） | 「worker 生命周期状态；ASR、双 TTS lane 与分人各自独立常驻。」 | 「指标为最近样本的平均值；…」 | 改回稿的句子——那张卡的表列就是「组件 / 状态」，原句讲的是上面的窗口指标 |
+| 配音失败条标题（912） | 「生成未完成：服务端没有返回音频」 | 「配音未完成」 | 标题取稿的前半句「生成未完成」；原因仍由服务端的真实文案单独成行（稿的示例句不能钉死） |
 
 三处都不属于「应用更准确、必须保留」那一类偏离（对比：作品行副标题不写「24-bit 44.1 kHz」，
 那条是服务契约不支持），也没有在任何文档里记过，所以按稿改。另外核对了两处**看起来像差异、
@@ -2352,9 +2248,9 @@ SwiftUI 系统文本样式**不生效**——同一段文字在 `large / xxLarge
 
 **同轮两处字号归位**（都是「代码和自己的注释、和稿都不一致」）：
 
-1. **诊断检查行的说明**：稿是 `Callout`（`main.js` 2013），4x 帧上这一行墨迹高 12.50、名称行 12.00
+1. **诊断检查行的说明**：稿是 `Callout`（2013），4x 帧上这一行墨迹高 12.50、名称行 12.00
    （两行都是中文，比例可比 → 与名称同档），应用却用 `caption`(10pt)。改 `callout`。
-2. **字段标签**：稿的 `fieldLabel` 是 `Caption / Medium`（`main.js` 692），应用 6 处字段标签
+2. **字段标签**：稿的 `fieldLabel` 是 `Caption / Medium`（692），应用 6 处字段标签
    （保存名称、试听与注册参考文案、试听文案、名称、音色描述、采样种子）用 `caption`(Regular)。
    改 `captionMedium`——这也是 `macos-app-design-system.md` 里「`caption` 只留给应用自有密集区块」
    那条约定第一次真正落到字段标签上。
@@ -2376,7 +2272,7 @@ SwiftUI 系统文本样式**不生效**——同一段文字在 `large / xxLarge
 **② 为什么还是决定再收一档。** 第三十二轮把 200 收到 160 时，给的理由是「下限的职责是短文稿
 也给一块整写作区」，并把 160 对应成「正文区 77pt ≈ 4 行」。但**滚动条这一条已经被用户撤回**：
 下限不必再为「拖后出现滚动条」多留一行，只需要保证**静止状态看得见 3 行写作区**。而画板上的
-160 从来不是「一行文稿的高度」——`figma-kit/main.js` 那一帧画的是**3 行**示例文稿（两段、
+160 从来不是「一行文稿的高度」——那一帧画的是**3 行**示例文稿（两段、
 1080pt 宽）。也就是说 160 是**3 行文稿自然长出来的高度**，把它当下限套在 1–2 行文稿上，
 多出来的空白没有任何稿依据。
 
@@ -2403,11 +2299,11 @@ SwiftUI 系统文本样式**不生效**——同一段文字在 `large / xxLarge
 分隔线 `202.0 → 186.0`、控制条 `307.0 → 291.0`——**卡以上的版式完全不动，卡以下整体上移 16pt**，
 正好等于卡高的变化量。
 
-**脚本同步**：`main.js` 的 `size(editor, null, 160)` **保持不变**（画的是 3 行示例，改后应用渲染
+**脚本同步**：的 `size(editor, null, 160)` **保持不变**（画的是 3 行示例，改后应用渲染
 158，比改前更接近），只更新了那段注释；`node --check main.js && node build.js` 通过，
 `code.js` 143001 bytes、SHA-256 `f800302f3f13204bc7421c765f4ea8c841763adfbe4c24b4df4c8ab48c21a770`
 （改前 `69b9b6b7…`，与第三十二轮记录一致，说明这中间几轮没有漂移），已落到
-`~/Downloads/SpeechRail-figma-kit/`；`node audit.js` 仍为 `audit: clean`。
+`~/Downloads/SpeechRail-figma-kit/`；仍为 `audit: clean`。
 
 **未验证**：真实窗口里 61pt 正文区的手感（一行文稿时够不够写、输入到第 4 行时卡开始长高是否
 察觉）是桌面走查项。**未构建官方包**（Xcode 许可仍未接受）、**未运行单元测试与 UI 自动化**、
@@ -2491,7 +2387,7 @@ chevron 稿的框 14，应用 `caption2`（10pt）墨迹约 9.4 × 5.5，残差 
 
 **① 形态：两行 + chevron → 一行**
 
-稿的 `Sidebar Status` 三个 tone 变体（`main.js`：`componentSet("Sidebar Status", …)`）写法一致：
+稿的 `Sidebar Status` 三个 tone 变体（：`componentSet("Sidebar Status", …)`）写法一致：
 `layout: HORIZONTAL, gap: 8, align: CENTER, padX: 8, padY: 7` + `dot(c, 8, …)` +
 `text("label", "服务已就绪 · Quality", "Callout", V["text/secondary"])`；页面帧里的 `sidebarStatus` 同款。
 4x 帧 `▸ 配音台.png` 侧栏底部实测：
@@ -2553,7 +2449,7 @@ V["border/separator"])`，而侧栏是 `frame("sidebar", { …, padX: 10 })`—�
 
 本轮把「诊断检查行」和「生成结果条」两处按稿重排，并把作品时长的写法改成稿的零填充。
 
-**① 稿的写法（`main.js`）**
+**① 稿的写法**
 
 | 位置 | 稿 |
 |---|---|
@@ -2618,14 +2514,14 @@ chevron、安静出口与 46 + 12 的文字列在真实窗口里的观感归桌�
 
 #### 第四十二轮：波形原语（三处）按稿重建
 
-**① 稿是「一个原语、三种参数」**：`waveform(parent, bars, colorVar, gap)`（`main.js:345`）——每根是
+**① 稿是「一个原语、三种参数」**：`waveform(parent, bars, colorVar, gap)`——每根是
 **2pt 宽、圆角 1** 的矩形，按给定高度**垂直居中**排开；整块宽 `n × 2 + (n − 1) × gap`、高 `max(bars)`。
 
 | 位置 | 稿的调用 | 4x 帧实测墨迹 |
 |---|---|---|
-| 结果条行首（`main.js:1372`） | 12 根、间隙 2、高度 `[5,11,16,8,14,6,12,17,9,5,13,7]` | `▸ 配音台.png` **46.0 × 17.0** |
-| 音色创作候选卡（`main.js:1425`，`justify CENTER`） | 18 根、间隙 3、高度 `[10,22,34,…]` | `▸ 音色创作.png` **87.0 × 36.0**（周期 5.0） |
-| 音色库试听行（`main.js:1601`，`justify CENTER`） | 16 根、间隙 3、高度 `[8,16,26,…]` | `▸ 音色库.png` **77.0 × 30.0** |
+| 结果条行首 | 12 根、间隙 2、高度 `[5,11,16,8,14,6,12,17,9,5,13,7]` | `▸ 配音台.png` **46.0 × 17.0** |
+| 音色创作候选卡（`justify CENTER`） | 18 根、间隙 3、高度 `[10,22,34,…]` | `▸ 音色创作.png` **87.0 × 36.0**（周期 5.0） |
+| 音色库试听行（`justify CENTER`） | 16 根、间隙 3、高度 `[8,16,26,…]` | `▸ 音色库.png` **77.0 × 30.0** |
 
 **② 应用改前**：一个固定组件（9 根、3 宽 / 3 距、框 72 × 20）顶两处，结果条那处则是一个 SF
 `waveform` 字形（第三十九轮实测墨迹 **11.5 × 10.0**）。三处都比稿小一大截，而且一律左对齐。
@@ -2778,7 +2674,7 @@ UI 自动化**、**未桌面走查**；回退点见 §12.4。
 
 **③ Inspector 试听面板按稿重建**。稿是 `previewWrap`（`padX 16 / padY 14`）里嵌
 `preview`（`gap 10 / padX 12 / padY 10 / radius 10 / fill surface/panel`）+ 1pt `border/separator`，
-里面是 `iconButton(play, 28)` 与**在剩余宽度里居中**的 16 根波形（`main.js` 1594–1603）。
+里面是 `iconButton(play, 28)` 与**在剩余宽度里居中**的 16 根波形（1594–1603）。
 4x 帧 `▸ 音色库.png` 逐像素实测：
 
 | 量 | 帧 |
@@ -2817,7 +2713,7 @@ Inspector 材质上的最终观感归桌面走查。**未构建官方包**、**�
 
 | 冲突 | 帧 | 应用 | 为什么不擅改 |
 |---|---|---|---|
-| 我的作品行动作 | 只有 `play` + `download` 两颗（4x 帧裁到窗口右沿确认） | `play` + `download` + 「更多操作」省略号 | **第六十轮结案**：当前 kit（`main.js:1692-1694`）本来就是三颗，帧属上一代——应用现状即 kit，**不改**（§12.4 决定 16） |
+| 我的作品行动作 | 只有 `play` + `download` 两颗（4x 帧裁到窗口右沿确认） | `play` + `download` + 「更多操作」省略号 | **第六十轮结案**：当前 kit本来就是三颗，帧属上一代——应用现状即 kit，**不改**（§12.4 决定 16） |
 | Inspector 分区 | header / preview / body / 动作之间有 1pt 全宽 hairline（帧 y 260.0–261.0 为 header 下那条） | 无分隔线，靠 `Inspector.sectionSpacing`(16) | **已在第四十五轮按稿实现**（三段 hairline，动作区固定在底部） |
 | Inspector 宽度 | 300（帧面板 267 = 300 − 2 × 16） | `Layout.inspectorWidth` 360（最小已是 300） | **第六十轮结案**：维持 360——详情列含应用自有的「试听文案」一段，稿的 300 是给没有那一段的版本画的（§12.4 决定 16） |
 | 列表选中行底色 | `#DCE9EE`（`surface/railTint`） | 系统 `List` 自带高亮（离屏 `#DCDCDC`；**活跃窗口实测 `#007CE7`**） | **第六十轮结案**：按稿采纳为 §5.4 的显式特例（§12.4 决定 15）——系统那一档在两种窗口状态下都不跟随稿与本 App 的强调色 |
@@ -2829,7 +2725,7 @@ Inspector 材质上的最终观感归桌面走查。**未构建官方包**、**�
 
 #### 第四十五轮：Inspector 按稿分段，并修回一条被重复画出的 hairline
 
-**① 结构**。稿 `main.js` 1584–1641 的 Inspector 是**一条竖列、段间整宽 1pt hairline**：
+**① 结构**。稿1584–1641 的 Inspector 是**一条竖列、段间整宽 1pt hairline**：
 `sideHead`（`Title / Page` + `Caption`/`text/tertiary`，`gap 4 / padX 16 / padY 16`）→ hairline →
 `previewWrap`（`padX 16 / padY 14`，内含 `preview` 面板）→ hairline → `sideBody`（取值行 + 描述）→
 hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容滚动**）。应用此前段与段之间没有
@@ -2839,7 +2735,7 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 |---|---|---|
 | 0.00–75.00 | 75.00 | 头部（16 + 标题行 + gap 4 + 徽标行 + 16，帧同段 76.0） |
 | 75.00–76.00 | 1.00 | hairline ①（头部 / 试听） |
-| 89.00–90.00 / 90.00–140.00 / 140.00–141.00 | 1.00 / 50.00 / 1.00 | 试听面板的描边 / 填充 / 描边（§11.6 第四十四轮已校准） |
+| 89.00–90.00 / 90.00–140.00 / 140.00–141.00 | 1.00 / 50.00 / 1.00 | 试听面板的描边 / 填充 / 描边（§11 第四十四轮已校准） |
 | 217.00–218.00 | 1.00 | hairline ②（试听 / 取值） |
 | 847.00–848.00 | 1.00 | hairline ③（取值 / 动作） |
 | 848.00–900.00 | 52.00 | 底部固定动作区（14 + 按钮 + 14） |
@@ -2855,15 +2751,15 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 
 **③ 修回一条重复的 hairline（本轮复测发现的回归）**。改分段时动作区自己带了一个前置
 `Divider()`，而 `ScrollView` 之外已经有一条段间 `Divider()`：渲染出来是 **834.00–835.00 与
-849.00–850.00 两条整宽 hairline、相隔 14pt**。稿与 `main.js` 在这个位置都只有**一条**
+849.00–850.00 两条整宽 hairline、相隔 14pt**。稿与在这个位置都只有**一条**
 （4x 帧实测 y 820.0–821.0 一条，再 14pt 到按钮上沿 835.0，与 `Inspector.actionPadding` 一致）。
 去掉动作区自带的那条后，两轮离屏色带都只剩三条 hairline。
 
-**④ 帧与 `main.js` 的分歧（本轮不改）**：4x 帧的 `sideHead` 徽标是 `系统音色 · 描述生成`
-（8 个汉字 ⇒ 与实测的 87.75 一致），`main.js:1589` 是 `系统音色`；同一帧的取值区还把
-`变体与模式` 合成一行，而 `main.js:1608` 明确写「变体与模式是两行，不合并」并指向
+**④ 帧与的分歧（本轮不改）**：4x 帧的 `sideHead` 徽标是 `系统音色 · 描述生成`
+（8 个汉字 ⇒ 与实测的 87.75 一致），是 `系统音色`；同一帧的取值区还把
+`变体与模式` 合成一行，而明确写「变体与模式是两行，不合并」并指向
 `macos-app-design-system.md` §4.2.3。**同一页上两处分歧方向相反**，说明这一代帧早于
-`main.js`；应用两处都跟 `main.js`（当前一代）。若要以帧为准，只能整页回退到那一代，不能只挑徽标。
+；应用两处都跟（当前一代）。若要以帧为准，只能整页回退到那一代，不能只挑徽标。
 
 **⑤ 试听段多一块内容（第六十轮结案：保留，见 §12.4 决定 16）**：帧的试听段只有面板（80 = 14 + 52 + 14），应用多一段
 「试听文案 · n/4,096」+ 输入行（+61pt）。这一段是应用自己的可编辑试听文案，稿上没有任何入口，
@@ -2934,7 +2830,7 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 
 #### 第四十七轮：按钮档位收口（18 处落在系统默认 24pt 的标准按钮）
 
-**① 口径本来就有，是执行漏了**。§11.6 第二十一轮为「稿的控件高度」定过映射：稿的主按钮
+**① 口径本来就有，是执行漏了**。§11 第二十一轮为「稿的控件高度」定过映射：稿的主按钮
 34pt、次按钮 30pt（Figma `size/control`），系统 `ControlSize` 本机实测 `.regular` 24 /
 `.large` 28 / `.extraLarge` 36，于是**主按钮取 `.extraLarge`、次按钮与危险按钮取 `.large`、
 安静按钮留 `.regular`**，统一由 `speechRailButton(_:)` 施加
@@ -2946,7 +2842,7 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 「标准动作按钮」按语义接进 `speechRailButton(_:)`——主按钮 `.primary`、次按钮 `.secondary`、
 静默行内动作仍 `.quiet`。涉及 Inspector 动作区（去配音台 / 重命名 / 编辑描述 / 删除）、
 两个弹窗页脚（保存到音色库 / 重命名及其取消）、三处空态 CTA（去音色创作 / 重新加载 /
-去配音台）、配音台失败卡的（重试 / 查看诊断，稿 `main.js` 914–915 把这一对都画成次级）、
+去配音台）、配音台失败卡的（重试 / 查看诊断，稿914–915 把这一对都画成次级）、
 预检全过结论的（重新运行预检 / 查看检查明细）、以及作品 Inspector 的（重命名 / 删除）。
 删除按钮**保留 `role: .destructive` 给无障碍，视觉走次级档**——帧上这三颗是同一个
 `secondaryButton`，没有单独的红底。
@@ -2964,7 +2860,7 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 **④ 同轮记录、未擅改（待拍板）**：帧的 Inspector 动作区是**一行三颗次级按钮**
 （59pt），应用在它上面多了一颗主按钮「去配音台」，动作区因此是 104pt。这颗按钮
 `AppRoute.dubbing` 没有负载、不携带当前音色，与侧栏/菜单栏的「配音台」入口重复，
-帧与 `main.js` 都没有它；但删入口属于**减功能**，与前一轮「我的作品行省略号」同一条口径。
+帧与都没有它；但删入口属于**减功能**，与前一轮「我的作品行省略号」同一条口径。
 **第六十轮结案：保留**（§12.4 决定 16）；要按帧去掉只需删那一块，动作带会从 104 回到稿的 88。
 
 **⑤ 本轮验证**：`swiftc -typecheck`（macOS 26 SDK，App 全部源码）0 error / 0 warning、
@@ -3192,7 +3088,7 @@ hairline → `actions`（`padX 16 / padY 14`，**压在最底部、不随内容�
 
 - **输入看不出可编辑**：输入槽当时是 `.textBackgroundColor` + **无描边**，而本机实测三个中性
   系统语义色逐位相同（第五十轮已证），等于没有底色台阶；再叠上多处输入用
-  `.textFieldStyle(.plain)`，空输入框在界面上**没有任何痕迹**。稿其实有明确配方：`figma-kit/main.js`
+  `.textFieldStyle(.plain)`，空输入框在界面上**没有任何痕迹**。稿其实有明确配方：
   的 `textField()` 与 `TextField` 组件集 = `fill surface/field` + **1pt `border/strong`** +
   `radius/field`(8)，聚焦态才换 `accent/rail` 2pt。边界不是我们发明的，是漏掉的。
 - **文本被钉死在 24 字**：`AppModel.workTitle(for:)` 在**写入时**把作品名截成「首行前 24 字 + …」，
@@ -3401,12 +3297,12 @@ y=940——正落在 chrome 带里，把「窗口 chrome」当成了「内容地
 
 - `creatorSpeedValueWidth` 32 → **26**：稿就是这串文字的自然宽度（25.5），应用多留了 6.5pt。
   该值是 `minWidth`（下限），字号放大时仍会跟着长，不会截断。
-- **`Stepper` 保留**：帧与 `figma-kit/main.js:1342-1360` 都没有它，但 §7.1 的「语速」条文
+- **`Stepper` 保留**：帧与都没有它，但 §7.1 的「语速」条文
   写明 `Slider` + `Stepper`（步长 0.1，范围 0.5–2.0）。两者冲突，按「明确条文优先」
   保留，代价是整组比帧宽 28pt；已在代码注释与本文件两处写明这是**有意偏离**，
   免得后来人当成漏改。
 - 分段控件宽 **157 vs 帧 147**：系统 segmented 每项自带约 2.5pt 内边距（稿的 `segmented`
-  是 `figma-kit` 自绘的近似件，不是系统控件）。这一档按 §5.4「控件交系统」不动。
+  是自绘的近似件，不是系统控件）。这一档按 §5.4「控件交系统」不动。
 - 语速整组比帧右移 **3.25pt**：卡片内边距 1.25 + 音色胶囊 2.5，都在既有残差范围内。
 
 #### 第五十三轮：编辑卡是 `surface/content`，边界属于整张卡
@@ -3433,13 +3329,13 @@ y=940——正落在 chrome 带里，把「窗口 chrome」当成了「内容地
 | `▸ 配音台 · Dark.png` y=175pt 整行 | 编辑卡整卡 **#2B292C**（x 1050–5673），页面地板 #201E21 |
 | `▸ 音色创作 · Dark.png` y=175pt 整行 | 描述卡整卡 **#2B292C**，卡内**没有**第二级表面 |
 
-`main.js` 对这两张卡的 `fill` 同样写的是 `surface/content`（`screenDubbing` 的 `editor`、
+对这两张卡的 `fill` 同样写的是 `surface/content`（`screenDubbing` 的 `editor`、
 `screenVoiceDesign` 的 `promptCard`）。所以第五十二轮把编辑卡按表单字段接成
 `surface/field` 是错的：浅色下看不出来，深色下整张卡会凹进去一格。
 
 **② 描述卡里不该再套一个输入框。**
 
-`main.js:1448-1452` 的注释是明确条文：「The description box *is* the field: a white input
+的注释是明确条文：「The description box *is* the field: a white input
 nested inside a white card only drew two borders around the same sentence.」4x 帧的两个外观
 版本都只有**一圈**描边，且**位于卡沿**：
 
@@ -3458,7 +3354,7 @@ nested inside a white card only drew two borders around the same sentence.」4x 
 - 帧：`▸ 配音台.png` 的描边实测跨 y 142.5–695.25pt（左沿列，含圆角内缩），
   把正文、分隔线与「62 / 5000 字」行一起圈在同一张卡里；分隔线以上是正文，
   以下是一条页脚带；
-- `main.js:1288-1322` 的注释：「The counter belongs to the field it counts, so the
+-的注释：「The counter belongs to the field it counts, so the
   information line lives inside the same card behind a divider instead of floating
   on the page.」；
 - §7.1 第 2 条：「编辑器卡片页脚：分隔线之内、卡片底部**一条固定高度的带**」。
@@ -3594,7 +3490,7 @@ Inspector 这一列自己的底色又是 `Color.field`（`Surface.inspectorFill`
 | 侧栏收起时（`.detailOnly`） | — | 148.0（随系统侧栏按钮一起左移，按钮本身 x 100） | 与系统同步 |
 | 内容层（八路由内容缓存逐像素差分） | — | **完全相同**（0 个差异像素） | 改动只落在窗口 chrome |
 
-**⑤ 为什么不跟帧的 78pt**：稿 `titlebar`（`main.js:1208-1226`）是「红绿灯 + 12pt + 图标 + 标题」
+**⑤ 为什么不跟帧的 78pt**：稿 `titlebar`是「红绿灯 + 12pt + 图标 + 标题」
 的整宽横带，4x 帧实测标题墨迹从 101pt 起（图标盒 78pt、标题带高 48pt、底色 `#F2F2F4`）。
 那一格正是**系统侧栏切换按钮**的位置（x 201 w 47 展开 / x 100 w 48 收起）。本轮用视图树
 独立复核了 `.toolbar(removing: .sidebarToggle)`：带与不带该修饰符的两次渲染里，
@@ -3698,12 +3594,12 @@ mtime 12:54:19），即那次只重编了本轮改的文件；产物二进制随
 chevron 用应用自己的 `caption` 档（10pt）换稿的 14pt 框，墨迹只差 0.67pt 见方。
 
 **⑦ 设置页「默认语速」行按帧重标（本轮改动）**：4x 帧 `Menu & Settings.png` 实测滑轨
-x 1183.0 → 1314.5 = **131.75pt**，与稿的 `sliderControl(p, 132, …)`（`main.js:2463` 定义、
+x 1183.0 → 1314.5 = **131.75pt**，与稿的 `sliderControl(p, 132, …)`（定义、
 `:2554` 调用）一致；应用此前在这里**就地写 `frame(width: 160)`**，残差 28pt。取值稿写全角
 `1.0×`（同页 caption `0.5×–2.0×` 也是全角；帧上 `×` 墨迹 x 2439–2496 可辨），应用写 ASCII `1.0x`。
 两处都改：滑块改用已有的 `Layout.creatorSpeedSliderWidth`（132——稿在设置页与配音台是同一个控件、
 同一个数值，不再写第二处 132），取值改 `%.1f×`。配音台那一处稿写的是 ASCII `1.0x`
-（`main.js:1359`），两页各自按稿，`CreatorSurfaceViews` 不动。
+，两页各自按稿，`CreatorSurfaceViews` 不动。
 
 **这一处的取证边界**：设置窗口的 `Form` 行在离屏宿主里**不实例化**——`--host` 只看到
 `HostingScrollView`（672 高、文档 250），既没有行也没有 `NSSlider`，所以改后拿不到像素证据，
@@ -3751,7 +3647,7 @@ sha256 **`79e6413e5f4a053f111051258ffefe3885eac34635e14b67905386c32d84d9a1`（�
 本轮不改公共接口、不改运行态。
 
 > 编号说明：本轮在并行轨道（工具栏身份槽、圆角复核两轮）之后落笔，第五十五 / 五十六轮
-> 已被那两条轨道占用，这里取第五十七轮；代码里 `§11.6 第五十七轮` 的引用都指本条。
+> 已被那两条轨道占用，这里取第五十七轮；代码里 `§11 第五十七轮` 的引用都指本条。
 
 **① 波形此前是稿上的一张固定图。** 三处 `WaveformBars` 画的都是 token 里的固定高度数组
 （`Waveform.resultBar/candidateTile/libraryPreview`，数字直接抄自稿 `main.js:1372/1425/1601`），
@@ -3822,7 +3718,7 @@ sha256 **`79e6413e5f4a053f111051258ffefe3885eac34635e14b67905386c32d84d9a1`（�
    内容固有高度小于宿主高度时会被裁掉，缓存出来是一片白）。
 
 **② 帧与现行 kit 脚本对账（两者已经不同代，必须先定权威）**：手上的 4x 帧
-（`~/Downloads/speechrail-screens-4x/`，导出时间 09-15 22:08）与仓内 `figma-kit/main.js`
+（`~/Downloads/speechrail-screens-4x/`，导出时间 09-15 22:08）与仓内
 （最后一次写入 **09-16 06:39**）在三处不一致：
 
 | 项 | 09-15 22:08 的帧 | 09-16 06:39 的 kit | 应用取 |
@@ -3832,7 +3728,7 @@ sha256 **`79e6413e5f4a053f111051258ffefe3885eac34635e14b67905386c32d84d9a1`（�
 | 行卡宽度常量 | 帧实测 **608**（卡沿 x 80→688，= 640 − 2×16） | `SETTINGS_CARD_W = 604`，注释写「640 − 18pt」 | **跟帧与 §7.10**（608） |
 
 第三行是 kit 自己的**陈旧常量**（正文用 `pad: 16`、常量却按 18 写），不影响渲染出来的帧；
-要改的是 `main.js:2206` 那一行，属后续（不影响应用）。
+要改的是那一行，属后续（不影响应用）。
 
 **③ 为什么必须放弃原生 grouped `Form`（本轮改动的依据）**：两条冲突是**结构性**的，
 不是数值调不齐——
@@ -4003,7 +3899,7 @@ sha256 `79e6413e…`）→ `ditto` 整包装入。装机件二进制 mtime 13:36
 
 **④ 冲突收口**：见 §12.4 决定 15（这一处）与决定 16（其余三处）。其中「我的作品的行动作」
 是**证据更正**而不是取舍：当前 kit 的 works 行本来就是三颗
-（`main.js:1692-1694`，`acts` 宽 92 = 3 × 28 + 2 × 4，与应用 `actionColumnWidth` 同一个式子），
+（`acts` 宽 92 = 3 × 28 + 2 × 4，与应用 `actionColumnWidth` 同一个式子），
 只有 4x 帧是两颗——此前记的「删按钮是减功能，等拍板」把它当成了取舍，实际是 kit 与帧不一致，
 而 kit 更新，**应用现状即 kit**。
 
@@ -4174,10 +4070,10 @@ Prometheus 的读法。
 **④ 验证（2026-09-16）**：`scripts/macos_app_build.sh --configuration Debug` → `** BUILD SUCCEEDED **`；
 `xcodebuild -scheme SpeechRailApp build-for-testing` → `** TEST BUILD SUCCEEDED **`（**只编译**，
 测试目标里的 `RuntimeMetricsSampler` / `RuntimeMonitoringAccessibility` 一并过了类型检查）。
-稿侧同步：`figma-kit/main.js` 的 `screenMonitoring` 换成本轮文案（页首说明、卡标题「使用趋势」、
-图例、组件表说明与组件名），`node audit.js` → `audit: clean`、`node --check main.js` 通过；
+稿侧同步：的 `screenMonitoring` 换成本轮文案（页首说明、卡标题「使用趋势」、
+图例、组件表说明与组件名），→ `audit: clean`、`node --check main.js` 通过；
 **但插件重跑与重导出未执行**（本次会话没有 Figma 连接器工具，生成器路线要人工在 Figma 桌面版
-触发，见 `figma-kit/README.md`）——当前 Figma 文档里那张画板仍是旧文案。
+触发，见）——当前 Figma 文档里那张画板仍是旧文案。
 
 **④+ 装机（用户当轮授权「安装，我来测试」，app-only，未动服务）**：`CFBundleVersion`
 11 → 12（`MARKETING_VERSION` 仍 2.6.4，与第六十/六十二轮同一口径）。门禁
@@ -4315,7 +4211,7 @@ App pid 88135 + control helper pid 88144；**服务未被触碰**：8201 仍是 
 
 1. **正文槽的字比稿小一档，槽高还跟着稿子走**。`Typography.promptScript` 取的是 `.title3`
    （macOS 15pt Regular），而稿上这一段是 `Title / Page`（20pt Semi Bold，
-   `figma-kit/main.js` 的 `scriptBody`）——**页标题那一档**；§5.5 对 `Title / Page` 的既有口径
+的 `scriptBody`）——**页标题那一档**；§5.5 对 `Title / Page` 的既有口径
    是 `.title`（22pt，+2 残差），这一处是唯一漏掉映射的地方（`display` / `windowTitle` /
    `diagnosticsSummary` 都在那一档）。高度上，四段官方稿 40–55 字、「自己写一段」又是输入框，
    只读正文走 `lineLimit(4)` + `fixedSize`、编辑器走 `minHeight`，五个选项的槽高各不相同：
@@ -4486,7 +4382,7 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
 （`ASR 制品` → `识别模型`、`受管运行时` → `运行环境`、`Base TTS` → 内置音色那一版模型）；
 音色克隆页的「声音复刻 → 音色克隆」与「预检 → 检查」；服务状态那条控制通道状态行
 （`本地控制通道已就绪` → `可以在这里管理服务`）。落地页从「服务状态」改成「语音助手」
-（`ControlCenterView.landingRoute`，会话规格里的 D15 一并结清）。`figma-kit/main.js` 同轮同步。
+（`ControlCenterView.landingRoute`，会话规格里的 D15 一并结清）。同轮同步。
 
 顺带修掉离屏渲染看出来的两个缺陷：控制通道那一条把「影响」写进了取值里，于是页面上出现
 「影响：影响：启动、停止、换档都能用」；`residentWorkerText` 直接把服务的
@@ -4495,10 +4391,10 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
 **③ 实测（2026-09-19，本机锁屏）**：`xcodebuild … build` → **BUILD SUCCEEDED**；
 `NSHostingView` 离屏工装（`/tmp`，不占屏幕、不需要解锁）重渲染 14 个页面，模型页、服务状态
 页、音色创作页与诊断页逐张核对：三张档位卡的九格取值在 76pt 标签列内不折行，「已加载的
-模型」等行取值到位。`node --check figma-kit/main.js` 通过。
+模型」等行取值到位。通过。
 
 **④ 未验证**：真机走查（本机全程锁屏，`cua.getState()` 报锁）、UI 自动化（AGENTS.md 要求
-当次明确授权，本会话没有）；`figma-kit` 的改动**尚未重新导出 4K PNG**，导出物与本轮文案
+当次明确授权，本会话没有）；的改动**尚未重新导出 4K PNG**，导出物与本轮文案
 存在时间差，重新导出前不要把旧 PNG 当作验收基线。回退 = 逐条恢复本轮的文案常量
 （`SpeechRailProfilePresentation`、`ControlAgentRegistration.impact`、
 `ModelManagementView.profileSpecs/profilePurpose`、
@@ -4527,7 +4423,7 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
   未量化的把权重数值格式换算成 `16-bit`（`bf16` / `fp16` → 16、`fp32` → 32），
   位数读不出来时写「未读取」，不编。`mlx`、`group 64`、`bf16` 这些格式名只解释「怎么做到的」，
   留在开发者详情（`QuantizationSpec` 的字段名也是内部名，按 §4.2 不上屏）。
-- **稿**：`figma-kit/main.js` 的 `screenModels` 同轮同步——卡头标题「模型制品 → 模型文件」、
+- **稿**：的 `screenModels` 同轮同步——卡头标题「模型制品 → 模型文件」、
   列头「量化 → 精度」、五条样例行改成位数（`8-bit` ×3、`16-bit` ×2）、卡头说明换成应用的那一句、
   脚注说明换成应用的说法（「谁在说话在补齐前用不了」）。
 
@@ -4538,10 +4434,10 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
 `test_model_catalog_builder` / `test_app_contract` 全绿（新增 5 条：缺 `dtype`、`bits` 与
 `dtype` 并存、档位与制品 `dtype` 不一致、CoreML 行形状、无分人档位不出该行）；
 `scripts/macos_app_build.sh --configuration Debug` → **BUILD SUCCEEDED**；
-`node --check figma-kit/main.js` 与 `node audit.js` 通过。
+与通过。
 
 **⑤ 未验证**：真机走查（未重装 App；UI 自动化按 AGENTS.md 需当次明确授权，本会话没有）；
-`figma-kit` 的帧**未重新导出**，导出物与本轮文案存在时间差，重导出前不要把旧帧当验收基线。
+的帧**未重新导出**，导出物与本轮文案存在时间差，重导出前不要把旧帧当验收基线。
 回退 = 恢复 `ArtifactQuantizationPresentation`（列值改回 `bf16`）、列名与开发者详情标签改回
 「量化」，以及 catalog 的 `dtype` 字段与那 5 条测试。
 
@@ -4570,11 +4466,11 @@ VAD / `capability` / 「词级时间戳由 ASR 原生提供」）；「运行信
 - App 侧已大量落地：Swift 源码已修改，`./scripts/macos_app_build.sh --configuration Debug` 与
   `xcodebuild … build-for-testing` 多轮通过。**仍未运行任何单元测试或 UI 自动化**（AGENTS.md：自动化验收需当次明确授权）。
 
-已核对的部分（见 §11.6）：Figma 产物的帧尺寸、绑定归属、颜色解析值、越界（含卡片内部）与占位灰计数由插件 audit
-实测输出（`all clean`，`bind errors: 0`）；同一目录的 `figma-kit/audit.js` 提供**离线**静态自检
+已核对的部分（见 §11）：Figma 产物的帧尺寸、绑定归属、颜色解析值、越界（含卡片内部）与占位灰计数由插件 audit
+实测输出（`all clean`，`bind errors: 0`）；同一目录的提供**离线**静态自检
 （2026-09-16 实测 `audit: clean`：颜色变量 23/23、图标 24/30、文本样式 9/9 全部解析），改动 kit 时不必先开 Figma。
 16 帧已导出 1x PNG 并逐页目视确认，浅色与深色两列都已看过。
-App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状态矩阵与 token 都逐项对过源码，
+App 侧的一致性证据见 §11 第四至第七轮：结构、文案、状态矩阵与 token 都逐项对过源码，
 但**目视与交互结论仍缺**——所有「看起来对不对」的判断都要等桌面走查。
 
 ### 12.4 决策记录与未决项
@@ -4587,7 +4483,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 
 4. **已解决（2026-09-15，阶段 2）**：浅色强调色的两处数值冲突（资产 `#23687D` vs Figma/`Color.rail` `#2A4E57`）
    按“交给系统”收口——`Color.rail` 改为 `Color.accentColor`，App 跟随用户在系统设置中选择的强调色，
-   不再由一个写死的浅色数值定义品牌色。Figma 变量保留为设计参考，不再作为运行时事实来源（§11.6 已按此记录）。
+   不再由一个写死的浅色数值定义品牌色。Figma 变量保留为设计参考，不再作为运行时事实来源（§11 已按此记录）。
 
 5. **决定（2026-09-16，第四十六轮）：圆角取「容器声明一处 + 叶面同心推导」，并且显式声明 12 / 8。**
    §5.3 原文是「不使用手挑半径」，本次实现有意偏离：`.concentric` 只在**祖先提供了容器形状**时
@@ -4599,7 +4495,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    证明容器面就是 12pt `.continuous`、叶面是 `容器半径 − inset`、无容器时落到 8。
    保留这条决策的代价是「有两个数值」，收益是渲染结果确定、可评审、只改一行就能整体对齐；
    **检查点**：全应用只有这两个半径数值，新增半径必须改进 token 而不是就地写死。
-   相关口径与量测见 §11.6 第四十六轮。
+   相关口径与量测见 §11 第四十六轮。
 
 6. **决定（2026-09-16，第四十八轮）：控件不参与同心推导，固定取 `Corner.nested`。**
    同心推导的半径是「容器半径 − 内缩」，内缩 ≥ 12pt 时推导值 ≤ 0，叶面直接画成方角；
@@ -4608,7 +4504,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    `Corner.controlShape = RoundedRectangle(8, .continuous)` 固定取值。半径数值仍然只有
    12 / 8 两个（`controlShape` 复用 `nested`），但**形状有三处声明点**：
     `containerShape`（容器）、`nestedShape`（叶面表面）、`controlShape`（控件）。
-   相关口径与量测见 §11.6 第四十八轮。
+   相关口径与量测见 §11 第四十八轮。
 
 7. **决定（2026-09-16，第五十轮）：中性表面阶梯不再交给系统语义色，改用稿的四级取值。**
    §5.4 原文是「系统拥有中性色阶」，但那条原则的**前提**（系统有分级）已被本机实测否定：
@@ -4616,7 +4512,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    逐位相同。于是 `canvas` → `#E8E8EA` / `#201E21`、`field` → `#FFFFFF` / `#2B292C`、
    `recessedField` → `#F5F5F7` / `#232124`（`dynamicColor` 显式取值，`named:` 避开资产目录里
    那两个同名死资产）。**检查点**：新增表面层级必须改进这三个 token，不得就地写死颜色；
-   §5.4 的表述已按此改写。回退 = 把三行换回三行系统语义色。证据与验证见 §11.6 第五十轮。
+   §5.4 的表述已按此改写。回退 = 把三行换回三行系统语义色。证据与验证见 §11 第五十轮。
 
 8. **决定（2026-09-16，第五十一轮）：可编辑输入槽的边界取稿的 `border/strong`，且「有边界」
    只表示「可输入」。** 三档中性色里输入槽与卡片只差一档（`#F5F5F7` vs `#FFFFFF`），
@@ -4625,7 +4521,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    （`.speechRailField()`）保持只有底色。**检查点**：新增可编辑控件必须带这圈边界，
    新增非输入槽不得带——否则「有边框」不再等于「可以输入」，用户的辨识问题会原样回来。
   代价：`separatorColor` 之外多了一个描边 token（都是稿值，不是自挑颜色）；
-  回退 = 去掉 `showsBoundary: true` 与 `Surface.borderStrong`。证据见 §11.6 第五十一轮。
+  回退 = 去掉 `showsBoundary: true` 与 `Surface.borderStrong`。证据见 §11 第五十一轮。
 
 9. **决定（2026-09-16，第五十三轮）：可编辑表面分两档，边界属于整张编辑卡。**
    `SpeechRailSlotModifier` 分三个 case：`editableInput`（表单字段，`surface/field` +
@@ -4635,7 +4531,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    **检查点**：新增可编辑表面必须选一支并带边界；**页面级编辑卡不得降级成表单字段**
    （深色下会凹进一格）。代价：几何从一处声明点变成两处（控件 8 / 容器 12），
    但两者都是稿的既有 token（`radius/field` / `radius/container`）。
-   回退 = `editorCard` 分支改回 `inputField` + `controlShape`。证据见 §11.6 第五十三轮。
+   回退 = `editorCard` 分支改回 `inputField` + `controlShape`。证据见 §11 第五十三轮。
 
 10. **决定（2026-09-16，第五十五轮）：页面身份放 `.navigation`（详情列 leading）并在槽内左对齐，
     不跟稿的窗口左沿 78pt。** 依据是「身份必须恒定」——`.principal` 的落点是剩余空间中点，
@@ -4645,19 +4541,19 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
     与 §5.2 / D1「工具栏层归系统」冲突，故不跟。
     **检查点**：头部身份只能有一条声明（组合根）+ 一个落点（`.navigation`）；
     新增「窗口居中标题」这类需求必须另开决策，不能把 `.principal` 混回来。
-    回退 = 两行（`placement` 与 `alignment`）。证据见 §11.6 第五十五轮。
+    回退 = 两行（`placement` 与 `alignment`）。证据见 §11 第五十五轮。
 
 11. **决定（2026-09-16，第五十六轮）：运行监控的表几何跟系统 `Table`（表头 28 / 行 24），
     不跟稿的 32 / 39。** 依据是用户当轮给的口径——运行监控按 `/metrics` 暴露的指标与
     Prometheus / Grafana 那一族的呈现惯例做，**可不完全按 Figma**。本机 macOS 26 / arm64 实测
-    系统 `Table` 是**表头 28 / 行 24**（§11.6 第二十四轮 ①，读 `NSTableView.headerView.frame.height`
+    系统 `Table` 是**表头 28 / 行 24**（§11 第二十四轮 ①，读 `NSTableView.headerView.frame.height`
     与 `rowHeight`，与内容无关）；稿的 `workers` 是 Figma 手画的静态表，**表头 32**（padY 9 +
     `Caption/Medium` 13.5）/ **行 39**（padY 11 + `Callout` 17.4）。要逐像素对齐就得把这层换成
     手搭网格，代价是丢掉排序、列宽调整、键盘导航与无障碍这些系统行为，也与 §4.2「列表交还系统」
     相反；而 Grafana 族的指标表本来就是紧凑行，不是稀疏行。
      **检查点**：运行监控的两张表继续用 `Table`，高度按 `28 + 24 × n` 预留；新增监控表沿用同一
      公式，不得再就地写 `36 + 26 × n`。**代价**：与帧差 4 / 15pt 的密度差被接受为「更接近监控面板
-     惯例」；若将来要逐像素对齐，这是唯一需要推翻的裁决点。证据与量测见 §11.6 第二十四轮。
+     惯例」；若将来要逐像素对齐，这是唯一需要推翻的裁决点。证据与量测见 §11 第二十四轮。
      **→ 2026-09-16 第六十八轮起，这两张表改由应用自己画（列头 + 行 + `Divider`），本条在
      这两张表上作废**：系统表的底色、隔行底纹与列分隔线都不在 token 里，见决定 17。
 
@@ -4672,7 +4568,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
     页面里就地写数值。**代价**：grouped 表单自带的行分隔改由 `settingsRowSeparator` 显式声明
     （只在稿画了 hairline 的地方加），焦点顺序仍由声明顺序决定。
     回退 = 把三个辅助函数换回第五十六轮的 `Form` + `Section` 版本（单文件、单次 revert）。
-    证据见 §11.6 第五十八轮。
+    证据见 §11 第五十八轮。
 
 13. **决定（2026-09-16，第五十九轮）：配音台的生成结果条维持规范的系统材质
     （`.speechRailSurface(.elevated)`），不跟稿的 `surface/railTint`。**
@@ -4697,7 +4593,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
     `AccentColor`、并在 §12.4 决定 4 里退役了那两个写死值——按帧画等于把退役值请回来，
     用户换强调色时它会不跟随；
     ② 「有边界」在 §5.1 / 决定 8 里是**状态**语义（= 可以输入），强调色是**焦点**的职责
-    （§11.6 第五十一轮：聚焦态才换 `accent/rail` 2pt）；常驻 1.5pt 强调色边框会与焦点环
+    （§11 第五十一轮：聚焦态才换 `accent/rail` 2pt）；常驻 1.5pt 强调色边框会与焦点环
     争同一层语义，反差也比稿自己给的 `border/strong` 弱；
     ③ 那一帧属更早一代：同页其他卡片还带 `#DCDCE0` 1pt 描边（当前脚本的 `card()` 已把
     卡片描边整体去掉），它的编辑卡高 568.5pt 也还是 §7.1 已废除的「占满剩余高度」。
@@ -4710,7 +4606,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
     未强调时是 `#DCDCDC`——两种状态**既不是稿的淡底、也不跟随本 App 的强调色**
     （`#23687D` / `#4FA4BA`），即这里的系统默认值同时偏离设计稿与应用自身。
     实现只用了 `listRowBackground` 一个修饰符（`.tint()` 无效、行内容 `.background` /
-    `.overlay` 会被选中材质合成掉；五种写法逐像素实测见 §11.6 第六十轮 ②），
+    `.overlay` 会被选中材质合成掉；五种写法逐像素实测见 §11 第六十轮 ②），
     因此 `List(selection:)` 的绑定、方向键与无障碍 selected 语义**全部保留**。
     **检查点**：`Surface.selectionTint` 只服务「列表选中行」，不得扩散到按钮、状态条或胶囊底色；
     §5.4 的六个手挑淡底照旧不采纳，**例外只有这一处**（与决定 13 那处「规范优先」的裁决并存，
@@ -4722,7 +4618,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 
 16. **决定（2026-09-16，第六十轮）：音色库 / 我的作品剩余三处「帧 vs 应用」按证据各自收口。**
     - **我的作品的行动作：跟当前 kit，不改。** kit 的 works 行本来就是
-      `play` + `download` + `ellipsis` 三颗（`main.js:1692-1694`，`acts` 宽 92 = 3 × 28 + 2 × 4，
+      `play` + `download` + `ellipsis` 三颗（`acts` 宽 92 = 3 × 28 + 2 × 4，
       与应用的 `actionColumnWidth` 同一个式子），只有 4x 帧是两颗——这条此前挂在
       「删按钮是减功能，等拍板」，实际是**证据问题**：kit 更新，帧属上一代。
       应用那颗省略号打开的就是行右键菜单的同一份内容（`Menu { workContextMenu(work) }`
@@ -4757,30 +4653,30 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   `--theme` 的主题 PNG 在 `models / overview / monitoring / voiceDesign` 四个路由缓存出来是
   **黑图**，不能拿来做逐像素比较。
 - **表面层级已在第五十轮按方案 A 落地**（`canvas` / `field` / `recessedField` 取稿的四级取值），
-  证据、落地位置与坑见 §11.6 第五十轮。**仍在的两条**：①三个中性 token 的 Increase Contrast
+  证据、落地位置与坑见 §11 第五十轮。**仍在的两条**：①三个中性 token 的 Increase Contrast
   取值与普通值同值，HC 下四级会不会再次塌成一级，需要真机复核；②`.inspector` / `.sidebar`
   两列的底色在离屏环境解析不出来（系统材质），所以 Inspector 那一列的底色只做到代码层。
 - **输入槽边界的高对比取值未验（2026-09-16 第五十一轮）**：`Surface.borderStrong` 的 `hc*` 分支
   暂与普通值同值（本机把高对比外观名设到应用/宿主后渲染仍回落到普通浅色，与第三十七轮同一条
   结论），因此「HC 下这圈边界是否够用」需要真机复核。同一轮的其余未验证项：真机目视/桌面走查、
-  单元测试与 UI 自动化（离屏量测与 `swiftc` 编译均已完成，见 §11.6 第五十一轮）。
+  单元测试与 UI 自动化（离屏量测与 `swiftc` 编译均已完成，见 §11 第五十一轮）。
 - **设置窗口的行卡已按帧重画（2026-09-16 第五十二轮提出、第五十八轮关闭）**：第五十二轮
   记下「原生 grouped `Form` 的行卡是背景 −3%、给不出稿的 `#FFFFFF` 行卡」，并把它挂在
   「要么放弃原生 `Form`、要么接受原生观感」。第五十八轮按**用户选定的方案 A** 落成
   「放弃原生 `Form`、用应用自己的卡片重画三个设置页」：行卡现在是 `Color.field`（`#FFFFFF`）、
   608 宽、距窗口左右各 16pt（§7.10）；内容区顶到首卡从 46 变成 54。**仍存的两条残差**
   （行高 54 / 39 vs 帧 59 / 42、hairline 用系统 `separatorColor` 而帧是 `border/separator`）
-  以及「为什么不再去凑帧的行高」见 §11.6 第五十八轮 ④。取证方法的两条更正（titled 宿主压暗
+  以及「为什么不再去凑帧的行高」见 §11 第五十八轮 ④。取证方法的两条更正（titled 宿主压暗
   2.5%、`--top` 不能省）也在那一节。
 - **档位卡的间隔与悬停已收口（2026-09-16 第五十二轮）**：可见间隔 27.5 → **12pt**（帧 12），
   左通槽 28 → **20**，卡宽 354.5 → **376**（把窗口拉到装得下、去掉离屏的 17pt 滚动条槽之后，
   与帧逐项一致）；样式的状态色改成叠在底色之上的同一背景层，不再被卡片的不透明底色盖住。
-  取证与改法见 §11.6 第五十二轮。**仍未验的是悬停/按压的观感**（离屏没有指针）。
+  取证与改法见 §11 第五十二轮。**仍未验的是悬停/按压的观感**（离屏没有指针）。
 - **编辑卡边界是灰还是 rail（2026-09-16 第五十三轮提出、第五十九轮关闭）**：裁决见
   §12.4 决定 14——**维持 1pt `Surface.borderStrong`**；帧的 `accent/rail` 1.5pt 属更早一代，
   且用的是 §5.4 / 决定 4 已退役的写死强调色。仍是一行可回退的判断
   （`SpeechRailSlotKind.editorCard` 分支），结构不动。
-- **编辑器页脚与描述框结构已按帧收敛（2026-09-16 第五十三轮）**：详见 §11.6 第五十三轮。
+- **编辑器页脚与描述框结构已按帧收敛（2026-09-16 第五十三轮）**：详见 §11 第五十三轮。
   同轮遗留：焦点环移到整卡之后的观感未验（离屏无法聚焦），`inputField` 的 HC 取值未验。
 - **视觉与无障碍矩阵未实测**：本机未获 UI 自动化授权，Light/Dark、Increase Contrast、Dynamic Type、
   Reduce Motion、VoiceOver 顺序与列表 `空格` 试听均只完成代码层验证。
@@ -4793,7 +4689,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   未被任何构建包含——所以桌面走查看到的仍是旧界面。重新构建需要先接受 Xcode 许可
   （`xcodebuild -checkFirstLaunchStatus` 返回 69，提示 `sudo xcodebuild -license accept`）；
   覆盖安装 `~/Applications/SpeechRail.app` 属破坏性操作，需用户当次明确授权后再做。
-  **2026-09-16 更新：这一步已完成**——用户当轮明确授权覆盖安装，随后按 §11.6 第三十五轮的
+  **2026-09-16 更新：这一步已完成**——用户当轮明确授权覆盖安装，随后按 §11 第三十五轮的
   预览构建路径（`swiftc` 直编，绕开仍被许可挡住的 `xcodebuild`）重建并覆盖安装：
   已安装件 `~/Applications/SpeechRail.app` 的二进制 mtime 变为 2026-09-16 07:28
   （`CFBundleShortVersionString` 2.6.4 / `CFBundleVersion` 8，与 `project.pbxproj` 的
@@ -4811,7 +4707,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   （sha256 `3f5975e6…`，含第五十七轮的试听链路与第五十八轮的设置页重画），
   官方 `xcodebuild` 路径对全树返回 `BUILD SUCCEEDED`；回退点
   `…/SpeechRailAppBackups/SpeechRail-2.6.4-8-installed-20260916-1344.zip`。
-  见 §11.6 第五十九轮 ①②③。**剩下的唯一准出门槛是 §12.5 的人工走查。**
+  见 §11 第五十九轮 ①②③。**剩下的唯一准出门槛是 §12.5 的人工走查。**
 
 **2026-09-16 11:48 装机（第五十三轮）**：官方路径 `xcodebuild … build` 已可用并返回
 `BUILD SUCCEEDED`（不再需要 `swiftc` 直编的绕行），装机件与构建产物
@@ -4824,7 +4720,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   **2026-09-16 补充（第三十五轮）**：根因查明——Xcode 在 00:51 被换成 27.0，而许可记录仍是
   26.6，属「换版本触发的重新同意」；同轮找到一条不依赖 xcodebuild 的**预览构建**路径，
   产物 `/tmp/sr-appbuild/SpeechRail.app` 可直接双击运行来做界面走查（不覆盖已安装件、
-  不作为发布件、未做启动验证，见 §11.6 第三十五轮）。官方路径仍需用户执行
+  不作为发布件、未做启动验证，见 §11 第三十五轮）。官方路径仍需用户执行
   `sudo xcodebuild -license accept`，之后按 `scripts/macos_app_build.sh` 重建并（经授权）覆盖安装。
   **2026-09-16 08:13 再次更新（第四十一 + 四十二轮）**：两轮源码再次走同一条预览构建路径并覆盖安装，
   已安装件的二进制 mtime 变为 2026-09-16 08:13、sha256 `381bb0c8…b30a3656`（版本号仍是
@@ -4898,7 +4794,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   `satisfies its Designated Requirement`）、版本号仍 2.6.4 / 8。`open -g` 后台启动未抢前台，
   主进程 pid 4934 与 `…local-control.xpc` pid 4946 均在、无新崩溃报告。
   **装的是 12:54:19 那次增量构建**（`SettingsView.o` 的 mtime 证明只重编了本轮改的文件，
-  见 §11.6 第五十六轮 ③），**没有在 13:11 重建**——并行轨道 13:02–13:06 正在改 6 个文件
+  见 §11 第五十六轮 ③），**没有在 13:11 重建**——并行轨道 13:02–13:06 正在改 6 个文件
   （详情列试听链路），重建会把半成品打进装机件。所以装机件 = 工作树在 12:54 的状态。
   **回退点**：`…-20260916-1311.zip`（= 12:17 那一版）。
 - **菜单栏面板与工具栏菜单的最终观感（第三十三轮）**：面板是系统菜单（`.menu` 样式），行高、
@@ -4918,7 +4814,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 
 这份清单只收**离屏取证到不了**的项目（材质、指针、系统辅助功能、真机观感）。前 5 条是本轮
 改动直接作用的界面，建议先看它们；其余是历轮累计下来、一直挂着「只有离屏证据」的项。
-任何一条不成立，把「页面名 + 现象」发回来即可——每一条都在 §11.6 留了对应轮次的量测与改法。
+任何一条不成立，把「页面名 + 现象」发回来即可——每一条都在 §11 留了对应轮次的量测与改法。
 
 **基线**：以 **2026-09-16 14:04 装机的 Release 版**为准（二进制 sha256 `79d5df0d…`，
 `CFBundleVersion` 9），含第五十七轮的「真实包络 + 真实进度」、第五十八轮的设置页重画、
@@ -4926,20 +4822,20 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 
 | # | 看哪里 | 期望 | 不成立时看 |
 |---|---|---|---|
-| 1 | 设置 → 通用 | 行卡是**白卡浮在灰地板上**（不是比地板暗一档），左右留白与卡片一致、圆角 12 | §11.6 第五十八轮 ④ |
+| 1 | 设置 → 通用 | 行卡是**白卡浮在灰地板上**（不是比地板暗一档），左右留白与卡片一致、圆角 12 | §11 第五十八轮 ④ |
 | 2 | 设置 → 创作 | 滑轨宽 132、右侧取值是**全角** `1.0×`；整卡只有一条行内分隔线（默认音色 / 默认语速之间） | 同上 |
 | 3 | 设置 → 服务 | 服务端口 / 产品定位 / 最低系统 / 版本的取值**贴右沿**；「关于」卡里有两条分隔线 | 同上 |
-| 4 | 设置窗口整体 | 640 × 454，切三个页签窗口不跳、任何页都不出滚动条 | §11.6 第五十八轮 ⑥ |
-| 5 | 深色（系统外观切深色） | 设置三页：卡比地板**亮**、不闷；主窗口任意页没有方角容器 | §11.6 第五十 / 五十八轮 |
-| 6 | 系统「辅助功能 → 显示 → 提高对比度」 | 页面底 / 卡片 / 凹槽三级在 HC 下仍分得出来 | §11.6 第五十 / 五十一轮（HC 从未实测） |
+| 4 | 设置窗口整体 | 640 × 454，切三个页签窗口不跳、任何页都不出滚动条 | §11 第五十八轮 ⑥ |
+| 5 | 深色（系统外观切深色） | 设置三页：卡比地板**亮**、不闷；主窗口任意页没有方角容器 | §11 第五十 / 五十八轮 |
+| 6 | 系统「辅助功能 → 显示 → 提高对比度」 | 页面底 / 卡片 / 凹槽三级在 HC 下仍分得出来 | §11 第五十 / 五十一轮（HC 从未实测） |
 | 7 | 系统「辅助功能 → 显示 → 文字大小」调到最大 | 设置页 + 任选两页：不裁字、不溢出、不出现横向滚动 | §9 那一格的落地方式 |
 | 8 | 系统「辅助功能 → 动态效果 → 减弱动态效果」 | 配音台波形脉冲停止，两处自定义动效变即时 | §9 |
 | 9 | VoiceOver | 任一列表页顺序 = 导航 → 结论 → 主对象 → 主操作 → 详情；设置页每个开关读出「标题 + 说明」 | §9 |
-| 10 | 键盘 | `⌘1`–`⌘8` 切页、`⌘?` 帮助、设置页 `Tab` 走一遍（焦点环是系统色、2pt、画在卡上） | §6.3 / §11.6 第五十三轮 |
-| 11 | 指针悬停 | 模型页档位卡悬停有**可见**的整卡反馈（不是只在两侧露一条窄带） | §11.6 第五十二轮 |
-| 12 | 音色库 / 我的作品的详情面板，播放一段音频 | 波形条高度随**这段音频自己的**幅度变化（换一首形状明显不同，不是每首都一样），播放中未播到的部分是淡色、随播放推进 | §11.6 第五十七轮 |
-| 13 | 头部工具栏（当前 14 个路由共享同一槽位） | 身份标题切页时**不横跳**（恒定在 x=252 那一格），工具栏是统一紧凑样式、不重复显示窗口标题 | §11.6 第五十五轮 |
-| 14 | 音色库 / 我的作品：点选一行 | 选中行是**淡青底**（稿值，不是系统实心蓝），且方向键上/下仍能换行、换行时底色跟着走 | §11.6 第六十轮 |
+| 10 | 键盘 | `⌘1`–`⌘8` 切页、`⌘?` 帮助、设置页 `Tab` 走一遍（焦点环是系统色、2pt、画在卡上） | §6.3 / §11 第五十三轮 |
+| 11 | 指针悬停 | 模型页档位卡悬停有**可见**的整卡反馈（不是只在两侧露一条窄带） | §11 第五十二轮 |
+| 12 | 音色库 / 我的作品的详情面板，播放一段音频 | 波形条高度随**这段音频自己的**幅度变化（换一首形状明显不同，不是每首都一样），播放中未播到的部分是淡色、随播放推进 | §11 第五十七轮 |
+| 13 | 头部工具栏（当前 14 个路由共享同一槽位） | 身份标题切页时**不横跳**（恒定在 x=252 那一格），工具栏是统一紧凑样式、不重复显示窗口标题 | §11 第五十五轮 |
+| 14 | 音色库 / 我的作品：点选一行 | 选中行是**淡青底**（稿值，不是系统实心蓝），且方向键上/下仍能换行、换行时底色跟着走 | §11 第六十轮 |
 
 不在本清单：单元测试与 UI 自动化（按 AGENTS.md 需当次明确授权，本会话未运行）。
 
@@ -4980,8 +4876,8 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 
 1. **提词稿**（卡 1）：四段官方提词稿（`GET /v1/voices/clone/prompts`）任选，另有「自己写一段」。
    稿件正文是这一页唯一的大字对象（`Typography.promptScript` = `.title`，与稿 `Title / Page` 同档，
-   见 §11.6 第六十六轮），五个选项共用同一个固定外框（`VoiceClone.scriptBodyHeight`）与同一条正文
-   原点——只读稿与自写编辑器逐点相同（见 §11.6 第六十七轮）。
+   见 §11 第六十六轮），五个选项共用同一个固定外框（`VoiceClone.scriptBodyHeight`）与同一条正文
+   原点——只读稿与自写编辑器逐点相同（见 §11 第六十七轮）。
    选稿会同步「实际朗读的文本」，但**只在用户还没改过它的时候**——已经改过的文本是「他实际说了
    什么」，不能被下一次选稿悄悄覆盖。
 2. **录制**（卡 2）：实心圆按钮（稿里唯一的圆形控件，56pt）、28 根电平条、等宽计时。
@@ -4990,8 +4886,8 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
    到 `VoiceClone.maximumSeconds`（45s，与服务端 `max_duration` 同值）自动停止并说明原因，
    而不是让用户提交后才吃到 `audio_too_long`。
 3. **回听与核对**（卡 3，录完才出现）：原始录音的波形来自这段音频自己的包络、
-   播放进度取播放器真实的 `currentTime / duration`（与 §11.6 第五十七轮同一条通道）；
-   动作是 `播放 / 重录 / 删除`（§11.6 第六十七轮：听完了不想用，必须有一条明确的出口，
+   播放进度取播放器真实的 `currentTime / duration`（与 §11 第五十七轮同一条通道）；
+   动作是 `播放 / 重录 / 删除`（§11 第六十七轮：听完了不想用，必须有一条明确的出口，
    而不是只能靠重录把它顶掉）；下面是「实际朗读的文本」输入槽，默认填入选中的提词稿全文、
    可改成真正说出的内容。
 4. **注册**（卡 4）：名称 + 「先检查参考音频」（`POST /v1/voices/clone/validate`，同一条质量门但不落档案）
@@ -5025,7 +4921,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 响应丢失后重试带同一对值，服务端会把第一次创建的那条档案还回来——重录才会换新身份。
 
 **档位门禁**：`/v1/models` 的 `supports_clone == false` 时不给注册，改给一条去模型页的路；
-能力还没读到（`nil`）时**不**拦——「未读取」不是「不支持」（与 §11.6 第五十一轮同一条口径）。
+能力还没读到（`nil`）时**不**拦——「未读取」不是「不支持」（与 §11 第五十一轮同一条口径）。
 
 ### 13.3 开发者文档（Developer Docs）
 
@@ -5060,33 +4956,7 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 **与仓库文档的关系**：应用内这一份是**入口**，不是替代品。每个主题的正文都点到对应契约
 或 `docs/users/` 的位置；仓库文档仍然是唯一完整版，应用内不复制整篇。
 
-### 13.4 Figma 侧（生成器）
-
-| 位置 | 变更 |
-|---|---|
-| `ROUTES` / `SCREEN_DEFS` | 各加两条（`voiceClone` / `developerDocs`），画板总数 8 → 10，深浅色共 20 帧 |
-| `icons.js` | 新增 4 个 lucide 图标（`mic` / `square` / `shield-check` / `book-open`），30 → 34 |
-| `main.js` | 新增 `screenVoiceClone` / `screenDeveloperDocs` 与 `endpointRow` / `codeBlock` 两个局部构造；组件页新增 `Prompt Option` / `Level Meter` / `Doc Topic Row` / `Code Block` 四个组件集（11 → 15） |
-| `03 Flows` | 新增第 4 条「音色克隆流程」（选稿 → 录制 → 回听核对 → 预检 → 注册 → 音色库） |
-| `00 Cover` | 目录行改成「四条主流程 / 10 个页面 × Light / Dark」 |
-| `audit.js` | 补 `primaryButton` / `secondaryButton` 的图标参数扫描——原先只扫 `icon()` / `iconButton()` / `icon:`，按钮上的图标名是**静默失去覆盖**的（本轮 `shield-check` 正是从这一条发现的）；`DOC_TOPICS` 因此从数组元组改成对象形式，让 `icon:` 键可被扫描 |
-| `PAGE_LAYOUT`（新） | 七组内容改排到**两个真实页面**上（`01 Kit` 三块文档、`02 Screens` 屏幕 + 流程 + 菜单设置 + 归档），每组建完就地平铺（组间 400px，顶端对齐） |
-
-**为什么只有两个页面**：2026-09-16 首次在 Figma 桌面版真跑时才发现，**Starter（免费）版每个文件
-只允许 3 个页面**。原方案一页一组（7 页），于是 `createPage` 在第 4 页抛错，`04 Screens` 等页面
-是 `undefined`，屏幕、流程、菜单设置、归档**一块都没建出来**——文件里只剩前三个文档页。改成两组、
-两个页面后一次跑通（见 §13.6 的下半张表）。生成器因此不再假设「页面随便建」：先复用同名页，
-再接管遗留页（改名），额度满了才尝试 `createPage`，并把不再拥有的页面清空删除。
-
-**稿侧已知取舍**：
-
-- 提词稿选项的标题来自服务端（`clone_prompts.json` 里带 emoji 前缀）。生成器源码里的 emoji
-  会在补丁通道里被吞，因此画板用同名纯文字标签；应用显示服务端返回的原文。
-- 代码块在稿里用 Inter 画示意（插件环境取不到 SF Pro／等宽字体），生产映射到系统等宽字体。
-- 开发者文档的目录列在稿上是 `surface/railTint` 选中底色（与侧边栏导航同一套画法），
-  应用用系统 `List` 的选中态：§3.2 第 5 条的例外只给音色库 / 我的作品两块目录页。
-
-### 13.5 落地
+### 13.4 落地
 
 - 新增文件：`VoiceRecordingController.swift`（录音通道）、`AudioReferenceCheck.swift`（本地量测）、
   `VoiceCloneView.swift`、`DeveloperDocsContent.swift`、`DeveloperDocsView.swift`。
@@ -5103,51 +4973,21 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
   因此 AGENTS.md 与 `docs/developers/macos-app-*.md` 里「不采集/播放音频」那句必须同步改，
   否则规则与代码打架。
 
-### 13.6 本轮实测
+### 13.5 本轮实测
 
 | 项 | 结果 | 时间 |
 |---|---|---|
-| 静态自检 | `node figma-kit/audit.js` → `audit: clean`（colour 23/23、icons 31/34、text styles 9/9） | 2026-09-16 17:30 |
-| 生成器语法 | `node --check figma-kit/main.js` → 通过 | 同上 |
-| 插件打包 | `node figma-kit/build.js` → `code.js` 161,697 bytes 落到 `~/Downloads/SpeechRail-figma-kit/` | 同上 |
 | 工程文件 | `plutil -lint SpeechRailApp.xcodeproj/project.pbxproj` → OK | 2026-09-16 17:38 |
 | Debug 构建 | `scripts/macos_app_build.sh --configuration Debug` → `** BUILD SUCCEEDED **`，0 条来自本轮源码的 error/warning | 2026-09-16 17:40 |
 | 测试构建 | `xcodebuild … build-for-testing` → `** TEST BUILD SUCCEEDED **`（**只编译，未运行**） | 2026-09-16 17:41 |
 | Info.plist | 产物 `NSMicrophoneUsageDescription` 已写入（`plutil -p` 实测） | 同上 |
 
-**Figma 桌面版实跑（2026-09-16 17:54–18:09，用户要求「在 figma app 里看到设计稿」，由 agent 驱动桌面版）**
-
-| 项 | 结果 | 时间 |
-|---|---|---|
-| 文件与套餐 | 用户账号（Starter / Free）里**没有任何 Figma 文件**（`Search results for “SpeechRail”` 也是空），本次新建 `Untitled`；3 页额度用了 2 页 | 17:54 |
-| 第一次运行（旧的 7 页方案） | `ERRORS pages -> in createPage: The Starter plan only comes with 3 pages…`；`screens / flows / menu & settings / archive -> in setCurrentPageAsync: Expected node, got undefined`；只建成 Cover / Foundations / Components 三块画板，**屏幕一块都没有** | 17:56 |
-| 改版后运行（两个真实页面） | 14 个步骤全 `ok`；`10 screens · 26 frames (Kit 3 · Screens 23)`；`prototype links: 198/198`；`bind errors: 0`（`code.js` 180,770 字节，sha256 `17d17cf8…`） | 18:03 |
-| 目视核对 | `01 Kit` = Cover / Foundations / Components 三块并排；`02 Screens` = 10 块浅色 + 10 块深色屏幕两列并排，右侧依次 Flows / Menu & Settings / Archive | 18:05–18:09 |
-| 未通过项（1 条） | `Flows: overflow → step · 试听与使用+30, detail+16 · inner 1: steps → step`——流程画板里某一步的内容比卡片高 30px。改排前后两次运行都报同一条，本轮未追成因、未修 | 18:03 |
-
-**第二轮：组件集排布与全量重导（2026-09-16 18:40–19:25，用户 `@电脑` 授权下由 agent 驱动桌面版）**
-
-核验 18:38 那版 `Components` 导出（把 SVG 重栅格化后放大逐块看）发现三处生成器缺陷，改
-`figma-kit/main.js` 后重跑插件并重导全部 26 块画板：
-
-| 缺陷 | 现象 | 修法 |
-|---|---|---|
-| 变体不摆位 | `combineAsVariants` 只把变体重新挂到集合下、不排布，16 个组件集的状态全落在创建时的同一点：Status Pill 的 5 个标签互相压字、Sidebar Status 叠成乱码、Profile Card 只看得见不透明的那一个变体 | `componentSet()` 自己排：按 `SET_W = 704` 换行、间距 24，集合尺寸按内容算；落位改成按列游标 `gridCursor`，某个集合长高了就把下一个往下推 |
-| 竖向变体被压成 40px | `comp()` 把 `w` 当主轴（竖向框的主轴是高），`o.h == null ? 40 : o.h` 又把高度写死 40：第二行起被裁掉——Profile Card 的说明、Empty State 的标题与正文、Doc Topic Row 的说明都缺 | 按轴写 `primaryAxisSizingMode` / `counterAxisSizingMode`（竖框的 `w` 归 counter 轴），两轴每次都写，未指定的轴保持 `AUTO` 继续 hug |
-| 子行不拉伸 | `Candidate Tile/head`、`Code Block/codeHead` 自己 hug 宽度，里面的 `spacer()` 推不动右对齐的 `seed` 与复制按钮 | 三处改为 `add(c, stretch(head))` |
-| 中文导出空白 | Inter 不承载 CJK；Figma 的缺字回退在刚重建的文档里未热，导出会把中文整段画成空白（19:09 / 19:11 / 19:13 三次导出实测，拉丁文正常） | 新增 `loadCjkFont()`（按偏好列表从 Figma 可用字体里挑一个 CJK 家族并加载）+ `applyCjkFont()`（给每个文本节点的 CJK 区段套该家族）；本轮选中 `PingFang SC`，报告新增 `CJK runs:` 一行 |
-
-重跑报告：`26 frames (Kit 3 · Screens 23)`、`prototype links: 198/198`、`bind errors: 0`、
-`CJK runs: PingFang SC`，未过项只剩既有的 `Flows: overflow → step`。导出：23 个屏幕帧用
-「选中 23 个 → `Export 23 layers`」一次落盘，`Cover` / `Components` / `Foundations` 单帧导出；
-52 个文件全部换成同一次构建的产物（19:17–19:25），画板尺寸与 18:20 那批一致。
-
-### 13.7 待验证与回退
+### 13.6 待验证与回退
 
 **未执行（需要授权或需要人工）**
 
 - Figma 插件重跑与 4x 重导出：轨道 B 下连接器工具不可用，写稿只能由人工在 Figma 桌面版触发
-  （`figma-kit/README.md`）。本轮只到「生成器就绪 + 静态自检 clean」。
+  。本轮只到「生成器就绪 + 静态自检 clean」。
 - 离屏量测：仓库里没有离屏渲染 harness，本轮没有新建；两个新页面的排版没有渲染证据。
 - 单元测试与 UI 自动化：按 AGENTS.md 需当次明确授权，本轮未运行。
 - 真机功能走查：麦克风录音需要真实设备与用户操作，agent 不做。
@@ -5168,7 +5008,6 @@ App 侧的一致性证据见 §11.6 第四至第七轮：结构、文案、状�
 **回退**
 
 - 代码回退按 hunk 挑，**不能整文件 `git checkout --`**：本轮改动叠在未提交的重设计工作区上。
-- 生成器回退：`main.js` / `icons.js` / `audit.js` 的三处新增都是独立块（两条路由、两个 builder、
   四个组件集、四个图标、一段扫描），可逐块撤回。
 - 工程回退：`project.pbxproj` 的五行文件引用、五行编译项与三处 `INFOPLIST_KEY_` 是唯一新增；
   `NSMicrophoneUsageDescription` 一旦回退，录音会在系统层直接失败（没有该键就没有权限弹窗）。

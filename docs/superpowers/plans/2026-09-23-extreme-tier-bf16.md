@@ -29,7 +29,7 @@
 | REST 能力与错误 | `src/speechrail/http/routes/voice_designs.py`、`audio.py`、`system.py`，以及 `src/speechrail/backends/qwen3_voice_binding.py` 的错误文案 |
 | MCP 当前能力边界 | `src/speechrail/mcp/tools.py`、`server.py`、`client.py`（`client.py` 仅核查，不预设改动） |
 | App 契约与展示 | `SpeechRailControlKit/ControlTypes.swift`、`ServiceDiagnosticsTypes.swift`；`SpeechRailApp/ModelManagementView.swift`、`ProfilePickerView.swift`、`WorkspaceComponents.swift`、`CreatorSurfaceViews.swift`、`ServiceOverviewView.swift`、`MeetingView.swift`、必要时 `SpeechRailDesignTokens.swift` |
-| 公共契约与文档 | `contracts/openapi.yaml`、`configs/speechrail.example.env`、`configs/speechrail.example.yaml`；用户 API/MCP/有效能力指南；产品概述；架构、边界、VoiceDesign/Base 与 MCP 文档；运行部署、评估和验收指南；`docs/developers/macos-app-design-system.md`、`docs/design/2026-09-15-macos-uiux-redesign/figma-kit/main.js`、`docs/decisions/0021-extreme-bf16-profile.md` 与各目录索引 |
+| 公共契约与文档 | `contracts/openapi.yaml`、`configs/speechrail.example.env`、`configs/speechrail.example.yaml`；用户 API/MCP/有效能力指南；产品概述；架构、边界、VoiceDesign/Base 与 MCP 文档；运行部署、评估和验收指南；`docs/developers/macos-app-design-system.md`、`docs/design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`、`docs/decisions/0021-extreme-bf16-profile.md` 与各目录索引 |
 | 定向回归 | `tests/test_model_presets.py`、`test_model_catalog_builder.py`、`test_model_identity.py`、`test_model_commands.py`、`test_profile_commands.py`、`test_profile_store.py`、`test_cli.py`、`test_installer.py`、`test_app_contract.py`、`test_voice_design_registration.py`、`tests/mcp/`、`SpeechRailMacControlTests/` |
 
 ## Review Focus
@@ -122,7 +122,7 @@
 - [x] 将 `download_bytes` 标为“该档模型总大小”；根据已校验制品状态推算尚需下载上限。目录外的 CoreML 分人包必须通过独立 `diarization-coreml` 状态纳入总量校验和剩余量计算，状态不全则显示“需下载量待确认”，不得把总量冒充本次下载量。确认中说明可用磁盘、已校验文件不重下、首次加载可能更久、其他档模型不会删除。
 - [x] 切档前只提示更大权重可能增加内存占用，不以当前档 `declared_footprint_bytes` 预测目标档或给出确定的 24/32 GiB 门槛；切换后依据当前 `/metrics.resources.heavy_overlap_allowed` 和 reason 显示实际并发状态。未知时说“尚未确认”，不禁止档位。
 - [x] `CreatorSurfaceViews` 与 `ServiceOverviewView` 依据服务声明的 VoiceDesign/Base 能力判断，而非 `.quality`；会议页移除“本机最强”，只显示活动档短名。更新 App 假数据和定向测试。
-- [x] 按现有设计系统更新 `docs/developers/macos-app-design-system.md` 和 Figma kit 的四卡规则；UI 自动化、接管窗口的视觉验证仅在实施当次获得用户明确授权后执行。
+- [x] 按现有设计系统更新 `docs/developers/macos-app-design-system.md` 与 REDESIGN-SPEC 的四卡规则；UI 自动化、接管窗口的视觉验证仅在实施当次获得用户明确授权后执行。
 
 **Gate G6：** 四档展示逻辑、未知值解码、能力入口、下载及内存提示的确定性检查通过且不夸大运行事实；未经当次授权的宽窄窗口与无障碍实际走查单列 `UNVERIFIED`，不伪装为静态门已实测。
 
@@ -132,7 +132,7 @@
 
 - [x] OpenAPI 的 `/health.profile`、`/v1/models` canonical entry profile 枚举加入 `extreme`；effective snapshot 的开放字符串字段保持原形。契约写清“profile 枚举扩展，端点与 payload 结构不变”。
 - [x] 全部 active 用户文档把“三档”“仅 quality 有 VoiceDesign/Base/分人”等现行承诺更新为四档；MCP 文档明言它不能切档，`describe()` 只暴露当前档有效能力。历史或 superseded 报告不改写。
-- [x] 架构图、产品矩阵、运行组成表、精度表、两个 example 配置中的档位说明、设计系统和 Figma kit 同步。数值区分 catalog 字节、推算 resident、已实测峰值；无证据的 ASR/TTS 优劣、延迟、内存行标 `未验证`，暂不写“质量最高”“分人最准”之类结论。
+- [x] 架构图、产品矩阵、运行组成表、精度表、两个 example 配置中的档位说明、设计系统与重设计规格同步。数值区分 catalog 字节、推算 resident、已实测峰值；无证据的 ASR/TTS 优劣、延迟、内存行标 `未验证`，暂不写“质量最高”“分人最准”之类结论。
 - [x] ADR-0021 记录 `extreme` 名称、仅显式选择、bf16 制品、精度类型扩展、MCP 禁止切档、机器级私有 resident 声明、未知档位解码及发布证据门。正文实质变化的正式文档才更新 `version/date`。
 - [x] 以仓库文字搜索收尾：active 文档与工具提示中不应再有把 VoiceDesign/Base 写成只有 `quality` 可用的现行断言；参考历史数据的段落明确标注历史。
 
@@ -191,4 +191,4 @@ R2/R3 不安排本次测量。将来若取得既有报告，先只读核对其�
 - 规格 §6 App 文案、布局、确认、内存、未知值 → G6；新增发现的其他 App 能力门禁同属 G6。
 - REST VoiceDesign/Base 漏项 → G4；MCP 当前档且永不切档 → G5。
 - 规格 §7/§10 的质量、资源、闭环 → R2–R4；遵循用户“不执行性能测试”且没有现成报告的决定，全部如实标记，不偷换成静态验收。
-- 公共枚举、用户文档、架构、ADR 和 Figma kit → G7。
+- 公共枚举、用户文档、架构、ADR 和重设计规格 → G7。
