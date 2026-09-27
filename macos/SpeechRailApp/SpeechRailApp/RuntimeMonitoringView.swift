@@ -549,13 +549,47 @@ public struct RuntimeMonitoringView: View {
         window.ttsLatencyByVoiceClass
     }
 
-    /// 趋势整宽置顶、运行组件在其下方：设计系统 §6 要求「时间序列占满整宽并位于
-    /// 首位」。此前把运行组件并排钉在 320pt，宽窗口下就是一条挤压的窄边栏，
-    /// 两卡底边也永远对不齐（2026-09-28 用户复核：布局不对仗）。
+    /// 趋势与运行组件并排，且**两张卡等高**（2026-09-28 用户复核：左右要一样高）。
     ///
-    /// 组件表按实际可用宽度自己决定用「组件 / 状态」两列还是竖排，不再由
-    /// `ViewThatFits` 在整页层面二选一。
+    /// 页面装在 `ScrollView` 里（`PageScaffold` 默认 `.scroll`），高度无界，
+    /// `HStack + .frame(maxHeight:.infinity)` 在这里不会把两卡拉到同一高度。`Grid`
+    /// 的 `GridRow` 会把行内单元格统一到该行的最大高度，再配合每张卡的
+    /// `maxHeight:.infinity` 让卡面背景撑满，于是左边图表多高、右边就多高。
+    ///
+    /// 宽度沿用原样：趋势图吃掉剩余宽度，运行组件固定 `monitoringCapabilityIdealWidth`，
+    /// 内部表按可用宽度在「组件 / 状态」两列与竖排间自适应（`workerTable`）。
     private var monitoringMainColumns: some View {
+        ViewThatFits(in: .horizontal) {
+            monitoringSideBySide
+            monitoringStacked
+        }
+    }
+
+    /// 宽窗口：趋势与运行组件并排，两张卡等高。
+    private var monitoringSideBySide: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: SpeechRailDesignTokens.Spacing.md) {
+            GridRow(alignment: .top) {
+                monitoringTrendPanel
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.monitoringChartMinimumWidth,
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
+                runtimeComponentsCard
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        idealWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
+            }
+        }
+    }
+
+    /// 窄窗口：运行组件落到趋势图下方（趋势仍占满整宽）。
+    private var monitoringStacked: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             monitoringTrendPanel
             runtimeComponentsCard
@@ -611,6 +645,7 @@ public struct RuntimeMonitoringView: View {
                     workerTable(compact: false)
                     workerTable(compact: true)
                 }
+                .frame(maxHeight: .infinity)
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("运行组件状态表")
             }
@@ -646,6 +681,10 @@ public struct RuntimeMonitoringView: View {
                 }
             }
         }
+        // 等高卡片里，表格吸收标题带与页脚之外的全部剩余高度，各行再按比例瓜分，
+        // 于是组件行向下铺开而不是挤在顶部。行仍带 `minHeight`，内容变多时按内容
+        // 自然增高、不裁切（2026-09-28 用户复核：铺开）。
+        .frame(maxHeight: .infinity)
     }
 
     private var workerCompactHeader: some View {
@@ -676,6 +715,7 @@ public struct RuntimeMonitoringView: View {
         .frame(
             maxWidth: .infinity,
             minHeight: SpeechRailDesignTokens.List.compactRowHeight,
+            maxHeight: .infinity,
             alignment: .leading
         )
         .accessibilityElement(children: .combine)
@@ -819,7 +859,10 @@ public struct RuntimeMonitoringView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .frame(minHeight: SpeechRailDesignTokens.List.compactRowHeight)
+        .frame(
+            minHeight: SpeechRailDesignTokens.List.compactRowHeight,
+            maxHeight: .infinity
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(row.title)
         .accessibilityValue(row.state)
