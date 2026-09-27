@@ -70,7 +70,7 @@ public struct DeveloperDocsView: View {
             // 都读自当前服务声明，所以它们必须以**同一时刻**的快照为准。原来这里只补能力清单，
             // 于是从落地页直接进来时会稳定出现「能力读到了、运行档位写着未读取」的半张页面；
             // `refresh()` 同时刷新健康快照、能力清单与控制面档位，这正是 ⌘R 做的那一次读取。
-            if model.health == nil || model.serviceCapabilities == nil {
+            if model.health == nil || model.discoveryState != .loaded {
                 await model.refresh()
             }
         }
@@ -161,12 +161,19 @@ public struct DeveloperDocsView: View {
     }
 
     private var capabilitySummary: String {
-        guard let capabilities = model.serviceCapabilities else { return unreadFact }
+        guard model.discoveryState == .loaded, model.effectiveCapabilities != nil else {
+            return unreadFact
+        }
         var names: [String] = []
-        if model.health?.asrReady == true { names.append("识别") }
-        if model.health?.ttsReady == true { names.append("合成") }
-        if capabilities.supportsInstruction { names.append("声音设计") }
-        if capabilities.supportsClone { names.append("声音复刻") }
+        if model.capabilityFacade.availability(ofTopLevelOperation: "realtime_transcription") == .available {
+            names.append("实时识别")
+        }
+        if model.capabilityFacade.availability(ofTopLevelOperation: "voice_preview") == .available {
+            names.append("音色创作")
+        }
+        if model.capabilityFacade.voiceCloneAvailability == .available {
+            names.append("音色复刻")
+        }
         if model.health?.diarization?.ready == true { names.append("匿名分人") }
         return names.isEmpty ? "未发布可用能力" : names.joined(separator: " · ")
     }
@@ -278,7 +285,7 @@ public struct DeveloperDocsView: View {
                             )
                             .fill(SpeechRailDesignTokens.Surface.selectionTint)
                             // 底色块把行上的三处边距镜像回来：列内边距 12、首尾各 14、
-                            // 以及行距（稿 gap 2）的一半 1 —— 相邻两块因此隔 2pt。
+                            // 以及行距（稿 `gap 2）的一半 1 —— 相邻两块因此隔 2pt。
                             .padding(
                                 .horizontal,
                                 SpeechRailDesignTokens.DeveloperDocs.topicColumnHorizontalPadding
@@ -346,7 +353,7 @@ public struct DeveloperDocsView: View {
     /// 这一页与档位有关的说法都读自当前服务声明，所以胶囊必须是一句真话，而且要把
     /// **还没读到**和**读不到**分开：服务正常、快照还在路上时报警，等于把加载说成故障；
     /// 只有读取真的失败（或读完了却缺那一项）才该说未读取——「未读取」不是「不支持」，
-    /// 与 §11.6 第五十一轮、音色创作页 `checking` / `failed` 同一口径。
+    /// 与 §11 第五十一轮、音色创作页 `checking` / `failed` 同一口径。
     private enum ContentState {
         case verified
         case checking
@@ -370,11 +377,11 @@ public struct DeveloperDocsView: View {
     }
 
     private var contentState: ContentState {
-        if model.health?.profile != nil, model.serviceCapabilities != nil { return .verified }
-        switch model.serviceCapabilitiesLoadState {
-        case .unknown, .loading: return .checking
+        if model.health?.profile != nil, model.discoveryState == .loaded { return .verified }
+        switch model.discoveryState {
+        case .idle, .loading: return .checking
         // 读完了却还缺一项（例如健康快照里没有档位），或这次读取失败：如实说没读到。
-        case .loaded, .failed: return .unread
+        case .loaded, .notSupported, .notReady, .unauthorized, .invalidContract, .failed: return .unread
         }
     }
 

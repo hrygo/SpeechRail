@@ -392,6 +392,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     public let creation: VoiceCreationSnapshot?
     /// `nil` 表示服务端未声明增量能力（旧服务或未实现）：按“不可用/未知”处理。
     public let streaming: VoiceStreamingCapability?
+    /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
+    public let preview: VoicePreviewSample?
 
     public init(
         id: String,
@@ -414,7 +416,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         availabilityReason: SafeVoiceAvailabilityReason? = nil,
         quality: VoiceQualityReportSnapshotV2? = nil,
         creation: VoiceCreationSnapshot? = nil,
-        streaming: VoiceStreamingCapability? = nil
+        streaming: VoiceStreamingCapability? = nil,
+        preview: VoicePreviewSample? = nil
     ) {
         self.id = id
         self.name = name
@@ -437,6 +440,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         self.quality = quality
         self.creation = creation
         self.streaming = streaming
+        self.preview = preview
     }
 
     public init(from decoder: Decoder) throws {
@@ -468,6 +472,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         quality = try container.decodeIfPresent(VoiceQualityReportSnapshotV2.self, forKey: .quality)
         creation = try container.decodeIfPresent(VoiceCreationSnapshot.self, forKey: .creation)
         streaming = try container.decodeIfPresent(VoiceStreamingCapability.self, forKey: .streaming)
+        preview = try container.decodeIfPresent(VoicePreviewSample.self, forKey: .preview)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -492,6 +497,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case quality
         case creation
         case streaming
+        case preview
     }
 }
 
@@ -551,6 +557,38 @@ public struct VoiceDesignReference: Codable, Equatable, Sendable {
     }
 }
 
+public enum VoiceDesignCandidateState: String, Codable, CaseIterable, Sendable {
+    case generated
+    case confirmed
+    case validating
+    case publishable
+    case published
+    case cancelled
+    case failed
+
+    public var canReadReferenceAudio: Bool {
+        switch self {
+        case .generated, .confirmed, .validating, .publishable:
+            true
+        case .published, .cancelled, .failed:
+            false
+        }
+    }
+
+    public var canReadValidationAudio: Bool {
+        self == .validating || self == .publishable
+    }
+
+    public var canCancel: Bool {
+        switch self {
+        case .generated, .confirmed, .validating, .publishable, .failed:
+            true
+        case .published, .cancelled:
+            false
+        }
+    }
+}
+
 public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable {
     public let validationID: String
     public let candidateRevision: String
@@ -560,7 +598,11 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
     public let naturalnessStatus: VoiceDesignReview
     public let failureCodes: [String]
     public let capabilityKey: String
+    public let modelArtifact: String
+    public let modelCatalogRevision: String
     public let transcriptMatch: Double?
+    public let createdAt: Double
+    public let updatedAt: Double
 
     public var id: String { validationID }
 
@@ -573,7 +615,11 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         naturalnessStatus: VoiceDesignReview,
         failureCodes: [String],
         capabilityKey: String,
-        transcriptMatch: Double?
+        modelArtifact: String,
+        modelCatalogRevision: String,
+        transcriptMatch: Double?,
+        createdAt: Double,
+        updatedAt: Double
     ) {
         self.validationID = validationID
         self.candidateRevision = candidateRevision
@@ -583,7 +629,11 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         self.naturalnessStatus = naturalnessStatus
         self.failureCodes = failureCodes
         self.capabilityKey = capabilityKey
+        self.modelArtifact = modelArtifact
+        self.modelCatalogRevision = modelCatalogRevision
         self.transcriptMatch = transcriptMatch
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -595,7 +645,11 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         case naturalnessStatus = "naturalness_status"
         case failureCodes = "failure_codes"
         case capabilityKey = "capability_key"
+        case modelArtifact = "model_artifact"
+        case modelCatalogRevision = "model_catalog_revision"
         case transcriptMatch = "transcript_match"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
     }
 }
 
@@ -609,6 +663,12 @@ public struct VoiceDesignCandidate: Codable, Equatable, Identifiable, Sendable {
     public let reference: VoiceDesignReference
     public let validations: [VoiceDesignValidation]
     public let publishable: Bool
+
+    /// Preserve unknown wire state in `state` for diagnostics while only
+    /// exposing operations gated by a recognized contract state.
+    public var knownState: VoiceDesignCandidateState? {
+        VoiceDesignCandidateState(rawValue: state)
+    }
 
     public init(
         id: String,
@@ -714,10 +774,23 @@ public protocol SpeechRailCreatorClient: Sendable {
         capabilityKey: String?,
         humanReview: VoiceDesignHumanReview?
     ) async throws -> VoiceDesignCandidate
+    func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate]
+    func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate
+    func fetchVoiceDesignReferenceAudio(
+        id: String,
+        expectedRevision: String
+    ) async throws -> Data
+    func fetchVoiceDesignValidationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) async throws -> Data
+    func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate
     func publishVoiceDesignCandidate(
         id: String,
         expectedCandidateRevision: String?
     ) async throws -> VoiceDesignPublishResult
+    func fetchCloneIdempotencyStatus(idempotencyKey: String) async throws -> CloneIdempotencyStatus
     func fetchClonePrompts() async throws -> [ClonePrompt]
     func validateVoiceClone(
         audio: Data,
@@ -731,12 +804,6 @@ public protocol SpeechRailCreatorClient: Sendable {
         name: String,
         voiceID: String?,
         idempotencyKey: String?
-    ) async throws -> CreatorVoice
-    func updateVoice(
-        id: String,
-        name: String?,
-        instruction: String?,
-        seed: Int?
     ) async throws -> CreatorVoice
     func deleteVoice(id: String) async throws
 
@@ -752,7 +819,7 @@ public protocol SpeechRailCreatorClient: Sendable {
         name: String?,
         instruction: String?,
         seed: Int?,
-        expectedRevision: String?
+        expectedRevision: String
     ) async throws -> VoiceRevisionMutation
     func rollbackVoice(
         id: String,
@@ -768,6 +835,7 @@ public protocol SpeechRailCreatorClient: Sendable {
     ) async throws -> PronunciationSet
     func revokePronunciationRevision(id: String, revision: String) async throws -> PronunciationSet
     func deletePronunciationSet(id: String) async throws
+    func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary]
     func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest
@@ -806,6 +874,63 @@ public extension SpeechRailCreatorClient {
             statusCode: 501,
             code: "unsupported",
             message: "voice design candidates are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design candidate listing is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design candidate lookup is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchVoiceDesignReferenceAudio(
+        id: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design reference audio is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchVoiceDesignValidationAudio(
+        id: String,
+        validationID: String,
+        expectedRevision: String
+    ) async throws -> Data {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design validation audio is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice design candidate cancellation is unsupported by this client",
             requestID: nil,
             retryable: false
         )
@@ -852,6 +977,16 @@ public extension SpeechRailCreatorClient {
         )
     }
 
+    func fetchCloneIdempotencyStatus(idempotencyKey: String) async throws -> CloneIdempotencyStatus {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "clone idempotency lookup is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
     func createVoice(
         name: String,
         instruction: String,
@@ -882,7 +1017,7 @@ public extension SpeechRailCreatorClient {
         name: String?,
         instruction: String?,
         seed: Int?,
-        expectedRevision: String?
+        expectedRevision: String
     ) async throws -> VoiceRevisionMutation {
         throw ServiceAPIClientError.http(
             statusCode: 501,
@@ -956,6 +1091,16 @@ public extension SpeechRailCreatorClient {
             statusCode: 501,
             code: "unsupported",
             message: "pronunciation sets are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary] {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "pronunciation-set listing is unsupported by this client",
             requestID: nil,
             retryable: false
         )
@@ -1055,15 +1200,6 @@ struct UnavailableCreatorClient: SpeechRailCreatorClient {
         name: String,
         voiceID: String?,
         idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func updateVoice(
-        id: String,
-        name: String?,
-        instruction: String?,
-        seed: Int?
     ) async throws -> CreatorVoice {
         throw ServiceAPIClientError.requestFailed
     }

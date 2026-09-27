@@ -291,6 +291,7 @@ private actor TTSStreamTransport: RealtimeASRTransport {
     private var receiver: CheckedContinuation<RealtimeASRSocketFrame, Error>?
     private var sent: [String] = []
     private var closed = false
+    private var nextSequence = 0
 
     func resume() async {}
 
@@ -318,11 +319,18 @@ private actor TTSStreamTransport: RealtimeASRTransport {
     }
 
     func enqueue(_ frame: RealtimeASRSocketFrame) {
+        let stamped = stampServerEvent(
+            frame,
+            defaultSessionID: "test-session",
+            defaultEventID: "server-event-\(nextSequence)",
+            defaultSequence: nextSequence
+        )
+        nextSequence += 1
         if let receiver {
             self.receiver = nil
-            receiver.resume(returning: frame)
+            receiver.resume(returning: stamped)
         } else {
-            frames.append(frame)
+            frames.append(stamped)
         }
     }
 

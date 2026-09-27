@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-// 稿构件层：`figma-kit/main.js` 的「会话共享件」（脚本 1812–2270）与闭环稿的通用构件。
+// 稿构件层：设计稿里的「会话共享件」与闭环稿的通用构件（`SESSIONS-SPEC` §6.7）。
 //
 // 为什么单开一层：这三页此前各自拼卡片、各自排行、各自写「标签在左 / 取值在右」，
 // 于是同一件事在三个页面有三种说法（`SESSIONS-SPEC` §6.7 的同一条理由）。这一层只放
@@ -11,7 +11,7 @@ import SwiftUI
 // 数值一律取自既有 token（`Spacing` / `Layout` / `Corner` / `Control`），本层**不新增
 // 数值常量**：稿那边的同一个数在实现里已经有一处声明，再写第二个就是漂移的起点。
 
-// MARK: - 键帽（稿 `kbd` / `kbdInRow`）
+// MARK: - 键帽（稿 ``kbd` / `kbdInRow`）
 
 /// 一颗键帽。稿里每一处快捷键提示都走它，所以提示在全 App 长得一样；
 /// 按钮自己的快捷键不走这里（那句长在按钮标签上，见 `ButtonShortcutHint`）。
@@ -41,7 +41,7 @@ public struct SessionKeycap: View {
 }
 
 /// 页头行里的键帽槽：稿给它一个 34pt 高的盒子，让键帽与同一行的按钮基线对齐
-/// （`kbdInRow`，脚本 1973）。
+/// （`kbdInRow`）。
 public struct SessionHeaderKeycap: View {
     public let label: String
 
@@ -55,7 +55,7 @@ public struct SessionHeaderKeycap: View {
     }
 }
 
-// MARK: - 「非主框体」的收起控件（稿 `sideToggle`）
+// MARK: - 「非主框体」的收起控件（稿 ``sideToggle`）
 
 /// 稿 `sideToggle`：内容列首行尾端的一枚 28pt 图标按钮，收起右栏那类面板。
 ///
@@ -91,11 +91,11 @@ public struct SessionPanelToggle: View {
     }
 }
 
-// MARK: - 检查行（稿 `closureCheckRow`）
+// MARK: - 检查行（稿 ``closureCheckRow`）
 
-/// 稿 `closureCheckRow`（脚本 4161）：一行 = 定宽的名字格 + 一句说明 + 行尾取值。
+/// 稿 `closureCheckRow`：一行 = 定宽的名字格 + 一句说明 + 行尾取值。
 ///
-/// 名字格是**定宽**（稿 132）而不是自适应：三行摆在一起时，说明文字的左沿要对齐；
+/// 名字格是**定宽**（稿 `132）而不是自适应：三行摆在一起时，说明文字的左沿要对齐；
 /// 让它按各自的名字长短伸缩，读起来就是一列歪的。稿的注释里记着两条实测教训
 /// （「Attention」在 96 里要 103、「腾讯会议」在 116 里要 122），所以这个格宽是按
 /// **最长的那条名字**定的，改文案之前先量一遍。
@@ -223,7 +223,7 @@ struct SessionRowMark: View {
     }
 }
 
-// MARK: - 卡片面板（稿 `card(pad: 0, clip: true)` + 头 + 分隔 + 正文 + 弹性 + 分隔 + 动作）
+// MARK: - 卡片面板（稿 ``card(pad: 0, clip: true)` + 头 + 分隔 + 正文 + 弹性 + 分隔 + 动作）
 
 /// 稿里带「头 / 正文 / 动作带」的容器卡。会话三页的右栏、人设区、音色区、对话流、
 /// 记录卡都用这一形状，区别只在内容。
@@ -310,7 +310,7 @@ public struct SessionPanelHead: View {
     }
 }
 
-/// 卡片里的一条 1pt 分隔线，左右顶到卡片内沿（稿 `hairline`）。
+/// 卡片里的一条 1pt 分隔线，左右顶到卡片内沿（稿 ``hairline`）。
 public struct SessionHairline: View {
     public init() {}
 
@@ -357,7 +357,7 @@ public struct SessionPanelActions<Content: View>: View {
     }
 }
 
-// MARK: - 取值行（稿 `kvRow`）
+// MARK: - 取值行（稿 ``kvRow`）
 
 /// 稿 `kvRow`：标签在左、取值在右，同一个 Inspector 里的取值因此左对齐成一列
 /// （会话三页的右栏、记录信息都走它）。
@@ -387,9 +387,9 @@ public struct SessionKVRow: View {
     }
 }
 
-// MARK: - 对话行 / 转录行（稿 `turnRow`）
+// MARK: - 对话行 / 转录行（稿 ``turnRow`）
 
-/// 对话行与转录行是同一条行（稿 `turnRow`，脚本 2128）：说话人 + 音色徽标 + 状态胶囊 +
+/// 对话行与转录行是同一条行（稿 ``turnRow`）：说话人 + 音色徽标 + 状态胶囊 +
 /// 来源 + 时间 + 行内动作 + 正文。
 ///
 /// 「被打断」这类**属于这一句**的状态挂在句子上，不挂在页面上：回看时要知道助手那一句
@@ -687,7 +687,7 @@ public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// 音色徽标（稿 `voiceBadge`）：助手说过的话上标着「这句是谁的声音」——
+/// 音色徽标（稿 ``voiceBadge`）：助手说过的话上标着「这句是谁的声音」——
 /// 会话里可以换音色，换完之后回看要分得清哪一句是哪一把嗓子。
 public struct SessionVoiceBadge: View {
     public let label: String
@@ -707,7 +707,7 @@ public struct SessionVoiceBadge: View {
     }
 }
 
-// MARK: - 音色胶囊（稿 `voiceCapsule`）
+// MARK: - 音色胶囊（稿 ``voiceCapsule`）
 
 /// 稿 `voiceCapsule`：波形图标 + 音色名 + chevron 的下拉。它替代了早先一颗纯文字按钮——
 /// 「音色」在会话里是一个**带对象的下拉**（当前是谁 + 能换成谁），不是一个动作。
@@ -757,9 +757,9 @@ public struct SessionVoiceCapsule<Content: View>: View {
     }
 }
 
-// MARK: - 结论条的动作组（稿 `conclusionBand` 的 actions 槽）
+// MARK: - 结论条的动作组（稿 ``conclusionBand` 的 actions 槽）
 
-/// 结论条（稿 `conclusionBand`，脚本 2173）：图标 + 结论 + 影响 + **一行提示** + 若干出口。
+/// 结论条（稿 ``conclusionBand`）：图标 + 结论 + 影响 + **一行提示** + 若干出口。
 ///
 /// 它和 `StatusBanner(kind: .conclusion)` 的差别有两处，所以没有合并：稿的结论条带
 /// `hint` 那一行（更小的字，写"怎么配合这件事"），而且**支持多个出口**（「打开设置…」+
@@ -899,12 +899,12 @@ private struct SharedSemanticPreviewSurface: View {
 #endif
 
 
-// MARK: - 记录库列（稿 `recordListColumn`，脚本 2240）
+// MARK: - 记录库列（稿 ``recordListColumn`）
 
 /// 三条闭环的产物住在同一个本机数据库里，所以它们长同一个样子：标题 + 计数 + 搜索 +
 /// 行 + 页脚（稿把这一形状在字幕记录库与对话记录库各写过一遍，这里收成一份）。
 ///
-/// 列宽走 `Layout.sessionListWidth`（稿 `size/list` 280）——它与模型配置列表是同一个数，
+/// 列宽走 `Layout.sessionListWidth`（稿 ``size/list` 280）——它与模型配置列表是同一个数，
 /// 全 App 的「列表列」只有这一档。
 public struct SessionLibraryColumn: View {
     public let kind: SessionKind

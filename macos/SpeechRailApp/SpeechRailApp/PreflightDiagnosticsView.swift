@@ -29,7 +29,7 @@ public struct PreflightDiagnosticsView: View {
                 Label("重新运行诊断", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
-            // 稿的页头次按钮是 30pt（脚本 `secondaryButton`）；系统 `.large` 是 28。
+            // 稿的页头次按钮是 30pt（稿的 `secondaryButton`）；系统 `.large` 是 28。
             .controlSize(.large)
             .disabled(model.isBusy || model.isRefreshingPreflight)
             .help("重新运行诊断")
@@ -63,7 +63,7 @@ public struct PreflightDiagnosticsView: View {
                     detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
                 )
                 LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
-                LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
+                LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection))
                 LabeledContent("服务状态", value: model.service.serviceState)
                 LabeledContent("检查数量", value: String(model.preflightChecks.count))
                 if let selectedCheck {
@@ -118,7 +118,7 @@ public struct PreflightDiagnosticsView: View {
                 }
             } else {
                 // 两栏之间是「栏与栏」，不是页面块：帧实测两栏底色带 15pt（即 16pt），
-                // 比页面级 20pt 紧一档（REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
+                // 比页面级 20pt 紧一档（REDESIGN-SPEC §5.6 / §11 第十七轮）。
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     checkList
                         .frame(
@@ -210,7 +210,7 @@ public struct PreflightDiagnosticsView: View {
         .accessibilityIdentifier("diagnostics-check-list")
     }
 
-    /// Figma `listHead` 右侧：需要处理的检查项数量。颜色之外还有文字，
+    /// 稿 `listHead` 右侧：需要处理的检查项数量。颜色之外还有文字，
     /// 不靠颜色单独表达（REDESIGN-SPEC §9）。
     private var pendingNote: some View {
         let pending = model.preflightChecks.filter { !$0.ok }.count
@@ -270,7 +270,7 @@ public struct PreflightDiagnosticsView: View {
         return reportCopySucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
     }
 
-    /// Figma `listFoot`：上次诊断多久前、一共查了几项 —— 两个本机事实，
+    /// 稿 `listFoot`：上次诊断多久前、一共查了几项 —— 两个本机事实，
     /// 不涉及任何检查内容或路径。
     private var checklistFootnote: String {
         let count = model.preflightChecks.count
@@ -303,7 +303,7 @@ public struct PreflightDiagnosticsView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             if let selectedCheck {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    // Figma `pillRow`：结论胶囊在左，这次预检的时间在右；
+                    // 稿 `pillRow`：结论胶囊在左，这次预检的时间在右；
                     // 状态由胶囊承载，标题下面不再重复一遍「检查通过 / 失败」。
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                         StatusPill(
@@ -331,7 +331,7 @@ public struct PreflightDiagnosticsView: View {
                 detailFact("这项检查确认", explanation(for: selectedCheck.name))
                 detailFact("对当前服务的影响", impact(for: selectedCheck))
 
-                // Figma `fix`：结论与影响之后就是这一项的动作，而且是详情卡里**唯一**
+                // 稿 `fix`：结论与影响之后就是这一项的动作，而且是详情卡里**唯一**
                 // 的按钮（当前生成脚本：`primaryButton(fix, "打开模型管理", "download", 268)`，
                 // 整宽 268/300、图标是托盘 + 下箭头）。这一格也是「不需要操作」的回执位置。
                 if selectedCheck.ok {
@@ -357,7 +357,7 @@ public struct PreflightDiagnosticsView: View {
                             modelEvidenceRows
                         }
                         LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
-                        LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
+                        LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection))
                         LabeledContent("服务状态", value: model.service.serviceState)
                     }
                     .font(SpeechRailDesignTokens.Typography.technical)
@@ -441,7 +441,7 @@ public struct PreflightDiagnosticsView: View {
         .accessibilityLabel("修复步骤")
     }
 
-    /// Figma `fix`：详情卡里只有一个动作，而且是整宽主按钮。
+    /// 稿 `fix`：详情卡里只有一个动作，而且是整宽主按钮。
     /// 稿实测（2026-09-15 22:04 的 4x 帧）按钮 268×34、内容宽 300.8pt——稿是手画的
     /// 固定宽度，应用取整宽；稿的图标是托盘 + 下箭头，文案是目的地而不是动作
     /// （「打开模型管理」）。另外两条路由在稿上没有画面，沿用原文案与各自路由图标。
@@ -749,7 +749,7 @@ public struct PreflightDiagnosticsView: View {
         }
         return """
         runtime_profile: \(displayedHealth?.profile ?? "未读取")
-        configured_profile: \(SpeechRailProfilePresentation.label(model.profile?.selection) ?? "未配置")
+        configured_profile: \(SpeechRailProfilePresentation.label(model.profile?.selection))
         service_state: \(safeIdentifier(model.service.serviceState))
         health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
         health_failure: \(healthFailureSummary)
@@ -895,21 +895,21 @@ private struct PreflightCheckRow: View {
 
     var body: some View {
         // 稿的诊断检查行是 `frame("diagRow", { gap: 10, padX: 16, padY: 12 })`
-        // （`main.js` 2009），图标是 `icon(row, item.icon, 16)` 的 **16pt 框**。
+        // ，图标是 `icon(row, item.icon, 16)` 的 **16pt 框**。
         // 上一轮只把墨迹从 10 收到 13（`Icon.rowStatusSize`），没有补框与间距，
         // 于是文字列停在 `16 + 13 + 8 = 37`，稿是 `16 + 16 + 10 = 42`。
         // 4x 帧 `▸ 诊断.png` 实测（`--cols`，就绪行在纯白底上）：图标墨迹 x 280.0
         // （= 卡左沿 261 + padX 16 + lucide `check` 在 16 框里的 2.25 留白）、
         // 标题墨迹 x 304.25（= 42 + 首字 1.25 字形留白）——与脚本的 16/10 逐位吻合。
         // 10 不在应用的 4pt 间距档上，也没有第二处用到，所以不新造 token，
-        // 就地写明来源（REDESIGN-SPEC §11.6 第四十一轮）。
+        // 就地写明来源（REDESIGN-SPEC §11 第四十一轮）。
         HStack(spacing: 10) {
             Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
                 // 稿的 `icon(row, item.icon, 16)` 是 16pt 图标框；4x 帧实测墨迹
                 // 对勾行 12.0 × 8.75、三角行 13.5 × 12.0。此前用 `.imageScale(.small)`
                 // 只有 10.0 × 10.0（比稿小 20–30%），改用行首状态字形这一档
                 // （`Icon.rowStatusSize` = 13，复现后 13 × 13 / 13 × 12）。
-                // REDESIGN-SPEC §11.6 第三十九轮。字号管**墨迹**，框由下面的
+                // REDESIGN-SPEC §11 第三十九轮。字号管**墨迹**，框由下面的
                 // `frame(width:)` 管，两者分开才是稿的写法。
                 .font(SpeechRailDesignTokens.Typography.rowStatusIcon)
                 .foregroundStyle(
@@ -931,20 +931,20 @@ private struct PreflightCheckRow: View {
                     // 4x 帧上这一行的墨迹高 12.50、名称行 12.00（两行都是中文，比例可比）——
                     // 说明与名称同档，而非小一档。应用此前用 `caption`，与上面这行注释自相矛盾，
                     // 也违反 `macos-app-design-system.md`「`caption` 只留给应用自有密集区块」的约定
-                    // （REDESIGN-SPEC §11.6 第三十七轮）。
+                    // （REDESIGN-SPEC §11 第三十七轮）。
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             Spacer(minLength: 0)
-            // 行尾是**导航指示**，不是状态词：稿 `main.js` 2016 写的是
+            // 行尾是**导航指示**，不是状态词：稿写的是
             // `icon(row, "chevron-right", 14, V["text/tertiary"])`，4x 帧
             // `▸ 诊断.png` 每一行的右端也只有一个灰色 `›`。应用此前在这里放
             // 「通过 / 失败」两个字的语义色文本，比稿多出一列文字，而状态在行首字形
             // （`checkmark.circle.fill` / `xmark.circle.fill`）、列表头的「N 项需要处理」
             // 和行自身的 `accessibilityValue` 里都已经说过一遍了
-            // （REDESIGN-SPEC §11.6 第四十一轮）。尺寸沿用应用自己的导航 chevron 档
+            // （REDESIGN-SPEC §11 第四十一轮）。尺寸沿用应用自己的导航 chevron 档
             // （`caption`，与折叠行、结果条同族），颜色取稿的 `text/tertiary`。
             Image(systemName: "chevron.right")
                 .font(SpeechRailDesignTokens.Typography.caption)

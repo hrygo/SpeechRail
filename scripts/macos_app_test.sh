@@ -37,6 +37,12 @@ XCODEBUILD_ARGS=(
   -derivedDataPath "$TEST_DERIVED_DATA" \
 )
 
+# Optional passthrough for targeted runs (e.g. a single UI acceptance case).
+# Unset — the default — keeps the full test plan exactly as before.
+if [[ -n "${SPEECHRAIL_MACOS_ONLY_TESTING:-}" ]]; then
+  XCODEBUILD_ARGS+=( -only-testing:"$SPEECHRAIL_MACOS_ONLY_TESTING" )
+fi
+
 if ((${#BUILD_SETTINGS[@]} > 0)); then
   xcodebuild "${XCODEBUILD_ARGS[@]}" "${BUILD_SETTINGS[@]}" test
 else

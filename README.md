@@ -281,7 +281,9 @@ ranking.
 | `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + design-only `tts-1.7b-design-bf16` | Reference precision inherits the same-family 8-bit gates and was not separately retested; VoiceDesign is excluded from ordinary synthesis. Diarization still requires explicit provisioning. |
 
 Every spec routes system voices through `custom_voice` and reference cloning
-through `base`; `reference` additionally binds `voice_design` for design jobs.
+through `base`. VoiceDesign is a single on-demand artifact that is not bound to any
+spec: every `tts_spec` can run design jobs once that snapshot is supplied, and its
+absence only removes the design capability.
 Different lanes may run concurrently while one lane remains serialized. The
 capability group can still trim/close workers after the configured idle
 cooldown and restore the roles needed by the next request lazily.

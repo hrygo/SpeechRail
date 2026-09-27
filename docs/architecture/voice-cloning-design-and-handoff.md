@@ -2,8 +2,8 @@
 title: "SpeechRail 音色克隆架构设计与工程交接"
 status: active
 audience: "SpeechRail / Sona 核心开发者"
-version: "2.3"
-date: 2026-09-26
+version: "2.4"
+date: 2026-09-27
 ---
 
 # SpeechRail 音色克隆架构设计与工程交接
@@ -17,7 +17,7 @@ Reference clone 与 VoiceDesign 已正式分离：
 - `voice_design`：仅负责提示词驱动的开放式音色创造与配置该 variant 的 profile 默认 TTS；
 - `base`：仅负责 reference audio + exact transcript 的 clone；
 - `custom_voice`：系统固定 speaker，普通合成与普通实时 TTS 的默认角色；
-- 每个 TTS 档位都绑定 `tts_base` 与 `tts_custom_voice` 两个角色（`fast`/`quality` 为 8-bit，`reference` 为 bf16），`voice_design` 只绑定在 `reference`。能力是否可用以服务当前声明为准。
+- 每个 TTS 档位都绑定 `tts_base` 与 `tts_custom_voice` 两个角色（`fast`/`quality` 为 8-bit，`reference` 为 bf16），`voice_design` 是不与档位绑定的按需制品。能力是否可用以服务当前声明为准。
 
 旧版“VoiceDesign 私有 `_generate_icl()` 直接做 clone”的实现不再是架构基线。Base clone 使用 MLX-Audio 的公开 `generate(text=..., ref_audio=..., ref_text=...)` 路径，使 speaker encoder / ICL 条件由 Base 模型按其公开接口建立。
 
@@ -91,7 +91,7 @@ Base worker 内部解码 reference，并调用 vendor public `generate`；不再
 
 ## 6. 按角色 worker 与资源边界
 
-每个 TTS spec 都绑定 `tts_custom_voice` 与 `tts_base`，`reference` 另绑定只用于设计作业的 `voice_design`。`Qwen3TtsCapabilityRouter` 按角色维护独立 worker：
+每个 TTS spec 都绑定 `tts_custom_voice` 与 `tts_base`，`voice_design` 是不与档位绑定、只用于设计作业的按需制品。`Qwen3TtsCapabilityRouter` 按角色维护独立 worker：
 
 - eager lifecycle 按当前配置 warm 所需角色；lazy lifecycle 先加载当前请求所需 worker，后续其他角色首次使用时再加载；
 - `custom_voice`、`base` 与 `voice_design` 是不同 governor resource lane，可以按预算并发；同一 lane 仍由 worker lock 串行；

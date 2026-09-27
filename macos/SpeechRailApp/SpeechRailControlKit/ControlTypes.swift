@@ -69,6 +69,14 @@ public enum SpeechRailProfile: Codable, CaseIterable, Hashable, RawRepresentable
     }
 }
 
+public extension SpeechRailProfile {
+    /// 目录用这两个非档位标记说明某份制品是**任务级按需资产**，而不是某一档的依赖：
+    /// 分人只在请求要说话人标签时准备，音色创作同理。它们因此不属于任何
+    /// ASR/TTS 档位，`artifacts(for:)` 永远不会返回它们，页面要单独列出。
+    static let diarizationMarker = SpeechRailProfile.unrecognized("diarization")
+    static let voiceDesignMarker = SpeechRailProfile.unrecognized("voice_design")
+}
+
 /// 一次档位切换/制品准备的完整选择：ASR 与 TTS 两项规格。
 ///
 /// 「快捷组合」把两项写相同值（`quick`），高级用户可以在诊断页分别调整，
@@ -288,7 +296,7 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
     public let asr: String
     public let tts: String
     public let aligner: String?
-    public let ttsClone: String?
+    public let ttsBase: String?
     public let diarization: Bool
     public let downloadBytes: Int64
 
@@ -297,7 +305,7 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
         asr: String,
         tts: String,
         aligner: String? = nil,
-        ttsClone: String? = nil,
+        ttsBase: String? = nil,
         diarization: Bool = false,
         downloadBytes: Int64
     ) {
@@ -305,7 +313,7 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
         self.asr = asr
         self.tts = tts
         self.aligner = aligner
-        self.ttsClone = ttsClone
+        self.ttsBase = ttsBase
         self.diarization = diarization
         self.downloadBytes = downloadBytes
     }
@@ -316,7 +324,7 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
         asr = try container.decode(String.self, forKey: .asr)
         tts = try container.decode(String.self, forKey: .tts)
         aligner = try container.decodeIfPresent(String.self, forKey: .aligner)
-        ttsClone = try container.decodeIfPresent(String.self, forKey: .ttsClone)
+        ttsBase = try container.decodeIfPresent(String.self, forKey: .ttsBase)
         diarization = try container.decodeIfPresent(Bool.self, forKey: .diarization) ?? false
         downloadBytes = try container.decode(Int64.self, forKey: .downloadBytes)
     }
@@ -326,7 +334,7 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
         case asr
         case tts
         case aligner
-        case ttsClone = "tts_clone"
+        case ttsBase = "tts_base"
         case diarization
         case downloadBytes = "download_bytes"
     }

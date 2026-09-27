@@ -6,6 +6,13 @@
 
 - macOS 模型管理界面支持混合档位组合：三张快捷组合卡之外新增「分别调整识别与配音」，下载 / 应用统一提交一对 `asr_spec`/`tts_spec`，混合组合按两档制品并集显示总量。
 - 新增 MCP 工具面对齐门 `scripts/check_mcp_tool_contract.py`，校验 `tools/list` / `resources/list` 与用户指南、Proxy 契约文档、`skill-manifest.json` 一致，并接入 CI 与验收清单。
+- 新增用户文档对齐门 `scripts/check_user_doc_contract.py`：校验契约中的每条路径都出现在 API 契约手册、手册标准错误码表中的每个 code 都有实现、服务实际下发的每个模型别名都被手册点名，并接入 CI。
+- `scripts/check_openapi_contract.py` 改为直接比对路由表（递归展开 FastAPI 的 `_IncludedRouter`），并新增成功状态码与 security scheme 校验。
+
+### Changed
+
+- 服务在 `GET /openapi.json`、`/docs` 与 `/redoc` 提供 `contracts/openapi.yaml` 本身，不再发布 FastAPI 生成的近似契约；生成结果缺少错误响应、Bearer 方案与 SpeechRail 扩展，客户端据此生成的客户端会与真实行为不符。契约随 wheel 一同发布（`speechrail/assets/openapi.yaml`），为此新增运行时依赖 `pyyaml`。
+- `POST /v1/voices`、`POST /v1/voices/clone`、`POST /v1/voice-designs` 与 `POST /v1/voice-designs/{candidate_id}/publish` 的路由装饰器补齐 `status_code`，使生成视图与契约一致。
 
 ### Removed
 
@@ -16,6 +23,9 @@
 
 ### Fixed
 
+- 修复 macOS App 模型页无法展示各档位与模型：`model catalog` / `model status` 的机器输出绕过了 envelope，直接打印 payload，前者因此把 ModelCatalog 文档版本 `2` 放在 `schema_version` 上，控制 Agent 按控制面 schema 校验后判定输出非法，模型页只剩失败横幅。现在这两条命令统一经 `_print_machine` 输出，envelope 版本由 CLI 掌握，payload 无法再改写它。
+- 模型目录档位摘要的克隆 Base 权重字段与服务的 `tts_base` 对齐（此前 App 按 `tts_clone` 解码，恒为 nil，「支持（含克隆）」永远不显示）。
+- 模型页补齐任务级按需能力：分人（`required_by: ["diarization"]`）与音色创作（`["voice_design"]`）不再绑定档位，此前不进入任何档位表、在页面上完全不可见，且分人小节因读一个服务早已不再下发的档位标志而永不出现。现在两者各自单列，分人补上来自 `/health` 的运行态；新增「语音活动检测」小节展示 VAD 引擎与就绪状态。
 - 修复音色设计（VoiceDesign）被错误绑定到 `reference` 档的问题：设计制品现在是唯一、与档位无关的按需模块，任何 ASR/TTS 档位都能进入设计作业；macOS App 的能力显示同步改为按目录里是否存在设计制品判定。
 - 模型完整性校验将制品根目录 `README.md` 视为非运行时文档；已有匹配的权重、配置与 tokenizer 可直接登记复用，不再因文档差异触发重新下载。
 

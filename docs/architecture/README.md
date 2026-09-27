@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.2.0"
-date: 2026-09-26
+version: "3.3.0"
+date: 2026-09-27
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -25,7 +25,8 @@ date: 2026-09-26
 ![三档模型与 TTS capability 关系图](diagrams/three-tier-model-architecture.svg)
 
 这张图是三档规格与共享入口的当前概览。每个 TTS 档位都绑定 `custom_voice`（系统声音）与 `base`（参考克隆）
-两个角色，`voice_design` 只绑定 `reference`；分人是任务级 opt-in，不由档位继承。`reference` 的 bf16 制品继承
+两个角色；`voice_design` 是不与档位绑定的按需制品，只在设计作业加载，缺失时只降级设计能力。
+分人是任务级 opt-in，不由档位继承。`reference` 的 bf16 制品继承
 同族 8-bit 档位的门禁证据，未在本机单独复测，不代表质量排名或硬件门槛。实际可用性以服务快照为准。
 详细实现与约束见[总体架构与数据流](architecture.md)及 [Quality / Reference 音色创造、克隆与稳定化能力](quality-voice-capabilities.md)。
 

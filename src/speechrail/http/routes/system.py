@@ -78,6 +78,7 @@ from speechrail.domain.tts_pronunciation import (
     PronunciationStoreUnavailableError,
     get_pronunciation_registry,
 )
+from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
@@ -351,6 +352,9 @@ def _voice_entry(
     }
     if profile.ref_text is not None:
         entry["ref_text"] = profile.ref_text
+    preview = preview_for_profile(profile)
+    if preview is not None:
+        entry["preview"] = preview
     if profile.duration_seconds > 0:
         entry["duration_seconds"] = profile.duration_seconds
     if profile.quality is not None:
@@ -410,6 +414,7 @@ def _voice_list_entry(
         "variant",
         "capabilities",
         "mode",
+        "preview",
         "revision",
         "revoked",
         "availability_reason",
@@ -1536,7 +1541,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.post("/v1/voices")
+    @router.post("/v1/voices", status_code=201)
     async def create_voice(request: Request) -> JSONResponse:
         """Create a persistent custom voice using natural language instruction."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
@@ -1635,7 +1640,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         """List official curated scripts for zero-shot voice cloning."""
         return {"object": "list", "data": _CACHED_CLONE_PROMPTS}
 
-    @router.post("/v1/voices/clone")
+    @router.post("/v1/voices/clone", status_code=201)
     async def clone_voice(
         request: Request,
         audio: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.

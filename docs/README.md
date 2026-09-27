@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "3.2.1"
-date: 2026-09-26
+version: "3.3.0"
+date: 2026-09-27
 ---
 
 # 📚 SpeechRail 文档中心
@@ -28,7 +28,7 @@ date: 2026-09-26
 - Realtime `server_vad` 只交付端点事实。endpointing 窗口、播放队列和 barge-in 决策由调用方负责，不是 SpeechRail 的全局业务默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
 - clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
-- 每个 TTS spec 都绑定 `custom_voice` 与 `base`；仅 `reference` 另绑定只用于设计作业的 `voice_design`。不同 capability lane 可并发，同一 lane 由 worker lock 串行，空闲冷却后按 capability group 回收。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测，也不导出质量排名。
+- 每个 TTS spec 都绑定 `custom_voice` 与 `base`；`voice_design` 是不与档位绑定、只用于设计作业的按需制品。不同 capability lane 可并发，同一 lane 由 worker lock 串行，空闲冷却后按 capability group 回收。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测，也不导出质量排名。
 
 ---
 

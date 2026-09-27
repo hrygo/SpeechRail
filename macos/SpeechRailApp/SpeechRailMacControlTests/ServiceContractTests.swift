@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 #if SWIFT_PACKAGE
 import SpeechRailAppSupport
@@ -5,52 +6,6 @@ import SpeechRailAppSupport
 @testable import SpeechRailControlKit
 
 final class ServiceContractTests: XCTestCase {
-    func testCapabilityPresentationSeparatesCheckingFromUnavailable() {
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: nil,
-                discoveryState: .loading,
-                supportedByProfile: true
-            ),
-            .checking
-        )
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: nil,
-                discoveryState: .unauthorized,
-                supportedByProfile: true
-            ),
-            .unavailable
-        )
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: nil,
-                discoveryState: .failed,
-                supportedByProfile: true
-            ),
-            .unavailable
-        )
-    }
-
-    func testLoadedCapabilitySnapshotDoesNotLookLikeAReadFailureWhenUndeclared() {
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: nil,
-                discoveryState: .loaded,
-                supportedByProfile: true
-            ),
-            .undeclared
-        )
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: nil,
-                discoveryState: .loaded,
-                supportedByProfile: false
-            ),
-            .unsupported
-        )
-    }
-
     func testCapabilityDiscoveryCanRetryAfterRecoverableStates() {
         XCTAssertTrue(CapabilityDiscoveryState.idle.shouldRetryOnRefresh)
         XCTAssertTrue(CapabilityDiscoveryState.unauthorized.shouldRetryOnRefresh)
@@ -69,33 +24,6 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.edit.rawValue, "pencil")
         XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.export.rawValue, "square.and.arrow.down")
         XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.more.rawValue, "ellipsis")
-    }
-
-    func testCapabilityPresentationKeepsDeclaredAndProfileVerdicts() {
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: true,
-                discoveryState: .loaded,
-                supportedByProfile: false
-            ),
-            .ready
-        )
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: false,
-                discoveryState: .loaded,
-                supportedByProfile: true
-            ),
-            .notReady
-        )
-        XCTAssertEqual(
-            ServiceCapabilityPresentation.resolve(
-                declared: false,
-                discoveryState: .loaded,
-                supportedByProfile: false
-            ),
-            .unsupported
-        )
     }
 
     func testEffectiveSnapshotKeepsAtomicIdentityAndUnknownAvailabilityReason() throws {
@@ -422,7 +350,6 @@ final class ServiceContractTests: XCTestCase {
             voice: .id("voice_demo"),
             model: "tts-1.7b-base",
             responseFormat: "mp3",
-            language: "en",
             speed: 1.0
         )
 
@@ -430,6 +357,72 @@ final class ServiceContractTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         XCTAssertEqual((object?["voice"] as? [String: String])?["id"], "voice_demo")
         XCTAssertEqual(object?["response_format"] as? String, "mp3")
+    }
+
+    func testSpeechRequestBodyCarriesNoSpeechrailExtension() throws {
+        let request = SpeechRequest(
+            input: "hello",
+            voice: .name("ryan"),
+            model: "speechrail/qwen3-tts",
+            responseFormat: "wav",
+            speed: 1.0
+        )
+
+        let body = try JSONEncoder().encode(request)
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+
+        // The server rejects `language` in this body, so the client must not
+        // be able to encode it even by accident.
+        XCTAssertNil(object?["language"])
+        XCTAssertEqual(
+            Set(object?.keys.map { String($0) } ?? []),
+            ["model", "input", "voice", "response_format", "speed"]
+        )
+    }
+
+    func testPlainOptionsSendNoSpeechrailExtensionHeaders() {
+        let headers = SpeechRailRequestOptions().headers
+
+        XCTAssertNil(headers["SpeechRail-Language"])
+        XCTAssertNil(headers["SpeechRail-Validation-Policy"])
+        XCTAssertTrue(headers.isEmpty)
+    }
+
+    func testLanguageAndPolicyTravelAsSpeechrailHeaders() {
+        let options = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            languageOverride: "en",
+            validationPolicy: "require_output_pass"
+        )
+
+        let headers = options.headers
+
+        XCTAssertEqual(headers["SpeechRail-Language"], "en")
+        XCTAssertEqual(headers["SpeechRail-Validation-Policy"], "require_output_pass")
+        XCTAssertEqual(headers["SpeechRail-Expected-Voice-Revision"], "vr_0123456789abcdef0123456789abcdef")
+    }
+
+    func testWithLanguageOverrideKeepsEveryOtherOption() {
+        let original = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40),
+            pronunciationSet: "story@pr_0123456789abcdef0123456789abcdef",
+            receiptMode: "integrity",
+            timingMode: "chunk",
+            purpose: "interactive",
+            latencyBudgetMs: 1_500,
+            validationPolicy: "require_output_pass"
+        )
+
+        let updated = original.with(languageOverride: "ja")
+
+        XCTAssertEqual(updated.languageOverride, "ja")
+        XCTAssertEqual(updated.headers["SpeechRail-Language"], "ja")
+        XCTAssertEqual(updated.headers["SpeechRail-Validation-Policy"], "require_output_pass")
+        // The render path rebuilds options; a derived copy must not drop fields.
+        for (key, value) in original.headers where key != "SpeechRail-Language" {
+            XCTAssertEqual(updated.headers[key], value, key)
+        }
     }
 
     func testJobDecodingKeepsRequiredNullFieldsAndOptionalMetadata() throws {
@@ -558,7 +551,11 @@ final class ServiceContractTests: XCTestCase {
                 availabilityReason: .backendNotReady,
                 voiceRevision: "vr_unavailable",
                 voiceIdentityAssurance: .contentAddressed,
-                model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+                model: ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-base",
+                    catalogRevision: "model-cat-1"
+                ),
                 descriptors: Self.testDescriptor,
                 operations: ["realtime_speech": JSONValue(.string("supported"))]
             )
@@ -611,7 +608,11 @@ final class ServiceContractTests: XCTestCase {
                 availabilityReason: .available,
                 voiceRevision: "vr_001",
                 voiceIdentityAssurance: .contentAddressed,
-                model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+                model: ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-base",
+                    catalogRevision: "model-cat-1"
+                ),
                 descriptors: Self.testDescriptor,
                 operations: ["http_speech": JSONValue(.string("supported"))]
             )
@@ -619,22 +620,116 @@ final class ServiceContractTests: XCTestCase {
 
         let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
             voiceID: "voice-1",
-            fallbackVoiceRevision: "vr_detail",
             in: snapshot
         )
 
-        XCTAssertEqual(options.expectedVoiceRevision, "vr_001")
-        XCTAssertEqual(options.expectedModelRevision, "model-cat-1")
-        XCTAssertEqual(options.headers["SpeechRail-Expected-Voice-Revision"], "vr_001")
-        XCTAssertEqual(options.headers["SpeechRail-Expected-Model-Revision"], "model-cat-1")
+        XCTAssertEqual(options?.expectedVoiceRevision, "vr_001")
+        XCTAssertEqual(options?.expectedModelRevision, "model-cat-1")
+        XCTAssertEqual(options?.headers["SpeechRail-Expected-Voice-Revision"], "vr_001")
+        XCTAssertEqual(options?.headers["SpeechRail-Expected-Model-Revision"], "model-cat-1")
 
         let withoutSnapshot = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
             voiceID: "voice-1",
-            fallbackVoiceRevision: "vr_detail",
             in: nil
         )
-        XCTAssertNil(withoutSnapshot.expectedVoiceRevision)
-        XCTAssertNil(withoutSnapshot.expectedModelRevision)
+        XCTAssertNil(withoutSnapshot)
+    }
+
+    func testCreatorRequestOptionsPinTheModelBoundToTheSelectedVoice() {
+        let voice = SafeVoiceEntry(
+            id: "clone-voice",
+            name: "Clone",
+            mode: "clone",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_clone",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                catalogRevision: "clone-model-revision"
+            ),
+            descriptors: Self.testDescriptor,
+            operations: ["http_speech": JSONValue(.string("supported"))]
+        )
+        var snapshot = makeRevisionSnapshot(voice: voice)
+        snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: snapshot.serviceInstanceEpoch,
+            catalogRevision: snapshot.catalogRevision,
+            snapshotID: snapshot.snapshotID,
+            profile: snapshot.profile,
+            models: [
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "custom-voice-model-revision"
+                ),
+                "tts_clone": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "clone-model-revision"
+                ),
+            ],
+            voices: snapshot.voices,
+            operations: snapshot.operations,
+            guarantees: snapshot.guarantees
+        )
+
+        let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "clone-voice",
+            in: snapshot
+        )
+
+        XCTAssertEqual(options?.expectedVoiceRevision, "vr_clone")
+        XCTAssertEqual(options?.expectedModelRevision, "clone-model-revision")
+    }
+
+    /// 系统音色没有 voice_revision（legacy），但普通合成不需要它：只带模型版本即可。
+    func testCreatorRequestOptionsAllowSystemVoiceWithoutVoiceRevision() {
+        let voice = SafeVoiceEntry(
+            id: "eric",
+            name: "System",
+            mode: "system",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: nil,
+            voiceIdentityAssurance: .legacy,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                catalogRevision: "model-cat-1"
+            ),
+            descriptors: Self.testDescriptor,
+            operations: ["http_speech": JSONValue(.string("supported"))]
+        )
+        let snapshot = makeRevisionSnapshot(voice: voice)
+
+        let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "eric",
+            in: snapshot
+        )
+
+        XCTAssertNil(options?.expectedVoiceRevision)
+        XCTAssertEqual(options?.expectedModelRevision, "model-cat-1")
+    }
+
+    func testCreatorRequestOptionsDoNotBorrowRevisionFromRichVoiceFallback() {
+        let voice = SafeVoiceEntry(
+            id: "legacy-voice",
+            name: "Legacy",
+            mode: "clone",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: nil,
+            voiceIdentityAssurance: .legacy,
+            model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+            descriptors: Self.testDescriptor,
+            operations: ["http_speech": JSONValue(.string("supported"))]
+        )
+        let snapshot = makeRevisionSnapshot(voice: voice)
+
+        let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "legacy-voice",
+            in: snapshot
+        )
+
+        XCTAssertNil(options)
     }
 
     /// 真实服务载荷里 `descriptors` 是**单个对象**（`GET /v1/speechrail/voices` 与能力快照
@@ -726,12 +821,213 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(candidate.id, "vd_0123456789abcdef01234567")
         XCTAssertEqual(candidate.targetVoiceID, "voice_design_demo")
         XCTAssertEqual(candidate.state, "publishable")
+        XCTAssertEqual(candidate.knownState, .publishable)
         XCTAssertTrue(candidate.publishable)
         XCTAssertEqual(candidate.latestValidation?.validationID, "vv_0123456789abcdef01234567")
         XCTAssertEqual(candidate.latestValidation?.identityStatus, .pass)
         XCTAssertEqual(candidate.latestValidation?.naturalnessStatus, .pass)
         XCTAssertEqual(candidate.latestValidation?.machineStatus, "pass")
+        XCTAssertEqual(candidate.latestValidation?.modelArtifact, "tts-1.7b-base-bf16")
+        XCTAssertEqual(
+            candidate.latestValidation?.modelCatalogRevision,
+            "0123456789abcdef0123456789abcdef01234567"
+        )
+        XCTAssertEqual(candidate.latestValidation?.createdAt, 3)
+        XCTAssertEqual(candidate.latestValidation?.updatedAt, 3)
     }
+
+    #if SWIFT_PACKAGE
+    func testVoiceUpdateUsesOnlyTheCurrentCASRouteAndRevision() async throws {
+        let client = makeHTTPClient(
+            statusCode: 200,
+            body: Data(
+                #"{"id":"voice_demo","voice_revision":"vr_next","mode":"custom_voice","revoked":false}"#.utf8
+            )
+        )
+
+        _ = try await client.updateVoice(
+            id: "voice_demo",
+            name: "Updated",
+            instruction: nil,
+            seed: nil,
+            expectedRevision: "vr_current"
+        )
+
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().first)
+        XCTAssertEqual(request.httpMethod, "PATCH")
+        XCTAssertEqual(request.url?.path, "/v1/speechrail/voices/voice_demo")
+        let body = try XCTUnwrap(
+            ServiceAPIURLProtocolStub.state.recordedBodies().first ?? nil
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(object["expected_revision"] as? String, "vr_current")
+        XCTAssertNil(object["expectedRevision"])
+        XCTAssertEqual(ServiceAPIURLProtocolStub.state.recordedRequests().count, 1)
+    }
+
+    func testVoiceQuality404DoesNotFallBackToTheLegacyRoute() async throws {
+        let client = makeHTTPClient(
+            statusCode: 404,
+            body: Data(
+                #"{"error":{"code":"not_found","message":"missing","request_id":"req-test","retryable":false}}"#.utf8
+            )
+        )
+
+        do {
+            _ = try await client.runVoiceQuality(id: "voice_demo")
+            XCTFail("A current-route 404 must remain visible")
+        } catch let error as ServiceAPIClientError {
+            XCTAssertEqual(error.statusCode, 404)
+            XCTAssertEqual(error.code, "not_found")
+        }
+
+        let requests = ServiceAPIURLProtocolStub.state.recordedRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests[0].httpMethod, "POST")
+        XCTAssertEqual(
+            requests[0].url?.path,
+            "/v1/speechrail/voices/voice_demo/quality-runs"
+        )
+    }
+
+    func testCloneIdempotencyStatusUsesTheStableKeyHeader() async throws {
+        let client = makeHTTPClient(
+            statusCode: 200,
+            body: Data(#"{"state":"completed","result_id":"voice_demo"}"#.utf8)
+        )
+
+        let status = try await client.fetchCloneIdempotencyStatus(
+            idempotencyKey: "stable-key"
+        )
+
+        XCTAssertEqual(status.state, .completed)
+        XCTAssertEqual(status.resultID, "voice_demo")
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(
+            request.url?.path,
+            "/v1/speechrail/voices/clone/idempotency"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Idempotency-Key"),
+            "stable-key"
+        )
+    }
+
+    func testCurrentCandidateAndPronunciationListSurfacesUseContractRoutes() async throws {
+        let candidate = VoiceDesignCandidate(
+            id: "vd_0123456789abcdef01234567",
+            targetVoiceID: "voice_design_demo",
+            name: "Demo",
+            state: "confirmed",
+            revision: "vr_0123456789abcdef0123456789abcdef01234567",
+            publishedVoiceRevision: nil,
+            reference: VoiceDesignReference(
+                audioSHA256: String(repeating: "a", count: 64),
+                textSHA256: String(repeating: "b", count: 64),
+                transcriptSHA256: String(repeating: "c", count: 64),
+                durationSeconds: 3
+            ),
+            validations: [],
+            publishable: false
+        )
+        let candidateJSON = String(
+            decoding: try JSONEncoder().encode(candidate),
+            as: UTF8.self
+        )
+        let client = makeHTTPClient(
+            statusCode: 200,
+            body: Data(#"{"object":"list","data":[]}"#.utf8)
+        )
+
+        let listedCandidates = try await client.fetchVoiceDesignCandidates()
+        XCTAssertTrue(listedCandidates.isEmpty)
+        ServiceAPIURLProtocolStub.state.setResponse(
+            statusCode: 200,
+            body: Data(#"{"candidate":\#(candidateJSON)}"#.utf8)
+        )
+        let fetchedCandidate = try await client.fetchVoiceDesignCandidate(id: candidate.id)
+        XCTAssertEqual(fetchedCandidate.id, candidate.id)
+        _ = try await client.cancelVoiceDesignCandidate(id: candidate.id)
+        ServiceAPIURLProtocolStub.state.setResponse(
+            statusCode: 200,
+            body: Data(
+                """
+                {"object":"list","data":[{"id":"zh_demo","revision":"pr_\(String(repeating: "d", count: 32))","revoked":false,"entry_count":2}]}
+                """.utf8
+            )
+        )
+        let summaries = try await client.fetchPronunciationSetSummaries()
+        XCTAssertEqual(summaries.map(\.id), ["zh_demo"])
+        XCTAssertEqual(summaries.first?.entryCount, 2)
+
+        let requests = ServiceAPIURLProtocolStub.state.recordedRequests()
+        XCTAssertEqual(
+            requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" },
+            [
+                "GET /v1/voice-designs",
+                "GET /v1/voice-designs/\(candidate.id)",
+                "POST /v1/voice-designs/\(candidate.id)/cancel",
+                "GET /v1/speechrail/pronunciation-sets",
+            ]
+        )
+    }
+
+    func testVoiceDesignAudioRoutesCarryTheExactCandidateRevision() async throws {
+        var wav = Data("RIFF".utf8)
+        wav.append(contentsOf: [0, 0, 0, 0])
+        wav.append(Data("WAVE".utf8))
+        let client = makeHTTPClient(statusCode: 200, body: wav)
+        let candidateID = "vd_0123456789abcdef01234567"
+        let validationID = "vv_0123456789abcdef01234567"
+        let expectedRevision = "vr_0123456789abcdef0123456789abcdef"
+
+        let referenceAudio = try await client.fetchVoiceDesignReferenceAudio(
+            id: candidateID,
+            expectedRevision: expectedRevision
+        )
+        XCTAssertEqual(referenceAudio, wav)
+
+        ServiceAPIURLProtocolStub.state.setResponse(statusCode: 200, body: wav)
+        let validationAudio = try await client.fetchVoiceDesignValidationAudio(
+            id: candidateID,
+            validationID: validationID,
+            expectedRevision: expectedRevision
+        )
+        XCTAssertEqual(validationAudio, wav)
+
+        let requests = ServiceAPIURLProtocolStub.state.recordedRequests()
+        XCTAssertEqual(
+            requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" },
+            [
+                "GET /v1/voice-designs/\(candidateID)/audio",
+                "GET /v1/voice-designs/\(candidateID)/validations/"
+                    + "\(validationID)/audio",
+            ]
+        )
+        XCTAssertEqual(
+            requests.map { $0.value(forHTTPHeaderField: "SpeechRail-Expected-Candidate-Revision") },
+            [expectedRevision, expectedRevision]
+        )
+        XCTAssertEqual(
+            requests.map { $0.value(forHTTPHeaderField: HTTPHeaderNames.accept) },
+            ["audio/wav", "audio/wav"]
+        )
+    }
+
+    private func makeHTTPClient(statusCode: Int, body: Data) -> ServiceAPIClient {
+        ServiceAPIURLProtocolStub.state.reset(statusCode: statusCode, body: body)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ServiceAPIURLProtocolStub.self]
+        return ServiceAPIClient(
+            baseURL: URL(string: "https://speechrail.test")!,
+            session: URLSession(configuration: configuration),
+            apiKey: "test-key"
+        )
+    }
+    #endif
 
     /// 契约把 `pitch_band` / `timbre_family` / `baseline_pace` 固定为 `unknown`、
     /// `metadata_method` 固定为 `declared_only`：这些是声明式元数据，不是实测推断。
@@ -801,3 +1097,96 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 }
+
+#if SWIFT_PACKAGE
+private final class ServiceAPIURLProtocolState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var statusCode = 200
+    private var body = Data()
+    private var recorded: [URLRequest] = []
+    private var recordedBodyData: [Data?] = []
+
+    func reset(statusCode: Int, body: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.statusCode = statusCode
+        self.body = body
+        recorded = []
+        recordedBodyData = []
+    }
+
+    func setResponse(statusCode: Int, body: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.statusCode = statusCode
+        self.body = body
+    }
+
+    func record(_ request: URLRequest, bodyData: Data?) -> (Int, Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(request)
+        recordedBodyData.append(bodyData)
+        return (statusCode, body)
+    }
+
+    func recordedRequests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func recordedBodies() -> [Data?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedBodyData
+    }
+}
+
+private final class ServiceAPIURLProtocolStub: URLProtocol {
+    static let state = ServiceAPIURLProtocolState()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let client
+        else {
+            return
+        }
+        let requestBody = Self.bodyData(from: request)
+        let (statusCode, body) = Self.state.record(request, bodyData: requestBody)
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client.urlProtocol(self, didLoad: body)
+        client.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4_096)
+        defer { buffer.deallocate() }
+        var data = Data()
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: 4_096)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data.isEmpty ? nil : data
+    }
+}
+#endif

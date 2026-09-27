@@ -977,11 +977,11 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
 
     formal = client.post(
         "/v1/audio/speech",
+        headers={"SpeechRail-Validation-Policy": "require_output_pass"},
         json={
             "model": "speechrail/qwen3-tts",
             "input": "正式制作",
             "voice": profile.id,
-            "validation_policy": "require_output_pass",
         },
     )
     assert formal.status_code == 409

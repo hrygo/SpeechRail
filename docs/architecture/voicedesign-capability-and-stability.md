@@ -2,8 +2,8 @@
 title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
 audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
-version: "2.4"
-date: 2026-09-26
+version: "2.5"
+date: 2026-09-27
 ---
 
 # VoiceDesign 能力优势与音色稳定性边界
@@ -36,13 +36,13 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 
 ## 3. 按角色绑定的能力与并发
 
-catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base` 两个角色，`reference` 另绑定只用于设计作业的 `voice_design`：
+catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base` 两个角色；`voice_design` 是不与档位绑定、只用于设计作业的按需制品，三档共用同一份：
 
 | TTS spec | 内置声音 `tts_custom_voice` | 参考克隆 `tts_base` | 提示词设计 `voice_design` |
 |---|---|---|---|
-| `fast` | CustomVoice 0.6B q8 | Base 0.6B q8 | — |
-| `quality` | CustomVoice 1.7B q8 | Base 1.7B q8 | — |
-| `reference` | CustomVoice 1.7B bf16 | Base 1.7B bf16 | VoiceDesign 1.7B bf16 |
+| `fast` | CustomVoice 0.6B q8 | Base 0.6B q8 | VoiceDesign 1.7B bf16（按需，不与档位绑定） |
+| `quality` | CustomVoice 1.7B q8 | Base 1.7B q8 | VoiceDesign 1.7B bf16（按需，不与档位绑定） |
+| `reference` | CustomVoice 1.7B bf16 | Base 1.7B bf16 | VoiceDesign 1.7B bf16（按需，不与档位绑定） |
 
 三个角色是独立 governor lane，可以按预算并发；同一 lane 由对应 worker 的私有 lock 串行。精度身份不等于质量排名：`reference` 的 bf16 制品按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。
 

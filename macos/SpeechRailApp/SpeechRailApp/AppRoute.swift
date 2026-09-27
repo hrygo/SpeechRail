@@ -29,7 +29,7 @@ public enum AppRouteGroup: String, CaseIterable, Sendable {
             // 且插在创作之后、引擎之前（SESSIONS-SPEC §5.1）。
             "会话"
         case .service:
-            // 技术页与服务状态同组，沿用 Figma shell 的分组名（REDESIGN-SPEC §6.1）。
+            // 技术页与服务状态同组，沿用稿 shell 的分组名（REDESIGN-SPEC §6.1）。
             "引擎"
         }
     }
@@ -89,7 +89,10 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .monitoring:
             "运行监控"
         case .models:
-            "模型"
+            // 2026-09-27 第七十五轮：这一页真正的对象是**识别 × 配音 的组合**
+            // （三套预置 + 九种自由搭配），不是「一堆模型」。名字跟着对象走，
+            // 侧栏、窗口标题与 View 菜单都读这一处。
+            "模型组合"
         case .diagnostics:
             "诊断"
         case .developerDocs:
@@ -97,7 +100,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         }
     }
 
-    /// 页首那一句话说明（`PageScaffold(purpose:)` 的默认值），与 Figma `pageHead`
+    /// 页首那一句话说明（`PageScaffold(purpose:)` 的默认值），与稿 `pageHead`
     /// 的第二行逐字一致；运行监控的动态采样状态由页面自己覆盖。
     /// 注意这里只是**说明**：页面名不在这条链上——它在工具栏的身份槽（§6.2）。
     public var pageSubtitle: String {
@@ -125,7 +128,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .monitoring:
             "服务最近在做什么、快不快、占多少内存；实时看最近 5 分钟，也能回看服务落盘的 30 天历史。"
         case .models:
-            "先下载并校验，再应用到运行档位；两者是独立操作。"
+            "挑一套预置组合，或把识别与配音分别搭配；先下载并校验，再应用到运行组合。"
         case .diagnostics:
             "本机检查的结论与每一步可以照做的修复动作。"
         case .developerDocs:
@@ -228,7 +231,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .monitoring:
             "看清服务最近的使用、速度与内存占用"
         case .models:
-            "下载并校验模型能力"
+            "选择并应用模型组合"
         case .diagnostics:
             "解释异常原因和下一步动作"
         case .developerDocs:

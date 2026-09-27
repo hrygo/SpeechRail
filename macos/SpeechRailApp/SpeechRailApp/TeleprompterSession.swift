@@ -201,7 +201,10 @@ public final class TeleprompterSession {
         return "第 \(min(currentSegmentIndex + 1, count)) / \(count) 段"
     }
 
+    /// Optional `/readyz` diagnostic; the effective capability binding is the start gate.
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
+    public var realtimeCapabilityBindingProvider:
+        (@MainActor () async -> RealtimeCapabilityBinding?)?
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
     /// Transport injection keeps the production lifecycle testable without a
     /// socket, model, microphone, or audio file.
@@ -1671,14 +1674,13 @@ public final class TeleprompterSession {
     }
 
     private func startPipeline(generation: UUID) async throws {
-        if let serviceReadiness {
-            switch await serviceReadiness() {
-            case .ready:
-                break
-            case .notReady(let message):
-                throw Blocked(reason: .serviceNotReady(message))
-            }
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
         }
+        // `/readyz` is advisory and may disagree with an operation-specific
+        // capability snapshot. Keep the observation for diagnostics only.
+        _ = await serviceReadiness?()
 
         guard generation == voiceLifecycle.generation else { throw CancellationError() }
 
@@ -1687,7 +1689,8 @@ public final class TeleprompterSession {
                 port: port,
                 silenceDurationMilliseconds: 400,
                 diarizationEnabled: false,
-                apiKey: apiKey
+                apiKey: apiKey,
+                expectedASRRevision: binding?.asrModelRevision
             )
         do {
             try await client.connect()

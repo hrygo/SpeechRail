@@ -220,7 +220,7 @@ public struct ServiceOverviewView: View {
         }
     }
 
-    /// Figma `capabilities`：标题带一句话说明，下面是一条能力矩阵。名称与状态各占
+    /// 稿 `capabilities`：标题带一句话说明，下面是一条能力矩阵。名称与状态各占
     /// 固定列，说明从同一 x 起排；否则矩阵会退化成六行长短不齐的句子
     /// （REDESIGN-SPEC §7.5）。
     private var capabilitiesCard: some View {
@@ -239,8 +239,8 @@ public struct ServiceOverviewView: View {
         }
     }
 
-    /// Figma `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
-    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 Figma 稿在这一卡里
+    /// 稿 `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
+    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 设计稿在这一卡里
     /// 都只放四行事实（档位 / 端口 / 版本 / 已加载的模型）；配置档位、配置代次与
     /// 作业队列属于同一批技术事实，跟随开发者详情，而不是把这张卡撑成一张表。
     private var runtimeCard: some View {
@@ -283,13 +283,13 @@ public struct ServiceOverviewView: View {
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         // 稿的 `infoRow` 是 padY 10 + Body 行（19.5）= 40pt 带；应用的行高 16，
-        // 取 `sm`(12) 补回同一档带高（帧实测 39.5）。REDESIGN-SPEC §11.6 第二十一轮。
+        // 取 `sm`(12) 补回同一档带高（帧实测 39.5）。REDESIGN-SPEC §11 第二十一轮。
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label)，\(value)")
     }
 
-    /// Figma `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
+    /// 稿 `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
     /// 主机。主机名由诊断客户端给出，拿不到时如实退回端口。
     private var serviceAddressText: String {
         guard let port = model.service.port.map(String.init) else { return "未读取" }
@@ -345,7 +345,7 @@ public struct ServiceOverviewView: View {
             case .notReady: "未就绪"
             case .unsupported: "当前档位不支持"
             case .checking: "检查中"
-            case .undeclared: "未发布"
+            case .undeclared: "未能确认"
             case .unavailable: "读取失败"
             }
         }
@@ -371,7 +371,7 @@ public struct ServiceOverviewView: View {
                 : "健康检查未返回结果，无法确认这一项。"
             return [
                 ServiceCapability(title: "语音识别", status: .notReady, reason: reason),
-                ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
+                ServiceCapability(title: "音色创作（按需）", status: .unavailable, reason: reason),
                 ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
                 ServiceCapability(title: "实时语音断句", status: .notReady, reason: reason),
@@ -383,30 +383,19 @@ public struct ServiceOverviewView: View {
         let asrState = health.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 ASR 运行状态。"
         let ttsReady = health.ttsReady == true
         let ttsState = health.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 TTS 运行状态。"
-        // 能力结论只读服务声明（`/v1/models.capabilities`）：音色列表是用户数据，
-        // 可以为空，而 capability 由当前档位与制品解析决定。拿“列表里有没有某一类
-        // 音色”当能力依据，会在服务已经发布能力时报出假的“未就绪”。
-        let declaredCapabilities = model.serviceCapabilitiesLoadState == .loaded
-            ? model.serviceCapabilities
-            : nil
         let voiceDesign = capabilityVerdict(
-            // 页面上不摆内部名：`VoiceDesign` / `Base` 是制品名，用户看到的是"两种合成各能做什么"。
-            title: "语音合成 · 语音设计",
-            capability: "语音设计",
-            declared: declaredCapabilities?.supportsInstruction,
-            supportedByProfile: false,
-            missingReason: "这一档没有发布「语音设计」。",
-            unsupportedReason: "当前服务没有发布「语音设计」能力。"
+            title: "音色创作（按需）",
+            availability: model.capabilityFacade.voiceDesignCreationAvailability,
+            availableReason: "生成候选时按需使用；普通语音合成不依赖这项能力。",
+            unsupportedReason: "当前服务没有同时开放候选生成和参考文案识别。",
+            unknownReason: "服务能力信息不完整，暂时无法确认音色创作。"
         )
         let voiceClone = capabilityVerdict(
-            // 名字跟着侧栏那一项走：用户点的、看到的、读到的都是「音色克隆」。
-            // `复刻` 是能力声明里的措辞，留在开发者文档里（用户 2026-09-19）。
             title: "音色克隆",
-            capability: "音色克隆",
-            declared: declaredCapabilities?.supportsClone,
-            supportedByProfile: false,
-            missingReason: "这一档没有发布音色克隆（需要的模型还没就位）。",
-            unsupportedReason: "当前服务没有发布音色克隆能力。"
+            availability: model.capabilityFacade.voiceCloneAvailability,
+            availableReason: "当前服务已配置参考音色制品。",
+            unsupportedReason: "当前服务没有配置可用的参考音色制品。",
+            unknownReason: "服务未提供足够的参考音色版本信息。"
         )
         let diarization = diarizationCapability(for: health)
 
@@ -477,42 +466,23 @@ public struct ServiceOverviewView: View {
     /// 这类音色」当成「服务没有这项能力」。
     private func capabilityVerdict(
         title: String,
-        capability: String,
-        declared: Bool?,
-        supportedByProfile: Bool,
-        missingReason: String,
-        unsupportedReason: String
+        availability: AppCapabilityAvailability,
+        availableReason: String,
+        unsupportedReason: String,
+        unknownReason: String
     ) -> ServiceCapability {
-        if declared == nil, model.serviceCapabilitiesLoadState == .loading {
-            return ServiceCapability(
-                title: title,
-                status: .checking,
-                reason: "正在读取服务能力，暂不能确认这一项。"
-            )
-        }
-
-        switch ServiceCapabilityPresentation.resolve(
-            declared: declared,
-            discoveryState: model.discoveryState,
-            supportedByProfile: supportedByProfile
-        ) {
-        case .ready:
+        switch availability {
+        case .available:
             return ServiceCapability(
                 title: title,
                 status: .ready,
-                reason: "服务声明「\(capability)」已经可用。"
+                reason: availableReason
             )
-        case .notReady, .unsupported:
+        case .unsupported:
             return ServiceCapability(
                 title: title,
-                status: supportedByProfile ? .notReady : .unsupported,
-                reason: supportedByProfile ? missingReason : unsupportedReason
-            )
-        case .undeclared:
-            return ServiceCapability(
-                title: title,
-                status: .undeclared,
-                reason: "服务没有发布「\(capability)」这项能力。"
+                status: .unsupported,
+                reason: unsupportedReason
             )
         case .checking:
             return ServiceCapability(
@@ -520,30 +490,22 @@ public struct ServiceOverviewView: View {
                 status: .checking,
                 reason: "正在读取服务能力，暂不能确认这一项。"
             )
+        case .unknown:
+            return ServiceCapability(
+                title: title,
+                status: .undeclared,
+                reason: unknownReason
+            )
         case .unavailable:
-            let reason = switch model.discoveryState {
-            case .unauthorized:
-                "无法验证本机服务。按 ⌘R 重新读取；若仍失败，请退出并重新打开 App。"
-            case .notReady:
-                "服务暂时未准备好。稍后按 ⌘R 重新读取。"
-            case .invalidContract:
-                "服务返回的能力信息无法识别。请更新 App 或服务后重试。"
-            case .notSupported:
-                "当前服务版本不支持读取能力信息。请更新服务后重试。"
-            case .failed:
-                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
-            case .idle, .loading, .loaded:
-                "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
-            }
             return ServiceCapability(
                 title: title,
                 status: .unavailable,
-                reason: reason
+                reason: "暂时无法读取服务能力。按 ⌘R 重新读取服务状态。"
             )
         }
     }
 
-    /// Figma `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
+    /// 稿 `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
     /// 状态用胶囊承载，颜色、图标与文字三者都在，不靠颜色单独表达（§9）。
     private func capabilityRow(_ capability: ServiceCapability) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -644,7 +606,7 @@ public struct ServiceOverviewView: View {
             return "SpeechRail 健康状态已单独读取，但控制通道不可用。只读健康信息仍可查看，请打开诊断。"
         }
         if displayedHealth?.ready == true {
-            // Figma `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
+            // 稿 `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
             // 运行事实，已经在下面的「运行信息」卡里；在这句里重复一遍只会把唯一主动作推远。
             let port = model.service.port.map(String.init) ?? "未知"
             let ready = "本地语音服务正在 \(port) 端口运行；离线也有完整的识别与合成能力。"

@@ -661,11 +661,11 @@ def test_speech_instructions_over_domain_limit_use_stable_envelope() -> None:
             "model": "speechrail/qwen3-tts",
             "input": "hello",
             "voice": "default",
-            "instructions": "x" * 10_001,
+            "instructions": "x" * 4_097,
             "response_format": "pcm",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 400
     body = response.json()
     assert body["error"]["code"] == "validation_error"
     assert "request_id" in body["error"]

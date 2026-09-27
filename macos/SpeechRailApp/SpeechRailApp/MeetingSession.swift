@@ -199,7 +199,10 @@ public final class MeetingSession {
 
     // MARK: 挂载点（由 App 注入）
 
+    /// Optional `/readyz` diagnostic; the effective capability binding is the start gate.
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
+    public var realtimeCapabilityBindingProvider:
+        (@MainActor () async -> RealtimeCapabilityBinding?)?
     public var preferences: (@MainActor () -> SessionPreferences)?
     private let coordinator: SessionCoordinator
     private let audio = AudioSourceCoordinator()
@@ -346,14 +349,20 @@ public final class MeetingSession {
         guard let selection, !selection.isEmpty else {
             throw Blocked(reason: .noSourceSelected)
         }
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
+        }
         let preferences = preferences?()
         let minutesConfiguration = preferences?.resolvedLLMConfiguration(for: .minutes).configuration
 
         var profile = coordinator.lastKnownProfile ?? "unknown"
         if let serviceReadiness {
             switch await serviceReadiness() {
-            case .notReady(let message):
-                throw Blocked(reason: .serviceNotReady(message))
+            case .notReady:
+                // `/readyz` is advisory; the capability binding above is the
+                // operation gate and the connection handshake verifies service reachability.
+                break
             case .ready(let reported):
                 profile = reported ?? profile
             }
@@ -375,7 +384,8 @@ public final class MeetingSession {
             // 会议 900 ms：要整句，不要抢速度（§5.3）。
             silenceDurationMilliseconds: 900,
             diarizationEnabled: wantsDiarization,
-            apiKey: serviceKey
+            apiKey: serviceKey,
+            expectedASRRevision: binding?.asrModelRevision
         )
         do {
             try await client.connect()
@@ -550,9 +560,27 @@ public final class MeetingSession {
         case .failed(_, let code, let message):
             lastFailure = "\(code)：\(message)"
             partialText = nil
-        case .attribution(let itemID, let units, let isFinal):
+        case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units)
-            if isFinal { diarizationDrained = true }
+        case .diarizationFinished:
+            diarizationDrained = true
+        case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
+            if diarizationMissing, labeling.isEnabled {
+                labeling.markDegraded(
+                    code: "auxiliary_window_expired",
+                    message: "部分说话人归属未能及时到达，正文已经保留。"
+                )
+                if let sessionID, let note = labeling.note {
+                    await coordinator.updateSessionDiarization(
+                        id: sessionID,
+                        state: .degraded,
+                        note: note
+                    )
+                }
+            }
+            if alignmentMissing || diarizationMissing {
+                lastFailure = "部分辅助信息未能及时到达，已保留转写内容。"
+            }
         case .diarizationDegraded(let code, let message):
             labeling.markDegraded(code: code, message: message)
             if let sessionID, let note = labeling.note {

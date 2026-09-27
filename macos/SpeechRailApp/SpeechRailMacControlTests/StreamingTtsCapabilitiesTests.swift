@@ -4,11 +4,8 @@ import XCTest
 @testable import SpeechRailAppSupport
 #endif
 
-/// W10：分档能力呈现的纯映射测试。
-///
-/// 只验证 DTO 如何解释 `/v1/voices[].streaming` 与
-/// `/v1/models[].capabilities.streaming_input`。不加载模型、不连接服务，
-/// 也不冒充 UI 或可听体验验收。
+/// Streaming diagnostics are a per-voice projection. These tests decode the
+/// projection without loading a model or connecting to a service.
 final class StreamingTtsCapabilitiesTests: XCTestCase {
     private func decodeVoice(_ json: String) throws -> CreatorVoice {
         try JSONDecoder().decode(CreatorVoice.self, from: Data(json.utf8))
@@ -135,37 +132,4 @@ final class StreamingTtsCapabilitiesTests: XCTestCase {
         XCTAssertNil(streaming.axes.budgetAvailable)
     }
 
-    func testModelUnionKeepsTheImplementationAxisSeparateFromPerVoiceSupport() {
-        let unimplemented = ServiceModelCapabilities()
-        let implemented = ServiceModelCapabilities(
-            supportsStreamingInput: true,
-            streamingProtocolNegotiated: true
-        )
-        let merged = unimplemented.union(implemented)
-
-        XCTAssertTrue(merged.supportsStreamingInput)
-        XCTAssertEqual(merged.streamingProtocolNegotiated, true)
-    }
-
-    func testModelUnionDoesNotInventNegotiationWhenEveryEntryIsSilent() {
-        let merged = ServiceModelCapabilities().union(ServiceModelCapabilities())
-
-        XCTAssertFalse(merged.supportsStreamingInput)
-        XCTAssertNil(merged.streamingProtocolNegotiated)
-    }
-
-    func testExplicitNegotiationFailureSurvivesTheUnion() {
-        let failed = ServiceModelCapabilities(
-            supportsStreamingInput: false,
-            streamingProtocolNegotiated: false
-        )
-        let alsoFailed = ServiceModelCapabilities(
-            supportsStreamingInput: false,
-            streamingProtocolNegotiated: false
-        )
-        let merged = failed.union(alsoFailed)
-
-        XCTAssertFalse(merged.supportsStreamingInput)
-        XCTAssertEqual(merged.streamingProtocolNegotiated, false)
-    }
 }

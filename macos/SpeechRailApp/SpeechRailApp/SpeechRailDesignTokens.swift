@@ -146,8 +146,18 @@ public enum SpeechRailDesignTokens {
         /// 三档（fast / quality / reference）单行所需断点：3 × 卡宽 + 2 × 卡间距。
         public static let modelProfileCardsRowBreakpoint: CGFloat =
             modelProfileCardMinimumWidth * 3 + SpeechRailDesignTokens.Spacing.sm * 2
-        /// 档位卡的规格行：标签列固定，取值右对齐（Figma `Profile Card` 的 76pt）。
-        public static let modelProfileSpecLabelWidth: CGFloat = 76
+        /// 档位卡上「识别 / 配音」两行模型名的行首标签列。
+        ///
+        /// 2026-09-27 第七十五轮取代 `modelProfileSpecLabelWidth`(76)：档位卡上的
+        /// 「识别规格 / 配音规格 / 核心特点」三行换成了两行模型名，行首标签也从
+        /// 四个字的规格名变成「识别 / 配音」两个字，76pt 的标签列随之作废。
+        public static let modelProfileAxisLabelWidth: CGFloat = 34
+        /// 自定义组合区两条轴并排时，单条轴需要的最小宽度（分段控件三格 + 模型名）。
+        public static let modelAxisColumnMinimumWidth: CGFloat = 268
+        /// 两条轴并排的断点：2 × 单轴宽 + 轴间距。
+        public static var modelAxisRowBreakpoint: CGFloat {
+            modelAxisColumnMinimumWidth * 2 + Spacing.md
+        }
         /// 服务状态能力矩阵：名称列与状态胶囊列各占固定宽度，说明列吸收余量
         /// （Figma `caps` 的 250 / 96）。
         public static let serviceCapabilityNameWidth: CGFloat = 250
@@ -1123,6 +1133,44 @@ public enum SpeechRailDesignTokens {
         public static let attention = SwiftUI.Color(nsColor: .systemOrange)
         public static let critical = SwiftUI.Color(nsColor: .systemRed)
         public static let info = SwiftUI.Color(nsColor: .systemBlue)
+
+        /// 模型组合页的三档识别色（2026-09-27 第七十五轮）。
+        ///
+        /// 三档此前共用一条轨道青加一枚图标色差，用户扫一眼分不出「哪一档是哪一档」，
+        /// 于是三张预置组合卡只能靠文字区分。这里给每档一个自己的色相，并按
+        /// §5.4 的口径显式给出浅色 / 深色 / 高对比四组取值：
+        ///
+        /// - 极速 = 冷青绿（快、占用小）
+        /// - 品质 = 产品强调色（官方推荐的主路径）
+        /// - 高精 = 靛紫（满血精度）
+        ///
+        /// 取值都按「在 `field` 卡片底上仍达 WCAG AA 正文对比」挑选：对白底三档分别为
+        /// 5.9 / 6.3 / 7.2:1（高对比 7.9 / 9.9 / 9.4），对深色卡片底 `#2B292C` 分别为
+        /// 8.1 / 5.1 / 6.0:1（高对比 9.4 / 8.5 / 7.5），所以它们可以直接当**文字色**用
+        /// （档位名、模型名），不只是图标色。
+        public enum Tier {
+            public static let fast = dynamicColor(
+                named: "TierFast",
+                lightHex: 0x116E7C,
+                darkHex: 0x5FD3DE,
+                hcLightHex: 0x0B5A66,
+                hcDarkHex: 0x7FE0E9
+            )
+            public static let quality = SwiftUI.Color.accentColor
+            public static let reference = dynamicColor(
+                named: "TierReference",
+                lightHex: 0x4B3FCF,
+                darkHex: 0xA79BFF,
+                hcLightHex: 0x3A2FB3,
+                hcDarkHex: 0xBDB2FF
+            )
+            public static let unrecognized = SwiftUI.Color(nsColor: .secondaryLabelColor)
+            /// 档位色作为**底色**时的强度：未选中 0.07、选中 0.14。
+            /// 12% 会让 `field` 上的正文对比掉到 AA 以下，所以未选中一档比
+            /// 状态胶囊（`statusTintOpacity` 0.14）更浅。
+            public static let fillOpacity: Double = 0.07
+            public static let selectedFillOpacity: Double = 0.14
+        }
     }
 
     /// Interactive surfaces. Every member resolves to a system semantic color,

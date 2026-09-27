@@ -2,20 +2,20 @@
 title: "Quality / Reference 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "2.0"
-date: 2026-09-26
+version: "2.1"
+date: 2026-09-27
 ---
 
 # Quality / Reference 档音色创造、克隆与稳定化能力架构
 
 ## 1. 决策摘要
 
-当前 catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`reference` 另绑定仅供设计作业使用的 `voice_design`。能力是否可用仍由当前运行时实际声明决定。三类任务不再由同一个模型混用：
+当前 catalog 为每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`voice_design` 是不与档位绑定、仅供设计作业使用的按需制品。能力是否可用仍由当前运行时实际声明决定。三类任务不再由同一个模型混用：
 
-- **提示词设计音色**：只由 `reference` 的 Qwen3-TTS VoiceDesign 1.7B BF16 承担，职责是根据自然语言描述创造声线；普通 synthesize 不接受 Design 音色。
+- **提示词设计音色**：由不与档位绑定的 Qwen3-TTS VoiceDesign 1.7B BF16 按需承担，职责是根据自然语言描述创造声线；普通 synthesize 不接受 Design 音色。
 - **参考音频克隆**：由所选 TTS spec 的 Qwen3-TTS Base 承担，职责是根据参考音频 + 准确参考文本复现 speaker identity；`fast` / `quality` 为 8-bit，`reference` 为 bf16。
 - **常规内置音色**：三档均由 CustomVoice 提供；0.6B 用于 `fast`，1.7B 用于 `quality` / `reference`。
-- **按角色 capability worker**：每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`reference` 另绑定 `voice_design`。角色各自使用独立 worker，可分别处理请求；懒加载只决定首次加载时机，不会在正常 capability 切换时反复换模。
+- **按角色 capability worker**：每个 TTS spec 绑定 `tts_custom_voice` 与 `tts_base`；`voice_design` 是所有 spec 共享的按需角色。角色各自使用独立 worker，可分别处理请求；懒加载只决定首次加载时机，不会在正常 capability 切换时反复换模。
 - **精度证据**：`quality` 使用 q8 speech artifacts；`reference` 使用 bf16 speech artifacts，按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。继承证据不推导质量排名、资源峰值或正式启用状态。
 
 该设计修正了旧实现把参考克隆请求送入 VoiceDesign 私有 `_generate_icl()` 的职责混用。clone 现在只允许由 `base` variant 经 MLX-Audio **公开 `generate(...)` 接口**执行。
@@ -199,7 +199,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 - catalog 为每个 spec 绑定 Base clone artifact；
 - Base 成为唯一 reference clone variant；
 - clone 改走 vendor public `generate`；
-- capability router 按 `custom_voice` / `base` / `voice_design` 角色路由、分 lane 并发与组级 idle eviction；VoiceDesign 只绑定 `reference` 且只服务设计作业；
+- capability router 按 `custom_voice` / `base` / `voice_design` 角色路由、分 lane 并发与组级 idle eviction；VoiceDesign 不绑定档位且只服务设计作业；
 - managed install / profile / preflight / model capability 全链同步；
 - README、架构与当前边界更新；
 - 公共 API payload 结构保持稳定，规格与能力通过显式 spec/role 声明。

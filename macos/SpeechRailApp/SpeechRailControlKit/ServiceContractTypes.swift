@@ -596,6 +596,21 @@ public struct SafeVoiceQualitySummary: Codable, Equatable, Sendable {
     }
 }
 
+/// A voice's maintained default audition text, as declared by the service.
+///
+/// `locale` describes `text` only. It is not a claim about which languages the
+/// voice can speak, so a client must not derive an output language from it
+/// unless the user explicitly asked for that language.
+public struct VoicePreviewSample: Codable, Equatable, Sendable {
+    public let locale: String
+    public let text: String
+
+    public init(locale: String, text: String) {
+        self.locale = locale
+        self.text = text
+    }
+}
+
 public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String
@@ -614,6 +629,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let operations: [String: JSONValue]
     public let qualitySummary: SafeVoiceQualitySummary?
     public let snapshotID: String?
+    /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
+    public let preview: VoicePreviewSample?
 
     public init(
         id: String,
@@ -629,7 +646,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         descriptors: SafeVoiceDescriptor,
         operations: [String: JSONValue],
         qualitySummary: SafeVoiceQualitySummary? = nil,
-        snapshotID: String? = nil
+        snapshotID: String? = nil,
+        preview: VoicePreviewSample? = nil
     ) {
         self.id = id
         self.name = name
@@ -645,6 +663,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         self.operations = operations
         self.qualitySummary = qualitySummary
         self.snapshotID = snapshotID
+        self.preview = preview
     }
 
     enum CodingKeys: String, CodingKey {
@@ -662,6 +681,7 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         case operations
         case qualitySummary = "quality_summary"
         case snapshotID = "snapshot_id"
+        case preview
     }
 
     public init(from decoder: Decoder) throws {
@@ -1037,6 +1057,61 @@ public struct PronunciationSet: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct PronunciationSetSummary: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let revision: String
+    public let revoked: Bool
+    public let entryCount: Int
+
+    public init(id: String, revision: String, revoked: Bool, entryCount: Int) {
+        self.id = id
+        self.revision = revision
+        self.revoked = revoked
+        self.entryCount = entryCount
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case revision
+        case revoked
+        case entryCount = "entry_count"
+    }
+}
+
+public enum CloneIdempotencyState: Equatable, Sendable {
+    case new
+    case pending
+    case completed
+    case unknown(String)
+}
+
+public struct CloneIdempotencyStatus: Decodable, Equatable, Sendable {
+    public let state: CloneIdempotencyState
+    public let resultID: String?
+
+    public init(state: CloneIdempotencyState, resultID: String?) {
+        self.state = state
+        self.resultID = resultID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case resultID = "result_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawState = try container.decode(String.self, forKey: .state)
+        resultID = try container.decode(String?.self, forKey: .resultID)
+        switch rawState {
+        case "new": state = .new
+        case "pending": state = .pending
+        case "completed": state = .completed
+        default: state = .unknown(rawState)
+        }
+    }
+}
+
 public struct PronunciationSetUpdate: Codable, Equatable, Sendable {
     public let id: String
     public let expectedRevision: String?
@@ -1098,7 +1173,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
     public let input: String
     public let voice: SpeechVoice
     public let responseFormat: String?
-    public let language: String?
     public let instructions: String?
     public let streamFormat: String?
     public let speed: Double?
@@ -1108,7 +1182,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         voice: SpeechVoice,
         model: String,
         responseFormat: String? = nil,
-        language: String? = nil,
         instructions: String? = nil,
         streamFormat: String? = nil,
         speed: Double? = nil
@@ -1117,7 +1190,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         self.voice = voice
         self.model = model
         self.responseFormat = responseFormat
-        self.language = language
         self.instructions = instructions
         self.streamFormat = streamFormat
         self.speed = speed
@@ -1128,7 +1200,6 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
         case input
         case voice
         case responseFormat = "response_format"
-        case language
         case instructions
         case streamFormat = "stream_format"
         case speed
@@ -1143,6 +1214,11 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     public let timingMode: String?
     public let purpose: String?
     public let latencyBudgetMs: Int?
+    /// Target language for this generation, as a short code (`en`, `zh`, ...).
+    /// SpeechRail-only: the OpenAI-compatible body has no `language` field, so
+    /// omitting this leaves the backend on `auto`.
+    public let languageOverride: String?
+    public let validationPolicy: String?
 
     public init(
         expectedVoiceRevision: String? = nil,
@@ -1151,7 +1227,9 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         receiptMode: String? = nil,
         timingMode: String? = nil,
         purpose: String? = nil,
-        latencyBudgetMs: Int? = nil
+        latencyBudgetMs: Int? = nil,
+        languageOverride: String? = nil,
+        validationPolicy: String? = nil
     ) {
         self.expectedVoiceRevision = expectedVoiceRevision
         self.expectedModelRevision = expectedModelRevision
@@ -1160,6 +1238,8 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         self.timingMode = timingMode
         self.purpose = purpose
         self.latencyBudgetMs = latencyBudgetMs
+        self.languageOverride = languageOverride
+        self.validationPolicy = validationPolicy
     }
 
     public var headers: [String: String] {
@@ -1185,7 +1265,31 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         if let latencyBudgetMs {
             result["SpeechRail-Latency-Budget-Ms"] = String(latencyBudgetMs)
         }
+        if let languageOverride {
+            result["SpeechRail-Language"] = languageOverride
+        }
+        if let validationPolicy {
+            result["SpeechRail-Validation-Policy"] = validationPolicy
+        }
         return result
+    }
+
+    /// Derive a copy with one option replaced.
+    ///
+    /// Prefer this over rebuilding the options by hand: a hand-written copy is
+    /// how a SpeechRail extension silently disappears from one call path.
+    public func with(languageOverride: String? = nil) -> SpeechRailRequestOptions {
+        SpeechRailRequestOptions(
+            expectedVoiceRevision: expectedVoiceRevision,
+            expectedModelRevision: expectedModelRevision,
+            pronunciationSet: pronunciationSet,
+            receiptMode: receiptMode,
+            timingMode: timingMode,
+            purpose: purpose,
+            latencyBudgetMs: latencyBudgetMs,
+            languageOverride: languageOverride ?? self.languageOverride,
+            validationPolicy: validationPolicy
+        )
     }
 }
 
@@ -1792,41 +1896,6 @@ public enum CapabilityDiscoveryState: Equatable, Sendable {
     }
 }
 
-/// Presentation-level distinction for a capability declaration.
-///
-/// Readiness of the ASR/TTS workers and publication of optional TTS
-/// capabilities are separate facts. A missing declaration while discovery is
-/// still running is therefore not the same as a declared-but-unavailable
-/// capability.
-public enum ServiceCapabilityPresentationStatus: Equatable, Sendable {
-    case ready
-    case notReady
-    case unsupported
-    case checking
-    case undeclared
-    case unavailable
-}
-
-public enum ServiceCapabilityPresentation {
-    public static func resolve(
-        declared: Bool?,
-        discoveryState: CapabilityDiscoveryState,
-        supportedByProfile: Bool
-    ) -> ServiceCapabilityPresentationStatus {
-        if declared == true { return .ready }
-        if declared == false { return supportedByProfile ? .notReady : .unsupported }
-
-        switch discoveryState {
-        case .idle, .loading:
-            return .checking
-        case .loaded:
-            return supportedByProfile ? .undeclared : .unsupported
-        case .notSupported, .notReady, .unauthorized, .invalidContract, .failed:
-            return .unavailable
-        }
-    }
-}
-
 public struct CapabilitySnapshotStore: Equatable, Sendable {
     public private(set) var snapshot: EffectiveCapabilitySnapshot?
     public private(set) var etag: String?
@@ -1934,21 +2003,21 @@ public enum SpeechRailCapabilityRevisionSelector {
 
     public static func creatorRequestOptions(
         voiceID: String,
-        fallbackVoiceRevision: String?,
         in snapshot: EffectiveCapabilitySnapshot?
-    ) -> SpeechRailRequestOptions {
+    ) -> SpeechRailRequestOptions? {
         guard
             let snapshot,
             let voice = matchingVoice(voiceID, in: snapshot),
             voice.available,
-            voice.operations["http_speech"] != nil
+            voice.operations["http_speech"] != nil,
+            let modelRevision = nonEmpty(voice.model.catalogRevision)
         else {
-            return SpeechRailRequestOptions()
+            return nil
         }
 
         return SpeechRailRequestOptions(
-            expectedVoiceRevision: nonEmpty(voice.voiceRevision) ?? nonEmpty(fallbackVoiceRevision),
-            expectedModelRevision: nonEmpty(snapshot.models["tts"]?.catalogRevision)
+            expectedVoiceRevision: nonEmpty(voice.voiceRevision),
+            expectedModelRevision: modelRevision
         )
     }
 
@@ -1956,9 +2025,11 @@ public enum SpeechRailCapabilityRevisionSelector {
         _ voiceID: String,
         in snapshot: EffectiveCapabilitySnapshot
     ) -> SafeVoiceEntry? {
-        snapshot.voices.first { voice in
+        let matches = snapshot.voices.filter { voice in
             voice.id == voiceID || voice.aliases.contains(voiceID)
         }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

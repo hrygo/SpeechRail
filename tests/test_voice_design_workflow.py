@@ -6,7 +6,9 @@ only transition that creates an immutable, routable voice revision.
 
 from __future__ import annotations
 
+import io
 import json
+import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -434,6 +436,283 @@ def test_unknown_runtime_identity_blocks_publication(
     assert all(profile.is_system for profile in registry.list_profiles())
 
 
+def test_candidate_reference_and_validation_audio_require_current_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, created = create_candidate(client)
+    revision_header = {
+        "SpeechRail-Expected-Candidate-Revision": created["revision"]
+    }
+    reference_path = (
+        registry.storage_path.parent
+        / "voice_design_candidates"
+        / f"{candidate_id}.wav"
+    )
+
+    reference_audio = client.get(
+        f"/v1/voice-designs/{candidate_id}/audio",
+        headers=revision_header,
+    )
+    assert reference_audio.status_code == 200, reference_audio.text
+    assert reference_audio.headers["content-type"].startswith("audio/wav")
+    assert reference_audio.headers["cache-control"] == "no-store"
+    assert reference_audio.content == reference_path.read_bytes()
+
+    missing_revision = client.get(f"/v1/voice-designs/{candidate_id}/audio")
+    assert missing_revision.status_code == 428
+    assert missing_revision.json()["error"]["code"] == (
+        "expected_candidate_revision_required"
+    )
+    stale_revision = client.get(
+        f"/v1/voice-designs/{candidate_id}/audio",
+        headers={"SpeechRail-Expected-Candidate-Revision": "vr_" + "0" * 32},
+    )
+    assert stale_revision.status_code == 409
+    assert stale_revision.json()["error"]["code"] == "voice_design_revision_conflict"
+
+    confirm_candidate(client, asr, candidate_id)
+    validated = validate_candidate(client, asr, candidate_id)["candidate"]
+    validation = validated["validations"][-1]
+    validation_audio_path = (
+        registry.storage_path.parent
+        / "voice_design_candidates"
+        / candidate_id
+        / f"{validation['validation_id']}.wav"
+    )
+    synth_request_count = len(synth.requests)
+
+    validation_audio = client.get(
+        (
+            f"/v1/voice-designs/{candidate_id}/validations/"
+            f"{validation['validation_id']}/audio"
+        ),
+        headers={
+            "SpeechRail-Expected-Candidate-Revision": validated["revision"]
+        },
+    )
+    assert validation_audio.status_code == 200, validation_audio.text
+    assert validation_audio.headers["content-type"].startswith("audio/wav")
+    assert validation_audio.headers["cache-control"] == "no-store"
+    with wave.open(io.BytesIO(validation_audio.content), "rb") as wav:
+        assert wav.getframerate() == 24_000
+        assert wav.readframes(wav.getnframes()) == synth.pcm
+    assert validation_audio.content == validation_audio_path.read_bytes()
+    assert len(synth.requests) == synth_request_count
+
+    validation_audio_path.unlink()
+    unavailable = client.get(
+        (
+            f"/v1/voice-designs/{candidate_id}/validations/"
+            f"{validation['validation_id']}/audio"
+        ),
+        headers={
+            "SpeechRail-Expected-Candidate-Revision": validated["revision"]
+        },
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.json()["error"]["code"] == "validation_audio_unavailable"
+    assert len(synth.requests) == synth_request_count
+
+
+def test_reference_audio_identity_is_checked_before_confirm_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    confirm_client, confirm_registry, _synth, confirm_asr = make_client(
+        tmp_path / "confirm", monkeypatch
+    )
+    candidate_id, _ = create_candidate(confirm_client)
+    reference_path = (
+        confirm_registry.storage_path.parent
+        / "voice_design_candidates"
+        / f"{candidate_id}.wav"
+    )
+    reference_path.write_bytes(reference_path.read_bytes() + b"changed")
+    transcription_count = len(confirm_asr.requests)
+
+    rejected_confirmation = confirm_client.post(
+        f"/v1/voice-designs/{candidate_id}/confirm",
+        json={},
+    )
+    assert rejected_confirmation.status_code == 409
+    assert rejected_confirmation.json()["error"]["code"] == (
+        "reference_audio_unavailable"
+    )
+    assert len(confirm_asr.requests) == transcription_count
+
+    publish_client, publish_registry, _synth, publish_asr = make_client(
+        tmp_path / "publish", monkeypatch
+    )
+    publish_candidate_id, _ = create_candidate(publish_client)
+    confirm_candidate(publish_client, publish_asr, publish_candidate_id)
+    validated = validate_candidate(
+        publish_client,
+        publish_asr,
+        publish_candidate_id,
+    )["candidate"]
+    human_review(
+        publish_client,
+        publish_candidate_id,
+        validation_id=validated["validations"][-1]["validation_id"],
+    )
+    publish_reference_path = (
+        publish_registry.storage_path.parent
+        / "voice_design_candidates"
+        / f"{publish_candidate_id}.wav"
+    )
+    publish_reference_path.write_bytes(b"changed")
+
+    rejected_publication = publish_client.post(
+        f"/v1/voice-designs/{publish_candidate_id}/publish",
+        json={},
+    )
+    assert rejected_publication.status_code == 409
+    assert rejected_publication.json()["error"]["code"] == (
+        "reference_audio_unavailable"
+    )
+    assert VOICE_ID not in published_voice_ids(publish_client)
+
+
+def test_reference_audio_read_rejects_a_symlinked_asset_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, _synth, _asr = make_client(tmp_path, monkeypatch)
+    candidate_id, candidate = create_candidate(client)
+    assets_dir = registry.storage_path.parent / "voice_design_candidates"
+    moved_assets_dir = tmp_path / "saved_candidate_assets"
+    assets_dir.rename(moved_assets_dir)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    assets_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    response = client.get(
+        f"/v1/voice-designs/{candidate_id}/audio",
+        headers={
+            "SpeechRail-Expected-Candidate-Revision": candidate["revision"]
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "reference_audio_unavailable"
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_cancel_during_confirmation_cannot_be_overwritten_by_stale_asr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    original_transcribe = asr.transcribe
+
+    from speechrail.http.routes import voice_designs
+
+    repository = voice_designs._repository()
+
+    async def cancel_before_transcript(request: TranscriptionRequest) -> TranscriptResult:
+        repository.update(
+            candidate_id,
+            lambda current: current.model_copy(update={"state": "cancelled"}),
+        )
+        return await original_transcribe(request)
+
+    monkeypatch.setattr(asr, "transcribe", cancel_before_transcript)
+    response = client.post(
+        f"/v1/voice-designs/{candidate_id}/confirm",
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "voice_design_revision_conflict"
+    assert repository.get(candidate_id).state == "cancelled"
+
+
+def test_cancel_during_publish_cannot_be_overwritten_by_stale_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    validated = validate_candidate(client, asr, candidate_id)["candidate"]
+    human_review(
+        client,
+        candidate_id,
+        validation_id=validated["validations"][-1]["validation_id"],
+    )
+
+    from speechrail.http.routes import voice_designs
+
+    repository = voice_designs._repository()
+
+    class CancelAfterReferenceRead:
+        def __getattr__(self, name: str) -> object:
+            return getattr(repository, name)
+
+        def read_reference_audio(self, *args: object, **kwargs: object) -> object:
+            result = repository.read_reference_audio(*args, **kwargs)
+            repository.update(
+                candidate_id,
+                lambda current: current.model_copy(update={"state": "cancelled"}),
+            )
+            return result
+
+    monkeypatch.setattr(
+        voice_designs,
+        "_repository",
+        lambda: CancelAfterReferenceRead(),
+    )
+    response = client.post(
+        f"/v1/voice-designs/{candidate_id}/publish",
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "voice_design_publish_conflict"
+    assert VOICE_ID not in published_voice_ids(client)
+    monkeypatch.setattr(voice_designs, "_repository", lambda: repository)
+    assert repository.get(candidate_id).state == "cancelled"
+
+
+def test_cancelled_candidate_audio_cannot_be_reviewed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    validated = validate_candidate(client, asr, candidate_id)["candidate"]
+    validation_id = validated["validations"][-1]["validation_id"]
+    revision_header = {
+        "SpeechRail-Expected-Candidate-Revision": validated["revision"]
+    }
+
+    cancelled = client.post(f"/v1/voice-designs/{candidate_id}/cancel", json={})
+    assert cancelled.status_code == 200, cancelled.text
+
+    reference_audio = client.get(
+        f"/v1/voice-designs/{candidate_id}/audio",
+        headers=revision_header,
+    )
+    assert reference_audio.status_code == 409
+    assert reference_audio.json()["error"]["code"] == "voice_design_candidate_unavailable"
+
+    validation_audio = client.get(
+        (
+            f"/v1/voice-designs/{candidate_id}/validations/"
+            f"{validation_id}/audio"
+        ),
+        headers=revision_header,
+    )
+    assert validation_audio.status_code == 409
+    assert validation_audio.json()["error"]["code"] == (
+        "voice_design_candidate_unavailable"
+    )
+
+
 def test_editing_the_reference_text_revokes_earlier_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -658,4 +937,12 @@ def test_design_routes_require_authentication(
 
     assert client.post("/v1/voice-designs", json=payload()).status_code == 401
     assert client.get("/v1/voice-designs").status_code == 401
+    candidate_id = "vd_" + "0" * 24
+    validation_id = "vv_" + "0" * 24
+    assert client.get(
+        f"/v1/voice-designs/{candidate_id}/audio"
+    ).status_code == 401
+    assert client.get(
+        f"/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio"
+    ).status_code == 401
     assert not synth.requests

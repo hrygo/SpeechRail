@@ -479,7 +479,7 @@ private struct CLIProfile: Decodable {
     let asr: String
     let tts: String
     let aligner: String?
-    let ttsClone: String?
+    let ttsBase: String?
     let diarization: Bool?
     let downloadBytes: Int64
 
@@ -488,7 +488,7 @@ private struct CLIProfile: Decodable {
         case asr
         case tts
         case aligner
-        case ttsClone = "tts_clone"
+        case ttsBase = "tts_base"
         case diarization
         case downloadBytes = "download_bytes"
     }
@@ -622,7 +622,7 @@ private enum CLIOutputDecoder {
                 asr: profile.asr,
                 tts: profile.tts,
                 aligner: profile.aligner,
-                ttsClone: profile.ttsClone,
+                ttsBase: profile.ttsBase,
                 diarization: profile.diarization ?? false,
                 downloadBytes: profile.downloadBytes
             )

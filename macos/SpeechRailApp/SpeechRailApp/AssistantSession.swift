@@ -225,6 +225,7 @@ public final class AssistantSession {
 
     // MARK: 挂载点（由 App 注入）
 
+    /// Optional `/readyz` diagnostic; the effective capability binding is the start gate.
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
     /// 助手默认使用一台同时负责采集与播放的引擎，让系统 voice processing 能看到
     /// near-end capture 与 far-end render。旧的 `AudioChunkSource` 注入仍保留：外部
@@ -238,12 +239,10 @@ public final class AssistantSession {
     }
     /// 音色被拒时的可用内置声音列表（给可读结论用，§9 第 14 行）。
     public var availableVoices: @MainActor () -> [String] = { [] }
-    /// 仅从同一代 capability snapshot 读取当前 voice revision；未知时保持 nil，
-    /// 不从 voice 名称或本地时间推断 revision。
-    public var realtimeVoiceRevision: @MainActor (String?) -> String? = { _ in nil }
-    /// 仅从同一代 capability snapshot 读取 TTS catalog revision；未知时保持 nil，
-    /// 让服务按普通协商处理，不从模型名或本地时间推断 revision。
-    public var realtimeModelRevision: @MainActor (String?) -> String? = { _ in nil }
+    /// App composition root resolves ASR + selected-voice TTS pins from one
+    /// effective-capability snapshot before the microphone is opened.
+    public var realtimeCapabilityBindingProvider:
+        (@MainActor (String?) async -> RealtimeCapabilityBinding?)?
 
     private let coordinator: SessionCoordinator
     private let provider = LLMProvider()
@@ -253,6 +252,7 @@ public final class AssistantSession {
     private var source: AudioChunkSource?
     private var audioSession: (any AssistantAudioSession)?
     private var client: RealtimeASRClient?
+    private var activeRealtimeBinding: RealtimeCapabilityBinding?
     private var pump: Task<Void, Never>?
     private var playback: PCMStreamPlayer?
     private var sessionStartedAt: Date?
@@ -323,21 +323,32 @@ public final class AssistantSession {
     /// 被拒时这一句仍用旧音色说，给可读原因与可用内置声音列表（§9 第 14 行）。
     public func changeVoice(to voice: String, name: String? = nil) async {
         let previous = voiceID
-        voiceID = voice
         guard let client else { return }
         do {
+            let binding = await realtimeCapabilityBindingProvider?(voice)
+            if realtimeCapabilityBindingProvider != nil,
+               binding?.includesSpeech != true
+            {
+                throw Blocked(.serviceNotReady("无法确认这个音色的实时朗读版本，请刷新服务信息后重试。"))
+            }
+            let canonicalVoiceID = binding?.canonicalVoiceID ?? voice
             try await client.updateVoice(
-                voice,
-                expectedVoiceRevision: realtimeVoiceRevision(voice)
+                canonicalVoiceID,
+                expectedVoiceRevision: binding?.voiceRevision,
+                expectedTTSRevision: binding?.ttsModelRevision
             )
+            voiceID = canonicalVoiceID
+            if let binding {
+                activeRealtimeBinding = binding
+            }
             try? await coordinator.noteVoiceChange(
                 atOrdinal: currentOrdinal + 1,
                 // 名字一起存：库里那一列是 `id|name`，音色改名或删除之后
                 // 这一行仍然说得清当时是谁（`SessionStore.noteVoiceChange` 的注解）。
-                voice: VoiceSnapshot(id: voice, name: name)
+                voice: VoiceSnapshot(id: canonicalVoiceID, name: name)
             )
             voiceChanges.append(
-                VoiceChange(atOrdinal: currentOrdinal + 1, voiceID: voice, name: name)
+                VoiceChange(atOrdinal: currentOrdinal + 1, voiceID: canonicalVoiceID, name: name)
             )
             lastFailure = nil
         } catch {
@@ -469,6 +480,12 @@ public final class AssistantSession {
     // MARK: - 生命周期
 
     private func startPipeline() async throws {
+        let binding = await realtimeCapabilityBindingProvider?(voiceID)
+        if realtimeCapabilityBindingProvider != nil,
+           binding?.includesSpeech != true
+        {
+            throw Blocked(.serviceNotReady("当前服务未确认语音识别和所选音色的实时朗读能力。"))
+        }
         guard let preferences = preferences?() else { throw Blocked(.llmNotConfigured) }
         let resolved = preferences.resolvedLLMConfiguration(
             for: .assistant,
@@ -490,8 +507,10 @@ public final class AssistantSession {
         var profile = "unknown"
         if let serviceReadiness {
             switch await serviceReadiness() {
-            case .notReady(let message):
-                throw Blocked(.serviceNotReady(message))
+            case .notReady:
+                // `/readyz` is diagnostic only. The capability binding above
+                // gates entry; the Realtime handshake reports transport failure.
+                break
             case .ready(let reported):
                 profile = reported ?? "unknown"
             }
@@ -517,10 +536,11 @@ public final class AssistantSession {
         let client = RealtimeASRClient(
             port: port,
             silenceDurationMilliseconds: 400,
-            voice: voiceID,
+            voice: binding?.canonicalVoiceID ?? voiceID,
             apiKey: serviceKey,
-            expectedModelRevision: realtimeModelRevision(voiceID),
-            expectedVoiceRevision: realtimeVoiceRevision(voiceID),
+            expectedASRRevision: binding?.asrModelRevision,
+            expectedTTSRevision: binding?.ttsModelRevision,
+            expectedVoiceRevision: binding?.voiceRevision,
             callerTTSEnabled: true
         )
         do {
@@ -532,6 +552,7 @@ public final class AssistantSession {
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
         self.client = client
+        activeRealtimeBinding = binding
 
         // 增量 TTS 的协调器先建好：播放层的"真播完"回调要直接挂到它上面。
         let tts = makeTTSStreamCoordinator(client: client)
@@ -723,7 +744,8 @@ public final class AssistantSession {
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
     ) async {
         switch envelope.payload {
-        case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded:
+        case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded,
+             .diarizationFinished, .auxiliaryIncomplete:
             break
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }

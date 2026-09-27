@@ -305,7 +305,7 @@ public struct ControlMenuView: View {
     }
 
     /// 服务操作在「控制通道不可用」或任一步操作进行中时必须一起禁用，
-    /// 三个动作共用同一条判据，免得漏掉其中一个（Figma `warning` 组的语义）。
+    /// 三个动作共用同一条判据，免得漏掉其中一个（稿 ``warning` 组的语义）。
     private var serviceActionsDisabled: Bool {
         model.isBusy
             || model.hasActiveMutation
@@ -416,7 +416,7 @@ public struct ControlMenuView: View {
     }
 }
 
-/// Figma `menuBarStrip` + 会话状态（设计稿 `菜单栏 · 三个入口`，2026-09-18 导出）：
+/// 稿 `menuBarStrip` + 会话状态（设计稿 `菜单栏 · 三个入口`，2026-09-18 导出）：
 ///
 /// · **空闲**：常态只有图标（产品名不占标题宽度）；
 /// · **服务操作进行中**：产品名 + 琥珀点（既有行为）；

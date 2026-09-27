@@ -49,6 +49,7 @@ public struct DubbingDeskView: View {
     @State private var exportFileName = "SpeechRail-配音"
     @State private var isExporting = false
     @State private var exportMessage: String?
+    @State private var saveNotice: String?
     @FocusState private var isScriptFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -67,6 +68,10 @@ public struct DubbingDeskView: View {
             .animation(
                 reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
                 value: model.lastCreatedWork?.id
+            )
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                value: model.pendingDubbing == nil
             )
         }
         // 头部（页面身份）由窗口组合根 `ControlCenterView` 声明；这一页没有头部动作：
@@ -487,7 +492,15 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
 
-        if let work = model.lastCreatedWork {
+        if let saveNotice {
+            Text(saveNotice)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+
+        if let pending = model.pendingDubbing {
+            pendingResultBar(for: pending)
+        } else if let work = model.lastCreatedWork {
             resultBar(for: work)
         } else if let creatorMessage = model.creatorMessage {
             failureBar(message: creatorMessage)
@@ -612,6 +625,105 @@ public struct DubbingDeskView: View {
         )
     }
 
+    /// 待保存的配音结果：音频只在内存，播放与导出可用；只有用户显式保存才进入作品库。
+    private func pendingResultBar(for pending: AppModel.PendingDubbingRender) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                WaveformBars(
+                    pattern: SpeechRailDesignTokens.Waveform.resultBar,
+                    isPlaying: model.isAudioPlaying
+                )
+                .accessibilityHidden(true)
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(pending.generatedTitle)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let durationText = pending.durationText {
+                        Text(durationText)
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .monospacedDigit()
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                }
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                Button {
+                    model.playPendingDubbing()
+                } label: {
+                    SpeechRailButtonLabel(
+                        model.isAudioPlaying ? "停止" : "播放",
+                        icon: model.isAudioPlaying ? .stop : .play
+                    )
+                }
+                .accessibilityLabel(model.isAudioPlaying ? "停止播放" : "播放试听")
+
+                Button {
+                    preparePendingExport(for: pending)
+                } label: {
+                    SpeechRailButtonLabel("导出…", icon: .export)
+                }
+                .accessibilityLabel("导出配音试听")
+
+                Button {
+                    savePending()
+                } label: {
+                    SpeechRailButtonLabel("保存到作品库", icon: .add)
+                }
+                .accessibilityLabel("保存到作品库")
+                .disabled(model.isCreatingSpeech)
+
+                Button {
+                    model.discardPendingDubbing()
+                } label: {
+                    SpeechRailButtonLabel("放弃", icon: .delete)
+                }
+                .accessibilityLabel("放弃这段未保存的配音")
+                .disabled(model.isCreatingSpeech)
+            }
+
+            Text("试听通过后再保存：保存前作品库不会新增。放弃后无法找回这段音频。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            if let playbackMessage = model.workPlaybackMessage {
+                Text(playbackMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+            }
+
+            if let exportMessage {
+                Text(exportMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .speechRailSurface(.elevated)
+        .accessibilityElement(children: .contain)
+        .transition(
+            reduceMotion
+                ? AnyTransition.identity
+                : AnyTransition.move(edge: .bottom).combined(with: .opacity)
+        )
+    }
+
+    private func savePending() {
+        exportMessage = nil
+        if model.savePendingDubbing() != nil {
+            saveNotice = "已保存到作品库。"
+        }
+    }
+
+    private func preparePendingExport(for pending: AppModel.PendingDubbingRender) {
+        exportDocument = WAVFileDocument(data: pending.audioData)
+        exportFileName = pending.generatedTitle
+        exportMessage = nil
+        isExporting = true
+    }
+
     /// A failed run reports in the same place the result would have appeared.
     private func failureBar(message: String) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -661,6 +773,7 @@ public struct DubbingDeskView: View {
     private func startSynthesis() {
         guard let voice = selectedVoice else { return }
         exportMessage = nil
+        saveNotice = nil
         model.startSynthesisAndSave(text: dubbingText, voice: voice, speed: speechSpeed)
     }
 
@@ -775,6 +888,7 @@ public struct VoiceDesignView: View {
         case available
         case serviceUnavailable
         case unsupported
+        case unknown
 
         var isAvailable: Bool {
             self == .available
@@ -814,15 +928,20 @@ public struct VoiceDesignView: View {
         .inspector(isPresented: $showInspector) {
             voiceDesignInspector
         }
-        .sheet(item: $pendingSave) { candidate in
+        .sheet(item: $pendingSave, onDismiss: handleSaveSheetDismissal) { candidate in
             VoiceCandidateSaveSheet(
                 candidate: candidate,
                 voiceName: $voiceName,
                 identityConfirmed: $identityConfirmed,
                 naturalnessConfirmed: $naturalnessConfirmed,
-                onSave: {
+                onStart: {
                     save(candidate)
-                    pendingSave = nil
+                },
+                onPublish: {
+                    model.publishVoiceDesignPublication(
+                        identityConfirmed: identityConfirmed,
+                        naturalnessConfirmed: naturalnessConfirmed
+                    )
                 },
                 onCancel: { pendingSave = nil }
             )
@@ -841,6 +960,22 @@ public struct VoiceDesignView: View {
                 playingSlot = nil
             }
         }
+        .onChange(of: model.voiceDesignPublication.phase) { _, phase in
+            guard phase == .published else { return }
+            identityConfirmed = false
+            naturalnessConfirmed = false
+            pendingSave = nil
+        }
+    }
+
+    private func handleSaveSheetDismissal() {
+        if model.voiceDesignPublication.phase != .idle,
+           model.voiceDesignPublication.phase != .published
+        {
+            model.cancelVoiceDesignPublication()
+        }
+        identityConfirmed = false
+        naturalnessConfirmed = false
     }
 
     /// Three steps, not a form: describe the voice, keep the reference text and
@@ -1170,6 +1305,8 @@ public struct VoiceDesignView: View {
             "语音合成服务未就绪"
         case .unsupported:
             "服务没有开放这个能力"
+        case .unknown:
+            "暂时无法确认"
         }
     }
 
@@ -1228,6 +1365,8 @@ public struct VoiceDesignView: View {
             (.attention, "语音合成服务还没就绪", "先在「服务状态」把服务恢复，再生成候选音频。", "exclamationmark.triangle")
         case .unsupported:
             (.critical, "当前服务没有开放音色创作", "服务目录没有声明这项能力；可在「模型」页查看当前档位与所需模型。", "xmark.circle")
+        case .unknown:
+            (.attention, "暂时无法确认音色创作", "服务能力信息不完整；重新读取服务状态后再试。", "questionmark.circle")
         }
 
         ViewThatFits(in: .horizontal) {
@@ -1265,7 +1404,27 @@ public struct VoiceDesignView: View {
 
     @ViewBuilder
     private var voiceDesignFeedback: some View {
-        if let error = errorMessage ?? model.voiceDesignErrorMessage {
+        if model.isCancellingVoiceDesignPublication {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在确认候选音色已取消…")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .speechRailSurface(.control)
+            .accessibilityElement(children: .combine)
+        } else if model.canRetryVoiceDesignCancellation {
+            StatusBanner(
+                tone: .critical,
+                title: "候选尚未取消",
+                message: model.voiceDesignPublication.message ?? "服务暂时无法确认取消状态。",
+                actionTitle: "重试取消"
+            ) {
+                model.retryVoiceDesignPublication()
+            }
+        } else if let error = errorMessage ?? model.voiceDesignErrorMessage {
             StatusBanner(
                 tone: .critical,
                 title: "音色生成未完成",
@@ -1280,15 +1439,8 @@ public struct VoiceDesignView: View {
                 tone: .critical,
                 title: "音色操作未完成",
                 message: message,
-                actionTitle: needsCapabilityRefresh ? "重新读取能力" : nil,
-                action: needsCapabilityRefresh
-                    ? {
-                        Task {
-                            await model.refresh()
-                            await model.refreshCreatorVoices()
-                        }
-                    }
-                    : nil
+                actionTitle: capabilityFailureActionTitle,
+                action: capabilityFailureAction
             )
         } else if let successMessage = model.voiceDesignSuccessMessage {
             StatusBanner(
@@ -1305,46 +1457,57 @@ public struct VoiceDesignView: View {
     private var voiceDesignAvailability: VoiceDesignAvailability {
         guard !model.isRefreshingService,
               !model.isRefreshingCreatorVoices,
-              !model.isRefreshingServiceCapabilities
+              !model.isRefreshingDiscovery
         else {
             return .checking
         }
-        guard let health = displayedHealth else {
-            return model.healthFailure == nil ? .checking : .serviceUnavailable
-        }
-        guard health.status == "ok", health.ttsReady == true, health.ready == true else {
-            return .serviceUnavailable
-        }
-        // 门禁读服务声明（`/v1/models.capabilities`）。旧实现要求音色列表里先有
-        // 一条可用的 voice_design 音色，等于拿用户数据当能力依据：列表为空时，
-        // 能力明明已发布也会被判成“服务端未提供”。
-        switch model.serviceCapabilitiesLoadState {
-        case .unknown, .loading:
+        switch model.capabilityFacade.voiceDesignCreationAvailability {
+        case .available:
+            return .available
+        case .unsupported:
+            return .unsupported
+        case .checking:
             return .checking
-        case .failed:
-            // 读不到能力清单属于服务不可用，不要把“不知道”说成“服务端未提供”。
+        case .unavailable:
             return .serviceUnavailable
-        case .loaded:
-            break
+        case .unknown:
+            return .unknown
         }
-        guard let capabilities = model.serviceCapabilities else {
-            return .checking
-        }
-        return capabilities.supportsInstruction && capabilities.supportsPreview
-            ? .available
-            : .unsupported
-    }
-
-    private var displayedHealth: HealthSnapshot? {
-        guard model.healthFailure == nil else { return nil }
-        return model.health
     }
 
     /// 音色列表与能力声明任一读失败，都给同一个重试入口：能力结论不再依赖列表，
     /// 但两个读取都是这一页的事实来源。
+    private var isCredentialFailure: Bool {
+        model.discoveryState == .unauthorized
+    }
+
+    private var capabilityFailureActionTitle: String? {
+        if isCredentialFailure {
+            return "打开诊断"
+        }
+        return needsCapabilityRefresh ? "重新读取能力" : nil
+    }
+
+    private var capabilityFailureAction: (() -> Void)? {
+        if isCredentialFailure {
+            return { navigation.request(.diagnostics) }
+        }
+        guard needsCapabilityRefresh else { return nil }
+        return {
+            Task {
+                await model.refresh()
+                await model.refreshCreatorVoices()
+            }
+        }
+    }
+
     private var needsCapabilityRefresh: Bool {
         model.creatorVoicesLoadState == .failed
-            || model.serviceCapabilitiesLoadState == .failed
+            || model.discoveryState == .failed
+            || model.discoveryState == .invalidContract
+            || model.discoveryState == .notSupported
+            || model.discoveryState == .notReady
+            || model.discoveryState == .unauthorized
     }
 
     private var voiceDesignAvailabilityBanner: AvailabilityBanner? {
@@ -1364,6 +1527,13 @@ public struct VoiceDesignView: View {
                 message: "服务目录没有声明这项能力。去「模型」页查看当前档位与所需模型。",
                 actionTitle: "查看模型",
                 route: .models
+            )
+        case .unknown:
+            AvailabilityBanner(
+                title: "暂时无法确认音色创作",
+                message: "请重新读取服务状态；能力确认前不能生成候选音频。",
+                actionTitle: "查看服务状态",
+                route: .overview
             )
         }
     }
@@ -1426,12 +1596,7 @@ public struct VoiceDesignView: View {
             return
         }
         errorMessage = nil
-        model.saveVoiceDesignCandidate(
-            candidate,
-            name: name,
-            humanIdentityConfirmed: identityConfirmed,
-            humanNaturalnessConfirmed: naturalnessConfirmed
-        )
+        model.startVoiceDesignPublication(candidate, name: name)
     }
 }
 
@@ -1675,11 +1840,14 @@ private struct VoiceCandidateCard: View {
 /// the description, the reference text and the seed all in one place
 /// (REDESIGN-SPEC §7.2).
 private struct VoiceCandidateSaveSheet: View {
+    @Environment(AppModel.self) private var model
+
     let candidate: VoiceDesignCandidateSnapshot
     @Binding var voiceName: String
     @Binding var identityConfirmed: Bool
     @Binding var naturalnessConfirmed: Bool
-    let onSave: () -> Void
+    let onStart: () -> Void
+    let onPublish: () -> Void
     let onCancel: () -> Void
 
     @FocusState private var isNameFocused: Bool
@@ -1689,52 +1857,268 @@ private struct VoiceCandidateSaveSheet: View {
             Text("保存候选 \(candidate.slot) 为音色")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
 
-            Text("保存前，服务会用另一段文字复验这个音色。你的试听结论会作为最终发布依据。")
+            Text("先试听服务保存的候选参考音频，再听复验输出并确认。只有当前版本的两项复核都完成后，才能发布到音色库。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("音色名称")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                TextField("例如：夜航主持", text: $voiceName)
-                    .textFieldStyle(.plain)
-                    .focused($isNameFocused)
-                    .speechRailSingleLineInput(.regular)
-                    .accessibilityLabel("音色名称")
-            }
-
-            summaryRow("音色描述", value: candidate.instructionSnapshot)
-            summaryRow("参考文案", value: candidate.referenceTextSnapshot)
-            summaryRow("Seed", value: String(candidate.seed))
-            summaryRow("时长", value: durationText)
-
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Toggle("我已经试听：声音与描述一致", isOn: $identityConfirmed)
-                    .accessibilityLabel("确认音色身份与描述一致")
-                Toggle("我已经试听：听起来自然、没有异常", isOn: $naturalnessConfirmed)
-                    .accessibilityLabel("确认音色自然度")
-            }
-
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Spacer(minLength: 0)
-                Button("取消", action: onCancel)
-                    .speechRailButton(.secondary)
-                    .keyboardShortcut(.cancelAction)
-                Button("复核并保存", action: onSave)
-                    .speechRailButton(.primary)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(
-                        voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || !identityConfirmed
-                            || !naturalnessConfirmed
-                    )
+            if showsPublicationFlow {
+                publicationSummary
+                publicationStep
+            } else {
+                nameField
+                candidateSummary
+                initialActions
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(width: Self.sheetWidth, alignment: .leading)
-        .onAppear { isNameFocused = true }
+        .onAppear {
+            if !showsPublicationFlow {
+                isNameFocused = true
+            }
+        }
+        .onChange(of: model.voiceDesignPublication.candidateRevision) { _, _ in
+            resetHumanReview()
+        }
+        .onChange(of: model.voiceDesignPublication.validationID) { _, _ in
+            resetHumanReview()
+        }
+    }
+
+    private var showsPublicationFlow: Bool {
+        model.voiceDesignPublication.phase != .idle
+            && model.voiceDesignPublication.phase != .published
+    }
+
+    private var nameField: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text("音色名称")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            TextField("例如：夜航主持", text: $voiceName)
+                .textFieldStyle(.plain)
+                .focused($isNameFocused)
+                .speechRailSingleLineInput(.regular)
+                .accessibilityLabel("音色名称")
+        }
+    }
+
+    private var candidateSummary: some View {
+        Group {
+            summaryRow("音色描述", value: candidate.instructionSnapshot)
+            summaryRow("参考文案", value: candidate.referenceTextSnapshot)
+            summaryRow("Seed", value: String(candidate.seed))
+            summaryRow("预览时长", value: durationText)
+        }
+    }
+
+    private var publicationSummary: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            summaryRow("音色名称", value: voiceName)
+            summaryRow("音色描述", value: candidate.instructionSnapshot)
+            summaryRow("参考文案", value: candidate.referenceTextSnapshot)
+            if let revision = model.voiceDesignPublication.candidateRevision {
+                summaryRow("当前候选版本", value: revision)
+            }
+            if let validationID = model.voiceDesignPublication.validationID {
+                summaryRow("当前复验", value: validationID)
+            }
+        }
+        .speechRailSurface(.control)
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var publicationStep: some View {
+        switch model.voiceDesignPublication.phase {
+        case .idle, .published:
+            EmptyView()
+        case .creatingCandidate:
+            progressMessage("正在创建并保存候选音色…")
+        case .loadingReferenceAudio:
+            progressMessage("正在读取候选的参考音频…")
+        case .awaitingReferenceReview:
+            audioReviewStep(
+                title: "候选参考音频",
+                isPlayed: model.voiceDesignPublication.referenceAudioWasPlayed,
+                play: toggleReferencePlayback,
+                continueTitle: "确认参考，开始复验",
+                continueAction: model.confirmVoiceDesignReference
+            ) {
+                Text("请听完这段音频，并对照上面的参考文案确认。播放完整结束后才能继续。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        case .confirmingReference:
+            progressMessage("正在确认参考并启动服务复验…")
+        case .validating:
+            progressMessage("服务正在用另一段文字复验这个候选…")
+        case .loadingValidationAudio:
+            progressMessage("正在读取本次复验的原始输出…")
+        case .awaitingValidationReview:
+            audioReviewStep(
+                title: "本次复验输出",
+                isPlayed: model.voiceDesignPublication.validationAudioWasPlayed,
+                play: toggleValidationPlayback,
+                continueTitle: "确认并发布到音色库",
+                continueAction: onPublish
+            ) {
+                Text("请听完整段复验输出，再判断身份是否一致、表达是否自然。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                if model.voiceDesignPublication.validationAudioWasPlayed {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Toggle("声音与描述一致", isOn: $identityConfirmed)
+                            .accessibilityLabel("确认复验声音与音色描述一致")
+                        Toggle("听起来自然、没有异常", isOn: $naturalnessConfirmed)
+                            .accessibilityLabel("确认复验声音自然且没有异常")
+                    }
+                }
+            }
+        case .submittingReview:
+            progressMessage("正在把两项人工复核绑定到本次复验…")
+        case .publishing:
+            progressMessage("复核已通过，正在发布到音色库…")
+        case .cancelling:
+            progressMessage("正在确认候选音色已取消…")
+        case .failed:
+            failedStep
+        }
+    }
+
+    private var failedStep: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Label("这一步没有完成", systemImage: "exclamationmark.triangle.fill")
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+            if let message = model.voiceDesignPublication.message {
+                Text(message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button("取消保存", action: onCancel)
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Spacer(minLength: 0)
+                Button("重试这一步", action: model.retryVoiceDesignPublication)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .speechRailSurface(.control)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func progressMessage(_ message: String) -> some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            Text(message)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .speechRailSurface(.control)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func audioReviewStep<Details: View>(
+        title: String,
+        isPlayed: Bool,
+        play: @escaping () -> Void,
+        continueTitle: String,
+        continueAction: @escaping () -> Void,
+        @ViewBuilder details: () -> Details
+    ) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            details()
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button(action: play) {
+                    Label(
+                        model.isVoiceDesignAudioPlaying ? "停止试听" : "试听音频",
+                        systemImage: model.isVoiceDesignAudioPlaying ? "stop.fill" : "play.fill"
+                    )
+                }
+                .speechRailButton(.secondary)
+                .accessibilityHint("请从头播放到结束，播放完成后才能继续")
+                Button("取消保存", action: onCancel)
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Spacer(minLength: 0)
+                Button(continueTitle, action: continueAction)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isPlayed || !canContinue)
+            }
+            if let message = model.voiceDesignPublication.message {
+                Text(message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(isPlayed ? "已完整播放，可以继续。" : "播放完成后才能继续。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .speechRailSurface(.control)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var canContinue: Bool {
+        switch model.voiceDesignPublication.phase {
+        case .awaitingReferenceReview:
+            true
+        case .awaitingValidationReview:
+            identityConfirmed && naturalnessConfirmed
+        default:
+            false
+        }
+    }
+
+    private var initialActions: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Spacer(minLength: 0)
+            Button("取消", action: onCancel)
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+            Button("创建候选并开始复核", action: onStart)
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
+                .disabled(voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func toggleReferencePlayback() {
+        if model.isVoiceDesignAudioPlaying {
+            model.stopAudio()
+        } else {
+            model.playVoiceDesignReferenceAudio()
+        }
+    }
+
+    private func toggleValidationPlayback() {
+        if model.isVoiceDesignAudioPlaying {
+            model.stopAudio()
+        } else {
+            model.playVoiceDesignValidationAudio()
+        }
+    }
+
+    private func resetHumanReview() {
+        identityConfirmed = false
+        naturalnessConfirmed = false
     }
 
     private func summaryRow(_ title: String, value: String) -> some View {
@@ -1851,6 +2235,7 @@ public struct VoiceLibraryView: View {
     @Environment(AppNavigationState.self) private var navigation
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @State private var sampleText = "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。"
+    @State private var sampleTextEdited = false
     @State private var selectedVoiceID: String?
     @State private var showInspector = true
     @State private var searchText = ""
@@ -1968,6 +2353,12 @@ public struct VoiceLibraryView: View {
         }
         .task(id: selectedVoiceID) {
             guard let selectedVoiceID else { return }
+            if !sampleTextEdited {
+                // 服务端声明的示例文案优先；用户改过的文案不覆盖。
+                sampleText = selectedVoice.map {
+                    AppModel.resolvedPreviewText(for: $0, text: nil)
+                } ?? AppModel.defaultPreviewText(forVoiceID: selectedVoiceID)
+            }
             await model.refreshCreatorVoiceDetail(id: selectedVoiceID)
         }
         .onChange(of: model.creatorVoices) { _, _ in
@@ -2005,10 +2396,8 @@ public struct VoiceLibraryView: View {
                 tone: .critical,
                 title: "音色操作未完成",
                 message: message,
-                actionTitle: model.creatorVoicesLoadState == .failed ? "重新加载音色" : nil,
-                action: model.creatorVoicesLoadState == .failed
-                    ? { Task { await model.refreshCreatorVoices() } }
-                    : nil
+                actionTitle: voiceLibraryFailureActionTitle,
+                action: voiceLibraryFailureAction
             )
         }
         if let deletionMessage {
@@ -2018,6 +2407,21 @@ public struct VoiceLibraryView: View {
                 message: deletionMessage
             )
         }
+    }
+
+    private var voiceLibraryFailureActionTitle: String? {
+        if model.discoveryState == .unauthorized {
+            return "打开诊断"
+        }
+        return model.creatorVoicesLoadState == .failed ? "重新加载音色" : nil
+    }
+
+    private var voiceLibraryFailureAction: (() -> Void)? {
+        if model.discoveryState == .unauthorized {
+            return { navigation.request(.diagnostics) }
+        }
+        guard model.creatorVoicesLoadState == .failed else { return nil }
+        return { Task { await model.refreshCreatorVoices() } }
     }
 
     private var emptyVoicesCard: some View {
@@ -2403,7 +2807,10 @@ public struct VoiceLibraryView: View {
                 // 「详情列多宽」变成「用户打了多少字」的函数；改成多行后宽度回给
                 // 容器，长文案改在槽内换行，两行起、五行封顶，再长由原生编辑器
                 // 内部滚动（REDESIGN-SPEC §11.6 第五十七轮）。
-                TextField("输入试听文案", text: $sampleText, axis: .vertical)
+                TextField("输入试听文案", text: Binding(
+                    get: { sampleText },
+                    set: { sampleText = $0; sampleTextEdited = true }
+                ), axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(previewTextLineCount)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)

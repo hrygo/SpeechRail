@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
+from speechrail.domain.voice_preview import normalize_preview_locale
 from speechrail.domain.voice_validation import VoiceValidationRepository
 
 if TYPE_CHECKING:
@@ -64,6 +65,10 @@ class VoiceProfile:
     creation: VoiceCreation | None = None
     revision: str | None = None
     revoked: bool = False
+    # Display-only: the language of the maintained audition sample text.
+    # It is not part of the acoustic identity, so changing it never mints a
+    # new ``revision``.  ``None`` means "no known default sample".
+    preview_locale: str | None = None
 
     @property
     def description(self) -> str:
@@ -114,6 +119,8 @@ class VoiceProfile:
             data["revision"] = self.revision
         if self.revoked:
             data["revoked"] = True
+        if self.preview_locale is not None:
+            data["preview_locale"] = self.preview_locale
         return data
 
 
@@ -137,6 +144,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             temperature=0.1,
             is_default=True,
             is_system=True,
+            preview_locale="zh",
         ),
         "vivian": VoiceProfile(
             id="vivian",
@@ -145,6 +153,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=1024,
             temperature=0.1,
             is_system=True,
+            preview_locale="zh",
         ),
         "uncle_fu": VoiceProfile(
             id="uncle_fu",
@@ -153,6 +162,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=2048,
             temperature=0.1,
             is_system=True,
+            preview_locale="zh",
         ),
         "dylan": VoiceProfile(
             id="dylan",
@@ -161,6 +171,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=5120,
             temperature=0.1,
             is_system=True,
+            preview_locale="zh",
         ),
         "eric": VoiceProfile(
             id="eric",
@@ -169,6 +180,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=6144,
             temperature=0.1,
             is_system=True,
+            preview_locale="zh",
         ),
         "ryan": VoiceProfile(
             id="ryan",
@@ -177,6 +189,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=7168,
             temperature=0.1,
             is_system=True,
+            preview_locale="en",
         ),
         "aiden": VoiceProfile(
             id="aiden",
@@ -185,6 +198,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=8192,
             temperature=0.1,
             is_system=True,
+            preview_locale="en",
         ),
         "ono_anna": VoiceProfile(
             id="ono_anna",
@@ -193,6 +207,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=9216,
             temperature=0.1,
             is_system=True,
+            preview_locale="ja",
         ),
         "sohee": VoiceProfile(
             id="sohee",
@@ -201,6 +216,7 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
             seed=10240,
             temperature=0.1,
             is_system=True,
+            preview_locale="ko",
         ),
     }
 )
@@ -912,6 +928,10 @@ class VoiceRegistry:
         revoked = item.get("revoked", False)
         if not isinstance(revoked, bool):
             raise ValueError("custom voice revoked flag is invalid")
+        # Display-only metadata: an absent, malformed or unsupported value
+        # degrades to "no default preview" instead of failing the whole load
+        # or guessing a language from the voice's name or reference text.
+        preview_locale = normalize_preview_locale(item.get("preview_locale"))
         return VoiceProfile(
             id=vid,
             name=name,
@@ -929,6 +949,7 @@ class VoiceRegistry:
             creation=creation,
             revision=revision,
             revoked=revoked,
+            preview_locale=preview_locale,
         )
 
     def _controlled_audio_path(

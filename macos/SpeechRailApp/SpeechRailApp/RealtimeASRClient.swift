@@ -47,6 +47,728 @@ private actor URLSessionRealtimeASRTransport: RealtimeASRTransport {
     }
 }
 
+/// Bounded per-connection transcript/auxiliary state. Transcript identity is
+/// the item ID; task, epoch, and revision are validated attributes, not map keys.
+struct RealtimeEventState: Sendable {
+    static let maxItems = 128
+    static let itemLifetime: Duration = .seconds(30)
+    static let maxTranscriptUTF8Bytes = 64 * 1024
+    static let maxAlignmentUnits = 1_024
+    static let maxDiarizationSpans = 1_024
+    static let maxAuxiliaryBytes = 256 * 1024
+    private static let auxiliaryEntryOverheadBytes = 64
+
+    enum LimitViolation: Equatable, Sendable {
+        case transcript
+        case alignment
+        case diarization
+
+        var message: String {
+            switch self {
+            case .transcript:
+                "单条实时转写超过本地安全上限，已关闭当前连接。"
+            case .alignment:
+                "单条实时对齐数据超过本地安全上限，已关闭当前连接。"
+            case .diarization:
+                "单条实时说话人数据超过本地安全上限，已关闭当前连接。"
+            }
+        }
+    }
+
+    struct Range: Equatable, Sendable {
+        let start: Int
+        let end: Int
+    }
+
+    struct Snapshot: Sendable {
+        let transcript: String?
+        let alignmentUnits: [RealtimeASRClient.AttributionUnit]
+        let diarizationSpans: [RealtimeASRClient.DiarizationSpan]
+        let auxiliaryExpected: Bool
+    }
+
+    struct ExpiredItem: Sendable {
+        let itemID: String
+        let snapshot: Snapshot
+    }
+
+    private struct SampleSpanKey: Hashable, Sendable {
+        let start: Int
+        let end: Int
+    }
+
+    private struct Item: Sendable {
+        let generation: UUID
+        let sessionID: String
+        var taskID: String?
+        var epoch: Int?
+        var transcript: String?
+        var frozenTranscriptRevision: Int?
+        var isTextTerminal = false
+        var latestHypothesisRevision: Int?
+        var alignmentTranscriptRevision: Int?
+        var alignmentRevision: Int?
+        var alignmentUnits: [String: RealtimeASRClient.AttributionUnit] = [:]
+        var alignmentStorageBytes = 0
+        var diarizationTranscriptRevision: Int?
+        var diarizationRevision: Int?
+        var diarizationSpans: [SampleSpanKey: RealtimeASRClient.DiarizationSpan] = [:]
+        var diarizationStorageBytes = 0
+        var lastActivity: ContinuousClock.Instant
+
+        init(
+            generation: UUID,
+            sessionID: String,
+            taskID: String?,
+            epoch: Int?,
+            now: ContinuousClock.Instant
+        ) {
+            self.generation = generation
+            self.sessionID = sessionID
+            self.taskID = taskID
+            self.epoch = epoch
+            self.lastActivity = now
+        }
+    }
+
+    private var generation = UUID()
+    private var sessionID: String?
+    private var serverTaskID: String?
+    private var latestEpoch: Int?
+    private var itemOrder: [String] = []
+    private var items: [String: Item] = [:]
+    private var retiredUntil: [String: ContinuousClock.Instant] = [:]
+    private var retiredOrder: [String] = []
+    private var pendingExpiry: [ExpiredItem] = []
+    private var auxiliaryExpected = false
+    private var lastLimitViolation: LimitViolation?
+
+    mutating func takeLimitViolation() -> LimitViolation? {
+        defer { lastLimitViolation = nil }
+        return lastLimitViolation
+    }
+
+    mutating func reset(generation: UUID, auxiliaryExpected: Bool) {
+        self.generation = generation
+        self.sessionID = nil
+        serverTaskID = nil
+        latestEpoch = nil
+        itemOrder.removeAll(keepingCapacity: true)
+        items.removeAll(keepingCapacity: true)
+        retiredUntil.removeAll(keepingCapacity: true)
+        retiredOrder.removeAll(keepingCapacity: true)
+        pendingExpiry.removeAll(keepingCapacity: true)
+        lastLimitViolation = nil
+        self.auxiliaryExpected = auxiliaryExpected
+    }
+
+    mutating func clear() {
+        sessionID = nil
+        serverTaskID = nil
+        latestEpoch = nil
+        itemOrder.removeAll(keepingCapacity: false)
+        items.removeAll(keepingCapacity: false)
+        retiredUntil.removeAll(keepingCapacity: false)
+        retiredOrder.removeAll(keepingCapacity: false)
+        pendingExpiry.removeAll(keepingCapacity: false)
+        lastLimitViolation = nil
+    }
+
+    mutating func prune(now: ContinuousClock.Instant) {
+        let expiredIDs = itemOrder.filter { itemID in
+            guard let item = items[itemID] else { return true }
+            return item.lastActivity.duration(to: now) > Self.itemLifetime
+        }
+        for itemID in expiredIDs {
+            retire(itemID, now: now)
+        }
+        retiredOrder.removeAll { itemID in
+            guard let deadline = retiredUntil[itemID], deadline > now else {
+                retiredUntil.removeValue(forKey: itemID)
+                return true
+            }
+            return false
+        }
+    }
+
+    mutating func takeExpired() -> [ExpiredItem] {
+        defer { pendingExpiry.removeAll(keepingCapacity: true) }
+        return pendingExpiry
+    }
+
+    func snapshot(itemID: String) -> Snapshot? {
+        guard let item = items[itemID] else { return nil }
+        return snapshot(item)
+    }
+
+    func nextExpiryDelay(now: ContinuousClock.Instant) -> Duration? {
+        guard let oldest = items.values.min(by: {
+            $0.lastActivity < $1.lastActivity
+        }) else { return nil }
+        let deadline = oldest.lastActivity.advanced(by: Self.itemLifetime)
+        return deadline <= now ? .zero : now.duration(to: deadline)
+    }
+
+    @discardableResult
+    mutating func observeDelta(
+        itemID: String,
+        delta: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        let deltaBytes = delta.utf8.count
+        guard deltaBytes <= Self.maxTranscriptUTF8Bytes else {
+            lastLimitViolation = .transcript
+            return false
+        }
+        guard prepareBaseItem(
+            itemID: itemID,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: true
+        ) else { return false }
+        var item = items[itemID]!
+        guard !item.isTextTerminal else { return false }
+        if item.latestHypothesisRevision == nil {
+            let transcriptBytes = item.transcript?.utf8.count ?? 0
+            guard deltaBytes <= Self.maxTranscriptUTF8Bytes - transcriptBytes else {
+                lastLimitViolation = .transcript
+                return false
+            }
+            item.transcript = (item.transcript ?? "") + delta
+        }
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func acceptHypothesis(
+        itemID: String,
+        taskID: String,
+        epoch: Int,
+        revision: Int,
+        text: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        guard text.utf8.count <= Self.maxTranscriptUTF8Bytes else {
+            lastLimitViolation = .transcript
+            return false
+        }
+        guard revision >= 0,
+              !itemID.isEmpty,
+              items[itemID]?.latestHypothesisRevision.map({ revision > $0 }) ?? true,
+              canAcceptExtension(
+                itemID: itemID,
+                taskID: taskID,
+                epoch: epoch,
+                sessionID: sessionID,
+                generation: generation,
+                now: now,
+                createIfMissing: true
+              ),
+              var item = items[itemID],
+              !item.isTextTerminal
+        else { return false }
+        item.latestHypothesisRevision = revision
+        item.transcript = text
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func complete(
+        itemID: String,
+        transcript: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        guard transcript.utf8.count <= Self.maxTranscriptUTF8Bytes else {
+            lastLimitViolation = .transcript
+            return false
+        }
+        guard prepareBaseItem(
+            itemID: itemID,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: true
+        ) else { return false }
+        var item = items[itemID]!
+        guard !item.isTextTerminal else { return false }
+        item.transcript = transcript
+        item.isTextTerminal = true
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func failText(
+        itemID: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        guard prepareBaseItem(
+            itemID: itemID,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: true
+        ),
+        var item = items[itemID],
+        !item.isTextTerminal
+        else { return false }
+        item.isTextTerminal = true
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func applyAlignment(
+        itemID: String,
+        taskID: String,
+        epoch: Int,
+        transcriptRevision: Int,
+        metadataRevision: Int,
+        sampleSpan: Range,
+        codepointSpan: Range,
+        units: [RealtimeASRClient.AttributionUnit],
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        guard units.count <= Self.maxAlignmentUnits else {
+            lastLimitViolation = .alignment
+            return false
+        }
+        guard transcriptRevision >= 0,
+              metadataRevision >= 0,
+              let candidate = items[itemID],
+              candidate.generation == generation,
+              candidate.sessionID == sessionID,
+              candidate.isTextTerminal,
+              candidate.frozenTranscriptRevision == nil
+                  || candidate.frozenTranscriptRevision == transcriptRevision,
+              let transcript = candidate.transcript,
+              Self.validAlignment(
+                units: units,
+                codepointSpan: codepointSpan,
+                sampleSpan: sampleSpan,
+                transcript: transcript
+              )
+        else { return false }
+        if let boundRevision = candidate.alignmentTranscriptRevision,
+           boundRevision != transcriptRevision {
+            return false
+        }
+        if let previous = candidate.alignmentRevision, metadataRevision < previous {
+            return false
+        }
+        var updatedUnits = candidate.alignmentUnits
+        var updatedStorageBytes = candidate.alignmentStorageBytes
+        if let previous = candidate.alignmentRevision, metadataRevision > previous {
+            updatedUnits.removeAll(keepingCapacity: true)
+            updatedStorageBytes = 0
+        }
+        for unit in units {
+            let existing = updatedUnits[unit.segmentUID]
+            if existing == nil, updatedUnits.count >= Self.maxAlignmentUnits {
+                lastLimitViolation = .alignment
+                return false
+            }
+            let previousCost = existing.map(Self.alignmentStorageCost) ?? 0
+            let nextCost = Self.alignmentStorageCost(unit)
+            let nextStorageBytes = updatedStorageBytes - previousCost + nextCost
+            let otherStorageBytes = candidate.diarizationStorageBytes
+            guard nextCost <= Self.maxAuxiliaryBytes - otherStorageBytes,
+                  nextStorageBytes <= Self.maxAuxiliaryBytes - otherStorageBytes
+            else {
+                lastLimitViolation = .alignment
+                return false
+            }
+            updatedUnits[unit.segmentUID] = unit
+            updatedStorageBytes = nextStorageBytes
+        }
+        guard canAcceptExtension(
+            itemID: itemID,
+            taskID: taskID,
+            epoch: epoch,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: false
+        ),
+        var item = items[itemID] else { return false }
+
+        item.alignmentTranscriptRevision = transcriptRevision
+        item.frozenTranscriptRevision = transcriptRevision
+        item.alignmentRevision = metadataRevision
+        item.alignmentUnits = updatedUnits
+        item.alignmentStorageBytes = updatedStorageBytes
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func acceptAlignmentFailure(
+        itemID: String,
+        taskID: String,
+        epoch: Int,
+        transcriptRevision: Int,
+        metadataRevision: Int,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        guard transcriptRevision >= 0,
+              metadataRevision >= 0,
+              let candidate = items[itemID],
+              candidate.isTextTerminal,
+              candidate.frozenTranscriptRevision == nil
+                  || candidate.frozenTranscriptRevision == transcriptRevision,
+              canAcceptExtension(
+                itemID: itemID,
+                taskID: taskID,
+                epoch: epoch,
+                sessionID: sessionID,
+                generation: generation,
+                now: now,
+                createIfMissing: false
+              ),
+              var item = items[itemID],
+              item.isTextTerminal
+        else { return false }
+        if let boundRevision = item.alignmentTranscriptRevision,
+           boundRevision != transcriptRevision {
+            return false
+        }
+        if let previous = item.alignmentRevision {
+            guard metadataRevision >= previous else { return false }
+            if metadataRevision > previous {
+                item.alignmentUnits.removeAll(keepingCapacity: true)
+                item.alignmentStorageBytes = 0
+            }
+        }
+        if item.alignmentTranscriptRevision == nil {
+            item.alignmentStorageBytes = 0
+        }
+        item.frozenTranscriptRevision = transcriptRevision
+        item.alignmentRevision = metadataRevision
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func applyDiarization(
+        itemID: String,
+        taskID: String,
+        epoch: Int,
+        transcriptRevision: Int,
+        metadataRevision: Int,
+        spans: [RealtimeASRClient.DiarizationSpan],
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        lastLimitViolation = nil
+        guard spans.count <= Self.maxDiarizationSpans else {
+            lastLimitViolation = .diarization
+            return false
+        }
+        guard transcriptRevision >= 0,
+              metadataRevision >= 0,
+              spans.allSatisfy({ $0.startSample >= 0 && $0.endSample > $0.startSample }),
+              let candidate = items[itemID],
+              candidate.generation == generation,
+              candidate.sessionID == sessionID,
+              candidate.frozenTranscriptRevision == nil
+                  || candidate.frozenTranscriptRevision == transcriptRevision
+        else { return false }
+
+        var updatedSpans = candidate.diarizationSpans
+        var updatedStorageBytes = candidate.diarizationStorageBytes
+        if let previousTranscriptRevision = candidate.diarizationTranscriptRevision {
+            guard transcriptRevision >= previousTranscriptRevision else { return false }
+            if transcriptRevision > previousTranscriptRevision {
+                updatedSpans.removeAll(keepingCapacity: true)
+                updatedStorageBytes = 0
+            }
+        }
+        if let previousMetadataRevision = candidate.diarizationRevision {
+            guard metadataRevision >= previousMetadataRevision else { return false }
+            if metadataRevision > previousMetadataRevision {
+                updatedSpans.removeAll(keepingCapacity: true)
+                updatedStorageBytes = 0
+            }
+        }
+        for span in spans {
+            let key = SampleSpanKey(start: span.startSample, end: span.endSample)
+            let existing = updatedSpans[key]
+            if existing == nil, updatedSpans.count >= Self.maxDiarizationSpans {
+                lastLimitViolation = .diarization
+                return false
+            }
+            let previousCost = existing.map(Self.diarizationStorageCost) ?? 0
+            let nextCost = Self.diarizationStorageCost(span)
+            let nextStorageBytes = updatedStorageBytes - previousCost + nextCost
+            let otherStorageBytes = candidate.alignmentStorageBytes
+            guard nextCost <= Self.maxAuxiliaryBytes - otherStorageBytes,
+                  nextStorageBytes <= Self.maxAuxiliaryBytes - otherStorageBytes
+            else {
+                lastLimitViolation = .diarization
+                return false
+            }
+            updatedSpans[key] = span
+            updatedStorageBytes = nextStorageBytes
+        }
+        guard canAcceptExtension(
+            itemID: itemID,
+            taskID: taskID,
+            epoch: epoch,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: false
+        ),
+        var item = items[itemID] else { return false }
+        item.diarizationTranscriptRevision = transcriptRevision
+        item.frozenTranscriptRevision = transcriptRevision
+        item.diarizationRevision = metadataRevision
+        item.diarizationSpans = updatedSpans
+        item.diarizationStorageBytes = updatedStorageBytes
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func acceptSessionEvent(
+        taskID: String,
+        epoch: Int,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        canAcceptExtension(
+            itemID: nil,
+            taskID: taskID,
+            epoch: epoch,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: false
+        )
+    }
+
+    private mutating func prepareBaseItem(
+        itemID: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant,
+        createIfMissing: Bool
+    ) -> Bool {
+        guard !itemID.isEmpty,
+              generation == self.generation,
+              acceptSession(sessionID)
+        else { return false }
+        if var item = items[itemID] {
+            guard item.generation == generation, item.sessionID == sessionID else {
+                return false
+            }
+            item.lastActivity = now
+            items[itemID] = item
+            touch(itemID)
+            return true
+        }
+        guard createIfMissing, retiredUntil[itemID] == nil else { return false }
+        makeRoom(now: now)
+        items[itemID] = Item(
+            generation: generation,
+            sessionID: sessionID,
+            taskID: serverTaskID,
+            epoch: latestEpoch,
+            now: now
+        )
+        itemOrder.append(itemID)
+        return true
+    }
+
+    private mutating func canAcceptExtension(
+        itemID: String?,
+        taskID: String,
+        epoch: Int,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant,
+        createIfMissing: Bool
+    ) -> Bool {
+        guard !taskID.isEmpty,
+              epoch >= 0,
+              generation == self.generation,
+              acceptSession(sessionID),
+              serverTaskID == nil || serverTaskID == taskID,
+              latestEpoch == nil || epoch >= latestEpoch!
+        else { return false }
+
+        var existing: Item?
+        if let itemID {
+            guard !itemID.isEmpty, retiredUntil[itemID] == nil else { return false }
+            existing = items[itemID]
+            if let existing {
+                guard existing.generation == generation,
+                      existing.sessionID == sessionID,
+                      existing.taskID == nil || existing.taskID == taskID,
+                      existing.epoch == nil || existing.epoch == epoch
+                else { return false }
+            } else if !createIfMissing {
+                return false
+            }
+        }
+
+        serverTaskID = taskID
+        if latestEpoch == nil || epoch > latestEpoch! {
+            latestEpoch = epoch
+        }
+        if let itemID {
+            if existing == nil {
+                makeRoom(now: now)
+                items[itemID] = Item(
+                    generation: generation,
+                    sessionID: sessionID,
+                    taskID: taskID,
+                    epoch: epoch,
+                    now: now
+                )
+                itemOrder.append(itemID)
+            } else if var item = existing {
+                item.taskID = taskID
+                item.epoch = epoch
+                item.lastActivity = now
+                items[itemID] = item
+                touch(itemID)
+            }
+        }
+        return true
+    }
+
+    private mutating func acceptSession(_ sessionID: String) -> Bool {
+        guard !sessionID.isEmpty else { return false }
+        if let expected = self.sessionID, expected != sessionID { return false }
+        self.sessionID = sessionID
+        return true
+    }
+
+    private mutating func makeRoom(now: ContinuousClock.Instant) {
+        guard items.count >= Self.maxItems, let oldest = itemOrder.first else { return }
+        retire(oldest, now: now)
+    }
+
+    private mutating func retire(_ itemID: String, now: ContinuousClock.Instant) {
+        guard let item = items.removeValue(forKey: itemID) else {
+            itemOrder.removeAll { $0 == itemID }
+            return
+        }
+        itemOrder.removeAll { $0 == itemID }
+        if auxiliaryExpected {
+            pendingExpiry.append(ExpiredItem(itemID: itemID, snapshot: snapshot(item)))
+        }
+        retiredUntil[itemID] = now.advanced(by: Self.itemLifetime)
+        retiredOrder.removeAll { $0 == itemID }
+        retiredOrder.append(itemID)
+        while retiredOrder.count > Self.maxItems {
+            let removed = retiredOrder.removeFirst()
+            retiredUntil.removeValue(forKey: removed)
+        }
+    }
+
+    private mutating func touch(_ itemID: String) {
+        itemOrder.removeAll { $0 == itemID }
+        itemOrder.append(itemID)
+    }
+
+    private func snapshot(_ item: Item) -> Snapshot {
+        Snapshot(
+            transcript: item.transcript,
+            alignmentUnits: item.alignmentUnits.values.sorted {
+                ($0.textStart ?? Int.max, $0.segmentUID)
+                    < ($1.textStart ?? Int.max, $1.segmentUID)
+            },
+            diarizationSpans: item.diarizationSpans.values.sorted {
+                ($0.startSample, $0.endSample) < ($1.startSample, $1.endSample)
+            },
+            auxiliaryExpected: auxiliaryExpected
+        )
+    }
+
+    private static func validAlignment(
+        units: [RealtimeASRClient.AttributionUnit],
+        codepointSpan: Range,
+        sampleSpan: Range,
+        transcript: String
+    ) -> Bool {
+        let codepointCount = transcript.unicodeScalars.count
+        guard codepointSpan.start <= codepointSpan.end,
+              codepointSpan.end <= codepointCount,
+              sampleSpan.start <= sampleSpan.end
+        else { return false }
+        return units.allSatisfy { unit in
+            guard let textStart = unit.textStart,
+                  let textEnd = unit.textEnd,
+                  let audioStart = unit.audioStartSample,
+                  let audioEnd = unit.audioEndSample
+            else { return false }
+            return textStart >= codepointSpan.start
+                && textEnd >= textStart
+                && textEnd <= codepointSpan.end
+                && audioStart >= sampleSpan.start
+                && audioEnd >= audioStart
+                && audioEnd <= sampleSpan.end
+        }
+    }
+
+    private static func alignmentStorageCost(
+        _ unit: RealtimeASRClient.AttributionUnit
+    ) -> Int {
+        auxiliaryEntryOverheadBytes
+            + MemoryLayout<RealtimeASRClient.AttributionUnit>.stride
+            + unit.segmentUID.utf8.count * 2
+            + (unit.speaker?.utf8.count ?? 0)
+            + (unit.timingQuality?.utf8.count ?? 0)
+            + (unit.granularity?.utf8.count ?? 0)
+    }
+
+    private static func diarizationStorageCost(
+        _ span: RealtimeASRClient.DiarizationSpan
+    ) -> Int {
+        auxiliaryEntryOverheadBytes
+            + MemoryLayout<RealtimeASRClient.DiarizationSpan>.stride
+            + (span.speaker?.utf8.count ?? 0)
+    }
+}
+
 // `/v1/realtime` 的客户端（契约：`contracts/realtime-openai.md`）。
 //
 // 它只做四件事：**连、配、喂 PCM、收事件**。没有大模型、没有播放、没有业务状态——
@@ -202,6 +924,14 @@ public actor RealtimeASRClient {
         )
         /// 顶层 `error`。请求级错误带 `request_id`；会话级错误没有。
         case serverError(code: String, message: String, requestID: String?)
+        /// Session-wide diarization drain barrier; it is not an item terminal.
+        case diarizationFinished
+        /// A recent item's auxiliary window expired. Text remains owned by the session.
+        case auxiliaryIncomplete(
+            itemID: String,
+            alignmentMissing: Bool,
+            diarizationMissing: Bool
+        )
         case closed(code: Int?)
     }
 
@@ -216,21 +946,24 @@ public actor RealtimeASRClient {
     private let diarizationEnabled: Bool
     /// `session.speechrail.task`（会话层语义标签）。
     private let sessionTask: SpeechRailSessionUpdate.Task
-    private let expectedModelRevision: String?
+    private let expectedASRRevision: String?
     /// 当前 caller-owned TTS voice 的 revision。随 voice 一起在连接内更新。
     private var expectedVoiceRevision: String?
+    /// 当前 caller-owned voice 对应的 TTS 制品 revision。
+    private var expectedTTSRevision: String?
     private let callerTTSEnabled: Bool
     /// `speechrail.tts.start` 的 task：助手会话固定 `conversation`。
     private let ttsTask: SpeechRailSessionUpdate.Task
     private let session: URLSession
+    private let eventStream: RealtimeEventStream<Event>
 
     private var transport: (any RealtimeASRTransport)?
     private var receiveLoop: Task<Void, Never>?
+    private var itemExpiryTask: Task<Void, Never>?
+    private var connectionGeneration = UUID()
     private var didClose = false
     private var configurationAcknowledged = false
     private var configurationFailure: Failure?
-    private var continuation: AsyncStream<RealtimeEventEnvelope<Event>>.Continuation?
-    private var stream: AsyncStream<RealtimeEventEnvelope<Event>>?
     /// 下一次 caller-owned TTS request 使用的音色。
     private var voice: String?
     private var activeTTSRequestID: String?
@@ -253,12 +986,8 @@ public actor RealtimeASRClient {
     private var appendedBytesSinceTerminal = 0
     private var closeBarrier = RealtimeCloseBarrier()
     private var diarizationAcknowledged = false
-    /// 当前 item 的对齐单元（`speechrail.alignment.done`），按 `item_id` 暂存，
-    /// 与分人采样区间合并后交给会话层。全部只存内存，且按 item 有界。
-    private var alignmentUnitsByItem: [String: [AttributionUnit]] = [:]
-    private var alignmentOrder: [String] = []
-    /// 当前 item 的分人区间（`speechrail.diarization.*`）。
-    private var diarizationSpansByItem: [String: [DiarizationSpan]] = [:]
+    /// Per-connection item identity, revisions, and bounded auxiliary snapshots.
+    private var eventState = RealtimeEventState()
     private var sequenceValidator = RealtimeSequenceValidator()
     /// Latest sequence diagnostic. The event envelope remains the source of
     /// truth; this property is only a non-sensitive convenience for session UI.
@@ -281,10 +1010,12 @@ public actor RealtimeASRClient {
         voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared,
-        expectedModelRevision: String? = nil,
+        expectedASRRevision: String? = nil,
+        expectedTTSRevision: String? = nil,
         expectedVoiceRevision: String? = nil,
         callerTTSEnabled: Bool = false,
-        ttsTask: SpeechRailSessionUpdate.Task = .conversation
+        ttsTask: SpeechRailSessionUpdate.Task = .conversation,
+        eventStreamLimits: RealtimeEventStream<Event>.Limits = .default
     ) {
         var components = URLComponents()
         components.scheme = "ws"
@@ -301,23 +1032,19 @@ public actor RealtimeASRClient {
         self.threshold = threshold
         self.diarizationEnabled = diarizationEnabled
         self.sessionTask = sessionTask
-        self.expectedModelRevision = expectedModelRevision
+        self.expectedASRRevision = expectedASRRevision
+        self.expectedTTSRevision = expectedTTSRevision
         self.expectedVoiceRevision = expectedVoiceRevision
         self.callerTTSEnabled = callerTTSEnabled
         self.ttsTask = ttsTask
         self.voice = voice
         self.session = session
+        self.eventStream = RealtimeEventStream(limits: eventStreamLimits)
     }
 
     /// 事件流。**只能取一次**：这条流与这条连接一一对应，多个消费者会让"谁负责写库"变得不确定。
-    public func events() -> AsyncStream<RealtimeEventEnvelope<Event>> {
-        if let stream { return stream }
-        let (stream, continuation) = AsyncStream<RealtimeEventEnvelope<Event>>.makeStream(
-            bufferingPolicy: .unbounded
-        )
-        self.stream = stream
-        self.continuation = continuation
-        return stream
+    public func events() -> RealtimeEventStream<Event> {
+        eventStream
     }
 
     // MARK: - 连接
@@ -337,11 +1064,20 @@ public actor RealtimeASRClient {
     func connect(using transport: any RealtimeASRTransport) async throws {
         guard self.transport == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
+        connectionGeneration = UUID()
+        eventState.reset(
+            generation: connectionGeneration,
+            auxiliaryExpected: diarizationEnabled
+        )
+        sequenceValidator.reset()
+        serverSessionID = nil
+        recentEventIDs.removeAll(keepingCapacity: true)
+        sequenceStatus = .missing
         configurationAcknowledged = false
         configurationFailure = nil
         self.transport = transport
         await transport.resume()
-        startReceiveLoop(using: transport)
+        startReceiveLoop(using: transport, generation: connectionGeneration)
 
         // `session.update` 要在首个 PCM **之前**落地：24 kHz 格式、任务、
         // 分人与 caller-owned TTS 都在这一刻协商。
@@ -421,9 +1157,14 @@ public actor RealtimeASRClient {
 
     /// 换音色。**下一次 TTS request 生效**，只影响 TTS，不进 prompt。
     /// voice 没有可验证 revision 时必须传 nil，以免沿用旧音色的 pin。
-    public func updateVoice(_ voice: String, expectedVoiceRevision: String? = nil) async throws {
+    public func updateVoice(
+        _ voice: String,
+        expectedVoiceRevision: String? = nil,
+        expectedTTSRevision: String? = nil
+    ) async throws {
         self.voice = voice
         self.expectedVoiceRevision = expectedVoiceRevision
+        self.expectedTTSRevision = expectedTTSRevision
     }
 
     /// 开始一次增量 utterance（契约 §3.3.1）。
@@ -450,7 +1191,7 @@ public actor RealtimeASRClient {
                     voice: voice,
                     speed: speed,
                     voiceRevision: expectedVoiceRevision,
-                    expectedModelRevision: expectedModelRevision
+                    expectedModelRevision: expectedTTSRevision
                 ).jsonObject
             )
         } catch {
@@ -544,8 +1285,8 @@ public actor RealtimeASRClient {
                 granularity: diarizationEnabled ? "segment" : nil
             ),
             diarizationEnabled: diarizationEnabled,
-            expectedASRRevision: nil,
-            expectedTTSRevision: expectedModelRevision
+            expectedASRRevision: expectedASRRevision,
+            expectedTTSRevision: expectedTTSRevision
         ).jsonObject
     }
 
@@ -629,13 +1370,16 @@ public actor RealtimeASRClient {
 
     // MARK: - 下行
 
-    private func startReceiveLoop(using transport: any RealtimeASRTransport) {
+    private func startReceiveLoop(
+        using transport: any RealtimeASRTransport,
+        generation: UUID
+    ) {
         receiveLoop?.cancel()
         receiveLoop = Task { [weak self] in
             while !Task.isCancelled {
                 do {
                     let message = try await transport.receive()
-                    await self?.handle(message)
+                    await self?.handle(message, generation: generation)
                 } catch {
                     await self?.finish(code: await transport.closeCode())
                     return
@@ -644,17 +1388,23 @@ public actor RealtimeASRClient {
         }
     }
 
-    private func handle(_ message: RealtimeASRSocketFrame) async {
+    private func handle(
+        _ message: RealtimeASRSocketFrame,
+        generation: UUID
+    ) async {
+        guard !didClose, generation == connectionGeneration else { return }
         let data: Data
         switch message {
         case .text(let text): data = Data(text.utf8)
         case .data(let raw): data = raw
         case .unsupported: return
         }
-        guard
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = object["type"] as? String
-        else {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            await rejectProtocolEvent(code: "invalid_server_event")
+            return
+        }
+        guard let type = object["type"] as? String, !type.isEmpty else {
+            await rejectProtocolEvent(code: "invalid_server_event")
             return
         }
         let metadata = RealtimeEventMetadata(
@@ -662,18 +1412,19 @@ public actor RealtimeASRClient {
             sessionID: object["session_id"] as? String,
             sequence: Self.int(object["sequence"])
         )
-        if let sessionID = metadata.sessionID {
-            serverSessionID = sessionID
-        }
-        if let eventID = metadata.eventID {
-            recentEventIDs.append(eventID)
-            if recentEventIDs.count > 64 {
-                recentEventIDs.removeFirst(recentEventIDs.count - 64)
-            }
-        }
         sequenceStatus = sequenceValidator.accept(metadata)
+        guard sequenceStatus.isAccepted else {
+            await rejectProtocolEvent(code: "realtime_protocol_violation")
+            return
+        }
+        serverSessionID = metadata.sessionID
+        recentEventIDs = sequenceValidator.recentEventIDs
         currentEventMetadata = metadata
-        currentEventReceivedAt = ContinuousClock().now
+        let receivedAt = ContinuousClock().now
+        currentEventReceivedAt = receivedAt
+        eventState.prune(now: receivedAt)
+        await flushExpiredItems()
+        guard !didClose, generation == connectionGeneration else { return }
         defer {
             currentEventMetadata = nil
             currentEventReceivedAt = nil
@@ -681,36 +1432,94 @@ public actor RealtimeASRClient {
         switch type {
         case "session.created":
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
-            emit(.ready(model: model))
+            await emit(.ready(model: model))
         case "session.updated":
-            configurationAcknowledged = true
-            emit(.configured)
+            await emit(.configured)
+            if !didClose {
+                configurationAcknowledged = true
+            }
         case "conversation.item.input_audio_transcription.delta":
-            emit(
+            let itemID = object["item_id"] as? String ?? ""
+            guard !itemID.isEmpty else {
+                await rejectProtocolEvent(code: "invalid_server_event")
+                return
+            }
+            let delta = object["delta"] as? String ?? ""
+            guard eventState.observeDelta(
+                itemID: itemID,
+                delta: delta,
+                sessionID: metadata.sessionID!,
+                generation: generation,
+                now: currentEventReceivedAt!
+            ) else {
+                if await rejectItemStateLimitIfNeeded() { return }
+                break
+            }
+            await flushExpiredItems()
+            await emit(
                 .partial(
-                    itemID: object["item_id"] as? String ?? "",
-                    delta: object["delta"] as? String ?? ""
+                    itemID: itemID,
+                    delta: delta
                 )
             )
         case "speechrail.transcription.hypothesis":
             // 官方 `delta` 是可证明的稳定前缀；hypothesis 是**可改写全文**。两者分开解码，
             // 调用点用整段替换而不是追加（契约 §5.1）。
             let itemID = object["utterance_id"] as? String ?? ""
+            let taskID = object["task_id"] as? String ?? ""
+            let epoch = Self.int(object["epoch"])
             guard let revision = Self.int(object["revision"]), revision > 0,
                   let text = object["text"] as? String else {
-                emit(.failed(itemID: itemID, code: "invalid_hypothesis", message: "流式转写快照格式无效"))
+                await emit(.failed(itemID: itemID, code: "invalid_hypothesis", message: "流式转写快照格式无效"))
                 return
             }
-            emit(.partialSnapshot(itemID: itemID, revision: revision, text: text))
+            guard !itemID.isEmpty, let epoch else { break }
+            guard eventState.acceptHypothesis(
+                    itemID: itemID,
+                    taskID: taskID,
+                    epoch: epoch,
+                    revision: revision,
+                    text: text,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  ) else {
+                if await rejectItemStateLimitIfNeeded() { return }
+                break
+            }
+            await flushExpiredItems()
+            await emit(.partialSnapshot(itemID: itemID, revision: revision, text: text))
         case "conversation.item.input_audio_transcription.completed":
             let itemID = object["item_id"] as? String ?? ""
+            let transcript = object["transcript"] as? String ?? ""
+            guard !itemID.isEmpty else { break }
+            guard eventState.complete(
+                    itemID: itemID,
+                    transcript: transcript,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  ) else {
+                if await rejectItemStateLimitIfNeeded() { return }
+                break
+            }
             settleDeclaredItem(failed: false)
-            emit(.completed(itemID: itemID, transcript: object["transcript"] as? String ?? ""))
+            await flushExpiredItems()
+            await emit(.completed(itemID: itemID, transcript: transcript))
         case "conversation.item.input_audio_transcription.failed":
             let itemID = object["item_id"] as? String ?? ""
+            guard !itemID.isEmpty,
+                  eventState.failText(
+                    itemID: itemID,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  )
+            else { break }
             let error = object["error"] as? [String: Any]
             settleDeclaredItem(failed: true)
-            emit(
+            await flushExpiredItems()
+            await emit(
                 .failed(
                     itemID: itemID,
                     code: error?["code"] as? String ?? object["code"] as? String ?? "backend_error",
@@ -718,13 +1527,52 @@ public actor RealtimeASRClient {
                 )
             )
         case "speechrail.alignment.done":
-            guard let itemID = object["utterance_id"] as? String else { break }
-            alignmentUnitsByItem[itemID] = Self.alignmentUnits(object["units"])
-            emit(attribution(itemID: itemID, isFinal: false))
+            guard let itemID = object["utterance_id"] as? String,
+                  let taskID = object["task_id"] as? String,
+                  let epoch = Self.int(object["epoch"]),
+                  let transcriptRevision = Self.int(object["transcript_revision"]),
+                  let metadataRevision = Self.int(object["metadata_revision"]),
+                  let sampleSpan = Self.span(object["sample_span"]),
+                  let codepointSpan = Self.span(object["codepoint_span"]),
+                  let units = Self.alignmentUnitsStrict(object["units"])
+            else { break }
+            guard eventState.applyAlignment(
+                    itemID: itemID,
+                    taskID: taskID,
+                    epoch: epoch,
+                    transcriptRevision: transcriptRevision,
+                    metadataRevision: metadataRevision,
+                    sampleSpan: sampleSpan,
+                    codepointSpan: codepointSpan,
+                    units: units,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  ) else {
+                if await rejectItemStateLimitIfNeeded() { return }
+                break
+            }
+            await flushExpiredItems()
+            await emit(attribution(itemID: itemID, isFinal: false))
         case "speechrail.alignment.failed":
             let itemID = object["utterance_id"] as? String ?? ""
+            guard let taskID = object["task_id"] as? String,
+                  let epoch = Self.int(object["epoch"]),
+                  let transcriptRevision = Self.int(object["transcript_revision"]),
+                  let metadataRevision = Self.int(object["metadata_revision"]),
+                  eventState.acceptAlignmentFailure(
+                    itemID: itemID,
+                    taskID: taskID,
+                    epoch: epoch,
+                    transcriptRevision: transcriptRevision,
+                    metadataRevision: metadataRevision,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  )
+            else { break }
             let error = object["error"] as? [String: Any]
-            emit(
+            await emit(
                 .alignmentFailed(
                     itemID: itemID,
                     code: error?["code"] as? String ?? "alignment_failed",
@@ -732,17 +1580,74 @@ public actor RealtimeASRClient {
                 )
             )
         case "speechrail.diarization.updated":
-            guard let itemID = object["utterance_id"] as? String else { break }
-            diarizationSpansByItem[itemID] = Self.diarizationSpans(object["units"])
-            emit(attribution(itemID: itemID, isFinal: false))
+            guard let itemID = object["utterance_id"] as? String,
+                  let taskID = object["task_id"] as? String,
+                  let epoch = Self.int(object["epoch"]),
+                  let transcriptRevision = Self.int(object["transcript_revision"]),
+                  let metadataRevision = Self.int(object["metadata_revision"]),
+                  let spans = Self.diarizationSpansStrict(object["units"])
+            else { break }
+            guard eventState.applyDiarization(
+                    itemID: itemID,
+                    taskID: taskID,
+                    epoch: epoch,
+                    transcriptRevision: transcriptRevision,
+                    metadataRevision: metadataRevision,
+                    spans: spans,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  ) else {
+                if await rejectItemStateLimitIfNeeded() { return }
+                break
+            }
+            await flushExpiredItems()
+            await emit(attribution(itemID: itemID, isFinal: false))
         case "speechrail.diarization.done":
-            guard let itemID = object["utterance_id"] as? String else { break }
-            diarizationSpansByItem[itemID] = Self.diarizationSpans(object["units"])
+            guard let itemID = object["utterance_id"] as? String,
+                  let taskID = object["task_id"] as? String,
+                  let epoch = Self.int(object["epoch"]),
+                  let transcriptRevision = Self.int(object["transcript_revision"]),
+                  let metadataRevision = Self.int(object["metadata_revision"]),
+                  let spans = Self.diarizationSpansStrict(object["units"]),
+                  eventState.acceptSessionEvent(
+                    taskID: taskID,
+                    epoch: epoch,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  )
+            else { break }
             diarizationAcknowledged = true
-            emit(attribution(itemID: itemID, isFinal: true))
+            if eventState.applyDiarization(
+                itemID: itemID,
+                taskID: taskID,
+                epoch: epoch,
+                transcriptRevision: transcriptRevision,
+                metadataRevision: metadataRevision,
+                spans: spans,
+                sessionID: metadata.sessionID!,
+                generation: generation,
+                now: currentEventReceivedAt!
+            ) {
+                await emit(attribution(itemID: itemID, isFinal: false))
+            } else if await rejectItemStateLimitIfNeeded() {
+                return
+            }
+            await emit(.diarizationFinished)
         case "speechrail.diarization.failed":
+            guard let taskID = object["task_id"] as? String,
+                  let epoch = Self.int(object["epoch"]),
+                  eventState.acceptSessionEvent(
+                    taskID: taskID,
+                    epoch: epoch,
+                    sessionID: metadata.sessionID!,
+                    generation: generation,
+                    now: currentEventReceivedAt!
+                  )
+            else { break }
             let error = object["error"] as? [String: Any]
-            emit(
+            await emit(
                 .diarizationDegraded(
                     code: error?["code"] as? String ?? "diarization_degraded",
                     message: error?["message"] as? String ?? "说话人编号停止更新了。"
@@ -757,7 +1662,7 @@ public actor RealtimeASRClient {
             // 不把未协商的字节当 24k 喂给播放器（§6 第 3 条）。
             guard started.sampleRate == TTSAudioPosition.canonicalSampleRate,
                   started.channels == 1 else {
-                emit(
+                await emit(
                     .ttsEnded(
                         requestID: started.requestID,
                         taskID: started.taskID,
@@ -773,7 +1678,7 @@ public actor RealtimeASRClient {
             activeTTSStreaming = true
             expectedAudioChunkIndex = 0
             expectedAudioSampleOffset = 0
-            emit(
+            await emit(
                 .ttsStarted(
                     requestID: started.requestID,
                     taskID: started.taskID,
@@ -787,7 +1692,7 @@ public actor RealtimeASRClient {
                 accepted.appendSequence == activeTTSConsumedSequence + 1
             else { break }
             activeTTSConsumedSequence = accepted.appendSequence
-            emit(
+            await emit(
                 .ttsTextAccepted(
                     requestID: accepted.requestID,
                     taskID: accepted.taskID,
@@ -815,7 +1720,10 @@ public actor RealtimeASRClient {
                 droppedAudioChunks += 1
                 break
             }
-            emit(.ttsAudio(requestID: requestID, taskID: activeTTSTaskID, pcm: data))
+            await emit(
+                .ttsAudio(requestID: requestID, taskID: activeTTSTaskID, pcm: data),
+                decodedAudioBytes: data.count
+            )
         case "speechrail.tts.completed", "speechrail.tts.cancelled", "speechrail.tts.failed":
             guard
                 let requestID = object["request_id"] as? String,
@@ -835,7 +1743,7 @@ public actor RealtimeASRClient {
                 code = error?["code"] as? String ?? "tts_failed"
                 message = error?["message"] as? String ?? "这一轮朗读失败了。"
             }
-            emit(
+            await emit(
                 .ttsEnded(
                     requestID: requestID,
                     taskID: activeTTSTaskID ?? object["task_id"] as? String,
@@ -855,7 +1763,7 @@ public actor RealtimeASRClient {
             if let requestID, requestID == activeTTSRequestID {
                 clearActiveTTS()
             }
-            emit(
+            await emit(
                 .serverError(
                     code: error?["code"] as? String ?? error?["type"] as? String ?? "unknown",
                     message: errorMessage,
@@ -866,6 +1774,61 @@ public actor RealtimeASRClient {
             // 其余事件不属于这一层：不报错，也不记日志。
             break
         }
+        scheduleItemExpiry()
+    }
+
+    private func scheduleItemExpiry() {
+        guard !didClose, itemExpiryTask == nil else { return }
+        let generation = connectionGeneration
+        itemExpiryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let delay = await self?.nextItemExpiryDelay(generation: generation) else {
+                    break
+                }
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    break
+                }
+                await self?.expireItems(generation: generation)
+            }
+            await self?.finishItemExpiryLoop(generation: generation)
+        }
+    }
+
+    private func nextItemExpiryDelay(generation: UUID) -> Duration? {
+        guard !didClose, generation == connectionGeneration else { return nil }
+        return eventState.nextExpiryDelay(now: ContinuousClock().now)
+    }
+
+    private func expireItems(generation: UUID) async {
+        guard !didClose, generation == connectionGeneration else { return }
+        eventState.prune(now: ContinuousClock().now)
+        await flushExpiredItems()
+    }
+
+    private func finishItemExpiryLoop(generation: UUID) {
+        guard generation == connectionGeneration else { return }
+        itemExpiryTask = nil
+    }
+
+    private func rejectProtocolEvent(code: String, message: String? = nil) async {
+        guard !didClose else { return }
+        let message = message ?? "语音服务事件顺序或身份无效，已关闭当前连接。"
+        if !configurationAcknowledged {
+            configurationFailure = .transport(message)
+        }
+        await emit(.serverError(code: code, message: message, requestID: nil))
+        await finish(code: nil)
+    }
+
+    private func rejectItemStateLimitIfNeeded() async -> Bool {
+        guard let violation = eventState.takeLimitViolation() else { return false }
+        await rejectProtocolEvent(
+            code: "realtime_item_state_overflow",
+            message: violation.message
+        )
+        return true
     }
 
     /// 一个转写终态把"自上次终态以来上行过 PCM"的计数归零，并让**已声明**的
@@ -883,19 +1846,30 @@ public actor RealtimeASRClient {
 
     /// 把对齐单元与分人区间按采样重叠合起来，交给会话层（§5.2）。
     private func attribution(itemID: String, isFinal: Bool) -> Event {
-        let units = alignmentUnitsByItem[itemID] ?? []
-        guard !units.isEmpty else {
-            return .attribution(itemID: itemID, units: [], isFinal: isFinal)
+        guard let snapshot = eventState.snapshot(itemID: itemID) else {
+            return .attribution(itemID: itemID, units: [], isFinal: false)
         }
-        let spans = diarizationSpansByItem[itemID] ?? []
-        let merged = units.map { unit -> AttributionUnit in
+        return .attribution(
+            itemID: itemID,
+            units: Self.mergedAttributionUnits(snapshot),
+            isFinal: isFinal
+        )
+    }
+
+    private static func mergedAttributionUnits(
+        _ snapshot: RealtimeEventState.Snapshot
+    ) -> [AttributionUnit] {
+        snapshot.alignmentUnits.map { unit -> AttributionUnit in
             var updated = unit
             if let start = unit.audioStartSample, let end = unit.audioEndSample, end > start {
-                updated.speaker = Self.speaker(forStart: start, end: end, spans: spans)
+                updated.speaker = Self.speaker(
+                    forStart: start,
+                    end: end,
+                    spans: snapshot.diarizationSpans
+                )
             }
             return updated
         }
-        return .attribution(itemID: itemID, units: merged, isFinal: isFinal)
     }
 
     /// 取与 `[start, end)` 重叠最多的分人区间的说话人（没有重叠就是 `nil`）。
@@ -911,39 +1885,90 @@ public actor RealtimeASRClient {
         return best?.speaker
     }
 
-    /// `speechrail.alignment.done.units`：文本片段 → 采样区间（`segment_uid` 是修订坐标）。
-    private static func alignmentUnits(_ value: Any?) -> [AttributionUnit] {
-        guard let items = value as? [[String: Any]] else { return [] }
-        return items.compactMap { item in
-            guard let uid = item["segment_uid"] as? String else { return nil }
-            return AttributionUnit(
-                segmentUID: uid,
-                speaker: nil,
-                textStart: int(item["text_start"]),
-                textEnd: int(item["text_end"]),
-                audioStartSample: int(item["audio_start_sample"]),
-                audioEndSample: int(item["audio_end_sample"]),
-                timingQuality: item["timing_quality"] as? String,
-                granularity: item["granularity"] as? String
+    /// `speechrail.alignment.done.units`：拒绝半份或不符合 schema 的位置单元。
+    private static func alignmentUnitsStrict(_ value: Any?) -> [AttributionUnit]? {
+        guard let items = value as? [[String: Any]] else { return nil }
+        var result: [AttributionUnit] = []
+        result.reserveCapacity(items.count)
+        for item in items {
+            guard
+                let uid = item["segment_uid"] as? String,
+                !uid.isEmpty,
+                let textStart = int(item["text_start"]),
+                let textEnd = int(item["text_end"]),
+                let audioStart = int(item["audio_start_sample"]),
+                let audioEnd = int(item["audio_end_sample"]),
+                let timingQuality = item["timing_quality"] as? String,
+                let granularity = item["granularity"] as? String
+            else { return nil }
+            result.append(
+                AttributionUnit(
+                    segmentUID: uid,
+                    textStart: textStart,
+                    textEnd: textEnd,
+                    audioStartSample: audioStart,
+                    audioEndSample: audioEnd,
+                    timingQuality: timingQuality,
+                    granularity: granularity
+                )
             )
         }
+        return result
     }
 
     /// `speechrail.diarization.updated/done.units`：采样区间 → 匿名说话人（可空）。
-    private static func diarizationSpans(_ value: Any?) -> [DiarizationSpan] {
-        guard let items = value as? [[String: Any]] else { return [] }
-        return items.compactMap { item in
-            guard let span = item["sample_span"] as? [String: Any],
-                  let start = int(span["start"]),
-                  let end = int(span["end"]),
-                  end > start
-            else { return nil }
-            let speaker = item["speaker"] as? String
-            return DiarizationSpan(
-                speaker: (speaker?.isEmpty ?? true) ? nil : speaker,
-                startSample: start,
-                endSample: end
+    private static func diarizationSpansStrict(_ value: Any?) -> [DiarizationSpan]? {
+        guard let items = value as? [[String: Any]] else { return nil }
+        var result: [DiarizationSpan] = []
+        result.reserveCapacity(items.count)
+        for item in items {
+            guard let span = Self.span(item["sample_span"]) else { return nil }
+            let speaker: String?
+            if let value = item["speaker"] as? String {
+                speaker = value.isEmpty ? nil : value
+            } else if item["speaker"] is NSNull {
+                speaker = nil
+            } else {
+                return nil
+            }
+            result.append(
+                DiarizationSpan(
+                    speaker: speaker,
+                    startSample: span.start,
+                    endSample: span.end
+                )
             )
+        }
+        return result
+    }
+
+    private static func span(_ value: Any?) -> RealtimeEventState.Range? {
+        guard let object = value as? [String: Any],
+              let start = int(object["start"]),
+              let end = int(object["end"]),
+              start >= 0,
+              end >= start
+        else { return nil }
+        return RealtimeEventState.Range(start: start, end: end)
+    }
+
+    private func flushExpiredItems() async {
+        for expired in eventState.takeExpired() {
+            await emit(
+                .attribution(
+                    itemID: expired.itemID,
+                    units: Self.mergedAttributionUnits(expired.snapshot),
+                    isFinal: false
+                )
+            )
+            await emit(
+                .auxiliaryIncomplete(
+                    itemID: expired.itemID,
+                    alignmentMissing: expired.snapshot.alignmentUnits.isEmpty,
+                    diarizationMissing: expired.snapshot.diarizationSpans.isEmpty
+                )
+            )
+            if didClose { return }
         }
     }
 
@@ -981,36 +2006,77 @@ public actor RealtimeASRClient {
         expectedAudioSampleOffset = 0
     }
 
-    private func emit(_ event: Event) {
-        continuation?.yield(
-            RealtimeEventEnvelope(
-                metadata: currentEventMetadata ?? RealtimeEventMetadata(),
-                payload: event,
-                receivedAt: currentEventReceivedAt ?? ContinuousClock().now
-            )
+    private func emit(_ event: Event, decodedAudioBytes: Int = 0) async {
+        guard !didClose else { return }
+        let envelope = RealtimeEventEnvelope(
+            metadata: currentEventMetadata ?? RealtimeEventMetadata(),
+            payload: event,
+            receivedAt: currentEventReceivedAt ?? ContinuousClock().now
+        )
+        let result = await eventStream.yield(
+            envelope,
+            decodedAudioBytes: decodedAudioBytes
+        )
+        guard result == .overflow else { return }
+
+        let message = "语音事件积压超过本地安全上限，已关闭当前连接。"
+        if !configurationAcknowledged {
+            configurationFailure = .transport(message)
+        }
+        let terminalMetadata = RealtimeEventMetadata()
+        let now = ContinuousClock().now
+        await finish(
+            code: nil,
+            terminalEvents: [
+                RealtimeEventEnvelope(
+                    metadata: terminalMetadata,
+                    payload: .serverError(
+                        code: "realtime_event_stream_overflow",
+                        message: message,
+                        requestID: nil
+                    ),
+                    receivedAt: now
+                ),
+                RealtimeEventEnvelope(
+                    metadata: terminalMetadata,
+                    payload: .closed(code: nil),
+                    receivedAt: now
+                )
+            ],
+            discardPending: true
         )
     }
 
     /// 只收尾一次：接收循环、显式 `close()`、以及流被取消这三条路都会走到这里。
-    private func finish(code: Int?) async {
+    private func finish(
+        code: Int?,
+        terminalEvents: [RealtimeEventEnvelope<Event>]? = nil,
+        discardPending: Bool = false
+    ) async {
         guard !didClose else { return }
         didClose = true
         closeCode = code
         receiveLoop?.cancel()
         receiveLoop = nil
+        itemExpiryTask?.cancel()
+        itemExpiryTask = nil
+        connectionGeneration = UUID()
+        eventState.clear()
         let transport = self.transport
         self.transport = nil
         activeTTSRequestID = nil
         activeTTSTaskID = nil
         activeTTSAudioSuppressed = true
         await transport?.cancel()
-        continuation?.yield(
+        let terminals = terminalEvents ?? [
             RealtimeEventEnvelope(
                 metadata: RealtimeEventMetadata(),
                 payload: .closed(code: code)
             )
+        ]
+        await eventStream.finish(
+            terminalEvents: terminals,
+            discardPending: discardPending
         )
-        continuation?.finish()
-        continuation = nil
     }
 }

@@ -61,7 +61,7 @@ public struct ControlCenterView: View {
                     // （音色库 / 我的作品的工具栏搜索）。八条固定导航项做全文过滤
                     // 的收益低于代价——它与内容搜索同屏并排、外观相近而作用域不同，
                     // 用户无法从外观判断自己在搜什么（REDESIGN-SPEC §6.1 / §6.2，
-                    // §11.6 第四十九轮）。
+                    // §11 第四十九轮）。
 
                     sidebarBottom
                 }
@@ -80,13 +80,13 @@ public struct ControlCenterView: View {
                     )
                     // 页面地板：窗口内容区的底色是稿的一级表面（`surface/window`），
                     // 卡片才是它上面更亮的一级；侧栏的材质与工具栏那一行不受影响
-                    // （REDESIGN-SPEC §11.6 第五十轮）。
+                    // （REDESIGN-SPEC §11 第五十轮）。
                     .background(SpeechRailDesignTokens.Color.canvas)
                     .toolbar {
                         // 页面身份（`.navigation` 槽，第五十五轮前是 `.principal`）由
                         // **窗口组合根**声明一次：它是当前路由的纯函数，页面自己没有
                         // 需要额外携带的标题状态，所以十四个屏幕不可能漂移成十五种头部
-                        // （REDESIGN-SPEC §6.2 / §11.6 第四十九、五十五轮）。
+                        // （REDESIGN-SPEC §6.2 / §11 第四十九、五十五轮）。
                         PageIdentityToolbarItem(selection ?? Self.landingRoute)
                         // 这一枚浮动间隔留着：页面动作由子视图声明、会排在它之前，而系统
                         // 搜索框（`.searchable(placement: .toolbar)`）在它之后——去掉它，
@@ -103,7 +103,7 @@ public struct ControlCenterView: View {
             // `NavigationSplitView` 布局下不生效。窗口最小宽 1120pt 里侧栏 240 + 内容 +
             // inspector 360 本来就紧，收起侧栏是真实需求，系统这枚按钮是它唯一的
             // 可发现入口（View ▸ Hide Sidebar ⌘⌃S 只是备选），因此不为了对上稿面而
-            // 保留一条不生效的修饰符（REDESIGN-SPEC §11.6 第四十九轮）。
+            // 保留一条不生效的修饰符（REDESIGN-SPEC §11 第四十九轮）。
             .frame(
                 minWidth: controlCenterMinimumWidth,
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
@@ -369,7 +369,7 @@ public struct ControlCenterView: View {
         }
         if displayedHealth?.ready == true {
             // macOS App 设计系统 §4.1：侧边栏底部是全 App 唯一的常驻服务状态指示器，
-            // 并且要带上当前运行档位（Figma 状态行同一写法）。
+            // 并且要带上当前运行档位（稿状态行同一写法）。
             guard let selection = displayedHealth?.selection else { return "服务已就绪" }
             return "服务已就绪 · \(SpeechRailProfilePresentation.shortTitle(selection))"
         }

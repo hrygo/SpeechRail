@@ -92,8 +92,10 @@ def test_probe_uses_public_tts_then_transcription_with_stable_aliases() -> None:
             assert request.headers["authorization"] == "Bearer secret"
             assert b'"model":"tts-1"' in request.content
             assert b'"voice":"serena"' in request.content
-            assert b'"language":"zh"' in request.content
             payload = json.loads(request.content)
+            # The smoke probe doubles as the plain-OpenAI-request check: it
+            # must carry no SpeechRail extension at all.
+            assert set(payload) == {"model", "input", "voice", "response_format"}
             assert payload["input"] == "这是语音服务的切换验证，请清楚朗读这段普通话。"
             return httpx.Response(
                 200,

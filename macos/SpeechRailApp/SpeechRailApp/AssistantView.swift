@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-// 语音助手页。形状按 `figma-kit/main.js` 的六块画板：未开始（先定人设与音色）、未配置模型、
+// 语音助手页。形状按设计稿的六个页面状态：未开始（先定人设与音色）、未配置模型、
 // 对话中（含收起态）、换音色、记忆、记录库。
 //
-// 页面按状态换内容，不为每个时刻单开一屏（稿 `闭环总览` 的状态模型）：页头与状态带在所有
+// 页面按状态换内容，不为每个时刻单开一屏（稿 ``闭环总览` 的状态模型）：页头与状态带在所有
 // 状态里原地不动，所以「不看右栏也不会做错事」；右栏是可收起的非主框体，收起后 360pt
 // 全归主框体（`closurePanelRulesBoard`）。
 //
@@ -314,7 +314,7 @@ public struct AssistantView: View {
                 ) { startNewRound() }
             }
             if state != .review {
-                // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）。
+                // 收起控件的名字按右栏**此刻装着什么**说（稿 ``sideToggle`）。
                 SessionPanelToggle(
                     panelName: inspectorTogglePanelName,
                     isCollapsed: isInspectorCollapsed
@@ -1957,7 +1957,7 @@ public struct AssistantView: View {
             who: isAssistant ? "助手" : "你",
             isVoice: isAssistant,
             // 换过音色之后，**前面那些行仍是旧音色**——徽标要按变更点回推，
-            // 而不是一律显示"现在选的那个"（稿 `换音色（下一句生效）` 的第一行
+            // 而不是一律显示"现在选的那个"（稿 ``换音色（下一句生效）` 的第一行
             // 是 夜航主持、后面才是 温柔讲解）。
             voiceBadge: isAssistant ? assistantVoiceName(at: turn.ordinal) : nil,
             pills: pills,
@@ -3923,7 +3923,7 @@ public struct AssistantView: View {
         inspectorTab = tab
     }
 
-    // MARK: - 记录正文底部的三个动作（稿 `screenClosureAssistantClosed`）
+    // MARK: - 记录正文底部的三个动作（稿 ``screenClosureAssistantClosed`）
 
     /// 「继续这一轮」= **新开一轮**（`SESSIONS-SPEC` §15 的 E7）：人设与音色按这一条记录预填，
     /// 但人设是每轮锁一次，所以新的这一轮**可以重选**——这正是它存在的理由

@@ -302,8 +302,8 @@ paths:
       summary: Generate a private VoiceDesign candidate reference
       description: |
         Creates a durable, private design candidate when the active selection
-        resolves the VoiceDesign role (currently the reference spec) and local
-        Batch ASR. VoiceDesign generates a 2-30 second reference which is
+        resolves the VoiceDesign role and local Batch ASR. VoiceDesign generates
+        a 2-30 second reference which is
         canonicalized and graded, then transcribed for a reference self-check.
         The expected text is never supplied as an ASR prompt.
 
@@ -422,6 +422,134 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/audio:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+      - name: SpeechRail-Expected-Candidate-Revision
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        description: Required current candidate revision; stale reads return 409.
+    get:
+      operationId: getVoiceDesignCandidateReferenceAudio
+      tags: [speech]
+      summary: Read the exact stored reference WAV for a candidate revision
+      description: >-
+        Returns the candidate's persisted reference WAV without exposing its
+        filesystem path. The response is not cached and is available only for
+        the exact candidate revision supplied in the required header.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Stored reference WAV
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Candidate revision changed, the candidate is cancelled or invalid,
+            or its reference audio is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '428':
+          description: Expected candidate revision header is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voice-designs/{candidate_id}/validations/{validation_id}/audio:
+    parameters:
+      - name: candidate_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vd_[0-9a-f]{24}$'
+      - name: validation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^vv_[0-9a-f]{24}$'
+      - name: SpeechRail-Expected-Candidate-Revision
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        description: Required current candidate revision; stale reads return 409.
+    get:
+      operationId: getVoiceDesignValidationAudio
+      tags: [speech]
+      summary: Read the exact Base WAV produced by one validation
+      description: >-
+        Returns the persisted WAV for this validation without re-synthesizing.
+        The validation must belong to the current candidate revision. Responses
+        are not cached; unavailable legacy assets return validation_audio_unavailable.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Stored validation WAV
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Candidate or validation was not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: >-
+            Candidate revision changed, the candidate is cancelled or invalid,
+            or validation audio is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '428':
+          description: Expected candidate revision header is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voice-designs/{candidate_id}/confirm:
@@ -1030,6 +1158,35 @@ paths:
             Relative service budget in milliseconds, capped by the configured
             server request timeout. It is not a client-supplied absolute deadline
             and cannot create an arbitrary priority class.
+        - in: header
+          name: SpeechRail-Language
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+          description: |
+            Optional target language for this generation, given as an ISO-ish
+            short code (`zh`, `en`, `ja`, `ko`, ...) or `auto`. Omission means
+            `auto`, which is what a plain OpenAI SDK request gets.
+
+            It selects the output language only: it does not translate or
+            rewrite `input`, and it does not assert the speaker's native
+            language. A value the active backend does not support is refused
+            with `400 unsupported_language`. This replaced the non-standard
+            `language` body field, which is now rejected.
+        - in: header
+          name: SpeechRail-Validation-Policy
+          required: false
+          schema:
+            type: string
+            enum: [allow_unverified, require_output_pass]
+          description: |
+            Optional SpeechRail admission policy for the requested voice.
+            `allow_unverified` (the default) suits audition and diagnosis;
+            `require_output_pass` makes the service check the current
+            voice/model binding at admission time. This replaced the
+            non-standard `validation_policy` body field, which is now rejected.
       requestBody:
         required: true
         content:
@@ -2051,6 +2208,25 @@ components:
           type: [string, 'null']
           pattern: '^vr_[0-9a-f]{32}$'
           description: Verified content-addressed acoustic revision when available; legacy voices remain null.
+        preview:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [locale, text]
+          description: >-
+            Maintained default audition text, identical to the one the voice
+            catalog returns for the same voice. Null when the source of the
+            sample is unknown.
+          properties:
+            locale:
+              type: string
+              enum: [zh, en, ja, ko]
+              description: >-
+                Base language tag of `text`. It describes the sample only and
+                does not constrain which languages the voice can speak.
+            text:
+              type: string
+              minLength: 1
+              description: Default preview text clients may send unchanged.
         voice_identity_assurance:
           type: string
           enum: [legacy, content_addressed]
@@ -2744,6 +2920,25 @@ components:
           type: string
           enum: [system, instruction, clone]
           default: system
+        preview:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [locale, text]
+          description: >-
+            Maintained default audition text for this voice. Present only when
+            the source of the sample is known; clients must not infer a
+            language from the voice name, description or reference text.
+          properties:
+            locale:
+              type: string
+              enum: [zh, en, ja, ko]
+              description: >-
+                Base language tag of `text`. It describes the sample only and
+                does not constrain which languages the voice can speak.
+            text:
+              type: string
+              minLength: 1
+              description: Default preview text clients may send unchanged.
         ref_text:
           type: [string, 'null']
         duration_seconds:
@@ -3596,7 +3791,11 @@ components:
           type: string
           enum: [json, verbose_json, diarized_json, text, srt, vtt]
           default: json
-          description: Use diarized_json only with model=gpt-4o-transcribe-diarize.
+          description: >-
+            Use diarized_json only with model=gpt-4o-transcribe-diarize. OpenAI
+            restricts gpt-4o-transcribe and gpt-4o-mini-transcribe to `json`;
+            SpeechRail deliberately serves the full format set for every alias
+            because all of them resolve to the same local ASR runtime.
         temperature:
           type: number
           minimum: 0
@@ -3619,11 +3818,18 @@ components:
           description: |
             Standard OpenAI bracketed multipart field. When both this field and
             timestamp_granularities are supplied, their values are merged. Only
-            meaningful with response_format=verbose_json.
+            meaningful with response_format=verbose_json. Omitting the field
+            returns both segment and word timestamps, where OpenAI defaults to
+            segment only.
         stream:
           type: boolean
           default: false
-          description: For diarized_json, emits transcript.text.delta, transcript.text.segment and transcript.text.done SSE events.
+          description: >-
+            Only accepted together with anonymous diarization (`diarized_json`
+            or model=gpt-4o-transcribe-diarize), where it emits
+            transcript.text.delta, transcript.text.segment and
+            transcript.text.done SSE events. Any other transcription request
+            with `stream=true` is refused with 400 stream_unsupported.
         chunking_strategy:
           type: string
           enum: [auto, server_vad]
@@ -3632,24 +3838,44 @@ components:
           type: array
           items:
             type: string
-          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+          description: >-
+            Accepted and ignored. SpeechRail never returns logprobs or
+            known-speaker identification, so there is nothing to include.
         keywords:
           type: array
           items:
             type: string
-          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+          description: >-
+            Composed into the transcription prompt as a `Key terms: ...`
+            prefix in front of `prompt`, deduplicated and bounded to 2000
+            characters. Not a known-speaker mechanism.
         known_speaker_names:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: >-
+            Accepted and ignored for ordinary transcription. A request that
+            also asks for anonymous diarization is refused with
+            400 unsupported_parameter, because SpeechRail never maps anonymous
+            labels to real speakers.
         known_speaker_references:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: >-
+            Accepted and ignored for ordinary transcription. A request that
+            also asks for anonymous diarization is refused with
+            400 unsupported_parameter, because SpeechRail never maps anonymous
+            labels to real speakers.
     SpeechRequest:
       type: object
+      additionalProperties: false
+      description: >-
+        The OpenAI-compatible subset of `/v1/audio/speech`. SpeechRail-specific
+        options travel in `SpeechRail-*` request headers, never in this body:
+        sending `language`, `seed` or `validation_policy` here — or any other
+        unknown field — is refused with `400 unsupported_parameter` instead of
+        being silently ignored.
       required: [model, input, voice]
       properties:
         model:
@@ -3687,28 +3913,10 @@ components:
           minimum: 0.25
           maximum: 4
           default: 1
-        language:
-          type: string
-          minLength: 1
-          maxLength: 64
-          default: auto
         instructions:
           type: string
-          maxLength: 10000
+          maxLength: 4096
           description: VoiceDesign instruction when the active TTS capability supports it. CustomVoice and clone voices reject it with a stable 400 error.
-        seed:
-          type: integer
-          minimum: 0
-          maximum: 4294967295
-          description: Optional caller seed; clone voices reject it with clone_seed_unsupported.
-        validation_policy:
-          type: string
-          enum: [allow_unverified, require_output_pass]
-          default: allow_unverified
-          description: |
-            `allow_unverified` is suitable for audition/diagnosis. Formal
-            production may require `require_output_pass`; the service checks
-            the current voice/model binding at admission time.
         stream_format:
           type: string
           enum: [audio]

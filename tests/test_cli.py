@@ -680,3 +680,47 @@ def test_mutating_profile_commands_delegate_to_current_managed_runtime(
         str(tmp_path.resolve()),
     )
     assert calls == [(expected, False)]
+
+
+def test_machine_envelope_version_is_owned_by_the_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A payload must never redefine the machine envelope version.
+
+    `model.catalog` used to ship the ModelCatalog *document* version under the
+    same key, which silently overrode the envelope contract and made the whole
+    reply undecodable for the macOS control agent (it rejects anything but
+    `schema_version=1`). The envelope wins, whatever the payload claims.
+    """
+    cli._print_machine(
+        {
+            "schema_version": 2,
+            "command": "model.catalog",
+            "status": "ok",
+        }
+    )
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["schema_version"] == cli._MACHINE_SCHEMA_VERSION == 1
+    assert envelope["command"] == "model.catalog"
+
+
+@pytest.mark.parametrize("model_command", ["catalog", "status"])
+def test_model_machine_output_carries_the_control_envelope(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    model_command: str,
+) -> None:
+    """`model <command> --json` must answer with the machine envelope.
+
+    Both commands used to print their payload verbatim, so the reply carried no
+    envelope at all — `model.catalog` shipped the ModelCatalog document version
+    (2) under the envelope key and the macOS control agent rejected it as invalid
+    output, which left the model page with no tiers and no model rows.
+    """
+    assert cli.main(["model", model_command, "--app-home", str(tmp_path), "--json"]) == 0
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["schema_version"] == cli._MACHINE_SCHEMA_VERSION == 1
+    assert envelope["command"] == f"model.{model_command}"
+    assert envelope["status"] == "ok"

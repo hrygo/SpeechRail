@@ -24,13 +24,295 @@ public enum CreatorVoicesLoadState: Equatable, Sendable {
     case failed
 }
 
-/// 服务级能力声明（`GET /v1/models`）的读取状态。能力结论只有“读到服务声明”
-/// 与“还没读到”两种前提，不能让空列表冒充“服务不支持”。
-public enum ServiceCapabilitiesLoadState: Equatable, Sendable {
+public enum AppCapabilityAvailability: Equatable, Sendable {
+    case available
+    case unsupported
+    case checking
     case unknown
-    case loading
-    case loaded
-    case failed
+    case unavailable
+}
+
+public struct RealtimeCapabilityBinding: Equatable, Sendable {
+    public let asrModelRevision: String
+    public let canonicalVoiceID: String?
+    public let voiceRevision: String?
+    public let ttsModelRevision: String?
+
+    /// Whether this binding covers a full speech round trip (ASR + spoken reply).
+    ///
+    /// `voiceRevision` is deliberately **not** part of this: OpenAPI declares
+    /// `voice_revision` nullable ("legacy voices remain null"), and the HTTP
+    /// synthesis path already treats it as optional
+    /// (`SpeechRailCapabilityRevisionSelector.creatorRequestOptions`). A missing
+    /// revision only means the pin is omitted, not that the voice is unusable.
+    public var includesSpeech: Bool {
+        canonicalVoiceID != nil
+            && ttsModelRevision != nil
+    }
+
+    public init(
+        asrModelRevision: String,
+        canonicalVoiceID: String? = nil,
+        voiceRevision: String? = nil,
+        ttsModelRevision: String? = nil
+    ) {
+        self.asrModelRevision = asrModelRevision
+        self.canonicalVoiceID = canonicalVoiceID
+        self.voiceRevision = voiceRevision
+        self.ttsModelRevision = ttsModelRevision
+    }
+}
+
+/// Pure interpretation of one effective capability snapshot.
+///
+/// Views and request builders use this same value so discovery errors, declared
+/// support, and per-voice operations cannot drift into separate gates.
+public struct AppCapabilityFacade: Equatable, Sendable {
+    public let snapshot: EffectiveCapabilitySnapshot?
+    public let discoveryState: CapabilityDiscoveryState
+
+    public init(
+        snapshot: EffectiveCapabilitySnapshot?,
+        discoveryState: CapabilityDiscoveryState
+    ) {
+        self.snapshot = snapshot
+        self.discoveryState = discoveryState
+    }
+
+    public func availability(ofTopLevelOperation name: String) -> AppCapabilityAvailability {
+        guard discoveryState == .loaded else { return availabilityWithoutSnapshot }
+        guard let snapshot else { return availabilityWithoutSnapshot }
+        guard let value = snapshot.operations[name] else { return .unknown }
+        return Self.status(value)
+    }
+
+    public func availability(
+        ofVoiceOperation name: String,
+        voiceID: String
+    ) -> AppCapabilityAvailability {
+        guard discoveryState == .loaded else { return availabilityWithoutSnapshot }
+        guard let snapshot else { return availabilityWithoutSnapshot }
+        guard let voice = Self.matchingVoice(voiceID, in: snapshot) else { return .unknown }
+        guard voice.available else { return .unsupported }
+        guard let operation = voice.operations[name] else { return .unsupported }
+        return Self.declaredVoiceOperationStatus(operation)
+    }
+
+    public var voiceCloneAvailability: AppCapabilityAvailability {
+        guard discoveryState == .loaded else { return availabilityWithoutSnapshot }
+        guard let snapshot else { return availabilityWithoutSnapshot }
+        guard let model = snapshot.models["tts_clone"] else { return .unsupported }
+        switch model.assurance {
+        case .unknown:
+            return .unsupported
+        case .unknownValue:
+            return .unknown
+        case .configuredCatalog:
+            guard Self.nonEmpty(model.artifact) != nil,
+                  Self.nonEmpty(model.catalogRevision) != nil
+            else {
+                return .unknown
+            }
+        }
+        return .available
+    }
+
+    public var voiceDesignCreationAvailability: AppCapabilityAvailability {
+        combined(
+            availability(ofTopLevelOperation: "voice_preview"),
+            availability(ofTopLevelOperation: "transcription")
+        )
+    }
+
+    public var voiceDesignValidationAvailability: AppCapabilityAvailability {
+        combined(
+            voiceCloneAvailability,
+            availability(ofTopLevelOperation: "transcription")
+        )
+    }
+
+    public func speechRequestOptions(for voiceID: String) -> SpeechRailRequestOptions? {
+        guard discoveryState == .loaded else { return nil }
+        return SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: voiceID,
+            in: snapshot
+        )
+    }
+
+    public func realtimeBinding(for voiceID: String? = nil) -> RealtimeCapabilityBinding? {
+        guard discoveryState == .loaded,
+              let snapshot,
+              Self.status(snapshot.operations["realtime_transcription"]) == .available,
+              let asrRevision = Self.nonEmpty(snapshot.models["asr"]?.catalogRevision)
+        else {
+            return nil
+        }
+        guard let voiceID else {
+            return RealtimeCapabilityBinding(asrModelRevision: asrRevision)
+        }
+        guard let voice = Self.matchingVoice(voiceID, in: snapshot),
+              voice.available,
+              let realtimeSpeech = voice.operations["realtime_speech"],
+              Self.declaredVoiceOperationStatus(realtimeSpeech) == .available,
+              let ttsModelRevision = Self.nonEmpty(voice.model.catalogRevision)
+        else {
+            return nil
+        }
+        return RealtimeCapabilityBinding(
+            asrModelRevision: asrRevision,
+            canonicalVoiceID: voice.id,
+            // Legacy system voices legitimately publish no acoustic revision;
+            // the pin is then omitted rather than blocking admission.
+            voiceRevision: Self.nonEmpty(voice.voiceRevision),
+            ttsModelRevision: ttsModelRevision
+        )
+    }
+
+    private var availabilityWithoutSnapshot: AppCapabilityAvailability {
+        switch discoveryState {
+        case .idle, .loading:
+            .checking
+        case .loaded:
+            .unknown
+        case .notSupported, .notReady, .unauthorized, .invalidContract, .failed:
+            .unavailable
+        }
+    }
+
+    private func combined(
+        _ lhs: AppCapabilityAvailability,
+        _ rhs: AppCapabilityAvailability
+    ) -> AppCapabilityAvailability {
+        if lhs == .unavailable || rhs == .unavailable { return .unavailable }
+        if lhs == .unsupported || rhs == .unsupported { return .unsupported }
+        if lhs == .checking || rhs == .checking { return .checking }
+        if lhs == .unknown || rhs == .unknown { return .unknown }
+        return .available
+    }
+
+    private static func status(_ value: JSONValue?) -> AppCapabilityAvailability {
+        guard let value else { return .unknown }
+        let rawStatus: String
+        switch value.storage {
+        case let .string(value):
+            rawStatus = value
+        case let .object(fields):
+            guard case let .string(value)? = fields["status"]?.storage else {
+                return .unknown
+            }
+            rawStatus = value
+        default:
+            return .unknown
+        }
+        switch rawStatus {
+        case "supported": return AppCapabilityAvailability.available
+        case "unsupported": return AppCapabilityAvailability.unsupported
+        default: return AppCapabilityAvailability.unknown
+        }
+    }
+
+    private static func declaredVoiceOperationStatus(
+        _ value: JSONValue
+    ) -> AppCapabilityAvailability {
+        // 音色级 operation 在契约里**没有** `status` 字段：服务把某个 operation 列进
+        // `voices[].operations` 本身就是「这个音色支持它」的声明，`parameters` 是可选的
+        // 参数说明。HTTP 合成路径读的一直是这个键（`creatorRequestOptions` 的
+        // `voice.operations["http_speech"] != nil`）；这里曾额外要求 `parameters`
+        // 子对象，于是服务少列一项参数就把整个音色判成「无法确认」。
+        guard case .object = value.storage else {
+            return .unknown
+        }
+        return .available
+    }
+
+    private static func matchingVoice(
+        _ voiceID: String,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> SafeVoiceEntry? {
+        let matches = snapshot.voices.filter {
+            $0.id == voiceID || $0.aliases.contains(voiceID)
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+}
+
+private struct SpeechBindingUnavailableError: LocalizedError {
+    let unauthorized: Bool
+
+    init(unauthorized: Bool = false) {
+        self.unauthorized = unauthorized
+    }
+
+    var errorDescription: String? {
+        if unauthorized {
+            return "本机服务凭据不可用，请检查服务配置后重试。"
+        }
+        return "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
+    }
+}
+
+private struct CloneRegistrationContext: Equatable, Sendable {
+    let audio: Data
+    let referenceText: String
+    let name: String
+    let voiceID: String
+    let idempotencyKey: String
+}
+
+private struct VoiceDesignPublicationContext: Equatable, Sendable {
+    let slot: String
+    let name: String
+    let instruction: String
+    let referenceText: String
+    let seed: Int
+    let voiceID: String
+    let idempotencyKey: String
+    var candidateID: String?
+    var candidateRevision: String?
+    var validationID: String?
+}
+
+private enum VoiceDesignPublicationRetryStep: Equatable {
+    case createCandidate
+    case loadReferenceAudio
+    case confirmReference
+    case validate
+    case loadValidationAudio
+    case submitReview
+    case publish
+    case cancelCandidate
+}
+
+private enum VoiceDesignPublicationTaskStep {
+    case createCandidate
+    case confirmReference
+    case loadReferenceAudio
+    case validate
+    case resumeValidation
+    case loadValidationAudio
+    case submitReviewAndPublish
+    case publish
+    case cancelCandidate
+}
+
+private enum VoiceDesignPlaybackIdentity: Equatable {
+    case reference(candidateID: String, revision: String)
+    case validation(candidateID: String, revision: String, validationID: String)
+}
+
+private enum CloneIdempotencyLookup {
+    case new
+    case pending
+    case completed(CreatorVoice)
+    case notFound
+    case unknown(String)
+    case failed(String)
 }
 
 public enum ServiceOperationPhase: Equatable, Sendable {
@@ -107,6 +389,56 @@ public struct VoiceDesignCandidateSnapshot: Equatable, Identifiable, Sendable {
     }
 }
 
+public enum VoiceDesignPublicationPhase: Equatable, Sendable {
+    case idle
+    case creatingCandidate
+    case loadingReferenceAudio
+    case awaitingReferenceReview
+    case confirmingReference
+    case validating
+    case loadingValidationAudio
+    case awaitingValidationReview
+    case submittingReview
+    case publishing
+    case cancelling
+    case published
+    case failed
+}
+
+public struct VoiceDesignPublicationSnapshot: Equatable, Sendable {
+    public var phase: VoiceDesignPublicationPhase
+    public var candidateID: String?
+    public var candidateRevision: String?
+    public var validationID: String?
+    public var referenceAudioData: Data?
+    public var validationAudioData: Data?
+    public var referenceAudioWasPlayed: Bool
+    public var validationAudioWasPlayed: Bool
+    public var message: String?
+
+    public init(
+        phase: VoiceDesignPublicationPhase = .idle,
+        candidateID: String? = nil,
+        candidateRevision: String? = nil,
+        validationID: String? = nil,
+        referenceAudioData: Data? = nil,
+        validationAudioData: Data? = nil,
+        referenceAudioWasPlayed: Bool = false,
+        validationAudioWasPlayed: Bool = false,
+        message: String? = nil
+    ) {
+        self.phase = phase
+        self.candidateID = candidateID
+        self.candidateRevision = candidateRevision
+        self.validationID = validationID
+        self.referenceAudioData = referenceAudioData
+        self.validationAudioData = validationAudioData
+        self.referenceAudioWasPlayed = referenceAudioWasPlayed
+        self.validationAudioWasPlayed = validationAudioWasPlayed
+        self.message = message
+    }
+}
+
 private enum OperationWaitResult {
     case committed
     case failed
@@ -129,6 +461,77 @@ public enum ClonePromptLoadState: Equatable, Sendable {
 @MainActor
 @Observable
 public final class AppModel {
+    /// 一次配音生成的待保存结果：音频只在内存，身份已固定。
+    /// 只有用户显式保存后才写入作品库。
+    ///
+    /// 这里的每一个字段都在**生成结束的那一刻**定下来。保存时不得回头读取 UI
+    /// 当前的语速、音色或文稿去重写身份——那样存下来的作品会描述一次根本没发生
+    /// 过的生成。
+    public struct PendingDubbingRender: Hashable, Sendable {
+        /// 本次生成的轻量代号。UI 的比较与动画只看它，不深比较音频字节。
+        public let renderID: String
+        /// 幂等键：同一次生成无论保存多少次重试，都落到同一个作品 ID。
+        public let workID: String
+        public let scriptText: String
+        public let voiceID: String
+        public let voiceName: String
+        public let voiceRevision: String?
+        public let planID: String?
+        public let speed: Double
+        public let responseFormat: String
+        /// 同文稿同音色的第几次渲染，生成时定下，不在保存时重算。
+        public let renderRevision: Int
+        public let durationSeconds: Double?
+        public let audioData: Data
+
+        public init(
+            renderID: String,
+            workID: String,
+            scriptText: String,
+            voiceID: String,
+            voiceName: String,
+            voiceRevision: String?,
+            planID: String?,
+            speed: Double,
+            responseFormat: String = "wav",
+            renderRevision: Int,
+            durationSeconds: Double?,
+            audioData: Data
+        ) {
+            self.renderID = renderID
+            self.workID = workID
+            self.scriptText = scriptText
+            self.voiceID = voiceID
+            self.voiceName = voiceName
+            self.voiceRevision = voiceRevision
+            self.planID = planID
+            self.speed = speed
+            self.responseFormat = responseFormat
+            self.renderRevision = renderRevision
+            self.durationSeconds = durationSeconds
+            self.audioData = audioData
+        }
+
+        public var generatedTitle: String {
+            CreativeWork.generatedTitle(fromScript: scriptText)
+        }
+
+        public var durationText: String? {
+            guard let durationSeconds else { return nil }
+            let totalSeconds = max(0, Int(durationSeconds.rounded()))
+            return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+        }
+
+        /// 身份相同即视为同一次生成：比较 `renderID` 而不是整段音频。
+        public static func == (lhs: PendingDubbingRender, rhs: PendingDubbingRender) -> Bool {
+            lhs.renderID == rhs.renderID
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(renderID)
+        }
+    }
+
     public private(set) var service = ServiceSnapshot(serviceState: "unknown")
     /// 服务端口行的 `host` 部分：`ServiceSnapshot` 只带端口，主机名由诊断客户端给出。
     public var serviceConnectionHost: String? { apiClient.connectionHost }
@@ -166,21 +569,21 @@ public final class AppModel {
     public private(set) var controlAgentStatus: ControlAgentStatusSnapshot
     public private(set) var serviceOperation: ServiceOperationStatus?
     public private(set) var isAudioPlaying = false
+    public var isVoiceDesignAudioPlaying: Bool {
+        isAudioPlaying && voiceDesignPlaybackIdentity != nil
+    }
     /// 当前音频的**真实**播放进度 0…1（`AVAudioPlayer.currentTime / duration`）。
-    /// 详情面板的波形用它表示「播到哪了」（REDESIGN-SPEC §11.6 第五十七轮）。
+    /// 详情面板的波形用它表示「播到哪了」（REDESIGN-SPEC §11 第五十七轮）。
     public private(set) var playbackProgress: Double = 0
-    /// 服务公开的 TTS 能力（`/v1/models.capabilities`）。`nil` 表示还没有读到
-    /// 结论，界面此时只能说“未读取”，不能把“没有克隆音色”当成“没有能力”。
-    public private(set) var serviceCapabilities: ServiceModelCapabilities?
-    public private(set) var serviceCapabilitiesLoadState: ServiceCapabilitiesLoadState = .unknown
-    public private(set) var isRefreshingServiceCapabilities = false
-    /// 同一代、最小披露的能力快照。能力发现只认这里或服务明确提供的 legacy 投影，
-    /// 不把音色用户数据拼成能力结论。
+    /// The effective snapshot is the only capability and revision source.
     public private(set) var effectiveCapabilities: EffectiveCapabilitySnapshot?
     public private(set) var safeVoiceCatalog: SafeVoiceList?
     public private(set) var discoveryState: CapabilityDiscoveryState = .idle
     public private(set) var discoveryMetadata: ServiceResponseMetadata?
     public private(set) var isRefreshingDiscovery = false
+    public var capabilityFacade: AppCapabilityFacade {
+        AppCapabilityFacade(snapshot: effectiveCapabilities, discoveryState: discoveryState)
+    }
     public private(set) var creatorVoices: [CreatorVoice] = []
     public private(set) var creatorVoicesLoadState: CreatorVoicesLoadState = .unknown
     public private(set) var isRefreshingCreatorVoiceDetail = false
@@ -191,6 +594,9 @@ public final class AppModel {
     public private(set) var isCreatingSpeech = false
     public private(set) var previewingVoiceID: String?
     public private(set) var lastCreatedWork: CreativeWork?
+    /// 配音台已生成、尚未显式保存的内存音频及制作身份。
+    /// 只有用户点击保存后才写入作品库；取消、失败或离开页面即丢弃。
+    public private(set) var pendingDubbing: PendingDubbingRender?
     public private(set) var isCreatingVoicePreview = false
     public private(set) var voiceDesignCandidates: [VoiceDesignCandidateSnapshot] = []
     public private(set) var voiceDesignSavedSlots: Set<String> = []
@@ -198,7 +604,15 @@ public final class AppModel {
     public private(set) var isGeneratingVoiceDesign = false
     public private(set) var voiceDesignErrorMessage: String?
     public private(set) var voiceDesignSuccessMessage: String?
+    public private(set) var voiceDesignPublication = VoiceDesignPublicationSnapshot()
     public private(set) var isRegisteringVoice = false
+    public var isCancellingVoiceDesignPublication: Bool {
+        voiceDesignPublication.phase == .cancelling
+    }
+    public var canRetryVoiceDesignCancellation: Bool {
+        voiceDesignPublication.phase == .failed
+            && voiceDesignPublicationRetryStep == .cancelCandidate
+    }
     public private(set) var isUpdatingVoice = false
     public private(set) var isDeletingVoice = false
     // MARK: 音色克隆（录音 → 回听 → 核对 → 注册）
@@ -253,17 +667,22 @@ public final class AppModel {
 
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
-    private let capabilityClient: any ServiceModelCapabilityClient
     private let discoveryClient: any ServiceCapabilityDiscoveryClient
     private let creatorClient: any SpeechRailCreatorClient
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
     private let observabilityLocation: ObservabilityLocation
     private let registration: ControlAgentRegistration?
+    private var cloneRegistrationContext: CloneRegistrationContext?
+    private var voiceDesignPublicationContext: VoiceDesignPublicationContext?
+    private var voiceDesignPublicationRetryStep: VoiceDesignPublicationRetryStep?
+    private var voiceDesignPublicationGeneration: UInt64 = 0
+    private var voiceDesignPlaybackIdentity: VoiceDesignPlaybackIdentity?
     private var healthRefreshGeneration: UInt64 = 0
     private var metricsRefreshGeneration: UInt64 = 0
     private var monitoringHistoryGeneration: UInt64 = 0
     private var creatorVoiceDetailGeneration: UInt64 = 0
+    private var creatorVoiceRefreshGeneration: UInt64 = 0
     private var discoveryRefreshGeneration: UInt64 = 0
     /// 模型准备的操作代数：`execute` / `cancelCurrentOperation` / `refreshModels`
     /// 每次进入都会递增。取消链在发起时记住自己的代数，等待与刷新期间一旦有更新
@@ -273,8 +692,6 @@ public final class AppModel {
     private var modelRefreshGeneration: UInt64 = 0
     /// 预检读取的刷新代际（issue #87）。
     private var preflightRefreshGeneration: UInt64 = 0
-    /// 服务能力读取的刷新代际（issue #87）。
-    private var serviceCapabilitiesRefreshGeneration: UInt64 = 0
     /// 共享 `message` 的代际令牌：刷新 / 操作入口开始时 bump，使过期链已写或待写的
     /// 文案失效，过期链的写入一律丢弃（issue #87）。
     private var messageGeneration: UInt64 = 0
@@ -283,15 +700,56 @@ public final class AppModel {
     private var synthesisTask: Task<Void, Never>?
     /// 波形包络缓存（key = `voice:<id>` / `work:<id>`）。分辨率固定
     /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
-    /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11.6 第五十七轮）。
+    /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11 第五十七轮）。
     private var waveformEnvelopes: [String: [CGFloat]] = [:]
-    /// 试听音频内存缓存（key = `\(voiceID):\(speed):\(text)`），同音色试听即点即播，0 延迟
-    private var previewAudioCache: [String: Data] = [:]
+    /// 试听音频内存缓存，同音色试听即点即播，0 延迟。
+    ///
+    /// 键包含音色与模型的**版本**：只用 `voiceID + speed + text` 时，音色被撤销
+    /// 或服务换用另一份模型之后仍会命中并播放旧音频。
+    private var previewAudioCache = VoicePreviewAudioCache(
+        byteLimit: VoicePreviewCacheLimits.byteLimit
+    )
+    /// 单调递增的试听请求代号。取消、切换或开始新请求都会推进它，迟到的成功 /
+    /// 失败 / defer 因此无法覆盖新请求的状态、播放句柄或缓存。
+    private var voicePreviewToken: UInt64 = 0
+    /// 拥有 `voicePreviewTask` 句柄的那一代任务。取消或重新开始都会推进它，
+    /// 使旧任务的收尾无法清空新任务的句柄。
+    private var voicePreviewTaskGeneration: UInt64 = 0
     private var voicePreviewTask: Task<Void, Never>?
     private var voiceDesignGenerationTask: Task<Void, Never>?
     private var voiceDesignSaveTask: Task<Void, Never>?
 
-    /// 槽位编号与 Figma `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
+    /// 推进试听请求代号，使此前所有在途请求的迟到回包失效。
+    private func invalidateVoicePreview() {
+        voicePreviewToken &+= 1
+    }
+
+    /// 构造试听缓存身份。
+    ///
+    /// 声学音色有 revision 时用它；系统 / legacy 音色没有 revision，改用模型
+    /// catalog revision 作为 epoch 隔离，**不制造假 revision**。`planID` 与
+    /// receipt 是生成之后才拿到的，只用于结果校验，不参与前置键。
+    static func previewCacheKey(
+        voice: CreatorVoice,
+        options: SpeechRailRequestOptions,
+        catalogRevision: String?,
+        input: String,
+        languageOverride: String?,
+        speed: Double
+    ) -> VoicePreviewCacheKey {
+        VoicePreviewCacheKey(
+            canonicalVoiceID: voice.id,
+            voiceRevision: options.expectedVoiceRevision ?? voice.revision,
+            catalogEpoch: options.expectedModelRevision ?? catalogRevision,
+            runtimeEpoch: nil,
+            input: input,
+            languageOverride: languageOverride,
+            speed: speed,
+            responseFormat: "wav"
+        )
+    }
+
+    /// 槽位编号与稿 `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
     private static let voiceDesignCandidateSpecs: [(slot: String, seed: Int, title: String)] = [
         ("1", 101, "候选 1"),
         ("2", 202, "候选 2"),
@@ -302,7 +760,6 @@ public final class AppModel {
     public init(
         transport: any SpeechRailControlTransport,
         apiClient: any ServiceDiagnosticsClient,
-        capabilityClient: (any ServiceModelCapabilityClient)? = nil,
         discoveryClient: (any ServiceCapabilityDiscoveryClient)? = nil,
         creatorClient: (any SpeechRailCreatorClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
@@ -312,7 +769,6 @@ public final class AppModel {
     ) {
         self.transport = transport
         self.apiClient = apiClient
-        self.capabilityClient = capabilityClient ?? UnavailableModelCapabilityClient()
         self.discoveryClient = discoveryClient ?? UnavailableServiceCapabilityDiscoveryClient()
         self.creatorClient = creatorClient ?? UnavailableCreatorClient()
         self.audioPlaybackController = audioPlaybackController
@@ -325,6 +781,7 @@ public final class AppModel {
         self.audioPlaybackController.onPlaybackFinished = { [weak self] successfully in
             guard let self else { return }
             let workWasPlaying = self.playingWorkID != nil
+            self.noteVoiceDesignAudioPlaybackFinished(successfully: successfully)
             self.isAudioPlaying = false
             self.playingWorkID = nil
             self.playingVoiceID = nil
@@ -349,31 +806,38 @@ public final class AppModel {
         try await creatorClient.fetchVoices()
     }
 
-    private func speechRequestOptions(
-        for voiceID: String,
-        fallbackVoiceRevision: String? = nil
-    ) -> SpeechRailRequestOptions {
-        SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
-            voiceID: voiceID,
-            fallbackVoiceRevision: fallbackVoiceRevision,
-            in: effectiveCapabilities
-        )
+    public func realtimeCapabilityBinding(for voiceID: String? = nil) async -> RealtimeCapabilityBinding? {
+        if let binding = capabilityFacade.realtimeBinding(for: voiceID) {
+            return binding
+        }
+        await refreshDiscovery()
+        return capabilityFacade.realtimeBinding(for: voiceID)
     }
 
-    private func speechRequestOptions(for voice: CreatorVoice) -> SpeechRailRequestOptions {
-        speechRequestOptions(for: voice.id, fallbackVoiceRevision: voice.revision)
+    private func speechRequestOptions(for voiceID: String) async throws -> SpeechRailRequestOptions {
+        if let options = capabilityFacade.speechRequestOptions(for: voiceID) {
+            return options
+        }
+
+        await refreshDiscovery()
+        guard let options = capabilityFacade.speechRequestOptions(for: voiceID) else {
+            throw SpeechBindingUnavailableError(unauthorized: discoveryState == .unauthorized)
+        }
+        return options
     }
 
     public func createSpeech(
         text: String,
         voiceID: String,
-        speed: Double
+        speed: Double,
+        language: String? = nil
     ) async throws -> Data {
-        try await creatorClient.createSpeech(
+        let options = try await speechRequestOptions(for: voiceID)
+        return try await creatorClient.createSpeech(
             text: text,
             voiceID: voiceID,
             speed: speed,
-            options: speechRequestOptions(for: voiceID)
+            options: language.map { options.with(languageOverride: $0) } ?? options
         )
     }
 
@@ -489,47 +953,932 @@ public final class AppModel {
         }
     }
 
-    public func saveVoiceDesignCandidate(
+    public func startVoiceDesignPublication(
         _ candidate: VoiceDesignCandidateSnapshot,
-        name: String,
-        humanIdentityConfirmed: Bool,
-        humanNaturalnessConfirmed: Bool
+        name: String
     ) {
-        guard voiceDesignSaveTask == nil, voiceDesignSavingSlot == nil else { return }
-        guard case .ready = candidate.status, candidate.audioData != nil else { return }
-        guard humanIdentityConfirmed, humanNaturalnessConfirmed else {
-            voiceDesignErrorMessage = "请先试听并确认音色身份与自然度，再保存到音色库。"
+        guard voiceDesignSaveTask == nil,
+              voiceDesignSavingSlot == nil,
+              voiceDesignPublicationContext == nil
+        else {
             return
         }
+        guard case .ready = candidate.status, candidate.audioData != nil else { return }
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             voiceDesignErrorMessage = "请先填写保存名称"
             return
         }
+        guard !candidate.instructionSnapshot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            voiceDesignErrorMessage = "请先填写音色描述"
+            return
+        }
+        guard (SpeechRailCreatorLimits.referenceTextMinimumLength...SpeechRailCreatorLimits.referenceTextMaximumLength)
+            .contains(candidate.referenceTextSnapshot.trimmingCharacters(in: .whitespacesAndNewlines).count)
+        else {
+            voiceDesignErrorMessage = "参考文案需要 20–240 个字符"
+            return
+        }
 
+        let voiceID = "voice_design_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let idempotencyKey = "voice-design-" + UUID().uuidString.lowercased()
+        voiceDesignPublicationContext = VoiceDesignPublicationContext(
+            slot: candidate.slot,
+            name: trimmedName,
+            instruction: candidate.instructionSnapshot.trimmingCharacters(in: .whitespacesAndNewlines),
+            referenceText: candidate.referenceTextSnapshot.trimmingCharacters(in: .whitespacesAndNewlines),
+            seed: max(0, candidate.seed),
+            voiceID: voiceID,
+            idempotencyKey: idempotencyKey
+        )
+        voiceDesignPublicationGeneration &+= 1
+        let generation = voiceDesignPublicationGeneration
+        voiceDesignPublicationRetryStep = nil
+        voiceDesignPublication = VoiceDesignPublicationSnapshot(phase: .creatingCandidate)
         voiceDesignErrorMessage = nil
         voiceDesignSuccessMessage = nil
         voiceDesignSavingSlot = candidate.slot
+        stopAudio()
+        scheduleVoiceDesignPublicationTask(.createCandidate, generation: generation)
+    }
+
+    public func confirmVoiceDesignReference() {
+        guard voiceDesignPublication.phase == .awaitingReferenceReview else { return }
+        guard voiceDesignPublication.referenceAudioWasPlayed else {
+            voiceDesignPublication.message = "请先完整试听这段候选参考音频，再继续复验。"
+            return
+        }
+        voiceDesignPublication.message = nil
+        voiceDesignPublication.phase = .confirmingReference
+        scheduleVoiceDesignPublicationTask(
+            .confirmReference,
+            generation: voiceDesignPublicationGeneration
+        )
+    }
+
+    public func publishVoiceDesignPublication(
+        identityConfirmed: Bool,
+        naturalnessConfirmed: Bool
+    ) {
+        guard voiceDesignPublication.phase == .awaitingValidationReview else { return }
+        guard voiceDesignPublication.validationAudioWasPlayed else {
+            voiceDesignPublication.message = "请先试听本次复验输出，再提交人工确认。"
+            return
+        }
+        guard identityConfirmed, naturalnessConfirmed else {
+            voiceDesignPublication.message = "请确认音色身份与自然度后再保存。"
+            return
+        }
+        voiceDesignPublication.message = nil
+        voiceDesignPublication.phase = .submittingReview
+        scheduleVoiceDesignPublicationTask(
+            .submitReviewAndPublish,
+            generation: voiceDesignPublicationGeneration
+        )
+    }
+
+    public func retryVoiceDesignPublication() {
+        guard voiceDesignPublication.phase == .failed,
+              let retryStep = voiceDesignPublicationRetryStep,
+              voiceDesignSaveTask == nil
+        else {
+            return
+        }
+        voiceDesignPublication.message = nil
+        voiceDesignErrorMessage = nil
+        let step: VoiceDesignPublicationTaskStep
+        switch retryStep {
+        case .createCandidate:
+            step = .createCandidate
+        case .loadReferenceAudio:
+            step = .loadReferenceAudio
+        case .confirmReference:
+            step = .confirmReference
+        case .validate:
+            step = .resumeValidation
+        case .loadValidationAudio:
+            step = .loadValidationAudio
+        case .submitReview:
+            step = .submitReviewAndPublish
+        case .publish:
+            step = .publish
+        case .cancelCandidate:
+            step = .cancelCandidate
+            voiceDesignPublication.phase = .cancelling
+        }
+        scheduleVoiceDesignPublicationTask(
+            step,
+            generation: voiceDesignPublicationGeneration
+        )
+    }
+
+    public func cancelVoiceDesignPublication() {
+        guard voiceDesignPublication.phase != .published,
+              voiceDesignPublication.phase != .cancelling
+        else {
+            return
+        }
+        let context = voiceDesignPublicationContext
+        voiceDesignPublicationGeneration &+= 1
+        let generation = voiceDesignPublicationGeneration
+        voiceDesignSaveTask?.cancel()
+        voiceDesignSaveTask = nil
+        voiceDesignPlaybackIdentity = nil
+        stopAudio()
+        voiceDesignErrorMessage = nil
+        guard let context else {
+            voiceDesignPublicationRetryStep = nil
+            voiceDesignPublication = VoiceDesignPublicationSnapshot()
+            voiceDesignSavingSlot = nil
+            isRegisteringVoice = false
+            return
+        }
+        voiceDesignPublicationRetryStep = .cancelCandidate
+        voiceDesignPublication = VoiceDesignPublicationSnapshot(
+            phase: .cancelling,
+            candidateID: context.candidateID,
+            candidateRevision: context.candidateRevision
+        )
+        scheduleVoiceDesignPublicationTask(.cancelCandidate, generation: generation)
+    }
+
+    func markVoiceDesignReferenceAudioPlaybackFinished(successfully: Bool) {
+        guard successfully,
+              voiceDesignPublication.phase == .awaitingReferenceReview,
+              voiceDesignPublication.referenceAudioData != nil
+        else {
+            return
+        }
+        voiceDesignPublication.referenceAudioWasPlayed = true
+    }
+
+    func markVoiceDesignValidationAudioPlaybackFinished(successfully: Bool) {
+        guard successfully,
+              voiceDesignPublication.phase == .awaitingValidationReview,
+              voiceDesignPublication.validationAudioData != nil
+        else {
+            return
+        }
+        voiceDesignPublication.validationAudioWasPlayed = true
+    }
+
+    private func scheduleVoiceDesignPublicationTask(
+        _ step: VoiceDesignPublicationTaskStep,
+        generation: UInt64
+    ) {
+        guard voiceDesignSaveTask == nil,
+              generation == voiceDesignPublicationGeneration,
+              voiceDesignPublicationContext != nil
+        else {
+            return
+        }
+        isRegisteringVoice = true
+        voiceDesignSavingSlot = voiceDesignPublicationContext?.slot
         voiceDesignSaveTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let voice = await self.saveDesignedVoice(
-                name: trimmedName,
-                instruction: candidate.instructionSnapshot,
-                referenceText: candidate.referenceTextSnapshot,
-                seed: candidate.seed,
-                humanIdentityConfirmed: humanIdentityConfirmed,
-                humanNaturalnessConfirmed: humanNaturalnessConfirmed
-            )
-            if let voice {
-                self.voiceDesignSavedSlots.insert(candidate.slot)
-                self.voiceDesignSuccessMessage = "“\(voice.name)” 已完成复验并保存到音色库，可以开始使用。"
-            } else if !Task.isCancelled {
-                self.voiceDesignErrorMessage = self.creatorMessage ?? "音色保存未完成，请重试"
-            }
-            self.voiceDesignSavingSlot = nil
+            await self.performVoiceDesignPublicationTask(step, generation: generation)
+            guard self.voiceDesignPublicationGeneration == generation else { return }
+            self.isRegisteringVoice = false
             self.voiceDesignSaveTask = nil
         }
+    }
+
+    private func performVoiceDesignPublicationTask(
+        _ step: VoiceDesignPublicationTaskStep,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation),
+              var context = voiceDesignPublicationContext
+        else {
+            return
+        }
+
+        switch step {
+        case .createCandidate:
+            voiceDesignPublication.phase = .creatingCandidate
+            do {
+                let candidate = try await creatorClient.createVoiceDesignCandidate(
+                    voiceID: context.voiceID,
+                    name: context.name,
+                    instruction: context.instruction,
+                    referenceText: context.referenceText,
+                    seed: context.seed,
+                    idempotencyKey: context.idempotencyKey
+                )
+                guard isCurrentVoiceDesignPublication(generation) else {
+                    _ = try? await creatorClient.cancelVoiceDesignCandidate(id: candidate.id)
+                    return
+                }
+                context.candidateID = candidate.id
+                context.candidateRevision = candidate.revision
+                voiceDesignPublicationContext = context
+                voiceDesignPublication.candidateID = candidate.id
+                voiceDesignPublication.candidateRevision = candidate.revision
+                await loadVoiceDesignReferenceAudio(context, generation: generation)
+            } catch {
+                failVoiceDesignPublication(
+                    error,
+                    retryStep: .createCandidate,
+                    generation: generation
+                )
+            }
+
+        case .confirmReference:
+            guard let candidateID = context.candidateID else {
+                failVoiceDesignPublication(
+                    "找不到这次创建的候选音色，请重试。",
+                    retryStep: .createCandidate,
+                    generation: generation
+                )
+                return
+            }
+            voiceDesignPublication.phase = .confirmingReference
+            do {
+                let confirmed = try await creatorClient.confirmVoiceDesignCandidate(
+                    id: candidateID,
+                    referenceText: nil
+                )
+                guard isCurrentVoiceDesignPublication(generation) else { return }
+                guard confirmed.knownState == .confirmed else {
+                    failVoiceDesignPublication(
+                        "服务返回了未知候选状态；保留候选信息，不能继续复验。",
+                        retryStep: .confirmReference,
+                        generation: generation
+                    )
+                    return
+                }
+                let revisionChanged = context.candidateRevision != confirmed.revision
+                context.candidateRevision = confirmed.revision
+                context.validationID = nil
+                voiceDesignPublicationContext = context
+                voiceDesignPublication.candidateRevision = confirmed.revision
+                voiceDesignPublication.validationID = nil
+                voiceDesignPublication.validationAudioData = nil
+                voiceDesignPublication.validationAudioWasPlayed = false
+                if revisionChanged {
+                    voiceDesignPublication.referenceAudioData = nil
+                    voiceDesignPublication.referenceAudioWasPlayed = false
+                    await loadVoiceDesignReferenceAudio(context, generation: generation)
+                    return
+                }
+                await validateVoiceDesignCandidate(context, generation: generation)
+            } catch {
+                failVoiceDesignPublication(
+                    error,
+                    retryStep: .confirmReference,
+                    generation: generation
+                )
+            }
+
+        case .loadReferenceAudio:
+            await loadVoiceDesignReferenceAudio(context, generation: generation)
+
+        case .validate:
+            await validateVoiceDesignCandidate(context, generation: generation)
+
+        case .resumeValidation:
+            guard let candidateID = context.candidateID,
+                  let expectedRevision = context.candidateRevision
+            else {
+                failVoiceDesignPublication(
+                    "候选版本信息缺失，请重试。",
+                    retryStep: .createCandidate,
+                    generation: generation
+                )
+                return
+            }
+            voiceDesignPublication.phase = .validating
+            do {
+                let latest = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+                guard isCurrentVoiceDesignPublication(generation) else { return }
+                guard let state = latest.knownState else {
+                    failVoiceDesignPublication(
+                        "服务返回了未知候选状态；保留候选信息，不能继续复验。",
+                        retryStep: .validate,
+                        generation: generation
+                    )
+                    return
+                }
+                if state == .published {
+                    await reconcilePublishedVoiceDesignCandidate(
+                        latest,
+                        context: context,
+                        generation: generation
+                    )
+                    return
+                }
+                guard [.confirmed, .validating, .publishable].contains(state) else {
+                    failVoiceDesignPublication(
+                        "这个候选状态已结束，不能继续复验。",
+                        retryStep: .validate,
+                        generation: generation
+                    )
+                    return
+                }
+                guard latest.revision == expectedRevision else {
+                    context.candidateRevision = latest.revision
+                    context.validationID = nil
+                    voiceDesignPublicationContext = context
+                    voiceDesignPublication.candidateRevision = latest.revision
+                    voiceDesignPublication.validationID = nil
+                    voiceDesignPublication.referenceAudioData = nil
+                    voiceDesignPublication.referenceAudioWasPlayed = false
+                    voiceDesignPublication.validationAudioData = nil
+                    voiceDesignPublication.validationAudioWasPlayed = false
+                    await loadVoiceDesignReferenceAudio(context, generation: generation)
+                    return
+                }
+                if let validation = latest.latestValidation,
+                   validation.candidateRevision == expectedRevision,
+                   validation.machineStatus == VoiceDesignReview.pass.rawValue
+                {
+                    context.validationID = validation.validationID
+                    voiceDesignPublicationContext = context
+                    voiceDesignPublication.validationID = validation.validationID
+                    await loadVoiceDesignValidationAudio(context, generation: generation)
+                    return
+                }
+                await validateVoiceDesignCandidate(context, generation: generation)
+            } catch {
+                failVoiceDesignPublication(
+                    error,
+                    retryStep: .validate,
+                    generation: generation
+                )
+            }
+
+        case .loadValidationAudio:
+            await loadVoiceDesignValidationAudio(context, generation: generation)
+
+        case .submitReviewAndPublish:
+            await submitVoiceDesignReviewAndPublish(context, generation: generation)
+
+        case .publish:
+            await publishVoiceDesignCandidate(context, generation: generation)
+
+        case .cancelCandidate:
+            await cancelVoiceDesignCandidate(context, generation: generation)
+        }
+    }
+
+    private func cancelVoiceDesignCandidate(
+        _ initialContext: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation) else { return }
+        var context = initialContext
+        do {
+            if context.candidateID == nil {
+                // Recover a create whose response raced with cancellation by
+                // replaying the same logical request with its original key.
+                let recovered = try await creatorClient.createVoiceDesignCandidate(
+                    voiceID: context.voiceID,
+                    name: context.name,
+                    instruction: context.instruction,
+                    referenceText: context.referenceText,
+                    seed: context.seed,
+                    idempotencyKey: context.idempotencyKey
+                )
+                guard isCurrentVoiceDesignPublication(generation) else {
+                    _ = try? await creatorClient.cancelVoiceDesignCandidate(id: recovered.id)
+                    return
+                }
+                context.candidateID = recovered.id
+                context.candidateRevision = recovered.revision
+                voiceDesignPublicationContext = context
+                voiceDesignPublication.candidateID = recovered.id
+                voiceDesignPublication.candidateRevision = recovered.revision
+            }
+            guard let candidateID = context.candidateID else {
+                failVoiceDesignPublication(
+                    "无法确认候选 ID，取消操作可重试。",
+                    retryStep: .cancelCandidate,
+                    generation: generation
+                )
+                return
+            }
+
+            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            if current.knownState == .cancelled {
+                finishVoiceDesignCancellation(generation: generation)
+                return
+            }
+            if current.knownState == .published {
+                await reconcilePublishedVoiceDesignCandidate(
+                    current,
+                    context: context,
+                    generation: generation
+                )
+                return
+            }
+            guard current.knownState?.canCancel == true else {
+                failVoiceDesignPublication(
+                    "服务返回了未知候选状态；保留候选信息，刷新后再重试取消。",
+                    retryStep: .cancelCandidate,
+                    generation: generation
+                )
+                return
+            }
+
+            let cancelled = try await creatorClient.cancelVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            if cancelled.knownState == .cancelled {
+                finishVoiceDesignCancellation(generation: generation)
+            } else if cancelled.knownState == .published {
+                await reconcilePublishedVoiceDesignCandidate(
+                    cancelled,
+                    context: context,
+                    generation: generation
+                )
+            } else {
+                throw ServiceAPIClientError.invalidResponse
+            }
+        } catch {
+            if await reconcileVoiceDesignCancellationOutcome(
+                context: context,
+                generation: generation
+            ) {
+                return
+            }
+            failVoiceDesignPublication(
+                error,
+                retryStep: .cancelCandidate,
+                generation: generation
+            )
+        }
+    }
+
+    private func reconcileVoiceDesignCancellationOutcome(
+        context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async -> Bool {
+        guard isCurrentVoiceDesignPublication(generation),
+              let candidateID = context.candidateID,
+              let current = try? await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+        else {
+            return false
+        }
+        guard isCurrentVoiceDesignPublication(generation) else { return true }
+        if current.knownState == .cancelled {
+            finishVoiceDesignCancellation(generation: generation)
+            return true
+        }
+        if current.knownState == .published {
+            await reconcilePublishedVoiceDesignCandidate(
+                current,
+                context: context,
+                generation: generation
+            )
+            return true
+        }
+        return false
+    }
+
+    private func reconcilePublishedVoiceDesignCandidate(
+        _ candidate: VoiceDesignCandidate,
+        context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation) else { return }
+        let expectedRevision = context.candidateRevision ?? candidate.revision
+        guard candidate.revision == expectedRevision,
+              candidate.publishedVoiceRevision == expectedRevision,
+              candidate.targetVoiceID == context.voiceID,
+              let voice = try? await creatorClient.fetchVoice(id: context.voiceID)
+        else {
+            failVoiceDesignPublication(
+                "候选已发布但无法确认音色版本；请刷新音色库确认结果。",
+                retryStep: .publish,
+                generation: generation
+            )
+            await refreshCreatorVoices()
+            return
+        }
+        await finishVoiceDesignPublication(
+            voice,
+            context: context,
+            generation: generation
+        )
+    }
+
+    private func finishVoiceDesignCancellation(generation: UInt64) {
+        guard generation == voiceDesignPublicationGeneration else { return }
+        voiceDesignPublicationContext = nil
+        voiceDesignPublicationRetryStep = nil
+        voiceDesignPublication = VoiceDesignPublicationSnapshot()
+        voiceDesignSavingSlot = nil
+        voiceDesignErrorMessage = nil
+    }
+
+    private func loadVoiceDesignReferenceAudio(
+        _ context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation),
+              let candidateID = context.candidateID,
+              let expectedRevision = context.candidateRevision
+        else {
+            return
+        }
+        voiceDesignPublication.phase = .loadingReferenceAudio
+        do {
+            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard candidate.knownState?.canReadReferenceAudio == true else {
+                let message = candidate.knownState == nil
+                    ? "服务返回了未知候选状态；保留候选信息，不能继续试听。"
+                    : "这个候选已结束，不能继续试听和发布。"
+                failVoiceDesignPublication(
+                    message,
+                    retryStep: .loadReferenceAudio,
+                    generation: generation
+                )
+                return
+            }
+            if candidate.revision != expectedRevision {
+                var updated = context
+                updated.candidateRevision = candidate.revision
+                updated.validationID = nil
+                voiceDesignPublicationContext = updated
+                voiceDesignPublication.candidateRevision = candidate.revision
+                voiceDesignPublication.validationID = nil
+                voiceDesignPublication.validationAudioData = nil
+                voiceDesignPublication.validationAudioWasPlayed = false
+                voiceDesignPublication.referenceAudioWasPlayed = false
+            }
+            let currentRevision = candidate.revision
+            let audio = try await creatorClient.fetchVoiceDesignReferenceAudio(
+                id: candidateID,
+                expectedRevision: currentRevision
+            )
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            voiceDesignPublication.phase = .awaitingReferenceReview
+            voiceDesignPublication.candidateRevision = currentRevision
+            voiceDesignPublication.referenceAudioData = audio
+            voiceDesignPublication.referenceAudioWasPlayed = false
+            voiceDesignPublication.validationID = nil
+            voiceDesignPublication.validationAudioData = nil
+            voiceDesignPublication.validationAudioWasPlayed = false
+            voiceDesignPublication.message = nil
+        } catch {
+            failVoiceDesignPublication(
+                error,
+                retryStep: .loadReferenceAudio,
+                generation: generation
+            )
+        }
+    }
+
+    private func validateVoiceDesignCandidate(
+        _ context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation),
+              let candidateID = context.candidateID,
+              let expectedRevision = context.candidateRevision
+        else {
+            return
+        }
+        voiceDesignPublication.phase = .validating
+        do {
+            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard current.revision == expectedRevision else {
+                var updated = context
+                updated.candidateRevision = current.revision
+                updated.validationID = nil
+                voiceDesignPublicationContext = updated
+                voiceDesignPublication.candidateRevision = current.revision
+                voiceDesignPublication.validationID = nil
+                await loadVoiceDesignReferenceAudio(updated, generation: generation)
+                return
+            }
+            // The service commits `validating` *before* it synthesizes, so a run
+            // that dies mid-flight (transport error, 502) leaves the candidate
+            // parked there. Re-issuing validation is the documented recovery and
+            // `resumeValidation` already accepts this state, so this gate has to
+            // agree with it — otherwise "重试这一步" is a dead end.
+            guard current.knownState == .confirmed || current.knownState == .validating
+            else {
+                failVoiceDesignPublication(
+                    current.knownState == nil
+                        ? "服务返回了未知候选状态；保留候选信息，不能继续复验。"
+                        : "候选状态已变化，请重新读取后再复验。",
+                    retryStep: .validate,
+                    generation: generation
+                )
+                return
+            }
+            let validated = try await creatorClient.validateVoiceDesignCandidate(
+                id: candidateID,
+                testText: nil,
+                capabilityKey: nil,
+                humanReview: nil
+            )
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard validated.knownState == .validating
+                    || validated.knownState == .failed
+            else {
+                failVoiceDesignPublication(
+                    "服务返回了未知候选状态；保留候选信息，不能继续听审。",
+                    retryStep: .validate,
+                    generation: generation
+                )
+                return
+            }
+            guard validated.revision == expectedRevision,
+                  let validation = validated.latestValidation,
+                  validation.candidateRevision == expectedRevision
+            else {
+                failVoiceDesignPublication(
+                    "服务返回的复验结果与当前候选版本不一致，请重新读取候选。",
+                    retryStep: .validate,
+                    generation: generation
+                )
+                return
+            }
+            guard validation.machineStatus == VoiceDesignReview.pass.rawValue else {
+                failVoiceDesignPublication(
+                    Self.voiceDesignValidationMessage(validation),
+                    retryStep: .validate,
+                    generation: generation
+                )
+                return
+            }
+            var updated = context
+            updated.validationID = validation.validationID
+            voiceDesignPublicationContext = updated
+            voiceDesignPublication.validationID = validation.validationID
+            await loadVoiceDesignValidationAudio(updated, generation: generation)
+        } catch {
+            failVoiceDesignPublication(
+                error,
+                retryStep: .validate,
+                generation: generation
+            )
+        }
+    }
+
+    private func loadVoiceDesignValidationAudio(
+        _ context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation),
+              let candidateID = context.candidateID,
+              let expectedRevision = context.candidateRevision,
+              let validationID = context.validationID
+        else {
+            return
+        }
+        voiceDesignPublication.phase = .loadingValidationAudio
+        do {
+            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard candidate.knownState?.canReadValidationAudio == true,
+                  candidate.revision == expectedRevision,
+                  let validation = candidate.validations.first(where: {
+                      $0.validationID == validationID
+                          && $0.candidateRevision == expectedRevision
+                  }),
+                  validation.machineStatus == VoiceDesignReview.pass.rawValue
+            else {
+                failVoiceDesignPublication(
+                    "复验结果已变化，请重新确认候选版本。",
+                    retryStep: .validate,
+                    generation: generation
+                )
+                return
+            }
+            let audio = try await creatorClient.fetchVoiceDesignValidationAudio(
+                id: candidateID,
+                validationID: validationID,
+                expectedRevision: expectedRevision
+            )
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            voiceDesignPublication.phase = .awaitingValidationReview
+            voiceDesignPublication.validationAudioData = audio
+            voiceDesignPublication.validationAudioWasPlayed = false
+            voiceDesignPublication.message = nil
+        } catch {
+            failVoiceDesignPublication(
+                error,
+                retryStep: .loadValidationAudio,
+                generation: generation
+            )
+        }
+    }
+
+    private func submitVoiceDesignReviewAndPublish(
+        _ context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard isCurrentVoiceDesignPublication(generation),
+              let candidateID = context.candidateID,
+              let expectedRevision = context.candidateRevision,
+              let validationID = context.validationID
+        else {
+            failVoiceDesignPublication(
+                "候选或复验身份缺失，请重新读取后再试。",
+                retryStep: .loadValidationAudio,
+                generation: generation
+            )
+            return
+        }
+        do {
+            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard candidate.knownState == .validating
+                    || candidate.knownState == .publishable,
+                  candidate.revision == expectedRevision,
+                  candidate.latestValidation?.validationID == validationID,
+                  candidate.latestValidation?.machineStatus == VoiceDesignReview.pass.rawValue
+            else {
+                failVoiceDesignPublication(
+                    "候选版本或复验结果已经变化，请重新试听当前输出。",
+                    retryStep: .loadValidationAudio,
+                    generation: generation
+                )
+                return
+            }
+            let review = VoiceDesignHumanReview(
+                validationID: validationID,
+                identity: .pass,
+                naturalness: .pass
+            )
+            let reviewed = try await creatorClient.validateVoiceDesignCandidate(
+                id: candidateID,
+                testText: nil,
+                capabilityKey: nil,
+                humanReview: review
+            )
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            guard reviewed.knownState == .publishable,
+                  reviewed.publishable,
+                  reviewed.revision == expectedRevision,
+                  reviewed.latestValidation?.validationID == validationID
+            else {
+                failVoiceDesignPublication(
+                    "人工复核尚未绑定到当前复验结果，暂时不能发布。",
+                    retryStep: .submitReview,
+                    generation: generation
+                )
+                return
+            }
+            voiceDesignPublication.phase = .publishing
+            await publishVoiceDesignCandidate(context, generation: generation)
+        } catch {
+            failVoiceDesignPublication(
+                error,
+                retryStep: .submitReview,
+                generation: generation
+            )
+        }
+    }
+
+    private func publishVoiceDesignCandidate(
+        _ context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        guard let candidateID = context.candidateID,
+              let expectedRevision = context.candidateRevision,
+              let validationID = context.validationID
+        else {
+            failVoiceDesignPublication(
+                "候选版本信息缺失，暂时不能发布。",
+                retryStep: .publish,
+                generation: generation
+            )
+            return
+        }
+        voiceDesignPublication.phase = .publishing
+        do {
+            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            guard isCurrentVoiceDesignPublication(generation) else { return }
+            if current.knownState == .published {
+                await reconcilePublishedVoiceDesignCandidate(
+                    current,
+                    context: context,
+                    generation: generation
+                )
+                return
+            }
+            guard current.knownState == .publishable,
+                  current.publishable,
+                  current.revision == expectedRevision,
+                  current.latestValidation?.validationID == validationID,
+                  current.latestValidation?.machineStatus == VoiceDesignReview.pass.rawValue,
+                  current.latestValidation?.identityStatus == .pass,
+                  current.latestValidation?.naturalnessStatus == .pass
+            else {
+                failVoiceDesignPublication(
+                    current.knownState == nil
+                        ? "服务返回了未知候选状态；保留候选信息，不能发布。"
+                        : "当前候选尚未处于可发布状态，请重新读取后再试。",
+                    retryStep: .publish,
+                    generation: generation
+                )
+                return
+            }
+            let result = try await creatorClient.publishVoiceDesignCandidate(
+                id: candidateID,
+                expectedCandidateRevision: expectedRevision
+            )
+            guard result.voice.id == context.voiceID,
+                  result.voice.revision == expectedRevision,
+                  result.candidate.publishedVoiceRevision == expectedRevision
+            else {
+                failVoiceDesignPublication(
+                    "服务已返回发布结果，但音色版本与复核版本不一致。请刷新音色库确认状态。",
+                    retryStep: .publish,
+                    generation: generation
+                )
+                await refreshCreatorVoices()
+                return
+            }
+            await finishVoiceDesignPublication(
+                result.voice,
+                context: context,
+                generation: generation
+            )
+        } catch {
+            if let current = try? await creatorClient.fetchVoiceDesignCandidate(id: candidateID),
+               current.state == "published",
+               current.publishedVoiceRevision == expectedRevision,
+               let voice = try? await creatorClient.fetchVoice(id: context.voiceID)
+            {
+                await finishVoiceDesignPublication(
+                    voice,
+                    context: context,
+                    generation: generation
+                )
+                return
+            }
+            failVoiceDesignPublication(
+                error,
+                retryStep: .publish,
+                generation: generation
+            )
+        }
+    }
+
+    private func finishVoiceDesignPublication(
+        _ voice: CreatorVoice,
+        context: VoiceDesignPublicationContext,
+        generation: UInt64
+    ) async {
+        let isCurrentGeneration = generation == voiceDesignPublicationGeneration
+        if isCurrentGeneration {
+            voiceDesignSavedSlots.insert(context.slot)
+            voiceDesignSuccessMessage = "“\(voice.name)” 已完成复核并保存到音色库，可以开始使用。"
+            voiceDesignSavingSlot = nil
+            voiceDesignPublicationRetryStep = nil
+            voiceDesignPublicationContext = nil
+            voiceDesignPublication.phase = .published
+            voiceDesignPublication.message = nil
+        }
+
+        // A completed server request can arrive after the user dismisses the
+        // workflow. Refresh shared catalog state, but never let that old result
+        // write into a newer publication flow or its candidate slot.
+        let refreshed = await refreshCapabilitySet()
+        await refreshCreatorVoices()
+        if generation == voiceDesignPublicationGeneration, !refreshed {
+            voiceDesignPublication.message = "音色已保存，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
+        }
+    }
+
+    private func failVoiceDesignPublication(
+        _ error: Error,
+        retryStep: VoiceDesignPublicationRetryStep,
+        generation: UInt64
+    ) {
+        failVoiceDesignPublication(
+            Self.creatorErrorMessage(for: error),
+            retryStep: retryStep,
+            generation: generation
+        )
+    }
+
+    private func failVoiceDesignPublication(
+        _ message: String,
+        retryStep: VoiceDesignPublicationRetryStep,
+        generation: UInt64
+    ) {
+        guard generation == voiceDesignPublicationGeneration else { return }
+        voiceDesignPublication.phase = .failed
+        voiceDesignPublication.message = message
+        voiceDesignPublicationRetryStep = retryStep
+        voiceDesignSavingSlot = nil
+        isRegisteringVoice = false
+        voiceDesignErrorMessage = message
+    }
+
+    private func isCurrentVoiceDesignPublication(_ generation: UInt64) -> Bool {
+        generation == voiceDesignPublicationGeneration && !Task.isCancelled
     }
 
     private func generateVoiceDesignCandidates(
@@ -644,106 +1993,6 @@ public final class AppModel {
         }
     }
 
-    public func saveDesignedVoice(
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int,
-        humanIdentityConfirmed: Bool,
-        humanNaturalnessConfirmed: Bool
-    ) async -> CreatorVoice? {
-        guard !isRegisteringVoice else { return nil }
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedReferenceText = referenceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            creatorMessage = "请先为音色命名"
-            return nil
-        }
-        guard !trimmedInstruction.isEmpty else {
-            creatorMessage = "请先填写音色描述"
-            return nil
-        }
-        guard trimmedInstruction.count <= SpeechRailCreatorLimits.voiceInstructionMaximumLength else {
-            creatorMessage = "音色描述不能超过 \(SpeechRailCreatorLimits.voiceInstructionMaximumLength) 个字符"
-            return nil
-        }
-        guard (SpeechRailCreatorLimits.referenceTextMinimumLength...SpeechRailCreatorLimits.referenceTextMaximumLength)
-            .contains(trimmedReferenceText.count)
-        else {
-            creatorMessage = "参考文案需要 20–240 个字符"
-            return nil
-        }
-
-        isRegisteringVoice = true
-        creatorMessage = nil
-        defer { isRegisteringVoice = false }
-        do {
-            let voiceID = "voice_design_" + UUID().uuidString
-                .replacingOccurrences(of: "-", with: "")
-                .lowercased()
-            let idempotencyKey = "voice-design-" + UUID().uuidString.lowercased()
-            let generated = try await creatorClient.createVoiceDesignCandidate(
-                voiceID: voiceID,
-                name: trimmedName,
-                instruction: trimmedInstruction,
-                referenceText: trimmedReferenceText,
-                seed: max(0, seed),
-                idempotencyKey: idempotencyKey
-            )
-            let confirmed = try await creatorClient.confirmVoiceDesignCandidate(
-                id: generated.id,
-                referenceText: nil
-            )
-            let machineValidation = try await creatorClient.validateVoiceDesignCandidate(
-                id: confirmed.id,
-                testText: nil,
-                capabilityKey: nil,
-                humanReview: nil
-            )
-            guard let validation = machineValidation.latestValidation,
-                  validation.candidateRevision == machineValidation.revision
-            else {
-                creatorMessage = "服务端没有返回这次音色的复验结果，请重试。"
-                return nil
-            }
-            guard validation.machineStatus == VoiceDesignReview.pass.rawValue else {
-                creatorMessage = Self.voiceDesignValidationMessage(validation)
-                return nil
-            }
-            let review = VoiceDesignHumanReview(
-                validationID: validation.validationID,
-                identity: humanIdentityConfirmed ? .pass : .notReviewed,
-                naturalness: humanNaturalnessConfirmed ? .pass : .notReviewed
-            )
-            let reviewed = try await creatorClient.validateVoiceDesignCandidate(
-                id: confirmed.id,
-                testText: nil,
-                capabilityKey: nil,
-                humanReview: review
-            )
-            guard reviewed.publishable, reviewed.revision == machineValidation.revision else {
-                creatorMessage = "人工试听确认还没有形成完整通过记录，请重新保存并完成两项确认。"
-                return nil
-            }
-            let published = try await creatorClient.publishVoiceDesignCandidate(
-                id: reviewed.id,
-                expectedCandidateRevision: reviewed.revision
-            )
-            let refreshed = await refreshCreatorVoices()
-            if !refreshed {
-                let refreshMessage = creatorMessage ?? "请重新读取音色列表"
-                creatorMessage = "音色已保存，但列表刷新失败：" + refreshMessage
-            }
-            return published.voice
-        } catch is CancellationError {
-            return nil
-        } catch {
-            creatorMessage = Self.creatorErrorMessage(for: error)
-            return nil
-        }
-    }
-
     // MARK: - 音色克隆
 
     /// 读取官方提词稿（`GET /v1/voices/clone/prompts`）。
@@ -763,6 +2012,11 @@ public final class AppModel {
     /// 同一段录音只生成一次注册身份（`cloneRegistrationID` + `cloneIdempotencyKey`），
     /// 重录才会换新的——这正是「一次逻辑注册」的边界。
     public func acceptCloneRecording(fileAt url: URL) async {
+        guard cloneRegistrationContext == nil else {
+            try? FileManager.default.removeItem(at: url)
+            cloneMessage = "上一次注册结果尚未确认；请先查询或重试原注册，再录制新的音色。"
+            return
+        }
         let audio = try? Data(contentsOf: url)
         let analysis = await Task.detached(priority: .userInitiated) {
             AudioReferenceCheck.analyze(fileAt: url)
@@ -774,15 +2028,22 @@ public final class AppModel {
         cloneMessage = analysis == nil ? "这段录音无法解码，请重录。" : nil
         cloneRegistrationID = Self.makeCloneRegistrationID()
         cloneIdempotencyKey = UUID().uuidString.lowercased()
+        cloneRegistrationContext = nil
     }
 
     /// 丢弃这次录音（重录、离开页面、注册完成）。
-    public func discardCloneRecording() {
+    @discardableResult
+    public func discardCloneRecording() -> Bool {
+        guard cloneRegistrationContext == nil else {
+            cloneMessage = "上一次注册结果尚未确认。请先恢复原名称和朗读文本，再查询或重试这次注册。"
+            return false
+        }
         cloneRecordingAudio = nil
         cloneReferenceAnalysis = nil
         cloneEvaluation = nil
         cloneRegistrationID = nil
         cloneIdempotencyKey = nil
+        return true
     }
 
     /// 服务端预检：与注册同一条管线，但不创建任何档案。
@@ -850,31 +2111,163 @@ public final class AppModel {
             return nil
         }
 
-        isRegisteringCloneVoice = true
-        cloneMessage = nil
-        defer { isRegisteringCloneVoice = false }
-        do {
-            let voice = try await creatorClient.registerVoiceClone(
+        guard let voiceID = cloneRegistrationID,
+              let idempotencyKey = cloneIdempotencyKey
+        else {
+            cloneMessage = "这次注册身份缺失，请重新录制后再试。"
+            return nil
+        }
+
+        let context: CloneRegistrationContext
+        if let existing = cloneRegistrationContext {
+            guard existing.referenceText == trimmedReference,
+                  existing.name == trimmedName,
+                  existing.voiceID == voiceID,
+                  existing.idempotencyKey == idempotencyKey
+            else {
+                cloneMessage = "这次注册结果尚未确认。请恢复原名称和朗读文本，再查询或重试；不要更换注册内容。"
+                return nil
+            }
+            context = existing
+        } else {
+            context = CloneRegistrationContext(
                 audio: audio,
                 referenceText: trimmedReference,
                 name: trimmedName,
-                voiceID: cloneRegistrationID,
-                idempotencyKey: cloneIdempotencyKey
+                voiceID: voiceID,
+                idempotencyKey: idempotencyKey
             )
-            lastRegisteredCloneVoice = voice
-            // 注册成功后放掉内存里的原始录音：档案里留下的是服务端生成的参考音频，
-            // 不是用户这次读的那一段。
-            cloneRecordingAudio = nil
-            let refreshed = await refreshCreatorVoices()
-            if !refreshed {
-                cloneMessage = "音色已注册，但列表刷新失败：" + (creatorMessage ?? "请重新读取音色列表")
-            }
-            return voice
+            cloneRegistrationContext = context
+        }
+
+        isRegisteringCloneVoice = true
+        cloneMessage = nil
+        defer { isRegisteringCloneVoice = false }
+
+        if context.audio != audio {
+            cloneMessage = "注册录音已变化；请保持原录音并查询或重试这次注册。"
+            return nil
+        }
+
+        // Resolve the stable operation key before each POST. Only new/not-found
+        // permits resubmitting the captured payload; pending/unknown never
+        // creates another logical registration.
+        switch await lookupCloneRegistration(context) {
+        case let .completed(voice):
+            return await finishCloneRegistration(voice)
+        case .pending:
+            cloneMessage = "音色注册仍在处理中；请稍后重新检查。"
+            return nil
+        case .new, .notFound:
+            break
+        case let .unknown(state):
+            cloneMessage = "服务返回了无法识别的注册状态（\(state)）；请稍后重新检查。"
+            return nil
+        case let .failed(message):
+            cloneMessage = message
+            return nil
+        }
+
+        do {
+            let voice = try await submitCloneRegistration(context)
+            return await finishCloneRegistration(voice)
         } catch is CancellationError {
             return nil
         } catch {
+            if Self.isUncertainCloneRegistrationError(error) {
+                switch await lookupCloneRegistration(context) {
+                case let .completed(voice):
+                    return await finishCloneRegistration(voice)
+                case .pending:
+                    cloneMessage = "注册请求已送达，服务仍在处理；请稍后重新检查。"
+                case .new, .notFound:
+                    cloneMessage = "暂时没有查到注册结果。重试会沿用同一注册身份和内容，不会新建第二个音色。"
+                case let .unknown(state):
+                    cloneMessage = "服务返回了无法识别的注册状态（\(state)）；请稍后重新检查。"
+                case let .failed(message):
+                    cloneMessage = "注册结果尚未确认：" + message
+                }
+                return nil
+            }
+            if let serviceError = error as? ServiceAPIClientError,
+               serviceError.statusCode == 409
+            {
+                cloneMessage = "这次注册与服务端已记录的操作冲突。请保留当前内容和注册身份，再重新检查状态。"
+                return nil
+            }
             cloneMessage = Self.creatorErrorMessage(for: error)
             return nil
+        }
+    }
+
+    private func submitCloneRegistration(
+        _ context: CloneRegistrationContext
+    ) async throws -> CreatorVoice {
+        try await creatorClient.registerVoiceClone(
+            audio: context.audio,
+            referenceText: context.referenceText,
+            name: context.name,
+            voiceID: context.voiceID,
+            idempotencyKey: context.idempotencyKey
+        )
+    }
+
+    private func lookupCloneRegistration(
+        _ context: CloneRegistrationContext
+    ) async -> CloneIdempotencyLookup {
+        do {
+            let status = try await creatorClient.fetchCloneIdempotencyStatus(
+                idempotencyKey: context.idempotencyKey
+            )
+            switch status.state {
+            case .new:
+                return .new
+            case .pending:
+                return .pending
+            case .completed:
+                guard let resultID = status.resultID,
+                      resultID == context.voiceID
+                else {
+                    return .unknown("completed_without_expected_result_id")
+                }
+                do {
+                    return .completed(try await creatorClient.fetchVoice(id: resultID))
+                } catch {
+                    return .failed("注册已确认，但暂时无法读取该音色。请重新检查音色列表。")
+                }
+            case let .unknown(value):
+                return .unknown(value)
+            }
+        } catch let error as ServiceAPIClientError
+            where error.statusCode == 404 && error.code == "idempotency_not_found"
+        {
+            return .notFound
+        } catch {
+            return .failed(Self.creatorErrorMessage(for: error))
+        }
+    }
+
+    private func finishCloneRegistration(_ voice: CreatorVoice) async -> CreatorVoice {
+        lastRegisteredCloneVoice = voice
+        cloneRegistrationContext = nil
+        // Release the original recording only after the server confirms success.
+        cloneRecordingAudio = nil
+        let refreshed = await refreshCapabilitySet()
+        if !refreshed {
+            cloneMessage = "音色已注册，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
+        }
+        return voice
+    }
+
+    private static func isUncertainCloneRegistrationError(_ error: Error) -> Bool {
+        guard let error = error as? ServiceAPIClientError else { return true }
+        return switch error {
+        case .requestFailed, .requestTimedOut:
+            true
+        case let .http(statusCode, _, _, _, retryable):
+            statusCode >= 500 || retryable
+        case .invalidURL, .invalidResponse, .notModifiedWithoutCache, .invalidContract:
+            false
         }
     }
 
@@ -901,10 +2294,9 @@ public final class AppModel {
             if playingVoiceID == voice.id {
                 stopAudio()
             }
-            let refreshed = await refreshCreatorVoices()
+            let refreshed = await refreshCapabilitySet()
             if !refreshed {
-                let refreshMessage = creatorMessage ?? "请重新读取音色列表"
-                creatorMessage = "音色已删除，但列表刷新失败：" + refreshMessage
+                creatorMessage = "音色已删除，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
             }
             return true
         } catch is CancellationError {
@@ -956,6 +2348,24 @@ public final class AppModel {
             return false
         }
 
+        var expectedRevision = voice.revision?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if expectedRevision?.isEmpty == true {
+            expectedRevision = nil
+        }
+        if expectedRevision == nil {
+            _ = await refreshCreatorVoices()
+            expectedRevision = creatorVoices.first(where: { $0.id == voice.id })?.revision?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if expectedRevision?.isEmpty == true {
+                expectedRevision = nil
+            }
+        }
+        guard let expectedRevision else {
+            creatorMessage = "无法确认这条音色的当前版本；请重新读取音色列表后再保存。"
+            return false
+        }
+
         isUpdatingVoice = true
         creatorMessage = nil
         defer { isUpdatingVoice = false }
@@ -964,17 +2374,24 @@ public final class AppModel {
                 id: voice.id,
                 name: trimmedName,
                 instruction: trimmedInstruction,
-                seed: seed
+                seed: seed,
+                expectedRevision: expectedRevision
             )
-            let refreshed = await refreshCreatorVoices()
+            let refreshed = await refreshCapabilitySet()
             if !refreshed {
-                let refreshMessage = creatorMessage ?? "请重新读取音色列表"
-                creatorMessage = "音色已更新，但列表刷新失败：" + refreshMessage
+                creatorMessage = "音色已更新，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
             }
             return true
         } catch is CancellationError {
             return false
         } catch {
+            if let serviceError = error as? ServiceAPIClientError,
+               serviceError.statusCode == 409
+            {
+                _ = await refreshCapabilitySet()
+                creatorMessage = "音色状态已变化。你的修改草稿仍保留；请核对最新音色信息后重试。"
+                return false
+            }
             creatorMessage = Self.creatorErrorMessage(for: error)
             return false
         }
@@ -982,17 +2399,19 @@ public final class AppModel {
 
     public func previewVoice(
         _ voice: CreatorVoice,
-        text: String = "你好，这是我的声音。",
+        text: String? = nil,
         speed: Double = 1.0
     ) async {
         // 如果当前正在播放该音色，再次点击即为停止
         if isAudioPlaying && playingVoiceID == voice.id {
+            invalidateVoicePreview()
             stopAudio()
             return
         }
         guard !isCreatingSpeech else {
             // 如果正在生成该音色，再次点击取消
             if previewingVoiceID == voice.id {
+                invalidateVoicePreview()
                 voicePreviewTask?.cancel()
                 voicePreviewTask = nil
                 isCreatingSpeech = false
@@ -1004,7 +2423,8 @@ public final class AppModel {
             creatorMessage = "当前音色暂不可用于试听"
             return
         }
-        let previewText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 未显式给文案时用服务端声明的默认示例：英语/日语/韩语音色不该被中文文案硬读。
+        let previewText = Self.resolvedPreviewText(for: voice, text: text)
         guard !previewText.isEmpty else {
             creatorMessage = "试听文案不能为空"
             return
@@ -1015,10 +2435,35 @@ public final class AppModel {
         }
 
         stopAudio()
-        let cacheKey = "\(voice.id):\(speed):\(previewText)"
+        let previewLanguage = Self.previewLanguage(for: voice)
+
+        // 先解析当前有效版本，再谈缓存：音色被撤销或服务换用另一份模型之后，
+        // 不应该复用旧音频。
+        let options: SpeechRailRequestOptions
+        do {
+            options = try await speechRequestOptions(for: voice.id)
+        } catch {
+            creatorMessage = Self.creatorErrorMessage(for: error)
+            return
+        }
+        guard !Task.isCancelled else { return }
+
+        let cacheKey = Self.previewCacheKey(
+            voice: voice,
+            options: options,
+            catalogRevision: capabilityFacade.snapshot?.catalogRevision,
+            input: previewText,
+            languageOverride: previewLanguage,
+            speed: speed
+        )
+
+        // 本次请求的代号。此后任何状态写入都必须先确认自己仍是最新请求，
+        // 否则迟到的成功 / 失败 / defer 会覆盖新请求的进度与播放句柄。
+        invalidateVoicePreview()
+        let token = voicePreviewToken
 
         // 优先命中本地内存缓存：0 毫秒即点即播，彻底免除反复生成延迟
-        if let cachedData = previewAudioCache[cacheKey] {
+        if let cachedData = previewAudioCache.data(for: cacheKey) {
             do {
                 try audioPlaybackController.play(data: cachedData)
                 isAudioPlaying = audioPlaybackController.isPlaying
@@ -1038,19 +2483,23 @@ public final class AppModel {
         previewingVoiceID = voice.id
         creatorMessage = nil
         defer {
-            isCreatingSpeech = false
-            previewingVoiceID = nil
+            // 只有仍是最新请求时才允许清理共享状态。
+            if token == voicePreviewToken {
+                isCreatingSpeech = false
+                previewingVoiceID = nil
+            }
         }
         do {
             let data = try await creatorClient.createSpeech(
                 text: previewText,
                 voiceID: voice.id,
                 speed: speed,
-                options: speechRequestOptions(for: voice)
+                options: options.with(languageOverride: previewLanguage)
             )
             try Task.checkCancellation()
-            // 写入本地内存缓存
-            previewAudioCache[cacheKey] = data
+            guard token == voicePreviewToken else { return }
+            // 只缓存解码通过、非空的完整结果；空音频不入缓存。
+            previewAudioCache.insert(data, for: cacheKey)
             do {
                 try audioPlaybackController.play(data: data)
             } catch {
@@ -1067,6 +2516,8 @@ public final class AppModel {
         } catch is CancellationError {
             return
         } catch {
+            // 迟到的失败同样不能覆盖新请求的提示。
+            guard token == voicePreviewToken else { return }
             creatorMessage = Self.creatorErrorMessage(for: error)
         }
     }
@@ -1076,29 +2527,46 @@ public final class AppModel {
     /// user has navigated elsewhere.
     public func startVoicePreview(
         _ voice: CreatorVoice,
-        text: String = "你好，这是我的声音。",
+        text: String? = nil,
         speed: Double = 1.0
     ) {
         if isAudioPlaying && playingVoiceID == voice.id {
+            invalidateVoicePreview()
             stopAudio()
             return
         }
         guard voicePreviewTask == nil, !isCreatingSpeech else { return }
+        voicePreviewTaskGeneration &+= 1
+        let generation = voicePreviewTaskGeneration
         voicePreviewTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.previewVoice(voice, text: text, speed: speed)
-            self.voicePreviewTask = nil
+            // 期间若已取消并开启新任务，旧任务的收尾无权清空新句柄。
+            if self.voicePreviewTaskGeneration == generation {
+                self.voicePreviewTask = nil
+            }
         }
     }
 
     public func cancelVoicePreview() {
-        guard voicePreviewTask != nil || isAudioPlaying else { return }
+        // `isCreatingSpeech` 也要纳入判断：助手等入口直接 `await previewVoice`，
+        // 不经过 `startVoicePreview`，此时没有 task 句柄，但请求确实在途。
+        guard voicePreviewTask != nil || isCreatingSpeech || isAudioPlaying else { return }
+        invalidateVoicePreview()
+        voicePreviewTaskGeneration &+= 1
         voicePreviewTask?.cancel()
         voicePreviewTask = nil
+        // 被取消的请求其 defer 已因代号失效而不再清理，这里由取消方负责收尾；
+        // 只在确实是试听在途时清，避免踩到并行的正式合成。
+        if previewingVoiceID != nil {
+            previewingVoiceID = nil
+            isCreatingSpeech = false
+        }
         stopAudio()
     }
 
     public func playAudio(data: Data) throws {
+        voiceDesignPlaybackIdentity = nil
         do {
             try audioPlaybackController.play(data: data)
         } catch {
@@ -1110,13 +2578,79 @@ public final class AppModel {
         playingVoiceID = nil
     }
 
+    public func playVoiceDesignReferenceAudio() {
+        guard voiceDesignPublication.phase == .awaitingReferenceReview,
+              let candidateID = voiceDesignPublication.candidateID,
+              let revision = voiceDesignPublication.candidateRevision,
+              let audio = voiceDesignPublication.referenceAudioData
+        else {
+            return
+        }
+        do {
+            try playAudio(data: audio)
+            voiceDesignPlaybackIdentity = .reference(
+                candidateID: candidateID,
+                revision: revision
+            )
+        } catch {
+            voiceDesignPublication.message = "候选参考音频无法播放，请重新读取后重试。"
+        }
+    }
+
+    public func playVoiceDesignValidationAudio() {
+        guard voiceDesignPublication.phase == .awaitingValidationReview,
+              let candidateID = voiceDesignPublication.candidateID,
+              let revision = voiceDesignPublication.candidateRevision,
+              let validationID = voiceDesignPublication.validationID,
+              let audio = voiceDesignPublication.validationAudioData
+        else {
+            return
+        }
+        do {
+            try playAudio(data: audio)
+            voiceDesignPlaybackIdentity = .validation(
+                candidateID: candidateID,
+                revision: revision,
+                validationID: validationID
+            )
+        } catch {
+            voiceDesignPublication.message = "复验音频无法播放，请重新读取后重试。"
+        }
+    }
+
     public func audioDuration(for data: Data) -> TimeInterval? {
         audioPlaybackController.duration(for: data)
     }
 
     public func stopAudio() {
+        voiceDesignPlaybackIdentity = nil
         audioPlaybackController.stop()
         clearPlaybackState()
+    }
+
+    func noteVoiceDesignAudioPlaybackFinished(successfully: Bool) {
+        guard let identity = voiceDesignPlaybackIdentity else { return }
+        voiceDesignPlaybackIdentity = nil
+        guard successfully else { return }
+        switch identity {
+        case let .reference(candidateID, revision):
+            guard voiceDesignPublication.phase == .awaitingReferenceReview,
+                  voiceDesignPublication.candidateID == candidateID,
+                  voiceDesignPublication.candidateRevision == revision
+            else {
+                return
+            }
+            markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        case let .validation(candidateID, revision, validationID):
+            guard voiceDesignPublication.phase == .awaitingValidationReview,
+                  voiceDesignPublication.candidateID == candidateID,
+                  voiceDesignPublication.candidateRevision == revision,
+                  voiceDesignPublication.validationID == validationID
+            else {
+                return
+            }
+            markVoiceDesignValidationAudioPlaybackFinished(successfully: true)
+        }
     }
 
     private func clearPlaybackState() {
@@ -1169,7 +2703,8 @@ public final class AppModel {
 
     @discardableResult
     public func refreshCreatorVoices() async -> Bool {
-        guard !isRefreshingCreatorVoices else { return false }
+        creatorVoiceRefreshGeneration &+= 1
+        let refreshGeneration = creatorVoiceRefreshGeneration
         // A directory refresh is the authoritative list snapshot. Invalidate
         // any in-flight single-voice read before starting it, otherwise a late
         // detail response can overwrite the newer list and leave the inspector
@@ -1179,25 +2714,55 @@ public final class AppModel {
         creatorVoiceDetailMessage = nil
         isRefreshingCreatorVoices = true
         creatorVoicesLoadState = .loading
-        defer { isRefreshingCreatorVoices = false }
+        defer {
+            if refreshGeneration == creatorVoiceRefreshGeneration {
+                isRefreshingCreatorVoices = false
+            }
+        }
         do {
-            creatorVoices = try await creatorClient.fetchVoices()
+            let voices = try await creatorClient.fetchVoices()
                 .sorted { lhs, rhs in
                     if lhs.isSystem != rhs.isSystem { return lhs.isSystem }
                     return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
+            guard refreshGeneration == creatorVoiceRefreshGeneration else { return false }
+            creatorVoices = voices
             creatorVoicesLoadState = .loaded
             creatorMessage = nil
             return true
         } catch is CancellationError {
+            guard refreshGeneration == creatorVoiceRefreshGeneration else { return false }
             creatorVoicesLoadState = .unknown
             return false
         } catch {
+            guard refreshGeneration == creatorVoiceRefreshGeneration else { return false }
             creatorVoices = []
             creatorVoicesLoadState = .failed
             creatorMessage = Self.creatorErrorMessage(for: error)
             return false
         }
+    }
+
+    /// Refresh rich voices and effective capability projections after a voice
+    /// mutation. These requests are independent; one retry repairs a safe-list
+    /// and effective-snapshot identity mismatch without inventing a remote
+    /// transaction.
+    @discardableResult
+    public func refreshCapabilitySet() async -> Bool {
+        async let richVoicesLoaded = refreshCreatorVoices()
+        async let discoveryRefresh: Void = refreshDiscovery()
+
+        let richLoaded = await richVoicesLoaded
+        await discoveryRefresh
+        guard richLoaded else { return false }
+
+        if safeVoiceCatalog?.snapshotID != effectiveCapabilities?.snapshotID {
+            await refreshDiscovery()
+        }
+
+        return creatorVoicesLoadState == .loaded
+            && discoveryState == .loaded
+            && safeVoiceCatalog?.snapshotID == effectiveCapabilities?.snapshotID
     }
 
     /// Read one authoritative voice profile when the user selects it. The
@@ -1301,6 +2866,69 @@ public final class AppModel {
         }
     }
 
+    /// 音色试听语种：服务端 system voice 无 language 字段，按音色 ID 映射。
+    /// 与服务端 `_LANGUAGE_ALIASES` 对齐；未知/自定义音色默认中文。
+    public enum VoicePreviewLanguage: String, Sendable {
+        case chinese = "chinese"
+        case english = "english"
+        case japanese = "japanese"
+        case korean = "korean"
+    }
+
+    public static func previewLanguage(forVoiceID voiceID: String) -> VoicePreviewLanguage {
+        switch voiceID {
+        case "ryan", "aiden":
+            return .english
+        case "ono_anna":
+            return .japanese
+        case "sohee":
+            return .korean
+        default:
+            return .chinese
+        }
+    }
+
+    /// 解析一次试听实际使用的文案：未显式给出时按音色语种取默认。
+    /// 助手等没有试听文案输入的入口依赖这里，不能退回硬编码中文。
+    public static func resolvedPreviewText(forVoiceID voiceID: String, text: String?) -> String {
+        let candidate = text ?? defaultPreviewText(forVoiceID: voiceID)
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 服务端下发的试听文案是唯一事实源；只有它缺失时才退回本地兜底。
+    ///
+    /// 兜底文案只用于填充界面，不写回元数据，也不因为它存在就断言音色只能
+    /// 读这一种语言。
+    public static func resolvedPreviewText(for voice: CreatorVoice, text: String?) -> String {
+        let candidate =
+            text ?? voice.preview?.text ?? defaultPreviewText(forVoiceID: voice.id)
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 这次试听要发送的目标语言。
+    ///
+    /// 服务端已声明 `preview.locale` 时直接用它，缺失时退回本地映射。注意这里
+    /// 选的是**本次生成的目标语言**，不是音色的母语，也不会翻译用户文案。
+    public static func previewLanguage(for voice: CreatorVoice) -> String {
+        if let locale = voice.preview?.locale, !locale.isEmpty {
+            return locale
+        }
+        return previewLanguage(forVoiceID: voice.id).rawValue
+    }
+
+    public static func defaultPreviewText(forVoiceID voiceID: String) -> String {
+        switch previewLanguage(forVoiceID: voiceID) {
+        case .english:
+            return "This is a SpeechRail voice preview. Clear, natural voice, every word just right."
+        case .japanese:
+            return "こちらはSpeechRailの音声プレビューです。クリアで自然な声をお届けします。"
+        case .korean:
+            return "SpeechRail 음성 미리듣기입니다. 맑고 자연스러운 목소리를 들어보세요."
+        case .chinese:
+            return "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。"
+        }
+    }
+
     /// Own the request task at the app-model level so navigating between pages
     /// cannot orphan a submitted generation or remove its cancellation handle.
     public func startSynthesisAndSave(
@@ -1309,7 +2937,11 @@ public final class AppModel {
         speed: Double
     ) {
         guard synthesisTask == nil, !isCreatingSpeech else { return }
-        lastCreatedWork = nil
+        // 已完成但未保存的结果不能被新一次生成静默顶掉：用户要先保存或明确放弃。
+        guard pendingDubbing == nil else {
+            creatorMessage = "当前还有一段未保存的配音，请先保存或放弃后再重新生成。"
+            return
+        }
         workPlaybackMessage = nil
         synthesisTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1318,8 +2950,67 @@ public final class AppModel {
         }
     }
 
+    /// 取消进行中的生成。已经生成完成、只是还没保存的结果不受影响——那是用户
+    /// 的数据，不该因为取消另一次生成而被顺带丢掉。
     public func cancelSynthesis() {
         synthesisTask?.cancel()
+    }
+
+    /// 显式放弃未保存的配音。只有用户点了"放弃"才会走到这里。
+    public func discardPendingDubbing() {
+        pendingDubbing = nil
+        workPlaybackMessage = nil
+    }
+
+    /// 把已生成的待保存配音写入作品库。返回 nil 表示没有待保存内容或保存失败。
+    ///
+    /// 幂等：`workID` 在生成时就冻结了，所以双击、重试、以及"写入成功但列表刷新
+    /// 失败后再点一次"都只会得到同一条作品，而不是每次多一条。
+    @discardableResult
+    public func savePendingDubbing() -> CreativeWork? {
+        guard let pending = pendingDubbing else { return nil }
+        let work = CreativeWork(
+            id: pending.workID,
+            title: pending.generatedTitle,
+            scriptText: pending.scriptText,
+            voiceID: pending.voiceID,
+            voiceName: pending.voiceName,
+            voiceRevision: pending.voiceRevision,
+            planID: pending.planID,
+            renderRevision: pending.renderRevision,
+            durationSeconds: pending.durationSeconds,
+            audioFileName: "\(pending.workID).wav"
+        )
+        do {
+            try workStore.save(work, audioData: pending.audioData)
+        } catch {
+            creatorMessage = "作品保存失败，请检查磁盘权限和可用空间后重试"
+            return nil
+        }
+        do {
+            works = try workStore.list()
+            worksMessage = nil
+        } catch {
+            worksMessage = "作品已保存，但作品列表暂时无法刷新"
+        }
+        pendingDubbing = nil
+        lastCreatedWork = work
+        return work
+    }
+
+    /// 未保存的配音试听音频：从内存播放，不经过作品库。
+    public func playPendingDubbing() {
+        guard let pending = pendingDubbing else { return }
+        do {
+            try audioPlaybackController.play(data: pending.audioData)
+            isAudioPlaying = audioPlaybackController.isPlaying
+            playingWorkID = nil
+            playingVoiceID = nil
+            workPlaybackMessage = nil
+        } catch {
+            clearPlaybackState()
+            workPlaybackMessage = "试听音频无法播放，请重新生成。"
+        }
     }
 
     public func synthesizeAndSave(
@@ -1353,60 +3044,50 @@ public final class AppModel {
         defer { isCreatingSpeech = false }
 
         do {
+            let options = try await speechRequestOptions(for: voice.id)
             let render = try await creatorClient.createSpeechRender(
                 text: scriptText,
                 voiceID: voice.id,
                 speed: speed,
-                options: speechRequestOptions(for: voice)
+                options: options
             )
             let data = render.audioData
             try Task.checkCancellation()
-            let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            let work = CreativeWork(
-                id: workID,
-                // 名称取文稿首行的整行：截断由行内按可用宽度做，不在写入时预截
-                // （用户反馈「文本应随 UI 宽度自然截断，见 `CreativeWork.generatedTitle`」）。
-                title: CreativeWork.generatedTitle(fromScript: scriptText),
+            // 生成结果只放内存：用户显式保存后才进入作品库。身份在此刻定下，
+            // 之后无论 UI 怎么改，保存的元数据都描述这一次真实的生成。
+            let workID = "work_" + UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+            let pending = PendingDubbingRender(
+                renderID: "render_" + UUID().uuidString
+                    .replacingOccurrences(of: "-", with: "")
+                    .lowercased(),
+                workID: workID,
                 scriptText: scriptText,
                 voiceID: voice.id,
                 voiceName: voice.name,
-                // 这一次渲染固定下来的身份：音色 revision 与 plan。
-                // 之后全局默认怎么变，这份作品都指向当时的那一版；
-                // 想换到新 plan 只能由用户显式重做，产生新的 render revision。
                 voiceRevision: render.voiceRevision,
                 planID: render.planID,
+                speed: speed,
                 renderRevision: (try? workStore.nextRenderRevision(
                     scriptText: scriptText,
                     voiceID: voice.id
                 )) ?? 1,
                 durationSeconds: audioPlaybackController.duration(for: data),
-                audioFileName: "\(workID).wav"
+                audioData: data
             )
-            try workStore.save(work, audioData: data)
-            do {
-                works = try workStore.list()
-                worksMessage = nil
-            } catch {
-                // The audio and index write already succeeded. Keep the
-                // generated work as the authoritative result and surface the
-                // list refresh problem separately instead of reporting a
-                // successful synthesis as a failed request.
-                worksMessage = "作品已保存，但作品列表暂时无法刷新"
-            }
+            pendingDubbing = pending
             workPlaybackMessage = nil
             do {
                 try audioPlaybackController.play(data: data)
                 isAudioPlaying = audioPlaybackController.isPlaying
-                playingWorkID = work.id
-                cacheEnvelope(key: Self.envelopeKey(kind: "work", id: work.id)) { buckets in
-                    AudioEnvelope.levels(forAudioData: data, buckets: buckets)
-                }
+                playingWorkID = nil
+                playingVoiceID = nil
             } catch {
                 clearPlaybackState()
-                workPlaybackMessage = "作品已保存，但本次音频无法播放；可以在“我的作品”中重新试听。"
+                workPlaybackMessage = "音频已生成，但本次无法播放；可以重新生成后试听。"
             }
-            lastCreatedWork = work
-            return work
+            return nil
         } catch is CancellationError {
             return nil
         } catch {
@@ -1448,12 +3129,14 @@ public final class AppModel {
     /// 能力快照是唯一的跨对象发现真相；ETag/304 只复用上一份完整快照，加载中和
     /// 失败时不会把旧结论清空，也不会用 legacy `/v1/models` 伪造一个新的 snapshot。
     public func refreshDiscovery() async {
-        guard !isRefreshingDiscovery else { return }
-        isRefreshingDiscovery = true
-        defer { isRefreshingDiscovery = false }
-
         discoveryRefreshGeneration &+= 1
         let refreshGeneration = discoveryRefreshGeneration
+        isRefreshingDiscovery = true
+        defer {
+            if refreshGeneration == discoveryRefreshGeneration {
+                isRefreshingDiscovery = false
+            }
+        }
         let requestToken = capabilitySnapshotStore.beginRefresh()
         discoveryState = .loading
         let cachedSnapshot = capabilitySnapshotStore.snapshot
@@ -1498,60 +3181,6 @@ public final class AppModel {
         }
     }
 
-    /// 读取服务公开的 legacy 能力投影（`GET /v1/models`）。
-    ///
-    /// 新服务先从 atomic snapshot 的显式 operations/model identity 生成兼容视图；
-    /// 只有旧服务返回 404/405 或 snapshot schema 无法识别时，才读取 `/v1/models`。
-    /// 鉴权、冲突、未就绪和其他服务错误不会静默降级成成功。
-    public func refreshServiceCapabilities() async {
-        serviceCapabilitiesRefreshGeneration &+= 1
-        let refreshGeneration = serviceCapabilitiesRefreshGeneration
-        isRefreshingServiceCapabilities = true
-        serviceCapabilitiesLoadState = .loading
-        defer {
-            if refreshGeneration == serviceCapabilitiesRefreshGeneration {
-                isRefreshingServiceCapabilities = false
-            }
-        }
-
-        if discoveryState.shouldRetryOnRefresh {
-            await refreshDiscovery()
-            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
-        }
-
-        if discoveryState == .loaded, let snapshot = effectiveCapabilities {
-            serviceCapabilities = Self.legacyCapabilities(from: snapshot)
-            serviceCapabilitiesLoadState = .loaded
-            return
-        }
-
-        guard discoveryState == .notSupported || discoveryState == .invalidContract else {
-            serviceCapabilities = nil
-            serviceCapabilitiesLoadState = switch discoveryState {
-            case .unauthorized, .notReady, .failed:
-                .failed
-            default:
-                .unknown
-            }
-            return
-        }
-
-        do {
-            let capabilities = try await capabilityClient.fetchModelCapabilities()
-            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
-            serviceCapabilities = capabilities
-            serviceCapabilitiesLoadState = .loaded
-        } catch is CancellationError {
-            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
-            // 取消不是结论：丢掉未完成的读取，回到“还没有读到”。
-            serviceCapabilitiesLoadState = .unknown
-        } catch {
-            guard refreshGeneration == serviceCapabilitiesRefreshGeneration else { return }
-            serviceCapabilities = nil
-            serviceCapabilitiesLoadState = .failed
-        }
-    }
-
     private func applyDiscoveryFailure(
         _ error: Error,
         requestToken: UInt64
@@ -1573,41 +3202,6 @@ public final class AppModel {
         }
         effectiveCapabilities = capabilitySnapshotStore.snapshot
         discoveryState = capabilitySnapshotStore.state
-    }
-
-    private static func legacyCapabilities(
-        from snapshot: EffectiveCapabilitySnapshot
-    ) -> ServiceModelCapabilities {
-        let preview = operationStatus(snapshot.operations["voice_preview"]) == "supported"
-        let instruction = operationStatus(
-            operationObject(snapshot.operations["voice_preview"])?["instruction"]
-        ) == "supported"
-        // `tts_clone` is a configured capability identity, not an inference from
-        // whether a user currently owns a clone voice.
-        let clone = snapshot.models["tts_clone"]?.artifact != nil
-        return ServiceModelCapabilities(
-            supportsPreview: preview,
-            supportsClone: clone,
-            supportsInstruction: instruction
-        )
-    }
-
-    private static func operationObject(
-        _ value: JSONValue?
-    ) -> [String: JSONValue]? {
-        guard let value,
-              case let .object(object) = value.storage
-        else { return nil }
-        return object
-    }
-
-    private static func operationStatus(
-        _ value: JSONValue?
-    ) -> String? {
-        guard let object = operationObject(value),
-              case let .string(status) = object["status"]?.storage
-        else { return nil }
-        return status
     }
 
     public func refresh() async {
@@ -1641,9 +3235,8 @@ public final class AppModel {
         controlPlaneMessage = nil
         profiles = []
         profile = nil
-        // 能力清单与健康快照同源（都是本机服务），一次刷新一起更新。能力读取失败
-        // 只影响能力结论，不回退已经读到的健康快照。
-        await refreshServiceCapabilities()
+        // 能力结论只读 effective snapshot；失败时保留健康快照，但不准入需要能力的动作。
+        await refreshDiscovery()
         do {
             let list = try await transport.send(ControlRequest(command: .profileList))
             guard refreshGeneration == healthRefreshGeneration else { return }
@@ -2176,6 +3769,9 @@ public final class AppModel {
             case .audioUnavailable:
                 "服务没有返回可保存音频，请检查服务状态后重试"
             }
+        }
+        if let error = error as? SpeechBindingUnavailableError {
+            return error.errorDescription ?? "无法确认所选音色的当前版本，请刷新音色和服务信息后重试。"
         }
         guard let error = error as? ServiceAPIClientError else {
             return "创作服务暂时不可用"

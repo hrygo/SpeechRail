@@ -2,13 +2,14 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.3.2"
-date: 2026-09-26
+version: "3.7.0"
+date: 2026-09-27
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
 
 > 机器可读的 OpenAPI 3.1 规范位于 [`contracts/openapi.yaml`](../../contracts/openapi.yaml)；WebSocket 全双工事件规范位于 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
+> 运行中的服务在 `GET /openapi.json` 与 `/docs`（Swagger UI）、`/redoc` 提供**同一份文件**，因此客户端从服务读到的契约与本手册引用的契约逐字一致，不存在“生成版”契约。
 
 ---
 
@@ -23,15 +24,19 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 
 | 能力类别 | Canonical 模型 ID | 标准别名 (Aliases) | 说明 |
 |---|---|---|---|
-| **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录） |
+| **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-transcribe`, `gpt-live-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录）；`gpt-4o-transcribe-diarize` 见 §3.1 |
 | **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign、CustomVoice 或 Base capability |
 
 > 💡 **模型规格自适应**：Canonical 模型 ID 标识服务后端能力契约，底层可通过 `SPEECHRAIL_QWEN3_MODEL_DIR` 自由加载 **Qwen3-ASR-1.7B** 或 **Qwen3-ASR-0.6B**（显存占用更低、适用于 8GB 内存设备），对外均遵循相同的 OpenAI 协议。
 
-客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系。
+客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系：以上别名
+都会出现在清单中，`gpt-4o-transcribe-diarize` 只在 `diarization_ready=true` 时出现。带日期后缀的
+官方快照 ID（如 `gpt-4o-mini-transcribe-2025-12-15`、`gpt-4o-mini-tts-2025-12-15`）不在支持集合内，
+返回 `400 model_not_found`。
 TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 与
 `supports_instruction`。三个 TTS 档位都绑定 `custom_voice`（系统声音）与 `base`（参考克隆）
-两个角色，`voice_design`（提示词设计）只绑定在 `reference` 档且快照缺失时降级为不可用。
+两个角色；`voice_design`（提示词设计）是不与档位绑定的一份按需制品，任何 `tts_spec` 都能进入
+设计作业，快照缺失时只把该能力降级为不可用。
 客户端必须读取运行时能力字段，不能仅由默认 `variant` 推断 clone 或 preview。
 
 ### 1.1 档位与能力可用性矩阵
@@ -67,10 +72,25 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
+| `GET` | `/v1/speechrail/audio/receipts/by-request/{source_request_id}` | 按来源请求 ID 读取最新回执 | 客户端自持 `X-Request-ID` 时用于找回回执；回执仍只含样本数与哈希，不含音频 |
 | `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
-| `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
+| `GET/POST` | `/v1/voice-designs` | 私有 VoiceDesign 候选列表与创建 | 创建需要 VoiceDesign 角色与本地 Batch ASR；可选 `Idempotency-Key` 回放 |
+| `GET` | `/v1/voice-designs/{candidate_id}` | 读取单个候选的当前 revision | 试听与复验都必须绑定这里的当前 revision |
+| `POST` | `/v1/voice-designs/{candidate_id}/cancel` | 取消未发布的候选 | 保留审计资产并释放目标 ID；已发布音色不受影响 |
+| `GET` | `/v1/voice-designs/{candidate_id}/audio` | 读取候选的当前参考 WAV | 必须固定 candidate revision；不重新合成 |
+| `GET` | `/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 读取指定复验的原始 Base WAV | 必须固定 candidate revision；不重新合成 |
+| `POST/GET` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据（可选 `Idempotency-Key`）与分页列出任务 |
+| `GET` | `/v1/jobs/{job_id}` | 查询单个异步任务 | 只返回同一 owner 范围的任务元数据 |
+| `DELETE` | `/v1/jobs/{job_id}` | 取消任务或释放已完成结果引用 | 排队中任务被取消；已完成任务的产物引用被释放 |
+| `GET` | `/v1/jobs/{job_id}/result` | 读取已完成任务的产物 | 返回音频或 JSON 结果引用，仍受 owner 范围约束 |
+| `GET` | `/v1/speechrail/voices` | 最小披露的安全音色目录 | 不含参考正文、私有 instruction 与本机路径；支持 ETag 与 `304` |
+| `GET/PATCH` | `/v1/speechrail/voices/{voice_id}` | 安全音色详情与 CAS 更新 | `PATCH` 必须带 `expected_revision`，成功后追加不可变 revision |
+| `GET` | `/v1/speechrail/voices/{voice_id}/revisions` | 列出不可变音色 revision | 只返回安全元数据，不含参考音频与路径 |
+| `POST` | `/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke` | 撤销指定 revision | 不打断已经获取的合成 lease |
+| `POST` | `/v1/speechrail/voices/{voice_id}/rollback` | 把音色别名回滚到未撤销的 revision | CAS 原子切换，不打断已获取的 lease |
 | `GET` | `/v1/speechrail/voices/clone/idempotency` | 克隆幂等状态查询 | 凭 `Idempotency-Key` 读取 durable 状态与 `result_id`，不重传素材 |
+| `GET` | `/v1/voices/clone/prompts` | 列出零样本克隆的官方推荐脚本 | 只读目录，供 App 提词与 Agent 选取参考文本 |
 | `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
 | `POST` | `/v1/speechrail/voices/{voice_id}/quality-runs` | 音色质量探针（带 evidence） | 同 `/v1/voices/{voice_id}/quality-runs`，另返回 `evidence` 命名空间 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
@@ -105,12 +125,15 @@ Content-Type: multipart/form-data
 | `language` | String | 否 | `auto` | 语言代码（如 `zh`, `en`, `ja`, `auto` 等） |
 | `prompt` | String | 否 | - | 专有名词提示文本（最长 2000 字符） |
 | `response_format` | String | 否 | `json` | 响应格式：`json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json`；后者仅与 `gpt-4o-transcribe-diarize` 配对 |
-| `timestamp_granularities[]` | Array | 否 | `["segment", "word"]` | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
+| `timestamp_granularities[]` | Array | 否 | 省略（等价于同时请求 `segment` + `word`） | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
 
 标准 multipart 数组使用重复字段，例如 `timestamp_granularities[]=word`。
 旧 `timestamp_granularities` 字段仍可使用；两种写法混用时合并后验证，任一字段中的非法值都会返回
 `422 invalid_timestamp_granularities`。只请求 `word` 时返回 `words`，只请求 `segment` 时返回
-`segments`；省略粒度时保持同时返回两者。
+`segments`；省略粒度时保持同时返回两者。OpenAI 的 `timestamp_granularities` 默认值是
+`["segment"]`，SpeechRail 有意在省略时同时返回两套时间戳。
+
+其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式。
 
 上传大小仍受 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制；解码输出另受 128 MiB 和
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 约束。WAV fastpath 在重采样前检查预计输出，其他容器在
@@ -170,6 +193,9 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
 `400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
 音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
+
+请求体与 OpenAI 一致接受 `stream_format`，但 SpeechRail 只实现完整音频响应：省略或传
+`audio` 正常返回，传 `sse` 返回 `400 stream_format_unsupported`，不会退化成 SSE 分片。
 
 `seed` 仅用于 VoiceDesign preview 的确定性采样；系统 VoiceDesign 音色使用其
 固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
@@ -284,7 +310,7 @@ timing registry 容量不足均不会把成功的音频合成改判失败。取�
 `uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
 `default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；别名解析与档位
 无关，客户端无需上送 profile。能力的**可用性**随当前规格组合和服务 readiness 不同：提示词设计
-只在绑定 `voice_design` 的 `reference` 档且快照就绪时可用，参考克隆在绑定 `base` 的档位就绪时
+不绑定档位，在设计快照就绪时可用，参考克隆在绑定 `base` 的档位就绪时
 可用，详见 §1.1。
 
 ---
@@ -421,7 +447,7 @@ Authorization: Bearer <TOKEN>
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
-该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；当前 catalog 只有 `reference` 档绑定 `voice_design`，且该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
+该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；`voice_design` 不绑定档位，该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
 一个自然语言音色配方。请求期间的 instruction 和 seed 通过内部类型化 TTS 请求传入 worker；接口
 不会创建 VoiceProfile、写入 `custom_voices.json` 或保存音频文件。
 
@@ -440,7 +466,7 @@ Authorization: Bearer <TOKEN>
 `instruction` 最长 10000 字符，`input` 最长 4096 字符，`seed` 范围为 `0`–`4294967295`。
 支持 `mp3`、`opus`、`aac`、`flac`、`wav` 和 `pcm`；预览接口先在内存中完成生成与编码，
 因此后端或编码失败时仍能返回统一错误 envelope。未绑定 `voice_design` 的档位（`fast`、`quality`）
-或快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
+或设计快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 
@@ -702,9 +728,36 @@ seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不
 机器模式必须使用不同于参考文本的 `test_text`（省略时服务选择受控文本），并由目标
 Base 角色重新合成、质检、转写且绑定 runtime identity。机器数值不会把
 identity/naturalness 标为通过。人工模式在机器通过后通过 `human_review` 附加实际听审结论；
-不能由自动指标代替。
+不能由自动指标代替。人工复核必须把 `human_review.validation_id` 绑定到刚刚试听的机器复验；
+只提交与当前 candidate revision 匹配的验证 ID，不能把另一轮输出的听审结果挪用过来。
 
-### 4. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
+### 4. 读取候选试听音频
+
+客户端分别使用以下只读资源播放服务端已保存的音频：
+
+| 用途 | 请求路径 | 返回内容 |
+|---|---|---|
+| 复核参考音频 | `GET /v1/voice-designs/{candidate_id}/audio` | 当前 candidate revision 的 reference WAV |
+| 复核机器输出 | `GET /v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 指定 validation 生成的原始 Base WAV |
+
+两个请求都必须携带当前 candidate DTO 中的 `revision`，不得省略或从旧缓存取值：
+
+```http
+GET /v1/voice-designs/vd_0123456789abcdef01234567/validations/vv_0123456789abcdef01234567/audio
+SpeechRail-Expected-Candidate-Revision: vr_0123456789abcdef0123456789abcdef
+```
+
+成功响应为 `audio/wav`，并带 `Cache-Control: no-store`。validation 音频是该 validation
+实际产出的文件；GET 只读取和校验已保存资产，不重新运行模型。缺少 revision header 返回
+`428 expected_candidate_revision_required`；candidate revision 已变化返回
+`409 voice_design_revision_conflict`；candidate 或 validation 不存在返回相应 `404`；
+已取消/失效 candidate 返回 `409 voice_design_candidate_unavailable`；音频缺失或与记录中的
+身份/hash 不匹配返回 `409 reference_audio_unavailable` 或
+`409 validation_audio_unavailable`。存储不可读返回 `503 voice_design_store_unavailable`。
+接口沿用常规 API 鉴权和错误 envelope，不暴露本机文件路径。历史 validation 没有对应 WAV
+时客户端应要求重新复验，不能用新合成结果冒充旧 validation。
+
+### 5. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
 
 只有当前 revision 同时具备完整机器通过和人工 identity/naturalness 通过时才能发布。
 201 响应包含已发布 `candidate` 与标准 `voice`（mode=clone、variant=base）；重复发布同一

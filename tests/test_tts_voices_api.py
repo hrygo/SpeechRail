@@ -223,11 +223,11 @@ def test_rest_speech_forwards_language_to_the_typed_synthesizer() -> None:
 
     response = client.post(
         "/v1/audio/speech",
+        headers={"SpeechRail-Language": "zh"},
         json={
             "model": "speechrail/qwen3-tts",
             "input": "你好",
             "voice": "warm",
-            "language": "zh",
             "response_format": "pcm",
         },
     )

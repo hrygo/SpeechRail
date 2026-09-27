@@ -100,11 +100,11 @@ public extension CreativeWork {
     var durationText: String? {
         guard let durationSeconds else { return nil }
         let totalSeconds = max(0, Int(durationSeconds.rounded()))
-        // 稿的时长一律是**零填充的 mm:ss**：`main.js` 里七条作品行的
+        // 稿的时长一律是**零填充的 mm:ss**：七条作品行的
         // `dur` 是 00:12 / 01:47 / 00:26 / 03:18 / 00:48 / 00:09 / 02:31，
         // 结果条与候选卡也是 00:12；4x 帧 `▸ 我的作品.png` 逐行量到同一形状
         // （分钟两位、冒号、秒两位）。应用此前是 `m:ss`（"0:12"），
-        // 在 10 分钟以内与稿不同形（REDESIGN-SPEC §11.6 第四十一轮）。
+        // 在 10 分钟以内与稿不同形（REDESIGN-SPEC §11 第四十一轮）。
         return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 

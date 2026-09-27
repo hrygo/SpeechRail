@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-version: "3.3.0"
-date: 2026-09-26
+version: "3.4.0"
+date: 2026-09-27
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -11,7 +11,7 @@ date: 2026-09-26
 
 1. REST 文件转写使用仓库外 Qwen3-ASR worker；运行时明确设置离线环境变量。
 2. 默认 Apple Silicon profile 为 MPS / `float16`，worker 拒绝自动 CPU fallback。
-3. 未配置 profile 路径时不加载模型；ASR 仍由一个隔离 worker 持有。TTS 由 capability router 按角色管理：每个 `fast` / `quality` / `reference` spec 分别绑定 `custom_voice` 与 `base` worker，`reference` 另绑定仅用于设计任务的 `voice_design` worker；不同 capability lane 可双常驻、可并发，同一 worker 内串行，懒加载只决定首次加载时机，冷却后由 router 组级驱逐。WLK 只可连接外部已运行 endpoint。分人由一个按需启动的私有 Swift/CoreML worker 执行，
+3. 未配置 profile 路径时不加载模型；ASR 仍由一个隔离 worker 持有。TTS 由 capability router 按角色管理：每个 `fast` / `quality` / `reference` spec 分别绑定 `custom_voice` 与 `base` worker，另有不与档位绑定、仅用于设计任务的 `voice_design` worker；不同 capability lane 可双常驻、可并发，同一 worker 内串行，懒加载只决定首次加载时机，冷却后由 router 组级驱逐。WLK 只可连接外部已运行 endpoint。分人由一个按需启动的私有 Swift/CoreML worker 执行，
    固定 FluidAudio Sortformer FP16 bundle，不是 NeMo 或第三个 MLX worker。Sortformer 与
    aligner 不随规格继承；只有任务显式 opt-in 且两个制品都点名为就绪时，才供给到
    `app_home/diarization/<aligner-key>`。

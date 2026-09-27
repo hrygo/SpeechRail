@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGURATION="Distribution"
 EXPORT_OPTIONS=""
 EXPORT_PATH=""
+ARCHIVE_PATH=""
 
 while (($# > 0)); do
   case "$1" in
@@ -21,6 +22,11 @@ while (($# > 0)); do
     --export-path)
       [[ $# -ge 2 ]] || { echo "--export-path requires a value" >&2; exit 2; }
       EXPORT_PATH="$2"
+      shift 2
+      ;;
+    --archive-path)
+      [[ $# -ge 2 ]] || { echo "--archive-path requires a value" >&2; exit 2; }
+      ARCHIVE_PATH="$2"
       shift 2
       ;;
     *)
@@ -41,6 +47,9 @@ if [[ -z "${SPEECHRAIL_TEAM_ID:-}" ]]; then
 fi
 
 args=(--configuration "$CONFIGURATION" --archive)
+if [[ -n "$ARCHIVE_PATH" ]]; then
+  args+=(--archive-path "$ARCHIVE_PATH")
+fi
 if [[ -n "$EXPORT_OPTIONS" ]]; then
   [[ -n "$EXPORT_PATH" ]] || { echo "--export-path is required with --export-options" >&2; exit 2; }
   args+=(--export-options "$EXPORT_OPTIONS" --export-path "$EXPORT_PATH")

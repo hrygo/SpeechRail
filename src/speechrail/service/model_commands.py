@@ -115,7 +115,6 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
 
     artifacts.append(coreml_diarization_row(required_by=["diarization"]))
     return {
-        "schema_version": 2,
         "command": "model.catalog",
         "status": "ok",
         "artifacts": artifacts,
@@ -217,7 +216,6 @@ def model_status_payload(
         usage_root, model_store_root(resolved_home), disk_usage
     )
     return {
-        "schema_version": 1,
         "command": "model.status",
         "status": "ok",
         "artifacts": [
