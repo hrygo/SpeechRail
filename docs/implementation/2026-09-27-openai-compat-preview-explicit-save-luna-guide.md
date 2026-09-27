@@ -45,12 +45,28 @@ runtime_validation: not_run
 已执行的验证（2026-09-27）：
 
 - `uv run --extra dev ruff check src tests` — 通过。
-- `uv run --extra dev pytest tests/ --no-cov` — 全量通过（`--no-cov` 仅用于定向/全量快速回归；仓库的 80% 覆盖率 gate 属于完整 gate，未在本次运行）。
+- `uv run --extra dev pytest tests/ --no-cov` — 全量通过（2507 项，`--co` 计数；`--no-cov` 仅用于定向/全量快速回归；仓库的 80% 覆盖率 gate 属于完整 gate，未在本次运行）。
 - `swift test --package-path macos/SpeechRailApp` — 275 XCTest + 145 swift-testing，0 失败。
 - `scripts/macos_app_build.sh --configuration Debug` — BUILD SUCCEEDED（覆盖 SPM 包外的 `CreatorSurfaceViews.swift` / `App.swift`；Debug 不安装、不改运行态）。
 - `uv run python scripts/check_version_consistency.py` — 通过（3.2.1）。
 
 **未执行**（需单独授权）：真机合成与人工听审、官方 SDK smoke、性能/质量基准、UI 自动化、Release 构建与安装、完整覆盖率 gate。
+
+### 验收结论（§8.1–8.4 确定性部分，2026-09-27）
+
+增量 1–4c 实现已全部合入本分支并推送。§8.1–§8.4 的可自动化行为均由确定性测试覆盖并通过：
+
+| 验收组 | 证据 | 结论 |
+|---|---|---|
+| §8.1 契约与协议 | `pytest tests/ --no-cov` 全量 2507 项通过：TTS 路由三旧字段/未知字段 400、`SpeechRail-Language` 三态、`SpeechRail-Validation-Policy` 缺省、`instructions` 上限、ASR 标准 `language` 不受影响 | pass |
+| §8.2 音色元数据 | 同上：9 音色 `preview.locale`、目录/详情/capability snapshot 三处 `preview` 一致、旧记录容错读取 | pass |
+| §8.3 App 试听 | `swift test` 275 XCTest + 145 swift-testing 全绿（含 U01–U04） | pass |
+| §8.4 显式保存 | 同上（含 W01–W04、保存幂等与 round-trip） | pass |
+| App 构建 | `scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED | pass |
+
+PR #99 OPEN / MERGEABLE，base `main`。`origin/main` 无领先提交（merge-base = `ee170d08`）；frontmatter `reviewed_ref` `3763eb01` 与当前 main HEAD 间无触及本次审阅范围文件的提交，已审阅内容未漂移。
+
+**结论边界**：以上仅覆盖可由确定性测试证明的行为。真机合成内容正确性与人工听审、官方 SDK 互操作、性能/质量、UI 自动化与 combined release（§8.5）均**未执行**，不据此声明质量、性能或长时稳定性通过。
 
 ### 破坏性变更提示
 
@@ -973,76 +989,76 @@ scripts/macos_app_verify_single_install.sh "$HOME/Applications/SpeechRail.app"
 
 ## 前置
 
-- [ ] 确认分支 `codex/app-service-integration`、PR #99 OPEN、工作区状态
-- [ ] 确认并行提交 `89f54185`（`AppModel.swift`、`CreatorSurfaceViews.swift`）仍在，未被覆盖
-- [ ] 确认 `reviewed_ref` 未漂移；漂移则先核实差异再继续
+- [x] 确认分支 `codex/app-service-integration`、PR #99 OPEN、工作区状态
+- [x] 确认并行提交 `89f54185`（`AppModel.swift`、`CreatorSurfaceViews.swift`）仍在，未被覆盖
+- [x] 确认 `reviewed_ref` 未漂移；漂移则先核实差异再继续
 
 ## 增量 1 — 服务端试听元数据（已完成 `47d19cb4`）
 
-- [ ] 新增 `src/speechrail/domain/voice_preview.py`（模板表 + `preview_for_profile`）
-- [ ] `VoiceProfile` 加 `preview_locale` 字段（末尾，默认 `None`）
-- [ ] `SYSTEM_VOICE_PROFILES` 9 个音色填 `preview_locale`（zh×5 / en×2 / ja / ko）
-- [ ] `to_dict()` 条件写入 `preview_locale`；`_profile_from_record` 容错读取
-- [ ] `system.py::_voice_entry` 加 `preview`；`_safe_voice_entry` 的 `safe_fields` 加 `preview`
-- [ ] `capability_snapshot.py::_voice_entry` 加 `preview`（同一函数）
-- [ ] `contracts/openapi.yaml` 音色条目加 `preview` schema
-- [ ] 测试：9 音色 locale、目录与快照一致、旧记录可读
-- [ ] `ruff check` + 定向 `pytest` 通过
-- [ ] 提交并推送到 PR #99
+- [x] 新增 `src/speechrail/domain/voice_preview.py`（模板表 + `preview_for_profile`）
+- [x] `VoiceProfile` 加 `preview_locale` 字段（末尾，默认 `None`）
+- [x] `SYSTEM_VOICE_PROFILES` 9 个音色填 `preview_locale`（zh×5 / en×2 / ja / ko）
+- [x] `to_dict()` 条件写入 `preview_locale`；`_profile_from_record` 容错读取
+- [x] `system.py::_voice_entry` 加 `preview`；`_safe_voice_entry` 的 `safe_fields` 加 `preview`
+- [x] `capability_snapshot.py::_voice_entry` 加 `preview`（同一函数）
+- [x] `contracts/openapi.yaml` 音色条目加 `preview` schema
+- [x] 测试：9 音色 locale、目录与快照一致、旧记录可读
+- [x] `ruff check` + 定向 `pytest` 通过
+- [x] 提交并推送到 PR #99
 
 ## 增量 2 — TTS HTTP 边界（已完成 `bc7e8a68`）
 
-- [ ] 契约先行：`SpeechRequest` 删三字段、加 `additionalProperties: false`、`instructions` 改 4096
-- [ ] 契约先行：新增 `SpeechRail-Language`、`SpeechRail-Validation-Policy` 两个头参数
-- [ ] `_SpeechHTTPBody` 加 `extra="forbid"` + `model_validator(mode="before")` 拒绝旧字段
-- [ ] 删除 `normalize_language` 校验器
-- [ ] `speech()` 签名加两个 `Header(...)`；归一化为 `effective_language` / `effective_validation_policy`
-- [ ] 替换全部 `body.language` / `body.validation_policy` 引用
-- [ ] **不**加“否则取音色推荐语言”分支
-- [ ] 错误映射到 400 + 公共 envelope，`param` 指向旧字段；只改 TTS 路由
-- [ ] `rg` 全量核查调用方迁移；ASR / VoiceDesign / 内部 domain 保持不动
-- [ ] 测试：零扩展合成、三旧字段、未知字段、语言头三态、policy 头、instructions 上限
-- [ ] `test_openapi_contract.py` 同步
-- [ ] ASR 测试保持全绿
-- [ ] `ruff check` + 定向 `pytest` 通过
-- [ ] 提交并推送到 PR #99
+- [x] 契约先行：`SpeechRequest` 删三字段、加 `additionalProperties: false`、`instructions` 改 4096
+- [x] 契约先行：新增 `SpeechRail-Language`、`SpeechRail-Validation-Policy` 两个头参数
+- [x] `_SpeechHTTPBody` 加 `extra="forbid"` + `model_validator(mode="before")` 拒绝旧字段
+- [x] 删除 `normalize_language` 校验器
+- [x] `speech()` 签名加两个 `Header(...)`；归一化为 `effective_language` / `effective_validation_policy`
+- [x] 替换全部 `body.language` / `body.validation_policy` 引用
+- [x] **不**加“否则取音色推荐语言”分支
+- [x] 错误映射到 400 + 公共 envelope，`param` 指向旧字段；只改 TTS 路由
+- [x] `rg` 全量核查调用方迁移；ASR / VoiceDesign / 内部 domain 保持不动
+- [x] 测试：零扩展合成、三旧字段、未知字段、语言头三态、policy 头、instructions 上限
+- [x] `test_openapi_contract.py` 同步
+- [x] ASR 测试保持全绿
+- [x] `ruff check` + 定向 `pytest` 通过
+- [x] 提交并推送到 PR #99
 
 ## 增量 3 — Swift 协议层（已完成 `22c09a65`）
 
-- [ ] `SpeechRequest` 删 `language`（属性 / init / CodingKeys）
-- [ ] `SpeechRailRequestOptions` 加 `languageOverride` / `validationPolicy`（参数追加在末尾）+ `headers`
-- [ ] `createSpeech` 删 `language` 参数与 `language ?? "auto"`
-- [ ] `createSpeechRender` 删 `language`，**并补齐手工重建 options 的两个新字段**
-- [ ] `rg` 复核所有 `SpeechRailRequestOptions(` 重建点
-- [ ] 编译错误驱动修复所有调用点（不做全文替换）
-- [ ] `ServiceContractTests` 覆盖编码快照与 headers
-- [ ] `swift test --filter ServiceContractTests` 通过
-- [ ] 提交并推送到 PR #99
+- [x] `SpeechRequest` 删 `language`（属性 / init / CodingKeys）
+- [x] `SpeechRailRequestOptions` 加 `languageOverride` / `validationPolicy`（参数追加在末尾）+ `headers`
+- [x] `createSpeech` 删 `language` 参数与 `language ?? "auto"`
+- [x] `createSpeechRender` 删 `language`，**并补齐手工重建 options 的两个新字段**
+- [x] `rg` 复核所有 `SpeechRailRequestOptions(` 重建点
+- [x] 编译错误驱动修复所有调用点（不做全文替换）
+- [x] `ServiceContractTests` 覆盖编码快照与 headers
+- [x] `swift test --filter ServiceContractTests` 通过
+- [x] 提交并推送到 PR #99
 
 ## 增量 4 — App 试听闭环与显式保存（4a/4b/4c 已完成 `7b5552e6`/`3986fe2b`/`8294fd09`）
 
-- [ ] 新增 `VoicePreviewTextOrigin` / `VoicePreviewDraft` / `VoicePreviewRequest` / `VoicePreviewRequestBuilder`
-- [ ] `AppModel` 消费服务端 `preview`；`defaultPreviewText` 降级为缺失时的界面回退
-- [ ] 两个试听入口都走 builder；`DubbingDeskView` 保持 `startVoicePreview(voice)`
-- [ ] 缓存键改为 `VoicePreviewCacheKey`（含版本维度）
-- [ ] 调整顺序：先查可用性/版本，后查缓存
-- [ ] 缓存只收成功解码的非空完整结果；设字节上限与淘汰
-- [ ] request token 隔离迟到回包（成功 / 失败 / defer 三处）
-- [ ] system / clone / candidate 三条音频路径不混淆
-- [ ] `PendingRender` 冻结身份；保存走稳定 workID 幂等键
-- [ ] 生成 / 播放 / 导出 / 切页 / 能力刷新均不写 `workStore`
-- [ ] 离开页面不静默丢弃已完成结果；保持既有存储格式
-- [ ] `AppModelTests` 覆盖 U01–U04、W01–W04
-- [ ] `CreativeWorkStoreTests` 覆盖幂等与 round-trip
-- [ ] `swift test --filter AppModelTests / CreativeWorkStoreTests` 通过
-- [ ] 提交并推送到 PR #99
+- [x] 新增 `VoicePreviewTextOrigin` / `VoicePreviewDraft` / `VoicePreviewRequest` / `VoicePreviewRequestBuilder`
+- [x] `AppModel` 消费服务端 `preview`；`defaultPreviewText` 降级为缺失时的界面回退
+- [x] 两个试听入口都走 builder；`DubbingDeskView` 保持 `startVoicePreview(voice)`
+- [x] 缓存键改为 `VoicePreviewCacheKey`（含版本维度）
+- [x] 调整顺序：先查可用性/版本，后查缓存
+- [x] 缓存只收成功解码的非空完整结果；设字节上限与淘汰
+- [x] request token 隔离迟到回包（成功 / 失败 / defer 三处）
+- [x] system / clone / candidate 三条音频路径不混淆
+- [x] `PendingRender` 冻结身份；保存走稳定 workID 幂等键
+- [x] 生成 / 播放 / 导出 / 切页 / 能力刷新均不写 `workStore`
+- [x] 离开页面不静默丢弃已完成结果；保持既有存储格式
+- [x] `AppModelTests` 覆盖 U01–U04、W01–W04
+- [x] `CreativeWorkStoreTests` 覆盖幂等与 round-trip
+- [x] `swift test --filter AppModelTests / CreativeWorkStoreTests` 通过
+- [x] 提交并推送到 PR #99
 
 ## 交付前
 
-- [ ] `git diff --check` 干净
-- [ ] `uv run python scripts/check_version_consistency.py` 通过
-- [ ] 记录所有 `not_run` 项（真机试听、SDK smoke、benchmark、UI 自动化、发布安装）
-- [ ] 报告中区分“契约声明”“当前实测”“历史记录”“推断”
+- [x] `git diff --check` 干净
+- [x] `uv run python scripts/check_version_consistency.py` 通过
+- [x] 记录所有 `not_run` 项（真机试听、SDK smoke、benchmark、UI 自动化、发布安装）
+- [x] 报告中区分“契约声明”“当前实测”“历史记录”“推断”
 
 ---
 
