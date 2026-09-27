@@ -20,8 +20,12 @@ from urllib.request import url2pathname
 
 from fastapi import UploadFile
 
+from speechrail.application.diarization import diarize_transcript
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.voice_validation_gate import validation_state_for_voice
+from speechrail.domain.alignment import AlignTextPort
+from speechrail.domain.diarization import DiarizationError
+from speechrail.domain.diarization.ports import StreamingActivityPort
 from speechrail.domain.job_request import JobParamsValidationError, validate_job_params
 from speechrail.domain.ports import (
     BatchTranscriber,
@@ -35,6 +39,10 @@ from speechrail.domain.tts_request import ValidationPolicy, normalize_tts_langua
 from speechrail.domain.voice_validation import (
     VoiceValidationArtifact,
     VoiceValidationStoreUnavailableError,
+)
+from speechrail.runtime.diarization_admission import (
+    DiarizationAdmission,
+    DiarizationAdmissionFullError,
 )
 from speechrail.runtime.job_artifacts import (
     RESULTS_SUBDIR,
@@ -68,6 +76,9 @@ class LocalFileJobProcessor:
         clone_model_catalog_revision: str | None = None,
         tts_capability_key: str | None = None,
         allowed_roots: Sequence[Path] | None = None,
+        diarization_engine: StreamingActivityPort | None = None,
+        text_aligner: AlignTextPort | None = None,
+        diarization_admission: DiarizationAdmission | None = None,
     ) -> None:
         if not spool_dir.is_absolute():
             raise ValueError("job spool directory must be absolute")
@@ -86,6 +97,9 @@ class LocalFileJobProcessor:
         self._clone_model_artifact = clone_model_artifact
         self._clone_model_catalog_revision = clone_model_catalog_revision
         self._tts_capability_key = tts_capability_key
+        self._diarization_engine = diarization_engine
+        self._text_aligner = text_aligner
+        self._diarization_admission = diarization_admission or DiarizationAdmission()
 
     def resource_key_for_job(self, job: JobRecord) -> str | None:
         """Return the TTS worker lane for a durable speech job when it is known."""
@@ -164,6 +178,23 @@ class LocalFileJobProcessor:
         except ValueError:
             raise JobProcessingError("job_input_invalid") from None
         result = await transcriber.transcribe(request)
+        if params.get("diarize") is True:
+            if self._diarization_engine is None or self._text_aligner is None:
+                raise JobProcessingError("diarization_not_available")
+            try:
+                async with self._diarization_admission.reserve():
+                    result = await diarize_transcript(
+                        activity_port=self._diarization_engine,
+                        aligner=self._text_aligner,
+                        audio=pcm,
+                        result=result,
+                        epoch=f"job-{job.id}",
+                        new_unit_id=lambda index: f"segment-{index}",
+                    )
+            except DiarizationAdmissionFullError:
+                raise JobProcessingError("backend_busy") from None
+            except DiarizationError as exc:
+                raise JobProcessingError(exc.code or "diarization_unresolved") from None
         payload = {
             "text": result.text,
             "language": result.language,

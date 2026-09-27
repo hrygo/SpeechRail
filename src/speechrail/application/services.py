@@ -761,6 +761,32 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     )
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
+    text_aligner = overrides.text_aligner
+    alignment_worker: Qwen3AlignmentWorker | None = None
+    if (
+        text_aligner is None
+        and settings.qwen3_aligner_model_dir is not None
+        and settings.qwen3_python is not None
+    ):
+        # Alignment is its own owner: it must never borrow ASR identity, ASR
+        # sessions, or ASR's mode gate.
+        alignment_worker = Qwen3AlignmentWorker(
+            Qwen3AlignmentConfig(
+                repository_root=_package_root(),
+                python_executable=settings.qwen3_python,
+                model_dir=settings.qwen3_aligner_model_dir,
+                device=settings.device,
+                dtype=resolve_backend_dtype(
+                    settings.qwen3_aligner_model_dir, settings.dtype
+                ),
+                cache_limit_mb=settings.mlx_cache_limit_mb,
+                memory_limit_mb=settings.mlx_memory_limit_mb,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+        )
+        text_aligner = FixedTextAligner(alignment_worker)
+
+    diarization_admission = DiarizationAdmission()
     job_active_tts = active_model_catalog(settings)
     job_clone_artifact = job_active_tts.tts_clone
     job_tts_spec = job_active_tts.tts_spec
@@ -787,6 +813,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                     if job_tts_spec is not None
                     else None
                 ),
+                diarization_engine=diarization_engine,
+                text_aligner=text_aligner,
+                diarization_admission=diarization_admission,
             )
         job_runner = JobRunner(
             repository=job_repository,
@@ -795,31 +824,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             deadline_seconds=settings.request_timeout_seconds,
             result_ttl_seconds=settings.job_result_ttl_seconds,
         )
-
-    text_aligner = overrides.text_aligner
-    alignment_worker: Qwen3AlignmentWorker | None = None
-    if (
-        text_aligner is None
-        and settings.qwen3_aligner_model_dir is not None
-        and settings.qwen3_python is not None
-    ):
-        # Alignment is its own owner: it must never borrow ASR identity, ASR
-        # sessions, or ASR's mode gate.
-        alignment_worker = Qwen3AlignmentWorker(
-            Qwen3AlignmentConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_python,
-                model_dir=settings.qwen3_aligner_model_dir,
-                device=settings.device,
-                dtype=resolve_backend_dtype(
-                    settings.qwen3_aligner_model_dir, settings.dtype
-                ),
-                cache_limit_mb=settings.mlx_cache_limit_mb,
-                memory_limit_mb=settings.mlx_memory_limit_mb,
-                timeout_seconds=settings.request_timeout_seconds,
-            )
-        )
-        text_aligner = FixedTextAligner(alignment_worker)
 
     render_receipts = RenderReceiptRegistry()
 
@@ -881,6 +885,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         governor=governor,
         lifecycle=lifecycle,
         text_aligner=text_aligner,
+        diarization_admission=diarization_admission,
         metrics=metrics,
         render_receipts=render_receipts,
         tts_streams=tts_streams,
