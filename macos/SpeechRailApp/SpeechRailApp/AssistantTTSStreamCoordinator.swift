@@ -105,6 +105,12 @@ final class AssistantTTSStreamCoordinator {
     private var pumpTask: Task<Void, Never>?
     private var pendingWait: PendingWait?
     private var prefetched: [WaitTarget: WaitResult] = [:]
+    /// 「发出去就不管」的异步工作的句柄。`invalidate()` 负责把它们收掉：
+    /// 没有句柄的 `Task { }` 一旦遇上不返回的依赖（挂死的网络取消、停不下的播放层）
+    /// 就会永远留在进程里，既回收不了内存也挡不住后续世代。
+    private var fireAndForgetTasks: [Task<Void, Never>] = []
+    /// `cancelServerBounded()` 里两个竞速任务的句柄，见该函数注释。
+    private var serverCancelTasks: [Task<Void, Never>] = []
 
     init(configuration: Configuration = .default) {
         self.configuration = configuration
@@ -211,6 +217,15 @@ final class AssistantTTSStreamCoordinator {
         ledger.invalidate()
         pumpTask?.cancel()
         pumpTask = nil
+        // 作废这一代时，已经发出去但还没收尾的活一并收掉，别让它们跨世代残留。
+        for task in fireAndForgetTasks {
+            task.cancel()
+        }
+        fireAndForgetTasks.removeAll()
+        for task in serverCancelTasks {
+            task.cancel()
+        }
+        serverCancelTasks.removeAll()
         releaseWaiters(.cancelled)
         prefetched.removeAll()
     }
@@ -421,7 +436,7 @@ final class AssistantTTSStreamCoordinator {
         let message = failure.errorDescription ?? "这一轮朗读失败了。"
         lastFailure = message
         let cancel = sendCancel
-        Task { @MainActor in try? await cancel() }
+        trackFireAndForget { try? await cancel() }
         report(.failed(message))
     }
 
@@ -447,23 +462,40 @@ final class AssistantTTSStreamCoordinator {
 
     private func stopPlaybackNow() {
         let stop = stopPlayback
-        Task { @MainActor in await stop() }
+        trackFireAndForget { await stop() }
+    }
+
+    /// 启动一个不阻塞调用方的异步工作，但**保留句柄**，好让 `invalidate()` 能收掉它。
+    private func trackFireAndForget(_ operation: @escaping @MainActor () async -> Void) {
+        fireAndForgetTasks.removeAll { $0.isCancelled }
+        fireAndForgetTasks.append(Task { @MainActor in await operation() })
     }
 
     /// 等后端确认取消，但**有上限**：后端不回话时不能把打断吊在这里。
     /// 超时只是不再等回执，本地静音与作废已经从 `invalidate()` 起生效。
     private func cancelServerBounded() async {
+        let send = sendCancel
+        let timeout = configuration.cancellationTimeout
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let latch = CompletionLatch(continuation)
-            Task { @MainActor in
-                try? await sendCancel()
-                latch.finish()
-            }
-            Task { @MainActor in
-                try? await Task.sleep(for: configuration.cancellationTimeout)
-                latch.finish()
-            }
+            serverCancelTasks = [
+                Task { @MainActor in
+                    try? await send()
+                    latch.finish()
+                },
+                Task { @MainActor in
+                    try? await Task.sleep(for: timeout)
+                    latch.finish()
+                },
+            ]
         }
+        // 闩只放行一次，所以两个竞速任务里**必定**还有一个没结束。这里立刻取消并清空
+        // 句柄：以前它们是无句柄的 `Task { }`，每次取消都会漏一个（后端不回话时那个
+        // 会一直挂到进程结束）。
+        for task in serverCancelTasks {
+            task.cancel()
+        }
+        serverCancelTasks.removeAll()
     }
 
     /// 只放行一次的等待闩：网络回执与超时谁先到都只 resume 一次。

@@ -9,6 +9,7 @@
 - 修复 macOS App 语音助手 / 会议 / 实时字幕一律连不上服务的问题：服务端 Realtime 传输层的事件 `sequence` 先自增再打戳, 首个 `session.created` 成了 `1`, 与契约 §5「sequence 从 0 连续递增」不符。App 的序列号校验按契约要求首个事件必须为 `0`, 于是把每个新连接都判成缺口并立即关闭, 表现为「语音服务事件顺序或身份无效」。服务端改为先打戳再自增, 恢复 0-based 连续编号。
 - `ManualTurnCollector` 的起始哨兵由 `0` 改为 `-1`。它的 `start_sequence` 表示**已消费**的最后一个序号, 下一个事件必须是 `start_sequence + 1`; 在 0-based wire 上「尚未消费任何事件」的默认值只能是 `-1`。此前该参考消费者与被测服务端一起停在 1-based, 使编号缺陷无法被测试发现。
 - 修复词级对齐在过期结果上抛异常：`dd041b35` 新增了 `record_alignment_event("fixed_text_stale")` 调用点, 却没把该标签登记进 `_ALIGNMENT_EVENTS` 有界集合, 记录函数因此抛 `ValueError`。抛出点位于**错误处理路径**, 于是本应按契约降级为 `speechrail.alignment.failed` 的情形变成异常, 日志留下 traceback 且对齐静默丢失。补齐标签登记, 并新增一条交叉守卫测试: 扫描全部 `record_alignment_event` 调用点, 任何未登记的标签都在测试期失败。
+- 修复助手朗读打断时泄漏后台任务：`cancelServerBounded()` 用两个无句柄的 `Task` 竞速「网络取消」与「超时」, 闩只放行一次, 因此**每次取消都必然漏掉一个任务**; 后端不回话时那个网络任务会一直挂到进程结束。`fail()` 与 `stopPlaybackNow()` 同样是发出去就不管的无句柄任务。三个位置改为保留句柄, 并由 `invalidate()` 统一取消, 与既有的 `pumpTask` 约定一致。
 
 ## [3.3.0] - 2026-09-27
 
