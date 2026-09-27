@@ -563,7 +563,7 @@ public final class AppModel {
         isAudioPlaying && voiceDesignPlaybackIdentity != nil
     }
     /// 当前音频的**真实**播放进度 0…1（`AVAudioPlayer.currentTime / duration`）。
-    /// 详情面板的波形用它表示「播到哪了」（REDESIGN-SPEC §11.6 第五十七轮）。
+    /// 详情面板的波形用它表示「播到哪了」（REDESIGN-SPEC §11 第五十七轮）。
     public private(set) var playbackProgress: Double = 0
     /// The effective snapshot is the only capability and revision source.
     public private(set) var effectiveCapabilities: EffectiveCapabilitySnapshot?
@@ -690,7 +690,7 @@ public final class AppModel {
     private var synthesisTask: Task<Void, Never>?
     /// 波形包络缓存（key = `voice:<id>` / `work:<id>`）。分辨率固定
     /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
-    /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11.6 第五十七轮）。
+    /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11 第五十七轮）。
     private var waveformEnvelopes: [String: [CGFloat]] = [:]
     /// 试听音频内存缓存，同音色试听即点即播，0 延迟。
     ///
@@ -739,7 +739,7 @@ public final class AppModel {
         )
     }
 
-    /// 槽位编号与 Figma `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
+    /// 槽位编号与稿 `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
     private static let voiceDesignCandidateSpecs: [(slot: String, seed: Int, title: String)] = [
         ("1", 101, "候选 1"),
         ("2", 202, "候选 2"),

@@ -23,7 +23,7 @@ date: 2026-09-27
 
 ### 1.1 档位与能力可用性
 
-三档规格（`fast` 轻快 / `quality` 品质 / `reference` 参考精度）共享同一套
+三档规格（`fast` 极速 / `quality` 品质 / `reference` 高精）共享同一套
 Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能力可用性**。识别与配音可分别选档
 （`asr_spec` / `tts_spec`），客户端应查运行时能力，不要假定所有能力在全部组合都存在：
 

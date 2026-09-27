@@ -12,19 +12,19 @@ final class ModelReadinessPresentationTests: XCTestCase {
     private let target = "品质"
     private let remaining = "尚需下载不超过 8.2 GiB"
 
-    private func present(
-        _ state: ModelReadinessState,
-        running: String? = "轻快"
-    ) -> ModelReadinessPresentation {
-        ModelReadinessPresenter.presentation(
-            state: state,
-            target: target,
-            running: running,
-            remainingDownloadText: remaining
-        )
-    }
+   private func present(
+       _ state: ModelReadinessState,
+        running: String? = "极速"
+   ) -> ModelReadinessPresentation {
+       ModelReadinessPresenter.presentation(
+           state: state,
+           target: target,
+           running: running,
+           remainingDownloadText: remaining
+       )
+   }
 
-    // MARK: - 逐个分支
+   // MARK: - 逐个分支
 
     func testCatalogUnreadableDoesNotClaimAnything() {
         let result = present(.catalogUnreadable)
@@ -79,11 +79,11 @@ final class ModelReadinessPresentationTests: XCTestCase {
         XCTAssertTrue(result.message.contains("还没读到服务当前运行的档位"))
     }
 
-    func testReadyToSwitchNamesTheRunningTierAndTheConsequence() {
-        let result = present(.readyToSwitch, running: "轻快")
-        XCTAssertEqual(result.tone, .attention)
-        XCTAssertTrue(result.message.contains("轻快"))
-        // 应用会重启服务并短暂不可用，这是不用点就知道的后果，必须写在按钮旁边。
+   func testReadyToSwitchNamesTheRunningTierAndTheConsequence() {
+        let result = present(.readyToSwitch, running: "极速")
+       XCTAssertEqual(result.tone, .attention)
+        XCTAssertTrue(result.message.contains("极速"))
+       // 应用会重启服务并短暂不可用，这是不用点就知道的后果，必须写在按钮旁边。
         XCTAssertTrue(result.message.contains("重启服务"))
     }
 

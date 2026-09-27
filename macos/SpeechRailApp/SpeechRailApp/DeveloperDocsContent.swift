@@ -22,7 +22,7 @@ struct DeveloperDocTopic: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let summary: String
-    /// SF Symbol；与 Figma 稿里 `DOC_TOPICS` 的 lucide 图标一一对应。
+    /// SF Symbol；与 设计稿里 `DOC_TOPICS` 的 lucide 图标一一对应。
     let systemImage: String
     let blocks: [Block]
 }
@@ -157,13 +157,13 @@ enum DeveloperDocsCatalog {
         DeveloperDocTopic(
             id: "profiles",
             title: "分档能力对照",
-            summary: "fast / quality / reference 三档，识别与配音分别选择",
+            summary: "极速 (fast) / 品质 (quality) / 高精 (reference) 三档，识别与配音分别选择",
             systemImage: "slider.horizontal.3",
             blocks: [
                 .bullets([
-                    "fast：ASR 0.6B、TTS 0.6B 的 8-bit 权重，aligner 用 aligner-q8；模型文件最小。",
-                    "quality：ASR 1.7B、TTS 1.7B 的 8-bit 权重，aligner 用 aligner-bf16；日常默认。",
-                    "reference：ASR 1.7B、TTS 1.7B 的 bf16 权重，aligner 用 aligner-bf16；设计模型快照就绪时声明 VoiceDesign。权重精度更高、占用更多内存。",
+                    "fast（极速）：ASR 0.6B、TTS 0.6B 的 8-bit 权重，aligner 用 aligner-q8；模型文件最小，毫秒级极低时延与低显存。",
+                    "quality（品质）：ASR 1.7B、TTS 1.7B 的 8-bit 权重，aligner 用 aligner-bf16；官方推荐日常主力，兼顾自然度与性能，支持声音克隆。",
+                    "reference（高精）：ASR 1.7B、TTS 1.7B 的 bf16 满血权重，aligner 用 aligner-bf16；录音室级高保真，设计模型快照就绪时声明 VoiceDesign。",
                     "分人（谁在说话）不再由档位单独决定：它按当前服务的对齐模型、CoreML 资产与任务开关计算；克隆与声音设计按 /v1/models 的 capabilities 决定展示。"
                 ]),
                 .paragraph(

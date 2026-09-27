@@ -285,7 +285,7 @@ public struct DeveloperDocsView: View {
                             )
                             .fill(SpeechRailDesignTokens.Surface.selectionTint)
                             // 底色块把行上的三处边距镜像回来：列内边距 12、首尾各 14、
-                            // 以及行距（稿 gap 2）的一半 1 —— 相邻两块因此隔 2pt。
+                            // 以及行距（稿 `gap 2）的一半 1 —— 相邻两块因此隔 2pt。
                             .padding(
                                 .horizontal,
                                 SpeechRailDesignTokens.DeveloperDocs.topicColumnHorizontalPadding
@@ -353,7 +353,7 @@ public struct DeveloperDocsView: View {
     /// 这一页与档位有关的说法都读自当前服务声明，所以胶囊必须是一句真话，而且要把
     /// **还没读到**和**读不到**分开：服务正常、快照还在路上时报警，等于把加载说成故障；
     /// 只有读取真的失败（或读完了却缺那一项）才该说未读取——「未读取」不是「不支持」，
-    /// 与 §11.6 第五十一轮、音色创作页 `checking` / `failed` 同一口径。
+    /// 与 §11 第五十一轮、音色创作页 `checking` / `failed` 同一口径。
     private enum ContentState {
         case verified
         case checking

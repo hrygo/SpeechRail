@@ -220,7 +220,7 @@ public struct ServiceOverviewView: View {
         }
     }
 
-    /// Figma `capabilities`：标题带一句话说明，下面是一条能力矩阵。名称与状态各占
+    /// 稿 `capabilities`：标题带一句话说明，下面是一条能力矩阵。名称与状态各占
     /// 固定列，说明从同一 x 起排；否则矩阵会退化成六行长短不齐的句子
     /// （REDESIGN-SPEC §7.5）。
     private var capabilitiesCard: some View {
@@ -239,8 +239,8 @@ public struct ServiceOverviewView: View {
         }
     }
 
-    /// Figma `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
-    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 Figma 稿在这一卡里
+    /// 稿 `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
+    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 设计稿在这一卡里
     /// 都只放四行事实（档位 / 端口 / 版本 / 已加载的模型）；配置档位、配置代次与
     /// 作业队列属于同一批技术事实，跟随开发者详情，而不是把这张卡撑成一张表。
     private var runtimeCard: some View {
@@ -283,13 +283,13 @@ public struct ServiceOverviewView: View {
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         // 稿的 `infoRow` 是 padY 10 + Body 行（19.5）= 40pt 带；应用的行高 16，
-        // 取 `sm`(12) 补回同一档带高（帧实测 39.5）。REDESIGN-SPEC §11.6 第二十一轮。
+        // 取 `sm`(12) 补回同一档带高（帧实测 39.5）。REDESIGN-SPEC §11 第二十一轮。
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label)，\(value)")
     }
 
-    /// Figma `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
+    /// 稿 `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
     /// 主机。主机名由诊断客户端给出，拿不到时如实退回端口。
     private var serviceAddressText: String {
         guard let port = model.service.port.map(String.init) else { return "未读取" }
@@ -505,7 +505,7 @@ public struct ServiceOverviewView: View {
         }
     }
 
-    /// Figma `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
+    /// 稿 `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
     /// 状态用胶囊承载，颜色、图标与文字三者都在，不靠颜色单独表达（§9）。
     private func capabilityRow(_ capability: ServiceCapability) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -606,7 +606,7 @@ public struct ServiceOverviewView: View {
             return "SpeechRail 健康状态已单独读取，但控制通道不可用。只读健康信息仍可查看，请打开诊断。"
         }
         if displayedHealth?.ready == true {
-            // Figma `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
+            // 稿 `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
             // 运行事实，已经在下面的「运行信息」卡里；在这句里重复一遍只会把唯一主动作推远。
             let port = model.service.port.map(String.init) ?? "未知"
             let ready = "本地语音服务正在 \(port) 端口运行；离线也有完整的识别与合成能力。"

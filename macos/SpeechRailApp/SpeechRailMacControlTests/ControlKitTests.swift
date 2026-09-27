@@ -678,7 +678,7 @@ final class ControlKitTests: XCTestCase {
         XCTAssertTrue(chart.summary?.contains("同时处理") == true)
         XCTAssertEqual(chart.xAxis.title, "时间")
         XCTAssertEqual(chart.yAxis?.title, "同时处理")
-        // 并发图与 Figma `lineChart` 一致地画两条序列：合计值不足以描述这张图。
+        // 并发图与稿 `lineChart` 一致地画两条序列：合计值不足以描述这张图。
         XCTAssertEqual(chart.series.map(\.name), ["实时语音会话", "单次请求"])
         XCTAssertEqual(chart.series.first?.dataPoints.count, 2)
     }

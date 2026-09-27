@@ -6,7 +6,7 @@ import AVFoundation
 /// 稿上的**固定高度数组**（`SpeechRailDesignTokens.Waveform.*`），播放时只叠一层整块
 /// 透明度呼吸——它知道「在播」，但既不知道「在响什么」，也不知道「播到哪了」。
 /// 这里补上第一条真实通道（幅度包络），第二条（播放进度）在
-/// `AudioPlaybackController.progress`（REDESIGN-SPEC §11.6 第五十七轮）。
+/// `AudioPlaybackController.progress`（REDESIGN-SPEC §11 第五十七轮）。
 ///
 /// 两个刻意的选择：
 /// - 取**峰值**而不是 RMS。波形图的通行读法就是逐窗峰值；RMS 会把语音的停顿拉成

@@ -104,7 +104,7 @@ public struct RuntimeUsageTotals: Equatable, Sendable {
 public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
     public let capturedAt: Date
     public let activeRequests: Int
-    /// Figma `lineChart` 画两条线：实时请求（实线）与批处理请求（虚线），
+    /// 稿 `lineChart` 画两条线：实时请求（实线）与批处理请求（虚线），
     /// 并发图因此必须保留分类计数，而不是只留一个合计值。
     public let realtimeActiveRequests: Int
     public let batchActiveRequests: Int

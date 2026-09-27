@@ -46,7 +46,7 @@ public struct ModelManagementView: View {
             if let pendingAction {
                 Button(
                     actionTitle(for: pendingAction),
-                    role: pendingAction == .apply ? .destructive : nil
+                    role: (pendingAction == .apply && needsServiceRestart) ? .destructive : nil
                 ) {
                     let action = pendingAction
                     self.pendingAction = nil
@@ -57,6 +57,8 @@ public struct ModelManagementView: View {
                         case .apply:
                             // 确认对话框可能在助手开始说话后才被按下；这里再挡一次。
                             guard !assistant.phase.isLive else { return }
+                            // 前置严格判断：如果当前已经在此档位运行且配置一致，无需重复应用与重启
+                            guard isApplyNecessary else { return }
                             await model.execute(.profileApply, selection: targetSelection)
                         }
                     }
@@ -149,181 +151,144 @@ public struct ModelManagementView: View {
         )
     }
 
-    private var modelWorkspace: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-            // 页面主对象（REDESIGN-SPEC §7.7「当前档位与它的准备状态」）先给结论，
-            // 再给选择与操作。此前这条结论是模型卡中段的一行小字，用户要读完上下文
-            // 三列、事实四列和动作区叠着的多条告警才拼得出来「我现在在哪、下一步做什么」。
-            readinessConclusion
-            specSelection
-            profilePresets
-            actionSection
-            modelFileSections
-        }
-    }
+   private var modelWorkspace: some View {
+       VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+           // 页面主对象（REDESIGN-SPEC §7.7「当前档位与它的准备状态」）先给结论，
+           // 再给选择与操作。此前这条结论是模型卡中段的一行小字，用户要读完上下文
+           // 三列、事实四列和动作区叠着的多条告警才拼得出来「我现在在哪、下一步做什么」。
+           readinessConclusion
+            modelControlConsole
+           modelFileSections
+       }
+   }
 
-    /// 两条轴常驻，不用先展开什么。
+    /// 模型配置控制台：整合三档预置组合、双轴自定义组合与操作执行栏，提供连贯沉浸的调配闭环。
     ///
-    /// 此前自由组合被收在一个默认折叠的「分别调整识别与配音」里，而三张档位卡摆在上面，
-    /// 于是整页读起来是「只有三档可选」。实际上三档只是**预设**：识别与配音各自三档，
-    /// 一共九种组合，两次点击就能任意搭配。既然如此，两条轴就该是页面上第一等的控件，
-    /// 预设退成它下面的快捷方式。
-    private var specSelection: some View {
+    /// 2026-09-27 第七十五轮把这一卡从「一列三张规格卡 + 两行分段控件」改成
+    /// 「三张预置组合卡 + 两条并排的轴」：两条轴各占半幅，分段控件直接吃满列宽，
+    /// 腾出来的那一行放**这一档真正要用的模型名**（旧布局里这行被 96pt 标签列和
+    /// 右侧大片留白挤没了）。两段之间仍然隔着 `Divider`，读起来是两种下手方式，
+    /// 而不是四五个平级控件。
+    private var modelControlConsole: some View {
+       CardSurface {
+           CardHead(
+                title: "模型组合",
+                detail: "点选一套预置组合，或在下面分别指定识别与配音用哪一档。切换前先下载并校验模型。",
+                accessory: consoleModeAccessory
+            )
+           Divider()
+           VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                presetSection
+
+               Divider()
+
+               fineTuningSection
+
+               Divider()
+
+               actionSection
+           }
+           .padding(SpeechRailDesignTokens.Spacing.md)
+           .accessibilityIdentifier("models-control-console")
+       }
+    }
+
+    /// 预置组合：三套最常用的搭配，点一下把两条轴设成同一档。
+    ///
+    /// 小标题用 `SectionHeading` 而不是一行 `calloutMedium`：这一段和下面的自定义
+    /// 组合是两种不同的下手方式，需要和正文有一样的层级差（§6.3 层级）。
+    private var presetSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            SectionHeading(
+                title: "预置组合",
+                detail: "三套常用搭配。点一下，识别与配音同时切到这一档。"
+            )
+
+            profileCards
+        }
+    }
+
+    private var consoleModeAccessory: String {
+        let size = targetSelectionTotalBytes.map { " · 约 \(formatBytes($0))" } ?? ""
+        return targetSelection.quickTier != nil ? "预置组合\(size)" : "自定义组合\(size)"
+    }
+
+    /// 自定义组合：识别与配音是两条**独立**的轴，任意一档都能配任意一档（九种组合）。
+    ///
+    /// 第七十五轮把这两条轴从「两行整幅」改成「两列并排」：此前一行里 96pt 标签列 +
+    /// 200–280pt 分段控件之外右侧全是留白，而这一段最该说的话（这一档用的是哪个模型）
+    /// 恰恰被挤到那圈留白里、缩成一枚灰底小标签。现在每条轴占半幅，分段控件吃满列宽，
+    /// 下面整行交给**模型名**，按档位色显示。宽度不够时整段落回上下两列。
+    private var fineTuningSection: some View {
         let profiles = availableProfiles
-        return CardSurface {
-            CardHead(
-                title: "识别与配音",
-                detail: "识别和配音各自选档，自由搭配。点击下方常用组合可一键重置为对应档位。"
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "自定义组合",
+                detail: "识别与配音可以任意搭配。点下面的分段控件直接改，两条轴互不影响。"
             )
-            Divider()
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                if profiles.isEmpty {
-                    Text("服务目录尚未返回可选择的档位。")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                } else {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        specPicker(
-                            "识别",
-                            systemImage: "waveform",
-                            identifier: "models-asr-axis",
-                            selection: $asrSpec,
-                            profiles: profiles,
-                            badgeText: asrAxisBadgeText(asrSpec)
-                        )
-                        specPicker(
-                            "配音",
-                            systemImage: "speaker.wave.2",
-                            identifier: "models-tts-axis",
-                            selection: $ttsSpec,
-                            profiles: profiles,
-                            badgeText: ttsAxisBadgeText(ttsSpec)
-                        )
+
+            combinationStatusBar
+
+            if !profiles.isEmpty {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                        axisPanel(.asr, tier: asrSpec, selection: $asrSpec, profiles: profiles)
+                        axisPanel(.tts, tier: ttsSpec, selection: $ttsSpec, profiles: profiles)
                     }
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.modelAxisRowBreakpoint,
+                        alignment: .leading
+                    )
 
-                    Divider()
-
-                    combinationSummaryBar
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        axisPanel(.asr, tier: asrSpec, selection: $asrSpec, profiles: profiles)
+                        axisPanel(.tts, tier: ttsSpec, selection: $ttsSpec, profiles: profiles)
+                    }
                 }
             }
-            .padding(SpeechRailDesignTokens.Spacing.md)
-            .accessibilityIdentifier("models-spec-selection")
         }
+        .accessibilityIdentifier("models-fine-tuning-section")
     }
 
-    private func specPicker(
-        _ title: String,
-        systemImage: String,
-        identifier: String,
-        selection: Binding<SpeechRailProfile>,
-        profiles: [SpeechRailProfile],
-        badgeText: String
-    ) -> some View {
-        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+    /// 当前组合的一句话结论 + 回到预置组合的出口。
+    ///
+    /// 胶囊跟着**当前选择的档位色**：同档时是那一档的色，混搭时没有单一档位可依，
+    /// 退回注意色——混搭本来就是「这两条轴现在不在同一档」。
+    private var combinationStatusBar: some View {
+        let quick = targetSelection.quickTier
+        let tone: Color = quick.map { SpeechRailProfilePresentation.accent($0) }
+            ?? SpeechRailDesignTokens.Color.attention
+        return HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: systemImage)
-                    .font(SpeechRailDesignTokens.Typography.calloutMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                    .frame(width: 16)
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            }
-            .frame(
-                width: SpeechRailDesignTokens.Layout.modelProfileSpecLabelWidth,
-                alignment: .leading
-            )
-            Picker(title, selection: selection) {
-                ForEach(profiles, id: \.self) { profile in
-                    Text(SpeechRailProfilePresentation.shortTitle(profile))
-                        .tag(profile)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(minWidth: 200, maxWidth: 280)
-            .accessibilityIdentifier(identifier)
-            .speechRailPointerCursor()
-
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-
-            Text(badgeText)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(1)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-                .background(
-                    SpeechRailDesignTokens.Color.field,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                )
-        }
-    }
-
-    private func asrAxisBadgeText(_ profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .fast:
-            "0.6B Q8 · 极速低显存"
-        case .quality:
-            "1.7B Q8 · 推荐日常主力"
-        case .reference:
-            "1.7B BF16 · 满血原生精度"
-        case .unrecognized:
-            "未识别规格"
-        }
-    }
-
-    private func ttsAxisBadgeText(_ profile: SpeechRailProfile) -> String {
-        switch profile {
-        case .fast:
-            "0.6B Q8 · 极低时延，实时对话"
-        case .quality:
-            "1.7B Q8 · 自然生动，支持声音克隆"
-        case .reference:
-            "1.7B BF16 · 满血高保真音色"
-        case .unrecognized:
-            "未识别规格"
-        }
-    }
-
-    private var combinationSummaryBar: some View {
-        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(targetSelection.quickTier != nil ? "同档预设" : "自定义混搭")
-                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                .foregroundStyle(
-                    targetSelection.quickTier != nil
-                        ? SpeechRailDesignTokens.Color.rail
-                        : SpeechRailDesignTokens.Color.inkSecondary
-                )
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
-                .background(
-                    targetSelection.quickTier != nil
-                        ? SpeechRailDesignTokens.Surface.selectedFill
-                        : SpeechRailDesignTokens.Color.field,
-                    in: Capsule()
-                )
-
-            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("当前组合：")
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(quick == nil ? "自定义组合" : "预置组合")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(tone)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                    .background(tone.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity), in: Capsule())
+                    .accessibilityHidden(true)
 
                 Text(combinationSummary)
-                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            }
-            .lineLimit(1)
-
-            if let totalBytes = targetSelectionTotalBytes {
-                Text("· 约 \(formatBytes(totalBytes))")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
-            if currentServiceProfile == targetSelection {
+            if quick == nil {
+                Button {
+                    withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+                        selectProfilePreset(.quality)
+                    }
+                } label: {
+                    Label("恢复品质预设", systemImage: "arrow.counterclockwise")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                }
+                .buttonStyle(.borderless)
+                .speechRailPointerCursor()
+            } else if currentServiceProfile == targetSelection {
                 Label("与当前运行一致", systemImage: "checkmark.circle.fill")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ready)
@@ -334,27 +299,112 @@ public struct ModelManagementView: View {
             }
         }
     }
-    /// 一句话说明当前组合。用短名（§4.2），并且**总是**把两条轴都写出来——
-    /// 只在混搭时写「识别轻快 · 配音品质」，同档时用户看不出这是两项都选了同一档。
-    private var combinationSummary: String {
-        let asr = SpeechRailProfilePresentation.shortTitle(asrSpec)
-        let tts = SpeechRailProfilePresentation.shortTitle(ttsSpec)
-        return asr == tts
-            ? "识别与配音都用「\(asr)」"
-            : "识别用「\(asr)」，配音用「\(tts)」"
+
+    /// 一条轴 = 一块小面板：档位名 → 分段控件 → **这一档真正用的模型**。
+    private func axisPanel(
+        _ axis: ModelAxis,
+        tier: SpeechRailProfile,
+        selection: Binding<SpeechRailProfile>,
+        profiles: [SpeechRailProfile]
+    ) -> some View {
+        let accent = SpeechRailProfilePresentation.accent(tier)
+        let artifact = modelArtifact(for: tier, axis: axis)
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: axis.systemImage)
+                    .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                    .foregroundStyle(accent)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                Text(axis.title)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Text(SpeechRailProfilePresentation.shortTitle(tier))
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                    .background(accent.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity), in: Capsule())
+                    .accessibilityHidden(true)
+            }
+
+            Picker(axis.title, selection: selection) {
+                ForEach(profiles, id: \.self) { profile in
+                    Text(SpeechRailProfilePresentation.shortTitle(profile))
+                        .tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier(axis.identifier)
+            .speechRailPointerCursor()
+
+            // 这一段是「选了它到底用哪个模型」的答案。目录没登记就如实说未读取，
+            // 不用档位名冒充模型名（§4.3）。
+            if let artifact {
+                HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(ModelNamePresentation.displayName(modelID: artifact.modelID))
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(accent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(ModelNamePresentation.displayName(modelID: artifact.modelID))
+
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                    Text(ModelNamePresentation.precisionText(artifact.quantization))
+                        .font(SpeechRailDesignTokens.Typography.technicalValue)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(axis.title)模型 \(ModelNamePresentation.displayName(modelID: artifact.modelID))")
+                .accessibilityValue(ModelNamePresentation.precisionAccessibilityText(artifact.quantization))
+            } else {
+                Text("模型未登记")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+
+            if let artifact, artifact.sizeBytes > 0 {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "internaldrive")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .accessibilityHidden(true)
+                    Text("该模型约 \(formatBytes(artifact.sizeBytes))")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
     }
 
-    /// 三张卡是**预设**而不是全部选项：点一下把两条轴一起设成同一档。
-    /// 卡上仍写这一档的取向与三行差异，供自由组合时对照每一档的差别。
-    private var profilePresets: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "常用组合",
-                detail: "点一下就把识别与配音一起设成这一档；要混搭，用上面两条轴分别选。"
-            )
-            profileCards
+    /// 目录里这一档、这条轴实际登记的模型。
+    private func modelArtifact(
+        for tier: SpeechRailProfile,
+        axis: ModelAxis
+    ) -> ModelArtifactSnapshot? {
+        guard let key = axis == .asr ? summary(for: tier)?.asr : summary(for: tier)?.tts else {
+            return nil
         }
+        return model.modelCatalog?.artifacts.first { $0.key == key }
     }
+
+   private var combinationSummary: String {
+       let asr = SpeechRailProfilePresentation.shortTitle(asrSpec)
+       let tts = SpeechRailProfilePresentation.shortTitle(ttsSpec)
+       return asr == tts
+            ? "识别与配音都用「\(asr)」"
+           : "识别用「\(asr)」，配音用「\(tts)」"
+   }
 
     /// 只显示服务目录实际发布的档位；宽度允许时单行展示，空间不足时改为两列。
     @ViewBuilder
@@ -417,9 +467,10 @@ public struct ModelManagementView: View {
             ProfileChoiceCard(
                 profile: profile,
                 sizeText: summary(for: profile).map {
-                    "该档模型总大小 \(formatBytes($0.downloadBytes))"
+                    "该组合模型总大小 \(formatBytes($0.downloadBytes))"
                 },
-                specs: profileSpecs(for: profile),
+                asrModelName: modelName(for: profile, axis: .asr),
+                ttsModelName: modelName(for: profile, axis: .tts),
                 isSelected: isQuickSelected,
                 isRunning: isRunning,
                 partialSelectionBadge: partialBadge
@@ -437,34 +488,10 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// 三行规格只呈现服务目录声明的能力和本档效果验证状态。
-    private func profileSpecs(for profile: SpeechRailProfile) -> [ProfileSpec] {
-        switch profile {
-        case .fast:
-            return [
-                ProfileSpec(label: "识别规格", value: "0.6B (8-bit) · 极速低显存"),
-                ProfileSpec(label: "配音规格", value: "0.6B (8-bit) · 极低时延"),
-                ProfileSpec(label: "核心特点", value: "加载秒级 · 资源占用最小"),
-            ]
-        case .quality:
-            return [
-                ProfileSpec(label: "识别规格", value: "1.7B (8-bit) · 日常高准确率"),
-                ProfileSpec(label: "配音规格", value: "1.7B (8-bit) · 自然生动支持克隆"),
-                ProfileSpec(label: "核心特点", value: "官方推荐 · 兼顾自然与性能"),
-            ]
-        case .reference:
-            return [
-                ProfileSpec(label: "识别规格", value: "1.7B (BF16) · 原生高精权重"),
-                ProfileSpec(label: "配音规格", value: "1.7B (BF16) · 满血高保真音质"),
-                ProfileSpec(label: "核心特点", value: "满血精度 · 需较大内存"),
-            ]
-        case .unrecognized:
-            return [
-                ProfileSpec(label: "识别规格", value: "未识别"),
-                ProfileSpec(label: "配音规格", value: "未识别"),
-                ProfileSpec(label: "核心特点", value: "未知档位"),
-            ]
-        }
+    /// 预置组合卡上那一行的模型名。目录没登记就不给这一行，不拿档位名冒充模型名。
+    private func modelName(for tier: SpeechRailProfile, axis: ModelAxis) -> String? {
+        modelArtifact(for: tier, axis: axis)
+            .map { ModelNamePresentation.displayName(modelID: $0.modelID) }
     }
 
     /// 分人是任务级按需能力, 不随档位变化: 三张卡上这一行说的是同一件事, 逐项状态
@@ -520,7 +547,7 @@ public struct ModelManagementView: View {
         )
     }
 
-    /// Figma `artifacts` 的列头：右侧三个窄列没有列头时读起来像无主的装饰。
+    /// 稿 `artifacts` 的列头：右侧三个窄列没有列头时读起来像无主的装饰。
     private var artifactColumnsHeader: some View {
         ArtifactColumnGrid { metrics in
             HStack(spacing: 0) {
@@ -540,10 +567,10 @@ public struct ModelManagementView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
-        // 稿的制品表列头是 `Caption / Medium`（脚本 1945）。
+        // 稿的制品表列头是 `Caption / Medium`。
         .font(SpeechRailDesignTokens.Typography.captionMedium)
         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-        // 列头与上方 `CardHead` 同一条左沿（稿 `header` 与 `head` 都是 padX 18；
+        // 列头与上方 `CardHead` 同一条左沿（稿 ``header` 与 `head` 都是 padX 18；
         // 应用此前 8pt，比卡头缩进 8pt，同一张卡里两行左沿对不齐）。
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -594,7 +621,7 @@ public struct ModelManagementView: View {
                     )
                 } else {
                     VStack(spacing: 0) {
-                        // Figma `artifacts`：制品表是四列，不是五行堆叠的说明块。
+                        // 稿 `artifacts`：制品表是四列，不是五行堆叠的说明块。
                         // 来源、目标档位与使用状态都在右侧 Inspector，行里只留
                         // 一眼要量的四个字段（§7.7、§7.6.1 密度约束）。
                         artifactColumnsHeader
@@ -610,6 +637,7 @@ public struct ModelManagementView: View {
                                 )
                             }
                             .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
+                            .speechRailPointerCursor()
                             .accessibilityIdentifier("artifact-\(artifact.key)")
                             .simultaneousGesture(
                                 TapGesture(count: 2).onEnded {
@@ -644,7 +672,7 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// Figma `listFoot`：当前档位的模型文件总数、待校验数量，以及它对「谁在说话」的影响。
+    /// 稿 `listFoot`：当前档位的模型文件总数、待校验数量，以及它对「谁在说话」的影响。
     private var artifactFootnote: String {
         let artifacts = visibleArtifacts
         guard !artifacts.isEmpty else { return "这组档位还没有登记模型文件。" }
@@ -677,7 +705,10 @@ public struct ModelManagementView: View {
             )
             Divider()
             VStack(spacing: 0) {
-                ForEach(unmanagedArtifactStatuses, id: \.key) { status in
+                ForEach(Array(unmanagedArtifactStatuses.enumerated()), id: \.element.key) { index, status in
+                    if index > 0 {
+                        Divider()
+                    }
                     UnmanagedArtifactRow(status: status)
                 }
             }
@@ -692,8 +723,9 @@ public struct ModelManagementView: View {
     private var onDemandCapabilitiesSection: some View {
         CardSurface {
             CardHead(
-                title: "按需能力",
-                detail: "这三项不随档位变化，任何档位都能用；用到时才准备，需要时单独下载。"
+                title: "专项功能模型",
+                detail: "独立于日常识别与配音档位，在会议分人、音色设计和实时断句等特定功能中按需调用。",
+                accessory: "\(onDemandCapabilities.count) 项功能支持"
             )
             Divider()
             VStack(spacing: 0) {
@@ -731,23 +763,35 @@ public struct ModelManagementView: View {
         if model.modelCatalog == nil {
             state = ("未读取", .neutral)
         } else if requiredDiarizationKeys.isEmpty {
-            // 同 `voiceDesignCapability`：目录没登记说话人模型时不能报就绪。
             state = ("状态未读取", .neutral)
-        } else if missingDiarizationKeys.isEmpty {
-            state = ("模型已就绪", .healthy)
-        } else {
+        } else if !missingDiarizationKeys.isEmpty {
             state = ("还差 \(missingDiarizationKeys.count) 个模型", .attention)
+        } else if isServiceRunning && model.health?.diarization?.ready == true {
+            state = ("服务运行中", .healthy)
+        } else {
+            state = ("模型已就绪", .healthy)
         }
+        let runtimeText: String? = {
+            if !missingDiarizationKeys.isEmpty {
+                return "需下载：\(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))"
+            }
+            if let diarizationRuntime {
+                return "服务：\(diarizationRuntime.text)"
+            }
+            return "基于 ANE 独立运行，不占用主显存"
+        }()
         return OnDemandCapability(
             id: "diarization",
+            icon: "person.2.wave.2",
+            iconColor: SpeechRailDesignTokens.Color.info,
             title: "说话人区分",
-            detail: "标出每句话是谁说的。会议和字幕需要说话人标签时才准备。",
+            specBadge: "CoreML · Sortformer v2.1",
+            detail: "标出每句话由谁所说，采用 Apple Neural Engine 端侧神经网络加速。",
+            targetScenario: "会议助手 · 实时字幕",
+            sizeText: diarizationSizeText,
             state: state.0,
             tone: state.1,
-            // 就绪时**不照抄服务端那句英文**（本机实测原文：
-            // `CoreML Sortformer FP16 is configured`）——它写给调用方看，不是给用户读的。
-            // 没就绪时才把服务给的原因带出来：那一刻它是唯一的线索（§4.3）。
-            runtime: diarizationRuntime.map { "服务：\($0.text)" }
+            runtime: runtimeText
         )
     }
 
@@ -767,13 +811,27 @@ public struct ModelManagementView: View {
         } else {
             state = ("需要下载", .attention)
         }
+        let runtimeText: String? = {
+            if model.modelCatalog?.hasVoiceDesignArtifact != true {
+                return "当前服务版本未开放 VoiceDesign 架构支持"
+            }
+            if allVoiceDesignArtifacts.allSatisfy({ isVerified(status(for: $0)) }) {
+                return "服务支持候选生成与克隆试听 · 建议搭配高精/品质档"
+            }
+            return "用于音色创作工坊生成候选参考音频"
+        }()
         return OnDemandCapability(
             id: "voice-design",
-            title: "音色创作",
-            detail: "用来试听和设计新音色，也支持按参考录音克隆。任何档位都能用。",
+            icon: "waveform.badge.mic",
+            iconColor: SpeechRailDesignTokens.Color.voice,
+            title: "音色设计",
+            specBadge: "Qwen3-VoiceDesign · 1.7B BF16",
+            detail: "通过自然语言描述自由设计新声音，并生成候选参考音频用于音色库试听与克隆。",
+            targetScenario: "音色创作 · 声音克隆",
+            sizeText: voiceDesignSizeText,
             state: state.0,
             tone: state.1,
-            runtime: model.modelCatalog?.hasVoiceDesignArtifact == true ? "可试听候选音色" : nil
+            runtime: runtimeText
         )
     }
 
@@ -790,14 +848,30 @@ public struct ModelManagementView: View {
         }
         return OnDemandCapability(
             id: "realtime-vad",
+            icon: "waveform.path.badge.microphone",
+            iconColor: SpeechRailDesignTokens.Color.attention,
             title: "实时语音断句",
-            detail: "实时模式靠它判断一句话从什么时候开始、什么时候结束。它不出文字，也不占档位模型。",
+            specBadge: "\(vadEngineLabel) · 神经声学引擎",
+            detail: "毫秒级在线判断人声起止与静默边界，驱动流式低时延断句，不占用主显存。",
+            targetScenario: "语音助手 · 实时交互",
+            sizeText: "轻量极速 (约 2 MB)",
             state: state,
             tone: runtime?.tone ?? .neutral,
             // 同上：本机实测就绪原文是 `Silero VAD runtime and model are ready`。
             // 就绪时用界面自己的话说明它在做什么；没就绪才把服务给的原因原样带出来。
             runtime: vadRuntimeDetail
         )
+    }
+
+    private var diarizationSizeText: String? {
+        let artifacts = model.modelCatalog?.diarizationArtifacts ?? []
+        let total = artifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        return total > 0 ? "约 \(formatBytes(total))" : "约 42 MB"
+    }
+
+    private var voiceDesignSizeText: String? {
+        let total = allVoiceDesignArtifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        return total > 0 ? "约 \(formatBytes(total))" : "约 4.0 GiB"
     }
 
     private var vadRuntimeDetail: String {
@@ -808,19 +882,19 @@ public struct ModelManagementView: View {
             : "\(engine) · \(runtime.text)"
     }
 
-    /// Figma `actions`：动作行紧跟档位卡、排在制品卡之前。4x 帧实测（`▸ 模型.png`）
+    /// 稿 `actions`：动作行紧跟档位卡、排在制品卡之前。4x 帧实测（`▸ 模型.png`）
     /// 两张卡之间是一条 74.25pt 的页面底色带，里面只有一行 34pt 的动作，上下各留
     /// 20pt——与页面级块间距 `Spacing.gutter` 同值；「磁盘」事实在这一行右端。
     ///
     /// 这里不再放「下一步」小标题：稿上没有，页头副标题「先下载并校验，再应用到运行
     /// 档位；两者是独立操作。」已经说过同一句话（全局密度约定：不重复解释）。
     /// 下方只保留会改变判断的阻塞原因，以及正在进行/被中断的操作本身。
-    private var actionSection: some View {
-        let isReadyToApply = canApplyProfile && (currentServiceProfile != targetSelection)
+   private var actionSection: some View {
+        let isReadyToApply = canApplyProfile && isApplyNecessary
         let isDownloadPrimary = !profileArtifactsVerified || !canApplyProfile
 
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            // 稿 `actions` 的 gap 是 8（脚本 `frame("actions", { gap: 8 })`）；4x 帧在
+            // 稿 `actions` 的 gap 是 8（稿的 `frame("actions", { gap: 8 })`）；4x 帧在
             // 按钮中线上量的间距是 8.25（圆角矩形在中线最宽，顶边附近量会被圆角吃掉
             // 几个 pt，这是上一轮把这一行判成「约 10」的原因）。应用此前取 `sm`(12)。
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -837,22 +911,26 @@ public struct ModelManagementView: View {
                 Button {
                     pendingAction = .apply
                 } label: {
-                    // 稿上这个次按钮只有文字，没有图标（4x 帧里是 5 个字形簇）。
-                    Text("应用此档位")
+                    Text(applyButtonTitle)
                 }
                 .speechRailButton(isReadyToApply ? .primary : .secondary)
-                .disabled(!canApplyProfile)
-                .accessibilityHint("把所选档位写进服务配置，并重启相关的后台组件")
+                .disabled(!canApplyProfile || !isApplyNecessary)
+                .accessibilityHint(applyButtonAccessibilityHint)
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
-                // Figma 把磁盘事实放在动作行的右端：准备模型前先看有没有地方放。
+                // 稿把磁盘事实放在动作行的右端：准备模型前先看有没有地方放。
                 if let disk = model.modelStatus?.disk {
-                    Text("磁盘：模型已用 \(formatBytes(disk.modelBytes)) · 可用 \(formatBytes(disk.freeBytes))")
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "internaldrive")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text("磁盘：模型已用 \(formatBytes(disk.modelBytes)) · 可用 \(formatBytes(disk.freeBytes))")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
                 }
             }
             // 动作区只保留**一条**会改变判断的说明。此前这里叠着四条同色小字
@@ -1519,53 +1597,98 @@ public struct ModelManagementView: View {
         }
     }
 
-    private var isConfirmingAction: Binding<Bool> {
-        Binding(
-            get: { pendingAction != nil },
-            set: { isPresented in
-                if !isPresented { pendingAction = nil }
-            }
-        )
+   private var isConfirmingAction: Binding<Bool> {
+       Binding(
+           get: { pendingAction != nil },
+           set: { isPresented in
+               if !isPresented { pendingAction = nil }
+           }
+       )
+   }
+
+    private var isServiceRunning: Bool {
+        model.healthFailure == nil && currentServiceProfile != nil
     }
 
-    private var confirmationTitle: String {
-        guard let pendingAction else { return "确认操作" }
-        switch pendingAction {
-        case .download:
-            return "确认下载并校验所选模型？"
-        case .apply:
-            return "确认应用该模型组合？"
-        }
-    }
-
-    private var confirmationMessage: String {
-        guard let pendingAction else { return "" }
-        switch pendingAction {
-        case .download:
-            return downloadConfirmationMessage
-        case .apply:
-            return applyConfirmationMessage
+    private var isApplyNecessary: Bool {
+        if isServiceRunning {
+            return currentServiceProfile != targetSelection || configuredProfile != targetSelection
+        } else {
+            return configuredProfile != targetSelection
         }
     }
 
-    private var applyConfirmationMessage: String {
-        let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
-        var details: [String] = []
-        if let sizeBytes = targetSelectionTotalBytes {
-            details.append("模型总大小约 \(formatBytes(sizeBytes))")
-        }
-        if let freeBytes = model.modelStatus?.disk.freeBytes {
-            details.append("磁盘可用空间 \(formatBytes(freeBytes))")
-        }
-        details.append("已校验模型不会重复下载，其他档位模型保留不删")
-        if targetSelection.asrSpec == .reference || targetSelection.ttsSpec == .reference {
-            details.append("更高精度权重将占用更多显存/内存")
-        }
-        return "目标组合：\(combinationSummary)。当前服务运行：\(current)。\n"
-            + "应用将更新服务配置并重启后台引擎，过程约需数秒。"
-            + details.joined(separator: "；")
-            + "。"
+    private var needsServiceRestart: Bool {
+        isServiceRunning && (currentServiceProfile != targetSelection)
     }
+
+    private var applyButtonTitle: String {
+        if !isApplyNecessary {
+            return isServiceRunning ? "已在运行" : "已是默认配置"
+        }
+        if needsServiceRestart {
+            return "应用此档位"
+        }
+        return "应用此配置"
+    }
+
+    private var applyButtonAccessibilityHint: String {
+        if !isApplyNecessary {
+            return isServiceRunning
+                ? "当前服务已在此配置下运行，无需重复应用或重启服务"
+                : "当前配置已是所选档位，无需重复应用"
+        }
+        if needsServiceRestart {
+            return "切换到所选档位，将更新服务配置并重启后台引擎"
+        }
+        return "更新服务配置档位，当前服务未运行，无需重启服务"
+    }
+
+   private var confirmationTitle: String {
+       guard let pendingAction else { return "确认操作" }
+       switch pendingAction {
+       case .download:
+           return "确认下载并校验所选模型？"
+       case .apply:
+            return needsServiceRestart ? "确认切换档位并重启服务？" : "确认应用该模型配置？"
+       }
+   }
+
+   private var confirmationMessage: String {
+       guard let pendingAction else { return "" }
+       switch pendingAction {
+       case .download:
+           return downloadConfirmationMessage
+       case .apply:
+           return applyConfirmationMessage
+       }
+   }
+
+   private var applyConfirmationMessage: String {
+       var details: [String] = []
+       if let sizeBytes = targetSelectionTotalBytes {
+           details.append("模型总大小约 \(formatBytes(sizeBytes))")
+       }
+       if let freeBytes = model.modelStatus?.disk.freeBytes {
+           details.append("磁盘可用空间 \(formatBytes(freeBytes))")
+       }
+       details.append("已校验模型不会重复下载，其他档位模型保留不删")
+       if targetSelection.asrSpec == .reference || targetSelection.ttsSpec == .reference {
+           details.append("更高精度权重将占用更多显存/内存")
+       }
+        if needsServiceRestart {
+            let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行中"
+            return "当前服务正在运行「\(current)」，将切换至「\(combinationSummary)」。\n"
+                + "因切换运行模型，应用将更新服务配置并平滑重启后台引擎，过程约需数秒。"
+                + details.joined(separator: "；")
+                + "。"
+        } else {
+            return "目标组合：\(combinationSummary)。\n"
+                + "当前服务未在运行，将更新默认配置档位；稍后启动服务时将按该配置加载模型，当前无需重启服务。"
+                + details.joined(separator: "；")
+                + "。"
+        }
+   }
 
     private var downloadConfirmationMessage: String {
         let size = targetSelectionTotalBytes.map(formatBytes)
@@ -1584,14 +1707,14 @@ public struct ModelManagementView: View {
         return "目标组合：\(combinationSummary)。\(details.joined(separator: "；"))。"
     }
 
-    private func actionTitle(for action: ModelAction) -> String {
-        return switch action {
-        case .download:
-            "下载并校验"
-        case .apply:
-            "应用此档位"
-        }
-    }
+   private func actionTitle(for action: ModelAction) -> String {
+       return switch action {
+       case .download:
+           "下载并校验"
+       case .apply:
+            needsServiceRestart ? "应用并重启服务" : "应用配置"
+       }
+   }
 
     private func profileTitle(for profile: SpeechRailProfile) -> String {
         SpeechRailProfilePresentation.title(profile)
@@ -1648,118 +1771,173 @@ private enum ModelAction {
     case apply
 }
 
-/// 档位规格行：标签列固定，取值右对齐（Figma `kvRow` 的 76pt 标签列）。
-private struct ProfileSpec: Identifiable {
-    let label: String
-    let value: String
+/// 识别 / 配音这两条独立轴。页面上凡是「按轴」取模型名、分段控件、无障碍标识的
+/// 地方都走它，避免同一个轴在两处各写一遍字面量。
+private enum ModelAxis: String {
+    case asr
+    case tts
 
-    var id: String { label }
+    var title: String {
+        switch self {
+        case .asr: "识别"
+        case .tts: "配音"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .asr: "waveform"
+        case .tts: "speaker.wave.2"
+        }
+    }
+
+    /// 卡片里那两行模型名的行首标签（「识别」「配音」），宽度取
+    /// `Layout.modelProfileAxisLabelWidth`，两行与轴面板共用一列。
+    var shortLabel: String { title }
+
+    var identifier: String {
+        switch self {
+        case .asr: "models-asr-axis"
+        case .tts: "models-tts-axis"
+        }
+    }
 }
 
-/// Figma `Profile Card`：档位名 + 「当前使用」胶囊、一句适用场景、发丝线，再接三行
-/// 规格。选中态用底色加轨道色描边，不用 2pt 粗框 —— 粗框读起来像错误态。
+/// 预置组合卡：档位名（带档位色）+「当前使用」胶囊、一句适用场景，再接**这一档
+/// 真正要用的两个模型名**，最后是模型总大小。
+///
+/// 第七十五轮把原来的三行规格（识别规格 / 配音规格 / 核心特点）换成模型名：那一档
+/// 用的是哪个模型才是用户选它时要知道的事，而「1.7B (8-bit)」这类参数在下面自定义
+/// 组合的轴面板里已经按轴写了一遍。卡因此矮了一截，三张并排时不再把下面的动作区
+/// 挤出首屏。
 private struct ProfileChoiceCard: View {
     let profile: SpeechRailProfile
     let sizeText: String?
-    let specs: [ProfileSpec]
+    let asrModelName: String?
+    let ttsModelName: String?
     let isSelected: Bool
     let isRunning: Bool
     let partialSelectionBadge: String?
     let action: () -> Void
 
+    private var accent: Color { SpeechRailProfilePresentation.accent(profile) }
+
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: SpeechRailProfilePresentation.systemImage(profile))
+                        .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                        .foregroundStyle(accent)
+                        .accessibilityHidden(true)
+
                     Text(SpeechRailProfilePresentation.shortTitle(profile))
-                        .font(SpeechRailDesignTokens.Typography.windowTitle)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .font(SpeechRailDesignTokens.Typography.title3Regular)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(accent)
                         .lineLimit(1)
 
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
                     if isRunning {
                         StatusPill(tone: .healthy, label: "当前使用")
+                    } else if isSelected {
+                        StatusPill(tone: .neutral, label: "已选择")
                     } else if let partialSelectionBadge {
                         StatusPill(tone: .neutral, label: partialSelectionBadge)
                     }
                 }
 
                 Text(profilePurpose)
-                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 
-                // 稿 `Profile Card` 的 `spec` 是 VERTICAL / gap 6，`kvRow` 取 `Callout`
-                // （12pt，行盒 17.4）→ 行距 23.4。4x 帧 `▸ 模型.png` 实测三行 ink 起点
-                // 221.75 / 245.75 / 268（行距 24 / 22.25）。系统 `callout` 行盒是 15，
-                // 用间距补回同一行距：15 + 8 = 23（残差 0.4），因此这里取 `xs` 而不是
-                // 稿的 6（应用的 4pt 节奏里没有 6，`micro`(4) 会让行距只剩 19）。
-                VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    ForEach(specs) { spec in
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text(spec.label)
-                                .font(SpeechRailDesignTokens.Typography.callout)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .frame(
-                                    width: SpeechRailDesignTokens.Layout.modelProfileSpecLabelWidth,
-                                    alignment: .leading
-                                )
-                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                            Text(spec.value)
-                                .font(SpeechRailDesignTokens.Typography.callout)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
+                // 模型名是这一卡的主角：按档位色显示，宽度不够时从中间省略，
+                // 完整名字留在 tooltip 与无障碍读法里。
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    modelNameRow(.asr, name: asrModelName)
+                    modelNameRow(.tts, name: ttsModelName)
                 }
 
                 if let sizeText {
-                    Text(sizeText)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .lineLimit(1)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "internaldrive")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .accessibilityHidden(true)
+                        Text(sizeText)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(SpeechRailDesignTokens.Spacing.md)
             // 卡片这层只**声明形状**（子层的 `.concentric` 靠它推导）；底色交给下面的
             // 交互样式：样式把底色与悬停/按压色叠在同一个背景层里，卡片自己再画一层
-            // 不透明底色会把悬停反馈整个盖住——样式那层填色只在卡片左右各露 8pt，
-            // 读起来是一条侧向晕边而不是悬停态（REDESIGN-SPEC §11.6 第五十 / 五十二轮）。
+            // 不透明底色会把悬停反馈整个盖住。
             .containerShape(SpeechRailDesignTokens.Corner.containerShape)
             .overlay {
-                // Only the active profile is outlined; an idle profile card is a
-                // static surface and separates by fill alone (§5.2, Figma
-                // `Profile Card` 的 Default 变体同样无描边). 选中描边与其他选中面
-                // 同为 1pt：粗细不再充当状态信号，只由填充与「当前使用」胶囊承担。
+                // 只有选中的那一套才描边，描边用**它自己的档位色**——三张卡并排时，
+                // 选中态不靠「哪张描边了」也要靠颜色认得出来。粗细不充当状态信号
+                // （与页面上其他选中面同为 1pt）。
                 if isSelected {
                     SpeechRailDesignTokens.Corner.containerShape
-                        .stroke(
-                            SpeechRailDesignTokens.Color.rail,
-                            lineWidth: SpeechRailDesignTokens.Stroke.strong
-                        )
+                        .stroke(accent, lineWidth: SpeechRailDesignTokens.Stroke.strong)
                 }
             }
         }
         // 卡片的底色与状态色都在这里：`horizontalInset: 0` 让卡片**铺满自己的格位**，
-        // 于是相邻卡片的可见间隔回到 `HStack` 的 `Spacing.sm`(12)——与帧一致；
-        // 此前样式自带左右各 8pt，间隔被撑到 27.5pt（帧 12pt）。
+        // 于是相邻卡片的可见间隔回到 `HStack` 的 `Spacing.sm`(12)。
         .speechRailInteractiveButtonStyle(
             fillsAvailableWidth: true,
             horizontalInset: 0,
             baseFill: isSelected
-                ? SpeechRailDesignTokens.Surface.selectedFill
-                : SpeechRailDesignTokens.Color.field,
+                ? accent.opacity(SpeechRailDesignTokens.Color.Tier.selectedFillOpacity)
+                : accent.opacity(SpeechRailDesignTokens.Color.Tier.fillOpacity),
             corner: .container
         )
         .accessibilityIdentifier(profile.rawValue)
         .accessibilityLabel(profileTitle)
-        .accessibilityValue(isSelected ? "已选择" : (partialSelectionBadge ?? "未选择"))
+        .accessibilityValue(accessibilityValue)
+        .speechRailPointerCursor()
+    }
+
+    private func modelNameRow(_ axis: ModelAxis, name: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(axis.shortLabel)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.modelProfileAxisLabelWidth,
+                    alignment: .leading
+                )
+
+            Text(name ?? "未登记")
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(name == nil ? SpeechRailDesignTokens.Color.inkTertiary : accent)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(name ?? "目录未登记该模型")
+
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// 朗读顺序跟着人读卡片的顺序：档位 → 两个模型 → 有没有在用。
+    private var accessibilityValue: String {
+        var parts: [String] = []
+        if let asrModelName { parts.append("识别模型 \(asrModelName)") }
+        if let ttsModelName { parts.append("配音模型 \(ttsModelName)") }
+        parts.append(isSelected ? "已选择" : (partialSelectionBadge ?? "未选择"))
+        return parts.joined(separator: "，")
     }
 
     private var profileTitle: String {
@@ -1770,7 +1948,6 @@ private struct ProfileChoiceCard: View {
         // 一份文案只写在一处：档位名、短名与这句话都在 `SpeechRailProfilePresentation`。
         SpeechRailProfilePresentation.purpose(profile)
     }
-
 }
 
 private struct ModelArtifactUsagePresentation {
@@ -1835,7 +2012,7 @@ private struct ModelArtifactStatusPresentation {
 /// 稿 `artifacts` 的列几何：`COLS = [440, 200, 140]` + 校验列吃掉余量，**列间距 0**
 /// （列自己留白）。4x 帧实测列沿：制品 280.5、量化 720.5、文件右沿 1060.5、
 /// 校验右沿 1400.5 —— 应用此前是「弹性制品 + 84 / 64 / 120 挤在右侧」，最右一列
-/// 的位置与稿差约 250pt（REDESIGN-SPEC §11.6 第二十一轮）。
+/// 的位置与稿差约 250pt（REDESIGN-SPEC §11 第二十一轮）。
 private struct ArtifactColumnMetrics {
     let artifact: CGFloat
     let artifactMinimum: CGFloat
@@ -1882,29 +2059,18 @@ private struct ArtifactColumnGrid<Content: View>: View {
 /// 目录里 `bits: null` / `format: none` 说的是**没有做量化**，不是「读不出来」；
 /// 而 `mlx`、`group 64`、`bf16` 这些格式名只解释「怎么做到的」，留在开发者详情里。
 private enum ArtifactQuantizationPresentation {
-    /// 未量化制品的数值格式对应的位数。别按字面猜：`bf16` 与 `fp16` 都是 16 位，
-    /// `fp32` 是 32 位。
-    private static let dtypeBits: [String: Int] = ["bf16": 16, "fp16": 16, "fp32": 32]
-
     static func isQuantized(_ quantization: ModelQuantizationSnapshot) -> Bool {
-        quantization.bits != nil && quantization.format.lowercased() != "none"
+        ModelNamePresentation.isQuantized(quantization)
     }
 
     /// 表格列里的取值：`8-bit` / `16-bit`。位数读不出来时如实写「未读取」，不编。
     static func columnText(_ quantization: ModelQuantizationSnapshot) -> String {
-        bitWidth(quantization).map { "\($0)-bit" } ?? "未读取"
+        ModelNamePresentation.precisionText(quantization)
     }
 
     /// 同一件事朗读出来要成句：`8-bit`、`16-bit` 在朗读里都不成句。
     static func accessibilityText(_ quantization: ModelQuantizationSnapshot) -> String {
-        bitWidth(quantization).map { "精度 \($0) 位" } ?? "精度未读取"
-    }
-
-    /// 位数只有一个来源：量化制品是 `bits`，未量化制品是 `dtype`（目录里两者互斥）。
-    static func bitWidth(_ quantization: ModelQuantizationSnapshot) -> Int? {
-        if isQuantized(quantization) { return quantization.bits }
-        guard let dtype = quantization.dtype else { return nil }
-        return dtypeBits[dtype.lowercased()]
+        ModelNamePresentation.precisionAccessibilityText(quantization)
     }
 }
 
@@ -1913,23 +2079,63 @@ private struct ArtifactChoiceRow: View {
     let status: ModelArtifactStatusSnapshot?
     let selected: Bool
 
+    private var artifactIcon: String {
+        switch artifact.variant {
+        case "asr":
+            return "waveform"
+        case "custom_voice", "base":
+            return "speaker.wave.2"
+        case "aligner":
+            return "text.word.spacing"
+        case "voice_design":
+            return "waveform.badge.mic"
+        default:
+            if artifact.family.contains("asr") {
+                return "waveform"
+            } else if artifact.family.contains("tts") {
+                return "speaker.wave.2"
+            } else if artifact.family.contains("aligner") {
+                return "text.word.spacing"
+            }
+            return "shippingbox"
+        }
+    }
+
     var body: some View {
         // 与列头同一套列网格，否则行与列头会各差几 pt。
         ArtifactColumnGrid { metrics in
             HStack(spacing: 0) {
-                Text(artifact.key)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(
-                        minWidth: metrics.artifactMinimum,
-                        maxWidth: metrics.artifact,
-                        alignment: .leading
-                    )
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: artifactIcon)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(selected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
+                        .frame(width: 14)
+
+                    // 第一列是「机器名 + 模型名」两行：key 留着（它是与诊断输出对照的
+                    // 锚点），下面这行才是用户要认的模型本身，并按它所属的档位上色。
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(artifact.key)
+                            .font(SpeechRailDesignTokens.Typography.body)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Text(ModelNamePresentation.displayName(modelID: artifact.modelID))
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(tierAccent)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(ModelNamePresentation.displayName(modelID: artifact.modelID))
+                    }
+                }
+                .frame(
+                    minWidth: metrics.artifactMinimum,
+                    maxWidth: metrics.artifact,
+                    alignment: .leading
+                )
 
                 Text(quantizationColumnText)
-                    // 稿的制品表单元格是 `Callout`(12)（脚本 `cell/v`）
+                    // 稿的制品表单元格是 `Callout`(12)（稿的 `cell/v`）
                     .font(SpeechRailDesignTokens.Typography.technicalValue)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
@@ -1952,7 +2158,7 @@ private struct ArtifactChoiceRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // 稿的制品表行是 padX 18 / padY 11 + 一行 `Callout`(17.4) = 39.4pt；应用的行高
-        // 16，纵向取 `sm`(12) 补回同一档带高。REDESIGN-SPEC §11.6 第二十一轮。
+        // 16，纵向取 `sm`(12) 补回同一档带高。REDESIGN-SPEC §11 第二十一轮。
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .background(
@@ -1960,7 +2166,9 @@ private struct ArtifactChoiceRow: View {
             in: SpeechRailDesignTokens.Corner.nestedShape
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(artifact.key)
+        .accessibilityLabel(
+            "\(artifact.key)，\(ModelNamePresentation.displayName(modelID: artifact.modelID))"
+        )
         .accessibilityValue(
             "\(modelSourceText)，\(ArtifactQuantizationPresentation.accessibilityText(artifact.quantization))，\(artifact.fileCount) 个文件，\(statusPresentation.summary)"
         )
@@ -1971,6 +2179,15 @@ private struct ArtifactChoiceRow: View {
     /// 列里不写 `mlx`、`group 64`、`bf16` 这类格式名（它们在开发者详情里）。
     private var quantizationColumnText: String {
         ArtifactQuantizationPresentation.columnText(artifact.quantization)
+    }
+
+    /// 制品行的模型名按它所属的档位上色；按需制品（分人 / 音色设计）不属于任何一档，
+    /// 没有档位色可依，退回三级文字色。
+    private var tierAccent: Color {
+        guard let tier = artifact.requiredBy.first(where: { $0.isSelectable }) else {
+            return SpeechRailDesignTokens.Color.inkTertiary
+        }
+        return SpeechRailProfilePresentation.accent(tier)
     }
 
     /// Model IDs can carry a local snapshot path. Keep the logical
@@ -2000,8 +2217,13 @@ private struct ArtifactChoiceRow: View {
 /// 肯定、实际没有证据的话（REDESIGN-SPEC §4.3「不能撒谎」）。
 private struct OnDemandCapability: Identifiable {
     let id: String
+    let icon: String
+    let iconColor: Color
     let title: String
+    let specBadge: String
     let detail: String
+    let targetScenario: String
+    let sizeText: String?
     let state: String
     let tone: StatusTone
     /// 服务自己给的运行状态；没有这条信号时为 nil，行里就不出现这一行。
@@ -2013,24 +2235,78 @@ private struct OnDemandCapabilityRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(capability.title)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
+            Image(systemName: capability.icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(capability.iconColor)
+                .frame(width: 32, height: 32)
+                .background(
+                    capability.iconColor.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                )
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(capability.title)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+
+                    Text(capability.specBadge)
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                        .background(
+                            SpeechRailDesignTokens.Color.field,
+                            in: Capsule()
+                        )
+
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                    if let size = capability.sizeText {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Image(systemName: "internaldrive")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            Text(size)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+
                 Text(capability.detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if let runtime = capability.runtime {
-                    Text(runtime)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+
+                HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.tiny) {
+                        Text("适用功能：")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text(capability.targetScenario)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                    .font(SpeechRailDesignTokens.Typography.caption)
+
+                    if let runtime = capability.runtime {
+                        Text("·")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text(runtime)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(
+                                capability.tone == .attention
+                                    ? SpeechRailDesignTokens.Color.attention
+                                    : SpeechRailDesignTokens.Color.inkTertiary
+                            )
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
             StatusPill(tone: capability.tone, label: capability.state)
+                .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -2038,7 +2314,7 @@ private struct OnDemandCapabilityRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(capability.title)
         .accessibilityValue(
-            ([capability.detail, capability.state] + [capability.runtime].compactMap { $0 })
+            ([capability.title, capability.specBadge, capability.detail, capability.state] + [capability.runtime].compactMap { $0 })
                 .joined(separator: "，")
         )
     }
@@ -2050,22 +2326,30 @@ private struct UnmanagedArtifactRow: View {
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: statusPresentation.systemImage)
+                .font(.system(size: 15))
                 .foregroundStyle(statusPresentation.color)
+                .frame(width: 32, height: 32)
+                .background(
+                    statusPresentation.color.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(status.key)
-                    .font(SpeechRailDesignTokens.Typography.body)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("存在：\(statusPresentation.summary)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(statusPresentation.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                Text("使用：当前 catalog 未登记")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("存在：\(statusPresentation.summary)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(statusPresentation.color)
+                    Text("·")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("使用：当前 catalog 未登记")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

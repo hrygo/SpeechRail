@@ -585,7 +585,7 @@ public struct RuntimeMonitoringView: View {
         }
     }
 
-    /// Figma `workers`：标题带 + worker 表 + 说明带。「运行组件」在原实现里和
+    /// 稿 `workers`：标题带 + worker 表 + 说明带。「运行组件」在原实现里和
     /// 能力状态共用一张卡，矩阵与表叠在一起，看不出这是两组不同的数据。
     private func runtimeComponentsCard(compact: Bool) -> some View {
         CardSurface {
@@ -609,7 +609,7 @@ public struct RuntimeMonitoringView: View {
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             } else {
                 // 表体自己画，不用系统 `Table`：系统那张表的底色、隔行底纹与列分隔线
-                // 都不在 token 里，且它不透明地盖住卡面（§11.6 第六十八轮）。
+                // 都不在 token 里，且它不透明地盖住卡面（§11 第六十八轮）。
                 VStack(spacing: 0) {
                     if compact {
                         workerCompactHeader
@@ -769,7 +769,7 @@ public struct RuntimeMonitoringView: View {
         }
     }
 
-    /// Figma `workers` 的 `header`：`padX 18 / padY 9` 的一行 `Caption / Medium`，
+    /// 稿 `workers` 的 `header`：`padX 18 / padY 9` 的一行 `Caption / Medium`，
     /// 两列宽度是 `COLS = [380]` 加一列吸收余量。左沿取 `Spacing.md`，与同一张卡的
     /// `CardHead` 对齐；行高由内容给，不钉死（§9）。
     private var workerColumnsHeader: some View {
@@ -789,7 +789,7 @@ public struct RuntimeMonitoringView: View {
         .accessibilityHidden(true)
     }
 
-    /// Figma `workers` 的 `row`：组件名 `Callout` / `text/primary`，
+    /// 稿 `workers` 的 `row`：组件名 `Callout` / `text/primary`，
     /// 状态在第二列。状态仍带语义色与字形（§9「状态不只靠颜色表达」），比稿的
     /// 纯灰字多一层可读线索。
     ///
@@ -959,7 +959,7 @@ public struct RuntimeMonitoringView: View {
             Image(systemName: tone.systemImage)
                 // 与诊断检查行同一族（行首状态字形）：`.imageScale(.small)` 实测只有
                 // 10.0 × 10.0，比稿小一档；同页的能力行用 `.medium`（13.0）本来就不一致。
-                // 统一取 `Icon.rowStatusSize` = 13（REDESIGN-SPEC §11.6 第三十九轮）。
+                // 统一取 `Icon.rowStatusSize` = 13（REDESIGN-SPEC §11 第三十九轮）。
                 .font(SpeechRailDesignTokens.Typography.rowStatusIcon)
                 .foregroundStyle(tone.color)
                 .accessibilityHidden(true)
@@ -1033,7 +1033,7 @@ public struct RuntimeMonitoringView: View {
             }
             // 稿的卡片内边距是 18（`card()` 默认 `pad: 18`），应用统一取
             // `Layout.cardInset`(20) 这一档；这张卡此前是 16，比稿和应用自己的
-            // 卡片档都紧 2–4pt（REDESIGN-SPEC §5.6 / §11.6 第二十八轮）。
+            // 卡片档都紧 2–4pt（REDESIGN-SPEC §5.6 / §11 第二十八轮）。
             .padding(SpeechRailDesignTokens.Layout.cardInset)
         }
     }
@@ -1173,7 +1173,7 @@ public struct RuntimeMonitoringView: View {
         let asrLatencyCount = latencySamples.reduce(0) { $0 + ($1.asrSeconds == nil ? 0 : 1) }
         let ttsLatencyCount = latencySamples.reduce(0) { $0 + ($1.ttsSeconds == nil ? 0 : 1) }
         return Chart {
-            // Figma `lineChart` 的两条序列：会话式的实时请求与一次一句的请求。
+            // 稿 `lineChart` 的两条序列：会话式的实时请求与一次一句的请求。
             // 合计值仍在指标条与可访问性摘要里，图上看的是这两类各占多少。
             ForEach(samples) { sample in
                 AreaMark(
@@ -1658,7 +1658,7 @@ public struct RuntimeMonitoringView: View {
         }
     }
 
-    /// Figma `foot`：样本数与「上次读取多久前」是判断这些数字还新不新的唯一本机事实。
+    /// 稿 `foot`：样本数与「上次读取多久前」是判断这些数字还新不新的唯一本机事实。
     /// 说法从「采样窗口 60」改成人话——「窗口」是 Grafana 的读法，不是用户读法。
     private var sampleWindowNote: String {
         if let history {
@@ -1875,7 +1875,6 @@ public struct RuntimeMonitoringView: View {
 
     private var serviceIdentity: String {
         let profile = SpeechRailProfilePresentation.title(displayedHealth?.selection)
-            ?? "档位未读取"
         let version = displayedHealth?.version ?? "版本未读取"
         return profile + " · " + version
     }

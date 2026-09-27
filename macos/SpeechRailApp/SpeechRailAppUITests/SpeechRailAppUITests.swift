@@ -10,7 +10,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["服务状态"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["音色创作"].exists)
         XCTAssertTrue(app.buttons["运行监控"].exists)
-        XCTAssertTrue(app.buttons["模型"].exists)
+        XCTAssertTrue(app.buttons["模型组合"].exists)
         // 2026-09-19：落地页从「服务状态」改成「语音助手」，所以这一页要自己走过去。
         app.buttons["overview"].clickWhenReady()
         // 2026-09-19：这一行的文案从「本地控制通道已就绪」改成「可以在这里管理服务」——
@@ -24,13 +24,13 @@ final class SpeechRailAppUITests: XCTestCase {
             workspaceTitle.label.contains("音色创作"),
             "workspace-title label was: \(workspaceTitle.label)"
         )
-        // 头部契约（REDESIGN-SPEC §6.2 / §11.6 第四十九轮）：页面身份只在工具栏，
+        // 头部契约（REDESIGN-SPEC §6.2 / §11 第四十九轮）：页面身份只在工具栏，
         // 创作页没有「更多操作」这类通用动作容器；重新读取走 View ▸ ⌘R
         // （由页面声明的 `reloadPageCommand` 提供，菜单栏断言容易受系统语言影响，
         // 这里只钉住「头部不再有通用菜单」这一条）。
         XCTAssertFalse(app.menuButtons["更多操作"].exists)
 
-        app.buttons["模型"].clickWhenReady()
+        app.buttons["模型组合"].clickWhenReady()
         let modelsTitle = app.descendants(matching: .any)["workspace-title"]
         XCTAssertTrue(modelsTitle.waitForExistence(timeout: 5))
         XCTAssertTrue(
@@ -46,7 +46,7 @@ final class SpeechRailAppUITests: XCTestCase {
         let routeTitles = [
             "配音台", "音色创作", "音色克隆", "音色库", "我的作品",
             "语音助手", "会议助手", "实时字幕", "AI 提词器",
-            "服务状态", "运行监控", "模型", "诊断", "开发者文档"
+            "服务状态", "运行监控", "模型组合", "诊断", "开发者文档"
         ]
 
         for title in routeTitles {
@@ -87,7 +87,7 @@ final class SpeechRailAppUITests: XCTestCase {
             ("会议助手", "开始会议"),
             ("实时字幕", "开始字幕"),
             ("AI 提词器", "新建空白稿"),
-            ("模型", "下载并校验"),
+            ("模型组合", "下载并校验"),
             ("诊断", "查看检查明细"),
         ]
 
@@ -193,12 +193,12 @@ final class SpeechRailAppUITests: XCTestCase {
         let app = launchSpeechRail()
         openControlCenter(in: app)
 
-        // REDESIGN-SPEC §6.1 / §11.6 第四十九轮：侧边栏是「创作」「引擎」两组，
+        // REDESIGN-SPEC §6.1 / §11 第四十九轮：侧边栏是「创作」「引擎」两组，
         // 服务那条线整体改名为「引擎」（`AppRouteGroup.service.title`）。
         XCTAssertTrue(app.staticTexts["创作"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["引擎"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["服务状态"].exists)
-        XCTAssertTrue(app.buttons["模型"].exists)
+        XCTAssertTrue(app.buttons["模型组合"].exists)
         // 2026-09-19：落地页改成「语音助手」；这一页的断言要先自己切过来
         // （SESSIONS-SPEC §13 D15）。
         app.buttons["overview"].clickWhenReady()
@@ -212,8 +212,8 @@ final class SpeechRailAppUITests: XCTestCase {
         // REDESIGN-SPEC §7.5：服务状态页只有「结论 + 能力 + 运行信息」。
         XCTAssertFalse(app.staticTexts["预检"].exists)
 
-        app.buttons["模型"].clickWhenReady()
-        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型")
+        app.buttons["模型组合"].clickWhenReady()
+        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型组合")
     }
 
     func testDiagnosticsUsesCompactSummaryAndSelectedDetail() {
@@ -221,7 +221,7 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
         app.buttons["诊断"].clickWhenReady()
 
-        // REDESIGN-SPEC §7.8 / §11.6 第六十四轮：预检全通过时整页先退化成
+        // REDESIGN-SPEC §7.8 / §11 第六十四轮：预检全通过时整页先退化成
         // 「未发现问题」结论面板，两栏清单（结论 + 清单 + 详情）由主动作展开，
         // 展开可逆（清单头留「只看结论」）。UI 测试的 fixture 只有一项且通过，
         // 所以这里走的就是用户真实路径，而不是绕开结论直接断言清单。
@@ -238,7 +238,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testModelDownloadRequiresExplicitConfirmation() throws {
         let app = launchSpeechRail(windowSize: CGSize(width: 1280, height: 960))
         openControlCenter(in: app)
-        app.buttons["模型"].clickWhenReady()
+        app.buttons["模型组合"].clickWhenReady()
 
         let downloadButton = app.buttons["下载并校验"]
         XCTAssertTrue(downloadButton.waitForExistence(timeout: 20))
@@ -251,7 +251,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     /// 第七十三轮两轴重排的视觉验收：在两个代表宽度 × 浅/深色下把整窗渲染成 PNG
-    /// 落到临时目录供人工核验版式，并守住结构（两条独立的三档轴 + 「常用组合」预设）
+    /// 落到临时目录供人工核验版式，并守住结构（两条独立的三档轴 + 「预置组合」预设）
     /// 与两轴独立性（点配音轴后组合摘要应变成混搭句式）。
     func testModelsPageTwoAxisLayoutRendersAtBothWidthsAndAppearances() throws {
         let cases: [(width: Int, height: Int, style: String, tag: String)] = [
@@ -270,47 +270,47 @@ final class SpeechRailAppUITests: XCTestCase {
                 windowSize: CGSize(width: testCase.width, height: testCase.height)
             )
             openControlCenter(in: app)
-            app.buttons["模型"].clickWhenReady()
+            app.buttons["模型组合"].clickWhenReady()
 
             // 两条轴各自三档（fixture catalog 覆盖 fast / quality / reference）。
             let asrAxis = identifierElement("models-asr-axis", in: app)
             let ttsAxis = identifierElement("models-tts-axis", in: app)
-            XCTAssertTrue(asrAxis.waitForExistence(timeout: 20), "missing 识别 axis at \(testCase.tag)")
-            XCTAssertTrue(ttsAxis.waitForExistence(timeout: 20), "missing 配音 axis at \(testCase.tag)")
-            for tier in ["轻快", "品质", "参考"] {
-                XCTAssertTrue(
-                    asrAxis.buttons[tier].exists,
-                    "识别 axis missing tier \(tier) at \(testCase.tag)"
-                )
-                XCTAssertTrue(
-                    ttsAxis.buttons[tier].exists,
-                    "配音 axis missing tier \(tier) at \(testCase.tag)"
-                )
-            }
-            // 三档只是预设，标题是「常用组合」而不是「档位」。
-            XCTAssertTrue(app.staticTexts["常用组合"].exists, "missing 常用组合 at \(testCase.tag)")
-            // 默认同档（fixture profile quality/quality）。
-            XCTAssertTrue(
-                app.staticTexts["识别与配音都用「品质」"].waitForExistence(timeout: 20),
-                "missing default combination summary at \(testCase.tag)"
-            )
+           XCTAssertTrue(asrAxis.waitForExistence(timeout: 20), "missing 识别 axis at \(testCase.tag)")
+           XCTAssertTrue(ttsAxis.waitForExistence(timeout: 20), "missing 配音 axis at \(testCase.tag)")
+            for tier in ["极速", "品质", "高精"] {
+               XCTAssertTrue(
+                   asrAxis.buttons[tier].exists,
+                   "识别 axis missing tier \(tier) at \(testCase.tag)"
+               )
+               XCTAssertTrue(
+                   ttsAxis.buttons[tier].exists,
+                   "配音 axis missing tier \(tier) at \(testCase.tag)"
+               )
+           }
+           // 三档只是预设，标题是「预置组合」而不是「档位」。
+           XCTAssertTrue(app.staticTexts["预置组合"].exists, "missing 预置组合 at \(testCase.tag)")
+           // 默认同档（fixture profile quality/quality）。
+           XCTAssertTrue(
+               app.staticTexts["识别与配音都用「品质」"].waitForExistence(timeout: 20),
+               "missing default combination summary at \(testCase.tag)"
+           )
 
-            try skipUnlessWorkspacePaneFits(app)
-            // 首屏默认态整窗 PNG，供人工核验版式（宽/窄 × 浅/深色）。
-            let screenshot = XCUIScreen.main.screenshot().pngRepresentation
-            let url = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("models-acceptance-\(testCase.tag).png")
-            try screenshot.write(to: url)
-            print("MODELS_ACCEPTANCE_PNG \(url.path)")
+           try skipUnlessWorkspacePaneFits(app)
+           // 首屏默认态整窗 PNG，供人工核验版式（宽/窄 × 浅/深色）。
+           let screenshot = XCUIScreen.main.screenshot().pngRepresentation
+           let url = URL(fileURLWithPath: NSTemporaryDirectory())
+               .appendingPathComponent("models-acceptance-\(testCase.tag).png")
+           try screenshot.write(to: url)
+           print("MODELS_ACCEPTANCE_PNG \(url.path)")
 
-            // 两轴独立：点配音轴的「参考」，组合摘要应变成混搭句式。
-            let ttsReference = ttsAxis.buttons["参考"]
-            XCTAssertTrue(ttsReference.waitForExistence(timeout: 10), "missing 配音 参考 at \(testCase.tag)")
-            ttsReference.clickWhenReady()
-            XCTAssertTrue(
-                app.staticTexts["识别用「品质」，配音用「参考」"].waitForExistence(timeout: 10),
-                "axes are not independent at \(testCase.tag)"
-            )
+            // 两轴独立：点配音轴的「高精」，组合摘要应变成混搭句式。
+            let ttsReference = ttsAxis.buttons["高精"]
+            XCTAssertTrue(ttsReference.waitForExistence(timeout: 10), "missing 配音 高精 at \(testCase.tag)")
+           ttsReference.clickWhenReady()
+           XCTAssertTrue(
+                app.staticTexts["识别用「品质」，配音用「高精」"].waitForExistence(timeout: 10),
+               "axes are not independent at \(testCase.tag)"
+           )
 
             app.terminate()
         }
@@ -328,7 +328,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testModelRecoveryRestoresInterruptedOperationAndRetryAction() {
         let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-recovery"])
         openControlCenter(in: app)
-        app.buttons["模型"].clickWhenReady()
+        app.buttons["模型组合"].clickWhenReady()
 
         XCTAssertTrue(app.staticTexts["上次模型准备被中断"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新下载并校验"].exists)
@@ -340,10 +340,10 @@ final class SpeechRailAppUITests: XCTestCase {
             arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-unsupported"]
         )
         openControlCenter(in: app)
-        app.buttons["模型"].clickWhenReady()
+        app.buttons["模型组合"].clickWhenReady()
 
         XCTAssertTrue(app.staticTexts["模型管理暂不可用"].waitForExistence(timeout: 5))
-        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型")
+        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型组合")
         XCTAssertTrue(app.buttons["打开诊断"].exists)
     }
 

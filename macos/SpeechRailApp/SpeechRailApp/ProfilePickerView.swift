@@ -22,11 +22,34 @@ public struct ProfilePickerView: View {
             : .quick(quickTier)
     }
 
-    private var selectionSummary: String {
-        SpeechRailProfilePresentation.title(pendingSelection)
+   private var selectionSummary: String {
+       SpeechRailProfilePresentation.title(pendingSelection)
+   }
+
+    private var isServiceRunning: Bool {
+        model.healthFailure == nil && model.health?.selection != nil
     }
 
-    /// 为什么现在不能切：会话占用最先说，其次是别的操作在做。
+    private var isApplyNecessary: Bool {
+        if isServiceRunning {
+            return model.health?.selection != pendingSelection || model.profile?.selection != pendingSelection
+        } else {
+            return model.profile?.selection != pendingSelection
+        }
+    }
+
+    private var needsServiceRestart: Bool {
+        isServiceRunning && (model.health?.selection != pendingSelection)
+    }
+
+    private var applyButtonTitle: String {
+        if !isApplyNecessary {
+            return isServiceRunning ? "已在运行" : "已是默认配置"
+        }
+        return needsServiceRestart ? "应用档位" : "应用配置"
+    }
+
+   /// 为什么现在不能切：会话占用最先说，其次是别的操作在做。
     private var blockedReason: String? {
         if let reason = model.profileSwitchBlockedReason { return reason }
         if model.hasActiveMutation || model.isBusy { return "正在执行其他操作，完成后再切档。" }
@@ -67,8 +90,13 @@ public struct ProfilePickerView: View {
         if target.asrSpec == .reference || target.ttsSpec == .reference {
             details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
         }
-        details.append("切换会重启本地服务，正在进行的识别与朗读会先结束")
-        return "确认应用\(selectionSummary)？\(details.joined(separator: "；"))。"
+        if needsServiceRestart {
+            details.append("切换会平滑重启本地服务，正在进行的识别与朗读会先结束")
+        } else {
+            details.append("当前服务未在运行，将更新默认配置档位，当前无需重启服务")
+        }
+        return (needsServiceRestart ? "确认切换档位并重启服务？" : "确认应用\(selectionSummary)？")
+            + details.joined(separator: "；") + "。"
     }
 
     /// 把已提交（或正在应用）的选择回填到两套控件上。
@@ -119,35 +147,39 @@ public struct ProfilePickerView: View {
                     Text(SpeechRailProfilePresentation.title(quickTier))
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text(SpeechRailProfilePresentation.purpose(quickTier))
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    advancedSpecs
-                }
-                Button("应用档位") {
+                   Text(SpeechRailProfilePresentation.purpose(quickTier))
+                       .font(SpeechRailDesignTokens.Typography.secondary)
+                       .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                       .fixedSize(horizontal: false, vertical: true)
+                   advancedSpecs
+               }
+                Button(applyButtonTitle) {
                     isConfirmingProfileApply = true
                 }
                 .speechRailButton(.primary)
                 .disabled(
-                    blockedReason != nil
+                    !isApplyNecessary
+                        || blockedReason != nil
                         || !pendingSelection.isSelectable
                         || !availableProfiles.contains(pendingSelection.asrSpec)
                         || !availableProfiles.contains(pendingSelection.ttsSpec)
                 )
                 .confirmationDialog(
-                    profileConfirmationMessage,
+                    needsServiceRestart ? "确认切换档位并重启服务？" : "确认应用该模型配置？",
                     isPresented: $isConfirmingProfileApply,
                     titleVisibility: .visible
                 ) {
-                    Button("应用档位", role: .destructive) {
+                    Button(needsServiceRestart ? "应用并重启服务" : "应用配置", role: needsServiceRestart ? .destructive : nil) {
                         let target = pendingSelection
                         guard availableProfiles.contains(target.asrSpec),
                               availableProfiles.contains(target.ttsSpec)
                         else { return }
+                        guard isApplyNecessary else { return }
                         Task { await model.execute(.profileApply, selection: target) }
                     }
                     Button("取消", role: .cancel) {}
+                } message: {
+                    Text(profileConfirmationMessage)
                 }
                 if let reason = blockedReason {
                     Text(reason)

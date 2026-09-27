@@ -29,7 +29,7 @@ extension ServiceAPIClientError {
 
 public protocol ServiceDiagnosticsClient: Sendable {
     var port: Int? { get }
-    /// Figma `runtime` 的「服务端口」行写的是 `host:port`：只报端口时看不出这一行连的是
+    /// 稿 `runtime` 的「服务端口」行写的是 `host:port`：只报端口时看不出这一行连的是
     /// 哪台主机。默认实现返回 nil，既有实现不必都实现它。
     var connectionHost: String? { get }
 

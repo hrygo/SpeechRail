@@ -36,7 +36,7 @@ public struct WorkspaceTitleLockup: View {
             // 不随时长抖动，但内容居中会让短标题（十四个页面名都不超过 4 个字、
             // 整组约 62–80pt）在 280pt 里浮到中间，读起来像一块没有归属的
             // 文字。左对齐后图标固定落在详情列的左沿，与帧「标题贴窗口左沿」
-            // 的意图一致（REDESIGN-SPEC §6.2 / §11.6 第五十五轮）。
+            // 的意图一致（REDESIGN-SPEC §6.2 / §11 第五十五轮）。
             alignment: .leading
         )
         // Keep unusually long localized titles inside the fixed toolbar slot;
@@ -59,7 +59,7 @@ public struct WorkspaceTitleLockup: View {
 ///
 /// 页面身份是当前路由的纯函数，页面自己没有要额外携带的标题状态，所以在组合根声明
 /// 一次最省也最不容易漂移——当前路由共用同一个槽位、同一套几何（`Toolbar.Identity`）
-/// 与同一个无障碍标识（REDESIGN-SPEC §6.2 / §11.6 第四十九轮）。页面只声明自己的动作。
+/// 与同一个无障碍标识（REDESIGN-SPEC §6.2 / §11 第四十九轮）。页面只声明自己的动作。
 public struct PageIdentityToolbarItem: ToolbarContent {
     public let route: AppRoute
 
