@@ -1289,8 +1289,11 @@ async def create_job(
 
     ``input_ref`` reuses the same path/URI convention as ``audio_ref``.
     ``params`` is a kind-specific caller-supplied JSON object that the server
-    stores and echoes back on GET.  Speech jobs support the same validation
-    policy names as synchronous TTS.
+    stores and echoes back on GET.  A transcription job's ``diarize`` runs the
+    same alignment and anonymous speaker projection as synchronous
+    ``transcribe``; if the active profile cannot serve it the job fails with
+    ``diarization_not_available`` rather than returning undiarized text.
+    Speech jobs support the same validation policy names as synchronous TTS.
     """
     if kind not in _JOB_KINDS:
         raise ToolCallError(
