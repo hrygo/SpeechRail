@@ -1547,7 +1547,13 @@ public final class AppModel {
                 await loadVoiceDesignReferenceAudio(updated, generation: generation)
                 return
             }
-            guard current.knownState == .confirmed else {
+            // The service commits `validating` *before* it synthesizes, so a run
+            // that dies mid-flight (transport error, 502) leaves the candidate
+            // parked there. Re-issuing validation is the documented recovery and
+            // `resumeValidation` already accepts this state, so this gate has to
+            // agree with it — otherwise "重试这一步" is a dead end.
+            guard current.knownState == .confirmed || current.knownState == .validating
+            else {
                 failVoiceDesignPublication(
                     current.knownState == nil
                         ? "服务返回了未知候选状态；保留候选信息，不能继续复验。"

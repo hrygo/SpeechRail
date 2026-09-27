@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import time
 import uuid
 import wave
@@ -88,6 +89,8 @@ from speechrail.runtime.resource_governor import (
     WorkClass,
     WorkPurpose,
 )
+
+logger = logging.getLogger(__name__)
 
 _SAMPLE_RATE = 24_000
 _MAX_REFERENCE_PCM_BYTES = 30 * _SAMPLE_RATE * 2
@@ -833,6 +836,10 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except (TTSDeliveryError, OverflowError, ValueError):
+            logger.exception(
+                "voice design candidate generation produced invalid output",
+                extra={"speechrail": {"request_id": request_id}},
+            )
             return error_response(
                 502,
                 request_id,
@@ -1164,6 +1171,10 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except (OSError, ValueError, TTSDeliveryError):
+            logger.exception(
+                "voice design candidate confirmation failed",
+                extra={"speechrail": {"request_id": request_id}},
+            )
             return error_response(
                 422,
                 request_id,
@@ -1492,6 +1503,10 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 diagnostic_class=exc.diagnostic_class,
             )
         except (OSError, ValueError, TTSDeliveryError, OverflowError):
+            logger.exception(
+                "voice design Base validation produced invalid output",
+                extra={"speechrail": {"request_id": request_id}},
+            )
             return error_response(
                 502,
                 request_id,
@@ -1672,6 +1687,10 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except (OSError, ValueError):
+            logger.exception(
+                "voice design candidate publication failed",
+                extra={"speechrail": {"request_id": request_id}},
+            )
             return error_response(
                 422,
                 request_id,

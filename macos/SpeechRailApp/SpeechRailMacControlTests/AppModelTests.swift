@@ -411,6 +411,64 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(events.contains("validate"))
     }
 
+    func testRetryResumesValidationWhenCandidateIsParkedInValidating() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于验证复验重试的测试参考文案。",
+            status: .ready,
+            audioData: Data([0, 1, 2])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "复验重试")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        await creator.failNextValidationLeavingCandidateValidating()
+        model.confirmVoiceDesignReference()
+
+        // The service commits `validating` before it synthesizes, so a failure
+        // after that point strands the candidate there with no stored result.
+        await waitForVoiceDesignPhase(.failed, model: model)
+        XCTAssertEqual(
+            model.voiceDesignPublication.candidateID,
+            "vd_0123456789abcdef01234567"
+        )
+
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+
+        let events = await creator.events()
+        XCTAssertEqual(
+            events,
+            [
+                "create",
+                "candidate.get",
+                "reference.audio",
+                "confirm",
+                "candidate.get",
+                "validate",
+                "candidate.get",
+                "candidate.get",
+                "validate",
+                "candidate.get",
+                "validation.audio",
+            ]
+        )
+    }
+
     func testLatePublishedResultDoesNotOverwriteNewPublicationGeneration() async {
         let creator = VoiceDesignWorkflowCreatorClient()
         let model = makeModel(
@@ -854,6 +912,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
     private let validationID = "vv_0123456789abcdef01234567"
     private var shouldHoldNextPublication = false
     private var shouldFailNextCandidateCancel = false
+    private var shouldFailNextValidation = false
     private var heldPublication: CheckedContinuation<VoiceDesignPublishResult, Error>?
     private var heldPublicationResult: VoiceDesignPublishResult?
     private var nextCandidateState = "generated"
@@ -866,6 +925,12 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
 
     func failNextCandidateCancel() {
         shouldFailNextCandidateCancel = true
+    }
+
+    /// Mimic a Base validation that dies after the service already committed
+    /// `validating`: the candidate is parked there with no stored result.
+    func failNextValidationLeavingCandidateValidating() {
+        shouldFailNextValidation = true
     }
 
     func setNextCandidateState(_ state: String) {
@@ -999,6 +1064,23 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
         }
         guard let existingCandidate = currentCandidate else {
             throw ServiceAPIClientError.requestFailed
+        }
+        if shouldFailNextValidation, humanReview == nil {
+            shouldFailNextValidation = false
+            currentCandidate = makeCandidate(
+                voiceID: existingCandidate.targetVoiceID,
+                name: existingCandidate.name,
+                state: "validating",
+                validations: [],
+                publishable: false
+            )
+            throw ServiceAPIClientError.http(
+                statusCode: 502,
+                code: "output_invalid",
+                message: "Base validation output was invalid",
+                requestID: nil,
+                retryable: true
+            )
         }
         let validation = VoiceDesignValidation(
             validationID: validationID,
