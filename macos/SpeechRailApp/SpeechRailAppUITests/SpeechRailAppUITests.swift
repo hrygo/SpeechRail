@@ -250,6 +250,72 @@ final class SpeechRailAppUITests: XCTestCase {
         dialog.buttons["取消"].clickWhenReady()
     }
 
+    /// 第七十三轮两轴重排的视觉验收：在两个代表宽度 × 浅/深色下把整窗渲染成 PNG
+    /// 落到临时目录供人工核验版式，并守住结构（两条独立的三档轴 + 「常用组合」预设）
+    /// 与两轴独立性（点配音轴后组合摘要应变成混搭句式）。
+    func testModelsPageTwoAxisLayoutRendersAtBothWidthsAndAppearances() throws {
+        let cases: [(width: Int, height: Int, style: String, tag: String)] = [
+            (1120, 960, "Light", "1120-light"),
+            (1120, 960, "Dark", "1120-dark"),
+            (1440, 960, "Light", "1440-light"),
+            (1440, 960, "Dark", "1440-dark"),
+        ]
+        for testCase in cases {
+            let app = launchSpeechRail(
+                arguments: [
+                    "--ui-test",
+                    "--ui-test-open-control-center",
+                    "-AppleInterfaceStyle", testCase.style,
+                ],
+                windowSize: CGSize(width: testCase.width, height: testCase.height)
+            )
+            openControlCenter(in: app)
+            app.buttons["模型"].clickWhenReady()
+
+            // 两条轴各自三档（fixture catalog 覆盖 fast / quality / reference）。
+            let asrAxis = identifierElement("models-asr-axis", in: app)
+            let ttsAxis = identifierElement("models-tts-axis", in: app)
+            XCTAssertTrue(asrAxis.waitForExistence(timeout: 20), "missing 识别 axis at \(testCase.tag)")
+            XCTAssertTrue(ttsAxis.waitForExistence(timeout: 20), "missing 配音 axis at \(testCase.tag)")
+            for tier in ["轻快", "品质", "参考"] {
+                XCTAssertTrue(
+                    asrAxis.buttons[tier].exists,
+                    "识别 axis missing tier \(tier) at \(testCase.tag)"
+                )
+                XCTAssertTrue(
+                    ttsAxis.buttons[tier].exists,
+                    "配音 axis missing tier \(tier) at \(testCase.tag)"
+                )
+            }
+            // 三档只是预设，标题是「常用组合」而不是「档位」。
+            XCTAssertTrue(app.staticTexts["常用组合"].exists, "missing 常用组合 at \(testCase.tag)")
+            // 默认同档（fixture profile quality/quality）。
+            XCTAssertTrue(
+                app.staticTexts["识别与配音都用「品质」"].waitForExistence(timeout: 20),
+                "missing default combination summary at \(testCase.tag)"
+            )
+
+            try skipUnlessWorkspacePaneFits(app)
+            // 首屏默认态整窗 PNG，供人工核验版式（宽/窄 × 浅/深色）。
+            let screenshot = XCUIScreen.main.screenshot().pngRepresentation
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("models-acceptance-\(testCase.tag).png")
+            try screenshot.write(to: url)
+            print("MODELS_ACCEPTANCE_PNG \(url.path)")
+
+            // 两轴独立：点配音轴的「参考」，组合摘要应变成混搭句式。
+            let ttsReference = ttsAxis.buttons["参考"]
+            XCTAssertTrue(ttsReference.waitForExistence(timeout: 10), "missing 配音 参考 at \(testCase.tag)")
+            ttsReference.clickWhenReady()
+            XCTAssertTrue(
+                app.staticTexts["识别用「品质」，配音用「参考」"].waitForExistence(timeout: 10),
+                "axes are not independent at \(testCase.tag)"
+            )
+
+            app.terminate()
+        }
+    }
+
     func testMonitoringExplainsMissingMetrics() {
         let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-metrics-unavailable"])
         openControlCenter(in: app)

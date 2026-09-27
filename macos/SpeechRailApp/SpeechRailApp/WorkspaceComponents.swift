@@ -540,6 +540,127 @@ enum SpeechRailProfilePresentation {
     }
 }
 
+/// 模型页首屏那句结论的**判定**。
+///
+/// 这一段刻意和 `SpeechRailProfilePresentation` 放在同一个文件、也就是可测试的包
+/// 目标里：`ModelManagementView.swift` 本身被 `SpeechRailAppSupport` 排除（见
+/// `Package.swift`），页面级视图进不了单测。但它决定界面对用户断言「现在是哪一档、
+/// 模型够不够」——按 REDESIGN-SPEC §4.3，一句拿不出证据的话就是界面在骗人，所以每个
+/// 分支都必须能被单独钉住。
+///
+/// 分支的**先后顺序**由页面侧决定（`ModelManagementView.modelReadinessState`）：
+/// 这里只负责「给定状态该说哪句话」，不负责「现在是哪个状态」。两者分开，是为了让顺序
+/// 这种最容易被后续改动悄悄破坏的约定，能被测试直接读出来。
+public enum ModelReadinessState: Sendable, Equatable {
+    /// 服务目录读不出来，界面无法判断这一档要什么。
+    case catalogUnreadable
+    /// 目录读到了，但这一档名下没有任何模型文件。
+    case noArtifactsRegistered
+    /// 正在准备这一档的模型文件。
+    case preparing
+    /// 正在把服务切到这一档。
+    case applying
+    /// 还差若干个模型文件（含说话人区分那一组按需模型）。
+    case pending(count: Int)
+    /// 模型已校验，服务正在用这一档，且配置档位与运行一致。
+    case inUseAndConfigured
+    /// 模型已校验，服务正在用这一档，但配置档位没读到。
+    case inUseConfigurationUnread
+    /// 模型已校验，但服务当前跑的哪一档没读到。
+    case readyRuntimeUnread
+    /// 模型已校验，可以换到这一档。
+    case readyToSwitch
+}
+
+/// 一句状态结论：语气、标题与依据。页面只渲染它，不再自己拼句子。
+public struct ModelReadinessPresentation: Equatable, Sendable {
+    public let tone: StatusTone
+    public let title: String
+    public let message: String
+
+    public init(tone: StatusTone, title: String, message: String) {
+        self.tone = tone
+        self.title = title
+        self.message = message
+    }
+}
+
+public enum ModelReadinessPresenter {
+    /// 把一个判定翻成界面上的一句话。
+    ///
+    /// - Parameters:
+    ///   - state: 页面侧按固定顺序判出的状态。
+    ///   - target: 目标档位的**短名**（「品质」）。完整标题「品质 · 日常使用」是给档位
+    ///     卡头用的，塞进一句结论会读成两个并列事实（§4.2）。
+    ///   - running: 服务当前档位的短名；`nil` 表示运行态没读到。
+    ///   - remainingDownloadText: 「尚需下载不超过 X」那句已经算好的事实。
+    public static func presentation(
+        state: ModelReadinessState,
+        target: String,
+        running: String?,
+        remainingDownloadText: String
+    ) -> ModelReadinessPresentation {
+        switch state {
+        case .catalogUnreadable:
+            return ModelReadinessPresentation(
+                tone: .neutral,
+                // 标题也点名档位：标题是这一屏最大的一行字，只写「这一档」的话，
+                // 只扫标题的人读不出这句话是关于哪一档的。
+                title: "「\(target)」需要哪些模型还没读到",
+                message: "服务目录暂时不可用，界面没法判断这一档的准备状态。重新读取后再决定是否切换。"
+            )
+        case .noArtifactsRegistered:
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "「\(target)」没有登记模型文件",
+                message: "服务目录里这一档没有任何模型文件。打开「诊断」查看原因。"
+            )
+        case .preparing:
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "正在准备「\(target)」的模型",
+                message: "阶段与进度见下方进度条；完成后会自动重新读取服务状态。"
+            )
+        case .applying:
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "正在切换到「\(target)」",
+                message: "阶段与进度见下方进度条；完成后会自动重新读取服务状态。"
+            )
+        case let .pending(count):
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "「\(target)」还差 \(count) 个模型文件",
+                message: "\(remainingDownloadText)。补齐并校验通过后，才能应用这一档。"
+            )
+        case .inUseAndConfigured:
+            return ModelReadinessPresentation(
+                tone: .healthy,
+                title: "服务正在使用「\(target)」",
+                message: "模型文件已校验，配置与运行是同一档。模型按需加载，空闲后自动释放内存。"
+            )
+        case .inUseConfigurationUnread:
+            return ModelReadinessPresentation(
+                tone: .healthy,
+                title: "服务正在使用「\(target)」",
+                message: "模型文件已校验；还没读到完整的配置档位，以重新读取的服务状态为准。"
+            )
+        case .readyRuntimeUnread:
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "「\(target)」的模型文件已就绪",
+                message: "还没读到服务当前运行的档位，无法确认是否需要切换。"
+            )
+        case .readyToSwitch:
+            return ModelReadinessPresentation(
+                tone: .attention,
+                title: "「\(target)」的模型文件已就绪",
+                message: "服务现在运行「\(running ?? "未读取")」。应用这一档会重启服务并短暂不可用。"
+            )
+        }
+    }
+}
+
 enum SpeechRailDiarizationPresentation {
     static func text(_ status: DiarizationStatusSnapshot) -> String {
         guard !status.ready else { return "已就绪" }

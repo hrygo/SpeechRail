@@ -3023,37 +3023,79 @@ function screenMonitoring(d) {
 function screenModels(d) {
   pageHead(d, "模型", "先下载并校验，再应用到运行档位；两者是独立操作。");
 
-  // Wide container: four columns. The App wraps to two columns below its
-  // 916pt card-width breakpoint, so a narrow window never compresses all four.
+  // 主对象先给结论（REDESIGN-SPEC §7.7）。面板只说状态、不摆动作：下面动作行
+  // 已经有同样两个按钮，同屏再来一次会被读成界面出错。
+  conclusionBand(d, {
+    tone: "Attention",
+    title: "「识别参考 · 配音轻快」还差 1 个模型文件",
+    body: "尚需下载不超过 0.4 GiB。补齐并校验通过后，才能应用这组档位。",
+    hint: "校验通过只说明本机文件完整，不代表服务正在用它。"
+  });
+
+  // Wide container: three columns — one per catalog tier. The App wraps to two
+  // columns below its 916pt card-width breakpoint, so a narrow window never
+  // compresses all three.
+  // 识别与配音是两条独立的轴（REDESIGN-SPEC §7.7 第七十三轮）：三档只是预设，任意
+  // 搭配都成立，所以两条轴常驻、是第一等的控件，预设退到它下面当快捷方式。
+  const axes = card(d, "specSelection", { pad: 0, gap: 0, clip: true });
+  const axHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
+  add(axHead, text("title", "识别与配音", "Heading / Section", V["text/primary"]));
+  add(axHead, text("detail",
+    "识别和配音各自选档，可以自由组合。下面的常用组合只是快捷方式，不是唯一的选法。",
+    "Callout", V["text/secondary"]));
+  add(axes, stretch(axHead));
+  hairline(axes);
+  // 演示一个混搭：同档是三张预设之一，混搭只能由这两条轴选出来。
+  [["识别", 2], ["配音", 0]].forEach(function (pair) {
+    const row = frame("axisRow", {
+      layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 18, padY: 10
+    });
+    add(row, text("label", pair[0], "Body / Medium", V["text/primary"], { w: 76 }));
+    const holder = frame("picker", { layout: "HORIZONTAL" });
+    grow(holder);
+    segmented(holder, ["轻快", "品质", "参考"], pair[1]);
+    add(row, grow(holder));
+    add(axes, stretch(row));
+  });
+  hairline(axes);
+  const axFoot = frame("foot", { layout: "HORIZONTAL", padX: 18, padY: 10 });
+  add(axFoot, text("summary", "当前组合：识别用「参考」，配音用「轻快」", "Callout", V["text/secondary"]));
+  add(axes, stretch(axFoot));
+
+  const presetHead = frame("presetHead", { layout: "VERTICAL", gap: 3 });
+  add(presetHead, text("title", "常用组合", "Heading / Section", V["text/primary"]));
+  add(presetHead, text("detail", "点一下就把识别与配音一起设成这一档；要混搭，用上面两条轴分别选。",
+    "Callout", V["text/secondary"]));
+  add(d, stretch(presetHead));
+
   const profiles = frame("profiles", { layout: "HORIZONTAL", gap: 12, align: "MIN" });
   add(d, stretch(profiles));
+  // 三张卡对应 catalog 里的三档：fast / quality / reference（5.8 / 9.8 / 14.0 GiB，
+  // 按 model-catalog.json 各档四个制品的文件总大小实算）。稿上原先画的是四档
+  // 轻量 / 均衡 / 精准 / 极致，那套档位已经不存在了。
   [
     {
-      // Keep effect claims separate from model weight precision until A/B evidence exists.
-      name: "极致",
-      sub: "使用更高精度的模型，支持音色创作和克隆；识别、配音效果与速度尚未完成对比验证。",
+      // 副行与三行规格逐字取自应用 ProfileChoiceCard / profilePurpose：说话人区分
+      // 和音色创作都不随档位变化（见 ModelManagementView.profileSpecs），所以三张
+      // 卡的这两行相同；只有「识别与配音」在参考档还没完成 A/B 验证。
+      name: "参考",
+      sub: "使用更高精度的权重，占用更多内存；识别与配音的实际差异尚未完成对比验证。",
       size: "该档模型总大小 · 14.0 GiB", sel: false,
-      specs: [["说话人区分", "支持"], ["音色创作", "支持（含克隆）"], ["识别与配音", "效果待验证"]]
+      specs: [["谁在说话", "可用"], ["音色创作", "支持"], ["识别与配音", "效果待验证"]]
     },
     {
-      // 卡片文案取自应用 ProfileChoiceCard：标题是「档位 · 取向」，副行是它的适用场景
-      // 说明（profilePurpose），下面三行规格只列差异。
-      name: "精准",
-      sub: "支持音色创作和克隆；与「极致」的实际效果差异尚未完成对比验证。",
-      size: "该档模型总大小 · 9.8 GiB", sel: true,
-      specs: [["说话人区分", "支持"], ["音色创作", "支持（含克隆）"], ["识别与配音", "已有档位"]]
+      name: "品质",
+      sub: "默认档位，识别与配音共用同一档；实际效果差异尚未完成对比验证。",
+      // 上面两条轴选的是混搭，所以三张预设**都不**是选中态——预设的选中条件是
+      // 「两条轴恰好同档」。这一档仍然是服务正在跑的那一档，所以「当前使用」胶囊还在。
+      size: "该档模型总大小 · 9.8 GiB", sel: false, running: true,
+      specs: [["谁在说话", "可用"], ["音色创作", "支持"], ["识别与配音", "已有档位"]]
     },
     {
-      name: "均衡",
-      sub: "支持区分说话人，适合日常识别与配音。",
-      size: "该档模型总大小 · 5.3 GiB", sel: false,
-      specs: [["说话人区分", "支持"], ["音色创作", "不支持"], ["识别与配音", "已有档位"]]
-    },
-    {
-      name: "轻量",
-      sub: "使用较小的模型文件；不区分说话人，也不能创作音色。",
-      size: "该档模型总大小 · 2.8 GiB", sel: false,
-      specs: [["说话人区分", "不支持"], ["音色创作", "不支持"], ["识别与配音", "已有档位"]]
+      name: "轻快",
+      sub: "使用较小的模型文件，加载更快；识别与配音的实际差异尚未完成对比验证。",
+      size: "该档模型总大小 · 5.8 GiB", sel: false,
+      specs: [["谁在说话", "可用"], ["音色创作", "支持"], ["识别与配音", "已有档位"]]
     }
   ].forEach(function (p) {
     const c = frame("Profile Card", {
@@ -3068,7 +3110,9 @@ function screenModels(d) {
     spacer(top);
     // "当前" as a pill instead of a heavy 2px outline: the outline read as an
     // error state rather than a selection.
-    if (p.sel) pill(top, "Ready", "当前使用");
+    // 「当前使用」说的是**服务正在跑哪一档**，与「这张预设是不是当前选择」是两件事：
+    // 选了混搭时后者为 false，前者仍为 true。
+    if (p.running) pill(top, "Ready", "当前使用");
     add(c, stretch(top));
     add(c, text("sub", p.sub, "Callout", V["text/secondary"], { w: 320 }));
     // Three facts per card, so the choice is made on the difference that
@@ -3090,10 +3134,25 @@ function screenModels(d) {
   add(actions, text("disk", "磁盘：模型已用 6.4 GB · 可用 182 GB", "Callout", V["text/secondary"]));
   add(d, stretch(actions));
 
+  // 动作区只留一条会改变判断的说明：此前这里叠着四条同色小字，读不出哪条更急。
+  const guidance = frame("guidance", {
+    layout: "HORIZONTAL", gap: 7, align: "CENTER",
+    padX: 12, padY: 9, radius: NT["radius/control"],
+    fill: V["surface/attentionTint"]
+  });
+  icon(guidance, "triangle-alert", 14, V["status/attention"]);
+  add(guidance, text("text", "说话人区分还要补齐 谁在说话用的小模型；补齐前这一项用不了。",
+    "Caption", V["text/secondary"]));
+  add(d, stretch(guidance));
+
   const table = card(d, "artifacts", { pad: 0, gap: 0, clip: true });
-  const aHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
-  add(aHead, text("title", "模型文件", "Heading / Section", V["text/primary"]));
-  add(aHead, text("detail", "这一档要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。", "Callout", V["text/secondary"]));
+  // 卡头右端给这张表自己的进度（结论面板给的是整页差口，两者口径不同）。
+  const aHead = frame("head", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 18, padY: 16 });
+  const aHeadText = frame("headText", { layout: "VERTICAL", gap: 3 });
+  add(aHeadText, text("title", "模型文件", "Heading / Section", V["text/primary"]));
+  add(aHeadText, text("detail", "这一档要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。", "Callout", V["text/secondary"]));
+  add(aHead, grow(aHeadText));
+  add(aHead, text("progress", "已就绪 4/5", "Subheadline", V["text/tertiary"]));
   add(table, stretch(aHead));
   hairline(table);
 
@@ -3135,6 +3194,33 @@ function screenModels(d) {
   spacer(foot);
   secondaryButton(foot, "仅校验缺失项", "refresh-cw");
   add(table, stretch(foot));
+
+  // 三项按任务准备的能力合成一张卡。它们都不随档位变化——上面那张表随档位换，
+  // 这张卡不换，这正是把它们放在一起要让人看见的事。
+  const onDemand = card(d, "onDemand", { pad: 0, gap: 0, clip: true });
+  const oHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
+  add(oHead, text("title", "按需能力", "Heading / Section", V["text/primary"]));
+  add(oHead, text("detail", "这三项不随档位变化，任何档位都能用；用到时才准备，需要时单独下载。",
+    "Callout", V["text/secondary"]));
+  add(onDemand, stretch(oHead));
+  hairline(onDemand);
+  [
+    // 胶囊只回答「模型齐了没有」（目录与本机校验），运行态另起一行（/health）——
+    // 两件事不合成一句看起来更肯定、实际没有证据的话（§4.3）。
+    { title: "说话人区分", detail: "标出每句话是谁说的。会议和字幕需要说话人标签时才准备。", state: "还差 1 个模型", tone: "Attention", rt: "服务：未就绪" },
+    { title: "音色创作", detail: "用来试听和设计新音色，也支持按参考录音克隆。任何档位都能用。", state: "模型已就绪", tone: "Ready", rt: "可试听候选音色" },
+    { title: "实时语音断句", detail: "实时模式靠它判断一句话从什么时候开始、什么时候结束。它不出文字，也不占档位模型。", state: "运行中", tone: "Ready", rt: "检测引擎：Silero" }
+  ].forEach(function (c, ci) {
+    const row = frame("row", { layout: "HORIZONTAL", gap: 16, align: "MIN", padX: 18, padY: 12 });
+    const info = frame("info", { layout: "VERTICAL", gap: 2 });
+    add(info, text("title", c.title, "Body / Medium", V["text/primary"]));
+    add(info, text("detail", c.detail, "Caption", V["text/secondary"], { w: 520 }));
+    add(info, text("runtime", c.rt, "Caption", V["text/tertiary"]));
+    add(row, grow(info));
+    pill(row, c.tone, c.state);
+    add(onDemand, stretch(row));
+    if (ci < 2) hairline(onDemand);
+  });
 }
 
 // --- 9. 诊断 -----------------------------------------------------------------

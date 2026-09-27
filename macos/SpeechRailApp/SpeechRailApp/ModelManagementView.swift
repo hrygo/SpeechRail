@@ -8,22 +8,19 @@ public struct ModelManagementView: View {
     @Environment(AssistantSession.self) private var assistant
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
-    @State private var selectedProfile: SpeechRailProfile = .quality
-    /// 高级路径：识别与配音各自选档；`false` 时只用三张快捷组合卡。
-    @State private var usesAdvancedSpecs = false
-    @State private var advancedAsrSpec: SpeechRailProfile = .quality
-    @State private var advancedTtsSpec: SpeechRailProfile = .quality
+    /// 识别与配音是两条**独立**的轴，任何一档都能配任何一档（九种组合）。
+    /// 三张档位卡只是其中三种最常用的预设，写这两项相同的值。
+    @State private var asrSpec: SpeechRailProfile = .quality
+    @State private var ttsSpec: SpeechRailProfile = .quality
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
 
     public init() {}
 
-    /// 下载与应用只认这一对 `asr_spec`/`tts_spec`：快捷卡写两项相同值，
-    /// 高级项按各自的选择独立提交，wire 上不产生第三份 preset 真相。
+    /// 下载与应用只认这一对 `asr_spec`/`tts_spec`，它是页面上唯一的选择真相：
+    /// 两条轴直接写它，预设卡只是把两项设成同一个值，wire 上不产生第三份 preset。
     private var targetSelection: SpecSelection {
-        usesAdvancedSpecs
-            ? SpecSelection(asrSpec: advancedAsrSpec, ttsSpec: advancedTtsSpec)
-            : .quick(selectedProfile)
+        SpecSelection(asrSpec: asrSpec, ttsSpec: ttsSpec)
     }
 
     public var body: some View {
@@ -68,6 +65,8 @@ public struct ModelManagementView: View {
             Button("取消", role: .cancel) {
                 pendingAction = nil
             }
+        } message: {
+            Text(confirmationMessage)
         }
         .task {
             model.refreshControlAgentStatus()
@@ -152,52 +151,209 @@ public struct ModelManagementView: View {
 
     private var modelWorkspace: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-            profileCards
-            advancedSpecs
+            // 页面主对象（REDESIGN-SPEC §7.7「当前档位与它的准备状态」）先给结论，
+            // 再给选择与操作。此前这条结论是模型卡中段的一行小字，用户要读完上下文
+            // 三列、事实四列和动作区叠着的多条告警才拼得出来「我现在在哪、下一步做什么」。
+            readinessConclusion
+            specSelection
+            profilePresets
             actionSection
-            selectedProfilePanel
+            modelFileSections
         }
     }
 
-    /// 三张快捷卡只写「两项同档」。需要混合组合（例如识别品质 + 配音轻快）时在这里
-    /// 分别选择；下载与应用都按同一对 `asr_spec`/`tts_spec` 执行，不产生第三份 preset 真相。
-    @ViewBuilder
-    private var advancedSpecs: some View {
+    /// 两条轴常驻，不用先展开什么。
+    ///
+    /// 此前自由组合被收在一个默认折叠的「分别调整识别与配音」里，而三张档位卡摆在上面，
+    /// 于是整页读起来是「只有三档可选」。实际上三档只是**预设**：识别与配音各自三档，
+    /// 一共九种组合，两次点击就能任意搭配。既然如此，两条轴就该是页面上第一等的控件，
+    /// 预设退成它下面的快捷方式。
+    private var specSelection: some View {
         let profiles = availableProfiles
-        DisclosureGroup("分别调整识别与配音", isExpanded: $usesAdvancedSpecs) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        return CardSurface {
+            CardHead(
+                title: "识别与配音",
+                detail: "识别和配音各自选档，自由搭配。点击下方常用组合可一键重置为对应档位。"
+            )
+            Divider()
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                 if profiles.isEmpty {
                     Text("服务目录尚未返回可选择的档位。")
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 } else {
-                    Picker("识别档位", selection: $advancedAsrSpec) {
-                        ForEach(profiles, id: \.self) { profile in
-                            Text(SpeechRailProfilePresentation.shortTitle(profile))
-                                .tag(profile)
-                        }
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        specPicker(
+                            "识别",
+                            systemImage: "waveform",
+                            identifier: "models-asr-axis",
+                            selection: $asrSpec,
+                            profiles: profiles,
+                            badgeText: asrAxisBadgeText(asrSpec)
+                        )
+                        specPicker(
+                            "配音",
+                            systemImage: "speaker.wave.2",
+                            identifier: "models-tts-axis",
+                            selection: $ttsSpec,
+                            profiles: profiles,
+                            badgeText: ttsAxisBadgeText(ttsSpec)
+                        )
                     }
-                    .pickerStyle(.segmented)
-                    .speechRailPointerCursor()
-                    Picker("配音档位", selection: $advancedTtsSpec) {
-                        ForEach(profiles, id: \.self) { profile in
-                            Text(SpeechRailProfilePresentation.shortTitle(profile))
-                                .tag(profile)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .speechRailPointerCursor()
-                    Text("当前选择：\(profileTitle(for: targetSelection))")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    combinationSummaryBar
                 }
             }
-            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+            .padding(SpeechRailDesignTokens.Spacing.md)
+            .accessibilityIdentifier("models-spec-selection")
         }
-        .font(SpeechRailDesignTokens.Typography.bodyMedium)
-        .speechRailPointerCursor()
-        .accessibilityIdentifier("models-advanced-specs")
+    }
+
+    private func specPicker(
+        _ title: String,
+        systemImage: String,
+        identifier: String,
+        selection: Binding<SpeechRailProfile>,
+        profiles: [SpeechRailProfile],
+        badgeText: String
+    ) -> some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: systemImage)
+                    .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .frame(width: 16)
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            }
+            .frame(
+                width: SpeechRailDesignTokens.Layout.modelProfileSpecLabelWidth,
+                alignment: .leading
+            )
+            Picker(title, selection: selection) {
+                ForEach(profiles, id: \.self) { profile in
+                    Text(SpeechRailProfilePresentation.shortTitle(profile))
+                        .tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(minWidth: 200, maxWidth: 280)
+            .accessibilityIdentifier(identifier)
+            .speechRailPointerCursor()
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+            Text(badgeText)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                .background(
+                    SpeechRailDesignTokens.Color.field,
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                )
+        }
+    }
+
+    private func asrAxisBadgeText(_ profile: SpeechRailProfile) -> String {
+        switch profile {
+        case .fast:
+            "0.6B Q8 · 极速低显存"
+        case .quality:
+            "1.7B Q8 · 推荐日常主力"
+        case .reference:
+            "1.7B BF16 · 满血原生精度"
+        case .unrecognized:
+            "未识别规格"
+        }
+    }
+
+    private func ttsAxisBadgeText(_ profile: SpeechRailProfile) -> String {
+        switch profile {
+        case .fast:
+            "0.6B Q8 · 极低时延，实时对话"
+        case .quality:
+            "1.7B Q8 · 自然生动，支持声音克隆"
+        case .reference:
+            "1.7B BF16 · 满血高保真音色"
+        case .unrecognized:
+            "未识别规格"
+        }
+    }
+
+    private var combinationSummaryBar: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(targetSelection.quickTier != nil ? "同档预设" : "自定义混搭")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(
+                    targetSelection.quickTier != nil
+                        ? SpeechRailDesignTokens.Color.rail
+                        : SpeechRailDesignTokens.Color.inkSecondary
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                .background(
+                    targetSelection.quickTier != nil
+                        ? SpeechRailDesignTokens.Surface.selectedFill
+                        : SpeechRailDesignTokens.Color.field,
+                    in: Capsule()
+                )
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("当前组合：")
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                Text(combinationSummary)
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            }
+            .lineLimit(1)
+
+            if let totalBytes = targetSelectionTotalBytes {
+                Text("· 约 \(formatBytes(totalBytes))")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .monospacedDigit()
+            }
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+            if currentServiceProfile == targetSelection {
+                Label("与当前运行一致", systemImage: "checkmark.circle.fill")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
+            } else if let running = currentServiceProfile {
+                Text("当前运行：\(SpeechRailProfilePresentation.shortTitle(running))")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+    }
+    /// 一句话说明当前组合。用短名（§4.2），并且**总是**把两条轴都写出来——
+    /// 只在混搭时写「识别轻快 · 配音品质」，同档时用户看不出这是两项都选了同一档。
+    private var combinationSummary: String {
+        let asr = SpeechRailProfilePresentation.shortTitle(asrSpec)
+        let tts = SpeechRailProfilePresentation.shortTitle(ttsSpec)
+        return asr == tts
+            ? "识别与配音都用「\(asr)」"
+            : "识别用「\(asr)」，配音用「\(tts)」"
+    }
+
+    /// 三张卡是**预设**而不是全部选项：点一下把两条轴一起设成同一档。
+    /// 卡上仍写这一档的取向与三行差异，供自由组合时对照每一档的差别。
+    private var profilePresets: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "常用组合",
+                detail: "点一下就把识别与配音一起设成这一档；要混搭，用上面两条轴分别选。"
+            )
+            profileCards
+        }
     }
 
     /// 只显示服务目录实际发布的档位；宽度允许时单行展示，空间不足时改为两列。
@@ -244,35 +400,71 @@ public struct ModelManagementView: View {
         minimumWidth: CGFloat
     ) -> some View {
         ForEach(profiles, id: \.self) { profile in
+            let isQuickSelected = targetSelection == .quick(profile)
+            let isRunning = currentServiceProfile == .quick(profile)
+            let partialBadge: String? = {
+                if isQuickSelected { return nil }
+                if asrSpec == profile && ttsSpec == profile {
+                    return nil
+                } else if asrSpec == profile {
+                    return "识别已选"
+                } else if ttsSpec == profile {
+                    return "配音已选"
+                }
+                return nil
+            }()
+
             ProfileChoiceCard(
                 profile: profile,
                 sizeText: summary(for: profile).map {
                     "该档模型总大小 \(formatBytes($0.downloadBytes))"
                 },
                 specs: profileSpecs(for: profile),
-                isSelected: targetSelection == .quick(profile),
-                isRunning: currentServiceProfile == .quick(profile)
+                isSelected: isQuickSelected,
+                isRunning: isRunning,
+                partialSelectionBadge: partialBadge
             ) {
-                selectedProfile = profile
-                advancedAsrSpec = profile
-                advancedTtsSpec = profile
-                usesAdvancedSpecs = false
+                selectProfilePreset(profile)
             }
             .frame(minWidth: minimumWidth, maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    private func selectProfilePreset(_ profile: SpeechRailProfile) {
+        withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+            asrSpec = profile
+            ttsSpec = profile
+        }
+    }
+
     /// 三行规格只呈现服务目录声明的能力和本档效果验证状态。
     private func profileSpecs(for profile: SpeechRailProfile) -> [ProfileSpec] {
-        let summary = summary(for: profile)
-        return [
-            ProfileSpec(
-                label: "谁在说话",
-                value: diarizationReadinessText
-            ),
-            ProfileSpec(label: "音色创作", value: voiceCreationSupport(for: summary)),
-            ProfileSpec(label: "识别与配音", value: profile == .reference ? "效果待验证" : "已有档位"),
-        ]
+        switch profile {
+        case .fast:
+            return [
+                ProfileSpec(label: "识别规格", value: "0.6B (8-bit) · 极速低显存"),
+                ProfileSpec(label: "配音规格", value: "0.6B (8-bit) · 极低时延"),
+                ProfileSpec(label: "核心特点", value: "加载秒级 · 资源占用最小"),
+            ]
+        case .quality:
+            return [
+                ProfileSpec(label: "识别规格", value: "1.7B (8-bit) · 日常高准确率"),
+                ProfileSpec(label: "配音规格", value: "1.7B (8-bit) · 自然生动支持克隆"),
+                ProfileSpec(label: "核心特点", value: "官方推荐 · 兼顾自然与性能"),
+            ]
+        case .reference:
+            return [
+                ProfileSpec(label: "识别规格", value: "1.7B (BF16) · 原生高精权重"),
+                ProfileSpec(label: "配音规格", value: "1.7B (BF16) · 满血高保真音质"),
+                ProfileSpec(label: "核心特点", value: "满血精度 · 需较大内存"),
+            ]
+        case .unrecognized:
+            return [
+                ProfileSpec(label: "识别规格", value: "未识别"),
+                ProfileSpec(label: "配音规格", value: "未识别"),
+                ProfileSpec(label: "核心特点", value: "未知档位"),
+            ]
+        }
     }
 
     /// 分人是任务级按需能力, 不随档位变化: 三张卡上这一行说的是同一件事, 逐项状态
@@ -296,118 +488,36 @@ public struct ModelManagementView: View {
         return supportsClone ? "支持（含克隆）" : "支持"
     }
 
-    private var selectedProfilePanel: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            profileContext
-            profileFacts
-            modelReadinessSummary
-            Divider()
+    /// 模型文件与按需能力各自成卡。此前它们连同「目标 / 当前 / 配置」上下文三列、
+    /// 事实四列和就绪小结共用**一张**大卡，四个主题被同一个外框兜住，读者分不清
+    /// 哪一段说的是「这一档要用什么」、哪一段说的是「不随档位变化的能力」。
+    private var modelFileSections: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             artifactSection
             if !unmanagedArtifactStatuses.isEmpty {
-                Divider()
                 unmanagedArtifactSection
             }
-            if showsDiarizationSection {
-                Divider()
-                diarizationSection
-            }
-            if !voiceDesignArtifacts.isEmpty {
-                Divider()
-                voiceDesignSection
-            }
-            if model.health?.realtimeVAD != nil {
-                Divider()
-                vadSection
+            if !onDemandCapabilities.isEmpty {
+                onDemandCapabilitiesSection
             }
         }
-        .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .speechRailContentSurface()
     }
 
-    private var profileContext: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            profileContextValue(
-                title: "目标档位",
-                value: profileTitle(for: targetSelection),
-                tone: .neutral
-            )
-            Divider()
-                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-            profileContextValue(
-                title: "当前服务",
-                value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取",
-                tone: currentServiceProfile == targetSelection ? .healthy : .attention
-            )
-            Divider()
-                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-            profileContextValue(
-                title: "配置档位",
-                value: configuredProfile.map { profileTitle(for: $0) } ?? "未配置",
-                tone: configuredProfile == targetSelection ? .healthy : .attention
-            )
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("模型档位上下文")
-        .accessibilityValue(profileContextAccessibilityValue)
-    }
-
-    private func profileContextValue(
-        title: String,
-        value: String,
-        tone: StatusTone
-    ) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            Text(value)
-                // 稿的 `kvRow`：键与值都是 `Callout`（12pt Regular）。
-                .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(tone.color)
-                .lineLimit(1)
-        }
-    }
-
-    @ViewBuilder
-    private var profileFacts: some View {
-        let totalBytes = usesAdvancedSpecs
-            ? targetSelectionCatalogBytes
-            : summary(for: selectedProfile).map(\.downloadBytes)
-        HStack(spacing: 0) {
-            fact(
-                usesAdvancedSpecs ? "组合总大小" : "档位总大小",
-                value: totalBytes.map(formatBytes) ?? "未读取"
-            )
-            Divider()
-                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            fact("识别", value: summary(for: targetSelection.asrSpec)?.asr ?? "未读取")
-            Divider()
-                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            fact("合成", value: summary(for: targetSelection.ttsSpec)?.tts ?? "未读取")
-            Divider()
-                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            // 这一行的三格是「这一档要用哪几个模型」（取值是制品 key），标题就用页面上
-            // 的名字；`VoiceDesign` 只留在开发者详情里（用户 2026-09-19）。
-            fact("语音设计", value: voiceDesignCapabilityText)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-        }
-    }
-
-    private func fact(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            Text(value)
-                .font(SpeechRailDesignTokens.Typography.technical)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineLimit(1)
-        }
-        .frame(minWidth: SpeechRailDesignTokens.Layout.modelFactMinimumWidth, alignment: .leading)
+    /// REDESIGN-SPEC §7.7 的主对象：当前档位与它的准备状态。
+    ///
+    /// 一句话先回答「服务现在跑的是哪一档、模型够不够」。
+    ///
+    /// 面板**只给结论，不摆动作**：「下载并校验 / 应用此档位」这两个操作由紧随其下
+    /// 的动作行承担，同一屏里出现两次同名主按钮会被读成界面出错。两者相距不到一个
+    /// 块间距，结论与出口的对应关系不需要靠按钮重复来强调。
+    private var readinessConclusion: some View {
+        let presentation = modelReadinessPresentation
+        return StatusBanner(
+            kind: .conclusion,
+            tone: presentation.tone,
+            title: presentation.title,
+            message: presentation.message
+        )
     }
 
     /// Figma `artifacts` 的列头：右侧三个窄列没有列头时读起来像无主的装饰。
@@ -448,14 +558,33 @@ public struct ModelManagementView: View {
                 // 「已下载」「在用」「已释放」在这一节里一次都没出现（它们在开发者详情
                 // 与运行监控里）。原来的说明解释的是别处才有的词，读起来像这张表
                 // 少了东西（用户 2026-09-22：模型信息要清晰）。
-                detail: "这一档要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。"
-            )
+                detail: "这组档位要用的模型文件。校验通过只说明本机文件完整，不代表服务正在用它。",
+                // 右端给进度：这一节最常被问的就是「还差几个」。结论面板说的是
+                // 整个页面（含按需能力）的差口，这里说的是**这张表**自己的进度，
+                // 两者口径不同，所以分开写。
+                accessory: artifactReadinessAccessory
+            ) {
+                Button {
+                    withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+                        showInspector.toggle()
+                    }
+                } label: {
+                    Label(
+                        showInspector ? "收起详情" : "模型详情",
+                        systemImage: showInspector ? "sidebar.right" : "info.circle"
+                    )
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                }
+                .buttonStyle(.borderless)
+                .speechRailPointerCursor()
+                .help("查看所选模型的来源、哈希与校验详情 (⌘⌥I)")
+            }
             Divider()
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
                 if artifacts.isEmpty {
                     ContentUnavailableView(
-                        "这一档还没有登记模型文件",
+                        "这组档位还没有登记模型文件",
                         systemImage: AppRoute.models.systemImage,
                         description: Text("先运行一次预检，或者去受管的运行环境目录里看看模型在不在。")
                     )
@@ -482,6 +611,13 @@ public struct ModelManagementView: View {
                             }
                             .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .accessibilityIdentifier("artifact-\(artifact.key)")
+                            .simultaneousGesture(
+                                TapGesture(count: 2).onEnded {
+                                    withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+                                        showInspector = true
+                                    }
+                                }
+                            )
                             if index < artifacts.count - 1 {
                                 Divider()
                             }
@@ -511,97 +647,165 @@ public struct ModelManagementView: View {
     /// Figma `listFoot`：当前档位的模型文件总数、待校验数量，以及它对「谁在说话」的影响。
     private var artifactFootnote: String {
         let artifacts = visibleArtifacts
-        guard !artifacts.isEmpty else { return "这一档还没有登记模型文件。" }
+        guard !artifacts.isEmpty else { return "这组档位还没有登记模型文件。" }
         let pending = artifacts.filter { !isVerified(status(for: $0)) }.count
         let base = pending == 0
             ? "\(artifacts.count) 个模型文件 · 全部已校验"
             : "\(artifacts.count) 个模型文件 · \(pending) 个待校验"
         let diarizationNote = missingDiarizationKeys.isEmpty
             ? ""
-            : "，谁在说话在补齐前用不了"
+            : "，说话人区分在补齐前用不了"
         return base + diarizationNote + "。"
     }
 
-    private var diarizationSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "谁在说话",
-                // 分人资产不在上面的档位表里：目录用 `required_by: ["diarization"]`
-                // 声明它们是任务级按需制品，服务另开一条通道检查。对齐用的 aligner
-                // 同时也绑定档位，已经在上面那张表里，所以这里只补说话人模型。
-                detail: "标出每句话是谁说的。对齐用的模型跟档位走，已经在上面那张表里；说话人模型不绑定档位，需要时单独下载。"
-            )
-            VStack(spacing: 0) {
-                ForEach(independentDiarizationKeys, id: \.self) { key in
-                    CapabilityArtifactRow(
-                        title: assetTitle(for: key),
-                        key: key,
-                        status: status(forKey: key),
-                        usage: usage(forKey: key)
-                    )
-                }
-                if let runtime = diarizationRuntime {
-                    Divider()
-                    RuntimeCapabilityRow(
-                        title: "当前状态",
-                        value: runtime.text,
-                        tone: runtime.tone
-                    )
-                }
-            }
-        }
-    }
-
-    /// 音色创作的设计权重同样不绑定档位, 目录里也不在任何一张档位表上, 必须单列。
-    private var voiceDesignSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "音色创作",
-                detail: "用来试听和设计新音色。它不绑定档位, 任何档位都能用, 需要时单独下载。"
-            )
-            VStack(spacing: 0) {
-                ForEach(voiceDesignArtifacts, id: \.key) { artifact in
-                    CapabilityArtifactRow(
-                        title: "设计用的模型",
-                        key: artifact.key,
-                        status: status(for: artifact),
-                        usage: usage(for: artifact)
-                    )
-                }
-            }
-        }
-    }
-
-    /// 语音活动检测只判断「什么时候算有人在说话」, 不产出文字, 因此既没有目录制品
-    /// 也不随档位变化: 它只出现在运行状态里。
-    private var vadSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "语音活动检测",
-                detail: "实时模式靠它判断一句话从什么时候开始、什么时候结束。它不出文字, 也不占档位模型。"
-            )
-            VStack(spacing: 0) {
-                RuntimeCapabilityRow(
-                    title: "检测引擎 · \(vadEngineLabel)",
-                    value: vadRuntime?.text ?? "运行状态未读取",
-                    tone: vadRuntime?.tone ?? .neutral
-                )
-            }
-        }
+    /// 卡头右端的进度事实。`CardHead.accessory` 是「贴着右边缘的一句本机事实」，
+    /// 与标题分开排，标题因此不会被一起推向右半边。
+    private var artifactReadinessAccessory: String? {
+        let artifacts = visibleArtifacts
+        guard !artifacts.isEmpty else { return nil }
+        let ready = artifacts.filter { isVerified(status(for: $0)) }.count
+        return ready == artifacts.count
+            ? "\(artifacts.count) 个全部就绪"
+            : "已就绪 \(ready)/\(artifacts.count)"
     }
 
     private var unmanagedArtifactSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
+        CardSurface {
+            CardHead(
                 title: "已检测但未纳入当前目录",
-                detail: "这些模型文件还在本机，但没有登记在当前这一档里；选档和运行都不会用到它们。"
+                detail: "这些模型文件还在本机，但没有登记在当前这组档位里；选档和运行都不会用到它们。"
             )
+            Divider()
             VStack(spacing: 0) {
                 ForEach(unmanagedArtifactStatuses, id: \.key) { status in
                     UnmanagedArtifactRow(status: status)
                 }
             }
         }
+    }
+
+    /// 三项按任务准备的能力合并成一张卡。
+    ///
+    /// 说话人区分、音色创作与实时语音断句都不随档位变化，此前各自是一个带标题的
+    /// 小节，读起来像三件互不相干的事；合在一张卡里之后，「这三项和上面的档位
+    /// 模型不是一回事」这件事才看得出来——上面那张表随档位换，这张卡不换。
+    private var onDemandCapabilitiesSection: some View {
+        CardSurface {
+            CardHead(
+                title: "按需能力",
+                detail: "这三项不随档位变化，任何档位都能用；用到时才准备，需要时单独下载。"
+            )
+            Divider()
+            VStack(spacing: 0) {
+                ForEach(Array(onDemandCapabilities.enumerated()), id: \.element.id) { index, capability in
+                    if index > 0 {
+                        Divider()
+                    }
+                    OnDemandCapabilityRow(capability: capability)
+                }
+            }
+        }
+    }
+
+    /// 按需能力的每一行都是「这一项是干什么的 + 现在是什么状态」。
+    /// 只有目录或 `/health` 真的报了对应能力才出现，不拿占位条目凑数。
+    private var onDemandCapabilities: [OnDemandCapability] {
+        var capabilities: [OnDemandCapability] = []
+        if !requiredDiarizationKeys.isEmpty || model.health?.diarization != nil {
+            capabilities.append(diarizationCapability)
+        }
+        if !voiceDesignArtifacts.isEmpty || model.modelCatalog?.hasVoiceDesignArtifact == true {
+            capabilities.append(voiceDesignCapability)
+        }
+        if model.health?.realtimeVAD != nil {
+            capabilities.append(vadCapability)
+        }
+        return capabilities
+    }
+
+    /// 说话人区分：目录用 `required_by: ["diarization"]` 声明这组按需制品，
+    /// 服务另开一条通道检查运行态。对齐用的 aligner 同时也绑定档位，已经在上面
+    /// 那张表里，所以这里只回答说话人模型本身。
+    private var diarizationCapability: OnDemandCapability {
+        let state: (String, StatusTone)
+        if model.modelCatalog == nil {
+            state = ("未读取", .neutral)
+        } else if requiredDiarizationKeys.isEmpty {
+            // 同 `voiceDesignCapability`：目录没登记说话人模型时不能报就绪。
+            state = ("状态未读取", .neutral)
+        } else if missingDiarizationKeys.isEmpty {
+            state = ("模型已就绪", .healthy)
+        } else {
+            state = ("还差 \(missingDiarizationKeys.count) 个模型", .attention)
+        }
+        return OnDemandCapability(
+            id: "diarization",
+            title: "说话人区分",
+            detail: "标出每句话是谁说的。会议和字幕需要说话人标签时才准备。",
+            state: state.0,
+            tone: state.1,
+            // 就绪时**不照抄服务端那句英文**（本机实测原文：
+            // `CoreML Sortformer FP16 is configured`）——它写给调用方看，不是给用户读的。
+            // 没就绪时才把服务给的原因带出来：那一刻它是唯一的线索（§4.3）。
+            runtime: diarizationRuntime.map { "服务：\($0.text)" }
+        )
+    }
+
+    /// 音色创作的设计权重同样不绑定档位，目录里也不在任何一张档位表上。
+    private var voiceDesignCapability: OnDemandCapability {
+        let state: (String, StatusTone)
+        if model.modelCatalog == nil {
+            state = ("未读取", .neutral)
+        } else if model.modelCatalog?.hasVoiceDesignArtifact != true {
+            state = ("不支持", .neutral)
+        } else if allVoiceDesignArtifacts.isEmpty {
+            // 目录声明了这项能力，却没给出可核对的文件。说不出「齐了没有」，
+            // 就不能报就绪（§4.3）。
+            state = ("状态未读取", .neutral)
+        } else if allVoiceDesignArtifacts.allSatisfy({ isVerified(status(for: $0)) }) {
+            state = ("模型已就绪", .healthy)
+        } else {
+            state = ("需要下载", .attention)
+        }
+        return OnDemandCapability(
+            id: "voice-design",
+            title: "音色创作",
+            detail: "用来试听和设计新音色，也支持按参考录音克隆。任何档位都能用。",
+            state: state.0,
+            tone: state.1,
+            runtime: model.modelCatalog?.hasVoiceDesignArtifact == true ? "可试听候选音色" : nil
+        )
+    }
+
+    /// 实时语音断句只判断「什么时候算有人在说话」，不产出文字，因此既没有目录
+    /// 制品也不随档位变化：它只出现在运行状态里。
+    private var vadCapability: OnDemandCapability {
+        let runtime = vadRuntime
+        // 胶囊只说「这一项现在能不能用」，不复述服务给的整句原因——那句话留在下面
+        // 那一行，胶囊保持可扫读。
+        let state: String = switch runtime?.tone {
+        case .healthy: "运行中"
+        case .attention, .critical: "未就绪"
+        default: "未读取"
+        }
+        return OnDemandCapability(
+            id: "realtime-vad",
+            title: "实时语音断句",
+            detail: "实时模式靠它判断一句话从什么时候开始、什么时候结束。它不出文字，也不占档位模型。",
+            state: state,
+            tone: runtime?.tone ?? .neutral,
+            // 同上：本机实测就绪原文是 `Silero VAD runtime and model are ready`。
+            // 就绪时用界面自己的话说明它在做什么；没就绪才把服务给的原因原样带出来。
+            runtime: vadRuntimeDetail
+        )
+    }
+
+    private var vadRuntimeDetail: String {
+        let engine = "检测引擎：\(vadEngineLabel)"
+        guard let runtime = vadRuntime else { return engine }
+        return runtime.tone == .healthy
+            ? "\(engine) · 说话与安静的边界由它在线判断，字幕带据此断句。"
+            : "\(engine) · \(runtime.text)"
     }
 
     /// Figma `actions`：动作行紧跟档位卡、排在制品卡之前。4x 帧实测（`▸ 模型.png`）
@@ -612,7 +816,10 @@ public struct ModelManagementView: View {
     /// 档位；两者是独立操作。」已经说过同一句话（全局密度约定：不重复解释）。
     /// 下方只保留会改变判断的阻塞原因，以及正在进行/被中断的操作本身。
     private var actionSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        let isReadyToApply = canApplyProfile && (currentServiceProfile != targetSelection)
+        let isDownloadPrimary = !profileArtifactsVerified || !canApplyProfile
+
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             // 稿 `actions` 的 gap 是 8（脚本 `frame("actions", { gap: 8 })`）；4x 帧在
             // 按钮中线上量的间距是 8.25（圆角矩形在中线最宽，顶边附近量会被圆角吃掉
             // 几个 pt，这是上一轮把这一行判成「约 10」的原因）。应用此前取 `sm`(12)。
@@ -623,7 +830,7 @@ public struct ModelManagementView: View {
                     // 稿的主按钮图标是「托盘 + 下箭头」，不是 `arrow.down.circle`。
                     Label("下载并校验", systemImage: "tray.and.arrow.down")
                 }
-                .speechRailButton(.primary)
+                .speechRailButton(isDownloadPrimary ? .primary : .secondary)
                 .disabled(!canPrepareModels)
                 .accessibilityHint("准备并校验所选档位的本机模型文件")
 
@@ -633,7 +840,7 @@ public struct ModelManagementView: View {
                     // 稿上这个次按钮只有文字，没有图标（4x 帧里是 5 个字形簇）。
                     Text("应用此档位")
                 }
-                .speechRailButton(.secondary)
+                .speechRailButton(isReadyToApply ? .primary : .secondary)
                 .disabled(!canApplyProfile)
                 .accessibilityHint("把所选档位写进服务配置，并重启相关的后台组件")
 
@@ -648,30 +855,15 @@ public struct ModelManagementView: View {
                         .lineLimit(1)
                 }
             }
-            if assistantBlocksProfileSwitch {
-                Text(profileSwitchBlockedByAssistantText)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if !missingDiarizationKeys.isEmpty {
-                Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            } else if !visibleArtifacts.isEmpty && !profileArtifactsVerified {
-                Text("换到这一档之前，先把这一档需要的模型下载并校验完。")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
-            if let message = model.message, !message.isEmpty, model.modelAvailability == .available {
-                Text(SpeechRailOperationMessagePresentation.text(message))
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                    .lineLimit(2)
+            // 动作区只保留**一条**会改变判断的说明。此前这里叠着四条同色小字
+            // （助手占用、缺说话人模型、没校验完、服务消息），字号字色都一样，
+            // 读不出哪一条更急、哪一条已经被上一条解释过。结论面板已经说明了
+            // 「差几个文件」，这里只补它没有说、且会挡住操作的那一条。
+            if let guidance = actionGuidance {
+                NoticeBar(
+                    tone: guidance.tone == .critical ? .critical : .warning,
+                    message: guidance.text
+                )
             }
             // 长任务进度贴在触发它的那一行下面（§6.4「在触发页内联」），
             // 而不是沉到制品卡后面去。
@@ -695,33 +887,25 @@ public struct ModelManagementView: View {
         }
     }
 
-    private var modelReadinessSummary: some View {
-        let presentation = modelReadinessPresentation
-        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: presentation.systemImage)
-                .font(SpeechRailDesignTokens.Typography.statusIcon)
-                .foregroundStyle(presentation.tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(presentation.title)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(presentation.detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
+    /// 按「先处理会挡路的、再处理需要解释的」排序，只返回最该先解决的那一条。
+    /// 服务消息排第一：它多半是上一次操作失败的原因，其余几条都是它的下游。
+    private var actionGuidance: (text: String, tone: StatusTone)? {
+        if let message = model.message,
+           !message.isEmpty,
+           model.modelAvailability == .available
+        {
+            return (SpeechRailOperationMessagePresentation.text(message), .critical)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(presentation.title)
-        .accessibilityValue(presentation.detail)
+        if assistantBlocksProfileSwitch {
+            return (profileSwitchBlockedByAssistantText, .attention)
+        }
+        if !missingDiarizationKeys.isEmpty {
+            return (
+                "说话人区分还要补齐 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))；补齐前这一项用不了。",
+                .attention
+            )
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -783,6 +967,21 @@ public struct ModelManagementView: View {
                     value: configuredProfile.map { profileTitle(for: $0) } ?? "未读取"
                 )
                 LabeledContent("目录状态", value: model.modelAvailability == .available ? "已读取" : "未读取")
+                // 这一档绑定的识别与合成权重。它们是制品 key（`asr-…` / `tts-…`），
+                // 按 §4.2 属机器名，因此只在开发者详情里出现——页面上原来那两格
+                // 「识别 / 合成」把它们摆在首屏，读起来像两个产品名。
+                LabeledContent(
+                    "这组档位的识别权重",
+                    value: summary(for: targetSelection.asrSpec)?.asr ?? "未读取"
+                )
+                LabeledContent(
+                    "这组档位的合成权重",
+                    value: summary(for: targetSelection.ttsSpec)?.tts ?? "未读取"
+                )
+                LabeledContent(
+                    "这组档位的音色克隆权重",
+                    value: summary(for: targetSelection.ttsSpec)?.ttsBase ?? "未登记"
+                )
                 if let disk = model.modelStatus?.disk {
                     LabeledContent("模型占用", value: formatBytes(disk.modelBytes))
                     LabeledContent("可用空间", value: formatBytes(disk.freeBytes))
@@ -835,8 +1034,17 @@ public struct ModelManagementView: View {
         return artifacts.reduce(Int64.zero) { $0 + $1.sizeBytes }
     }
 
-    /// 把服务端的当前/配置选择回填到两套控件：快捷组合收回卡片，混合组合自动展开高级项，
-    /// 否则界面会把混合组合显示成其中一档。
+    /// 当前这组档位的模型总大小。两条轴同档时用档位摘要——它额外算上了单独安装、
+    /// 不在档位表里的分人小模型；混搭时没有单一摘要，退回目录并集求和。
+    private var targetSelectionTotalBytes: Int64? {
+        if let quick = targetSelection.quickTier, let summary = summary(for: quick) {
+            return summary.downloadBytes
+        }
+        return targetSelectionCatalogBytes
+    }
+
+    /// 把服务端的当前/配置选择回填到两条轴。此前同一件事要分两套控件（卡片 + 高级项），
+    /// 混合组合还得「自动展开」才看得见；现在只有一对轴，回填就是赋值。
     private func adopt(_ selection: SpecSelection) {
         guard selection.isSelectable,
               availableProfiles.contains(selection.asrSpec),
@@ -844,39 +1052,12 @@ public struct ModelManagementView: View {
         else {
             return
         }
-        advancedAsrSpec = selection.asrSpec
-        advancedTtsSpec = selection.ttsSpec
-        if let quick = selection.quickTier {
-            selectedProfile = quick
-            usesAdvancedSpecs = false
-        } else {
-            usesAdvancedSpecs = true
-            if !availableProfiles.contains(selectedProfile), let first = availableProfiles.first {
-                selectedProfile = first
-            }
-        }
+        asrSpec = selection.asrSpec
+        ttsSpec = selection.ttsSpec
     }
 
     private var configuredProfile: SpecSelection? {
         model.profile?.selection
-    }
-
-    private var profileContextAccessibilityValue: String {
-        let target = "目标档位：\(profileTitle(for: targetSelection))"
-        let current = currentServiceProfile.map { "当前服务：\(profileTitle(for: $0))" }
-            ?? "当前服务：运行态未读取"
-        let consistency: String
-        switch (configuredProfile, currentServiceProfile) {
-        case let (.some(configured), .some(current)) where configured == current:
-            consistency = "配置与运行一致"
-        case (.some, .some):
-            consistency = "配置与运行不一致"
-        default:
-            consistency = "配置与运行一致性未确认"
-        }
-        let configured = configuredProfile.map { "配置档位：\(profileTitle(for: $0))" }
-            ?? "配置档位：未配置"
-        return [target, current, configured, consistency].joined(separator: "，")
     }
 
     private var visibleArtifacts: [ModelArtifactSnapshot] {
@@ -931,17 +1112,6 @@ public struct ModelManagementView: View {
         }
     }
 
-    private var independentDiarizationKeys: [String] {
-        let visibleKeys = Set(visibleArtifacts.map(\.key))
-        return requiredDiarizationKeys
-            .filter { !visibleKeys.contains($0) }
-    }
-
-    /// 目录里标为按需、且没被当前档位表覆盖的分人制品。
-    private var showsDiarizationSection: Bool {
-        !independentDiarizationKeys.isEmpty || model.health?.diarization != nil
-    }
-
     /// 目录里标为按需、且没被当前档位表覆盖的音色创作制品。
     private var voiceDesignArtifacts: [ModelArtifactSnapshot] {
         let visibleKeys = Set(visibleArtifacts.map(\.key))
@@ -949,13 +1119,28 @@ public struct ModelManagementView: View {
             .filter { $0.isVoiceDesignAsset && !visibleKeys.contains($0.key) }
     }
 
-    /// 分人的运行态来自 `/health`: 目录只说文件在不在, 说不了服务加载了没有。
+    /// 目录里声明的**全部**音色创作制品（含已被某一档顺带覆盖的那些）。
+    /// 判断「模型齐了没有」必须按全集算：只看没进档位表的那几条，会在它们恰好
+    /// 全部被档位表覆盖时得出空集，从而误报就绪。
+    private var allVoiceDesignArtifacts: [ModelArtifactSnapshot] {
+        (model.modelCatalog?.artifacts ?? []).filter(\.isVoiceDesignAsset)
+    }
+
+    /// 分人的运行态来自 `/health`：目录只说文件在不在，说不了服务加载了没有。
+    ///
+    /// 取值用界面自己的话，不照抄服务端那句英文（本机 `/health` 实测就绪原文是
+    /// `CoreML Sortformer FP16 is configured`）——它写给调用方看，不是给用户读的。
+    /// 没就绪时也走同一套中文措辞（`SpeechRailDiarizationPresentation` 已把 code 翻成
+    /// 「缺少对齐模型」这类界面语言），与服务状态页同源（§4.3）。
     private var diarizationRuntime: (text: String, tone: StatusTone)? {
         guard model.healthFailure == nil, let health = model.health else {
             return (text: "运行状态未读取", tone: .neutral)
         }
         if let status = health.diarization {
-            return (text: status.message, tone: status.ready ? .healthy : .attention)
+            return (
+                text: SpeechRailDiarizationPresentation.text(status),
+                tone: status.ready ? .healthy : .attention
+            )
         }
         guard let ready = health.diarizationReady else { return nil }
         return (text: ready ? "已就绪" : "未就绪", tone: ready ? .healthy : .attention)
@@ -1019,72 +1204,56 @@ public struct ModelManagementView: View {
     }
 
     private var modelReadinessPresentation: ModelReadinessPresentation {
+        // 行文里一律用短名（§4.2）：完整标题「品质 · 日常使用」是给卡片头用的，
+        // 塞进一句结论会读成两个并列事实。
+        return ModelReadinessPresenter.presentation(
+            state: modelReadinessState,
+            target: SpeechRailProfilePresentation.shortTitle(targetSelection),
+            running: currentServiceProfile.map { SpeechRailProfilePresentation.shortTitle($0) },
+            remainingDownloadText: remainingDownloadText(for: targetSelection)
+        )
+    }
+
+    /// 判定的**顺序**是这一页最容易被后续改动悄悄破坏的约定，因此它留在页面侧
+    /// 读得到的地方，而「该说哪句话」放在可测试的 `ModelReadinessPresenter`。
+    ///
+    /// 顺序本身：读不出目录 → 这一档没登记文件 → 有操作在跑 → 还没校验完 →
+    /// 正在用且配置一致 → 正在用但配置没读到 → 运行档位没读到 → 可以切换。
+    private var modelReadinessState: ModelReadinessState {
         guard targetSummaries != nil else {
-            return ModelReadinessPresentation(
-                systemImage: "questionmark.circle",
-                tone: .neutral,
-                title: "目标档位映射未读取",
-                detail: "暂时无法判断模型需求；请刷新模型状态。"
-            )
+            return .catalogUnreadable
         }
         guard !visibleArtifacts.isEmpty else {
-            return ModelReadinessPresentation(
-                systemImage: "shippingbox",
-                tone: .attention,
-                title: "这一档还没有可用的模型文件",
-                detail: "去受管运行时目录看一眼，或者打开「诊断」看原因。"
-            )
+            return .noArtifactsRegistered
         }
         if let operation = activeModelOperation,
            operation.state == .accepted || operation.state == .running
         {
-            let title = operation.command == .profileApply ? "正在应用目标档位" : "正在准备目标档位模型"
-            return ModelReadinessPresentation(
-                systemImage: operation.command == .profileApply
-                    ? "arrow.triangle.2.circlepath"
-                    : "arrow.down.circle",
-                tone: .attention,
-                title: title,
-                detail: "以 OperationBar 的阶段和进度为准，完成后会重新读取服务状态。"
-            )
+            return operation.command == .profileApply ? .applying : .preparing
         }
         guard profileArtifactsVerified else {
-            let detail = missingDiarizationKeys.isEmpty
-                ? "这一档的模型文件还没全部校验通过。"
-                : "还需要校验：\(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))。"
-            return ModelReadinessPresentation(
-                systemImage: "arrow.down.circle",
-                tone: .attention,
-                title: "需要下载并校验",
-                detail: detail
-            )
+            return .pending(count: pendingArtifactCount)
         }
 
         if currentServiceProfile == targetSelection,
            configuredProfile == targetSelection
         {
-            return ModelReadinessPresentation(
-                systemImage: "checkmark.seal.fill",
-                tone: .healthy,
-                title: "模型文件已验证，服务正在用这一档",
-                detail: "配置与运行是同一档；模型按需加载，空闲后自动释放内存。"
-            )
+            return .inUseAndConfigured
         }
         if currentServiceProfile == targetSelection {
-            return ModelReadinessPresentation(
-                systemImage: "checkmark.circle",
-                tone: .healthy,
-                title: "模型文件已验证，服务正在用这一档",
-                detail: "还没读到完整的配置档位；以重新读取的服务状态为准。"
-            )
+            return .inUseConfigurationUnread
         }
-        let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
-        return ModelReadinessPresentation(
-            systemImage: "checkmark.circle",
-            tone: .attention,
-            title: "模型文件已验证，可以换到这一档",
-            detail: "服务现在跑的是 \(current)；按下「应用此档位」才会换。"
-        )
+        if currentServiceProfile == nil {
+            return .readyRuntimeUnread
+        }
+        return .readyToSwitch
+    }
+
+    /// 这一档还差几个文件：档位表里没校验通过的，加上说话人区分那一组按需模型。
+    /// 两组都不绑定档位但都挡着「应用此档位」，所以合成一个数报给用户。
+    private var pendingArtifactCount: Int {
+        let pending = visibleArtifacts.filter { !isVerified(status(for: $0)) }.count
+        return pending + missingDiarizationKeys.count
     }
 
     private var missingDiarizationKeys: [String] {
@@ -1343,17 +1512,10 @@ public struct ModelManagementView: View {
     }
 
     private func selectAvailableProfileIfNeeded() {
-        if !availableProfiles.contains(selectedProfile) {
-            if availableProfiles.contains(.quality) {
-                selectedProfile = .quality
-            } else if let first = availableProfiles.first {
-                selectedProfile = first
-            }
-        }
-        // 高级项同样只能落在服务目录实际发布的档位上，否则回到第一个可用项。
+        // 两条轴都只能落在服务目录实际发布的档位上，否则回到第一个可用项。
         if let first = availableProfiles.first {
-            if !availableProfiles.contains(advancedAsrSpec) { advancedAsrSpec = first }
-            if !availableProfiles.contains(advancedTtsSpec) { advancedTtsSpec = first }
+            if !availableProfiles.contains(asrSpec) { asrSpec = first }
+            if !availableProfiles.contains(ttsSpec) { ttsSpec = first }
         }
     }
 
@@ -1368,55 +1530,58 @@ public struct ModelManagementView: View {
 
     private var confirmationTitle: String {
         guard let pendingAction else { return "确认操作" }
-        return switch pendingAction {
+        switch pendingAction {
         case .download:
-            downloadConfirmationTitle
+            return "确认下载并校验所选模型？"
         case .apply:
-            applyConfirmationTitle
+            return "确认应用该模型组合？"
         }
     }
 
-    private var applyConfirmationTitle: String {
+    private var confirmationMessage: String {
+        guard let pendingAction else { return "" }
+        switch pendingAction {
+        case .download:
+            return downloadConfirmationMessage
+        case .apply:
+            return applyConfirmationMessage
+        }
+    }
+
+    private var applyConfirmationMessage: String {
         let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
         var details: [String] = []
-        let sizeBytes = usesAdvancedSpecs
-            ? targetSelectionCatalogBytes
-            : summary(for: selectedProfile).map(\.downloadBytes)
-        if let sizeBytes {
-            details.append("\(usesAdvancedSpecs ? "组合" : "该档")模型总大小 \(formatBytes(sizeBytes))")
+        if let sizeBytes = targetSelectionTotalBytes {
+            details.append("模型总大小约 \(formatBytes(sizeBytes))")
         }
         if let freeBytes = model.modelStatus?.disk.freeBytes {
-            details.append("当前可用磁盘空间 \(formatBytes(freeBytes))")
+            details.append("磁盘可用空间 \(formatBytes(freeBytes))")
         }
-        details.append("已校验的模型文件不会重下，首次加载可能更久，其他档位模型不会删除")
+        details.append("已校验模型不会重复下载，其他档位模型保留不删")
         if targetSelection.asrSpec == .reference || targetSelection.ttsSpec == .reference {
-            details.append("更大的模型权重可能增加内存占用；实际并发能力以切换后服务诊断为准")
+            details.append("更高精度权重将占用更多显存/内存")
         }
-        return "确认应用 \(profileTitle(for: targetSelection))？当前服务为 \(current)。"
-            + "这会更新服务配置、重新加载语音模型并重新读取状态。"
+        return "目标组合：\(combinationSummary)。当前服务运行：\(current)。\n"
+            + "应用将更新服务配置并重启后台引擎，过程约需数秒。"
             + details.joined(separator: "；")
             + "。"
     }
 
-    private var downloadConfirmationTitle: String {
-        let target = profileTitle(for: targetSelection)
-        let sizeBytes = usesAdvancedSpecs
-            ? targetSelectionCatalogBytes
-            : summary(for: selectedProfile).map(\.downloadBytes)
-        let size = sizeBytes.map(formatBytes)
+    private var downloadConfirmationMessage: String {
+        let size = targetSelectionTotalBytes.map(formatBytes)
         let remaining = remainingDownloadText(for: targetSelection)
         let free = model.modelStatus.map { formatBytes($0.disk.freeBytes) }
         var details: [String] = []
         if let size {
-            details.append("\(usesAdvancedSpecs ? "组合" : "该档")模型总大小 \(size)")
+            details.append("模型总大小约 \(size)")
         }
         details.append(remaining)
         if let free {
-            details.append("当前可用磁盘空间 \(free)")
+            details.append("磁盘可用空间 \(free)")
         }
-        details.append("已校验文件不会重下，首次加载可能更久，其他档位模型不会删除")
-        details.append("只下载并校验，不会重启服务或切换档位，也不会上传音频或作品")
-        return "确认下载并校验 \(target) 模型？\(details.joined(separator: "；"))。"
+        details.append("已校验文件不会重下，其他档位模型保留不删")
+        details.append("仅下载并校验本地文件，不会重启服务，也不会上传任何数据")
+        return "目标组合：\(combinationSummary)。\(details.joined(separator: "；"))。"
     }
 
     private func actionTitle(for action: ModelAction) -> String {
@@ -1499,6 +1664,7 @@ private struct ProfileChoiceCard: View {
     let specs: [ProfileSpec]
     let isSelected: Bool
     let isRunning: Bool
+    let partialSelectionBadge: String?
     let action: () -> Void
 
     var body: some View {
@@ -1514,6 +1680,8 @@ private struct ProfileChoiceCard: View {
 
                     if isRunning {
                         StatusPill(tone: .healthy, label: "当前使用")
+                    } else if let partialSelectionBadge {
+                        StatusPill(tone: .neutral, label: partialSelectionBadge)
                     }
                 }
 
@@ -1591,7 +1759,7 @@ private struct ProfileChoiceCard: View {
         )
         .accessibilityIdentifier(profile.rawValue)
         .accessibilityLabel(profileTitle)
-        .accessibilityValue(isSelected ? "已选择" : "未选择")
+        .accessibilityValue(isSelected ? "已选择" : (partialSelectionBadge ?? "未选择"))
     }
 
     private var profileTitle: String {
@@ -1662,13 +1830,6 @@ private struct ModelArtifactStatusPresentation {
     var summary: String {
         "\(title) · \(detail)"
     }
-}
-
-private struct ModelReadinessPresentation {
-    let systemImage: String
-    let tone: StatusTone
-    let title: String
-    let detail: String
 }
 
 /// 稿 `artifacts` 的列几何：`COLS = [440, 200, 140]` + 校验列吃掉余量，**列间距 0**
@@ -1832,91 +1993,54 @@ private struct ArtifactChoiceRow: View {
     }
 }
 
-/// 目录里标为「任务级按需」的模型行。行名说**这一份文件是干什么的**；机器 key
-/// 留给开发者详情, 对不上名字时还能拿去比对诊断输出。
-private struct CapabilityArtifactRow: View {
+/// 按需能力的一行。左侧说**这一项是干什么的**，右侧一个胶囊说**现在是什么状态**。
+///
+/// 「模型齐了」和「服务正在用」是两件事：前者来自目录与本机校验，后者来自
+/// `/health`。所以状态胶囊只回答前者，运行态另起一行，不合成一句看起来更
+/// 肯定、实际没有证据的话（REDESIGN-SPEC §4.3「不能撒谎」）。
+private struct OnDemandCapability: Identifiable {
+    let id: String
     let title: String
-    let key: String
-    let status: ModelArtifactStatusSnapshot?
-    let usage: ModelArtifactUsagePresentation
-
-    var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: statusPresentation.systemImage)
-                .foregroundStyle(statusPresentation.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("存在：\(statusPresentation.summary)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(statusPresentation.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                Text("使用：\(usage.text)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(usage.tone.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(key)
-        .accessibilityValue("存在：\(statusPresentation.summary)，使用：\(usage.text)")
-    }
-
-    private var statusPresentation: ModelArtifactStatusPresentation {
-        ModelArtifactStatusPresentation(status: status)
-    }
+    let detail: String
+    let state: String
+    let tone: StatusTone
+    /// 服务自己给的运行状态；没有这条信号时为 nil，行里就不出现这一行。
+    let runtime: String?
 }
 
-/// 只在运行状态里出现、没有目录制品的能力行（分人运行态、VAD 引擎）。
-private struct RuntimeCapabilityRow: View {
-    let title: String
-    let value: String
-    let tone: StatusTone
+private struct OnDemandCapabilityRow: View {
+    let capability: OnDemandCapability
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: iconName)
-                .foregroundStyle(tone.color)
-                .accessibilityHidden(true)
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.body)
+                Text(capability.title)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(value)
+                Text(capability.detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(tone.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let runtime = capability.runtime {
+                    Text(runtime)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
+            StatusPill(tone: capability.tone, label: capability.state)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(title)
-        .accessibilityValue(value)
-    }
-
-    private var iconName: String {
-        switch tone {
-        case .healthy: "checkmark.circle.fill"
-        case .attention: "exclamationmark.circle.fill"
-        case .critical: "xmark.octagon.fill"
-        case .neutral: "questionmark.circle"
-        }
+        .accessibilityLabel(capability.title)
+        .accessibilityValue(
+            ([capability.detail, capability.state] + [capability.runtime].compactMap { $0 })
+                .joined(separator: "，")
+        )
     }
 }
 

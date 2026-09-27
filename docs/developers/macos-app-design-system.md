@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.24"
-date: 2026-09-26
+version: "0.10.0"
+date: 2026-09-27
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -979,6 +979,99 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > `model_catalog_payload` 实测 8 行均有精度值、精准档 5 行；`pytest --no-cov` 六个相关文件
 > 全绿；`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**。
 > **未验证**：真机走查与 UI 自动化（未重装 App，本会话无授权）、`figma-kit` 帧未重新导出。
+
+> 2026-09-27 模型页按产品层级重排（REDESIGN-SPEC §7.7 第七十二轮）。这一轮**没有新增
+> token**：结论面板复用 `StatusBanner(kind: .conclusion)`，动作区说明复用 `NoticeBar`，
+> 按需能力卡复用 `CardSurface` / `CardHead` / `StatusPill`，卡头进度复用 `CardHead.accessory`。
+> 四处改动都是**信息架构**而非视觉值。
+>
+> ① 首屏加状态结论面板，标题是一句可验证的判断（「服务正在使用「品质」」「「品质」还差 3 个
+> 模型文件」），档位一律用 `shortTitle`——完整标题「品质 · 日常使用」是给卡片头的，塞进一句
+> 结论会读成两个并列事实。**面板只给结论、不摆动作**：`下载并校验` / `应用此档位` 由紧随其下
+> 的动作行承担，同屏出现两次同名主按钮会被读成界面出错；本轮第一版曾把行动作也放进面板，
+> 自查时撤掉了。
+> ② 拆掉原先兜住全页的那张大卡：上下文三列（目标 / 当前 / 配置）、事实四列（总大小 / 识别 /
+> 合成 / 语音设计）与就绪小结一行由结论面板取代，模型文件、未登记文件与按需能力各自成卡。
+> 事实四列里的「识别 / 合成」取值本来就是制品 key（`asr-…`），按 §4.2 属机器名，已随该行撤下，
+> 改由开发者详情以「这一档的识别权重 / 合成权重 / 音色克隆权重」承接。
+> ③ 动作区原先叠着四条同色同字号小字（助手占用 / 缺说话人模型 / 没校验完 / 服务消息），收成
+> 一条 `NoticeBar`，按「服务消息 → 助手占用 → 待补齐」取最急的一条。
+> ④ 说话人区分、音色创作、实时语音断句合并成一张「按需能力」卡：三项都不随档位变化，合在
+> 一张卡里之后「它们和上面的档位模型不是一回事」才看得出来。每行是「这一项是干什么的 + 一个
+> 状态胶囊 + 一行服务自己的运行态」；胶囊只回答「模型齐了没有」（目录与本机校验），运行态另起
+> 一行（`/health`），不合成一句看起来更肯定、实际没有证据的话（§4.3）。模型文件卡头右端加
+> `CardHead.accessory` 进度（`已就绪 3/5`），与结论面板的整页差口口径不同，分开写。
+>
+> **这一轮的判定逻辑被单独拆出来做了单测**（2026-09-27 追加）。面板那句结论决定界面对用户
+> 断言「现在是哪一档、模型够不够」，按 §4.3 拿不出证据却读成肯定就是界面在骗人，所以
+> `ModelReadinessState`（9 个状态）、`ModelReadinessPresentation` 与 `ModelReadinessPresenter`
+> 落在 `WorkspaceComponents.swift`——和 `SpeechRailProfilePresentation` 同一处，也是**可测试
+> 包目标**里。页面侧只留「现在是哪个状态」的判定顺序，「该说哪句话」交给 presenter；两者
+> 分开是因为顺序最容易被后续改动悄悄破坏。类型标 `public` 才能被 `swift test` 看到。
+> 之所以能这样放：`ModelManagementView.swift` 被 `SpeechRailAppSupport` 排除（`Package.swift`），
+> 页面级视图进不了单测，但 `WorkspaceComponents.swift` 同时在包目标与 App target 里。
+> 配套 `ModelReadinessPresentationTests` 11 条，钉住三件事：逐个分支的措辞、
+> **只有「模型已校验且服务确实在用」才允许 `.healthy` 语气**、以及渲染结果里不出现
+> `fast` / `quality` / `reference` 等内部名。第三条当场抓到一处真问题：`catalogUnreadable`
+> 的标题原写「还没读到这一档需要哪些模型」，只扫大标题读不出是哪一档，已改成
+> 「「品质」需要哪些模型还没读到」。
+>
+> **证据**：`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**（无新增
+> warning）；`swift test --package-path macos/SpeechRailApp` 全绿（XCTest 289 条 +
+> swift-testing 145 条，0 失败，其中新增 11 条）；CI 同款 Xcode 门禁
+> （`test -testPlan SpeechRailApp -skip-testing:SpeechRailAppUITests`）**TEST SUCCEEDED**，
+> 261 条 0 失败（临时 derived data 已 `lsregister -u` 并 `trash`）；`figma-kit` 的
+> `node audit.js` clean、`node smoke.js full` SMOKE OK、`node check-links.js` CHECK OK。
+> 规格同步：`REDESIGN-SPEC` §7.7 重写，version 1.9.0。
+> **覆盖缺口**：新增的 11 条只在 SwiftPM 门禁跑。Xcode 的 `SpeechRailAppTests` target 用
+> 显式 `project.pbxproj` 文件引用，本轮没有把新测试文件加进去（该 target 本就比包目标少
+> 28 条），所以只跑 Xcode 门禁会漏掉它们。
+> **未验证**：真机走查、UI 自动化、Light/Dark 与窄窗观感、VoiceOver 实读（本会话均无授权，
+> 未安装 App）。本轮**没有**为 SwiftUI 视图本身加断言——页面级视图按架构就不进单测，
+> 上面这 11 条覆盖的是它背后的判定，不是它的布局。
+> **另记**：`figma-kit` 此前在**模型页画板**也画着已下线的 4 档（极致 / 精准 / 均衡 /
+> 轻量），与实现契约的 3 档（`轻快` / `品质` / `参考`）不符。本轮已把模型页画板同步为
+> 3 档（档位名、副行、每档模型总大小 5.8 / 9.8 / 14.0 GiB 与两条轴的 `.segmented` 选项
+> 都按 `model-catalog.json` 与应用文案实算），`node audit.js` / `node smoke.js full` /
+> `node check-links.js` 均通过。其余画板（会议、服务总览等）的档位措辞仍是旧的，
+> 属先前就存在的跨屏漂移，不在本次页面重排范围内，未改。
+>
+> 2026-09-27 第七十三轮（用户指令「快速，品质，参考，只是三档预设组合，应允许用户在模型
+> 配置页面做任意组合」）：**识别与配音升为一等控件，三张卡降级为「常用组合」预设**。
+> 此前自由组合被收在一个**默认折叠**的 DisclosureGroup 里，而三张卡摆在它上面，于是整页
+> 读起来是「只有三档可选」——把预设当成了选项本身。现在：
+> - 常驻一张「识别与配音」卡，两条 `.segmented` 选择器（标签列固定 76pt =
+>   `Layout.modelProfileSpecLabelWidth`，与档位卡的规格行同一列宽）各自三档，**九种组合两次
+>   点击可达**；卡脚给一句「当前组合」。
+> - 三张档位卡移到它下方，加 `SectionHeading`「常用组合」，点一下只做一件事：把两条轴设成
+>   同一档。wire 上仍然只有 `asr_spec` / `tts_spec` 一对，不产生第三份 preset 真相。
+> - `usesAdvancedSpecs` 这层「模式」连同 `selectedProfile` 一起删掉。此前一个选择要分两套
+>   控件同步，混合组合还得「自动展开」才看得见；现在只有一对轴。
+> - **卡片选中态与「当前使用」胶囊拆成两件事**（`isSelected` vs `isRunning`）：选了混搭时
+>   三张预设都不选中，但服务正在跑的那一档仍然挂「当前使用」。此前两者是同一个条件，
+>   混搭下会连运行态指示一起丢掉。
+> - 混搭时 `SpeechRailProfilePresentation.title(selection)` 会拼出
+>   「识别轻快 · 模型文件较小 · 配音品质 · 日常使用」——分隔点复用、指向不明，确认对话框
+>   与组合摘要一律改用短名句式「识别用「轻快」，配音用「品质」」。
+> - 页面其余「这一档」改「这组档位」（模型文件卡头、空态、脚注、未登记说明、动作区提示、
+>   开发者详情三行），与「组合」这个概念对齐。
+> - 模型总大小按情形取数：两条轴同档用档位摘要（它额外算上单独安装、不在档位表里的分人
+>   小模型），混搭退回目录并集求和。
+>
+> 同轮还修掉两处**真实数据才暴露**的缺陷（本机 `/health` 与 `model catalog` 只读实测）：
+> ① 按需能力行原先把服务端原文直接上屏——就绪时会显示
+> `CoreML Sortformer FP16 is configured` 与 `Silero VAD runtime and model are ready`，
+> 正是 §4.3 点名禁止的两句。改走 `SpeechRailDiarizationPresentation.text` 与界面自己的措辞，
+> 与服务状态页同源；没就绪时才带出服务给的原因。② 上一轮的判定逻辑抽取顺带发现
+> `voiceDesignCapability` 用过滤后的列表判「模型齐了没有」，恰好全被档位表覆盖时空集为真、
+> 会误报就绪；改为按目录全集判断，并补「目录没登记就不能报就绪」的分支。
+>
+> **本轮证据**：`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**
+> （无新增 warning）；`swift test --package-path macos/SpeechRailApp` XCTest 289 +
+> swift-testing 145 全绿；`figma-kit` 的 `node audit.js` clean、`node smoke.js full` SMOKE OK、
+> `node check-links.js` CHECK OK。规格同步：`REDESIGN-SPEC` §7.7 第 2 条重写，version 1.10.0。
+> **未验证**：真机走查、UI 自动化、Light/Dark 与窄窗观感、VoiceOver 实读（本会话均无授权，
+> 未安装 App）。两条轴的键盘可达性依赖系统 `.segmented` 控件，未做实机确认。
 
 ## 7. 变更流程
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，
