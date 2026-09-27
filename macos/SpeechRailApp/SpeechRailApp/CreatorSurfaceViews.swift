@@ -349,10 +349,7 @@ public struct DubbingDeskView: View {
                 if isPreviewing {
                     model.cancelVoicePreview()
                 } else {
-                    model.startVoicePreview(
-                        voice,
-                        text: AppModel.defaultPreviewText(forVoiceID: voice.id)
-                    )
+                    model.startVoicePreview(voice)
                 }
             } label: {
                 Image(systemName: isPreviewing ? "stop.circle.fill" : "play.circle")

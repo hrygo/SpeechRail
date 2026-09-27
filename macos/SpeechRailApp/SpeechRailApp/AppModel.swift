@@ -2295,7 +2295,7 @@ public final class AppModel {
 
     public func previewVoice(
         _ voice: CreatorVoice,
-        text: String = "你好，这是我的声音。",
+        text: String? = nil,
         speed: Double = 1.0
     ) async {
         // 如果当前正在播放该音色，再次点击即为停止
@@ -2317,7 +2317,8 @@ public final class AppModel {
             creatorMessage = "当前音色暂不可用于试听"
             return
         }
-        let previewText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 未显式给文案时按音色语种取默认：英语/日语/韩语音色不该被中文文案硬读。
+        let previewText = Self.resolvedPreviewText(forVoiceID: voice.id, text: text)
         guard !previewText.isEmpty else {
             creatorMessage = "试听文案不能为空"
             return
@@ -2392,7 +2393,7 @@ public final class AppModel {
     /// user has navigated elsewhere.
     public func startVoicePreview(
         _ voice: CreatorVoice,
-        text: String = "你好，这是我的声音。",
+        text: String? = nil,
         speed: Double = 1.0
     ) {
         if isAudioPlaying && playingVoiceID == voice.id {
@@ -2715,8 +2716,6 @@ public final class AppModel {
         }
     }
 
-    /// Own the request task at the app-model level so navigating between pages
-    /// cannot orphan a submitted generation or remove its cancellation handle.
     /// 音色试听语种：服务端 system voice 无 language 字段，按音色 ID 映射。
     /// 与服务端 `_LANGUAGE_ALIASES` 对齐；未知/自定义音色默认中文。
     public enum VoicePreviewLanguage: String, Sendable {
@@ -2739,6 +2738,13 @@ public final class AppModel {
         }
     }
 
+    /// 解析一次试听实际使用的文案：未显式给出时按音色语种取默认。
+    /// 助手等没有试听文案输入的入口依赖这里，不能退回硬编码中文。
+    public static func resolvedPreviewText(forVoiceID voiceID: String, text: String?) -> String {
+        let candidate = text ?? defaultPreviewText(forVoiceID: voiceID)
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public static func defaultPreviewText(forVoiceID voiceID: String) -> String {
         switch previewLanguage(forVoiceID: voiceID) {
         case .english:
@@ -2752,6 +2758,8 @@ public final class AppModel {
         }
     }
 
+    /// Own the request task at the app-model level so navigating between pages
+    /// cannot orphan a submitted generation or remove its cancellation handle.
     public func startSynthesisAndSave(
         text: String,
         voice: CreatorVoice,

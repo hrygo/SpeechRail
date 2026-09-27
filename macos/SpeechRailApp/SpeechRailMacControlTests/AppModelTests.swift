@@ -152,6 +152,35 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(chinese.contains("音色试听"), "chinese voice keeps chinese text")
     }
 
+    /// 助手等没有试听文案输入的入口会走 nil 分支：英语/日语/韩语音色不能被中文硬读。
+    func testPreviewTextFallsBackToVoiceLanguageWhenCallerSuppliesNone() {
+        for voiceID in ["ryan", "aiden"] {
+            let resolved = AppModel.resolvedPreviewText(forVoiceID: voiceID, text: nil)
+            XCTAssertFalse(
+                resolved.contains("这是"),
+                "\(voiceID) 无文案输入时不应回落到中文默认：\(resolved)"
+            )
+            XCTAssertTrue(resolved.contains("SpeechRail"))
+        }
+        XCTAssertFalse(
+            AppModel.resolvedPreviewText(forVoiceID: "ono_anna", text: nil).contains("这是"),
+            "日语音色不应使用中文默认文案"
+        )
+        XCTAssertTrue(
+            AppModel.resolvedPreviewText(forVoiceID: "serena", text: nil).contains("音色试听"),
+            "中文音色保持中文默认文案"
+        )
+    }
+
+    /// 用户显式改写的文案优先于语种默认值。
+    func testPreviewTextKeepsCallerSuppliedWording() {
+        let custom = "  自定义试听文案  "
+        XCTAssertEqual(
+            AppModel.resolvedPreviewText(forVoiceID: "ryan", text: custom),
+            "自定义试听文案"
+        )
+    }
+
     func testPendingCloneRegistrationKeepsOriginalPayloadAndBlocksRerecording() async throws {
         let creator = PendingCloneRegistrationClient()
         let model = makeModel(
