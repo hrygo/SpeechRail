@@ -8,7 +8,10 @@
     }
   ],
   "defaultOptions" : {
-    "codeCoverage" : false
+    "codeCoverage" : false,
+    "commandLineArguments" : [
+      "--no-parallel"
+    ]
   },
   "testTargets" : [
     {

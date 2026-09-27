@@ -9,6 +9,7 @@ EXPORT_OPTIONS=""
 EXPORT_PATH=""
 ARCHIVE_PATH=""
 TIMEOUT_SECONDS="1800"
+PASSTHROUGH=()
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 
 while (($# > 0)); do
@@ -30,6 +31,11 @@ while (($# > 0)); do
       [[ $# -ge 2 ]] || { echo "--timeout requires a value" >&2; exit 2; }
       TIMEOUT_SECONDS="$2"
       shift 2
+      ;;
+    --)
+      shift
+      PASSTHROUGH=("$@")
+      break
       ;;
     --export-options)
       [[ $# -ge 2 ]] || { echo "--export-options requires a value" >&2; exit 2; }
@@ -150,7 +156,8 @@ elif [[ "$ACTION" == "test-unit" ]]; then
     ARCHS=arm64 \
     test \
     -testPlan SpeechRailApp \
-    -skip-testing:SpeechRailAppUITests &
+    -skip-testing:SpeechRailAppUITests \
+    ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} &
   XCODEBUILD_PID=$!
 
   # 挂死是这个入口必须自己兜住的风险：xcodebuild 不退出时 EXIT trap 永远不会跑，
