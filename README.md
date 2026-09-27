@@ -278,7 +278,7 @@ ranking.
 |---|---|---|---|
 | `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice system voices and Base reference clone; diarization requires explicit Sortformer + aligner provisioning. |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice and Base roles; diarization requires explicit provisioning. |
-| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + design-only `tts-1.7b-design-bf16` | Reference precision inherits the same-family 8-bit gates and was not separately retested; VoiceDesign is excluded from ordinary synthesis. Diarization still requires explicit provisioning. |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | Reference precision inherits the same-family 8-bit gates and was not separately retested. Diarization still requires explicit provisioning. |
 
 Every spec routes system voices through `custom_voice` and reference cloning
 through `base`. VoiceDesign is a single on-demand artifact that is not bound to any
@@ -311,8 +311,8 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 
 Select voices from `/v1/voices` rather than assuming that a registered custom
 voice is usable on every spec. VoiceDesign preview/design and Base clone
-availability follow the current effective capability; VoiceDesign is bound only
-to `reference`, while CustomVoice and Base are bound in every spec. See
+availability follow the current effective capability; VoiceDesign is bound to no
+spec, while CustomVoice and Base are bound in every spec. See
 [`docs/users/api-contract.md`](docs/users/api-contract.md).
 
 ## Security and data handling

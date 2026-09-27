@@ -5,7 +5,7 @@
      role="img"
      aria-labelledby="diagram-title diagram-desc">
   <title id="diagram-title">SpeechRail 三档规格、ASR/TTS 角色与资源边界</title>
-  <desc id="diagram-desc">客户端通过共享 FastAPI Gateway 和 Plan Resolver 进入 fast、quality 或 reference 规格。ASR 与 TTS 可独立选档；每个 TTS 规格绑定 custom_voice 与 base 角色，只有 reference 另绑定仅用于设计作业的 voice_design。Alignment 与 Diarization 是显式 opt-in 的独立制品，不随规格继承。</desc>
+  <desc id="diagram-desc">客户端通过共享 FastAPI Gateway 和 Plan Resolver 进入 fast、quality 或 reference 规格。ASR 与 TTS 可独立选档；每个规格都绑定 custom_voice 与 base 角色。voice_design 不绑定任何档位，是唯一一份按需共享制品，任何 tts_spec 供给该快照后都能进入设计作业。Alignment 与 Diarization 是显式 opt-in 的独立制品，不随规格继承。</desc>
 
   <defs>
     <style>
@@ -43,7 +43,6 @@
         .reference-header { fill: #efe8ff; }
         .reference-text { fill: #4b2e8c; }
         .role-box { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.6; }
-        .role-box-design { fill: #fbf9ff; stroke: #ab91df; stroke-width: 1.6; }
         .optional-box { fill: #f5f7fa; stroke: #c5d2e0; stroke-width: 1.6; stroke-dasharray: 7 5; }
         .lifecycle-box { fill: #fff8e8; stroke: #d19a35; stroke-width: 1.6; stroke-dasharray: 8 6; }
         .blue-text { fill: #1f5fae; }
@@ -58,7 +57,7 @@
   <rect class="canvas" x="0" y="0" width="1920" height="1200"/>
 
   <text class="title" x="60" y="58">SpeechRail 三档规格、ASR/TTS 角色与资源边界</text>
-  <text class="subtitle" x="60" y="88">ASR 与 TTS 独立选档 · custom_voice / base 每档绑定 · voice_design 仅 reference 且仅设计作业</text>
+  <text class="subtitle" x="60" y="88">ASR 与 TTS 独立选档 · custom_voice / base 每档绑定 · voice_design 不绑定档位，是唯一按需共享制品</text>
 
   <rect class="top-box" x="60" y="125" width="310" height="120" rx="16"/>
   <text class="box-title" x="85" y="164">Clients / Agents</text>
@@ -140,7 +139,7 @@
   <text class="section-label" x="708" y="738">TASK OPT-IN</text>
   <text class="model-copy" x="708" y="765">aligner：显式点名 aligner-bf16</text>
   <text class="model-copy" x="708" y="790">Diarization：Sortformer + aligner 都就绪才声明</text>
-  <text class="note" x="708" y="825">不继承 reference 的 VoiceDesign</text>
+  <text class="note" x="708" y="825">VoiceDesign 不绑定档位，见图底共享制品</text>
 
   <!-- reference -->
   <rect class="reference-card" x="1260" y="345" width="600" height="545" rx="20"/>
@@ -153,18 +152,15 @@
   <text class="model-key" x="1308" y="492">asr-1.7b-bf16</text>
   <text class="model-copy" x="1545" y="492">单共享 ASR owner</text>
 
-  <rect class="role-box" x="1288" y="530" width="260" height="72" rx="12"/>
+  <rect class="role-box" x="1288" y="530" width="544" height="72" rx="12"/>
   <text class="role-title" x="1308" y="556">TTS custom_voice</text>
   <text class="model-key" x="1308" y="582">tts-1.7b-custom-bf16</text>
+  <text class="model-copy" x="1585" y="582">系统声音</text>
 
-  <rect class="role-box" x="1572" y="530" width="260" height="72" rx="12"/>
-  <text class="role-title" x="1592" y="556">TTS base</text>
-  <text class="model-key" x="1592" y="582">tts-1.7b-base-bf16</text>
-
-  <rect class="role-box-design" x="1288" y="620" width="544" height="72" rx="12"/>
-  <text class="role-title" x="1308" y="646">TTS voice_design · 仅设计作业</text>
-  <text class="model-key" x="1308" y="672">tts-1.7b-design-bf16</text>
-  <text class="model-copy" x="1585" y="672">普通 synthesize 拒绝 Design</text>
+  <rect class="role-box" x="1288" y="620" width="544" height="72" rx="12"/>
+  <text class="role-title" x="1308" y="646">TTS base</text>
+  <text class="model-key" x="1308" y="672">tts-1.7b-base-bf16</text>
+  <text class="model-copy" x="1585" y="672">参考克隆</text>
 
   <rect class="optional-box" x="1288" y="710" width="544" height="145" rx="12"/>
   <text class="section-label" x="1308" y="738">TASK OPT-IN</text>
@@ -183,4 +179,9 @@
   <text class="footer-title orange-text" x="1225" y="980">Capability group lifecycle</text>
   <text class="footer-copy" x="1225" y="1008">按请求懒加载角色 → 可驻留的不同 lane 并发 → 空闲冷却</text>
   <text class="footer-copy" x="1225" y="1033">→ trim/close group → 下一请求只恢复需要的角色</text>
+
+  <!-- shared on-demand artifact: bound to no spec -->
+  <rect class="shared-box" x="60" y="1090" width="1800" height="88" rx="18"/>
+  <text class="footer-title blue-text" x="88" y="1122">VoiceDesign · 不绑定档位的唯一按需制品</text>
+  <text class="footer-copy" x="88" y="1152">唯一一份 <tspan class="model-key" fill="#15243a">tts-1.7b-design-bf16</tspan>，不进 REQUIRED_SPEC_BINDINGS；任何 tts_spec 供给该快照即可进入设计作业，缺失只降级设计能力，普通 synthesize 始终拒绝 Design 音色。</text>
 </svg>

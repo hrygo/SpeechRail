@@ -245,7 +245,7 @@ selection 与 readiness。BF16 权重类型本身不代表质量更高。
 |---|---|---|---|
 | `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice 系统声音与 Base reference clone；分人需显式供给 Sortformer + aligner。 |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice 与 Base 角色；分人需显式供给。 |
-| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + 仅设计作业使用的 `tts-1.7b-design-bf16` | bf16 制品继承同族 8-bit 门禁证据，未在本机单独复测；VoiceDesign 不进入普通合成。分人仍需显式供给。 |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | bf16 制品继承同族 8-bit 门禁证据，未在本机单独复测。分人仍需显式供给。 |
 
 每个规格都把系统声音路由到 `custom_voice`、把参考克隆路由到 `base`。VoiceDesign 是不与档位
 绑定的一份按需制品：该快照供给后任何 `tts_spec` 都能进入设计作业，缺失时只降级设计能力。
