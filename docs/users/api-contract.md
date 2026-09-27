@@ -24,15 +24,19 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 
 | 能力类别 | Canonical 模型 ID | 标准别名 (Aliases) | 说明 |
 |---|---|---|---|
-| **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录） |
+| **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-transcribe`, `gpt-live-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录）；`gpt-4o-transcribe-diarize` 见 §3.1 |
 | **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign、CustomVoice 或 Base capability |
 
 > 💡 **模型规格自适应**：Canonical 模型 ID 标识服务后端能力契约，底层可通过 `SPEECHRAIL_QWEN3_MODEL_DIR` 自由加载 **Qwen3-ASR-1.7B** 或 **Qwen3-ASR-0.6B**（显存占用更低、适用于 8GB 内存设备），对外均遵循相同的 OpenAI 协议。
 
-客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系。
+客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系：以上别名
+都会出现在清单中，`gpt-4o-transcribe-diarize` 只在 `diarization_ready=true` 时出现。带日期后缀的
+官方快照 ID（如 `gpt-4o-mini-transcribe-2025-12-15`、`gpt-4o-mini-tts-2025-12-15`）不在支持集合内，
+返回 `400 model_not_found`。
 TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 与
 `supports_instruction`。三个 TTS 档位都绑定 `custom_voice`（系统声音）与 `base`（参考克隆）
-两个角色，`voice_design`（提示词设计）只绑定在 `reference` 档且快照缺失时降级为不可用。
+两个角色；`voice_design`（提示词设计）是不与档位绑定的一份按需制品，任何 `tts_spec` 都能进入
+设计作业，快照缺失时只把该能力降级为不可用。
 客户端必须读取运行时能力字段，不能仅由默认 `variant` 推断 clone 或 preview。
 
 ### 1.1 档位与能力可用性矩阵
@@ -68,12 +72,25 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
+| `GET` | `/v1/speechrail/audio/receipts/by-request/{source_request_id}` | 按来源请求 ID 读取最新回执 | 客户端自持 `X-Request-ID` 时用于找回回执；回执仍只含样本数与哈希，不含音频 |
 | `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
+| `GET/POST` | `/v1/voice-designs` | 私有 VoiceDesign 候选列表与创建 | 创建需要 VoiceDesign 角色与本地 Batch ASR；可选 `Idempotency-Key` 回放 |
+| `GET` | `/v1/voice-designs/{candidate_id}` | 读取单个候选的当前 revision | 试听与复验都必须绑定这里的当前 revision |
+| `POST` | `/v1/voice-designs/{candidate_id}/cancel` | 取消未发布的候选 | 保留审计资产并释放目标 ID；已发布音色不受影响 |
 | `GET` | `/v1/voice-designs/{candidate_id}/audio` | 读取候选的当前参考 WAV | 必须固定 candidate revision；不重新合成 |
 | `GET` | `/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio` | 读取指定复验的原始 Base WAV | 必须固定 candidate revision；不重新合成 |
-| `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
+| `POST/GET` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据（可选 `Idempotency-Key`）与分页列出任务 |
+| `GET` | `/v1/jobs/{job_id}` | 查询单个异步任务 | 只返回同一 owner 范围的任务元数据 |
+| `DELETE` | `/v1/jobs/{job_id}` | 取消任务或释放已完成结果引用 | 排队中任务被取消；已完成任务的产物引用被释放 |
+| `GET` | `/v1/jobs/{job_id}/result` | 读取已完成任务的产物 | 返回音频或 JSON 结果引用，仍受 owner 范围约束 |
+| `GET` | `/v1/speechrail/voices` | 最小披露的安全音色目录 | 不含参考正文、私有 instruction 与本机路径；支持 ETag 与 `304` |
+| `GET/PATCH` | `/v1/speechrail/voices/{voice_id}` | 安全音色详情与 CAS 更新 | `PATCH` 必须带 `expected_revision`，成功后追加不可变 revision |
+| `GET` | `/v1/speechrail/voices/{voice_id}/revisions` | 列出不可变音色 revision | 只返回安全元数据，不含参考音频与路径 |
+| `POST` | `/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke` | 撤销指定 revision | 不打断已经获取的合成 lease |
+| `POST` | `/v1/speechrail/voices/{voice_id}/rollback` | 把音色别名回滚到未撤销的 revision | CAS 原子切换，不打断已获取的 lease |
 | `GET` | `/v1/speechrail/voices/clone/idempotency` | 克隆幂等状态查询 | 凭 `Idempotency-Key` 读取 durable 状态与 `result_id`，不重传素材 |
+| `GET` | `/v1/voices/clone/prompts` | 列出零样本克隆的官方推荐脚本 | 只读目录，供 App 提词与 Agent 选取参考文本 |
 | `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
 | `POST` | `/v1/speechrail/voices/{voice_id}/quality-runs` | 音色质量探针（带 evidence） | 同 `/v1/voices/{voice_id}/quality-runs`，另返回 `evidence` 命名空间 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |

@@ -6,6 +6,7 @@
 
 - macOS 模型管理界面支持混合档位组合：三张快捷组合卡之外新增「分别调整识别与配音」，下载 / 应用统一提交一对 `asr_spec`/`tts_spec`，混合组合按两档制品并集显示总量。
 - 新增 MCP 工具面对齐门 `scripts/check_mcp_tool_contract.py`，校验 `tools/list` / `resources/list` 与用户指南、Proxy 契约文档、`skill-manifest.json` 一致，并接入 CI 与验收清单。
+- 新增用户文档对齐门 `scripts/check_user_doc_contract.py`：校验契约中的每条路径都出现在 API 契约手册、手册标准错误码表中的每个 code 都有实现、服务实际下发的每个模型别名都被手册点名，并接入 CI。
 - `scripts/check_openapi_contract.py` 改为直接比对路由表（递归展开 FastAPI 的 `_IncludedRouter`），并新增成功状态码与 security scheme 校验。
 
 ### Changed
