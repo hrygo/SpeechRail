@@ -63,7 +63,7 @@ enum DeveloperDocsCatalog {
                 ]),
                 .note(
                     "调用前先读 GET /health 与 GET /readyz：/readyz 只表示 ASR 或 TTS 至少一个可用，"
-                    + "要哪一项能力就查对应字段。"
+                    + "分项就绪状态（asr_ready、tts_ready、diarization_ready）到 /health 里查。"
                 )
             ]
         ),
@@ -89,9 +89,11 @@ enum DeveloperDocsCatalog {
                     .init(method: "POST", path: "/v1/voice-designs/{id}/confirm", detail: "确认候选参考文案，可选改写转写"),
                     .init(method: "POST", path: "/v1/voice-designs/{id}/validate", detail: "Base 新文本复验，并附人工听审结论"),
                     .init(method: "POST", path: "/v1/voice-designs/{id}/publish", detail: "复验通过后原子发布为 Base 音色"),
+                    .init(method: "POST", path: "/v1/voice-designs/{id}/cancel", detail: "放弃候选，不注册音色"),
                     .init(method: "POST", path: "/v1/voices/clone", detail: "用参考录音注册音色（当前 Base 可用时）"),
                     .init(method: "GET", path: "/v1/voices/clone/prompts", detail: "官方提词稿列表"),
                     .init(method: "POST", path: "/v1/voices/clone/validate", detail: "只跑质量门，不创建档案"),
+                    .init(method: "GET", path: "/v1/speechrail/voices/clone/idempotency", detail: "凭同一个 Idempotency-Key 查克隆的 durable 状态与结果 id，不重传素材"),
                     .init(method: "PATCH", path: "/v1/voices/{voice_id}", detail: "改名称；instruction 音色还能改描述与 seed"),
                     .init(method: "DELETE", path: "/v1/voices/{voice_id}", detail: "删除自定义音色，系统音色受保护"),
                     .init(method: "POST", path: "/v1/voices/{voice_id}/quality-runs", detail: "对已有音色跑输出质量探针"),
@@ -115,9 +117,11 @@ enum DeveloperDocsCatalog {
                     + "分人开关。它不承载 LLM 回复、tool call、播放与会议策略——那些属于调用方。"
                 ),
                 .bullets([
-                    "会话配置、音频追加与提交沿用 Realtime 的消息名；服务端用 Server VAD 判定语音起止。",
+                    "会话配置、音频追加与提交沿用 Realtime 的消息名；官方的 audio.input.turn_detection 只接受 "
+                    + "null 或 manual，自动断句要显式用 session.speechrail.endpointing={\"mode\":\"server_vad\"}。",
                     "识别结果按转写事件返回；合成按音频增量事件返回，客户端自己负责播放与打断。",
-                    "分人能力按档位发布，只输出会话级匿名标签，不提供实名或跨会话身份。",
+                    "对齐、匿名分人与 TTS 都是任务级 opt-in（session.speechrail.*），不随档位自动开启；"
+                    + "分人只输出会话级匿名标签，不提供实名或跨会话身份。",
                     "能力未就绪时服务端在会话开始时给出稳定错误码，而不是静默丢帧。"
                 ]),
                 .note("完整消息表与字段语义见仓库里的 contracts/realtime-openai.md。")
@@ -149,8 +153,10 @@ enum DeveloperDocsCatalog {
                     "  -F name=\"我的声音\""
                 ]),
                 .note(
-                    "响应丢失时用同一个 Idempotency-Key 与同一个 id 重试：服务端认得这是同一次注册，"
-                    + "不会建出第二个音色。"
+                    "响应丢失时用同一个 Idempotency-Key 与完全相同的请求体重试，服务端认得这是同一次注册，"
+                    + "不会建出第二个音色；音频、正文、名称或目标 id 一变就是另一次操作（同 key 不同请求体返回 "
+                    + "idempotency_conflict）。不想重传素材时，用 GET /v1/speechrail/voices/clone/idempotency "
+                    + "凭同一个 key 查这次注册的 durable 状态与结果 id。"
                 )
             ]
         ),
@@ -161,10 +167,16 @@ enum DeveloperDocsCatalog {
             systemImage: "slider.horizontal.3",
             blocks: [
                 .bullets([
-                    "fast（极速）：ASR 0.6B、TTS 0.6B 的 8-bit 权重，aligner 用 aligner-q8；模型文件最小，毫秒级极低时延与低显存。",
-                    "quality（品质）：ASR 1.7B、TTS 1.7B 的 8-bit 权重，aligner 用 aligner-bf16；官方推荐日常主力，兼顾自然度与性能，支持声音克隆。",
-                    "reference（高精）：ASR 1.7B、TTS 1.7B 的 bf16 满血权重，aligner 用 aligner-bf16；录音室级高保真，设计模型快照就绪时声明 VoiceDesign。",
-                    "分人（谁在说话）不再由档位单独决定：它按当前服务的对齐模型、CoreML 资产与任务开关计算；克隆与声音设计按 /v1/models 的 capabilities 决定展示。"
+                    "fast（极速）：ASR 0.6B、TTS 0.6B 的 8-bit 权重，aligner 用 aligner-q8；模型文件最小，"
+                    + "适合实时对话与轻量交互。",
+                    "quality（品质）：ASR 1.7B、TTS 1.7B 的 8-bit 权重，aligner 用 aligner-bf16；兼顾自然度与"
+                    + "资源占用。",
+                    "reference（高精）：ASR 1.7B、TTS 1.7B 的 bf16 满血权重，aligner 用 aligner-bf16；满血原生"
+                    + "高保真，它的资源与延迟沿用同族 8-bit 档位的门禁证据，本机未单独复测。",
+                    "三档都绑定 Base（参考克隆）与 CustomVoice（系统音色）两个角色；声音设计只有一份 1.7B bf16 "
+                    + "制品，由三档共享、不绑定档位，快照就绪时任何一档都可声明 VoiceDesign。",
+                    "分人（谁在说话）不由档位决定：它按当前服务的对齐模型、CoreML 资产与任务开关计算；"
+                    + "克隆与声音设计按 /v1/models 的 capabilities 决定展示。"
                 ]),
                 .paragraph(
                     "档位改变的是服务端发布的能力，不是客户端 payload 形状：识别与配音各自选档，在 wire 上都落到同一对 "
@@ -190,7 +202,8 @@ enum DeveloperDocsCatalog {
                 ),
                 .code(language: "Codex · ~/.codex/config.toml", lines: [
                     "[mcp_servers.speechrail]",
-                    "command = \"~/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail-mcp\"",
+                    "# command 必须是绝对路径，不能写 ~",
+                    "command = \"/Users/<you>/Library/Application Support/SpeechRail/runtime/current/.venv/bin/speechrail-mcp\"",
                     "env = { SPEECHRAIL_BASE_URL = \"http://127.0.0.1:8201/v1\" }"
                 ]),
                 .bullets([
@@ -225,9 +238,10 @@ enum DeveloperDocsCatalog {
                     "}"
                 ]),
                 .bullets([
-                    "backend_not_ready：先看 /readyz 与模型页，模型没准备好时不要重试风暴。",
+                    "backend_not_ready：先看 /readyz 与模型组合页，模型没准备好时不要重试风暴。",
                     "backend_busy / queue_full：服务按 retryable 与 Retry-After 提示退避重试。",
-                    "voice_cloning_unsupported：当前档位没有发布参考音色复刻能力；到模型管理查看服务当前公布的档位与能力。",
+                    "voice_cloning_unsupported：当前组合的 Base 克隆能力没有解析成功或未就绪；到模型组合页查看"
+                    + "服务当前公布的档位与能力。",
                     "audio_too_short / audio_too_long：参考音频要在 2–45 秒之间。",
                     "voice_quality_reject：参考音频没过质量门（噪声、削波或内容不匹配），重新录一段。",
                     "invalid_api_key：非回环部署时 Authorization: Bearer 没配对，检查服务配置。"
