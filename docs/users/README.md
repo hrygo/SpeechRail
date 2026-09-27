@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.1.4"
-date: 2026-09-26
+version: "3.2.0"
+date: 2026-09-27
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -92,7 +92,7 @@ SpeechRail macOS App 面向本机用户提供三类入口：
 
 ### Capability 路由提示
 
-客户端只调用公共 REST/WebSocket endpoint，不需要感知模型 worker 的加载、卸载或切换。选定的规格组合与请求 capability 会由服务端自动路由；每个 TTS 档位都绑定系统声音（`custom_voice`）与参考克隆（`base`），提示词设计（`voice_design`）只由 `reference` 档绑定。实际可用性以当前服务声明的能力为准。不同 lane 可以并发，同一 lane 的请求会按 worker lock 排队。空闲冷却导致 worker 回收时，服务会在下一次对应请求中惰性恢复，不改变客户端契约。
+客户端只调用公共 REST/WebSocket endpoint，不需要感知模型 worker 的加载、卸载或切换。选定的规格组合与请求 capability 会由服务端自动路由；每个 TTS 档位都绑定系统声音（`custom_voice`）与参考克隆（`base`），提示词设计（`voice_design`）是不与档位绑定的按需制品。实际可用性以当前服务声明的能力为准。不同 lane 可以并发，同一 lane 的请求会按 worker lock 排队。空闲冷却导致 worker 回收时，服务会在下一次对应请求中惰性恢复，不改变客户端契约。
 
 ---
 

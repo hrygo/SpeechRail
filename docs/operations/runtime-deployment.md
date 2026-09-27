@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-version: "3.2.1"
-date: 2026-09-26
+version: "3.3.0"
+date: 2026-09-27
 ---
 
 # SpeechRail 运行时与部署
@@ -79,7 +79,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
 | 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` (默认) 或 `int8` (内存优化) | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS CustomVoice + Base clone（`reference` 另含 VoiceDesign） | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8`；bf16 snapshot 的模型 dtype 由实际权重头与 catalog identity 校验 | 每个档位用 CustomVoice 服务系统声音、用 Base 服务参考克隆；`reference` 可配置 VoiceDesign 与 Base 两个 worker；TTS 未就绪不阻塞 ASR；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
+| TTS runtime 成对配置 | Qwen3-TTS CustomVoice + Base clone（VoiceDesign 为不与档位绑定的按需制品） | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8`；bf16 snapshot 的模型 dtype 由实际权重头与 catalog identity 校验 | 每个档位用 CustomVoice 服务系统声音、用 Base 服务参考克隆；供给设计快照后任何档位都可额外配置 VoiceDesign worker；TTS 未就绪不阻塞 ASR；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
 | diarization profile | 私有 Swift/CoreML Sortformer FP16 worker | 活跃会话时惰性启动；仅一条连续状态链路 | `/v1/audio/transcriptions` 的 `gpt-4o-transcribe-diarize` / `diarized_json`；Realtime 通过 `session.speechrail.diarization.enabled` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。

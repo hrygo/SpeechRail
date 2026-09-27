@@ -310,7 +310,7 @@ timing registry 容量不足均不会把成功的音频合成改判失败。取�
 `uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
 `default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；别名解析与档位
 无关，客户端无需上送 profile。能力的**可用性**随当前规格组合和服务 readiness 不同：提示词设计
-只在绑定 `voice_design` 的 `reference` 档且快照就绪时可用，参考克隆在绑定 `base` 的档位就绪时
+不绑定档位，在设计快照就绪时可用，参考克隆在绑定 `base` 的档位就绪时
 可用，详见 §1.1。
 
 ---
@@ -447,7 +447,7 @@ Authorization: Bearer <TOKEN>
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
-该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；当前 catalog 只有 `reference` 档绑定 `voice_design`，且该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
+该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；`voice_design` 不绑定档位，该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
 一个自然语言音色配方。请求期间的 instruction 和 seed 通过内部类型化 TTS 请求传入 worker；接口
 不会创建 VoiceProfile、写入 `custom_voices.json` 或保存音频文件。
 
@@ -466,7 +466,7 @@ Authorization: Bearer <TOKEN>
 `instruction` 最长 10000 字符，`input` 最长 4096 字符，`seed` 范围为 `0`–`4294967295`。
 支持 `mp3`、`opus`、`aac`、`flac`、`wav` 和 `pcm`；预览接口先在内存中完成生成与编码，
 因此后端或编码失败时仍能返回统一错误 envelope。未绑定 `voice_design` 的档位（`fast`、`quality`）
-或快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
+或设计快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 

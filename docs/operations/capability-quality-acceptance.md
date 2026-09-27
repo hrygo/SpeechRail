@@ -2,8 +2,8 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "3.2.1"
-date: 2026-09-26
+version: "3.3.0"
+date: 2026-09-27
 ---
 
 # 能力诊断与质量验收
@@ -74,8 +74,7 @@ legacy。若 profile 未配置或 artifact 不可用，再用同一 managed CLI 
 
 当前 Realtime 在独立 Base clone capability（每个 TTS 档位的 `tts_base` 角色）实际配置且 ready 时，通过
 `/v1/models[].capabilities.supports_clone=true` 声明可用性（同一份也可从
-`/v1/speechrail/capabilities` 的原子快照读取）。系统声音走 `custom_voice`，只有 `reference` 档另绑定
-`voice_design`；客户端不能由默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
+`/v1/speechrail/capabilities` 的原子快照读取）。系统声音走 `custom_voice`，`voice_design` 是不与档位绑定、仅在设计作业加载的按需角色；客户端不能由默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
 normalization 使用请求级状态，并以私有 200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，
 不是客户端可依赖的公共 Realtime delta 大小承诺。
 

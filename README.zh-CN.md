@@ -247,8 +247,9 @@ selection 与 readiness。BF16 权重类型本身不代表质量更高。
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice 与 Base 角色；分人需显式供给。 |
 | `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` + 仅设计作业使用的 `tts-1.7b-design-bf16` | bf16 制品继承同族 8-bit 门禁证据，未在本机单独复测；VoiceDesign 不进入普通合成。分人仍需显式供给。 |
 
-每个规格都把系统声音路由到 `custom_voice`、把参考克隆路由到 `base`；`reference` 另绑定仅用于
-设计作业的 `voice_design`。不同 lane 可并发，同一 lane 仍串行；能力组仍会在配置的空闲冷却后
+每个规格都把系统声音路由到 `custom_voice`、把参考克隆路由到 `base`。VoiceDesign 是不与档位
+绑定的一份按需制品：该快照供给后任何 `tts_spec` 都能进入设计作业，缺失时只降级设计能力。
+不同 lane 可并发，同一 lane 仍串行；能力组仍会在配置的空闲冷却后
 关闭 worker，并按下一个请求实际需要的角色惰性恢复。
 
 ![三档模型与 TTS capability 关系图](docs/architecture/diagrams/three-tier-model-architecture.svg)
@@ -272,7 +273,7 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 ```
 
 请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有规格上都可用。
-VoiceDesign 试听/设计和 Base 克隆能力由当前有效能力决定；VoiceDesign 只绑定 `reference`，
+VoiceDesign 试听/设计和 Base 克隆能力由当前有效能力决定；VoiceDesign 不绑定档位，
 CustomVoice 与 Base 在每个规格中都存在。
 详见
 [`docs/users/api-contract.md`](docs/users/api-contract.md)。

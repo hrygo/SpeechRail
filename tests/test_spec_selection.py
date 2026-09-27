@@ -8,6 +8,7 @@ import speechrail.config.selection as selection_module
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog, load_runtime_lock
 from speechrail.config.selection import SelectionError, active_model_catalog, resolve_selection
+from speechrail.domain.model_spec import required_spec_artifact
 
 
 def _settings(**kwargs: object) -> Settings:
@@ -119,6 +120,58 @@ def test_selection_requires_the_base_clone_snapshot(tmp_path: Path) -> None:
 
     with pytest.raises(SelectionError, match="TTS clone model snapshot directory is missing"):
         resolve_selection(_settings(), _selection(), load_catalog(), tmp_path)
+
+
+@pytest.mark.parametrize("spec", ["fast", "quality", "reference"])
+def test_voice_design_is_not_a_tier_role(spec: str) -> None:
+    """The design artifact is on-demand, so no tier may claim the role."""
+
+    assert required_spec_artifact(spec, "voice_design") is None  # type: ignore[arg-type]
+    assert load_catalog().voice_design_artifact() is not None
+
+
+@pytest.mark.parametrize("spec", ["fast", "quality", "reference"])
+def test_voice_design_is_published_for_every_spec_once_supplied(
+    tmp_path: Path, spec: str
+) -> None:
+    """Any ``tts_spec`` must expose design jobs once the shared snapshot exists.
+
+    The user documentation states that VoiceDesign is not bound to a tier, so
+    the selection layer has to keep publishing the same artifact for every
+    spec. Re-binding it to one tier would silently falsify that contract.
+    """
+
+    catalog = load_catalog()
+    design = catalog.voice_design_artifact()
+    assert design is not None
+    for role in ("asr", "tts_custom_voice", "tts_base"):
+        _directory(tmp_path, catalog.binding(spec, role))  # type: ignore[arg-type]
+    _directory(tmp_path, design.key)
+
+    resolved = resolve_selection(
+        _settings(), _selection(asr_spec=spec, tts_spec=spec), catalog, tmp_path
+    )
+
+    assert resolved.voice_design_artifact_key == design.key
+    assert active_model_catalog(resolved, catalog).voice_design is not None
+
+
+@pytest.mark.parametrize("spec", ["fast", "quality", "reference"])
+def test_missing_design_snapshot_degrades_instead_of_failing(
+    tmp_path: Path, spec: str
+) -> None:
+    """A missing design snapshot must not block ASR/TTS/Base activation."""
+
+    catalog = load_catalog()
+    for role in ("asr", "tts_custom_voice", "tts_base"):
+        _directory(tmp_path, catalog.binding(spec, role))  # type: ignore[arg-type]
+
+    resolved = resolve_selection(
+        _settings(), _selection(asr_spec=spec, tts_spec=spec), catalog, tmp_path
+    )
+
+    assert resolved.voice_design_artifact_key is None
+    assert active_model_catalog(resolved, catalog).voice_design is None
 
 
 def test_legacy_selection_is_rejected_before_paths_are_used(tmp_path: Path) -> None:

@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.1.4"
-date: 2026-09-26
+version: "3.2.0"
+date: 2026-09-27
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -32,20 +32,20 @@ Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能�
 | ASR 文件转写（`segment`/`word` 时间戳）/ Realtime（`segment`） | ✓ | ✓ | ✓ |
 | 系统声音合成（`custom_voice`） | ✓ | ✓ | ✓ |
 | 参考克隆（`base`，就绪时） | ✓ | ✓ | ✓ |
-| 自然语言音色设计 / 试听（`voice_design`） | ✗ | ✗ | ✓ |
+| 自然语言音色设计 / 试听（`voice_design`，不与档位绑定） | 需设计快照 | 需设计快照 | 需设计快照 |
 | 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | 需显式供给 | 需显式供给 | 需显式供给 |
 
 - **分人是任务 opt-in**：不分档位继承。需要显式供给外部 CoreML Sortformer 与一个 ForcedAligner
   （`aligner-q8` / `aligner-bf16`）并保持 `diarization_ready=true`；未供给时不声明
   `gpt-4o-transcribe-diarize`，文件分人返回 `503 diarization_not_available`，Realtime 分人扩展也不会开启。
 - **词级时间戳三档都有**：由 ASR 原生提供（`timestamp_granularities`），与分人 / aligner 无关。
-- **音色设计 / 克隆**：`voice_design` 只绑定 `reference`；`fast`、`quality` 上预览返回 `400 voice_preview_unsupported`。
+- **音色设计 / 克隆**：`voice_design` 不绑定档位，快照供给后三档都可预览与设计；快照缺失或未就绪时返回 `400 voice_preview_unsupported`。
   参考克隆由每个档位的 `base` 角色提供；角色未解析成功或未就绪时，克隆返回 `400 voice_cloning_unsupported`。
 - `reference` 的 bf16 制品继承同族 8-bit 档位的门禁证据，未在本机单独复测。没有质量、资源与延迟
   汇总证据前，不宣称其质量更高或建议用于正式运行。
 - 权威能力矩阵与运行时字段见 [公共 API 契约手册 §1.1](api-contract.md#11-档位与能力可用性矩阵)。
 
-每个 TTS 档位的 `custom_voice` / `base` 角色（以及 `reference` 档的 `voice_design`）由独立 TTS capability worker 处理。客户端无需管理 worker 的加载或卸载；不同 capability lane 可以并发，同一 lane 仍会按 worker lock 排队。空闲冷却会按 capability group 回收常驻权重，下一次请求再惰性恢复所需 worker，这不改变 endpoint、模型别名或错误 envelope。
+每个 TTS 档位的 `custom_voice` / `base` 角色，以及不与档位绑定的 `voice_design`，由独立 TTS capability worker 处理。客户端无需管理 worker 的加载或卸载；不同 capability lane 可以并发，同一 lane 仍会按 worker lock 排队。空闲冷却会按 capability group 回收常驻权重，下一次请求再惰性恢复所需 worker，这不改变 endpoint、模型别名或错误 envelope。
 
 ---
 
