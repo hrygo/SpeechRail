@@ -66,6 +66,20 @@ runtime_validation: not_run
 
 PR #99 OPEN / MERGEABLE，base `main`。`origin/main` 无领先提交（merge-base = `ee170d08`）；frontmatter `reviewed_ref` `3763eb01` 与当前 main HEAD 间无触及本次审阅范围文件的提交，已审阅内容未漂移。
 
+**源方案 §8.1 目标命令集**（方案自定义的确定性 gate）逐条通过：
+
+| 命令 | 结果 |
+|---|---|
+| `git diff --check` | 干净 |
+| `uv run --extra dev ruff check src tests` | 通过 |
+| `pytest test_speech_api test_openapi_contract test_capability_snapshot test_voice_design_workflow` | 109 passed |
+| `swift test --filter ServiceContractTests` | 38 passed |
+| `swift test --filter AppModelTests` | 28 passed |
+| `swift test --filter CreativeWorkStoreTests` | 5 passed |
+| `uv run python scripts/check_version_consistency.py` | 通过（3.2.1） |
+
+对照源方案 §8 验收矩阵：确定性项 **C01–C07、M01–M03、U01–U04、W01–W04** 均有对应自动化测试并通过；**Q01/Q02**（真实样例内容一致性、跨语言对照，需真实合成 + 人工听审）与 **R01**（App/service 联合发布）属运行时/人工项，**未执行**。
+
 **结论边界**：以上仅覆盖可由确定性测试证明的行为。真机合成内容正确性与人工听审、官方 SDK 互操作、性能/质量、UI 自动化与 combined release（§8.5）均**未执行**，不据此声明质量、性能或长时稳定性通过。
 
 ### 破坏性变更提示
