@@ -49,6 +49,7 @@ public struct DubbingDeskView: View {
     @State private var exportFileName = "SpeechRail-配音"
     @State private var isExporting = false
     @State private var exportMessage: String?
+    @State private var saveNotice: String?
     @FocusState private var isScriptFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -67,6 +68,10 @@ public struct DubbingDeskView: View {
             .animation(
                 reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
                 value: model.lastCreatedWork?.id
+            )
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                value: model.pendingDubbing == nil
             )
         }
         // 头部（页面身份）由窗口组合根 `ControlCenterView` 声明；这一页没有头部动作：
@@ -344,7 +349,10 @@ public struct DubbingDeskView: View {
                 if isPreviewing {
                     model.cancelVoicePreview()
                 } else {
-                    model.startVoicePreview(voice)
+                    model.startVoicePreview(
+                        voice,
+                        text: AppModel.defaultPreviewText(forVoiceID: voice.id)
+                    )
                 }
             } label: {
                 Image(systemName: isPreviewing ? "stop.circle.fill" : "play.circle")
@@ -487,7 +495,15 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
 
-        if let work = model.lastCreatedWork {
+        if let saveNotice {
+            Text(saveNotice)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+
+        if let pending = model.pendingDubbing {
+            pendingResultBar(for: pending)
+        } else if let work = model.lastCreatedWork {
             resultBar(for: work)
         } else if let creatorMessage = model.creatorMessage {
             failureBar(message: creatorMessage)
@@ -612,6 +628,97 @@ public struct DubbingDeskView: View {
         )
     }
 
+    /// 待保存的配音结果：音频只在内存，播放与导出可用；只有用户显式保存才进入作品库。
+    private func pendingResultBar(for pending: AppModel.PendingDubbingRender) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                WaveformBars(
+                    pattern: SpeechRailDesignTokens.Waveform.resultBar,
+                    isPlaying: model.isAudioPlaying
+                )
+                .accessibilityHidden(true)
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(pending.generatedTitle)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let durationText = pending.durationText {
+                        Text(durationText)
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .monospacedDigit()
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                }
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                Button {
+                    model.playPendingDubbing()
+                } label: {
+                    SpeechRailButtonLabel(
+                        model.isAudioPlaying ? "停止" : "播放",
+                        icon: model.isAudioPlaying ? .stop : .play
+                    )
+                }
+                .accessibilityLabel(model.isAudioPlaying ? "停止播放" : "播放试听")
+
+                Button {
+                    preparePendingExport(for: pending)
+                } label: {
+                    SpeechRailButtonLabel("导出…", icon: .export)
+                }
+                .accessibilityLabel("导出配音试听")
+
+                Button {
+                    savePending()
+                } label: {
+                    SpeechRailButtonLabel("保存到作品库", icon: .add)
+                }
+                .accessibilityLabel("保存到作品库")
+                .disabled(model.isCreatingSpeech)
+            }
+
+            Text("试听通过后再保存：保存前作品库不会新增。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            if let playbackMessage = model.workPlaybackMessage {
+                Text(playbackMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+            }
+
+            if let exportMessage {
+                Text(exportMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .speechRailSurface(.elevated)
+        .accessibilityElement(children: .contain)
+        .transition(
+            reduceMotion
+                ? AnyTransition.identity
+                : AnyTransition.move(edge: .bottom).combined(with: .opacity)
+        )
+    }
+
+    private func savePending() {
+        exportMessage = nil
+        if model.savePendingDubbing() != nil {
+            saveNotice = "已保存到作品库。"
+        }
+    }
+
+    private func preparePendingExport(for pending: AppModel.PendingDubbingRender) {
+        exportDocument = WAVFileDocument(data: pending.audioData)
+        exportFileName = pending.generatedTitle
+        exportMessage = nil
+        isExporting = true
+    }
+
     /// A failed run reports in the same place the result would have appeared.
     private func failureBar(message: String) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -661,6 +768,7 @@ public struct DubbingDeskView: View {
     private func startSynthesis() {
         guard let voice = selectedVoice else { return }
         exportMessage = nil
+        saveNotice = nil
         model.startSynthesisAndSave(text: dubbingText, voice: voice, speed: speechSpeed)
     }
 
@@ -2122,6 +2230,7 @@ public struct VoiceLibraryView: View {
     @Environment(AppNavigationState.self) private var navigation
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @State private var sampleText = "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。"
+    @State private var sampleTextEdited = false
     @State private var selectedVoiceID: String?
     @State private var showInspector = true
     @State private var searchText = ""
@@ -2239,6 +2348,9 @@ public struct VoiceLibraryView: View {
         }
         .task(id: selectedVoiceID) {
             guard let selectedVoiceID else { return }
+            if !sampleTextEdited {
+                sampleText = AppModel.defaultPreviewText(forVoiceID: selectedVoiceID)
+            }
             await model.refreshCreatorVoiceDetail(id: selectedVoiceID)
         }
         .onChange(of: model.creatorVoices) { _, _ in
@@ -2687,7 +2799,10 @@ public struct VoiceLibraryView: View {
                 // 「详情列多宽」变成「用户打了多少字」的函数；改成多行后宽度回给
                 // 容器，长文案改在槽内换行，两行起、五行封顶，再长由原生编辑器
                 // 内部滚动（REDESIGN-SPEC §11.6 第五十七轮）。
-                TextField("输入试听文案", text: $sampleText, axis: .vertical)
+                TextField("输入试听文案", text: Binding(
+                    get: { sampleText },
+                    set: { sampleText = $0; sampleTextEdited = true }
+                ), axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(previewTextLineCount)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)

@@ -451,6 +451,29 @@ public enum ClonePromptLoadState: Equatable, Sendable {
 @MainActor
 @Observable
 public final class AppModel {
+    /// 一次配音生成的待保存结果：音频只在内存，身份已固定。
+    /// 只有用户显式保存后才写入作品库；取消、失败或离开页面即丢弃。
+    public struct PendingDubbingRender: Equatable, Sendable {
+        public let scriptText: String
+        public let voiceID: String
+        public let voiceName: String
+        public let voiceRevision: String?
+        public let planID: String?
+        public let speed: Double
+        public let durationSeconds: Double?
+        public let audioData: Data
+
+        public var generatedTitle: String {
+            CreativeWork.generatedTitle(fromScript: scriptText)
+        }
+
+        public var durationText: String? {
+            guard let durationSeconds else { return nil }
+            let totalSeconds = max(0, Int(durationSeconds.rounded()))
+            return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+        }
+    }
+
     public private(set) var service = ServiceSnapshot(serviceState: "unknown")
     /// 服务端口行的 `host` 部分：`ServiceSnapshot` 只带端口，主机名由诊断客户端给出。
     public var serviceConnectionHost: String? { apiClient.connectionHost }
@@ -513,6 +536,9 @@ public final class AppModel {
     public private(set) var isCreatingSpeech = false
     public private(set) var previewingVoiceID: String?
     public private(set) var lastCreatedWork: CreativeWork?
+    /// 配音台已生成、尚未显式保存的内存音频及制作身份。
+    /// 只有用户点击保存后才写入作品库；取消、失败或离开页面即丢弃。
+    public private(set) var pendingDubbing: PendingDubbingRender?
     public private(set) var isCreatingVoicePreview = false
     public private(set) var voiceDesignCandidates: [VoiceDesignCandidateSnapshot] = []
     public private(set) var voiceDesignSavedSlots: Set<String> = []
@@ -704,14 +730,16 @@ public final class AppModel {
     public func createSpeech(
         text: String,
         voiceID: String,
-        speed: Double
+        speed: Double,
+        language: String? = nil
     ) async throws -> Data {
         let options = try await speechRequestOptions(for: voiceID)
         return try await creatorClient.createSpeech(
             text: text,
             voiceID: voiceID,
             speed: speed,
-            options: options
+            options: options,
+            language: language
         )
     }
 
@@ -2300,7 +2328,8 @@ public final class AppModel {
         }
 
         stopAudio()
-        let cacheKey = "\(voice.id):\(speed):\(previewText)"
+        let previewLanguage = Self.previewLanguage(forVoiceID: voice.id).rawValue
+        let cacheKey = "\(voice.id):\(speed):\(previewLanguage):\(previewText)"
 
         // 优先命中本地内存缓存：0 毫秒即点即播，彻底免除反复生成延迟
         if let cachedData = previewAudioCache[cacheKey] {
@@ -2332,7 +2361,8 @@ public final class AppModel {
                 text: previewText,
                 voiceID: voice.id,
                 speed: speed,
-                options: options
+                options: options,
+                language: previewLanguage
             )
             try Task.checkCancellation()
             // 写入本地内存缓存
@@ -2687,13 +2717,48 @@ public final class AppModel {
 
     /// Own the request task at the app-model level so navigating between pages
     /// cannot orphan a submitted generation or remove its cancellation handle.
+    /// 音色试听语种：服务端 system voice 无 language 字段，按音色 ID 映射。
+    /// 与服务端 `_LANGUAGE_ALIASES` 对齐；未知/自定义音色默认中文。
+    public enum VoicePreviewLanguage: String, Sendable {
+        case chinese = "chinese"
+        case english = "english"
+        case japanese = "japanese"
+        case korean = "korean"
+    }
+
+    public static func previewLanguage(forVoiceID voiceID: String) -> VoicePreviewLanguage {
+        switch voiceID {
+        case "ryan", "aiden":
+            return .english
+        case "ono_anna":
+            return .japanese
+        case "sohee":
+            return .korean
+        default:
+            return .chinese
+        }
+    }
+
+    public static func defaultPreviewText(forVoiceID voiceID: String) -> String {
+        switch previewLanguage(forVoiceID: voiceID) {
+        case .english:
+            return "This is a SpeechRail voice preview. Clear, natural voice, every word just right."
+        case .japanese:
+            return "こちらはSpeechRailの音声プレビューです。クリアで自然な声をお届けします。"
+        case .korean:
+            return "SpeechRail 음성 미리듣기입니다. 맑고 자연스러운 목소리를 들어보세요."
+        case .chinese:
+            return "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。"
+        }
+    }
+
     public func startSynthesisAndSave(
         text: String,
         voice: CreatorVoice,
         speed: Double
     ) {
         guard synthesisTask == nil, !isCreatingSpeech else { return }
-        lastCreatedWork = nil
+        pendingDubbing = nil
         workPlaybackMessage = nil
         synthesisTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2704,6 +2769,59 @@ public final class AppModel {
 
     public func cancelSynthesis() {
         synthesisTask?.cancel()
+        pendingDubbing = nil
+    }
+
+    /// 把已生成的待保存配音写入作品库。返回 nil 表示没有待保存内容或保存失败。
+    @discardableResult
+    public func savePendingDubbing() -> CreativeWork? {
+        guard let pending = pendingDubbing else { return nil }
+        let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let work = CreativeWork(
+            id: workID,
+            title: pending.generatedTitle,
+            scriptText: pending.scriptText,
+            voiceID: pending.voiceID,
+            voiceName: pending.voiceName,
+            voiceRevision: pending.voiceRevision,
+            planID: pending.planID,
+            renderRevision: (try? workStore.nextRenderRevision(
+                scriptText: pending.scriptText,
+                voiceID: pending.voiceID
+            )) ?? 1,
+            durationSeconds: pending.durationSeconds,
+            audioFileName: "\(workID).wav"
+        )
+        do {
+            try workStore.save(work, audioData: pending.audioData)
+        } catch {
+            creatorMessage = "作品保存失败，请检查磁盘权限和可用空间后重试"
+            return nil
+        }
+        do {
+            works = try workStore.list()
+            worksMessage = nil
+        } catch {
+            worksMessage = "作品已保存，但作品列表暂时无法刷新"
+        }
+        pendingDubbing = nil
+        lastCreatedWork = work
+        return work
+    }
+
+    /// 未保存的配音试听音频：从内存播放，不经过作品库。
+    public func playPendingDubbing() {
+        guard let pending = pendingDubbing else { return }
+        do {
+            try audioPlaybackController.play(data: pending.audioData)
+            isAudioPlaying = audioPlaybackController.isPlaying
+            playingWorkID = nil
+            playingVoiceID = nil
+            workPlaybackMessage = nil
+        } catch {
+            clearPlaybackState()
+            workPlaybackMessage = "试听音频无法播放，请重新生成。"
+        }
     }
 
     public func synthesizeAndSave(
@@ -2746,52 +2864,29 @@ public final class AppModel {
             )
             let data = render.audioData
             try Task.checkCancellation()
-            let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            let work = CreativeWork(
-                id: workID,
-                // 名称取文稿首行的整行：截断由行内按可用宽度做，不在写入时预截
-                // （用户反馈「文本应随 UI 宽度自然截断，见 `CreativeWork.generatedTitle`」）。
-                title: CreativeWork.generatedTitle(fromScript: scriptText),
+            // 生成结果只放内存：用户显式保存后才进入作品库。
+            let pending = PendingDubbingRender(
                 scriptText: scriptText,
                 voiceID: voice.id,
                 voiceName: voice.name,
-                // 这一次渲染固定下来的身份：音色 revision 与 plan。
-                // 之后全局默认怎么变，这份作品都指向当时的那一版；
-                // 想换到新 plan 只能由用户显式重做，产生新的 render revision。
                 voiceRevision: render.voiceRevision,
                 planID: render.planID,
-                renderRevision: (try? workStore.nextRenderRevision(
-                    scriptText: scriptText,
-                    voiceID: voice.id
-                )) ?? 1,
+                speed: speed,
                 durationSeconds: audioPlaybackController.duration(for: data),
-                audioFileName: "\(workID).wav"
+                audioData: data
             )
-            try workStore.save(work, audioData: data)
-            do {
-                works = try workStore.list()
-                worksMessage = nil
-            } catch {
-                // The audio and index write already succeeded. Keep the
-                // generated work as the authoritative result and surface the
-                // list refresh problem separately instead of reporting a
-                // successful synthesis as a failed request.
-                worksMessage = "作品已保存，但作品列表暂时无法刷新"
-            }
+            pendingDubbing = pending
             workPlaybackMessage = nil
             do {
                 try audioPlaybackController.play(data: data)
                 isAudioPlaying = audioPlaybackController.isPlaying
-                playingWorkID = work.id
-                cacheEnvelope(key: Self.envelopeKey(kind: "work", id: work.id)) { buckets in
-                    AudioEnvelope.levels(forAudioData: data, buckets: buckets)
-                }
+                playingWorkID = nil
+                playingVoiceID = nil
             } catch {
                 clearPlaybackState()
-                workPlaybackMessage = "作品已保存，但本次音频无法播放；可以在“我的作品”中重新试听。"
+                workPlaybackMessage = "音频已生成，但本次无法播放；可以重新生成后试听。"
             }
-            lastCreatedWork = work
-            return work
+            return nil
         } catch is CancellationError {
             return nil
         } catch {

@@ -939,7 +939,8 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions
+        options: SpeechRailRequestOptions,
+        language: String? = nil
     ) async throws -> Data {
         if ProcessInfo.processInfo.arguments.contains("--ui-test-slow-voice-preview") {
             try await Task.sleep(for: .seconds(5))

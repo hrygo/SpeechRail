@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 接入最新服务与 VoiceDesign 职责收口"
 status: reviewed
 audience: "SpeechRail macOS App 设计、开发、评审与验收人员"
-version: "1.4"
+version: "1.5"
 date: 2026-09-26
 baseline: "main@1116aa85 (实现基线 ee170d08)"
 ---
@@ -91,7 +91,7 @@ Issue 95 服务分支已经包含大量 App 接线，当前问题不是“App �
 | 音色库 | `/v1/voices`，`/v1/speechrail/voices`，`/v1/audio/speech` | rich list 用于展示；safe projection 用于可用性；普通试听只走 HTTP speech。 |
 | 音色修改 | `/v1/speechrail/voices/{voice_id}` | 强制 CAS；成功后刷新三类快照。 |
 | 音色克隆 | `/v1/voices/clone/*`，`/v1/speechrail/voices/clone/idempotency` | 增加 idempotency 接线，保证超时重试安全。 |
-| 配音台 | `/v1/audio/speech` | 仅使用已发布 Base clone/CustomVoice，不使用 VoiceDesign runtime voice。 |
+| 配音台 | `/v1/audio/speech` | 仅使用已发布 Base clone/CustomVoice，不使用 VoiceDesign runtime voice。生成后仅内存试听，用户显式保存才进入作品库。 |
 | 作品重放与导出 | `CreativeWorkStore` 已保存音频 | 离线重放/导出；只有用户明确重新生成才调用 HTTP speech，不自动覆盖作品。 |
 | 服务状态 | `/health`，`/v1/speechrail/capabilities`，`/v1/speechrail/voices` | 能力只读 effective snapshot；VoiceDesign 单列为按需创作，不混入普通 TTS。 |
 | 模型管理 | `/v1/models`，`/v1/speechrail/capabilities` | `/v1/models` 只做模型/别名发现；加载与可用性读 snapshot 和 readiness。 |
@@ -206,9 +206,9 @@ VoiceDesign 是音色创作期的候选生成器，不是普通 TTS 路由，也
 | 音色创作候选保存 | `/v1/voice-designs` 创建、确认、验证、发布 | 直接把临时 preview 注册成普通 voice。 |
 | 临时设计期试听 | `/v1/voices/previews`，只在创作流程内 | 把临时 preview 的试听确认转用为耐久候选的人工验证。 |
 | 保存前 Base 复验 | VoiceDesign candidate validate，使用不同测试文本 | 用同一参考文本复验后宣称发布候选已通过。 |
-| 已发布音色试听 | `/v1/audio/speech` | 用 `/v1/voices/previews` 播放已发布音色。 |
+| 已发布音色试听 | `/v1/audio/speech` | 用 `/v1/voices/previews` 播放已发布音色。试听文案与 `language` 按音色语种匹配，不用中文文案试听非中文音色。 |
 | 配音台 | `/v1/audio/speech` | VoiceDesign instruction 作为运行时 voice。 |
-| 作品重放/导出 | 已保存音频；重新生成才用 `/v1/audio/speech` | 依赖临时 runtime ID，或静默重新合成已有作品。 |
+| 作品重放/导出 | 已保存音频；重新生成才用 `/v1/audio/speech` | 依赖临时 runtime ID、静默重新合成已有作品，或生成成功后未经用户确认自动入库。 |
 | Realtime TTS | `/v1/realtime` 的 `realtime_speech` | 在没有已发布 Base/CustomVoice binding 时使用 VoiceDesign。 |
 
 ### 7.3 候选生命周期
@@ -587,3 +587,7 @@ Client 错误必须保留稳定的 service code、request ID 和 revision/confli
 4. 只清理清单内已证实不合规、归属明确的记录及其专属派生资产；不新增迁移层或通用清理工具，不扩展到无关目录。服务启停等运行态操作仍遵循独立授权。
 5. 清理后核实保留记录可读且没有悬空引用，并报告实际清理数量和依据。数据清理与代码回滚分开记录。
 6. 该授权不扩展至远端或其他机器，也不自动授权安装发布、UI 自动化、模型下载或无关运行态变更。
+
+## 19. 2026-09-27 增补（v1.5）
+
+用户反馈两项，均由 App 端修复，服务端契约不变：配音台生成后仅内存试听，需用户显式点击保存才写入作品库；音色库试听默认文案与 `language` 按音色语种匹配（ryan/aiden 英文、ono_anna 日文、sohee 韩文，其余中文）。详细实施见配套 Luna 方案 `../plans/2026-09-27-dubbing-save-and-preview-language-luna-guide.md`。

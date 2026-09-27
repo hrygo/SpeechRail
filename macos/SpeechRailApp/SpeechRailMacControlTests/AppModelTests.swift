@@ -134,6 +134,24 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testPreviewLanguageMapsVoicesToServiceLanguageNames() {
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "ryan"), .english)
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "aiden"), .english)
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "ono_anna"), .japanese)
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "sohee"), .korean)
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "serena"), .chinese)
+        XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "some_custom_voice"), .chinese)
+    }
+
+    func testDefaultPreviewTextMatchesVoiceLanguage() {
+        let english = AppModel.defaultPreviewText(forVoiceID: "ryan")
+        XCTAssertTrue(english.contains("SpeechRail voice preview"), "english voice gets english text: \(english)")
+        let japanese = AppModel.defaultPreviewText(forVoiceID: "ono_anna")
+        XCTAssertFalse(japanese.contains("这是"), "japanese voice must not get chinese text")
+        let chinese = AppModel.defaultPreviewText(forVoiceID: "serena")
+        XCTAssertTrue(chinese.contains("音色试听"), "chinese voice keeps chinese text")
+    }
+
     func testPendingCloneRegistrationKeepsOriginalPayloadAndBlocksRerecording() async throws {
         let creator = PendingCloneRegistrationClient()
         let model = makeModel(
@@ -703,7 +721,8 @@ private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions
+        options: SpeechRailRequestOptions,
+        language: String? = nil
     ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
@@ -801,7 +820,8 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
         text: String,
         voiceID: String,
         speed: Double,
-        options: SpeechRailRequestOptions
+        options: SpeechRailRequestOptions,
+        language: String? = nil
     ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
