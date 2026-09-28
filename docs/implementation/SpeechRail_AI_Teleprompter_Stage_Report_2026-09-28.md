@@ -190,6 +190,10 @@
     - 变异验证 2 条，全部被杀：删掉回滚（杀）、把文案换回 `aiFailureMessage`（杀）。
     - **这一条附带的元教训比缺陷本身更值钱**：回归第一次跑红时，红的是**回滚**和**文案指向**两条，而我最初写的第一条断言是「文案含『AI』」——它当场通过了，因为旧文案正好含「AI」。**断言写反了：我想表达的是「不要归因给 AI」，写成了「要含 AI」。** 如果当时不看红的是哪几行、只看到「测试通过」就收工，这条缺陷会以「已修复」的名义留在报告里，而断言会在下一次重构里变成相反的意思。**先写回归再改代码的另一个好处在这里显形：它连你的测试写得对不对一起验。**
 
+45. **台账里有一条引用在代码里搜不到（第十三轮，审计交接文档本身）**：交接文档里每个「通过」都点名了具体回归——**这些点名就是证据指针**，接手方按引用去核是这份文档最基本的使用方式。脚本抽出 §4 台账里的 141 个标识，逐个回到 `macos/SpeechRailApp`、`tests`、`tools`、`src` 里查，**140 个命中，1 个查无此条**：`theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`。实际那条测试的函数名是 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`，`@Test` 显示名是 `the adopt decision pins recognition and duration separately`（带空格）。报告引用的是把显示名手工转成 camelCase 的第三种写法，**在代码里不存在任何一种对应形式**。已改为引用函数名。
+    - **这次审计本身也犯了一个错，值得一并记**：第一版脚本只比对**函数名**，于是把这条报成缺失，同时把 4 个 `tests/test_resource_governor.py` 里的用例和 `tools/probe_teleprompter_latency.py` 里的类型名 `RealtimeProbeError` 也报成缺失——后者根本不是测试名。补上 `@Test` 显示名与扫描范围后才收敛。**同一份「缺失清单」里既有真问题也有工具的假阳性，说明任何自动化审计的输出都必须逐条查因，不能直接当结论用**——这与第 33 条「探针没跑起来却全报 KILLED」是同一个教训的两种形态：那次是**测量工具完全没运行**，这次是**测量工具口径不全**。
+    - 扫描脚本与本轮的静态扫描（第 43 条）都还在 `/tmp`，固化进 `tools/` 仍需授权，见 §5 第 10 条。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
@@ -204,6 +208,7 @@
 | Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），XCTest **346 项** 0 failures，进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
+| 交接文档引用可解析性 | 抽出 §4 台账与 §4.2 对照表里的具名标识，回到代码里逐个查 | **141 个标识全部可解析**（2026-09-29）。首轮查无此条 1 处：#111 引用了 `theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`，而实际函数名是 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`、显示名是带空格的 `the adopt decision pins recognition and duration separately`，报告写的是第三种形式，已改。详见 §2 第 45 条 |
 | 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，11 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条，全部被新回归杀死，无存活，详见 §2 第 41–44 条。**累计有效变异 90 次、58 杀 / 32 存活；累计新增 24 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6） |
 
 ### 3.2 未执行（需要逐次授权）
@@ -349,7 +354,7 @@
 | #110 | M-01～M-05、P-05／P-09／P-11／P-12 使用生产 Store／mapper | 满足 | 台账 M-01～M-05 全通过 |
 | #111 | 保真操作不因目标时长删信息；有损操作单独动作且删减可见 | **满足（视觉走查未做）** | 回归仍全绿；本轮补齐入口与确认（`TeleprompterCondenseDisclosure`，无绕过路径）以及删减原文的界面渲染（`sourceSnippet` 此前只写不读）。**按钮位置、确认弹层与原文行的实际呈现未走查**，属 U-10 未执行范围（§2 第 20 条） |
 | #111 | 锁定内容有效；无法达标时诚实报告 | **满足（界面未走查）** | 流水线侧 `condenseRefusesToDeleteLockedContent` 既有；本轮补上此前完全缺失的 **session 层重叠映射**回归：`condenseFailsClosedWhenAMarkedParagraphWouldBeDeleted`（锁太空则红）与 `condenseStillReviewsDeletionsOutsideTheMarkedParagraphs`（锁过度则红），两次变异分别只命中对应一条。标记界面见 §2 第 21 条 |
-| #111 | 试读校准复用既有类型与入口；证据来源清晰 | 满足（界面未走查） | `TeleprompterCalibrationSource` 区分 `.uncalibrated`／`.manualTrial`／**`.speechTrial(durationSeconds:recognizedUnits:)`** 三种来源；语音辅助试读已交付（第十一轮），无识别不产出倍率（`theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`） |
+| #111 | 试读校准复用既有类型与入口；证据来源清晰 | 满足（界面未走查） | `TeleprompterCalibrationSource` 区分 `.uncalibrated`／`.manualTrial`／**`.speechTrial(durationSeconds:recognizedUnits:)`** 三种来源；语音辅助试读已交付（第十一轮），无识别不产出倍率（`theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`） |
 | #111 | 采用／放弃／编辑／取消均不覆盖原稿 | 满足 | `rollingBackToAnEarlierVersionKeepsEveryScript`、`editingSourceInvalidatesReviewState` |
 | #111 | P-01／P-13～P-18 及候选版本隔离通过生产 seam | 满足 | 台账对应项全通过 |
 | #112 | fake transport 能观察 language／keywords 进入正确字段；其他调用方不变 | **满足（界面未走查）** | 契约与 keywords 侧本就成立；本轮补上此前缺失的生产写入者（识别语言菜单 + 持久化 + 恢复时清洗），并加两条防呆回归防止菜单出现「点了没反应」的选项（§2 第 22 条） |
@@ -431,6 +436,7 @@
     - **探针本身没跑起来时，全部变异都会假报 KILLED**——本轮 T 段六个变异「全杀」实际是因为 pytest 根本没装、每次都因 module not found 非零退出（第 33 条）。因此探针必须带**基线自检**：不改代码时必须 exit 0，且一次已知应被杀死的变异确实被杀，否则拒绝解读任何结果。
     - 建议把这三点固化成 `tools/` 下的可复用脚本。本轮**未擅自新增**——属于新增仓库资产，需要另行授权。
     - 同批建议再加一条**静态扫描**：枚举「先改状态、后面才出现 `try`／`throw`／`guard … else`」的函数（本轮脚本命中 `TeleprompterSession.swift` 12 处，人工复核后 11 处为假阳性或已有回滚，1 处是本轮最重的真缺陷，见 §2 第 43 条）。它的产出只有一行函数名加一行失败点，误报需要人读一遍才能排除——**适合当线索来源，不适合当结论**。
+    - 再加一条**引用可解析性检查**：把报告与台账里出现的具名标识（函数名、测试显示名）拿回代码里逐个查，缺失的列出来（本轮 141 个标识查出 1 个查无此条并已修，见 §2 第 45 条）。**写这类脚本时务必把口径一次备齐**——本轮第一版只比对函数名，既漏报了真问题，又把 `tests/` 与 `tools/` 里的用例和类型名误报成缺失。检查自身口径是否完整，比检查结果更重要。
 11. **worktree 里跑不了 Python 测试（可复现性缺口）**：pytest 放在 `[project.optional-dependencies].dev`，而 `uv sync` 默认不装 optional extra，因此 `.worktree/.venv` 里没有 pytest。本轮实际依赖主检出 `/Users/hrygo/Documents/SpeechRail/.venv`，并须把 worktree 的 `src` 放在 `PYTHONPATH` 前面才测的是 worktree 代码；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 让退出码恒为非零。**§3.1 过去记的 `pytest tests/…` 在 worktree 中开箱即用并不成立。** 建议要么把测试依赖移到 `dependency-groups.dev`（`uv sync` 默认安装），要么在开发文档里写明这条命令的完整形态。本轮只记录，未改依赖结构。
 
 ## 6. 回退
