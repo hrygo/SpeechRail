@@ -1728,7 +1728,8 @@ public actor LLMProvider {
             body["instructions"] = instructions
         }
         // SpeechRail 不需要 reasoning/thinking。标准兼容端点使用标准字段；已知本机
-        // 模板端点保留它的专用禁用表达；任一字段被拒绝后，调用方只重试一次并省略控制。
+        // 模板端点保留它的专用禁用表达。语音助手流要求控制字段生效，
+        // 非流式任务仍可按各自策略处理端点拒绝。
         if includeThinkingControl {
             switch configuration.compatibilityMode.responsesThinkingControl {
             case .standard:
@@ -1995,7 +1996,7 @@ public actor LLMProvider {
         configuration: LLMConfiguration,
         apiKey: String?,
         operation: LLMOperation = .responses,
-        requiresThinkingDisabled: Bool = false
+        allowThinkingControlFallback: Bool = true
     ) async -> LLMConnectionResult {
         guard configuration.isConfigured else { return .notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential else { return .badBaseURL }
@@ -2017,7 +2018,7 @@ public actor LLMProvider {
         let controlKey = thinkingKey(configuration, operation: operation)
         let sessionID = "check-\(UUID().uuidString)"
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
-        if requiresThinkingDisabled && !includeThinkingControl {
+        if !allowThinkingControlFallback && !includeThinkingControl {
             return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
         }
         let data: Data
@@ -2040,7 +2041,7 @@ public actor LLMProvider {
                     body: String(decoding: result.0, as: UTF8.self)
                ) {
                 thinkingControlRejected.insert(controlKey)
-                if requiresThinkingDisabled {
+                if !allowThinkingControlFallback {
                     return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
                 }
                 includeThinkingControl = false

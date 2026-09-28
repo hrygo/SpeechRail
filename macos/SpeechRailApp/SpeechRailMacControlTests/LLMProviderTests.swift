@@ -1194,7 +1194,7 @@ final class LLMProviderTests: XCTestCase {
             configuration: localTemplateConfiguration,
             apiKey: nil,
             operation: .responses,
-            requiresThinkingDisabled: true
+            allowThinkingControlFallback: false
         )
 
         XCTAssertFalse(result.isReady)

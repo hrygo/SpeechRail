@@ -103,7 +103,7 @@ final class AssistantSessionTests: XCTestCase {
             configuration: LLMConfiguration,
             apiKey: String?,
             operation: LLMOperation,
-            requiresThinkingDisabled: Bool
+            allowThinkingControlFallback: Bool
         ) async -> LLMConnectionResult {
             checkCount += 1
             return isReady

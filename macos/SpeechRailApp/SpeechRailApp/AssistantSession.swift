@@ -719,7 +719,7 @@ public final class AssistantSession {
             configuration: configuration,
             apiKey: key,
             operation: .responses,
-            requiresThinkingDisabled: true
+            allowThinkingControlFallback: false
         )
         try requireLive(token)
         guard result.isReady else {

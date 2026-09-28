@@ -20,7 +20,7 @@ public protocol AssistantLLM: Sendable {
         configuration: LLMConfiguration,
         apiKey: String?,
         operation: LLMOperation,
-        requiresThinkingDisabled: Bool
+        allowThinkingControlFallback: Bool
     ) async -> LLMConnectionResult
     func stream(
         configuration: LLMConfiguration,
