@@ -22,7 +22,10 @@ from speechrail.domain.tts_reference_condition import (
 )
 from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 from speechrail.domain.voice_preview import preview_for_profile
-from speechrail.domain.voice_validation import VoiceValidationArtifact
+from speechrail.domain.voice_validation import (
+    OUTPUT_VALIDATION_SCOPE,
+    VoiceValidationArtifact,
+)
 
 SCHEMA_VERSION = "effective_capabilities_v1"
 Support = Literal["supported", "unsupported", "unknown"]
@@ -240,7 +243,10 @@ def _validation_state(
     stale = bool(synthesis.get("stale_reason"))
 
     validated_for = synthesis.get("validated_for")
-    output_validated = isinstance(validated_for, list) and "output" in validated_for
+    output_validated = (
+        isinstance(validated_for, list)
+        and OUTPUT_VALIDATION_SCOPE in validated_for
+    )
     production_ready = profile.mode != "clone" or (
         reference["status"] == "pass"
         and synthesis["status"] == "pass"

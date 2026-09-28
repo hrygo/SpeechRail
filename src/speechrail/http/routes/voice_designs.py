@@ -70,7 +70,10 @@ from speechrail.domain.tts import (
 from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_creation import VoiceCreation
-from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
+from speechrail.domain.voice_validation import (
+    OUTPUT_VALIDATION_SCOPE,
+    VoiceValidationStoreUnavailableError,
+)
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
 from speechrail.http.routes.system import (
@@ -1209,6 +1212,16 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             if candidate.state in {"generated", "cancelled", "failed"}:
                 return _invalid_state(request_id, candidate)
             capability_key = body.capability_key or _selected_capability_key(services)
+            if capability_key != _selected_capability_key(services):
+                return error_response(
+                    422,
+                    request_id,
+                    "voice_design_capability_mismatch",
+                    (
+                        "VoiceDesign validation must be observed for the "
+                        "currently selected render capability"
+                    ),
+                )
             now = time.time()
             if body.human_review is not None:
                 review = body.human_review
@@ -1559,7 +1572,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     status_code=200,
                     content={
                         "candidate": _safe_candidate(repository, candidate),
-                        "voice": _voice_entry(profile, active, services.tts_ready),
+                        "voice": _voice_entry(
+                            profile,
+                            active,
+                            services.tts_ready,
+                            synthesizer=services.tts_synthesizer,
+                            strict_validation=True,
+                        ),
                     },
                 )
             if candidate.state != "validating" and candidate.state != "publishable":
@@ -1586,7 +1605,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     status_code=200,
                     content={
                         "candidate": _safe_candidate(repository, candidate),
-                        "voice": _voice_entry(profile, active, services.tts_ready),
+                        "voice": _voice_entry(
+                            profile,
+                            active,
+                            services.tts_ready,
+                            synthesizer=services.tts_synthesizer,
+                            strict_validation=True,
+                        ),
                     },
                 )
             current_validation = candidate.passing_validation()
@@ -1619,7 +1644,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "probe_set": "voice_design_base_v1",
                 "repetitions": 1,
                 "failure_codes": [],
-                "validated_for": [validation.capability_key],
+                "validated_for": [OUTPUT_VALIDATION_SCOPE],
             }
             registry.validation_store.put(validation_record)
             profile_holder: list[Any] = []
@@ -1673,7 +1698,13 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 status_code=201,
                 content={
                     "candidate": _safe_candidate(repository, published),
-                    "voice": _voice_entry(profile, active, services.tts_ready),
+                    "voice": _voice_entry(
+                        profile,
+                        active,
+                        services.tts_ready,
+                        synthesizer=services.tts_synthesizer,
+                        strict_validation=True,
+                    ),
                 },
             )
         except VoiceDesignNotFoundError:

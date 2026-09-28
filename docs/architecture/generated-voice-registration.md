@@ -2,8 +2,8 @@
 title: "生成式音色注册：VoiceDesign 参考到 Base 音色"
 status: active
 audience: "SpeechRail / Sona 维护者与客户端工程师"
-version: "1.3"
-date: 2026-09-26
+version: "1.4"
+date: 2026-09-28
 ---
 
 # 生成式音色注册
@@ -92,6 +92,23 @@ registry 在写入前核对参考音频及文本 hash。旧记录可缺省 creat
 并提供 revision list、CAS update、rollback、revoke 与 delete；`creation` 仍是来源元数据，
 不能单独证明跨文本 speaker similarity。Base 由当前有效能力路由，后端升级时的旧资产
 不提供自动迁移或跨模型兼容；模型或生成路径变化后，必须重新注册或按当前路径显式重新验收。
+
+## 发布证据如何支撑正式制作
+
+发布写入的验证证据用两个互相独立的字段定位，不合并成一个字符串：
+
+```text
+validated_for  = ["output"]              # 验收维度：只有 output 参与正式制作准入
+capability_key = "<当前档位>.render"       # 执行规格：证据只在这一档有效
+```
+
+因此，发布后的音色可以直接走**同档位**的严格 render，无需先试听预热；冷 worker
+会按需加载。跨档位、streaming、变更后的模型都不借用这份证据。参考预检（reference）
+无论通过与否都不会贡献 `output`，机器验收也不能替用户填写人工 identity/naturalness。
+
+旧格式记录不删除、不就地升级：缺少 `output` 维度或 `capability_key` 的历史证据一律
+不提升为可用。已有发布音色无需删除或重新注册——对已发布 voice 调用
+`POST /v1/speechrail/voices/{id}/quality-runs` 即可生成当前绑定下的新证据。
 
 ## Sona 对接与回退
 

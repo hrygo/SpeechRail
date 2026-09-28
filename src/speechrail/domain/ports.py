@@ -57,6 +57,14 @@ class SpeechRequest(BaseModel):
             "Internal negotiated model artifact revision pin; legacy public v1 does not expose it."
         ),
     )
+    expected_runtime_revision: str | None = Field(
+        default=None,
+        pattern=r"^rt_[0-9a-f]{64}$",
+        description=(
+            "Internal worker identity pin established after strict voice "
+            "validation admission; it is never part of the public request body."
+        ),
+    )
     timing_mode: Literal["chunk"] | None = Field(
         default=None,
         description="Internal SpeechRail timing negotiation; never changes OpenAI request JSON.",

@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.8.0"
+version: "3.9.0"
 date: 2026-09-28
 ---
 
@@ -237,6 +237,35 @@ alias/模型选择行为。
 音色、另一模型或最新 revision。`voice_revision=null` 且 `voice_identity_assurance=legacy`
 的条目没有可复制的不可变音色身份，只能按普通可用性路由。revision pin 约束版本绑定，
 不等价于跨文本说话人相似度、自然度或长时稳定性的质量验收。
+
+### 4.3 试听与正式制作：验证策略
+
+`SpeechRail-Validation-Policy` 决定这次合成是否必须是“已验收音色”的正式成片：
+
+| 取值 | 适用场景 | 克隆音色行为 |
+|---|---|---|
+| `allow_unverified`（缺省） | 试听、预览、诊断 | 不检查输出验收证据 |
+| `require_output_pass` | 正式制作、交付 | 必须有当前绑定下的 `output` 验收证据 |
+
+正式制作请始终显式发送 `require_output_pass`。它只对克隆音色生效；系统预置音色不受影响。
+
+严格准入发生在**资源准入之后、任何音频产生之前**：服务按需加载该 voice 所属的 worker，
+用真实握手的 runtime revision 精确匹配证据（voice revision + 模型 artifact/catalog/runtime +
+策略 + capability key），并在真正发送合成帧前再核对一次身份。因此**冷 worker 不需要先
+试听预热**；缺证据、错档位或身份漂移则一律拒绝，不返回半截音频。
+
+拒绝时的稳定错误码：
+
+| HTTP | `error.code` | 含义与下一步 |
+|---|---|---|
+| 409 | `voice_not_production_ready` | 没有当前绑定下的输出验收证据 → 先跑一次 `POST /v1/speechrail/voices/{id}/quality-runs` |
+| 409 | `voice_validation_runtime_changed` | 准备与执行之间模型被重载 → 重新检查后重试 |
+| 503 | `voice_validation_store_unavailable` | 证据存储不可读 → 检查服务状态后重试 |
+| 503 | `voice_validation_runtime_unavailable` | 运行时身份无法确认 → 先检查服务状态 |
+
+不要把 409 自动降级成 `allow_unverified` 重试：那是把“未验收”变成“悄悄放行”。
+正确做法是引导用户执行一次显式的配音效果检查。参考预检（`clone/validate`）通过
+**不等于**输出验收通过，两者不可互相替代。
 
 `speechrail-mcp` 对同一流程提供自动化：当 effective snapshot 可用时，`synthesize` 自动
 转发上述两个 Header；调用方也可用工具参数 `expected_voice_revision` /
@@ -538,7 +567,19 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 携带与 `POST /v1/voices/clone` 相同的 `Idempotency-Key` 请求头即可读取该 key 的 durable
 状态，无需重传音频或参考正文。响应为
 `{"state": "new|pending|completed", "result_id": <voice_id|null>}`：`completed` 且
-`result_id` 非空表示已存在可直接回放的音色；`pending` 表示结果尚不可用，客户端应等待或重试。
+`result_id` 非空表示已存在可直接回放的音色。
+
+`pending` 表示**结果未知**，不是失败。正确恢复方式是：用**同一个 key、同一个 payload、同一个
+目标 voice ID** 重放原本的 `POST /v1/voices/clone`。服务会与已创建的 profile 对账并补记
+完成状态，因此恢复最多产生一份声学资产，不会注册出第二个音色。**不要**换一个新 key
+重新提交——那会绕过 create-only 与 payload 指纹校验，制造重复资产。
+
+同理，已发出 POST 后的超时、取消、断连或 5xx 都不代表注册失败：保留同一身份，先查询再按
+原身份重放。只有能证明发生在提交**之前**的拒绝（`invalid_name`、`invalid_ref_text`、
+`invalid_voice_id`、`invalid_audio`、`audio_too_short`、`audio_too_long`、
+`voice_quality_reject`）才可以让用户改资料或重录。`POST /v1/voices/clone/validate` 是同一
+条管线的预检，对这些输入的判定与注册完全一致：预检通过的 `id` 不会在注册时被拒。
+
 缺少 header 返回 `400 idempotency_key_required`；未知 key 返回 `404 idempotency_not_found`；
 journal 不可读返回 `503 idempotency_store_unavailable`（可重试）。该只读查询不创建音色、不
 触发推理，也不暴露 journal 内的 key、payload 指纹或参考正文。

@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
 from speechrail.application.diarization import diarize_transcript
+from speechrail.application.ffmpeg import (
+    cleanup_ffmpeg_process,
+    run_ffmpeg_subprocess,
+)
 from speechrail.application.render_receipts import bind_observed_runtime_revision
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
@@ -29,7 +33,7 @@ from speechrail.application.tts_delivery import (
     iter_until,
     iter_validated_audio,
 )
-from speechrail.application.voice_validation_gate import validation_state_for_voice
+from speechrail.application.voice_validation_gate import prepare_validated_speech
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
@@ -63,7 +67,6 @@ from speechrail.domain.tts_pronunciation import (
 from speechrail.domain.tts_request import TtsParameterError, validate_tts_parameters
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.tts_text_planner import TtsTextPlanner
-from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import (
@@ -152,6 +155,18 @@ def _tts_backend_error_response(
     if exc.code in TTS_PARAMETER_ERROR_CODES:
         status_code = 400
         message = "TTS request parameters are unsupported for the selected voice"
+    elif exc.public_code == "voice_not_production_ready":
+        status_code = 409
+        message = "The selected clone voice has no current passing output validation"
+    elif exc.public_code == "voice_validation_runtime_changed":
+        status_code = 409
+        message = "The TTS worker changed after voice validation"
+    elif exc.public_code in {
+        "voice_validation_store_unavailable",
+        "voice_validation_runtime_unavailable",
+    }:
+        status_code = 503
+        message = "Voice validation could not confirm the current runtime"
     elif exc.public_code == "tts_initialization_failed":
         status_code = 503
         message = "TTS backend failed to initialize"
@@ -376,114 +391,6 @@ class _FFmpegOutputLimitError(Exception):
         self.error = error
 
 
-async def _write_ffmpeg_stdin(stdin: asyncio.StreamWriter, payload: bytes) -> None:
-    """Feed ffmpeg in bounded chunks and close stdin so it can finish."""
-    try:
-        for offset in range(0, len(payload), _FFMPEG_IO_CHUNK_BYTES):
-            stdin.write(payload[offset : offset + _FFMPEG_IO_CHUNK_BYTES])
-            await stdin.drain()
-    finally:
-        stdin.close()
-
-
-async def _read_ffmpeg_stdout(
-    stdout: asyncio.StreamReader,
-    *,
-    max_bytes: int,
-    limit_error: ValueError | OverflowError,
-) -> bytes:
-    """Read at most max_bytes plus one probe byte from ffmpeg stdout."""
-    output = bytearray()
-    max_bytes = max(0, max_bytes)
-    while True:
-        read_size = min(_FFMPEG_IO_CHUNK_BYTES, max_bytes + 1 - len(output))
-        chunk = await stdout.read(read_size)
-        if not chunk:
-            return bytes(output)
-        if len(output) + len(chunk) > max_bytes:
-            raise _FFmpegOutputLimitError(limit_error)
-        output.extend(chunk)
-
-
-async def _cleanup_ffmpeg_process(
-    process: asyncio.subprocess.Process,
-    tasks: tuple[asyncio.Task[object], ...],
-) -> None:
-    """Stop ffmpeg and drain its pipes so cancellation cannot leak a child."""
-    if process.stdin is not None:
-        with contextlib.suppress(Exception):
-            process.stdin.close()
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-    if tasks:
-        with contextlib.suppress(BaseException):
-            await asyncio.gather(*tasks, return_exceptions=True)
-    if process.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-    # communicate() is used only after termination to drain/discard buffered output and reap.
-    with contextlib.suppress(BaseException):
-        await process.communicate()
-
-
-async def _run_ffmpeg_subprocess(
-    command: tuple[str, ...],
-    payload: bytes,
-    *,
-    max_output_bytes: int,
-    output_limit_error: ValueError | OverflowError,
-    timeout_error: ValueError,
-    failure_error: ValueError,
-) -> bytes:
-    """Run fixed-argv ffmpeg with bounded concurrent stdin/stdout tasks."""
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    if process.stdin is None or process.stdout is None:
-        await _cleanup_ffmpeg_process(process, ())
-        raise failure_error
-
-    writer_task = asyncio.create_task(_write_ffmpeg_stdin(process.stdin, payload))
-    reader_task = asyncio.create_task(
-        _read_ffmpeg_stdout(
-            process.stdout,
-            max_bytes=max_output_bytes,
-            limit_error=output_limit_error,
-        )
-    )
-    tasks: tuple[asyncio.Task[object], ...] = (writer_task, reader_task)
-    try:
-        async with asyncio.timeout(_FFMPEG_TIMEOUT_SECONDS):
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            # FIRST_EXCEPTION returns all tasks when neither task raises. When a task
-            # fails, inspect the reader first so the earliest output limit wins over
-            # a simultaneous BrokenPipeError from the input writer.
-            for task in (reader_task, writer_task):
-                if task in done:
-                    task.result()
-            await process.wait()
-            output = reader_task.result()
-            if process.returncode != 0 or not output:
-                raise RuntimeError("ffmpeg exited without a valid output")
-    except _FFmpegOutputLimitError as exc:
-        await _cleanup_ffmpeg_process(process, tasks)
-        raise exc.error from None
-    except TimeoutError:
-        await _cleanup_ffmpeg_process(process, tasks)
-        raise timeout_error from None
-    except asyncio.CancelledError:
-        await _cleanup_ffmpeg_process(process, tasks)
-        raise
-    except Exception as exc:
-        await _cleanup_ffmpeg_process(process, tasks)
-        raise failure_error from exc
-    return output
-
-
 async def _decode_pcm(
     audio: bytes,
     max_decompressed_bytes: int = 128 * 1024 * 1024,
@@ -513,7 +420,7 @@ async def _decode_pcm(
             output_limit = duration_limit
             output_limit_error = ValueError("audio_too_long")
     executable = _resolve_ffmpeg() if ffmpeg_path is None else _resolve_ffmpeg(ffmpeg_path)
-    pcm = await _run_ffmpeg_subprocess(
+    pcm = await run_ffmpeg_subprocess(
         (
             executable,
             "-nostdin",
@@ -536,6 +443,7 @@ async def _decode_pcm(
         output_limit_error=output_limit_error,
         timeout_error=ValueError("audio_decode_timeout"),
         failure_error=ValueError("audio_decode_failed"),
+        timeout_seconds=_FFMPEG_TIMEOUT_SECONDS,
     )
 
     if not pcm or len(pcm) % 2:
@@ -625,7 +533,7 @@ async def _stream_encode_container(
         raise ValueError("audio_encode_failed") from exc
 
     if process.stdin is None or process.stdout is None:
-        await _cleanup_ffmpeg_process(process, ())
+        await cleanup_ffmpeg_process(process, ())
         raise ValueError("audio_encode_failed")
 
     stdin = process.stdin
@@ -762,7 +670,7 @@ async def _stream_encode_container(
         if process.returncode != 0 or not emitted or counter.total_bytes == 0:
             raise ValueError("audio_encode_failed")
     finally:
-        await _cleanup_ffmpeg_process(process, tasks)
+        await cleanup_ffmpeg_process(process, tasks)
         close = getattr(pcm_source, "aclose", None)
         if close is not None:
             with contextlib.suppress(BaseException):
@@ -790,7 +698,7 @@ async def _encode_container(
         executable = _resolve_ffmpeg() if ffmpeg_path is None else _resolve_ffmpeg(ffmpeg_path)
     except Exception as exc:
         raise ValueError("audio_encode_failed") from exc
-    return await _run_ffmpeg_subprocess(
+    return await run_ffmpeg_subprocess(
         (
             executable,
             "-nostdin",
@@ -812,6 +720,7 @@ async def _encode_container(
         output_limit_error=ValueError("audio_encode_failed"),
         timeout_error=ValueError("audio_encode_failed"),
         failure_error=ValueError("audio_encode_failed"),
+        timeout_seconds=_FFMPEG_TIMEOUT_SECONDS,
     )
 
 
@@ -1786,39 +1695,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail TTS backend is not ready",
                 retryable=True,
             )
-        if (
-            effective_validation_policy == "require_output_pass"
-            and profile.mode == "clone"
-        ):
-            try:
-                validation_state, _evidence, _binding = validation_state_for_voice(
-                    profile,
-                    tts_artifact,
-                    get_voice_registry().validation_store,
-                    synthesizer,
-                    require_current_binding=True,
-                    capability_key=(
-                        tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
-                        if active.tts_spec is not None
-                        else None
-                    ),
-                )
-            except VoiceValidationStoreUnavailableError:
-                return error_response(
-                    503,
-                    request_id,
-                    "voice_validation_store_unavailable",
-                    "Voice output validation state is unavailable",
-                    retryable=True,
-                )
-            if validation_state["production_ready"] is not True:
-                return error_response(
-                    409,
-                    request_id,
-                    "voice_not_production_ready",
-                    "The selected clone voice has no current passing output validation",
-                    param="voice",
-                )
         if body.stream_format not in (None, "audio"):
             return error_response(
                 422,
@@ -1988,6 +1864,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if latency_budget_ms is not None:
             budget_seconds = min(budget_seconds, latency_budget_ms / 1000.0)
         expires_at = asyncio.get_running_loop().time() + budget_seconds
+        render_capability_key = (
+            tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
+            if active.tts_spec is not None
+            else None
+        )
 
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
@@ -2003,8 +1884,17 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     resource_key=tts_resource_key(synthesizer, synthesis.voice),
                     purpose=work_purpose,
                 ):
+                    admitted_synthesis = await prepare_validated_speech(
+                        synthesis,
+                        synthesizer=synthesizer,
+                        artifact=tts_artifact,
+                        capability_key=render_capability_key,
+                        registry=get_voice_registry(),
+                    )
                     async for chunk in iter_until(
-                        iter_validated_audio(synthesizer.synthesize(synthesis)),
+                        iter_validated_audio(
+                            synthesizer.synthesize(admitted_synthesis)
+                        ),
                         expires_at,
                     ):
                         if backend_response_id is None:
@@ -2015,12 +1905,18 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         if receipt_id is not None:
                             if not runtime_revision_checked:
                                 runtime_revision_checked = True
-                                bind_observed_runtime_revision(
-                                    services.render_receipts,
-                                    receipt_id,
-                                    synthesizer=synthesizer,
-                                    voice=synthesis.voice,
-                                )
+                                if admitted_synthesis.expected_runtime_revision is not None:
+                                    services.render_receipts.bind_model_runtime_revision(
+                                        receipt_id,
+                                        admitted_synthesis.expected_runtime_revision,
+                                    )
+                                else:
+                                    bind_observed_runtime_revision(
+                                        services.render_receipts,
+                                        receipt_id,
+                                        synthesizer=synthesizer,
+                                        voice=synthesis.voice,
+                                    )
                             services.render_receipts.accept_pcm(
                                 receipt_id,
                                 chunk.audio,

@@ -803,6 +803,26 @@ paths:
         is created and returned with `quality.status=warn`. If quality status is
         `reject`, the request is rejected with a stable `voice_quality_reject`
         error.
+
+        Registration is create-only and durable. Name, reference text and voice
+        id are validated *before* the idempotency record is opened, so those
+        rejections provably created nothing: `invalid_name`, `invalid_ref_text`
+        and `invalid_voice_id` (an id that is malformed or reserved by a system
+        voice or alias) all mean the caller may correct the input and resubmit
+        under a fresh key. `POST /v1/voices/clone/validate` is the same pipeline
+        without persistence and accepts exactly the same ids, so a passing
+        preflight never green-lights an input registration would reject. Once
+        the record is open the outcome may be unknown — for example the registry
+        committed but the journal could not be finalized. An unknown outcome is
+        never reported as a failure: the key stays `pending` and the client
+        recovers it by replaying the same `POST` with the same key, payload and
+        target id. The service reconciles the replay against the already-created
+        profile, so recovery yields at most one acoustic asset and never a
+        second voice. Reusing a key with a different payload is rejected with
+        `409 idempotency_conflict`. A different key targeting an existing voice
+        id never overwrites it: when the stored clone matches the submitted
+        payload the call converges on that voice and returns it, and when the
+        payloads differ it is rejected with `409 voice_already_exists`.
       security:
         - BearerAuth: []
         - {}
@@ -812,7 +832,11 @@ paths:
           required: false
           schema:
             type: string
-          description: Optional idempotency key to deduplicate retry attempts.
+          description: >-
+            Optional idempotency key to deduplicate retry attempts. The key
+            identifies one logical registration: keep it, the payload and the
+            target voice id stable while the outcome is unknown, and replay the
+            same POST to recover a pending registration.
       requestBody:
         required: true
         content:
@@ -1187,6 +1211,16 @@ paths:
             `require_output_pass` makes the service check the current
             voice/model binding at admission time. This replaced the
             non-standard `validation_policy` body field, which is now rejected.
+
+            Strict admission runs *after* resource admission and *before* any
+            audio byte is emitted: the service prepares the single worker that
+            owns the requested voice, reads the real runtime identity from that
+            handshake, matches stored evidence against the exact voice revision,
+            model artifact/catalog/runtime and capability key, and re-checks the
+            runtime identity immediately before sending the synthesis frame. A
+            cold worker is therefore loaded on demand — the caller does not have
+            to warm it with an audition first. Missing or stale evidence is still
+            rejected, and a rejection never produces partial audio.
       requestBody:
         required: true
         content:
@@ -1237,7 +1271,15 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          description: A requested SpeechRail immutable revision is stale or revoked.
+          description: |
+            A requested SpeechRail immutable revision is stale or revoked.
+            Under `require_output_pass` this also carries the strict voice
+            admission outcomes, all of which reject before any audio byte:
+            `voice_not_production_ready` (no output-pass evidence bound to the
+            current voice revision, artifact and tier),
+            `voice_validation_runtime_changed` (the worker runtime identity
+            changed between preparation and synthesis), and
+            `voice_revision_conflict` / `voice_revoked`.
           content:
             application/json:
               schema:
@@ -2037,7 +2079,12 @@ paths:
       summary: Read durable clone operation state by key
       description: |
         Proves possession of a clone `Idempotency-Key`; returns the recorded
-        operation state and, when settled, the resulting voice id.
+        operation state and, when settled, the resulting voice id. This is a
+        read-only projection: it never mutates the journal and never advances a
+        registration. A `pending` result means the outcome is still unknown —
+        recover it by replaying the original `POST /v1/voices/clone` with the
+        same key, payload and target id rather than by starting a new operation
+        under a fresh key.
       security:
         - BearerAuth: []
         - {}
@@ -2096,7 +2143,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VoiceQualityRunResponse'
+                $ref: '#/components/schemas/VoiceQualityRunEnvelope'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2269,7 +2316,12 @@ components:
           type: array
           items:
             type: string
-          description: Bounded production uses supported by current validation evidence.
+          description: >-
+            Validation *dimensions* covered by the current evidence. The only
+            dimension strict production admission reads is `output`; a reference
+            pre-check never contributes it. The execution specification is
+            carried separately by `capability_key`, so evidence from one tier is
+            never borrowed by another.
         production_ready:
           type: boolean
         production_ready_reason:
@@ -3532,6 +3584,9 @@ components:
               - output_nondeterministic
               - transcription_unavailable
     VoiceQualityRunResponse:
+      description: >-
+        Response of the legacy `/v1/voices/{voice_id}/quality-runs` route: the
+        report itself, optionally carrying `validation_persisted`.
       oneOf:
         - allOf:
             - $ref: '#/components/schemas/VoiceQualityReport'
@@ -3541,19 +3596,28 @@ components:
                 validation_persisted:
                   type: boolean
                   description: Whether output validation was durably bound to the current voice revision.
-        - type: object
-          additionalProperties: false
-          required: [legacy_report, evidence, validation_persisted]
-          properties:
-            legacy_report:
-              $ref: '#/components/schemas/VoiceQualityReport'
-            evidence:
-              type: object
-              additionalProperties: true
-              description: Namespaced quality evidence with model and voice identity bindings.
-            validation_persisted:
-              type: boolean
-              description: Whether output validation was durably bound to the current voice revision.
+        - $ref: '#/components/schemas/VoiceQualityRunEnvelope'
+    VoiceQualityRunEnvelope:
+      description: >-
+        Response of the namespaced
+        `/v1/speechrail/voices/{voice_id}/quality-runs` route. This is an
+        envelope, not a report: there is deliberately no top-level `status`, so
+        a client cannot mistake HTTP 200 for a passed check. A run counts as a
+        recorded acceptance only when the report passed *and*
+        `validation_persisted` is true.
+      type: object
+      additionalProperties: false
+      required: [legacy_report, evidence, validation_persisted]
+      properties:
+        legacy_report:
+          $ref: '#/components/schemas/VoiceQualityReport'
+        evidence:
+          type: object
+          additionalProperties: true
+          description: Namespaced quality evidence with model and voice identity bindings.
+        validation_persisted:
+          type: boolean
+          description: Whether output validation was durably bound to the current voice revision.
     VoiceQualityRunRequest:
       type: object
       properties:

@@ -77,6 +77,17 @@ class DesignSynth:
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         return self.runtime_revision
 
+    async def prepare_voice(
+        self,
+        voice: str,
+        *,
+        expected_voice_revision: str | None,
+    ) -> str:
+        del voice, expected_voice_revision
+        if self.runtime_revision is None:
+            raise RuntimeError("voice_validation_runtime_unavailable")
+        return self.runtime_revision
+
     async def evict_warm_capability(self) -> None:
         self.events.append("tts.evicted")
 
@@ -324,8 +335,9 @@ def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
 
     published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
     assert published.status_code == 201, published.text
-    assert published.json()["candidate"]["state"] == "published"
-    voice = published.json()["voice"]
+    published_payload = published.json()
+    assert published_payload["candidate"]["state"] == "published"
+    voice = published_payload["voice"]
     assert voice["id"] == VOICE_ID
     assert voice["mode"] == "clone"
     assert voice["variant"] == "base"
@@ -337,6 +349,46 @@ def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
     assert profile.mode == "clone"
     assert profile.revision == reviewed["revision"]
     assert profile.ref_text == REFERENCE_TEXT
+    validation = published_payload["candidate"]["validations"][-1]
+    from speechrail.application.voice_validation_gate import build_validation_binding
+    from speechrail.domain.voice_validation import VoiceValidationArtifact
+
+    binding = build_validation_binding(
+        profile,
+        VoiceValidationArtifact(
+            validation["model_artifact"],
+            validation["model_catalog_revision"],
+        ),
+        observed_runtime_revision=RUNTIME_REVISION,
+        require_current_binding=True,
+        capability_key="reference.render",
+    )
+    evidence = registry.validation_store.get(
+        voice_id=VOICE_ID,
+        voice_revision=profile.revision,
+        model_artifact=binding.model_artifact,
+        model_catalog_revision=binding.model_catalog_revision,
+        model_runtime_revision=binding.model_runtime_revision,
+        runtime_fingerprint=binding.runtime_fingerprint,
+        preprocess_version=binding.preprocess_version,
+        generation_recipe_revision=binding.generation_recipe_revision,
+        policy_version=binding.policy_version,
+        capability_key=binding.capability_key,
+        require_current_binding=True,
+    )
+    assert evidence is not None
+    assert evidence["validated_for"] == ["output"]
+
+    strict = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Validation-Policy": "require_output_pass"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "正式制作",
+            "voice": VOICE_ID,
+        },
+    )
+    assert strict.status_code == 200, strict.text
 
     # Re-publishing the same candidate is idempotent, not a second revision.
     again = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
@@ -905,6 +957,27 @@ def test_base_unavailable_is_reported_before_any_validation_work(
     )
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "voice_design_base_unavailable"
+
+
+def test_validate_rejects_a_capability_key_the_active_tier_cannot_produce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _created = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    request_count = len(synth.requests)
+
+    response = validate_candidate(
+        client,
+        asr,
+        candidate_id,
+        capability_key="fast.render",
+        expect=422,
+    )
+
+    assert response["error"]["code"] == "voice_design_capability_mismatch"
+    assert len(synth.requests) == request_count
 
 
 def test_candidate_list_and_read_are_safe_and_scoped(

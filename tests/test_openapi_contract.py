@@ -3,6 +3,32 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import yaml
+
+
+class _DuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that reports repeated keys instead of silently keeping the last."""
+
+
+def _construct_mapping(
+    loader: _DuplicateKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[str, object]:
+    mapping: dict[str, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise AssertionError(
+                f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_DuplicateKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping,
+)
+
 
 def _checker() -> object:
     script_path = Path(__file__).parents[1] / "scripts" / "check_openapi_contract.py"
@@ -42,6 +68,20 @@ def test_security_requirements_name_a_declared_scheme() -> None:
 
     module = _checker()
     assert module._security_drift() == []  # type: ignore[attr-defined]
+
+
+def test_contract_has_no_duplicate_mapping_keys() -> None:
+    """A repeated key is silently dropped by PyYAML, hiding the losing value.
+
+    An earlier edit left two ``description`` keys on one schema property: the
+    spec still parsed, the first text was simply gone, and no drift check saw
+    it. Parse fail-closed so the contract cannot carry dead or contradictory
+    text again.
+    """
+
+    contract = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
+    document = yaml.load(contract.read_text(encoding="utf-8"), Loader=_DuplicateKeyLoader)
+    assert isinstance(document, dict)
 
 
 def test_route_walker_unwraps_included_routers() -> None:
@@ -138,3 +178,53 @@ def test_speech_language_and_policy_travel_as_speechrail_headers() -> None:
     ]
     for name in ("SpeechRail-Language", "SpeechRail-Validation-Policy"):
         assert headers[name]["description"].strip(), name
+
+
+def test_namespaced_quality_run_keeps_the_envelope_shape() -> None:
+    """C1: the client must not be able to read this route as a bare report."""
+    response = _contract()["paths"]["/v1/speechrail/voices/{voice_id}/quality-runs"][
+        "post"
+    ]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response["$ref"].endswith("VoiceQualityRunEnvelope")
+
+    envelope = _contract()["components"]["schemas"]["VoiceQualityRunEnvelope"]
+    assert envelope["type"] == "object"
+    assert set(envelope["required"]) == {
+        "legacy_report",
+        "evidence",
+        "validation_persisted",
+    }
+    # The top level deliberately has no `status`: it is an envelope, not a report.
+    assert "status" not in envelope["properties"]
+
+
+def test_strict_admission_outcomes_are_documented() -> None:
+    """F1/F3: strict rejection reasons must be part of the public contract."""
+    responses = _contract()["paths"]["/v1/audio/speech"]["post"]["responses"]
+    conflict = responses["409"]["description"]
+    for code in (
+        "voice_not_production_ready",
+        "voice_validation_runtime_changed",
+    ):
+        assert code in conflict, code
+
+
+def test_clone_registration_documents_pending_replay_recovery() -> None:
+    """F4/F5: an unknown registration outcome is recovered, never re-keyed."""
+    operation = _contract()["paths"]["/v1/voices/clone"]["post"]
+    # Folded YAML inserts newlines mid-sentence; compare on collapsed whitespace.
+    description = " ".join(operation["description"].split())
+    assert "replaying the same" in description
+    assert "at most one acoustic asset" in description
+
+    status = _contract()["paths"]["/v1/speechrail/voices/clone/idempotency"]["get"]
+    assert "read-only" in " ".join(status["description"].split())
+    assert "replaying the original" in " ".join(status["description"].split())
+
+
+def test_validated_for_is_the_dimension_not_the_execution_spec() -> None:
+    """F2: the scope and the capability key are two separate facts."""
+    safe_voice = _contract()["components"]["schemas"]["SafeVoiceEntry"]
+    description = safe_voice["properties"]["validated_for"]["description"]
+    assert "output" in description
+    assert "capability_key" in description

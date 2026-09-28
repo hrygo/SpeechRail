@@ -22,7 +22,7 @@ from fastapi import UploadFile
 
 from speechrail.application.diarization import diarize_transcript
 from speechrail.application.tts_admission import tts_resource_key
-from speechrail.application.voice_validation_gate import validation_state_for_voice
+from speechrail.application.voice_validation_gate import prepare_validated_speech
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.diarization import DiarizationError
 from speechrail.domain.diarization.ports import StreamingActivityPort
@@ -33,13 +33,15 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, get_voice_registry
+from speechrail.domain.tts import (
+    DEFAULT_VOICE_ID,
+    VoiceRevisionConflictError,
+    VoiceStoreUnavailableError,
+    get_voice_registry,
+)
 from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
 from speechrail.domain.tts_request import ValidationPolicy, normalize_tts_language
-from speechrail.domain.voice_validation import (
-    VoiceValidationArtifact,
-    VoiceValidationStoreUnavailableError,
-)
+from speechrail.domain.voice_validation import VoiceValidationArtifact
 from speechrail.runtime.diarization_admission import (
     DiarizationAdmission,
     DiarizationAdmissionFullError,
@@ -231,33 +233,15 @@ class LocalFileJobProcessor:
         if validation_policy_raw not in {"allow_unverified", "require_output_pass"}:
             raise JobProcessingError("job_input_invalid")
         validation_policy = cast(ValidationPolicy, validation_policy_raw)
-        if validation_policy == "require_output_pass":
-            try:
-                profile = get_voice_registry().get_profile(voice)
-                if profile.mode == "clone":
-                    artifact = (
-                        VoiceValidationArtifact(
-                            self._clone_model_artifact,
-                            self._clone_model_catalog_revision,
-                        )
-                        if self._clone_model_artifact is not None
-                        and self._clone_model_catalog_revision is not None
-                        else None
-                    )
-                    validation_state, _evidence, _binding = validation_state_for_voice(
-                        profile,
-                        artifact,
-                        get_voice_registry().validation_store,
-                        synthesizer,
-                        require_current_binding=True,
-                        capability_key=self._tts_capability_key,
-                    )
-                    if validation_state["production_ready"] is not True:
-                        raise JobProcessingError("voice_not_production_ready")
-            except VoiceValidationStoreUnavailableError:
-                raise JobProcessingError("voice_validation_store_unavailable") from None
-            except (KeyError, ValueError, VoiceStoreUnavailableError):
-                raise JobProcessingError("job_input_invalid") from None
+        artifact = (
+            VoiceValidationArtifact(
+                self._clone_model_artifact,
+                self._clone_model_catalog_revision,
+            )
+            if self._clone_model_artifact is not None
+            and self._clone_model_catalog_revision is not None
+            else None
+        )
         try:
             request = SpeechRequest(
                 text=text,
@@ -272,6 +256,27 @@ class LocalFileJobProcessor:
                 validation_policy=validation_policy,
             )
         except (ValueError, TtsBackendError):
+            raise JobProcessingError("job_input_invalid") from None
+        try:
+            request = await prepare_validated_speech(
+                request,
+                synthesizer=synthesizer,
+                artifact=artifact,
+                capability_key=self._tts_capability_key,
+                registry=get_voice_registry(),
+            )
+        except TtsBackendError as exc:
+            if exc.public_code in {
+                "voice_not_production_ready",
+                "voice_validation_runtime_changed",
+                "voice_validation_store_unavailable",
+                "voice_validation_runtime_unavailable",
+            }:
+                raise JobProcessingError(exc.public_code) from None
+            raise JobProcessingError("job_processor_failed") from None
+        except VoiceRevisionConflictError:
+            raise JobProcessingError("voice_revision_conflict") from None
+        except (KeyError, ValueError, VoiceStoreUnavailableError):
             raise JobProcessingError("job_input_invalid") from None
         pcm = bytearray()
         try:

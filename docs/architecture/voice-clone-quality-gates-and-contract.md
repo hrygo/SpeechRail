@@ -4,8 +4,8 @@ description: "定义克隆参考音频校验、生成后固定 probe 质量运�
 status: under_review
 type: technical_spec
 category: tts
-version: "1.0.2"
-date: 2026-09-26
+version: "1.1"
+date: 2026-09-28
 last_updated: 2026-09-26
 last_updated: 2026-09-09
 author: "SpeechRail Core Team"
@@ -195,6 +195,38 @@ clone route 必须始终重新执行输入门禁，即使客户端刚刚成功�
 - 失败时区分 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch` 与 `transcription_unavailable`。ASR 不可用时结果必须是 `unevaluated`，不能返回假 `pass`。
 
 固定中文 probe 至少覆盖：短句、长段落、问句、数字和标点、多个停顿，以及“请进行自我介绍”这一跨清空/重启验收句。
+
+## 5.1 证据绑定与严格制作准入
+
+一次质量运行产出的证据用两个独立字段定位，缺一不可：
+
+```text
+validated_for  = ["output"]              # 验收维度
+capability_key = "<tier>.render"          # 唯一适用的执行规格
+```
+
+- `validated_for` 回答“验证了什么”。正式制作准入只读 `output`；参考预检（reference）
+  无论通过与否都不贡献 `output`。
+- `capability_key` 回答“在哪个档位/模式验证”。它取运行开始时捕获的 TTS spec，不随
+  运行期间重新查询的档位改写。查询证据必须精确匹配该 key：其他档位、streaming、
+  变更后的模型都不借用。
+
+严格合成（`SpeechRail-Validation-Policy: require_output_pass`）的判定顺序是：
+
+1. 资源准入（governor reservation）；
+2. 准备请求 voice 所属的唯一 worker，换取真实 runtime revision；
+3. 按 voice revision + artifact/catalog/runtime + policy + capability key 精确匹配证据；
+4. 发送合成帧前再次核对 runtime revision，防止准备与执行之间的 TOCTOU；
+5. 全部通过才允许出第一块音频。
+
+因此冷 worker 无需先试听预热即可严格合成；反过来，缺证据、错档位或身份漂移都在任何
+音频产生之前拒绝。HTTP 与 durable speech job 共用同一语义。
+
+已发布的设计音色和普通克隆音色都通过
+`POST /v1/speechrail/voices/{id}/quality-runs` 获取该证据。响应是 envelope
+（`legacy_report` / `evidence` / `validation_persisted`），不是裸报告；只有
+`legacy_report.status == pass` 且 `validation_persisted == true` 才算一次落盘的验收，
+HTTP 200 本身不表示通过。
 
 ## 6. 生成输出质量指标
 
