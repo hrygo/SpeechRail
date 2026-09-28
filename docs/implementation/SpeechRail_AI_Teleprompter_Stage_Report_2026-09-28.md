@@ -377,6 +377,19 @@
 
 **证据边界（如实记）**：改动只有一行，`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**——这是该改动的唯一编译门禁，因为 SwiftPM 既不编译 `App.swift` 也不编译视图层，而单测 target 无 `TEST_HOST`、同样不编译 App 入口。**没有做任何单测**，因为没有测试断言命令菜单结构，而 `handleVoiceAssistCommand` 背后的会话层行为（`disableVoiceAssist`／`retryStopVoiceAssist`／`enableVoiceAssist`）一行未改、其回归仍在。**真实按键未验证**：`⌘⌥V` 实际按下是否触发、菜单项禁用态与快捷键是否一致，仍属 U-10 走查——这一条只把「不可达」变成「已接线且编译通过」，不宣称走查通过。
 
+### 2.9 第二十二轮：给「采用候选版本」补上 `⌘⏎`（审阅相位主操作）
+
+接着 §2.8 把走查清单里另一条点名的「必须键盘可达」补上：**「采用候选版本」——不可重做的一步**。
+
+**这一条比 ⌘⌥V 难，难在两处，都查清了才动手**：
+
+- **不能做成菜单命令**。`acceptPendingVersion` 那条按钮处理器是 `try session.acceptPendingVersion(); operationMessage = nil; reloadDocuments()`，而 `reloadDocuments()` 会 `documents = try session.listDocuments()` 刷新侧栏（含 `updatedAt`）。`documents` 是**视图本地 `@State`**，菜单命令（`SpeechRailCommands`）够不着它。若菜单命令只调 `acceptPendingVersion()`，侧栏的 `updatedAt` 会停在旧值——给一个不可逆动作造出**第二份、少一步的实现**，正是 `App.swift` 注释里点名要避免的「同一件事两处实现」。**结论：快捷键必须挂在按钮上，复用完整处理器。**
+- **键位不是新造，是「各相位主操作」**。`⌘⏎` 已被「整理朗读稿」占用，但它在 `case .draft`；accept 在 `case .review`。两者**互斥**，同一相位只会注册一个 `⌘⏎`：草稿按 `⌘⏎`=整理，审阅按 `⌘⏎`=采用。这是上下文相关主操作的常见形态，不引入新键、不与任何系统键冲突。
+
+**顺带发现一个既存问题（本轮只记录、不重构）**：accept 按钮在代码里有**两份、处理器逐字相同**——`workbenchReviewContent` 内一处（`TeleprompterView` 1879）、`workbenchBottomDock` 的 `case .review` 一处（2255）。审阅相位两者可能同屏。**同屏挂两个 `⌘⏎` 会冲突，因此只给常驻底座那一个挂快捷键**；读者在任一相位按 `⌘⏎` 触发的都是同一个动作，行为无差异。重复本身属可清理项，但拆它要动审阅页布局，超出本轮「补键盘可达」的范围。
+
+**证据边界（如实记）**：`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**。**未加单测**——SwiftPM 不编译 `TeleprompterView.swift`，无 `TEST_HOST` 的单测 target 同样不编译视图层，这一行没有任何测试能覆盖；`acceptPendingVersion` 的会话层行为一行未改、其既有回归仍在。**这次多了一个真实风险**：给 accept 标签新增了可见的 `ButtonShortcutHint("⌘⏎")`（沿用「整理朗读稿」的既有模式），**这是一个未经走查的视觉变化**——按钮在窄底座里加上快捷键提示后是否仍不折行、是否与 `.primary` 样式协调，都要 U-10 看一眼。真实按键同样未验证。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -505,7 +518,7 @@
 | U-04 控制栏显隐几何稳定 | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` |
 | U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries`、`two-row mode still leaves the trailing slot empty and row counts stay clamped`（两行模式稿尾留空与行数夹取，本轮补齐并经变异验证）。**内部上限夹取不可观测**，见 §2 第 31 条 |
 | U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`an offset past the end of a segment still resolves to that segment's last row`（换字号后偏移落到段尾之外，本轮补齐并经变异验证） |
-| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证**。**键盘侧此前是零证据**：方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」。**第二十一轮给「手动接管／语音跟随」补上常驻菜单快捷键 `⌘⌥V`**（§2.8，走查清单点名「不能只能点」的那一条，现已接线且编译通过、真实按键待 U-10），其余高频操作——新建／导入／打开舞台／重试保存／采用候选版本——**仍无键位**，纯键盘完成这些仍取决于系统「键盘导航」开关（默认关闭）。其余已并入 §5 第 1 条 U-10 走查清单 |
+| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证**。**键盘侧此前是零证据**：方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」。**第二十一轮给「手动接管／语音跟随」补上常驻菜单快捷键 `⌘⌥V`**（§2.8），**第二十二轮给「采用候选版本」补上审阅相位主操作 `⌘⏎`**（§2.9，走查清单点名的「不可重做的一步」）——两条走查点名的最关键操作现已接线且编译通过、真实按键待 U-10。其余高频操作——新建／导入／打开舞台／重试保存／回到朗读位置——**仍无键位**，纯键盘完成这些仍取决于系统「键盘导航」开关（默认关闭）。其余已并入 §5 第 1 条 U-10 走查清单 |
 | U-08 后台更新不抢焦点 | 通过 | `readingShortcutFocusPolicy`（阅读区外焦点、控件焦点、popover 打开时方向键都不被舞台接管）；提词器与 App 均未注册 `NSEvent` 全局／本地监视器，阅读键只作用于舞台窗口 |
 | U-09 显示预设持久化 | 通过 | `stage settings clamp and persist their supported ranges`、`stage visibility preferences default off and persist independently` |
 | U-10 真实窗口可见性 | 未执行 | 需 UI 自动化逐次授权。**待走查面已增至 7 处**：原四处（精简入口、精简确认 sheet、删除审阅卡片「原文：」行、识别语言菜单）＋读法标注窗口、语音辅助试读的「麦克风／识别／定位」三段链路，以及三处复选框的 VoiceOver 朗读 |
@@ -679,7 +692,7 @@
      - 打开提词舞台、关闭舞台（舞台内 Esc 是否真的可达）；
       - 停用语音／手动接管——**这是「随时手动接管」这条成功目标的入口，不能只能点**。**第二十一轮已给它接上常驻菜单快捷键 `⌘⌥V`**（§2.8），走查时改为确认：按下 `⌘⌥V` 能否真正触发开启／关闭、菜单项的禁用态（舞台不可见或语音忙时灰显）是否与快捷键行为一致，以及菜单里该键位是否如实显示；
      - 存盘失败横幅里的「重试保存」与「复制稿件内容」：读者在这两个动作上最需要键盘，它们也是第 48、49 条修过的路径；
-     - 审阅页的「采用候选版本」——不可重做的一步，必须键盘可达；
+     - 审阅页的「采用候选版本」——不可重做的一步，必须键盘可达。**第二十二轮已给它接上审阅相位主操作 `⌘⏎`**（§2.9，常驻底座那一个按钮；与草稿相位「整理朗读稿 ⌘⏎」互斥）。走查时确认：审阅相位按 `⌘⏎` 是否真正触发采用、按钮上新增的 `ButtonShortcutHint("⌘⏎")` 在窄底座里是否不折行且与 `.primary` 样式协调、采用后侧栏 `updatedAt` 是否同步刷新；另顺带确认审阅面板内那个同名 accept（与底座那个处理器逐字相同，§2.9）是否让人困惑——两处同屏是否应合并属产品决定；
      - 「回到朗读位置」与字号调整在工作台侧是否有键位。
    - 同时确认**焦点可见性**：纯键盘走完上述路径，焦点环是否始终可见、是否有焦点陷阱。策略层只有 `readingShortcutFocusPolicy` 一条回归（管的是「输入框有焦点时不截获阅读键」），**焦点环本身与上述任何一项都没有回归**。
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。

@@ -2252,7 +2252,7 @@ public struct TeleprompterView: View {
                 .speechRailButton(.secondary)
 
             case .review:
-                Button(TeleprompterReviewCopy.acceptAction) {
+                Button {
                     do {
                         try session.acceptPendingVersion()
                         operationMessage = nil
@@ -2260,7 +2260,23 @@ public struct TeleprompterView: View {
                     } catch {
                         operationMessage = error.localizedDescription
                     }
+                } label: {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text(TeleprompterReviewCopy.acceptAction)
+                        ButtonShortcutHint("⌘⏎")
+                    }
                 }
+                // 「采用候选版本」是审阅相位唯一不可重做的一步，走查清单点名
+                // 「必须键盘可达」。`⌘⏎` 沿用「各相位主操作」的模式：草稿相位
+                // 是「整理朗读稿」，审阅相位是「采用」——两个按钮分处
+                // `case .draft` 与 `case .review`，互斥因而不会同时注册。
+                //
+                // 快捷键挂在**常驻底座**这一个 accept 上，而不是审阅面板里的
+                // 同名按钮（两处处理器相同，见 1879）：同屏挂两个 `⌘⏎` 会冲突。
+                // 挂在按钮上而非做成菜单命令，是因为按钮处理器会 `reloadDocuments()`
+                // 刷新侧栏，而 `documents` 是视图本地 `@State`，菜单命令够不着——
+                // 另做一份会漏掉刷新，正是本仓库要避免的「同一件事两处实现」。
+                .keyboardShortcut(.return, modifiers: .command)
                 .speechRailButton(.primary)
                 .disabled(!session.canAcceptPendingVersion)
 
