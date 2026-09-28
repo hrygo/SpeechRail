@@ -115,21 +115,45 @@
     - **本轮验证到什么程度**：Xcode Debug **BUILD SUCCEEDED**、`swift test` 218 项 / 16 套件。**无障碍名称的实际朗读效果仍未验证**——`.accessibilityLabel` 是否被正确合成、是否与相邻文字重复播报，都需要一次授权的 VoiceOver 走查，已并入 §5 第 1 条。
     - **给承接团队的一条方法提醒**：本项目已四次出现「证据只覆盖了命题的一部分，却被写成覆盖了全部」。U-07 这一条至今仍是**部分满足**——控件可见性有证据，控件名称此前没有证据、现在只有静态修复没有朗读证据。
 
+24. **F-07「真实重读受控回退」的「受控」二字从未被任何测试触及（第八轮证据强度审计）**：台账把 F-07 标为通过，引用的 `localRepeatCanReturnToPreviousSentence` 位于 `TeleprompterAlignerTests`，**只调用 `TeleprompterAligner.locate`**，证明的是「对齐器找得到上一段」，与跟随控制器要不要真的回退是两件事。真正裁决回退的是 `TeleprompterFollowController.mayConfirm` 的后向门禁（`confidence >= 0.95 && matchedCount >= 6 && tokenDistanceFromAnchor <= 24`）。把该门禁改成无条件 `return true` 后，**218 项测试全绿**。
+    - **行为本身是对的，但完全没被钉住**：探针实测——整句重读（`matched=10`、`conf=1.0`、`dist=13`）确实回退；只命中两个 token 的远处短语（`matched=2`）被 `matchedCount >= 6` 挡下，位置与已确认位置均不变。换句话说，**门禁在生产里是有效的，只是没有任何测试证明它有效**。
+    - **补两条回归**：`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong` 用同一个控制器连打三次——前进、整句重读（必须回退）、再前进、然后一句两 token 的远处短语（必须留在原位，且 `committedPosition` 不变），把「能回退」和「不许乱回退」钉在同一串事件序列上。`rereadDoesNotRollBackAcrossDistantParagraphs` 用五段脚本从第 5 段回匹配第 1 段（`matched=17`、`conf=1.0`，但 `dist=61` 已超半径），固定距离上限这道子句——**没有它，一次口误就能把观众在提词器上倒退四段**。
+    - **两条都经变异验证**：删掉整个后向门禁、只删距离子句，各自变红的正是对应的新用例。
+
+25. **F-11 的真实 epoch 证据藏在一个名字不相干的测试里，同函数另两道闸门零覆盖（同一轮审计）**：`RealtimeEventState.canAcceptExtension` 是一组身份闸门——`latestEpoch` 回退、旧 `generation` 复用、`retiredUntil` 复活、跨 `serverTaskID` 复用。逐个变异后：
+    - `latestEpoch` 被 `testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards` 杀掉。**该测试的名字里没有任何 epoch 字样**，台账引的却是两个控制器层的陈旧 item 测试——真证据引错了地方。
+    - `retiredUntil`、`serverTaskID` 两道闸门**此前零覆盖**：删掉任一，218 项全绿。补 `testRealtimeItemStateRejectsLateHypothesisForARetiredItem`（item 走完生命周期退役后，窗口内的迟到 hypothesis 必须被拒）与 `testRealtimeItemStateRejectsAForeignTaskIDWithinOneConnection`（同一条连接内换 `task_id` 必须被拒，且不得留下任何 item 状态）。两条均经变异验证。
+    - 第三道 `existing.generation == generation` **在生产中不可达**：`generation` 只在 `reset(generation:)` 里改，而 `reset` 与 `clear` 都清空 `items`，因此 `existing` 永远与当前 generation 同源。与本报告第 19 条的 `suffix(2048)` 同类——**在不可达路径上补断言是自欺**，只记录不补测试。
+
+26. **F-12 与 F-15 的行为有覆盖，但台账引错测试／计数过期（同一轮审计）**：
+    - **F-12**：sequence 缺口、回退、首事件必须为 0、缺口后仍须报回退——四个变异分别被 `testSequenceValidatorReportsGapAndRegression` 与 `testSequenceValidatorRejectsMissingIdentityAndNonzeroInitialSequence` 杀掉，**行为确实被覆盖**。但台账写的是「`RealtimeContractTests`（31 项 XCTest 全通过）」——该套件现有 **35 项**（本轮新增 2 项），且以整个套件充作单条场景的证据本身就过宽，应引具名测试。
+    - **F-15**：越界的 `stable_prefix_codepoints` 在 **`RealtimeASRClient` 解码层**就被拒（`invalid_hypothesis`／「稳定前缀超出当前快照范围」），根本到不了跟随控制器。台账引的 `stableHypothesisPrefixLimitsPreviewToProvenText` 测的是控制器的稳定前缀预显机制，与越界无关。**行为有覆盖，引错测试**；正确证据是 `testHypothesisRejectsStablePrefixBeyondCurrentUnicodeScalars`。附带查清：控制器内 `$0 <= item.text.unicodeScalars.count` 那道检查既不可达（wire 已拒）又是空操作（`prefix` 自己会夹），因此控制器的越界变异存活属预期，不补测试。
+
+27. **变异探针本身出错，差点连着给出四个假结论（同一轮的方法教训，比上面三条更值得记住）**：第一次跑 Realtime 闸门变异时，八个变异全部「存活」。**结论是错的**——`testSequenceValidatorReportsGapAndRegression` 直接断言 `.regression`，删掉该分支不可能不红。手工复核发现探针只匹配 swift-testing 的 `✘`，完全漏掉 XCTest 的 `Test Case '…' failed`，于是把编译期就失败或 XCTest 失败一律误判成存活。修正为「退出码 + 两种失败格式」并**加了一道编译预检**（先把变异编译一遍，编译不过直接判为无效变异，不计入存活）后重跑，真实结果是有 killed 有 survived。
+    - **这是本项目第二次栽在「变异没让测试变红」上**（第一次见第 18 条）。两次的成因不同但教训同构：**「变异没让测试变红」几乎总是先怀疑变异本身，而不是先怀疑测试**。具体检查顺序是三条：变异是否真的写进了被测文件、变异是否编译通过、被测 target 是否真的包含该文件。第 25 条里 `generation` 闸门之所以判为不可达，也是靠第三条（确认 `reset` 清空 `items`）才站得住。
+    - **对交接的提醒**：本轮新增的四条回归**每条都做了变异验证**（删掉对应门禁必须变红），不是只看「测试通过」。承接团队若要扩充证据，建议沿用 `/tmp` 下的三段式探针（写变异 → 编译预检 → 匹配两种失败格式），否则很容易把「探针没报错」当成「行为没被覆盖」。
+
+28. **三处内存有界化在当前接口下不可证伪，只记录不补断言**：变异删掉 `retired`／`eventIDs` 的 128 上限、以及 `items.count > 8` 的最旧 item 淘汰，**220 项测试全部存活**。查因后确认这不是漏测而是**测不了**：
+    - 两处上限是私有列表长度，删掉不改变任何可观察行为。
+    - 淘汰失效后，迟到事件仍被另外两道守卫挡住——`retired` 名单未含该 id，但 `finalizedSequence` 单调递增，旧 item 的 `sequence` 必然小于它，`receiveCompleted` 里的 `guard item.sequence > finalizedSequence` 会退回。这与第 19 条的 `suffix(2048)`、第 25 条的 `generation` 闸门同属**纵深防御的外层**，内层已经足够。
+    - 因此只补了一条**不冒充上限证明**的回归 `longRunsStayCorrectAcrossHundredsOfItems`：连打 300 个 item，断言末条证据仍能推进、且长跑之后重复 event id 仍被抑制。它固定的是「长跑后行为不漂移」，**不是**「列表被截断到 128」——测试名与注释都按后者不可证伪来写，避免下一轮有人以为这里有覆盖。
+    - R-07 仍是**部分满足**：本条不改变该结论，真实长时连续运行仍需授权（§5 第 3 条）。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | 218 项 / 16 套件全部通过（2026-09-29 复跑） |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **221 项 / 16 套件** + XCTest **389 项**全部通过（2026-09-29 复跑；本轮新增 3 条 Swift Testing、2 条 XCTest） |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | 11 项通过 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
-| Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
-| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（Swift Testing 218 项 / 16 套件，0 failures），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条。本轮只新增 Swift Testing 用例，XCTest 项数不受影响 |
+| Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**（2026-09-29 复跑）；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
+| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
-| 回归有效性（变异验证） | 对 `TeleprompterReadingProgressRestorer` 施加两次定向变异 | 见 §2 第 18 条：其中只破坏 nil 分支的那次，**既有 13 条同套件测试全绿、仅新增用例变红** |
+| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 第 18 条：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。第 24–28 条：本轮**有效变异 28 次**——跟随控制器 18、`RealtimeASRClient` 事件闸门 6、sequence validator 4，覆盖 F-01/02/04/07/08/10/11/12/14/17/19/20/21 与 R-07。结果 **17 杀 / 11 存活**；另有 2 次锚点写错未生效、8 次因探针缺陷作废（见第 27 条），均不计入。**11 次存活逐个查因**：4 次靠补回归转杀掉，7 次判为纵深防御的外层或生产不可达（§2 第 19、24、25、28 条）。新增 5 条回归，其中 **4 条经变异验证**（删掉对应门禁必须变红），第 5 条（`longRunsStayCorrectAcrossHundredsOfItems`）经变异验证后确认**钉不住内存上限**，因此只声称它固定长跑后行为不漂移 |
 
 ### 3.2 未执行（需要逐次授权）
 
@@ -176,15 +200,15 @@
 | F-04 远处唯一短语 | 通过 | `distantUniquePhraseCannotAdvanceThroughPartialOrFinal` |
 | F-05 相同开场短语消歧 | 通过 | `unrelatedSpeechAndRepeatedShortPhrasesDoNotMove`、`explicitManualSelectionMakesTheSamePhraseALocalAnchor` |
 | F-06 修订不引发整行往返 | 通过 | `partialMovesProvisionallyAndFinalReplacesIt`、`partialCanPreviewForwardWithoutImmediateFinalRollback` |
-| F-07 真实重读受控回退 | 通过 | `localRepeatCanReturnToPreviousSentence` |
+| F-07 真实重读受控回退 | 通过 | `rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`、`rereadDoesNotRollBackAcrossDistantParagraphs`（均经变异验证；此前引用的 `localRepeatCanReturnToPreviousSentence` 只证明对齐器找得到上一段，删掉 `mayConfirm` 回退门禁它仍全绿，见 §2 第 24 条） |
 | F-08 重复快照不重复推进 | 通过 | `snapshotRevisionReplacesTextAndDuplicateEventIsIgnored`、`repeatedWireEventDoesNotAppendTwice` |
 | F-09 增量与全文不双计 | 通过 | `snapshotRevisionsReplaceTextAndFollowRevisions`、`partialMovesProvisionallyAndFinalReplacesIt` |
 | F-10 旧 revision／eventID | 通过 | `duplicateSnapshotRevisionCannotAppendOrAdvance`、`lateFinalFromOlderItemCannotUndoNewerFinal` |
-| F-11 旧 epoch／generation | 通过 | `pausedAndRetiredItemsCannotOverrideManualPosition`、`eventsAfterManualTakeoverCannotMovePosition` |
-| F-12 sequence 缺口／回退 | 通过 | `RealtimeContractTests`（31 项 XCTest 全通过，含 sequence validator 用例） |
+| F-11 旧 epoch／generation | 通过 | `testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards`（`latestEpoch` 回退闸门，变异验证）、`testRealtimeItemStateRejectsLateHypothesisForARetiredItem`（`retiredUntil`，变异验证）、`testRealtimeItemStateRejectsAForeignTaskIDWithinOneConnection`（`serverTaskID`，变异验证）、`pausedAndRetiredItemsCannotOverrideManualPosition`、`eventsAfterManualTakeoverCannotMovePosition`。同函数第三道 `existing.generation` 闸门**生产不可达**（`reset`／`clear` 都清空 `items`），只记录不补断言，见 §2 第 25 条 |
+| F-12 sequence 缺口／回退 | 通过 | `testSequenceValidatorReportsGapAndRegression`（缺口、回退、缺口后仍报回退）、`testSequenceValidatorRejectsMissingIdentityAndNonzeroInitialSequence`（首事件必须为 0）、`testSequenceValidatorRejectsDuplicateEventID`、`testClientClosesBeforeDeliveringEventAfterSequenceGap`（四项均经变异验证；此前引整个 `RealtimeContractTests` 套件过宽，且套件已增至 35 项） |
 | F-13 未见过 hypothesis 的 final | 通过 | `isolatedFinalMismatchKeepsLastConfirmedPosition` |
 | F-14 迟到 final 不覆盖新位置 | 通过 | `lateOldFinalCannotUndoNewerItem` |
-| F-15 稳定前缀越界 | 通过 | `stableHypothesisPrefixLimitsPreviewToProvenText` |
+| F-15 稳定前缀越界 | 通过 | `testHypothesisRejectsStablePrefixBeyondCurrentUnicodeScalars`（越界在 `RealtimeASRClient` 解码层即被拒为 `invalid_hypothesis`，变异验证）；`stableHypothesisPrefixLimitsPreviewToProvenText` 覆盖的是控制器的稳定前缀预显机制，与越界无关，见 §2 第 26 条 |
 | F-16 emoji／代理对不切断 | 通过 | `preservesUTF16SourceRangesAcrossSupplementaryCharactersAndFillers`、`sourceUnitsRoundTripUTF8AndDoNotSplitGrapheme` |
 | F-17 自由发挥后恢复 | 通过 | `sustainedDetourEntersFreePlayAndLaterReanchors` |
 | F-18 有意跳读 | 通过 | `differentSegmentManualMoveStartsAtParagraphBeginning`、`explicitManualSelectionMakesTheSamePhraseALocalAnchor` |
@@ -208,7 +232,7 @@
 | R-04 设备拔插／蓝牙重连 | 部分 | `inputDeviceLossFailsClosedWithManualFallback`（失败即释放占用、关闭连接、不推进稿件、保留手动；真实拔插与蓝牙重连未执行） |
 | R-05 队列风暴有界降级 | 通过 | `eventStormDegradesInsideBoundedTransport`（600 条事件连续灌入后舞台仍在跟随、无错误、位置在稿内）；传输层 `RealtimeEventStream.Limits.default` 本身有界（256 事件／4 MB），探针侧 `test_receive_loop_fails_instead_of_growing_an_unbounded_queue` |
 | R-06 共享准入不复制模型 | 通过 | 服务侧具名证据：`test_tts_requests_share_one_admitted_worker_slot`、`test_same_tts_resource_key_remains_serialized`、`test_realtime_slot_remains_available_when_batch_lane_is_saturated`、`test_heavy_overlap_serialization_when_budget_constrained`（2026-09-28 重跑 25 项通过） |
-| R-07 长时运行不泄漏 | 部分 | `repeatedStageCyclesReleaseResources`（20 轮开讲→跟随→关舞台，每轮占用归零、连接各关闭一次、采集各停止一次）；长时间连续运行未执行 |
+| R-07 长时运行不泄漏 | 部分 | `repeatedStageCyclesReleaseResources`（20 轮开讲→跟随→关舞台，每轮占用归零、连接各关闭一次、采集各停止一次）、`longRunsStayCorrectAcrossHundredsOfItems`（300 个 item 后行为不漂移；**不覆盖内存上限本身**，见 §2 第 28 条）；长时间连续运行未执行 |
 | R-08 日志与导出脱敏 | 通过 | `observationsCorrelateCallAndRedactedFailure`、`mapDecoderReportsRangeGapWithoutExposingSourceText`、`reportCarriesOnlyAggregatesAndNoScriptText` |
 | M-01 旧稿缺字段仍可读 | 通过 | `runSummaryWrittenBeforeIntraSegmentProgressStillLoads` |
 | M-02 写入原子性 | 通过 | `sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched` |
@@ -223,6 +247,8 @@
 | T-06 慢消费者与队列溢出 | 通过 | `test_receive_loop_fails_instead_of_growing_an_unbounded_queue`、`test_cli_reports_queue_overflow_as_input_error` |
 
 合计 69 项：通过 65、部分 3、未覆盖 0、未执行 1。
+
+计数说明：2026-09-29 的证据强度审计（§2 第 24–27 条）发现 F-07、F-11、F-12、F-15 四行的**证据指向有误或过宽**，补齐了缺失的回归并更正了引用。这四行**审计前后都是「通过」**——审计改变的是「凭什么说通过」，不是结论本身；合计数不变。新增 4 条回归均为变异验证。
 
 ### 4.1 Issue 验收项对照
 
@@ -239,19 +265,19 @@
 | #104 | 报告误报情况；不宣称能自动证明全部事实关系 | 未量化 | 只逐例证明「无害改写不被阻塞」（P-01），**没有汇总误报率**；不得据此推断低误报。已知边界：中文数字互改不受硬门禁保护（`chineseNumeralsRemainOutsideTheHardGateByDesign`），补齐需可测误报率 |
 | #105 | 远距短语在 partial 与 completed 两条路径均不得越过未读句 | 满足 | `distantUniquePhraseCannotAdvanceThroughPartialOrFinal` |
 | #105 | 手动选中后文后可从新位置继续跟随 | 满足 | `explicitManualSelectionMakesTheSamePhraseALocalAnchor`、`differentSegmentManualMoveStartsAtParagraphBeginning` |
-| #105 | 重复标题、相似枚举、跳句、重读、脱稿回近处有正负对照 | 满足 | `unrelatedSpeechAndRepeatedShortPhrasesDoNotMove`、`localRepeatCanReturnToPreviousSentence`、`bodyAloneMatchesWithProductionDefaults` |
+| #105 | 重复标题、相似枚举、跳句、重读、脱稿回近处有正负对照 | 满足 | `unrelatedSpeechAndRepeatedShortPhrasesDoNotMove`、`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`、`rereadDoesNotRollBackAcrossDistantParagraphs`、`bodyAloneMatchesWithProductionDefaults`。**审计更正**：此前引的 `localRepeatCanReturnToPreviousSentence` 只覆盖对齐器，正负对照的实际裁决在跟随控制器，见 §2 第 24 条 |
 | #105 | 不靠「永远不动」规避误跳，同时报告滞后、停滞与人工纠正 | 边界 | 确定性侧由回放评估器输出（`tracking_latency_p50_ms`／`tracking_latency_p95_ms`、`failed_sample_count` 等）；**真实语速下的三者对比需真实音频授权** |
 | #105 | F-01～F-07、F-17～F-22 与参数／策略 revision 可追溯 | 满足 | 台账 F-01～F-22 全通过；报告只输出聚合量 |
-| #105 | 旧 generation、手动接管后到达的结果无推进权 | 满足 | `pausedAndRetiredItemsCannotOverrideManualPosition`、`eventsAfterManualTakeoverCannotMovePosition` |
+| #105 | 旧 generation、手动接管后到达的结果无推进权 | 满足 | `testRealtimeItemStateRejectsLateHypothesisForARetiredItem`、`testRealtimeItemStateRejectsAForeignTaskIDWithinOneConnection`、`testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards`（`latestEpoch` 回退闸门）、`pausedAndRetiredItemsCannotOverrideManualPosition`、`eventsAfterManualTakeoverCannotMovePosition`。四条 Realtime 侧证据为本轮审计补齐，见 §2 第 25 条 |
 | #106 | 有／无稳定信息的同文本事件可区分，invalid span 拒绝或降级 | 满足 | `stableHypothesisPrefixLimitsPreviewToProvenText` |
 | #106 | emoji、组合字符、中英混合的 codepoint 与 UTF-16 不错位 | 满足 | `preservesUTF16SourceRangesAcrossSupplementaryCharactersAndFillers`、`sourceUnitsRoundTripUTF8AndDoNotSplitGrapheme` |
-| #106 | 同音频重复解码不累计为新增证据；稳定前缀被改写时不推进 | 满足 | `snapshotRevisionReplacesTextAndDuplicateEventIsIgnored`、`repeatedWireEventDoesNotAppendTwice`、`stableHypothesisPrefixLimitsPreviewToProvenText` |
+| #106 | 同音频重复解码不累计为新增证据；稳定前缀被改写时不推进 | 满足 | `snapshotRevisionReplacesTextAndDuplicateEventIsIgnored`、`repeatedWireEventDoesNotAppendTwice`、`stableHypothesisPrefixLimitsPreviewToProvenText`（区分有／无稳定信息）、`testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards`（invalid span 拒绝）、`testHypothesisRejectsStablePrefixBeyondCurrentUnicodeScalars`（稳定前缀越界在解码层拒绝）。后两条为审计补齐的引用，见 §2 第 26 条 |
 | #106 | 共享 Realtime 调用方回归通过，助手／会议／字幕不退化 | 满足 | 本机实测（2026-09-28）：`RealtimeContractTests` 28 项、助手等共享调用方套件（`Assistant*`／`Realtime*`／`ServiceContractTests`／`Control*`）合计 185 项、全量 XCTest 344 项，均 0 failures |
 | #106 | F-08～F-16、F-21；配合 #105 统一授权 | 满足 | 台账 F-08～F-16、F-21 全通过 |
 | #106 | 逐段列出已验证／未验证字段；不宣称解决 ASR 正确率 | 边界 | 已验证字段＝内部类型化 evidence；**worker 是否真实产出高质量稳定前缀仍未验证**，本轮未跑真实 ASR |
 | #107 | 构造「partial 前进→final 未匹配→恢复」并分别断言三位置 | 满足 | `partialMovesProvisionallyAndFinalReplacesIt`、`isolatedFinalMismatchKeepsLastConfirmedPosition`、`oneWindowFailureKeepsOtherWindowsAndFallsBackOnlyLocally` |
 | #107 | 差异不足、同 item 修订收缩不触发整行反向移动 | 满足 | `partialCanPreviewForwardWithoutImmediateFinalRollback`、`snapshotRevisionsReplaceTextAndFollowRevisions` |
-| #107 | 重读、点击本句、上下行键仍可回退；旧 generation 不移动位置 | 满足 | `localRepeatCanReturnToPreviousSentence`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`pausedAndRetiredItemsCannotOverrideManualPosition` |
+| #107 | 重读、点击本句、上下行键仍可回退；旧 generation 不移动位置 | 满足 | `rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`、`rereadDoesNotRollBackAcrossDistantParagraphs`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`pausedAndRetiredItemsCannotOverrideManualPosition` 及 §2 第 25 条列出的 Realtime 侧证据。**审计更正**：重读一行此前引的 `localRepeatCanReturnToPreviousSentence` 不含控制器的回退裁决 |
 | #107 | 字号／列宽变化与首尾空槽、长句、emoji 坐标通过定向测试 | 满足 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries`、`display-line layout wraps at the requested width and preserves UTF-16 source ranges` |
 | #107 | F-06／F-22、U-04～U-07 进入验收；滚动观感另行授权 | 边界 | 台账对应项全通过；**实际滚动观感仍是未执行项 U-10** |
 | #108 | fake recv 延迟不记到前一个事件；first-partial 原点一致 | 满足 | `test_receive_loop_stamps_time_after_recv_returns` |
@@ -348,6 +374,7 @@
 7. **语音辅助试读不存在（#111／#112）**：试读 sheet 只有手动秒表。#111 要求「手动计时、语音辅助试读」两类证据来源都清晰，#112 要求主动语音试读显示真实链路状态，两者都因此只有一半。建议与第 4、5 条合并成同一轮审阅／设置 UI 交付。
 8. **Xcode 单测挂死已解决，但成因是测试辅助件而非 App**：见 §2 第 9 条。`TestGate` 现为一次性开启，并附具名回归；`scripts/macos_app_build.sh --configuration Debug --test-unit` 现以 `** TEST SUCCEEDED **`、`test-unit: passed`、exit 0 结束。留在台账里是因为它给出一条通用教训：**挂死先二分到具体用例再下机制结论**，否则很容易把测试缺陷误判成 App 生命周期问题并据此改动生产语义。
 9. **pbxproj 注册必须有 Xcode 侧证据**：本轮已证明 `plutil -lint` 与 SwiftPM 都不足以发现“文件挂错组”这类错误；后续任何新增源码都至少要跑一次包装脚本的 Debug 编译，测试文件还要跑一次 `--test-unit` 构建阶段。
+10. **证据审计已跑完第一轮，但方法本身没进仓库（交接建议）**：第八轮用变异探针查了台账 69 行的证据强度，查出 4 行指向有误并补齐（§2 第 24–27 条）。**探针脚本目前在 `/tmp`，不是仓库资产**——这意味着承接团队拿不到它，而 §2 第 27 条的教训（探针只匹配 swift-testing 会漏掉 XCTest、注释吞掉 guard 条件会造出无效变异）**只写在报告里，工具本身没固化**。建议后续把三段式探针（写变异 → 编译预检 → 同时匹配 `✘` 与 `Test Case '…' failed`）落到 `tools/` 下作为可复用脚本，否则下一轮很容易重犯同样的假结论。本轮**未擅自新增该脚本**——属于新增仓库资产，需要另行授权。
 
 ## 6. 回退
 

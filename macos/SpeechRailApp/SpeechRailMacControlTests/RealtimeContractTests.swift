@@ -1620,6 +1620,85 @@ final class RealtimeContractTests: XCTestCase {
         await client.close()
     }
 
+    func testRealtimeItemStateRejectsLateHypothesisForARetiredItem() {
+        let clock = ContinuousClock()
+        let generation = UUID()
+        let start = clock.now
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+
+        XCTAssertTrue(
+            state.acceptHypothesis(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                revision: 1,
+                text: "你好",
+                sessionID: "session-1",
+                generation: generation,
+                now: start
+            )
+        )
+
+        // 让 item 走完生命周期并进入退役窗口。
+        let afterExpiry = start.advanced(by: .seconds(3600))
+        state.prune(now: afterExpiry)
+
+        XCTAssertFalse(
+            state.acceptHypothesis(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 1,
+                revision: 2,
+                text: "你好啊",
+                sessionID: "session-1",
+                generation: generation,
+                now: afterExpiry
+            ),
+            "已退役 item 在退役窗口内不得被迟到的 hypothesis 复活"
+        )
+    }
+
+    func testRealtimeItemStateRejectsAForeignTaskIDWithinOneConnection() {
+        let clock = ContinuousClock()
+        let generation = UUID()
+        let now = clock.now
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: true)
+
+        XCTAssertTrue(
+            state.acceptHypothesis(
+                itemID: "item-1",
+                taskID: "task-1",
+                epoch: 0,
+                revision: 1,
+                text: "你好",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "首个事件必须绑定 task 与 session"
+        )
+
+        XCTAssertFalse(
+            state.acceptHypothesis(
+                itemID: "item-2",
+                taskID: "task-2",
+                epoch: 0,
+                revision: 1,
+                text: "今天讲相机",
+                sessionID: "session-1",
+                generation: generation,
+                now: now
+            ),
+            "同一条连接内不得跨 task_id 复用 item 状态；换任务必须先重建连接"
+        )
+        XCTAssertNil(
+            state.snapshot(itemID: "item-2"),
+            "被拒绝的跨 task 事件不得留下任何 item 状态"
+        )
+    }
+
     private func sentEventTypes(_ transport: TestRealtimeASRTransport) async -> [String] {
         await transport.sentMessages().compactMap { message in
             let data = Data(message.utf8)

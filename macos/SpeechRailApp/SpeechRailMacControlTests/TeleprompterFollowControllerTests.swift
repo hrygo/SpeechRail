@@ -110,6 +110,49 @@ struct TeleprompterFollowControllerTests {
         #expect(diagnostics.captureToSendP95Milliseconds == 7)
     }
 
+    /// 长稿会产生远超 `items` 窗口的 item。这条固定的是**长跑之后行为仍然正确**：
+    /// 末条证据仍能推进、重复 event id 仍被抑制。
+    ///
+    /// 它**不**证明 `retired`／`eventIDs` 的 128 上限本身——那两个上限是私有
+    /// 列表长度，删掉它们不改变任何可观察行为（迟到事件另有两道守卫兜底），
+    /// 因此在当前接口下无法证伪，见 §2 第 28 条。
+    @Test func longRunsStayCorrectAcrossHundredsOfItems() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let spokenLines = ["欢迎来到今天的直播", "今天我们介绍相机设置", "最后演示照片导出"]
+
+        for index in 0..<300 {
+            controller.receiveSnapshot(
+                itemID: "item-\(index)",
+                revision: 1,
+                text: spokenLines[index % spokenLines.count],
+                segments: segments,
+                eventID: "event-\(index)"
+            )
+        }
+        // 最后一个 item 仍然有效，300 轮之后跟随没有漂移。
+        controller.receiveCompleted(
+            itemID: "item-299",
+            transcript: "最后演示照片导出",
+            segments: segments
+        )
+        #expect(controller.position.segmentIndex == 2)
+        #expect(controller.mode == .following)
+
+        // 重复 event id 在长跑之后仍必须被抑制。
+        let before = controller.position
+        controller.receiveCompleted(
+            itemID: "item-299",
+            transcript: "欢迎来到今天的直播",
+            segments: segments,
+            eventID: "event-299"
+        )
+        #expect(
+            controller.position == before,
+            "长跑之后重复 event id 仍不得再次推进位置"
+        )
+    }
+
     @Test func splitFinalsAccumulatePosition() throws {
         let segments = try script()
         var controller = TeleprompterFollowController()
@@ -182,6 +225,74 @@ struct TeleprompterFollowControllerTests {
 
         #expect(controller.currentIndex == 0)
         #expect(controller.position.utf16Offset == 6)
+    }
+
+    /// 重读回退必须由跟随控制器裁决，而不是由对齐器"能不能找到上一段"决定：
+    /// 证据充分的整句重读要真的回退，只有几个 token 的远处短语必须留在原位。
+    @Test func rereadRollsBackOnlyWhenTheBackwardMatchIsStrong() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+
+        controller.receiveCompleted(
+            itemID: "forward",
+            transcript: "最后演示照片导出",
+            segments: segments
+        )
+        #expect(controller.position.segmentIndex == 2)
+
+        controller.receiveCompleted(
+            itemID: "reread",
+            transcript: "今天我们介绍相机设置",
+            segments: segments
+        )
+        #expect(
+            controller.position.segmentIndex == 1,
+            "证据充分的整句重读必须真的回退到上一段"
+        )
+
+        controller.receiveCompleted(
+            itemID: "forward-again",
+            transcript: "最后演示照片导出",
+            segments: segments
+        )
+        let afterForward = controller.position
+        #expect(afterForward.segmentIndex == 2)
+
+        controller.receiveCompleted(itemID: "stray", transcript: "直播", segments: segments)
+        #expect(
+            controller.position == afterForward,
+            "只命中两个 token 的远处短语不足以证明重读，必须留在原位"
+        )
+        #expect(
+            controller.committedPosition == afterForward,
+            "被拒绝的回退不得改写已确认位置"
+        )
+    }
+
+    /// 命中再准也不能跨段落倒退：远处的整句复述更可能是旁人声或口误，
+    /// 自动跳回四段之前比留在原地更糟。
+    @Test func rereadDoesNotRollBackAcrossDistantParagraphs() throws {
+        let long = [
+            "第一段介绍今天的直播主题和嘉宾安排。",
+            "第二段讲述相机机身的基本操作方式。",
+            "第三段说明镜头选择和对焦要点。",
+            "第四段介绍曝光参数的常见组合。",
+            "第五段演示照片导出的具体流程。",
+        ].joined(separator: "\n\n")
+        let segments = try TeleprompterSegmenter.segment(sourceText: long)
+        var controller = TeleprompterFollowController()
+        controller.manualMove(to: 4, segmentCount: segments.count)
+        controller.resume()
+
+        controller.receiveCompleted(
+            itemID: "far",
+            transcript: "第一段介绍今天的直播主题和嘉宾安排",
+            segments: segments
+        )
+        #expect(
+            controller.committedPosition.segmentIndex == 4,
+            "远处整句复述不得把已确认位置拖回前面的段落"
+        )
     }
 
     @Test func candidateCommittedAndViewportPositionsAreSeparated() throws {
