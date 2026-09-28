@@ -1645,6 +1645,185 @@ struct TeleprompterSessionLifecycleTests {
     /// 带上原因**（否则界面只能说「有几份打不开」而读者无法判断该备份什么）、
     /// **原文件必须原样留在磁盘上**——这一条最要紧，「保留原数据」如果只是
     /// 「先不报错」，而文件其实被清掉或改写，那就是丢数据。
+    /// 第十九轮。改内容范围会作废当前 AI 分段——这本身是对的——但它连同
+    /// **读者已经逐条处理完的审阅**一起清掉，而且没有确认、没有消息。
+    ///
+    /// 为什么这条要紧：审阅是第 43 条之后唯一剩下的**不可重做**的读者工作。
+    /// 候选版本一旦离开内存，读者花在每一条上的判断就不在屏幕上了；要做回来
+    /// 得重新跑一次 AI、再从头审一遍。而入口（工作台顶栏「选择范围」）在
+    /// `editor()` 里只要有稿件就渲染，**不看阶段**——审阅页上点得到。
+    @Test("changing the content range refuses to silently discard completed review work")
+    func changingContentRangeRefusesToDiscardReviewWorkSilently() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "范围稿",
+            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
+        )
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "方案 A 的单次成本是 50 元。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try TestPreparationResponse.response(for: prompt)
+        }
+
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .review)
+        let item = try #require(harness.session.reviewItems.first)
+
+        // 读者还没动手时，丢掉的是 AI 的建议、不是读者的工作——不该拦。
+        #expect(
+            !harness.session.hasReviewDecisionsAtRisk,
+            "刚整理完、读者尚未处理任何审阅项时，改范围不该弹确认"
+        )
+
+        // 读者处理了一条——这是不可重做的工作。
+        harness.session.resolveReviewItem(id: item.id, action: .accept)
+        #expect(item.isResolved || harness.session.reviewItems.first?.isResolved == true)
+        #expect(
+            harness.session.hasReviewDecisionsAtRisk,
+            "有已处理过的审阅时，改范围必须先问过读者"
+        )
+
+        // 改范围：不问就吃掉，不行。
+        #expect(throws: TeleprompterTextError.reviewDecisionsWouldBeDiscarded) {
+            try harness.session.updateContentSelection(
+                TeleprompterContentSelection(
+                    totalParagraphCount: 1,
+                    selectedParagraphIndices: [0]
+                )
+            )
+        }
+        #expect(harness.session.phase == .review, "拒绝不得把审阅页带走")
+        #expect(
+            harness.session.reviewItems.contains { $0.isResolved },
+            "拒绝不得弄丢读者已经做过的判断"
+        )
+
+        // 读者确认之后才真的作废——这时候丢失是读者自己选的。
+        try harness.session.applyContentSelectionAfterConfirmation(
+            TeleprompterContentSelection(
+                totalParagraphCount: 1,
+                selectedParagraphIndices: [0]
+            )
+        )
+        #expect(harness.session.reviewItems.isEmpty)
+        #expect(!harness.session.hasReviewDecisionsAtRisk)
+    }
+
+    /// 「该报警时才报警」和「不该报警时不报」是两件事。原来只有前者。
+    ///
+    /// 边界在 `pendingVersion`：采用候选版本之后 `pendingVersion` 为 nil、
+    /// `reviewItems` 可能仍有记录，但那些判断**已经烘进已确认版本**了，
+    /// 再改范围丢掉它们不损失任何工作——这时候弹确认框就是纯粹的打扰。
+    @Test("adopting the candidate makes a later range change safe again")
+    func adoptingTheCandidateEndsTheReviewLossRisk() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "边界稿",
+            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
+        )
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "方案 A 的单次成本是 50 元。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try TestPreparationResponse.response(for: prompt)
+        }
+
+        await harness.session.analyzeDraft()
+        #expect(!harness.session.reviewItems.isEmpty, "前提：这次整理确实产生了审阅项")
+        // 全部处理完才可采用（`canAcceptPendingVersion` 要求没有未决项）。
+        for item in harness.session.reviewItems {
+            harness.session.resolveReviewItem(id: item.id, action: .accept)
+        }
+        #expect(harness.session.canAcceptPendingVersion, "前提：候选版本本来是可采用的")
+        #expect(harness.session.hasReviewDecisionsAtRisk)
+
+        try harness.session.acceptPendingVersion()
+        #expect(harness.session.phase == .ready)
+        #expect(
+            !harness.session.hasReviewDecisionsAtRisk,
+            "候选版本一旦被采用，审阅判断已经落进已确认版本，不再有丢失风险"
+        )
+        // 因此这一步是普通编辑，不该再拦一次。
+        try harness.session.updateContentSelection(
+            TeleprompterContentSelection(
+                totalParagraphCount: 1,
+                selectedParagraphIndices: [0]
+            )
+        )
+    }
+
+    /// 没有已处理的审阅时，改范围就是普通编辑，不该多问一句。
+    @Test("changing the content range stays a plain edit when no review work is at stake")
+    func changingContentRangeIsPlainWithoutReviewWork() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "范围稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
+
+        #expect(!harness.session.hasReviewDecisionsAtRisk)
+        try harness.session.updateContentSelection(
+            TeleprompterContentSelection(
+                totalParagraphCount: 3,
+                selectedParagraphIndices: [0, 2]
+            )
+        )
+        #expect(harness.session.contentSelection.selectedParagraphIndices == [0, 2])
+
+        // 确认路径同样要守 canEdit：语音开着时改了范围，旧事件仍可能推进刚
+        // 选定的内容。拒绝必须有声音。
+        //
+        // 注意前提是**语音**开着而不是窗口开着——`.manual` 阶段没有语音时
+        // `canEdit` 为 true，编辑器和范围本来就该可用（这与标题/正文编辑器
+        // 的既有行为一致）。我第一版把前提写成「舞台开着」，实测直接打脸。
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        #expect(harness.session.canEdit, "前提：手动阅读时改范围仍然是允许的")
+        await harness.session.enableVoiceAssist()
+        #expect(!harness.session.canEdit, "前提：语音开着时不能改范围")
+        #expect(throws: TeleprompterTextError.sessionBusy) {
+            try harness.session.applyContentSelectionAfterConfirmation(
+                TeleprompterContentSelection(
+                    totalParagraphCount: 3,
+                    selectedParagraphIndices: [0, 1]
+                )
+            )
+        }
+        #expect(
+            harness.session.contentSelection.selectedParagraphIndices == [0, 2],
+            "拒绝不得顺手把范围改掉"
+        )
+    }
+
     @Test("bundles this build cannot read keep their files and do not take the other documents down")
     func unreadableBundlesArePreservedAndIsolated() throws {
         let harness = try TeleprompterSessionHarness()

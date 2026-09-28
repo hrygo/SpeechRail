@@ -847,7 +847,33 @@ public final class TeleprompterSession {
         return evidence
     }
 
-    public func updateContentSelection(_ selection: TeleprompterContentSelection) {
+    /// True when changing the content range would throw away review the reader
+    /// has already worked through. That work cannot be recovered without
+    /// another AI round and another pass over every item, so the caller asks
+    /// before calling `updateContentSelection`.
+    public var hasReviewDecisionsAtRisk: Bool {
+        pendingVersion != nil && reviewItems.contains(where: \.isResolved)
+    }
+
+    /// Narrows the material this reading covers. The segmentation built for the
+    /// old range no longer applies, so it is rebuilt from scratch — but if the
+    /// reader has already resolved review items, that is unrecoverable work and
+    /// this refuses rather than dropping it in silence. The caller confirms and
+    /// then uses `applyContentSelectionAfterConfirmation`.
+    public func updateContentSelection(_ selection: TeleprompterContentSelection) throws {
+        guard !hasReviewDecisionsAtRisk else {
+            throw TeleprompterTextError.reviewDecisionsWouldBeDiscarded
+        }
+        try applyContentSelectionAfterConfirmation(selection)
+    }
+
+    /// The confirmed path. Callers reach this only after the reader has agreed
+    /// to lose the review work, so the discard is a choice rather than a side
+    /// effect.
+    public func applyContentSelectionAfterConfirmation(
+        _ selection: TeleprompterContentSelection
+    ) throws {
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         self.contentSelection = selection
         if pendingVersion != nil || !readingBlocks.isEmpty {
             invalidateAnalysis()

@@ -10,6 +10,12 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     /// tighten in flight. Refusing is correct; refusing *silently* is not, so
     /// this is a thrown, user-facing reason rather than a bare `return`.
     case sessionBusy
+    /// Changing the content range invalidates the current segmentation, and
+    /// with it any review the reader already worked through. That work is not
+    /// reproducible without another AI round, so the session refuses instead
+    /// of dropping it; the caller confirms first and then calls
+    /// `applyContentSelectionAfterConfirmation`.
+    case reviewDecisionsWouldBeDiscarded
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +29,8 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
             "没能准备好 AI 整理请求"
         case .sessionBusy:
             "现在不能切换稿件：提词窗口还开着，或上一步还没收尾。先关掉提词窗口再试。"
+        case .reviewDecisionsWouldBeDiscarded:
+            "改范围会作废你已经审阅过的内容，需要重新整理并重新审阅。确认要继续吗？"
         }
     }
 }
