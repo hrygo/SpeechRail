@@ -343,12 +343,19 @@ public final class TeleprompterSession {
     /// Validates pasted/drop text through the same strict importer as files.
     /// Blank documents remain available through `createDocument` for the empty editor state.
     public func createDocumentValidated(title: String, sourceText: String) throws {
+        // 门控放在导入之前：舞台开着时，「正在解析内容」是次要事实，
+        // 读者需要先知道的是现在不能换稿。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         let imported = try TeleprompterSourceImporter.importData(Data(sourceText.utf8))
-        createDocument(title: title, importedSource: imported)
+        try createDocument(title: title, importedSource: imported)
     }
 
-    public func createDocument(title: String, importedSource: TeleprompterImportedSource) {
-        guard canEdit else { return }
+    /// 导入入口一律 `throws`，不静默返回：调用方（剪贴板、拖拽、文件导入）
+    /// 拿到成功才会提示「已导入」。原先这里是 `guard canEdit else { return }`，
+    /// 而 `importFromURL` 在调用**之后无条件**显示「已导入」——舞台开着时
+    /// 导入文件，界面谎报成功，读者以为换好了稿子，实际还在旧稿上。
+    public func createDocument(title: String, importedSource: TeleprompterImportedSource) throws {
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         invalidateAnalysis()
         savedRunState = nil
         let now = Date()

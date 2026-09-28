@@ -305,6 +305,7 @@ public struct TeleprompterView: View {
                     Button("新建空白稿") {
                         session.createDocument(title: "未命名稿子", sourceText: "")
                     }
+                    .disabled(!session.canEdit)
                     Button("从剪贴板创建") {
                         createFromClipboard()
                     }
@@ -391,6 +392,7 @@ public struct TeleprompterView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.extraLarge)
+                    .disabled(!session.canEdit)
 
                     Button {
                         createFromClipboard()
@@ -485,6 +487,7 @@ public struct TeleprompterView: View {
                         }
                         .buttonStyle(.plain)
                         .speechRailPointerCursor()
+                        .disabled(!session.canEdit)
                     }
                 }
             }
@@ -678,6 +681,7 @@ public struct TeleprompterView: View {
                         Button("新建空白稿") {
                             session.createDocument(title: "未命名稿子", sourceText: "")
                         }
+                        .disabled(!session.canEdit)
                         Button("从剪贴板创建") {
                             createFromClipboard()
                         }
@@ -871,6 +875,7 @@ public struct TeleprompterView: View {
                 Button("新建空白稿") {
                     session.createDocument(title: "未命名稿子", sourceText: "")
                 }
+                .disabled(!session.canEdit)
                 .buttonStyle(.borderedProminent)
                 Button("从剪贴板创建") {
                     createFromClipboard()
@@ -929,6 +934,7 @@ public struct TeleprompterView: View {
                     Button("新建空白稿") {
                         session.createDocument(title: "未命名稿子", sourceText: "")
                     }
+                    .disabled(!session.canEdit)
                     Button("从剪贴板创建") {
                         createFromClipboard()
                     }
@@ -2773,7 +2779,7 @@ public struct TeleprompterView: View {
     private func importFromURL(_ url: URL) {
         do {
             let imported = try TeleprompterSourceImporter.load(from: url)
-            session.createDocument(
+            try session.createDocument(
                 title: url.deletingPathExtension().lastPathComponent,
                 importedSource: imported
             )

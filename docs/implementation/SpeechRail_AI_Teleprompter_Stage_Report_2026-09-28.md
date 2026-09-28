@@ -244,13 +244,25 @@
     - **剩下四处为什么这一轮没改，写明白**：两处编辑器（`updateTitle`／`updateSourceText`）在界面上**已经有** `.disabled(!session.canEdit)`——同文件里的既有做法，读者得到的是灰显而不是静默，那两处守卫只是纵深防御，**不是缺陷**。真正剩下的是 `createDocument` 的两个重载与 `discardPendingVersion`，它们的按钮散在 6 个视图里（顶栏 `PageActionsMenu`、卡片菜单、内联选择器、空状态、模板卡片），**全都没有 `disabled` 门控**，属于同一族。**这一轮没有改，理由是**：改法本身有争议（灰显按钮 vs. 点击后给消息），而判断哪种对只能靠 U-10 界面走查——按 AGENTS.md，那需要用户逐次授权，在没有授权的情况下改 6 处视图等于把一个**未验证的视觉判断**写进代码。**这一条作为已知跟进项交给承接团队，并入 §5 第 1 条的 U-10 走查清单。**
     - **本族最终统计（第 46–50 条共五处）**：两处 `try?`、两处静默 `return`、一处无兜底的 `if let`。共同点依旧是**代码本身全都正常**，缺陷不在函数里，在「界面在成功和失败两条路上分别显示什么」这个跨越函数与视图的问题上。这也是为什么前四条里有一条必须靠变异探针而不是「先红」来证明——有些缺陷根本不在可单测的那一层。
 
+51. **舞台开着时导入文件，界面谎报「已导入」（第十五轮，本族最坏的一条）**：把第 50 条列出的六个静默入口逐个问「读者点了会怎样」，问到 `importFromURL` 时停住了。它的实现是：`try TeleprompterSourceImporter.load(from: url)` → `session.createDocument(title:importedSource:)` → **无条件**设 `operationMessage = "已导入「…」"`。而 `createDocument` 的两个重载都是 `guard canEdit else { return }`。于是舞台开着时导入文件：**什么都没导入，界面却显示「已导入」**。
+    这比第 47、50 条的静默更坏：静默至少不骗人，虚假成功消息则让读者**以为稿子已经换好了**，随后在旧稿上继续练习——一段本来该跳过的新稿变成了跟错内容，而且没有任何迹象能让他发现。
+    修复（把「导入」整条链改成有声音，零调用点签名变更）：
+    - `createDocument(title:importedSource:)` 由静默 `return` 改为 `throws`，拒绝时抛 `TeleprompterTextError.sessionBusy`。两个调用方（`createDocumentValidated`、`importFromURL`）本来就在 `do`／`catch` 里，不需要改结构。
+    - `createDocumentValidated` 顶部也加同一道守卫，**顺序在导入之前**：舞台开着时「正在解析内容」是次要事实，读者需要先知道的是现在不能换稿。
+    - 视图侧 `importFromURL` 的调用点补 `try`。
+    - 回归 `importingWhileTheStageIsLiveFailsLoudly`，并钉住「拒绝必须是干净的」：稿件不变、舞台相位不下滑。
+    - **先红如实记录**：本条**拿到了先红**。临时把两个源文件退回 HEAD、只留新测试，`#expect(throws:)` 报 `an error was expected but none was thrown`——正是 `guard canEdit else { return }` 的静默 return；恢复修复版后通过。这与第 49 条不同（那条缺陷在视图层、拿不到先红），本条缺陷同时落在会话层，因此走完了完整流程。
+    - 变异验证 1 条，被杀：把 `createDocument(title:importedSource:)` 的守卫改回静默 `return`（杀）。
+    - **六个「新建」按钮同时补了 `.disabled(!session.canEdit)`**（顶栏 `PageActionsMenu`、空状态主按钮、模板卡片、卡片菜单、空状态次按钮、拖放提示区）。依据不是审美判断，而是**同文件既有做法**：标题与正文编辑器早已用这个模式，读者得到的是灰显而不是静默。第 50 条把这一族留作「等 U-10 走查再定」，本轮把它按既有约定统一了——灰显与否是视觉判断，**是否与同文件既有约定一致**不是。
+    - **刻意没改的一处**：视图在 `case .analyzing, .preparing` 分支显示的「取消整理」按钮**不能**加 `.disabled(!session.canEdit)`。它是「取消正在进行的 AI 整理」，而 `prepareDraft` 只设 `phase = .analyzing`、不动 `isTightening`／`isAnnotating`，所以 `.analyzing` 期间 `canEdit` 为 true、取消本该可用；灰显它会直接破坏取消功能。但由此暴露一个**真缺陷留给 U-10**：`.preparing` 是语音启动瞬态（`canEdit` 为 false），该分支此时也显示「取消整理」，点了静默无效，且标签与场景不符。**本轮只记录不改**——它需要授权走查才能确认正确形态。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **267 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 12 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **268 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 第十五轮复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 12 条，导入拒绝一轮再新增 1 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
@@ -485,8 +497,9 @@
 | 第 48 条 「重试保存」成功后仍宣称失败 | 判据第 3 条（数据安全与恢复） | 恢复入口永远恢复不了，读者只能手动 ✕ 关闭 |
 | 第 49 条 存盘失败时「复制稿件内容」无反应 | 判据第 3 条（数据安全） | 存盘失败时读者最需要的「把稿子拿走」这条路恰好是唯一没有兜底的 |
 | 第 50 条 删除稿子时确认框点了「删除」却静默 | 判据第 3 条（数据安全） | 破坏性操作上「确认之后静默」；同类静默守卫共 7 处，已修 3 处 |
+| 第 51 条 舞台开着时导入文件，界面谎报「已导入」 | 判据第 2、3 条（切稿安全与数据安全） | **虚假成功消息**——读者以为稿子换好了，实际在旧稿上继续工作；比静默更坏 |
 
-**给接手方的判断**：这十个缺陷的共同形态是「**先改状态、后可能失败，而失败路径没有把状态放回去**」，加上「**把多个原因压成一个返回值或一句文案**」。两者都不影响正常路径，只在磁盘写失败、用户重复操作这类边界上暴露。已全部修复并各配回归与变异验证，但**同类形态是否还有第五处，本轮没有证据能保证没有**——第 43 条那次静态扫描在 `TeleprompterSession.swift` 命中 12 处、其余四个提词器文件全部为假阳性，这是本轮实际查到的范围，不等于全仓无遗漏。
+**给接手方的判断**：这十一个缺陷的共同形态是「**先改状态、后可能失败，而失败路径没有把状态放回去**」，加上「**把多个原因压成一个返回值或一句文案**」，以及「**拒绝之后仍然走成功路径的显示分支**」（第 51 条独有）。三者都不影响正常路径，只在磁盘写失败、用户重复操作、舞台已开启这类边界上暴露。已全部修复并各配回归与变异验证，但**同类形态是否还有第五处，本轮没有证据能保证没有**——第 43 条那次静态扫描在 `TeleprompterSession.swift` 命中 12 处、其余四个提词器文件全部为假阳性，这是本轮实际查到的范围，不等于全仓无遗漏。第 51 条的发现方式值得接手方沿用：**不是读代码读出来的，是把「读者点了这个按钮，接下来会看到什么」逐个问完六个创建入口问出来的**。
 
 另需注意：**UI 走查缺口由 #89 跟踪，首个 ASR partial 的用户可见延迟由 #83 跟踪，两条至今 OPEN**。§3.2 列的两项未执行验证并非无人认领。
 
@@ -510,7 +523,8 @@
     - 再加一条**引用可解析性检查**：把报告与台账里出现的具名标识（函数名、测试显示名）拿回代码里逐个查，缺失的列出来（本轮 141 个标识查出 1 个查无此条并已修，见 §2 第 45 条）。**写这类脚本时务必把口径一次备齐**——本轮第一版只比对函数名，既漏报了真问题，又把 `tests/` 与 `tools/` 里的用例和类型名误报成缺失。检查自身口径是否完整，比检查结果更重要。
 11. **worktree 里跑不了 Python 测试（可复现性缺口）**：pytest 放在 `[project.optional-dependencies].dev`，而 `uv sync` 默认不装 optional extra，因此 `.worktree/.venv` 里没有 pytest。本轮实际依赖主检出 `/Users/hrygo/Documents/SpeechRail/.venv`，并须把 worktree 的 `src` 放在 `PYTHONPATH` 前面才测的是 worktree 代码；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 让退出码恒为非零。**§3.1 过去记的 `pytest tests/…` 在 worktree 中开箱即用并不成立。** 建议要么把测试依赖移到 `dependency-groups.dev`（`uv sync` 默认安装），要么在开发文档里写明这条命令的完整形态。本轮只记录，未改依赖结构。
 
-12. **「静默拒绝」这一族还剩四处按钮没有门控，已并入 U-10 走查（第十四轮遗留）**：§2 第 46–50 条共修掉五处（两处 `try?`、两处静默 `return`、一处无兜底的 `if let`）。会话层还剩 `createDocument` 的两个重载与 `discardPendingVersion` 带着 `guard canEdit else { return }`，而它们的按钮散在 6 个视图里（顶栏 `PageActionsMenu`、卡片菜单、内联选择器、空状态、模板卡片），**全部没有 `disabled` 门控**——舞台开着时点「新建」或「取消整理」会静默无反应。**本轮刻意没改**：改法本身有争议（灰显按钮 vs. 点击后给消息），而判断哪一种对只能靠实际界面走查；按 AGENTS.md，UI 走查需要用户逐次授权，在没有授权的情况下改 6 处视图等于把一个未验证的视觉判断写进代码。**走查时要一并确认**：这几处在舞台开启时的表现应该是灰显还是点击后提示，以及提示文案是否说清了「先关掉提词窗口」。
+12. **「静默拒绝」这一族的按钮门控已按同文件既有约定统一，只剩一处必须走查（第十五轮更新）**：§2 第 46–50 条修掉五处会话层缺陷（两处 `try?`、两处静默 `return`、一处无兜底的 `if let`），第 51 条修掉导入链的虚假成功。**六个「新建」入口已补 `.disabled(!session.canEdit)`**，依据是同文件里标题／正文编辑器早已在用这个模式——是否与既有约定一致不需要走查授权，「灰显好不好看」才需要。
+    **仍然只剩一处，且本轮刻意没改**：视图 `case .analyzing, .preparing` 分支里的「取消整理」按钮。**不能**给它加 `.disabled(!session.canEdit)`——它是「取消正在进行的 AI 整理」，而 `prepareDraft` 只设 `phase = .analyzing`、不动 `isTightening`／`isAnnotating`，所以 `.analyzing` 期间 `canEdit` 为 true、取消本该可用；灰显它会**直接破坏取消功能**。但由此暴露一个真缺陷：`.preparing`（语音启动瞬态，`canEdit` 为 false）时该分支也显示「取消整理」，点了静默无效，标签与场景也不符。**走查时要确认**：`.preparing` 期间这个按钮应显示什么、是否该换成「正在启动」之类的状态文案。
 
 ## 6. 回退
 

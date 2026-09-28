@@ -1613,6 +1613,30 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.phase == .following, "拒绝删除不得把舞台带下去")
     }
 
+    /// `createDocument` 的两个重载都是 `guard canEdit else { return }`，而调用它们的
+    /// 入口里，`importFromURL` 在调用**之后无条件**设 `operationMessage = "已导入「…」`。
+    /// 于是舞台开着时导入文件：什么都没导入，界面却说「已导入」——**虚假成功消息**，
+    /// 比静默更坏：读者会以为稿子已经换好了，随后在旧稿上继续工作。
+    @Test("importing while the stage is live reports failure instead of claiming success")
+    func importingWhileTheStageIsLiveFailsLoudly() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.canEdit == false, "前提：语音开着时不允许新建或导入")
+
+        // 剪贴板／拖拽文本走的这条路径。
+        #expect(throws: TeleprompterTextError.sessionBusy) {
+            try harness.session.createDocumentValidated(title: "剪贴板稿件", sourceText: "新的稿子内容。")
+        }
+        #expect(harness.session.document?.id == documentID, "拒绝导入不得换掉当前稿件")
+        #expect(harness.session.phase == .following, "拒绝导入不得把舞台带下去")
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()
