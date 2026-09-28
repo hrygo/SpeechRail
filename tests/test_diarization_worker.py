@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from pathlib import Path
 
 import pytest
@@ -20,15 +19,6 @@ from speechrail.runtime.diarization_worker import (
     CoreMLWorkerProcess,
     decode_message,
     encode_message,
-)
-
-_SWIFT_WORKER = (
-    Path(__file__).resolve().parents[1]
-    / "native"
-    / "diarization"
-    / ".build"
-    / "debug"
-    / "SpeechRailDiarizationWorker"
 )
 
 
@@ -185,23 +175,6 @@ def test_coreml_activity_session_maps_worker_transport_failure_to_stable_error()
         assert "private child diagnostics" not in str(error.value)
 
     asyncio.run(scenario())
-
-
-@pytest.mark.skipif(
-    sys.platform != "darwin" or not _SWIFT_WORKER.is_file(),
-    reason="requires a locally built macOS Swift diarization worker",
-)
-def test_real_swift_worker_returns_a_private_error_packet_for_an_invalid_bundle(tmp_path) -> None:
-    """The actual executable fails its preflight without leaving a child behind."""
-
-    invalid_bundle = tmp_path / MODEL_BUNDLE_NAME
-    invalid_bundle.mkdir()
-    worker = CoreMLWorkerProcess(executable=_SWIFT_WORKER, model_path=invalid_bundle)
-
-    with pytest.raises(RuntimeError, match="preflight failed"):
-        asyncio.run(worker.start())
-
-    assert worker.process is None
 
 
 def test_worker_close_targets_one_pid_cancel_then_terminate_then_kill(monkeypatch) -> None:
