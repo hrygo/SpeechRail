@@ -284,6 +284,12 @@ public enum TeleprompterCalibrationSource: Equatable, Sendable {
     case uncalibrated
     /// 手动计时试读：倍率与实测秒数来自同一次朗读。
     case manualTrial(durationSeconds: TimeInterval)
+    /// 语音辅助试读：除时长外，还留下了识别器真的听到内容的证据。
+    ///
+    /// 单独一种来源而不是复用 `manualTrial`，是因为两者的可信度不同：
+    /// 手动秒表只证明读者按了开始和结束，语音试读还证明采集、识别与定位
+    /// 这条链路当时是通的。#111 要求「手动计时、语音辅助试读的证据来源清晰」。
+    case speechTrial(durationSeconds: TimeInterval, recognizedUnits: Int)
 }
 
 public struct TeleprompterTrialReadingResult: Codable, Equatable, Sendable {
@@ -307,6 +313,63 @@ public struct TeleprompterTrialReadingResult: Codable, Equatable, Sendable {
     public var isWithinValidRange: Bool {
         (TeleprompterTimingPolicy.minimumCalibrationFactor...TeleprompterTimingPolicy.maximumCalibrationFactor)
             .contains(calibrationFactor)
+    }
+}
+
+/// 语音辅助试读走到哪一步了。
+///
+/// #112 要求「主动语音试读显示真实链路状态，不能只以输入电平证明识别和定位
+/// 成功」。所以「麦克风在响」不算一档：必须能把采集、识别、定位分开报给用户。
+public enum TeleprompterSpeechTrialStage: Equatable, Sendable {
+    case idle
+    /// 正在取设备租约、连识别服务、打开麦克风。
+    case preparing
+    /// 采集与识别都活着；此时是否真的听到内容看证据，不看这个状态。
+    case listening
+    case failed(String)
+
+    public var isActive: Bool {
+        self == .preparing || self == .listening
+    }
+}
+
+/// 一次语音辅助试读留下的证据。
+///
+/// 只记计数，不记转写正文：#112 明确「不产生音频或全文 ASR 持久化」，
+/// 而逐字记录留在本机 SQLite 的提词器侧与这里都不是这个功能需要的。
+public struct TeleprompterSpeechTrialEvidence: Equatable, Sendable {
+    public let durationSeconds: TimeInterval
+    /// 识别器返回的单位数。0 表示麦克风开了但什么都没听到。
+    public let recognizedUnits: Int
+    /// 其中能在稿件里定位到的单位数。0 表示听到了但对不上正文。
+    public let matchedUnits: Int
+
+    public init(durationSeconds: TimeInterval, recognizedUnits: Int, matchedUnits: Int) {
+        self.durationSeconds = durationSeconds
+        self.recognizedUnits = recognizedUnits
+        self.matchedUnits = matchedUnits
+    }
+
+    /// 只有真的识别出内容，这次试读才比手动秒表多一档证据。
+    public var provesRecognition: Bool { recognizedUnits > 0 }
+
+    /// 识别之外还完成了定位，才算 #112 说的整条链路通了。
+    public var provesAlignment: Bool { matchedUnits > 0 }
+
+    /// 能否采用为校准。识别不到内容的试读不产生倍率——那只是又按了一次开始。
+    public var isAdoptable: Bool { provesRecognition }
+
+    /// 这次试读能给出的校准倍率，不能给出时返回 `nil`。
+    ///
+    /// 抽成纯函数是为了让「识别到内容」与「时长够」两个条件能被分别钉住。
+    /// 合在会话方法里时，一个条件的失效很容易被另一个条件的通过掩盖过去——
+    /// 这正是「没听到东西的试读也产出了倍率」能够藏住的地方。
+    public func calibrationFactor(baseEstimateSeconds: TimeInterval) -> Double? {
+        guard isAdoptable,
+              baseEstimateSeconds > 0,
+              durationSeconds >= TeleprompterTimingPolicy.minimumTrialDurationSeconds
+        else { return nil }
+        return durationSeconds / baseEstimateSeconds
     }
 }
 

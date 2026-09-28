@@ -99,6 +99,20 @@ public final class TeleprompterSession {
     /// In-memory timing evidence for diagnosing follow lag; no text or IDs are retained.
     public private(set) var followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
 
+    // MARK: - 语音辅助试读（#112）
+    //
+    // 单独显式动作，不是手动秒表的替代品，也不是「打开试读页就申请麦克风」。
+    // 采集与识别走既有 coordinator 与 client 构造路径，因此权限、设备租约与
+    // 释放只有一套；试读期间不建 SessionStore 行、不动阅读位置、不起运行计时。
+    public private(set) var speechTrialStage: TeleprompterSpeechTrialStage = .idle
+    public private(set) var speechTrialEvidence: TeleprompterSpeechTrialEvidence?
+    private var isSpeechTrialRequested = false
+    private var trialPump: Task<Void, Never>?
+    private var trialStartedAt: ContinuousClock.Instant?
+    private var trialRecognizedUnits = 0
+    private var trialMatchedUnits = 0
+    private var trialGeneration: UUID?
+
     // MARK: - 终版规格状态与参数
     public var targetMinutes: Int = TeleprompterTimingPolicy.defaultTargetMinutes
     public var pace: TeleprompterPace = .natural
@@ -707,6 +721,28 @@ public final class TeleprompterSession {
         calibrationSource = source
         recalculateCurrentDraftBudget()
         scheduleDraftSave()
+    }
+
+    /// 采用一次语音辅助试读。
+    ///
+    /// 只有真的识别出内容才返回倍率并写入来源：#112 要求「不能只以输入电平证明
+    /// 识别和定位成功」，一个没听到东西的试读如果也产出倍率，就等于用一次失败的
+    /// 采集冒充一次测量——这正是方案里反复强调的「不自动编造语速」红线。
+    @discardableResult
+    public func applySpeechTrialCalibration(
+        baseEstimateSeconds: TimeInterval
+    ) -> TeleprompterSpeechTrialEvidence? {
+        guard let evidence = speechTrialEvidence,
+              let factor = evidence.calibrationFactor(baseEstimateSeconds: baseEstimateSeconds)
+        else { return nil }
+        applyTrialCalibration(
+            k: factor,
+            source: .speechTrial(
+                durationSeconds: evidence.durationSeconds,
+                recognizedUnits: evidence.recognizedUnits
+            )
+        )
+        return evidence
     }
 
     public func updateContentSelection(_ selection: TeleprompterContentSelection) {
@@ -1661,6 +1697,12 @@ public final class TeleprompterSession {
     /// Coordinator starter. The generation was issued synchronously by the
     /// voice lifecycle before ownership was requested.
     public func beginCapture() async throws {
+        // 语音辅助试读是单独显式动作，但它仍走同一个 coordinator starter，
+        // 所以设备 owner 只有这一个（#112 步骤 4／6）。
+        if isSpeechTrialRequested {
+            try await beginSpeechTrialCapture()
+            return
+        }
         guard client == nil,
               voiceLifecycle.state == .starting,
               let activeVersion else {
@@ -1911,10 +1953,239 @@ public final class TeleprompterSession {
         pump?.cancel()
         pump = nil
         partialText = nil
+        // 试读收尾：不写进度、不碰跟读状态、不动阅读位置，只把证据定下来。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            finishSpeechTrial()
+            return
+        }
         followController.enterManual()
         syncFollowState()
         saveProgress()
         runningVersion = nil
+    }
+
+    // MARK: - 语音辅助试读（#112）
+
+    /// 主动开始一次语音辅助试读。
+    ///
+    /// 与 `enableVoiceAssist()` 的区别是不接管跟读：不进 `.following`、不移动
+    /// 阅读位置、不起运行计时、不写进度、不建 `SessionStore` 行。它只验证
+    /// #112 点名的那条真实链路——采集、识别、定位——并把证据留下来。
+    ///
+    /// 设备租约、权限与功能切换确认全部走既有 `coordinator`，因此本机麦克风
+    /// 同一时刻仍只有一个 owner，试读结束走同一条释放路径。
+    @discardableResult
+    public func startSpeechTrial() async -> Bool {
+        guard !speechTrialStage.isActive else { return false }
+        guard client == nil, source == nil else { return false }
+        guard activeVersion != nil, phase != .draft else {
+            speechTrialStage = .failed("先准备好朗读稿，再开始语音试读。")
+            return false
+        }
+        if let occupancy = coordinator.occupancy, occupancy.kind != .teleprompter {
+            speechTrialStage = .failed("麦克风正在被\(occupancy.kind.title)使用，请先结束那个会话。")
+            return false
+        }
+
+        speechTrialEvidence = nil
+        trialRecognizedUnits = 0
+        trialMatchedUnits = 0
+        speechTrialStage = .preparing
+        isStoppingIntentionally = false
+        isSpeechTrialRequested = true
+        await coordinator.requestStart(.teleprompter)
+        return speechTrialStage.isActive
+    }
+
+    /// 结束语音辅助试读并释放设备。设备释放复用 `stopCapture()`，
+    /// 因此停止失败、权限撤销与切稿都只有一条处理路径。
+    public func stopSpeechTrial() async {
+        guard speechTrialStage.isActive || isSpeechTrialRequested else { return }
+        // 释放必须走 coordinator：它才是设备租约的持有者。直接停自己的
+        // client/source 只会关掉采集，租约仍被占着，麦克风再也开不了下一次。
+        // coordinator 会经 stopper 回调到 `stopCapture()` 完成实际收尾。
+        await coordinator.stopCapture()
+    }
+
+    /// Coordinator starter 的试读分支。`beginCapture()` 在请求带着试读标记时
+    /// 走这里，因此调用方不需要新增第二套设备 owner 接线。
+    private func beginSpeechTrialCapture() async throws {
+        guard isSpeechTrialRequested, let activeVersion else {
+            throw Blocked(reason: .noActiveVersion)
+        }
+        do {
+            try await startSpeechTrialPipeline(segments: activeVersion.segments)
+            speechTrialStage = .listening
+        } catch {
+            let reason = Self.blockReason(for: error)
+            speechTrialStage = .failed(reason.title)
+            isSpeechTrialRequested = false
+            throw Blocked(reason: reason)
+        }
+    }
+
+    /// 与 `startPipeline(generation:)` 共用同一套能力校验、client 构造与
+    /// 显式语言／术语配置——试读要验证的正是这条真实链路，用另一条构造路径
+    /// 等于什么也没验证。区别只是不接管跟读状态。
+    private func startSpeechTrialPipeline(segments: [TeleprompterSegment]) async throws {
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
+        }
+        _ = await serviceReadiness?()
+
+        let generation = UUID()
+        let configuration = realtimeConfiguration()
+        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey, configuration)
+            ?? RealtimeASRClient(
+                port: port,
+                language: configuration.language,
+                keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
+                silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
+                diarizationEnabled: false,
+                apiKey: apiKey,
+                expectedASRRevision: binding?.asrModelRevision
+            )
+        do {
+            try await client.connect()
+        } catch {
+            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+        }
+
+        let source = audioSourceFactory()
+        let stream: AsyncStream<AudioChunk>
+        do {
+            stream = try await source.start()
+        } catch {
+            await client.close()
+            throw Blocked(reason: Self.blockReason(for: error))
+        }
+
+        // 与跟读共用这两个持有者：设备被占住这件事，所有既有判据都看得见。
+        self.client = client
+        self.source = source
+        self.trialGeneration = generation
+        self.trialStartedAt = ContinuousClock().now
+        startSpeechTrialPump(stream: stream, client: client, segments: segments, generation: generation)
+    }
+
+    private func startSpeechTrialPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any TeleprompterRealtimeClientProtocol,
+        segments: [TeleprompterSegment],
+        generation: UUID
+    ) {
+        trialPump?.cancel()
+        trialPump = Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { [weak self] in
+                    for await chunk in stream {
+                        guard let self else { return }
+                        await self.uploadTrialChunk(chunk, to: client, generation: generation)
+                    }
+                }
+                group.addTask { [weak self] in
+                    let events = await client.events()
+                    for await envelope in events {
+                        guard let self else { return }
+                        await self.handleTrialEvent(
+                            envelope,
+                            segments: segments,
+                            generation: generation
+                        )
+                    }
+                }
+                await group.waitForAll()
+            }
+        }
+    }
+
+    private func uploadTrialChunk(
+        _ chunk: AudioChunk,
+        to client: any TeleprompterRealtimeClientProtocol,
+        generation: UUID
+    ) async {
+        guard isCurrentTrial(generation), !isStoppingIntentionally else { return }
+        do {
+            try await client.append(chunk.pcm)
+        } catch {
+            guard isCurrentTrial(generation) else { return }
+            speechTrialStage = .failed("语音连接中断，可以手动继续或重新开始。")
+        }
+    }
+
+    /// 只累计证据，不推进任何位置。
+    ///
+    /// 「识别」与「定位」分开计数是有意的：#112 明确不能只以输入电平证明
+    /// 识别和定位成功。听到了但对不上正文（`matchedUnits == 0`）必须能和
+    /// 什么都没听到区分开，否则界面只能说「试过了」，说不上证明了什么。
+    private func handleTrialEvent(
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        segments: [TeleprompterSegment],
+        generation: UUID
+    ) async {
+        guard isCurrentTrial(generation), !isStoppingIntentionally else { return }
+        let text: String
+        switch envelope.payload {
+        case .partial(_, let delta):
+            text = delta
+        case .partialSnapshot(_, _, let snapshot, _):
+            text = snapshot
+        case .completed(_, let transcript):
+            text = transcript
+        case .serverError(let code, let message, _):
+            if code == "backend_busy" {
+                speechTrialStage = .failed(BlockReason.serviceBusy(message).title)
+            } else {
+                speechTrialStage = .failed(message)
+            }
+            return
+        default:
+            return
+        }
+
+        let units = TeleprompterCanonicalizer.units(text)
+        guard !units.isEmpty else { return }
+        trialRecognizedUnits += units.count
+        let match = TeleprompterAligner().locate(
+            transcript: text,
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        trialMatchedUnits += match.matchedCount
+        // 证据边听边更新，界面才能显示真实链路走到哪一步，而不是只在结束后
+        // 给一个结论。
+        speechTrialEvidence = TeleprompterSpeechTrialEvidence(
+            durationSeconds: trialStartedAt.map { Self.seconds(since: $0) } ?? 0,
+            recognizedUnits: trialRecognizedUnits,
+            matchedUnits: trialMatchedUnits
+        )
+    }
+
+    private func isCurrentTrial(_ generation: UUID) -> Bool {
+        speechTrialStage.isActive && trialGeneration == generation
+    }
+
+    /// 把这次试读留下的证据定下来。只记计数，不留转写正文。
+    private func finishSpeechTrial() {
+        trialPump?.cancel()
+        trialPump = nil
+        let duration = trialStartedAt.map { Self.seconds(since: $0) } ?? 0
+        speechTrialEvidence = TeleprompterSpeechTrialEvidence(
+            durationSeconds: duration,
+            recognizedUnits: trialRecognizedUnits,
+            matchedUnits: trialMatchedUnits
+        )
+        speechTrialStage = .idle
+        isSpeechTrialRequested = false
+        trialGeneration = nil
+        trialStartedAt = nil
+    }
+
+    private static func seconds(since start: ContinuousClock.Instant) -> TimeInterval {
+        let elapsed = start.duration(to: ContinuousClock.now)
+        return Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
     }
 
     private func startPipeline(generation: UUID) async throws {

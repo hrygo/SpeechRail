@@ -498,6 +498,179 @@ struct TeleprompterSessionLifecycleTests {
                 "只登记被选中的那一段，另一段不受影响")
     }
 
+    @Test("a speech trial proves recognition and alignment without moving the script")
+    func aSpeechTrialProvesRecognitionAndAlignmentWithoutMovingTheScript() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "语音试读",
+            sourceText: "今天讲鲲鹏一体机。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segmentBefore = try #require(harness.session.activeVersion?.segments.first)
+
+        #expect(await harness.session.startSpeechTrial())
+        #expect(harness.session.speechTrialStage == .listening,
+                "采集与识别都活着才可以进入 listening")
+        let client = try #require(harness.clientFactory.clients.first)
+        await client.emit(.completed(itemID: "i1", transcript: "今天讲鲲鹏一体机"))
+
+        await waitFor {
+            (harness.session.speechTrialEvidence?.recognizedUnits ?? 0) > 0
+        }
+        let evidence = try #require(harness.session.speechTrialEvidence)
+        #expect(evidence.provesRecognition, "识别器真的返回了内容")
+        #expect(evidence.provesAlignment, "并且这些内容能在稿件里定位")
+
+        // 再送一条能定位到末段的正文：即使对齐器找到了它，试读也只记证据，
+        // 不许把阅读位置带走。
+        await client.emit(.completed(itemID: "i2", transcript: "第三段内容"))
+        await waitFor {
+            (harness.session.speechTrialEvidence?.matchedUnits ?? 0) > evidence.matchedUnits
+        }
+
+        // 试读不是跟读：阅读位置、跟读状态与运行计时都不能被它动过。
+        #expect(harness.session.currentSegmentIndex == 0)
+        #expect(harness.session.voiceAssistState == .off)
+        #expect(harness.session.phase != .following)
+        #expect(!harness.session.hasHeardSpeech,
+                "试读不把「听到了」记到跟读状态上")
+        #expect(harness.session.readingOffset == 0)
+        #expect(harness.session.activeVersion?.segments.first?.text == segmentBefore.text)
+    }
+
+    @Test("the adopt decision pins recognition and duration separately")
+    func theSpeechTrialAdoptDecisionPinsBothConditionsSeparately() {
+        let long = TeleprompterTimingPolicy.minimumTrialDurationSeconds + 10
+
+        // 时长够、也听到了内容 → 给出倍率。
+        let good = TeleprompterSpeechTrialEvidence(
+            durationSeconds: long, recognizedUnits: 12, matchedUnits: 10
+        )
+        #expect(good.calibrationFactor(baseEstimateSeconds: 100) == long / 100)
+
+        // 时长够但什么都没听到：不得产出倍率。#112 要求不能只以输入电平
+        // 证明识别成功，而一个假的倍率比没有倍率更糟。
+        #expect(
+            TeleprompterSpeechTrialEvidence(
+                durationSeconds: long, recognizedUnits: 0, matchedUnits: 0
+            ).calibrationFactor(baseEstimateSeconds: 100) == nil
+        )
+
+        // 听到了但时间太短：同样不产出倍率。
+        #expect(
+            TeleprompterSpeechTrialEvidence(
+                durationSeconds: 1, recognizedUnits: 12, matchedUnits: 10
+            ).calibrationFactor(baseEstimateSeconds: 100) == nil
+        )
+
+        // 基准估计本身不成立时也不能算。
+        #expect(good.calibrationFactor(baseEstimateSeconds: 0) == nil)
+    }
+
+    @Test("a speech trial uses the same explicit language and terms as following")
+    func aSpeechTrialUsesTheSameRecognitionConfiguration() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        harness.session.preferredSpeechLanguage = "zh"
+        harness.session.aiClient = TeleprompterAIClient { prompt in
+            let data = Data(prompt.input.utf8)
+            let context = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let units = context?["units"] as? [[String: Any]] ?? []
+            let annotations = units.map { unit -> [String: Any] in
+                let id = unit["id"] as? Int ?? 0
+                let raw = unit["text"] as? String ?? ""
+                let keyword = String(raw.prefix(3))
+                return [
+                    "start_unit": id,
+                    "end_unit": id + 1,
+                    "keywords": keyword.isEmpty ? [] : [keyword],
+                    "match_phrases": [],
+                    "pause_hint": "short",
+                ]
+            }
+            return String(decoding: try JSONSerialization.data(withJSONObject: [
+                "schema_version": "teleprompter.analysis.v2",
+                "segments": annotations,
+            ]), as: UTF8.self)
+        }
+        await harness.session.annotateActiveVersion()
+
+        let recorder = ConfigurationRecorder()
+        let clientFactory = FakeTeleprompterClientFactory()
+        harness.session.realtimeClientFactory = { _, _, configuration in
+            recorder.record(configuration)
+            return clientFactory.make()
+        }
+
+        #expect(await harness.session.startSpeechTrial())
+        let configuration = try #require(recorder.value)
+        #expect(configuration.language == "zh")
+        #expect(
+            configuration.keywords == ["第一段", "第二段", "第三段"],
+            "试读要验证的正是用户显式选择的那条链路，用另一套配置等于什么也没验证"
+        )
+        #expect(harness.coordinator.phase != .recording,
+                "试读期间不得进入录制态——那会建出记录库里的行")
+        await harness.session.stopSpeechTrial()
+    }
+
+    @Test("a speech trial that heard nothing cannot become a calibration")
+    func aSpeechTrialThatHeardNothingCannotBecomeACalibration() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "空试读",
+            sourceText: "今天讲鲲鹏一体机。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+
+        #expect(await harness.session.startSpeechTrial())
+        let client = try #require(harness.clientFactory.clients.first)
+        // 只送空白 partial：麦克风在响，但识别器没听到任何内容。
+        await client.emit(.partial(itemID: "i1", delta: ""))
+        await waitFor { harness.session.speechTrialStage == .listening }
+        await harness.session.stopSpeechTrial()
+
+        let evidence = try #require(harness.session.speechTrialEvidence)
+        #expect(evidence.recognizedUnits == 0)
+        #expect(!evidence.provesRecognition)
+        #expect(!evidence.isAdoptable, "没听到内容的试读不产生倍率")
+        #expect(harness.session.applySpeechTrialCalibration(baseEstimateSeconds: 60) == nil)
+        #expect(harness.session.calibrationSource == .uncalibrated,
+                "失败的试读不得改写倍率来源")
+        #expect(harness.session.calibrationFactor == 1.0)
+    }
+
+    @Test("a speech trial releases the device and leaves no session row")
+    func aSpeechTrialReleasesTheDeviceAndLeavesNoSessionRow() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "试读释放",
+            sourceText: "今天讲鲲鹏一体机。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+
+        #expect(await harness.session.startSpeechTrial())
+        #expect(harness.coordinator.occupancy != nil, "试读期间设备确实被占用")
+        let client = try #require(harness.clientFactory.clients.first)
+
+        await harness.session.stopSpeechTrial()
+
+        #expect(harness.session.speechTrialStage == .idle)
+        #expect(harness.coordinator.occupancy == nil, "结束后不得残留占用")
+        #expect(harness.coordinator.activeSessionID == nil,
+                "试读不建 SessionStore 行")
+        #expect(harness.sourceFactory.sources.first?.stopCount == 1)
+        #expect(await client.currentCounters().closeCount == 1)
+        #expect(harness.session.voiceAssistState == .off,
+                "试读不占用语音跟读生命周期")
+    }
+
     @Test("manual display-line positioning preserves UTF-16 offsets and takes over voice assist")
     func manualDisplayLinePositionUsesExistingTakeover() async throws {
         let harness = try TeleprompterSessionHarness()
