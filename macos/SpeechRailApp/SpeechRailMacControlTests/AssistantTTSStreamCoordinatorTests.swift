@@ -160,7 +160,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             pcm: Data([1, 2, 3, 4])
         )
 
-        coordinator.notePlaybackCompleted(samples: 2, epoch: 4)
+        coordinator.notePlaybackCompleted(samples: 2, epoch: try XCTUnwrap(recorder.epochs.first))
         XCTAssertTrue(coordinator.isDrained)
         XCTAssertTrue(recorder.outcomes.isEmpty, "只是暂时排空，不能宣布整轮结束")
 
@@ -184,7 +184,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.isAwaitingPlayback)
         XCTAssertTrue(recorder.outcomes.isEmpty)
 
-        coordinator.notePlaybackCompleted(samples: 3, epoch: 5)
+        coordinator.notePlaybackCompleted(samples: 3, epoch: try XCTUnwrap(recorder.epochs.first))
         XCTAssertEqual(recorder.outcomes.count, 1, "整轮只在音频真的播完之后收束一次")
         XCTAssertEqual(recorder.outcomes.first?.outcome, .completed)
     }
@@ -341,19 +341,21 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 30, requestID: "req-30")
         await coordinator.handleAudio(requestID: "req-30", pcm: Data([1, 2, 3, 4]))
-        XCTAssertEqual(recorder.epochs, [30], "入队时就要把这一代的身份交给播放层")
+        XCTAssertEqual(recorder.epochs.count, 1, "入队时就要把这一代的身份交给播放层")
+        let firstEpoch = try XCTUnwrap(recorder.epochs.first)
         XCTAssertEqual(coordinator.queuedSamples, 2)
 
         // 新一轮开始，而上一轮的最后一块还在路上。
         try await coordinator.begin(generation: 31, requestID: "req-31")
         await coordinator.handleAudio(requestID: "req-31", pcm: Data([1, 2, 3, 4]))
-        XCTAssertEqual(recorder.epochs, [30, 31])
+        let secondEpoch = try XCTUnwrap(recorder.epochs.last)
+        XCTAssertNotEqual(firstEpoch, secondEpoch, "每一代播放都要有自己的身份")
         XCTAssertEqual(coordinator.queuedSamples, 2)
 
-        coordinator.notePlaybackCompleted(samples: 2, epoch: 30)
+        coordinator.notePlaybackCompleted(samples: 2, epoch: firstEpoch)
         XCTAssertEqual(coordinator.queuedSamples, 2, "上一代迟到的 dataRendered 不许动新一代的账本")
 
-        coordinator.notePlaybackCompleted(samples: 2, epoch: 31)
+        coordinator.notePlaybackCompleted(samples: 2, epoch: secondEpoch)
         XCTAssertEqual(coordinator.queuedSamples, 0, "本代的 dataRendered 才归还本代的预算")
     }
 
@@ -378,5 +380,155 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         await coordinator.handleAudio(requestID: "req-40", pcm: Data([5, 6, 7, 8]))
         XCTAssertEqual(recorder.played.count, 1, "取消失败或超时都不许把旧音放回来")
+    }
+
+    // MARK: - D01：等待者必须按 (世代, 目标) 分槽
+
+    /// ACK 等待与播放预算等待同时挂起时，两个 continuation 都必须被精确唤醒。
+    /// 之前它们共用一个 `pendingWait` 槽：后注册的覆盖先注册的，
+    /// 于是"等播放预算"永远挂着，文本泵再也等不到 ACK，`finish_text` 永远发不出去。
+    func testAckWaitAndPlaybackWaitBothSurviveInterleaving() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 2
+        let (coordinator, recorder) = makeHarness(
+            configuration: configuration,
+            acknowledgeAppend: false
+        )
+        try await coordinator.begin(generation: 50, requestID: "req-50")
+
+        // 文本泵挂住等 ack(0)（sendAppend 不自动回 ACK）。
+        coordinator.offer("你好。")
+        await waitUntil({ recorder.appends.count == 1 }, message: "第一段文本没有发出去")
+
+        // 播放队列（上限 2 采样）被第一块占满。**必须放到独立 Task**：
+        // `handleAudio` 会挂起等 `.playback`，直接 await 会把测试体自己也挂住。
+        await coordinator.handleAudio(requestID: "req-50", pcm: Data([1, 2, 3, 4]))
+        var secondAudioDone = false
+        let secondAudio = Task { @MainActor in
+            await coordinator.handleAudio(requestID: "req-50", pcm: Data([5, 6, 7, 8]))
+            secondAudioDone = true
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(coordinator.queuedSamples, 2)
+        XCTAssertTrue(coordinator.isActive, "挂起等待不等于失败")
+
+        // 此刻 ACK 等待与播放预算等待同时挂着，任何一个被覆盖都会让另一个永远醒不过来。
+        var finished = false
+        let finish = Task { @MainActor in
+            await coordinator.finishInput()
+            finished = true
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(finished, "ACK 未回来之前不许 finish")
+
+        XCTAssertTrue(
+            coordinator.handleTextAccepted(
+                requestID: "req-50",
+                appendSequence: 0,
+                totalCodepoints: 3
+            ),
+            "等播放预算不能挡住 ACK 唤醒文本泵"
+        )
+        await waitUntil({ finished }, message: "ACK 到达后文本泵没有被唤醒")
+        if finished { await finish.value }
+        XCTAssertEqual(recorder.finishes, [0], "文本泵被唤醒后这一轮才能收尾")
+
+        // 播放侧随后排空，挂起的第二块也必须真的进播放层。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: try XCTUnwrap(recorder.epochs.first))
+        await waitUntil(
+            { recorder.played.count == 2 },
+            message: "播放预算归还后，等预算的音频没有被唤醒"
+        )
+        await waitUntil({ secondAudioDone }, message: "等预算的 handleAudio 没有返回")
+        secondAudio.cancel()
+    }
+
+    func testInvalidateReleasesEveryPendingWaiter() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 2
+        let (coordinator, recorder) = makeHarness(
+            configuration: configuration,
+            acknowledgeAppend: false
+        )
+        try await coordinator.begin(generation: 51, requestID: "req-51")
+
+        coordinator.offer("你好。")
+        await waitUntil({ recorder.appends.count == 1 })
+        await coordinator.handleAudio(requestID: "req-51", pcm: Data([1, 2, 3, 4]))
+        var secondAudioDone = false
+        let secondAudio = Task { @MainActor in
+            await coordinator.handleAudio(requestID: "req-51", pcm: Data([5, 6, 7, 8]))
+            secondAudioDone = true
+        }
+        try await Task.sleep(for: .milliseconds(30))
+
+        var finished = false
+        let finish = Task { @MainActor in
+            await coordinator.finishInput()
+            finished = true
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(finished)
+
+        coordinator.invalidate()
+
+        await waitUntil({ finished }, message: "invalidate 必须释放全部等待者")
+        if finished { await finish.value }
+        await waitUntil({ secondAudioDone }, message: "invalidate 必须释放播放预算的等待者")
+        secondAudio.cancel()
+        XCTAssertEqual(recorder.finishes, [], "代已经作废，不许再发 finish")
+    }
+
+    /// 重播同一轮逻辑回复时，物理播放身份必须换新：否则上一轮迟到的
+    /// `dataRendered` 会把这一轮的排队预算当成自己的还掉，提前宣布播完。
+    func testReplayOfTheSameLogicalGenerationGetsAFreshPlaybackEpoch() async throws {
+        let (coordinator, recorder) = makeHarness()
+        try await coordinator.begin(generation: 60, requestID: "req-60a")
+        await coordinator.handleAudio(requestID: "req-60a", pcm: Data([1, 2, 3, 4]))
+
+        // 同一逻辑 generation 再次开嗓（重播）。
+        try await coordinator.begin(generation: 60, requestID: "req-60b")
+        await coordinator.handleAudio(requestID: "req-60b", pcm: Data([5, 6, 7, 8]))
+
+        let epochs = recorder.epochs
+        XCTAssertEqual(epochs.count, 2)
+        XCTAssertNotEqual(
+            epochs[0],
+            epochs[1],
+            "重播必须分配新的播放 epoch，不能复用逻辑 generation"
+        )
+        XCTAssertEqual(coordinator.queuedSamples, 2)
+
+        coordinator.notePlaybackCompleted(samples: 2, epoch: epochs[0])
+        XCTAssertEqual(
+            coordinator.queuedSamples,
+            2,
+            "上一轮迟到的 dataRendered 不许动重播这一轮的账本"
+        )
+        coordinator.notePlaybackCompleted(samples: 2, epoch: epochs[1])
+        XCTAssertEqual(coordinator.queuedSamples, 0)
+    }
+
+    /// 旧一轮的 `cancel()` 跨越 await 落地时，不能把结局写进已经开起来的新一轮。
+    func testLateCancelDoesNotReportIntoTheNextTurn() async throws {
+        let (coordinator, recorder) = makeHarness()
+        let gate = Gate()
+        coordinator.stopPlayback = { await gate.enter() }
+        try await coordinator.begin(generation: 70, requestID: "req-70a")
+
+        let cancel = Task { @MainActor in await coordinator.cancel() }
+        await waitUntil({ gate.entered }, message: "取消没有进入停播屏障")
+
+        // 停播屏障还没落地时用户已经开始了新一轮。
+        try await coordinator.begin(generation: 71, requestID: "req-71b")
+        gate.release()
+        await cancel.value
+
+        XCTAssertTrue(
+            recorder.outcomes.isEmpty,
+            "旧一轮的取消完成得再晚，也不能改写新一轮的结局"
+        )
+        XCTAssertNil(coordinator.outcome)
+        XCTAssertTrue(coordinator.isActive)
     }
 }

@@ -21,6 +21,11 @@ public struct AssistantView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var typed = ""
+    /// 发送中的单飞门闩（D07）：双击只发一次。
+    @State private var isSending = false
+    /// 一次发送被拒绝的原因。**失败时草稿会留在输入框里**，
+    /// 这里再给一句用户读得懂的话，而不是把已经打出来的字吞掉。
+    @State private var sendFailure: String?
     /// 「本次会话」那一栏收起了没有。稿：收起不是少一个面板，是同一个面板的另一个状态。
     @State private var isInspectorCollapsed = false
     @FocusState private var inspectorToggleFocused: Bool
@@ -114,7 +119,8 @@ public struct AssistantView: View {
 
     // MARK: - 状态判定
 
-    private var isLive: Bool { assistant.phase.isLive }
+    /// 这一场对话还在（静音、断线都不算"未开始"）。见 `AssistantSession` 的界面投影。
+    private var isLive: Bool { assistant.hasActiveConversation }
 
     /// 受阻原因：运行时记下的优先，其次是**首屏就能知道的事实**。
     ///
@@ -125,7 +131,9 @@ public struct AssistantView: View {
     /// 受阻原因：麦克风被拒、服务没起来、被占用等真正的硬件/运行时阻断。
     /// 未配大模型时不进入硬受阻，而是作为就绪待配置状态，在首屏提供极简一键预设。
     private var blockedReason: AssistantSession.BlockReason? {
-        if isLive { return nil }
+        // 只有"正在跑"才盖住受阻结论；断线之后这一场还在，
+        // 必须让用户看见"识别中断了"和重试出口，而不是退回"未开始"。
+        if assistant.isActivelyRunning { return nil }
         if let blocked = assistant.blocked { return blocked }
         return nil
     }
@@ -1553,6 +1561,16 @@ public struct AssistantView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             SessionHairline()
+            if let sendFailure {
+                NoticeBar(
+                    tone: .warning,
+                    message: sendFailure,
+                    actionTitle: "重试",
+                    action: { send() }
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             liveChatIntegratedControls
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1911,10 +1929,10 @@ public struct AssistantView: View {
     }
 
     private var liveChatSendButton: some View {
-        Button("发送") { send() }
+        Button(isSending ? "发送中…" : "发送") { send() }
             .speechRailButton(.primary)
             .fixedSize(horizontal: true, vertical: false)
-            .disabled(!canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(isSending || !canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .keyboardShortcut(.return, modifiers: .command)
     }
 
@@ -2339,6 +2357,20 @@ public struct AssistantView: View {
     }
 
     private var controlsInputRow: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if let sendFailure {
+                NoticeBar(
+                    tone: .warning,
+                    message: sendFailure,
+                    actionTitle: "重试",
+                    action: { send() }
+                )
+            }
+            controlsInputControls
+        }
+    }
+
+    private var controlsInputControls: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             TextField(inputPlaceholder, text: $typed)
                 .textFieldStyle(.plain)
@@ -2346,9 +2378,9 @@ public struct AssistantView: View {
                 .speechRailSingleLineInput(.regular)
                 .onSubmit { send() }
                 .disabled(!canCompose)
-            Button("发送") { send() }
+            Button(isSending ? "发送中…" : "发送") { send() }
                 .speechRailButton(.primary)
-                .disabled(!canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isSending || !canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 // §8 的「对话页：结束并发送」`⌘⏎`（与配音台同义）。Enter 仍然是
                 // `onSubmit` 那条路，加上 ⌘ 之后是一条**带修饰键**的命令，
                 // 不会跟输入框里的普通按键抢键。
@@ -2639,21 +2671,28 @@ public struct AssistantView: View {
 
     private func send() {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !isSending else { return }
         if state == .ready && !preferences.isLLMConfigured(for: .assistant) {
             setShowingQuickLLM(true)
             return
         }
-        typed = ""
+        isSending = true
+        sendFailure = nil
         Task {
-            if state == .ready {
-                await start()
-                let deadline = Date().addingTimeInterval(3.0)
-                while Date() < deadline && assistant.sessionID == nil {
-                    try? await Task.sleep(for: .milliseconds(50))
+            // 纯文字对话不需要麦克风，也不需要语音服务：ready 状态下直接建一条
+            // 文字记录就发出去。以前这里是"先试着开麦，再忙等 3 秒等 sessionID"，
+            // 于是麦克风被拒或别的功能占着设备时，发送既没反应又吞掉了草稿（D07）。
+            let result = await assistant.ask(typed: text)
+            isSending = false
+            switch result {
+            case .accepted:
+                // 只在用户没有在等待期间接着输入时才清空——晚到的成功不能抹掉新输入。
+                if typed.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                    typed = ""
                 }
+            case .rejected(let reason):
+                sendFailure = reason
             }
-            await assistant.ask(typed: text)
         }
     }
 

@@ -212,7 +212,8 @@ public actor SessionStore {
             bind(statement, 11, draft.isInterrupted ? 1 : 0)
             bind(statement, 12, draft.isDeviceSwitch ? 1 : 0)
             bind(statement, 13, draft.timingQuality?.rawValue)
-            bind(statement, 14, Date().timeIntervalSince1970)
+            // 有观测时刻就用它；没有才退回"这一刻"（D09）。
+            bind(statement, 14, (draft.createdAt ?? Date()).timeIntervalSince1970)
             try step(statement)
         }
         guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(id)]) else {
@@ -360,6 +361,52 @@ public actor SessionStore {
         }
     }
 
+    /// 助手单轮回复的**幂等收尾**（D08 / 方案 S4 第 3 条）。
+    ///
+    /// 一轮回复在拿到第一段非空正文时就建好了行，之后只有这一个 `lineID`：
+    /// 正常说完、用户打断、provider 失败都走这一个入口，不会插出第二行。
+    /// 因此这里刻意只允许改**本任务自己的三列**：
+    ///
+    /// - `text`：截至此刻已经知道的全部正文（被打断时是已保存的那部分，不虚构余文）；
+    /// - `status`：一律 `final`——`partial` 是"还在写"的内部状态，不该被回看当成定稿；
+    /// - `interrupted`：**只能从 false 推向 true**。迟到的"正常完成"路径可以补全正文，
+    ///   但不能把用户已经看到的打断标记擦掉。
+    ///
+    /// `starred` / `created_at` / `ordinal` / `source` / `t_start` 一律不碰：星标是用户写的，
+    /// 建行时间就是这一句开始的时刻。
+    ///
+    /// 三重校验 `id + session_id + role='assistant'`：别的记录、用户行、根本没建过的行，
+    /// 一律抛错而不是静默成功——0 行受影响不能被上层读成"已保存"。
+    @discardableResult
+    public func finalizeAssistantLine(
+        sessionID: String,
+        lineID: String,
+        text: String,
+        interrupted: Bool
+    ) throws -> Int {
+        let sql = """
+        UPDATE line
+        SET text = ?,
+            status = 'final',
+            interrupted = CASE WHEN interrupted = 1 THEN 1 ELSE ? END
+        WHERE id = ? AND session_id = ? AND role = 'assistant';
+        """
+        try withStatement(sql) { statement in
+            bind(statement, 1, text)
+            bind(statement, 2, interrupted ? 1 : 0)
+            bind(statement, 3, lineID)
+            bind(statement, 4, sessionID)
+            try step(statement)
+            guard sqlite3_changes(handle.pointer) == 1 else {
+                throw SessionStoreError.statementFailed("这一行不属于本记录")
+            }
+        }
+        guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(lineID)]) else {
+            throw SessionStoreError.statementFailed("行写入后读不回序号")
+        }
+        return ordinal
+    }
+
     /// 上次没正常结束的那些会话：把 `recording` / `processing` 封存成 `archived`，
     /// `end_reason = 'unexpected_exit'`（§9 第 10 行、§5.6 的第四类中断）。
     ///
@@ -381,14 +428,40 @@ public actor SessionStore {
         }
         guard !ids.isEmpty else { return [] }
         let update = "UPDATE session SET state = 'archived', ended_at = ?, end_reason = ? WHERE id = ?;"
-        try withStatement(update) { statement in
-            for id in ids {
-                sqlite3_reset(statement)
-                bind(statement, 1, now.timeIntervalSince1970)
-                bind(statement, 2, SessionEndReason.unexpectedExit.rawValue)
-                bind(statement, 3, id)
-                try step(statement)
+        // 助手单轮回复是先建行、再在结束或打断时收尾的（D08）。进程在两者之间退出时，
+        // 库里会留下一行 `partial` 的助手正文——那不是"没发生"，那是用户已经看到的半句话。
+        // 所以封存会话的**同一个事务**里把这些助手行收成 final + interrupted：
+        // 正文留着、能回看，同时明确标出它没说完。
+        //
+        // 条件写死 `role = 'assistant'`：用户行、会议/字幕的说话人 partial 各有各的封存规则，
+        // 不归这条路管，也不该被顺手改掉。
+        let sealAssistantPartials = """
+        UPDATE line
+        SET status = 'final', interrupted = 1
+        WHERE session_id = ? AND role = 'assistant' AND status = 'partial';
+        """
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement(update) { statement in
+                for id in ids {
+                    sqlite3_reset(statement)
+                    bind(statement, 1, now.timeIntervalSince1970)
+                    bind(statement, 2, SessionEndReason.unexpectedExit.rawValue)
+                    bind(statement, 3, id)
+                    try step(statement)
+                }
             }
+            try withStatement(sealAssistantPartials) { statement in
+                for id in ids {
+                    sqlite3_reset(statement)
+                    bind(statement, 1, id)
+                    try step(statement)
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return ids
     }
@@ -514,6 +587,17 @@ public actor SessionStore {
                 if let id = columnText(statement, 0) { found.append(id) }
             }
             return found
+        }
+    }
+
+    /// 库里一共有多少条会话记录（含已封存的）。
+    ///
+    /// "这一场是不是唯一一场"这类断言要它：断线重连**不允许**多出一条记录，
+    /// 光看当前 `sessionID` 相同还不够——必须能证明没有第二行。
+    public func sessionCount() throws -> Int {
+        try withStatement("SELECT COUNT(*) FROM session;") { statement in
+            guard try step(statement) == SQLITE_ROW else { return 0 }
+            return Int(sqlite3_column_int64(statement, 0))
         }
     }
 

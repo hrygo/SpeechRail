@@ -393,6 +393,16 @@ public final class SessionCoordinator {
         phase = .idle
     }
 
+    /// 按**明确的 sessionID** 封存一条记录，且不碰当前占用。
+    ///
+    /// 建档是启动流程里最后一个 await：它落库之后启动可能已经被取消。
+    /// 那时不能删记录（用户的操作真的发生过），也不该把它挂到新会话上，
+    /// 所以只按它自己的 ID 收口。
+    public func sealSession(id: String, reason: SessionEndReason = .user) async {
+        guard activeSessionID != id else { return }
+        try? await store.finalizeSession(id: id, endReason: reason)
+    }
+
     private func releaseDevices() {
         // 空闲 = 真的没有设备。阶段 3/6 的真实采集释放挂在这里，先保证状态不撒谎。
         holdsDeviceLease = false
@@ -613,6 +623,23 @@ public final class SessionCoordinator {
         let ordinal = try await store.appendLine(draft, id: id)
         noteLineAppended()
         return ordinal
+    }
+
+    /// 助手单轮回复的收尾（D08）。**不推进水位**：这一行在生成开始时就建好了，
+    /// 收尾只是把同一行改成定稿，不是一次新的追加。
+    @discardableResult
+    public func finalizeAssistantLine(
+        sessionID: String,
+        lineID: String,
+        text: String,
+        interrupted: Bool
+    ) async throws -> Int {
+        try await store.finalizeAssistantLine(
+            sessionID: sessionID,
+            lineID: lineID,
+            text: text,
+            interrupted: interrupted
+        )
     }
 
     /// 分人的状态变了（协商失败 / 运行中降级）。**只动这两列**，正文与时间码不参与。
