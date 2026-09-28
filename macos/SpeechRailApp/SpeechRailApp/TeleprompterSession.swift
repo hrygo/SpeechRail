@@ -778,13 +778,16 @@ public final class TeleprompterSession {
         displayRange: TeleprompterSourceRange,
         spokenText: String
     ) -> TeleprompterAcceptedReadingRejection? {
-        guard canEdit,
-              let versionIndex = versions.firstIndex(where: { version in
+        // 三种「写不进去」的原因必须分开报。笼统回一句「正文变了」会让磁盘写
+        // 失败被说成正文问题，用户去重新打开窗口，白等一场。
+        guard canEdit else { return .notEditable }
+        guard document != nil else { return .segmentUnavailable }
+        guard let versionIndex = versions.firstIndex(where: { version in
                   version.segments.contains { $0.id == segmentID }
               }),
               let segmentIndex = versions[versionIndex].segments
                   .firstIndex(where: { $0.id == segmentID })
-        else { return .displayTextChanged }
+        else { return .segmentUnavailable }
 
         let segment = versions[versionIndex].segments[segmentIndex]
         let alias = TeleprompterAcceptedReading(
@@ -800,7 +803,6 @@ public final class TeleprompterSession {
         aliases.append(alias)
         let previous = version(at: versionIndex, withSegmentAt: segmentIndex, acceptedReadings: aliases)
         versions[versionIndex] = previous
-        guard document != nil else { return .displayTextChanged }
         let previousUpdatedAt = document?.updatedAt ?? Date()
         document?.updatedAt = Date()
         do {
@@ -815,7 +817,7 @@ public final class TeleprompterSession {
                 acceptedReadings: segment.acceptedReadings
             )
             document?.updatedAt = previousUpdatedAt
-            return .displayTextChanged
+            return .saveFailed
         }
     }
 

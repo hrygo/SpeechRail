@@ -326,6 +326,12 @@ private enum TeleprompterReadingAliasMessage: Equatable {
             "没有保存成功，请重试。"
         case let .rejection(rejection):
             switch rejection {
+            case .notEditable:
+                "现在不能改读法：舞台还开着或上一步还没收尾。关掉提词窗口后再试。"
+            case .segmentUnavailable:
+                "找不到这一段内容了，可能稿件已经切换。重新打开窗口再试。"
+            case .saveFailed:
+                "没有保存成功，稿件内容未改动。检查磁盘空间或文件夹权限后重试。"
             case .rangeOutOfBounds, .displayTextChanged:
                 "这段正文已经变了，请重新打开窗口再试。"
             case .emptySpokenText:

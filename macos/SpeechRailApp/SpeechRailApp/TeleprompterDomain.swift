@@ -421,6 +421,17 @@ public enum TeleprompterPauseHint: String, Codable, Sendable, CaseIterable {
 /// that silently re-targets a different term would move the reading position
 /// onto text the reader never said.
 public enum TeleprompterAcceptedReadingRejection: Error, Equatable, Sendable {
+    /// The session is not in a state where readings can be written at all —
+    /// the stage is open, a version is still being prepared, or a previous stop
+    /// has not finished. Distinct from "the text moved": retrying after the
+    /// session settles is what fixes this one.
+    case notEditable
+    /// No confirmed version holds a segment with this id.
+    case segmentUnavailable
+    /// The reading was rejected by the store and the change was rolled back.
+    /// The script on disk is untouched; this is a storage failure, not a
+    /// problem with the reading itself.
+    case saveFailed
     /// The recorded range no longer fits the segment (segment shortened or replaced).
     case rangeOutOfBounds
     /// The text at that range is no longer what the user confirmed — the segment

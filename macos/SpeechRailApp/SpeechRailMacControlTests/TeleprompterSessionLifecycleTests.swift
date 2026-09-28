@@ -386,6 +386,84 @@ struct TeleprompterSessionLifecycleTests {
         #expect(try #require(harness.session.activeVersion).segments.count == 3)
     }
 
+    /// #110 复审：`canEdit` 为 false 原本回的是 `.displayTextChanged`，界面把它
+    /// 说成「正文变了，请重新打开窗口」。舞台明明还开着，用户重开一次窗口也
+    /// 解决不了，只会白等一场。这条把「现在不能改」和「正文变了」分开。
+    @Test("a reading confirmed while the stage is live reports that it is not editable")
+    func confirmingAReadingWhileTheStageIsLiveIsNotEditable() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "舞台开着",
+            sourceText: "SpeechRail 很快。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+        let found = (segment.text as NSString).range(of: "SpeechRail")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.canEdit == false, "语音开着时这段本就不该可改")
+
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayRange: range,
+            spokenText: "斯比尔雷尔"
+        ) == .notEditable)
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
+    }
+
+    /// #110 复审：存盘失败原本也回 `.displayTextChanged`。磁盘写不进去被说成正文
+    /// 问题，方向完全错。而且内存里必须先回滚——否则界面会显示一条 store 下次
+    /// 拒绝加载的读法，用户以为标好了，下次打开又没了。
+    @Test("a store failure is reported as a save failure and rolls the reading back")
+    func aStoreFailureIsReportedAsASaveFailureAndRolledBack() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "存盘失败",
+            sourceText: "SpeechRail 很快。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+        let found = (segment.text as NSString).range(of: "SpeechRail")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let before = try Data(contentsOf: url)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayRange: range,
+            spokenText: "斯比尔雷尔"
+        ) == .saveFailed)
+        // 内存必须回到写入前，读法不能留在界面上。
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
+        // 磁盘字节逐字节不变。
+        #expect(try Data(contentsOf: url) == before, "存盘失败后原始字节必须逐字节不变")
+    }
+
     @Test("a reading can be confirmed by typing the term instead of picking a range")
     func aReadingCanBeConfirmedByTypingTheTerm() throws {
         let harness = try TeleprompterSessionHarness()
