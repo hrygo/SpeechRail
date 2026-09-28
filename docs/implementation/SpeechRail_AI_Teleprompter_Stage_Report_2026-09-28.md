@@ -17,7 +17,7 @@
 | #107 | 三位置分离 | 完成 | `committedPosition` / `hypothesisPosition` / `viewportAnchor` |
 | #109 | 语义风险审阅 | 完成 | 主体—数值、条件、否定、比较、确定程度五类风险进入生产审阅 |
 | #110 | 同版本句内进度与安全恢复 | 完成 | `currentSegmentOffset`、纯函数恢复器、锁定文本偏移丢弃 |
-| #111 | 独立有损精简 | 完成 | `condense` 操作、锁定项、删除转 `skip` 与 `contentRemoved` 审阅、语速校准来源与未校准标注 |
+| #111 | 独立有损精简 | **部分完成（产品内无入口）** | `condense` 操作、锁定项、删除转 `skip` 与 `contentRemoved` 审阅、语速校准来源与未校准标注；会话层与流水线层已交付并有回归，但 **App 内无任何触发入口，必讲标记无生产者**（见 §2 第 15 条） |
 | #112 | language／keywords 接线 | 完成 | Realtime `transcription.language`／`keywords` 真正下发 |
 | #113 | 场景预设、列宽与快捷恢复 | 完成（视觉走查未执行） | `TeleprompterStagePreset`、正文列宽与窗口宽度分离、`TeleprompterStageLayoutPolicy`、“回到朗读位置” |
 | #114 | 确定性回放与阶段证据 | 部分完成 | 回放评估器与 runner 已交付；真实时延基线未执行 |
@@ -46,6 +46,14 @@
     - **本轮先被这个现象误导过一次，值得原样留下**：把一份「读者确实在朗读」的素材标成 `improvise` 后，报告如实报出 1 次严重误推进。追踪控制器才发现行为是**正确的**——从锚点开始、逐字连续的 final 按方案 §8.9「continuous advance → advance committedPosition to evidence-supported end」本就该跟到文末。#105 的具名回归针对的是**位于脚本别处**的远距短语（`distantUniquePhraseCannotAdvanceThroughPartialOrFinal` 用的是第 100 个单位处的「稳定性」），那一条行为正确。两次教训合起来：**用回放指标下结论前必须先确认标注语义与素材一致**；指标可信度上限由标注决定，仪器必须自己说明这一点。
 
 14. **「写入失败不丢数据」此前没有任何回归覆盖（第三轮审查验收标准 3 时发现）**：#110 的验收写的是「旧稿／损坏文件／写入失败不丢数据」，但已有回归 `sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched` 只覆盖**写入之前**的校验失败——不可变源版本不匹配时根本走不到写文件。真正的提交路径既无接缝也无覆盖：`atomicWrite` 是 fileprivate，测试无法直接调用；`FileManager.replaceItemAt` 在 Swift 里不可覆写，注入失败同样走不通。**这是测试缺口而非缺陷**：`atomicWrite` 先写临时文件再 `replaceItemAt`，catch 只删临时文件、不碰目标文件。已用只读目录构造同一类失败（磁盘满／权限拒绝正是该验收项指的场景）补上回归，断言抛出 `atomicWriteFailed`、原始字节逐字节不变、原稿仍可读、不残留 `.tmp`；root 绕过目录权限，测试显式跳过而不是假装通过。通用教训：**验收项里点名的失败模式，必须有一条真正走到该路径的回归**；只覆盖前置校验会让「已覆盖」变成一种自我安慰。
+
+15. **「独立有损精简」在产品内没有任何入口（第四轮审查验收标准 1 时发现）**：验收标准 1 要求「有损精简须**单独授权**并展示删减，原稿和已确认版本不被覆盖」。逐条核对三个环节：
+    - **单独授权——用户无法发起**：`condenseDraft(mustKeepSourceRanges:)` 在全仓范围内**只有一个调用点**，位于 `TeleprompterSessionLifecycleTests.swift:509`。`TeleprompterView.swift` 里与加工相关的入口只有 `analyzeDraft()`（自然朗读）和 `tightenReadingBlocks()`（让表达更简洁）；`TeleprompterReviewCopy` 连一条精简文案都没有。方案 §4 期望的三个加工选项「保持原文／自然朗读／按时长精简」中，第三个不存在。
+    - **标记必讲／可删——无生产者**：`mustKeepSourceRanges` 参数在全仓没有任何调用方传入，`condenseLockedRanges` 因此恒为空，`lockedUnitIDs` 恒为空集。方案 §5.7 定义的「标记必讲／可删内容」这一步在产品中不存在，`condenseRefusesToDeleteLockedContent` 只有测试能到达。
+    - **展示删减——审阅项永不出现**：`contentRemoved` 审阅项的唯一来源是 `applyPreparationResult` 中 `block.disposition == .skip` 的分支，而 `finalize` 只在 `input.operation == .condense` 时才把空文本转成 `.skip`。既然 `.condense` 不可达，`.skip`、`contentRemoved` 审阅项与由其触发的复核态在真实 App 中**一次都不会出现**。
+    - **未被覆盖的部分是成立的**：`acceptPendingVersion` 走 `versions.append`，`sourceText` 不被改写，原稿与已确认版本确实不会被覆盖。
+    - **性质**：这不是计算错误，而是**交付缺口被记成了完成**。会话层与流水线层的实现正确且有回归（`condenseReportsOmittedContentAsSkippedAndReviewable`、`condenseRefusesToDeleteLockedContent`），但单测通过并不等于用户能用到。这与第 13 条同属一类——**当验收项依赖一个从未被触发的路径时，测试可以全绿而验收从未真正成立**。方案 §12.7 的回退条款写「停用新的精简入口不影响已确认版本阅读」，本身已经把「入口」当作本包应当存在的产物。
+    - **本轮未补 UI**：补齐需要新增入口、「标记必讲」交互与删除清单展示三处产品设计决定，超出审查范围，交由承接团队按方案 §5.7 实现。此处只把「已完成」的表述纠正为「部分完成」。
 
 ## 3. 验证证据
 
@@ -201,8 +209,8 @@
 | #110 | cue／skip 不进入已读覆盖率、语速估计或语音定位 | 满足 | 删减转 `skip` 且保留原文：`condenseReportsOmittedContentAsSkippedAndReviewable` |
 | #110 | 同版本可恢复句内位置；不同 revision 不复用旧偏移；旧稿／损坏／写入失败不丢数据 | 满足 | `readingProgressRestoresTheExactOffsetInsideTheSameVersion`、`readingProgressFallsBackToSegmentStartWhenTheTextChanged`、`runSummaryWrittenBeforeIntraSegmentProgressStillLoads`、`sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched`（只覆盖写入**之前**的校验失败）、`aFailedWriteLeavesThePreviousDocumentIntact`（第三轮补：提交路径此前无接缝无覆盖，见 §2 第 14 条） |
 | #110 | M-01～M-05、P-05／P-09／P-11／P-12 使用生产 Store／mapper | 满足 | 台账 M-01～M-05 全通过 |
-| #111 | 保真操作不因目标时长删信息；有损操作单独动作且删减可见 | 满足 | `fidelityOperationsStillRejectOmissionsAsUnresolved`、`condenseReportsOmittedContentAsSkippedAndReviewable` |
-| #111 | 锁定内容有效；无法达标时诚实报告 | 满足 | 删除锁定单元整轮失败关闭（Task 8 记录）；时长估计来源见 §2 第 10 条 |
+| #111 | 保真操作不因目标时长删信息；有损操作单独动作且删减可见 | **部分满足（机制成立，产品内无入口）** | `fidelityOperationsStillRejectOmissionsAsUnresolved`、`condenseReportsOmittedContentAsSkippedAndReviewable` 均通过，但 `condenseDraft` 全仓唯一调用点是单测，`contentRemoved` 审阅项在真实 App 中不会出现（§2 第 15 条） |
+| #111 | 锁定内容有效；无法达标时诚实报告 | **部分满足（锁定无生产者）** | 删除锁定单元整轮失败关闭（Task 8 记录）有回归且逻辑正确，但 `mustKeepSourceRanges` 无任何调用方，`lockedUnitIDs` 恒空；时长估计来源见 §2 第 10 条 |
 | #111 | 试读校准复用既有类型与入口；证据来源清晰 | 满足（部分） | 新增 `TeleprompterCalibrationSource`；**语音辅助试读不存在**，只有手动秒表 |
 | #111 | 采用／放弃／编辑／取消均不覆盖原稿 | 满足 | `rollingBackToAnEarlierVersionKeepsEveryScript`、`editingSourceInvalidatesReviewState` |
 | #111 | P-01／P-13～P-18 及候选版本隔离通过生产 seam | 满足 | 台账对应项全通过 |
@@ -225,11 +233,11 @@
 | #114 | 真实素材、音频、完整转写、hash、私有路径不进仓库 | 满足 | `reportCarriesOnlyAggregatesAndNoScriptText`、`observationsCorrelateCallAndRedactedFailure` |
 | #114 | 集成报告区分代码／局部探针／生产 seam／真实声音／桌面观感 | 满足 | 本报告 §3.1／§3.2 分层列出，§3.2 明确未执行项 |
 
-**对照小结**：11 个 Issue 正文共 **61** 条验收项（104:5、105:6、106:6、107:5、108:6、109:5、110:5、111:5、112:6、113:5、114:7），逐条已落表。**满足 53、边界 6、未量化 1、部分满足 1。**
+**对照小结**：11 个 Issue 正文共 **61** 条验收项（104:5、105:6、106:6、107:5、108:6、109:5、110:5、111:5、112:6、113:5、114:7），逐条已落表。**满足 51、边界 6、未量化 1、部分满足 3。**
 
 - 6 条边界：#105 真实语速下「滞后／停滞／人工纠正」三者对比、#106 worker 是否真实产出稳定前缀、#107 与 #113 的实际滚动观感（U-10 未执行）、#110 术语别名通道（按方案要求保持关闭）、#112 主动语音试读（当前不存在）。每条都在「边界」列写明了缺什么。
 - 1 条未量化：#104 要求「报告误报情况」。只逐例证明了无害改写不被阻塞（P-01），**没有汇总误报率**，不得据此推断低误报。
-- 1 条部分满足：#111 要求试读校准的「手动计时、语音辅助试读」证据来源都清晰。手动计时已实现并带来源（§2 第 10 条），**语音辅助试读不存在**，未为对齐措辞虚构。
+- 3 条部分满足，均属 #111：① 试读校准要求「手动计时、语音辅助试读」证据来源都清晰——手动计时已实现并带来源（§2 第 10 条），**语音辅助试读不存在**，未为对齐措辞虚构；② 「有损操作单独动作且删减可见」——机制正确且有回归，但产品内无入口，删减在真实 App 中不可见；③ 「锁定内容有效」——锁定逻辑正确，但无生产者，锁定集合恒空。后两条见 §2 第 15 条。
 
 **比单条验收项更重要的一个结论**：[`提词器稿件准备设计规格`](../../superpowers/specs/2026-09-20-teleprompter-reading-preparation-design.md) 第「质量门禁」表要求报告一整组真实质量指标——**必要问题检出率、误报率、每千字待处理数量**、首轮 schema／覆盖通过率（≥98%）、严重事实变更在 holdout 重复运行中的观察数、需要改写的普通稿实际完成率（≥90%）、可直接朗读评分（人工 1–5 分中 ≥4 的占比 ≥90%）、用户编辑负担、preparation 各段 p50／p95 与 token／重试率。**这九项目前一项都没有测量**，因为它们全部需要真实 LLM 运行与真人评分。本轮只证明了确定性机制（门禁会不会触发、审阅项是否可定位、跟随是否有推进权），没有证明任何真实质量数字。该规格自己也写明「当前样本规模只能给初步证据……不外推『绝对保真』」。接手团队若要给出任何质量结论，必须先取得真实 LLM／音频授权并按该表逐项产出。
 
@@ -255,7 +263,7 @@
 | #104 | 4／5 | 「报告误报情况」只有逐例断言，**没有汇总误报率**；需真实稿件样本与真实 LLM 运行 |
 | #105 | 5／6 | 「同时报告正常跟随滞后、错误停滞和人工纠正」目前只有确定性回放口径，**真实语速下的三者对比**仍缺 |
 | #110 | 4／5 | 别名通道是 Issue 标题范围内的能力，`match_phrases` 仍被解码器拒绝；按方案要求须随审阅 UI 交付，不单独放开模型注入 |
-| #111 | 4／5 | 试读校准的**语音辅助试读不存在**，只有手动秒表；该项要求两类证据来源都清晰 |
+| #111 | 3／5 | 试读校准的**语音辅助试读不存在**，只有手动秒表；**验收 1「单独授权并展示删减」在产品内不成立**——`condenseDraft` 无生产调用点、`mustKeepSourceRanges` 无生产者（见 §2 第 15 条）。原稿与已确认版本不被覆盖这半个要求成立 |
 | #112 | 4／6 | **主动语音试读本身不存在**，无从显示真实链路状态；相关两项随之待办 |
 
 **2026-09-29 追加：5 项保留项已按用户指示全部关闭**
@@ -270,8 +278,9 @@
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。
 3. **两项“部分”场景**：R-04 需要真实拔插／蓝牙重连，R-07 需要长时连续运行；两者都无法用 fake 证明，不接受用单测冒充。
 4. **#110 术语别名通道**：`match_phrases` 仍被解码器拒绝。按方案要求别名必须由用户确认并绑定来源范围，该能力依赖审阅界面，应与下一轮审阅 UI 一起交付，不要单独放开模型注入。
-5. **Xcode 单测挂死已解决，但成因是测试辅助件而非 App**：见 §2 第 9 条。`TestGate` 现为一次性开启，并附具名回归；`scripts/macos_app_build.sh --configuration Debug --test-unit` 现以 `** TEST SUCCEEDED **`、`test-unit: passed`、exit 0 结束。留在台账里是因为它给出一条通用教训：**挂死先二分到具体用例再下机制结论**，否则很容易把测试缺陷误判成 App 生命周期问题并据此改动生产语义。
-6. **pbxproj 注册必须有 Xcode 侧证据**：本轮已证明 `plutil -lint` 与 SwiftPM 都不足以发现“文件挂错组”这类错误；后续任何新增源码都至少要跑一次包装脚本的 Debug 编译，测试文件还要跑一次 `--test-unit` 构建阶段。
+5. **有损精简缺产品入口（#111，见 §2 第 15 条）**：需要按方案 §5.7 补齐「选择目标时长 → 标记必讲／可删内容 → 生成删减候选 → 展示删除清单和保留重点 → 用户确认」这条完整流程。会话层与流水线层已就绪，缺的是触发入口、必讲标记交互与删除清单呈现。**在此之前 `contentRemoved` 审阅项不会在真实 App 中出现**，「删除必须展示」只是机制成立而用户看不到。建议与上一条的审阅 UI 合并为同一轮交付。
+6. **Xcode 单测挂死已解决，但成因是测试辅助件而非 App**：见 §2 第 9 条。`TestGate` 现为一次性开启，并附具名回归；`scripts/macos_app_build.sh --configuration Debug --test-unit` 现以 `** TEST SUCCEEDED **`、`test-unit: passed`、exit 0 结束。留在台账里是因为它给出一条通用教训：**挂死先二分到具体用例再下机制结论**，否则很容易把测试缺陷误判成 App 生命周期问题并据此改动生产语义。
+7. **pbxproj 注册必须有 Xcode 侧证据**：本轮已证明 `plutil -lint` 与 SwiftPM 都不足以发现“文件挂错组”这类错误；后续任何新增源码都至少要跑一次包装脚本的 Debug 编译，测试文件还要跑一次 `--test-unit` 构建阶段。
 
 ## 6. 回退
 
