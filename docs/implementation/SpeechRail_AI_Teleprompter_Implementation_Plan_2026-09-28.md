@@ -2,11 +2,11 @@
 
 > 文档版本：1.5  
 > 编制日期：2026-09-28  
-> 本次修订：文首状态段与 §12.1「待同步事项」按实际结果更新——6 项 Issue 已关闭、5 项保留 OPEN 并留有复审评论；正文规格未变。  
+> 本次修订：文首状态段与 §12.1「Issue 同步状态」按实际结果更新（2026-09-29）——6 项 Issue 已关闭、5 项保留 OPEN 并留有复审评论；正文规格未变。  
 > 适用仓库：`hrygo/SpeechRail`  
 > 原分析基线：`186e5430058dc31bf888d7000654cd2e44a53b44`  
 > 本轮源码复核：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；Issue 基线：`074b6fd59f480e71dd342a829de2eb39823e92e4`  
-> 复核日期：2026-09-28（Asia/Shanghai；19:47 开始，源码静态审阅与 GitHub 只读查询）  
+> 复核日期：2026-09-28（Asia/Shanghai；19:47 开始，源码静态审阅与 GitHub 只读查询）；状态段与 Issue 处置结果更新于 2026-09-29  
 > 文档状态：**规格文档**。实施已在分支 `codex/teleprompter-implementation`（工作树 `.worktrees/teleprompter-implementation`，基线 `7468efb8…`）进行到「部分交付」，改动已分 6 个提交落在该分支、**尚未 push**；实际状态以该分支上的 `docs/implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md`（阶段实施报告）为准，本文不记录实施结果。  
 > 覆盖范围：产品与交互、提词稿加工、智能语音跟随、数据与协议、测试验收、任务拆分、迁移与回退。
 

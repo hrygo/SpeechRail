@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.5.1"
-date: 2026-09-28
+version: "0.5.2"
+date: 2026-09-29
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -50,6 +50,17 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 | `TeleprompterReplayEvaluator.swift` / `TeleprompterReplayTool` | 确定性回放评估器与 CLI：用生产跟随路径重放带版本记录的语料，只输出脱敏聚合 |
 
 `SessionCoordinator` 只负责设备占用。提词器调用 `sessionDidStartRecording(id: nil)`，因此可参与共享麦克风占用而不写入会话记录库；停止时由 coordinator 释放占用，提词器自己的 `TeleprompterRunState` 只保存稿件进度。
+
+## 回放素材怎么写
+
+`teleprompter-replay` 的素材 manifest 写在仓库外，由人标注。两个约定不写对不会报错，只会让报告全零，因此值得单独说明：
+
+- `labels[].expected_segment_index` 标的是**读者当时已经读到的段落**，不是系统确认到的段落。跟随延迟是「读者进入某段」到「系统追上这一段」之间的差值；把标签挂到系统已经追上的那个事件上，延迟会恒为 0，看上去「没有延迟」，实际是**没有样本**。
+- 第 0 段是回放起点，系统一开始就在 0，因此第 0 段不产生延迟样本。验证跟随延迟至少要有一个非 0 段。
+
+`labels[].intent` 只接受 `read`／`improvise`／`reRead`／`manualJump`（区分大小写）。取值列表由 `TeleprompterReplayManifest.Intent.manifestValues` 单独声明，CLI 的帮助文本和报错信息都从它读，改动时三者不会漂移。
+
+素材写错时 CLI 以退出码 2 拒绝，并指出具体字段与合法取值；不会产出可被误当作质量成绩的部分结果。跑之前先确认 `status` 不是 `not_run`。
 
 ## AI 结果契约
 
@@ -153,3 +164,5 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-28：按 [`AI 提词器优化方案`](../../implementation/SpeechRail_AI_Teleprompter_Implementation_Plan_2026-09-28.md) 完成 #113 场景预设、正文列宽与「回到朗读位置」，并把 69 项场景台账中 13 项「未覆盖／部分」全部用具名回归收敛（详见 [`阶段实施报告`](../../implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md)）。同轮修复五个既有缺陷：保真门禁两侧提取口径不一致、改稿后旧候选块与审阅条目残留、输入设备失败被归因为 ASR 服务、回放报告把运行绝对时刻当成跟随延迟、错误停顿在进入阅读瞬间即被计数；另由 Xcode 构建查出新测试文件被挂进 App 源码组（`plutil -lint` 与 SwiftPM 都发现不了），以及测试闸门 `TestGate` 不记开启状态、导致 Xcode 单元测试在全量并行时挂死（首轮曾误判为 App 测试宿主不退出，实际单测 target 无 `TEST_HOST`、App 从未启动，见阶段报告 §2 第 9 条）。`swift test --package-path macos/SpeechRailApp` 201 项 / 16 套件通过；`pytest tests/test_resource_governor.py tests/test_teleprompter_latency_probe.py` 36 项通过；`swift build --product teleprompter-replay` 成功；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED（本轮文件 0 warning）；`scripts/macos_app_build.sh --configuration Debug --test-unit` TEST SUCCEEDED（XCTest 344 项、Swift Testing 201 项 / 16 套件，0 failures，exit 0）；`git diff --check` 通过。台账为通过 66、部分 2（R-04 真实拔插、R-07 长时运行）、未覆盖 0、未执行 1（U-10 真实窗口）。仍未执行且不得据此宣称通过：UI 视觉走查与 UI 自动化、真实音频时延基线、真人表达验收、§11.7 的全部质量门槛。
 
 2026-09-28（第二轮）：按 Issue 正文逐条复核实现（此前只核对了标题与状态），发现 #111 步骤 5「未经有效试读使用默认估计并标明不确定性」与验收「试读校准复用既有类型与入口；手动计时、语音辅助试读的证据来源清晰」未实现，已补齐：新增 `TeleprompterCalibrationSource` 与 `EstimateResult.isCalibrated`，试读采用写入 `.manualTrial(durationSeconds:)`、「恢复默认语速」写回 `.uncalibrated`，未试读时预计用时标注「（未试读校准）」且校准入口常驻。`swift test --package-path macos/SpeechRailApp` 204 项 / 16 套件通过；`scripts/macos_app_build.sh --configuration Debug --test-unit` TEST SUCCEEDED（XCTest 344 项、Swift Testing 204 项 / 16 套件，0 failures，exit 0）。语音辅助试读目前不存在，未为对齐措辞虚构路径。
+
+2026-09-29（第三轮）：端到端跑 `teleprompter-replay` 时发现素材 intent 契约与工具帮助文本不一致——`--help` 写 `re_read`／`manual_jump`，解码器只接受 `reRead`／`manualJump`，且失败信息是 Foundation 的通用句子，不指字段也不给合法取值。此前所有测试都用 Swift 构造枚举，没有字符串往返，所以没暴露。已让 `Intent` 显式钉住 raw value，并由 `manifestValues` 统一供给帮助文本与报错；解码失败改为指出字段与可接受取值；补两条回归钉住拼写。另新增「回放素材怎么写」一节：`expected_segment_index` 标的是读者已读到的段落而非系统确认到的段落，挂到系统已追上的事件会让延迟恒为 0 且不报错，第 0 段不产生延迟样本。CLI 与单测同形核对复现了单测断言的 400／1100 ms，确认 runner 驱动的是生产跟随路径。`swift test --package-path macos/SpeechRailApp` 206 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 206 项 / 16 套件，0 failures，exit 0）。
