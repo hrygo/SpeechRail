@@ -426,7 +426,8 @@ public enum TeleprompterReplayEvaluator {
             caveats: caveats(
                 for: metrics,
                 sampleCount: manifest.events.count,
-                durationMilliseconds: manifest.events.last?.atMilliseconds ?? 0
+                durationMilliseconds: manifest.events.last?.atMilliseconds ?? 0,
+                labels: manifest.labels
             ),
             status: "deterministic_replay"
         )
@@ -463,9 +464,20 @@ public enum TeleprompterReplayEvaluator {
     private static func caveats(
         for metrics: Metrics,
         sampleCount: Int,
-        durationMilliseconds: Int
+        durationMilliseconds: Int,
+        labels: [TeleprompterReplayManifest.Label]
     ) -> [String] {
         var caveats: [String] = []
+        // Every safety number below is derived from human labels, so a zero has
+        // two very different meanings: "the system did not do this" or "the
+        // material never asked". Publishing the second as the first is how a
+        // frozen follow path gets reported as a clean run.
+        if !labels.contains(where: { $0.intent == .improvise }) {
+            caveats.append("本次素材没有 improvise 标注：严重误推进只在该标注下计数，因此 0 表示该检测项未被触发，不表示跟随不会越权推进。")
+        }
+        if !labels.contains(where: { $0.intent == .read && $0.expectedSegmentIndex != nil }) {
+            caveats.append("本次素材没有带 expected_segment_index 的 read 标注：跟随与恢复延迟没有样本，分位为 null 只说明未测量，不表示延迟为零。")
+        }
         if metrics.failureShareExceedsThreshold {
             caveats.append(
                 "失败样本占比 \(formatPercent(metrics.failureShare))（\(metrics.failedSampleCount)/\(sampleCount)）超过 5%；延迟分位只覆盖成功子集，不能单独引用。"

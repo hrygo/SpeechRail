@@ -197,6 +197,49 @@ struct TeleprompterReplayEvaluatorTests {
         }
     }
 
+    /// `harmfulJumpCount` only increments under an `improvise` label, and the
+    /// latency percentiles only exist when a `read` label carries an expected
+    /// position. A material that exercises neither therefore reports a clean
+    /// run no matter how the follow path behaved. Saying so is the difference
+    /// between "measured" and "not asked".
+    @Test func reportSaysWhenASafetyDetectorWasNeverExercised() throws {
+        let unexercised = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 500)],
+                labels: [.init(eventIndex: 0, intent: .read)]
+            )
+        )
+        #expect(
+            unexercised.caveats.contains { $0.contains("没有 improvise 标注") },
+            "缺少 improvise 标注时必须说明误推进计数未被触发"
+        )
+        #expect(
+            unexercised.caveats.contains { $0.contains("没有带 expected_segment_index") },
+            "缺少定位标注时必须说明延迟分位只是未测量"
+        )
+        #expect(
+            unexercised.metrics.harmfulJumpCount == 0,
+            "计数本身仍然是 0，caveat 负责说明它没有被触发"
+        )
+    }
+
+    @Test func reportStaysQuietWhenBothDetectorsAreExercised() throws {
+        let exercised = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 1_500, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise)
+                ]
+            )
+        )
+        #expect(!exercised.caveats.contains { $0.contains("没有 improvise 标注") })
+        #expect(!exercised.caveats.contains { $0.contains("没有带 expected_segment_index") })
+    }
+
     @Test func reportCarriesOnlyAggregatesAndNoScriptText() throws {
         let report = try TeleprompterReplayEvaluator.evaluate(
             manifest(
