@@ -32,12 +32,26 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     workflow_call = triggers["workflow_call"]
     assert isinstance(workflow_call, dict)
     assert workflow_call["inputs"]["package-runner"]["default"] == "macos-26"
+    # The gate switches must default to "auto": `inputs` is null for
+    # push/pull_request, so an empty value would be read as an explicit
+    # override and silently skip every gate.
+    assert workflow_call["inputs"]["run-python"]["default"] == "auto"
+    assert workflow_call["inputs"]["run-swift"]["default"] == "auto"
 
     jobs = _jobs(workflow)
     assert jobs["test"]["runs-on"] == "${{ matrix.os }}"
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["macos-26"]
     assert jobs["macos-app"]["runs-on"] == "macos-26"
-    assert jobs["package"]["needs"] == ["quality", "test"]
+    # The heavy gates hang off change-scope; `package` follows `test` so a
+    # skipped Python gate skips the wheel rather than publishing an untested one.
+    assert jobs["test"]["needs"] == ["change-scope"]
+    assert jobs["macos-app"]["needs"] == ["change-scope"]
+    assert jobs["test"]["if"] == "${{ needs.change-scope.outputs.run_python == 'true' }}"
+    assert (
+        jobs["macos-app"]["if"]
+        == "${{ needs.change-scope.outputs.run_swift == 'true' }}"
+    )
+    assert jobs["package"]["needs"] == ["change-scope", "quality", "test"]
     assert "speechrail-*.whl" in ci_text
     assert "speechrail-wheel-candidate" in ci_text
     assert "tests/test_diarization_extensions.py" in ci_text
@@ -105,7 +119,9 @@ def test_release_blocks_publish_until_tag_ci_and_unsigned_dmg_are_verified() -> 
 
     jobs = _jobs(workflow)
     assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
-    assert jobs["ci"]["with"] == {"package-runner": "macos-26"}
+    # build-app already compiles the App from the tagged commit, so the release
+    # must not repeat the Swift gate on a second runner.
+    assert jobs["ci"]["with"] == {"package-runner": "macos-26", "run-swift": "false"}
     assert jobs["publish"]["needs"] == ["verify-tag", "ci", "build-app"]
     assert jobs["publish"]["permissions"] == {"contents": "write"}
     assert jobs["build-app"]["runs-on"] == "macos-26"
