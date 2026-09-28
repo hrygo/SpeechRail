@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+
+# Opt-out for the native worker build, used by CI to keep an editable install
+# cheap. The worker is a release artifact input, not a test input: nothing in
+# the test suite consumes the binary this hook produces, so a test-only sync
+# does not have to pay for it. Default stays "build", and any wheel published
+# by CI is still asserted to carry the worker before release.
+NATIVE_BUILD_SKIP_ENV = "SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD"
 
 
 class CustomBuildHook(BuildHookInterface):
@@ -18,9 +26,11 @@ class CustomBuildHook(BuildHookInterface):
         if self.target_name != "wheel":
             return
         _include_engine_wheel(self, build_data)
-        if sys.platform != "darwin":
+        if sys.platform != "darwin" or _native_build_skipped():
             # The application is macOS-only; Linux CI can build and test the
             # Python package without attempting to compile its CoreML worker.
+            # The opt-out covers macOS, where the worker is otherwise compiled
+            # on every sync even when the caller only needs the Python package.
             return
         root = Path(self.root)
         package_dir = Path(self.directory) / "speechrail-native"
@@ -46,6 +56,17 @@ class CustomBuildHook(BuildHookInterface):
         assert isinstance(force_include, dict)
         force_include[str(destination)] = "speechrail/_native/SpeechRailDiarizationWorker"
         build_data["infer_tag"] = True
+
+
+def _native_build_skipped() -> bool:
+    """Return whether the caller opted out of compiling the native worker."""
+
+    return os.environ.get(NATIVE_BUILD_SKIP_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
 
 def _include_engine_wheel(hook: object, build_data: dict[str, object]) -> None:
     """Ship the controlled engine wheel and its provenance, not overlay sources.

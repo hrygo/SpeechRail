@@ -258,15 +258,53 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install locked project dependencies
+        env:
+          # The native CoreML worker is a release artifact input, not a test
+          # input: nothing in the suite reads the binary this build hook
+          # produces, and the wheel built below compiles it for real. Paying
+          # ~3m of Swift here duplicated that work on the critical path. The
+          # published wheel is still asserted to carry the worker in `package`.
+          SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD: "1"
         run: uv sync --locked --extra dev --extra mcp
 
-      - name: Build wheel package
+      # The wheel build is this job's long pole (~3m of Swift release
+      # compilation) and the suite reads nothing it produces, so build it in
+      # the background and run the suite against the same checkout meanwhile.
+      # Start, await and check happen in ONE step on purpose: each `run:` is a
+      # fresh shell, so a PID recorded by an earlier step is not a child of the
+      # shell that would `wait` on it.
+      #
+      # `--no-sync` is load-bearing. A bare `uv run` re-syncs the project, which
+      # re-enters the build hook WITHOUT the opt-out and pays the full compile
+      # again on the foreground path, silently restoring the serial cost.
+      - name: Build wheel and run test suite
         run: |
-          uv build --no-sources --wheel
+          # No `set -e`: both the build and the suite must be awaited so a
+          # failure in either is reported, and the wheel log is always shown.
+          set -uo pipefail
+
+          mkdir -p dist
+          uv build --no-sources --wheel >"$RUNNER_TEMP/wheel-build.log" 2>&1 &
+          build_pid=$!
+
+          echo "--- pytest ---"
+          uv run --no-sync pytest --cov=src
+          pytest_status=$?
+
+          if wait "$build_pid"; then build_status=0; else build_status=$?; fi
+
+          echo "--- uv build ---"
+          cat "$RUNNER_TEMP/wheel-build.log"
+          if [[ "$build_status" -ne 0 ]]; then
+            echo "::error::wheel 构建失败，退出码 $build_status"
+            exit 1
+          fi
+
           shopt -s nullglob
           wheels=(dist/speechrail-*.whl)
           test "${#wheels[@]}" -eq 1
           echo "SPEECHRAIL_WHEEL_PATH=${wheels[0]}" >> "$GITHUB_ENV"
+          exit "$pytest_status"
 
       - name: Verify the wheel installs itself without a checkout (macOS)
         if: runner.os == 'macOS'
@@ -278,9 +316,6 @@ jobs:
           test "${#wheels[@]}" -eq 1
           uvx --python 3.14.7 --from "${wheels[0]}" speechrail install --help \
             | grep -F 'usage: speechrail install'
-
-      - name: Run test suite with coverage gate (Pytest)
-        run: uv run pytest --cov=src
 
       - name: Upload tested wheel artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

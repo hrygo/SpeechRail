@@ -109,6 +109,52 @@ def test_ci_reuses_the_tested_wheel_artifact_in_the_package_job() -> None:
     assert "tests/test_wheel_contents.py" not in package_run_text
 
 
+def test_ci_overlaps_the_native_wheel_build_with_the_test_suite() -> None:
+    """The wheel build and the suite must stay concurrent, and stay honest.
+
+    The wheel is the job's long pole (~3m of Swift release compilation) and the
+    suite consumes nothing it produces, so running them back to back put both
+    on the critical path. Two details are load-bearing and easy to regress into
+    a silent serial run: the sync must carry the native-build opt-out, and the
+    foreground `uv run` must pass `--no-sync` (a bare `uv run` re-syncs the
+    project, re-entering the build hook without the opt-out).
+    """
+
+    workflow = _workflow("ci.yml")
+    jobs = _jobs(workflow)
+    test_steps = jobs["test"]["steps"]
+    assert isinstance(test_steps, list)
+
+    sync_steps = [
+        step
+        for step in test_steps
+        if isinstance(step, dict) and "uv sync --locked" in str(step.get("run", ""))
+    ]
+    assert len(sync_steps) == 1
+    assert sync_steps[0]["env"]["SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD"] == "1"
+
+    overlap = next(
+        step
+        for step in test_steps
+        if isinstance(step, dict) and step.get("name") == "Build wheel and run test suite"
+    )
+    script = overlap["run"]
+    # The build is backgrounded and awaited by PID within the same step; each
+    # `run:` is a fresh shell, so a PID from an earlier step cannot be waited on.
+    assert "uv build --no-sources --wheel" in script
+    assert "build_pid=$!" in script
+    assert 'wait "$build_pid"' in script
+    assert "uv run --no-sync pytest --cov=src" in script
+    assert "uv run pytest" not in script
+    # A failing suite must not be masked by a successful build, or vice versa.
+    assert "pytest_status=$?" in script
+    assert "exit \"$pytest_status\"" in script
+
+    # The opt-out must never reach the release wheel, or the published artifact
+    # would ship without the worker.
+    assert "SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD" not in script
+
+
 def test_release_blocks_publish_until_tag_ci_and_unsigned_dmg_are_verified() -> None:
     workflow = _workflow("release.yml")
     release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

@@ -99,6 +99,57 @@ def test_custom_build_hook_skips_the_engine_wheel_before_the_build_gate(
     assert build_data == {}
 
 
+def test_custom_build_hook_honors_the_native_build_opt_out_on_macos(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        hatch_build,
+        "sys",
+        SimpleNamespace(platform="darwin"),
+        raising=False,
+    )
+    monkeypatch.setenv(hatch_build.NATIVE_BUILD_SKIP_ENV, "1")
+
+    def unexpected_native_build(*args, **kwargs):
+        raise AssertionError("the opt-out must skip the native worker build")
+
+    monkeypatch.setattr(hatch_build.subprocess, "run", unexpected_native_build)
+    hook = SimpleNamespace(
+        target_name="wheel",
+        root=str(tmp_path),
+        directory=str(tmp_path / "build"),
+    )
+    build_data: dict[str, object] = {}
+
+    hatch_build.CustomBuildHook.initialize(hook, "2.0.3", build_data)
+
+    # Nothing native is claimed or shipped, and no build directory is created.
+    assert build_data == {}
+    assert not (tmp_path / "build" / "speechrail-native").exists()
+
+
+def test_custom_build_hook_still_builds_the_native_worker_without_the_opt_out(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        hatch_build,
+        "sys",
+        SimpleNamespace(platform="darwin"),
+        raising=False,
+    )
+    # An empty or unrelated value must not silently disable the release input.
+    for value in ("", "0", "false", "no", "maybe"):
+        monkeypatch.setenv(hatch_build.NATIVE_BUILD_SKIP_ENV, value)
+        assert not hatch_build._native_build_skipped(), value
+
+    monkeypatch.delenv(hatch_build.NATIVE_BUILD_SKIP_ENV, raising=False)
+    assert not hatch_build._native_build_skipped()
+
+    for value in ("1", "true", "TRUE", " Yes "):
+        monkeypatch.setenv(hatch_build.NATIVE_BUILD_SKIP_ENV, value)
+        assert hatch_build._native_build_skipped(), value
+
+
 def test_custom_build_hook_rejects_provenance_without_a_wheel(
     monkeypatch, tmp_path
 ) -> None:
