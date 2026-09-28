@@ -4,6 +4,15 @@ import Foundation
 /// Audio session used by the assistant when capture and TTS playback must share
 /// one engine. Keeping this boundary separate from `AssistantSession` lets the
 /// orchestration layer remain unaware of AVAudioEngine's real-time details.
+/// 一次设备重建的结果。`recovered` 为 false 时上层要停止采集与连接，
+/// 并把这一场记成可重试的语音中断，而不是只改一句错误文案。
+struct AssistantAudioInvalidation: Sendable, Equatable {
+    /// 每次重建 +1。旧 epoch 的播放回调据此失效。
+    let deviceGeneration: Int
+    let recovered: Bool
+    let message: String?
+}
+
 protocol AssistantAudioSession: AnyObject, AudioChunkSource {
     func configure(mode: AssistantMode)
     var onPlaybackDrained: (@MainActor () -> Void)? { get set }
@@ -12,6 +21,13 @@ protocol AssistantAudioSession: AnyObject, AudioChunkSource {
     /// "排空"与"播完"是两件事，而 epoch 让迟到的回调无法改动新一轮的账本。
     var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)? { get set }
     var onFailure: (@MainActor (String) -> Void)? { get set }
+    /// 设备重建（切换输出设备/耳机）把这一轮**还没播完**的缓冲丢掉了（D05）。
+    ///
+    /// 这不是"播完了"：旧 epoch 的 rendered 回调会被代次过滤掉，永远不会回来，
+    /// 所以账本预算如果不等这次通知，就永远排不空。**不要**用伪造的 rendered
+    /// 回调把预算骗回来——那会让"用户其实没听到"显示成"读完了"。
+    /// 上层据此中止本轮朗读、作废账本，并把回复按打断收尾。
+    var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)? { get set }
     /// 返回 `false` 表示这一块**没有**进播放队列（已停止/设备不可用），
     /// 调用方必须把已经预约的播放预算还回去。
     /// `epoch` 是调用方给这一块贴的账本身份，必须原样在 `onPlaybackBufferRendered` 里带回。
@@ -84,6 +100,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     private var playbackDrainedHandler: (@MainActor () -> Void)?
     private var playbackBufferRenderedHandler: (@MainActor (Int, Int) -> Void)?
     private var failureHandler: (@MainActor (String) -> Void)?
+    private var playbackInvalidatedHandler: (@MainActor (AssistantAudioInvalidation) async -> Void)?
 
     init() {
         playbackFormat = AVAudioFormat(
@@ -102,6 +119,11 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)? {
         get { stateLock.withLock { playbackBufferRenderedHandler } }
         set { stateLock.withLock { playbackBufferRenderedHandler = newValue } }
+    }
+
+    var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)? {
+        get { stateLock.withLock { playbackInvalidatedHandler } }
+        set { stateLock.withLock { playbackInvalidatedHandler = newValue } }
     }
 
     var onFailure: (@MainActor (String) -> Void)? {
@@ -598,13 +620,22 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     /// change while preserving the same AsyncStream and session ownership.
     private func rebuildAfterConfigurationChangeOnQueue() {
         guard stateLock.withLock({ !stopped && started }) else { return }
-        stateLock.withLock {
+        let (generation, invalidationHandler) = stateLock.withLock {
+            () -> (Int, (@MainActor (AssistantAudioInvalidation) async -> Void)?) in
             playbackGeneration += 1
             pendingBuffers = 0
+            return (playbackGeneration, playbackInvalidatedHandler)
         }
         tearDownEngineOnQueue(cancelDrainTimer: false)
         do {
             try startEngineOnQueue()
+            // 恢复成功也要通知：这一轮的缓冲已经被丢掉了，上层必须把账本归零，
+            // 不能因为"重建成功了"就当这一轮还会在新引擎上继续播。
+            Task { @MainActor in
+                await invalidationHandler?(
+                    AssistantAudioInvalidation(deviceGeneration: generation, recovered: true, message: nil)
+                )
+            }
         } catch {
             let message = error.localizedDescription
             let (continuation, handler) = stateLock.withLock {
@@ -616,7 +647,16 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             }
             cancelDrainTimerOnQueue()
             continuation?.finish()
-            Task { @MainActor in handler?("音频设备切换后无法恢复：\(message)") }
+            Task { @MainActor in
+                await invalidationHandler?(
+                    AssistantAudioInvalidation(
+                        deviceGeneration: generation,
+                        recovered: false,
+                        message: message
+                    )
+                )
+                handler?("音频设备切换后无法恢复：\(message)")
+            }
         }
     }
 

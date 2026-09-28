@@ -206,6 +206,7 @@ class OpenAIRealtimeSession:
         self._tts_request_ids: set[str] = set()
         self._tts_terminal_lock = asyncio.Lock()
         self._tts_terminal_sent = False
+        self._tts_owner_retired = False
         self._tts_request_id: str | None = None
         self._tts_response_id: str | None = None
         self._tts_item_id: str | None = None
@@ -583,6 +584,7 @@ class OpenAIRealtimeSession:
                         "transcription options cannot change after the first audio frame",
                     )
 
+        requested_alignment = self._alignment_enabled
         if candidate.get("alignment_explicit"):
             requested_alignment = bool(candidate.get("alignment_enabled", False))
             if requested_alignment != self._alignment_enabled:
@@ -596,18 +598,18 @@ class OpenAIRealtimeSession:
                         "backend_not_ready",
                         "fixed-text alignment is not available",
                     )
-                self._alignment_enabled = requested_alignment
 
         previous_enabled = self._diarization_enabled
+        requested_diarization = self._diarization_enabled
         if candidate.get("diarization_explicit"):
-            requested_enabled = bool(candidate.get("diarization_enabled", False))
-            if requested_enabled != self._diarization_enabled:
+            requested_diarization = bool(candidate.get("diarization_enabled", False))
+            if requested_diarization != self._diarization_enabled:
                 if self._wire_timeline.accepted_samples > 0:
                     raise RealtimeAdapterError(
                         "invalid_state",
                         "diarization can only be enabled before the first audio",
                     )
-                if requested_enabled and (
+                if requested_diarization and (
                     not self._services.diarization_ready
                     or self._diarization_engine is None
                     or not bool(getattr(self._diarization_engine, "supports_stream", False))
@@ -617,7 +619,6 @@ class OpenAIRealtimeSession:
                         "diarization_not_available",
                         str(self._services.diarization_status["message"]),
                     )
-                self._diarization_enabled = requested_enabled
 
         configured_voice = candidate.get("voice")
         if isinstance(configured_voice, str):
@@ -640,43 +641,52 @@ class OpenAIRealtimeSession:
                     "model_revision_conflict",
                     "Requested ASR revision is not the active ASR artifact",
                 )
-        if self._diarization_enabled:
-            try:
-                await self._ensure_diarization()
-            except BaseException:
-                self._diarization_enabled = False
-                await self._close_diarization()
-                self._diarization_enabled = previous_enabled
-                raise
-        else:
-            await self._close_diarization()
-
         turn_detection = candidate.get("turn_detection")
+        if (
+            isinstance(turn_detection, dict)
+            and turn_detection.get("mode") == "server_vad"
+            and self._settings.resolves_to_silero_vad
+        ):
+            from speechrail.backends.neural_vad import SileroVadDetector
+
+            ready, reason = SileroVadDetector.check_readiness(
+                self._settings.realtime_vad_model_path
+            )
+            if not ready:
+                raise RealtimeAdapterError(
+                    "backend_not_ready",
+                    f"Silero VAD preflight failed: {reason}",
+                )
+
+        # 原子发布 (B08): 候选 VAD 先构建到**局部变量**, 分人资源也先建/关成功,
+        # 之后才一次性写回 self。任一步失败都不改动旧 flags、config、输入缓冲
+        # 与资源身份, 不留部分生效。
+        candidate_vad: Any = None
+        candidate_shadow_vad: Any = None
+        candidate_admission: SpeechAdmission | None = None
+        candidate_bargein_max_bytes = self._bargein_pending_max_bytes
+        resets_vad_buffer = False
+        replaces_vad_state = False
         if isinstance(turn_detection, dict) and turn_detection.get("mode") == "server_vad":
+            replaces_vad_state = True
             threshold = float(turn_detection.get("threshold", 0.5))
             prefix_padding = int(turn_detection.get("prefix_padding_ms", 300))
             silence_duration = int(turn_detection.get("silence_duration_ms", 400))
 
             if self._settings.resolves_to_silero_vad:
-                from speechrail.backends.neural_vad import SileroVadConfig, SileroVadDetector
-
-                ready, reason = SileroVadDetector.check_readiness(
-                    self._settings.realtime_vad_model_path
+                from speechrail.backends.neural_vad import (
+                    SileroVadConfig,
+                    SileroVadDetector,
                 )
-                if not ready:
-                    raise RealtimeAdapterError(
-                        "backend_not_ready",
-                        f"Silero VAD preflight failed: {reason}",
-                    )
-                self._vad = SileroVadDetector(
+
+                candidate_vad = SileroVadDetector(
                     self._settings.realtime_vad_model_path,
                     config=SileroVadConfig(threshold=threshold),
                 )
-                self._shadow_vad = None
             else:
                 from speechrail.backends.vad import VadConfig, VoiceActivityDetector
 
-                self._vad = VoiceActivityDetector(
+                candidate_vad = VoiceActivityDetector(
                     VadConfig(
                         threshold=threshold,
                         prefix_padding_ms=prefix_padding,
@@ -690,19 +700,15 @@ class OpenAIRealtimeSession:
                         self._settings.realtime_vad_model_path
                     )
                     if ready:
-                        self._shadow_vad = SileroVadDetector(
+                        candidate_shadow_vad = SileroVadDetector(
                             self._settings.realtime_vad_model_path,
                             config=SileroVadConfig(threshold=threshold),
                         )
-                    else:
-                        self._shadow_vad = None
-                else:
-                    self._shadow_vad = None
 
             if self._settings.realtime_speech_admission_enabled:
                 prefix_samples = int(prefix_padding * 16)
                 stop_frames = max(1, (silence_duration + 31) // 32)
-                self._speech_admission = SpeechAdmission(
+                candidate_admission = SpeechAdmission(
                     threshold=threshold,
                     start_frames=3,
                     stop_frames=stop_frames,
@@ -710,21 +716,41 @@ class OpenAIRealtimeSession:
                     frame_samples=512,
                     sample_rate=16_000,
                 )
-                self._vad_raw_buffer.clear()
-                self._vad_sample_cursor = self._kernel_timeline.accepted_samples
-            else:
-                self._speech_admission = None
-            self._bargein_pending_max_bytes = max(1, prefix_padding * 32)
+                # 与原实现一致: 只有 speech admission 接管时才重置采样游标与原始缓冲.
+                resets_vad_buffer = True
+            candidate_bargein_max_bytes = max(1, prefix_padding * 32)
         elif (
             turn_detection is None
             or (isinstance(turn_detection, dict) and turn_detection.get("type") is None)
             or turn_detection == "manual"
         ):
-            self._vad = None
-            self._shadow_vad = None
-            self._speech_admission = None
-            self._vad_raw_buffer.clear()
+            replaces_vad_state = True
+            resets_vad_buffer = True
 
+        # 分人资源先建/关成功 (会 await 外部服务, 可能失败)。
+        self._diarization_enabled = requested_diarization
+        if requested_diarization:
+            try:
+                await self._ensure_diarization()
+            except BaseException:
+                await self._close_diarization()
+                self._diarization_enabled = previous_enabled
+                raise
+        else:
+            await self._close_diarization()
+
+        # 全部成功, 现在一次性发布 VAD 相关状态。
+        # 与原实现一致: 两种 endpointing 形态之外, 既有 VAD 状态原样保留。
+        if replaces_vad_state:
+            self._vad = candidate_vad
+            self._shadow_vad = candidate_shadow_vad
+            self._speech_admission = candidate_admission
+            self._bargein_pending_max_bytes = candidate_bargein_max_bytes
+        if resets_vad_buffer:
+            self._vad_raw_buffer.clear()
+            if candidate_admission is not None:
+                self._vad_sample_cursor = self._kernel_timeline.accepted_samples
+        self._alignment_enabled = requested_alignment
         self._config = candidate
         await self._send(updated)
 
@@ -829,8 +855,12 @@ class OpenAIRealtimeSession:
                 if self._diarization_enabled
                 else (self._settings.max_realtime_buffer_bytes or 8_388_608)
             )
-            if self._buffered_audio_bytes > 0 and (
+            if (
+                not in_commit
+                and self._buffered_audio_bytes > 0
+                and (
                 self._buffered_audio_bytes + len(dec.pcm) > max_item_bytes
+                )
             ):
                 await self._commit_audio(reason="rollover")
                 self._input_generation += 1
@@ -871,7 +901,18 @@ class OpenAIRealtimeSession:
             # progress: nesting another one here would double-commit the item
             # and append a phantom empty close-out after the real transcript.
             if not in_commit:
-                await self._commit_audio(reason="vad_stop")
+                # ``_commit_audio`` treats the VAD buffer as EOF and pushes it
+                # into admission.  A legal append may still contain complete
+                # frames after this utterance ends, so hide those unscored
+                # frames while the current item is finalized and restore them
+                # for the outer frame loop afterwards.  They must not be
+                # misclassified as silence.
+                unscored = bytes(self._vad_raw_buffer)
+                self._vad_raw_buffer.clear()
+                try:
+                    await self._commit_audio(reason="vad_stop")
+                finally:
+                    self._vad_raw_buffer.extend(unscored)
 
     async def _append_audio(self, event: dict[str, Any]) -> None:
         if self._diarization_phase != "active":
@@ -1228,7 +1269,11 @@ class OpenAIRealtimeSession:
         duplicate/full ledger as ``tts_request_invalid``.
         """
 
-        if self._tts_task is not None and not self._tts_task.done():
+        if (
+            not self._tts_owner_retired
+            and self._tts_task is not None
+            and not self._tts_task.done()
+        ):
             raise RealtimeAdapterError(
                 "tts_in_progress", "a TTS response is already in progress"
             )
@@ -1419,6 +1464,7 @@ class OpenAIRealtimeSession:
         self._tts_receipt_id = None
         self._tts_request_ids.add(request.request_id)
         self._tts_terminal_sent = False
+        self._tts_owner_retired = False
         self._tts_stream_mode = True
         self._tts_stream_pending.clear()
         self._tts_stream_accepted = 0
@@ -1485,6 +1531,11 @@ class OpenAIRealtimeSession:
     async def _finish_tts_stream(self, event: dict[str, Any]) -> None:
         request = parse_tts_finish_text(event)
         controller = await self._await_stream_controller(request.request_id)
+        if controller.terminal is not None or controller.closed:
+            # ``finish_text`` may already be queued on the data lane when a
+            # backend failure wins the race. The single terminal is authoritative;
+            # do not add a client error for closing input that is moot.
+            return
         try:
             await controller.finish_text(request.last_sequence)
         except TtsStreamError as exc:
@@ -1630,25 +1681,35 @@ class OpenAIRealtimeSession:
 
         if self._closing:
             return
+        response_id = self._tts_response_id
+        receipt_id = self._tts_receipt_id
+        request_id = self._tts_request_id
+        # The controller has already closed the model session and released its
+        # governor/worker admission before publishing this event. Mark the
+        # exact owner retirable before the wire terminal without clearing the
+        # per-request accounting still needed to render that terminal. The old
+        # task finally remains compare-and-clear if a new request starts.
+        if response_id == self._tts_response_id:
+            self._tts_owner_retired = True
         if event.terminal is TtsStreamTerminal.COMPLETED:
             await self._finalize_tts(
                 status="completed",
-                receipt_id=self._tts_receipt_id,
-                request_id=self._tts_request_id,
+                receipt_id=receipt_id,
+                request_id=request_id,
             )
             return
         if event.terminal is TtsStreamTerminal.CANCELLED:
             await self._finalize_tts(
                 status="cancelled",
-                receipt_id=self._tts_receipt_id,
-                request_id=self._tts_request_id,
+                receipt_id=receipt_id,
+                request_id=request_id,
             )
             return
         self._tts_failure_code = event.error_code or "tts_backend_failed"
         await self._finalize_tts(
             status="failed",
-            receipt_id=self._tts_receipt_id,
-            request_id=self._tts_request_id,
+            receipt_id=receipt_id,
+            request_id=request_id,
         )
 
     async def _fail_stream_open(
@@ -1726,6 +1787,7 @@ class OpenAIRealtimeSession:
         self._tts_stream_limits = None
         self._tts_generated_samples = 0
         self._tts_failure_code = None
+        self._tts_owner_retired = False
 
     def _completed_event(
         self, *, transcript: str, commit_event_id: str | None = None
@@ -2300,7 +2362,12 @@ class OpenAIRealtimeSession:
                             commit_event_id=self._active_commit_event_id,
                         )
                     )
-        except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
+        except asyncio.CancelledError:
+            # The commit deadline cancels this reader while awaiting its
+            # terminal event.  Swallowing that cancellation lets the commit
+            # look successful without ever observing an ASR terminal.
+            raise
+        except WebSocketDisconnect:
             pass
         except Exception:
             # A dead reader must not die silently: the client would keep

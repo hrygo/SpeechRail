@@ -134,4 +134,96 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
         XCTAssertEqual(buffer.append("abc"), nil)
         XCTAssertEqual(buffer.append("defg"), .total(offered: 7, limit: 6))
     }
+
+    // MARK: - D11：开嗓时机与原始空白
+
+    func testLeadingWhitespaceIsBufferedUntilRealTextArrives() {
+        var gate = AssistantSpeechStartGate()
+
+        XCTAssertEqual(gate.offer(" "), .buffered)
+        XCTAssertEqual(gate.offer("\n"), .buffered)
+        XCTAssertFalse(gate.isStarted, "只有空白时不能开嗓")
+
+        XCTAssertEqual(
+            gate.offer("你好"),
+            .start(pending: " \n你好"),
+            "开嗓时要把之前缓冲的空白原样一起交出去，不能吃掉"
+        )
+        XCTAssertTrue(gate.isStarted)
+        XCTAssertEqual(gate.pendingScalars, 0)
+    }
+
+    /// 曾经的缺陷：`delta` 去掉空白后非空才 offer，于是分隔空白被丢掉，
+    /// 分段到达的正文在朗读输入里粘成一个词。
+    func testWhitespaceBetweenDeltasReachesTheUtteranceUnchanged() {
+        var gate = AssistantSpeechStartGate()
+        var spoken: [String] = []
+
+        for delta in ["Hello", " ", "", "\n", "world", " ", "again"] {
+            switch gate.offer(delta) {
+            case .buffered:
+                continue
+            case .start(let pending):
+                spoken.append(pending)
+            case .speak(let text):
+                spoken.append(text)
+            }
+        }
+
+        XCTAssertEqual(
+            spoken.joined(),
+            "Hello \nworld again",
+            "清洗前的原始增量拼接必须与输入完全一致：无重复、无丢失"
+        )
+    }
+
+    func testWholeWhitespaceTurnNeverStarts() {
+        var gate = AssistantSpeechStartGate()
+        var starts = 0
+
+        for delta in [" ", "\n", "\t", "  \n "] {
+            if case .start = gate.offer(delta) { starts += 1 }
+        }
+
+        XCTAssertEqual(starts, 0, "纯空白的一轮不许启动朗读")
+        XCTAssertFalse(gate.isStarted)
+    }
+
+    func testUnicodeAndMarkdownAdjacencyIsPreserved() {
+        var gate = AssistantSpeechStartGate()
+        var spoken: [String] = []
+        for delta in ["**粗**", " ", "与", " ", "emoji 🎧", "\n", "结束"] {
+            switch gate.offer(delta) {
+            case .buffered: continue
+            case .start(let pending): spoken.append(pending)
+            case .speak(let text): spoken.append(text)
+            }
+        }
+
+        XCTAssertEqual(spoken.joined(), "**粗** 与 emoji 🎧\n结束")
+    }
+
+    /// 开嗓失败之后不许反复尝试 start，但正文继续。
+    func testDisabledStartingNeverStartsAgain() {
+        var gate = AssistantSpeechStartGate()
+        XCTAssertEqual(gate.offer("你好"), .start(pending: "你好"))
+        // 真实流程里 start 失败后调用方会立刻 disableStarting()。
+        gate.disableStarting()
+
+        XCTAssertEqual(gate.offer("还有"), .buffered)
+        XCTAssertEqual(gate.offer("。"), .buffered)
+        XCTAssertFalse(gate.isStarted)
+    }
+
+    func testPendingBufferIsBoundedAndReportsTheLimit() {
+        var configuration = AssistantSpeechStartGate.Configuration.default
+        configuration.maximumPendingScalars = 8
+        var gate = AssistantSpeechStartGate(configuration: configuration)
+
+        // 只用空白把缓冲顶到上限：这正是开嗓前缓冲最坏的情况。
+        XCTAssertEqual(gate.offer("        "), .buffered)
+        XCTAssertEqual(gate.offer(" "), .buffered, "超限之后不再继续吞文本")
+        XCTAssertEqual(gate.lastLimit, .pending(offered: 9, limit: 8))
+        XCTAssertFalse(gate.isStarted)
+    }
 }

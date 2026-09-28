@@ -29,8 +29,10 @@ from speechrail.backends.qwen3_tts_incremental import Qwen3TtsIncrementalModelSe
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceProfile
 from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamError,
     TtsStreamEventKind,
+    TtsStreamLimits,
     TtsStreamOptions,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
@@ -81,6 +83,7 @@ class _LoopbackTransport:
                     "response_id": frame.get("response_id"),
                     "sample_rate": 24_000,
                     "stream_protocol": 1,
+                    "limits": frame.get("limits"),
                 }
             )
         elif kind == "tts_stream_text":
@@ -405,7 +408,13 @@ class _RecordingStreamWorker:
         self.calls: list[TtsStreamOptions] = []
         self.session = object()
 
-    async def open_incremental_stream(self, options: TtsStreamOptions) -> Any:
+    async def open_incremental_stream(
+        self,
+        options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
+    ) -> Any:
+        self.limits = limits
         self.calls.append(options)
         return self.session
 

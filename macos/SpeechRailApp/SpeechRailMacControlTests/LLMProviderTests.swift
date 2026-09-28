@@ -702,6 +702,254 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(response.outcome, "received")
     }
 
+    // MARK: - D10：Responses 流必须以明确的成功终态收束
+
+    @MainActor
+    private func drainResponsesStream(_ provider: LLMProvider) async -> Result<String, Error> {
+        do {
+            var text = ""
+            let stream = await provider.stream(
+                configuration: configuration,
+                messages: Self.messages,
+                apiKey: nil,
+                instructions: "语音对话契约"
+            )
+            for try await delta in stream {
+                text += delta
+            }
+            return .success(text)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// delta 之后直接 EOF：以前会被当成成功返回整段正文，
+    /// 于是半截回答被朗读、被落库、被当成"模型答完了"。
+    @MainActor
+    func testResponsesStreamDeltaThenEOFAreNotSuccess() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_a\",\"delta\":\"好\"}\n\n"
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("没有成功终态就结束，必须是失败，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(error as? LLMError, .streamEndedEarly)
+        }
+    }
+
+    /// `[DONE]` 只表示传输关闭，不是模型的成功终态。
+    @MainActor
+    func testResponsesStreamDeltaThenDoneSentinelIsNotSuccess() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_a\",\"delta\":\"好\"}\n\ndata: [DONE]\n\n"
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("[DONE] 不能代替 response.completed，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(error as? LLMError, .streamEndedEarly)
+        }
+    }
+
+    @MainActor
+    func testResponsesStreamCompletedThenGarbageStillSucceeds() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                data: {"type":"response.output_text.delta","response_id":"resp_a","delta":"好"}
+
+                data: {"type":"response.completed","response":{"id":"resp_a"}}
+
+                data: { 这不是 JSON
+
+                data: [DONE]
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        XCTAssertEqual(try result.get(), "好", "收到合法 completed 之后就该收尾，不再要求提供方关 TCP")
+    }
+
+    @MainActor
+    func testResponsesStreamEmptyCompletedSucceeds() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_a\"}}\n\ndata: [DONE]\n\n"
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        XCTAssertEqual(try result.get(), "", "空的成功响应是合法的，交给上层提示空内容")
+    }
+
+    @MainActor
+    func testResponsesStreamRefusalStillNeedsASuccessfulTerminal() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.refusal.delta\",\"response_id\":\"resp_a\",\"delta\":\"我不能\"}\n\ndata: [DONE]\n\n"
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("refusal delta 不等于成功终态，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(error as? LLMError, .streamEndedEarly)
+        }
+    }
+
+    @MainActor
+    func testResponsesStreamRejectsTerminalOfAnotherResponse() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                data: {"type":"response.output_text.delta","response_id":"resp_a","delta":"好"}
+
+                data: {"type":"response.completed","response":{"id":"resp_b"}}
+
+                data: [DONE]
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("别的响应的成功终态不能收束本轮，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(error as? LLMError, .streamEndedEarly)
+        }
+    }
+
+    @MainActor
+    func testResponsesStreamMalformedDataDoesNotSilentlyBecomeSuccess() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                data: {"type":"response.output_text.delta","response_id":"resp_a","delta":"好"}
+
+                data: { 这不是 JSON
+
+                data: {"type":"response.completed","response":{"id":"resp_a"}}
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("坏 JSON 不能被静默跳过直到假成功，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(error as? LLMError, .malformedStreamEvent)
+        }
+    }
+
+    /// 一个 SSE 事件可以由多行 `data:` 拼成；按行解析会把它读成两个坏事件。
+    @MainActor
+    func testResponsesStreamJoinsMultiLineDataFields() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                data: {"type":"response.output_text.delta",
+                data: "response_id":"resp_a","delta":"好"}
+
+                data: {"type":"response.completed","response":{"id":"resp_a"}}
+
+                data: [DONE]
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        XCTAssertEqual(try result.get(), "好")
+    }
+
+    @MainActor
+    func testResponsesStreamIgnoresCommentsAndHeartbeats() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                : keep-alive
+
+                data: {"type":"response.output_text.delta","response_id":"resp_a","delta":"好"}
+
+                event: ping
+                data: {"type":"response.in_progress","response_id":"resp_a"}
+
+                data: {"type":"response.completed","response":{"id":"resp_a"}}
+
+                data: [DONE]
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        XCTAssertEqual(try result.get(), "好", "注释和心跳不影响正文")
+    }
+
+    @MainActor
+    func testResponsesStreamFailedEventFailsImmediately() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: """
+                data: {"type":"response.output_text.delta","response_id":"resp_a","delta":"好"}
+
+                data: {"type":"response.failed","response":{"id":"resp_a","error":{"message":"上游中断"}}}
+
+                data: {"type":"response.completed","response":{"id":"resp_a"}}
+
+                """
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+
+        switch result {
+        case .success(let text):
+            XCTFail("response.failed 之后不能再被 completed 覆盖，实际拿到 \(text)")
+        case .failure(let error):
+            guard case .refused(let reason)? = error as? LLMError else {
+                return XCTFail("预期 refused，实际 \(error)")
+            }
+            XCTAssertTrue(reason.contains("上游中断"))
+        }
+    }
+
     @MainActor
     func testBackgroundPollEmitsProviderObservationMetadata() async throws {
         FakeTransport.reset([.init(status: 200, contentType: "application/json", body: Self.okBody)])

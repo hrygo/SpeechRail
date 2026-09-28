@@ -55,6 +55,10 @@ def test_limits_reject_bools_non_integers_and_impossible_orderings() -> None:
         TtsStreamLimits(max_append_codepoints=4097, max_total_codepoints=4096)
     with pytest.raises(ValueError):
         TtsStreamLimits(max_pending_codepoints=4097)
+    with pytest.raises(ValueError):
+        TtsStreamLimits(max_pending_audio_bytes=1)
+    with pytest.raises(ValueError):
+        TtsStreamLimits(max_pending_audio_bytes=3)
 
 
 def test_options_require_identity_and_finite_speed() -> None:

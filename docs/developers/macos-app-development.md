@@ -82,6 +82,42 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 
 这段是当前代码行为说明，不替代会话层技术方案；真实声学 AEC、双讲收敛和各种设备组合仍以音频文档中的未验收项为准。
 
+### 语音助手的对话状态、文字降级与回复行（2026-09-28）
+
+**"这一场还在"和"正在跑"是两个状态。** 静音和断线都不再把会话退回"未开始"：
+`AssistantSession.hasActiveConversation` 表示对话仍然存在（可以继续说话、继续打字、结束），
+`isActivelyRunning` 表示此刻确实在跑。`AssistantView` 用前者决定 live 投影、用后者决定是否
+盖住受阻结论——断线之后用户要看见的是"识别中断了"和重试出口，而不是退回 ready。
+静音只关掉麦克风上行，状态标题显示"麦克风已静音"；静音期间同样可以结束会话，
+WebSocket 关闭也照常走清理。新的对话重置静音，同一会话的重连保留用户的选择。
+
+**打字降级不经过麦克风。** 输入框里的文字走 `AssistantSession.ask(typed:)`：
+没有会话时用 `SessionCoordinator.createSession` 建一条纯文字记录——这条路不碰设备占用，
+既不抢 `activeSessionID`，也不会打断正在占用设备的会议；因此麦克风被拒或会议占着设备时
+文字照样能发出去（不建音频档位，`engineProfile` 记 `unknown` 而不是编一个）。
+纯文字提问不朗读回复。`AssistantView` 侧有单飞门闩：发送中按钮显示"发送中…"并禁用，
+双击只发一次；成功后**只在草稿未被改动时**清空，晚到的成功不会抹掉用户等待期间新输入的字；
+失败时草稿原样保留，并用 `NoticeBar` 给出可读原因和「重试」，不吞字。
+
+**一轮回复就是一个行身份。** `AssistantReplyState` 让一轮回复的 `id` 同时是 `line.id` 和
+`Turn.id`：第一段非空正文即以该 id 建 `partial` 行，之后只 UPDATE，不再每段插一行。
+`finalizeReply(_:reply:)` 是唯一收尾入口并按 `isFinalized` 幂等——正常说完、用户打断
+（Esc 或 barge-in）、provider 失败、连接断开、结束对话都经它收尾；它接收值类型快照，
+跨过 `await` 之后即使新的一轮已经接管也不会写错会话。打断标记只能从 false 推向 true，
+迟到的"正常完成"可以补全正文但擦不掉打断标记。落库失败显示为失败，不假装"已保存"。
+异常退出时 `sealAbandonedSessions` 在同一个事务里封存会话，并把该记录中助手自己的 partial 行
+收成 final + interrupted，保留已写下的正文；用户行和其他功能的说话人 partial 不受影响。
+
+**取消要等服务端确认。** `AssistantTTSStreamCoordinator.cancel()` 返回的是"服务端是否已确认
+这一轮终止"，等的是匹配 `request_id` 的**终态**而不是"取消命令发出去"；闩在 Realtime 接收层
+的 `handleTerminal` 上解锁，避免自己等自己。确认了就回聆听态；没确认则关闭连接、释放设备并
+记一次**可重试**的语音中断，不靠 sleep 或自动重发正文盖住竞态。
+
+**没有精确时间就不写时间。** 助手记录的用户行不再拿会话起点冒充发言起点：每个 item 按
+**首条证据到达的时刻**（`itemObservedAt`，按 itemID 记，重连不清）与每个连接建立的时钟锚点
+计算，`t_start` / `t_end` 存 NULL，`timingQuality = .unavailable`。精确声学时轴仍以服务端的
+`sample_span` 为准，不与本地观测时刻混为一类；历史记录不做批量回填。
+
 ## 发布与运行态关系
 
 - `com.speechrail` 是实际服务 owner，必须由服务发布/安装流程负责登录常驻；`SpeechRail.app` 只是按需打开的控制面，不是登录启动项。

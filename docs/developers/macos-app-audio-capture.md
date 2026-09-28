@@ -202,6 +202,21 @@ date: 2026-09-20
 可以继续播放。`AVAudioEngineConfigurationChangeNotification` 触发后会重建 input tap、converter
 和 player；新路由不支持 duplex 时回调为可读失败，而不是静默发送未经处理的帧。
 
+**设备重建会丢弃这一轮还没播完的缓冲，并且必须通知上层（2026-09-28）**：
+`AVAudioEngineConfigurationChangeNotification` 之后 engine 被拆掉重建，player 队列里
+已入队但没有 `dataRendered` 的 PCM 一并不存在了。旧 epoch 的 `dataRendered` 回调会被代次
+过滤掉，永远不会回来——所以 `AssistantAudioSession` 在重建时把 `pendingBuffers` 归零，并通过
+`onPlaybackInvalidated(AssistantAudioInvalidation)` 把这次丢弃通知 `AssistantSession`：
+
+- `recovered == true`：设备已恢复，但这一轮朗读**已经停了**。上层作废播放账本、把当前回复
+  按打断收尾，并显示「音频设备已切换，本次朗读已停止」。重建成功不等于这一轮会在新引擎上
+  继续播。
+- `recovered == false`：这一场语音已经无法继续。上层停止采集与连接，记一次**可重试**的语音
+  中断；文字输入和「重试语音」保持可用。
+
+这两种情况都**不能**用伪造的 rendered 回调把播放预算骗回来——那会把「用户其实没听到」显示成
+「读完了」。会议与字幕仍走 `MicrophoneCapture` 的旧「采集流结束 → 中断」口径，不受此影响。
+
 **尚未完成的验收**：本机 Debug 构建已通过，但系统 AEC 的真实 ERLE、双讲不收敛、外放距离与不同
 耳机/麦克风组合仍需在实际设备上测量。没有这组声学数据，不把「已调用 voice processing」写成
 「外放也一定不回采」。

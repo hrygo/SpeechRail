@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`4.1.0`；生效日期：2026-09-28。唯一机器 schema 是
+> 契约版本：`4.2.0`；生效日期：2026-09-28。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -68,7 +68,10 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   未知 voice、未知 revision、Q4/Q6、Design runtime voice 均 fail closed。
 - 缺失字段使用服务端当前默认；显式 `null` 只对 schema 声明可空的字段有效，不能用 `null`
   删除有语义的字段。
-- 更新确认是 `session.updated`。若候选配置失败，旧配置保持不变，不半应用。
+- 更新确认是 `session.updated`。更新是原子的：候选配置先完整校验（revision、voice、
+  VAD 与各能力初始化），成功后才一次性发布。若候选配置失败，旧 flags、config、输入缓冲
+  与资源身份都不变，不留任何部分生效；候选持有的资源被关闭且只关闭一次，客户端改正后
+  重发可以正常成功。
 
 ## 4. 客户端事件
 
@@ -81,7 +84,7 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 | `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice` | 开始一个增量 TTS utterance |
 | `speechrail.tts.append_text` | `event_id`, `request_id`, `sequence`, `text` | 追加不可变稳定文本；sequence 从 0 连续递增 |
 | `speechrail.tts.finish_text` | `event_id`, `request_id`, `last_sequence` | 关闭文本侧并以最后 ACK 序号为屏障 |
-| `speechrail.tts.cancel` | `event_id`, `request_id` | 取消匹配 utterance；取消优先于音频和终态 |
+| `speechrail.tts.cancel` | `event_id`, `request_id` | 取消匹配 utterance；取消优先于音频和终态（见 5.3） |
 
 `speechrail.tts.start` 还接受 `voice_revision`、`expected_model_revision`、`speed` 和仅能收紧的
 `limits`。未知字段不是 no-op，返回稳定错误。`speechrail.tts.create`、
@@ -130,6 +133,16 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `completed` 只承载 `type`、`item_id`、`content_index`、`transcript` 与可选的
 `commit_event_id`；对齐与匿名 speaker 归属随后以独立的
 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
+
+两条准入语义是调用方可以依赖的：
+
+- **分包方式不改变内容。** 同一段音频无论整包发送、按 32 ms 切片还是不齐整的分包，
+  admitted PCM 与样本顺序必须一致；句末（VAD 或显式 commit）之后**同一包内剩余的完整帧**
+  属于下一个 utterance，不会被当作不足一帧的尾部丢掉或二次计分。调用方可以自由决定
+  `input_audio_buffer.append` 的分包粒度。
+- **每个 utterance 恰好一个终态。** commit 已 ACK 但后续读取挂起时，utterance 必须在
+  deadline 后以 `failed` 收尾并释放资源，不得既无终态也不释放；读取成功后的错误不再产生
+  矛盾的第二个终态。
 
 ### 5.2 Alignment 与 Diarization
 
@@ -200,6 +213,22 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 和生效 `limits`。每个 `audio.delta` 带 `task_id`、`request_id`、`chunk_index`、`sample_offset` 与
 Base64 PCM。TTS 只使用 SpeechRail namespace；不同时发送 `response.done`，每次 utterance 恰好一个
 terminal：`completed`、`cancelled` 或 `failed`。取消后不得再投递旧音频。
+
+本节的三条时序是调用方可以依赖的契约，不只是当前实现细节：
+
+1. **取消优先于音频准入。** `speechrail.tts.cancel` 不排在已入队的音频准入之后；即使有音频
+   正在等待准入，cancel 也先执行。已经排队但尚未准入的用户音频不被 cancel 隐式清空。
+2. **终态屏障。** terminal 在该 utterance 的 lane 资源回收**确认之后**才上 wire；取消路径
+   同样如此。因此 terminal 之后立即发起的下一个 `speechrail.tts.start` 会成功，不会拿到
+   `tts_in_progress`。回收无法确认时连接被关闭或该 lane 被隔离，不提前发 terminal 冒充
+   “已可复用”。这条保证的是**终态之前不释放资源**，不是**终态一定先于下一条 started 到达**：
+   已经越过准入的流水线式客户端可能在旧 utterance 的 terminal 之前就收到下一条
+   `speechrail.tts.started`。依赖严格 before-terminal 顺序的调用方应当等待匹配
+   `request_id` 的 terminal，而不是假定它排在下一条 `started` 之前。
+3. **pending 预算按实际消费归还。** `started` 里的 `limits` 是执行层实际生效的预算，并通过
+   IPC 传到 worker；被接受但尚未消费的字符继续占用额度，worker 消费掉的一批立即归还。
+   累计可以超过首个 2048 的常量上限（总上限 4096 仍然有效）。消费水位只归还**文本**额度，
+   不表示对应音频已被播放，也不改变 render receipt 的 `delivered` 口径。
 
 ## 6. 错误
 

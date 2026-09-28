@@ -1,0 +1,320 @@
+{
+  "version": 1,
+  "note": "App—服务边界的共享合成 fixture。只记录公共 wire 事件与稳定字段：不含真实音频、用户文本、绝对路径或凭据。`server_events` 由 tests/test_assistant_realtime_lifecycle_fixture.py 通过真实 /v1/realtime WebSocket + fake backend 观测得到；macos 侧由 AssistantRealtimeLifecycleFixtureTests.swift 消费同一份事件驱动生产 AssistantSession。任一侧的时序变化都必须先重录本文件，两侧断言因此不会各自漂移。逐事件 id（event_id/session_id/task_id/plan_id）与逐 utterance id（item_id）在两侧都归一化成占位符，只断言它们的类型、顺序与互不相同。",
+  "volatile_fields": [
+    "event_id",
+    "session_id",
+    "task_id",
+    "plan_id"
+  ],
+  "omitted_event_types": [
+    "speechrail.tts.audio.delta"
+  ],
+  "omitted_event_types_reason": "audio.delta 的载荷是 Base64 PCM。项目规则禁止 fixture 记录原始音频/Base64，所以它不写进本文件；两侧测试改为断言「这些被省略的类型确实出现过且顺序符合预期」，而不是把它们从观测里悄悄丢掉。",
+  "sequence_semantics": "每条事件的 sequence 是 wire 上真实分配的序号，因此在被省略的事件处保留跳号（例如 long_reply 的 completed 是 9 不是 8）。序号连续性由服务端侧测试单独断言。",
+  "scenarios": [
+    {
+      "id": "barge_in_closure",
+      "covers": [
+        "D01",
+        "D06",
+        "D08",
+        "B02",
+        "B05"
+      ],
+      "summary": "增量 TTS 正在播放时用户打断：App 停本地播放并发 cancel，服务端不必等音频准入队列就回终态，终态之后立即发起的下一轮 start 必须被准入（B05 终态屏障），且第二轮同样恰好一个 terminal。",
+      "client_script": [
+        "session.update(tts.enabled=true)",
+        "tts.start(request_id=req_barge)",
+        "tts.append_text(sequence=0, text=好的，)",
+        "tts.append_text(sequence=1, text=我停下了)",
+        "tts.cancel(request_id=req_barge)",
+        "tts.start(request_id=req_next)",
+        "tts.cancel(request_id=req_next)"
+      ],
+      "server_events": [
+        {
+          "type": "session.created",
+          "sequence": 0
+        },
+        {
+          "type": "session.updated",
+          "sequence": 1
+        },
+        {
+          "type": "speechrail.tts.started",
+          "request_id": "req_barge",
+          "limits": {
+            "max_append_codepoints": 512,
+            "max_total_codepoints": 4096,
+            "max_pending_codepoints": 2048,
+            "max_pending_audio_bytes": 48000
+          },
+          "sequence": 2
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_barge",
+          "append_sequence": 0,
+          "accepted_codepoints": 3,
+          "total_codepoints": 3,
+          "sequence": 3
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_barge",
+          "append_sequence": 1,
+          "accepted_codepoints": 4,
+          "total_codepoints": 7,
+          "sequence": 4
+        },
+        {
+          "type": "speechrail.tts.cancelled",
+          "request_id": "req_barge",
+          "sequence": 5
+        },
+        {
+          "type": "speechrail.tts.started",
+          "request_id": "req_next",
+          "limits": {
+            "max_append_codepoints": 512,
+            "max_total_codepoints": 4096,
+            "max_pending_codepoints": 2048,
+            "max_pending_audio_bytes": 48000
+          },
+          "sequence": 6
+        },
+        {
+          "type": "speechrail.tts.cancelled",
+          "request_id": "req_next",
+          "sequence": 7
+        }
+      ],
+      "app_expectation": {
+        "assistant_rows": [
+          {
+            "text": "好的，我停下了",
+            "interrupted": true
+          }
+        ]
+      },
+      "app_inputs": {
+        "reply_deltas": [
+          "好的，",
+          "我停下了"
+        ]
+      }
+    },
+    {
+      "id": "long_reply",
+      "covers": [
+        "D11",
+        "B04",
+        "B07"
+      ],
+      "summary": "回复里独立空格、换行与连续空白都是合法增量：tts.started 回带收紧后的生效 limits（B07 全链路一致），每个 append 恰好一个 ACK，append_sequence 从 0 连续递增，total_codepoints 单调累加且把纯空白批次如实计入（B04/D11 的 wire 侧证据），finish_text 后恰好一个 completed。App 侧 D11 的断言落在**落库正文**上：raw_reply_text 必须等于五个增量的原样拼接（含 \\n 与连续空格）；tts_appended_text 是同一条文本经 VoicePrompt.spokenText 清洗后的结果（行折叠、空格收敛），这是产品有意保留的朗读清洗层，不是空白丢失。",
+      "client_script": [
+        "session.update(tts.enabled=true)",
+        "tts.start(request_id=req_long, limits.max_pending_codepoints=1024)",
+        "tts.append_text(sequence=0, text=Hello)",
+        "tts.append_text(sequence=1, text=' ')",
+        "tts.append_text(sequence=2, text='world\\n')",
+        "tts.append_text(sequence=3, text='  ')",
+        "tts.append_text(sequence=4, text=再见)",
+        "tts.finish_text(request_id=req_long, last_sequence=4)"
+      ],
+      "server_events": [
+        {
+          "type": "session.created",
+          "sequence": 0
+        },
+        {
+          "type": "session.updated",
+          "sequence": 1
+        },
+        {
+          "type": "speechrail.tts.started",
+          "request_id": "req_long",
+          "limits": {
+            "max_append_codepoints": 512,
+            "max_total_codepoints": 4096,
+            "max_pending_codepoints": 1024,
+            "max_pending_audio_bytes": 48000
+          },
+          "sequence": 2
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_long",
+          "append_sequence": 0,
+          "accepted_codepoints": 5,
+          "total_codepoints": 5,
+          "sequence": 3
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_long",
+          "append_sequence": 1,
+          "accepted_codepoints": 1,
+          "total_codepoints": 6,
+          "sequence": 4
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_long",
+          "append_sequence": 2,
+          "accepted_codepoints": 6,
+          "total_codepoints": 12,
+          "sequence": 5
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_long",
+          "append_sequence": 3,
+          "accepted_codepoints": 2,
+          "total_codepoints": 14,
+          "sequence": 6
+        },
+        {
+          "type": "speechrail.tts.text_accepted",
+          "request_id": "req_long",
+          "append_sequence": 4,
+          "accepted_codepoints": 2,
+          "total_codepoints": 16,
+          "sequence": 7
+        },
+        {
+          "type": "speechrail.tts.completed",
+          "request_id": "req_long",
+          "sequence": 9
+        }
+      ],
+      "app_expectation": {
+        "raw_reply_text": "Hello world\n  再见",
+        "tts_appended_text": "Hello world 再见",
+        "assistant_rows": [
+          {
+            "text": "Hello world\n  再见",
+            "interrupted": false
+          }
+        ]
+      },
+      "app_inputs": {
+        "reply_deltas": [
+          "Hello",
+          " ",
+          "world\n",
+          "  ",
+          "再见"
+        ]
+      }
+    },
+    {
+      "id": "input_packetization",
+      "covers": [
+        "D09",
+        "B01",
+        "B03",
+        "B06"
+      ],
+      "summary": "第一句整包 64 ms 发送，第二句按 1/7/1/5/2 帧的不齐切片发送：分包粒度不改变内容，两句各自恰好一个 completed、item_id 互不相同、commit_event_id 原样回显（B01/B03），两个 ASR session 都被回收（B06）。",
+      "client_script": [
+        "input_audio_buffer.append(frames=1536)",
+        "input_audio_buffer.commit(event_id=evt-c1)",
+        "input_audio_buffer.append(frames=1)",
+        "input_audio_buffer.append(frames=7)",
+        "input_audio_buffer.append(frames=1)",
+        "input_audio_buffer.append(frames=5)",
+        "input_audio_buffer.append(frames=2)",
+        "input_audio_buffer.commit(event_id=evt-c2)"
+      ],
+      "server_events": [
+        {
+          "type": "session.created",
+          "sequence": 0
+        },
+        {
+          "type": "conversation.item.input_audio_transcription.completed",
+          "item_ref": "<item:0>",
+          "content_index": 0,
+          "transcript": "第一句",
+          "commit_event_id": "evt-c1",
+          "sequence": 1
+        },
+        {
+          "type": "conversation.item.input_audio_transcription.completed",
+          "item_ref": "<item:1>",
+          "content_index": 0,
+          "transcript": "第二句",
+          "commit_event_id": "evt-c2",
+          "sequence": 2
+        }
+      ],
+      "app_expectation": {
+        "user_rows": [
+          {
+            "text": "第一句",
+            "has_created_at": true,
+            "t_start_is_null": true,
+            "t_end_is_null": true
+          },
+          {
+            "text": "第二句",
+            "has_created_at": true,
+            "t_start_is_null": true,
+            "t_end_is_null": true
+          }
+        ]
+      },
+      "app_inputs": {
+        "user_transcripts": [
+          "第一句",
+          "第二句"
+        ]
+      }
+    },
+    {
+      "id": "reconnect_recovery",
+      "covers": [
+        "D02",
+        "D03",
+        "D04",
+        "B06",
+        "B08"
+      ],
+      "summary": "同一条连接上先用未注册的 model 提交 session.update：候选配置在发布前被拒，只回一个 model_not_found 错误，不产生 session.updated；随后同一条连接上的合法更新照常成功，session_id 不变（B08 原子发布 + 连接仍然可用）。",
+      "client_script": [
+        "session.update(model=no-such-registered-model, event_id=evt-bad-update)",
+        "session.update(event_id=evt-good-update)"
+      ],
+      "server_events": [
+        {
+          "type": "session.created",
+          "sequence": 0
+        },
+        {
+          "type": "error",
+          "request_id": "evt-bad-update",
+          "error": {
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+            "message": "unknown model: no-such-registered-model"
+          },
+          "sequence": 1
+        },
+        {
+          "type": "session.updated",
+          "sequence": 2
+        }
+      ],
+      "app_expectation": {
+        "same_record_after_retry": true,
+        "record_count_after_retry": 1,
+        "history_preserved": true
+      },
+      "app_inputs": {
+        "rejected_update_code": "model_not_found"
+      }
+    }
+  ]
+}

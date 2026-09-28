@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import hashlib
 import math
 import sys
@@ -45,6 +46,7 @@ from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
 from speechrail.domain.tts_request import validate_tts_parameters
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
+    TtsStreamLimits,
     TtsStreamOptions,
 )
 from speechrail.domain.tts_text_planner import TtsTextPlanner
@@ -1112,6 +1114,27 @@ def _open_stream_session(
     return opener(**kwargs)
 
 
+def _stream_limits_from_frame(frame: dict[str, object]) -> TtsStreamLimits:
+    value = frame.get("limits")
+    if not isinstance(value, dict):
+        raise ProtocolError("incremental stream start requires limits")
+    names = tuple(field.name for field in dataclasses.fields(TtsStreamLimits))
+    unknown = sorted(set(value) - set(names))
+    if unknown:
+        raise ProtocolError(f"incremental stream limits contain unknown field: {unknown[0]}")
+    missing = sorted(set(names) - set(value))
+    if missing:
+        raise ProtocolError(f"incremental stream limits omit field: {missing[0]}")
+    try:
+        limits = TtsStreamLimits(**{name: value[name] for name in names})
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError("incremental stream limits are invalid") from exc
+    for name in names:
+        if getattr(limits, name) > getattr(DEFAULT_TTS_STREAM_LIMITS, name):
+            raise ProtocolError("incremental stream limits widen the server budget")
+    return limits
+
+
 def _run_stream(
     pump: StreamPump,
     opener: Callable[..., IncrementalModelSession],
@@ -1123,6 +1146,7 @@ def _run_stream(
         return
     try:
         parse_stream_command(frame)
+        limits = _stream_limits_from_frame(frame)
         fields = _decode_synthesis_fields(
             frame, expected_type=FRAME_STREAM_START, require_text=False
         )
@@ -1158,7 +1182,7 @@ def _run_stream(
         speed=fields.speed,
     )
     try:
-        host = TtsStreamHost(session, options)
+        host = TtsStreamHost(session, options, limits=limits)
     except Exception:
         traceback.print_exc(file=sys.stderr)
         with contextlib.suppress(Exception):

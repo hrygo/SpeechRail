@@ -31,9 +31,11 @@ from speechrail.domain.tts import VoiceProfile, VoiceStoreUnavailableError
 from speechrail.domain.tts_errors import TtsBackendError, from_worker_frame
 from speechrail.domain.tts_request import validate_tts_parameters
 from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
     IncrementalSpeechSession,
     TtsStreamError,
     TtsStreamEvent,
+    TtsStreamLimits,
     TtsStreamOptions,
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
@@ -514,6 +516,8 @@ class Qwen3TtsWorker:
     async def open_incremental_stream(
         self,
         options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
     ) -> IncrementalSpeechSession:
         """Open one append-only utterance while holding its worker and voice lease.
 
@@ -581,6 +585,7 @@ class Qwen3TtsWorker:
                 stale_request_ids = self._remember_stream_id(options.request_id)
                 inner = await synthesizer.open_stream(
                     options,
+                    limits=limits,
                     start_fields=start_fields,
                     stale_request_ids=stale_request_ids,
                 )
@@ -1027,6 +1032,8 @@ class Qwen3TtsCapabilityRouter:
     async def open_incremental_stream(
         self,
         options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
     ) -> IncrementalSpeechSession:
         """Route one incremental utterance to the lane that owns its voice."""
 
@@ -1034,7 +1041,7 @@ class Qwen3TtsCapabilityRouter:
             _, worker = self._require_runtime_worker(options.voice)
         except RuntimeError as exc:
             raise TtsStreamError("tts_streaming_unsupported", str(exc)) from None
-        return await worker.open_incremental_stream(options)
+        return await worker.open_incremental_stream(options, limits=limits)
 
     def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
         """Consume timing metadata from whichever worker served the response."""

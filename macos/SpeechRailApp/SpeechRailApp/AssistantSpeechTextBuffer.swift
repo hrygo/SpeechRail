@@ -1,5 +1,80 @@
 import Foundation
 
+/// 决定"这一轮什么时候第一次开嗓，以及开嗓前后的**原始**文本怎么交给朗读"。
+///
+/// 以前的做法是"`delta` 去掉空白后非空才 `offer`"。那会把纯空白的增量直接丢掉，
+/// 于是 LLM 分成 `"你好"`、`" "`、`"世界"` 三段到达时，朗读输入粘成 `"你好世界"`，
+/// 词边界消失；反过来整轮只有空白时，判断逻辑散在调用方，无法证明它不会开嗓。
+///
+/// 规则：
+///
+///   1. 只有**累计**文本里出现非空白字符，才允许第一次 start；
+///   2. start 之前把原始增量攒进有界缓冲，成功 start 后**一次**交出去并清空；
+///   3. start 之后每个增量原样 offer，空格和换行都照原样传给清洗层；
+///   4. 缓冲超限按整轮上限明确失败，不另开无界缓冲。
+struct AssistantSpeechStartGate {
+    struct Configuration {
+        /// 开嗓前原始缓冲的上限（Unicode scalar）。复用整轮上限。
+        var maximumPendingScalars = AssistantSpeechTextBuffer.Configuration.default.maximumTotalScalars
+
+        static let `default` = Configuration()
+    }
+
+    enum Offer: Equatable {
+        /// 还不到开嗓的时候：这一段已被原样缓冲。
+        case buffered
+        /// 该开嗓了，`pending` 是开嗓前缓冲的原始文本。
+        case start(pending: String)
+        /// 已经开嗓：这一段原样交出去（含空格与换行）。
+        case speak(String)
+    }
+
+    enum Limit: Equatable {
+        case pending(offered: Int, limit: Int)
+    }
+
+    private let configuration: Configuration
+    private var pending: [Unicode.Scalar] = []
+    private var startDisabled = false
+
+    private(set) var isStarted = false
+    private(set) var lastLimit: Limit?
+
+    init(configuration: Configuration = .default) {
+        self.configuration = configuration
+    }
+
+    /// 开嗓前缓冲里还压着的原始 scalar 数。
+    var pendingScalars: Int { pending.count }
+
+    /// 第一次 start 失败：这一轮不再自动朗读，但正文与落库照常继续。
+    mutating func disableStarting() {
+        isStarted = false
+        startDisabled = true
+        pending.removeAll()
+    }
+
+    mutating func offer(_ delta: String) -> Offer {
+        if isStarted {
+            return .speak(delta)
+        }
+        guard !startDisabled else { return .buffered }
+        pending.append(contentsOf: delta.unicodeScalars)
+        guard pending.count <= configuration.maximumPendingScalars else {
+            lastLimit = .pending(offered: pending.count, limit: configuration.maximumPendingScalars)
+            startDisabled = true
+            pending.removeAll()
+            return .buffered
+        }
+        // 只有出现非空白字符才开嗓：整轮空白不会白开一次 TTS。
+        guard pending.contains(where: { !$0.properties.isWhitespace }) else { return .buffered }
+        let text = String(String.UnicodeScalarView(pending))
+        pending.removeAll()
+        isStarted = true
+        return .start(pending: text)
+    }
+}
+
 /// 把 LLM 的流式增量文本切成**已经可以安全朗读**的前缀。
 ///
 /// 它只解决一件事：同一轮 utterance 里，"什么时候把这段文本交给模型"。

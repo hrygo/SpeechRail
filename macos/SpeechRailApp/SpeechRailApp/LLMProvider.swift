@@ -666,6 +666,11 @@ public enum LLMError: LocalizedError, Equatable {
     case outputTruncated
     case invalidStructuredResponse
     case refused(String)
+    /// 流在拿到明确的成功终态之前就结束了（EOF 或 `[DONE]`）。
+    /// 已经收到的正文由调用方保留，所以这不是"什么都没拿到"。
+    case streamEndedEarly
+    /// 流里出现无法解析或无法分类的事件：不能静默跳过直到"看起来成功"。
+    case malformedStreamEvent
     case cancelled
 
     public var errorDescription: String? {
@@ -683,8 +688,189 @@ public enum LLMError: LocalizedError, Equatable {
         case .outputTruncated: "整理结果可能未完成，请缩小处理范围后重试。"
         case .invalidStructuredResponse: "模型返回的整理结果无法使用，请重试。"
         case .refused(let reason): "模型没有回答：\(reason)"
+        case .streamEndedEarly: "回答提前结束，已保留收到的内容。"
+        case .malformedStreamEvent: "服务返回了无法解析的回答流。"
         case .cancelled: "已取消。"
         }
+    }
+}
+
+/// 一轮 Responses 流的终态判定。
+///
+/// 只有 `response.completed` 算成功；`[DONE]` 与 EOF 都只是**传输**结束。
+/// `responseID` 由第一个带身份的事件定下来，之后别的响应的终态一律不认。
+struct LLMResponseStreamState {
+    private enum Terminal {
+        case awaiting
+        case completed
+        case failed
+    }
+
+    private(set) var responseID: String?
+    private var terminal: Terminal = .awaiting
+
+    var isFinished: Bool { terminal != .awaiting }
+
+    /// 第一个带身份的事件定下这一轮是谁；后来的身份不改写它。
+    mutating func observe(_ id: String?) {
+        guard let id, !id.isEmpty, responseID == nil else { return }
+        responseID = id
+    }
+
+    /// 事件是否属于本轮。事件没带身份时按本轮处理。
+    func matches(_ id: String?) -> Bool {
+        guard let id, let responseID else { return true }
+        return id == responseID
+    }
+
+    mutating func complete() { terminal = .completed }
+    mutating func fail() { terminal = .failed }
+}
+
+/// 逐字节把 Responses 的 SSE 流解码成事件。
+///
+/// 为什么不用 `URLSession.AsyncBytes.lines`：它会丢掉空行，于是拿不到 SSE 的事件边界，
+/// 一个由多行 `data:` 拼成的事件会被读成几个坏事件。
+struct ResponsesEventStreamDecoder {
+    private var lineBytes: [UInt8] = []
+    private var dataLines: [String] = []
+    private(set) var state = LLMResponseStreamState()
+    private(set) var usage: [String: Any]?
+    private(set) var byteCount = 0
+
+    /// 收到一个字节。返回 `true` 表示本轮已收束，调用方应停止读取。
+    mutating func consume(
+        _ byte: UInt8,
+        onDelta: @Sendable (String) -> Void
+    ) throws -> Bool {
+        byteCount += 1
+        guard byte != 0x0D else { return false }  // CRLF
+        guard byte == 0x0A else {
+            lineBytes.append(byte)
+            return false
+        }
+        let line = String(decoding: lineBytes, as: UTF8.self)
+        lineBytes.removeAll(keepingCapacity: true)
+        return try handle(line: line, onDelta: onDelta)
+    }
+
+    /// 流结束（EOF）：把没落下的行与最后一个事件一并结算。
+    mutating func finish(onDelta: @Sendable (String) -> Void) throws {
+        if !lineBytes.isEmpty {
+            let line = String(decoding: lineBytes, as: UTF8.self)
+            lineBytes.removeAll(keepingCapacity: true)
+            if try handle(line: line, onDelta: onDelta) { return }
+        }
+        guard !state.isFinished, !dataLines.isEmpty else { return }
+        for object in try Self.parseEvent(dataLines) {
+            if try apply(object, onDelta: onDelta) { return }
+        }
+        dataLines.removeAll()
+    }
+
+    private mutating func handle(
+        line: String,
+        onDelta: @Sendable (String) -> Void
+    ) throws -> Bool {
+        if line.isEmpty {
+            guard !state.isFinished else { return true }
+            for object in try Self.parseEvent(dataLines) {
+                if try apply(object, onDelta: onDelta) { return true }
+            }
+            dataLines.removeAll()
+            return state.isFinished
+        }
+        // 注释（`: keep-alive`）与 `event:` / `id:` / `retry:` 不影响本任务。
+        guard line.hasPrefix("data:") else { return false }
+        dataLines.append(line.dropFirst(5).trimmingCharacters(in: .whitespaces))
+        return false
+    }
+
+    private mutating func apply(
+        _ object: [String: Any],
+        onDelta: @Sendable (String) -> Void
+    ) throws -> Bool {
+        var state = self.state
+        var usage = self.usage
+        let finished = try Self.handle(object, state: &state, usage: &usage, onDelta: onDelta)
+        self.state = state
+        self.usage = usage
+        return finished
+    }
+
+    /// 把一个 SSE 事件的若干 `data:` 行解成事件对象。
+    ///
+    /// 规范允许一个事件由多行 `data:` 拼成，所以先按事件边界整体解析；
+    /// 整体解析不了再退回逐行，兼容不发布空行的提供方。两种方式都失败时
+    /// 明确报错，不把它静默跳过——否则会一路"跳过"到假成功。
+    static func parseEvent(_ dataLines: [String]) throws -> [[String: Any]] {
+        guard !dataLines.isEmpty else { return [] }
+        let payload = dataLines.joined(separator: "\n")
+        if payload == "[DONE]" { return [] }
+        if let object = decode(payload) { return [object] }
+        var objects: [[String: Any]] = []
+        for line in dataLines where line != "[DONE]" {
+            guard let object = decode(line) else {
+                throw LLMError.malformedStreamEvent
+            }
+            objects.append(object)
+        }
+        return objects
+    }
+
+    private static func decode(_ payload: String) -> [String: Any]? {
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    /// 处理一个事件。返回 `true` 表示本轮已收束，调用方应停止读取。
+    static func handle(
+        _ object: [String: Any],
+        state: inout LLMResponseStreamState,
+        usage: inout [String: Any]?,
+        onDelta: @Sendable (String) -> Void
+    ) throws -> Bool {
+        guard let type = object["type"] as? String else {
+            throw LLMError.malformedStreamEvent
+        }
+        let response = object["response"] as? [String: Any]
+        let eventID = (object["response_id"] as? String) ?? (response?["id"] as? String)
+        state.observe(eventID)
+        // 别的响应的终态不是本轮的终态：不认，也不因此报错。
+        guard state.matches(eventID) else { return false }
+        usage = (object["usage"] as? [String: Any]) ?? (response?["usage"] as? [String: Any])
+        switch type {
+        case "response.output_text.delta", "response.refusal.delta":
+            // refusal 的正文也要朗读，但它本身不是成功终态。
+            if let delta = object["delta"] as? String { onDelta(delta) }
+        case "response.completed":
+            state.complete()
+            return true
+        case "response.failed", "response.incomplete":
+            state.fail()
+            throw LLMError.refused(Self.failureReason(from: object) ?? "生成中断")
+        case "error":
+            let message = (object["error"] as? [String: Any])?["message"] as? String ?? "服务返回错误"
+            throw LLMError.transport(message)
+        default:
+            // 进度、心跳等不影响正文的事件。
+            break
+        }
+        return false
+    }
+
+    private static func failureReason(from object: [String: Any]) -> String? {
+        guard let response = object["response"] as? [String: Any] else { return nil }
+        if let error = response["error"] as? [String: Any], let message = error["message"] as? String {
+            return message
+        }
+        if let details = response["incomplete_details"] as? [String: Any],
+           let reason = details["reason"] as? String {
+            return reason
+        }
+        return response["status"] as? String
     }
 }
 
@@ -1440,33 +1626,15 @@ public actor LLMProvider {
             throw failure
         }
         do {
-            for try await line in bytes.lines {
-                streamResponseBytes += line.utf8.count + 1
-                guard line.hasPrefix("data:") else { continue }
-                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                if payload == "[DONE]" { break }
-                guard
-                    let data = payload.data(using: .utf8),
-                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let type = object["type"] as? String
-                else { continue }
-                streamUsage = (object["usage"] as? [String: Any])
-                    ?? (object["response"] as? [String: Any])?["usage"] as? [String: Any]
-                switch type {
-                case "response.output_text.delta":
-                    if let delta = object["delta"] as? String { onDelta(delta) }
-                case "response.refusal.delta":
-                    if let delta = object["delta"] as? String { onDelta(delta) }
-                case "response.failed", "response.incomplete":
-                    let reason = Self.failureReason(from: object) ?? "生成中断"
-                    throw LLMError.refused(reason)
-                case "error":
-                    let message = (object["error"] as? [String: Any])?["message"] as? String ?? "服务返回错误"
-                    throw LLMError.transport(message)
-                default:
-                    continue
-                }
+            var decoder = ResponsesEventStreamDecoder()
+            for try await byte in bytes {
+                if try decoder.consume(byte, onDelta: onDelta) { break }
             }
+            try decoder.finish(onDelta: onDelta)
+            // `[DONE]` 与 EOF 都只是传输结束，不是模型的成功终态。
+            guard decoder.state.isFinished else { throw LLMError.streamEndedEarly }
+            streamResponseBytes = decoder.byteCount
+            streamUsage = decoder.usage
             streamResponseCapture.recordStreaming(
                 response: streamResponse,
                 responseBytes: streamResponseBytes,
