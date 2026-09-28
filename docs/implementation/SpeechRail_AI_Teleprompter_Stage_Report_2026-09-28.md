@@ -18,7 +18,7 @@
 | #109 | 语义风险审阅 | 完成 | 主体—数值、条件、否定、比较、确定程度五类风险进入生产审阅 |
 | #110 | 同版本句内进度与安全恢复 | 完成 | `currentSegmentOffset`、纯函数恢复器、锁定文本偏移丢弃 |
 | #111 | 独立有损精简 | **实现完成，界面未走查** | `condense` 操作、锁定项、删除转 `skip` 与 `contentRemoved` 审阅、语速校准来源与未校准标注；有损确认入口、删减原文展示、**精简前的必讲段落标记**均已交付（§2 第 20、21 条）。方案 §5.7 的四步流程至此完整，**但全部界面只通过编译，未做视觉走查** |
-| #112 | language／keywords 接线 | **部分完成（语言侧产品内不可设）** | Realtime `transcription.keywords` 真正下发；**`transcription.language` 的生产写入者不存在**，`preferredSpeechLanguage` 只有测试赋值（见 §2 第 16 条） |
+| #112 | language／keywords 接线 | **实现完成，界面未走查** | Realtime `transcription.keywords` 真正下发；`transcription.language` 本轮补上生产写入者——语音跟随控制旁的识别语言菜单，持久化并在恢复时按契约清洗（§2 第 22 条） |
 | #113 | 场景预设、列宽与快捷恢复 | 完成（视觉走查未执行） | `TeleprompterStagePreset`、正文列宽与窗口宽度分离、`TeleprompterStageLayoutPolicy`、“回到朗读位置” |
 | #114 | 确定性回放与阶段证据 | 部分完成 | 回放评估器与 runner 已交付；真实时延基线未执行 |
 
@@ -100,18 +100,26 @@
     - **交互落在哪里**：按项目「默认路径只给少量明确动作、进阶操作渐进式披露」的约定，必讲标记收在精简确认 sheet 的 `DisclosureGroup` 里，**默认折叠**——不展开就是两步确认，展开才逐段勾选。默认全部不标记，并在展开区明确写出「未标记任何段落：所有内容都可能被精简列为删减候选」，避免用户以为「没标记＝安全」。
     - **本轮验证到什么程度**：Xcode Debug **BUILD SUCCEEDED**、`swift test` 216 项 / 16 套件、`--test-unit` **TEST SUCCEEDED**。**界面仍未走查**：sheet 的默认高度、Disclosure 展开后的段落列表、滚动与勾选的可访问性都没有实际窗口证据，已并入 §5 第 1 条。
 
+22. **显式识别语言在产品内无法设置（第六轮补齐，见第 16 条）**：第 16 条记录了 `preferredSpeechLanguage` 全仓没有生产写入者，真实连接恒用服务端默认语言。本轮补齐时定了三条约束：
+    - **持久化放在视图层，不放进 session**。`preferredSpeechLanguage` 是被测试直接赋值的普通 `public var`；若把 `UserDefaults` 写进它的 setter，测试每次赋值都会留下持久化副作用。因此 session 保持纯内存，写入与持久化都由视图层负责，与既有的 `aiDataFlowAcknowledgementKey` 同一模式。
+    - **恢复时必须清洗，不能直读**。存进 UserDefaults 的值可能来自旧版本、手工改写或损坏。`restorePreferredSpeechLanguage()` 复用 `TeleprompterRealtimeConfiguration.sanitized`——越界值退回「自动」，而不是把非法语言带进连接。这样「读取设置」和「下发设置」走同一套契约判定，不会出现两套口径。
+    - **进阶项做渐进式披露**。识别语言对多数脚本是「自动」就对了，因此不占主路径，而是收成语音跟随控制旁一个带标签的菜单（标签随当前值变化，如「识别语言：自动」）。标签本身就是状态，用户不必点开就知道现在是自动还是指定。
+    - **一条防呆回归**：菜单里列出的每个语言都必须能通过契约清洗。否则会出现「点了没反应、也不报错」的选项——用户以为设置失败或服务有问题。`offeredSpeechLanguagesAreAllContractValid` 遍历选项列表逐个断言；变异验证塞入一个越界项后该测试变红，生产文件已还原。配套的 `storedSpeechLanguageIsSanitisedBeforeUse` 钉住越界、空串与带空白三种存储值。
+    - **本轮验证到什么程度**：Xcode Debug **BUILD SUCCEEDED**、`swift test` 218 项 / 16 套件、`--test-unit` **TEST SUCCEEDED**。**界面未走查**：菜单的呈现、标签长度、帮助文本在窄窗下的表现都没有窗口证据，已并入 §5 第 1 条。
+    - **诚实边界**：契约只保证 2–24 个字符的合法值会被下发，**不保证所列语言都受当前引擎支持**。服务端不支持时应按既有降级处理，真实识别效果仍属 §3.2 未执行项。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | 216 项 / 16 套件全部通过（2026-09-29 复跑） |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | 218 项 / 16 套件全部通过（2026-09-29 复跑） |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | 11 项通过 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
 | Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
-| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（Swift Testing 216 项 / 16 套件，0 failures），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条。本轮只新增 Swift Testing 用例，XCTest 项数不受影响 |
+| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（Swift Testing 218 项 / 16 套件，0 failures），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条。本轮只新增 Swift Testing 用例，XCTest 项数不受影响 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
 | 回归有效性（变异验证） | 对 `TeleprompterReadingProgressRestorer` 施加两次定向变异 | 见 §2 第 18 条：其中只破坏 nil 分支的那次，**既有 13 条同套件测试全绿、仅新增用例变红** |
@@ -260,7 +268,7 @@
 | #111 | 试读校准复用既有类型与入口；证据来源清晰 | 满足（部分） | 新增 `TeleprompterCalibrationSource`；**语音辅助试读不存在**，只有手动秒表 |
 | #111 | 采用／放弃／编辑／取消均不覆盖原稿 | 满足 | `rollingBackToAnEarlierVersionKeepsEveryScript`、`editingSourceInvalidatesReviewState` |
 | #111 | P-01／P-13～P-18 及候选版本隔离通过生产 seam | 满足 | 台账对应项全通过 |
-| #112 | fake transport 能观察 language／keywords 进入正确字段；其他调用方不变 | **部分满足（契约与 keywords 成立，language 无生产写入者）** | 两个具名回归真实通过，共享契约 `RealtimeContractTypes` 的 transcription payload 也确实写入 `language`；但 `session.preferredSpeechLanguage` 在生产代码中**没有任何写入点**，真实 App 里恒为 `nil`（§2 第 16 条） |
+| #112 | fake transport 能观察 language／keywords 进入正确字段；其他调用方不变 | **满足（界面未走查）** | 契约与 keywords 侧本就成立；本轮补上此前缺失的生产写入者（识别语言菜单 + 持久化 + 恢复时清洗），并加两条防呆回归防止菜单出现「点了没反应」的选项（§2 第 22 条） |
 | #112 | 不支持语言／能力、busy、权限拒绝不阻断手动看稿 | 满足 | `readyz diagnostics do not override a valid realtime capability binding`、`manual open is readable without microphone, transport, or model work` |
 | #112 | 主动语音试读显示真实链路状态，不以输入电平冒充定位成功 | 边界 | 设备失败归因已修（`an input device that disappears fails closed and keeps manual reading`）；**语音辅助试读本身不存在**，见 §5 第 7 条 |
 | #112 | 设备变化、延迟连接、停止失败、重试与旧 generation 回归 | 满足 | `manual takeover during a delayed connect closes the late client`、`stop failure remains fail-closed until an explicit stop retry`、`repeated close is idempotent` |
@@ -279,13 +287,13 @@
 | #114 | 真实素材、音频、完整转写、hash、私有路径不进仓库 | 满足 | `reportCarriesOnlyAggregatesAndNoScriptText`、`observationsCorrelateCallAndRedactedFailure` |
 | #114 | 集成报告区分代码／局部探针／生产 seam／真实声音／桌面观感 | 满足 | 本报告 §3.1／§3.2 分层列出，§3.2 明确未执行项 |
 
-**对照小结**：11 个 Issue 正文共 **61** 条验收项（104:5、105:6、106:6、107:5、108:6、109:5、110:5、111:5、112:6、113:5、114:7），逐条已落表。**满足 52、边界 6、未量化 1、部分满足 2。**
+**对照小结**：11 个 Issue 正文共 **61** 条验收项（104:5、105:6、106:6、107:5、108:6、109:5、110:5、111:5、112:6、113:5、114:7），逐条已落表。**满足 53、边界 6、未量化 1、部分满足 1。**
 
 - 6 条边界：#105 真实语速下「滞后／停滞／人工纠正」三者对比、#106 worker 是否真实产出稳定前缀、#107 与 #113 的实际滚动观感（U-10 未执行）、#110 术语别名通道（按方案要求保持关闭）、#112 主动语音试读（当前不存在）。每条都在「边界」列写明了缺什么。
 - 1 条未量化：#104 要求「报告误报情况」。只逐例证明了无害改写不被阻塞（P-01），**没有汇总误报率**，不得据此推断低误报。
-- 2 条部分满足：#111 一条——试读校准要求「手动计时、语音辅助试读」证据来源都清晰，手动计时已实现并带来源（§2 第 10 条），**语音辅助试读不存在**，未为对齐措辞虚构（表中记作「满足（部分）」）。#112 一条——「language／keywords 进入正确字段」中 keywords 成立，**language 侧无生产写入者**，真实连接恒用服务端默认（§2 第 16 条）。
+- 1 条部分满足：#111——试读校准要求「手动计时、语音辅助试读」证据来源都清晰，手动计时已实现并带来源（§2 第 10 条），**语音辅助试读不存在**，未为对齐措辞虚构（表中记作「满足（部分）」）。
 
-> **「满足」是代码层结论，不是体验结论。** #111 的五条验收项在实现层面现已全部满足，但其中三条依赖本轮新增的界面（精简确认 sheet、必讲标记、删减原文行），它们只通过编译，**呈现效果一次都没看过**。读这份报告时请把「实现满足」与「用户已验证可用」分开。
+> **「满足」是代码层结论，不是体验结论。** 61 条里有 4 条的实现依赖本轮新增的界面（精简确认 sheet、必讲标记、删减原文行、识别语言菜单），它们只通过编译，**呈现效果一次都没看过**。读这份报告时请把「实现满足」与「用户已验证可用」分开。
 
 > 这 4 条有共同形状：**机制正确、具名回归通过，但产品无法到达该状态**。第 17 条记录了针对这一类的系统性排查与误报分类。后续任何「已完成」结论，都应先确认生产路径能产生该状态，而不只是测试能。
 
@@ -314,7 +322,7 @@
 | #105 | 5／6 | 「同时报告正常跟随滞后、错误停滞和人工纠正」目前只有确定性回放口径，**真实语速下的三者对比**仍缺 |
 | #110 | 4／5 | 别名通道是 Issue 标题范围内的能力，`match_phrases` 仍被解码器拒绝；按方案要求须随审阅 UI 交付，不单独放开模型注入 |
 | #111 | 5／5（实现层面） | 唯一未达成的是**语音辅助试读不存在**，只有手动秒表。方案 §5.7 的四步流程（选目标时长 → 标记必讲 → 生成删减候选 → 展示删除清单与保留重点 → 确认）已全部有实现与回归。**但这不等于验收通过**：本轮新增的三处界面只通过编译，呈现效果未走查，须并入 U-10 一次验证（见 §2 第 20、21 条） |
-| #112 | 3／6 | **主动语音试读本身不存在**，无从显示真实链路状态；**验收 1 的 language 半边在产品内不成立**——`preferredSpeechLanguage` 无生产写入者，真实连接恒用服务端默认语言（见 §2 第 16 条）。keywords 半边成立 |
+| #112 | 4／6 | **主动语音试读本身不存在**，无从显示真实链路状态，相关两项随之待办。验收 1 的 language 半边本轮已补齐（§2 第 22 条），keywords 半边此前即成立；**但语言菜单只通过编译，呈现未走查** |
 
 **2026-09-29 追加：5 项保留项已按用户指示全部关闭**
 
@@ -324,12 +332,12 @@
 
 ## 5. 未完成与建议的下一步
 
-1. **UI 视觉验收（U-10）**：`#113` 的显示设置弹层（场景分段控件、列宽滑杆）、最小 500 pt 宽度下的图标化“回到朗读位置”，以及 Reduce Motion 下的舞台滚动，都需要一次逐次授权的 UI 走查。**本轮新增的「按时长精简…」入口与有损确认弹层、删除审阅卡片的「原文：…」行也必须并入同一次走查**——它们只通过了编译，位置、层级与窄窗表现均未验证。策略层已有单测，视觉结论尚未产生。
+1. **UI 视觉验收（U-10）**：`#113` 的显示设置弹层（场景分段控件、列宽滑杆）、最小 500 pt 宽度下的图标化“回到朗读位置”，以及 Reduce Motion 下的舞台滚动，都需要一次逐次授权的 UI 走查。**本轮新增的四处界面必须并入同一次走查**——「按时长精简…」入口、精简确认 sheet（含默认折叠的必讲标记区）、删除审阅卡片的「原文：…」行、以及识别语言菜单。它们只通过了编译，位置、层级、标签长度与窄窗表现均未验证。策略层已有单测，视觉结论尚未产生。
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。
 3. **两项“部分”场景**：R-04 需要真实拔插／蓝牙重连，R-07 需要长时连续运行；两者都无法用 fake 证明，不接受用单测冒充。
 4. **#110 术语别名通道**：`match_phrases` 仍被解码器拒绝。按方案要求别名必须由用户确认并绑定来源范围，该能力依赖审阅界面，应与下一轮审阅 UI 一起交付，不要单独放开模型注入。
 5. **有损精简的实现已齐，但一步都没在窗口里看过（#111，见 §2 第 20、21 条）**：入口、有损确认、删减原文展示与精简前的必讲段落标记都已交付，方案 §5.7 的流程在代码层面完整，锁定映射也补上了此前完全缺失的 session 层回归。**剩下的不是功能，是验证**：确认 sheet 的默认高度、必讲标记的 Disclosure 展开态、段落列表的滚动与勾选可访问性、删减原文行在窄窗下的表现，全部只有编译证据。走查时顺带确认两件容易错的事——必讲标记默认应全部不勾选且文案要说清「未标记＝可能被删」，以及有损确认不得复用保真整理那段写着「不会删」的文案。
-6. **显式语言配置缺设置入口（#112，见 §2 第 16 条）**：契约、连接配置与降级路径都已就绪，`keywords` 也已真正下发；缺的是 `preferredSpeechLanguage` 的生产写入者——持久化键、设置界面与合法性校验。**在此之前真实连接恒用服务端默认语言**，`#112` 的语言侧价值没有兑现。
+6. **识别语言菜单已交付但未走查（#112，见 §2 第 22 条）**：`preferredSpeechLanguage` 现在有生产写入者、持久化与恢复时的契约清洗，`keywords` 此前即已真正下发，#112 的语言侧价值在代码层兑现。剩下的是验证：菜单的呈现、标签在窄窗下的排版、以及帮助文本是否真的被读到。另外要记住契约的边界——它只保证合法值会被下发，**不保证当前引擎支持所列语言**；真实识别效果仍属 §3.2 未执行项。
 7. **语音辅助试读不存在（#111／#112）**：试读 sheet 只有手动秒表。#111 要求「手动计时、语音辅助试读」两类证据来源都清晰，#112 要求主动语音试读显示真实链路状态，两者都因此只有一半。建议与第 4、5 条合并成同一轮审阅／设置 UI 交付。
 8. **Xcode 单测挂死已解决，但成因是测试辅助件而非 App**：见 §2 第 9 条。`TestGate` 现为一次性开启，并附具名回归；`scripts/macos_app_build.sh --configuration Debug --test-unit` 现以 `** TEST SUCCEEDED **`、`test-unit: passed`、exit 0 结束。留在台账里是因为它给出一条通用教训：**挂死先二分到具体用例再下机制结论**，否则很容易把测试缺陷误判成 App 生命周期问题并据此改动生产语义。
 9. **pbxproj 注册必须有 Xcode 侧证据**：本轮已证明 `plutil -lint` 与 SwiftPM 都不足以发现“文件挂错组”这类错误；后续任何新增源码都至少要跑一次包装脚本的 Debug 编译，测试文件还要跑一次 `--test-unit` 构建阶段。
