@@ -293,6 +293,42 @@ struct TeleprompterPreparationPipelineTests {
         #expect(block.reviewIssues.contains(.comparisonChanged))
     }
 
+    /// 否定词丢失（「不得」变成「会」）不改任何数字，硬门禁必须放行到语义审阅，
+    /// 并把这一条单独标成待审阅——它是四类限定语变化里唯一会翻转含义方向的。
+    @Test func negationLossBecomesUnresolvedReview() async throws {
+        let fixture = try makeFixture(
+            text: "本功能不得自动上传观众的原始录音。"
+        )
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "本功能会自动上传观众的原始录音。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.fallbackBlockCount == 0, "数值未变，硬门禁应放行到语义审阅")
+        #expect(result.status == .reviewRequired, "否定词被删必须进入待审阅")
+        let block = try #require(result.draft.blocks.first)
+        #expect(block.disposition == .unresolved)
+        #expect(block.reviewIssues.contains(.negationChanged))
+    }
+
     @Test func subjectValueSwapIsRejectedByHardGateAndKeepsSource() async throws {
         let fixture = try makeFixture(
             text: "方案 A 的成本是 50 元，方案 B 的成本是 80 元。"

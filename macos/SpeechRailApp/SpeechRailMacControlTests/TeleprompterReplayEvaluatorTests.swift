@@ -353,4 +353,41 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(report.metrics.trackingLatencyP50Milliseconds == nil, "没有确认就没有跟随延迟")
         #expect(report.caveats.contains { $0.contains("错误停顿") })
     }
+
+    /// 这两条 caveat 是「不把没测到的说成没问题」的最后一道闸：
+    /// 未标注的事件不计入分母，恢复超时的样本按失败计入，两者都必须显式说出来，
+    /// 否则报告里的 0 会被读成「安全」而不是「没测」。
+    @Test func unlabelledEventsAndReanchorTimeoutsBothSurfaceAsCaveats() throws {
+        let unlabelled = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。", at: 1_400, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0)
+                ]
+            )
+        )
+        #expect(unlabelled.metrics.unlabelledEventCount == 1)
+        #expect(unlabelled.caveats.contains { $0.contains("没有人工标注") })
+
+        // 脱稿后超过恢复时限才确认：计入失败与恢复超时，而不是被悄悄丢掉。
+        let stalled = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("这里即兴说一段。", at: 6_000, item: "item-2"),
+                    completed("欢迎来到今天的直播。", at: 12_000, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 0)
+                ]
+            )
+        )
+        #expect(stalled.metrics.reanchorTimeoutCount >= 1)
+        #expect(stalled.caveats.contains { $0.contains("回稿恢复超时") })
+    }
 }

@@ -44,6 +44,30 @@ struct TeleprompterPreparationDomainTests {
         #expect(position == .init(segmentIndex: 0, utf16Offset: 0), "旧偏移不能套进新文本")
     }
 
+    /// 记录进度时那个版本已经被删掉（回退、精简或清理）的情况：无从证明
+    /// 偏移仍然有效，必须退回段首，而不是把偏移盲目采信到别的段落上。
+    @Test func readingProgressFallsBackToSegmentStartWhenTheRecordedVersionIsGone() {
+        let active = makeVersion(id: "v2", segmentTexts: ["第一段内容。", "第二段内容。"])
+        let saved = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v-deleted",
+            currentSegmentID: active.segments[1].id,
+            currentSegmentOffset: 4,
+            mode: .manual
+        )
+
+        let position = TeleprompterReadingProgressRestorer.position(
+            saved: saved,
+            versions: [active],
+            activeVersion: active
+        )
+
+        #expect(
+            position == .init(segmentIndex: 1, utf16Offset: 0),
+            "记录版本已不存在时不得采信旧偏移"
+        )
+    }
+
     @Test func readingProgressMigratesOffsetWhenTheSegmentTextIsIdentical() {
         let recorded = makeVersion(id: "v1", segmentTexts: ["第一段内容。"])
         let active = makeVersion(id: "v2", segmentTexts: ["第一段内容。", "新增的一段。"])

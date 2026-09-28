@@ -136,6 +136,19 @@ def test_media_origin_is_established_after_session_configuration() -> None:
     assert configured_at == 12.0
 
 
+def test_media_origin_refuses_to_start_before_the_configuration_ack() -> None:
+    """时钟回退必须硬失败，而不是让媒体起点早于 ACK 算出负延迟。"""
+
+    backwards = _Clock([11.5])
+
+    try:
+        _media_origin_after_configuration(backwards, 10.0, 12.0)
+    except RuntimeError as error:
+        assert "monotonic clock moved backwards" in str(error)
+    else:
+        raise AssertionError("时钟回退时必须拒绝建立媒体起点")
+
+
 def test_commit_terminal_requires_the_matching_event_id() -> None:
     rollover = {
         "type": "conversation.item.input_audio_transcription.completed",
@@ -233,10 +246,15 @@ def test_receive_loop_fails_instead_of_growing_an_unbounded_queue() -> None:
             _Clock([1.0, 2.0]),
             1,
         ),
+        # 必须守护：一旦有界投递退化成阻塞投递，这个线程会永久卡在 put 上，
+        # 非守护线程会让整个 pytest 进程无法退出——本项目已经吃过一次测试挂死
+        # 拖垮闸门的亏（阶段报告 §2 第 9 条）。守护化后，退化只会让断言失败。
+        daemon=True,
     )
     thread.start()
-    thread.join(timeout=1)
+    thread.join(timeout=5)
 
+    assert not thread.is_alive(), "接收循环必须在有界投递失败后退出"
     assert isinstance(errors[0], RealtimeQueueOverflowError)
     assert events.get_nowait() == (0.0, {"type": "existing"})
 

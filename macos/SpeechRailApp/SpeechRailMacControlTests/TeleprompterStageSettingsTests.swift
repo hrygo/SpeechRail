@@ -256,6 +256,26 @@ struct TeleprompterStageSettingsTests {
         #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 1, totalCount: 10) == [4])
     }
 
+    /// 行数在稿尾与稿首都必须留空，越界那个位置不能显示成别的段落；
+    /// 请求的行数还要被夹进设计区间，0 行与超大请求都落到同一组槽位。
+    ///
+    /// 注意这里断言的是**具体槽位数组**而不是「等于某个入参的结果」：
+    /// `visibleLineSlots` 的 `switch` 对任何 ≥3 的入参都走 `default` 返回 3 槽，
+    /// 所以 `stageMaximumVisibleLineCount` 这个上限从本函数**不可观测**，
+    /// 拿「99 的结果等于 3 的结果」去断言等于什么都没断言，见 §2 第 29 条。
+    @Test("two-row mode still leaves the trailing slot empty and row counts stay clamped")
+    func displayLineSlotsClampRowsAndEmptyTheTrailingSlot() {
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 9, visibleCount: 2, totalCount: 10) == [9, nil])
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 0, visibleCount: 2, totalCount: 10) == [0, 1])
+
+        let single = [4]
+        let triple = [3, 4, 5]
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 0, totalCount: 10) == single)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 99, totalCount: 10) == triple)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: -3, totalCount: 10) == single)
+        #expect(TeleprompterStagePresentation.visibleLineSlots(currentIndex: 4, visibleCount: 3, totalCount: 0) == [])
+    }
+
     @Test("stage preferred height grows with configured context and stays bounded")
     func preferredHeightTracksVisibleRows() {
         let one = TeleprompterStageGeometryPolicy.preferredContentHeight(
@@ -714,6 +734,44 @@ struct TeleprompterStageSettingsTests {
             #expect(line?.utf16Start ?? Int.max <= position.utf16Offset)
             #expect(line?.utf16End ?? Int.min >= position.utf16Offset)
         }
+    }
+
+    /// 换字号或列宽会重排行，旧的偏移可能落到新布局的段尾之外。此时必须
+    /// 落到该段最后一行，而不是返回 nil 把阅读位置整个丢掉。
+    @Test("an offset past the end of a segment still resolves to that segment's last row")
+    @MainActor
+    func displayLineIndexClampsOffsetsPastTheSegmentEnd() throws {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let source = "换行之后偏移会落到新布局的段尾之外，必须落到最后一行。"
+        let segment = TeleprompterSegment(
+            id: "segment-0",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+        let lines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: tokens.stageScriptPointSize * tokens.stageCameraFontScale,
+            availableWidth: tokens.stageCameraContentWidth
+        )
+        let lastRow = try #require(lines.last)
+
+        let beyond = TeleprompterAligner.Position(
+            segmentIndex: 0,
+            utf16Offset: source.utf16.count + 500
+        )
+        #expect(
+            TeleprompterStagePresentation.displayLineIndex(for: beyond, lines: lines)
+                == lines.indices.last,
+            "超出段尾的偏移必须落到该段最后一行"
+        )
+        #expect(
+            TeleprompterStagePresentation.positionByMovingLine(
+                by: 1, from: beyond, lines: lines
+            ) == nil,
+            "已经在最后一行时向下移动必须原地不动"
+        )
+        #expect(lastRow.utf16End <= source.utf16.count)
     }
 
     @Test("the quick recovery action appears only after leaving the reading position")

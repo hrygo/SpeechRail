@@ -139,21 +139,34 @@
     - 因此只补了一条**不冒充上限证明**的回归 `longRunsStayCorrectAcrossHundredsOfItems`：连打 300 个 item，断言末条证据仍能推进、且长跑之后重复 event id 仍被抑制。它固定的是「长跑后行为不漂移」，**不是**「列表被截断到 128」——测试名与注释都按后者不可证伪来写，避免下一轮有人以为这里有覆盖。
     - R-07 仍是**部分满足**：本条不改变该结论，真实长时连续运行仍需授权（§5 第 3 条）。
 
+29. **P-08 的三个子项里「否定」从未被测过（第九轮审计 P 段）**：把 `negationMarkers` 整个清空，**223 项测试全绿**。`TeleprompterReviewIssue.negationChanged` 在全仓**只出现在生产代码里，没有任何测试断言它**——而台账 P-08 写的是「条件／否定／确定程度变化」，引用的 `qualifierLossInRewriteBecomesUnresolvedReview` 只断言了 `.conditionRemoved` 与 `.comparisonChanged`，`semanticReviewDetectsSubjectValueAndQualifierChanges` 只断言了条件与确定程度。**四类限定语里，恰恰是唯一会翻转含义方向的那类没有证据**。探针确认生产行为正确（「不得」→「会」等四例都触发）。补 `negationLossBecomesUnresolvedReview`，从 pipeline 端到端断言：数值未变时硬门禁放行、块进入 `.unresolved`、issue 含 `.negationChanged`。
+
+30. **「精简／保真权限分离」在解码层没有守卫（P-16）**：`omit` 必须空文本、`.review` 不得同时声明 `nonspokenContent`——这两条守卫删掉后 223 项全绿。台账 P-16 引的是 `fidelityOperationsStillRejectOmissionsAsUnresolved` 与 `condenseReportsOmittedContentAsSkippedAndReviewable`，两者都验证**操作层**的权限分离（保真操作不许删内容），不经过 `TeleprompterRewriteDecoder` 的 mode 分支。补 `rewriteRejectsOmitWithTextAndReviewClaimingNonspokenContent`。
+
+31. **M／U 段四处缺口（同一轮）**：`TeleprompterReadingProgressRestorer` 在**记录版本已被删掉**时退回段首这一支无覆盖（已有三条只覆盖「同版本」「文本变了」「偏移越界」）；`visibleLineSlots` 的**两行模式在稿尾**不留空无覆盖（已有用例只测了两行模式的**中段**）；`displayLineIndex` 在偏移**超出段尾**时落到该段最后一行无覆盖；`listDocuments` 的排序方向无覆盖，但**台账未声明这一条**，只记录不补断言。补前三条：`readingProgressFallsBackToSegmentStartWhenTheRecordedVersionIsGone`、`displayLineSlotsClampRowsAndEmptyTheTrailingSlot`、`displayLineIndexClampsOffsetsPastTheSegmentEnd`，均经变异验证。
+    - **一处必须写清的界限**：`visibleLineSlots` 内部的**上限**夹取（`stageMaximumVisibleLineCount`）**不可观测**——`switch` 对任何 ≥3 的入参都走 `default` 返回 3 槽，删掉上限没有任何可观察差异。因此新回归断言的是**具体槽位数组**（`[9, nil]`、`[3,4,5]`、`[4]`），**不是**「99 的结果等于 3 的结果」这种同义反复的写法；后者在第一次写时就错误地存活了，改正后才杀掉真正的变异。
+
+32. **T-06 的回归靠挂死来发现缺陷，本轮修掉了这个隐患（真缺陷，非证据问题）**：`test_receive_loop_fails_instead_of_growing_an_unbounded_queue` 用**非守护线程**跑 `_receive_loop`。把有界投递改成阻塞投递后，线程永久卡在 `put` 上——断言确实会失败，但**非守护线程让整个 pytest 进程无法退出**。实测：变异后跑满 9 分钟仍未结束，只能中断。改为守护线程并补 `assert not thread.is_alive()` 后，同一变异从「挂死 9 分钟」变成 **0.4 秒内正常失败**，整批 T 段变异 7.6 秒跑完。**这与第 9 条记录的 Xcode 测试闸门挂死是同一类风险**：一个会挂死的测试比一个缺失的测试更难查，因为它卡住的是整条流水线而不是给出红灯。
+
+33. **变异探针第三次栽在「工具没真正跑起来」上（同一轮，最值得记的一条）**：跑 T 段时六个变异**全部报 KILLED**，但整批只用了 0.007 秒。复核发现当前解释器**根本没装 pytest**，每次 `python3 -m pytest` 都以「module not found」非零退出——被我的判据读成「测试失败」。换成主检出的 venv 后又撞上第二层：单文件运行必然触发 `--cov-fail-under=80` 而非零退出，同样会被读成「被杀掉」。两层都修好并加**基线自检**（不改代码时必须 exit 0，否则拒绝解读任何变异结果）后才得到可信结论。
+    - **教训比第 27 条更通用**：第 27 条讲的是「变异本身写错」，这条讲的是「**测量工具本身没运行**」。两者都会产出看似干净、实则全错的结论。探针必须先自证：基线 exit 0、一次已知应当 KILLED 的变异确实被杀。**任何变异审计的结论，在没有基线自检之前都不该被采信。**
+    - **顺带的可复现性问题**：worktree 的 `.venv` 没装 `dev` extra，而项目把 pytest 放在 `[project.optional-dependencies].dev` 而非 `dependency-groups`。阶段报告 §3.1 记的 `pytest tests/…` 在这个 worktree 里**开箱即用是不成立的**，实际依赖主检出的 venv。这条留给承接团队处理（见 §5 第 10 条）。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **221 项 / 16 套件** + XCTest **389 项**全部通过（2026-09-29 复跑；本轮新增 3 条 Swift Testing、2 条 XCTest） |
-| 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | 11 项通过 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **227 项 / 16 套件** + XCTest **389 项**全部通过（2026-09-29 复跑；两轮审计共新增 8 条 Swift Testing、2 条 XCTest） |
+| 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
 | Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**（2026-09-29 复跑）；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
 | Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
-| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 第 18 条：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。第 24–28 条：本轮**有效变异 28 次**——跟随控制器 18、`RealtimeASRClient` 事件闸门 6、sequence validator 4，覆盖 F-01/02/04/07/08/10/11/12/14/17/19/20/21 与 R-07。结果 **17 杀 / 11 存活**；另有 2 次锚点写错未生效、8 次因探针缺陷作废（见第 27 条），均不计入。**11 次存活逐个查因**：4 次靠补回归转杀掉，7 次判为纵深防御的外层或生产不可达（§2 第 19、24、25、28 条）。新增 5 条回归，其中 **4 条经变异验证**（删掉对应门禁必须变红），第 5 条（`longRunsStayCorrectAcrossHundredsOfItems`）经变异验证后确认**钉不住内存上限**，因此只声称它固定长跑后行为不漂移 |
+| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |
 
 ### 3.2 未执行（需要逐次授权）
 
@@ -183,7 +196,7 @@
 | P-05 百分比与百分点 | 通过 | `mapDecoderRejectsChangedUnitAndUnicodeNumber`、`itnVariantsShareTheSameScriptPosition` |
 | P-06 重复出现不被去重掩盖 | 通过 | `protectedLiteralExtractorPreservesOccurrencesAndUnicodeBoundaries` |
 | P-07 A／B 价格互换 | 通过 | `subjectValueSwapIsRejectedByHardGateAndKeepsSource`、`semanticReviewDetectsSubjectValueAndQualifierChanges` |
-| P-08 条件／否定／确定程度变化 | 通过 | `qualifierLossInRewriteBecomesUnresolvedReview`、`semanticReviewMapsRisksIntoExistingReviewIssues` |
+| P-08 条件／否定／确定程度变化 | 通过 | 条件与比较级 `qualifierLossInRewriteBecomesUnresolvedReview`、确定程度与主体-数值 `semanticReviewDetectsSubjectValueAndQualifierChanges`／`semanticReviewMapsRisksIntoExistingReviewIssues`（四项均经变异验证）、**否定 `negationLossBecomesUnresolvedReview`**（本轮补齐）。此前四类限定语里唯独「否定」无任何断言，见 §2 第 29 条 |
 | P-09 `0012`／`v1.2.3`／`C++`／URL | 通过 | `identifiersVersionsSymbolsAndURLsBecomeProtectedLiterals`（四类均成为受保护值，且原子偏移能指回原字符） |
 | P-10 中文数字／年份读法 | 通过 | `circleZeroYearSharesTheSamePositionAsItsArabicForm`、`itnVariantsShareTheSameScriptPosition`、`toleratesOmissionAndDigitReading` |
 | P-11 表格转口语行列归属 | 通过 | `tableRowsKeepTheirOwnPricesAcrossRewrite`（忠实改写保序；跨行调价被门禁拒绝并逐字回退） |
@@ -191,7 +204,7 @@
 | P-13 原文注入不当指令 | 通过 | `instructionsInjectedByTheScriptStayInsideTheDataPayload`（注入文本只出现在 JSON 数据里，指令区不含脚本内容，注入文本中的数字同样受保护） |
 | P-14 结构错误与重叠被拒 | 通过 | `groupingRejectsNonRangeFieldsAndIncompleteCoverage`、`rejectsOmissionsOverlapAndUnknownFields`、`rewriteRejectsUnknownAndDuplicateBlockIDs` |
 | P-15 旧请求结果失效 | 通过 | `cancellationInvalidatesLateMapResponse`、`manualTakeoverInvalidatesOldPipeline` |
-| P-16 精简与保真权限分离 | 通过 | `fidelityOperationsStillRejectOmissionsAsUnresolved`、`condenseReportsOmittedContentAsSkippedAndReviewable` |
+| P-16 精简与保真权限分离 | 通过 | 操作层 `fidelityOperationsStillRejectOmissionsAsUnresolved`、`condenseReportsOmittedContentAsSkippedAndReviewable`；解码层 `rewriteRejectsOmitWithTextAndReviewClaimingNonspokenContent`（`omit` 必须空文本、`.review` 不得声明 `nonspoken_content`，本轮补齐并经变异验证），见 §2 第 30 条 |
 | P-17 用户编辑后诊断失效 | 通过 | `editingSourceInvalidatesReviewState`、`latePreparationResultAfterEditIsDiscarded`（编辑后候选、审阅条目与块全部失效；旧 generation 的迟到结果不回填） |
 | P-18 局部窗口失败不冒充成功 | 通过 | `oneWindowFailureKeepsOtherWindowsAndFallsBackOnlyLocally`、`laterWindowFailureDoesNotReturnPartialScript` |
 | F-01 连续朗读不跳读 | 通过 | `bodyAloneMatchesWithProductionDefaults`、`tracksInsideSentenceAndAcrossSegments` |
@@ -220,8 +233,8 @@
 | U-02 未确认候选不采用 | 通过 | `manual open never adopts an unconfirmed AI draft` |
 | U-03 焦点不被截获 | 通过 | `reading shortcuts require reading focus and never steal control keys` |
 | U-04 控制栏显隐几何稳定 | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` |
-| U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries` |
-| U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist` |
+| U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries`、`two-row mode still leaves the trailing slot empty and row counts stay clamped`（两行模式稿尾留空与行数夹取，本轮补齐并经变异验证）。**内部上限夹取不可观测**，见 §2 第 31 条 |
+| U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`an offset past the end of a segment still resolves to that segment's last row`（换字号后偏移落到段尾之外，本轮补齐并经变异验证） |
 | U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证** |
 | U-08 后台更新不抢焦点 | 通过 | `readingShortcutFocusPolicy`（阅读区外焦点、控件焦点、popover 打开时方向键都不被舞台接管）；提词器与 App 均未注册 `NSEvent` 全局／本地监视器，阅读键只作用于舞台窗口 |
 | U-09 显示预设持久化 | 通过 | `stage settings clamp and persist their supported ranges`、`stage visibility preferences default off and persist independently` |
@@ -233,22 +246,22 @@
 | R-05 队列风暴有界降级 | 通过 | `eventStormDegradesInsideBoundedTransport`（600 条事件连续灌入后舞台仍在跟随、无错误、位置在稿内）；传输层 `RealtimeEventStream.Limits.default` 本身有界（256 事件／4 MB），探针侧 `test_receive_loop_fails_instead_of_growing_an_unbounded_queue` |
 | R-06 共享准入不复制模型 | 通过 | 服务侧具名证据：`test_tts_requests_share_one_admitted_worker_slot`、`test_same_tts_resource_key_remains_serialized`、`test_realtime_slot_remains_available_when_batch_lane_is_saturated`、`test_heavy_overlap_serialization_when_budget_constrained`（2026-09-28 重跑 25 项通过） |
 | R-07 长时运行不泄漏 | 部分 | `repeatedStageCyclesReleaseResources`（20 轮开讲→跟随→关舞台，每轮占用归零、连接各关闭一次、采集各停止一次）、`longRunsStayCorrectAcrossHundredsOfItems`（300 个 item 后行为不漂移；**不覆盖内存上限本身**，见 §2 第 28 条）；长时间连续运行未执行 |
-| R-08 日志与导出脱敏 | 通过 | `observationsCorrelateCallAndRedactedFailure`、`mapDecoderReportsRangeGapWithoutExposingSourceText`、`reportCarriesOnlyAggregatesAndNoScriptText` |
+| R-08 日志与导出脱敏 | 通过 | `observationsCorrelateCallAndRedactedFailure`、`mapDecoderReportsRangeGapWithoutExposingSourceText`、`reportCarriesOnlyAggregatesAndNoScriptText`，以及本轮补齐的 `unlabelledEventsAndReanchorTimeoutsBothSurfaceAsCaveats`（**未标注事件**与**回稿恢复超时**两条 caveat 此前无覆盖，而它们正是「不把没测到的说成没问题」的关键），见 §2 第 31 条 |
 | M-01 旧稿缺字段仍可读 | 通过 | `runSummaryWrittenBeforeIntraSegmentProgressStillLoads` |
 | M-02 写入原子性 | 通过 | `sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched` |
 | M-03 损坏保留原文件 | 通过 | `unknownFutureVersionFailsClosedAndCorruptDocumentsDoNotBreakListing` |
-| M-04 块位置映射 | 通过 | `readingProgressRestoresTheExactOffsetInsideTheSameVersion`、`readingProgressFallsBackToSegmentStartWhenTheTextChanged`、`readingProgressMigratesOffsetWhenTheSegmentTextIsIdentical` |
+| M-04 块位置映射 | 通过 | `readingProgressRestoresTheExactOffsetInsideTheSameVersion`、`readingProgressFallsBackToSegmentStartWhenTheTextChanged`、`readingProgressMigratesOffsetWhenTheSegmentTextIsIdentical`、`readingProgressClampsOffsetsAndIgnoresUnknownSegments`、`readingProgressFallsBackToSegmentStartWhenTheRecordedVersionIsGone`（记录版本已删除这一支，本轮补齐并经变异验证），见 §2 第 31 条 |
 | M-05 回退不删稿件 | 通过 | `rollingBackToAnEarlierVersionKeepsEveryScript`（回到旧版本只是切换选中，精简稿与源修订都还在） |
 | T-01 recv 返回后才取时戳 | 通过 | `test_receive_loop_stamps_time_after_recv_returns` |
-| T-02 ACK 后建立媒体原点 | 通过 | `test_media_origin_is_established_after_session_configuration` |
+| T-02 ACK 后建立媒体原点 | 通过 | `test_media_origin_is_established_after_session_configuration`、`test_media_origin_refuses_to_start_before_the_configuration_ack`（时钟回退必须硬失败，本轮补齐并经变异验证） |
 | T-03 终态绑定 commit event_id | 通过 | `test_commit_terminal_requires_the_matching_event_id`、`test_wait_for_terminal_ignores_other_commit_and_surfaces_errors` |
 | T-04 revision 按 utterance 分组 | 通过 | `test_revision_tracker_scopes_regressions_to_one_utterance` |
 | T-05 终态缺失与失败 | 通过 | `test_probe_measurements_record_hypothesis_without_losing_first_partial` |
-| T-06 慢消费者与队列溢出 | 通过 | `test_receive_loop_fails_instead_of_growing_an_unbounded_queue`、`test_cli_reports_queue_overflow_as_input_error` |
+| T-06 慢消费者与队列溢出 | 通过 | `test_receive_loop_fails_instead_of_growing_an_unbounded_queue`、`test_cli_reports_queue_overflow_as_input_error`。**本轮修了该测试自身的挂死隐患**：非守护线程会让有界投递一旦退化成阻塞投递就把整个 pytest 进程卡死，见 §2 第 32 条 |
 
 合计 69 项：通过 65、部分 3、未覆盖 0、未执行 1。
 
-计数说明：2026-09-29 的证据强度审计（§2 第 24–27 条）发现 F-07、F-11、F-12、F-15 四行的**证据指向有误或过宽**，补齐了缺失的回归并更正了引用。这四行**审计前后都是「通过」**——审计改变的是「凭什么说通过」，不是结论本身；合计数不变。新增 4 条回归均为变异验证。
+计数说明：2026-09-29 做了两轮证据强度审计。**第一轮（§2 第 24–28 条，范围 F 段）**查出 F-07、F-11、F-12、F-15 四行证据指向有误或过宽；**第二轮（第 29–33 条，覆盖 P／F／M／U／R／T 全部六段）**又查出 P-08、P-16、M-04、U-05、U-06、R-08、T-02 七行存在**具名回归缺失**（不是引错，是根本没有对应断言），以及 T-06 的**测试自身会挂死**这一隐患。**69 行至此全部用变异探针核过一遍**，共补 12 条回归、修 1 处测试缺陷。审计改变的都是「凭什么说通过」，没有一行行的结论从「通过」降级——**唯一仍未通过的是 U-10（需 UI 授权）、R-04 与 R-07（需真机／长时）**，与本轮无关。
 
 ### 4.1 Issue 验收项对照
 
@@ -374,7 +387,12 @@
 7. **语音辅助试读不存在（#111／#112）**：试读 sheet 只有手动秒表。#111 要求「手动计时、语音辅助试读」两类证据来源都清晰，#112 要求主动语音试读显示真实链路状态，两者都因此只有一半。建议与第 4、5 条合并成同一轮审阅／设置 UI 交付。
 8. **Xcode 单测挂死已解决，但成因是测试辅助件而非 App**：见 §2 第 9 条。`TestGate` 现为一次性开启，并附具名回归；`scripts/macos_app_build.sh --configuration Debug --test-unit` 现以 `** TEST SUCCEEDED **`、`test-unit: passed`、exit 0 结束。留在台账里是因为它给出一条通用教训：**挂死先二分到具体用例再下机制结论**，否则很容易把测试缺陷误判成 App 生命周期问题并据此改动生产语义。
 9. **pbxproj 注册必须有 Xcode 侧证据**：本轮已证明 `plutil -lint` 与 SwiftPM 都不足以发现“文件挂错组”这类错误；后续任何新增源码都至少要跑一次包装脚本的 Debug 编译，测试文件还要跑一次 `--test-unit` 构建阶段。
-10. **证据审计已跑完第一轮，但方法本身没进仓库（交接建议）**：第八轮用变异探针查了台账 69 行的证据强度，查出 4 行指向有误并补齐（§2 第 24–27 条）。**探针脚本目前在 `/tmp`，不是仓库资产**——这意味着承接团队拿不到它，而 §2 第 27 条的教训（探针只匹配 swift-testing 会漏掉 XCTest、注释吞掉 guard 条件会造出无效变异）**只写在报告里，工具本身没固化**。建议后续把三段式探针（写变异 → 编译预检 → 同时匹配 `✘` 与 `Test Case '…' failed`）落到 `tools/` 下作为可复用脚本，否则下一轮很容易重犯同样的假结论。本轮**未擅自新增该脚本**——属于新增仓库资产，需要另行授权。
+10. **证据审计已覆盖全部 69 行，但方法本身没进仓库（交接建议，本轮两次追加）**：第八轮查 F 段（4 行有误），第九轮把 P／M／U／R／T 全部核完（7 行缺断言、1 处测试挂死隐患）。**探针脚本目前只在 `/tmp`，不是仓库资产**——承接团队拿不到它，而三轮教训**只写在报告里、工具没固化**：
+    - 探针只匹配 swift-testing 的 `✘`，会漏掉 XCTest 的 `Test Case '…' failed`（第 27 条）；
+    - 注释吞掉后续 guard 条件会造出编译不过的「无效变异」，必须先编译预检（第 27 条）；
+    - **探针本身没跑起来时，全部变异都会假报 KILLED**——本轮 T 段六个变异「全杀」实际是因为 pytest 根本没装、每次都因 module not found 非零退出（第 33 条）。因此探针必须带**基线自检**：不改代码时必须 exit 0，且一次已知应被杀死的变异确实被杀，否则拒绝解读任何结果。
+    - 建议把这三点固化成 `tools/` 下的可复用脚本。本轮**未擅自新增**——属于新增仓库资产，需要另行授权。
+11. **worktree 里跑不了 Python 测试（可复现性缺口）**：pytest 放在 `[project.optional-dependencies].dev`，而 `uv sync` 默认不装 optional extra，因此 `.worktree/.venv` 里没有 pytest。本轮实际依赖主检出 `/Users/hrygo/Documents/SpeechRail/.venv`，并须把 worktree 的 `src` 放在 `PYTHONPATH` 前面才测的是 worktree 代码；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 让退出码恒为非零。**§3.1 过去记的 `pytest tests/…` 在 worktree 中开箱即用并不成立。** 建议要么把测试依赖移到 `dependency-groups.dev`（`uv sync` 默认安装），要么在开发文档里写明这条命令的完整形态。本轮只记录，未改依赖结构。
 
 ## 6. 回退
 

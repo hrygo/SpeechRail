@@ -240,6 +240,34 @@ struct TeleprompterPreparationPromptsTests {
         }
     }
 
+    /// `omit` 与 `review` 的模式守卫是「精简／保真权限分离」在解码层的落点：
+    /// 声称不朗读就必须真的没有文本，声称要审阅就不能同时声明不朗读。
+    /// 两者都改过稿仍不会留下任何痕迹，因此必须有回归钉住。
+    @Test func rewriteRejectsOmitWithTextAndReviewClaimingNonspokenContent() throws {
+        let groups = [
+            TeleprompterRewriteGroup(
+                id: "block-a",
+                sourceUnits: [.init(id: 0, rawText: "第一段原文。")],
+                budgetSeconds: 10
+            )
+        ]
+        let omitWithText = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"omit","text":"偷偷留下的内容","issues":["nonspoken_content"]}]}"#
+        do {
+            _ = try TeleprompterRewriteDecoder().decode(omitWithText, groups: groups)
+            Issue.record("omit 块不得携带任何文本")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .modeMismatch)
+        }
+
+        let reviewClaimingNonspoken = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"review","text":"第一段原文。","issues":["reading_choice","nonspoken_content"]}]}"#
+        do {
+            _ = try TeleprompterRewriteDecoder().decode(reviewClaimingNonspoken, groups: groups)
+            Issue.record("审阅块不得同时声明不朗读")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .modeMismatch)
+        }
+    }
+
     @Test func mapDecoderRejectsUnknownFieldsGapsEmptySpeakAndInvalidIssues() throws {
         let units = try sourceUnits()
         let sourceText = units.map(\.rawText).joined()
