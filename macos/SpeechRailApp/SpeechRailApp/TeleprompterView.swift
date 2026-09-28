@@ -1141,28 +1141,32 @@ public struct TeleprompterView: View {
             .pickerStyle(.menu)
             .labelsHidden()
 
-            if session.calibrationFactor != 1.0 {
-                Menu {
-                    Button("重新计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
-                        isTrialReadingPresented = true
-                    }
+            Menu {
+                Button("计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
+                    isTrialReadingPresented = true
+                }
+                if session.calibrationSource != .uncalibrated {
                     Divider()
                     Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
-                        session.applyTrialCalibration(k: 1.0)
+                        session.applyTrialCalibration(k: 1.0, source: .uncalibrated)
                         operationMessage = "已恢复为默认自然语速 (1.0x)"
                     }
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        StatusPill(
-                            tone: .healthy,
-                            label: "\(String(format: "%.2fx", session.calibrationFactor))"
-                        )
-                        SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    }
                 }
-                .menuStyle(.borderlessButton)
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                    StatusPill(
+                        tone: session.calibrationSource == .uncalibrated
+                            ? .neutral
+                            : .healthy,
+                        label: session.calibrationSource == .uncalibrated
+                            ? "未试读校准"
+                            : "\(String(format: "%.2fx", session.calibrationFactor))"
+                    )
+                    SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
             }
+            .menuStyle(.borderlessButton)
         }
     }
 
@@ -1173,11 +1177,20 @@ public struct TeleprompterView: View {
                 label: preflight.badgeTitle
             )
 
-            Text(preflight.userGuidance)
+            Text(preflightGuidance(preflight))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
         }
+    }
+
+    /// 预检结论里的「预计 N 分钟」来自预检计算。没试读校准时它只是按默认语速推的，
+    /// 与「无内容」这类结论不同，不加标注会被当成量出来的判断。
+    private func preflightGuidance(_ preflight: TeleprompterTimingPolicy.PreflightConclusion) -> String {
+        guard preflight.showsDurationEstimate, !session.isPaceCalibrated else {
+            return preflight.userGuidance
+        }
+        return "\(preflight.userGuidance)（未试读校准）"
     }
 
     private var quickToolsGroup: some View {
@@ -1256,7 +1269,7 @@ public struct TeleprompterView: View {
                         }
                         .speechRailButton(.secondary)
 
-                    case .serviceNotReady, .serviceBusy, .streamFailed:
+                    case .inputDeviceUnavailable, .serviceNotReady, .serviceBusy, .streamFailed:
                         Button("打开提词器") {
                             showStage()
                         }

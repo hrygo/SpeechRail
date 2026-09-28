@@ -118,6 +118,101 @@ struct TeleprompterV2StoreTests {
         }
     }
 
+    @Test @MainActor func runSummaryWrittenBeforeIntraSegmentProgressStillLoads() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var bundle = fixture.bundle
+        bundle.lastRun = .init(
+            versionID: "version-1",
+            targetSeconds: 300,
+            elapsedSeconds: 42,
+            lastSegmentID: "segment-1",
+            lastSegmentOffset: 3,
+            endedReason: "paused",
+            completedReading: false
+        )
+        try store.save(bundle)
+
+        let url = directory.appendingPathComponent("\(bundle.document.id).json", isDirectory: false)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        var run = try #require(object["last_run"] as? [String: Any])
+        run.removeValue(forKey: "last_segment_offset")
+        object["last_run"] = run
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+        let loaded = try store.load(documentID: bundle.document.id)
+        #expect(loaded.lastRun?.lastSegmentID == "segment-1")
+        #expect(loaded.lastRun?.lastSegmentOffset == nil, "旧稿缺少新字段仍必须可读")
+    }
+
+    @Test @MainActor func rollingBackToAnEarlierVersionKeepsEveryScript() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let original = try #require(fixture.bundle.versions.first)
+        let condensedText = "第一段精简后。"
+        let condensed = TeleprompterV2ReadingVersion(
+            id: "version-2",
+            documentID: original.documentID,
+            sourceRevisionID: original.sourceRevisionID,
+            selectionSnapshot: original.selectionSnapshot,
+            readingText: condensedText,
+            blocks: [
+                TeleprompterV2ReadingBlock(
+                    id: "block-condensed",
+                    revision: 1,
+                    sourceUnitIDs: [0],
+                    text: condensedText,
+                    disposition: .speak,
+                    origin: .deterministic,
+                    budgetShare: 60
+                )
+            ],
+            segments: [
+                TeleprompterV2ReadingSegment(
+                    id: "segment-condensed",
+                    ordinal: 0,
+                    readingRange: .init(start: 0, end: condensedText.utf16.count),
+                    text: condensedText
+                )
+            ],
+            goalSnapshot: original.goalSnapshot,
+            paceSnapshot: .natural,
+            estimate: TeleprompterDurationEstimator.estimate(condensedText),
+            analysisSource: .deterministic
+        )
+        var bundle = fixture.bundle
+        bundle.versions = [original, condensed]
+        bundle.document.activeVersionID = condensed.id
+        try store.save(bundle)
+
+        // Rolling back to the earlier AI result is a selection change, never a
+        // deletion: the condensed script and the source revision stay readable.
+        var rolledBack = try store.load(documentID: bundle.document.id)
+        rolledBack.document.activeVersionID = original.id
+        rolledBack.document.updatedAt = Date()
+        try store.save(rolledBack)
+
+        let reloaded = try store.load(documentID: bundle.document.id)
+        #expect(reloaded.document.activeVersionID == original.id)
+        #expect(reloaded.versions.count == 2)
+        #expect(reloaded.versions.map(\.id).contains(condensed.id))
+        #expect(reloaded.versions.map(\.readingText).contains(condensedText))
+        #expect(
+            try #require(reloaded.versions.first { $0.id == original.id }).readingText
+                == original.readingText
+        )
+        #expect(try #require(reloaded.sourceRevisions.first).sourceText == fixture.sourceText)
+        #expect(try store.listDocuments().count == 1)
+    }
+
     private struct Fixture {
         var bundle: TeleprompterV2DocumentBundle
         let sourceText: String

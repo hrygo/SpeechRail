@@ -21,6 +21,7 @@ public final class TeleprompterSession {
     public enum BlockReason: Equatable, Sendable {
         case noActiveVersion
         case microphoneDenied
+        case inputDeviceUnavailable(String)
         case serviceNotReady(String)
         case serviceBusy(String)
         case occupiedBy(SessionKind)
@@ -32,6 +33,7 @@ public final class TeleprompterSession {
             switch self {
             case .noActiveVersion: "还没有可跟读的稿子"
             case .microphoneDenied: "麦克风权限受限"
+            case .inputDeviceUnavailable: "麦克风不可用"
             case .serviceNotReady: "语音识别服务未就绪"
             case .serviceBusy: "语音识别正在被其他功能占用"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
@@ -47,6 +49,8 @@ public final class TeleprompterSession {
                 "先确认一份用于跟读的稿子，或直接按原文分段。"
             case .microphoneDenied:
                 "请在系统设置中允许 SpeechRail 使用麦克风，然后再试。你也可以先手动提词。"
+            case .inputDeviceUnavailable(let message):
+                "当前输入设备没有继续工作（\(message)）。换回设备后重试，或继续手动看稿。"
             case .serviceNotReady:
                 "语音识别服务暂不可用。稍后重试，或选择手动看稿。"
             case .serviceBusy:
@@ -99,6 +103,8 @@ public final class TeleprompterSession {
     public var targetMinutes: Int = TeleprompterTimingPolicy.defaultTargetMinutes
     public var pace: TeleprompterPace = .natural
     public var calibrationFactor: Double = 1.0
+    /// 倍率的来源。默认 1.0 不是测量结果，时长估计必须据此标明未校准（#111 步骤 5）。
+    public private(set) var calibrationSource: TeleprompterCalibrationSource = .uncalibrated
     public var contentSelection: TeleprompterContentSelection = TeleprompterContentSelection()
     public private(set) var reviewItems: [TeleprompterReviewItem] = []
     public private(set) var readingBlocks: [TeleprompterReadingBlock] = []
@@ -167,9 +173,13 @@ public final class TeleprompterSession {
             text: effectiveSourceText,
             targetMinutes: targetMinutes,
             pace: pace,
-            calibrationFactor: calibrationFactor
+            calibrationFactor: calibrationFactor,
+            calibrationSource: calibrationSource
         )
     }
+
+    /// 预检结论里的分钟数是否来自一次真实试读。没试读过就只是按默认语速推的。
+    public var isPaceCalibrated: Bool { calibrationSource != .uncalibrated }
 
     public var effectiveSourceText: String {
         guard let sourceText = document?.sourceText else { return "" }
@@ -208,7 +218,10 @@ public final class TeleprompterSession {
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
     /// Transport injection keeps the production lifecycle testable without a
     /// socket, model, microphone, or audio file.
-    public var realtimeClientFactory: (@MainActor (Int, String?) -> any TeleprompterRealtimeClientProtocol)?
+    public var realtimeClientFactory: (@MainActor (Int, String?, TeleprompterRealtimeConfiguration) -> any TeleprompterRealtimeClientProtocol)?
+    /// Optional recognition language hint. `nil` keeps the server default; an
+    /// out-of-contract value is dropped instead of failing the connection.
+    public var preferredSpeechLanguage: String?
     /// MapReduce preparation is injected so the session never knows provider,
     /// endpoint, credential, or response transport details.
     public var preparationClient: TeleprompterPreparationClient?
@@ -244,6 +257,7 @@ public final class TeleprompterSession {
     private var clockSampleStartElapsed = 0.0
     private var savedRunState: TeleprompterRunState?
     private var importedSource: TeleprompterImportedSource?
+    private var condenseLockedRanges: [TeleprompterSourceRange] = []
 
     public init(
         coordinator: SessionCoordinator,
@@ -397,6 +411,10 @@ public final class TeleprompterSession {
         importedSource = nil
         contentSelection = TeleprompterContentSelection()
         pendingVersion = nil
+        // Blocks and review items describe the previous text. Keeping them after
+        // an edit would attribute old risks to sentences the reader never wrote.
+        readingBlocks = []
+        reviewItems = []
         phase = .draft
         scheduleDraftSave()
     }
@@ -462,9 +480,33 @@ public final class TeleprompterSession {
         await prepareDraft(document: document, preparationClient: preparationClient)
     }
 
+    /// Explicitly lossy shortening, kept separate from the fidelity operations:
+    /// only this path may drop source content, every omission comes back as a
+    /// reviewable skip, and the ranges the reader marked as must-keep are
+    /// rejected as deletions rather than silently dropped.
+    public func condenseDraft(mustKeepSourceRanges: [TeleprompterSourceRange] = []) async {
+        guard canEdit, phase != .analyzing else { return }
+        guard let document else {
+            blocked = .aiUnavailable("请先创建一份稿子。")
+            return
+        }
+        guard let preparationClient else {
+            blocked = .aiUnavailable("AI 精简服务不可用；你可以继续使用当前稿件。")
+            return
+        }
+        condenseLockedRanges = mustKeepSourceRanges
+        await prepareDraft(
+            document: document,
+            preparationClient: preparationClient,
+            operation: .condense
+        )
+        condenseLockedRanges = []
+    }
+
     private func prepareDraft(
         document: TeleprompterDocument,
-        preparationClient: TeleprompterPreparationClient
+        preparationClient: TeleprompterPreparationClient,
+        operation: TeleprompterPreparationOperation = .prepare
     ) async {
         phase = .analyzing
         preparationProgress = nil
@@ -489,13 +531,22 @@ public final class TeleprompterSession {
                 targetMinutes: targetMinutes,
                 selectedUnitIDs: selectedUnitIDs
             )
+            let lockedUnitIDs: Set<Int> = operation == .condense
+                ? Set(sourceUnits.lazy.filter { unit in
+                    self.condenseLockedRanges.contains { range in
+                        unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
+                    }
+                }.map(\.id))
+                : []
             let input = TeleprompterPreparationInput(
                 source: source,
                 sourceUnits: sourceUnits,
                 timingPlan: timingPlan,
                 pace: pace,
                 calibrationFactor: calibrationFactor,
-                selectedUnitIDs: selectedUnitIDs
+                operation: operation,
+                selectedUnitIDs: selectedUnitIDs,
+                lockedUnitIDs: lockedUnitIDs
             )
             let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
                 Task { @MainActor [weak self] in
@@ -540,15 +591,22 @@ public final class TeleprompterSession {
         readingBlocks = result.draft.blocks
         reviewItems = []
         for block in readingBlocks where block.disposition == .unresolved || !block.reviewIssues.isEmpty {
-            let issue = block.reviewIssues.first ?? .uncertainMeaning
-            reviewItems.append(
-                TeleprompterReviewItem(
-                    blockID: block.id,
-                    issue: issue,
-                    suggestedText: block.text,
-                    sourceSnippet: block.rawSourceText
+            let reported = block.disposition == .skip
+                ? [TeleprompterReviewIssue.contentRemoved]
+                : block.reviewIssues
+            let issues = reported.isEmpty
+                ? [TeleprompterReviewIssue.uncertainMeaning]
+                : reported
+            for issue in issues {
+                reviewItems.append(
+                    TeleprompterReviewItem(
+                        blockID: block.id,
+                        issue: issue,
+                        suggestedText: block.text,
+                        sourceSnippet: block.rawSourceText
+                    )
                 )
-            )
+            }
         }
         for boundary in result.boundaries where !boundary.reviewBlockIDs.isEmpty {
             for blockID in boundary.reviewBlockIDs
@@ -626,7 +684,8 @@ public final class TeleprompterSession {
         let estimate = TeleprompterTimingPolicy.estimateDuration(
             metrics: metrics,
             pace: pace,
-            calibrationFactor: calibrationFactor
+            calibrationFactor: calibrationFactor,
+            calibrationSource: calibrationSource
         )
         guard let duration = estimate.pointSeconds, duration > 0 else { return nil }
         return max(1, Int(ceil(duration / 60.0)))
@@ -638,8 +697,14 @@ public final class TeleprompterSession {
         scheduleDraftSave()
     }
 
-    public func applyTrialCalibration(k: Double) {
+    /// 采用一次试读结果。`source` 记录倍率是怎么来的：`.uncalibrated` 表示
+    /// 「恢复默认语速」——倍率回到 1.0，但它是选择的结果，不是一次测量。
+    public func applyTrialCalibration(
+        k: Double,
+        source: TeleprompterCalibrationSource = .uncalibrated
+    ) {
         calibrationFactor = min(max(k, TeleprompterTimingPolicy.minimumCalibrationFactor), TeleprompterTimingPolicy.maximumCalibrationFactor)
+        calibrationSource = source
         recalculateCurrentDraftBudget()
         scheduleDraftSave()
     }
@@ -1684,9 +1749,12 @@ public final class TeleprompterSession {
 
         guard generation == voiceLifecycle.generation else { throw CancellationError() }
 
-        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey)
+        let configuration = realtimeConfiguration()
+        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey, configuration)
             ?? RealtimeASRClient(
                 port: port,
+                language: configuration.language,
+                keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
                 silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
                 diarizationEnabled: false,
                 apiKey: apiKey,
@@ -1797,7 +1865,7 @@ public final class TeleprompterSession {
             }
         }
         switch envelope.payload {
-        case .partial(_, _), .partialSnapshot(_, _, _):
+        case .partial(_, _), .partialSnapshot(_, _, _, _):
             guard !isResuming, let activeVersion else { return }
             _ = followAdapter.apply(
                 envelope.payload,
@@ -1873,8 +1941,8 @@ public final class TeleprompterSession {
 
     private func syncFollowState() {
         let previousIndex = currentSegmentIndex
-        currentSegmentIndex = followController.currentIndex
-        readingOffset = followController.position.utf16Offset
+        currentSegmentIndex = followController.viewportAnchor.segmentIndex
+        readingOffset = followController.viewportAnchor.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
         followState = followController.followState
@@ -1939,6 +2007,7 @@ public final class TeleprompterSession {
                     documentID: document.id,
                     versionID: activeVersion.id,
                     currentSegmentID: currentSegment?.id,
+                    currentSegmentOffset: followController.viewportAnchor.utf16Offset,
                     mode: followController.mode
                 )
             savedRunState = state
@@ -1947,6 +2016,22 @@ public final class TeleprompterSession {
         } catch {
             lastFailure = error.localizedDescription
         }
+    }
+
+    /// Recognition hints for the segment the reader is about to speak. The
+    /// keywords come from the frozen running version, so what the recognizer
+    /// is told matches the text actually on stage.
+    private func realtimeConfiguration() -> TeleprompterRealtimeConfiguration {
+        let version = runningVersion ?? activeVersion
+        let upcoming = version?.segments.dropFirst(currentSegmentIndex).prefix(8) ?? []
+        var keywords: [String] = []
+        for segment in upcoming {
+            keywords.append(contentsOf: segment.keywords)
+        }
+        return .init(
+            language: preferredSpeechLanguage,
+            keywords: keywords
+        ).sanitized
     }
 
     private func saveBundle() throws {
@@ -2001,6 +2086,7 @@ public final class TeleprompterSession {
                 documentID: bundle.document.id,
                 versionID: run.versionID,
                 currentSegmentID: run.lastSegmentID,
+                currentSegmentOffset: run.lastSegmentOffset,
                 mode: mode
             )
         }
@@ -2062,19 +2148,38 @@ public final class TeleprompterSession {
             }
         }
 
-        let restoredIndex = savedRunState.flatMap { state in
-            versions.first { $0.id == state.versionID }?.segments.firstIndex {
-                $0.id == state.currentSegmentID
-            }
-        } ?? 0
+        let restoredPosition = restoredReadingPosition()
+        let restoredIndex = restoredPosition?.segmentIndex ?? 0
         currentSegmentIndex = restoredIndex
         followController = TeleprompterFollowController(
             currentIndex: restoredIndex,
             mode: savedRunState?.mode ?? .manual
         )
+        if let restoredPosition, restoredPosition.utf16Offset > 0,
+           let activeVersion {
+            followController.manualMove(
+                to: restoredPosition,
+                segmentCount: activeVersion.segments.count,
+                segmentUTF16Lengths: activeVersion.segments.map(\.text.utf16.count)
+            )
+        }
         blocked = nil
         lastFailure = nil
         syncFollowState()
+    }
+
+    /// Restores the saved reading position. The exact UTF-16 offset is only
+    /// reused inside the same frozen version; across versions the offset is
+    /// migrated solely when the segment text is byte-identical, otherwise the
+    /// reader returns to the start of that segment instead of reusing an offset
+    /// that now points into different text.
+    private func restoredReadingPosition() -> TeleprompterAligner.Position? {
+        guard let savedRunState else { return nil }
+        return TeleprompterReadingProgressRestorer.position(
+            saved: savedRunState,
+            versions: versions,
+            activeVersion: activeVersion
+        )
     }
 
     private func legacyDocument(from bundle: TeleprompterV2DocumentBundle) throws -> TeleprompterDocument {
@@ -2230,6 +2335,7 @@ public final class TeleprompterSession {
                 targetSeconds: runClock.targetSeconds,
                 elapsedSeconds: runClock.elapsedSeconds,
                 lastSegmentID: state.currentSegmentID,
+                lastSegmentOffset: state.currentSegmentOffset,
                 endedReason: state.mode.rawValue,
                 completedReading: activeVersion.map {
                     currentSegmentIndex >= max(0, $0.segments.count - 1)
@@ -2584,6 +2690,14 @@ public final class TeleprompterSession {
     private static func blockReason(for error: Error) -> BlockReason {
         if let failure = error as? MicrophoneCapture.Failure, failure == .permissionDenied {
             return .microphoneDenied
+        }
+        // A vanished or unusable input device is a microphone problem, not an
+        // ASR service problem: say which one, and keep manual reading offered.
+        if case .engineFailed(let message)? = error as? MicrophoneCapture.Failure {
+            return .inputDeviceUnavailable(message)
+        }
+        if case .converterUnavailable? = error as? MicrophoneCapture.Failure {
+            return .inputDeviceUnavailable("输入设备格式不兼容")
         }
         if let blocked = error as? Blocked { return blocked.reason }
         return .serviceNotReady(error.localizedDescription)

@@ -50,6 +50,61 @@ struct TeleprompterTimingPolicyTests {
         #expect(abs((briskEst.pointSeconds ?? 0) - (60.0 * 220.0 / 260.0)) < 0.1)
     }
 
+    /// 倍率 1.0 既可能是没人试读过的默认值，也可能是某次试读的真实结果。
+    /// 只看倍率时两者无法区分，未测过的估计会被当成实测的显示（#111 步骤 5）。
+    @Test func theSameFactorCarriesItsProvenance() {
+        let text = String(repeating: "中", count: 220)
+        let metrics = TeleprompterTimingPolicy.countMetrics(in: text)
+
+        let uncalibrated = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: .natural)
+        #expect(uncalibrated.pointSeconds != nil)
+        #expect(!uncalibrated.isCalibrated)
+
+        // 一次真实的 60 秒试读：点估计同为 60 秒，但这次它是被测过的。
+        let measured = TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics,
+            pace: .natural,
+            calibrationFactor: 1.0,
+            calibrationSource: .manualTrial(durationSeconds: 60)
+        )
+        #expect(measured.isCalibrated)
+        #expect(abs((measured.pointSeconds ?? 0) - 60.0) < 0.1)
+
+        // 校准过的估计即使遇到读法不确定的文本，也仍然带着「测过」这一事实。
+        let measuredWithDigits = TeleprompterTimingPolicy.estimateDuration(
+            metrics: TeleprompterTimingPolicy.countMetrics(in: "版本 2.0"),
+            pace: .natural,
+            calibrationFactor: 1.0,
+            calibrationSource: .manualTrial(durationSeconds: 20)
+        )
+        #expect(measuredWithDigits.isUncertain)
+        #expect(measuredWithDigits.isCalibrated)
+    }
+
+    /// 只有带分钟数的结论需要标注「未试读校准」。「无内容」「目标无效」「无法预估」
+    /// 本来就没有时长数字，标了反而变成噪声（#111 步骤 5）。
+    @Test func onlyDurationBearingConclusionsAskForACalibrationNote() {
+        let underfilled = TeleprompterTimingPolicy.PreflightConclusion
+            .underfilled(estimateMinutes: 2, targetMinutes: 5)
+        let matching = TeleprompterTimingPolicy.PreflightConclusion
+            .matching(estimateMinutes: 5, targetMinutes: 5)
+        let slightlyOver = TeleprompterTimingPolicy.PreflightConclusion
+            .slightlyOver(estimateMinutes: 5.4, targetMinutes: 5)
+        let tight = TeleprompterTimingPolicy.PreflightConclusion
+            .tight(estimateMinutes: 8, targetMinutes: 5)
+
+        for conclusion in [underfilled, matching, slightlyOver, tight] {
+            #expect(conclusion.showsDurationEstimate)
+        }
+        for conclusion in [
+            TeleprompterTimingPolicy.PreflightConclusion.emptyText,
+            .invalidTarget("目标时长应在 1–120 分钟之间。"),
+            .uncertain("包含数字、网址或非中英文本，无法可靠预估整稿时长"),
+        ] {
+            #expect(!conclusion.showsDurationEstimate)
+        }
+    }
+
     @Test func preflightEvaluatesFeasibilityBands() {
         // Target 1 minute = 60s, budget B = 0.95 * 60 = 57s
 

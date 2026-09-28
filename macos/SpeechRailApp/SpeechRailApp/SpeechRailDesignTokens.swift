@@ -1275,6 +1275,18 @@ public enum SpeechRailDesignTokens {
         public static let sourceEditorMaximumHeight: CGFloat = 360
         public static let stageDefaultWidth: CGFloat = 760
         public static let stageMinimumWidth: CGFloat = 500
+        /// 正文最大列宽与窗口宽度分开：窗口再宽，正文也保持可读的行长，
+        /// 避免在超宽屏上把一行拉得过长而增加视线回扫。
+        public static let stageDefaultContentWidth: CGFloat = 680
+        public static let stageMinimumContentWidth: CGFloat = 360
+        public static let stageMaximumContentWidth: CGFloat = 1_200
+        /// 「镜头口播」预设：靠近镜头阅读的舒适窄栏。
+        public static let stageCameraContentWidth: CGFloat = 680
+        public static let stageCameraFontScale: Double = 1.0
+        /// 「讲台阅读」预设：更大的正文与更宽的列，照顾远距离可读性。
+        public static let stagePodiumContentWidth: CGFloat = 820
+        public static let stagePodiumFontScale: Double = 1.25
+        public static let stagePodiumVisibleLineCount = 2
         public static let stageDefaultHeight: CGFloat = 236
         public static let stageMinimumHeight: CGFloat = 168
         public static let stagePadding: CGFloat = Spacing.sm

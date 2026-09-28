@@ -5,6 +5,98 @@ import Testing
 #endif
 
 struct TeleprompterPreparationDomainTests {
+    @Test func readingProgressRestoresTheExactOffsetInsideTheSameVersion() {
+        let version = makeVersion(id: "v1", segmentTexts: ["第一段内容。", "第二段内容。"])
+        let saved = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "segment-0",
+            currentSegmentOffset: 4,
+            mode: .manual
+        )
+
+        let position = TeleprompterReadingProgressRestorer.position(
+            saved: saved,
+            versions: [version],
+            activeVersion: version
+        )
+
+        #expect(position == .init(segmentIndex: 0, utf16Offset: 4))
+    }
+
+    @Test func readingProgressFallsBackToSegmentStartWhenTheTextChanged() {
+        let recorded = makeVersion(id: "v1", segmentTexts: ["第一段内容。", "第二段内容。"])
+        let active = makeVersion(id: "v2", segmentTexts: ["第一段内容改写了。", "第二段内容。"])
+        let saved = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "segment-0",
+            currentSegmentOffset: 4,
+            mode: .manual
+        )
+
+        let position = TeleprompterReadingProgressRestorer.position(
+            saved: saved,
+            versions: [recorded, active],
+            activeVersion: active
+        )
+
+        #expect(position == .init(segmentIndex: 0, utf16Offset: 0), "旧偏移不能套进新文本")
+    }
+
+    @Test func readingProgressMigratesOffsetWhenTheSegmentTextIsIdentical() {
+        let recorded = makeVersion(id: "v1", segmentTexts: ["第一段内容。"])
+        let active = makeVersion(id: "v2", segmentTexts: ["第一段内容。", "新增的一段。"])
+        let saved = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "segment-0",
+            currentSegmentOffset: 4,
+            mode: .manual
+        )
+
+        let position = TeleprompterReadingProgressRestorer.position(
+            saved: saved,
+            versions: [recorded, active],
+            activeVersion: active
+        )
+
+        #expect(position == .init(segmentIndex: 0, utf16Offset: 4))
+    }
+
+    @Test func readingProgressClampsOffsetsAndIgnoresUnknownSegments() {
+        let version = makeVersion(id: "v1", segmentTexts: ["第一段。"])
+        let beyond = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "segment-0",
+            currentSegmentOffset: 999,
+            mode: .manual
+        )
+        let unknown = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "gone",
+            currentSegmentOffset: 2,
+            mode: .manual
+        )
+
+        #expect(
+            TeleprompterReadingProgressRestorer.position(
+                saved: beyond,
+                versions: [version],
+                activeVersion: version
+            ) == .init(segmentIndex: 0, utf16Offset: 4)
+        )
+        #expect(
+            TeleprompterReadingProgressRestorer.position(
+                saved: unknown,
+                versions: [version],
+                activeVersion: version
+            ) == nil
+        )
+    }
+
     @Test func importsBOMWithoutChangingSourceBytes() throws {
         let body = "# 标题\r\n\r\n😀欢迎。\n"
         let data = Data([0xEF, 0xBB, 0xBF]) + Data(body.utf8)
@@ -140,5 +232,24 @@ struct TeleprompterPreparationDomainTests {
         }
         let valid = try? TeleprompterTimingPlanner.validateTargetMinutes(20)
         #expect(valid == 1_200)
+    }
+
+    private func makeVersion(id: String, segmentTexts: [String]) -> TeleprompterVersion {
+        TeleprompterVersion(
+            id: id,
+            documentID: "doc",
+            sourceText: segmentTexts.joined(),
+            segments: segmentTexts.enumerated().map { index, text in
+                TeleprompterSegment(
+                    // Segment identities come from source blocks, so they stay
+                    // stable across versions built from the same source.
+                    id: "segment-\(index)",
+                    ordinal: index,
+                    sourceRange: .init(start: 0, end: text.utf16.count),
+                    text: text
+                )
+            },
+            analysisSource: .ai
+        )
     }
 }

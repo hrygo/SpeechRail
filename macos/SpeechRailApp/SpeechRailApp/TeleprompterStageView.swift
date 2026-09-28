@@ -520,13 +520,14 @@ public struct TeleprompterStageView: View {
     private var scriptStack: some View {
         GeometryReader { geometry in
             let segments = session.activeVersion?.segments ?? []
+            let contentWidth = TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: geometry.size.width - 2 * SpeechRailDesignTokens.Spacing.md,
+                requestedContentWidth: settings.contentWidth
+            )
             let request = LineLayoutRequest(
                 segments: segments,
                 pointSize: settings.scriptPointSize,
-                availableWidth: max(
-                    1,
-                    floor(geometry.size.width - 2 * SpeechRailDesignTokens.Spacing.md)
-                )
+                availableWidth: contentWidth
             )
             let browsingAll = isBrowsingAll && !isFollowing
             let currentLineIndex = currentDisplayLineIndex
@@ -567,7 +568,8 @@ public struct TeleprompterStageView: View {
                         }
                     }
                 }
-                .frame(width: geometry.size.width, alignment: .leading)
+                .frame(width: contentWidth, alignment: .leading)
+                .frame(width: geometry.size.width, alignment: .center)
             }
             .scrollPosition($scrollPosition)
             .scrollDisabled(!browsingAll)
@@ -619,7 +621,7 @@ public struct TeleprompterStageView: View {
     private func scrollToReadingPosition() {
         let id = isBrowsingAll && !isFollowing ? currentSegmentID : currentDisplayLineID
         guard let id else { return }
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+        withAnimation(TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion: reduceMotion)) {
             scrollPosition.scrollTo(
                 id: id,
                 anchor: settings.visibleLineCount == 3 && !isBrowsingAll ? .center : .top
@@ -636,6 +638,13 @@ public struct TeleprompterStageView: View {
             return
         }
         session.moveToReadingPosition(target)
+    }
+
+    /// 查阅全稿或手动滚动之后，把舞台收回当前朗读行。
+    /// 语音推进权不因这次点击而恢复，仍由用户显式开启。
+    private func returnToReadingPosition() {
+        isBrowsingAll = false
+        scrollToReadingPosition()
     }
 
     private var currentSegmentID: String? {
@@ -912,6 +921,25 @@ public struct TeleprompterStageView: View {
             .speechRailButton(session.voiceAssistState == .following ? .secondary : .primary)
             .help(voiceAssistHelp)
 
+            if TeleprompterStageRecoveryPresentation.shouldOfferRecovery(
+                isBrowsingAll: isBrowsingAll,
+                isFollowing: isFollowing
+            ) {
+                Button {
+                    returnToReadingPosition()
+                } label: {
+                    Label(
+                        TeleprompterStageRecoveryPresentation.recoveryTitle,
+                        systemImage: "arrow.uturn.backward.circle"
+                    )
+                }
+                .labelStyle(.iconOnly)
+                .accessibilityLabel(TeleprompterStageRecoveryPresentation.recoveryTitle)
+                .accessibilityHint(TeleprompterStageRecoveryPresentation.recoveryHelp)
+                .speechRailButton(.primary)
+                .help(TeleprompterStageRecoveryPresentation.recoveryHelp)
+            }
+
             Spacer(minLength: 0)
 
             appearanceControl
@@ -1059,6 +1087,24 @@ private struct TeleprompterStageAppearancePopover: View {
             Text("显示设置")
                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
             Picker(
+                "场景",
+                selection: Binding(
+                    get: { settings.preset },
+                    set: { settings.apply($0) }
+                )
+            ) {
+                ForEach(TeleprompterStagePreset.allCases) { preset in
+                    Text(preset.title).tag(preset)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("显示场景")
+            .help("镜头口播是舒适窄栏，讲台阅读更大字号；手动调整后自动变为自定义")
+            Text(settings.preset.guidance)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            TeleprompterStageColumnWidthControl(settings: settings)
+            Picker(
                 "显示行数",
                 selection: Binding(
                     get: { settings.visibleLineCount },
@@ -1110,6 +1156,23 @@ private struct TeleprompterStageFontControl: View {
             accessibilityLabel: "提词卡字号",
             accessibilityValue: String(format: "%.1f 点", Double(settings.scriptPointSize)),
             helpText: "连续调节提词卡字号"
+        )
+    }
+}
+
+@MainActor
+private struct TeleprompterStageColumnWidthControl: View {
+    let settings: TeleprompterStageSettings
+
+    var body: some View {
+        TeleprompterStageContinuousSliderRow(
+            title: "正文列宽",
+            valueText: "\(Int(settings.contentWidth.rounded())) pt",
+            value: Binding(get: { settings.contentWidth }, set: { settings.contentWidth = $0 }),
+            range: Double(SpeechRailDesignTokens.Teleprompter.stageMinimumContentWidth)...Double(SpeechRailDesignTokens.Teleprompter.stageMaximumContentWidth),
+            accessibilityLabel: "提词卡正文列宽",
+            accessibilityValue: "\(Int(settings.contentWidth.rounded())) 点",
+            helpText: "限制每行字数；窗口再宽也不会把一行拉得过长"
         )
     }
 }

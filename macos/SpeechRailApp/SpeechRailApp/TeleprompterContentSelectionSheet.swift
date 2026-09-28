@@ -114,7 +114,7 @@ public struct TeleprompterContentSelectionSheet: View {
             Text("·")
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-            Text("预计用时 \(formatMinutes(selectedEstimateMinutes))")
+            Text(estimatedDurationText)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
@@ -257,12 +257,26 @@ public struct TeleprompterContentSelectionSheet: View {
     }
 
     private var selectedEstimateMinutes: Double {
+        selectedEstimate.pointMinutes ?? 0
+    }
+
+    private var selectedEstimate: TeleprompterTimingPolicy.EstimateResult {
         let selectedText = selectedIndices.compactMap { index in
             paragraphs.first(where: { $0.id == index })?.text
         }.joined(separator: "\n\n")
         let metrics = TeleprompterTimingPolicy.countMetrics(in: selectedText)
-        let est = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: session.pace, calibrationFactor: session.calibrationFactor)
-        return (est.pointSeconds ?? 0) / 60.0
+        return TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics,
+            pace: session.pace,
+            calibrationFactor: session.calibrationFactor,
+            calibrationSource: session.calibrationSource
+        )
+    }
+
+    /// 没试读过的时长只是按默认语速推出来的，必须说出来，否则它和实测估计长得一样。
+    private var estimatedDurationText: String {
+        let base = "预计用时 \(formatMinutes(selectedEstimateMinutes))"
+        return selectedEstimate.isCalibrated ? base : "\(base)（未试读校准）"
     }
 
     private func formatMinutes(_ minutes: Double) -> String {

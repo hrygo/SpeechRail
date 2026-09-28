@@ -928,7 +928,7 @@ final class RealtimeContractTests: XCTestCase {
             )
         )
         guard let hypothesis = await events.next(),
-              case .partialSnapshot(let hypothesisItemID, _, _) = hypothesis.payload else {
+              case .partialSnapshot(let hypothesisItemID, _, _, _) = hypothesis.payload else {
             XCTFail("Expected the current task to establish item identity")
             return
         }
@@ -1188,6 +1188,58 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(endpointing?["silence_duration_ms"] as? Int, 500)
         XCTAssertEqual(endpointing?["threshold"] as? Double, 0.4)
         XCTAssertNil(speechrail?["transcription"])
+    }
+
+    func testSessionUpdateCarriesLanguageAndKeywordsOnlyWhenConfigured() {
+        let configured = SpeechRailSessionUpdate(
+            model: RealtimeASRClientModelFixture.canonical,
+            language: "zh",
+            keywords: ["SpeechRail", "提词器"]
+        )
+        let transcription = ((configured.jsonObject["session"] as? [String: Any])?["audio"]
+            as? [String: Any])?["input"]
+            as? [String: Any]
+        let configuredTranscription = transcription?["transcription"] as? [String: Any]
+        XCTAssertEqual(configuredTranscription?["language"] as? String, "zh")
+        XCTAssertEqual(
+            configuredTranscription?["keywords"] as? [String],
+            ["SpeechRail", "提词器"]
+        )
+
+        let bare = SpeechRailSessionUpdate(model: RealtimeASRClientModelFixture.canonical)
+        let bareInput = ((bare.jsonObject["session"] as? [String: Any])?["audio"]
+            as? [String: Any])?["input"] as? [String: Any]
+        let bareTranscription = bareInput?["transcription"] as? [String: Any]
+        XCTAssertNil(bareTranscription?["language"], "未配置时不覆盖服务端默认语言")
+        XCTAssertNil(bareTranscription?["keywords"], "未配置时不发送空关键词")
+    }
+
+    func testClientSendsConfiguredLanguageAndKeywordsBeforeAnyAudio() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(
+            language: "zh",
+            keywords: ["SpeechRail"],
+            apiKey: ""
+        )
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()
+
+        let sent = await transport.sentMessages()
+        let update = try XCTUnwrap(
+            sent.compactMap { message -> [String: Any]? in
+                guard let data = message.data(using: .utf8),
+                      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      payload["type"] as? String == "session.update"
+                else { return nil }
+                return payload
+            }.first
+        )
+        let transcription = (((update["session"] as? [String: Any])?["audio"] as? [String: Any])?["input"]
+            as? [String: Any])?["transcription"] as? [String: Any]
+        XCTAssertEqual(transcription?["language"] as? String, "zh")
+        XCTAssertEqual(transcription?["keywords"] as? [String], ["SpeechRail"])
     }
 
     func testCallerTTSIgnoresStaleDoneAndSuppressesAudioAfterCancel() async throws {
@@ -1453,7 +1505,7 @@ final class RealtimeContractTests: XCTestCase {
             await client.close()
             return
         }
-        guard case .partialSnapshot("item-1", 1, "你好") = snapshot.payload else {
+        guard case .partialSnapshot("item-1", 1, "你好", _) = snapshot.payload else {
             XCTFail("Expected a hypothesis snapshot, got \(snapshot.payload)")
             await client.close()
             return
@@ -1465,6 +1517,103 @@ final class RealtimeContractTests: XCTestCase {
         }
         guard case .completed("item-1", "你好") = terminal.payload else {
             XCTFail("Delta was displayed twice for a snapshot-backed item: \(terminal.payload)")
+            await client.close()
+            return
+        }
+        await client.close()
+    }
+
+    func testHypothesisProjectsStablePrefixAndSampleSpanWithoutInventingMissingValues() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.transcription.hypothesis",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "item-1",
+                    "revision": 1,
+                    "text": "A🦜",
+                    "sample_span": ["start": 0, "end": 2400],
+                    "stable_prefix_codepoints": 1,
+                ])
+            )
+        )
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.transcription.hypothesis",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "item-1",
+                    "revision": 2,
+                    "text": "A🦜e",
+                ])
+            )
+        )
+
+        guard let first = await events.next() else {
+            XCTFail("Expected the first hypothesis snapshot")
+            await client.close()
+            return
+        }
+        guard case .partialSnapshot("item-1", 1, "A🦜", let firstEvidence) = first.payload else {
+            XCTFail("Expected typed hypothesis evidence, got \(first.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(firstEvidence.stablePrefixCodepoints, 1)
+        XCTAssertEqual(firstEvidence.sampleSpan, .init(startSample: 0, endSample: 2400))
+
+        guard let second = await events.next() else {
+            XCTFail("Expected the second hypothesis snapshot")
+            await client.close()
+            return
+        }
+        guard case .partialSnapshot("item-1", 2, "A🦜e", let secondEvidence) = second.payload else {
+            XCTFail("Expected the replaced hypothesis snapshot, got \(second.payload)")
+            await client.close()
+            return
+        }
+        XCTAssertNil(secondEvidence.stablePrefixCodepoints)
+        XCTAssertNil(secondEvidence.sampleSpan)
+        await client.close()
+    }
+
+    func testHypothesisRejectsStablePrefixBeyondCurrentUnicodeScalars() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        await transport.enqueue(
+            .text(
+                jsonText([
+                    "type": "speechrail.transcription.hypothesis",
+                    "task_id": "task-1",
+                    "epoch": 0,
+                    "utterance_id": "item-1",
+                    "revision": 1,
+                    "text": "你好",
+                    "stable_prefix_codepoints": 3,
+                ])
+            )
+        )
+
+        guard let failure = await events.next() else {
+            XCTFail("Expected invalid hypothesis evidence to be rejected")
+            await client.close()
+            return
+        }
+        guard case .failed("item-1", "invalid_hypothesis", _) = failure.payload else {
+            XCTFail("Expected invalid_hypothesis, got \(failure.payload)")
             await client.close()
             return
         }

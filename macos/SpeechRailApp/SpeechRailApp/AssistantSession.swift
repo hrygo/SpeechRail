@@ -1153,7 +1153,7 @@ public final class AssistantSession {
             _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             await noteSpeechEvidence()
             partialText = (partialText ?? "") + delta
-        case .partialSnapshot(let itemID, _, let text):
+        case .partialSnapshot(let itemID, _, let text, _):
             if !text.isEmpty {
                 _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             }

@@ -551,4 +551,184 @@ struct TeleprompterStageSettingsTests {
         settings.resetFontScale()
         #expect(settings.fontScale == 1.0)
     }
+
+    @Test("content column width clamps to its own range and persists")
+    func contentWidthClampsAndPersists() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        #expect(settings.contentWidth == Double(tokens.stageDefaultContentWidth))
+
+        settings.contentWidth = 1
+        #expect(settings.contentWidth == Double(tokens.stageMinimumContentWidth))
+        settings.contentWidth = 9_999
+        #expect(settings.contentWidth == Double(tokens.stageMaximumContentWidth))
+        #expect(
+            defaults.double(forKey: "speechrail.teleprompter.stage.contentWidth")
+                == Double(tokens.stageMaximumContentWidth)
+        )
+    }
+
+    @Test("scene presets apply token display values and persist the selection")
+    func displayPresetsApplyAndPersist() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        #expect(settings.preset == .camera)
+        #expect(settings.contentWidth == Double(tokens.stageCameraContentWidth))
+        #expect(settings.fontScale == tokens.stageCameraFontScale)
+
+        settings.opacity = 0.5
+        settings.lineSpacing = 12
+        let windowWidth = settings.width
+
+        settings.apply(.podium)
+        #expect(settings.preset == .podium)
+        #expect(settings.contentWidth == Double(tokens.stagePodiumContentWidth))
+        #expect(settings.fontScale == tokens.stagePodiumFontScale)
+        #expect(settings.visibleLineCount == tokens.stagePodiumVisibleLineCount)
+        // A scene preset only tunes the reading surface: window geometry,
+        // transparency and line spacing stay exactly as the user left them.
+        #expect(settings.width == windowWidth)
+        #expect(settings.opacity == 0.5)
+        #expect(settings.lineSpacing == 12)
+
+        let reloaded = TeleprompterStageSettings(defaults: defaults)
+        #expect(reloaded.preset == .podium)
+        #expect(reloaded.contentWidth == Double(tokens.stagePodiumContentWidth))
+        #expect(reloaded.fontScale == tokens.stagePodiumFontScale)
+        #expect(reloaded.visibleLineCount == tokens.stagePodiumVisibleLineCount)
+
+        settings.apply(.camera)
+        #expect(settings.preset == .camera)
+        #expect(settings.contentWidth == Double(tokens.stageCameraContentWidth))
+        #expect(settings.fontScale == tokens.stageCameraFontScale)
+        #expect(settings.visibleLineCount == tokens.stageDefaultVisibleLineCount)
+    }
+
+    @Test("manual display edits fall back to the custom preset")
+    func manualDisplayEditsSelectCustomPreset() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+
+        settings.apply(.camera)
+        #expect(settings.preset == .camera)
+        settings.increaseFontScale()
+        #expect(settings.preset == .custom)
+
+        settings.apply(.podium)
+        #expect(settings.preset == .podium)
+        settings.contentWidth += 40
+        #expect(settings.preset == .custom)
+
+        settings.apply(.camera)
+        settings.visibleLineCount = 1
+        #expect(settings.preset == .custom)
+
+        // Re-selecting custom never rewrites the values the user already tuned.
+        let tunedWidth = settings.contentWidth
+        settings.apply(.custom)
+        #expect(settings.preset == .custom)
+        #expect(settings.contentWidth == tunedWidth)
+        #expect(TeleprompterStageSettings(defaults: defaults).preset == .custom)
+    }
+
+    @Test("the content column never outgrows the stage window")
+    func contentColumnStaysWithinWindowBounds() {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+
+        // Ultrawide windows keep the requested reading measure.
+        #expect(
+            TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: 3_000,
+                requestedContentWidth: tokens.stageCameraContentWidth
+            ) == tokens.stageCameraContentWidth
+        )
+        // A narrower window wins over the requested column.
+        #expect(
+            TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: 420,
+                requestedContentWidth: tokens.stagePodiumContentWidth
+            ) == 420
+        )
+        // A window narrower than the minimum column still fits its own text.
+        #expect(
+            TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: 200,
+                requestedContentWidth: tokens.stageCameraContentWidth
+            ) == 200
+        )
+        // An extreme request clamps to the token maximum instead of the window.
+        #expect(
+            TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: 4_000,
+                requestedContentWidth: 9_999
+            ) == tokens.stageMaximumContentWidth
+        )
+        // Non-finite geometry degrades to a drawable width instead of NaN.
+        #expect(
+            TeleprompterStageLayoutPolicy.contentLayoutWidth(
+                windowContentWidth: .nan,
+                requestedContentWidth: tokens.stageCameraContentWidth
+            ) == 1
+        )
+    }
+
+    @Test("switching scene presets keeps the reading position on the same text")
+    func columnWidthChangesPreserveReadingPosition() {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let source = "欢迎来到今天的发布会现场，接下来介绍本次升级的重点内容与节奏安排。"
+        let segment = TeleprompterSegment(
+            id: "preset-source",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+        let position = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 12)
+
+        let cameraLines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: tokens.stageScriptPointSize * tokens.stageCameraFontScale,
+            availableWidth: tokens.stageCameraContentWidth
+        )
+        let podiumLines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: tokens.stageScriptPointSize * tokens.stagePodiumFontScale,
+            availableWidth: tokens.stagePodiumContentWidth
+        )
+
+        #expect(cameraLines.map(\.text).joined() == source)
+        #expect(podiumLines.map(\.text).joined() == source)
+        for lines in [cameraLines, podiumLines] {
+            let index = TeleprompterStagePresentation.displayLineIndex(for: position, lines: lines)
+            let line = index.flatMap { lines[$0] }
+            #expect(line?.utf16Start ?? Int.max <= position.utf16Offset)
+            #expect(line?.utf16End ?? Int.min >= position.utf16Offset)
+        }
+    }
+
+    @Test("the quick recovery action appears only after leaving the reading position")
+    func quickRecoveryOnlyAppearsWhileBrowsing() {
+        #expect(TeleprompterStageRecoveryPresentation.shouldOfferRecovery(isBrowsingAll: true, isFollowing: false))
+        #expect(!TeleprompterStageRecoveryPresentation.shouldOfferRecovery(isBrowsingAll: false, isFollowing: false))
+        #expect(!TeleprompterStageRecoveryPresentation.shouldOfferRecovery(isBrowsingAll: true, isFollowing: true))
+        #expect(!TeleprompterStageRecoveryPresentation.shouldOfferRecovery(isBrowsingAll: false, isFollowing: true))
+        #expect(!TeleprompterStageRecoveryPresentation.recoveryTitle.isEmpty)
+        #expect(!TeleprompterStageRecoveryPresentation.recoveryHelp.isEmpty)
+    }
+
+    @Test("Reduce Motion removes the stage scrolling animation")
+    func reduceMotionRemovesScrollAnimation() {
+        #expect(TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion: true) == nil)
+        #expect(TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion: false) != nil)
+    }
 }

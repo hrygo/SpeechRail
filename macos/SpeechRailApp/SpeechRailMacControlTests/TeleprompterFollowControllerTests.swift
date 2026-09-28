@@ -158,6 +158,62 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.partialPreview == "今天我们介绍相机设置")
     }
 
+    @Test func stableHypothesisPrefixLimitsPreviewToProvenText() throws {
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "今天我们介绍相机设置。后文稳定性。"
+        )
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+
+        _ = adapter.apply(
+            .partialSnapshot(
+                itemID: "i",
+                revision: 1,
+                text: "今天我们介绍相机设置。后文稳定性。",
+                evidence: .init(
+                    stablePrefixCodepoints: 6,
+                    sampleSpan: .init(startSample: 0, endSample: 24_000)
+                )
+            ),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(controller.currentIndex == 0)
+        #expect(controller.position.utf16Offset == 6)
+    }
+
+    @Test func candidateCommittedAndViewportPositionsAreSeparated() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let origin = controller.position
+
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍",
+            segments: segments
+        )
+        let preview = controller.position
+
+        #expect(controller.committedPosition == origin)
+        #expect(controller.hypothesisPosition == preview)
+        #expect(controller.viewportAnchor == preview)
+        #expect(controller.position == preview)
+
+        controller.receiveCompleted(
+            itemID: "a",
+            transcript: "我先回答观众的问题",
+            segments: segments
+        )
+
+        #expect(controller.committedPosition == origin)
+        #expect(controller.hypothesisPosition == nil)
+        #expect(controller.viewportAnchor == preview)
+        #expect(controller.position == preview)
+    }
+
     @Test func uniqueNearAnchorSnapshotCanAdvanceImmediately() throws {
         let segments = try TeleprompterSegmenter.segment(
             sourceText: "开场。今天我们介绍相机设置。下一段。"
@@ -246,15 +302,17 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.position.utf16Offset > 0)
     }
 
-    @Test func finalRejectsWrongProvisionalProgress() throws {
+    @Test func failedFinalKeepsViewportWhileCommittedPositionRemainsAuthoritative() throws {
         let segments = try script()
         var controller = TeleprompterFollowController()
         let origin = controller.position
         controller.receivePartial(itemID: "a", delta: "今天我们介绍", segments: segments)
         controller.receivePartial(itemID: "a", delta: "相机设置", segments: segments)
+        let preview = controller.position
         #expect(controller.currentIndex == 1)
         controller.receiveCompleted(itemID: "a", transcript: "我来回答观众的问题", segments: segments)
-        #expect(controller.position == origin)
+        #expect(controller.committedPosition == origin)
+        #expect(controller.position == preview)
     }
 
     @Test func lateFinalFromOlderItemCannotUndoNewerFinal() throws {
@@ -337,6 +395,49 @@ struct TeleprompterFollowControllerTests {
 
         #expect(controller.position == confirmed)
         #expect(controller.followState == .catchingUp)
+    }
+
+    @Test func distantUniquePhraseCannotAdvanceThroughPartialOrFinal() throws {
+        let filler = String(repeating: "甲", count: 100)
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(filler)。稳定性。\(String(repeating: "乙", count: 30))。"
+        )
+        var controller = TeleprompterFollowController()
+        let origin = controller.position
+
+        controller.receiveSnapshot(
+            itemID: "partial",
+            revision: 1,
+            text: "稳定性",
+            segments: segments
+        )
+        #expect(controller.position == origin)
+
+        controller.receiveCompleted(
+            itemID: "final",
+            transcript: "稳定性",
+            segments: segments
+        )
+        #expect(controller.position == origin)
+    }
+
+    @Test func explicitManualSelectionMakesTheSamePhraseALocalAnchor() throws {
+        let filler = String(repeating: "甲", count: 100)
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(filler)。稳定性。\(String(repeating: "乙", count: 30))。"
+        )
+        var controller = TeleprompterFollowController()
+        let target = try #require(segments.firstIndex { $0.text.contains("稳定性") })
+
+        controller.move(to: target, segmentCount: segments.count)
+        controller.resetFollowWindow()
+        controller.receiveCompleted(
+            itemID: "selected",
+            transcript: "稳定性",
+            segments: segments
+        )
+
+        #expect(controller.currentIndex == target)
     }
 
 

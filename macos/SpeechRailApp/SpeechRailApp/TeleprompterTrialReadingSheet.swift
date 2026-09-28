@@ -259,7 +259,10 @@ public struct TeleprompterTrialReadingSheet: View {
 
             if let result = trialResult, result.isWithinValidRange {
                 Button("采用此校准") {
-                    session.applyTrialCalibration(k: result.calibrationFactor)
+                    session.applyTrialCalibration(
+                        k: result.calibrationFactor,
+                        source: .manualTrial(durationSeconds: result.durationSeconds)
+                    )
                     dismiss()
                 }
                 .speechRailButton(.primary)

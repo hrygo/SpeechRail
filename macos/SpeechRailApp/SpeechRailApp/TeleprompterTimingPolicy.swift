@@ -108,19 +108,24 @@ public enum TeleprompterTimingPolicy {
         public let uncertaintyReason: String?
         /// 可可靠计量的已知部分秒数；不把未知内容当作 0 秒。
         public let knownPartSeconds: TimeInterval
+        /// 语速是否来自一次真实试读。`false` 时点估计仍可用，但只是按默认语速推的，
+        /// 界面上要说明它没有被测量过。
+        public let isCalibrated: Bool
 
         public init(
             pointSeconds: TimeInterval?,
             rangeSeconds: ClosedRange<TimeInterval>?,
             isUncertain: Bool,
             uncertaintyReason: String? = nil,
-            knownPartSeconds: TimeInterval = 0
+            knownPartSeconds: TimeInterval = 0,
+            isCalibrated: Bool = false
         ) {
             self.pointSeconds = pointSeconds
             self.rangeSeconds = rangeSeconds
             self.isUncertain = isUncertain
             self.uncertaintyReason = uncertaintyReason
             self.knownPartSeconds = knownPartSeconds
+            self.isCalibrated = isCalibrated
         }
 
         public var pointMinutes: Double? {
@@ -173,6 +178,15 @@ public enum TeleprompterTimingPolicy {
                 "预计 \(formatMinutes(est))，可能略微超过目标 \(target) 分钟，将采用更紧凑自然的口语表达。"
             case .tight(let est, let target):
                 "按当前节奏可能需要 \(formatMinutes(est))，明显超过目标 \(target) 分钟。可延长目标、选择本次要讲的段落，或仍按完整内容整理。"
+            }
+        }
+
+        /// 时长类结论里的那个分钟数是不是量出来的。未试读校准时它只是按默认语速推的，
+        /// 与「无内容」「目标无效」这类结论不同，不加标注会被当成已测得的判断。
+        public var showsDurationEstimate: Bool {
+            switch self {
+            case .underfilled, .matching, .slightlyOver, .tight: true
+            case .emptyText, .invalidTarget, .uncertain: false
             }
         }
 
@@ -230,14 +244,17 @@ public enum TeleprompterTimingPolicy {
     public static func estimateDuration(
         metrics: TextMetrics,
         pace: Pace,
-        calibrationFactor: Double = 1.0
+        calibrationFactor: Double = 1.0,
+        calibrationSource: TeleprompterCalibrationSource = .uncalibrated
     ) -> EstimateResult {
+        let isCalibrated = calibrationSource != .uncalibrated
         guard !metrics.isEmpty else {
             return EstimateResult(
                 pointSeconds: 0,
                 rangeSeconds: 0...0,
                 isUncertain: false,
-                knownPartSeconds: 0
+                knownPartSeconds: 0,
+                isCalibrated: isCalibrated
             )
         }
 
@@ -252,7 +269,8 @@ public enum TeleprompterTimingPolicy {
                 rangeSeconds: nil,
                 isUncertain: true,
                 uncertaintyReason: "包含数字、网址或非中英文本，无法可靠预估整稿时长",
-                knownPartSeconds: knownPartSeconds
+                knownPartSeconds: knownPartSeconds,
+                isCalibrated: isCalibrated
             )
         }
 
@@ -268,7 +286,8 @@ public enum TeleprompterTimingPolicy {
             pointSeconds: point,
             rangeSeconds: lower...upper,
             isUncertain: false,
-            knownPartSeconds: point
+            knownPartSeconds: point,
+            isCalibrated: isCalibrated
         )
     }
 
@@ -277,7 +296,8 @@ public enum TeleprompterTimingPolicy {
         text: String,
         targetMinutes: Int,
         pace: Pace,
-        calibrationFactor: Double = 1.0
+        calibrationFactor: Double = 1.0,
+        calibrationSource: TeleprompterCalibrationSource = .uncalibrated
     ) -> PreflightConclusion {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -289,7 +309,12 @@ public enum TeleprompterTimingPolicy {
         }
 
         let metrics = countMetrics(in: trimmed)
-        let estimate = estimateDuration(metrics: metrics, pace: pace, calibrationFactor: calibrationFactor)
+        let estimate = estimateDuration(
+            metrics: metrics,
+            pace: pace,
+            calibrationFactor: calibrationFactor,
+            calibrationSource: calibrationSource
+        )
 
         guard let pointSeconds = estimate.pointSeconds, !estimate.isUncertain else {
             return .uncertain(estimate.uncertaintyReason ?? "无法可靠预估时长")

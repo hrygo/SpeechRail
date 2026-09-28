@@ -364,6 +364,9 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
     public let targetSeconds: TimeInterval
     public let elapsedSeconds: TimeInterval
     public let lastSegmentID: String?
+    /// UTF-16 offset inside `lastSegmentID`'s text. Absent in bundles written
+    /// before intra-segment progress existed; decoding yields `nil`.
+    public let lastSegmentOffset: Int?
     public let endedReason: String
     public let completedReading: Bool
 
@@ -372,6 +375,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         targetSeconds: TimeInterval,
         elapsedSeconds: TimeInterval,
         lastSegmentID: String?,
+        lastSegmentOffset: Int? = nil,
         endedReason: String,
         completedReading: Bool
     ) {
@@ -379,6 +383,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         self.targetSeconds = targetSeconds
         self.elapsedSeconds = elapsedSeconds
         self.lastSegmentID = lastSegmentID
+        self.lastSegmentOffset = lastSegmentOffset
         self.endedReason = endedReason
         self.completedReading = completedReading
     }
@@ -388,6 +393,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         case targetSeconds = "target_seconds"
         case elapsedSeconds = "elapsed_seconds"
         case lastSegmentID = "last_segment_id"
+        case lastSegmentOffset = "last_segment_offset"
         case endedReason = "ended_reason"
         case completedReading = "completed_reading"
     }

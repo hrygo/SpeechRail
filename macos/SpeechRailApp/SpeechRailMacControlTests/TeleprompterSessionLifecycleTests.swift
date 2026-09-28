@@ -9,9 +9,14 @@ import Testing
 @MainActor
 private final class FakeTeleprompterSourceFactory {
     private(set) var sources: [FakeTeleprompterAudioSource] = []
+    /// Set before enabling voice assist to simulate an input device that
+    /// disappeared (unplugged USB interface, dropped Bluetooth headset).
+    var nextStartFailure: (any Error)?
 
     func make() -> any AudioChunkSource {
         let source = FakeTeleprompterAudioSource()
+        source.startFailure = nextStartFailure
+        nextStartFailure = nil
         sources.append(source)
         return source
     }
@@ -22,10 +27,18 @@ private final class FakeTeleprompterAudioSource: AudioChunkSource, @unchecked Se
     private var startCountStorage = 0
     private var stopCountStorage = 0
     private var continuation: AsyncStream<AudioChunk>.Continuation?
+    var startFailure: (any Error)?
 
     func start() async throws -> AsyncStream<AudioChunk> {
-        withLock {
+        let failure: (any Error)? = withLock {
             startCountStorage += 1
+            defer { startFailure = nil }
+            return startFailure
+        }
+        if let failure {
+            throw failure
+        }
+        return withLock {
             var capturedContinuation: AsyncStream<AudioChunk>.Continuation?
             let stream = AsyncStream<AudioChunk> { continuation in
                 capturedContinuation = continuation
@@ -63,8 +76,10 @@ private final class FakeTeleprompterAudioSource: AudioChunkSource, @unchecked Se
 private actor TestGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var isWaiting = false
+    private var isOpen = false
 
     func wait() async {
+        if isOpen { return }
         await withCheckedContinuation { continuation in
             self.continuation = continuation
             self.isWaiting = true
@@ -72,16 +87,24 @@ private actor TestGate {
     }
 
     func waitUntilWaiting() async {
-        while !isWaiting {
+        while !isWaiting && !isOpen {
             await Task.yield()
         }
     }
 
     func open() {
+        isOpen = true
         isWaiting = false
         continuation?.resume()
         continuation = nil
     }
+}
+
+/// 记录后台等待是否结束，让「不该挂起」的断言能失败而不是把整条流水线拖死。
+private actor GateProbe {
+    private(set) var finished = false
+
+    func markFinished() { finished = true }
 }
 
 private actor FakeTeleprompterRealtimeClient: TeleprompterRealtimeClientProtocol {
@@ -149,7 +172,16 @@ private actor FakeTeleprompterRealtimeClient: TeleprompterRealtimeClientProtocol
     }
 }
 
+/// Captures the recognition configuration the session hands to the transport.
 @MainActor
+private final class ConfigurationRecorder {
+    private(set) var value: TeleprompterRealtimeConfiguration?
+
+    func record(_ configuration: TeleprompterRealtimeConfiguration) {
+        value = configuration
+    }
+}
+
 private final class FakeTeleprompterClientFactory {
     private(set) var clients: [FakeTeleprompterRealtimeClient] = []
     let connectGate: TestGate?
@@ -199,7 +231,7 @@ private final class TeleprompterSessionHarness {
             v2Store: v2Store,
             audioSourceFactory: { sourceFactory.make() }
         )
-        session.realtimeClientFactory = { _, _ in clientFactory.make() }
+        session.realtimeClientFactory = { _, _, _ in clientFactory.make() }
         coordinator.starter = { kind in
             guard kind == .teleprompter else { return }
             try await session.beginCapture()
@@ -217,6 +249,24 @@ private final class TeleprompterSessionHarness {
             title: "测试稿",
             sourceText: "第一段内容。第二段内容。第三段内容。"
         )
+    }
+
+    /// A second session over the same store, so restored progress has to come
+    /// from disk instead of in-memory state.
+    func makeReloadedSession() throws -> TeleprompterSession {
+        let store = SessionStore(
+            directory: directory.appendingPathComponent("sessions", isDirectory: true)
+        )
+        let v2Store = try TeleprompterV2Store(
+            directoryURL: directory.appendingPathComponent("documents", isDirectory: true)
+        )
+        return TeleprompterSession(coordinator: SessionCoordinator(store: store), v2Store: v2Store)
+    }
+
+    func documentBundleURL(documentID: String) -> URL {
+        directory
+            .appendingPathComponent("documents", isDirectory: true)
+            .appendingPathComponent("\(documentID).json", isDirectory: false)
     }
 
     func cleanup() {
@@ -403,6 +453,276 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.clientFactory.clients.isEmpty)
     }
 
+    @Test("qualifier loss surfaces as locatable review items instead of silent success")
+    func semanticRiskBecomesReviewItems() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "成本稿",
+            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
+        )
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "方案 A 的单次成本是 50 元。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try TestPreparationResponse.response(for: prompt)
+        }
+
+        await harness.session.analyzeDraft()
+
+        #expect(harness.session.phase == .review)
+        #expect(harness.session.pendingVersion != nil)
+        let item = try #require(harness.session.reviewItems.first {
+            $0.issue == .conditionRemoved
+        })
+        #expect(item.sourceSnippet.contains("不超过"))
+        #expect(harness.session.reviewItems.contains { $0.issue == .comparisonChanged })
+        let block = try #require(harness.session.readingBlocks.first {
+            $0.id == item.blockID
+        })
+        #expect(block.disposition == .unresolved)
+    }
+
+    @Test("condense proposes deletions that must be reviewed before use")
+    func condenseCreatesDeletionReviewItems() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "精简稿", sourceText: "甲段。乙段。丙段。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
+        }
+
+        await harness.session.condenseDraft()
+
+        #expect(harness.session.phase == .review)
+        #expect(harness.session.pendingVersion != nil)
+        let item = try #require(harness.session.reviewItems.first {
+            $0.issue == .contentRemoved
+        })
+        #expect(item.sourceSnippet.contains("丙段"), "删除审阅必须展示被删掉的原文")
+        let block = try #require(harness.session.readingBlocks.first {
+            $0.id == item.blockID
+        })
+        #expect(block.disposition == .skip)
+        #expect(!harness.session.canAcceptPendingVersion, "删除未确认前不能采用")
+    }
+
+    @Test("editing the script invalidates the previous AI review state")
+    func editingSourceInvalidatesReviewState() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "改稿", sourceText: "甲段。乙段。丙段。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .review)
+        #expect(harness.session.pendingVersion != nil)
+        #expect(!harness.session.readingBlocks.isEmpty)
+
+        harness.session.updateSourceText("甲段被改写。乙段。丙段。")
+
+        #expect(harness.session.phase == .draft)
+        #expect(harness.session.pendingVersion == nil, "改稿后旧候选必须失效")
+        #expect(harness.session.reviewItems.isEmpty)
+        #expect(harness.session.readingBlocks.isEmpty)
+        #expect(harness.session.preparationResult == nil)
+        #expect(harness.session.preparationProgress == nil)
+    }
+
+    @Test("an AI result that lands after an edit never comes back")
+    func latePreparationResultAfterEditIsDiscarded() async throws {
+        let gate = TestGate()
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "改稿", sourceText: "甲段。乙段。丙段。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            await gate.wait()
+            return try TestPreparationResponse.response(for: prompt)
+        }
+
+        let preparation = Task { await harness.session.analyzeDraft() }
+        await gate.waitUntilWaiting()
+        harness.session.updateSourceText("甲段被改写。乙段。丙段。")
+        await gate.open()
+        await preparation.value
+
+        #expect(harness.session.phase == .draft)
+        #expect(harness.session.pendingVersion == nil, "旧文本的分析结果不得回填")
+        #expect(harness.session.reviewItems.isEmpty)
+        #expect(harness.session.readingBlocks.isEmpty)
+    }
+
+    @Test("an input device that disappears fails closed and keeps manual reading")
+    func inputDeviceLossFailsClosedWithManualFallback() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        harness.session.moveToSegment(1)
+        harness.sourceFactory.nextStartFailure = MicrophoneCapture.Failure.engineFailed("蓝牙耳机已断开")
+
+        await harness.session.enableVoiceAssist()
+
+        #expect(
+            harness.session.blocked == .inputDeviceUnavailable("蓝牙耳机已断开"),
+            "设备异常要说明是输入设备，而不是把责任推给识别服务"
+        )
+        #expect(harness.session.blocked?.detail.contains("蓝牙耳机已断开") == true)
+        #expect(harness.session.blocked?.detail.contains("手动") == true)
+        #expect(harness.session.phase == .manual)
+        #expect(harness.session.currentSegmentIndex == 1, "设备故障不能推进稿件")
+        if case .unavailable = harness.session.voiceAssistState {} else {
+            Issue.record("语音跟随应进入 unavailable 状态等待用户重试")
+        }
+        #expect(harness.coordinator.occupancy == nil, "失败后必须释放本功能的采集占用")
+        for client in harness.clientFactory.clients {
+            #expect(await client.currentCounters().closeCount == 1, "失败的连接必须关闭")
+        }
+    }
+
+    @Test("an event storm degrades inside the bounded transport")
+    func eventStormDegradesInsideBoundedTransport() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+        let client = try #require(harness.clientFactory.clients.first)
+
+        for revision in 1...600 {
+            await client.emit(
+                .partialSnapshot(
+                    itemID: "storm",
+                    revision: revision,
+                    text: String(repeating: "甲", count: revision % 7 + 1)
+                ),
+                eventID: "storm-\(revision)"
+            )
+        }
+        await settleTasks()
+
+        #expect(harness.session.phase == .following, "事件风暴不能让舞台进入错误状态")
+        #expect(harness.session.blocked == nil)
+        #expect(harness.session.voiceAssistState == .following)
+        #expect(
+            harness.session.activeVersion?.segments.indices.contains(
+                harness.session.currentSegmentIndex
+            ) == true,
+            "阅读位置必须仍在稿件范围内"
+        )
+    }
+
+    @Test("every stage cycle releases its capture, connection and occupancy")
+    func repeatedStageCyclesReleaseResources() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+
+        for _ in 0..<20 {
+            try harness.session.openForManualReading()
+            await harness.session.enableVoiceAssist()
+            #expect(harness.session.voiceAssistState == .following)
+            #expect(harness.coordinator.occupancy?.kind == .teleprompter)
+            await harness.session.closeStage()
+            #expect(harness.coordinator.occupancy == nil, "关闭舞台必须立即释放占用")
+            #expect(harness.session.currentSegmentIndex >= 0)
+        }
+
+        #expect(harness.clientFactory.clients.count == 20)
+        for client in harness.clientFactory.clients {
+            #expect(await client.currentCounters().closeCount == 1, "每一轮的连接都必须关闭")
+            #expect(await client.currentCounters().connectCount == 1)
+        }
+        #expect(harness.sourceFactory.sources.count == 20)
+        #expect(harness.sourceFactory.sources.allSatisfy { $0.stopCount == 1 }, "每一轮采集都必须停止")
+    }
+
+    @Test("voice start hands the recognizer the script's keywords and the chosen language")
+    func voiceStartSendsLanguageAndKeywords() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        harness.session.preferredSpeechLanguage = "zh"
+        harness.session.aiClient = TeleprompterAIClient { prompt in
+            let data = Data(prompt.input.utf8)
+            let context = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let units = context?["units"] as? [[String: Any]] ?? []
+            let annotations = units.map { unit -> [String: Any] in
+                let id = unit["id"] as? Int ?? 0
+                // Keywords must be grounded in their own segment text; the
+                // analysis decoder rejects invented terms.
+                let raw = unit["text"] as? String ?? ""
+                let keyword = String(raw.prefix(3))
+                return [
+                    "start_unit": id,
+                    "end_unit": id + 1,
+                    "keywords": keyword.isEmpty ? [] : [keyword],
+                    "match_phrases": [],
+                    "pause_hint": "short"
+                ]
+            }
+            return String(decoding: try JSONSerialization.data(withJSONObject: [
+                "schema_version": "teleprompter.analysis.v2",
+                "segments": annotations
+            ]), as: UTF8.self)
+        }
+        await harness.session.annotateActiveVersion()
+
+        let recorder = ConfigurationRecorder()
+        let clientFactory = FakeTeleprompterClientFactory()
+        harness.session.realtimeClientFactory = { _, _, configuration in
+            recorder.record(configuration)
+            return clientFactory.make()
+        }
+
+        await harness.session.enableVoiceAssist()
+
+        let configuration = try #require(recorder.value)
+        #expect(configuration.language == "zh")
+        #expect(
+            configuration.keywords == ["第一段", "第二段", "第三段"],
+            "识别提示必须来自当前稿件的关键词"
+        )
+    }
+
+    @Test("an out-of-contract language degrades to the server default")
+    func invalidSpeechLanguageIsDropped() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        harness.session.preferredSpeechLanguage = "中"
+        let recorder = ConfigurationRecorder()
+        let clientFactory = FakeTeleprompterClientFactory()
+        harness.session.realtimeClientFactory = { _, _, configuration in
+            recorder.record(configuration)
+            return clientFactory.make()
+        }
+
+        await harness.session.enableVoiceAssist()
+
+        #expect(harness.session.voiceAssistState == .following)
+        #expect(recorder.value?.language == nil, "越界语言不应让连接失败")
+    }
+
     @Test("explicit voice start uses the current segment and old failures cannot move it")
     func manualTakeoverInvalidatesOldPipeline() async throws {
         let drainGate = TestGate()
@@ -571,6 +891,29 @@ struct TeleprompterSessionLifecycleTests {
         #expect(!harness.session.isStageOpen)
     }
 
+    @Test("intra-segment reading offset is restored for the same frozen version")
+    func savedIntraSegmentOffsetSurvivesReload() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+        let segment = try #require(harness.session.currentSegment)
+        let offset = min(4, segment.text.utf16.count)
+        harness.session.moveToReadingPosition(
+            .init(segmentIndex: 0, utf16Offset: offset)
+        )
+
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: documentID)
+
+        #expect(reloaded.activeVersion?.id == harness.session.activeVersion?.id)
+        #expect(reloaded.currentSegmentIndex == 0)
+        #expect(reloaded.currentSegment?.text == segment.text)
+        #expect(reloaded.readingOffset == offset, "同一冻结版本必须精确恢复句内位置")
+    }
+
     @Test("run clock is continuous across voice transitions and resets only on reopen")
     func runClockSurvivesVoiceTransitions() async throws {
         let harness = try TeleprompterSessionHarness()
@@ -598,6 +941,99 @@ struct TeleprompterSessionLifecycleTests {
 
         try harness.session.openForManualReading()
         #expect(harness.session.runClock.elapsedSeconds == 0)
+    }
+
+    /// 闸门必须记住自己已经开启。2026-09-28 实测：`drainGate` 的开启信号在等待者
+    /// 到达之前发出时被整段丢弃，随后到达的 `wait()` 永久挂起。单独跑这个套件时
+    /// 时序恰好成立，全量并行时翻转，`xcodebuild` 就再也等不到进程退出。
+    @Test("a gate that was opened before the wait arrived still releases the wait")
+    func gateOpenedBeforeWaitStillReleasesTheWait() async {
+        let gate = TestGate()
+        let probe = GateProbe()
+
+        await gate.open()
+        Task {
+            await gate.wait()
+            await probe.markFinished()
+        }
+
+        for _ in 0..<1_000 {
+            if await probe.finished { break }
+            await Task.yield()
+        }
+        #expect(await probe.finished, "先开启的闸门必须放行后到的等待者")
+    }
+
+    /// 恢复默认语速是一次选择，不是一次测量。倍率回到 1.0 之后，时长估计必须
+    /// 重新按未校准呈现，否则用户会把默认值当成实测值（#111 步骤 5）。
+    @Test("resetting to the default pace is not a measurement")
+    func resettingCalibrationClearsItsProvenance() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+
+        #expect(harness.session.calibrationSource == .uncalibrated)
+        #expect(harness.session.calibrationFactor == 1.0)
+        #expect(!harness.session.isPaceCalibrated)
+
+        harness.session.applyTrialCalibration(
+            k: 1.2,
+            source: .manualTrial(durationSeconds: 72)
+        )
+        #expect(harness.session.calibrationSource == .manualTrial(durationSeconds: 72))
+        #expect(harness.session.calibrationFactor == 1.2)
+        #expect(harness.session.isPaceCalibrated)
+
+        harness.session.applyTrialCalibration(k: 1.0, source: .uncalibrated)
+        #expect(harness.session.calibrationSource == .uncalibrated)
+        #expect(harness.session.calibrationFactor == 1.0)
+        #expect(!harness.session.isPaceCalibrated)
+    }
+}
+
+/// Condense runs through the map stage: one block per source unit, with the
+/// last unit omitted so deletion review can be exercised end to end.
+private enum TestCondenseResponse {
+    enum Failure: Error {
+        case unavailable
+    }
+
+    static func response(
+        for prompt: TeleprompterPreparationPrompt,
+        omittingLastUnit: Bool
+    ) throws -> String {
+        if prompt.schemaVersion == "teleprompter.reduction.v1" {
+            return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
+        }
+        guard prompt.schemaVersion == "teleprompter.preparation.v2" else {
+            throw Failure.unavailable
+        }
+        let input = try JSONDecoder().decode(
+            TeleprompterPreparationMapInput.self,
+            from: Data(prompt.input.utf8)
+        )
+        let blocks = input.targets.indices.map { index in
+            if omittingLastUnit, index == input.targets.count - 1 {
+                return TeleprompterMapBlock(
+                    startUnit: index,
+                    endUnit: index + 1,
+                    mode: .omit,
+                    text: "",
+                    issues: [.nonspokenContent]
+                )
+            }
+            return TeleprompterMapBlock(
+                startUnit: index,
+                endUnit: index + 1,
+                mode: .speak,
+                text: input.targets[index].rawText,
+                issues: []
+            )
+        }
+        return String(decoding: try JSONEncoder().encode(
+            TeleprompterMapOutput(blocks: blocks)
+        ), as: UTF8.self)
     }
 }
 

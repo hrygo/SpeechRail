@@ -43,6 +43,7 @@ public struct TeleprompterAligner: Sendable {
         public let matchedCount: Int
         public let isUniqueExactContinuation: Bool
         public let isUniqueNearAnchor: Bool
+        public let tokenDistanceFromAnchor: Int
 
         public init(
             position: Position?,
@@ -50,7 +51,8 @@ public struct TeleprompterAligner: Sendable {
             confidence: Double,
             matchedCount: Int,
             isUniqueExactContinuation: Bool = false,
-            isUniqueNearAnchor: Bool = false
+            isUniqueNearAnchor: Bool = false,
+            tokenDistanceFromAnchor: Int = 0
         ) {
             self.position = position
             self.startPosition = startPosition
@@ -58,6 +60,7 @@ public struct TeleprompterAligner: Sendable {
             self.matchedCount = matchedCount
             self.isUniqueExactContinuation = isUniqueExactContinuation
             self.isUniqueNearAnchor = isUniqueNearAnchor
+            self.tokenDistanceFromAnchor = max(0, tokenDistanceFromAnchor)
         }
     }
 
@@ -161,16 +164,19 @@ public struct TeleprompterAligner: Sendable {
                 position: nil,
                 startPosition: window[best.start].start,
                 confidence: best.confidence,
-                matchedCount: best.matches
+                matchedCount: best.matches,
+                tokenDistanceFromAnchor: abs(lower + best.start - anchorIndex)
             )
         }
+        let tokenDistanceFromAnchor = abs(lower + best.start - anchorIndex)
         return Match(
             position: window[best.end - 1].position,
             startPosition: window[best.start].start,
             confidence: best.confidence,
             matchedCount: best.matches,
             isUniqueExactContinuation: uniqueExactContinuation,
-            isUniqueNearAnchor: uniqueNearAnchor
+            isUniqueNearAnchor: uniqueNearAnchor,
+            tokenDistanceFromAnchor: tokenDistanceFromAnchor
         )
     }
 

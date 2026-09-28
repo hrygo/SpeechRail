@@ -110,6 +110,14 @@ public enum TeleprompterReviewIssue: String, Codable, Sendable, CaseIterable {
     case readingChoice = "reading_choice"
     case uncertainMeaning = "uncertain_meaning"
     case nonspokenContent = "nonspoken_content"
+    case subjectValueChanged = "subject_value_changed"
+    case conditionRemoved = "condition_removed"
+    case negationChanged = "negation_changed"
+    case comparisonChanged = "comparison_changed"
+    case certaintyChanged = "certainty_changed"
+    /// A passage the lossy condense operation proposes to drop. Distinct from
+    /// `nonspokenContent`: this content was meant to be spoken.
+    case contentRemoved = "content_removed"
 
     public var title: String {
         switch self {
@@ -118,6 +126,12 @@ public enum TeleprompterReviewIssue: String, Codable, Sendable, CaseIterable {
         case .readingChoice: "读法选择"
         case .uncertainMeaning: "含义存疑"
         case .nonspokenContent: "建议略过"
+        case .subjectValueChanged: "主体与数值关系变化"
+        case .conditionRemoved: "限定条件变化"
+        case .negationChanged: "否定或禁止含义变化"
+        case .comparisonChanged: "比较范围变化"
+        case .certaintyChanged: "确定程度变化"
+        case .contentRemoved: "这一段将被删除"
         }
     }
 
@@ -128,6 +142,12 @@ public enum TeleprompterReviewIssue: String, Codable, Sendable, CaseIterable {
         case .readingChoice: "存在多种读法（如按字读或按意译读），请选择你希望的读法。"
         case .uncertainMeaning: "原文含义模糊或存在歧义，未做臆测，请确认正文。"
         case .nonspokenContent: "模型建议不朗读此项（如版权声明、未闭合标记或纯排版内容），由你决定是否跳过。"
+        case .subjectValueChanged: "主体与数值的对应关系发生变化，请确认没有互换或错配。"
+        case .conditionRemoved: "原文中的时间、范围或前提条件发生变化，请确认是否保留。"
+        case .negationChanged: "否定、禁止或无边界的含义可能发生变化，请核对。"
+        case .comparisonChanged: "上限、下限、范围或相等关系发生变化，请确认。"
+        case .certaintyChanged: "可能、预计、必须等确定程度发生变化，请确认。"
+        case .contentRemoved: "精简建议不讲这一段，删除后就不会出现在朗读稿里。保留请选择“保留原文”。"
         }
     }
 }
@@ -236,6 +256,19 @@ public struct TeleprompterContentSelection: Codable, Equatable, Sendable {
     public var selectedCount: Int {
         selectedParagraphIndices.count
     }
+}
+
+/// 时长估计的语速校准来源。
+///
+/// 倍率 `1.0` 既是「没人试读过」的默认值，也可能恰好是某次试读的真实结果。
+/// 只看倍率无法区分这两者，于是未校准的估计会和实测估计长得一模一样。
+/// 这里显式记录来源，让时长估计能说清自己是按默认语速推的还是量出来的
+/// （#111 步骤 5：未经有效试读使用默认估计并标明不确定性）。
+public enum TeleprompterCalibrationSource: Equatable, Sendable {
+    /// 没有有效试读：按默认语速估算。
+    case uncalibrated
+    /// 手动计时试读：倍率与实测秒数来自同一次朗读。
+    case manualTrial(durationSeconds: TimeInterval)
 }
 
 public struct TeleprompterTrialReadingResult: Codable, Equatable, Sendable {
@@ -393,6 +426,9 @@ public struct TeleprompterRunState: Codable, Equatable, Sendable {
     public let documentID: String
     public let versionID: String
     public var currentSegmentID: String?
+    /// UTF-16 offset inside the current segment's display text. Older payloads
+    /// simply omit it and decode as `nil`, which restores the segment start.
+    public var currentSegmentOffset: Int?
     public var mode: TeleprompterRunMode
     public var lastUpdatedAt: Date
 
@@ -400,14 +436,47 @@ public struct TeleprompterRunState: Codable, Equatable, Sendable {
         documentID: String,
         versionID: String,
         currentSegmentID: String?,
+        currentSegmentOffset: Int? = nil,
         mode: TeleprompterRunMode,
         lastUpdatedAt: Date = .now
     ) {
         self.documentID = documentID
         self.versionID = versionID
         self.currentSegmentID = currentSegmentID
+        self.currentSegmentOffset = currentSegmentOffset
         self.mode = mode
         self.lastUpdatedAt = lastUpdatedAt
+    }
+}
+
+/// Restores the reading position recorded with a run. An intra-segment UTF-16
+/// offset is only reused when the text it was measured against is unchanged:
+/// the same frozen version, or a different version whose segment text is
+/// identical. Otherwise the reader returns to the start of that segment
+/// instead of pointing an old offset at different words.
+public enum TeleprompterReadingProgressRestorer {
+    public static func position(
+        saved: TeleprompterRunState,
+        versions: [TeleprompterVersion],
+        activeVersion: TeleprompterVersion?
+    ) -> TeleprompterAligner.Position? {
+        guard let segmentID = saved.currentSegmentID,
+              let activeVersion,
+              let index = activeVersion.segments.firstIndex(where: { $0.id == segmentID })
+        else { return nil }
+        let segment = activeVersion.segments[index]
+        let recordedText = versions
+            .first { $0.id == saved.versionID }?
+            .segments
+            .first { $0.id == segmentID }?
+            .text
+        guard recordedText == segment.text else {
+            return .init(segmentIndex: index, utf16Offset: 0)
+        }
+        return .init(
+            segmentIndex: index,
+            utf16Offset: min(max(saved.currentSegmentOffset ?? 0, 0), segment.text.utf16.count)
+        )
     }
 }
 
