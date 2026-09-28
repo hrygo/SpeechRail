@@ -165,6 +165,7 @@ public struct TeleprompterContentSelectionSheet: View {
                             EmptyView()
                         }
                         .toggleStyle(.checkbox)
+                        .accessibilityLabel("选择第 \(index + 1) 段，加入本次要讲的内容")
                         .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {

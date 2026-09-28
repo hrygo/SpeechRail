@@ -1588,6 +1588,7 @@ public struct TeleprompterView: View {
                                         EmptyView()
                                     }
                                     .toggleStyle(.checkbox)
+                                    .accessibilityLabel("选中这条待确认事项，用于批量处理")
                                     .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                                     StatusPill(tone: .attention, label: item.issue.title)
@@ -2846,6 +2847,7 @@ private struct TeleprompterCondenseSheet: View {
                 EmptyView()
             }
             .toggleStyle(.checkbox)
+            .accessibilityLabel("把第 \(index + 1) 段标记为必讲，精简不会删除它")
             .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {

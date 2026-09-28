@@ -4,7 +4,7 @@
 > 报告日期：2026-09-28（Asia/Shanghai）；复审与收尾续至 2026-09-29  
 > 实施分支：`codex/teleprompter-implementation`（worktree `.worktrees/teleprompter-implementation`）  
 > 基线：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；改动已提交到 `codex/teleprompter-implementation`，未推送、未发布  
-> 状态：**部分交付**。安全、正确性与体验工作包均有确定性证据（69 项场景：通过 66、部分 2、未执行 1）；真实音频、真人表达与 UI 视觉验收未执行。
+> 状态：**部分交付**。安全、正确性与体验工作包均有确定性证据（69 项场景：通过 65、部分 3、未执行 1）；真实音频、真人表达与 UI 视觉验收未执行。
 
 ## 1. 本轮实际完成的工作包
 
@@ -108,6 +108,13 @@
     - **本轮验证到什么程度**：Xcode Debug **BUILD SUCCEEDED**、`swift test` 218 项 / 16 套件、`--test-unit` **TEST SUCCEEDED**。**界面未走查**：菜单的呈现、标签长度、帮助文本在窄窗下的表现都没有窗口证据，已并入 §5 第 1 条。
     - **诚实边界**：契约只保证 2–24 个字符的合法值会被下发，**不保证所列语言都受当前引擎支持**。服务端不支持时应按既有降级处理，真实识别效果仍属 §3.2 未执行项。
 
+23. **三处复选框没有无障碍名称，台账 U-07 的措辞比实际支持的范围宽（第七轮自审本轮新增界面时发现）**：本轮新增了四处界面但未获授权做 UI 走查，于是改为静态自审。结果发现一个既有缺陷，而且我新增的那处是照抄了它的写法：
+    - **缺陷本身**：三处使用 `Toggle(isOn:) { EmptyView() }` 配合 `.toggleStyle(.checkbox)`——审阅卡片的批量勾选、内容选择 sheet 的段落勾选、以及本轮新增的必讲段落勾选。**`EmptyView()` 意味着复选框没有无障碍名称**，VoiceOver 只会念「复选框，未选中」，用户无从判断自己选的是哪一段。旁边的可见文字不构成控件名称。
+    - **台账为什么没抓到**：U-07「无障碍与 Reduce Motion」标为通过，引用的 `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` 实际只验证**控制栏在 VoiceOver 开启时不被隐藏**（`voiceOverEnabled` 参与 `controlsVisible` 判定），**完全不涉及控件自身的名称与角色**。引用它来支撑「无障碍通过」是扩大了证据能证明的范围——这与本项目此前几次「测试验模型、用户看不见」是同一类错误，只是这次发生在报告层而不是代码层。
+    - **修复**：三处分别补上具体名称——「选中这条待确认事项，用于批量处理」「选择第 N 段，加入本次要讲的内容」「把第 N 段标记为必讲，精简不会删除它」。名称都描述**动作与对象**，而不是复述控件类型。
+    - **本轮验证到什么程度**：Xcode Debug **BUILD SUCCEEDED**、`swift test` 218 项 / 16 套件。**无障碍名称的实际朗读效果仍未验证**——`.accessibilityLabel` 是否被正确合成、是否与相邻文字重复播报，都需要一次授权的 VoiceOver 走查，已并入 §5 第 1 条。
+    - **给承接团队的一条方法提醒**：本项目已四次出现「证据只覆盖了命题的一部分，却被写成覆盖了全部」。U-07 这一条至今仍是**部分满足**——控件可见性有证据，控件名称此前没有证据、现在只有静态修复没有朗读证据。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
@@ -191,7 +198,7 @@
 | U-04 控制栏显隐几何稳定 | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` |
 | U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries` |
 | U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist` |
-| U-07 无障碍与 Reduce Motion | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on`、`readingShortcutFocusPolicy`、`reduceMotionRemovesScrollAnimation`（Reduce Motion 下舞台不做位移动画，阅读位置仍更新） |
+| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证** |
 | U-08 后台更新不抢焦点 | 通过 | `readingShortcutFocusPolicy`（阅读区外焦点、控件焦点、popover 打开时方向键都不被舞台接管）；提词器与 App 均未注册 `NSEvent` 全局／本地监视器，阅读键只作用于舞台窗口 |
 | U-09 显示预设持久化 | 通过 | `stage settings clamp and persist their supported ranges`、`stage visibility preferences default off and persist independently` |
 | U-10 真实窗口可见性 | 未执行 | 需 UI 自动化逐次授权 |
@@ -215,7 +222,7 @@
 | T-05 终态缺失与失败 | 通过 | `test_probe_measurements_record_hypothesis_without_losing_first_partial` |
 | T-06 慢消费者与队列溢出 | 通过 | `test_receive_loop_fails_instead_of_growing_an_unbounded_queue`、`test_cli_reports_queue_overflow_as_input_error` |
 
-合计 69 项：通过 66、部分 2、未覆盖 0、未执行 1。
+合计 69 项：通过 65、部分 3、未覆盖 0、未执行 1。
 
 ### 4.1 Issue 验收项对照
 
@@ -332,7 +339,7 @@
 
 ## 5. 未完成与建议的下一步
 
-1. **UI 视觉验收（U-10）**：`#113` 的显示设置弹层（场景分段控件、列宽滑杆）、最小 500 pt 宽度下的图标化“回到朗读位置”，以及 Reduce Motion 下的舞台滚动，都需要一次逐次授权的 UI 走查。**本轮新增的四处界面必须并入同一次走查**——「按时长精简…」入口、精简确认 sheet（含默认折叠的必讲标记区）、删除审阅卡片的「原文：…」行、以及识别语言菜单。它们只通过了编译，位置、层级、标签长度与窄窗表现均未验证。策略层已有单测，视觉结论尚未产生。
+1. **UI 视觉验收（U-10）**：`#113` 的显示设置弹层（场景分段控件、列宽滑杆）、最小 500 pt 宽度下的图标化“回到朗读位置”，以及 Reduce Motion 下的舞台滚动，都需要一次逐次授权的 UI 走查。**本轮新增的四处界面必须并入同一次走查**——「按时长精简…」入口、精简确认 sheet（含默认折叠的必讲标记区）、删除审阅卡片的「原文：…」行、以及识别语言菜单。它们只通过了编译，位置、层级、标签长度与窄窗表现均未验证。策略层已有单测，视觉结论尚未产生。**同一次走查还要用 VoiceOver 复核三处复选框的名称是否被正确朗读**——本轮补了名称但未验证朗读，见 §2 第 23 条。
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。
 3. **两项“部分”场景**：R-04 需要真实拔插／蓝牙重连，R-07 需要长时连续运行；两者都无法用 fake 证明，不接受用单测冒充。
 4. **#110 术语别名通道**：`match_phrases` 仍被解码器拒绝。按方案要求别名必须由用户确认并绑定来源范围，该能力依赖审阅界面，应与下一轮审阅 UI 一起交付，不要单独放开模型注入。
