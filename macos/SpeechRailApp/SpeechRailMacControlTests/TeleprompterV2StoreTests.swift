@@ -43,6 +43,49 @@ struct TeleprompterV2StoreTests {
         #expect(try store.load(documentID: "document-1").sourceRevisions[0].sourceText == fixture.sourceText)
     }
 
+    /// #110 asks for 「旧稿／损坏文件／写入失败不丢数据」. The regression above
+    /// only covers a failure raised *before* the write, and `atomicWrite` is
+    /// fileprivate, so the commit itself had no seam and no coverage at all.
+    /// A read-only directory is the same class of failure the requirement names
+    /// — a full disk or a denied write — and it reaches the temporary-file step
+    /// instead of a validation shortcut.
+    @Test @MainActor func aFailedWriteLeavesThePreviousDocumentIntact() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: directory.path
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+        try store.save(fixture.bundle)
+        let url = directory.appendingPathComponent("\(fixture.bundle.document.id).json")
+        let before = try Data(contentsOf: url)
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: directory.path
+        )
+        var changed = fixture.bundle
+        changed.document.title = "写入失败时不该出现的标题"
+
+        #expect(throws: TeleprompterV2StoreError.atomicWriteFailed) {
+            try store.save(changed)
+        }
+        #expect(try Data(contentsOf: url) == before, "写入失败后原始字节必须逐字节不变")
+        #expect(
+            try store.load(documentID: fixture.bundle.document.id).document.title
+                == fixture.bundle.document.title,
+            "写入失败后原稿必须仍可读且内容未变"
+        )
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .allSatisfy { !$0.hasSuffix(".tmp") },
+            "写入失败不应残留临时文件"
+        )
+    }
+
     @Test @MainActor func unknownFutureVersionFailsClosedAndCorruptDocumentsDoNotBreakListing() throws {
         let fixture = try makeFixture()
         let directory = try makeDirectory()
