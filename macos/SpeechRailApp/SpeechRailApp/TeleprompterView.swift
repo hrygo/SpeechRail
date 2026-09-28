@@ -2679,11 +2679,13 @@ public struct TeleprompterView: View {
     // MARK: - 导出、拖拽与朗读提示辅助
 
     private func copyDocumentContent() {
-        if let markdown = session.exportMarkdown() {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(markdown, forType: .string)
-            operationMessage = "已复制稿件内容"
+        guard let text = session.copyableDocumentText() else {
+            operationMessage = "还没有可复制的稿件内容。"
+            return
         }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        operationMessage = "已复制稿件内容"
     }
 
     private func exportSourceDocument() {

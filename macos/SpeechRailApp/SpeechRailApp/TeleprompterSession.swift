@@ -413,6 +413,19 @@ public final class TeleprompterSession {
         }
     }
 
+    /// The text the workbench puts on the clipboard for 「复制稿件内容」.
+    ///
+    /// Unlike `exportMarkdown()` this never gives up just because the store is
+    /// unreachable: a draft that failed to persist still exists in memory, and
+    /// refusing to copy it leaves the reader with no way to get their text out.
+    /// The two export paths already fall back to the raw source; this makes the
+    /// copy path consistent with them. Returns nil only when there is no
+    /// document at all.
+    public func copyableDocumentText() -> String? {
+        guard let document else { return nil }
+        return exportMarkdown() ?? document.sourceText
+    }
+
     public func exportSourceData() -> Data? {
         guard let document else { return nil }
         return try? v2Store.exportSource(v2Store.load(documentID: document.id))

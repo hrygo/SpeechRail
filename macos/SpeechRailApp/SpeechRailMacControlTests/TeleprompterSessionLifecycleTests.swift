@@ -1548,6 +1548,47 @@ struct TeleprompterSessionLifecycleTests {
         )
     }
 
+    /// 存盘失败态下（也就是第 48 条那个状态），文档只在内存里、不在 store 里。
+    /// 此时 `exportMarkdown()` 与 `exportSourceData()` 双双返回 nil，而「复制稿件
+    /// 内容」用的是前者且**没有任何兜底**——读者点了「复制稿件内容」，既没有复制、
+    /// 也没有提示。对照两条导出路径：导出原稿有 `?? Data(doc.sourceText.utf8)`，
+    /// 导出朗读稿有 `?? doc.sourceText`，**只有复制这条没有**。
+    @Test("the manuscript text stays reachable for copying while the store is failing")
+    func manuscriptTextStaysReachableWhileStoreFails() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        let documentsDirectory = harness.directory.appendingPathComponent("documents", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: documentsDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        let source = "第一段内容。第二段内容。"
+        harness.session.createDocument(title: "复制", sourceText: source)
+        guard case .storeUnavailable = harness.session.blocked else {
+            Issue.record("前提：只读目录下必须进入存盘失败态")
+            return
+        }
+
+        // 前提事实：两条现役导出接口在 store 失败时都拿不到东西。
+        #expect(harness.session.exportMarkdown() == nil)
+        #expect(harness.session.exportSourceData() == nil)
+        // 缺陷本体：读者仍要能把稿子内容复制走。「复制稿件内容」原先直接用
+        // `exportMarkdown()` 且无兜底，此时是空的——点了既没复制也没提示。
+        #expect(harness.session.copyableDocumentText() == source)
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()
