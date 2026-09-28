@@ -287,6 +287,8 @@ private enum VoiceDesignPublicationRetryStep: Equatable {
     case submitReview
     case publish
     case cancelCandidate
+    /// 候选已进入 `failed` 终态：复验不再受理，只能重新生成候选。
+    case regenerateCandidate
 }
 
 private enum VoiceDesignPublicationTaskStep {
@@ -298,6 +300,7 @@ private enum VoiceDesignPublicationTaskStep {
     case loadValidationAudio
     case submitReviewAndPublish
     case publish
+    case regenerateCandidate
     case cancelCandidate
 }
 
@@ -456,6 +459,62 @@ public enum ClonePromptLoadState: Equatable, Sendable {
     case empty
     case ready
     case failed(String)
+}
+
+/// 「检查配音效果」的状态机。
+///
+/// 关键区分：机器报告通过 ≠ 已保存。`validation_persisted == false` 的运行
+/// 是一次真实观测，但不能提升为「已验收」——证据没落盘，下次严格合成仍然拒绝。
+public enum VoiceOutputCheckState: Equatable, Sendable {
+    case idle
+    case running(voiceID: String)
+    /// 机器报告 pass 且证据已保存。
+    case passed(voiceID: String, voiceRevision: String?, runID: String?)
+    /// 机器报告通过，但结果未保存：显示「检查已完成，但结果未保存，请重试」。
+    case passedNotPersisted(voiceID: String, voiceRevision: String?)
+    /// 机器报告未通过（warn/reject）。
+    case failed(voiceID: String, voiceRevision: String?, message: String)
+    /// 请求本身失败（网络、契约、取消之外的错误）。
+    case error(voiceID: String, message: String)
+
+    public var voiceID: String? {
+        switch self {
+        case .idle:
+            nil
+        case let .running(voiceID),
+             let .passed(voiceID, _, _),
+             let .passedNotPersisted(voiceID, _),
+             let .failed(voiceID, _, _),
+             let .error(voiceID, _):
+            voiceID
+        }
+    }
+
+    public var isRunning: Bool {
+        if case .running = self { return true }
+        return false
+    }
+
+    /// 面向用户的一句话结果。检查成功只代表这一次运行通过并落盘，
+    /// 生成时仍会确认当前声音环境。
+    public var resultMessage: String? {
+        switch self {
+        case .idle, .running:
+            nil
+        case let .passed(_, _, runID):
+            if let runID, !runID.isEmpty {
+                "本次检查通过（\(runID)）。生成时仍会确认当前声音环境。"
+            } else {
+                "本次检查通过。生成时仍会确认当前声音环境。"
+            }
+        case .passedNotPersisted:
+            "检查已完成，但结果未保存，请重试。"
+        case let .failed(_, _, message):
+            message
+        case let .error(_, message):
+            message
+        }
+    }
 }
 
 @MainActor
@@ -634,6 +693,11 @@ public final class AppModel {
     public private(set) var isRegisteringCloneVoice = false
     public private(set) var cloneMessage: String?
     public private(set) var lastRegisteredCloneVoice: CreatorVoice?
+    /// 「检查配音效果」的结果状态。绑定到 voice ID + revision + 请求代际：
+    /// 切换选择、删除或改版后的迟到结果不得污染新选择（issue: 质量检查陈旧响应）。
+    public private(set) var voiceOutputCheck: VoiceOutputCheckState = .idle
+    /// 正在检查的 voice ID：用于阻止重复提交。
+    public private(set) var voiceOutputCheckInFlightVoiceID: String?
     /// 一次逻辑注册的稳定身份：响应丢失后重试必须带同一个 `id` 与 `Idempotency-Key`，
     /// 否则服务端会把同一次注册再建一遍（§13.2 / `POST /v1/voices/clone`）。
     public private(set) var cloneRegistrationID: String?
@@ -684,6 +748,8 @@ public final class AppModel {
     private var creatorVoiceDetailGeneration: UInt64 = 0
     private var creatorVoiceRefreshGeneration: UInt64 = 0
     private var discoveryRefreshGeneration: UInt64 = 0
+    /// 质量检查的请求代际：只有最新一次请求可以落地结果。
+    private var voiceOutputCheckGeneration: UInt64 = 0
     /// 模型准备的操作代数：`execute` / `cancelCurrentOperation` / `refreshModels`
     /// 每次进入都会递增。取消链在发起时记住自己的代数，等待与刷新期间一旦有更新
     /// 入口 bump，就自认过期、不再落地状态，避免覆盖更新的终态（issue #88）。
@@ -1065,6 +1131,8 @@ public final class AppModel {
             step = .submitReviewAndPublish
         case .publish:
             step = .publish
+        case .regenerateCandidate:
+            step = .regenerateCandidate
         case .cancelCandidate:
             step = .cancelCandidate
             voiceDesignPublication.phase = .cancelling
@@ -1073,6 +1141,14 @@ public final class AppModel {
             step,
             generation: voiceDesignPublicationGeneration
         )
+    }
+
+    /// `failed` 是候选终态：此时唯一有效的动作是重新生成候选，而不是重复一次
+    /// 必然被服务拒绝的复验。UI 据此显示正确按钮，避免展示无效重试。
+    public var voiceDesignPublicationRetryActionTitle: String {
+        voiceDesignPublicationRetryStep == .regenerateCandidate
+            ? "重新生成候选"
+            : "重试这一步"
     }
 
     public func cancelVoiceDesignPublication() {
@@ -1273,7 +1349,9 @@ public final class AppModel {
                 guard [.confirmed, .validating, .publishable].contains(state) else {
                     failVoiceDesignPublication(
                         "这个候选状态已结束，不能继续复验。",
-                        retryStep: .validate,
+                        // `failed` is terminal on the service side; anything else
+                        // that ended early is still worth one plain retry.
+                        retryStep: state == .failed ? .regenerateCandidate : .validate,
                         generation: generation
                     )
                     return
@@ -1319,9 +1397,44 @@ public final class AppModel {
         case .publish:
             await publishVoiceDesignCandidate(context, generation: generation)
 
+        case .regenerateCandidate:
+            regenerateFailedVoiceDesignCandidate(context)
+
         case .cancelCandidate:
             await cancelVoiceDesignCandidate(context, generation: generation)
         }
+    }
+
+    /// `failed` 是候选的终态：服务不再受理对该候选的复验或发布，所以重试必须
+    /// 换一个新候选，而不是重复一次必然被拒的调用。这里结束当前 publication
+    /// context（不复用 failed 的 candidate ID / target voice ID / idempotency key），
+    /// 保留服务端失败候选与证据供排查，再复用现有候选 slot 的生成方法。
+    private func regenerateFailedVoiceDesignCandidate(
+        _ context: VoiceDesignPublicationContext
+    ) {
+        let slot = voiceDesignSavingSlot ?? context.slot
+        // `retryVoiceDesignCandidate` silently no-ops while another generation is
+        // running. Check first so the button never clears the failure state and
+        // then does nothing: if we cannot start, the terminal action stays
+        // visible and retryable.
+        guard voiceDesignGenerationTask == nil, !isGeneratingVoiceDesign else {
+            voiceDesignPublication.message =
+                "正在生成其他候选，请等它结束后再重新生成这一个。"
+            return
+        }
+        guard let candidate = voiceDesignCandidates.first(where: { $0.slot == slot }),
+              !candidate.instructionSnapshot.isEmpty
+        else {
+            voiceDesignPublication.message =
+                "候选信息已变化，无法就地重新生成；请重新填写描述后生成新候选。"
+            return
+        }
+        voiceDesignPublicationContext = nil
+        voiceDesignPublicationRetryStep = nil
+        voiceDesignSavingSlot = nil
+        voiceDesignPublication = VoiceDesignPublicationSnapshot(phase: .idle)
+        voiceDesignErrorMessage = nil
+        retryVoiceDesignCandidate(slot: slot)
     }
 
     private func cancelVoiceDesignCandidate(
@@ -1565,10 +1678,14 @@ public final class AppModel {
             guard current.knownState == .confirmed || current.knownState == .validating
             else {
                 failVoiceDesignPublication(
-                    current.knownState == nil
+                    current.knownState == .failed
+                        ? "这个候选没有通过机器验收，不能继续复验；请重新生成候选。"
+                        : current.knownState == nil
                         ? "服务返回了未知候选状态；保留候选信息，不能继续复验。"
                         : "候选状态已变化，请重新读取后再复验。",
-                    retryStep: .validate,
+                    retryStep: current.knownState == .failed
+                        ? .regenerateCandidate
+                        : .validate,
                     generation: generation
                 )
                 return
@@ -1604,7 +1721,12 @@ public final class AppModel {
             guard validation.machineStatus == VoiceDesignReview.pass.rawValue else {
                 failVoiceDesignPublication(
                     Self.voiceDesignValidationMessage(validation),
-                    retryStep: .validate,
+                    // The service moves a machine-rejected candidate to `failed`,
+                    // which is terminal: re-validating it is rejected every time.
+                    // Offer a new candidate instead of a dead retry.
+                    retryStep: validated.knownState == .failed
+                        ? .regenerateCandidate
+                        : .validate,
                     generation: generation
                 )
                 return
@@ -2156,8 +2278,10 @@ public final class AppModel {
         case let .completed(voice):
             return await finishCloneRegistration(voice)
         case .pending:
-            cloneMessage = "音色注册仍在处理中；请稍后重新检查。"
-            return nil
+            // A durable pending record is recoverable by replaying the exact
+            // same POST. The service keeps create-only + fingerprint checks, so
+            // this cannot create a second logical voice.
+            break
         case .new, .notFound:
             break
         case let .unknown(state):
@@ -2194,6 +2318,9 @@ public final class AppModel {
             {
                 cloneMessage = "这次注册与服务端已记录的操作冲突。请保留当前内容和注册身份，再重新检查状态。"
                 return nil
+            }
+            if Self.isDefinitiveCloneRejection(error) {
+                releaseRejectedCloneRegistrationForRetry()
             }
             cloneMessage = Self.creatorErrorMessage(for: error)
             return nil
@@ -2269,6 +2396,31 @@ public final class AppModel {
         case .invalidURL, .invalidResponse, .notModifiedWithoutCache, .invalidContract:
             false
         }
+    }
+
+    private static let definitiveCloneRejectionCodes: Set<String> = [
+        "invalid_name",
+        "invalid_ref_text",
+        "invalid_voice_id",
+        "invalid_audio",
+        "audio_too_short",
+        "audio_too_long",
+        "voice_quality_reject",
+    ]
+
+    private static func isDefinitiveCloneRejection(_ error: Error) -> Bool {
+        guard let error = error as? ServiceAPIClientError else { return false }
+        guard case let .http(_, code, _, _, _) = error else { return false }
+        return definitiveCloneRejectionCodes.contains(code)
+    }
+
+    /// Release only the operation identity. The captured recording stays audible
+    /// so a definite pre-commit rejection can be corrected without discarding the
+    /// user's take; the next submission receives a new logical operation key.
+    private func releaseRejectedCloneRegistrationForRetry() {
+        cloneRegistrationContext = nil
+        cloneRegistrationID = Self.makeCloneRegistrationID()
+        cloneIdempotencyKey = UUID().uuidString.lowercased()
     }
 
     public func clearCloneMessage() {
@@ -3049,7 +3201,10 @@ public final class AppModel {
                 text: scriptText,
                 voiceID: voice.id,
                 speed: speed,
-                options: options
+                // Formal production states its validation policy here as well as
+                // at the client boundary, so a creator client that falls back to
+                // the plain speech primitive still produces a checked render.
+                options: options.withValidationPolicy("require_output_pass")
             )
             let data = render.audioData
             try Task.checkCancellation()
@@ -3094,6 +3249,86 @@ public final class AppModel {
             creatorMessage = Self.creatorErrorMessage(for: error)
             return nil
         }
+    }
+
+    /// 对克隆音色执行一次输出验收（`POST /v1/speechrail/voices/{id}/quality-runs`）。
+    ///
+    /// 状态绑定到 voice ID + revision + 请求代际：切换选择、删除或改版后，
+    /// 迟到的结果不会污染新的选择。检查通过只代表这一次运行通过并落盘，
+    /// 生成时仍会确认当前声音环境。
+    @discardableResult
+    public func checkVoiceOutput(voiceID: String) async -> VoiceOutputCheckState {
+        // A duplicate submission for the same voice is ignored while its check
+        // runs; checking a *different* voice supersedes the in-flight request so
+        // the stale result can never land on the newly selected voice.
+        guard voiceOutputCheckInFlightVoiceID != voiceID else {
+            return voiceOutputCheck
+        }
+        guard !Task.isCancelled else { return voiceOutputCheck }
+        let voiceRevision = creatorVoices.first { $0.id == voiceID }?.revision
+        voiceOutputCheckGeneration &+= 1
+        let generation = voiceOutputCheckGeneration
+        voiceOutputCheck = .running(voiceID: voiceID)
+        voiceOutputCheckInFlightVoiceID = voiceID
+        defer {
+            if voiceOutputCheckGeneration == generation {
+                voiceOutputCheckInFlightVoiceID = nil
+            }
+        }
+        do {
+            let response = try await creatorClient.runVoiceQuality(
+                id: voiceID,
+                request: VoiceQualityRunRequest()
+            )
+            try Task.checkCancellation()
+            guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
+            // 刷新后运行时未知不能把刚结束的检查改判为失败，也不显示「当前生产已确认」。
+            _ = await refreshCapabilitySet()
+            let refreshedRevision = creatorVoices.first { $0.id == voiceID }?.revision
+            let effectiveRevision = refreshedRevision ?? voiceRevision
+            guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
+            if response.isRecordedOutputPass {
+                voiceOutputCheck = .passed(
+                    voiceID: voiceID,
+                    voiceRevision: effectiveRevision,
+                    runID: response.legacyReport.runID
+                )
+            } else if response.legacyReport.status == .pass {
+                voiceOutputCheck = .passedNotPersisted(
+                    voiceID: voiceID,
+                    voiceRevision: effectiveRevision
+                )
+            } else {
+                voiceOutputCheck = .failed(
+                    voiceID: voiceID,
+                    voiceRevision: effectiveRevision,
+                    message: Self.voiceOutputCheckFailureMessage(response.legacyReport)
+                )
+            }
+        } catch is CancellationError {
+            guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
+            voiceOutputCheck = .idle
+        } catch {
+            guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
+            voiceOutputCheck = .error(
+                voiceID: voiceID,
+                message: Self.creatorErrorMessage(for: error)
+            )
+        }
+        return voiceOutputCheck
+    }
+
+    private static func voiceOutputCheckFailureMessage(
+        _ report: VoiceQualityReportSnapshotV2
+    ) -> String {
+        let codes = report.failureCodes
+        if codes.contains("output_invalid") {
+            return "配音效果检查未通过：服务生成的参考音频无效，请重试或打开诊断"
+        }
+        if codes.contains("transcript_mismatch") {
+            return "配音效果检查未通过：生成音频与参考文案未能匹配，请重试"
+        }
+        return "配音效果检查未通过，请重试或打开诊断"
     }
 
     public func playWork(_ work: CreativeWork) {
@@ -3829,6 +4064,14 @@ public final class AppModel {
                 return "当前档位未提供参考音色能力；请到模型管理查看服务公布的可用档位"
             case "voice_quality_reject":
                 return "生成的参考音频未通过质量检查，请调整描述或参考文案后重试"
+            case "voice_not_production_ready":
+                return "该音色还没有通过配音效果检查。请到音色库点「检查配音效果」，通过后即可正式制作。"
+            case "voice_validation_runtime_changed":
+                return "检查期间服务重新加载了语音模型，本次结果已作废。请重新检查配音效果。"
+            case "voice_validation_store_unavailable":
+                return "音色验收记录暂时不可读，请检查服务状态后重试"
+            case "voice_validation_runtime_unavailable":
+                return "语音服务尚未就绪，无法确认音色当前可用性；请先检查服务状态"
             case "transcript_mismatch":
                 return "生成音频与参考文案未能匹配，请调整参考文案后重试"
             case "transcription_unavailable":

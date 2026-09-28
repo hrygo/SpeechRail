@@ -631,6 +631,12 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let snapshotID: String?
     /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
     public let preview: VoicePreviewSample?
+    /// 服务端当前运行事实下的正式制作准入。`available` 只说明「可路由」，
+    /// 不等于「已通过输出验收」；克隆音色必须读这两个字段才能决定能否正式配音。
+    /// 缺失表示来源未知，一律按未就绪处理，绝不默认 true。
+    public let productionReady: Bool?
+    public let productionReadyReason: String?
+    public let validationState: JSONValue?
 
     public init(
         id: String,
@@ -647,7 +653,10 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         operations: [String: JSONValue],
         qualitySummary: SafeVoiceQualitySummary? = nil,
         snapshotID: String? = nil,
-        preview: VoicePreviewSample? = nil
+        preview: VoicePreviewSample? = nil,
+        productionReady: Bool? = nil,
+        productionReadyReason: String? = nil,
+        validationState: JSONValue? = nil
     ) {
         self.id = id
         self.name = name
@@ -664,6 +673,9 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         self.qualitySummary = qualitySummary
         self.snapshotID = snapshotID
         self.preview = preview
+        self.productionReady = productionReady
+        self.productionReadyReason = productionReadyReason
+        self.validationState = validationState
     }
 
     enum CodingKeys: String, CodingKey {
@@ -682,6 +694,9 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         case qualitySummary = "quality_summary"
         case snapshotID = "snapshot_id"
         case preview
+        case productionReady = "production_ready"
+        case productionReadyReason = "production_ready_reason"
+        case validationState = "validation_state"
     }
 
     public init(from decoder: Decoder) throws {
@@ -709,7 +724,16 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
                 SafeVoiceQualitySummary.self,
                 forKey: .qualitySummary
             ),
-            snapshotID: try container.decodeIfPresent(String.self, forKey: .snapshotID)
+            snapshotID: try container.decodeIfPresent(String.self, forKey: .snapshotID),
+            productionReady: try container.decodeIfPresent(Bool.self, forKey: .productionReady),
+            productionReadyReason: try container.decodeIfPresent(
+                String.self,
+                forKey: .productionReadyReason
+            ),
+            validationState: try container.decodeIfPresent(
+                JSONValue.self,
+                forKey: .validationState
+            )
         )
     }
 }
@@ -949,6 +973,42 @@ public struct VoiceQualityRunRequest: Codable, Equatable, Sendable {
         case probeSet = "probe_set"
         case runs
         case includeAudio = "include_audio"
+    }
+}
+
+/// Namespaced `POST /v1/speechrail/voices/{id}/quality-runs` envelope.
+///
+/// The service does not return a bare `VoiceQualityReportSnapshotV2` here: it
+/// wraps the legacy report under `legacy_report`, adds a structured `evidence`
+/// projection, and reports whether the run was durably recorded via
+/// `validation_persisted`. A client that decodes the report as the top-level
+/// object fails, and treating HTTP 200 as success would promote an unpersisted
+/// check to "已验收" — both defects this type exists to prevent.
+public struct VoiceQualityRunResponse: Codable, Equatable, Sendable {
+    public let legacyReport: VoiceQualityReportSnapshotV2
+    public let evidence: JSONValue?
+    public let validationPersisted: Bool
+
+    public init(
+        legacyReport: VoiceQualityReportSnapshotV2,
+        evidence: JSONValue? = nil,
+        validationPersisted: Bool
+    ) {
+        self.legacyReport = legacyReport
+        self.evidence = evidence
+        self.validationPersisted = validationPersisted
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case legacyReport = "legacy_report"
+        case evidence
+        case validationPersisted = "validation_persisted"
+    }
+
+    /// A run only counts as a completed, recorded acceptance when the machine
+    /// report passed *and* the evidence reached durable storage.
+    public var isRecordedOutputPass: Bool {
+        legacyReport.status == .pass && validationPersisted
     }
 }
 
@@ -1289,6 +1349,23 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
             latencyBudgetMs: latencyBudgetMs,
             languageOverride: languageOverride ?? self.languageOverride,
             validationPolicy: validationPolicy
+        )
+    }
+
+    /// Derive a copy with an explicit validation policy, preserving every other
+    /// field. Formal production must always carry `require_output_pass`; a
+    /// hand-rebuilt options struct is how that guarantee silently disappears.
+    public func withValidationPolicy(_ policy: String?) -> SpeechRailRequestOptions {
+        SpeechRailRequestOptions(
+            expectedVoiceRevision: expectedVoiceRevision,
+            expectedModelRevision: expectedModelRevision,
+            pronunciationSet: pronunciationSet,
+            receiptMode: receiptMode,
+            timingMode: timingMode,
+            purpose: purpose,
+            latencyBudgetMs: latencyBudgetMs,
+            languageOverride: languageOverride,
+            validationPolicy: policy
         )
     }
 }

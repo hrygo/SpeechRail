@@ -1017,6 +1017,179 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    /// C1: the namespaced quality-runs route returns an envelope, not a bare report.
+    /// Decoding it as `VoiceQualityReportSnapshotV2` fails on the missing top-level
+    /// `status`, which is exactly the mismatch this DTO now models.
+    func testQualityRunEnvelopeDecodesLegacyReportAndPersistedFlag() throws {
+        let json = """
+        {
+          "legacy_report": {
+            "policy_version": "voice_quality_v1",
+            "status": "pass",
+            "run_id": "vq_0123456789abcdef0123456789abcdef",
+            "tested_at": "2026-09-28T00:00:00Z",
+            "failure_codes": []
+          },
+          "evidence": {"schema": "voice_quality_evidence_v1"},
+          "validation_persisted": true
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(VoiceQualityRunResponse.self, from: Data(json.utf8))
+
+        XCTAssertEqual(decoded.legacyReport.status, .pass)
+        XCTAssertEqual(decoded.legacyReport.runID, "vq_0123456789abcdef0123456789abcdef")
+        XCTAssertTrue(decoded.validationPersisted)
+        XCTAssertTrue(decoded.isRecordedOutputPass)
+    }
+
+    /// A `pass` report whose evidence never reached storage is a real observation,
+    /// but it must not be promoted to "已验收": the next strict render still rejects.
+    func testQualityRunEnvelopeWithPersistedFalseIsNotARecordedPass() throws {
+        let json = """
+        {
+          "legacy_report": {"status": "pass", "failure_codes": []},
+          "evidence": null,
+          "validation_persisted": false
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(VoiceQualityRunResponse.self, from: Data(json.utf8))
+
+        XCTAssertEqual(decoded.legacyReport.status, .pass)
+        XCTAssertFalse(decoded.validationPersisted)
+        XCTAssertFalse(decoded.isRecordedOutputPass)
+        XCTAssertNil(decoded.evidence)
+    }
+
+    /// A missing `legacy_report` must fail to decode: an envelope without a report
+    /// is a contract violation, not an empty successful check.
+    func testQualityRunEnvelopeWithoutLegacyReportFailsToDecode() {
+        let json = #"{"validation_persisted": true}"#
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(VoiceQualityRunResponse.self, from: Data(json.utf8))
+        )
+    }
+
+    /// `SafeVoiceEntry` must expose the service's production-readiness fact.
+    /// A missing field is "unknown", never a silent `true`.
+    func testSafeVoiceEntryDecodesProductionReadinessAndDefaultsToUnknown() throws {
+        let withReadiness = try JSONDecoder().decode(
+            SafeVoiceEntry.self,
+            from: Data(Self.safeVoiceEntryJSON(productionReady: "false", reason: "\"output_validation_scope_missing\"").utf8)
+        )
+        XCTAssertEqual(withReadiness.productionReady, false)
+        XCTAssertEqual(withReadiness.productionReadyReason, "output_validation_scope_missing")
+
+        let withoutReadiness = try JSONDecoder().decode(
+            SafeVoiceEntry.self,
+            from: Data(Self.safeVoiceEntryJSON(productionReady: nil, reason: nil).utf8)
+        )
+        XCTAssertNil(withoutReadiness.productionReady)
+        XCTAssertNil(withoutReadiness.productionReadyReason)
+    }
+
+    func testWithValidationPolicyKeepsEveryOtherOption() {
+        let original = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40),
+            pronunciationSet: "story@pr_0123456789abcdef0123456789abcdef",
+            receiptMode: "integrity",
+            timingMode: "chunk",
+            purpose: "interactive",
+            latencyBudgetMs: 1_500,
+            languageOverride: "ja",
+            validationPolicy: "require_output_pass"
+        )
+
+        let updated = original.withValidationPolicy("allow_unverified")
+
+        XCTAssertEqual(updated.validationPolicy, "allow_unverified")
+        XCTAssertEqual(updated.headers["SpeechRail-Validation-Policy"], "allow_unverified")
+        for (key, value) in original.headers where key != "SpeechRail-Validation-Policy" {
+            XCTAssertEqual(updated.headers[key], value, key)
+        }
+    }
+
+    /// F1: formal production must always carry the strict policy, even when the
+    /// caller forgot it. Audition keeps the permissive default.
+    func testRenderPinsStrictPolicyAndAuditionStaysUnverified() async throws {
+        let client = makeHTTPClient(
+            statusCode: 200,
+            body: Data([0x52, 0x49, 0x46, 0x46])
+        )
+        ServiceAPIURLProtocolStub.state.setContentType("audio/wav")
+        let options = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40),
+            validationPolicy: nil
+        )
+
+        _ = try await client.createSpeechRender(
+            text: "正式制作",
+            voiceID: "voice_demo",
+            speed: 1.0,
+            options: options
+        )
+        let renderRequest = try XCTUnwrap(
+            ServiceAPIURLProtocolStub.state.recordedRequests().first
+        )
+        XCTAssertEqual(
+            renderRequest.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"),
+            "require_output_pass"
+        )
+        // The render path must not drop the other options while pinning strict.
+        XCTAssertEqual(
+            renderRequest.value(forHTTPHeaderField: "SpeechRail-Expected-Voice-Revision"),
+            "vr_0123456789abcdef0123456789abcdef"
+        )
+        XCTAssertEqual(
+            renderRequest.value(forHTTPHeaderField: "SpeechRail-Receipt-Mode"),
+            "integrity"
+        )
+
+        _ = try await client.createSpeech(
+            text: "试听一下",
+            voiceID: "voice_demo",
+            speed: 1.0,
+            options: options
+        )
+        let auditionRequest = try XCTUnwrap(
+            ServiceAPIURLProtocolStub.state.recordedRequests().dropFirst().first
+        )
+        XCTAssertEqual(
+            auditionRequest.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"),
+            "allow_unverified"
+        )
+    }
+
+    private static func safeVoiceEntryJSON(
+        productionReady: String?,
+        reason: String?
+    ) -> String {
+        let readyField = productionReady.map { "\"production_ready\": \($0)," } ?? ""
+        let reasonField = reason.map { "\"production_ready_reason\": \($0)," } ?? ""
+        return """
+        {
+          "id": "voice_demo",
+          "name": "Demo",
+          "mode": "clone",
+          "available": true,
+          "availability_reason": "available",
+          "variant": "custom_voice",
+          "voice_revision": "vr_0123456789abcdef0123456789abcdef",
+          "voice_identity_assurance": "content_addressed",
+          "model": {"assurance": "configured_catalog", "catalog_revision": "catalog-7"},
+          "descriptors": \(objectDescriptorsJSON),
+          "operations": {},
+          \(readyField)
+          \(reasonField)
+          "snapshot_id": "snap-1"
+        }
+        """
+    }
+
     private func makeHTTPClient(statusCode: Int, body: Data) -> ServiceAPIClient {
         ServiceAPIURLProtocolStub.state.reset(statusCode: statusCode, body: body)
         let configuration = URLSessionConfiguration.ephemeral
@@ -1103,6 +1276,7 @@ private final class ServiceAPIURLProtocolState: @unchecked Sendable {
     private let lock = NSLock()
     private var statusCode = 200
     private var body = Data()
+    private var contentType = "application/json"
     private var recorded: [URLRequest] = []
     private var recordedBodyData: [Data?] = []
 
@@ -1111,8 +1285,23 @@ private final class ServiceAPIURLProtocolState: @unchecked Sendable {
         defer { lock.unlock() }
         self.statusCode = statusCode
         self.body = body
+        self.contentType = "application/json"
         recorded = []
         recordedBodyData = []
+    }
+
+    /// Audio routes assert on the request headers, not the decoded body, so they
+    /// only need a plausible audio content type on the stubbed response.
+    func setContentType(_ value: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        contentType = value
+    }
+
+    func responseContentType() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return contentType
     }
 
     func setResponse(statusCode: Int, body: Data) {
@@ -1164,7 +1353,7 @@ private final class ServiceAPIURLProtocolStub: URLProtocol {
             url: url,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: ["Content-Type": Self.state.responseContentType()]
         )!
         client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client.urlProtocol(self, didLoad: body)

@@ -397,7 +397,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.previewLanguage(for: voice), "japanese")
     }
 
-    func testPendingCloneRegistrationKeepsOriginalPayloadAndBlocksRerecording() async throws {
+    func testPendingCloneRegistrationReplaysTheSameOperationAndBlocksRerecording() async throws {
         let creator = PendingCloneRegistrationClient()
         let model = makeModel(
             transport: ClosureControlTransport { request in
@@ -426,8 +426,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(result)
         let queriedKeys = await creator.statusKeys()
         let registrationCount = await creator.registrationCount()
-        XCTAssertEqual(queriedKeys, [originalIdempotencyKey])
-        XCTAssertEqual(registrationCount, 0)
+        XCTAssertEqual(queriedKeys, [originalIdempotencyKey, originalIdempotencyKey])
+        XCTAssertEqual(registrationCount, 1)
 
         let replacementRecording = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -439,6 +439,263 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.cloneRegistrationID, originalRegistrationID)
         XCTAssertEqual(model.cloneIdempotencyKey, originalIdempotencyKey)
         XCTAssertFalse(model.discardCloneRecording())
+    }
+
+    func testDefinitiveCloneRejectionAllowsRerecordingWithANewOperation() async throws {
+        let creator = RejectingCloneRegistrationClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let recording = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data([1, 2, 3, 4]).write(to: recording)
+        await model.acceptCloneRecording(fileAt: recording)
+        let rejectedID = try XCTUnwrap(model.cloneRegistrationID)
+        let rejectedKey = try XCTUnwrap(model.cloneIdempotencyKey)
+
+        let result = await model.registerCloneVoice(
+            referenceText: "这是一段用于注册音色的测试朗读文本。",
+            name: "测试音色"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertTrue(model.discardCloneRecording())
+        let replacement = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data([5, 6, 7, 8]).write(to: replacement)
+        await model.acceptCloneRecording(fileAt: replacement)
+        XCTAssertNotEqual(model.cloneRegistrationID, rejectedID)
+        XCTAssertNotEqual(model.cloneIdempotencyKey, rejectedKey)
+        XCTAssertEqual(model.cloneRecordingAudio, Data([5, 6, 7, 8]))
+    }
+
+    /// C1 + S3: a `pass` report whose evidence was not persisted must not be
+    /// promoted to "已验收". The user is told to retry instead.
+    func testVoiceOutputCheckWithPersistedFalseIsNotTreatedAsAccepted() async {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(
+                    status: .pass,
+                    runID: "vq_0123456789abcdef0123456789abcdef"
+                ),
+                validationPersisted: false
+            )
+        )
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+
+        let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
+
+        guard case .passedNotPersisted(let voiceID, _) = state else {
+            return XCTFail("unpersisted pass must not be reported as accepted, got \(state)")
+        }
+        XCTAssertEqual(voiceID, "voice_clone_a")
+        XCTAssertEqual(state.resultMessage, "检查已完成，但结果未保存，请重试。")
+        XCTAssertFalse(state.isRunning)
+    }
+
+    /// A recorded pass is reported as accepted, and the wording makes clear it is
+    /// a past observation rather than a standing production confirmation.
+    func testVoiceOutputCheckWithPersistedPassIsAccepted() async {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(
+                    status: .pass,
+                    runID: "vq_0123456789abcdef0123456789abcdef"
+                ),
+                validationPersisted: true
+            )
+        )
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+
+        let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
+
+        guard case .passed(let voiceID, _, let runID) = state else {
+            return XCTFail("recorded pass must be reported as accepted, got \(state)")
+        }
+        XCTAssertEqual(voiceID, "voice_clone_a")
+        XCTAssertEqual(runID, "vq_0123456789abcdef0123456789abcdef")
+        let message = try? XCTUnwrap(state.resultMessage)
+        XCTAssertTrue(message?.contains("本次检查通过") == true, message ?? "")
+        XCTAssertTrue(message?.contains("生成时仍会确认当前声音环境") == true, message ?? "")
+    }
+
+    func testVoiceOutputCheckFailureCarriesActionableMessage() async {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(
+                    status: .reject,
+                    failureCodes: ["output_invalid"]
+                ),
+                validationPersisted: true
+            )
+        )
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+
+        let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
+
+        guard case .failed = state else {
+            return XCTFail("a reject report must not be reported as accepted, got \(state)")
+        }
+        XCTAssertEqual(state.resultMessage, "配音效果检查未通过：服务生成的参考音频无效，请重试或打开诊断")
+    }
+
+    /// A check that started for one voice must not overwrite the state after the
+    /// user switched to a different voice and started a new check.
+    func testLateVoiceOutputCheckResultDoesNotPolluteNewerSelection() async throws {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_first"),
+                validationPersisted: true
+            )
+        )
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+
+        let staleTask = Task { await model.checkVoiceOutput(voiceID: "voice_clone_a") }
+        // Let the first check enter its in-flight window, then supersede it.
+        while model.voiceOutputCheckInFlightVoiceID == nil {
+            await Task.yield()
+        }
+
+        await creator.setResponse(
+            VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_second"),
+                validationPersisted: true
+            )
+        )
+        let fresh = await model.checkVoiceOutput(voiceID: "voice_clone_b")
+        _ = await staleTask.value
+
+        guard case let .passed(_, _, runID) = fresh else {
+            return XCTFail("the newest check must win, got \(model.voiceOutputCheck)")
+        }
+        XCTAssertEqual(runID, "vq_second")
+        XCTAssertEqual(model.voiceOutputCheck.voiceID, "voice_clone_b")
+    }
+
+    /// A duplicate submission for the same voice while its check is running must
+    /// not start a second server run.
+    func testDuplicateVoiceOutputCheckForSameVoiceIsIgnored() async throws {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_only"),
+                validationPersisted: true
+            )
+        )
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+
+        let first = Task { await model.checkVoiceOutput(voiceID: "voice_clone_a") }
+        while model.voiceOutputCheckInFlightVoiceID == nil {
+            await Task.yield()
+        }
+        let duplicate = await model.checkVoiceOutput(voiceID: "voice_clone_a")
+        _ = await first.value
+
+        XCTAssertTrue(duplicate.isRunning)
+        let calls = await creator.runCount()
+        XCTAssertEqual(calls, 1)
+    }
+
+    /// F7: a machine-rejected candidate is `failed` on the service side, so
+    /// re-validating it is rejected every time. The only reachable action is
+    /// "重新生成候选", and taking it must not issue another `validate` call.
+    func testFailedVoiceDesignCandidateOffersRegenerationInsteadOfRetry() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于终态复现与重新生成的测试参考文案。",
+            status: .ready,
+            audioData: Data([0, 1, 2])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "测试音色")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await creator.failNextValidationWithTerminalCandidate()
+        model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
+        model.confirmVoiceDesignReference()
+        await waitForVoiceDesignPhase(.failed, model: model)
+
+        XCTAssertEqual(model.voiceDesignPublicationRetryActionTitle, "重新生成候选")
+        let eventsBeforeRetry = await creator.events()
+        XCTAssertEqual(eventsBeforeRetry.filter { $0 == "validate" }.count, 1)
+
+        model.retryVoiceDesignPublication()
+        for _ in 0..<200 {
+            if !model.isGeneratingVoiceDesign, model.voiceDesignPublication.phase != .failed {
+                break
+            }
+            await Task.yield()
+        }
+        let eventsAfterRetry = await creator.events()
+        // The retry must not replay validation against a terminal candidate.
+        XCTAssertEqual(
+            eventsAfterRetry.filter { $0 == "validate" }.count,
+            eventsBeforeRetry.filter { $0 == "validate" }.count
+        )
     }
 
     func testVoiceDesignCannotReviewOrPublishBeforeHearingDurableAudio() async {
@@ -1010,6 +1267,85 @@ private struct UnavailableDiagnosticsClient: ServiceDiagnosticsClient {
     }
 }
 
+/// Returns a scripted namespaced quality-run envelope so the check state machine
+/// can be driven without a service. `runVoiceQuality` is the only method that
+/// matters here; the rest use the protocol's default implementations.
+private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
+    private var response: VoiceQualityRunResponse
+    private var runs = 0
+
+    init(response: VoiceQualityRunResponse) {
+        self.response = response
+    }
+
+    func setResponse(_ value: VoiceQualityRunResponse) {
+        response = value
+    }
+
+    func runCount() -> Int { runs }
+
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        CloneIdempotencyStatus(state: .new, resultID: nil)
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func deleteVoice(id: String) async throws {}
+
+    func runVoiceQuality(
+        id: String,
+        request: VoiceQualityRunRequest
+    ) async throws -> VoiceQualityRunResponse {
+        runs += 1
+        return response
+    }
+}
+
 private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
     private var queriedKeys: [String] = []
     private var registrations = 0
@@ -1074,6 +1410,67 @@ private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
     func registrationCount() -> Int { registrations }
 }
 
+private actor RejectingCloneRegistrationClient: SpeechRailCreatorClient {
+    func fetchVoices() async throws -> [CreatorVoice] { [] }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchCloneIdempotencyStatus(
+        idempotencyKey: String
+    ) async throws -> CloneIdempotencyStatus {
+        CloneIdempotencyStatus(state: .new, resultID: nil)
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.http(
+            statusCode: 400,
+            code: "voice_quality_reject",
+            message: "Reference quality rejected",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func deleteVoice(id: String) async throws {}
+}
+
 private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
     private var currentCandidate: VoiceDesignCandidate?
     private var recordedEvents: [String] = []
@@ -1083,6 +1480,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
     private var shouldHoldNextPublication = false
     private var shouldFailNextCandidateCancel = false
     private var shouldFailNextValidation = false
+    private var shouldFailNextValidationTerminally = false
     private var heldPublication: CheckedContinuation<VoiceDesignPublishResult, Error>?
     private var heldPublicationResult: VoiceDesignPublishResult?
     private var nextCandidateState = "generated"
@@ -1101,6 +1499,12 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
     /// `validating`: the candidate is parked there with no stored result.
     func failNextValidationLeavingCandidateValidating() {
         shouldFailNextValidation = true
+    }
+
+    /// Machine verification rejects the candidate: the service moves it to the
+    /// terminal `failed` state, which no longer accepts re-validation.
+    func failNextValidationWithTerminalCandidate() {
+        shouldFailNextValidationTerminally = true
     }
 
     func setNextCandidateState(_ state: String) {
@@ -1234,6 +1638,33 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
         }
         guard let existingCandidate = currentCandidate else {
             throw ServiceAPIClientError.requestFailed
+        }
+        if shouldFailNextValidationTerminally, humanReview == nil {
+            shouldFailNextValidationTerminally = false
+            let validation = VoiceDesignValidation(
+                validationID: validationID,
+                candidateRevision: candidateRevision,
+                status: "reject",
+                machineStatus: "reject",
+                identityStatus: .notReviewed,
+                naturalnessStatus: .notReviewed,
+                failureCodes: ["output_invalid"],
+                capabilityKey: "reference.render",
+                modelArtifact: "tts-1.7b-base-bf16",
+                modelCatalogRevision: String(repeating: "a", count: 40),
+                transcriptMatch: 0.2,
+                createdAt: 1,
+                updatedAt: 1
+            )
+            let terminal = makeCandidate(
+                voiceID: existingCandidate.targetVoiceID,
+                name: existingCandidate.name,
+                state: "failed",
+                validations: [validation],
+                publishable: false
+            )
+            currentCandidate = terminal
+            return terminal
         }
         if shouldFailNextValidation, humanReview == nil {
             shouldFailNextValidation = false
@@ -1889,10 +2320,13 @@ extension AppModelTests {
 /// 正式制作路径的可控替身：返回合法 WAV，并记录每次 render 的身份参数。
 private actor ScriptedRenderClient: SpeechRailCreatorClient {
     private(set) var renderCalls: [(text: String, voiceID: String, speed: Double)] = []
+    private(set) var renderPolicies: [String?] = []
     private let audio: Data
+    private let renderError: Error?
 
-    init(audio: Data) {
+    init(audio: Data, renderError: Error? = nil) {
         self.audio = audio
+        self.renderError = renderError
     }
 
     func fetchVoices() async throws -> [CreatorVoice] { [] }
@@ -1917,6 +2351,10 @@ private actor ScriptedRenderClient: SpeechRailCreatorClient {
         options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult {
         renderCalls.append((text, voiceID, speed))
+        renderPolicies.append(options.validationPolicy)
+        if let renderError {
+            throw renderError
+        }
         return SpeechRenderResult(
             audioData: audio,
             planID: "plan_frozen_at_generation",
@@ -1999,6 +2437,57 @@ extension AppModelTests {
     }
 
     /// 生成、播放、导出不入库；显式保存只增加一条；重复保存仍是同一条。
+    /// F1: formal production must state its validation policy at the call site,
+    /// not only at the client boundary. Otherwise a creator client that resolves
+    /// `createSpeechRender` to the protocol default would hand an unverified
+    /// render to the work library.
+    func testFormalRenderAlwaysRequestsStrictOutputValidation() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-strict-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let creator = ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x20))
+        let model = makeRenderModel(store: store, creator: creator)
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "这是一段用于验证正式制作策略的文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+
+        let policies = await creator.renderPolicies
+        XCTAssertEqual(policies, ["require_output_pass"])
+    }
+
+    /// F1: 当服务因严格门禁拒绝这次正式制作时，App 不得留下任何"待保存"的
+    /// 音频。没有 pendingDubbing，就没有可被误当成已验收作品的残留。
+    func testRejectedStrictRenderLeavesNoPendingDubbingAudio() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-strict-reject-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        // 服务拒绝严格渲染（如证据缺失 / 身份变化），客户端以错误结束这次生成。
+        let rejecting = ScriptedRenderClient(
+            audio: silentPreviewWAV(marker: 0x20),
+            renderError: ServiceAPIClientError.requestFailed
+        )
+        let model = makeRenderModel(store: store, creator: rejecting)
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "这是一段应当被服务端拒绝的正式制作文稿。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+
+        // 拒绝后既不能有待保存音频，也不能落一条作品。
+        XCTAssertNil(model.pendingDubbing, "被拒绝的正式制作不得留下待保存音频")
+        XCTAssertEqual(try store.list().count, 0, "被拒绝的正式制作不得落库")
+        // 拒绝必须以一条明确的用户可见提示结束，而不是静默。
+        XCTAssertNotNil(model.creatorMessage, "被拒绝时必须给出明确提示")
+    }
+
     func testExplicitSaveAddsExactlyOneWorkAndIsIdempotent() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("speechrail-save-\(UUID().uuidString)", isDirectory: true)

@@ -2004,7 +2004,10 @@ private struct VoiceCandidateSaveSheet: View {
                     .speechRailButton(.secondary)
                     .keyboardShortcut(.cancelAction)
                 Spacer(minLength: 0)
-                Button("重试这一步", action: model.retryVoiceDesignPublication)
+                Button(
+                    model.voiceDesignPublicationRetryActionTitle,
+                    action: model.retryVoiceDesignPublication
+                )
                     .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
             }
@@ -2860,6 +2863,13 @@ public struct VoiceLibraryView: View {
     @ViewBuilder
     private func voiceInspectorActions(_ voice: CreatorVoice) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            // 克隆音色必须先通过输出验收才能正式制作。冷态下服务端不会声称已就绪，
+            // 这里因此显示「可试听 / 未检查」而不是把按钮锁死——正式制作是否放行
+            // 由服务在严格准入时最终判定。
+            if voice.mode == "clone" {
+                voiceOutputCheckSection(voice)
+            }
+
             Button("去配音台") {
                 navigation.request(.dubbing)
             }
@@ -2924,6 +2934,53 @@ public struct VoiceLibraryView: View {
                 .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
             }
         }
+    }
+
+    /// 克隆音色的输出验收入口与结果。检查是重计算，不在注册成功时自动触发；
+    /// 用户点一次跑一次，结果按 voice ID + revision 绑定，切换选择不会串。
+    @ViewBuilder
+    private func voiceOutputCheckSection(_ voice: CreatorVoice) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            voiceOutputCheckHeader(voice)
+            Text(voiceOutputCheckStatusText(voice))
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+    }
+
+    private func voiceOutputCheckHeader(_ voice: CreatorVoice) -> some View {
+        let isRunning = isRunningVoiceOutputCheck(for: voice)
+        return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("配音效果")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Spacer(minLength: 0)
+            Button(isRunning ? "正在检查…" : "检查配音效果") {
+                Task { await model.checkVoiceOutput(voiceID: voice.id) }
+            }
+            .speechRailButton(.secondary)
+            .disabled(isRunning || model.voiceOutputCheckInFlightVoiceID != nil)
+            .accessibilityLabel("检查 \(voice.name) 的配音效果")
+        }
+    }
+
+    private func isRunningVoiceOutputCheck(for voice: CreatorVoice) -> Bool {
+        let state = model.voiceOutputCheck
+        return state.voiceID == voice.id && state.isRunning
+    }
+
+    private func voiceOutputCheckStatusText(_ voice: CreatorVoice) -> String {
+        let state = model.voiceOutputCheck
+        if state.voiceID == voice.id, let message = state.resultMessage {
+            return message
+        }
+        if voice.productionReady == true {
+            return "已通过检查，可以正式制作。"
+        }
+        // 可试听 ≠ 已验收：不把参考预检显示成输出验收通过。
+        return "可以试听，但正式制作前需要先通过检查。"
     }
 
     private func worksUsing(_ voice: CreatorVoice) -> [CreativeWork] {
