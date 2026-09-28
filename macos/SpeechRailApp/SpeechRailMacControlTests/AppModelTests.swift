@@ -479,6 +479,7 @@ final class AppModelTests: XCTestCase {
     /// C1 + S3: a `pass` report whose evidence was not persisted must not be
     /// promoted to "已验收". The user is told to retry instead.
     func testVoiceOutputCheckWithPersistedFalseIsNotTreatedAsAccepted() async {
+        let revision = "vr_" + String(repeating: "a", count: 32)
         let creator = VoiceOutputCheckCreatorClient(
             response: VoiceQualityRunResponse(
                 legacyReport: VoiceQualityReportSnapshotV2(
@@ -486,18 +487,10 @@ final class AppModelTests: XCTestCase {
                     runID: "vq_0123456789abcdef0123456789abcdef"
                 ),
                 validationPersisted: false
-            )
+            ),
+            voices: [voiceOutputCheckVoice(id: "voice_clone_a", revision: revision)]
         )
-        let model = makeModel(
-            transport: ClosureControlTransport { request in
-                ControlResponse(
-                    requestID: request.requestID,
-                    command: request.command,
-                    status: .completed
-                )
-            },
-            creatorClient: creator
-        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
 
         let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
 
@@ -505,6 +498,7 @@ final class AppModelTests: XCTestCase {
             return XCTFail("unpersisted pass must not be reported as accepted, got \(state)")
         }
         XCTAssertEqual(voiceID, "voice_clone_a")
+        XCTAssertEqual(state.voiceRevision, revision)
         XCTAssertEqual(state.resultMessage, "检查已完成，但结果未保存，请重试。")
         XCTAssertFalse(state.isRunning)
     }
@@ -512,6 +506,7 @@ final class AppModelTests: XCTestCase {
     /// A recorded pass is reported as accepted, and the wording makes clear it is
     /// a past observation rather than a standing production confirmation.
     func testVoiceOutputCheckWithPersistedPassIsAccepted() async {
+        let revision = "vr_" + String(repeating: "a", count: 32)
         let creator = VoiceOutputCheckCreatorClient(
             response: VoiceQualityRunResponse(
                 legacyReport: VoiceQualityReportSnapshotV2(
@@ -519,18 +514,10 @@ final class AppModelTests: XCTestCase {
                     runID: "vq_0123456789abcdef0123456789abcdef"
                 ),
                 validationPersisted: true
-            )
+            ),
+            voices: [voiceOutputCheckVoice(id: "voice_clone_a", revision: revision)]
         )
-        let model = makeModel(
-            transport: ClosureControlTransport { request in
-                ControlResponse(
-                    requestID: request.requestID,
-                    command: request.command,
-                    status: .completed
-                )
-            },
-            creatorClient: creator
-        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
 
         let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
 
@@ -538,6 +525,7 @@ final class AppModelTests: XCTestCase {
             return XCTFail("recorded pass must be reported as accepted, got \(state)")
         }
         XCTAssertEqual(voiceID, "voice_clone_a")
+        XCTAssertEqual(state.voiceRevision, revision)
         XCTAssertEqual(runID, "vq_0123456789abcdef0123456789abcdef")
         let message = try? XCTUnwrap(state.resultMessage)
         XCTAssertTrue(message?.contains("本次检查通过") == true, message ?? "")
@@ -552,18 +540,10 @@ final class AppModelTests: XCTestCase {
                     failureCodes: ["output_invalid"]
                 ),
                 validationPersisted: true
-            )
+            ),
+            voices: [voiceOutputCheckVoice(id: "voice_clone_a")]
         )
-        let model = makeModel(
-            transport: ClosureControlTransport { request in
-                ControlResponse(
-                    requestID: request.requestID,
-                    command: request.command,
-                    status: .completed
-                )
-            },
-            creatorClient: creator
-        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
 
         let state = await model.checkVoiceOutput(voiceID: "voice_clone_a")
 
@@ -573,25 +553,47 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(state.resultMessage, "配音效果检查未通过：服务生成的参考音频无效，请重试或打开诊断")
     }
 
+    func testVoiceOutputCheckFailsClosedWhenVoiceRevisionChangesDuringCheck() async {
+        let originalRevision = "vr_" + String(repeating: "a", count: 32)
+        let updatedRevision = "vr_" + String(repeating: "b", count: 32)
+        let voiceID = "voice_clone_revision"
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_stale"),
+                validationPersisted: true
+            ),
+            voices: [voiceOutputCheckVoice(id: voiceID, revision: originalRevision)]
+        )
+        await creator.setVoicesAfterNextQualityRun([
+            voiceOutputCheckVoice(id: voiceID, revision: updatedRevision)
+        ])
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
+
+        let state = await model.checkVoiceOutput(voiceID: voiceID)
+
+        guard case let .error(actualVoiceID, actualRevision, message) = state else {
+            return XCTFail("a check against an obsolete revision must fail closed, got \(state)")
+        }
+        XCTAssertEqual(actualVoiceID, voiceID)
+        XCTAssertEqual(actualRevision, updatedRevision)
+        XCTAssertEqual(message, "检查期间音色版本发生变化，请重新检查。")
+    }
+
     /// A check that started for one voice must not overwrite the state after the
     /// user switched to a different voice and started a new check.
     func testLateVoiceOutputCheckResultDoesNotPolluteNewerSelection() async throws {
+        let revision = "vr_" + String(repeating: "a", count: 32)
         let creator = VoiceOutputCheckCreatorClient(
             response: VoiceQualityRunResponse(
                 legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_first"),
                 validationPersisted: true
-            )
+            ),
+            voices: [
+                voiceOutputCheckVoice(id: "voice_clone_a", revision: revision),
+                voiceOutputCheckVoice(id: "voice_clone_b", revision: revision)
+            ]
         )
-        let model = makeModel(
-            transport: ClosureControlTransport { request in
-                ControlResponse(
-                    requestID: request.requestID,
-                    command: request.command,
-                    status: .completed
-                )
-            },
-            creatorClient: creator
-        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
 
         let staleTask = Task { await model.checkVoiceOutput(voiceID: "voice_clone_a") }
         // Let the first check enter its in-flight window, then supersede it.
@@ -622,18 +624,10 @@ final class AppModelTests: XCTestCase {
             response: VoiceQualityRunResponse(
                 legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_only"),
                 validationPersisted: true
-            )
+            ),
+            voices: [voiceOutputCheckVoice(id: "voice_clone_a")]
         )
-        let model = makeModel(
-            transport: ClosureControlTransport { request in
-                ControlResponse(
-                    requestID: request.requestID,
-                    command: request.command,
-                    status: .completed
-                )
-            },
-            creatorClient: creator
-        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
 
         let first = Task { await model.checkVoiceOutput(voiceID: "voice_clone_a") }
         while model.voiceOutputCheckInFlightVoiceID == nil {
@@ -1199,6 +1193,37 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private func makeVoiceOutputCheckModel(
+        creatorClient: VoiceOutputCheckCreatorClient
+    ) async -> AppModel {
+        let model = makeModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            creatorClient: creatorClient
+        )
+        let didLoadVoices = await model.refreshCreatorVoices()
+        XCTAssertTrue(didLoadVoices, "the check needs an authoritative voice revision")
+        return model
+    }
+
+    private func voiceOutputCheckVoice(
+        id: String,
+        revision: String = "vr_11111111111111111111111111111111"
+    ) -> CreatorVoice {
+        CreatorVoice(
+            id: id,
+            name: id,
+            available: true,
+            mode: "clone",
+            revision: revision
+        )
+    }
+
     private func makeModel(
         transport: any SpeechRailControlTransport,
         creatorClient: any SpeechRailCreatorClient = UnavailableCreatorClient()
@@ -1273,18 +1298,28 @@ private struct UnavailableDiagnosticsClient: ServiceDiagnosticsClient {
 private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
     private var response: VoiceQualityRunResponse
     private var runs = 0
+    private var voices: [CreatorVoice]
+    private var voicesAfterNextQualityRun: [CreatorVoice]?
 
-    init(response: VoiceQualityRunResponse) {
+    init(
+        response: VoiceQualityRunResponse,
+        voices: [CreatorVoice] = []
+    ) {
         self.response = response
+        self.voices = voices
     }
 
     func setResponse(_ value: VoiceQualityRunResponse) {
         response = value
     }
 
+    func setVoicesAfterNextQualityRun(_ value: [CreatorVoice]) {
+        voicesAfterNextQualityRun = value
+    }
+
     func runCount() -> Int { runs }
 
-    func fetchVoices() async throws -> [CreatorVoice] { [] }
+    func fetchVoices() async throws -> [CreatorVoice] { voices }
 
     func fetchVoice(id: String) async throws -> CreatorVoice {
         throw ServiceAPIClientError.requestFailed
@@ -1342,6 +1377,10 @@ private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
         request: VoiceQualityRunRequest
     ) async throws -> VoiceQualityRunResponse {
         runs += 1
+        if let voicesAfterNextQualityRun {
+            voices = voicesAfterNextQualityRun
+            self.voicesAfterNextQualityRun = nil
+        }
         return response
     }
 }
