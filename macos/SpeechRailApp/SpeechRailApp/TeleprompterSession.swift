@@ -1475,6 +1475,10 @@ public final class TeleprompterSession {
             guard let versionIndex = versions.firstIndex(where: { $0.id == active.id }) else {
                 return "找不到当前朗读版本。"
             }
+            let previousVersion = versions[versionIndex]
+            // 读副本、写回 `self.document`：`TeleprompterDocument` 是结构体，
+            // 直接改局部 `document` 不会生效。
+            let previousUpdatedAt = document.updatedAt
             versions[versionIndex] = TeleprompterVersion(
                 id: active.id,
                 documentID: active.documentID,
@@ -1484,8 +1488,22 @@ public final class TeleprompterSession {
                 createdAt: active.createdAt
             )
             self.document?.updatedAt = Date()
-            try saveBundle()
-            return nil
+            // The AI call already succeeded by this point, so a save failure is
+            // not an AI failure. Roll the in-memory version back: leaving it
+            // applied would show the reader cues as live while the next
+            // unrelated save — a target-minutes tweak, an accepted review, the
+            // progress written when the stage closes — writes them to disk.
+            // Reporting a failure that quietly takes effect anyway is harder to
+            // chase than a plain error.
+            do {
+                try saveBundle()
+                return nil
+            } catch {
+                versions[versionIndex] = previousVersion
+                self.document?.updatedAt = previousUpdatedAt
+                return "朗读提示已经算好，但没有保存成功，稿件内容未改动。"
+                    + "检查磁盘空间或文件夹权限后重试。"
+            }
         } catch is CancellationError {
             return "朗读提示已取消。"
         } catch {

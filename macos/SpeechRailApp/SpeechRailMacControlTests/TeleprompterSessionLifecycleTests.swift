@@ -1310,6 +1310,76 @@ struct TeleprompterSessionLifecycleTests {
         )
     }
 
+    /// 朗读提示这条路上，AI 调用成功、本地存盘失败，却被 `aiFailureMessage` 说成
+    /// 「AI 暂时没能整理这份稿子……你可以重试」。责任归错了对象：AI 明明成功
+    /// 了，而重试只会再烧一遍同样的调用、再失败一次。更糟的是 `versions` 里已经
+    /// 写入了新提示却没回滚——用户被告知失败，提示却留在内存里，下一次任何
+    /// 无关的保存（改目标时长、采用候选版本、关闭舞台存进度）会把它悄悄写进
+    /// 磁盘。**报告失败，却悄悄生效**，是比报错本身更难查的一类问题。
+    @Test("a store failure while saving reading cues blames the disk, not the AI, and rolls back")
+    func aStoreFailureWhileSavingReadingCuesIsAttributedToTheDisk() async throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        let documentID = try #require(harness.session.document?.id)
+        let before = try #require(harness.session.activeVersion)
+        let keywordsBefore = before.segments.map(\.keywords)
+
+        harness.session.aiClient = TeleprompterAIClient { prompt in
+            let data = Data(prompt.input.utf8)
+            let context = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let units = context?["units"] as? [[String: Any]] ?? []
+            let annotations = units.map { unit -> [String: Any] in
+                let id = unit["id"] as? Int ?? 0
+                let raw = unit["text"] as? String ?? ""
+                let keyword = String(raw.prefix(3))
+                return [
+                    "start_unit": id,
+                    "end_unit": id + 1,
+                    "keywords": keyword.isEmpty ? [] : [keyword],
+                    "match_phrases": [],
+                    "pause_hint": "short",
+                ]
+            }
+            return String(decoding: try JSONSerialization.data(withJSONObject: [
+                "schema_version": "teleprompter.analysis.v2",
+                "segments": annotations,
+            ]), as: UTF8.self)
+        }
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let onDisk = try Data(contentsOf: url)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        let message = await harness.session.annotateActiveVersion()
+
+        // 归因必须指向保存，不能说 AI 没能整理——它明明成功了。
+        let text = try #require(message)
+        #expect(
+            text.contains("保存"),
+            "磁盘写失败必须说成保存失败，实际是 \(text)"
+        )
+        #expect(
+            !text.contains("没能整理"),
+            "AI 调用本身是成功的，把磁盘写失败说成 AI 没能整理会让读者白等一次重试，实际是 \(text)"
+        )
+        // 没存住就不能留在内存里，否则下一次无关保存会把它悄悄写进去。
+        #expect(harness.session.activeVersion?.segments.map(\.keywords) == keywordsBefore)
+        #expect(try Data(contentsOf: url) == onDisk, "磁盘字节必须逐字节不变")
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()

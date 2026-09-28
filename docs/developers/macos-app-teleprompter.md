@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.5.5"
+version: "0.5.6"
 date: 2026-09-29
 ---
 
@@ -94,6 +94,8 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)` 或程序分配的 `block_id`，不得返回字符偏移、来源范围或未知 ID。两个 decoder 都拒绝重复键、未知字段、漏单元、重叠、越界和不完整 envelope；rewrite 还拒绝重复/未知/缺失 block ID、mode 矛盾和 protected literal 丢失。每个窗口成功后才生成 AI 块；可恢复的窗口失败则构造 `origin=deterministic`、`disposition=unresolved` 的逐源单元原文块，必须经过现有待确认操作后才能采用。全部结果统一重算时长，不能把回退显示成“已完成 AI 整理”。
 
 `teleprompter.preparation.v2` 仍保留为 `tighten` 兼容路径；`teleprompter.analysis.v2` 只属于已确认稿件的可选朗读标注，不能作为整理结果契约。
+
+AI 调用成功之后、本地存盘失败的那一段，责任必须说给磁盘，不能说给 AI：读者若被告知「AI 没能整理、可以重试」，会白等一次同样会失败的调用。此时内存里的改动也必须回滚——留着就会在下一次无关保存（改目标时长、采用候选版本、关闭舞台写进度）时悄悄生效，变成**报告了失败却真的落地**，比一条干脆报错的提示更难查。同理，存盘失败不得让界面显示已生效的朗读提示。
 
 v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结构不变，既有版本仍可跟读。草稿允许没有活动版本或正文；这扩展了有效保存状态，旧代码无法完整支持新的草稿流程。不得回退或删除用户稿件来处理版本差异。
 

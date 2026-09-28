@@ -181,13 +181,22 @@
     - 变异验证 3 条，全部被杀：整个回滚删掉（杀）、不恢复 `pendingVersion`（杀）、不恢复 `phase`（杀）。第三条单独值得记：只写「候选还在、按钮还能按」而不写「仍停在审阅页」的话，回滚漏掉 `phase` 时界面会停在 `.ready` 而审阅内容已经不在——**这类缺陷只有断言到具体状态才看得见**。
     - **这一条不是运气**：第 41、42 条都是「重读自己写的代码」读出来的，本条是把那条线索形式化成一次静态扫描——脚本枚举「先改状态、后面才出现 `try`／`throw`／`guard else`」的函数，命中 12 处，逐个读源码。11 处是假阳性或已有回滚，本条是唯一一条真缺陷，而且是最重的一条。**这个扫描值得固化成 `tools/` 下的脚本**（并入 §5 第 10 条同批建议）：它的产出只有一行函数名和一行失败点，人工复核成本极低。
 
+44. **AI 明明成功了，存盘失败却被说成「AI 没能整理」，而改动还留在内存里（第十三轮，接第 43 条查出的候选 B，真缺陷）**：第 43 条那次静态扫描同时标出了 `annotateActiveVersion()`，我先修了更重的 `acceptPendingVersion()`，把它搁在一边没回头——**这正是本报告自己写过的教训（「不再信任自己写的代码，重读代码」）的反面：一轮里发现的东西要当轮收掉**。它的形态是前一条的加强版：`versions[versionIndex]` 写入新提示、`document.updatedAt` 推进，然后 `try saveBundle()`；存盘失败落进外层 `catch`，回滚没有，消息来自 `aiFailureMessage(for:)`。三重问题：
+    - **归因对象错了**：AI 调用在抛出前已经成功返回，提示算得好好的。`aiFailureMessage` 对任何非 `unsupportedStructuredOutput` 的错误统一返回「AI 暂时没能整理这份稿子……你可以重试，或直接按原文分段」。
+    - **建议的动作是错的**：「重试」会让读者重跑一次**结果完全相同**的 LLM 调用，再失败一次；真正要做的是腾出磁盘空间。
+    - **报告了失败却悄悄生效**：新提示留在 `versions` 里没回滚。下一次任何无关保存——改目标时长、采用候选版本、关闭舞台写进度——都会把它写进磁盘。读者被告知 AI 没成功，提示却在他不知情的时候落地了。这比一条干脆的报错难查得多。
+
+    修复：把 `saveBundle()` 从大 `do` 里单独拎出来自带 `do`/`catch`，失败时回滚 `versions[versionIndex]` 与 `document.updatedAt` 并返回指向保存的文案（「朗读提示已经算好，但没有保存成功，稿件内容未改动。检查磁盘空间或文件夹权限后重试。」）。改完之后外层 `catch` 只可能看到 AI 错误，`aiFailureMessage` 的适用范围也就名副其实了。
+    - 变异验证 2 条，全部被杀：删掉回滚（杀）、把文案换回 `aiFailureMessage`（杀）。
+    - **这一条附带的元教训比缺陷本身更值钱**：回归第一次跑红时，红的是**回滚**和**文案指向**两条，而我最初写的第一条断言是「文案含『AI』」——它当场通过了，因为旧文案正好含「AI」。**断言写反了：我想表达的是「不要归因给 AI」，写成了「要含 AI」。** 如果当时不看红的是哪几行、只看到「测试通过」就收工，这条缺陷会以「已修复」的名义留在报告里，而断言会在下一次重构里变成相反的意思。**先写回归再改代码的另一个好处在这里显形：它连你的测试写得对不对一起验。**
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **260 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 5 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **261 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 6 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
@@ -195,7 +204,7 @@
 | Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），XCTest **346 项** 0 failures，进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
-| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因，9 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条，全部被新回归杀死，无存活，详见 §2 第 41、42、43 条。**累计有效变异 88 次、56 杀 / 32 存活；累计新增 23 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 5） |
+| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，11 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条，全部被新回归杀死，无存活，详见 §2 第 41–44 条。**累计有效变异 90 次、58 杀 / 32 存活；累计新增 24 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6） |
 
 ### 3.2 未执行（需要逐次授权）
 
@@ -209,7 +218,7 @@
 ### 3.3 契约与文档
 
 - **公共契约无需修改**：`audio.input.transcription.language` 与 `keywords` 早已写入 `contracts/realtime-events.schema.json`（`session.update` 形状）并在 `contracts/realtime-openai.md` 的示例中给出；#112 是客户端向既有契约看齐，而不是新增字段。#106 的稳定性证据同样只走内部 Swift 事件（可选类型化字段，wire 协议未新增事件）。本轮没有改变任何公共端点、事件或错误 envelope。
-- **已同步的文档**：`docs/developers/macos-app-teleprompter.md`（版本 0.5.5：场景预设、正文列宽、「回到朗读位置」、Reduce Motion、输入设备失败归因、读法标注的失败归因边界（`TeleprompterAcceptedReadingRejection` 现为 13 种原因，「现在不能改／找不到这一段／没有保存成功／正文变了」是四件不同的事，且**新增与移除走同一套原因**）、模块表与本轮验收记录）、`docs/developers/macos-app-design-system.md`（正文列宽与窗口宽度分离的描述 + §6 验证矩阵新增一行）、`docs/users/mcp-agent-integration.md`（`session.update` 示例补 `keywords`，并说明语言／关键词是可选提示、越界取值应降级为不给提示）、本报告与 SDD ledger。
+- **已同步的文档**：`docs/developers/macos-app-teleprompter.md`（版本 0.5.6：场景预设、正文列宽、「回到朗读位置」、Reduce Motion、输入设备失败归因、读法标注的失败归因边界（`TeleprompterAcceptedReadingRejection` 现为 13 种原因，「现在不能改／找不到这一段／没有保存成功／正文变了」是四件不同的事，且**新增与移除走同一套原因**）、模块表与本轮验收记录）、`docs/developers/macos-app-design-system.md`（正文列宽与窗口宽度分离的描述 + §6 验证矩阵新增一行）、`docs/users/mcp-agent-integration.md`（`session.update` 示例补 `keywords`，并说明语言／关键词是可选提示、越界取值应降级为不给提示）、本报告与 SDD ledger。
 - **未同步且不需要同步**：`docs/users/` 其余文档不描述舞台列宽与预设入口；根 `README.md` 只保留价值与公共能力，不随本次实现变化更新。
 
 ## 4. 69 项场景台账
