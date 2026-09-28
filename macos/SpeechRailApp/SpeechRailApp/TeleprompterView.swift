@@ -22,6 +22,7 @@ public struct TeleprompterView: View {
     // 终版规格 Sheet 状态
     @State private var isTrialReadingPresented = false
     @State private var isContentSelectionPresented = false
+    @State private var isReadingAliasPresented = false
     @State private var isComparingWithSource = false
     @State private var targetMinutesInput = "20"
     @State private var selectedReviewItemIDs: Set<String> = []
@@ -113,6 +114,9 @@ public struct TeleprompterView: View {
         }
         .sheet(isPresented: $isContentSelectionPresented) {
             TeleprompterContentSelectionSheet(session: session)
+        }
+        .sheet(isPresented: $isReadingAliasPresented) {
+            TeleprompterReadingAliasSheet(session: session)
         }
         .alert(
             TeleprompterAIDataFlowDisclosure.title,
@@ -1960,9 +1964,19 @@ public struct TeleprompterView: View {
 
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.md)
 
-                    Text("点击段落设定起讲位置")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text("点击段落设定起讲位置")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                        // 读法标注是进阶操作：默认路径只留「选起讲段」一件事，
+                        // 术语登记放在命名明确的次级按钮里，不占首屏。
+                        Button("读法标注") {
+                            isReadingAliasPresented = true
+                        }
+                        .speechRailButton(.secondary)
+                        .accessibilityHint("登记识别器容易听错的词，跟读时按你的实际读法匹配")
+                    }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)

@@ -103,7 +103,7 @@ public enum TeleprompterReviewCopy {
     }
 }
 
-public struct TeleprompterSourceRange: Codable, Equatable, Sendable {
+public struct TeleprompterSourceRange: Codable, Hashable, Sendable {
     public let start: Int
     public let end: Int
 
@@ -357,7 +357,7 @@ public enum TeleprompterPauseHint: String, Codable, Sendable, CaseIterable {
 /// alias is dropped from matching rather than applied loosely, because an alias
 /// that silently re-targets a different term would move the reading position
 /// onto text the reader never said.
-public enum TeleprompterAcceptedReadingRejection: Equatable, Sendable {
+public enum TeleprompterAcceptedReadingRejection: Error, Equatable, Sendable {
     /// The recorded range no longer fits the segment (segment shortened or replaced).
     case rangeOutOfBounds
     /// The text at that range is no longer what the user confirmed — the segment
@@ -371,6 +371,12 @@ public enum TeleprompterAcceptedReadingRejection: Equatable, Sendable {
     case numericValuesDiffer
     /// The alias overlaps another confirmed alias on the same segment.
     case overlappingAlias
+    /// The term the reader typed does not occur in the segment they picked.
+    case termNotFound
+    /// The term occurs more than once, so typing it cannot say *which* occurrence
+    /// the alias belongs to. Guessing here would bind the reading to the wrong
+    /// words, so the reader is asked to narrow it down instead.
+    case termAmbiguousOccurrences(Int)
     /// Written by a newer rule revision than this build understands. Dropping it is
     /// the only safe answer: we cannot claim an entry passes rules we have not read.
     case unknownRuleRevision

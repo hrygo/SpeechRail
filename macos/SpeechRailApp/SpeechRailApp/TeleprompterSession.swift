@@ -815,6 +815,68 @@ public final class TeleprompterSession {
         }
     }
 
+    /// Resolves a term the reader typed to the one place it occurs in a segment.
+    ///
+    /// An alias belongs to a single occurrence, so a term that appears twice
+    /// cannot be resolved by typing alone. Rather than binding the reading to
+    /// whichever match happened to come first, this refuses and lets the caller
+    /// ask the reader to narrow it down.
+    public func resolveDisplayTerm(
+        _ term: String,
+        inSegmentID segmentID: String
+    ) -> Result<TeleprompterSourceRange, TeleprompterAcceptedReadingRejection> {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let segment = currentSegment(withID: segmentID) else {
+            return .failure(.termNotFound)
+        }
+        let nsText = segment.text as NSString
+        var found: [TeleprompterSourceRange] = []
+        var search = NSRange(location: 0, length: nsText.length)
+        while search.length > 0 {
+            let hit = nsText.range(of: trimmed, options: [], range: search)
+            guard hit.location != NSNotFound else { break }
+            found.append(.init(start: hit.location, end: hit.location + hit.length))
+            let next = hit.location + hit.length
+            // `trimmed` is non-empty, so every hit advances the cursor and the
+            // walk terminates; the length check is only a bound on the last one.
+            guard next < nsText.length else { break }
+            search = NSRange(location: next, length: nsText.length - next)
+        }
+        switch found.count {
+        case 0: return .failure(.termNotFound)
+        case 1: return .success(found[0])
+        default: return .failure(.termAmbiguousOccurrences(found.count))
+        }
+    }
+
+    /// Confirms a reading for a term the reader typed, resolving the occurrence
+    /// first. This is the entry point the interface uses; the range-based overload
+    /// stays for callers that already know exactly where the words are.
+    @discardableResult
+    public func confirmReading(
+        segmentID: String,
+        displayTerm: String,
+        spokenText: String
+    ) -> TeleprompterAcceptedReadingRejection? {
+        switch resolveDisplayTerm(displayTerm, inSegmentID: segmentID) {
+        case let .failure(rejection):
+            return rejection
+        case let .success(range):
+            return confirmReading(
+                segmentID: segmentID,
+                displayRange: range,
+                spokenText: spokenText
+            )
+        }
+    }
+
+    private func currentSegment(withID segmentID: String) -> TeleprompterSegment? {
+        versions.first { version in
+            version.segments.contains { $0.id == segmentID }
+        }?.segments.first { $0.id == segmentID }
+    }
+
     private func version(
         at index: Int,
         withSegmentAt segmentIndex: Int,

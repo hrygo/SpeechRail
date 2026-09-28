@@ -117,9 +117,27 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 
 运行中不调用 LLM，不保存音频或转写。稿件和最后段落位置持久化；句内位置仅在本次运行内保留。AI、服务或识别失败均不阻止用户手动看稿。
 
+### 读法别名（#110）
+
+有些词识别器会稳定听错——产品名、内部术语、人名地名。`TeleprompterAcceptedReading` 允许读者登记「屏幕上写 A，我实际念 B」，**绑定到某个段落内的一处 UTF-16 范围**，并连同当时的显示文本一起保存。对齐时用读法的值去匹配，位置仍落在显示文本上：稿件、导出与逐字记录一个字都不改。方案 §5.6 明确不得全局替换，因此别名只作用于确认的那一段。
+
+入口在稿件就绪页表头的「读法标注」，是渐进式披露的进阶操作，不占「选起讲段」这条默认路径。读者填「屏幕上的词」与「我会念成」两个字段，由会话层解析出现位置，界面不自行计算偏移。
+
+几条规则是实测换来的：
+
+- **替换而非追加**。同时保留两种读法会抬高匹配窗口的分母，把本来精确的匹配打到 0.75，两种读法一起变差。
+- **数值必须无损**。`50%` → `百分之五十` 放行；`大约一半`、`百分之六十` 一律拒绝，否则别名就成了绕过保真闸门的通道。
+- **一处一议**。同一个词在一段里出现多次时拒绝并要求用更长的词组限定，不猜是哪一处；跨段同词则始终在被选中的那一段内解析。
+- **正文一改即失效**。别名记录了当时的显示文本，正文被改后校验失败，匹配时整条丢弃，不会指向别的词。
+- 念显示文本时置信度从 1.0 降到 0.875，仍高于 0.72 的前进门槛——这是「替换而非追加」的已知代价。
+
+`TeleprompterAcceptedReadingRejection` 是唯一的失败出口，共 9 种原因，界面按普通用户语言逐条映射，不暴露内部术语。存盘与读盘都会校验别名，因此旧稿没有该键也照常打开（M-01）。
+
 ## 跟读验收边界
 
 确定性 fake-event 测试只证明 canonicalization、位置决策、snapshot 替换、final 确认和乱序恢复逻辑；不证明麦克风采集、Realtime ASR 识别准确率、视觉呈现或长时间运行质量。实音频验收应覆盖目标语言、数字/日期/货币、邮箱、产品名与领域词，并分别统计空转写、截断、延迟和位置恢复；snapshot 修订必须按全文替换来评估。当前跟读是文本相似度驱动的短语/字符范围定位，不提供词级时间戳；精确词级跟随需要未来 ASR 时间戳或声学强制对齐能力。
+
+读法别名的匹配效果同样只由确定性测试证明，**没有实音频验证**：读者登记的读法能否真的抵消真实识别器的误听，未测。
 
 ## 设计 token 约束
 
@@ -174,3 +192,5 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-29（第五轮）：对抗性审查回放报告时发现，报告无法区分「测得为零」与「检测项从未被触发」——`harmfulJumpCount` 只在 `improvise` 标注下递增，延迟分位只在 `read` 标注带 `expected_segment_index` 时才有样本。一份不含 `improvise` 标注的素材会输出 `harmful_jump_count: 0` 与 `status: deterministic_replay`，读起来像一次干净验收，实际误推进检测从未触发；这正是「不以全部停住换取安全」在测量仪器层面的缺口。已在 caveat 层补上说明，不改 `teleprompter.eval.v1` schema。过程中先被这个现象误导过一次——把「读者在朗读」的素材标成 `improvise` 导致报告如实报出 1 次误推进，追踪控制器后确认行为正确（从锚点开始逐字连续的 final 按方案 §8.9 属于 continuous advance）。`swift test --package-path macos/SpeechRailApp` 212 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 212 项 / 16 套件，0 failures，exit 0）。
 
 2026-09-29（第六轮）：审查验收标准 3 的「迁移失败保留原数据」时发现，#110 验收里点名的「写入失败不丢数据」此前没有任何回归覆盖——已有回归`sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched` 只覆盖写入**之前**的校验失败，不可变源版本不匹配时根本走不到写文件。真正的提交路径既无接缝也无覆盖：`atomicWrite` 是 fileprivate，`FileManager.replaceItemAt` 在 Swift 里也不可覆写。结论是测试缺口而非缺陷——`atomicWrite` 先写临时文件再 `replaceItemAt`，catch 只删临时文件、不碰目标文件。已用只读目录构造同一类失败补上回归（磁盘满／权限拒绝正是该验收项指的场景），断言抛出 `atomicWriteFailed`、原始字节逐字节不变、原稿仍可读、不残留 `.tmp`；root 绕过目录权限，测试显式跳过而不是假装通过。`swift test --package-path macos/SpeechRailApp` 213 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 213 项 / 16 套件，0 failures，exit 0）。
+
+2026-09-29（第七轮）：#110 的读法别名此前只有领域层与对齐器，**没有任何界面入口**——`confirmReading` 无调用方，功能等于不存在。按项目「首屏只留当前任务必需动作、进阶操作渐进式披露」的约束，入口放在稿件就绪页表头的「读法标注」次级按钮，弹窗内用「屏幕上的词／我会念成」两个字段，由会话层 `resolveDisplayTerm` 解析段内出现位置，界面不自行计算 UTF-16 偏移；就绪列表每段本身已是一个 Button，内联控件会形成嵌套按钮并破坏键盘与 VoiceOver 可达性，因此不放在段内。同一词在一段中出现多次时拒绝并提示改用更长词组，不猜；跨段同词始终在被选中段内解析。`TeleprompterSourceRange` 增加 `Hashable` 供 `ForEach` 使用。新文件 `TeleprompterReadingAliasSheet.swift` 已显式注册进 `project.pbxproj`（本工程无文件系统同步组，漏注册会静默不参与 App target 编译）；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED 证明注册生效——SwiftPM 不编译 `TeleprompterView.swift` 与各 sheet，视图层只有 Xcode 一条门禁。设计 token 新增 `readingAliasSheet*` 与 `readingAliasListMaximumHeight` 并按规则同步设计系统文档。证据用变异探针核过：22 次变异带基线自检与已知应杀变异，首轮 5 条存活补 4 条回归（别名 span 自身位置从未被断言、跨数值边界整条作废、失效别名不入 token 流、存盘拒绝重叠别名），另 5 次针对按词解析，4 杀 1 存活——存活那条是 `trimmed` 空值守卫，实测 `NSString.range(of: "")` 返回 `NSNotFound`，且零宽范围会被 `isValid` 再拒一层，属冗余守卫而非测试盲区，按纵深防御保留。`swift test --package-path macos/SpeechRailApp` 248 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（0 failures，exit 0）。**未做 U-10 界面走查、VoiceOver 朗读与真实音频验证**——别名能否真的抵消真实识别器的误听仍未测。

@@ -1352,6 +1352,15 @@ public enum SpeechRailDesignTokens {
         public static let condenseSheetMaximumHeight: CGFloat = 720
         /// 「标记必讲」展开后段落列表的可视高度上限。
         public static let condenseMustKeepListMaximumHeight: CGFloat = 240
+        /// 读法标注窗口尺寸：只放一个段落的读法与新增表单，比内容选择窗口窄。
+        public static let readingAliasSheetMinimumWidth: CGFloat = 440
+        public static let readingAliasSheetWidth: CGFloat = 520
+        public static let readingAliasSheetMaximumWidth: CGFloat = 680
+        public static let readingAliasSheetMinimumHeight: CGFloat = 380
+        public static let readingAliasSheetHeight: CGFloat = 460
+        public static let readingAliasSheetMaximumHeight: CGFloat = 680
+        /// 读法标注窗口里，已确认读法列表的可视高度上限；超出后列表内部滚动。
+        public static let readingAliasListMaximumHeight: CGFloat = 200
         /// 审阅对照分栏最小宽度
         public static let diffColumnMinimumWidth: CGFloat = 320
         /// 待确认事项提示图标尺寸

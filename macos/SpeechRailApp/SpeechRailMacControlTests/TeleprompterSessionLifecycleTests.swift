@@ -386,6 +386,118 @@ struct TeleprompterSessionLifecycleTests {
         #expect(try #require(harness.session.activeVersion).segments.count == 3)
     }
 
+    @Test("a reading can be confirmed by typing the term instead of picking a range")
+    func aReadingCanBeConfirmedByTypingTheTerm() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "按词标注",
+            sourceText: "今天讲鲲鹏一体机。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+
+        let resolved = harness.session.resolveDisplayTerm("鲲鹏", inSegmentID: segment.id)
+        #expect(try resolved.get() == .init(start: 3, end: 5),
+                "唯一出现时应当解析成它在段内的 UTF-16 范围")
+        #expect(harness.session.resolveDisplayTerm("  鲲鹏  ", inSegmentID: segment.id)
+            == .success(.init(start: 3, end: 5)),
+                "复制粘贴常带首尾空格，不该因此认不出这个词")
+
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayTerm: "鲲鹏",
+            spokenText: "昆鹏"
+        ) == nil)
+        let stored = try #require(harness.session.activeVersion?.segments.first)
+        #expect(stored.acceptedReadings.count == 1)
+        #expect(stored.acceptedReadings.first?.spokenText == "昆鹏")
+        #expect(stored.text == segment.text, "标注读法不得改动显示文本")
+    }
+
+    @Test("a term occurring twice is refused rather than silently bound to the first one")
+    func anAmbiguousTermIsRefusedRatherThanGuessed() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "重复词",
+            sourceText: "今天讲鲲鹏，鲲鹏很好。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+
+        let resolved = harness.session.resolveDisplayTerm("鲲鹏", inSegmentID: segment.id)
+        #expect(resolved == .failure(.termAmbiguousOccurrences(2)))
+
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayTerm: "鲲鹏",
+            spokenText: "昆鹏"
+        ) == .termAmbiguousOccurrences(2))
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true,
+                "拒绝之后不得留下任何写了一半的读法")
+
+        // 换成能唯一定位的词组就应当通过——这是界面上给出的出路。
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayTerm: "讲鲲鹏",
+            spokenText: "讲昆鹏"
+        ) == nil)
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.count == 1)
+    }
+
+    @Test("a term that is not in the chosen segment is refused")
+    func aTermOutsideTheSegmentIsRefused() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "找不到的词",
+            sourceText: "今天讲鲲鹏一体机。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+
+        #expect(harness.session.resolveDisplayTerm("并不存在", inSegmentID: segment.id)
+            == .failure(.termNotFound))
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayTerm: "并不存在",
+            spokenText: "壹段"
+        ) == .termNotFound)
+        // 空输入不是「匹配到空」，而是根本没有可登记的词。
+        #expect(harness.session.resolveDisplayTerm("   ", inSegmentID: segment.id)
+            == .failure(.termNotFound))
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
+    }
+
+    @Test("a term is resolved inside the picked segment, not anywhere in the document")
+    func aTermIsResolvedInsideThePickedSegment() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        // 同一个词出现在两段里，且两段内的位置不同。段内偏移才是别名绑定的
+        // 坐标，拿到全文里的第一处就会把读法记到别人的段子上。
+        harness.session.createDocument(
+            title: "跨段同词",
+            sourceText: "今天讲鲲鹏。第二段也讲鲲鹏。"
+        )
+        try harness.session.openForManualReading()
+        let segments = try #require(harness.session.activeVersion?.segments)
+        let second = try #require(segments.count == 2 ? segments[1] : nil)
+
+        let resolved = harness.session.resolveDisplayTerm("鲲鹏", inSegmentID: second.id)
+        #expect(try resolved.get() == .init(start: 5, end: 7),
+                "偏移相对的是被选中段落，不是整篇稿件")
+
+        #expect(harness.session.confirmReading(
+            segmentID: second.id,
+            displayTerm: "鲲鹏",
+            spokenText: "昆鹏"
+        ) == nil)
+        #expect(harness.session.activeVersion?.segments[1].acceptedReadings.count == 1)
+        #expect(harness.session.activeVersion?.segments[0].acceptedReadings.isEmpty == true,
+                "只登记被选中的那一段，另一段不受影响")
+    }
+
     @Test("manual display-line positioning preserves UTF-16 offsets and takes over voice assist")
     func manualDisplayLinePositionUsesExistingTakeover() async throws {
         let harness = try TeleprompterSessionHarness()
