@@ -181,13 +181,14 @@ public struct TeleprompterReadingAliasSheet: View {
 
             Button {
                 guard let segment = selectedSegment else { return }
-                if session.removeConfirmedReading(
+                let rejection = session.removeConfirmedReading(
                     segmentID: segment.id,
                     displayRange: reading.displayRange
-                ) {
-                    message = nil
+                )
+                if let rejection {
+                    message = .init(rejection: rejection)
                 } else {
-                    message = .actionFailed
+                    message = nil
                 }
             } label: {
                 Text("移除")
@@ -311,7 +312,6 @@ public struct TeleprompterReadingAliasSheet: View {
 
 private enum TeleprompterReadingAliasMessage: Equatable {
     case added
-    case actionFailed
     case rejection(TeleprompterAcceptedReadingRejection)
 
     init(rejection: TeleprompterAcceptedReadingRejection) {
@@ -322,14 +322,14 @@ private enum TeleprompterReadingAliasMessage: Equatable {
         switch self {
         case .added:
             "已登记，跟读时会按这个说法匹配。"
-        case .actionFailed:
-            "没有保存成功，请重试。"
         case let .rejection(rejection):
             switch rejection {
             case .notEditable:
                 "现在不能改读法：舞台还开着或上一步还没收尾。关掉提词窗口后再试。"
             case .segmentUnavailable:
                 "找不到这一段内容了，可能稿件已经切换。重新打开窗口再试。"
+            case .noSuchReading:
+                "这条读法已经不在了，刷新一下列表即可。"
             case .saveFailed:
                 "没有保存成功，稿件内容未改动。检查磁盘空间或文件夹权限后重试。"
             case .rangeOutOfBounds, .displayTextChanged:
@@ -355,7 +355,7 @@ private enum TeleprompterReadingAliasMessage: Equatable {
     var tone: StatusTone {
         switch self {
         case .added: .healthy
-        case .actionFailed, .rejection: .attention
+        case .rejection: .attention
         }
     }
 }

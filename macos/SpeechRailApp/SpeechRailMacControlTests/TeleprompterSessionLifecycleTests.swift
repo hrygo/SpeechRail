@@ -345,14 +345,14 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.removeConfirmedReading(
             segmentID: original.id,
             displayRange: range
-        ))
+        ) == nil)
         #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
-        // Removing something that is not there reports honestly instead of
-        // pretending a save happened.
-        #expect(!(harness.session.removeConfirmedReading(
+        // Removing something that is not there says so, rather than claiming
+        // a save happened or blaming the disk.
+        #expect(harness.session.removeConfirmedReading(
             segmentID: original.id,
             displayRange: range
-        )))
+        ) == .noSuchReading)
     }
 
     @Test("a confirmed reading that changes the number is refused and leaves no trace")
@@ -462,6 +462,94 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
         // 磁盘字节逐字节不变。
         #expect(try Data(contentsOf: url) == before, "存盘失败后原始字节必须逐字节不变")
+    }
+
+    /// #110 复审第二条：「移除」这条路原本只返回一个 `Bool`，三种原因
+    /// （舞台开着不能改／这条读法已经不在／存盘失败）全被弹窗说成
+    /// 「没有保存成功，请重试」。舞台开着时重试多少次都不会成功。
+    @Test("removing a reading while the stage is live reports that it is not editable")
+    func removingAReadingWhileTheStageIsLiveIsNotEditable() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "舞台开着",
+            sourceText: "SpeechRail 很快。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+        let found = (segment.text as NSString).range(of: "SpeechRail")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayRange: range,
+            spokenText: "斯比尔雷尔"
+        ) == nil)
+
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.canEdit == false)
+
+        #expect(harness.session.removeConfirmedReading(
+            segmentID: segment.id,
+            displayRange: range
+        ) == .notEditable)
+        // 拒绝移除时读法必须原样留着。
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.count == 1)
+    }
+
+    /// 移除路径的存盘失败必须同样回滚。这条此前完全没有覆盖：移除只返回一个
+    /// `Bool`，失败时把内存里那条读法留在原处，界面显示「已移除」而磁盘上
+    /// 的稿件还带着它——下次打开读法又回来了。
+    @Test("a store failure while removing a reading rolls the removal back")
+    func aStoreFailureWhileRemovingARollsBack() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "移除存盘失败",
+            sourceText: "SpeechRail 很快。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+        let segment = try #require(harness.session.activeVersion?.segments.first)
+        let found = (segment.text as NSString).range(of: "SpeechRail")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+        #expect(harness.session.confirmReading(
+            segmentID: segment.id,
+            displayRange: range,
+            spokenText: "斯比尔雷尔"
+        ) == nil)
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let before = try Data(contentsOf: url)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        #expect(harness.session.removeConfirmedReading(
+            segmentID: segment.id,
+            displayRange: range
+        ) == .saveFailed)
+        #expect(
+            harness.session.activeVersion?.segments.first?.acceptedReadings.count == 1,
+            "移除失败时读法必须回到内存里，否则界面显示已移除而磁盘上还在"
+        )
+        #expect(try Data(contentsOf: url) == before, "移除失败后原始字节必须逐字节不变")
     }
 
     @Test("a reading can be confirmed by typing the term instead of picking a range")

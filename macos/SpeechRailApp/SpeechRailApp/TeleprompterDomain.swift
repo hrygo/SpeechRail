@@ -428,6 +428,9 @@ public enum TeleprompterAcceptedReadingRejection: Error, Equatable, Sendable {
     case notEditable
     /// No confirmed version holds a segment with this id.
     case segmentUnavailable
+    /// There is no confirmed reading bound to that range. Distinct from a
+    /// storage failure: nothing was wrong, the reading is simply already gone.
+    case noSuchReading
     /// The reading was rejected by the store and the change was rolled back.
     /// The script on disk is untouched; this is a storage failure, not a
     /// problem with the reading itself.

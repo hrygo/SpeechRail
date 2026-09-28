@@ -822,40 +822,42 @@ public final class TeleprompterSession {
     }
 
     /// Removes one confirmed reading. The script itself is untouched.
+    ///
+    /// Reports the same typed reasons as `confirmReading` rather than a bare
+    /// `Bool`: "the stage is live", "that reading is already gone" and "the
+    /// store refused the write" are different problems, and the interface
+    /// tells the reader to do different things about each.
     @discardableResult
     public func removeConfirmedReading(
         segmentID: String,
         displayRange: TeleprompterSourceRange
-    ) -> Bool {
-        guard canEdit,
-              let versionIndex = versions.firstIndex(where: { version in
+    ) -> TeleprompterAcceptedReadingRejection? {
+        guard canEdit else { return .notEditable }
+        guard document != nil else { return .segmentUnavailable }
+        guard let versionIndex = versions.firstIndex(where: { version in
                   version.segments.contains { $0.id == segmentID }
               }),
               let segmentIndex = versions[versionIndex].segments
                   .firstIndex(where: { $0.id == segmentID })
-        else { return false }
+        else { return .segmentUnavailable }
         let before = versions[versionIndex].segments[segmentIndex].acceptedReadings
         let remaining = before.filter { $0.displayRange != displayRange }
-        guard remaining.count != before.count else { return false }
+        guard remaining.count != before.count else { return .noSuchReading }
         let original = versions[versionIndex]
         versions[versionIndex] = version(
             at: versionIndex,
             withSegmentAt: segmentIndex,
             acceptedReadings: remaining
         )
-        guard document != nil else {
-            versions[versionIndex] = original
-            return false
-        }
         let previousUpdatedAt = document?.updatedAt ?? Date()
         document?.updatedAt = Date()
         do {
             try saveBundle()
-            return true
+            return nil
         } catch {
             versions[versionIndex] = original
             document?.updatedAt = previousUpdatedAt
-            return false
+            return .saveFailed
         }
     }
 
