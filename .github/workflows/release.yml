@@ -48,6 +48,11 @@ jobs:
       contents: read
     with:
       package-runner: macos-26
+      # The tag is cut from a commit main already tested at full scope, and
+      # build-app below compiles the same App from that same commit. Re-running
+      # the Swift gate here only repeats ~7 minutes of xcodebuild on a second
+      # runner with its own DerivedData.
+      run-swift: "false"
 
   build-app:
     name: Build unsigned macOS DMG

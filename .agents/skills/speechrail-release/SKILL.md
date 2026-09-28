@@ -198,3 +198,27 @@ ZIP 到同一路径，不删除服务数据；combined 先判断失败单元再�
 PID/listener、health/ready、preflight、models/voices、smoke、App 签名/公证状态、回退点和未验证项；原始
 JSON、音频、embedding、日志和绝对私有路径留在仓库外。创建 commit/tag 需用户明确授权；只有发布 commit 包含全部所需材料、工作树无未归属改动且
 同名 tag 不存在时才创建 tag；远端 push 需用户明确授权，禁止 force-push。
+
+## 7. 发布说明（Release note）
+
+发布说明的**正文是 CHANGELOG 里该版本的段落**，由
+`scripts/build_release_notes.py` 组装：CHANGELOG 版本段 → 安装说明 → 对比链接。
+不手写发布说明，也不要把 CHANGELOG 复制粘贴进 workflow 或 issue。
+
+**打 tag 前**该版本段必须已存在于 `CHANGELOG.md`：
+
+```bash
+uv run python scripts/check_version_consistency.py   # 校验版本标题存在
+python3 scripts/build_release_notes.py --version <version> --repository <owner/repo> >/dev/null
+```
+
+第二条在版本段缺失或为空时退出 1，发布流程随之 fail closed——tag 不能带着不含
+CHANGELOG 的说明发出去。CI 的 publish job 会执行同一脚本，不要在 workflow 里另写一份。
+
+**发布后**核对线上 `gh release view <tag>` 的正文：CHANGELOG 条目已就位、无
+`<version>` 占位符、制品文件名带真实版本号、`**Full Changelog**` 指向
+`v<上一版本>...v<本版本>`。占位符不会让 workflow 失败，只能靠这条核对发现。
+
+安装说明文案集中在脚本的 `_INSTALLATION_NOTES`，改动它时同步
+`tests/test_build_release_notes.py`；该测试用隐式字符串拼接把长中文行压到
+100 列内，**不要改成折行的三引号字符串**——CJK 软换行会在渲染时插入空格。

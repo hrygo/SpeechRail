@@ -14,6 +14,16 @@ on:
         required: false
         type: string
         default: macos-26
+      run-python:
+        description: "Force the Python gate on/off. 'auto' classifies pull_request diffs and otherwise runs everything."
+        required: false
+        type: string
+        default: "auto"
+      run-swift:
+        description: "Force the macOS App gate on/off. 'auto' classifies pull_request diffs and otherwise runs everything."
+        required: false
+        type: string
+        default: "auto"
 
 permissions:
   contents: read
@@ -28,8 +38,82 @@ concurrency:
 
 env:
   UV_VERSION: "0.12.13"
+  UV_CACHE_DIR: ~/.cache/uv
 
 jobs:
+  change-scope:
+    name: Change Scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_python: ${{ steps.scope.outputs.run_python }}
+      run_swift: ${{ steps.scope.outputs.run_swift }}
+      scope: ${{ steps.scope.outputs.scope }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INPUT_RUN_PYTHON: ${{ inputs.run-python }}
+          INPUT_RUN_SWIFT: ${{ inputs.run-swift }}
+        run: |
+          set -euo pipefail
+
+          emit() {
+            printf 'run_python=%s\nrun_swift=%s\nscope=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"
+            {
+              echo "### CI change scope: \`$3\`"
+              echo
+              echo "- Run Python gate: \`$1\`"
+              echo "- Run Swift gate: \`$2\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # An explicit input wins. The release path uses it to skip the macOS
+          # gate, because build-app already compiles the App from the same commit.
+          if [[ "$INPUT_RUN_PYTHON" != "auto" || "$INPUT_RUN_SWIFT" != "auto" ]]; then
+            run_python="$INPUT_RUN_PYTHON"; [[ "$run_python" == "auto" ]] && run_python=true
+            run_swift="$INPUT_RUN_SWIFT";     [[ "$run_swift" == "auto" ]] && run_swift=true
+            emit "$run_python" "$run_swift" "explicit"
+            echo "- Reason: <code>workflow_call 显式指定</code>" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Only pull requests are classified. main carries the branch
+          # protection's required checks, and a conditional skip there would
+          # change merge semantics rather than save work.
+          if [[ "$EVENT_NAME" != "pull_request" || -z "$PR_BASE_SHA" ]]; then
+            emit true true full
+            echo "- Reason: <code>非 pull_request 事件，保持全量门禁</code>" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Run the classifier from the PR base ref: a pull request must not be
+          # able to relax the gates by editing the classifier itself.
+          classifier=scripts/ci_changed_scope.py
+          if git cat-file -e "$PR_BASE_SHA:$classifier" 2>/dev/null; then
+            git show "$PR_BASE_SHA:$classifier" > "$RUNNER_TEMP/ci_changed_scope.py"
+            classifier="$RUNNER_TEMP/ci_changed_scope.py"
+          else
+            echo "::warning::base ref 尚无 $classifier，回退到全量门禁"
+            emit true true full
+            exit 0
+          fi
+
+          git diff --name-only -z "$PR_BASE_SHA...$PR_HEAD_SHA" \
+            | python3 "$classifier" \
+              --github-output "$GITHUB_OUTPUT" \
+              --summary "$GITHUB_STEP_SUMMARY"
+
   quality:
     name: Quality Gates
     runs-on: ubuntu-latest
@@ -46,8 +130,20 @@ jobs:
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          enable-cache: false
+
+      # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
+      # project's own version inside uv.lock, so that key changes on every
+      # release and forces a full ~85MB re-download. restore-keys falls back to
+      # the newest cache for this platform; uv is content-addressed, so it only
+      # fetches what genuinely changed.
+      - name: Restore uv download cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-
 
       - name: Set up Python 3.14.7
         run: uv python install 3.14.7
@@ -97,6 +193,8 @@ jobs:
     name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.run_python == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -120,8 +218,20 @@ jobs:
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          enable-cache: false
+
+      # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
+      # project's own version inside uv.lock, so that key changes on every
+      # release and forces a full ~85MB re-download. restore-keys falls back to
+      # the newest cache for this platform; uv is content-addressed, so it only
+      # fetches what genuinely changed.
+      - name: Restore uv download cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -163,6 +273,8 @@ jobs:
     name: macOS App Build & Tests
     runs-on: macos-26
     timeout-minutes: 20
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.run_swift == 'true' }}
 
     steps:
       - name: Checkout repository
@@ -203,7 +315,8 @@ jobs:
     name: Package wheel artifact
     runs-on: ${{ inputs.package-runner || 'macos-26' }}
     timeout-minutes: 10
-    needs: [quality, test]
+    needs: [change-scope, quality, test]
+    if: ${{ needs.change-scope.outputs.run_python == 'true' }}
 
     steps:
       - name: Download tested wheel artifact
@@ -237,3 +350,69 @@ jobs:
           path: release-artifact/
           if-no-files-found: error
           retention-days: 7
+
+  gate-summary:
+    name: Gate Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [change-scope, quality, test, macos-app, package]
+    if: ${{ always() }}
+
+    steps:
+      - name: Validate scope consistency and propagate failures
+        env:
+          SCOPE: ${{ needs.change-scope.outputs.scope }}
+          RUN_PYTHON: ${{ needs.change-scope.outputs.run_python }}
+          RUN_SWIFT: ${{ needs.change-scope.outputs.run_swift }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          MACOS_RESULT: ${{ needs.macos-app.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### CI 门禁结果"
+            echo
+            echo "| 门禁 | 结果 |"
+            echo "|---|---|"
+            echo "| scope | \`$SCOPE\` |"
+            echo "| Quality Gates | $QUALITY_RESULT |"
+            echo "| Test | $TEST_RESULT |"
+            echo "| macOS App | $MACOS_RESULT |"
+            echo "| Package | $PACKAGE_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A scope that disagrees with its own booleans means the classifier
+          # output is untrustworthy; fail instead of reporting a green summary.
+          if [[ "$SCOPE" == "full" && ( "$RUN_PYTHON" != "true" || "$RUN_SWIFT" != "true" ) ]]; then
+            echo "::error::scope=full 与门禁布尔不一致 (python=$RUN_PYTHON swift=$RUN_SWIFT)"
+            exit 1
+          fi
+          if [[ "$SCOPE" == "meta" && ( "$RUN_PYTHON" != "false" || "$RUN_SWIFT" != "false" ) ]]; then
+            echo "::error::scope=meta 与门禁布尔不一致 (python=$RUN_PYTHON swift=$RUN_SWIFT)"
+            exit 1
+          fi
+          if [[ "$SCOPE" == "python" && ( "$RUN_PYTHON" != "true" || "$RUN_SWIFT" != "false" ) ]]; then
+            echo "::error::scope=python 与门禁布尔不一致 (python=$RUN_PYTHON swift=$RUN_SWIFT)"
+            exit 1
+          fi
+          if [[ "$SCOPE" == "swift" && ( "$RUN_PYTHON" != "false" || "$RUN_SWIFT" != "true" ) ]]; then
+            echo "::error::scope=swift 与门禁布尔不一致 (python=$RUN_PYTHON swift=$RUN_SWIFT)"
+            exit 1
+          fi
+
+          # A skipped gate is only legitimate when its scope says so; anything
+          # else must not be reported as a green run.
+          for entry in "quality:$QUALITY_RESULT" "test:$TEST_RESULT" \
+                       "macos-app:$MACOS_RESULT" "package:$PACKAGE_RESULT"; do
+            name="${entry%%:*}"; result="${entry##*:}"
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "::error::门禁 $name 结果为 $result"
+              exit 1
+            fi
+            if [[ "$result" == "skipped" && "$SCOPE" == "full" ]]; then
+              echo "::error::scope=full 但门禁 $name 被跳过"
+              exit 1
+            fi
+          done
+          echo "All selected CI gates passed; skipped gates were out of scope."
