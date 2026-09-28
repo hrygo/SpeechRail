@@ -752,6 +752,7 @@
 - 场景预设：停用只需不再调用 `TeleprompterStageSettings.apply(_:)`；`contentWidth` 与 `preset` 是新增 UserDefaults 键，删掉后回落到「镜头口播」默认值，不影响已确认版本。
 - 设备异常文案：`BlockReason.inputDeviceUnavailable` 是新增枚举分支，回退到上一版即可；旧分支 `serviceNotReady` 保持原样，不涉及持久化数据。
 - 改稿失效修复：`updateSourceText` 现在清空 `readingBlocks`／`reviewItems`，与 `updateContentSelection` 一致；这两项本来就来自上一轮候选，回退不会恢复错误状态，也不需要迁移。
+- 第二十一／二十二轮新增的两处键盘快捷键（`⌘⌥V` 手动接管、`⌘⏎` 采用候选）**彼此独立、删一行即回退**，不涉及会话层或持久化。其中 `⌘⌥V` 与舞台规格第 101 行有张力（详见 §2.10），若接手方决定严格回到「只用 Tab」路线，回退方式与功能影响已写在该节。
 
 ## 7. 复现方式
 
