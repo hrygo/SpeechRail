@@ -357,7 +357,21 @@ jobs:
       - name: Run Swift package tests
         run: swift test --package-path macos/SpeechRailApp
 
-      - name: Build and test unsigned App
+      # Deliberately `build`, never `test`. The step above already runs every
+      # test in macos/SpeechRailApp/SpeechRailMacControlTests through SwiftPM,
+      # and that is the same source directory the Xcode test target compiles.
+      # Running those XCTest and swift-testing suites a second time under
+      # `xcodebuild test` reproduced a lost-wakeup hang: every test reported
+      # passed, TeleprompterSessionLifecycleTests never reported suite
+      # completion, the swift-testing run summary never printed, all threads
+      # parked idle, and `** TEST SUCCEEDED **` never appeared — so the job sat
+      # until `timeout-minutes` killed it. SwiftPM runs the same suites in
+      # under a second, so this step's only remaining job is to prove the app
+      # target still compiles and links in the Xcode project.
+      #
+      # UI tests are not run here either way: they take over the foreground and
+      # require explicit per-run authorization.
+      - name: Build unsigned App
         run: |
           # UI tests take over the foreground and require explicit per-run authorization.
           xcodebuild \
@@ -368,9 +382,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             ARCHS=arm64 \
-            test \
-            -testPlan SpeechRailApp \
-            -skip-testing:SpeechRailAppUITests
+            build
 
       - name: Lint macOS bundle metadata
         run: |
