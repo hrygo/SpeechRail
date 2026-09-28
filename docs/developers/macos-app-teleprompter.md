@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.5.11"
+version: "0.5.12"
 date: 2026-09-29
 ---
 
@@ -65,6 +65,8 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 报告里每个安全数字都由标注推导：严重误推进只在 `improvise` 标注下计数，跟随与恢复延迟只在 `read` 标注带 `expected_segment_index` 时才有样本。素材里一条 `improvise` 都没有，误推进数就恒为 0——报告会明确写出「该检测项未被触发，不表示跟随不会越权推进」；同理，没有带位置的 `read` 标注时会写明分位为 null 只是未测量。**要让一次回放真正充当验收，素材必须包含即兴段与带位置的跟读段**，否则得到的只是一份没问过问题的答卷。
 
 反方向同样要挡住：**标注齐全、跟随却一次没动**。报告里的 `advanced_event_count` 统计实际把阅读位置往前推的事件数；当它为 0 而样本数大于 0 时，报告会写明「0 次严重误推进只说明跟随没有动过，不表示跟随可用」。没有这一条，一条冻住的跟随路径可以带着「零误跳、零停顿、零告警」的结果去验收——每个数字都是真的，合起来描述的却是「什么都没发生」。素材为空（0 个事件）时报「0/0」没有意义，因此该提示只在有样本时出现。
+
+同理，**方案 §11.7 的「回稿恢复 P95」门槛在没量到样本时必须自己说明**：全程直读、一次没脱稿的素材会得到 `reanchor_latency_p50/p95 = null` 与 `reanchor_timeout_count = 0`，报告会写明该门槛本次未被测量。判据是**分位本身有没有样本**，不是素材里有没有 `reRead` 标注——恢复样本来自 `reanchorStartedAt`，而 `improvise` 事件在没有推进时也会设它，所以「没有 `reRead` 标注」的素材同样可能量出恢复延迟。
 
 ## AI 结果契约
 
@@ -204,3 +206,4 @@ scripts/macos_app_build.sh --configuration Debug
 
 2026-09-29（第八轮）：补上 #111／#112 唯一剩余的「语音辅助试读」——此前试读 sheet 只有手动秒表，文档里直接写着「语音辅助试读目前不存在」。新增 `startSpeechTrial()`／`stopSpeechTrial()`，走既有 coordinator 与 client 构造，因此权限、设备租约、显式语言与术语都只有一套；试读不进 `.following`、不动阅读位置、不起运行计时、不写进度、不建 `SessionStore` 行。写第一版时 `stopSpeechTrial()` 直接调 `stopCapture()`，回归当场抓到：`stopCapture` 只关掉会话自己的 client 与 source，**coordinator 仍持着设备租约**，麦克风会再也开不了下一次；改为经 `coordinator.stopCapture()` 归还。这条是测试先于提交发现的。证据只记计数不记正文（`recognizedUnits` / `matchedUnits` 分开），界面按「麦克风 / 识别 / 定位」三段分别报，不把输入电平说成识别成功。没听到内容的试读不产生倍率。变异探针 8 次变异 7 杀：首轮 4 条存活里 3 条是我自己的测试盲区（试读不推进阅读位置、采用闸门、试读沿用同一套识别配置），补断言后杀掉；其中「沿用同一套配置」那条首版变异改错了位置——改的是 `RealtimeASRClient` 兜底构造，而测试注入的 factory 根本不经过它，这种探针改与被测代码不相干，比没写更糟。剩余 1 条存活（把试读事件也喂给 `followAdapter`）已定位为结构性失效：`TeleprompterFollowController` 的每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 掉每个 item，按纵深防御记录。`swift test --package-path macos/SpeechRailApp` 253 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 346 项，0 failures，exit 0）。**未做真实麦克风验证**——语音试读整条链路目前只有 fake transport 证据，真人语速下的识别与定位效果未测。
 2026-09-29（第十七轮）：回放报告新增 `advanced_event_count`，并在跟随一次都没推进时写出告警——验收第 4 条要求「不以全部停住换取安全」，而此前标注齐全的素材上，一条冻住的跟随路径会输出「零误跳、零停顿、零告警」，每个数字都是真的，合起来描述的是「什么都没发生」。详见阶段报告 §2 第 52 条。
+2026-09-29（第十七轮续）：回放报告新增恢复门槛告警——方案 §11.7 的回稿恢复 P95 在没量到样本时必须自己说明未被测量，否则 `null` 与 `0ms` 在报告里无法区分。判据是分位有无样本，不是素材有无 `reRead` 标注。详见阶段报告 §2 第 53 条。

@@ -303,6 +303,45 @@ struct TeleprompterReplayEvaluatorTests {
         )
     }
 
+    /// 第 52 条的同族下一层。方案 §11.7 把**回稿恢复 P95** 列为质量门槛。
+    /// 素材全程直读、没有一次脱稿时：恢复分位是 `null`、恢复超时是 0，
+    /// 而**没有任何 caveat 解释这件事**。于是「回稿恢复 P95 = null」在一份
+    /// 报告里和「回稿恢复 P95 = 0ms」长得一样——前者是没测，后者是极好。
+    /// 验收人引用这个门槛时会以为测过了。
+    ///
+    /// **判据为什么不能是「有没有 reRead 标注」**：恢复样本来自 `reanchorStartedAt`，
+    /// 而 `improvise` 事件在没有推进时也会设它。既有回归
+    /// `reanchorLatencyIsMeasuredFromTheDetour` 的素材一条 `reRead` 都没有，
+    /// 却量出了 1_100ms 恢复延迟——本条第一版就是按标签存在性写的，被它当场打红。
+    @Test func aRunWithoutAnyDetourSaysTheRecoveryGateWasNeverMeasured() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 1_200, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 1)
+                ]
+            )
+        )
+
+        // 前置：跟随确实推进了，所以第 52 条那条零推进告警不会来抢戏。
+        #expect(report.metrics.advancedEventCount > 0)
+        #expect(
+            !report.caveats.contains { $0.contains("一次都没有推进") },
+            "前提：这一段是正常跟上的"
+        )
+        #expect(report.metrics.reanchorLatencyP50Milliseconds == nil, "前提：没有恢复样本")
+        #expect(report.metrics.reanchorLatencyP95Milliseconds == nil)
+        #expect(report.metrics.reanchorTimeoutCount == 0, "前提：没有恢复，也就没有恢复超时")
+        #expect(
+            report.caveats.contains { $0.contains("回稿恢复 P95") && $0.contains("未被测量") },
+            "方案把回稿恢复 P95 列为门槛，没有样本就必须说明它未被测量"
+        )
+    }
+
     @Test func reportCarriesOnlyAggregatesAndNoScriptText() throws {
         let report = try TeleprompterReplayEvaluator.evaluate(
             manifest(

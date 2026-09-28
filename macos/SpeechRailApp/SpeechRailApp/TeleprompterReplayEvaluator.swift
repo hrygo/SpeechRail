@@ -486,6 +486,18 @@ public enum TeleprompterReplayEvaluator {
         if !labels.contains(where: { $0.intent == .read && $0.expectedSegmentIndex != nil }) {
             caveats.append("本次素材没有带 expected_segment_index 的 read 标注：跟随与恢复延迟没有样本，分位为 null 只说明未测量，不表示延迟为零。")
         }
+        // 方案 §11.7 把「回稿恢复 P95」列为质量门槛。恢复样本的来源是
+        // `reanchorStartedAt`——**`reRead` 与「`improvise` 但没有推进」都会设它**，
+        // 所以判据不能是「有没有 reRead 标注」：一份全程直读、没有 reRead 的
+        // 素材同样可能量出恢复延迟（既有回归 `reanchorLatencyIsMeasuredFromTheDetour`
+        // 就是这种素材，它没有 reRead 标注却量出了 1_100ms）。
+        //
+        // 这里直接看分位本身有没有样本。恢复超时为 0 在这里同样是「没问」而不是
+        // 「没发生」：缺这一条，null 与 0ms 在报告里长得一样，验收人会以为这个
+        // 门槛测过了。
+        if metrics.reanchorLatencyP95Milliseconds == nil {
+            caveats.append("本次回放没有量到回稿恢复延迟（分位为 null、超时为 0）：方案 §11.7 的回稿恢复 P95 门槛本次未被测量，不表示恢复够快。")
+        }
         // 上面两条管的是「素材没问」。这一条管的是「素材问了，系统却一次没动」——
         // 标注齐全时上面两条都不触发，事件够密时「错误停顿」也不触发，于是
         // 「0 次严重误推进」会被读成干净结果。一条完全停住的跟随路径必须自己
