@@ -654,16 +654,31 @@ public final class TeleprompterSession {
     }
 
     public func acceptPendingVersion() throws {
-        guard canEdit, let pendingVersion, var document,
-              pendingVersion.documentID == document.id else {
+        guard canEdit, let candidate = pendingVersion, var document,
+              candidate.documentID == document.id else {
             throw TeleprompterTextError.invalidAnalysis
         }
         guard canAcceptPendingVersion else {
             throw TeleprompterTextError.invalidAnalysis
         }
-        versions.append(pendingVersion)
+        // 采用候选版本是这个界面里唯一一件**读者没法重做**的编辑：`pendingVersion`
+        // 一旦置 nil，审阅结果就从这个窗口里消失了。此时若 store 拒绝写入，读者看到
+        // 的是 `.atomicWriteFailed` 那句「原版本仍然保留」——而他们的工作在磁盘和
+        // 界面上都不在了；`canAcceptPendingVersion` 又依赖 `pendingVersion != nil`，
+        // 按钮随之变灰，连重试都不行。
+        //
+        // 所以这里把这次改动碰到的每一项都存下来：写失败就整体放回去，让审阅留在
+        // 屏幕上、按钮留着可按，读者腾出磁盘空间后还能再试一次。
+        let previousVersions = versions
+        let previousDocument = self.document
+        let previousSavedRunState = savedRunState
+        let previousFollowController = followController
+        let previousPhase = phase
+        let previousBlocked = blocked
+
+        versions.append(candidate)
         savedRunState = nil
-        document.activeVersionID = pendingVersion.id
+        document.activeVersionID = candidate.id
         document.updatedAt = Date()
         self.document = document
         self.pendingVersion = nil
@@ -673,7 +688,21 @@ public final class TeleprompterSession {
         phase = .ready
         blocked = nil
         cancelScheduledDraftSave()
-        try saveBundle()
+        do {
+            try saveBundle()
+        } catch {
+            versions = previousVersions
+            self.document = previousDocument
+            savedRunState = previousSavedRunState
+            followController = previousFollowController
+            phase = previousPhase
+            blocked = previousBlocked
+            pendingVersion = candidate
+            // 位置、跟随状态这些是从控制器推出来的，恢复控制器后重算一次，
+            // 而不是逐字段猜回去。
+            syncFollowState()
+            throw error
+        }
     }
 
     public func discardPendingVersion() {

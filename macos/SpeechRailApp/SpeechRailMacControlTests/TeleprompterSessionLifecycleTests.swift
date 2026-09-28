@@ -1040,6 +1040,53 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.clientFactory.clients.isEmpty)
     }
 
+    /// 审阅页最重的一条数据安全缺陷：`acceptPendingVersion()` 先把候选版本写进
+    /// `versions`、把 `pendingVersion` 置 nil、把 `document.activeVersionID` 挪到
+    /// 新版本，最后才 `try saveBundle()`。存盘失败时 throw 出去，**候选版本已经
+    /// 从内存里消失了**，而 `.atomicWriteFailed` 的文案偏偏是「稿件保存失败，原
+    /// 版本仍然保留」——这句话在这条路上是假的。更糟的是 `canAcceptPendingVersion`
+    /// 依赖 `pendingVersion != nil`，按钮随之变灰，**用户连重试都不行**。
+    @Test("a store failure while accepting a pending version keeps the review on screen")
+    func aStoreFailureWhileAcceptingKeepsTheReview() async throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        let acceptedVersionID = try #require(harness.session.activeVersion?.id)
+
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        let documentID = try #require(harness.session.document?.id)
+        #expect(harness.session.canAcceptPendingVersion, "前提：这次审阅本来是可采用的")
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let before = try Data(contentsOf: url)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        #expect(throws: TeleprompterV2StoreError.atomicWriteFailed) {
+            try harness.session.acceptPendingVersion()
+        }
+        // 审阅必须还在，按钮必须还能按——用户才有腾出空间后重试的机会。
+        #expect(harness.session.pendingVersion != nil, "存盘失败不得销毁候选版本")
+        #expect(harness.session.canAcceptPendingVersion, "存盘失败后必须还能重试")
+        #expect(harness.session.activeVersion?.id == acceptedVersionID, "未写入的版本不得生效")
+        #expect(harness.session.phase == .review, "必须仍停在审阅页")
+        #expect(try Data(contentsOf: url) == before, "磁盘字节必须逐字节不变")
+    }
+
     @Test("qualifier loss surfaces as locatable review items instead of silent success")
     func semanticRiskBecomesReviewItems() async throws {
         let harness = try TeleprompterSessionHarness()

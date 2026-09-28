@@ -172,13 +172,22 @@
     - **第 34 条在写下它的同一轮里又重演了一次**：改这个弹窗时我先写了 `if rejection == nil { ... } else { message = .init(rejection: rejection) }`，Swift 不会因为 `== nil` 就在 `else` 分支收窄 Optional。`swift test` **全绿**（259 项），因为它不编译这个 sheet；`scripts/macos_app_build.sh` 当场报 `must be unwrapped to a value` 并 BUILD FAILED。**这条记录现在有了一条自证的注脚**：不是「别人踩过」，是「改这块代码时当场踩到」。凡改 `TeleprompterView.swift` 与各 sheet，Xcode 门禁不是可选项。
     - **可复用的一般结论**：修好一条路径的失败归因后，**必须顺着同一个 UI 入口把姊妹路径读完**。这两条缺陷在同一个弹窗里、相隔 60 行，成因完全相同——用粗粒度的返回类型（一个 `Bool`、一个错误码）承载多个原因。凡是把多个原因压成单一返回值的函数，都值得顺着调用方再读一遍。
 
+43. **本轮最重的一条：采用候选版本时存盘失败，会把读者唯一没法重做的工作弄丢，还配了一句安慰话（第十三轮，真缺陷）**：`acceptPendingVersion()` 先把候选版本 append 进 `versions`、把 `pendingVersion` 置 nil、把 `document.activeVersionID` 挪到新版本、重建 `followController`、把 `phase` 推到 `.ready`，**最后**才 `try saveBundle()`。存盘失败时异常抛出去，以上全部改动**一个都没回滚**。三重后果：
+    - `pendingVersion == nil` → **AI 审阅结果从界面上消失**，读者已经审过、已经点过采用的那份稿子没了；
+    - `canAcceptPendingVersion` 的定义是 `unresolvedReviewItemCount == 0 && pendingVersion != nil`，所以**「采用」按钮变灰，读者连重试都不行**——而重试本该是唯一合理的下一步（腾出磁盘空间后再点一次）；
+    - 抛出的错误是 `TeleprompterV2StoreError.atomicWriteFailed`，它的文案是「**稿件保存失败，原版本仍然保留**」。这句话在这条路径上是**假的**：磁盘上保留旧版本没错，但读者刚采用的那份工作既没进磁盘也没留在界面，而这句话正在主动安抚他不要担心。
+
+    修复前先写失败回归，当场四条断言全红（`pendingVersion`、`canAcceptPendingVersion`、`activeVersion` 指向、`phase`），确认可达后才改。修复：把这次改动碰到的每一项（`versions`／`document`／`savedRunState`／`followController`／`phase`／`blocked`／`pendingVersion`）在改动前存下来，写失败整体放回再重抛；位置与跟随状态这些派生字段不逐个猜，而是恢复 `followController` 后调 `syncFollowState()` 重算。改完之后 `.atomicWriteFailed` 那句「原版本仍然保留」**第一次变成真话**。
+    - 变异验证 3 条，全部被杀：整个回滚删掉（杀）、不恢复 `pendingVersion`（杀）、不恢复 `phase`（杀）。第三条单独值得记：只写「候选还在、按钮还能按」而不写「仍停在审阅页」的话，回滚漏掉 `phase` 时界面会停在 `.ready` 而审阅内容已经不在——**这类缺陷只有断言到具体状态才看得见**。
+    - **这一条不是运气**：第 41、42 条都是「重读自己写的代码」读出来的，本条是把那条线索形式化成一次静态扫描——脚本枚举「先改状态、后面才出现 `try`／`throw`／`guard else`」的函数，命中 12 处，逐个读源码。11 处是假阳性或已有回滚，本条是唯一一条真缺陷，而且是最重的一条。**这个扫描值得固化成 `tools/` 下的脚本**（并入 §5 第 10 条同批建议）：它的产出只有一行函数名和一行失败点，人工复核成本极低。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **259 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因一轮再新增 4 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **260 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 5 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
@@ -186,7 +195,7 @@
 | Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），XCTest **346 项** 0 failures，进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
-| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因，6 次变异）**：新增路径 3 条、移除路径 3 条，全部被新回归杀死，无存活，详见 §2 第 41、42 条。**累计有效变异 85 次、53 杀 / 32 存活；累计新增 22 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因 4） |
+| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因，9 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条，全部被新回归杀死，无存活，详见 §2 第 41、42、43 条。**累计有效变异 88 次、56 杀 / 32 存活；累计新增 23 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 5） |
 
 ### 3.2 未执行（需要逐次授权）
 
@@ -200,7 +209,7 @@
 ### 3.3 契约与文档
 
 - **公共契约无需修改**：`audio.input.transcription.language` 与 `keywords` 早已写入 `contracts/realtime-events.schema.json`（`session.update` 形状）并在 `contracts/realtime-openai.md` 的示例中给出；#112 是客户端向既有契约看齐，而不是新增字段。#106 的稳定性证据同样只走内部 Swift 事件（可选类型化字段，wire 协议未新增事件）。本轮没有改变任何公共端点、事件或错误 envelope。
-- **已同步的文档**：`docs/developers/macos-app-teleprompter.md`（版本 0.5.4：场景预设、正文列宽、「回到朗读位置」、Reduce Motion、输入设备失败归因、读法标注的失败归因边界（`TeleprompterAcceptedReadingRejection` 现为 13 种原因，「现在不能改／找不到这一段／没有保存成功／正文变了」是四件不同的事，且**新增与移除走同一套原因**）、模块表与本轮验收记录）、`docs/developers/macos-app-design-system.md`（正文列宽与窗口宽度分离的描述 + §6 验证矩阵新增一行）、`docs/users/mcp-agent-integration.md`（`session.update` 示例补 `keywords`，并说明语言／关键词是可选提示、越界取值应降级为不给提示）、本报告与 SDD ledger。
+- **已同步的文档**：`docs/developers/macos-app-teleprompter.md`（版本 0.5.5：场景预设、正文列宽、「回到朗读位置」、Reduce Motion、输入设备失败归因、读法标注的失败归因边界（`TeleprompterAcceptedReadingRejection` 现为 13 种原因，「现在不能改／找不到这一段／没有保存成功／正文变了」是四件不同的事，且**新增与移除走同一套原因**）、模块表与本轮验收记录）、`docs/developers/macos-app-design-system.md`（正文列宽与窗口宽度分离的描述 + §6 验证矩阵新增一行）、`docs/users/mcp-agent-integration.md`（`session.update` 示例补 `keywords`，并说明语言／关键词是可选提示、越界取值应降级为不给提示）、本报告与 SDD ledger。
 - **未同步且不需要同步**：`docs/users/` 其余文档不描述舞台列宽与预设入口；根 `README.md` 只保留价值与公共能力，不随本次实现变化更新。
 
 ## 4. 69 项场景台账
@@ -412,6 +421,7 @@
     - 注释吞掉后续 guard 条件会造出编译不过的「无效变异」，必须先编译预检（第 27 条）；
     - **探针本身没跑起来时，全部变异都会假报 KILLED**——本轮 T 段六个变异「全杀」实际是因为 pytest 根本没装、每次都因 module not found 非零退出（第 33 条）。因此探针必须带**基线自检**：不改代码时必须 exit 0，且一次已知应被杀死的变异确实被杀，否则拒绝解读任何结果。
     - 建议把这三点固化成 `tools/` 下的可复用脚本。本轮**未擅自新增**——属于新增仓库资产，需要另行授权。
+    - 同批建议再加一条**静态扫描**：枚举「先改状态、后面才出现 `try`／`throw`／`guard … else`」的函数（本轮脚本命中 `TeleprompterSession.swift` 12 处，人工复核后 11 处为假阳性或已有回滚，1 处是本轮最重的真缺陷，见 §2 第 43 条）。它的产出只有一行函数名加一行失败点，误报需要人读一遍才能排除——**适合当线索来源，不适合当结论**。
 11. **worktree 里跑不了 Python 测试（可复现性缺口）**：pytest 放在 `[project.optional-dependencies].dev`，而 `uv sync` 默认不装 optional extra，因此 `.worktree/.venv` 里没有 pytest。本轮实际依赖主检出 `/Users/hrygo/Documents/SpeechRail/.venv`，并须把 worktree 的 `src` 放在 `PYTHONPATH` 前面才测的是 worktree 代码；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 让退出码恒为非零。**§3.1 过去记的 `pytest tests/…` 在 worktree 中开箱即用并不成立。** 建议要么把测试依赖移到 `dependency-groups.dev`（`uv sync` 默认安装），要么在开发文档里写明这条命令的完整形态。本轮只记录，未改依赖结构。
 
 ## 6. 回退
