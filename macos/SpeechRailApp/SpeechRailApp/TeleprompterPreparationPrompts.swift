@@ -959,7 +959,15 @@ public enum TeleprompterProtectedLiteralExtractor {
             priority: 2
         ),
         pattern(
-            #"(?<![A-Za-z0-9])[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|分钟|小时|公里|千克|元|秒|天|年|月|日|倍|个|次|台|人|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?![A-Za-z0-9])"#,
+            // The trailing `[A-Za-z]{1,4}` and the exponent and radix groups exist
+            // because the validator compares the *sequence* of protected atoms.
+            // A number the extractor cannot see produces no atom on either side,
+            // so an exact-sequence comparison reports "nothing changed" and a
+            // changed number passes silently. `1080p` → `4K` and `1e10` → `2e10`
+            // both used to take that path. The leading lookbehind still keeps
+            // digits that are part of an identifier (`A1`, `GPT4`, `ISO8601`)
+            // out of the number set, so model names are unaffected.
+            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|分钟|小时|公里|千克|元|秒|天|年|月|日|倍|个|次|台|人|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
             kind: .number,
             priority: 3
         ),

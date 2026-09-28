@@ -352,6 +352,99 @@ struct TeleprompterPreparationPromptsTests {
         )
     }
 
+    /// The validator compares the *sequence* of protected atoms, so a number the
+    /// extractor cannot see yields no atom on either side and the comparison
+    /// reports "unchanged". Every numeric form below used to take that path,
+    /// which made `1080p` → `4K` and `1e10` → `2e10` pass a gate whose entire
+    /// job is to stop exactly that.
+    @Test func extractorSeesExponentRadixAndUnitSuffixForms() {
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "1080p 4K 8K 29.97fps")
+                .map(\.rawValue) == ["1080p", "4K", "8K", "29.97fps"]
+        )
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "1e10 1E+5 1e-5 1.5e-3")
+                .map(\.rawValue) == ["1e10", "1E+5", "1e-5", "1.5e-3"]
+        )
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "0x1F 0b101")
+                .map(\.rawValue) == ["0x1F", "0b101"]
+        )
+    }
+
+    @Test func extractorStillLeavesDigitsInsideIdentifiersAlone() {
+        // The leading lookbehind is what keeps model and product names out of
+        // the number set; widening the number pattern must not erode it.
+        for name in ["A1", "GPT4", "ISO8601", "x1"] {
+            #expect(
+                TeleprompterProtectedLiteralExtractor.atoms(from: name).isEmpty,
+                "\(name) 不应被当成受保护数值"
+            )
+        }
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "v1.2.3")
+                .map(\.rawValue) == ["v1.2.3"]
+        )
+    }
+
+    @Test func hardGateRejectsChangesToNumbersItCouldNotPreviouslySee() {
+        let changed: [(String, String)] = [
+            ("分辨率 1080p", "分辨率 4K"),
+            ("画面 4K", "画面 8K"),
+            ("曝光 1e5 秒", "曝光 2e5 秒"),
+            ("1.5e-3 秒", "1.5e-4 秒"),
+            ("掩码 0x1F", "掩码 0x2F"),
+            ("29.97fps", "60fps"),
+        ]
+        for (source, candidate) in changed {
+            #expect(
+                !TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                    candidate: candidate
+                ),
+                "\(source) → \(candidate) 必须被硬门禁拒绝"
+            )
+        }
+        #expect(
+            TeleprompterProtectedContentValidator.matches(
+                protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(
+                    from: "速度 50 公里，曝光 1e5 秒"
+                ),
+                candidate: "速度 50 公里，曝光 1e5 秒"
+            ),
+            "未改动的稿子不应被误拦"
+        )
+    }
+
+    /// Known boundary, pinned on purpose so it cannot be forgotten: Chinese
+    /// numerals are not part of the protected set, so a rewrite that changes one
+    /// to another Chinese numeral (`五十` → `五十一`) passes the hard gate.
+    /// The opposite direction is caught, because the candidate then produces an
+    /// Arabic atom the source did not have. Widening the gate to Chinese
+    /// numerals was rejected: ordinary prose is full of 一/两/三 (`第一次` →
+    /// `首次` is a lossless rewrite), so a naive run comparison would block
+    /// large amounts of legitimate text. Whoever closes this must do it with a
+    /// measured false-positive rate, not by adding the characters to the regex.
+    @Test func chineseNumeralsRemainOutsideTheHardGateByDesign() {
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "五十元").isEmpty
+        )
+        #expect(
+            TeleprompterProtectedContentValidator.matches(
+                protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: "五十元"),
+                candidate: "五十一元"
+            ),
+            "中文数字互改目前不受硬门禁保护，见本测试文档说明"
+        )
+        #expect(
+            !TeleprompterProtectedContentValidator.matches(
+                protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: "五十元"),
+                candidate: "50元"
+            ),
+            "中文数字被正规化为阿拉伯数字时必须被拒绝"
+        )
+    }
+
     @Test func rewriteDecoderRejectsChangedAndRepeatedProtectedValues() throws {
         let source = TeleprompterRewriteGroup(
             id: "block-a",
