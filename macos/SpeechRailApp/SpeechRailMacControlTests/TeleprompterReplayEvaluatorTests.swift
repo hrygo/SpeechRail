@@ -238,6 +238,69 @@ struct TeleprompterReplayEvaluatorTests {
         )
         #expect(!exercised.caveats.contains { $0.contains("没有 improvise 标注") })
         #expect(!exercised.caveats.contains { $0.contains("没有带 expected_segment_index") })
+        // 「该报警时才报警」和「不该报警时不报警」是两件事。原来这里只钉了
+        // 前者——多余 caveat 照样能过，于是「零推进」这条完全无条件触发也
+        // 是一条能过的实现。
+        #expect(
+            !exercised.caveats.contains { $0.contains("一次都没有推进") },
+            "正常跟上的回放不得报零推进"
+        )
+        #expect(
+            exercised.metrics.advancedEventCount > 0,
+            "这段素材里跟随确实推进过，推进计数不能是 0"
+        )
+    }
+
+    /// 验收第 4 条明写「不以全部停住换取安全」。这族 caveat 原本只覆盖
+    /// 「素材没问」（缺标注），**没覆盖「素材问了、系统却一次没动」**。
+    ///
+    /// 后面这一种更危险：标注齐全，所以「没有 improvise 标注」和「没有带
+    /// expected_segment_index」两条都不触发；事件间隔压在 3 秒停顿阈值
+    /// 以内，所以「错误停顿」也不触发。于是报告读起来是：0 次严重误推进、
+    /// 0 次停顿、0 条 caveat——**一场什么都没跟上的干净结果**。
+    ///
+    /// 而这正是本文件自己注释里警告的事：「Publishing the second as the
+    /// first is how a frozen follow path gets reported as a clean run.」
+    @Test func aFollowPathThatNeverAdvancesIsNotReportedAsACleanRun() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    .init(atMilliseconds: 400, kind: .completed, itemID: "item-1",
+                          eventID: "evt-400", text: "完全跑偏的这一段识别内容甲"),
+                    .init(atMilliseconds: 1_200, kind: .completed, itemID: "item-2",
+                          eventID: "evt-1200", text: "完全跑偏的这一段识别内容乙"),
+                    .init(atMilliseconds: 2_200, kind: .completed, itemID: "item-3",
+                          eventID: "evt-2200", text: "完全跑偏的这一段识别内容丙")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 2)
+                ]
+            )
+        )
+
+        // 前置：这两条必须都不触发，否则下面的断言说明不了问题。
+        #expect(!report.caveats.contains { $0.contains("没有 improvise 标注") })
+        #expect(!report.caveats.contains { $0.contains("没有带 expected_segment_index") })
+        #expect(report.metrics.harmfulJumpCount == 0, "前提：确实一次都没推进")
+        #expect(report.metrics.trackingLatencyP95Milliseconds == nil, "前提：没有跟随样本")
+        #expect(
+            report.caveats.contains { $0.contains("一次都没有推进") || $0.contains("没有推进过") },
+            "素材标了期望段位而跟随一次没动，必须说明这份结果不代表跟随可用"
+        )
+
+        // 「0/0 个事件」不是「一次都没推进」，是没素材。evaluate 只挡空稿子、
+        // 不挡空事件，所以这个分支真实可达——不钉住的话，把样本数守卫去掉
+        // 也能全绿。
+        let empty = try TeleprompterReplayEvaluator.evaluate(
+            manifest(events: [], labels: [])
+        )
+        #expect(empty.metrics.sampleCount == 0)
+        #expect(
+            !empty.caveats.contains { $0.contains("一次都没有推进") },
+            "没有事件就没有「零推进」这回事，不能报 0/0"
+        )
     }
 
     @Test func reportCarriesOnlyAggregatesAndNoScriptText() throws {

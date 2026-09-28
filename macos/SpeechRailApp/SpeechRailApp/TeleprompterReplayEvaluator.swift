@@ -172,6 +172,11 @@ public enum TeleprompterReplayEvaluator {
 
     public struct Metrics: Codable, Equatable, Sendable {
         public var sampleCount: Int
+        /// How many events actually moved the reading position forward. This
+        /// is the denominator that makes "0 harmful jumps" readable: a run
+        /// that never advances trivially has zero harmful jumps, and without
+        /// this counter the report cannot tell that apart from a clean run.
+        public var advancedEventCount: Int
         public var harmfulJumpCount: Int
         public var unintentionalBackjumpCount: Int
         public var trackingLatencyP50Milliseconds: Int?
@@ -220,6 +225,7 @@ public enum TeleprompterReplayEvaluator {
                 "sample_count": sampleCount,
                 "duration_seconds": durationMilliseconds / 1_000,
                 "metrics": [
+                    "advanced_event_count": metrics.advancedEventCount,
                     "harmful_jump_count": metrics.harmfulJumpCount,
                     "unintentional_backjump_count": metrics.unintentionalBackjumpCount,
                     "tracking_latency_p50_ms": metrics.trackingLatencyP50Milliseconds
@@ -285,6 +291,7 @@ public enum TeleprompterReplayEvaluator {
         let adapter = TeleprompterRealtimeFollowAdapter()
         var metrics = Metrics(
             sampleCount: manifest.events.count,
+            advancedEventCount: 0,
             harmfulJumpCount: 0,
             unintentionalBackjumpCount: 0,
             trackingLatencyP50Milliseconds: nil,
@@ -325,6 +332,7 @@ public enum TeleprompterReplayEvaluator {
             let advanced = after.segmentIndex > before.segmentIndex
                 || (after.segmentIndex == before.segmentIndex
                     && after.utf16Offset > before.utf16Offset)
+            if advanced { metrics.advancedEventCount += 1 }
             let reversed = after.segmentIndex < before.segmentIndex
                 || (after.segmentIndex == before.segmentIndex
                     && after.utf16Offset < before.utf16Offset)
@@ -477,6 +485,16 @@ public enum TeleprompterReplayEvaluator {
         }
         if !labels.contains(where: { $0.intent == .read && $0.expectedSegmentIndex != nil }) {
             caveats.append("本次素材没有带 expected_segment_index 的 read 标注：跟随与恢复延迟没有样本，分位为 null 只说明未测量，不表示延迟为零。")
+        }
+        // 上面两条管的是「素材没问」。这一条管的是「素材问了，系统却一次没动」——
+        // 标注齐全时上面两条都不触发，事件够密时「错误停顿」也不触发，于是
+        // 「0 次严重误推进」会被读成干净结果。一条完全停住的跟随路径必须自己
+        // 说明自己没跟上，否则这份报告无法用于任何验收判断。
+        if metrics.advancedEventCount == 0, sampleCount > 0 {
+            caveats.append(
+                "本次回放跟随一次都没有推进（0/\(sampleCount) 个事件移动了阅读位置）："
+                    + "0 次严重误推进只说明跟随没有动过，不表示跟随可用；延迟分位为空同理。"
+            )
         }
         if metrics.failureShareExceedsThreshold {
             caveats.append(
