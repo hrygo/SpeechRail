@@ -63,8 +63,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          INPUT_RUN_PYTHON: ${{ inputs.run-python }}
-          INPUT_RUN_SWIFT: ${{ inputs.run-swift }}
+          # `inputs` is null for push/pull_request, so the workflow_call
+          # defaults do not apply on those events. Without the `|| 'auto'`
+          # fallback the explicit branch below would see an empty string,
+          # treat it as an override, and skip every gate.
+          INPUT_RUN_PYTHON: ${{ inputs.run-python || 'auto' }}
+          INPUT_RUN_SWIFT: ${{ inputs.run-swift || 'auto' }}
         run: |
           set -euo pipefail
 
@@ -80,6 +84,10 @@ jobs:
 
           # An explicit input wins. The release path uses it to skip the macOS
           # gate, because build-app already compiles the App from the same commit.
+          # Second guard: an empty value can never mean "run nothing".
+          [[ -z "$INPUT_RUN_PYTHON" ]] && INPUT_RUN_PYTHON=auto
+          [[ -z "$INPUT_RUN_SWIFT" ]] && INPUT_RUN_SWIFT=auto
+
           if [[ "$INPUT_RUN_PYTHON" != "auto" || "$INPUT_RUN_SWIFT" != "auto" ]]; then
             run_python="$INPUT_RUN_PYTHON"; [[ "$run_python" == "auto" ]] && run_python=true
             run_swift="$INPUT_RUN_SWIFT";     [[ "$run_swift" == "auto" ]] && run_swift=true
@@ -104,7 +112,7 @@ jobs:
             git show "$PR_BASE_SHA:$classifier" > "$RUNNER_TEMP/ci_changed_scope.py"
             classifier="$RUNNER_TEMP/ci_changed_scope.py"
           else
-            echo "::warning::base ref 尚无 $classifier，回退到全量门禁"
+            echo "::warning::base ref 尚无 ${classifier}，回退到全量门禁"
             emit true true full
             exit 0
           fi
@@ -382,8 +390,29 @@ jobs:
             echo "| Package | $PACKAGE_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Booleans must be exactly true/false. An empty or otherwise malformed
+          # value silently compares unequal to 'true' downstream and would skip
+          # a gate while the run still reported success.
+          for pair in "run_python:$RUN_PYTHON" "run_swift:$RUN_SWIFT"; do
+            name="${pair%%:*}"; value="${pair##*:}"
+            if [[ "$value" != "true" && "$value" != "false" ]]; then
+              echo "::error::$name 必须是 true 或 false，实际为 '$value'"
+              exit 1
+            fi
+          done
+
+          if [[ "$SCOPE" != "full" && "$SCOPE" != "meta" && "$SCOPE" != "python" \
+             && "$SCOPE" != "swift" && "$SCOPE" != "explicit" ]]; then
+            echo "::error::未知 scope '$SCOPE'"
+            exit 1
+          fi
+
           # A scope that disagrees with its own booleans means the classifier
           # output is untrustworthy; fail instead of reporting a green summary.
+          if [[ "$SCOPE" == "explicit" && ( "$RUN_PYTHON" != "true" && "$RUN_SWIFT" != "true" ) ]]; then
+            echo "::error::scope=explicit 但两个门禁都为 false"
+            exit 1
+          fi
           if [[ "$SCOPE" == "full" && ( "$RUN_PYTHON" != "true" || "$RUN_SWIFT" != "true" ) ]]; then
             echo "::error::scope=full 与门禁布尔不一致 (python=$RUN_PYTHON swift=$RUN_SWIFT)"
             exit 1
