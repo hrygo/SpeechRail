@@ -245,30 +245,55 @@ public final class AssistantSession {
         (@MainActor (String?) async -> RealtimeCapabilityBinding?)?
 
     private let coordinator: SessionCoordinator
-    private let provider = LLMProvider()
+    private let dependencies: AssistantSessionDependencies
+    private var provider: any AssistantLLM { dependencies.llm }
     private let port: Int
     private let serviceKey: String?
 
     private var source: AudioChunkSource?
     private var audioSession: (any AssistantAudioSession)?
-    private var client: RealtimeASRClient?
+    private var client: (any AssistantRealtimeClient)?
     private var activeRealtimeBinding: RealtimeCapabilityBinding?
     private var pump: Task<Void, Never>?
-    private var playback: PCMStreamPlayer?
+    private var playback: (any AssistantPlaybackChannel)?
     private var sessionStartedAt: Date?
-    private var commitCursor: Date?
-    private var pendingItem: (start: Date, end: Date)?
     private var currentOrdinal = 0
     private var committedItemIDs: Set<String> = []
+    /// itemID -> 这一句**第一个非空证据**被本机收到的时刻（D09）。
+    ///
+    /// 这是本地观测时间，不是声学开口时间：wire 上没有 sample span，
+    /// 精确的 `t_start/t_end` 一律写 NULL（见 `commitUserTurn`）。
+    private var itemObservedAt: [String: Date] = [:]
+    /// 连接级时钟锚点：`envelope.receivedAt` 是 `ContinuousClock.Instant`，
+    /// 要变成墙上时间得有一对锚。重连换新锚，于是旧连接的 itemID 不会串到新会话。
+    private var connectionClockAnchor: ContinuousClock.Instant = ContinuousClock().now
+    private var connectionDateAnchor: Date = Date()
     private var isStoppingIntentionally = false
+    /// 会话级生命周期令牌（D02）。**每次开始或结束都推进一次**。
+    /// 启动流程里每个 `await` 之后都要校验它：不匹配说明这一轮已经被
+    /// 结束或被新的一轮顶替，此时只能收掉自己的私有资源，不得发布到 `self`。
+    private var startToken = 0
+    /// 连接级令牌（D03）：每次建连/重连推进一次。下行事件按它门禁，
+    /// 旧连接晚到的事件不许改动当前会话。
+    private var connectionToken = 0
     /// 历史回合（**只追加、从不重写**，见 §5.5 的前缀结构）。
     private var history: [LLMMessage] = []
     /// 本场已经确认并生效的记忆（开始时读一次，会话内不变）。
     private var memories: [String] = []
     /// 半双工门闩：它说话的时候不上行音频（§14.5）。
     private var isMutedForPlayback = false
-    /// 这一句助手的回复被打断过。
-    private var currentReplyInterrupted = false
+    /// 正在跑的这一轮回复（D08）。`nil` 表示此刻没有助手回复在生成或待收尾。
+    /// 它的 `id` 就是库里那一行的 id，也是界面 `Turn.id`——全程不变。
+    private var currentReply: AssistantReplyState?
+    /// 这一场是**纯文字**对话：没有麦克风、没有语音连接、没有设备租约（D07）。
+    /// 麦克风被拒或别的功能占着设备时，打字依然要能问出答案。
+    private var isTextOnlyConversation = false
+    /// 助手这一场结束时封存的记录 id。界面靠它跳回看，纯文字与语音共用同一个结果，
+    /// 免得两条路径各跳一次。
+    public private(set) var lastFinalizedSessionID: String?
+    /// 刚刚收尾的那一轮。用来处理"正文已完整定稿、但朗读还没放完就按了停止"：
+    /// 这时候没有正在跑的回复，只有已落库的那一行还要补一个打断标记。
+    private var lastFinalizedReply: AssistantReplyState?
     /// 服务端是否在生成 TTS（用来区分"在思考"与"在说话"）。
     private var isSpeaking = false
     /// 单轮增量 TTS 的状态机（`speechrail.tts.start/append_text/finish_text`）。
@@ -278,14 +303,68 @@ public final class AssistantSession {
     /// 上游不及时响应，也不能继续把 delta、TTS 或落库写回当前会话。
     private var replyTask: Task<Void, Never>?
     private var replyGeneration = 0
+    /// 重连的 single-flight 句柄。第二次重试与结束都要能让旧重试失效（S2 第 10 条）。
+    private var retryTask: Task<Void, Never>?
     /// 用户按了「静音麦克风」：不再上行音频，但会话、连接、记录都留着。
     /// 它与「结束对话」是两件事——前者只是暂时不说，后者交出占用（§6.1 的状态带尾部两个动作）。
     public private(set) var isMuted = false
 
-    public init(coordinator: SessionCoordinator, port: Int = 8201, apiKey: String? = nil) {
+    // MARK: 界面投影（D04）
+    //
+    // 以前 View 用一个 `phase.isLive` 推导所有入口，于是"静音"被表达成
+    // `phase = .paused`，而 `paused` 同时又是"语音中断"。结果是：静音之后界面
+    // 不再 active、结束按钮消失、断线时又被判定成"本来就没在跑"而跳过清理。
+    // 这里把三件事拆成三个明确投影，View 不再自己拼。
+
+    /// 这一场对话还活着（有记录、设备在手、没在收尾）。
+    /// 静音**不影响**它：麦克风还在会话手里，只是不上行。
+    public var hasActiveConversation: Bool {
+        switch phase {
+        case .preparing, .listening, .thinking, .speaking, .paused: true
+        default: false
+        }
+    }
+
+    /// 「结束对话」可用：这一场确实占着设备或记录。
+    public var canEndConversation: Bool {
+        hasActiveConversation && phase != .ending
+    }
+
+    /// 「重试语音」可用：这一场还在，只是语音通道掉了。
+    public var canRetryVoice: Bool {
+        hasActiveConversation && (blocked != nil || phase == .paused)
+    }
+
+    /// 此刻正在采集/思考/说话。**不含"这一场还在但语音掉了"**——
+    /// 界面要靠它区分"正在跑"与"对话中（已中断）"，不能都当成"未开始"。
+    public var isActivelyRunning: Bool {
+        switch phase {
+        case .preparing, .listening, .thinking, .speaking: true
+        default: false
+        }
+    }
+
+    /// 状态条上那句给用户看的话。静音是**用户自己选的**，不是故障；
+    /// 纯文字对话也不该显示成"正在聆听"——那时根本没有在听。
+    public var statusTitle: String {
+        if isTextOnlyConversation && hasActiveConversation { return "文字对话" }
+        return isMuted && hasActiveConversation ? "麦克风已静音" : phase.title
+    }
+
+    /// 能不能朗读。纯文字对话没有语音通道，「重播」要禁用并说明怎么开启，
+    /// 不能偷偷去拿设备。
+    public var canReplaySpeech: Bool { ttsStream != nil }
+
+    public init(
+        coordinator: SessionCoordinator,
+        port: Int = 8201,
+        apiKey: String? = nil,
+        dependencies: AssistantSessionDependencies = AssistantSessionDependencies()
+    ) {
         self.coordinator = coordinator
         self.port = port
         self.serviceKey = apiKey
+        self.dependencies = dependencies
     }
 
     // MARK: - 入口
@@ -310,6 +389,10 @@ public final class AssistantSession {
         blocked = nil
         do {
             try await startPipeline()
+        } catch Superseded.start {
+            // 已经被结束或被新一轮顶替：不写受阻结论，也不抢 `phase`——
+            // 新一轮（如果存在）会自己发布状态。
+            return
         } catch {
             let reason = Self.blockReason(for: error)
             blocked = reason
@@ -365,14 +448,65 @@ public final class AssistantSession {
             + "想换就新开一轮；这一轮的记录会留着。"
     }
 
+    /// 打字发送的结果。`.rejected` 带用户读得懂的原因，界面据此**保留草稿**——
+    /// 用户已经打出来的字不能因为一次失败就被吞掉（D07）。
+    public enum TextSendResult: Equatable, Sendable {
+        case accepted
+        case rejected(String)
+    }
+
+    /// 确保有一条**纯文字**助手记录，没有就建一条（D07）。
+    ///
+    /// 纯文字对话不需要麦克风、语音服务或设备租约。这里走
+    /// `SessionCoordinator.createSession` 这条**不碰设备占用**的 Store 门面：
+    /// 既不抢 `activeSessionID`，也不会打断正在占用设备的会议。
+    private func ensureTextConversation() async throws -> String {
+        if let sessionID { return sessionID }
+        let startedAt = Date()
+        let configuration: LLMConfiguration? = preferences?().resolvedLLMConfiguration(
+            for: .assistant,
+            globalAPIKey: apiKeyProvider(),
+            moduleAPIKey: moduleAPIKeyProvider(.assistant)
+        ).configuration
+        let record = try await coordinator.createSession(
+            SessionDraft(
+                kind: .assistant,
+                // 纯文字这一场没有真正跑起来的引擎档位，别编一个。
+                engineProfile: "unknown",
+                audioSource: .microphone,
+                diarization: .off,
+                llmEndpoint: configuration?.normalizedBaseURL,
+                llmModel: configuration?.model,
+                persona: persona.map { PersonaSnapshot(id: $0.id, title: $0.title) },
+                startedAt: startedAt
+            )
+        )
+        prepareConversationContext(startedAt: startedAt)
+        sessionID = record.id
+        isTextOnlyConversation = true
+        blocked = nil
+        phase = .listening
+        return record.id
+    }
+
     /// 打字提问：同一条编排，**不朗读回复**（§6.1 第一条）。
-    public func ask(typed text: String) async {
+    @discardableResult
+    public func ask(typed text: String) async -> TextSendResult {
         let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else { return }
-        guard blocked == nil || blocked?.allowsTyping == true,
-              let sessionID,
-              let startedAt = sessionStartedAt
-        else { return }
+        guard !question.isEmpty else { return .rejected("先写下要问的内容。") }
+        guard blocked == nil || blocked?.allowsTyping == true else {
+            return .rejected(lastFailure ?? "现在还不能发送。")
+        }
+        let sessionID: String
+        do {
+            sessionID = try await ensureTextConversation()
+        } catch {
+            lastFailure = "文字对话没能开始：\(error.localizedDescription)"
+            return .rejected(lastFailure ?? "文字对话没能开始。")
+        }
+        guard let startedAt = sessionStartedAt else {
+            return .rejected("这一场还没准备好，请稍后再试。")
+        }
         do {
             let ordinal = try await coordinator.appendLine(
                 LineDraft(
@@ -399,9 +533,10 @@ public final class AssistantSession {
             history.append(LLMMessage(role: .user, text: question))
         } catch {
             lastFailure = error.localizedDescription
-            return
+            return .rejected(lastFailure ?? "没能把这条问题记下来。")
         }
         beginReply(spoken: false)
+        return .accepted
     }
 
     /// 重播某一句话（打字提问的回复也能听——「不朗读」不等于「不能听」）。
@@ -430,22 +565,31 @@ public final class AssistantSession {
     /// 静音 / 取消静音。**不结束会话**：麦克风还在会话手里，只是不上行。
     public func toggleMute() {
         isMuted.toggle()
-        if !isMuted, phase == .paused { phase = .listening }
-        if isMuted, phase == .listening { phase = .paused }
     }
 
     /// 主动停止当前助手的朗读或思考（打断当前回答），但不结束会话。
     /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking || replyTask != nil else { return }
-        await interruptCurrentReply()
+        // 两种情况要分开（D08 第 5 条）：
+        // - 还在生成/已经定稿但没落库 → 走统一收尾，正文与打断标记一起写；
+        // - 正文早已完整定稿、只是朗读没放完 → 同一行只补一个打断标记。
+        let remoteIdleConfirmed: Bool
+        if let reply = currentReply {
+            remoteIdleConfirmed = await interruptCurrentReply()
+            await finalizeReply(.interrupted, reply: reply)
+        } else {
+            remoteIdleConfirmed = await interruptCurrentReply()
+            await markLastReplyInterruptedAfterPlaybackCut()
+        }
         isSpeaking = false
         streamingReply = nil
-        phase = .listening
         isMutedForPlayback = false
-        // 若最后一条是助手且处于生成/朗读中，标记被打断
-        if let lastIndex = turns.indices.last, turns[lastIndex].role == .assistant {
-            turns[lastIndex].isInterrupted = true
+        // 服务端没确认这一轮已经结束，就不能把这条连接当成"空出来了"继续用。
+        if remoteIdleConfirmed {
+            phase = .listening
+        } else {
+            await handleUnconfirmedRemoteIdle()
         }
     }
 
@@ -455,16 +599,47 @@ public final class AssistantSession {
     /// LLM 侧的"取消"只是本地断开这一轮生成（没有网络往返），因此与后面的 TTS 网络取消
     /// 天然并行；真正必须排序的是"停播先于网络取消"——增量路径由协调器保证，
     /// 非增量路径在这里显式等播放层停完。后端取消超时也不把旧音放回来。
-    private func interruptCurrentReply() async {
-        currentReplyInterrupted = true
+    /// - Returns: 服务端是否已确认这一轮终止。`false` 表示取消命令发出去了，
+    ///   但在有界时间内没等到匹配 requestID 的终态——这条连接的 TTS 归属未知。
+    @discardableResult
+    private func interruptCurrentReply() async -> Bool {
         // ① 本地先作废：LLM 不再产出。TTS 这一代的作废与排队预算清空在 cancel() 内部完成。
         invalidateReply()
         // ② 停播屏障 → ③ 取消。
         if let stream = ttsStream, stream.isActive {
-            await stream.cancel()
+            return await stream.cancel()
         } else {
             await stopPlaybackLayer()
             if let client { try? await client.cancelTTS() }
+            return true
+        }
+    }
+
+    /// 服务端没确认上一轮已经结束：这条连接上"还有没有在跑的朗读"是未知的，
+    /// 在它上面开下一轮会让两个 `request_id` 并存。
+    /// 所以关掉它、记一次中断，让用户走「重试语音」重建连接——
+    /// 而不是靠 sleep 或者自动重发正文把竞态盖过去（方案 S4 第 12 条）。
+    private func handleUnconfirmedRemoteIdle(
+        message: String = "没能确认上一轮朗读已经结束，已断开连接。请重试语音。"
+    ) async {
+        ttsStream?.invalidate()
+        ttsStream = nil
+        if let client { await client.close() }
+        client = nil
+        if let audioSession {
+            audioSession.stop()
+            self.audioSession = nil
+        } else {
+            source?.stop()
+        }
+        source = nil
+        pump?.cancel()
+        pump = nil
+        level = 0
+        blocked = .streamFailed(message)
+        phase = .paused
+        if coordinator.occupancy?.kind == .assistant {
+            _ = await coordinator.markInterruption(.serviceLost, atOrdinal: currentOrdinal)
         }
     }
 
@@ -479,8 +654,49 @@ public final class AssistantSession {
 
     // MARK: - 生命周期
 
+    private func beginStartToken() -> Int {
+        startToken &+= 1
+        return startToken
+    }
+
+    /// 新会话：初始化会话上下文 + 建档 + 开语音通道。
     private func startPipeline() async throws {
+        let token = beginStartToken()
+        let transport = try await openVoiceTransport(token: token)
+        try requireLive(token)
+        prepareConversationContext(startedAt: transport.startedAt)
+        try await createConversationRecord(token: token, transport: transport)
+        phase = .listening
+        startPump(
+            stream: transport.stream,
+            client: transport.client,
+            connection: transport.connection
+        )
+    }
+
+    /// 重连：**只换设备、连接与能力 binding**。
+    ///
+    /// 记录、turns/history、ordinal、起始时间、人设、记忆与音色变更一律不动
+    /// （S2 第 8 条）；本轮 LLM 配置沿用已选快照，配置变化要求新会话。
+    private func reconnectPipeline() async throws {
+        let token = beginStartToken()
+        let transport = try await openVoiceTransport(token: token)
+        try requireLive(token)
+        // 设备与新连接确实 ready 之后才闭合中断；失败时 interruption 仍然开着，可再重试。
+        await coordinator.resumeAfterInterruption()
+        phase = .listening
+        startPump(
+            stream: transport.stream,
+            client: transport.client,
+            connection: transport.connection
+        )
+    }
+
+    /// 语音通道：能力 binding → 设备 → 连接 → 播放。
+    /// 全部在**局部作用域**里建好；令牌仍然有效才发布到 `self`（S2 第 3 条）。
+    private func openVoiceTransport(token: Int) async throws -> VoiceTransport {
         let binding = await realtimeCapabilityBindingProvider?(voiceID)
+        try requireLive(token)
         if realtimeCapabilityBindingProvider != nil,
            binding?.includesSpeech != true
         {
@@ -499,7 +715,12 @@ public final class AssistantSession {
         let configuration = resolved.configuration
         let key = resolved.apiKey
         // 大模型先探一次：它连不上时**不开会话、不取设备**（§9 第 15–16 行）。
-        let result = await provider.check(configuration: configuration, apiKey: key)
+        let result = await provider.check(
+            configuration: configuration,
+            apiKey: key,
+            operation: .responses
+        )
+        try requireLive(token)
         guard result.isReady else {
             throw Blocked(.llmUnreachable("\(result.title)。\(result.detail)"))
         }
@@ -515,51 +736,72 @@ public final class AssistantSession {
                 profile = reported ?? "unknown"
             }
         }
+        try requireLive(token)
 
+        // —— 以下到 `publish` 之间，设备、连接、播放都只存在于**局部作用域**。
+        // 只有令牌仍然有效时才写进 `self`；失效路径只收掉自己那一份。
         let source = audioSourceFactory()
         let audioSession = source as? any AssistantAudioSession
         audioSession?.configure(mode: mode)
-        self.source = source
-        self.audioSession = audioSession
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
             source.stop()
-            self.source = nil
-            self.audioSession = nil
             throw Blocked(Self.blockReason(for: error))
+        }
+        do {
+            try requireLive(token)
+        } catch {
+            source.stop()
+            throw error
         }
 
         // 一条连接同时承载 ASR 与 caller-owned TTS（§5.5）；LLM、历史和句子队列
         // 都留在本地，服务端只接收增量 TTS 的 `speechrail.tts.*` 子集。
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: 400,
-            voice: binding?.canonicalVoiceID ?? voiceID,
-            apiKey: serviceKey,
-            expectedASRRevision: binding?.asrModelRevision,
-            expectedTTSRevision: binding?.ttsModelRevision,
-            expectedVoiceRevision: binding?.voiceRevision,
-            callerTTSEnabled: true
+        let client = dependencies.makeRealtimeClient(
+            AssistantRealtimeClientConfiguration(
+                port: port,
+                silenceDurationMilliseconds: 400,
+                voice: binding?.canonicalVoiceID ?? voiceID,
+                apiKey: serviceKey,
+                expectedASRRevision: binding?.asrModelRevision,
+                expectedTTSRevision: binding?.ttsModelRevision,
+                expectedVoiceRevision: binding?.voiceRevision
+            )
         )
         do {
             try await client.connect()
         } catch {
             source.stop()
-            self.source = nil
-            self.audioSession = nil
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
-        self.client = client
-        activeRealtimeBinding = binding
+        let connection = connectionToken &+ 1
+        self.connectionToken = connection
+        // 每条连接换一对时钟锚点（D09）：`receivedAt` 是单调时钟的 instant，
+        // 跨连接没有可比性。旧连接的 item 观测时刻一并清掉，
+        // 免得重连之后同一个 itemID 沿用上一条连接的时间。
+        connectionClockAnchor = ContinuousClock().now
+        connectionDateAnchor = Date()
+        itemObservedAt.removeAll()
+        // itemID 是**连接内**的去重键：重连之后服务端会从头编号，
+        // 沿用上一条连接的集合会把新的一句话当成重复而丢掉。
+        committedItemIDs.removeAll()
+        do {
+            try requireLive(token)
+        } catch {
+            // 晚到的连接：只关掉它自己，不碰当前会话的设备与状态。
+            source.stop()
+            await client.close()
+            throw error
+        }
 
         // 增量 TTS 的协调器先建好：播放层的"真播完"回调要直接挂到它上面。
         let tts = makeTTSStreamCoordinator(client: client)
-        ttsStream = tts
 
         let playbackDrained: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
+            guard self.startToken == token else { return }
             // 增量模式：排空可能只是**欠载**（服务端还在生成），整轮结束由协调器判。
             if let stream = self.ttsStream, stream.isActive || stream.isAwaitingPlayback {
                 return
@@ -575,31 +817,92 @@ public final class AssistantSession {
             }
             audioSession.onFailure = { [weak self] message in
                 guard let self else { return }
+                // 旧设备的迟到通知不许动新一轮的账本。
+                guard self.startToken == token else { return }
                 self.ttsStream?.notePlaybackFailure(message)
                 self.lastFailure = message
             }
+            // D05：设备重建丢掉了这一轮还没播完的缓冲。旧 epoch 的 rendered
+            // 回调被代次过滤掉了，永远不会回来——所以账本必须在这里归零，
+            // 而且要明确告诉用户"这次朗读停了"，不能伪装成播完了。
+            audioSession.onPlaybackInvalidated = { [weak self] invalidation in
+                guard let self else { return }
+                // 结束或重连之后到达的旧设备通知只清理它自己那一份。
+                guard self.startToken == token else { return }
+                self.ttsStream?.invalidate()
+                self.isSpeaking = false
+                self.isMutedForPlayback = false
+                if let reply = self.currentReply {
+                    self.invalidateReply()
+                    await self.finalizeReply(.interrupted, reply: reply)
+                } else {
+                    await self.markLastReplyInterruptedAfterPlaybackCut()
+                }
+                if invalidation.recovered {
+                    self.lastFailure = "音频设备已切换，本次朗读已停止。"
+                    if self.phase == .speaking || self.phase == .thinking {
+                        self.phase = .listening
+                    }
+                } else {
+                    // 恢复失败：这一场已经没法继续语音了。停止采集与连接，
+                    // 记一次可重试的中断，文字输入与「重试语音」都留着。
+                    await self.handleUnconfirmedRemoteIdle(
+                        message: "音频设备切换后无法恢复：\(invalidation.message ?? "未知原因")"
+                    )
+                }
+            }
         } else {
-            let player = PCMStreamPlayer()
+            let player = dependencies.makePlaybackChannel()
             do {
                 try await player.start()
             } catch {
-                await client.close()
                 source.stop()
-                self.source = nil
-                self.audioSession = nil
-                self.client = nil
+                await client.close()
                 throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
             }
             player.onDrained = playbackDrained
             player.onBufferRendered = { [weak tts] epoch, frames in
                 tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
             }
+            do {
+                try requireLive(token)
+            } catch {
+                source.stop()
+                await player.stop()
+                await client.close()
+                throw error
+            }
             playback = player
         }
+        self.source = source
+        self.audioSession = audioSession
+        self.client = client
+        self.ttsStream = tts
+        activeRealtimeBinding = binding
+        return VoiceTransport(
+            stream: stream,
+            client: client,
+            profile: profile,
+            configuration: configuration,
+            startedAt: Date(),
+            connection: connection
+        )
+    }
 
-        let startedAt = Date()
+    /// 一次启动/重连里"语音通道"那部分的产物。
+    private struct VoiceTransport {
+        var stream: AsyncStream<AudioChunk>
+        var client: any AssistantRealtimeClient
+        var profile: String
+        var configuration: LLMConfiguration
+        var startedAt: Date
+        var connection: Int
+    }
+
+    /// **只在新会话开始时执行一次**的人设、记忆、历史与序号初始化。
+    /// 重连不调用它：那些是会话级状态，中断续接必须原样保留（S2 第 8 条）。
+    private func prepareConversationContext(startedAt: Date) {
         sessionStartedAt = startedAt
-        commitCursor = startedAt
         invalidateReply()
         turns = []
         history = []
@@ -608,13 +911,36 @@ public final class AssistantSession {
         committedItemIDs = []
         currentOrdinal = 0
         isStoppingIntentionally = false
-        memories = ((try? await coordinator.memories(activeOnly: true)) ?? []).map(\.body)
+        // 新会话默认可上行；同一场重连不动它（D04）。
+        isMuted = false
+    }
 
+    /// 建档：放在语音准备成功且令牌有效之后（S2 第 7 条）。
+    ///
+    /// 建档期间被取消也可能产生记录：预分配 record ID 跟踪该创建；
+    /// 如果确实落库，只按该 ID 封存，不删除，也不把它挂到新会话。
+    private func createConversationRecord(token: Int, transport: VoiceTransport) async throws {
+        let source = self.source
+        let audioSession = self.audioSession
+        let client = transport.client
+        let startedAt = transport.startedAt
+        let configuration = transport.configuration
+        memories = ((try? await coordinator.memories(activeOnly: true)) ?? []).map(\.body)
+        do {
+            try requireLive(token)
+        } catch {
+            if let source { await tearDownPrivate(source: source, audioSession: audioSession, client: client) }
+            throw error
+        }
+
+        // 建档放在语音准备成功之后（S2 第 7 条）。建档期间被取消也可能留下记录：
+        // 那就只按这个 ID 封存，不删除，也不把它挂到新会话上。
+        let recordID: String
         do {
             let record = try await coordinator.createSession(
                 SessionDraft(
                     kind: .assistant,
-                    engineProfile: profile,
+                    engineProfile: transport.profile,
                     audioSource: .microphone,
                     diarization: .off,
                     llmEndpoint: configuration.normalizedBaseURL,
@@ -624,31 +950,69 @@ public final class AssistantSession {
                     startedAt: startedAt
                 )
             )
-            sessionID = record.id
-            coordinator.sessionDidStartRecording(id: record.id)
+            recordID = record.id
         } catch {
-            if let audioSession {
-                audioSession.stop()
-            } else if let playback {
-                await playback.stop()
-                self.playback = nil
-                source.stop()
-            }
-            await client.close()
+            if let source { await tearDownPrivate(source: source, audioSession: audioSession, client: client) }
             self.source = nil
             self.audioSession = nil
             self.client = nil
+            self.ttsStream = nil
             throw Blocked(.storeUnavailable(error.localizedDescription))
         }
-        phase = .listening
-        startPump(stream: stream, client: client)
+        guard token == startToken else {
+            // 记录已经落库：按它自己的 ID 封存，不删除、不挂到新会话。
+            await coordinator.sealSession(id: recordID, reason: .user)
+            if let source { await tearDownPrivate(source: source, audioSession: audioSession, client: client) }
+            self.source = nil
+            self.audioSession = nil
+            self.client = nil
+            self.ttsStream = nil
+            throw Superseded.start
+        }
+        sessionID = recordID
+        isTextOnlyConversation = false
+        coordinator.sessionDidStartRecording(id: recordID)
+    }
+
+    /// 启动流程内部用：令牌已经变了就抛 `Superseded.start`。
+    /// 它**不是**受阻——界面不该给"麦克风被占用"这类结论，只该安静收掉自己那一份。
+    private func requireLive(_ token: Int) throws {
+        guard token == startToken else { throw Superseded.start }
+    }
+
+    /// 收掉启动流程**私有**的那一份资源。已经发布到 `self` 的由调用方另行清理。
+    private func tearDownPrivate(
+        source: (any AudioChunkSource)?,
+        audioSession: (any AssistantAudioSession)?,
+        client: any AssistantRealtimeClient
+    ) async {
+        if let audioSession {
+            audioSession.stop()
+        } else {
+            source?.stop()
+        }
+        await client.close()
     }
 
     /// 协调器的 `stopper`：把最后半句交出去、关连接、释放设备。
     public func stopCapture() async {
         guard phase != .ending else { return }
         phase = .ending
+        // **先作废令牌，再做任何 await**：这样任何还在飞的启动 await
+        // 都会在返回后看见自己过期，只能收掉自己的私有资源（D02）。
+        startToken &+= 1
+        connectionToken &+= 1
+        retryTask?.cancel()
+        retryTask = nil
         isStoppingIntentionally = true
+        // 结束对话也是一次回复收尾：正在生成的那一轮先把已知正文存下来并标成打断，
+        // 再去关连接。否则最后半句会随着连接一起消失（D06 / D08）。
+        if let reply = currentReply {
+            await stopPlaybackLayer()
+            if let client { try? await client.cancelTTS() }
+            invalidateReply()
+            await finalizeReply(.interrupted, reply: reply)
+        }
         invalidateReply()
         ttsStream?.invalidate()
         if let audioSession {
@@ -675,6 +1039,12 @@ public final class AssistantSession {
         pump?.cancel()
         pump = nil
         client = nil
+        // 纯文字这一场没有设备租约，但也得有终态：按它自己的 sessionID 封存，
+        // 不能走 `coordinator.finalize`（那会停掉别的功能正在用的设备，D07 / §4.2）。
+        if isTextOnlyConversation, let recordID = sessionID {
+            await coordinator.sealSession(id: recordID, reason: .user)
+        }
+        lastFinalizedSessionID = isTextOnlyConversation ? sessionID : lastFinalizedSessionID
         resetToIdleKeepingTurns()
     }
 
@@ -684,8 +1054,11 @@ public final class AssistantSession {
         level = 0
         partialText = nil
         streamingReply = nil
-        pendingItem = nil
-        commitCursor = nil
+        // 场次都结束了，两轮回复的身份也一并作废：下一次开始会重新分配。
+        currentReply = nil
+        lastFinalizedReply = nil
+        isTextOnlyConversation = false
+        itemObservedAt.removeAll()
         sessionStartedAt = nil
         sessionID = nil
         isMutedForPlayback = false
@@ -702,7 +1075,11 @@ public final class AssistantSession {
 
     // MARK: - 采集 → 上行
 
-    private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
+    private func startPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any AssistantRealtimeClient,
+        connection: Int
+    ) {
         pump?.cancel()
         pump = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
@@ -716,7 +1093,7 @@ public final class AssistantSession {
                     let events = await client.events()
                     for await envelope in events {
                         guard let self else { return }
-                        await self.handle(envelope)
+                        await self.handle(envelope, from: connection)
                     }
                 }
                 await group.waitForAll()
@@ -724,7 +1101,7 @@ public final class AssistantSession {
         }
     }
 
-    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient) async {
+    private func upload(_ chunk: AudioChunk, to client: any AssistantRealtimeClient) async {
         guard !isStoppingIntentionally else { return }
         level = chunk.level
         // 用户按了静音：电平照显（麦克风仍归这次会话），但一个字节都不上行。
@@ -740,22 +1117,51 @@ public final class AssistantSession {
 
     // MARK: - 下行
 
+    /// 记下"这一句第一次有非空证据"的时间，之后的修订不改它（D09 第 3 条）。
+    ///
+    /// 锚点把单调的 `receivedAt` 换算成墙上时间，所以同一条连接上的多条 item
+    /// 仍然保持真实的先后顺序；墙钟被改动也影响不到它。
+    private func observedAt(forItem itemID: String?, receivedAt: ContinuousClock.Instant) -> Date {
+        let wall = connectionDateAnchor.addingTimeInterval(
+            durationSeconds(receivedAt - connectionClockAnchor)
+        )
+        guard let itemID, !itemID.isEmpty else { return wall }
+        if let existing = itemObservedAt[itemID] { return existing }
+        itemObservedAt[itemID] = wall
+        return wall
+    }
+
+    private func durationSeconds(_ d: Duration) -> Double {
+        let c = d.components
+        return Double(c.seconds) + Double(c.attoseconds) / 1e18
+    }
+
     private func handle(
-        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        from connection: Int
     ) async {
+        // 连接代次门禁（D03）：重连之后旧连接晚到的事件一律丢弃，
+        // 不许把上一条连接的识别结果、播放账本或终态写进新会话。
+        guard connection == connectionToken else { return }
         switch envelope.payload {
         case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded,
              .diarizationFinished, .auxiliaryIncomplete:
             break
-        case .partial(_, let delta):
+        case .partial(let itemID, let delta):
             guard !delta.isEmpty else { return }
+            _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             await noteSpeechEvidence()
             partialText = (partialText ?? "") + delta
-        case .partialSnapshot(_, _, let text):
+        case .partialSnapshot(let itemID, _, let text):
+            if !text.isEmpty {
+                _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
+            }
             await noteSpeechEvidence()
             partialText = text.isEmpty ? nil : text
         case .completed(let itemID, let transcript):
-            await commitUserTurn(itemID: itemID, transcript: transcript)
+            // final-only 的 item 到这里才有第一个证据，用它自己的接收时刻。
+            let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
+            await commitUserTurn(itemID: itemID, transcript: transcript, observedAt: observed)
         case .failed(_, let code, let message):
             partialText = nil
             lastFailure = "\(code)：\(message)"
@@ -780,14 +1186,19 @@ public final class AssistantSession {
                 await stream.handleAudio(requestID: requestID, pcm: pcm)
             }
         case .ttsEnded(let requestID, _, let status, let code, let message):
-            if let stream = ttsStream, stream.isActive {
-                await stream.handleTerminal(requestID: requestID, status: status)
-            }
+            // 终态**无条件**转给协调器，不在这里按 `isActive` 过滤。
+            // 打断之后那一轮已经被 `invalidate()` 作废，`isActive` 是 false；
+            // 在这一层挡掉的话，远端空闲屏障就永远等不到解除的那条终态
+            // （方案 S4 第 12 条）。活动/已作废的区分由协调器自己判断。
+            await ttsStream?.handleTerminal(requestID: requestID, status: status)
             if status == "failed" {
                 lastFailure = [code, message].compactMap { $0 }.joined(separator: "：")
             }
             if status == "cancelled" {
-                currentReplyInterrupted = true
+                // 记录"这一轮没听完"；是否落成 `interrupted` 由统一收尾决定。
+                if let reply = currentReply, reply.generation == replyGeneration {
+                    currentReply?.termination = .interrupted
+                }
             }
         case .serverError(let code, let message, let requestID):
             if let stream = ttsStream, stream.isActive {
@@ -803,25 +1214,40 @@ public final class AssistantSession {
     /// 所以 barge-in 完全由客户端决定：**允许插话时，第一次收到非空识别结果
     /// 就是"用户开始说话"**。半双工模式下播放期本来就不上行，自然不会触发。
     private func noteSpeechEvidence() async {
-        guard mode.allowsBargeIn, isSpeaking || replyTask != nil, !currentReplyInterrupted else {
+        guard mode.allowsBargeIn, isSpeaking || replyTask != nil else {
             return
         }
-        await interruptCurrentReply()
+        // 插话和 ESC 走同一条路：同一个回复收尾（D08），正文与打断标记一起写。
+        let remoteIdleConfirmed: Bool
+        if let reply = currentReply {
+            remoteIdleConfirmed = await interruptCurrentReply()
+            await finalizeReply(.interrupted, reply: reply)
+        } else {
+            remoteIdleConfirmed = await interruptCurrentReply()
+            await markLastReplyInterruptedAfterPlaybackCut()
+        }
         isSpeaking = false
-        phase = .listening
+        if remoteIdleConfirmed {
+            phase = .listening
+        } else {
+            await handleUnconfirmedRemoteIdle()
+        }
     }
 
     /// 用户说完一句：落库 → 调大模型 → 逐句合成。
-    private func commitUserTurn(itemID: String, transcript: String) async {
+    private func commitUserTurn(
+        itemID: String,
+        transcript: String,
+        observedAt observed: Date
+    ) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         partialText = nil
-        defer { pendingItem = nil }
+        defer { if !itemID.isEmpty { itemObservedAt.removeValue(forKey: itemID) } }
         guard !text.isEmpty, let sessionID, let startedAt = sessionStartedAt else { return }
         if !itemID.isEmpty {
             guard !committedItemIDs.contains(itemID) else { return }
             committedItemIDs.insert(itemID)
         }
-        let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
         var appendedOrdinal = 0
         do {
             let ordinal = try await coordinator.appendLine(
@@ -830,8 +1256,13 @@ public final class AssistantSession {
                     role: .user,
                     text: text,
                     source: .microphone,
-                    tStart: window.start.timeIntervalSince(startedAt),
-                    tEnd: window.end.timeIntervalSince(startedAt)
+                    // D09：wire 上没有 sample span，精确的声学起止**存 NULL**，
+                    // 不再拿会话起点冒充。`timingQuality = .unavailable` 让界面
+                    // 能识别"这段时间不可用"，而不是显示一个假的 00:00。
+                    tStart: nil,
+                    tEnd: nil,
+                    timingQuality: .unavailable,
+                    createdAt: observed
                 )
             )
             currentOrdinal = ordinal
@@ -845,9 +1276,9 @@ public final class AssistantSession {
                     source: .microphone,
                     isInterrupted: false,
                     speakerLabel: nil,
-                    // 说这一句是**从**什么时候开始的：时间码给的是开口那一刻，
-                    // 与库里 `t_start` 同一个来源。
-                    createdAt: window.start
+                    // 实时对话流与回看必须显示**同一个**时间（D09）：
+                    // 都是"第一个非空证据被本机收到的那一刻"。
+                    createdAt: observed
                 )
             )
             history.append(LLMMessage(role: .user, text: text))
@@ -867,10 +1298,12 @@ public final class AssistantSession {
 
     /// 把增量 TTS 的发送、播放与终态接到现有连接 / 播放层上。
     /// 协调器不认识 WebSocket 与 AVAudioEngine 的细节，这里只做注入。
-    private func makeTTSStreamCoordinator(client: RealtimeASRClient) -> AssistantTTSStreamCoordinator {
+    private func makeTTSStreamCoordinator(
+        client: any AssistantRealtimeClient
+    ) -> AssistantTTSStreamCoordinator {
         let tts = AssistantTTSStreamCoordinator()
         tts.sendStart = { requestID in
-            try await client.startTTSStream(requestID: requestID)
+            try await client.startTTSStream(requestID: requestID, speed: nil)
         }
         tts.sendAppend = { sequence, text in
             try await client.appendTTSText(text, sequence: sequence)
@@ -905,7 +1338,13 @@ public final class AssistantSession {
             case .completed:
                 break
             case .cancelled:
-                self.currentReplyInterrupted = true
+                // 朗读被打断**不等于**这一轮已经收尾：正文可能已经完整生成并定稿，
+                // 这里只是把"没听完"记在同一个 `AssistantReplyState` 上，
+                // 由 `finalizeReply` 决定要不要把 `interrupted` 推成 true。
+                // generation 对不上（重播上一句、或者新一轮已经接替）就不动。
+                if let reply = self.currentReply, reply.generation == self.replyGeneration {
+                    self.currentReply?.termination = .interrupted
+                }
             case .failed(let message):
                 self.lastFailure = message
             }
@@ -920,8 +1359,146 @@ public final class AssistantSession {
         replyGeneration &+= 1
         let generation = replyGeneration
         replyTask?.cancel()
+        guard let sessionID else { return }
+        currentReply = AssistantReplyState(
+            sessionID: sessionID,
+            generation: generation,
+            source: spoken ? .microphone : .keyboard,
+            startedAt: Date()
+        )
         replyTask = Task { [weak self] in
             await self?.runReply(spoken: spoken, generation: generation)
+        }
+    }
+
+    /// 第一段非空正文到达时**建行**，之后只累计内存（方案 S4 第 2 条）。
+    ///
+    /// 不在每个 token 上写库：那既没必要，也会把 WAL 写满。崩溃前还没落库的那部分
+    /// 本来就不承诺恢复——已经落库的那部分由 `sealAbandonedSessions` 封成
+    /// final + interrupted（见 `SessionStore`），用户至少还能看到已经说过的话。
+    private func persistReplyPartial(generation: Int) async {
+        guard var reply = currentReply,
+              reply.generation == generation,
+              !reply.isPersisted,
+              reply.hasSpeakableText
+        else { return }
+        do {
+            let ordinal = try await coordinator.appendLine(
+                LineDraft(
+                    sessionID: reply.sessionID,
+                    role: .assistant,
+                    text: reply.text,
+                    source: reply.source,
+                    status: .partial
+                ),
+                id: reply.id
+            )
+            reply.isPersisted = true
+            reply.ordinal = ordinal
+            currentReply = reply
+        } catch {
+            // 建行失败不打断这一轮：正文还在内存里，收尾时会再试一次完整落库。
+            lastFailure = "这一句正在生成，但暂时存不下来：\(error.localizedDescription)"
+        }
+    }
+
+    /// 一轮回复的**唯一收尾入口**（D06 / D08）。
+    ///
+    /// 正常说完、用户打断、provider 失败、连接断开、结束对话都走这里，
+    /// 按 `isFinalized` 幂等：重复调用只生效一次，所以取消路径和正常路径
+    /// 不会各插一行，也不会各追加一次 history。
+    ///
+    /// `snapshot` 是**值类型副本**。跨过 await 之后即使新的一轮已经接管，
+    /// 这里写的仍然是调用方按下按钮那一刻的那一轮，不会把旧回复写进新会话。
+    private func finalizeReply(
+        _ termination: AssistantReplyState.Termination,
+        reply snapshot: AssistantReplyState
+    ) async {
+        var reply = snapshot
+        guard !reply.isFinalized else { return }
+        reply.isFinalized = true
+        reply.termination = termination
+        let text = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isCurrent = currentReply?.id == reply.id
+        guard !text.isEmpty else {
+            // 纯空白的一轮不留下伪造的正文行。
+            if isCurrent { currentReply = nil }
+            return
+        }
+
+        // 不依赖快照的 isPersisted：快照可能过期（persistReplyPartial 在
+        // await 期间完成建行），先试 UPDATE，不存在再退回 INSERT。
+        do {
+            let ordinal = try await coordinator.finalizeAssistantLine(
+                sessionID: reply.sessionID,
+                lineID: reply.id,
+                text: text,
+                interrupted: termination.marksInterrupted
+            )
+            reply.ordinal = ordinal
+            reply.isPersisted = true
+        } catch {
+            // 行还没建过（快照过期或建行失败过）：退回 INSERT 路径。
+            do {
+                let ordinal = try await coordinator.appendLine(
+                    LineDraft(
+                        sessionID: reply.sessionID,
+                        role: .assistant,
+                        text: text,
+                        source: reply.source,
+                        status: .final,
+                        isInterrupted: termination.marksInterrupted
+                    ),
+                    id: reply.id
+                )
+                reply.ordinal = ordinal
+                reply.isPersisted = true
+            } catch {
+                lastFailure = "这一句没能存下来：\(error.localizedDescription)"
+            }
+        }
+
+        guard isCurrent else { return }
+        currentReply = nil
+        lastFinalizedReply = reply
+        // 被打断的回复把**已经说出口的那部分**交给下一轮，不虚构余文，
+        // 也不伪造一条"成功"的空消息。
+        history.append(LLMMessage(role: .assistant, text: text))
+        streamingReply = nil
+        turns.append(
+            Turn(
+                id: reply.id,
+                ordinal: reply.ordinal ?? (currentOrdinal + 1),
+                role: .assistant,
+                text: text,
+                source: reply.source,
+                isInterrupted: termination.marksInterrupted,
+                speakerLabel: nil,
+                createdAt: reply.startedAt
+            )
+        )
+        if let ordinal = reply.ordinal { currentOrdinal = ordinal }
+    }
+
+    /// 完整生成、也已经定稿，但朗读还没放完时用户按了停止（D08 第 5 条的后半段）。
+    /// 正文已经是完整的，这一行要改的只有"没听完"这一个标记——
+    /// `finalizeAssistantLine` 的 SQL 只把 `interrupted` 从 false 推向 true，
+    /// 所以重复调用是安全的。
+    private func markLastReplyInterruptedAfterPlaybackCut() async {
+        guard let reply = lastFinalizedReply, reply.termination == .completed else { return }
+        do {
+            _ = try await coordinator.finalizeAssistantLine(
+                sessionID: reply.sessionID,
+                lineID: reply.id,
+                text: reply.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                interrupted: true
+            )
+            lastFinalizedReply?.termination = .interrupted
+            if let index = turns.indices.last, turns[index].id == reply.id {
+                turns[index].isInterrupted = true
+            }
+        } catch {
+            lastFailure = "打断标记没能存下来：\(error.localizedDescription)"
         }
     }
 
@@ -935,7 +1512,6 @@ public final class AssistantSession {
             }
         }
         guard generation == replyGeneration,
-              let sessionID,
               let preferences = preferences?()
         else { return }
 
@@ -961,13 +1537,11 @@ public final class AssistantSession {
 
         phase = .thinking
         streamingReply = ""
-        currentReplyInterrupted = false
-        // 这一句回复的时刻按**开始回答**算，不是按它说完算：生成要几秒，
-        // 用结束时刻会让时间码落在那一句之后（稿行右侧那个 `14:02:16`）。
-        let replyStartedAt = Date()
         var reply = ""
         // 这一轮是否已经开过增量 utterance：`start` 一轮只允许一次。
         var streamStarted = false
+        // 开嗓时机与原始空白由它统一决定（D11）：分隔空白不能被丢掉。
+        var speechGate = AssistantSpeechStartGate()
         // 服务端明确拒绝增量时，只停朗读，不静默退回逐句 create 队列。
         var streamUnavailable = false
         do {
@@ -976,19 +1550,29 @@ public final class AssistantSession {
                 configuration: configuration,
                 messages: messages,
                 apiKey: key,
+                maxOutputTokens: nil,
                 instructions: VoicePrompt.instructions
             ) {
                 try Task.checkCancellation()
                 guard generation == replyGeneration else { return }
                 reply += delta
                 streamingReply = reply
+                // 同一轮只有一个身份：流式正文、库里那一行、界面那一行都挂在它下面（D08）。
+                // 这一句的时刻按**开始回答**算，不是按它说完算：生成要几秒，
+                // 用结束时刻会让时间码落在那一句之后（稿行右侧那个 `14:02:16`）。
+                currentReply?.text = reply
+                // 第一次出现非空白正文时按固定 id 建行；之后只 UPDATE，不再 INSERT。
+                await persistReplyPartial(generation: generation)
                 // 屏幕与落库永远用**原始**文本；朗读那份从同一条流里另走一路。
                 guard spoken, !streamUnavailable else { continue }
-                guard !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 guard let stream = ttsStream else { continue }
-                if !streamStarted {
+                switch speechGate.offer(delta) {
+                case .buffered:
+                    continue
+                case .speak(let text):
+                    stream.offer(text)
+                case .start(let pending):
                     // 第一批有效文本就开轮：不再等整句，更不等整段回复（§8.1）。
-                    streamStarted = true
                     do {
                         try await stream.begin(
                             generation: generation,
@@ -998,28 +1582,46 @@ public final class AssistantSession {
                         guard generation == replyGeneration else { return }
                         streamUnavailable = true
                         lastFailure = error.localizedDescription
+                        speechGate.disableStarting()
                         continue
                     }
+                    streamStarted = true
+                    // 开嗓前缓冲的空白与正文一次交出去，再逐段原样 offer。
+                    stream.offer(pending)
                 }
-                stream.offer(delta)
             }
         } catch is CancellationError {
+            // 取消不是失败：谁按下停止，谁负责收尾（`interruptCurrentReply` /
+            // `stopCapture`）。这一路只把界面上的流式文本收掉。
             if generation == replyGeneration {
                 streamingReply = nil
             }
             return
         } catch {
             guard generation == replyGeneration else { return }
-            lastFailure = "这一次没有回答出来：\(error.localizedDescription)"
-            streamingReply = nil
+            let message = "这一次没有回答出来：\(error.localizedDescription)"
+            // D06：provider 失败必须走**同一个回复收尾**。以前这里只改文案就返回，
+            // 于是已经开嗓的 TTS 继续往下播、半句话也永远不落库。
+            // 顺序与用户手动打断一致：先停本地播放 → 再取消服务端这一轮 → 再落库归位。
+            await stopPlaybackLayer()
+            if let client { try? await client.cancelTTS() }
+            ttsStream?.invalidate()
+            isSpeaking = false
+            isMutedForPlayback = false
+            lastFailure = message
             phase = .listening
+            if let replyState = currentReply, replyState.generation == generation {
+                await finalizeReply(.failed(message), reply: replyState)
+            }
             return
         }
 
         guard generation == replyGeneration else { return }
-        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard let replyState = currentReply, replyState.generation == generation else { return }
+        guard replyState.hasSpeakableText else {
+            // 空回复不留下伪造的正文行（D08 第 6 条）。
             streamingReply = nil
+            currentReply = nil
             lastFailure = "模型这次没有给出内容。"
             phase = .listening
             return
@@ -1028,43 +1630,13 @@ public final class AssistantSession {
             // 关输入之后仍然继续收音频；这里只保证"没 ACK 的文本不会越过 finish"。
             await stream.finishInput()
         }
-        guard generation == replyGeneration else { return }
-        streamingReply = nil
-        history.append(LLMMessage(role: .assistant, text: trimmed))
-        do {
-            try Task.checkCancellation()
-            guard generation == replyGeneration else { return }
-            let ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .assistant,
-                    text: trimmed,
-                    source: spoken ? .microphone : .keyboard,
-                    isInterrupted: currentReplyInterrupted
-                )
-            )
-            try Task.checkCancellation()
-            guard generation == replyGeneration else { return }
-            currentOrdinal = ordinal
-            turns.append(
-                Turn(
-                    id: UUID().uuidString,
-                    ordinal: ordinal,
-                    role: .assistant,
-                    text: trimmed,
-                    source: spoken ? .microphone : .keyboard,
-                    isInterrupted: currentReplyInterrupted,
-                    speakerLabel: nil,
-                    createdAt: replyStartedAt
-                )
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == replyGeneration else { return }
-            lastFailure = error.localizedDescription
-        }
-        if !spoken, generation == replyGeneration { phase = .listening }
+        guard generation == replyGeneration, currentReply?.id == replyState.id else { return }
+        // 朗读被打断过就按打断收尾，否则按正常完成收尾。两者写的是同一行。
+        await finalizeReply(
+            replyState.termination == .interrupted ? .interrupted : .completed,
+            reply: replyState
+        )
+        if !spoken { phase = .listening }
     }
 
     /// 从流式正文里切出"已经可以念"的句子：遇到句末标点就切，**并且要够长**
@@ -1089,8 +1661,17 @@ public final class AssistantSession {
     }
 
     private func handleUnexpectedClose(code: Int?) async {
-        guard !isStoppingIntentionally, phase.isLive else { return }
+        // 断线判定看**连接身份与是否主动停**，不看展示用的 `phase`（D04）。
+        // 以前用 `phase.isLive`：静音把 phase 变成 `.paused` 之后，
+        // 断线会被判成"本来就没在跑"，于是设备、连接、占用全都留在原地。
+        guard !isStoppingIntentionally, client != nil else { return }
         let reason = code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
+        // 断线时正在生成的那一轮要**先收尾**：否则它会继续往一条已经关掉的连接上写，
+        // 已经说出口的那半句也永远不落库（D06）。
+        if let reply = currentReply {
+            invalidateReply()
+            await finalizeReply(.interrupted, reply: reply)
+        }
         // 断线：本地作废这一轮 utterance，不假装它播完了。
         ttsStream?.invalidate()
         if let audioSession {
@@ -1121,13 +1702,34 @@ public final class AssistantSession {
 
     /// 受阻后的「重试」：占用还在自己手里就续接（新连接 = 新 epoch），否则走守卫。
     public func retry() async {
+        // **先作废旧重试的令牌，再取消它**：这样无论谁先恢复，
+        // 旧重试下一次校验时一定看见自己过期，不会有"两个重试同时建连"的窗口。
+        startToken &+= 1
+        retryTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRetry()
+        }
+        retryTask = task
+        await task.value
+        // compare-and-clear：只有自己这一轮能清掉句柄。
+        if retryTask == task { retryTask = nil }
+    }
+
+    private func performRetry() async {
         if coordinator.occupancy?.kind == .assistant {
             if coordinator.phase == .interrupted {
-                await coordinator.resumeAfterInterruption()
+                // 已经封存的记录不允许 retry 把它重新变成 recording。
+                guard coordinator.activeSessionID != nil else { return }
             }
             do {
-                try await startPipeline()
+                try await reconnectPipeline()
                 blocked = nil
+            } catch is CancellationError {
+                return
+            } catch Superseded.start {
+                // 结束或新一轮把它顶替了：保持现状，不写受阻结论。
+                return
             } catch {
                 blocked = Self.blockReason(for: error)
             }
@@ -1177,6 +1779,13 @@ public final class AssistantSession {
         init(_ reason: BlockReason) {
             self.reason = reason
         }
+    }
+
+    /// 启动流程被更新的一轮顶替（结束、切功能、或重新开始）。
+    /// 它**不是**受阻：不该给"麦克风被占用"这类可读结论，
+    /// 也不该把 `phase` 拉回任何活动态——只安静收掉自己那一份资源。
+    enum Superseded: Error {
+        case start
     }
 }
 

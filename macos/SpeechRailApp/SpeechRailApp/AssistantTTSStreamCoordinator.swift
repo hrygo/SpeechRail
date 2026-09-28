@@ -103,14 +103,29 @@ final class AssistantTTSStreamCoordinator {
     private var finishRequested = false
     private var finishSent = false
     private var pumpTask: Task<Void, Never>?
-    private var pendingWait: PendingWait?
-    private var prefetched: [WaitTarget: WaitResult] = [:]
+    /// 单调递增的**物理**播放身份。`generation` 是"第几轮回复"的逻辑身份（重播会重复），
+    /// epoch 是"第几次真正开嗓"：迟到回调只认 epoch，所以重播不会被上一轮的
+    /// `dataRendered` 误清账。
+    private var utteranceEpoch = 0
+    /// 等待者按 `(epoch, target)` 分槽。共用单个槽位时，ACK 等待与播放预算等待会互相覆盖，
+    /// 被覆盖的 continuation 永远没人唤醒（`SWIFT TASK CONTINUATION MISUSE`）。
+    private var waiters: [WaitKey: Waiter] = [:]
+    private var prefetched: [WaitKey: WaitResult] = [:]
     /// 「发出去就不管」的异步工作的句柄。`invalidate()` 负责把它们收掉：
     /// 没有句柄的 `Task { }` 一旦遇上不返回的依赖（挂死的网络取消、停不下的播放层）
     /// 就会永远留在进程里，既回收不了内存也挡不住后续世代。
     private var fireAndForgetTasks: [Task<Void, Never>] = []
     /// `cancelServerBounded()` 里两个竞速任务的句柄，见该函数注释。
     private var serverCancelTasks: [Task<Void, Never>] = []
+    /// 正在等"服务端确认这一轮终止"的闩,按 requestID 索引(D06)。
+    /// 它们属于**已经作废**的 utterance,所以不参与 `isActive` 那套状态。
+    private var retiredTerminals: [String: TerminalLatch] = [:]
+    /// 终态先于等待到达时先记下来:取消命令与服务端终态可以赛跑,
+    /// 谁先到都不能让这一轮被判成"没收到终态"。
+    private var terminalSignals: Set<String> = []
+    /// 已经作废、但 `awaitRemoteTerminal` 还没挂上闩的那一小段窗口。
+    private var retiringRequests: Set<String> = []
+    private var retiredTimeoutTasks: [String: Task<Void, Never>] = [:]
 
     init(configuration: Configuration = .default) {
         self.configuration = configuration
@@ -130,9 +145,21 @@ final class AssistantTTSStreamCoordinator {
     // MARK: - 上行
 
     /// 开始一轮。返回即表示服务端已确认 `speechrail.tts.started`。
+    ///
+    /// 上一轮的**远端空闲屏障还没解除**时拒绝开新一轮（方案 S4 第 11 条）：
+    /// 悄悄 `invalidate()` 掉旧的一轮，会让两个 `request_id` 在服务端并存，
+    /// 账本、终态和「谁在说话」全部对不上。这种情况要显式失败，
+    /// 由上层去关连接重连，而不是在这里假装没事。
+    ///
+    /// 判据是"屏障已经挂上闩"，不是"本地取消还没跑完"：后者只是本地顺序，
+    /// 远端归属尚未被问，前一轮随时可以被本地顶替。
     func begin(generation: Int, requestID: String, speed: Double? = nil) async throws {
+        guard retiredTerminals.isEmpty else {
+            throw RemoteOwnershipUnknown()
+        }
         invalidate()
         self.generation = generation
+        self.utteranceEpoch = advanceEpoch()
         self.requestID = requestID
         self.outcome = nil
         self.serverLimits = nil
@@ -142,7 +169,7 @@ final class AssistantTTSStreamCoordinator {
         self.finishRequested = false
         self.finishSent = false
         self.buffer.reset()
-        self.ledger.begin(generation: generation)
+        self.ledger.begin(generation: utteranceEpoch)
         do {
             try await sendStart(requestID)
         } catch {
@@ -193,17 +220,38 @@ final class AssistantTTSStreamCoordinator {
     /// 顺序是有意的：`invalidate()` 先推进 epoch 并清空本地排队预算，然后 `await` 停播
     /// （返回即表示播放层已经丢下旧代缓冲），最后才发网络取消。后端取消超时或失败都
     /// 不回滚本地静音，也不把旧音放回来。
-    func cancel() async {
-        guard requestID != nil else { return }
-        let generation = self.generation
+    /// - Returns: 服务端是否已经在有界时间内**确认**这一轮终止。
+    ///   `false` 只表示"取消命令发出去了，但没等到匹配 requestID 的终态"。
+    ///   调用方据此不得在同一条连接上直接开下一轮：要么关连接重连，
+    ///   要么进入可重试的语音中断（方案 S4 第 12 条）。
+    @discardableResult
+    func cancel() async -> Bool {
+        guard let retiring = requestID else { return true }
+        let logicalGeneration = self.generation
         invalidate()
+        // 记下作废后的 epoch：跨过下面的 await 之后只有它还是当前这一轮，
+        // 才允许把结局写回去（旧取消完成得再晚也不能改写新一轮）。
+        let epoch = self.utteranceEpoch
+        // 登记必须在 invalidate 之后：invalidate 会清场。
+        // 这中间的 await 里终态可能先到，`handleTerminal` 据此把它记进 terminalSignals。
+        retiringRequests.insert(retiring)
         await stopPlayback()
         await cancelServerBounded()
-        reportOutcome(.cancelled, generation: generation, playbackAlreadyStopped: true)
+        // `cancelTTS()` 返回只代表**发送完成**，不是服务端腾出了这一轮。
+        // 真正的空闲屏障是匹配 requestID 的终态。
+        let confirmed = await awaitRemoteTerminal(for: retiring)
+        reportOutcome(
+            .cancelled,
+            generation: logicalGeneration,
+            epoch: epoch,
+            playbackAlreadyStopped: true
+        )
+        return confirmed
     }
 
     /// 只作废本地状态，不发网络命令（断线、设备重建时用）。
     func invalidate() {
+        advanceEpoch()
         requestID = nil
         taskID = nil
         outcome = nil
@@ -263,17 +311,33 @@ final class AssistantTTSStreamCoordinator {
         guard samples > 0 else { return }
         guard await awaitPlaybackBudget(samples: samples) else { return }
         guard ledger.reserve(samples: samples) else { return }
-        guard await enqueuePlayback(pcm, generation) else {
+        guard await enqueuePlayback(pcm, utteranceEpoch) else {
             // 没进队列就别占着预算，否则这一轮会一直等一块永远播不完的音频。
-            _ = ledger.complete(samples: samples, generation: ledger.generation)
+            _ = ledger.complete(samples: samples, generation: utteranceEpoch)
             return
         }
     }
 
     func handleTerminal(requestID: String, status: String) async {
+        // 已经被作废、正在等空闲屏障的那一轮:这里就是它等的那个终态。
+        // 放在 `isActive` 判断之前——作废之后 `self.requestID` 已经是 nil,
+        // 但这一轮的终态仍然必须把等待放行,否则打断会一直吊到超时。
+        if let latch = retiredTerminals[requestID] {
+            retiredTerminals.removeValue(forKey: requestID)
+            retiredTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+            retiringRequests.remove(requestID)
+            latch.continuation.resume(returning: true)
+            return
+        }
+        // 终态比等待先到：记下来，随后开始的等待直接命中，
+        // 否则会白等一个完整超时，把"服务端其实早就确认了"误判成没确认。
+        if retiringRequests.contains(requestID) {
+            terminalSignals.insert(requestID)
+            return
+        }
         guard isActive, requestID == self.requestID else { return }
         releaseWaiters(.failed("服务端结束了这一轮。"))
-        ledger.markServerTerminal(status: status, generation: generation)
+        ledger.markServerTerminal(status: status, generation: utteranceEpoch)
         switch status {
         case "cancelled":
             report(.cancelled)
@@ -299,7 +363,7 @@ final class AssistantTTSStreamCoordinator {
     /// 否则它会把新一轮的排队预算当成自己的还掉，让整轮提前宣布播完。
     func notePlaybackCompleted(samples: Int, epoch: Int) {
         guard ledger.complete(samples: samples, generation: epoch) else { return }
-        resolve(.playback, .satisfied)
+        resolve(WaitKey(epoch: epoch, target: .playback), .satisfied)
         if ledger.isUtteranceFinished {
             report(.completed)
         }
@@ -403,9 +467,9 @@ final class AssistantTTSStreamCoordinator {
 
     private func awaitPlaybackBudget(samples: Int) async -> Bool {
         if ledger.canReserve(samples: samples) { return true }
-        let generation = self.generation
+        let epoch = self.utteranceEpoch
         let startedAt = clock()
-        while isActive, self.generation == generation, !ledger.canReserve(samples: samples) {
+        while isActive, self.utteranceEpoch == epoch, !ledger.canReserve(samples: samples) {
             let result = await wait(for: .playback, timeout: configuration.playbackWaitTimeout)
             switch result {
             case .satisfied:
@@ -420,7 +484,7 @@ final class AssistantTTSStreamCoordinator {
                 return false
             }
         }
-        guard isActive, self.generation == generation else { return false }
+        guard isActive, self.utteranceEpoch == epoch else { return false }
         if startedAt.duration(to: clock()) >= configuration.playbackWaitTimeout,
            !ledger.canReserve(samples: samples) {
             fail(Failure.playbackBackpressure(queuedSamples: ledger.queuedSamples))
@@ -442,14 +506,17 @@ final class AssistantTTSStreamCoordinator {
 
     private func report(_ outcome: Outcome) {
         guard isActive else { return }
-        reportOutcome(outcome, generation: generation)
+        reportOutcome(outcome, generation: generation, epoch: utteranceEpoch)
     }
 
     private func reportOutcome(
         _ outcome: Outcome,
         generation: Int,
+        epoch: Int,
         playbackAlreadyStopped: Bool = false
     ) {
+        // 跨越 await 的旧操作回来时可能已经换了一轮：不许写进新一轮的结局。
+        guard epoch == utteranceEpoch else { return }
         self.outcome = outcome
         pumpTask?.cancel()
         pumpTask = nil
@@ -514,10 +581,59 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
+    // MARK: - 远端空闲屏障（D06 / S4 第 12 条）
+
+    /// 等匹配 `requestID` 的**服务端终态**，而不是等"取消命令发出去"。
+    ///
+    /// 闩在 `handleTerminal`（Realtime 接收层）解锁，不在业务收尾这一侧：
+    /// 业务等的是"服务端承认这一轮结束了",而这条终态本身必须由接收循环派发。
+    /// 两者要是同一条任务,就是自己等自己——所以这里只挂一个 continuation,
+    /// 解锁动作留在接收层。
+    private func awaitRemoteTerminal(for requestID: String) async -> Bool {
+        if terminalSignals.remove(requestID) != nil {
+            retiringRequests.remove(requestID)
+            return true
+        }
+        return await withCheckedContinuation { continuation in
+            let id = UUID()
+            retiredTerminals[requestID] = TerminalLatch(id: id, continuation: continuation)
+            let timeout = configuration.cancellationTimeout
+            retiredTimeoutTasks[requestID] = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: timeout)
+                self?.resolveRemoteTerminal(requestID, id: id, confirmed: false)
+            }
+        }
+    }
+
+    /// 终态到了,或者等待超时。**先按 requestID + latch id 比对**:
+    /// 迟到的超时不能把已经确认过的那一次等待改写成失败。
+    private func resolveRemoteTerminal(_ requestID: String, id: UUID, confirmed: Bool) {
+        guard let latch = retiredTerminals[requestID], latch.id == id else { return }
+        retiredTerminals.removeValue(forKey: requestID)
+        retiredTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+        retiringRequests.remove(requestID)
+        latch.continuation.resume(returning: confirmed)
+    }
+
+    @MainActor
+    private struct TerminalLatch {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    /// 上一轮在服务端的归属还没确认（取消已发出但没等到终态）。
+    /// 调用方应把它当成"这条连接不能再开新一轮"的信号。
+    struct RemoteOwnershipUnknown: Error, Equatable {}
+
     private enum WaitTarget: Hashable {
         case started
         case acknowledgement(Int)
         case playback
+    }
+
+    private struct WaitKey: Hashable {
+        let epoch: Int
+        let target: WaitTarget
     }
 
     private enum WaitResult: Equatable {
@@ -527,61 +643,86 @@ final class AssistantTTSStreamCoordinator {
         case failed(String)
     }
 
-    private struct PendingWait {
-        let target: WaitTarget
-        let generation: Int
+    private struct Waiter {
+        let id: UUID
         let timeoutTask: Task<Void, Never>
         let continuation: CheckedContinuation<WaitResult, Never>
     }
 
+    private func advanceEpoch() -> Int {
+        utteranceEpoch += 1
+        return utteranceEpoch
+    }
+
     private func wait(for target: WaitTarget, timeout: Duration) async -> WaitResult {
-        if let prefetched = prefetched.removeValue(forKey: target) { return prefetched }
-        let generation = self.generation
+        let key = WaitKey(epoch: utteranceEpoch, target: target)
+        if let prefetched = prefetched.removeValue(forKey: key) { return prefetched }
         return await withCheckedContinuation { continuation in
+            // 注册之前先看一眼：取消可能已经发生，别把 continuation 挂到作废的世代上。
+            guard isActive, key.epoch == utteranceEpoch, !Task.isCancelled else {
+                continuation.resume(returning: .cancelled)
+                return
+            }
+            guard waiters[key] == nil else {
+                // 同一世代的同一目标已经在等。覆盖它会让先来那个永远醒不过来，
+                // 所以这里明确失败，而不是静默泄漏。
+                assertionFailure("duplicate waiter for \(key)")
+                continuation.resume(returning: .failed("这一轮已经在等同一个事件了。"))
+                return
+            }
+            let id = UUID()
             let timeoutTask = Task { @MainActor [weak self] in
                 do {
                     try await Task.sleep(for: timeout)
                 } catch {
                     return
                 }
-                self?.resolve(target, .timedOut, generation: generation)
+                // 超时按 ID 精确命中：同一目标可能已经注册了新的 waiter。
+                self?.resolve(key, .timedOut, waiterID: id)
             }
-            pendingWait = PendingWait(
-                target: target,
-                generation: generation,
+            waiters[key] = Waiter(
+                id: id,
                 timeoutTask: timeoutTask,
                 continuation: continuation
             )
+            // 封闭"取消先于注册"的窗口：注册本身不让出执行权，
+            // 所以再确认一次当前世代与取消状态就够了。
+            if !isActive || key.epoch != utteranceEpoch || Task.isCancelled {
+                resolve(key, .cancelled, waiterID: id)
+            }
         }
     }
 
     private func resolve(_ target: WaitTarget, _ result: WaitResult) {
-        resolve(target, result, generation: generation)
+        resolve(WaitKey(epoch: utteranceEpoch, target: target), result)
     }
 
-    private func resolve(_ target: WaitTarget, _ result: WaitResult, generation: Int) {
-        guard generation == self.generation else { return }
-        if let pending = pendingWait, pending.target == target, pending.generation == generation {
-            pendingWait = nil
-            pending.timeoutTask.cancel()
-            pending.continuation.resume(returning: result)
+    private func resolve(
+        _ key: WaitKey,
+        _ result: WaitResult,
+        waiterID: UUID? = nil
+    ) {
+        if let waiter = waiters[key] {
+            if let waiterID, waiter.id != waiterID { return }
+            waiters.removeValue(forKey: key)
+            waiter.timeoutTask.cancel()
+            waiter.continuation.resume(returning: result)
             return
         }
         // 事件比等待先到：只有幂等的目标值得预存，playback 进度不预存
-        // （否则会被下一个人当成"已经等到过"，空转一圈）。
-        if target != .playback {
-            prefetched[target] = result
-        }
+        // （否则会被下一个人当成"已经等到过"，空转一圈），过期的 epoch 也不预存。
+        guard key.epoch == utteranceEpoch, key.target != .playback else { return }
+        prefetched[key] = result
     }
 
     private func releaseWaiters(_ result: WaitResult) {
-        guard let pending = pendingWait else {
-            prefetched.removeAll()
-            return
-        }
-        pendingWait = nil
-        pending.timeoutTask.cancel()
-        pending.continuation.resume(returning: result)
+        // 先整体摘下再逐个唤醒：resume 之后对方可能同步改集合。
+        let pending = waiters
+        waiters.removeAll()
         prefetched.removeAll()
+        for waiter in pending.values {
+            waiter.timeoutTask.cancel()
+            waiter.continuation.resume(returning: result)
+        }
     }
 }

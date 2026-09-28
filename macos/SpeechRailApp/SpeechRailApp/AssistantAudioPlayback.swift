@@ -10,12 +10,12 @@ import Foundation
 ///
 /// 阻塞式 CoreAudio 调用（`engine.start()`）**不在主线程**上做（§5.13 的实测教训：
 /// 最坏 36 秒）。
-final class PCMStreamPlayer: @unchecked Sendable {
-    enum Failure: LocalizedError {
+public final class PCMStreamPlayer: @unchecked Sendable {
+    public enum Failure: LocalizedError {
         case unsupportedFormat
         case engineFailed(String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .unsupportedFormat: "这个输出格式没法播放。"
             case .engineFailed(let message): message
@@ -24,7 +24,7 @@ final class PCMStreamPlayer: @unchecked Sendable {
     }
 
     /// 契约：TTS 输出 24 kHz PCM16。
-    static let sampleRate: Double = 24_000
+    public static let sampleRate: Double = 24_000
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -35,12 +35,14 @@ final class PCMStreamPlayer: @unchecked Sendable {
     private var stopped = false
 
     /// 队列播完（真正静音）时回调一次。界面用它把相位从"正在说话"退回"正在聆听"。
-    var onDrained: (@MainActor () -> Void)?
+    public var onDrained: (@MainActor () -> Void)?
     /// 每一块真的播完时回调一次（入队时的 epoch、帧数）。增量 TTS 用它逐块归还播放预算；
     /// epoch 让迟到的回调无法改动新一轮的账本。
-    var onBufferRendered: (@MainActor (Int, Int) -> Void)?
+    public var onBufferRendered: (@MainActor (Int, Int) -> Void)?
 
-    func start() async throws {
+    public init() {}
+
+    public func start() async throws {
         guard
             let format = AVAudioFormat(
                 commonFormat: .pcmFormatInt16,
@@ -70,7 +72,7 @@ final class PCMStreamPlayer: @unchecked Sendable {
 
     /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了），返回 `false`。
     @discardableResult
-    func enqueue(_ pcm: Data, epoch: Int) async -> Bool {
+    public func enqueue(_ pcm: Data, epoch: Int) async -> Bool {
         guard !pcm.isEmpty else { return false }
         let frames = pcm.count / MemoryLayout<Int16>.size
         guard frames > 0, let format else { return false }
@@ -112,7 +114,7 @@ final class PCMStreamPlayer: @unchecked Sendable {
     }
 
     /// 立刻静音并丢掉还没播的部分（插话打断 / 结束会话）。
-    func stop() async {
+    public func stop() async {
         lock.withLock {
             pendingBuffers = 0
             stopped = true

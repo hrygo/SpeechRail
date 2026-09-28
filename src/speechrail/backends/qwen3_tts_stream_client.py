@@ -30,6 +30,7 @@ from speechrail.backends.qwen3_tts_stream_host import (
     FRAME_STREAM_STARTED,
     FRAME_STREAM_TEXT,
     FRAME_STREAM_TEXT_ACCEPTED,
+    FRAME_STREAM_TEXT_CONSUMED,
 )
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
@@ -53,6 +54,15 @@ _TERMINAL_EVENTS: Final[frozenset[TtsStreamEventKind]] = frozenset(
     }
 )
 _FALLBACK_ERROR_CODE: Final[str] = "tts_backend_failed"
+_LIMIT_FIELDS: Final[tuple[str, ...]] = (
+    "max_append_codepoints",
+    "max_total_codepoints",
+    "max_pending_codepoints",
+    "max_pending_audio_bytes",
+    "input_wait_seconds",
+    "utterance_wall_clock_seconds",
+    "slow_consumer_seconds",
+)
 
 # Conditioning fields travel with the utterance but may never redefine the
 # identity or envelope the parent already validated.
@@ -64,8 +74,25 @@ _RESERVED_START_FIELDS: Final[frozenset[str]] = frozenset(
         "response_id",
         "voice",
         "stream_protocol",
+        "limits",
     }
 )
+
+
+def _limits_payload(limits: TtsStreamLimits) -> dict[str, int | float]:
+    return {name: getattr(limits, name) for name in _LIMIT_FIELDS}
+
+
+def _limits_from_payload(value: object) -> TtsStreamLimits:
+    if not isinstance(value, dict):
+        raise ProtocolError("incremental stream started without limits")
+    unknown = sorted(set(value) - set(_LIMIT_FIELDS))
+    if unknown:
+        raise ProtocolError(f"incremental stream limits contain unknown field: {unknown[0]}")
+    try:
+        return TtsStreamLimits(**{name: value[name] for name in _LIMIT_FIELDS if name in value})
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError("incremental stream limits are invalid") from exc
 
 
 class StreamTransport(Protocol):
@@ -139,6 +166,8 @@ class Qwen3TtsIncrementalSession:
             maxsize=_EVENT_QUEUE_SIZE
         )
         self._ack_waiters: dict[int, asyncio.Future[None]] = {}
+        self._unacknowledged_appends: dict[int, int] = {}
+        self._consumed_codepoints_total = 0
         self._started: asyncio.Future[None] | None = None
         self._dispatcher: asyncio.Task[None] | None = None
         self._fatal: BaseException | None = None
@@ -189,6 +218,7 @@ class Qwen3TtsIncrementalSession:
             "speed": self._options.speed,
             "language": self._options.language,
             "stream_protocol": 1,
+            "limits": _limits_payload(self._limits),
         }
         frame.update(self._start_fields)
         if self._options.expected_voice_revision is not None:
@@ -219,7 +249,8 @@ class Qwen3TtsIncrementalSession:
 
         if self._closed or self._state.terminal is not None:
             raise TtsStreamError("tts_input_closed", "the utterance is already finished")
-        self._state.accept_append(sequence, text)
+        codepoints = self._state.accept_append(sequence, text)
+        self._unacknowledged_appends[sequence] = codepoints
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._ack_waiters[sequence] = waiter
         try:
@@ -236,6 +267,7 @@ class Qwen3TtsIncrementalSession:
                 await waiter
         except TtsStreamError:
             self._ack_waiters.pop(sequence, None)
+            self._rollback_unacknowledged(sequence)
             raise
         except TimeoutError as exc:
             self._ack_waiters.pop(sequence, None)
@@ -243,6 +275,10 @@ class Qwen3TtsIncrementalSession:
             raise TtsStreamError(
                 "tts_input_timeout", "the worker never acknowledged appended text"
             ) from exc
+        except BaseException:
+            self._ack_waiters.pop(sequence, None)
+            self._rollback_unacknowledged(sequence)
+            raise
         finally:
             self.last_active = time.monotonic()
 
@@ -370,6 +406,8 @@ class Qwen3TtsIncrementalSession:
                 f"expected={self._options.request_id!r})"
             )
         if frame_type == FRAME_STREAM_STARTED:
+            if _limits_from_payload(frame.get("limits")) != self._limits:
+                raise ProtocolError("worker echoed different incremental stream limits")
             if self._started is not None and not self._started.done():
                 self._started.set_result(None)
             await self._publish(
@@ -386,6 +424,7 @@ class Qwen3TtsIncrementalSession:
                 raise ProtocolError("invalid text_accepted sequence")
             if isinstance(accepted, bool) or not isinstance(accepted, int) or accepted < 0:
                 raise ProtocolError("invalid text_accepted codepoint count")
+            self._unacknowledged_appends.pop(sequence, None)
             waiter = self._ack_waiters.pop(sequence, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(None)
@@ -399,6 +438,28 @@ class Qwen3TtsIncrementalSession:
                     accepted_codepoints=accepted,
                 )
             )
+            return True
+        if frame_type == FRAME_STREAM_TEXT_CONSUMED:
+            through_sequence = frame.get("through_sequence")
+            total = frame.get("consumed_codepoints_total")
+            if (
+                isinstance(through_sequence, bool)
+                or not isinstance(through_sequence, int)
+                or through_sequence < 0
+            ):
+                raise ProtocolError("invalid text_consumed sequence")
+            if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                raise ProtocolError("invalid text_consumed codepoint total")
+            if total < self._consumed_codepoints_total:
+                raise ProtocolError("text_consumed watermark moved backwards")
+            if total > self._state.total_codepoints:
+                raise ProtocolError("text_consumed watermark exceeds accepted text")
+            if through_sequence > self._state.accepted_sequence:
+                raise ProtocolError("text_consumed sequence exceeds accepted appends")
+            delta = total - self._consumed_codepoints_total
+            if delta:
+                self._state.mark_text_consumed(delta)
+                self._consumed_codepoints_total = total
             return True
         if frame_type == FRAME_STREAM_AUDIO:
             await self._publish(self._audio_event(frame))
@@ -513,6 +574,13 @@ class Qwen3TtsIncrementalSession:
             if not waiter.done():
                 waiter.set_exception(error)
         self._ack_waiters.clear()
+        self._unacknowledged_appends.clear()
+
+    def _rollback_unacknowledged(self, sequence: int) -> None:
+        codepoints = self._unacknowledged_appends.pop(sequence, None)
+        if codepoints is None or self._state.terminal is not None:
+            return
+        self._state.rollback_unacknowledged_append(sequence, codepoints)
 
     async def _await_dispatcher(self, seconds: float) -> bool:
         """Wait for the dispatcher; ``False`` means it never finished in time."""
@@ -561,6 +629,7 @@ class Qwen3TtsIncrementalSynthesizer:
         self,
         options: TtsStreamOptions,
         *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
         start_fields: Mapping[str, object] | None = None,
         stale_request_ids: frozenset[str] | None = None,
     ) -> Qwen3TtsIncrementalSession:
@@ -581,7 +650,7 @@ class Qwen3TtsIncrementalSynthesizer:
         session = Qwen3TtsIncrementalSession(
             transport=self._transport,
             options=options,
-            limits=self._limits,
+            limits=limits,
             io_timeout_seconds=self._io_timeout,
             cancel_grace_seconds=self._cancel_grace,
             start_fields=start_fields,

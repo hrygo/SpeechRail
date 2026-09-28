@@ -328,18 +328,18 @@ class StreamController:
         return _INPUT_TIMEOUT_CODE if self._input_open else _BACKEND_FAILURE_CODE
 
     async def _settle(self) -> None:
-        """Finalize the receipt, then emit the single downstream terminal event."""
+        """Release the utterance, then publish its single downstream terminal."""
 
         if self._terminal is None:
             self._claim(TtsStreamTerminal.FAILED, _BACKEND_FAILURE_CODE)
         outcome = self._terminal
         assert outcome is not None  # the claim above always records one
+        await self._shutdown()
         self._finish_receipt(outcome, self._terminal_detail)
         try:
             await self._send(self._terminal_event(outcome, self._terminal_detail))
         except Exception:
             logger.warning("incremental TTS terminal event was not delivered")
-        await self._shutdown()
 
     def _terminal_event(self, outcome: TtsStreamTerminal, detail: str | None) -> TtsStreamEvent:
         if outcome is TtsStreamTerminal.FAILED:
@@ -458,7 +458,7 @@ class TtsStreamService:
             )
             if self.worker_lease is not None:
                 await admission.enter_async_context(self.worker_lease())
-            session = await self._open_session(options)
+            session = await self._open_session(options, effective)
             if receipt is not None:
                 try:
                     receipt_id = self._begin_receipt(options, receipt)
@@ -498,14 +498,16 @@ class TtsStreamService:
         controller.start()
         return controller
 
-    async def _open_session(self, options: TtsStreamOptions) -> IncrementalSpeechSession:
+    async def _open_session(
+        self, options: TtsStreamOptions, limits: TtsStreamLimits
+    ) -> IncrementalSpeechSession:
         opener = getattr(self.synthesizer, "open_incremental_stream", None)
         if not callable(opener):
             raise TtsStreamError(
                 "tts_streaming_unsupported",
                 "the configured synthesizer exposes no incremental stream",
             )
-        return cast(IncrementalSpeechSession, await opener(options))
+        return cast(IncrementalSpeechSession, await opener(options, limits=limits))
 
     def _begin_receipt(self, options: TtsStreamOptions, receipt: TtsStreamReceipt) -> str:
         receipt_id = self.receipts.begin(

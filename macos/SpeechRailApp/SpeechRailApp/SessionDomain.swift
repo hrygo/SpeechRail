@@ -680,6 +680,12 @@ public struct LineDraft: Sendable {
     public var isInterrupted: Bool
     public var isDeviceSwitch: Bool
     public var timingQuality: SessionTimingQuality?
+    /// 这一句的**观测时刻**（D09）。
+    ///
+    /// `nil` 表示"沿用 Store 写入的那一刻"——那是插入延迟，不是用户说话的时间。
+    /// 助手语音行会显式传**第一个非空证据被本机收到的那一刻**：既不冒充声学开口
+    /// 时间，也不会因为"每条都写同一串零"而让回看的时间轴恒等于会话起点。
+    public var createdAt: Date?
 
     public init(
         sessionID: String,
@@ -692,7 +698,8 @@ public struct LineDraft: Sendable {
         status: SessionLineStatus = .final,
         isInterrupted: Bool = false,
         isDeviceSwitch: Bool = false,
-        timingQuality: SessionTimingQuality? = nil
+        timingQuality: SessionTimingQuality? = nil,
+        createdAt: Date? = nil
     ) {
         self.sessionID = sessionID
         self.role = role
@@ -705,5 +712,6 @@ public struct LineDraft: Sendable {
         self.isInterrupted = isInterrupted
         self.isDeviceSwitch = isDeviceSwitch
         self.timingQuality = timingQuality
+        self.createdAt = createdAt
     }
 }

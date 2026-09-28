@@ -15,6 +15,7 @@ from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_tts_stream_host import ModelStepEvent
 from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.tts_stream import DEFAULT_TTS_STREAM_LIMITS
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -514,6 +515,18 @@ def test_serve_drives_one_incremental_utterance_over_the_pipe(tmp_path: Path) ->
             "voice": "default",
             "speed": 1.0,
             "language": "auto",
+            "limits": {
+                field: getattr(DEFAULT_TTS_STREAM_LIMITS, field)
+                for field in (
+                    "max_append_codepoints",
+                    "max_total_codepoints",
+                    "max_pending_codepoints",
+                    "max_pending_audio_bytes",
+                    "input_wait_seconds",
+                    "utterance_wall_clock_seconds",
+                    "slow_consumer_seconds",
+                )
+            },
         },
     )
     write_frame(

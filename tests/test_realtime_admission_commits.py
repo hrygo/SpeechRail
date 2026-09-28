@@ -44,6 +44,18 @@ def _b64(pcm: bytes) -> str:
     return base64.b64encode(pcm).decode("ascii")
 
 
+class _EnergyScriptedVad:
+    """Deterministic stand-in for the production energy VAD."""
+
+    threshold = 0.5
+
+    def score_frame(self, frame: bytes) -> float:
+        return 1.0 if any(frame) else 0.0
+
+    def reset(self) -> None:
+        return None
+
+
 def _build(**settings_overrides: Any) -> tuple[Any, FakeStreamingFactory]:
     settings = Settings(
         qwen3_model_dir=None,
@@ -120,6 +132,84 @@ def test_rollover_during_admitted_utterance_produces_single_sequence_per_item() 
     completed = _completed_events(sent)
     assert len(completed) >= 2, f"rollover never triggered: {types}"
     assert all(event["transcript"] == "你好" for event in completed)
+
+
+def test_rollover_during_explicit_commit_never_reenters_commit_lock() -> None:
+    """A sub-frame tail can produce a final audio decision while the commit
+    lock is held.  Crossing the item cap there must not recursively await the
+    same non-reentrant lock."""
+
+    async def run() -> None:
+        services, _ = _build(
+            realtime_speech_admission_enabled=True,
+            max_realtime_buffer_bytes=4096,
+        )
+
+        async def send(_event: dict[str, Any]) -> int:
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id="s", send=send)
+        await session._update_session(_VAD_UPDATE)
+        frame = _sine_frame_16k()
+        for _ in range(4):
+            await session._append_audio(
+                {"type": "input_audio_buffer.append", "audio": _b64(frame)}
+            )
+        assert session._buffered_audio_bytes == 4096
+        assert session._speech_admission is not None
+        assert session._speech_admission.state == "ACTIVE"
+        # An odd wire tail leaves one PCM16 sample for admission.finish() to
+        # emit as audio while _commit_audio owns the lock.
+        session._vad_raw_buffer.extend(b"\x01\x00")
+        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        await session.close()
+
+    asyncio.run(run())
+
+
+def test_vad_packetization_preserves_following_utterance() -> None:
+    """The same speech/silence PCM must produce the same two ASR items whether
+    it arrives in one large packet or one 32 ms frame at a time."""
+
+    speech = _sine_frame_16k()
+    silence = bytes(len(speech))
+    frames = (
+        [speech] * 3
+        + [silence] * 13
+        + [speech] * 3
+        + [silence] * 13
+    )
+
+    async def run(packetized: bool) -> list[bytes]:
+        services, factory = _build(realtime_speech_admission_enabled=True)
+
+        async def send(_event: dict[str, Any]) -> int:
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id="s", send=send)
+        await session._update_session(_VAD_UPDATE)
+        session._vad = _EnergyScriptedVad()
+        if packetized:
+            await session._append_audio(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": _b64(b"".join(frames)),
+                }
+            )
+        else:
+            for frame in frames:
+                await session._append_audio(
+                    {"type": "input_audio_buffer.append", "audio": _b64(frame)}
+                )
+        await session.close()
+        assert len(factory.sessions) == 2
+        received = [chunk for item in factory.sessions for chunk in item.received]
+        assert received
+        return received
+
+    single_packet = asyncio.run(run(True))
+    per_frame = asyncio.run(run(False))
+    assert b"".join(single_packet) == b"".join(per_frame)
 
 
 def test_legacy_vad_pending_silence_is_bounded() -> None:

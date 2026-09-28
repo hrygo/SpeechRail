@@ -38,8 +38,6 @@ let package = Package(
             exclude: [
                 "App.swift",
                 "AppNavigationState.swift",
-                "AssistantAudioPlayback.swift",
-                "AssistantAudioSession.swift",
                 "Assets.xcassets",
                 "CaptionBandWindow.swift",
                 "CaptionSession.swift",
@@ -69,6 +67,14 @@ let package = Package(
                 "AudioSampleRing.swift",
                 "SpeechRailDesignTokens.swift",
                 "RealtimeASRClient.swift",
+                // 助手编排层：生产 AssistantSession 本身进单测目标，
+                // 依赖的 LLM / Realtime / 播放通道由 AssistantSessionDependencies 注入。
+                "AssistantSession.swift",
+                "AssistantSessionDependencies.swift",
+                "AssistantReplyState.swift",
+                "AssistantAudioPlayback.swift",
+                "AssistantAudioSession.swift",
+                "SessionPreferences.swift",
                 // 单轮增量 TTS：文本稳定前缀、播放预算、utterance 状态机。
                 // 三个都不依赖 AVFoundation，所以能和 RealtimeASRClient 一起进单测目标。
                 "AssistantSpeechTextBuffer.swift",

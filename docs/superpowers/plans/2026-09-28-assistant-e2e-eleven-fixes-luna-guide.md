@@ -4,7 +4,7 @@ status: proposed
 date: 2026-09-28
 baseline: f3063a6e
 service_baseline: 0f171401
-revision: 3
+revision: 4
 implementation_branch: codex/assistant-e2e-fixes
 progress_ledger: .superpowers/sdd/2026-09-28-assistant-e2e-eleven-fixes-luna-guide/progress.md
 ---
@@ -13,7 +13,9 @@ progress_ledger: .superpowers/sdd/2026-09-28-assistant-e2e-eleven-fixes-luna-gui
 
 本方案对应 2026-09-28 对语音助手的端到端源码审查，覆盖页面入口、启动、采集、WebSocket 队列、VAD/ASR、外部 LLM、增量 TTS、worker IPC、资源准入、播放、打断、重连、持久化与回看，共 **19 项：App D01–D11，服务端 B01–B08**。保留原文件名和 D 编号，便于继续引用。目标是修复已有功能，不重做语音助手，也不改变 SpeechRail 服务端只负责 ASR/TTS、调用方负责 LLM/播放/业务记录的产品边界。
 
-**本文件是实施方案，不是修复完成报告。** 它的定位是给 Luna 的唯一实施口径：设计、步骤、测试矩阵和验收清单都以本文件为准；实际进度以 `progress_ledger` 指向的账本为准，两者不得互相覆盖。实施已在独立 worktree 的 `codex/assistant-e2e-fixes` 分支开始（基线 `0f171401`），本轮只补充完善本文件，未在主工作区修改业务代码；构建、测试、UI 自动化与服务操作仍遵循当时授权及 AGENTS.md。
+**本文件是实施方案，不是修复完成报告。** 它的定位是给 Luna 的唯一实施口径：设计、步骤、测试矩阵和验收清单都以本文件为准；实际进度以 `progress_ledger` 指向的账本为准，两者不得互相覆盖。实施在独立 worktree 的 `codex/assistant-e2e-fixes` 分支进行（基线 `0f171401`），主工作区未改动业务代码；构建、测试、UI 自动化与服务操作遵循当时授权及 AGENTS.md。
+
+revision 4 的回写只包含**实施期间定下的设计口径**（见 §7.2 的三条 fixture 口径与 §8.3 第 7 条的收尾约束），不写任何进度或完成状态——那属于账本。
 
 证据基线：
 
@@ -780,6 +782,21 @@ UI 展示验证优先通过生产使用的纯状态投影与输入接收逻辑�
 
 这是一组双方使用真实生产 adapter 的确定性契约闭环，**不是**已运行的真实 App→真实服务→真实模型端到端验收。无法复用同一 fixture 时需记录原因并保留双方等价断言，不能只测另写的模拟协议。
 
+**实施时确定的三条 fixture 口径（revision 4 回写，progress 为准）**：
+
+1. **不写 `speechrail.tts.audio.delta`。** 其载荷是 Base64 PCM，项目规则禁止 fixture
+   记录原始音频/Base64。fixture 用 `omitted_event_types` 显式声明被省略的类型，两侧
+   测试改为断言「这些类型确实出现过」，而不是从观测里悄悄删掉。`sequence` 因此保留
+   wire 上真实分配的跳号。
+2. **`request_id` 要显式映射。** App 自选 `request_id`，fixture 记录的是服务端那一轮
+   的身份。App 侧适配器取 fixture 的**内容**（准入、ACK 计数、终态），换上 App 自己的
+   **身份**；不做这层映射就会出现「App 永远等一个服务端从未录下的 `tts.started`」，
+   测到的是超时而不是本场景。
+3. **D11 的断言落在落库正文，不是 wire 文本。** 产品在 `tts.cleanForSpeech` 上挂了
+   `VoicePrompt.spokenText`，朗读文本是原样正文**清洗后**的结果。fixture 因此同时钉
+   `raw_reply_text`（落库/显示/历史的原文）与 `tts_appended_text`（送进 TTS 的清洗
+   文本）两种形态；只写一种会把「有意保留的清洗层」误判成「空白丢失」。
+
 ## 7.3 缺陷—实施—回归—验收追踪矩阵
 
 本表是 §5、§7、§8.2 的索引，用于逐项对账，避免三处清单各自漂移。**实施进度不写在本表**，只由 `progress_ledger` 记录；本表的“回归测试”列填写的是必须存在的用例语义，不要求文件名一字不差。
@@ -899,6 +916,14 @@ uv run python scripts/check_user_doc_contract.py
 4. **失败证据优先于退出码**。Xcode 编译失败的退出码是 65，必须从日志里读出具体 `error:` 行才算定位到原因。“命令执行完毕”“退出码为 0”都不能证明新增用例被执行。
 5. **红绿判据**。一次有效的红测试需要同时满足：目标用例名出现在 `Executed N tests` 列表中、失败断言指向本方案描述的行为、失败原因不是编译或导入错误。修复后同一命令必须通过且该用例仍在列表中。
 6. **挂起场景用 gate，不用 sleep**。测试内部用 continuation gate 控制时序；watchdog 只负责在真挂死时兜底结束进程，不能用固定等待时间代替断言。
+
+7. **SwiftPM 退进程会掩盖泄漏任务**（2026-09-28 实测）。`AssistantTTSStreamCoordinator`
+   的文本泵是 `Task { @MainActor … }`，只要这一代没 `invalidate()` 就一直按
+   `tickInterval` 空转。`swift test` 跑完直接退进程，看不见这类泄漏；Xcode test bundle
+   会等它，于是整轮 `--test-unit` 挂死在 `XCTWaiter`。因此涉及真实编排层的测试，
+   收尾必须**先 `stopCapture()` 再清临时目录**（删目录不会停泵），并优先用
+   `addTeardownBlock` 保证失败路径也执行。挂住时先 `sample` 那个 `xctest` 进程：
+   栈里出现哪个 `Task` 的 `Task.sleep` 重试循环，就知道是哪条收尾漏了。
 
 # 9. 风险与注意事项
 

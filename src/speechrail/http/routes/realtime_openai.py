@@ -144,7 +144,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         # Only count a session once the handshake resolved successfully: the
         # finally block below always pairs this with record_realtime_session_end.
         services.metrics.record_realtime_session_start()
-        event_envelope = tuple[dict[str, Any], int, asyncio.Future[None] | None]
+        event_envelope = tuple[dict[str, Any], int]
         client_events: asyncio.Queue[event_envelope | None] = asyncio.Queue(
             maxsize=CLIENT_EVENT_QUEUE_LIMIT
         )
@@ -152,7 +152,6 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             maxsize=CONTROL_EVENT_QUEUE_LIMIT
         )
         pending_client_event_bytes = 0
-        latest_append_dispatch: asyncio.Future[None] | None = None
         # JSON/Base64 is larger than decoded PCM.  Leave headroom for one
         # legal maximum frame so API-level ``buffer_too_large`` remains a
         # stable error rather than being shadowed by transport backpressure.
@@ -162,7 +161,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         )
 
         async def receive_loop() -> None:
-            nonlocal latest_append_dispatch, pending_client_event_bytes
+            nonlocal pending_client_event_bytes
             try:
                 while True:
                     raw = await websocket.receive_text()
@@ -203,25 +202,12 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             )
                         )
                         continue
-                    append_dispatch: asyncio.Future[None] | None = None
-                    if event_type == "input_audio_buffer.append":
-                        append_dispatch = asyncio.get_running_loop().create_future()
-                        latest_append_dispatch = append_dispatch
-                    elif event_type in _CONTROL_EVENT_TYPES:
-                        # A TTS cancellation may bypass a long ASR commit, but
-                        # it must never overtake audio already accepted on this
-                        # websocket. The newest append dispatch subsumes all
-                        # earlier append events because the data lane is FIFO.
-                        # Waiting for inference completion here would deadlock
-                        # when the append is waiting for the TTS-held lane that
-                        # this cancel must release.
-                        append_dispatch = latest_append_dispatch
                     queue = (
                         control_events
                         if event_type in _CONTROL_EVENT_TYPES
                         else client_events
                     )
-                    queue.put_nowait((event, raw_size, append_dispatch))
+                    queue.put_nowait((event, raw_size))
                     pending_client_event_bytes += raw_size
             except WebSocketDisconnect:
                 pass
@@ -291,10 +277,8 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 event = await client_events.get()
                 if event is None:
                     return
-                payload, payload_size, append_dispatch = event
+                payload, payload_size = event
                 try:
-                    if append_dispatch is not None and not append_dispatch.done():
-                        append_dispatch.set_result(None)
                     await handle_client_event(payload, payload_size)
                 except (WebSocketDisconnect, RuntimeError):
                     return
@@ -304,10 +288,8 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 event = await control_events.get()
                 if event is None:
                     return
-                payload, payload_size, append_dispatch = event
+                payload, payload_size = event
                 try:
-                    if append_dispatch is not None:
-                        await append_dispatch
                     await handle_client_event(payload, payload_size)
                 except (WebSocketDisconnect, RuntimeError):
                     return
