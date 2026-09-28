@@ -1380,6 +1380,101 @@ struct TeleprompterSessionLifecycleTests {
         #expect(try Data(contentsOf: url) == onDisk, "磁盘字节必须逐字节不变")
     }
 
+    /// 「直接使用原稿」是 AI 不可用时的主恢复路径，成功目标第一条就是让用户能
+    /// 直接用原稿开讲。`useDeterministicFallback()` 的形态与第 43 条的
+    /// `acceptPendingVersion()` 逐行相同：先 append 版本、挪 `activeVersionID`、
+    /// 清掉 `pendingVersion`、把 `phase` 推到 `.ready`、清空 `blocked`，最后才
+    /// `try saveBundle()`，**没有回滚**。存盘失败时：
+    /// - 界面上两个「直接使用原稿」按钮用的是 `try?`，**错误被整个吞掉**，
+    ///   用户点了没有任何反馈；
+    /// - 内存已经推进到 `.ready`，磁盘还是原样，重开就没了；
+    /// - 已经在审的 AI 结果被清空。
+    @Test("a store failure while using the raw script keeps the session where it was")
+    func aStoreFailureWhileUsingTheRawScriptRollsBack() async throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        let documentID = try #require(harness.session.document?.id)
+        let versionsBefore = harness.session.versions.count
+
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.pendingVersion != nil, "前提：审阅结果是在的")
+        let pendingID = try #require(harness.session.pendingVersion?.id)
+        let blocksBefore = harness.session.readingBlocks
+        #expect(!blocksBefore.isEmpty, "前提：审阅页有内容，回滚才看得出来")
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let onDisk = try Data(contentsOf: url)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        #expect(throws: TeleprompterV2StoreError.atomicWriteFailed) {
+            try harness.session.useDeterministicFallback()
+        }
+        // 没存住就必须整体退回：审阅结果、版本数、阶段都留在原地，
+        // 用户才能再按一次「直接使用原稿」。
+        #expect(harness.session.pendingVersion?.id == pendingID, "存盘失败不得清掉在审的 AI 结果")
+        #expect(harness.session.versions.count == versionsBefore, "存盘失败不得留下没落盘的版本")
+        #expect(harness.session.readingBlocks == blocksBefore, "审阅页内容必须原样留下")
+        #expect(harness.session.phase == .review, "必须仍停在审阅页而不是假装已就绪")
+        #expect(try Data(contentsOf: url) == onDisk, "磁盘字节必须逐字节不变")
+    }
+
+    /// 整个回滚里最关键的字段是 `blocked`：界面上那两个「直接使用原稿」按钮
+    /// **正是 `blocked` 非空时才渲染的**。`useDeterministicFallback()` 成功时把
+    /// 它清成 nil 是对的，失败时若没放回去，恢复按钮就从界面上消失——用户既没有
+    /// 版本、也看不到那条出路，卡在中间。这条单独钉住它。
+    @Test("a store failure keeps the recovery reason that shows the raw-script button")
+    func aStoreFailureKeepsTheRecoveryReason() async throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        let documentID = try #require(harness.session.document?.id)
+
+        let url = harness.documentBundleURL(documentID: documentID)
+        let documentsDirectory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        // 真实流程：用户开启语音 → 没有可用版本 → 内部试一次「直接使用原稿」→
+        // 存盘失败 → blocked = .noActiveVersion → 界面上出现那个恢复按钮。
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.blocked != nil, "前提：恢复按钮此时是可见的")
+
+        // 用户按下那个按钮。存盘再失败一次时，blocked 必须回到 .noActiveVersion：
+        // 它非空按钮才渲染，被清成 nil 的话读者既没有版本、也看不到那条出路。
+        #expect(throws: TeleprompterV2StoreError.atomicWriteFailed) {
+            try harness.session.useDeterministicFallback()
+        }
+        #expect(
+            harness.session.blocked != nil,
+            "存盘失败后恢复按钮必须还在——blocked 被清成 nil 的话用户就没有出路了"
+        )
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()

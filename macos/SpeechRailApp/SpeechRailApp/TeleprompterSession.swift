@@ -441,6 +441,43 @@ public final class TeleprompterSession {
 
     public func useDeterministicFallback() throws {
         guard canEdit else { return }
+        // 「直接使用原稿」是 AI 不可用时的主恢复路径，也是成功目标里「用户能直接
+        // 用原稿开讲」那句话的落点。这个函数推进的状态和 `acceptPendingVersion()`
+        // 一样多，存盘失败时必须整体退回：否则界面上两个按钮用的是 `try?`，
+        // 错误被整个吞掉，用户点了没有任何反馈，而内存已经推进到 `.ready`、
+        // 在审的 AI 结果已被清空、磁盘还是原样。
+        //
+        // `invalidateAnalysis()` 不进快照——取消在途任务、推进 generation 是有意
+        // 的一次性动作，退回去反而会让已经作废的分析结果重新生效。
+        let previousVersions = versions
+        let previousDocument = document
+        let previousSavedRunState = savedRunState
+        let previousReadingBlocks = readingBlocks
+        let previousReviewItems = reviewItems
+        let previousPendingVersion = pendingVersion
+        let previousFollowController = followController
+        let previousSegmentIndex = currentSegmentIndex
+        let previousPhase = phase
+        let previousBlocked = blocked
+        var didPersist = false
+
+        defer {
+            // 只有存盘失败才回滚；成功路径不动任何东西。
+            if !didPersist {
+                versions = previousVersions
+                self.document = previousDocument
+                savedRunState = previousSavedRunState
+                readingBlocks = previousReadingBlocks
+                reviewItems = previousReviewItems
+                pendingVersion = previousPendingVersion
+                followController = previousFollowController
+                currentSegmentIndex = previousSegmentIndex
+                phase = previousPhase
+                blocked = previousBlocked
+                syncFollowState()
+            }
+        }
+
         invalidateAnalysis()
         savedRunState = nil
         guard var document else { throw TeleprompterTextError.emptySource }
@@ -485,6 +522,7 @@ public final class TeleprompterSession {
         phase = .ready
         blocked = nil
         try saveBundle()
+        didPersist = true
     }
 
     public func analyzeDraft() async {

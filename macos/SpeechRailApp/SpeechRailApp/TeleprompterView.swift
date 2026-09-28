@@ -1305,13 +1305,25 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
 
                         Button("直接使用原稿") {
-                            try? session.useDeterministicFallback()
+                            do {
+                                try session.useDeterministicFallback()
+                                operationMessage = nil
+                            } catch {
+                                // 静默 `try?` 会让读者以为按钮坏了：状态已回滚，
+                                // 按钮还能再按，但必须告诉他为什么这次没成。
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.secondary)
 
                     case .noActiveVersion:
                         Button("直接使用原稿") {
-                            try? session.useDeterministicFallback()
+                            do {
+                                try session.useDeterministicFallback()
+                                operationMessage = nil
+                            } catch {
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.primary)
 
