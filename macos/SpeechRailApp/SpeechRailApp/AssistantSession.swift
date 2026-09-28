@@ -667,7 +667,11 @@ public final class AssistantSession {
         prepareConversationContext(startedAt: transport.startedAt)
         try await createConversationRecord(token: token, transport: transport)
         phase = .listening
-        startPump(stream: transport.stream, client: transport.client)
+        startPump(
+            stream: transport.stream,
+            client: transport.client,
+            connection: transport.connection
+        )
     }
 
     /// 重连：**只换设备、连接与能力 binding**。
@@ -681,7 +685,11 @@ public final class AssistantSession {
         // 设备与新连接确实 ready 之后才闭合中断；失败时 interruption 仍然开着，可再重试。
         await coordinator.resumeAfterInterruption()
         phase = .listening
-        startPump(stream: transport.stream, client: transport.client)
+        startPump(
+            stream: transport.stream,
+            client: transport.client,
+            connection: transport.connection
+        )
     }
 
     /// 语音通道：能力 binding → 设备 → 连接 → 播放。
@@ -876,7 +884,8 @@ public final class AssistantSession {
             client: client,
             profile: profile,
             configuration: configuration,
-            startedAt: Date()
+            startedAt: Date(),
+            connection: connection
         )
     }
 
@@ -887,6 +896,7 @@ public final class AssistantSession {
         var profile: String
         var configuration: LLMConfiguration
         var startedAt: Date
+        var connection: Int
     }
 
     /// **只在新会话开始时执行一次**的人设、记忆、历史与序号初始化。
@@ -1065,7 +1075,11 @@ public final class AssistantSession {
 
     // MARK: - 采集 → 上行
 
-    private func startPump(stream: AsyncStream<AudioChunk>, client: any AssistantRealtimeClient) {
+    private func startPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any AssistantRealtimeClient,
+        connection: Int
+    ) {
         pump?.cancel()
         pump = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
@@ -1079,7 +1093,7 @@ public final class AssistantSession {
                     let events = await client.events()
                     for await envelope in events {
                         guard let self else { return }
-                        await self.handle(envelope)
+                        await self.handle(envelope, from: connection)
                     }
                 }
                 await group.waitForAll()
@@ -1123,8 +1137,12 @@ public final class AssistantSession {
     }
 
     private func handle(
-        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        from connection: Int
     ) async {
+        // 连接代次门禁（D03）：重连之后旧连接晚到的事件一律丢弃，
+        // 不许把上一条连接的识别结果、播放账本或终态写进新会话。
+        guard connection == connectionToken else { return }
         switch envelope.payload {
         case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded,
              .diarizationFinished, .auxiliaryIncomplete:
@@ -1408,20 +1426,19 @@ public final class AssistantSession {
             return
         }
 
-        if reply.isPersisted {
-            do {
-                let ordinal = try await coordinator.finalizeAssistantLine(
-                    sessionID: reply.sessionID,
-                    lineID: reply.id,
-                    text: text,
-                    interrupted: termination.marksInterrupted
-                )
-                reply.ordinal = ordinal
-            } catch {
-                // 存不下来要说出来，不能让界面显示成"已保存"。
-                lastFailure = "这一句没能存下来：\(error.localizedDescription)"
-            }
-        } else {
+        // 不依赖快照的 isPersisted：快照可能过期（persistReplyPartial 在
+        // await 期间完成建行），先试 UPDATE，不存在再退回 INSERT。
+        do {
+            let ordinal = try await coordinator.finalizeAssistantLine(
+                sessionID: reply.sessionID,
+                lineID: reply.id,
+                text: text,
+                interrupted: termination.marksInterrupted
+            )
+            reply.ordinal = ordinal
+            reply.isPersisted = true
+        } catch {
+            // 行还没建过（快照过期或建行失败过）：退回 INSERT 路径。
             do {
                 let ordinal = try await coordinator.appendLine(
                     LineDraft(
@@ -1429,6 +1446,7 @@ public final class AssistantSession {
                         role: .assistant,
                         text: text,
                         source: reply.source,
+                        status: .final,
                         isInterrupted: termination.marksInterrupted
                     ),
                     id: reply.id

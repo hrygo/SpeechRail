@@ -658,18 +658,17 @@ class OpenAIRealtimeSession:
                     f"Silero VAD preflight failed: {reason}",
                 )
 
-        self._diarization_enabled = requested_diarization
-        if requested_diarization:
-            try:
-                await self._ensure_diarization()
-            except BaseException:
-                await self._close_diarization()
-                self._diarization_enabled = previous_enabled
-                raise
-        else:
-            await self._close_diarization()
-
+        # 原子发布 (B08): 候选 VAD 先构建到**局部变量**, 分人资源也先建/关成功,
+        # 之后才一次性写回 self。任一步失败都不改动旧 flags、config、输入缓冲
+        # 与资源身份, 不留部分生效。
+        candidate_vad: Any = None
+        candidate_shadow_vad: Any = None
+        candidate_admission: SpeechAdmission | None = None
+        candidate_bargein_max_bytes = self._bargein_pending_max_bytes
+        resets_vad_buffer = False
+        replaces_vad_state = False
         if isinstance(turn_detection, dict) and turn_detection.get("mode") == "server_vad":
+            replaces_vad_state = True
             threshold = float(turn_detection.get("threshold", 0.5))
             prefix_padding = int(turn_detection.get("prefix_padding_ms", 300))
             silence_duration = int(turn_detection.get("silence_duration_ms", 400))
@@ -680,15 +679,14 @@ class OpenAIRealtimeSession:
                     SileroVadDetector,
                 )
 
-                self._vad = SileroVadDetector(
+                candidate_vad = SileroVadDetector(
                     self._settings.realtime_vad_model_path,
                     config=SileroVadConfig(threshold=threshold),
                 )
-                self._shadow_vad = None
             else:
                 from speechrail.backends.vad import VadConfig, VoiceActivityDetector
 
-                self._vad = VoiceActivityDetector(
+                candidate_vad = VoiceActivityDetector(
                     VadConfig(
                         threshold=threshold,
                         prefix_padding_ms=prefix_padding,
@@ -702,19 +700,15 @@ class OpenAIRealtimeSession:
                         self._settings.realtime_vad_model_path
                     )
                     if ready:
-                        self._shadow_vad = SileroVadDetector(
+                        candidate_shadow_vad = SileroVadDetector(
                             self._settings.realtime_vad_model_path,
                             config=SileroVadConfig(threshold=threshold),
                         )
-                    else:
-                        self._shadow_vad = None
-                else:
-                    self._shadow_vad = None
 
             if self._settings.realtime_speech_admission_enabled:
                 prefix_samples = int(prefix_padding * 16)
                 stop_frames = max(1, (silence_duration + 31) // 32)
-                self._speech_admission = SpeechAdmission(
+                candidate_admission = SpeechAdmission(
                     threshold=threshold,
                     start_frames=3,
                     stop_frames=stop_frames,
@@ -722,21 +716,40 @@ class OpenAIRealtimeSession:
                     frame_samples=512,
                     sample_rate=16_000,
                 )
-                self._vad_raw_buffer.clear()
-                self._vad_sample_cursor = self._kernel_timeline.accepted_samples
-            else:
-                self._speech_admission = None
-            self._bargein_pending_max_bytes = max(1, prefix_padding * 32)
+                # 与原实现一致: 只有 speech admission 接管时才重置采样游标与原始缓冲.
+                resets_vad_buffer = True
+            candidate_bargein_max_bytes = max(1, prefix_padding * 32)
         elif (
             turn_detection is None
             or (isinstance(turn_detection, dict) and turn_detection.get("type") is None)
             or turn_detection == "manual"
         ):
-            self._vad = None
-            self._shadow_vad = None
-            self._speech_admission = None
-            self._vad_raw_buffer.clear()
+            replaces_vad_state = True
+            resets_vad_buffer = True
 
+        # 分人资源先建/关成功 (会 await 外部服务, 可能失败)。
+        self._diarization_enabled = requested_diarization
+        if requested_diarization:
+            try:
+                await self._ensure_diarization()
+            except BaseException:
+                await self._close_diarization()
+                self._diarization_enabled = previous_enabled
+                raise
+        else:
+            await self._close_diarization()
+
+        # 全部成功, 现在一次性发布 VAD 相关状态。
+        # 与原实现一致: 两种 endpointing 形态之外, 既有 VAD 状态原样保留。
+        if replaces_vad_state:
+            self._vad = candidate_vad
+            self._shadow_vad = candidate_shadow_vad
+            self._speech_admission = candidate_admission
+            self._bargein_pending_max_bytes = candidate_bargein_max_bytes
+        if resets_vad_buffer:
+            self._vad_raw_buffer.clear()
+            if candidate_admission is not None:
+                self._vad_sample_cursor = self._kernel_timeline.accepted_samples
         self._alignment_enabled = requested_alignment
         self._config = candidate
         await self._send(updated)

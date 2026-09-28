@@ -221,7 +221,10 @@ terminal：`completed`、`cancelled` 或 `failed`。取消后不得再投递旧�
 2. **终态屏障。** terminal 在该 utterance 的 lane 资源回收**确认之后**才上 wire；取消路径
    同样如此。因此 terminal 之后立即发起的下一个 `speechrail.tts.start` 会成功，不会拿到
    `tts_in_progress`。回收无法确认时连接被关闭或该 lane 被隔离，不提前发 terminal 冒充
-   “已可复用”。
+   “已可复用”。这条保证的是**终态之前不释放资源**，不是**终态一定先于下一条 started 到达**：
+   已经越过准入的流水线式客户端可能在旧 utterance 的 terminal 之前就收到下一条
+   `speechrail.tts.started`。依赖严格 before-terminal 顺序的调用方应当等待匹配
+   `request_id` 的 terminal，而不是假定它排在下一条 `started` 之前。
 3. **pending 预算按实际消费归还。** `started` 里的 `limits` 是执行层实际生效的预算，并通过
    IPC 传到 worker；被接受但尚未消费的字符继续占用额度，worker 消费掉的一批立即归还。
    累计可以超过首个 2048 的常量上限（总上限 4096 仍然有效）。消费水位只归还**文本**额度，
