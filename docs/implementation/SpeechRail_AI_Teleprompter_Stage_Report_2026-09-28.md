@@ -361,6 +361,22 @@
 
 三条都指向同一件事：**本轮没有可提交的产品改动**。第 43 条那条通用教训在这里再次生效——「已覆盖」要有直接证据，不能靠「上一轮说它覆盖了」。而验收第 3 条的键盘子项、验收第 4 条的真实时延基线，仍分别锁在 U-10 走查与 #83 真实音频这两道**逐次授权**后面（见 §3.2），本轮未触碰、也未以任何方式绕过。
 
+### 2.8 第二十一轮：给「手动接管」补上常驻菜单快捷键 `⌘⌥V`
+
+§2.7 把验收第 3 条的键盘子项核实清楚了：**它是一项明文要求，而现状是这些高频操作没有任何键位**。这一轮不再只停在描述上——目标本身就是授权，而补齐它的代价只有一行。
+
+**为什么选常驻菜单命令，而不是给按钮挂 `.keyboardShortcut`**。先否掉了我自己的一个顾虑：曾以为按钮是条件渲染（`switch blocked` 的四个变体、`.review` 才出现的「采用」、`.following` 才出现的「关闭语音跟随」），给条件渲染的按钮挂快捷键会「有时候可达」——但**这在语义上其实是对的**：动作只在对应状态可用，读者不该在非审阅态按到「采用」、在舞台没开时按到「停用语音」。真正该担心的是**键位冲突与系统开关依赖**，而常驻菜单命令恰好两者都躲开：
+
+- **不依赖渲染**：`CommandMenu("提词器")`（`App.swift`）本来就常驻，直接持有 `teleprompter` 与 `teleprompterStage`，不随工作台某个分支出现或消失；
+- **不依赖系统开关**：菜单命令由系统这一侧派发，不需要按钮进焦点链，因此**绕开了系统「键盘导航／全键盘访问」默认关闭**这个坑——那正是报告里「键盘可达与不可达只差这一个开关」的根源；
+- **处理器已经写好**：`handleVoiceAssistCommand()` 覆盖开启／关闭／`stopFailed` 重试／`pausedByUser` 恢复，`.disabled(!isVisible || isBusy)` 的禁用态也已在。缺的只是键位。
+
+**选 `⌘⌥V`（Voice）的冲突分析**（这是本轮唯一需要判断的地方，因此写下来）：全仓已占用 `⌘1–⌘0`（路由 `AppRoute.shortcutSpec`）、`⇧⌘T/M/D/H`（路由）、`⌘N/E/R`、`⌥⌘I`、`⇧⌘L`、`⇧⌘.`、`⌘⌥←/→`（本菜单行导航）、`⌘Esc`（关提词器），舞台内另有 `⌘=/-/0/[/]`。系统保留的 `⌘C/V/X`（文本编辑）必须让位。`⌘⌥V` 与既有 `⌘⌥←/→` 同族好记，全仓与系统均未占用。
+
+**它关掉的是走查清单里被点名的一条**：§5 第 1 条写着「停用语音／手动接管——**这是「随时手动接管」这条成功目标的入口，不能只能点**」。现在它在纯键盘下可达了。
+
+**证据边界（如实记）**：改动只有一行，`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**——这是该改动的唯一编译门禁，因为 SwiftPM 既不编译 `App.swift` 也不编译视图层，而单测 target 无 `TEST_HOST`、同样不编译 App 入口。**没有做任何单测**，因为没有测试断言命令菜单结构，而 `handleVoiceAssistCommand` 背后的会话层行为（`disableVoiceAssist`／`retryStopVoiceAssist`／`enableVoiceAssist`）一行未改、其回归仍在。**真实按键未验证**：`⌘⌥V` 实际按下是否触发、菜单项禁用态与快捷键是否一致，仍属 U-10 走查——这一条只把「不可达」变成「已接线且编译通过」，不宣称走查通过。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -489,7 +505,7 @@
 | U-04 控制栏显隐几何稳定 | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` |
 | U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries`、`two-row mode still leaves the trailing slot empty and row counts stay clamped`（两行模式稿尾留空与行数夹取，本轮补齐并经变异验证）。**内部上限夹取不可观测**，见 §2 第 31 条 |
 | U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`an offset past the end of a segment still resolves to that segment's last row`（换字号后偏移落到段尾之外，本轮补齐并经变异验证） |
-| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证**。**键盘侧同样是零证据**：方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」，而舞台绑定 10 组键、工作台只有 ⌘⏎ 一个，新建／导入／打开舞台／手动接管／重试保存／采用候选版本**全部没有键位**，纯键盘能否完成取决于系统「键盘导航」开关（默认关闭）。已并入 §5 第 1 条 U-10 走查清单 |
+| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证**。**键盘侧此前是零证据**：方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」。**第二十一轮给「手动接管／语音跟随」补上常驻菜单快捷键 `⌘⌥V`**（§2.8，走查清单点名「不能只能点」的那一条，现已接线且编译通过、真实按键待 U-10），其余高频操作——新建／导入／打开舞台／重试保存／采用候选版本——**仍无键位**，纯键盘完成这些仍取决于系统「键盘导航」开关（默认关闭）。其余已并入 §5 第 1 条 U-10 走查清单 |
 | U-08 后台更新不抢焦点 | 通过 | `readingShortcutFocusPolicy`（阅读区外焦点、控件焦点、popover 打开时方向键都不被舞台接管）；提词器与 App 均未注册 `NSEvent` 全局／本地监视器，阅读键只作用于舞台窗口 |
 | U-09 显示预设持久化 | 通过 | `stage settings clamp and persist their supported ranges`、`stage visibility preferences default off and persist independently` |
 | U-10 真实窗口可见性 | 未执行 | 需 UI 自动化逐次授权。**待走查面已增至 7 处**：原四处（精简入口、精简确认 sheet、删除审阅卡片「原文：」行、识别语言菜单）＋读法标注窗口、语音辅助试读的「麦克风／识别／定位」三段链路，以及三处复选框的 VoiceOver 朗读 |
@@ -661,7 +677,7 @@
    - **第十八轮追加：常用操作的键盘可达（验收第 3 条最后一句，此前整份清单漏了它）**。方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」，台账 U-07 也写着「控制可达」，但上面这份清单里「键盘」一次都没出现——接手方走完这一遍，键盘可达仍然是零证据。现状是**舞台内覆盖良好、工作台几乎没有**：舞台已绑定 space／←→↑↓／PageUp·PageDown／Home／End／Esc／Tab 与 ⌘= ⌘- ⌘0 ⌘[ ⌘]（`TeleprompterStageView` 168–178、963–971），而工作台**只有 ⌘⏎ 一个**（整理朗读稿，`TeleprompterView` 2213）。走查要逐项确认下列操作能否纯键盘完成，并**记录系统「键盘导航／全键盘访问」是开还是关**——该设置默认关闭，关闭时按钮根本不在焦点链上，「键盘可达」与「不可达」只差这一个系统开关：
      - 新建空白稿／从剪贴板创建／导入文本文件（顶栏 `PageActionsMenu` 里的三项，以及空状态区的重复入口）；
      - 打开提词舞台、关闭舞台（舞台内 Esc 是否真的可达）；
-     - 停用语音／手动接管——**这是「随时手动接管」这条成功目标的入口，不能只能点**；
+      - 停用语音／手动接管——**这是「随时手动接管」这条成功目标的入口，不能只能点**。**第二十一轮已给它接上常驻菜单快捷键 `⌘⌥V`**（§2.8），走查时改为确认：按下 `⌘⌥V` 能否真正触发开启／关闭、菜单项的禁用态（舞台不可见或语音忙时灰显）是否与快捷键行为一致，以及菜单里该键位是否如实显示；
      - 存盘失败横幅里的「重试保存」与「复制稿件内容」：读者在这两个动作上最需要键盘，它们也是第 48、49 条修过的路径；
      - 审阅页的「采用候选版本」——不可重做的一步，必须键盘可达；
      - 「回到朗读位置」与字号调整在工作台侧是否有键位。

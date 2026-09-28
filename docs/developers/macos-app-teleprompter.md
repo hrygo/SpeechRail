@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.5.13"
+version: "0.5.14"
 date: 2026-09-29
 ---
 
@@ -160,7 +160,7 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 - **紧凑预留，不重排**：顶部辅助条只在计时/进度或实际采集状态需要时显示，固定 `stageAuxiliaryBarHeight`（24pt）；底部控制区固定 `stageControlAreaHeight`（48pt）。隐藏只撤下操作内容与无障碍子树，保留紧凑槽位避免台词跳动；隐藏控件不响应点击。
 - **最小辅助状态**：只有实际采集时显示「麦克风使用中」角标；计时与进度默认关闭，用户开启 `showClockAndProgress` 后才显示。两者都不以常驻节奏评价、段末训导或状态看板抢占台词。
 - **末段即正文**：舞台没有自动完稿、复盘或末段关闭分支。用户关闭、按 Esc、窗口系统关闭和程序关闭统一调用 `closeStage()`，释放本功能的麦克风、client 与 coordinator 占用，同时保留阅读位置。
-- **键盘与菜单**：舞台阅读区域在用户显式打开窗口后获得键盘焦点；空格/→/↓/PageDown 下一显示行，←/↑/PageUp 上一显示行，Home/End 首末行，Esc 关闭。设置控件或弹层获得焦点时不执行阅读命令；关闭设置后焦点返回阅读区。Tab 请求显示控制区，应用菜单仍提供全部核心动作；菜单上一行/下一行分别使用 `⌘⌥←` / `⌘⌥→`，不占用全局裸方向键；关闭使用 Command-Esc。字号与背景透明度的 Command-=/-/0 和 Command-[/] 是舞台内辅助快捷键；不再用 Command-A 切换全稿，也不让空格隐式开启语音。
+- **键盘与菜单**：舞台阅读区域在用户显式打开窗口后获得键盘焦点；空格/→/↓/PageDown 下一显示行，←/↑/PageUp 上一显示行，Home/End 首末行，Esc 关闭。设置控件或弹层获得焦点时不执行阅读命令；关闭设置后焦点返回阅读区。Tab 请求显示控制区，应用菜单仍提供全部核心动作；菜单上一行/下一行分别使用 `⌘⌥←` / `⌘⌥→`，不占用全局裸方向键；关闭使用 Command-Esc；**开启／关闭语音跟随（手动接管）使用 `⌘⌥V`**——这条常驻菜单命令不依赖按钮是否渲染，舞台一开即可用，比依赖系统「键盘导航」开关（默认关闭）更稳。字号与背景透明度的 Command-=/-/0 和 Command-[/] 是舞台内辅助快捷键；不再用 Command-A 切换全稿，也不让空格隐式开启语音。
 - **语音与设置**：语音按钮状态来自 `TeleprompterVoiceAssistLifecycle`；`off`、`starting`、`following`、`stopping`、`stopFailed`、`pausedByUser`、`unavailable` 都必须有明确文案。`alwaysShowControls` 与 `showClockAndProgress` 使用独立 UserDefaults 键，默认关闭，旧版本可忽略；`contentWidth` 与 `preset` 也是独立键，缺省时按「镜头口播」读取，旧设置不需要迁移。
 - **失败归因要说对人**：输入设备启动失败或格式不兼容归入 `BlockReason.inputDeviceUnavailable`，文案说明是麦克风并保留底层错误信息，同时继续提供手动看稿；只有 ASR 服务本身的问题才用 `serviceNotReady`。任何失败都不得推进稿件、不得留在已连接状态，并必须释放本功能的占用、连接与采集。
 - **时长估计要说明它是推的还是量的**：倍率 `1.0` 既是「没人试读过」的默认值，也可能恰好是某次试读的真实结果，只看倍率无法区分。`TeleprompterCalibrationSource` 因此显式记录来源（`.uncalibrated` / `.manualTrial(durationSeconds:)`），`TeleprompterTimingPolicy.estimateDuration` 与 `evaluatePreflight` 据此给出 `EstimateResult.isCalibrated`；试读采用时写入 `.manualTrial`，「恢复默认语速」写回 `.uncalibrated`——那是一次选择，不是一次测量。未校准时两处时长展示都要标注：内容选择页的预计用时，以及工作台预检结论——后者经 `PreflightConclusion.showsDurationEstimate` 区分，带分钟数的结论才标，「无内容」「目标无效」「无法预估」本身没有时长数字，不加标注以免变成噪声。校准入口常驻并显示「未试读校准」，不使用 `.healthy` 语气冒充已测。倍率不落盘，因此没有存储迁移。
@@ -208,3 +208,4 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-29（第十七轮）：回放报告新增 `advanced_event_count`，并在跟随一次都没推进时写出告警——验收第 4 条要求「不以全部停住换取安全」，而此前标注齐全的素材上，一条冻住的跟随路径会输出「零误跳、零停顿、零告警」，每个数字都是真的，合起来描述的是「什么都没发生」。详见阶段报告 §2 第 52 条。
 2026-09-29（第十七轮续）：回放报告新增恢复门槛告警——方案 §11.7 的回稿恢复 P95 在没量到样本时必须自己说明未被测量，否则 `null` 与 `0ms` 在报告里无法区分。判据是分位有无样本，不是素材有无 `reRead` 标注。详见阶段报告 §2 第 53 条。
 2026-09-29（第十九轮）：改内容范围不再静默丢弃已完成的审阅——审阅是采用之后链路上最后一份不可重做的工作，而「选择范围」入口不看阶段、审阅页点得到。会话层改为抛 `reviewDecisionsWouldBeDiscarded` 并保持状态不变，界面确认后才走 `applyContentSelectionAfterConfirmation`；刚整理完未处理、或候选已被采用时不拦。详见阶段报告 §2 第 54 条。
+2026-09-29（第二十一轮）：给「开启／关闭语音跟随」这条常驻菜单命令补上 `⌘⌥V`（Voice）。它同时覆盖「随时手动接管」与「恢复／重试跟随」，是走查清单里被点名「不能只能点」、也是成功目标一条主线的入口。此前该命令与完整处理器（`handleVoiceAssistCommand`）本就在 `CommandMenu("提词器")` 里，只是缺键位——补一行即可让「停用语音／手动接管」在纯键盘下可达，不依赖系统「键盘导航」开关（默认关闭）。选 `⌘⌥V` 是因为与本菜单既有的 `⌘⌥←/→`（行导航）同族、全仓与系统均未占用（路由占 `⌘1–⌘0` 与 `⇧⌘T/M/D/H`，`⌘N/E/R`、`⇧⌘L/.`、`⌘Esc` 各有其主，`⌘C/V/X` 属系统文本编辑必须让位）。`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED——SwiftPM 不编译 `App.swift` 与视图层，Debug 构建是这一行改动的唯一编译门禁。**未做真实按键验证**：`⌘⌥V` 实际按下时是否正确触发、菜单项禁用态（舞台不可见／忙碌时灰显）是否与快捷键一致，仍属 U-10 走查。详见阶段报告 §2.7 与 §5 第 1 条。

@@ -623,6 +623,16 @@ struct SpeechRailCommands: Commands {
             Button(voiceAssistCommandTitle) {
                 handleVoiceAssistCommand()
             }
+            // 「随时手动接管」是成功目标的一条主线，也是走查清单里被点名
+            // 「不能只能点」的入口（报告 §5 第 1 条）。它本来就有一条常驻的
+            // 菜单命令与完整处理器（开启／关闭／失败重试），缺的只是键位。
+            //
+            // 选 `⌘⌥V`（Voice）的理由：与本菜单既有的 `⌘⌥←/→`（行导航）
+            // 同族好记，且全仓与系统都未占用——路由占了 `⌘1–⌘0` 与
+            // `⇧⌘T/M/D/H`，`⌘N/E/R`、`⇧⌘L/.`、`⌘Esc` 也已各有其主，
+            // `⌘C/V/X` 属系统文本编辑必须让位。菜单命令不依赖按钮是否渲染，
+            // 因此舞台一开就能用，比依赖系统「键盘导航」开关（默认关闭）更稳。
+            .keyboardShortcut("v", modifiers: [.command, .option])
             .disabled(!teleprompterStage.isVisible || teleprompter.voiceAssistState.isBusy)
 
             Button("显示设置") {
