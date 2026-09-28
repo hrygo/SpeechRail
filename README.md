@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Local speech infrastructure for Apple Silicon macOS</strong><br>
-  <em>Shared ASR, TTS, and Realtime endpoints for desktop agents and local apps</em>
+  <em>One bounded runtime · OpenAI-compatible REST and Realtime · a macOS control plane</em>
 </p>
 
 <p align="center">
@@ -23,111 +23,139 @@
 </p>
 
 <p align="center">
+  <a href="#what-speechrail-is">What it is</a> ·
+  <a href="#public-surface">Public surface</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#openai-compatible-usage">Usage</a> ·
+  <a href="#model-specs">Model specs</a> ·
   <a href="#documentation">Documentation</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="https://github.com/hrygo/SpeechRail/discussions">Discussions</a>
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-SpeechRail is a single-user local speech service for desktop agents, meeting
-tools, content workflows, and other applications that need reusable speech
-capabilities. It hosts shared ASR/TTS workers behind one local endpoint and
-exposes the narrow OpenAI-compatible subset that SpeechRail can verify.
+SpeechRail is a single-user local speech service for one Apple Silicon Mac,
+shared by desktop agents, meeting tools, content workflows, and the bundled
+macOS app. It hosts ASR, TTS, and optional speaker-diarization workers behind a
+single local endpoint, and exposes the narrow OpenAI-compatible subset that
+SpeechRail actually implements and verifies.
 
-The service owns protocol translation, model adapters, worker lifecycle,
-resource admission, and capability reporting. Calling applications own
+The **service** owns protocol translation, model adapters, worker lifecycle,
+resource admission, and capability reporting. The **calling application** owns
 microphone capture, playback, meeting storage, UI, and LLM orchestration.
 
 > [!NOTE]
-> `/readyz` and a successful smoke request confirm service readiness, not
-> universal quality, latency, or performance guarantees.
+> `/readyz` returning 200 and a successful smoke request confirm that the
+> service is wired up. They are not quality, latency, or stability
+> certifications — see [Boundaries](#boundaries) for what remains unproven.
 
-## Why SpeechRail
+## What SpeechRail is
 
-SpeechRail is designed for one Apple Silicon Mac shared by several local
-clients. It keeps model execution and request scheduling in one bounded
-runtime, so applications do not each need to load their own speech models or
-invent their own OpenAI-compatible adapter.
+One process tree, one model set, one contract. Applications stop loading their
+own speech models and stop inventing their own OpenAI-compatible adapters.
 
 It is a good fit when you need:
 
-- local processing for ordinary ASR/TTS requests;
-- one reusable HTTP/WebSocket service for multiple desktop applications;
-- a narrow, inspectable OpenAI-compatible surface;
-- optional Realtime ASR/TTS, anonymous session-scoped diarization, or MCP
-  access.
+- local ASR and TTS without a cloud round trip;
+- one HTTP/WebSocket service shared by several desktop applications;
+- a narrow, inspectable OpenAI-compatible surface with a machine-readable
+  contract;
+- optional Realtime ASR/TTS, session-scoped anonymous diarization, or MCP
+  access for agents.
 
-## What is available
+It is **not** a voice-agent platform. SpeechRail does not run an LLM, hold
+conversation history, call tools, or decide when to interrupt playback. The
+caller owns all of that; SpeechRail delivers speech facts and renders audio.
 
-| Surface | Capability | Notes |
+## Public surface
+
+### REST and WebSocket
+
+| Endpoint | Purpose | Notes |
 |---|---|---|
-| `GET /health`, `/readyz`, `/metrics` | Service diagnostics | Inspect process, subsystem, readiness, and metrics state. |
-| `POST /v1/audio/transcriptions` | File ASR | OpenAI-compatible multipart input; `json`, `verbose_json`, `text`, `srt`, `vtt`, and optional `diarized_json` responses. |
-| `POST /v1/audio/speech` | TTS | Streaming `mp3`, `opus`, `aac`, `flac`, `wav`, or raw `pcm`; select an `available=true` voice from `/v1/voices`. |
-| `GET /v1/models`, `GET /v1/voices` | Compatibility discovery | Profile and available-voice discovery projections. |
-| `GET /v1/speechrail/capabilities`, `/v1/speechrail/voices*` | Safe discovery | `effective_capabilities_v1` provides one effective capability generation; namespaced voice discovery omits source text and does not start workers. |
-| `WS /v1/realtime` | Realtime ASR/TTS | Current-only stateless Speech Plane: transcription session wire, server-side speech facts, explicit `speechrail.tts.*`, and an opt-in namespaced diarization extension. |
-| `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
-| `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it reports current REST capabilities, does not host models, and never switches profiles. |
+| `GET /health`, `/readyz`, `/metrics` | Diagnostics | Process, subsystem, readiness, and Prometheus metrics. `server_vad` reports separately from ASR/TTS readiness. |
+| `POST /v1/audio/transcriptions` | File ASR | OpenAI-compatible multipart input; `json`, `verbose_json`, `text`, `srt`, `vtt`, plus opt-in `diarized_json` with anonymous speaker labels. |
+| `POST /v1/audio/speech` | TTS | Streaming `mp3`, `opus`, `aac`, `flac`, `wav`, or raw `pcm`. Select a voice with `available=true` from `/v1/voices`. |
+| `GET /v1/models`, `GET /v1/voices` | Discovery | Projection of the active profile and currently serviceable voices. |
+| `GET /v1/speechrail/capabilities` | Effective capabilities | `effective_capabilities_v1`: one internally consistent snapshot of models, voices, and parameter domains. Reading it starts no worker and runs no inference. |
+| `/v1/voice-designs*`, `/v1/voices/clone*` | Voice creation and cloning | Design a voice from a description, preview it, clone from a reference recording, validate, and publish to the voice library. |
+| `/v1/speechrail/voices*`, `/v1/speechrail/pronunciation-sets*` | Voice library and pronunciation | Immutable voice revisions with rollback and revocation; versioned pronunciation sets for synthesis. |
+| `/v1/jobs*` | Durable async jobs | Owner-scoped job records for long transcriptions. You pass opaque references; the service never stores raw audio or transcripts. |
+| `WS /v1/realtime` | Realtime ASR/TTS | current-only stateless Speech Plane (contract `4.1.0`): transcription sessions, server VAD facts, word-level alignment and diarization as independent opt-ins, and explicit `speechrail.tts.*` render control. |
 
-Speaker diarization is available only when the task explicitly opts in and both
-the local CoreML Sortformer bundle and a named aligner are ready. It returns
-session-scoped anonymous labels; it does not identify people or maintain a
-cross-session speaker database.
+The full machine-readable contract is
+[`contracts/openapi.yaml`](contracts/openapi.yaml); the WebSocket contract is
+[`contracts/realtime-openai.md`](contracts/realtime-openai.md).
 
-The repository also contains a SwiftUI macOS control plane under
-`macos/SpeechRailApp`. It reports service state and delegates profile/service
-operations to the existing Python CLI. It does not load models or replace the
-user-level `com.speechrail` LaunchAgent. Its feature-scoped session surfaces
-(voice assistant, meeting assistant, and live captions), plus voice-clone and
-preview flows, may capture or play audio only while the user has enabled that
-feature; session PCM is not persisted, while text and records stay in local
-App storage.
+### speechrail-mcp
 
-## Scope and boundaries
+`speechrail-mcp` is a stateless proxy that exposes the current REST
+capabilities to MCP clients over `stdio` (default, no listening port) or
+`streamable-http` (default `127.0.0.1:8202`). It hosts no model, never switches
+profiles, and does not proxy Realtime — agent clients connect to
+`/v1/realtime` directly. `speechrail agents install --client codex` installs
+the bundled skill and MCP config for Codex.
 
-SpeechRail is deliberately a speech runtime, not a complete voice-agent
-application. It does not provide:
+### macOS app
 
-- The SpeechRail service itself does not provide microphone capture, speaker
-  playback, conference management, or UI. The bundled App may provide those
-  client-side capabilities only inside an explicitly active feature session;
-- LLM responses, tool calls, or application-level interruption policy;
-- named-speaker identity, voiceprint databases, or cross-session attribution;
-- cloud inference, multi-tenant isolation, high availability, or a distributed queue.
+`macos/SpeechRailApp` is a SwiftUI control plane for the installed service. It
+does not load models and does not replace the user-level `com.speechrail`
+LaunchAgent; it drives the existing Python CLI through a constrained XPC
+delegate. It is organized into three groups:
 
-Realtime is the sole public WebSocket entry point and implements ASR/TTS
-events only. The caller owns LLM, history, tools, playback queue, and barge-in
-policy; SpeechRail does not translate old Realtime events or provide a legacy
-wire. Read the contract before relying on an OpenAI feature that is not listed
-above.
+- **Create** — dubbing desk, voice design, voice cloning, voice library, and
+  local works.
+- **Sessions** — voice assistant, meeting assistant, live captions, and the
+  AI teleprompter.
+- **Engine** — service status, runtime monitoring, model combinations,
+  preflight and diagnostics, and in-app developer docs.
+
+Microphone capture and playback exist only while a session feature is active
+and are released when you leave it. Session PCM is never written to disk;
+only text and records are stored locally. Teleprompter camera and window
+capture stay in your streaming software — SpeechRail supplies the script
+follow-along, not the video.
+
+## Boundaries
+
+These are deliberate, and they are load-bearing:
+
+- **No LLM, history, tools, or playback policy.** Realtime carries the ASR/TTS
+  subset only. The caller owns orchestration and barge-in.
+- **No named speakers.** Diarization returns session-scoped anonymous labels.
+  There is no voiceprint database, no cross-session identity, and no speaker
+  enrollment.
+- **No silent network on the request path.** Inference does not download
+  models, fetch remote audio URLs, or call a cloud. Installing and preparing
+  models is an explicit operator action.
+- **One service, one ASGI worker.** Throughput is not scaled by replicating
+  model processes. Contention returns `backend_busy` by design.
+- **No cloud inference, multi-tenancy, or high availability.** This is a
+  single-user local runtime.
+
+Speaker diarization additionally requires the local CoreML Sortformer bundle
+and a named aligner to be provisioned, and the task to opt in. VoiceDesign is
+an on-demand artifact bound to no spec.
 
 ## Requirements
 
-- Apple Silicon Mac with macOS 26.0 or later for the native managed runtime;
-  Intel Macs and Ubuntu/Linux are not supported runtime targets. Linux may be
-  used for platform-neutral development checks only.
-- The bundled `SpeechRailApp` also targets macOS 26.0 or later and `arm64`.
-- Python `>=3.14,<3.15` for source development and the Python service CLI.
-- [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
-- `ffmpeg` for the audio decoding/transcoding paths used by local setup and
-  selected audio formats. The managed installer ships a pinned
-  `imageio-ffmpeg` inside the isolated runtime, so a system copy is optional
-  for `speechrail install`.
-- Local model snapshots and vendor runtimes stored outside the repository.
+- Apple Silicon Mac, macOS 26.0 or later, for the managed runtime. Intel Macs
+  and Linux are not supported runtime targets; Linux is usable for
+  platform-neutral development checks only.
+- The bundled app also targets macOS 26.0+, `arm64`.
+- Python `>=3.14,<3.15` for source development and the service CLI.
+- [`uv`](https://docs.astral.sh/uv/) for dependency and environment
+  management.
+- Model snapshots and vendor runtimes, stored outside the repository.
 
-Inference requests do not download models, fetch remote audio URLs, or make
-silent cloud calls. Explicit setup and operator commands may provision local
-artifacts; review the relevant operation guide before running them.
+`ffmpeg` is used by the audio decode/transcode paths. The managed installer
+ships a pinned `imageio-ffmpeg` inside the isolated runtime, so a system copy
+is optional for `speechrail install`.
 
 ## Quick start
 
 ### From a release asset
 
 Download the wheel and `SHA256SUMS` from
-[Releases](https://github.com/hrygo/SpeechRail/releases), verify the checksums,
-then install with only `uv` — no source checkout:
+[Releases](https://github.com/hrygo/SpeechRail/releases), verify the
+checksums, then install with `uv` alone — no source checkout:
 
 ```bash
 cd ~/Downloads
@@ -143,21 +171,21 @@ uvx --python 3.14.7 --from ./speechrail-*.whl \
 The wheel ships the `speechrail install` entry point. It stages the release,
 prepares and verifies the tier's model artifacts, runs preflight, switches
 `runtime/current` atomically, and with `--enable` registers and starts
-`com.speechrail`. It refuses a wheel whose version differs from the installer,
-so the installer can never drift from the code it installs. Repeating the
-command upgrades an existing install; stop the running service first, because
-the installer refuses to replace `runtime/current` while port 8201 is owned.
-Verified local model snapshots are reused instead of re-downloaded, and the
-command reports what it will fetch before it starts. The `--from` glob needs
-exactly one `speechrail-*.whl` in the directory.
+`com.speechrail`. It refuses a wheel whose version differs from the
+installer, so the two can never drift. Repeating the command upgrades an
+existing install; stop the running service first, because the installer
+refuses to replace `runtime/current` while port 8201 is owned. Verified local
+model snapshots are reused instead of re-downloaded.
+
+Then install the app (optional) from the unsigned DMG in the same release.
+The DMG ships the control plane only; it installs no service.
 
 ### From the repository
 
-Use this path on a fresh Apple Silicon Mac that also needs prerequisites
-installed. The bootstrap flow installs prerequisites, prepares the selected
-local model artifacts, and registers the `com.speechrail` LaunchAgent. It
-performs external setup work and therefore requires the explicit `--yes`
-confirmation.
+Use this path on a fresh Apple Silicon Mac that also needs prerequisites. The
+bootstrap flow installs prerequisites, prepares the selected local model
+artifacts, and registers the `com.speechrail` LaunchAgent. It performs
+external setup work and therefore requires an explicit `--yes`:
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
@@ -169,13 +197,10 @@ cd SpeechRail
 ```
 
 Read the [zero-setup guide](.agents/skills/speechrail-zero-setup/SKILL.md)
-before using the bootstrap entry point. It documents disk requirements,
-profile selection, model verification, and recovery behavior.
-
-The [install and first-run guide](docs/users/installing-speechrail.md) explains
-what each release asset is for, the install order, and the common failure
-states. The unsigned DMG ships only the App control plane; it installs no
-service.
+first: it documents disk requirements, spec selection, model verification,
+and recovery behavior. The
+[install guide](docs/users/installing-speechrail.md) explains what each
+release asset is for, the install order, and the common failure states.
 
 After installation, inspect the service without starting a second instance:
 
@@ -190,9 +215,9 @@ curl http://127.0.0.1:8201/readyz
 
 ### Source development
 
-This path is useful for deterministic contract and application development.
-It can start the HTTP surface without real model snapshots; inference then
-returns `503 backend_not_ready` until a local ASR/TTS runtime is configured.
+This path is useful for deterministic contract and application work. It can
+serve HTTP without real model snapshots; inference then returns
+`503 backend_not_ready` until a local ASR/TTS runtime is configured.
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
@@ -205,10 +230,10 @@ uv run speechrail serve
 
 For real local inference, set the documented ASR and TTS snapshot/interpreter
 pairs in the private `.env`, then run `speechrail service preflight` before
-starting the service. Keep snapshots, `.env`, audio, logs, and benchmark
-raw data outside the repository.
+starting the service. Keep snapshots, `.env`, audio, logs, and benchmark raw
+data outside the repository.
 
-Useful read-only checks are:
+Useful read-only checks:
 
 ```bash
 curl http://127.0.0.1:8201/health
@@ -218,15 +243,11 @@ curl http://127.0.0.1:8201/v1/voices
 uv run speechrail diagnose
 ```
 
-`/health` reports process and subsystem state. `/readyz` reports whether the
-ASR/TTS runtime can accept inference; a successful readiness response is not a
-quality or performance certification.
-
 ## OpenAI-compatible usage
 
-The standard OpenAI Python client can target the local service by changing its
+The standard OpenAI Python client targets the local service by changing its
 base URL. Loopback access uses a placeholder key; use a real bearer key only
-when the service is deliberately exposed beyond loopback.
+when you deliberately expose the service beyond loopback.
 
 ```python
 from openai import OpenAI
@@ -253,48 +274,39 @@ speech = client.audio.speech.create(
 speech.stream_to_file("speech-output.wav")
 ```
 
-For Realtime clients, connect to:
-
-```text
-ws://127.0.0.1:8201/v1/realtime
-```
-
-Then follow [`contracts/realtime-openai.md`](contracts/realtime-openai.md). The
-Realtime wire is current-only: `delta` partials are append-only, while the
-optional `snapshot` extension replaces the complete text for an item according
-to its monotonic `revision`. Both `partial_mode` and `chunk_duration_ms` must
-be confirmed by `transcription_session.updated` before the first PCM frame.
-For SDK, cURL, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
+Realtime clients connect to `ws://127.0.0.1:8201/v1/realtime` and follow
+[`contracts/realtime-openai.md`](contracts/realtime-openai.md). The wire is
+current-only: `delta` partials are append-only, the optional `snapshot`
+extension replaces an item's text by monotonic `revision`, and both
+`partial_mode` and `chunk_duration_ms` must be confirmed by
+`transcription_session.updated` before the first PCM frame. SDK, cURL,
+Open-WebUI, LiveKit/Pipecat, and OpenClaw examples live in
 [`docs/users/integrations.md`](docs/users/integrations.md).
 
 ## Model specs
 
-The public API payload shape is shared across specs, and ASR/TTS can select
-different tiers. The advertised capability set follows the active catalog
-selection and current readiness; BF16 weight dtype does not establish a quality
-ranking.
+ASR and TTS select independently. The advertised capability set follows the
+active catalog selection and current readiness; BF16 weight dtype alone does
+not establish a quality ranking.
 
-| Spec | ASR | TTS roles | Diarization and voice behavior |
+| Spec | ASR | TTS lanes | Diarization and voice behavior |
 |---|---|---|---|
 | `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice system voices and Base reference clone; diarization requires explicit Sortformer + aligner provisioning. |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice and Base roles; diarization requires explicit provisioning. |
-| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | Reference precision inherits the same-family 8-bit gates and was not separately retested. Diarization still requires explicit provisioning. |
+| `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | Reference precision inherits the same-family 8-bit gate evidence and was not separately retested. Diarization still requires explicit provisioning. |
 
 Every spec routes system voices through `custom_voice` and reference cloning
-through `base`. VoiceDesign is a single on-demand artifact that is not bound to any
-spec: every `tts_spec` can run design jobs once that snapshot is supplied, and its
-absence only removes the design capability.
-Different lanes may run concurrently while one lane remains serialized. The
-capability group can still trim/close workers after the configured idle
-cooldown and restore the roles needed by the next request lazily.
+through `base`. VoiceDesign (`tts-1.7b-design-bf16`) is a single on-demand
+artifact bound to no spec: any `tts_spec` can run design jobs once that
+snapshot is supplied, and its absence only removes the design capability.
+Different lanes may run concurrently while one lane stays serialized. The
+capability group can still trim or close workers after the configured idle
+cooldown and restore the roles the next request needs lazily.
 
 ![Three-spec model and TTS capability relationship](docs/architecture/diagrams/three-tier-model-architecture.svg)
 
-The diagram is the current overview of spec routing, role binding, model
-sharing, TTS capabilities, and the shared resource/lifecycle boundary.
-
 Use the CLI to inspect or change a managed selection. `setup` provides a
-memory-based starting suggestion; it is not a hard hardware guarantee.
+memory-based starting suggestion; it is not a hardware guarantee.
 
 ```bash
 SPEECHRAIL_APP_HOME="$HOME/Library/Application Support/SpeechRail"
@@ -309,10 +321,9 @@ SPEECHRAIL_CLI="$SPEECHRAIL_APP_HOME/runtime/current/.venv/bin/speechrail"
 "$SPEECHRAIL_CLI" profile rollback --app-home "$SPEECHRAIL_APP_HOME" --yes
 ```
 
-Select voices from `/v1/voices` rather than assuming that a registered custom
-voice is usable on every spec. VoiceDesign preview/design and Base clone
-availability follow the current effective capability; VoiceDesign is bound to no
-spec, while CustomVoice and Base are bound in every spec. See
+Select voices from `/v1/voices` rather than assuming a registered voice works
+on every spec. VoiceDesign and Base clone availability follow the current
+effective capability. See
 [`docs/users/api-contract.md`](docs/users/api-contract.md).
 
 ## Security and data handling
@@ -333,10 +344,12 @@ spec, while CustomVoice and Base are bound in every spec. See
 
 | Need | Start here |
 |---|---|
-| Install and first run | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
 | Documentation overview | [`docs/README.md`](docs/README.md) |
-| API and client integration | [`docs/users/README.md`](docs/users/README.md), [`docs/users/api-contract.md`](docs/users/api-contract.md), [`contracts/openapi.yaml`](contracts/openapi.yaml) |
+| Install and first run | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
+| API and client integration | [`docs/users/README.md`](docs/users/README.md), [`docs/users/integrations.md`](docs/users/integrations.md) |
+| Public API contract | [`docs/users/api-contract.md`](docs/users/api-contract.md), [`contracts/openapi.yaml`](contracts/openapi.yaml) |
 | Realtime protocol | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |
+| Effective capabilities | [`docs/users/effective-capabilities.md`](docs/users/effective-capabilities.md) |
 | MCP agent integration | [`docs/users/mcp-agent-integration.md`](docs/users/mcp-agent-integration.md) |
 | Operations and rollback | [`docs/operations/README.md`](docs/operations/README.md), [`docs/operations/operations-runbook.md`](docs/operations/operations-runbook.md) |
 | Development and testing | [`docs/developers/README.md`](docs/developers/README.md), [`docs/developers/testing-acceptance.md`](docs/developers/testing-acceptance.md) |
@@ -346,8 +359,8 @@ spec, while CustomVoice and Base are bound in every spec. See
 
 ## Contributing
 
-Before opening a pull request, read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-run the deterministic quality gates:
+Before opening a pull request, read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and run the deterministic quality gates:
 
 ```bash
 uv sync --extra dev
@@ -359,18 +372,20 @@ git diff --check
 ```
 
 The CI workflow also builds the wheel and tests the SwiftUI macOS control
-plane. Please use the repository's issue templates for bug reports and feature
-requests. Questions and integration discussions belong in
+plane. Please use the repository's issue templates for bug reports and
+feature requests. Questions and integration discussions belong in
 [GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions).
 
-Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md) when participating
-in the project.
+Please also follow the
+[Code of Conduct](CODE_OF_CONDUCT.md) when participating in the project.
 
 ## Support and security
 
-For usage questions and troubleshooting, start with [`SUPPORT.md`](SUPPORT.md)
-and [GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions). For
-confirmed bugs, use the [issue templates](https://github.com/hrygo/SpeechRail/issues/new/choose).
+For usage questions and troubleshooting, start with
+[`SUPPORT.md`](SUPPORT.md) and
+[GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions). For
+confirmed bugs, use the
+[issue templates](https://github.com/hrygo/SpeechRail/issues/new/choose).
 
 For security vulnerabilities, follow [`SECURITY.md`](SECURITY.md) instead of
 opening a public issue.

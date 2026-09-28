@@ -1,6 +1,6 @@
 # SpeechRail Agent 指南
 
-本文件是仓库根目录的常驻项目规则，只保留跨任务稳定、不能低成本从代码或文档推断出的约束。当前行为以代码、测试、公共契约和实测为准；易变的端点、字段、profile、模型、资源数值、目录细节和操作命令应查阅对应事实源，不要复制到本文件。
+本文件是仓库根目录的常驻项目规则，只保留跨任务稳定、不能低成本从代码或文档推断出的约束。当前行为以代码、测试、公共契约和实测为准；易变的端点、字段、档位、模型、资源数值、目录细节和操作命令应查阅对应事实源，不要复制到本文件。
 
 ## 适用范围与优先级
 
@@ -32,11 +32,11 @@
 - 架构：`docs/architecture/README.md`；
 - 用户与 API：`docs/users/README.md`；
 - 开发与测试：`docs/developers/README.md`、`docs/developers/testing-acceptance.md`；
-- macOS 开发：`docs/developers/macos-app-development.md`；UI/UX：`docs/developers/macos-app-design-system.md`；
+- macOS 开发：`docs/developers/macos-app-development.md`；UI/UX：`docs/developers/macos-app-design-system.md`；提词器：`docs/developers/macos-app-teleprompter.md`；
 - 运维：`docs/operations/README.md`；决策：`docs/decisions/README.md`；历史：`docs/archive/README.md`；
 - 公共接口：`contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/realtime-events.schema.json`；实现主要位于 `src/speechrail/`，macOS 控制面位于 `macos/`，回归与契约测试位于 `tests/`。
 
-版本、profile、模型、能力档位和资源预算等易变事实，必须从当前代码、配置、catalog、契约或对应专业文档核实；不得依据本文件中的历史快照做结论。
+版本、档位、模型、能力档位和资源预算等易变事实，必须从当前代码、配置、catalog、契约或对应专业文档核实；不得依据本文件中的历史快照做结论。
 
 ## 产品边界与架构原则
 
@@ -45,7 +45,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - REST、Realtime、MCP 和 macOS 控制面的具体接口以各自契约和文档为准，不在本文件维护端点清单。
 - Realtime 只承载 OpenAI Realtime 的 ASR/TTS 子集与 SpeechRail 命名空间扩展，不承载 LLM response、tool call、播放、会议或应用级打断策略。
 - `speechrail-mcp` 是无状态 REST 代理，支持其文档声明的传输方式；不导入 FastAPI 应用、不加载模型，Realtime 仍直接使用 `/v1/realtime`。
-- `macos/SpeechRailApp` 是 SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不加载模型、不直接执行 `launchctl`。采集与播放只在会话功能启用期间存在，离开功能即释放；PCM 不落盘，记录只落本机 SQLite 的文字。
+- `macos/SpeechRailApp` 是 SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不加载模型、不直接执行 `launchctl`。它面向本机用户分为三组：创作（配音台、音色设计与克隆、音色库、我的作品）、会话（语音助手、会议助手、实时字幕、AI 提词器）和引擎（服务状态、运行监控、模型组合、诊断、开发者文档）。采集与播放只在会话功能启用期间存在，离开功能即释放；PCM 不落盘，记录只落本机 SQLite 的文字。
 
 ## 项目约束
 
@@ -63,8 +63,8 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 ### 资源与生命周期
 
 - 一次只运行一个 SpeechRail 服务和一个 ASGI worker；不得复制模型进程来提高吞吐。batch ASR 与 streaming ASR 不作为同机并行产品场景，冲突必须稳定返回 `backend_busy`。
-- 重计算并发由 Resource Governor 根据启用组件声明的 resident bytes 与物理内存预算决定；峰值缺失或总量超预算时必须 fail-closed 串行。只有 active profile 明确声明的独立能力 lane 才可跨 lane 并发，同一 lane 仍串行。
-- 能力声明必须与 active profile、preflight 和实际 ready 状态一致；不因模型存在、配置存在或代码路径存在就宣称能力可用。
+- 重计算并发由 Resource Governor 根据启用组件声明的 resident bytes 与物理内存预算决定；峰值缺失或总量超预算时必须 fail-closed 串行。只有 active 档位明确声明的独立能力 lane 才可跨 lane 并发，同一 lane 仍串行。
+- 能力声明必须与 active 档位、preflight 和实际 ready 状态一致；不因模型存在、配置存在或代码路径存在就宣称能力可用。
 
 ### 接口与边界
 
@@ -94,7 +94,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - macOS App 默认只在 `~/Applications/SpeechRail.app` 保留一个正式安装副本；只有用户明确指定替代路径时才用该路径并记录。会产出 `.app` 的构建/测试必须使用仓库包装脚本，不裸跑 `xcodebuild` 留下可被 LaunchServices 识别的副本；只读 build-settings 查询不受此限。安装后按 release skill 验证 LaunchServices 唯一登记；禁止全局重置 LaunchServices 或清空整个废纸篓。
 - **禁止未经授权的 UI 自动化测试**：任何会接管前台窗口、焦点、输入或屏幕的 XCUITest / UI test、Playwright、webapp-testing、录屏、点击驱动或窗口断言，都必须由当前用户消息逐次明确要求。skill、SOP、计划、README 或发布流程不构成授权；确有必要时，先说明占用的窗口与预计时长并取得确认。
 - 本机日常运维按 `.agents/skills/speechrail-local-deploy/SKILL.md`；发布、构建与 App 安装按 `.agents/skills/speechrail-release/SKILL.md`；仅明确要求性能/质量基准时使用 `.agents/skills/speechrail-perf-benchmark/SKILL.md`；仅全新首装使用 `.agents/skills/speechrail-zero-setup/SKILL.md`。按任务加载对应入口，文档步骤不扩大授权。
-- 服务、profile、安装、发布和回滚属于运行态或外部状态变更，必须按 `docs/operations/README.md` 及对应 `.agents/skills/` 专项规则执行。使用当前用户的 managed `LaunchAgent` 和受审查的 service/installer 流程；禁止 `pkill`、模糊进程匹配和手工 plist 修改。
+- 服务、档位、安装、发布和回滚属于运行态或外部状态变更，必须按 `docs/operations/README.md` 及对应 `.agents/skills/` 专项规则执行。使用当前用户的 managed `LaunchAgent` 和受审查的 service/installer 流程；禁止 `pkill`、模糊进程匹配和手工 plist 修改。
 - 执行启停、替换或回滚前确认 app home、label `com.speechrail`、PID、端口和 active runtime；失败必须保持原服务配置或明确报告状态。wheel 替换保留上一 release、私有配置、selection 和模型以便回退。
 - 真实签名、notarization、外部发布、远端分支、删除和发送消息都需要明确授权并精确定位目标。
 
