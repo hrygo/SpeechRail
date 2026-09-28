@@ -142,6 +142,7 @@ public struct TeleprompterView: View {
         .onDrop(of: [.fileURL, .plainText], isTargeted: nil) { providers in
             handleDrop(providers)
         }
+        .onAppear(perform: restorePreferredSpeechLanguage)
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [
@@ -2264,6 +2265,7 @@ public struct TeleprompterView: View {
                 .speechRailButton(.primary)
 
                 workbenchVoiceAssistControl
+                speechLanguageMenu
             }
 
             Spacer()
@@ -2462,6 +2464,51 @@ public struct TeleprompterView: View {
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%02d:%02d", mins, secs)
+    }
+
+    // MARK: - 识别语言（进阶设置）
+
+    /// `preferredSpeechLanguage` 只有在这里才会被写入生产路径。契约、连接配置
+    /// 与降级都已就绪，但在此之前它没有任何写入者，真实连接恒用服务端默认。
+    private var speechLanguageMenu: some View {
+        Menu {
+            Picker("识别语言", selection: Binding(
+                get: { session.preferredSpeechLanguage ?? "" },
+                set: { newValue in
+                    session.preferredSpeechLanguage = newValue.isEmpty ? nil : newValue
+                    UserDefaults.standard.set(
+                        newValue,
+                        forKey: TeleprompterRealtimeConfiguration.preferredSpeechLanguageDefaultsKey
+                    )
+                }
+            )) {
+                Text("自动（服务默认）").tag("")
+                ForEach(TeleprompterRealtimeConfiguration.speechLanguageChoices) { choice in
+                    Text(choice.label).tag(choice.code)
+                }
+            }
+        } label: {
+            Label(speechLanguageLabel, systemImage: "globe")
+        }
+        .speechRailButton(.secondary)
+        .help("脚本语言与识别默认不一致时才需要改；自动会沿用服务端的默认语言。")
+    }
+
+    private var speechLanguageLabel: String {
+        guard let code = session.preferredSpeechLanguage else { return "识别语言：自动" }
+        let name = TeleprompterRealtimeConfiguration.label(forSpeechLanguage: code) ?? code
+        return "识别语言：\(name)"
+    }
+
+    /// 恢复上次选择。存的是清洗后的值，非法值一律退回「自动」而不是带进连接。
+    private func restorePreferredSpeechLanguage() {
+        let stored = UserDefaults.standard.string(
+            forKey: TeleprompterRealtimeConfiguration.preferredSpeechLanguageDefaultsKey
+        )
+        session.preferredSpeechLanguage = TeleprompterRealtimeConfiguration(
+            language: stored,
+            keywords: []
+        ).sanitized.language
     }
 
     // MARK: - 剪贴板与数据辅助

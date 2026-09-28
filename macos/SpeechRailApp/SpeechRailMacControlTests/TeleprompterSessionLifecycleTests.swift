@@ -772,6 +772,30 @@ struct TeleprompterSessionLifecycleTests {
         #expect(recorder.value?.language == nil, "越界语言不应让连接失败")
     }
 
+    @Test("every offered recognition language survives contract sanitisation")
+    func offeredSpeechLanguagesAreAllContractValid() {
+        for choice in TeleprompterRealtimeConfiguration.speechLanguageChoices {
+            let sanitized = TeleprompterRealtimeConfiguration(language: choice.code).sanitized
+            #expect(
+                sanitized.language == choice.code,
+                "菜单里的「\(choice.label)」会被契约清洗成 nil：用户点了没有任何效果，而且不会报错"
+            )
+        }
+    }
+
+    @Test("a stored recognition language is sanitised before it reaches the connection")
+    func storedSpeechLanguageIsSanitisedBeforeUse() {
+        #expect(
+            TeleprompterRealtimeConfiguration(language: "中").sanitized.language == nil,
+            "越界值退回服务端默认，而不是带进连接"
+        )
+        #expect(TeleprompterRealtimeConfiguration(language: "").sanitized.language == nil)
+        #expect(
+            TeleprompterRealtimeConfiguration(language: "  zh  ").sanitized.language == "zh",
+            "存储里可能带空白，清洗后应恢复成可用值"
+        )
+    }
+
     @Test("explicit voice start uses the current segment and old failures cannot move it")
     func manualTakeoverInvalidatesOldPipeline() async throws {
         let drainGate = TestGate()

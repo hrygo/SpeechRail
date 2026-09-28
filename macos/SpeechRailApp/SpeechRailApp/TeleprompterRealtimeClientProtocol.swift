@@ -17,6 +17,31 @@ public struct TeleprompterRealtimeConfiguration: Sendable, Equatable {
     public static let contractMaxKeywordLength = 1000
     public static let contractLanguageRange = 2...24
 
+    /// The recognition language is an advanced hint: `nil` keeps whatever the
+    /// server defaults to, which is right for most scripts. The picker is
+    /// therefore collapsed into a labelled menu rather than sitting on the
+    /// default reading path.
+    public static let preferredSpeechLanguageDefaultsKey =
+        "speechrail.teleprompter.preferredSpeechLanguage.v1"
+
+    public struct SpeechLanguageChoice: Identifiable, Hashable, Sendable {
+        public let code: String
+        public let label: String
+        public var id: String { code }
+    }
+
+    public static let speechLanguageChoices: [SpeechLanguageChoice] = [
+        .init(code: "zh", label: "中文"),
+        .init(code: "en", label: "English"),
+        .init(code: "ja", label: "日本語"),
+        .init(code: "ko", label: "한국어"),
+        .init(code: "yue", label: "粤语")
+    ]
+
+    public static func label(forSpeechLanguage code: String) -> String? {
+        speechLanguageChoices.first { $0.code == code }?.label
+    }
+
     /// Keeps only values the wire contract accepts, so a bad setting degrades
     /// to "no hint" instead of failing the connection.
     public var sanitized: TeleprompterRealtimeConfiguration {
