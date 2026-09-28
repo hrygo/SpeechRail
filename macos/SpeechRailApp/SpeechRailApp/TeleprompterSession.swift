@@ -374,8 +374,13 @@ public final class TeleprompterSession {
     }
 
     public func deleteDocument(documentID: String) throws {
-        guard canEdit else { return }
-        guard phase != .following, phase != .paused, phase != .uncertain else { return }
+        // 破坏性操作上的「静默」比不做这个按钮更让人不安：读者点删除、在确认框
+        // 里点了「删除」、然后什么都没发生，界面那支 `do`/`catch` 还会把提示区
+        // 清成 nil。拒绝是对的（判据第 2、3 条），但必须有声音。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        guard phase != .following, phase != .paused, phase != .uncertain else {
+            throw TeleprompterTextError.sessionBusy
+        }
         try v2Store.delete(documentID: documentID)
         if document?.id == documentID {
             let remaining = try listDocuments()
@@ -457,7 +462,7 @@ public final class TeleprompterSession {
     }
 
     public func useDeterministicFallback() throws {
-        guard canEdit else { return }
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         // 「直接使用原稿」是 AI 不可用时的主恢复路径，也是成功目标里「用户能直接
         // 用原稿开讲」那句话的落点。这个函数推进的状态和 `acceptPendingVersion()`
         // 一样多，存盘失败时必须整体退回：否则界面上两个按钮用的是 `try?`，

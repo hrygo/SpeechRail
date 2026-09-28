@@ -1589,6 +1589,30 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.copyableDocumentText() == source)
     }
 
+    /// 第 47、49 条之后把会话层里所有 `guard canEdit else { return }` 横扫了一遍，
+    /// 共七处，`load` 已修，**剩下六处全是静默**。其中最刺眼的是 `deleteDocument`：
+    /// 读者点删除、**在确认框里点了「删除」**、然后什么都没发生，界面那支
+    /// `do`/`catch` 还会把 `operationMessage` 清成 nil。破坏性操作上「确认之后
+    /// 静默」，比不做这个按钮更让人不安。
+    @Test("deleting while the stage is live reports why it is refused")
+    func deletingWhileTheStageIsLiveIsRefusedLoudly() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.canEdit == false, "前提：语音开着时不允许破坏性操作")
+
+        #expect(throws: TeleprompterTextError.sessionBusy) {
+            try harness.session.deleteDocument(documentID: documentID)
+        }
+        #expect(harness.session.document?.id == documentID, "拒绝删除不得动稿件")
+        #expect(harness.session.phase == .following, "拒绝删除不得把舞台带下去")
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()
