@@ -2608,6 +2608,11 @@ public final class TeleprompterSession {
     /// 显式保存当前稿件，供工作台的失败恢复动作使用。
     public func save() throws {
         try saveBundle()
+        // 「重试保存」按钮存在的**前提**就是上次存盘失败了。存盘既然成功，横幅
+        // 就不能继续宣称失败——否则这个恢复入口永远恢复不了，读者只能去按旁边
+        // 的 ✕ 手动关掉，而那等于让应用继续断言一件已经不成立的事。
+        // `persistDraft()` 一直有这一行，只有显式 `save()` 漏了。
+        if case .storeUnavailable = blocked { blocked = nil }
     }
 
     // MARK: - v2 持久化桥接

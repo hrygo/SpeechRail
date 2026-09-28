@@ -1346,7 +1346,14 @@ public struct TeleprompterView: View {
 
                     case .storeUnavailable:
                         Button("重试保存") {
-                            try? session.save()
+                            do {
+                                try session.save()
+                                operationMessage = nil
+                            } catch {
+                                // 重试再次失败时不能一声不吭：读者刚腾出磁盘空间，
+                                // 看不到结果就只会以为按钮坏了。
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.primary)
                     }

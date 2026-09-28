@@ -1502,6 +1502,52 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.phase == .following, "拒绝切稿不得把舞台带下去")
     }
 
+    /// 「重试保存」按钮存在的**前提**就是上次存盘失败了。读者腾出磁盘空间后按下
+    /// 它，存盘确实成功了——但 `blocked` 仍然是 `.storeUnavailable`：横幅继续写着
+    /// 「稿件保存失败」，按钮也还在。再点多少次结果都一样，**这个恢复入口永远
+    /// 恢复不了**，只能靠旁边的 ✕ 手动关掉，而那等于让应用继续断言一件已经不
+    /// 成立的事。同一文件的 `persistDraft()` 成功后是会清掉它的（`if case
+    /// .storeUnavailable = blocked { blocked = nil }`），只有显式 `save()` 漏了。
+    @Test("a successful explicit save clears the store failure it was retrying")
+    func aSuccessfulExplicitSaveClearsTheStoreFailure() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        let documentsDirectory = harness.directory.appendingPathComponent("documents", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: documentsDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        harness.session.createDocument(title: "存盘失败", sourceText: "第一段内容。第二段内容。")
+        guard case .storeUnavailable = harness.session.blocked else {
+            Issue.record("前提：只读目录下新建稿件必须进入存盘失败态")
+            return
+        }
+
+        // 读者腾出空间后点「重试保存」。
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: documentsDirectory.path
+        )
+        try harness.session.save()
+
+        #expect(
+            harness.session.blocked != .storeUnavailable("稿子暂时没能保存，请稍后重试。"),
+            "存盘已经成功，横幅还宣称失败——恢复入口永远恢复不了"
+        )
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()
