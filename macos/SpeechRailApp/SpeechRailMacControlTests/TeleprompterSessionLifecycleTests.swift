@@ -1475,6 +1475,33 @@ struct TeleprompterSessionLifecycleTests {
         )
     }
 
+    /// 语音开着时 `canEdit` 为 false，`load(documentID:)` 于是**静默 return**——
+    /// 不抛错、不给消息。界面上那份文档行没有 `disabled` 门控，用户点另一份稿子
+    /// 什么都没发生，而那支 `do`/`catch` 还会把 `operationMessage` 清成 nil，连
+    /// 提示区都一并清空。判据第 2 条「切稿后旧事件不能推进」靠这个守卫成立，
+    /// 但**拒绝得没有声音**：读者只会以为应用卡了。
+    @Test("switching documents while the stage is live reports why it is refused")
+    func switchingDocumentsWhileTheStageIsLiveIsRefusedLoudly() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.useDeterministicFallback()
+        try harness.session.openForManualReading()
+        let documentID = try #require(harness.session.document?.id)
+        let versionID = try #require(harness.session.activeVersion?.id)
+
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.canEdit == false, "前提：语音开着时不允许切稿")
+
+        #expect(throws: TeleprompterTextError.sessionBusy) {
+            try harness.session.load(documentID: documentID)
+        }
+        // 拒绝必须是干净的：稿件、版本、阅读位置都不能动。
+        #expect(harness.session.document?.id == documentID)
+        #expect(harness.session.activeVersion?.id == versionID)
+        #expect(harness.session.phase == .following, "拒绝切稿不得把舞台带下去")
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()

@@ -2596,12 +2596,19 @@ public struct TeleprompterView: View {
     private func reloadDocuments() {
         do {
             documents = try session.listDocuments()
-            if session.document == nil, let first = documents.first {
-                try? session.load(documentID: first.id)
-            }
         } catch {
             documents = []
             operationMessage = error.localizedDescription
+            return
+        }
+        // 自动打开第一份稿件失败时，列表本身仍然有用——不能把两者混在同一个
+        // `catch` 里连列表一起清空，那会让读者看到一份空工作台且没有任何说明。
+        if session.document == nil, let first = documents.first {
+            do {
+                try session.load(documentID: first.id)
+            } catch {
+                operationMessage = error.localizedDescription
+            }
         }
     }
 

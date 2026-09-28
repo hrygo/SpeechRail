@@ -305,7 +305,11 @@ public final class TeleprompterSession {
     }
 
     public func load(documentID: String) throws {
-        guard canEdit else { return }
+        // 拒绝切稿是对的（判据第 2 条：切稿后旧事件不能推进），但**必须有声音**。
+        // 原来这里 `guard canEdit else { return }` 静默返回，界面上那份文档行
+        // 又没有 `disabled` 门控，读者点了另一份稿子什么都没发生，连提示区都被
+        // 同一支 `do`/`catch` 清成了 nil。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         invalidateAnalysis()
         applyV2Bundle(try v2Store.load(documentID: documentID))
     }
