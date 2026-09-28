@@ -39,10 +39,16 @@ concurrency:
 env:
   UV_VERSION: "0.12.13"
 
+# Runner labels are pinned instead of tracking the `ubuntu-latest` alias:
+# GitHub migrates that alias to Ubuntu 26 on 2026-10-19, which turns every
+# ubuntu job into a deprecation notice and silently moves the gate OS under us.
+# These jobs only need uv, a downloaded CPython and node, so the current LTS
+# image is the stable choice.
+
 jobs:
   change-scope:
     name: Change Scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run_python: ${{ steps.scope.outputs.run_python }}
@@ -123,7 +129,7 @@ jobs:
 
   quality:
     name: Quality Gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -151,8 +157,10 @@ jobs:
       # release and forces a full ~85MB re-download. restore-keys falls back to
       # the newest cache for this platform; uv is content-addressed, so it only
       # fetches what genuinely changed.
+      # Pinned to v6: v4.3.0 still targets the Node.js 20 runtime that GitHub
+      # deprecated, and v6 is the same action with unchanged inputs.
       - name: Restore uv download cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
@@ -246,8 +254,10 @@ jobs:
       # release and forces a full ~85MB re-download. restore-keys falls back to
       # the newest cache for this platform; uv is content-addressed, so it only
       # fetches what genuinely changed.
+      # Pinned to v6: v4.3.0 still targets the Node.js 20 runtime that GitHub
+      # deprecated, and v6 is the same action with unchanged inputs.
       - name: Restore uv download cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
@@ -409,7 +419,7 @@ jobs:
 
   gate-summary:
     name: Gate Summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [change-scope, quality, test, macos-app, package]
     if: ${{ always() }}

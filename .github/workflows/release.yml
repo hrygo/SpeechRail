@@ -15,10 +15,15 @@ concurrency:
 env:
   UV_VERSION: "0.12.13"
 
+# Runner labels are pinned instead of tracking the `ubuntu-latest` alias:
+# GitHub migrates that alias to Ubuntu 26 on 2026-10-19, which turns every
+# ubuntu job into a deprecation notice and silently moves the release jobs
+# onto a new OS under us. Neither job depends on Ubuntu specifics.
+
 jobs:
   verify-tag:
     name: Verify tag and project version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -128,7 +133,7 @@ jobs:
   publish:
     name: Publish GitHub Release assets
     needs: [verify-tag, ci, build-app]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
