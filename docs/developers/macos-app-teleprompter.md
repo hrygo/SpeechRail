@@ -62,6 +62,8 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 
 素材写错时 CLI 以退出码 2 拒绝，并指出具体字段与合法取值；不会产出可被误当作质量成绩的部分结果。跑之前先确认 `status` 不是 `not_run`。
 
+报告里每个安全数字都由标注推导：严重误推进只在 `improvise` 标注下计数，跟随与恢复延迟只在 `read` 标注带 `expected_segment_index` 时才有样本。素材里一条 `improvise` 都没有，误推进数就恒为 0——报告会明确写出「该检测项未被触发，不表示跟随不会越权推进」；同理，没有带位置的 `read` 标注时会写明分位为 null 只是未测量。**要让一次回放真正充当验收，素材必须包含即兴段与带位置的跟读段**，否则得到的只是一份没问过问题的答卷。
+
 ## AI 结果契约
 
 正常整理不再让同一个模型响应同时负责“划边界”和“写正文”。第一阶段只返回区间：
@@ -167,4 +169,6 @@ scripts/macos_app_build.sh --configuration Debug
 
 2026-09-29（第三轮）：端到端跑 `teleprompter-replay` 时发现素材 intent 契约与工具帮助文本不一致——`--help` 写 `re_read`／`manual_jump`，解码器只接受 `reRead`／`manualJump`，且失败信息是 Foundation 的通用句子，不指字段也不给合法取值。此前所有测试都用 Swift 构造枚举，没有字符串往返，所以没暴露。已让 `Intent` 显式钉住 raw value，并由 `manifestValues` 统一供给帮助文本与报错；解码失败改为指出字段与可接受取值；补两条回归钉住拼写。另新增「回放素材怎么写」一节：`expected_segment_index` 标的是读者已读到的段落而非系统确认到的段落，挂到系统已追上的事件会让延迟恒为 0 且不报错，第 0 段不产生延迟样本。CLI 与单测同形核对复现了单测断言的 400／1100 ms，确认 runner 驱动的是生产跟随路径。`swift test --package-path macos/SpeechRailApp` 206 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 206 项 / 16 套件，0 failures，exit 0）。
 
-2026-09-29（第四轮）：对抗性探测保真门禁时发现一处 fail-open——`TeleprompterProtectedContentValidator` 比较受保护原子的序列，提取器看不见的数字在两侧都不产生原子，精确序列比较因此得出「没有变化」。实测确认静默放行的包括 `1080p` → `4K`、`4K` → `8K`、`1e10` → `2e10`、`0x1F` → `0x2F`，以及 `29.97fps` 只抽出 `29`。根因是数字模式末尾的 `(?![A-Za-z0-9])` 拒绝任何紧跟 ASCII 字母的数字。已补进制前缀、指数与紧邻 ASCII 单位后缀；首部 lookbehind 保留，`A1`／`GPT4`／`ISO8601` 仍不产生数值原子。中文数字互改（`五十` → `五十一`）仍不受门禁保护，作为具名回归 `chineseNumeralsRemainOutsideTheHardGateByDesign` 钉成已知边界——直接加正则会大面积误拦 `第一次` → `首次` 这类无损改写。`swift test --package-path macos/SpeechRailApp` 210 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 210 项 / 16 套件，0 failures，exit 0）。
+2026-09-29（第四轮）：对抗性探测保真门禁时发现一处 fail-open——`TeleprompterProtectedContentValidator` 比较受保护原子的序列，提取器看不见的数字在两侧都不产生原子，精确序列比较因此得出「没有变化」。实测确认静默放行的包括 `1080p` → `4K`、`4K` → `8K`、`1e10` → `2e10`、`0x1F` → `0x2F`，以及 `29.97fps` 只抽出 `29`。根因是数字模式末尾的 `(?![A-Za-z0-9])` 拒绝任何紧跟 ASCII 字母的数字。已补进制前缀、指数与紧邻 ASCII 单位后缀；首部 lookbehind 保留，`A1`／`GPT4`／`ISO8601` 仍不产生数值原子。中文数字互改（`五十` → `五十一`）仍不受门禁保护，作为具名回归 `chineseNumeralsRemainOutsideTheHardGateByDesign` 钉成已知边界——直接加正则会大面积误拦 `第一次` → `首次` 这类无损改写。`swift test --package-path macos/SpeechRailApp` 212 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 212 项 / 16 套件，0 failures，exit 0）。
+
+2026-09-29（第五轮）：对抗性审查回放报告时发现，报告无法区分「测得为零」与「检测项从未被触发」——`harmfulJumpCount` 只在 `improvise` 标注下递增，延迟分位只在 `read` 标注带 `expected_segment_index` 时才有样本。一份不含 `improvise` 标注的素材会输出 `harmful_jump_count: 0` 与 `status: deterministic_replay`，读起来像一次干净验收，实际误推进检测从未触发；这正是「不以全部停住换取安全」在测量仪器层面的缺口。已在 caveat 层补上说明，不改 `teleprompter.eval.v1` schema。过程中先被这个现象误导过一次——把「读者在朗读」的素材标成 `improvise` 导致报告如实报出 1 次误推进，追踪控制器后确认行为正确（从锚点开始逐字连续的 final 按方案 §8.9 属于 continuous advance）。`swift test --package-path macos/SpeechRailApp` 212 项 / 16 套件通过；Xcode 单测 target TEST SUCCEEDED（XCTest 344 项、Swift Testing 212 项 / 16 套件，0 failures，exit 0）。
