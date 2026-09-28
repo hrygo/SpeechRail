@@ -97,6 +97,33 @@ struct TeleprompterPreparationDomainTests {
         )
     }
 
+    @Test func readingProgressRestoresTheRecordedSegmentStartWhenNoOffsetWasEverSaved() {
+        // Documents written before intra-segment progress existed decode with a
+        // nil offset. `TeleprompterV2Store` already proves the key may be
+        // absent; this pins what the reader then does with it — the recorded
+        // segment's own start, not the start of the script and not a stale
+        // offset borrowed from another segment.
+        let version = makeVersion(id: "v1", segmentTexts: ["第一段内容。", "第二段内容。"])
+        let saved = TeleprompterRunState(
+            documentID: "doc",
+            versionID: "v1",
+            currentSegmentID: "segment-1",
+            currentSegmentOffset: nil,
+            mode: .manual
+        )
+
+        let position = TeleprompterReadingProgressRestorer.position(
+            saved: saved,
+            versions: [version],
+            activeVersion: version
+        )
+
+        #expect(
+            position == .init(segmentIndex: 1, utf16Offset: 0),
+            "旧稿缺少句内偏移时必须回到该记录段的开头"
+        )
+    }
+
     @Test func importsBOMWithoutChangingSourceBytes() throws {
         let body = "# 标题\r\n\r\n😀欢迎。\n"
         let data = Data([0xEF, 0xBB, 0xBF]) + Data(body.utf8)

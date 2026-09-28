@@ -71,20 +71,28 @@
     - **仅供测试的公开别名**：`TeleprompterFollowController.hypothesisPosition` 是私有 `candidatePosition` 的别名；#107 的三位置分离在算法内部真实成立，不受此影响。
     - **既无文档声称、也无产品消费**：跟随诊断的 `queueAgeP95Milliseconds`／`matchP95Milliseconds`／`captureToSendP95Milliseconds`。控制器在生产中确实采集这些样本，但没有任何界面读取；方案与本报告都未声称它们对用户可见，因此**不记为缺陷**，只作为未认领范围提示承接团队。
 
+18. **旧稿的句内恢复落点此前没有任何回归覆盖（第四轮审查验收标准 3 时发现并补上）**：验收标准 3 要求「迁移失败保留原数据」。本轮实际只新增了两个持久化字段，且都可选——`TeleprompterV2RunSummary.lastSegmentOffset`（键 `last_segment_offset`）与 `TeleprompterRunState.currentSegmentOffset`。逐条核实后：
+    - **确认没有不可逆迁移**：两个字段都是 `Int?` 且带默认值，Swift 合成解码器对可选属性用 `decodeIfPresent`，旧 bundle 缺键即解为 `nil`。`current_segment_offset` 实际上根本不落盘——它只存在于 `TeleprompterRunState` 这个内存桥接类型里，加载时由 `applyV2Bundle` 从 `lastRun.lastSegmentOffset` 重建。真正跨版本落盘的只有 `last_segment_offset`，§6 的回退声明成立。
+    - **已有的旧格式回归只验了一半**：`runSummaryWrittenBeforeIntraSegmentProgressStillLoads` 删掉 `last_segment_offset` 后断言解出 `nil`，但**没有断言读者随后落在哪里**。而 `lastSegmentOffset` 的文档注释明确承诺「older payloads simply omit it … which restores the segment start」——这个承诺当时没有任何测试钉住。
+    - **恢复器的 nil 分支此前完全无覆盖**：`TeleprompterReadingProgressRestorer.position` 有三条测试，分别覆盖偏移 4、跨版本改文回落、跨版本同文迁移与越界钳制，**全部带非 nil 偏移**。而 `saved.currentSegmentOffset ?? 0` 这个 `?? 0` 正是每个升级前文档都会走的分支。
+    - **补上的回归**：`readingProgressRestoresTheRecordedSegmentStartWhenNoOffsetWasEverSaved` 用第二段（`segment-1`）而不是第一段做记录点，因此它能区分「回到该记录段的开头」与「盲目回退到全文开头」——后者是这个分支最自然的写错方式。
+    - **变异验证（这条测试确实有约束力）**：对 `position` 施加两次定向变异。第一次把返回改成恒定 `segmentIndex: 0, utf16Offset: 0`，新用例与既有用例一起变红——说明它不是孤例。第二次**只**在 nil 分支上插入 `guard saved.currentSegmentOffset != nil else { return nil }`，结果**同套件 13 条既有测试全部保持绿色，只有新增这条变红**。这证明既有覆盖确实漏掉了整个 nil 路径，而新增用例精确地锁住了它。生产文件在两次变异后均已还原，`git diff` 为空。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | 213 项 / 16 套件全部通过 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | 214 项 / 16 套件全部通过（2026-09-29 复跑） |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | 11 项通过 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
 | Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
-| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（XCTest 344 项、Swift Testing 213 项 / 16 套件，均 0 failures），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
+| Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（Swift Testing 214 项 / 16 套件，0 failures），进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条。本轮只新增 Swift Testing 用例，XCTest 项数不受影响 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
+| 回归有效性（变异验证） | 对 `TeleprompterReadingProgressRestorer` 施加两次定向变异 | 见 §2 第 18 条：其中只破坏 nil 分支的那次，**既有 13 条同套件测试全绿、仅新增用例变红** |
 
 ### 3.2 未执行（需要逐次授权）
 
