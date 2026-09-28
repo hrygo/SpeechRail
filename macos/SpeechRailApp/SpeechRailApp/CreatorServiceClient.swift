@@ -394,6 +394,10 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     public let streaming: VoiceStreamingCapability?
     /// 服务端声明的默认试听文案；缺失表示来源未知，客户端不要自行猜测语种。
     public let preview: VoicePreviewSample?
+    /// 服务端在当前运行事实下给出的正式制作准入。`available` 只说明可路由，
+    /// 克隆音色是否可正式配音必须读这个字段；缺失按未就绪处理。
+    public let productionReady: Bool?
+    public let productionReadyReason: String?
 
     public init(
         id: String,
@@ -417,7 +421,9 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         quality: VoiceQualityReportSnapshotV2? = nil,
         creation: VoiceCreationSnapshot? = nil,
         streaming: VoiceStreamingCapability? = nil,
-        preview: VoicePreviewSample? = nil
+        preview: VoicePreviewSample? = nil,
+        productionReady: Bool? = nil,
+        productionReadyReason: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -441,6 +447,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         self.creation = creation
         self.streaming = streaming
         self.preview = preview
+        self.productionReady = productionReady
+        self.productionReadyReason = productionReadyReason
     }
 
     public init(from decoder: Decoder) throws {
@@ -473,6 +481,11 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         creation = try container.decodeIfPresent(VoiceCreationSnapshot.self, forKey: .creation)
         streaming = try container.decodeIfPresent(VoiceStreamingCapability.self, forKey: .streaming)
         preview = try container.decodeIfPresent(VoicePreviewSample.self, forKey: .preview)
+        productionReady = try container.decodeIfPresent(Bool.self, forKey: .productionReady)
+        productionReadyReason = try container.decodeIfPresent(
+            String.self,
+            forKey: .productionReadyReason
+        )
     }
 
     enum CodingKeys: String, CodingKey {
@@ -497,6 +510,8 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case quality
         case creation
         case streaming
+        case productionReady = "production_ready"
+        case productionReadyReason = "production_ready_reason"
         case preview
     }
 }
@@ -839,7 +854,7 @@ public protocol SpeechRailCreatorClient: Sendable {
     func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest
-    ) async throws -> VoiceQualityReportSnapshotV2
+    ) async throws -> VoiceQualityRunResponse
 }
 
 public extension SpeechRailCreatorClient {
@@ -1109,7 +1124,7 @@ public extension SpeechRailCreatorClient {
     func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest
-    ) async throws -> VoiceQualityReportSnapshotV2 {
+    ) async throws -> VoiceQualityRunResponse {
         throw ServiceAPIClientError.http(
             statusCode: 501,
             code: "unsupported",

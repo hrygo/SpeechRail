@@ -754,8 +754,8 @@ public struct VoiceCloneView: View {
             StatusBanner(
                 tone: .healthy,
                 title: "音色已注册",
-                message: "「\(voice.name)」已写进本机音色库，可以在配音台直接选用。",
-                actionTitle: "去音色库查看",
+                message: "「\(voice.name)」已写进本机音色库。先检查配音效果，通过后就能正式制作。",
+                actionTitle: "前往音色库检查",
                 action: { navigation.request(.voiceLibrary) }
             )
         }

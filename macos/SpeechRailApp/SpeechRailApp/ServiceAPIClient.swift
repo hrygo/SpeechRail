@@ -221,7 +221,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 responseFormat: "wav",
                 speed: speed
             ),
-            options: options
+            // Audition is the permissive default, but an explicit caller
+            // request still wins: formal production states its policy on the
+            // options, so a client that only implements this primitive (such as
+            // the protocol's default createSpeechRender) cannot silently
+            // downgrade a deliverable to unverified output.
+            options: options.withValidationPolicy(
+                options.validationPolicy ?? "allow_unverified"
+            )
         ).audioData
     }
 
@@ -243,9 +250,10 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 responseFormat: "wav",
                 speed: speed
             ),
-            // Rebuilt by hand, so every option must be carried over — a
-            // dropped field silently disables that SpeechRail extension on
-            // the render path.
+            // The render path is formal production: pin the strict validation
+            // policy here (not just at the caller) so no caller can produce a
+            // deliverable from an unverified clone voice. Every other option
+            // is carried over from the caller.
             options: SpeechRailRequestOptions(
                 expectedVoiceRevision: options.expectedVoiceRevision,
                 expectedModelRevision: options.expectedModelRevision,
@@ -255,7 +263,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 purpose: options.purpose,
                 latencyBudgetMs: options.latencyBudgetMs,
                 languageOverride: options.languageOverride,
-                validationPolicy: options.validationPolicy
+                validationPolicy: "require_output_pass"
             )
         )
         var voiceRevision = options.expectedVoiceRevision
@@ -627,7 +635,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
     public func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest = VoiceQualityRunRequest()
-    ) async throws -> VoiceQualityReportSnapshotV2 {
+    ) async throws -> VoiceQualityRunResponse {
         guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
             throw ServiceAPIClientError.invalidURL
         }
