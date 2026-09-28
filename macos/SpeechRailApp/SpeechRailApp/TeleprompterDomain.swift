@@ -353,6 +353,104 @@ public enum TeleprompterPauseHint: String, Codable, Sendable, CaseIterable {
     case long
 }
 
+/// Why a reader-confirmed alias cannot be used. Every case fails closed: the
+/// alias is dropped from matching rather than applied loosely, because an alias
+/// that silently re-targets a different term would move the reading position
+/// onto text the reader never said.
+public enum TeleprompterAcceptedReadingRejection: Equatable, Sendable {
+    /// The recorded range no longer fits the segment (segment shortened or replaced).
+    case rangeOutOfBounds
+    /// The text at that range is no longer what the user confirmed — the segment
+    /// was edited after the alias was added, so the alias would point somewhere else.
+    case displayTextChanged
+    case emptySpokenText
+    case spokenTextTooLong
+    /// Display and spoken form do not carry the same numbers and units. An alias
+    /// must never be a way to launder a different quantity past the fidelity gate:
+    /// `50%` → `百分之五十` is fine, `50%` → `大约一半` is not.
+    case numericValuesDiffer
+    /// The alias overlaps another confirmed alias on the same segment.
+    case overlappingAlias
+    /// Written by a newer rule revision than this build understands. Dropping it is
+    /// the only safe answer: we cannot claim an entry passes rules we have not read.
+    case unknownRuleRevision
+}
+
+/// A reading the reader confirmed they will say instead of the displayed text,
+/// bound to exactly one occurrence inside one segment.
+///
+/// This exists for the cases deterministic normalisation cannot cover — product
+/// names and internal jargon the recogniser reliably mis-hears. Numeric and unit
+/// forms are already handled by `TeleprompterCanonicalizer`, so this type
+/// deliberately refuses any alias whose numbers do not survive normalisation.
+public struct TeleprompterAcceptedReading: Codable, Equatable, Sendable {
+    /// Bumped when the validation rules change so stored entries can be re-checked.
+    public static let currentRuleRevision = 1
+    public static let maximumSpokenTextLength = 60
+
+    /// UTF-16 range inside the owning segment's display text.
+    public let displayRange: TeleprompterSourceRange
+    /// The display substring at `displayRange`, recorded so a later edit that moves
+    /// the text invalidates the alias instead of silently re-targeting it.
+    public let displayText: String
+    /// What the reader will actually say.
+    public let spokenText: String
+    public let ruleRevision: Int
+
+    public init(
+        displayRange: TeleprompterSourceRange,
+        displayText: String,
+        spokenText: String,
+        ruleRevision: Int = TeleprompterAcceptedReading.currentRuleRevision
+    ) {
+        self.displayRange = displayRange
+        self.displayText = displayText
+        self.spokenText = spokenText
+        self.ruleRevision = ruleRevision
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayRange = "display_range"
+        case displayText = "display_text"
+        case spokenText = "spoken_text"
+        case ruleRevision = "rule_revision"
+    }
+
+    /// Re-checks this alias against the segment it claims to belong to.
+    ///
+    /// Callers pass the segment's current text: an alias recorded before an edit
+    /// must stop being honoured once the text it named has moved or changed.
+    public func rejection(inSegmentText segmentText: String) -> TeleprompterAcceptedReadingRejection? {
+        guard ruleRevision <= Self.currentRuleRevision else { return .unknownRuleRevision }
+        guard displayRange.isValid(in: segmentText) else { return .rangeOutOfBounds }
+        let nsText = segmentText as NSString
+        let substring = nsText.substring(with: NSRange(
+            location: displayRange.start,
+            length: displayRange.end - displayRange.start
+        ))
+        guard substring == displayText else {
+            return .displayTextChanged
+        }
+        let spoken = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spoken.isEmpty else { return .emptySpokenText }
+        guard spoken.count <= Self.maximumSpokenTextLength else { return .spokenTextTooLong }
+        guard TeleprompterAcceptedReading.numericFingerprint(of: displayText)
+                == TeleprompterAcceptedReading.numericFingerprint(of: spoken) else {
+            return .numericValuesDiffer
+        }
+        return nil
+    }
+
+    /// The numeric and unit content of a piece of text, after deterministic
+    /// normalisation. Two texts may stand in for each other only when this is
+    /// equal — that is what keeps an alias from swallowing a different quantity.
+    static func numericFingerprint(of text: String) -> [String] {
+        TeleprompterCanonicalizer.units(text)
+            .filter(\.isNumeric)
+            .map(\.value)
+    }
+}
+
 public struct TeleprompterSegment: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let ordinal: Int
@@ -360,6 +458,11 @@ public struct TeleprompterSegment: Codable, Equatable, Identifiable, Sendable {
     public var text: String
     public var keywords: [String]
     public var matchPhrases: [String]
+    /// Reader-confirmed alternative readings for specific occurrences in this
+    /// segment. Never produced by the model: the analysis schema caps
+    /// `match_phrases` at zero items, so these only ever come from an explicit
+    /// user confirmation. Each entry is bound to one occurrence — never global.
+    public var acceptedReadings: [TeleprompterAcceptedReading]
     public var pauseHint: TeleprompterPauseHint
 
     public init(
@@ -369,6 +472,7 @@ public struct TeleprompterSegment: Codable, Equatable, Identifiable, Sendable {
         text: String,
         keywords: [String] = [],
         matchPhrases: [String] = [],
+        acceptedReadings: [TeleprompterAcceptedReading] = [],
         pauseHint: TeleprompterPauseHint = .short
     ) {
         self.id = id
@@ -377,6 +481,7 @@ public struct TeleprompterSegment: Codable, Equatable, Identifiable, Sendable {
         self.text = text
         self.keywords = keywords
         self.matchPhrases = matchPhrases
+        self.acceptedReadings = acceptedReadings
         self.pauseHint = pauseHint
     }
 }

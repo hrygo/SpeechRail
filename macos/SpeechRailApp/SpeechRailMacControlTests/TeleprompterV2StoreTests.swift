@@ -23,6 +23,138 @@ struct TeleprompterV2StoreTests {
         #expect(loaded.versions[0].segments[0].readingRange == .init(start: 0, end: 4))
     }
 
+    /// `TeleprompterV2ReadingVersion.segments` is immutable, so a bundle that gains
+    /// a confirmed reading is rebuilt the same way the app rebuilds it.
+    private func bundle(
+        _ source: TeleprompterV2DocumentBundle,
+        segmentReadings: [TeleprompterAcceptedReading]
+    ) -> TeleprompterV2DocumentBundle {
+        var bundle = source
+        var version = source.versions[0]
+        var segments = version.segments
+        segments[0].acceptedReadings = segmentReadings
+        version = TeleprompterV2ReadingVersion(
+            id: version.id,
+            documentID: version.documentID,
+            sourceRevisionID: version.sourceRevisionID,
+            selectionSnapshot: version.selectionSnapshot,
+            readingText: version.readingText,
+            readingHash: version.readingHash,
+            blocks: version.blocks,
+            segments: segments,
+            goalSnapshot: version.goalSnapshot,
+            paceSnapshot: version.paceSnapshot,
+            estimate: version.estimate,
+            analysisSource: version.analysisSource,
+            createdAt: version.createdAt
+        )
+        bundle.versions = [version]
+        return bundle
+    }
+
+    /// #110 的别名必须真的落盘并在重开后还在——否则用户确认过的读法在下次打开
+    /// 时悄悄消失，跟随又会退回错词。
+    @Test @MainActor func confirmedReadingsSurviveSaveAndReload() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let ns = "第一段。" as NSString
+        let found = ns.range(of: "一段")
+        let bundle = bundle(fixture.bundle, segmentReadings: [
+            TeleprompterAcceptedReading(
+                displayRange: .init(start: found.location, end: found.location + found.length),
+                displayText: "一段",
+                spokenText: "壹段"
+            )
+        ])
+        try store.save(bundle)
+
+        let loaded = try store.load(documentID: bundle.document.id)
+        let alias = try #require(loaded.versions[0].segments[0].acceptedReadings.first)
+        #expect(alias.spokenText == "壹段")
+        #expect(alias.displayText == "一段")
+        #expect(alias.displayRange == .init(start: found.location, end: found.location + found.length))
+        #expect(loaded.versions[0].segments[0].text == "第一段。", "别名不得改动显示文本")
+    }
+
+    /// M-01：别名通道是后加的字段，旧稿根本没有这个键，仍必须能打开。
+    @Test @MainActor func aBundleWrittenBeforeTheAliasChannelStillLoads() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+        try store.save(fixture.bundle)
+
+        let url = directory.appendingPathComponent("\(fixture.bundle.document.id).json")
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        var versions = try #require(object["versions"] as? [[String: Any]])
+        var segments = try #require(versions[0]["segments"] as? [[String: Any]])
+        segments[0].removeValue(forKey: "accepted_readings")
+        versions[0]["segments"] = segments
+        object["versions"] = versions
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+        let loaded = try store.load(documentID: fixture.bundle.document.id)
+        #expect(loaded.versions[0].segments[0].acceptedReadings.isEmpty)
+        #expect(loaded.versions[0].segments[0].text == "第一段。")
+    }
+
+    /// 别名与它所属的段落写在同一次原子保存里，所以二者对不上说明调用方拼错了
+    /// bundle。此时必须拒绝保存，而不是存下一条日后会被丢掉、或更糟——被套用到
+    /// 别的词上的别名。
+    @Test @MainActor func aBundleWhoseReadingNoLongerMatchesItsSegmentIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let bundle = bundle(fixture.bundle, segmentReadings: [
+            TeleprompterAcceptedReading(
+                displayRange: .init(start: 0, end: 2),
+                displayText: "根本不存在于此段",
+                spokenText: "壹段"
+            )
+        ])
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle)
+        }
+        #expect(throws: TeleprompterV2StoreError.self) {
+            _ = try store.load(documentID: bundle.document.id)
+        }
+    }
+
+    /// 两条别名压在同一段文字上时，「谁生效」就没有确定答案了。与其让读取
+    /// 端自己挑一条，不如在存盘时就把这种 bundle 挡下来。
+    @Test @MainActor func aBundleCarryingTwoOverlappingReadingsIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let ns = "第一段。" as NSString
+        let first = ns.range(of: "第一")
+        let second = ns.range(of: "一段")
+        let bundle = bundle(fixture.bundle, segmentReadings: [
+            TeleprompterAcceptedReading(
+                displayRange: .init(start: first.location, end: first.location + first.length),
+                displayText: "第一",
+                spokenText: "蒂一"
+            ),
+            TeleprompterAcceptedReading(
+                displayRange: .init(start: second.location, end: second.location + second.length),
+                displayText: "一段",
+                spokenText: "壹段"
+            )
+        ])
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle)
+        }
+    }
+
     @Test @MainActor func sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched() throws {
         let fixture = try makeFixture()
         let directory = try makeDirectory()

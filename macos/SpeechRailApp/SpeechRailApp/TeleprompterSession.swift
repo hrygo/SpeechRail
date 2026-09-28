@@ -721,6 +721,118 @@ public final class TeleprompterSession {
         scheduleDraftSave()
     }
 
+    // MARK: - 用户确认的读法
+
+    /// Records a reading the reader confirmed they will say instead of the words on
+    /// screen, bound to one occurrence inside one segment.
+    ///
+    /// Deliberately narrow: it never rewrites the script, never touches other
+    /// segments, and refuses any alias whose numbers or units would not survive
+    /// deterministic normalisation. An alias is a pronunciation hint for the
+    /// matcher — never a way to display or record a different quantity.
+    @discardableResult
+    public func confirmReading(
+        segmentID: String,
+        displayRange: TeleprompterSourceRange,
+        spokenText: String
+    ) -> TeleprompterAcceptedReadingRejection? {
+        guard canEdit,
+              let versionIndex = versions.firstIndex(where: { version in
+                  version.segments.contains { $0.id == segmentID }
+              }),
+              let segmentIndex = versions[versionIndex].segments
+                  .firstIndex(where: { $0.id == segmentID })
+        else { return .displayTextChanged }
+
+        let segment = versions[versionIndex].segments[segmentIndex]
+        let alias = TeleprompterAcceptedReading(
+            displayRange: displayRange,
+            displayText: text(in: displayRange, source: segment.text) ?? "",
+            spokenText: spokenText
+        )
+        if let rejection = alias.rejection(inSegmentText: segment.text) { return rejection }
+
+        // Re-confirming the same occurrence replaces the previous reading rather
+        // than stacking a second one on the same words.
+        var aliases = segment.acceptedReadings.filter { $0.displayRange != displayRange }
+        aliases.append(alias)
+        let previous = version(at: versionIndex, withSegmentAt: segmentIndex, acceptedReadings: aliases)
+        versions[versionIndex] = previous
+        guard document != nil else { return .displayTextChanged }
+        let previousUpdatedAt = document?.updatedAt ?? Date()
+        document?.updatedAt = Date()
+        do {
+            try saveBundle()
+            return nil
+        } catch {
+            // Roll back so the interface never shows a reading the store would
+            // refuse to load again.
+            versions[versionIndex] = version(
+                at: versionIndex,
+                withSegmentAt: segmentIndex,
+                acceptedReadings: segment.acceptedReadings
+            )
+            document?.updatedAt = previousUpdatedAt
+            return .displayTextChanged
+        }
+    }
+
+    /// Removes one confirmed reading. The script itself is untouched.
+    @discardableResult
+    public func removeConfirmedReading(
+        segmentID: String,
+        displayRange: TeleprompterSourceRange
+    ) -> Bool {
+        guard canEdit,
+              let versionIndex = versions.firstIndex(where: { version in
+                  version.segments.contains { $0.id == segmentID }
+              }),
+              let segmentIndex = versions[versionIndex].segments
+                  .firstIndex(where: { $0.id == segmentID })
+        else { return false }
+        let before = versions[versionIndex].segments[segmentIndex].acceptedReadings
+        let remaining = before.filter { $0.displayRange != displayRange }
+        guard remaining.count != before.count else { return false }
+        let original = versions[versionIndex]
+        versions[versionIndex] = version(
+            at: versionIndex,
+            withSegmentAt: segmentIndex,
+            acceptedReadings: remaining
+        )
+        guard document != nil else {
+            versions[versionIndex] = original
+            return false
+        }
+        let previousUpdatedAt = document?.updatedAt ?? Date()
+        document?.updatedAt = Date()
+        do {
+            try saveBundle()
+            return true
+        } catch {
+            versions[versionIndex] = original
+            document?.updatedAt = previousUpdatedAt
+            return false
+        }
+    }
+
+    private func version(
+        at index: Int,
+        withSegmentAt segmentIndex: Int,
+        acceptedReadings: [TeleprompterAcceptedReading]
+    ) -> TeleprompterVersion {
+        var segments = versions[index].segments
+        segments[segmentIndex].acceptedReadings = acceptedReadings
+        let existing = versions[index]
+        return TeleprompterVersion(
+            id: existing.id,
+            documentID: existing.documentID,
+            sourceText: existing.sourceText,
+            segments: segments,
+            analysisSource: existing.analysisSource,
+            createdAt: existing.createdAt
+        )
+    }
+
     // MARK: - 待确认事项处理
 
     public func resolveReviewItem(id: String, action: TeleprompterReviewAction, customText: String? = nil) {
@@ -1350,6 +1462,11 @@ public final class TeleprompterSession {
         segments[index].text = text
         segments[index].keywords = []
         segments[index].matchPhrases = []
+        // 正文一改，按原文确认的读法就不再指向同一片字，和 keywords /
+        // matchPhrases 一样必须跟着作废。目前两处 pendingVersion 都从零重建
+        // 段落、不会带别名过来，所以这一行还够不着；留着是因为同一函数里
+        // 「文本变了就清掉派生数据」的约定不能只对两个字段成立。
+        segments[index].acceptedReadings = []
         self.pendingVersion = TeleprompterVersion(
             id: pendingVersion.id,
             documentID: pendingVersion.documentID,
@@ -2219,6 +2336,9 @@ public final class TeleprompterSession {
                 text: segment.text,
                 keywords: segment.keywords,
                 matchPhrases: segment.matchPhrases,
+                // Aliases are bound to a confirmed segment's exact text; the stored
+                // text is what the reader confirmed against, so they carry over.
+                acceptedReadings: segment.acceptedReadings,
                 pauseHint: segment.pauseHint
             )
         }
@@ -2519,6 +2639,7 @@ public final class TeleprompterSession {
                 text: segment.text,
                 keywords: segment.keywords,
                 matchPhrases: segment.matchPhrases,
+                acceptedReadings: segment.acceptedReadings,
                 pauseHint: segment.pauseHint
             )
         }

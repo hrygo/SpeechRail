@@ -299,6 +299,93 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.currentSegmentIndex == 1)
     }
 
+    @Test("a confirmed reading is stored as an alias without rewriting the script")
+    func confirmingAReadingStoresItWithoutChangingTheScript() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "读法别名",
+            sourceText: "SpeechRail 很快。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let original = try #require(harness.session.activeVersion?.segments.first)
+        let found = (original.text as NSString).range(of: "SpeechRail")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+
+        let rejection = harness.session.confirmReading(
+            segmentID: original.id,
+            displayRange: range,
+            spokenText: "SpeechRail"
+        )
+
+        #expect(rejection == nil)
+        let stored = try #require(harness.session.activeVersion?.segments.first)
+        // The script the reader sees and records is untouched; only the matcher
+        // gets a different token to look for.
+        #expect(stored.text == original.text)
+        #expect(stored.acceptedReadings.count == 1)
+        #expect(stored.acceptedReadings.first?.displayRange == range)
+        #expect(stored.acceptedReadings.first?.displayText == "SpeechRail")
+
+        // Re-confirming the same occurrence replaces rather than stacks, so the
+        // token stream cannot grow a second variant for the same words.
+        #expect(harness.session.confirmReading(
+            segmentID: original.id,
+            displayRange: range,
+            spokenText: "斯比尔雷尔"
+        ) == nil)
+        let replaced = try #require(harness.session.activeVersion?.segments.first)
+        #expect(replaced.acceptedReadings.count == 1)
+        #expect(replaced.acceptedReadings.first?.spokenText == "斯比尔雷尔")
+
+        #expect(harness.session.removeConfirmedReading(
+            segmentID: original.id,
+            displayRange: range
+        ))
+        #expect(harness.session.activeVersion?.segments.first?.acceptedReadings.isEmpty == true)
+        // Removing something that is not there reports honestly instead of
+        // pretending a save happened.
+        #expect(!(harness.session.removeConfirmedReading(
+            segmentID: original.id,
+            displayRange: range
+        )))
+    }
+
+    @Test("a confirmed reading that changes the number is refused and leaves no trace")
+    func confirmingAReadingThatChangesTheNumberIsRefused() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "别名数值",
+            sourceText: "覆盖率是 50%。第二段内容。第三段内容。"
+        )
+        try harness.session.openForManualReading()
+        let original = try #require(harness.session.activeVersion?.segments.first)
+        let found = (original.text as NSString).range(of: "50%")
+        #expect(found.location != NSNotFound)
+        let range = TeleprompterSourceRange(
+            start: found.location,
+            end: found.location + found.length
+        )
+
+        let rejection = harness.session.confirmReading(
+            segmentID: original.id,
+            displayRange: range,
+            spokenText: "大约一半"
+        )
+
+        #expect(rejection == .numericValuesDiffer)
+        let after = try #require(harness.session.activeVersion?.segments.first)
+        #expect(after.acceptedReadings.isEmpty)
+        #expect(after.text == original.text)
+        // A rejected confirmation must not have been written to the bundle either.
+        #expect(try #require(harness.session.activeVersion).segments.count == 3)
+    }
+
     @Test("manual display-line positioning preserves UTF-16 offsets and takes over voice assist")
     func manualDisplayLinePositionUsesExistingTakeover() async throws {
         let harness = try TeleprompterSessionHarness()
