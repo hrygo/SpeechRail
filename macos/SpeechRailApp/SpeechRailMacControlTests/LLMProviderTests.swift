@@ -702,6 +702,56 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(response.outcome, "received")
     }
 
+    @MainActor
+    func testAssistantStreamUsesLocalTemplateThinkingControl() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 200,
+                contentType: "text/event-stream",
+                body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"
+            )
+        ])
+
+        let stream = await makeProvider().stream(
+            configuration: localTemplateConfiguration,
+            messages: Self.messages,
+            apiKey: nil,
+            instructions: "语音对话契约"
+        )
+        var text = ""
+        for try await delta in stream { text += delta }
+
+        XCTAssertEqual(text, "好")
+        let body = try XCTUnwrap(FakeTransport.requestBodies().first)
+        XCTAssertEqual(
+            (body["chat_template_kwargs"] as? [String: Bool])?["enable_thinking"],
+            false
+        )
+        XCTAssertNil(body["reasoning"])
+    }
+
+    @MainActor
+    func testAssistantStreamDoesNotRetryWithoutThinkingControl() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json", body: Self.rejectedBody),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+
+        let stream = await makeProvider().stream(
+            configuration: localTemplateConfiguration,
+            messages: Self.messages,
+            apiKey: nil,
+            instructions: "语音对话契约"
+        )
+        do {
+            for try await _ in stream {}
+            XCTFail("语音助手不能在关闭 thinking 失败后省略控制字段重试")
+        } catch let error as LLMError {
+            XCTAssertEqual(error, .thinkingControlUnavailable)
+        }
+        XCTAssertEqual(FakeTransport.requestBodies().count, 1)
+    }
+
     // MARK: - D10：Responses 流必须以明确的成功终态收束
 
     @MainActor
@@ -1131,6 +1181,24 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertNil(probes[1]["chat_template_kwargs"], "第二次探测不该再带上被拒绝的参数")
         XCTAssertEqual(probes[0]["max_output_tokens"] as? Int, 16)
         XCTAssertEqual(probes[1]["model"] as? String, "test-model")
+    }
+
+    func testAssistantProbeRequiresThinkingControl() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 400, contentType: "application/json", body: Self.rejectedBody),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+
+        let result = await makeProvider().check(
+            configuration: localTemplateConfiguration,
+            apiKey: nil,
+            operation: .responses,
+            requiresThinkingDisabled: true
+        )
+
+        XCTAssertFalse(result.isReady)
+        XCTAssertEqual(probeBodies().count, 1)
     }
 
     func testConnectionProbeDoesNotRetryUnrelatedBadRequest() async throws {

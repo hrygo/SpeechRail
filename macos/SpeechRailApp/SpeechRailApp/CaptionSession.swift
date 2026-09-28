@@ -326,7 +326,7 @@ public final class CaptionSession {
 
         let client = RealtimeASRClient(
             port: port,
-            silenceDurationMilliseconds: 400,
+            silenceDurationMilliseconds: RealtimeVADProfile.caption.silenceDurationMilliseconds,
             diarizationEnabled: diarizationEnabled,
             apiKey: apiKey,
             expectedASRRevision: binding?.asrModelRevision
@@ -519,7 +519,7 @@ public final class CaptionSession {
         // 否则这一段的归属会静默丢掉。
         let client = RealtimeASRClient(
             port: port,
-            silenceDurationMilliseconds: 400,
+            silenceDurationMilliseconds: RealtimeVADProfile.caption.silenceDurationMilliseconds,
             diarizationEnabled: diarizationActive,
             apiKey: apiKey,
             expectedASRRevision: binding?.asrModelRevision

@@ -102,7 +102,8 @@ final class AssistantSessionTests: XCTestCase {
         func check(
             configuration: LLMConfiguration,
             apiKey: String?,
-            operation: LLMOperation
+            operation: LLMOperation,
+            requiresThinkingDisabled: Bool
         ) async -> LLMConnectionResult {
             checkCount += 1
             return isReady
@@ -384,6 +385,7 @@ final class AssistantSessionTests: XCTestCase {
         let llm: FakeAssistantLLM
         let audio: FakeAssistantAudio
         let clients: () -> [FakeAssistantRealtime]
+        let configurations: () -> [AssistantRealtimeClientConfiguration]
         let defaults: UserDefaults
         let directory: URL
     }
@@ -470,6 +472,7 @@ final class AssistantSessionTests: XCTestCase {
             llm: llm,
             audio: audio,
             clients: { box.clients },
+            configurations: { box.configurations },
             defaults: defaults,
             directory: directory
         )
@@ -963,6 +966,7 @@ final class AssistantSessionTests: XCTestCase {
             llm: llm,
             audio: audio,
             clients: { [] },
+            configurations: { [] },
             defaults: defaults,
             directory: directory
         )
@@ -1179,6 +1183,32 @@ final class AssistantSessionTests: XCTestCase {
     }
 
     // MARK: - 基线：这份夹具本身能跑通 start → ask → end
+
+    func testDuplexUsesItsPauseWindowOnStartAndReconnect() async throws {
+        let harness = try await makeHarness()
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        XCTAssertEqual(harness.configurations().map(\.silenceDurationMilliseconds), [900])
+
+        await harness.clients()[0].emit(.closed(code: 1006))
+        await waitUntil({ harness.session.blocked != nil }, message: "断线没有进入受阻态")
+        await harness.session.retry()
+        XCTAssertEqual(harness.configurations().map(\.silenceDurationMilliseconds), [900, 900])
+    }
+
+    func testTurnTakingWaitsLongerForQuestionCompletion() async throws {
+        let harness = try await makeHarness()
+        defer { cleanup(harness) }
+
+        await harness.session.start(
+            persona: SessionPreferences.catalog[0],
+            voiceID: nil,
+            mode: .turnTaking
+        )
+        await waitUntil({ harness.configurations().count == 1 }, message: "一问一答没有建连")
+        XCTAssertEqual(harness.configurations()[0].silenceDurationMilliseconds, 1_200)
+    }
 
     func testHarnessStartsAndStopsThroughTheProductionSession() async throws {
         let harness = try await makeHarness(llmScripts: [.deltas(["你好", "。"])])

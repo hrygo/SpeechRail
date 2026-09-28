@@ -718,7 +718,8 @@ public final class AssistantSession {
         let result = await provider.check(
             configuration: configuration,
             apiKey: key,
-            operation: .responses
+            operation: .responses,
+            requiresThinkingDisabled: true
         )
         try requireLive(token)
         guard result.isReady else {
@@ -762,7 +763,7 @@ public final class AssistantSession {
         let client = dependencies.makeRealtimeClient(
             AssistantRealtimeClientConfiguration(
                 port: port,
-                silenceDurationMilliseconds: 400,
+                silenceDurationMilliseconds: RealtimeVADProfile.assistant(mode).silenceDurationMilliseconds,
                 voice: binding?.canonicalVoiceID ?? voiceID,
                 apiKey: serviceKey,
                 expectedASRRevision: binding?.asrModelRevision,

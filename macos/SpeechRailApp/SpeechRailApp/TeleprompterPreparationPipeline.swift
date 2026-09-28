@@ -481,6 +481,7 @@ public enum TeleprompterAIObservability {
             case .http(let status, _), .httpWithRetry(let status, _, _): return "http_\(status)"
             case .notChatAPI: return "not_chat_api"
             case .notResponsesAPI: return "not_responses_api"
+            case .thinkingControlUnavailable: return "thinking_control_unavailable"
             case .unsupportedStructuredOutput: return "unsupported_structured_output"
             case .outputTruncated: return "output_truncated"
             case .invalidStructuredResponse: return "invalid_structured_response"
@@ -1709,6 +1710,7 @@ private extension TeleprompterPreparationPipeline {
             return status == 408 || status == 409 || status == 425 || status == 429
                 || (500...599).contains(status)
         case .notConfigured, .badBaseURL, .notResponsesAPI, .notChatAPI,
+             .thinkingControlUnavailable,
              .unsupportedStructuredOutput, .refused, .cancelled:
             return false
         }

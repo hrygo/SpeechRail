@@ -19,7 +19,8 @@ public protocol AssistantLLM: Sendable {
     func check(
         configuration: LLMConfiguration,
         apiKey: String?,
-        operation: LLMOperation
+        operation: LLMOperation,
+        requiresThinkingDisabled: Bool
     ) async -> LLMConnectionResult
     func stream(
         configuration: LLMConfiguration,

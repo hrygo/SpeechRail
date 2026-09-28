@@ -661,6 +661,8 @@ public enum LLMError: LocalizedError, Equatable {
     case notResponsesAPI
     /// 端点没有 Chat Completions API（404/405，或返回里明确说没有）。
     case notChatAPI
+    /// 语音助手要求关闭推理，但端点拒绝了所选兼容模式的控制字段。
+    case thinkingControlUnavailable
     /// 端点可达，但不支持请求要求的严格结构化输出。
     case unsupportedStructuredOutput
     case outputTruncated
@@ -684,6 +686,8 @@ public enum LLMError: LocalizedError, Equatable {
             body.isEmpty ? "服务返回了 \(status)，请稍后重试。" : "服务返回了 \(status)：\(body)"
         case .notResponsesAPI: "这个服务没有 Responses API。"
         case .notChatAPI: "这个服务没有 Chat Completions API。"
+        case .thinkingControlUnavailable:
+            "当前服务不支持所选的关闭推理方式。请检查模型的兼容模式。"
         case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"
         case .outputTruncated: "整理结果可能未完成，请缩小处理范围后重试。"
         case .invalidStructuredResponse: "模型返回的整理结果无法使用，请重试。"
@@ -1469,6 +1473,7 @@ public actor LLMProvider {
     ) async throws {
         let controlKey = thinkingKey(configuration, operation: .responses)
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+        guard includeThinkingControl else { throw LLMError.thinkingControlUnavailable }
         var bytes: URLSession.AsyncBytes?
         var streamStartedAt: Date?
         var streamResponseCapture: SpeechRailOpenAIResponseCapture?
@@ -1602,12 +1607,12 @@ public actor LLMProvider {
                 errorCode: TeleprompterAIObservability.errorCode(for: failure),
                 operation: .responses
             )
-            // 端点不认识关 thinking 的那组参数时只失败一次：记下来，再按不带它的形状重发。
+            // 语音助手不能在关闭推理失败后省略控制字段继续生成。
             guard attempt == 0, includeThinkingControl, Self.rejectsThinkingControl(failure) else {
                 throw failure
             }
             thinkingControlRejected.insert(controlKey)
-            includeThinkingControl = false
+            throw LLMError.thinkingControlUnavailable
         }
         guard let bytes, let streamStartedAt, let streamResponseCapture else {
             let failure = LLMError.transport("请求没有完成")
@@ -1989,7 +1994,8 @@ public actor LLMProvider {
     public func check(
         configuration: LLMConfiguration,
         apiKey: String?,
-        operation: LLMOperation = .responses
+        operation: LLMOperation = .responses,
+        requiresThinkingDisabled: Bool = false
     ) async -> LLMConnectionResult {
         guard configuration.isConfigured else { return .notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential else { return .badBaseURL }
@@ -2011,6 +2017,9 @@ public actor LLMProvider {
         let controlKey = thinkingKey(configuration, operation: operation)
         let sessionID = "check-\(UUID().uuidString)"
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+        if requiresThinkingDisabled && !includeThinkingControl {
+            return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
+        }
         let data: Data
         let response: URLResponse
         do {
@@ -2031,6 +2040,9 @@ public actor LLMProvider {
                     body: String(decoding: result.0, as: UTF8.self)
                ) {
                 thinkingControlRejected.insert(controlKey)
+                if requiresThinkingDisabled {
+                    return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
+                }
                 includeThinkingControl = false
                 result = try await session.data(
                     for: Self.probeRequest(

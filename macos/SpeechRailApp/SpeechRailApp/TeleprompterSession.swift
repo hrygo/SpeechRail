@@ -1687,7 +1687,7 @@ public final class TeleprompterSession {
         let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey)
             ?? RealtimeASRClient(
                 port: port,
-                silenceDurationMilliseconds: 400,
+                silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
                 diarizationEnabled: false,
                 apiKey: apiKey,
                 expectedASRRevision: binding?.asrModelRevision

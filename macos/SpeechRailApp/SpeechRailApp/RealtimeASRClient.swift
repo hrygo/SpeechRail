@@ -1,6 +1,28 @@
 import Foundation
 import SpeechRailControlKit
 
+/// App 场景的断句预设。短暂停顿是否结束一轮由调用方场景决定，
+/// Realtime 服务只执行这里传入的静音窗口。
+enum RealtimeVADProfile: Sendable {
+    case assistantTurnTaking
+    case assistantDuplex
+    case caption
+    case meeting
+    case teleprompter
+
+    static func assistant(_ mode: AssistantMode) -> Self {
+        mode == .turnTaking ? .assistantTurnTaking : .assistantDuplex
+    }
+
+    var silenceDurationMilliseconds: Int {
+        switch self {
+        case .assistantTurnTaking: 1_200
+        case .assistantDuplex, .meeting: 900
+        case .caption, .teleprompter: 400
+        }
+    }
+}
+
 enum RealtimeASRSocketFrame: Sendable {
     case text(String)
     case data(Data)
@@ -942,8 +964,7 @@ public actor RealtimeASRClient {
     private let url: URL
     private let apiKey: String?
     private let model: String
-    /// 静音窗口。**字幕 400 ms / 会议 900 ms**（`SCOPE-DECISIONS` 的口径，也是
-    /// 服务端既有策略）：字幕要快，会议要整句。
+    /// 静音窗口由 App 的场景预设选择；服务端据此确定句末。
     private let silenceDurationMilliseconds: Int
     private let threshold: Double
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。

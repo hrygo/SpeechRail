@@ -381,8 +381,7 @@ public final class MeetingSession {
 
         let client = RealtimeASRClient(
             port: port,
-            // 会议 900 ms：要整句，不要抢速度（§5.3）。
-            silenceDurationMilliseconds: 900,
+            silenceDurationMilliseconds: RealtimeVADProfile.meeting.silenceDurationMilliseconds,
             diarizationEnabled: wantsDiarization,
             apiKey: serviceKey,
             expectedASRRevision: binding?.asrModelRevision
