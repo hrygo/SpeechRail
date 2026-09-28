@@ -502,6 +502,33 @@ def transcode_and_validate_clone_audio(
         raise ValueError(f"audio transcoding failed: {err_msg}")
 
     wav_bytes = proc.stdout
+    duration = validate_transcoded_clone_wav(
+        wav_bytes,
+        min_duration=min_duration,
+        max_duration=max_duration,
+        target_sample_rate=target_sample_rate,
+        skip_signal_validation=skip_signal_validation,
+    )
+    return wav_bytes, duration
+
+
+def validate_transcoded_clone_wav(
+    wav_bytes: bytes,
+    *,
+    min_duration: float = 2.0,
+    max_duration: float = 45.0,
+    target_sample_rate: int = 24_000,
+    skip_signal_validation: bool = False,
+) -> float:
+    """Validate a bounded in-memory 24kHz mono PCM16 WAV and return its duration.
+
+    This is the shared single source of truth for clone reference container,
+    duration and (optional) signal checks. Both the synchronous transcode helper
+    and the async HTTP transcode path delegate here so the WAV boundary rules
+    cannot drift between them. ``skip_signal_validation`` is True on the HTTP
+    path so the authoritative quality gate (``grade_reference_quality``) remains
+    the single classifier for reference audio quality.
+    """
     max_pcm_bytes = int(max_duration * target_sample_rate * 2) + 2048
     if len(wav_bytes) > max_pcm_bytes:
         raise ValueError(
@@ -550,7 +577,7 @@ def transcode_and_validate_clone_audio(
 
     if not skip_signal_validation:
         _validate_clone_audio_signal(wav_bytes, target_sample_rate=target_sample_rate)
-    return wav_bytes, duration
+    return duration
 
 
 def _validate_clone_audio_signal(wav_bytes: bytes, *, target_sample_rate: int) -> None:
@@ -1984,5 +2011,6 @@ __all__ = [
     "transcode_and_validate_clone_audio",
     "tts_voice_class",
     "use_voice_profile",
+    "validate_transcoded_clone_wav",
     "voice_revision_for_clone",
 ]

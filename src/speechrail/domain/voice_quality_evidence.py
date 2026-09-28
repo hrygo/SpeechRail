@@ -128,6 +128,7 @@ def build_quality_evidence(
             "preprocess_version",
             "generation_recipe_revision",
             "policy_version",
+            "capability_key",
         )
     } if validation_binding is not None else None
 

@@ -15,6 +15,7 @@ from speechrail.application.voice_validation_gate import (
 )
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.tts import VoiceStoreUnavailableError, get_voice_registry, resolve_voice
+from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
@@ -24,6 +25,11 @@ def create_capability_router(services: AppServices) -> APIRouter:
     router = APIRouter()
     active = active_model_catalog(services.settings)
     epoch = uuid4().hex
+    capability_key = (
+        tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
+        if active.tts_spec is not None
+        else None
+    )
 
     def asr_capability_facts() -> dict[str, object]:
         """Declared ASR-side facts for discovery; never includes busy state."""
@@ -64,6 +70,7 @@ def create_capability_router(services: AppServices) -> APIRouter:
                     active.tts_clone,
                     services.tts_synthesizer,
                     require_current_binding=True,
+                    capability_key=capability_key,
                 )
                 validation_bindings[profile.id] = binding.as_mapping()
                 evidence = load_validation_evidence(

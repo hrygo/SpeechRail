@@ -249,6 +249,27 @@ class Qwen3TtsWorker:
         async with self._lock:
             await self._start_locked()
 
+    async def prepare(
+        self,
+        *,
+        expected_voice_revision: str | None = None,
+    ) -> str:
+        """Load this lane's worker and return its observed runtime identity."""
+
+        del expected_voice_revision
+        async with self._incremental_slot, self._lock:
+            if not self._started:
+                await self._start_locked()
+            revision = self.runtime_revision
+            if revision is None:
+                raise TtsBackendError(
+                    "voice_validation_runtime_unavailable",
+                    stage="validate",
+                    public_code="voice_validation_runtime_unavailable",
+                    retryable=True,
+                )
+            return revision
+
     async def _start_locked(self) -> None:
         if self._started:
             return
@@ -342,6 +363,16 @@ class Qwen3TtsWorker:
                 async with self._incremental_slot, self._lock:
                     if not self._started:
                         await self._start_locked()
+                    if (
+                        request.expected_runtime_revision is not None
+                        and self.runtime_revision != request.expected_runtime_revision
+                    ):
+                        raise TtsBackendError(
+                            "voice_validation_runtime_changed",
+                            stage="validate",
+                            public_code="voice_validation_runtime_changed",
+                            retryable=False,
+                        )
                     epoch = self._epoch
                     self.last_active = time.monotonic()
                     response_id = f"resp_{uuid4().hex}"
@@ -936,6 +967,19 @@ class Qwen3TtsCapabilityRouter:
             return None
         worker = self._workers.get(role)
         return worker.runtime_revision if worker is not None else None
+
+    async def prepare_voice(
+        self,
+        voice: str,
+        *,
+        expected_voice_revision: str | None = None,
+    ) -> str:
+        """Prepare only the worker lane that owns ``voice``."""
+
+        _role, worker = self._require_runtime_worker(voice)
+        return await worker.prepare(
+            expected_voice_revision=expected_voice_revision,
+        )
 
     def _require_runtime_worker(self, voice: str) -> tuple[str, Qwen3TtsWorker]:
         """Resolve one voice to its plan role and resident worker, or fail closed."""

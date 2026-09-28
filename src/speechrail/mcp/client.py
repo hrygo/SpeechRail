@@ -410,9 +410,12 @@ class SpeechRailClient:
             body["instructions"] = instruction
         if seed is not None:
             body["seed"] = seed
-        if validation_policy != "allow_unverified":
-            body["validation_policy"] = validation_policy
         headers: dict[str, str] = {}
+        if validation_policy != "allow_unverified":
+            # The OpenAI-compatible body forbids extra fields; the service
+            # rejects a body-borne `validation_policy` outright. The policy is
+            # a SpeechRail header, exactly like the revision pins below.
+            headers["SpeechRail-Validation-Policy"] = validation_policy
         if expected_voice_revision is not None:
             headers["SpeechRail-Expected-Voice-Revision"] = expected_voice_revision
         if expected_model_revision is not None:

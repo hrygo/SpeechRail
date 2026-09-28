@@ -9,7 +9,6 @@ import json
 import logging
 import struct
 import wave
-from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -59,7 +58,9 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.tts import (
+    SYSTEM_VOICE_PROFILES,
     VOICE_ALIASES,
+    VOICE_ID_RE,
     VoiceAlreadyExistsError,
     VoiceInUseError,
     VoiceProfile,
@@ -78,10 +79,14 @@ from speechrail.domain.tts_pronunciation import (
     PronunciationStoreUnavailableError,
     get_pronunciation_registry,
 )
+from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
-from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
+from speechrail.domain.voice_validation import (
+    OUTPUT_VALIDATION_SCOPE,
+    VoiceValidationStoreUnavailableError,
+)
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.runtime.admission import QueueFullError
@@ -270,6 +275,11 @@ def _voice_entry(
     )
     validation: dict[str, Any] | None = None
     validation_state: dict[str, object]
+    capability_key = (
+        tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
+        if active.tts_spec is not None
+        else None
+    )
     if profile.mode == "clone":
         try:
             repository = get_voice_registry().validation_store
@@ -280,6 +290,7 @@ def _voice_entry(
                     repository,
                     synthesizer,
                     require_current_binding=True,
+                    capability_key=capability_key,
                 )
             else:
                 validation = repository.get(
@@ -300,12 +311,14 @@ def _voice_entry(
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
+    binding_resolved = True
     binding_variant = variant
     if binding_variant in {"voice_design", "custom_voice", "base"}:
         try:
             binding = resolve_binding(binding_variant, profile.id)
         except ValueError:
             available = False
+            binding_resolved = False
         else:
             capabilities = binding.capabilities
             supports_speaker = capabilities.supports_speaker
@@ -325,6 +338,9 @@ def _voice_entry(
         "is_system": profile.is_system,
         "created_at": profile.created_at,
         "available": available,
+        # `available` can still have been flipped to False by the binding
+        # resolution above, so the reason is derived from the final value
+        # rather than restating "available" unconditionally.
         "availability_reason": (
             "disabled"
             if not enabled
@@ -332,6 +348,10 @@ def _voice_entry(
             if profile.revoked
             else "backend_not_ready"
             if not tts_ready
+            else "binding_unavailable"
+            if not binding_resolved
+            else "voice_not_available"
+            if not available
             else "available"
         ),
         "variant": binding_variant,
@@ -550,17 +570,66 @@ async def _read_uploaded_audio(
     return bytes(content), None
 
 
-def _transcode_clone_audio(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
-    from speechrail.domain.tts import transcode_and_validate_clone_audio
+async def _transcode_clone_audio(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
+    """Transcode reference audio without blocking the ASGI event loop.
 
-    return transcode_and_validate_clone_audio(
-        audio_content,
-        ffmpeg_path=ffmpeg_cmd,
+    The child stdout is read through the shared bounded executor so a long or
+    malformed reference can never grow the process heap, and cancellation or a
+    timeout reaps the exact child instead of leaking it into the worker.
+    """
+    from speechrail.application.ffmpeg import run_ffmpeg_subprocess
+    from speechrail.domain.tts import validate_transcoded_clone_wav
+
+    if not audio_content:
+        raise ValueError("audio content must not be empty")
+    if len(audio_content) > 15 * 1024 * 1024:
+        raise ValueError("audio file exceeds 15MB limit")
+
+    target_sample_rate = 24_000
+    max_duration = 45.0
+    # 45s of 24kHz mono PCM16 plus a generous WAV header margin. Exceeding this
+    # is rejected outright; we never silently truncate with -t.
+    max_output_bytes = int(max_duration * target_sample_rate * 2) + 64 * 1024
+    try:
+        wav_bytes = await run_ffmpeg_subprocess(
+            (
+                ffmpeg_cmd,
+                "-nostdin",
+                "-threads",
+                "1",
+                "-v",
+                "error",
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                str(target_sample_rate),
+                "-f",
+                "wav",
+                "pipe:1",
+            ),
+            audio_content,
+            max_output_bytes=max_output_bytes,
+            output_limit_error=ValueError(
+                f"audio exceeds maximum allowed size for {max_duration}s duration (too long)"
+            ),
+            timeout_error=ValueError("audio transcoding timed out"),
+            failure_error=ValueError("audio transcoding failed"),
+            timeout_seconds=10.0,
+        )
+    except FileNotFoundError as exc:
+        # The bounded executor surfaces a missing binary as FileNotFoundError;
+        # keep the historical 500 dependency_missing contract for this route.
+        raise RuntimeError("ffmpeg_not_found") from exc
+    duration = validate_transcoded_clone_wav(
+        wav_bytes,
         min_duration=2.0,
-        max_duration=45.0,
-        target_sample_rate=24_000,
+        max_duration=max_duration,
+        target_sample_rate=target_sample_rate,
         skip_signal_validation=True,
     )
+    return wav_bytes, duration
 
 
 _CLONE_SPEED_UNSUPPORTED_CODE = vq.VoiceQualityFailureCode.CLONE_SPEED_UNSUPPORTED.value
@@ -571,6 +640,31 @@ _TRANSCRIPTION_UNAVAILABLE_CODE = (
 _TRANSCRIPT_PASS_SCORE = 0.92
 _TRANSCRIPT_WARN_SCORE = 0.80
 _MAX_QUALITY_PROBE_PCM_BYTES = 30 * 24_000 * 2
+_CLONE_NAME_MAX_LENGTH = 32
+_CLONE_REF_TEXT_MAX_LENGTH = 2_000
+
+
+def _normalized_clone_voice_id(voice_id: object) -> tuple[str | None, str | None]:
+    """Normalize an optional requested clone voice id and reject reserved ids.
+
+    ``POST /v1/voices/clone/validate`` runs the same pipeline as
+    ``POST /v1/voices/clone`` without persisting anything, so both routes must
+    accept exactly the same ids. Sharing this check keeps a dry run from
+    reporting "参考音频合格" for an id that registration then rejects.
+    """
+
+    if not isinstance(voice_id, str) or not voice_id.strip():
+        return None, None
+    normalized = voice_id.strip().lower()
+    if (
+        VOICE_ID_RE.fullmatch(normalized) is None
+        or normalized in SYSTEM_VOICE_PROFILES
+        or normalized in VOICE_ALIASES
+    ):
+        return None, (
+            "Voice id must match ^[a-zA-Z0-9_-]{1,64}$ and must not be reserved"
+        )
+    return normalized, None
 
 
 def _classify_probe_failure(exc: BaseException) -> str:
@@ -1669,9 +1763,35 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         if not name or not name.strip():
             return error_response(400, request_id, "invalid_name", "Voice name is required")
+        if len(name) > _CLONE_NAME_MAX_LENGTH:
+            return error_response(
+                400,
+                request_id,
+                "invalid_name",
+                f"Voice name must not exceed {_CLONE_NAME_MAX_LENGTH} characters",
+            )
         if not ref_text or not ref_text.strip():
             return error_response(
                 400, request_id, "invalid_ref_text", "Reference text (ref_text) is required"
+            )
+        if len(ref_text) > _CLONE_REF_TEXT_MAX_LENGTH:
+            return error_response(
+                400,
+                request_id,
+                "invalid_ref_text",
+                (
+                    "Reference text must not exceed "
+                    f"{_CLONE_REF_TEXT_MAX_LENGTH} characters"
+                ),
+            )
+        requested_voice_id, voice_id_error = _normalized_clone_voice_id(voice_id)
+        if voice_id_error is not None:
+            return error_response(
+                400,
+                request_id,
+                "invalid_voice_id",
+                voice_id_error,
+                param="id",
             )
 
         audio_content, read_error = await _read_uploaded_audio(audio, request_id)
@@ -1682,7 +1802,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
-            wav_bytes, _duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
+            wav_bytes, _duration = await _transcode_clone_audio(audio_content, ffmpeg_cmd)
         except RuntimeError as exc:
             return error_response(500, request_id, "dependency_missing", str(exc))
         except ValueError as exc:
@@ -1705,11 +1825,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         canonical_duration = evaluation.canonical_duration
         report = evaluation.report
 
-        vid_str = (
-            voice_id.strip().lower()
-            if isinstance(voice_id, str) and voice_id.strip()
-            else None
-        )
+        vid_str = requested_voice_id
         if idempotency_key and vid_str is None:
             key_hash = DurableIdempotencyJournal.key_hash(idempotency_key)
             vid_str = f"clone_idem_{key_hash[:24]}"
@@ -1847,9 +1963,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     ),
                 )
 
-        publication_started = False
         try:
-            publication_started = True
             profile = get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
@@ -1875,14 +1989,6 @@ def create_system_router(services: AppServices) -> APIRouter:
                         "Another completed result already owns this Idempotency-Key",
                     )
         except VoiceStoreUnavailableError:
-            if idempotency_key and fingerprint is not None and not publication_started:
-                with suppress(IdempotencyStoreUnavailableError):
-                    _clone_idempotency_journal.abort(
-                        owner=_CLONE_IDEMPOTENCY_OWNER,
-                        operation=_CLONE_IDEMPOTENCY_OPERATION,
-                        key=idempotency_key,
-                        fingerprint=fingerprint,
-                    )
             return error_response(
                 503,
                 request_id,
@@ -1938,14 +2044,6 @@ def create_system_router(services: AppServices) -> APIRouter:
                     retryable=True,
                 )
         except ValueError as exc:
-            if idempotency_key and fingerprint is not None and not publication_started:
-                with suppress(IdempotencyStoreUnavailableError):
-                    _clone_idempotency_journal.abort(
-                        owner=_CLONE_IDEMPOTENCY_OWNER,
-                        operation=_CLONE_IDEMPOTENCY_OPERATION,
-                        key=idempotency_key,
-                        fingerprint=fingerprint,
-                    )
             return error_response(400, request_id, "voice_creation_failed", str(exc))
 
         return JSONResponse(
@@ -2029,9 +2127,36 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         if not name or not name.strip():
             return error_response(400, request_id, "invalid_name", "Voice name is required")
+        if len(name) > _CLONE_NAME_MAX_LENGTH:
+            return error_response(
+                400,
+                request_id,
+                "invalid_name",
+                f"Voice name must not exceed {_CLONE_NAME_MAX_LENGTH} characters",
+            )
         if not ref_text or not ref_text.strip():
             return error_response(
                 400, request_id, "invalid_ref_text", "Reference text (ref_text) is required"
+            )
+        if len(ref_text) > _CLONE_REF_TEXT_MAX_LENGTH:
+            return error_response(
+                400,
+                request_id,
+                "invalid_ref_text",
+                (
+                    "Reference text must not exceed "
+                    f"{_CLONE_REF_TEXT_MAX_LENGTH} characters"
+                ),
+            )
+
+        _requested_voice_id, voice_id_error = _normalized_clone_voice_id(voice_id)
+        if voice_id_error is not None:
+            return error_response(
+                400,
+                request_id,
+                "invalid_voice_id",
+                voice_id_error,
+                param="id",
             )
 
         audio_content, read_error = await _read_uploaded_audio(audio, request_id)
@@ -2040,7 +2165,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
-            wav_bytes, _duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
+            wav_bytes, _duration = await _transcode_clone_audio(audio_content, ffmpeg_cmd)
         except RuntimeError as exc:
             return error_response(500, request_id, "dependency_missing", str(exc))
         except ValueError as exc:
@@ -2308,6 +2433,11 @@ def create_system_router(services: AppServices) -> APIRouter:
             artifact,
             require_current_binding=True,
             observed_runtime_revision=observed_model_runtime_revision,
+            capability_key=(
+                tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
+                if active.tts_spec is not None
+                else None
+            ),
         )
         validation_persisted = True
         try:
@@ -2335,9 +2465,10 @@ def create_system_router(services: AppServices) -> APIRouter:
                     ),
                     "probe_set": str(probe_set),
                     "repetitions": runs,
+                    "capability_key": validation_binding.capability_key,
                     "failure_codes": list(report.failure_codes),
                     "validated_for": (
-                        ["output"]
+                        [OUTPUT_VALIDATION_SCOPE]
                         if report.status
                         in {vq.VoiceQualityStatus.PASS.value, vq.VoiceQualityStatus.WARN.value}
                         else []

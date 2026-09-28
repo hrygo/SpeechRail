@@ -15,12 +15,22 @@ from typing import Any, Literal
 
 from speechrail.application.capability_snapshot import _validation_state
 from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
+from speechrail.backends.model_identity import is_observed_runtime_revision
 from speechrail.config.model_catalog import ModelArtifact
-from speechrail.domain.tts import VoiceProfile
+from speechrail.domain.ports import SpeechRequest
+from speechrail.domain.tts import (
+    VoiceProfile,
+    VoiceRegistry,
+    VoiceRevisionConflictError,
+    VoiceStoreUnavailableError,
+    get_voice_registry,
+)
+from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.voice_quality import POLICY_VERSION
 from speechrail.domain.voice_validation import (
     VoiceValidationArtifact,
     VoiceValidationRepository,
+    VoiceValidationStoreUnavailableError,
 )
 
 REFERENCE_PREPROCESS_VERSION = "energy_v1"
@@ -191,6 +201,7 @@ def validation_state_for_voice(
     *,
     require_current_binding: bool,
     capability_key: str | None = None,
+    observed_runtime_revision: str | None = None,
 ) -> tuple[dict[str, object], dict[str, Any] | None, VoiceValidationBinding]:
     """Return the evidence, binding, and shared projected validation state."""
 
@@ -200,6 +211,7 @@ def validation_state_for_voice(
         synthesizer,
         require_current_binding=require_current_binding,
         capability_key=capability_key,
+        observed_runtime_revision=observed_runtime_revision,
     )
     evidence = load_validation_evidence(
         repository,
@@ -218,6 +230,112 @@ def validation_state_for_voice(
     return state, evidence, binding
 
 
+async def prepare_validated_speech(
+    request: SpeechRequest,
+    *,
+    synthesizer: object,
+    artifact: ModelArtifact | VoiceValidationArtifact | None,
+    capability_key: str | None,
+    registry: VoiceRegistry | None = None,
+) -> SpeechRequest:
+    """Prepare a strict request's worker and admit only current evidence.
+
+    The caller must already hold the TTS resource admission.  This helper never
+    synthesizes probe audio and never falls back to an unobserved worker
+    identity.  On success the returned request pins both the voice revision and
+    the exact worker runtime that the evidence was checked against.
+    """
+
+    if request.validation_policy != "require_output_pass":
+        return request
+
+    registry = registry or get_voice_registry()
+    try:
+        profile = registry.get_profile(request.voice)
+    except VoiceStoreUnavailableError as exc:
+        raise TtsBackendError(
+            "voice_store_unavailable",
+            stage="validate",
+            public_code="voice_store_unavailable",
+            retryable=True,
+        ) from exc
+    if (
+        request.expected_voice_revision is not None
+        and profile.revision != request.expected_voice_revision
+    ):
+        raise VoiceRevisionConflictError(
+            "requested voice revision no longer matches the resolved voice"
+        )
+    if profile.mode != "clone":
+        return request
+
+    prepare = getattr(synthesizer, "prepare_voice", None)
+    if not callable(prepare):
+        raise TtsBackendError(
+            "voice_validation_runtime_unavailable",
+            stage="validate",
+            public_code="voice_validation_runtime_unavailable",
+            retryable=True,
+        )
+    try:
+        runtime_revision = await prepare(
+            request.voice,
+            expected_voice_revision=profile.revision,
+        )
+    except TtsBackendError:
+        raise
+    except Exception as exc:
+        # `asyncio.CancelledError` derives from BaseException, so it is
+        # deliberately not caught here: cancellation has to propagate so the
+        # caller's admission can release the slot and lease it still holds.
+        raise TtsBackendError(
+            "voice_validation_runtime_unavailable",
+            stage="validate",
+            public_code="voice_validation_runtime_unavailable",
+            retryable=True,
+        ) from exc
+    # Only the canonical handshake shape may travel in `expected_runtime_revision`,
+    # which is declared with that exact pattern. A backend that reports some
+    # other string is treated as "identity unknown" rather than trusted.
+    if not is_observed_runtime_revision(runtime_revision):
+        raise TtsBackendError(
+            "voice_validation_runtime_unavailable",
+            stage="validate",
+            public_code="voice_validation_runtime_unavailable",
+            retryable=True,
+        )
+
+    try:
+        state, _evidence, _binding = validation_state_for_voice(
+            profile,
+            artifact,
+            registry.validation_store,
+            require_current_binding=True,
+            capability_key=capability_key,
+            observed_runtime_revision=runtime_revision,
+        )
+    except VoiceValidationStoreUnavailableError as exc:
+        raise TtsBackendError(
+            "voice_validation_store_unavailable",
+            stage="validate",
+            public_code="voice_validation_store_unavailable",
+            retryable=True,
+        ) from exc
+    if state["production_ready"] is not True:
+        raise TtsBackendError(
+            "voice_not_production_ready",
+            stage="validate",
+            public_code="voice_not_production_ready",
+            retryable=False,
+        )
+    return request.model_copy(
+        update={
+            "expected_voice_revision": profile.revision,
+            "expected_runtime_revision": runtime_revision,
+        }
+    )
+
+
 __all__ = [
     "BASE_GENERATION_RECIPE_REVISION",
     "REFERENCE_PREPROCESS_VERSION",
@@ -225,5 +343,6 @@ __all__ = [
     "VoiceValidationBinding",
     "build_validation_binding",
     "load_validation_evidence",
+    "prepare_validated_speech",
     "validation_state_for_voice",
 ]

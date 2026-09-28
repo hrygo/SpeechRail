@@ -20,6 +20,8 @@ from typing import Any
 
 from speechrail.domain.file_locks import exclusive_file_lock
 
+OUTPUT_VALIDATION_SCOPE = "output"
+
 
 class VoiceValidationStoreUnavailableError(RuntimeError):
     """The validation evidence store cannot be read or safely updated."""

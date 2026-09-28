@@ -286,6 +286,102 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
     asyncio.run(start_and_close())
 
 
+def test_tts_worker_prepare_returns_the_observed_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-prepare"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            model_variant="voice_design",
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    fake = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+                "model_variant": "voice_design",
+                "family": "qwen3_tts",
+                "weight_fingerprint": "shape:" + ("a" * 64),
+                "profile_snapshot_version": 1,
+            }
+        ]
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> str:
+        revision = await worker.prepare()
+        assert worker.ready is True
+        assert revision == worker.runtime_revision
+        assert revision.startswith("rt_")
+        assert [frame["type"] for frame in fake.sends] == ["start"]
+        return revision
+
+    asyncio.run(scenario())
+
+
+def test_tts_worker_rejects_a_runtime_change_after_strict_admission(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-runtime-pin"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            model_variant="voice_design",
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    fake = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+                "model_variant": "voice_design",
+                "family": "qwen3_tts",
+                "weight_fingerprint": "shape:" + ("a" * 64),
+                "profile_snapshot_version": 1,
+            }
+        ]
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        request = SpeechRequest(
+            text="你好",
+            voice="serena",
+            expected_runtime_revision="rt_" + ("b" * 64),
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            async for _chunk in worker.synthesize(request):
+                pass
+        assert exc_info.value.public_code == "voice_validation_runtime_changed"
+        assert [frame["type"] for frame in fake.sends] == ["start"]
+
+    asyncio.run(scenario())
+
+
 def test_start_failure_keeps_worker_diagnostics_out_of_exception_text(tmp_path: Path) -> None:
     snapshot = tmp_path.parent / "external-qwen3-tts-load-error"
     snapshot.mkdir()

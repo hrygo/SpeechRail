@@ -167,6 +167,61 @@ def test_synthesis_forwards_voice_and_model_revision_pins(
     assert len(requests) == 1
 
 
+def test_synthesis_sends_validation_policy_as_a_header_not_a_body_field(
+    make_client: Any, run_async: Any
+) -> None:
+    """The TTS body forbids extra fields, so a body-borne policy is a hard 400.
+
+    The service rejects ``validation_policy`` inside the OpenAI-compatible body
+    with ``unsupported_parameter`` and names the header to use instead. Sending
+    it in the body made ``synthesize(validation_policy="require_output_pass")``
+    fail for every caller, which is the one path that must work for formal
+    production.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["SpeechRail-Validation-Policy"] == "require_output_pass"
+        assert "validation_policy" not in json.loads(request.content)
+        return httpx.Response(status_code=200, content=b"audio")
+
+    client, requests = make_client(handler)
+    content, _request_id = run_async(
+        client.synthesize(
+            model="speechrail/qwen3-tts",
+            text="正式制作",
+            voice="clone_1",
+            response_format="wav",
+            speed=1.0,
+            validation_policy="require_output_pass",
+        )
+    )
+
+    assert content == b"audio"
+    assert len(requests) == 1
+
+
+def test_synthesis_omits_the_policy_header_when_unverified(
+    make_client: Any, run_async: Any
+) -> None:
+    """The default must stay off the wire, not be sent as an explicit default."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "SpeechRail-Validation-Policy" not in request.headers
+        return httpx.Response(status_code=200, content=b"audio")
+
+    client, _requests = make_client(handler)
+    content, _request_id = run_async(
+        client.synthesize(
+            model="speechrail/qwen3-tts",
+            text="试听",
+            voice="serena",
+            response_format="wav",
+            speed=1.0,
+        )
+    )
+    assert content == b"audio"
+
+
 def test_voice_preview_json_body_and_raw_audio_response(
     make_client: Any, run_async: Any
 ) -> None:

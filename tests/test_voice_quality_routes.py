@@ -7,6 +7,7 @@ fake-backend client wiring as ``tests/test_tts_voice_clone.py`` (no real models)
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -21,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
+from speechrail.application.voice_validation_gate import prepare_validated_speech
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
 from speechrail.domain import voice_quality as vq
@@ -96,9 +98,20 @@ class SineSynthesizer:
     def __init__(self, *, runtime_revision: str | None = None) -> None:
         self.requests: list[SpeechRequest] = []
         self.runtime_revision = runtime_revision
+        self.prepared_runtime_revision = runtime_revision
+        self.prepare_calls = 0
+        self.flip_on_synthesize = False
 
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         del voice
+        return self.runtime_revision
+
+    async def prepare_voice(self, voice: str, *, expected_voice_revision: str | None) -> str:
+        del voice, expected_voice_revision
+        self.prepare_calls += 1
+        self.runtime_revision = self.prepared_runtime_revision
+        if self.runtime_revision is None:
+            raise RuntimeError("voice_validation_runtime_unavailable")
         return self.runtime_revision
 
     async def evict_warm_capability(self) -> None:
@@ -106,6 +119,17 @@ class SineSynthesizer:
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
+        if self.flip_on_synthesize:
+            self.runtime_revision = "rt_" + ("f" * 64)
+        if (
+            request.expected_runtime_revision is not None
+            and self.runtime_revision != request.expected_runtime_revision
+        ):
+            raise TtsBackendError(
+                "voice_validation_runtime_changed",
+                stage="validate",
+                public_code="voice_validation_runtime_changed",
+            )
 
         async def chunks() -> AsyncIterator[AudioChunk]:
             yield AudioChunk(
@@ -355,9 +379,16 @@ def _patch(
     journal_path: Path | None = None,
 ) -> None:
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    async def _fake_transcode(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
+        del ffmpeg_cmd
+        if not audio_content:
+            raise ValueError("audio content must not be empty")
+        return wav, 4.0
+
     monkeypatch.setattr(
-        "speechrail.domain.tts.transcode_and_validate_clone_audio",
-        lambda *args, **kwargs: (wav, 4.0),
+        "speechrail.http.routes.system._transcode_clone_audio",
+        _fake_transcode,
     )
     if journal_path is not None:
         from speechrail.domain.idempotency import DurableIdempotencyJournal
@@ -372,6 +403,143 @@ def _patch(
 
 def _clone_payload(name: str = "我的数字分身", ref_text: str = "测试参考文本") -> dict[str, str]:
     return {"name": name, "ref_text": ref_text}
+
+
+# ---------------------------------------------------------------------------
+# S4 — the dry run and the registration must accept exactly the same voice ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/v1/voices/clone/validate", "/v1/voices/clone"])
+@pytest.mark.parametrize("voice_id", ["serena", "not a valid id"])
+def test_clone_routes_reject_the_same_reserved_and_malformed_voice_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    voice_id: str,
+) -> None:
+    """A preflight pass must never green-light an id registration then rejects."""
+
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    wav = _clean_wav(4.0)
+    _patch(registry, wav, monkeypatch)
+
+    transcoded: list[bytes] = []
+
+    async def _tracking_transcode(
+        audio_content: bytes, ffmpeg_cmd: str
+    ) -> tuple[bytes, float]:
+        del ffmpeg_cmd
+        transcoded.append(audio_content)
+        return wav, 4.0
+
+    monkeypatch.setattr(
+        "speechrail.http.routes.system._transcode_clone_audio",
+        _tracking_transcode,
+    )
+
+    resp = client.post(
+        path,
+        data={**_clone_payload(), "id": voice_id},
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_voice_id"
+    # A deterministic pre-commit rejection must not pay for the transcode, and
+    # must not leave a profile behind on either route.
+    assert transcoded == []
+    assert [p for p in registry.list_profiles() if not p.is_system] == []
+
+
+def test_published_voice_entries_never_claim_available_while_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`availability_reason` must be derived from the final `available` value.
+
+    Binding resolution runs after the availability inputs are combined and can
+    still flip ``available`` to False. Computing the reason before that left
+    entries claiming ``availability_reason="available"`` next to
+    ``available=false`` — a self-contradictory public claim that a client
+    trusting the reason string would route on.
+    """
+
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    wav = _clean_wav(4.0)
+    _patch(registry, wav, monkeypatch)
+    assert client.post(
+        "/v1/voices/clone",
+        data={**_clone_payload(), "id": "availability_probe_voice"},
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+    ).status_code == 201
+
+    listed = client.get("/v1/voices")
+    assert listed.status_code == 200, listed.text
+    entries = listed.json()["data"]
+    clone = next(e for e in entries if e["id"] == "availability_probe_voice")
+    # The clone's binding does not resolve in this app, so it is unavailable
+    # for a reason other than the backend being down.
+    assert clone["available"] is False
+    assert clone["availability_reason"] == "binding_unavailable", clone
+    # The invariant itself: "available" is claimed if and only if it is true.
+    for entry in entries:
+        assert (entry["availability_reason"] == "available") is bool(
+            entry["available"]
+        ), entry
+
+
+def test_second_key_on_the_same_clone_id_converges_but_never_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retried registration that lost its key must still converge.
+
+    The route compares the stored clone against the submitted payload: an
+    identical payload converges on the existing voice, a different one is
+    rejected. Neither may overwrite the stored voice or add a second acoustic
+    asset — the property the OpenAPI text now states explicitly.
+    """
+
+    client, registry, _synth, voices_dir = _make_client(tmp_path)
+    wav = _clean_wav(4.0)
+    # The journal singleton defaults to the real ~/.speechrail path; redirect it
+    # or this test writes into the user's own durable state.
+    _patch(registry, wav, monkeypatch, journal_path=tmp_path / "converge_journal.json")
+
+    first = client.post(
+        "/v1/voices/clone",
+        data={**_clone_payload(), "id": "converge_probe_voice"},
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "converge-key-0001"},
+    )
+    assert first.status_code == 201, first.text
+    original_revision = first.json()["revision"]
+
+    # Same id, same payload, different key: converges on the same voice.
+    again = client.post(
+        "/v1/voices/clone",
+        data={**_clone_payload(), "id": "converge_probe_voice"},
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "converge-key-0002"},
+    )
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == "converge_probe_voice"
+    assert again.json()["revision"] == original_revision
+
+    # Same id, different payload: rejected, and the stored voice is untouched.
+    conflicting = client.post(
+        "/v1/voices/clone",
+        data={
+            **_clone_payload(name="另一个音色", ref_text="完全不同的参考文本内容。"),
+            "id": "converge_probe_voice",
+        },
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "converge-key-0003"},
+    )
+    assert conflicting.status_code == 409, conflicting.text
+    assert conflicting.json()["error"]["code"] == "voice_already_exists"
+
+    assert registry.get_profile("converge_probe_voice").revision == original_revision
+    assert len(list(voices_dir.glob("*.wav"))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +721,93 @@ def test_s3_warn_clone_and_idempotency_dedup(
 
     custom = [p for p in registry.list_profiles() if not p.is_system]
     assert len(custom) == 1
+
+
+def test_clone_replay_recovers_a_created_voice_when_completion_recording_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from speechrail.domain.idempotency import (
+        DurableIdempotencyJournal,
+        IdempotencyStoreUnavailableError,
+    )
+    from speechrail.http.routes import system as system_routes
+
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    wav = _clean_wav(4.0)
+    journal_path = tmp_path / "clone-idempotency.json"
+    _patch(registry, wav, monkeypatch, journal_path=journal_path)
+    journal = DurableIdempotencyJournal(journal_path, max_entries=32)
+    monkeypatch.setattr(system_routes, "_clone_idempotency_journal", journal)
+    original_complete = journal.complete
+
+    def unavailable_complete(**kwargs: object) -> str:
+        del kwargs
+        raise IdempotencyStoreUnavailableError("injected completion failure")
+
+    monkeypatch.setattr(journal, "complete", unavailable_complete)
+    payload = {**_clone_payload(name="恢复音色"), "id": "clone_recovery"}
+    first = client.post(
+        "/v1/voices/clone",
+        data=payload,
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "recover-clone"},
+    )
+    assert first.status_code == 503
+    assert first.json()["error"]["code"] == "idempotency_store_unavailable"
+    assert registry.get_profile("clone_recovery").mode == "clone"
+    decision = journal.lookup(
+        owner=system_routes._CLONE_IDEMPOTENCY_OWNER,
+        operation=system_routes._CLONE_IDEMPOTENCY_OPERATION,
+        key="recover-clone",
+    )
+    assert decision is not None and decision.state == "pending"
+
+    monkeypatch.setattr(journal, "complete", original_complete)
+    second = client.post(
+        "/v1/voices/clone",
+        data=payload,
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "recover-clone"},
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] == "clone_recovery"
+    decision = journal.lookup(
+        owner=system_routes._CLONE_IDEMPOTENCY_OWNER,
+        operation=system_routes._CLONE_IDEMPOTENCY_OPERATION,
+        key="recover-clone",
+    )
+    assert decision is not None and decision.state == "completed"
+    assert len(list((tmp_path / "voices").glob("*.wav"))) == 1
+
+
+def test_clone_rejects_oversized_name_before_starting_idempotency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from speechrail.domain.idempotency import DurableIdempotencyJournal
+    from speechrail.http.routes import system as system_routes
+
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    wav = _clean_wav(4.0)
+    journal_path = tmp_path / "clone-idempotency.json"
+    _patch(registry, wav, monkeypatch, journal_path=journal_path)
+    journal = DurableIdempotencyJournal(journal_path, max_entries=32)
+    monkeypatch.setattr(system_routes, "_clone_idempotency_journal", journal)
+
+    response = client.post(
+        "/v1/voices/clone",
+        data=_clone_payload(name="x" * 33),
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+        headers={"Idempotency-Key": "oversized-name"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_name"
+    assert journal.lookup(
+        owner=system_routes._CLONE_IDEMPOTENCY_OWNER,
+        operation=system_routes._CLONE_IDEMPOTENCY_OPERATION,
+        key="oversized-name",
+    ) is None
+    assert [p for p in registry.list_profiles() if not p.is_system] == []
 
 
 def test_clone_completed_idempotency_result_is_not_recreated_after_delete(
@@ -755,10 +1010,19 @@ def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
         tmp_path,
         synthesizer=synthesizer,
     )
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_runtime",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     response = client.post(
-        "/v1/speechrail/voices/serena/quality-runs",
+        f"/v1/speechrail/voices/{profile.id}/quality-runs",
         json={"probe_set": "voice_quality_v1_zh", "runs": 1},
     )
 
@@ -770,6 +1034,22 @@ def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
     assert binding["preprocess_version"] == "energy_v1"
     assert binding["generation_recipe_revision"] == "qwen3_tts_base_clone_v1"
     assert binding["policy_version"] == "voice_quality_v1"
+    assert binding["capability_key"] == "quality.render"
+    stored = registry.validation_store.get(
+        voice_id=profile.id,
+        voice_revision=profile.revision,
+        model_artifact=evidence["identity"]["model"]["artifact"],
+        model_catalog_revision=evidence["identity"]["model"]["catalog_revision"],
+        model_runtime_revision=evidence["identity"]["model"]["runtime_revision"],
+        runtime_fingerprint=binding["runtime_fingerprint"],
+        preprocess_version=binding["preprocess_version"],
+        generation_recipe_revision=binding["generation_recipe_revision"],
+        policy_version=binding["policy_version"],
+        capability_key="quality.render",
+        require_current_binding=True,
+    )
+    assert stored is not None
+    assert stored["validated_for"] == ["output"]
 
 
 
@@ -928,7 +1208,11 @@ def test_quality_runs_classifies_clone_speed_unsupported(
 def test_quality_run_persists_output_validation_and_promotes_capability_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    runtime_revision = "rt_" + ("a" * 64)
+    client, registry, synth, _voices_dir = _make_client(
+        tmp_path,
+        synthesizer=SineSynthesizer(runtime_revision=runtime_revision),
+    )
     profile = registry.create_cloned_profile(
         name="Clone",
         ref_text="测试参考文本",
@@ -966,15 +1250,16 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
 
     snapshot = client.get("/v1/speechrail/capabilities").json()
     entry = next(item for item in snapshot["voices"] if item["id"] == profile.id)
-    # The quality run captured a worker identity, but the fake lifecycle evicts
-    # that worker before discovery.  Discovery must not promote the persisted
-    # pass while the current runtime identity is unknown.
+    # The quality run evicts its worker before the independent ASR phase.
+    # Discovery stays cold and honest...
     assert entry["validation_state"]["synthesis"]["status"] == "unevaluated"
     assert entry["validation_state"]["synthesis"]["reason"] == (
         "model_runtime_identity_unknown"
     )
     assert entry["production_ready"] is False
 
+    # ...while the strict request itself may prepare the current worker and
+    # validate the matching persisted evidence before producing any audio.
     formal = client.post(
         "/v1/audio/speech",
         headers={"SpeechRail-Validation-Policy": "require_output_pass"},
@@ -984,8 +1269,169 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
             "voice": profile.id,
         },
     )
-    assert formal.status_code == 409
-    assert formal.json()["error"]["code"] == "voice_not_production_ready"
+    assert formal.status_code == 200, formal.text
+    assert synth.prepare_calls == 1
+
+
+def test_strict_synthesis_prepares_cold_worker_but_rejects_changed_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_revision = "rt_" + ("a" * 64)
+    synthesizer = SineSynthesizer(runtime_revision=runtime_revision)
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        synthesizer=synthesizer,
+    )
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_runtime_change",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+    assert client.post(
+        f"/v1/voices/{profile.id}/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    ).status_code == 200
+    probe_count = len(synthesizer.requests)
+    synthesizer.flip_on_synthesize = True
+
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Validation-Policy": "require_output_pass"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "正式制作",
+            "voice": profile.id,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "voice_validation_runtime_changed"
+    assert len(synthesizer.requests) == probe_count + 1
+
+
+@pytest.mark.anyio
+async def test_strict_gate_rejects_non_canonical_runtime_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`expected_runtime_revision` is declared with a strict pattern.
+
+    A backend that reports some other string must be treated as "identity
+    unknown" rather than trusted, otherwise an arbitrary value would flow into
+    a field every other producer validates against that shape.
+    """
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_bad_runtime_id",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+
+    with pytest.raises(TtsBackendError) as excinfo:
+        await prepare_validated_speech(
+            SpeechRequest(
+                text="正式制作",
+                voice=profile.id,
+                validation_policy="require_output_pass",
+            ),
+            synthesizer=SineSynthesizer(runtime_revision="not-a-canonical-revision"),
+            artifact=None,
+            capability_key=None,
+            registry=registry,
+        )
+
+    assert excinfo.value.public_code == "voice_validation_runtime_unavailable"
+
+
+@pytest.mark.anyio
+async def test_strict_gate_lets_prepare_cancellation_propagate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling worker preparation must not be reported as a backend failure.
+
+    The gate runs inside the caller's TTS admission. If it swallowed
+    ``CancelledError`` the request would turn into a retryable 503 and the
+    admission would never release the slot and lease it still holds.
+    """
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_cancelled_prepare",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+
+    class _CancellingSynthesizer(SineSynthesizer):
+        async def prepare_voice(
+            self, voice: str, *, expected_voice_revision: str | None
+        ) -> str:
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await prepare_validated_speech(
+            SpeechRequest(
+                text="正式制作",
+                voice=profile.id,
+                validation_policy="require_output_pass",
+            ),
+            synthesizer=_CancellingSynthesizer(runtime_revision="rt_" + ("a" * 64)),
+            artifact=None,
+            capability_key=None,
+            registry=registry,
+        )
+
+
+def test_strict_synthesis_rejects_missing_evidence_before_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_revision = "rt_" + ("a" * 64)
+    synthesizer = SineSynthesizer(runtime_revision=runtime_revision)
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        synthesizer=synthesizer,
+    )
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_unvalidated",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Validation-Policy": "require_output_pass"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "正式制作",
+            "voice": profile.id,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "voice_not_production_ready"
+    assert synthesizer.prepare_calls == 1
+    assert synthesizer.requests == []
 
 
 def test_quality_runs_classifies_output_invalid(

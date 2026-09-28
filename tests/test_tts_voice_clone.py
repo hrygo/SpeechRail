@@ -85,6 +85,15 @@ def _clean_clone_wav(
 class CapturingSpeechSynthesizer:
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
+        self.runtime_revision: str | None = "rt_" + ("a" * 64)
+        self.prepare_calls = 0
+
+    async def prepare_voice(self, voice: str, *, expected_voice_revision: str | None) -> str:
+        del voice, expected_voice_revision
+        self.prepare_calls += 1
+        if self.runtime_revision is None:
+            raise RuntimeError("voice_validation_runtime_unavailable")
+        return self.runtime_revision
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
@@ -391,6 +400,44 @@ def test_transcode_accepts_pipe_wav_with_unknown_riff_sizes() -> None:
     data_offset = pipe_wav.find(b"data")
     assert data_offset > 0
     pipe_wav[data_offset + 4 : data_offset + 8] = b"\xff\xff\xff\xff"
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout=bytes(pipe_wav),
+            stderr=b"",
+        )
+        wav_out, duration = transcode_and_validate_clone_audio(b"fake_raw_audio")
+
+    assert len(wav_out) == len(pipe_wav)
+    assert duration == pytest.approx(5.0, abs=0.1)
+
+
+def test_transcode_accepts_real_ffmpeg_pipe_wav_with_list_chunk() -> None:
+    """Reproduce the header ffmpeg actually writes to a non-seekable pipe.
+
+    Verified against ffmpeg 9.0.2 on pipe output: the RIFF and data sizes are
+    both ``0xFFFFFFFF`` *and* an ancillary ``LIST`` (INFO/encoder) chunk sits
+    between ``fmt `` and ``data``. The recovery walk has to skip that chunk to
+    reach the payload; a header built by :mod:`wave` has no such chunk, so the
+    skip arithmetic is otherwise never exercised. A naive strict parse of this
+    file reports ~24.8 hours, which is why the walk exists at all.
+    """
+
+    base = _generate_test_wav(duration_seconds=5.0)
+    data_offset = base.find(b"data")
+    assert data_offset > 0
+    # `LIST` + `INFO` + `ISFT`/encoder string, as emitted (26-byte payload).
+    list_payload = b"INFOISFTLavf60.16.100".ljust(26, b"\x00")
+    list_chunk = b"LIST" + len(list_payload).to_bytes(4, "little") + list_payload
+    assert len(list_chunk) == 8 + 26
+    pipe_wav = bytearray(base)
+    pipe_wav[4:8] = b"\xff\xff\xff\xff"
+    pipe_wav[data_offset + 4 : data_offset + 8] = b"\xff\xff\xff\xff"
+    pipe_wav[data_offset:data_offset] = list_chunk
+    # Sanity-check the layout the recovery walk now has to traverse.
+    assert pipe_wav[data_offset : data_offset + 4] == b"LIST"
+    assert pipe_wav.find(b"data") == data_offset + len(list_chunk)
 
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = SimpleNamespace(
@@ -1111,10 +1158,16 @@ def test_api_voices_clone_success_in_quality_tier(
 
     wav_bytes = _clean_clone_wav(duration_seconds=4.0)
 
-    # Mock transcode_and_validate_clone_audio to return the sample wav
+    async def _fake_transcode(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
+        del ffmpeg_cmd
+        if not audio_content:
+            raise ValueError("audio content must not be empty")
+        return wav_bytes, 4.0
+
+    # Mock the async route transcode to return the sample wav
     monkeypatch.setattr(
-        "speechrail.domain.tts.transcode_and_validate_clone_audio",
-        lambda *args, **kwargs: (wav_bytes, 4.0),
+        "speechrail.http.routes.system._transcode_clone_audio",
+        _fake_transcode,
     )
 
     resp = client.post(
