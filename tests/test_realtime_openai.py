@@ -5,6 +5,7 @@ import base64
 import threading
 import time
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from realtime_wire import (
     server_vad,
     session_update,
     tts_append_text,
+    tts_cancel,
     tts_finish_text,
     tts_start,
 )
@@ -1564,6 +1566,48 @@ def test_realtime_alignment_opt_in_without_aligner_fails_closed() -> None:
     asyncio.run(scenario())
 
 
+def test_rejected_session_update_does_not_partially_enable_alignment() -> None:
+    """Validation must not publish a flag before the whole update is accepted."""
+
+    async def scenario() -> OpenAIRealtimeSession:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                text_aligner=FakeTextAligner(),
+            ),
+        )
+
+        async def send(_event: dict[str, object]) -> int:
+            return 0
+
+        session = OpenAIRealtimeSession(
+            services, session_id="atomic-update", send=send
+        )
+        await session.start()
+        before = dict(session._config)
+        with pytest.raises(RealtimeAdapterError) as raised:
+            await session.handle(
+                session_update(
+                    alignment={"enabled": True},
+                    expected_asr_revision="stale-revision",
+                )
+            )
+        assert raised.value.code == "model_revision_conflict"
+        assert session._alignment_enabled is False
+        assert session._config == before
+        await session.close()
+        return session
+
+    asyncio.run(scenario())
+
+
 def test_realtime_alignment_runs_without_diarization() -> None:
     async def scenario() -> list[dict[str, object]]:
         settings = Settings(
@@ -1960,6 +2004,70 @@ class _DelayedAppendSession(FakeStreamingSession):
 class DelayedAppendStreamingFactory(FakeStreamingFactory):
     def session_class(self) -> type[_DelayedAppendSession]:
         return _DelayedAppendSession
+
+
+class _BlockingAppendSession(FakeStreamingSession):
+    """Hold the first append so a queued second append cannot dispatch."""
+
+    def __init__(
+        self,
+        *,
+        started: threading.Event | None = None,
+        release: threading.Event | None = None,
+        **kwargs: object,
+    ):
+        super().__init__(**kwargs)
+        self._started = started or threading.Event()
+        self._release = release or threading.Event()
+
+    async def append_audio(self, audio: bytes) -> None:
+        self._started.set()
+        await asyncio.to_thread(self._release.wait, 1.0)
+        await super().append_audio(audio)
+
+
+class BlockingAppendStreamingFactory(FakeStreamingFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_started = threading.Event()
+        self.append_release = threading.Event()
+
+    def session_class(self) -> type[_BlockingAppendSession]:
+        return _BlockingAppendSession
+
+    def create(self, **kwargs: Any) -> FakeStreamingSession:
+        session = super().create(**kwargs)
+        assert isinstance(session, _BlockingAppendSession)
+        session._started = self.append_started
+        session._release = self.append_release
+        return session
+
+
+def test_tts_cancel_bypasses_two_queued_audio_appends() -> None:
+    """A queued microphone append must not delay the control lane that
+    releases the TTS resource the first append is waiting for."""
+
+    factory = BlockingAppendStreamingFactory()
+    client, _ = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(session_update(model="whisper-1", tts={"enabled": True}))
+        socket.receive_json()
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+        assert factory.append_started.wait(1.0)
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+        socket.send_json(tts_cancel(request_id="missing"))
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            pending = executor.submit(socket.receive_json)
+            event = pending.result(timeout=0.5)
+            assert factory.append_release.is_set() is False
+        finally:
+            factory.append_release.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+    assert event["type"] == "error"
+    assert event["error"]["code"] == "tts_not_active"
 
 
 def test_openai_query_model_echoed_in_session_created() -> None:
@@ -2606,6 +2714,118 @@ class _HangingCommitSession(FakeStreamingSession):
 class HangingCommitStreamingFactory(FakeStreamingFactory):
     def session_class(self) -> type[_HangingCommitSession]:
         return _HangingCommitSession
+
+
+class _HangingEventsSession(FakeStreamingSession):
+    """Session whose commit is acknowledged before its event stream stalls."""
+
+    async def commit(self, want_segments: bool = False) -> None:
+        return None
+
+    def events(self):
+        async def iterator():
+            yield StreamingAsrEvent(kind="partial", text="hi")
+            await asyncio.Event().wait()
+
+        return iterator()
+
+
+class HangingEventsStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[_HangingEventsSession]:
+        return _HangingEventsSession
+
+
+class _RuntimeErrorEventsSession(FakeStreamingSession):
+    def events(self):
+        async def iterator():
+            raise RuntimeError("backend reader boom")
+            yield StreamingAsrEvent(kind="partial", text="unreachable")
+
+        return iterator()
+
+
+class RuntimeErrorEventsStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[_RuntimeErrorEventsSession]:
+        return _RuntimeErrorEventsSession
+
+
+def test_openai_commit_ack_then_hung_reader_times_out_with_failure() -> None:
+    """The commit ACK alone is not an ASR terminal.  A reader that stalls
+    afterwards must still hit the request deadline and release its slot."""
+
+    async def scenario() -> tuple[list[dict[str, Any]], FakeStreamingFactory]:
+        factory = HangingEventsStreamingFactory()
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+            request_timeout_seconds=0.01,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=factory),
+        )
+        sent: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="hung-reader", send=send)
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        with pytest.raises(RealtimeAdapterError) as raised:
+            await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        assert raised.value.code == "backend_timeout"
+        await session.close()
+        return sent, factory
+
+    sent, factory = asyncio.run(scenario())
+    assert not any(
+        event["type"] == "conversation.item.input_audio_transcription.completed"
+        for event in sent
+    )
+    assert len(factory.released) == 1
+
+
+def test_openai_asr_reader_runtime_error_emits_transcription_failed() -> None:
+    """RuntimeError from a backend iterator is a failure, not a disconnect."""
+
+    async def scenario() -> list[dict[str, Any]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=RuntimeErrorEventsStreamingFactory()),
+        )
+        sent: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="reader-error", send=send)
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        await session.close()
+        return sent
+
+    sent = asyncio.run(scenario())
+    failed = [
+        event
+        for event in sent
+        if event["type"] == "conversation.item.input_audio_transcription.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["error"]["code"] == "backend_error"
 
 
 def test_openai_client_event_queue_overflow_closes_session() -> None:

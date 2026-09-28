@@ -24,6 +24,7 @@ from speechrail.config import Settings
 from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts import VoiceRevokedError
 from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamError,
     TtsStreamEvent,
     TtsStreamEventKind,
@@ -132,6 +133,7 @@ class _FakeSynthesizer:
     def __init__(self, *, failures: dict[str, BaseException] | None = None) -> None:
         self.failures = dict(failures or {})
         self.opened: list[TtsStreamOptions] = []
+        self.limits: list[TtsStreamLimits] = []
         self.sessions: list[_FakeSession] = []
         self.runtime_revision: str | None = None
 
@@ -141,10 +143,16 @@ class _FakeSynthesizer:
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         return self.runtime_revision
 
-    async def open_incremental_stream(self, options: TtsStreamOptions) -> _FakeSession:
+    async def open_incremental_stream(
+        self,
+        options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
+    ) -> _FakeSession:
         failure = self.failures.pop(options.voice, None)
         if failure is not None:
             raise failure
+        self.limits.append(limits)
         session = _FakeSession(options)
         self.opened.append(options)
         self.sessions.append(session)
@@ -420,6 +428,50 @@ def test_reclamation_stops_generation_before_releasing_the_admission() -> None:
 
         assert order == ["lease-enter", "session-close", "lease-exit"]
         assert governor.snapshot().active_tts == 0
+
+    asyncio.run(run())
+
+
+def test_service_passes_effective_limits_to_the_incremental_opener() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        service = _service(synth)
+        limits = TtsStreamLimits(
+            max_append_codepoints=256,
+            max_total_codepoints=2048,
+            max_pending_codepoints=256,
+            max_pending_audio_bytes=24_000,
+        )
+        controller = await service.open(options=_options(), sink=_Sink(), limits=limits)
+        assert synth.limits == [limits]
+        assert controller.limits == limits
+        await controller.cancel()
+
+    asyncio.run(run())
+
+
+def test_terminal_is_published_only_after_session_and_admission_are_released() -> None:
+    async def run() -> None:
+        order: list[str] = []
+        synth = _FakeSynthesizer()
+
+        class OrderedSink(_Sink):
+            async def __call__(self, event: TtsStreamEvent) -> None:
+                order.append(f"sink:{event.kind.value}")
+                await super().__call__(event)
+
+        controller = await _service(synth).open(
+            options=_options(), sink=OrderedSink()
+        )
+        synth.sessions[0].order = order
+        synth.sessions[0].push(_terminal_event(TtsStreamTerminal.COMPLETED))
+        await asyncio.wait_for(controller.wait_closed(), timeout=1.0)
+        terminal_index = next(
+            index
+            for index, value in enumerate(order)
+            if value.endswith(":completed")
+        )
+        assert order.index("session-close") < terminal_index
 
     asyncio.run(run())
 

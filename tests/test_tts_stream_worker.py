@@ -22,6 +22,7 @@ from speechrail.backends.qwen3_tts_stream_host import (
     FRAME_STREAM_STARTED,
     FRAME_STREAM_TEXT,
     FRAME_STREAM_TEXT_ACCEPTED,
+    FRAME_STREAM_TEXT_CONSUMED,
     TTS_STREAM_PROTOCOL_VERSION,
     ModelStepEvent,
     StreamFrame,
@@ -209,6 +210,53 @@ def test_contiguous_append_is_acknowledged_and_forwarded_to_the_model() -> None:
     (second,) = host.accept_text(1, "继续")
     assert second.payload["sequence"] == 1
     assert session.appended == ["你好。", "继续"]
+
+
+def test_waiting_for_text_reports_consumed_watermark_and_restores_pending_budget() -> None:
+    session = FakeModelSession(
+        events=[ModelStepEvent(kind="waiting_for_text")],
+    )
+    host = _host(
+        session,
+        limits=TtsStreamLimits(
+            max_append_codepoints=5,
+            max_total_codepoints=12,
+            max_pending_codepoints=5,
+            max_pending_audio_bytes=8,
+        ),
+    )
+    host.accept_text(0, "abc")
+    result = host.step()
+    assert result.waiting_for_text is True
+    (frame,) = result.frames
+    assert frame.payload["type"] == FRAME_STREAM_TEXT_CONSUMED
+    assert frame.payload["through_sequence"] == 0
+    assert frame.payload["consumed_codepoints_total"] == 3
+    host.accept_text(1, "abcde")
+    assert host.accepted_sequence == 1
+
+
+def test_audio_chunk_is_split_to_the_negotiated_pending_budget() -> None:
+    session = FakeModelSession(events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3))])
+    host = _host(
+        session,
+        limits=TtsStreamLimits(
+            max_pending_audio_bytes=4,
+        ),
+    )
+    result = host.step()
+    assert len(result.frames) == 1
+    frame = result.frames[0]
+    assert frame.binary == _pcm(2)
+    assert frame.payload["chunk_index"] == 0
+    assert frame.payload["sample_offset"] == 0
+    assert frame.on_sent is not None
+    frame.on_sent()
+    remainder = host.step().frames
+    assert len(remainder) == 1
+    assert remainder[0].binary == _pcm(1)
+    assert remainder[0].payload["chunk_index"] == 1
+    assert remainder[0].payload["sample_offset"] == 2
 
 
 def test_sequence_gap_is_recoverable_and_does_not_advance_state() -> None:

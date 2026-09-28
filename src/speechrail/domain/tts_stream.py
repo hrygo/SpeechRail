@@ -135,6 +135,10 @@ class TtsStreamLimits:
             raise ValueError("max_append_codepoints must not exceed max_total_codepoints")
         if self.max_pending_codepoints > self.max_total_codepoints:
             raise ValueError("max_pending_codepoints must not exceed max_total_codepoints")
+        if self.max_pending_audio_bytes < 2 or self.max_pending_audio_bytes % 2:
+            raise ValueError(
+                "max_pending_audio_bytes must hold at least one even-length PCM16 sample"
+            )
 
 
 DEFAULT_TTS_STREAM_LIMITS: Final[TtsStreamLimits] = TtsStreamLimits()
@@ -333,6 +337,26 @@ class TtsStreamStateMachine:
             raise ValueError("cannot consume text that was never accepted")
         self._pending_codepoints -= codepoints
 
+    def rollback_unacknowledged_append(self, sequence: int, codepoints: int) -> None:
+        """Retire one locally validated append that the worker rejected.
+
+        The parent validates budgets before the IPC send so concurrent appends
+        cannot overrun them.  A recoverable worker rejection must undo that
+        speculative accounting without rewinding the cumulative total or any
+        text the model already consumed.
+        """
+
+        self._require_active()
+        if self._accepted_sequence != sequence:
+            raise ValueError("only the most recent append can be rolled back")
+        if codepoints <= 0 or codepoints > self._pending_codepoints:
+            raise ValueError("rolled-back codepoints exceed the pending text budget")
+        if self._total_codepoints < codepoints:
+            raise ValueError("rolled-back codepoints exceed the cumulative total")
+        self._accepted_sequence = sequence - 1
+        self._total_codepoints -= codepoints
+        self._pending_codepoints -= codepoints
+
     def accept_finish(self, last_sequence: int) -> None:
         """Close text input, requiring the exact last accepted sequence."""
 
@@ -469,7 +493,12 @@ class IncrementalSpeechSession(Protocol):
 class IncrementalSpeechSynthesizer(Protocol):
     """Vendor-neutral entry point; implementations must fail closed when unsupported."""
 
-    async def open_stream(self, options: TtsStreamOptions) -> IncrementalSpeechSession: ...
+    async def open_stream(
+        self,
+        options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
+    ) -> IncrementalSpeechSession: ...
 
 
 __all__ = [

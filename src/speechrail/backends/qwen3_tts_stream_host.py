@@ -52,6 +52,7 @@ FRAME_STREAM_FINISH: Final[str] = "tts_stream_finish"
 FRAME_STREAM_CANCEL: Final[str] = "tts_stream_cancel"
 FRAME_STREAM_STARTED: Final[str] = "tts_stream_started"
 FRAME_STREAM_TEXT_ACCEPTED: Final[str] = "tts_stream_text_accepted"
+FRAME_STREAM_TEXT_CONSUMED: Final[str] = "tts_stream_text_consumed"
 FRAME_STREAM_AUDIO: Final[str] = "tts_stream_audio"
 FRAME_STREAM_DONE: Final[str] = "tts_stream_done"
 FRAME_STREAM_ERROR: Final[str] = "tts_stream_error"
@@ -210,6 +211,9 @@ class TtsStreamHost:
         self._started_at = started_at
         self._last_input_at = started_at
         self._failure_code: str | None = None
+        self._consumed_codepoints = 0
+        self._consumed_sequence = -1
+        self._pcm_remainder = b""
 
     @property
     def options(self) -> TtsStreamOptions:
@@ -324,6 +328,15 @@ class TtsStreamHost:
 
         if self._state.terminal is not None:
             return HostStepResult(terminal=True)
+        if self._pcm_remainder:
+            frames = self._flush_pcm_remainder()
+            if frames:
+                return HostStepResult(frames=frames)
+            frames = self._terminate(
+                "tts_backpressure",
+                detail="pending audio exceeds the configured byte budget",
+            )
+            return HostStepResult(frames=frames, terminal=True)
         budget = self._step_size if max_steps is None else max_steps
         try:
             event = self._session.step(max_steps=budget)
@@ -384,40 +397,82 @@ class TtsStreamHost:
             # The vendor feeder answers a closed input with EOS/pad tokens, never
             # with "waiting", so a waiting event here means the model stalled
             # mid-drain.  Fail closed instead of silently truncating the tail.
-            frames = self._terminate(
+            terminal_frames = self._terminate(
                 "tts_backend_failed",
                 detail="the model stalled after the input was closed",
             )
-            return HostStepResult(frames=frames, terminal=True)
+            return HostStepResult(frames=terminal_frames, terminal=True)
         if self._state.terminal is not None:
             return HostStepResult(terminal=True)
         if self.timeout_remaining() <= 0.0:
-            frames = self.expire()
-            return HostStepResult(frames=frames, terminal=True)
-        return HostStepResult(waiting_for_text=True)
+            terminal_frames = self.expire()
+            return HostStepResult(frames=terminal_frames, terminal=True)
+        frames: tuple[StreamFrame, ...] = ()
+        consumed = self._state.total_codepoints - self._consumed_codepoints
+        if consumed > 0:
+            self._state.mark_text_consumed(consumed)
+            self._consumed_codepoints += consumed
+            self._consumed_sequence = self._state.accepted_sequence
+            frames = (
+                StreamFrame(
+                    {
+                        "version": PROTOCOL_VERSION,
+                        "type": FRAME_STREAM_TEXT_CONSUMED,
+                        "request_id": self._options.request_id,
+                        "through_sequence": self._consumed_sequence,
+                        "consumed_codepoints_total": self._consumed_codepoints,
+                    }
+                ),
+            )
+        return HostStepResult(frames=frames, waiting_for_text=True)
 
     def _emit_audio(self, pcm16: bytes) -> HostStepResult:
         if not pcm16 or len(pcm16) % 2:
             frames = self._terminate("tts_backend_failed", detail="invalid PCM chunk")
             return HostStepResult(frames=frames, terminal=True)
-        try:
-            position = self._state.enqueue_audio(len(pcm16))
-        except TtsStreamError as exc:
-            frames = self._recoverable_or_terminal(exc)
-            return HostStepResult(frames=frames, terminal=self._state.terminal is not None)
-        frame = StreamFrame(
-            {
-                "version": PROTOCOL_VERSION,
-                "type": FRAME_STREAM_AUDIO,
-                "request_id": self._options.request_id,
-                "chunk_index": position.chunk_index,
-                "sample_offset": position.sample_offset,
-                "sample_rate": self._session.sample_rate,
-            },
-            binary=pcm16,
-            on_sent=self._audio_sent(position.byte_length),
-        )
-        return HostStepResult(frames=(frame,))
+        self._pcm_remainder += pcm16
+        frames = self._flush_pcm_remainder()
+        if not frames and self._pcm_remainder == pcm16:
+            frames = self._terminate(
+                "tts_backpressure",
+                detail="pending audio exceeds the configured byte budget",
+            )
+            return HostStepResult(frames=frames, terminal=True)
+        return HostStepResult(frames=frames)
+
+    def _flush_pcm_remainder(self) -> tuple[StreamFrame, ...]:
+        frames: list[StreamFrame] = []
+        while self._pcm_remainder:
+            available = self._limits.max_pending_audio_bytes - self._state.pending_audio_bytes
+            if available < 2:
+                break
+            byte_length = min(
+                available - (available % 2),
+                len(self._pcm_remainder),
+            )
+            try:
+                position = self._state.enqueue_audio(byte_length)
+            except TtsStreamError as exc:
+                error = self._recoverable_or_terminal(exc)
+                self._pcm_remainder = b""
+                return (*frames, *error)
+            chunk = self._pcm_remainder[:byte_length]
+            self._pcm_remainder = self._pcm_remainder[byte_length:]
+            frames.append(
+                StreamFrame(
+                    {
+                        "version": PROTOCOL_VERSION,
+                        "type": FRAME_STREAM_AUDIO,
+                        "request_id": self._options.request_id,
+                        "chunk_index": position.chunk_index,
+                        "sample_offset": position.sample_offset,
+                        "sample_rate": self._session.sample_rate,
+                    },
+                    binary=chunk,
+                    on_sent=self._audio_sent(position.byte_length),
+                )
+            )
+        return tuple(frames)
 
     def _audio_sent(self, byte_length: int) -> Callable[[], None]:
         def retire() -> None:
@@ -789,6 +844,7 @@ __all__ = [
     "FRAME_STREAM_STARTED",
     "FRAME_STREAM_TEXT",
     "FRAME_STREAM_TEXT_ACCEPTED",
+    "FRAME_STREAM_TEXT_CONSUMED",
     "RECOVERABLE_STREAM_ERROR_CODES",
     "STREAM_FRAME_TYPES",
     "TTS_STREAM_PROTOCOL_VERSION",

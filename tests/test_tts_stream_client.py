@@ -35,8 +35,10 @@ from speechrail.backends.qwen3_tts_stream_host import (
     TtsStreamHost,
 )
 from speechrail.domain.tts_stream import (
+    DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamError,
     TtsStreamEventKind,
+    TtsStreamLimits,
     TtsStreamOptions,
     TtsStreamTerminal,
 )
@@ -126,7 +128,26 @@ class LoopbackTransport:
     def _apply(self, frame: dict[str, object]) -> None:
         frame_type = frame["type"]
         if frame_type == FRAME_STREAM_START:
-            host = TtsStreamHost(self._session_factory(), _options())
+            raw_limits = frame["limits"]
+            assert isinstance(raw_limits, dict)
+            host = TtsStreamHost(
+                self._session_factory(),
+                _options(),
+                limits=TtsStreamLimits(
+                    **{
+                        name: raw_limits[name]
+                        for name in (
+                            "max_append_codepoints",
+                            "max_total_codepoints",
+                            "max_pending_codepoints",
+                            "max_pending_audio_bytes",
+                            "input_wait_seconds",
+                            "utterance_wall_clock_seconds",
+                            "slow_consumer_seconds",
+                        )
+                    }
+                ),
+            )
             self.host = host
             for outbound in host.started_frames():
                 self._emit(outbound)
@@ -230,6 +251,51 @@ def test_append_is_acknowledged_and_audio_arrives_before_finish() -> None:
         assert events[-1].terminal is TtsStreamTerminal.COMPLETED
         assert transport.host is not None
         assert transport.host.terminal is TtsStreamTerminal.COMPLETED
+
+    _run(scenario)
+
+
+def test_consumed_watermark_allows_more_than_pending_budget_below_total() -> None:
+    async def scenario() -> None:
+        transport = LoopbackTransport(ScriptedSession, steps_per_append=1)
+        session = await _open(transport)
+        chunk = "a" * 512
+        for sequence in range(5):
+            await session.append_text(sequence, chunk)
+        assert transport.host is not None
+        assert transport.host.options.request_id == "req-1"
+        await session.finish_text(4)
+        await session.cancel()
+
+    _run(scenario)
+
+
+def test_negotiated_pending_limit_is_enforced_by_parent_and_worker() -> None:
+    async def scenario() -> None:
+        transport = LoopbackTransport(ScriptedSession, steps_per_append=1)
+        limits = TtsStreamLimits(
+            max_append_codepoints=4,
+            max_total_codepoints=8,
+            max_pending_codepoints=4,
+            max_pending_audio_bytes=8,
+        )
+        synth = Qwen3TtsIncrementalSynthesizer(transport, stream_protocol=1)
+        session = await synth.open_stream(_options(), limits=limits)
+        assert transport.sent[0]["limits"] == {
+            "max_append_codepoints": 4,
+            "max_total_codepoints": 8,
+            "max_pending_codepoints": 4,
+            "max_pending_audio_bytes": 8,
+            "input_wait_seconds": 15.0,
+            "utterance_wall_clock_seconds": 120.0,
+            "slow_consumer_seconds": 2.0,
+        }
+        assert transport.host is not None
+        assert transport.host.limits == limits
+        with pytest.raises(TtsStreamError) as raised:
+            await session.append_text(0, "12345")
+        assert raised.value.code == "tts_stream_limit_exceeded"
+        await session.cancel()
 
     _run(scenario)
 
@@ -419,6 +485,29 @@ class ScriptedTransport:
 
 
 def _frame(frame_type: str, **extra: object) -> dict[str, object]:
+    if frame_type == FRAME_STREAM_STARTED:
+        extra.setdefault(
+            "limits",
+            {
+                "max_append_codepoints": (
+                    DEFAULT_TTS_STREAM_LIMITS.max_append_codepoints
+                ),
+                "max_total_codepoints": DEFAULT_TTS_STREAM_LIMITS.max_total_codepoints,
+                "max_pending_codepoints": (
+                    DEFAULT_TTS_STREAM_LIMITS.max_pending_codepoints
+                ),
+                "max_pending_audio_bytes": (
+                    DEFAULT_TTS_STREAM_LIMITS.max_pending_audio_bytes
+                ),
+                "input_wait_seconds": DEFAULT_TTS_STREAM_LIMITS.input_wait_seconds,
+                "utterance_wall_clock_seconds": (
+                    DEFAULT_TTS_STREAM_LIMITS.utterance_wall_clock_seconds
+                ),
+                "slow_consumer_seconds": (
+                    DEFAULT_TTS_STREAM_LIMITS.slow_consumer_seconds
+                ),
+            },
+        )
     base: dict[str, object] = {
         "version": PROTOCOL_VERSION,
         "type": frame_type,
@@ -516,6 +605,16 @@ def test_recoverable_rejection_releases_the_waiting_append() -> None:
             await asyncio.wait_for(waiter, timeout=2.0)
         assert failure.value.code == "tts_sequence_invalid"
         assert session.notices == ("tts_sequence_invalid",)
+        retry = asyncio.create_task(session.append_text(0, "abc"))
+        await asyncio.sleep(0)
+        transport.push(
+            _frame(
+                FRAME_STREAM_TEXT_ACCEPTED,
+                sequence=0,
+                accepted_codepoints=3,
+            )
+        )
+        await asyncio.wait_for(retry, timeout=2.0)
         await session.close()
 
     _run(scenario)

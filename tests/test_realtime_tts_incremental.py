@@ -35,6 +35,7 @@ from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamEvent,
     TtsStreamEventKind,
+    TtsStreamLimits,
     TtsStreamOptions,
     TtsStreamStateMachine,
     TtsStreamTerminal,
@@ -163,7 +164,10 @@ class FakeIncrementalSynthesizer:
         self.supports_incremental_stream = protocol_negotiated
 
     async def open_incremental_stream(
-        self, options: TtsStreamOptions
+        self,
+        options: TtsStreamOptions,
+        *,
+        limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
     ) -> FakeIncrementalSession:
         self.open_calls += 1
         if self._open_delay:
@@ -324,6 +328,26 @@ def test_start_does_not_block_appends_during_admission() -> None:
     assert accepted == [0, 1]
     assert types[-1] == "speechrail.tts.completed"
     assert synthesizer.open_calls == 1
+
+
+def test_new_start_is_accepted_immediately_after_completed_terminal() -> None:
+    synthesizer = FakeIncrementalSynthesizer()
+    client = _client(synthesizer)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _channel(socket)
+        socket.send_json(tts_start(request_id="inc_first"))
+        _append(socket, "inc_first", 0, "第一轮")
+        socket.send_json(tts_finish_text(request_id="inc_first", last_sequence=0))
+        _drain(socket)
+        socket.send_json(tts_start(request_id="inc_second"))
+        events = _until(socket, "speechrail.tts.started")
+    started = [
+        event["request_id"]
+        for event in events
+        if event["type"] == "speechrail.tts.started"
+    ]
+    assert started == ["inc_second"]
+    assert synthesizer.open_calls == 2
 
 
 def test_cancel_emits_exactly_one_cancelled_terminal() -> None:
