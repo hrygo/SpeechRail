@@ -127,7 +127,11 @@ MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 
     "audio": {
       "input": {
         "format": {"type": "audio/pcm", "rate": 24000},
-        "transcription": {"model": "<registered-speechrail-model>", "language": "zh"},
+        "transcription": {
+          "model": "<registered-speechrail-model>",
+          "language": "zh",
+          "keywords": ["SpeechRail"]
+        },
         "turn_detection": null
       }
     },
@@ -145,6 +149,9 @@ MCP 的 `transcribe` 适合本地文件的请求/响应转写；它不会暴露 
 `revision` 替换而不是追加；`conversation.item.input_audio_transcription.completed` 仍是终态权威
 文本，固定对齐与匿名归属随后由 `speechrail.alignment.done` / `speechrail.diarization.*` 独立到达。
 该扩展不让 MCP 代理持有连接、创建会话或管理 LLM/播放状态。
+
+`language` 与 `keywords` 都是可选提示：留空即使用服务端默认，`keywords` 只用来偏向调用方预期
+出现的专有词。越界或空白的取值应降级为“不给提示”，不应让连接失败。
 
 ---
 

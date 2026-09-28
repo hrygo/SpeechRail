@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.4.2"
-date: 2026-09-24
+version: "0.5.1"
+date: 2026-09-28
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -25,8 +25,8 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。
 2. 点击「打开提词器」直接进入可手动阅读的舞台；此动作不会申请麦克风或连接 ASR，AI 朗读标注也不会阻塞开始。
 3. 如使用 AI，先看懂“已经完成什么、原稿有没有被改、下一步要做什么”，再审阅朗读稿；默认路径使用普通用户语言，高级的拆分、合并和来源编辑收进“编辑本段”等渐进式披露入口。确认采用前可查看原文对照、修改、保留原文或跳过；编辑段落时清空对应旧辅助标注。
-4. 在显示设置中选择 1／2／3 行并调整字号、背景透明度（0–100%）；三行模式上方显示已读行、中间显示当前行、下方预览下一行。正文按可用宽度自然折行并映射回稿件；三行在稿首／稿尾留空槽，避免当前行跳位。舞台按行数与字号调整高度，最多 360pt；绿色缩放横向铺满屏幕可用宽度。控制区首次展示 2 秒，指针进入操作区后显示，离开后 250ms 隐藏；正文布局和键盘可达性不随控制显隐变化。
-5. 使用空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 首末行；`⌘⌥←/→` 是应用菜单中的上一行／下一行快捷键。控制按钮和所有快捷键统一移动到对应行的原稿位置；「查阅全稿」仍提供完整段落滚动与文本选择。短暂脱稿时保持位置，需要语音协助时再点击「开启语音跟随」。
+4. 在显示设置中先选场景：「镜头口播」是舒适窄栏加三行，「讲台阅读」更大字号、更宽行与两行，「自定义」保留用户自己的列宽、字号与行数。预设只改列宽、字号与行数，窗口宽度、透明度和行距不动；手动调过其中任何一项就自动变为「自定义」，预设不会与手动设置互相覆盖。正文列宽与窗口宽度分开：窗口再宽，正文也保持 680pt／820pt 的可读行长，不铺满超宽屏；窗口变窄时列宽跟随收窄。三行模式上方显示已读行、中间显示当前行、下方预览下一行；正文按列宽自然折行并映射回稿件；三行在稿首／稿尾留空槽，避免当前行跳位。舞台按行数与字号调整高度，最多 360pt；绿色缩放横向铺满屏幕可用宽度。控制区首次展示 2 秒，指针进入操作区后显示，离开后 250ms 隐藏；正文布局和键盘可达性不随控制显隐变化。开启 Reduce Motion 时舞台不做位移动画，阅读位置仍照常更新。
+5. 使用空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 首末行；`⌘⌥←/→` 是应用菜单中的上一行／下一行快捷键。控制按钮和所有快捷键统一移动到对应行的原稿位置；「查阅全稿」仍提供完整段落滚动与文本选择。查阅全稿或手动滚动之后，控制栏出现「回到朗读位置」，把舞台收回当前朗读行；它不恢复语音推进权，语音仍需显式开启。短暂脱稿时保持位置，需要语音协助时再点击「开启语音跟随」。
 6. 开启语音后，会话从当前段建立一条 pipeline；任何手动定位立即进入手动态、废弃旧 generation，并异步停止本功能麦克风、上传、drain/clear 和占用。只有明确点击「恢复/重试语音跟随」才可再次启动。
 7. 到达末行、反复下一行或读完末行都不会自动弹出总结或关闭窗口；用户点「关闭」、按 Esc 或关闭窗口时统一停止并释放提词器自己的资源，保留阅读位置。直播软件必须选择摄像头或目标内容窗口，不分享包含提词器的屏幕。不能依赖 `NSWindow.sharingType = .none` 隐藏窗口；当前 Apple 文档已将该值标注为系统不再使用的旧常量。
 
@@ -42,10 +42,12 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 | `TeleprompterFollowController.swift` | partial/completed 事件与跟读、暂停、手动接管状态机 |
 | `TeleprompterVoiceAssistLifecycle.swift` | 显式启停、generation token、停止失败重试与旧回调失效的纯状态机 |
 | `TeleprompterStageInteractionPolicy.swift` | 舞台控制显隐原因与 2s/250ms/4s 时序契约 |
+| `TeleprompterStageSettings.swift` | 舞台显示设置：场景预设、正文列宽（与窗口宽度分离）、字号、透明度、行数与 Reduce Motion 动效策略 |
 | `TeleprompterRealtimeClientProtocol.swift` | Session 测试 seam：让生产 Realtime 生命周期可直接注入 fake client |
 | `TeleprompterSession.swift` | MainActor 会话编排、服务/麦克风门禁、Realtime 生命周期和失败降级 |
 | `TeleprompterView.swift` | 准备页、稿件编辑、AI 审阅和舞台设置 |
 | `TeleprompterStageWindow.swift` / `TeleprompterStageView.swift` | 独立浮动舞台窗口、键盘控制和可访问状态反馈 |
+| `TeleprompterReplayEvaluator.swift` / `TeleprompterReplayTool` | 确定性回放评估器与 CLI：用生产跟随路径重放带版本记录的语料，只输出脱敏聚合 |
 
 `SessionCoordinator` 只负责设备占用。提词器调用 `sessionDidStartRecording(id: nil)`，因此可参与共享麦克风占用而不写入会话记录库；停止时由 coordinator 释放占用，提词器自己的 `TeleprompterRunState` 只保存稿件进度。
 
@@ -108,7 +110,11 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 
 ## 设计 token 约束
 
-所有提词器新增尺寸、字号、行距、背景透明度范围、内容间距、视线吸顶偏移和窗口 autosave 名称位于 `SpeechRailDesignTokens.Teleprompter`。正常阅读舞台以 `TeleprompterStageLineLayout` 得到的实际显示行为单位，显示条数为 1／2／3，默认 3 行；每行映射回原稿段落索引和 UTF-16 范围。全稿模式仍展示完整语义段落，不展示内部跟读对齐切片；正文填满舞台可用宽度。
+所有提词器新增尺寸、字号、行距、背景透明度范围、内容间距、视线吸顶偏移和窗口 autosave 名称位于 `SpeechRailDesignTokens.Teleprompter`。正常阅读舞台以 `TeleprompterStageLineLayout` 得到的实际显示行为单位，显示条数为 1／2／3，默认 3 行；每行映射回原稿段落索引和 UTF-16 范围。全稿模式仍展示完整语义段落，不展示内部跟读对齐切片。
+
+- **场景预设与正文列宽**：正文列宽是独立设置（`stageDefaultContentWidth` 680pt，范围 360–1200pt），与窗口宽度分开保存。`TeleprompterStagePreset.camera` 应用 680pt／1.0 倍字号／3 行，`.podium` 应用 820pt／1.25 倍字号／2 行，`.custom` 不改任何值。窗口宽度、背景透明度与行距不属于预设。`TeleprompterStageLayoutPolicy.contentLayoutWidth` 决定实际排版宽度：窗口更窄时跟随窗口（不小于 1pt），窗口更宽时保持请求列宽，因此超宽屏不会把一行拉长。字号或列宽变化后按稿件坐标重算显示行，阅读位置不依赖旧行号。
+- **快捷恢复**：只有「查阅全稿」且当前没有语音跟随时，控制栏才出现「回到朗读位置」；点击后退出全稿浏览并滚回当前朗读行，不恢复语音推进权。可见性由 `TeleprompterStageRecoveryPresentation` 单点判定。
+- **Reduce Motion**：`TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion:)` 在 Reduce Motion 开启时返回 `nil`，舞台不做位移动画但位置照常更新。
 
 - **手动优先的阅读层**：正文、错误提示和最小辅助条是阅读层；操作栏是独立控制层。手动打开、翻段、滚轮接管和语音启停都不改变正文几何。
 - **控制显隐**：首次打开展示 2s，指针离开后延迟 250ms 隐藏；错误提示独立保留 4s。指针位于舞台、控制焦点存在、popover/menu 打开、VoiceOver 开启、键盘主动请求或用户选择「始终显示控制」时保持可见。所有时长集中在 `TeleprompterStageInteractionPolicy`，不允许页面散落第二套数值。
@@ -116,7 +122,9 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 - **最小辅助状态**：只有实际采集时显示「麦克风使用中」角标；计时与进度默认关闭，用户开启 `showClockAndProgress` 后才显示。两者都不以常驻节奏评价、段末训导或状态看板抢占台词。
 - **末段即正文**：舞台没有自动完稿、复盘或末段关闭分支。用户关闭、按 Esc、窗口系统关闭和程序关闭统一调用 `closeStage()`，释放本功能的麦克风、client 与 coordinator 占用，同时保留阅读位置。
 - **键盘与菜单**：舞台阅读区域在用户显式打开窗口后获得键盘焦点；空格/→/↓/PageDown 下一显示行，←/↑/PageUp 上一显示行，Home/End 首末行，Esc 关闭。设置控件或弹层获得焦点时不执行阅读命令；关闭设置后焦点返回阅读区。Tab 请求显示控制区，应用菜单仍提供全部核心动作；菜单上一行/下一行分别使用 `⌘⌥←` / `⌘⌥→`，不占用全局裸方向键；关闭使用 Command-Esc。字号与背景透明度的 Command-=/-/0 和 Command-[/] 是舞台内辅助快捷键；不再用 Command-A 切换全稿，也不让空格隐式开启语音。
-- **语音与设置**：语音按钮状态来自 `TeleprompterVoiceAssistLifecycle`；`off`、`starting`、`following`、`stopping`、`stopFailed`、`pausedByUser`、`unavailable` 都必须有明确文案。`alwaysShowControls` 与 `showClockAndProgress` 使用独立 UserDefaults 键，默认关闭，旧版本可忽略。
+- **语音与设置**：语音按钮状态来自 `TeleprompterVoiceAssistLifecycle`；`off`、`starting`、`following`、`stopping`、`stopFailed`、`pausedByUser`、`unavailable` 都必须有明确文案。`alwaysShowControls` 与 `showClockAndProgress` 使用独立 UserDefaults 键，默认关闭，旧版本可忽略；`contentWidth` 与 `preset` 也是独立键，缺省时按「镜头口播」读取，旧设置不需要迁移。
+- **失败归因要说对人**：输入设备启动失败或格式不兼容归入 `BlockReason.inputDeviceUnavailable`，文案说明是麦克风并保留底层错误信息，同时继续提供手动看稿；只有 ASR 服务本身的问题才用 `serviceNotReady`。任何失败都不得推进稿件、不得留在已连接状态，并必须释放本功能的占用、连接与采集。
+- **时长估计要说明它是推的还是量的**：倍率 `1.0` 既是「没人试读过」的默认值，也可能恰好是某次试读的真实结果，只看倍率无法区分。`TeleprompterCalibrationSource` 因此显式记录来源（`.uncalibrated` / `.manualTrial(durationSeconds:)`），`TeleprompterTimingPolicy.estimateDuration` 与 `evaluatePreflight` 据此给出 `EstimateResult.isCalibrated`；试读采用时写入 `.manualTrial`，「恢复默认语速」写回 `.uncalibrated`——那是一次选择，不是一次测量。未校准时两处时长展示都要标注：内容选择页的预计用时，以及工作台预检结论——后者经 `PreflightConclusion.showsDurationEstimate` 区分，带分钟数的结论才标，「无内容」「目标无效」「无法预估」本身没有时长数字，不加标注以免变成噪声。校准入口常驻并显示「未试读校准」，不使用 `.healthy` 语气冒充已测。倍率不落盘，因此没有存储迁移。语音辅助试读目前不存在，试读 sheet 只有手动秒表。
 - **窗口边界**：舞台是独立 `NSPanel`；用户从提词器入口打开时成为 key window 以确保局部快捷键可用，不在正文更新或后台语音回调时抢焦点。最大化经标准 frame 策略横向铺满屏幕可用宽度，高度不超过 `stageMaximumHeight`（360pt），并保留普通尺寸；读取设置时不会重置窗口。窗口只复用系统材质、语义色、系统按钮和既有 `Corner`/`Spacing`/`Typography`，不为隐藏控制新增自绘玻璃或裸视觉常量。
 
 ## 验收与限制
@@ -141,3 +149,7 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-24 21:20：第二轮 review 修复完成。手动同段定位保留阅读偏移，跨段定位回到段首；键盘请求的控制显隐会在焦点或指针离开后正常结束；准备中/关闭中的手动打开分别返回忙碌/关闭错误；关闭语音后舞台保持手动；移除整段点击劫持，改为非当前段定位按钮；工作台语音操作按真实生命周期显示关闭/恢复/重试停止/重试语音；删除呼吸光效、脱稿归队、节奏看板和自动复盘等旧 UI 死代码；舞台菜单命令仅在舞台可见时出现且不再占用全局方向键。`swift test --disable-sandbox --package-path macos/SpeechRailApp --filter Teleprompter` 共 135 项 / 15 个 suite 全部通过；新测试文件与生产依赖已接入 `SpeechRailAppTests` Unit Test Sources，`plutil -lint project.pbxproj` 通过。21:26 `scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED；21:29 Xcode Unit Test-only TEST SUCCEEDED（135 项 / 15 suite）。UI 淡出几何、焦点/Tab、VoiceOver、Reduce Motion、真实麦克风与真实服务端到端仍未执行。
 
 2026-09-24 23:55 起：提词器舞台布局改为真实排版行，显示 1／2／3 条并以段落索引 + UTF-16 偏移导航；快捷键与菜单按行移动；透明度范围扩至 100%；工作台行数设置同步改名；标准窗口缩放横向铺满可用屏幕，并限制最大窗框高度。`TeleprompterStageSettingsTests` 23 项、`TeleprompterSessionLifecycleTests` 13 项和 `Teleprompter` 全部 142 项 / 15 suites 均通过；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED。上述是 Swift Testing 与 App 编译证据；由于项目要求逐次授权前台 UI 自动化，本轮未做桌面视觉、键盘焦点、VoiceOver、Reduce Motion 或真实麦克风验收，不能推断这些项目通过。
+
+2026-09-28：按 [`AI 提词器优化方案`](../../implementation/SpeechRail_AI_Teleprompter_Implementation_Plan_2026-09-28.md) 完成 #113 场景预设、正文列宽与「回到朗读位置」，并把 69 项场景台账中 13 项「未覆盖／部分」全部用具名回归收敛（详见 [`阶段实施报告`](../../implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md)）。同轮修复五个既有缺陷：保真门禁两侧提取口径不一致、改稿后旧候选块与审阅条目残留、输入设备失败被归因为 ASR 服务、回放报告把运行绝对时刻当成跟随延迟、错误停顿在进入阅读瞬间即被计数；另由 Xcode 构建查出新测试文件被挂进 App 源码组（`plutil -lint` 与 SwiftPM 都发现不了），以及测试闸门 `TestGate` 不记开启状态、导致 Xcode 单元测试在全量并行时挂死（首轮曾误判为 App 测试宿主不退出，实际单测 target 无 `TEST_HOST`、App 从未启动，见阶段报告 §2 第 9 条）。`swift test --package-path macos/SpeechRailApp` 201 项 / 16 套件通过；`pytest tests/test_resource_governor.py tests/test_teleprompter_latency_probe.py` 36 项通过；`swift build --product teleprompter-replay` 成功；`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED（本轮文件 0 warning）；`scripts/macos_app_build.sh --configuration Debug --test-unit` TEST SUCCEEDED（XCTest 344 项、Swift Testing 201 项 / 16 套件，0 failures，exit 0）；`git diff --check` 通过。台账为通过 66、部分 2（R-04 真实拔插、R-07 长时运行）、未覆盖 0、未执行 1（U-10 真实窗口）。仍未执行且不得据此宣称通过：UI 视觉走查与 UI 自动化、真实音频时延基线、真人表达验收、§11.7 的全部质量门槛。
+
+2026-09-28（第二轮）：按 Issue 正文逐条复核实现（此前只核对了标题与状态），发现 #111 步骤 5「未经有效试读使用默认估计并标明不确定性」与验收「试读校准复用既有类型与入口；手动计时、语音辅助试读的证据来源清晰」未实现，已补齐：新增 `TeleprompterCalibrationSource` 与 `EstimateResult.isCalibrated`，试读采用写入 `.manualTrial(durationSeconds:)`、「恢复默认语速」写回 `.uncalibrated`，未试读时预计用时标注「（未试读校准）」且校准入口常驻。`swift test --package-path macos/SpeechRailApp` 204 项 / 16 套件通过；`scripts/macos_app_build.sh --configuration Debug --test-unit` TEST SUCCEEDED（XCTest 344 项、Swift Testing 204 项 / 16 套件，0 failures，exit 0）。语音辅助试读目前不存在，未为对齐措辞虚构路径。
