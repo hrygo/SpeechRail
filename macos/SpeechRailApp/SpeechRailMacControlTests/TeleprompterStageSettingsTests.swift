@@ -736,6 +736,117 @@ struct TeleprompterStageSettingsTests {
         }
     }
 
+    /// 验收第 3 条要的是「字号、列宽**变化**保持位置」，不是「切换两个预设
+    /// 保持位置」。既有那条只钉了 camera 与 podium 两个取值——两个点能过，
+    /// 不等于整条范围都成立。快捷缩放按钮和列宽滑杆给的是**连续值域**，
+    /// 读者随时可以停在中间任何一格，所以这条扫全值域。
+    ///
+    /// 同时钉住「重排不许丢字」：位置保持的首要前提是每个字符都还在，
+    /// 一旦 layout 在某个宽度／字号下吞掉或重复了字符，位置断言会假绿。
+    @Test("reading position and text survive every font scale and column width in range")
+    func fontScaleAndColumnWidthSweepPreservesPositionAndText() {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        // 混排：中文（无空格，靠字断行）、ASCII 单词、代理对 emoji。
+        // 三者的 UTF-16 长度不同，只用纯中文会让这条回归漏掉一半风险。
+        let sources = [
+            "欢迎来到今天的发布会现场，接下来介绍本次升级的重点内容与节奏安排。",
+            "Model 3 的延迟降到 240ms，error rate 稳定在 0.8% 以内。",
+            "第一段落含 emoji 🎯 与代理对 😀，第二段落保持独立。",
+            // 连续结尾换行。**不要**指望这一段能触到 layout 的尾行兜底分支：
+            // 探针量过——12 段候选文本 × 3 档列宽 × 3 档字号共 108 组，
+            // 每组行区间都连续覆盖到 sourceLength，那条分支一次都没进。
+            // 它防的是「TextKit 省掉尾部空行片段」，本机复现不出来。
+            // 留这一段是为了让区间覆盖断言带上真实会遇到的结尾形态。
+            "最后一段以换行结尾，\n\n",
+        ]
+        let segments = sources.enumerated().map { index, source in
+            TeleprompterSegment(
+                id: "sweep-\(index)",
+                ordinal: index,
+                sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+                text: source
+            )
+        }
+        // 每段取三个位置：段首、正中、段尾前一字。
+        var positions: [TeleprompterAligner.Position] = []
+        for (index, source) in sources.enumerated() {
+            for offset in [0, source.utf16.count / 2, max(0, source.utf16.count - 1)] {
+                positions.append(
+                    TeleprompterAligner.Position(segmentIndex: index, utf16Offset: offset)
+                )
+            }
+        }
+
+        let scales = stride(
+            from: tokens.stageMinimumFontScale,
+            through: tokens.stageMaximumFontScale,
+            by: 0.05
+        )
+        let widths = stride(
+            from: tokens.stageMinimumContentWidth,
+            through: tokens.stageMaximumContentWidth,
+            by: 40
+        )
+
+        var checked = 0
+        for scale in scales {
+            for width in widths {
+                let lines = TeleprompterStageLineLayout.layout(
+                    segments: segments,
+                    pointSize: tokens.stageScriptPointSize * scale,
+                    availableWidth: width
+                )
+                // 「不丢字」的正确不变量是**区间并集覆盖全文**，不是显示文本
+                // 逐字相等。第一版这里写的是 `lines.map(\.text).joined() ==
+                // sources.joined()`，加上结尾换行那段就红了——查下来不是产品
+                // 缺陷：行的区间是 [0, 11) 正确覆盖了换行符，而 `text` 是
+                // **显示文本**，`displayRange` 刻意不渲染控制字符，少的那一个
+                // 单位正是 U+000A。断言写错，不是代码写错。
+                for (index, source) in sources.enumerated() {
+                    let rows = lines.filter { $0.segmentIndex == index }
+                        .sorted { $0.utf16Start < $1.utf16Start }
+                    var cursor = 0
+                    for row in rows {
+                        #expect(
+                            row.utf16Start == cursor,
+                            "字号 \(scale)、列宽 \(width) 下第 \(index) 段在 \(cursor) 处断了"
+                        )
+                        #expect(
+                            row.utf16End > row.utf16Start,
+                            "字号 \(scale)、列宽 \(width) 下第 \(index) 段出现空行"
+                        )
+                        cursor = row.utf16End
+                    }
+                    #expect(
+                        cursor == source.utf16.count,
+                        "字号 \(scale)、列宽 \(width) 下第 \(index) 段只覆盖了 \(cursor)/\(source.utf16.count)"
+                    )
+                }
+                // 不含换行的三段可以更强：显示文本必须逐字还原。
+                #expect(
+                    lines.filter { $0.segmentIndex < 3 }.map(\.text).joined()
+                        == sources.prefix(3).joined(),
+                    "字号 \(scale)、列宽 \(width) 下重排改了字"
+                )
+                for position in positions {
+                    let index = TeleprompterStagePresentation.displayLineIndex(
+                        for: position,
+                        lines: lines
+                    )
+                    let line = index.flatMap { lines.indices.contains($0) ? lines[$0] : nil }
+                    #expect(line != nil, "字号 \(scale)、列宽 \(width) 下位置 \(position) 丢了")
+                    #expect(
+                        line?.utf16Start ?? Int.max <= position.utf16Offset
+                            && line?.utf16End ?? Int.min >= position.utf16Offset,
+                        "字号 \(scale)、列宽 \(width) 下位置 \(position) 漂到了别的文字上"
+                    )
+                }
+                checked += 1
+            }
+        }
+        #expect(checked > 100, "值域扫得太少，这条回归没有说服力：只跑了 \(checked) 组")
+    }
+
     /// 换字号或列宽会重排行，旧的偏移可能落到新布局的段尾之外。此时必须
     /// 落到该段最后一行，而不是返回 nil 把阅读位置整个丢掉。
     @Test("an offset past the end of a segment still resolves to that segment's last row")
