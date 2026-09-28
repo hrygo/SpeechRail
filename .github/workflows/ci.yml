@@ -38,7 +38,6 @@ concurrency:
 
 env:
   UV_VERSION: "0.12.13"
-  UV_CACHE_DIR: ~/.cache/uv
 
 jobs:
   change-scope:
@@ -140,6 +139,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
+      # Do NOT pin UV_CACHE_DIR here: GitHub does not expand `~` in env
+      # values, so uv would write into a literal `~` directory while
+      # actions/cache resolves the path to $HOME/.cache/uv. The save step
+      # then fails with "Path Validation Error ... no cache is being
+      # saved" and the cache never exists. uv's own runner default is
+      # already $HOME/.cache/uv, which is what the path below resolves to.
+      #
       # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
       # project's own version inside uv.lock, so that key changes on every
       # release and forces a full ~85MB re-download. restore-keys falls back to
@@ -228,6 +234,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
+      # Do NOT pin UV_CACHE_DIR here: GitHub does not expand `~` in env
+      # values, so uv would write into a literal `~` directory while
+      # actions/cache resolves the path to $HOME/.cache/uv. The save step
+      # then fails with "Path Validation Error ... no cache is being
+      # saved" and the cache never exists. uv's own runner default is
+      # already $HOME/.cache/uv, which is what the path below resolves to.
+      #
       # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
       # project's own version inside uv.lock, so that key changes on every
       # release and forces a full ~85MB re-download. restore-keys falls back to
