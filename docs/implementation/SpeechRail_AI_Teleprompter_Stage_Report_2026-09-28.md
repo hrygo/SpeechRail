@@ -446,7 +446,7 @@
 | U-04 控制栏显隐几何稳定 | 通过 | `controls remain visible for focus, menus, VoiceOver, and opt-in always-on` |
 | U-05 稿首稿尾三行模式 | 通过 | `stage preview shows one, two, or three actual display lines`、`line slots preserve a centered current row at script boundaries`、`two-row mode still leaves the trailing slot empty and row counts stay clamped`（两行模式稿尾留空与行数夹取，本轮补齐并经变异验证）。**内部上限夹取不可观测**，见 §2 第 31 条 |
 | U-06 字号列宽变化位置不串 | 通过 | `display-line layout wraps at the requested width and preserves UTF-16 source ranges`、`manual display-line positioning preserves UTF-16 offsets and takes over voice assist`、`an offset past the end of a segment still resolves to that segment's last row`（换字号后偏移落到段尾之外，本轮补齐并经变异验证） |
-| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证** |
+| U-07 无障碍与 Reduce Motion | 部分 | Reduce Motion 有回归（`reduceMotionRemovesScrollAnimation`：舞台不做位移动画但阅读位置仍更新），焦点策略有回归（`readingShortcutFocusPolicy`）。**无障碍此前只有「控制栏在 VoiceOver 开启时不隐藏」这一条**（`controls remain visible…` 验的是 `controlsVisible`，不涉及控件名称），三处复选框因此长期没有无障碍名称；本轮已补名称（§2 第 23 条），但**朗读效果未验证**。**键盘侧同样是零证据**：方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」，而舞台绑定 10 组键、工作台只有 ⌘⏎ 一个，新建／导入／打开舞台／手动接管／重试保存／采用候选版本**全部没有键位**，纯键盘能否完成取决于系统「键盘导航」开关（默认关闭）。已并入 §5 第 1 条 U-10 走查清单 |
 | U-08 后台更新不抢焦点 | 通过 | `readingShortcutFocusPolicy`（阅读区外焦点、控件焦点、popover 打开时方向键都不被舞台接管）；提词器与 App 均未注册 `NSEvent` 全局／本地监视器，阅读键只作用于舞台窗口 |
 | U-09 显示预设持久化 | 通过 | `stage settings clamp and persist their supported ranges`、`stage visibility preferences default off and persist independently` |
 | U-10 真实窗口可见性 | 未执行 | 需 UI 自动化逐次授权。**待走查面已增至 7 处**：原四处（精简入口、精简确认 sheet、删除审阅卡片「原文：」行、识别语言菜单）＋读法标注窗口、语音辅助试读的「麦克风／识别／定位」三段链路，以及三处复选框的 VoiceOver 朗读 |
@@ -614,6 +614,14 @@
 ## 5. 未完成与建议的下一步
 
 1. **UI 视觉验收（U-10）**：`#113` 的显示设置弹层（场景分段控件、列宽滑杆）、最小 500 pt 宽度下的图标化“回到朗读位置”，以及 Reduce Motion 下的舞台滚动，都需要一次逐次授权的 UI 走查。**本轮新增的七处界面必须并入同一次走查**——「按时长精简…」入口、精简确认 sheet（含默认折叠的必讲标记区）、删除审阅卡片的「原文：…」行、识别语言菜单、读法标注窗口（就绪页表头）、语音辅助试读的「麦克风／识别／定位」三段链路，以及其分段控件。它们只通过了编译，位置、层级、标签长度与窄窗表现均未验证。策略层已有单测，视觉结论尚未产生。**同一次走查还要用 VoiceOver 复核三处复选框的名称是否被正确朗读**——本轮补了名称但未验证朗读，见 §2 第 23 条。
+   - **第十八轮追加：常用操作的键盘可达（验收第 3 条最后一句，此前整份清单漏了它）**。方案第 242 行要求「常用操作仍须键盘与无障碍可达 [R01]」，台账 U-07 也写着「控制可达」，但上面这份清单里「键盘」一次都没出现——接手方走完这一遍，键盘可达仍然是零证据。现状是**舞台内覆盖良好、工作台几乎没有**：舞台已绑定 space／←→↑↓／PageUp·PageDown／Home／End／Esc／Tab 与 ⌘= ⌘- ⌘0 ⌘[ ⌘]（`TeleprompterStageView` 168–178、963–971），而工作台**只有 ⌘⏎ 一个**（整理朗读稿，`TeleprompterView` 2213）。走查要逐项确认下列操作能否纯键盘完成，并**记录系统「键盘导航／全键盘访问」是开还是关**——该设置默认关闭，关闭时按钮根本不在焦点链上，「键盘可达」与「不可达」只差这一个系统开关：
+     - 新建空白稿／从剪贴板创建／导入文本文件（顶栏 `PageActionsMenu` 里的三项，以及空状态区的重复入口）；
+     - 打开提词舞台、关闭舞台（舞台内 Esc 是否真的可达）；
+     - 停用语音／手动接管——**这是「随时手动接管」这条成功目标的入口，不能只能点**；
+     - 存盘失败横幅里的「重试保存」与「复制稿件内容」：读者在这两个动作上最需要键盘，它们也是第 48、49 条修过的路径；
+     - 审阅页的「采用候选版本」——不可重做的一步，必须键盘可达；
+     - 「回到朗读位置」与字号调整在工作台侧是否有键位。
+   - 同时确认**焦点可见性**：纯键盘走完上述路径，焦点环是否始终可见、是否有焦点陷阱。策略层只有 `readingShortcutFocusPolicy` 一条回归（管的是「输入框有焦点时不截获阅读键」），**焦点环本身与上述任何一项都没有回归**。
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。
 3. **两项“部分”场景**：R-04 需要真实拔插／蓝牙重连，R-07 需要长时连续运行；两者都无法用 fake 证明，不接受用单测冒充。
 4. **#110 读法别名通道已交付，界面仍未走查**：`match_phrases` 仍被解码器拒绝，因此别名只能由用户显式确认产生，不放开模型注入——这与方案要求一致。已交付：`TeleprompterAcceptedReading` 绑定段内一处 UTF-16 范围并记下当时的显示文本；对齐时用读法的值匹配、位置仍落在显示文本上，稿件／导出／逐字记录一字不改；同值数值校验拒绝「大约一半」这类无损外的替换；就绪页「读法标注」入口经会话层解析段内出现位置，同段重复出现时要求用户用更长词组限定而不猜。**剩下的仍不是功能，是验证**：弹窗的呈现、两个输入框的窄窗排版、错误文案的可达性，全部只有编译与单测证据，须并入 U-10 同一次走查。另有一条**已知代价**要记在走查 checklist 里：加了别名后，念显示文本的置信度从 1.0 降到 0.875（仍高于 0.72 前进门槛）。
