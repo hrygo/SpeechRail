@@ -143,6 +143,60 @@ struct TeleprompterReplayEvaluatorTests {
         }
     }
 
+    /// The manifest is authored outside the repository, so its intent strings
+    /// are a real wire contract, not an implementation detail.
+    private static let manifestJSON = """
+        {
+          "schema_version": "teleprompter.replay.v1",
+          "dataset_revision": "dataset-1",
+          "baseline_commit": "baseline-sha",
+          "candidate_commit": "candidate-sha",
+          "policy_revision": "policy-1",
+          "language_lane": "zh",
+          "device_class": "test-device",
+          "segments": [{"id": "s0", "text": "欢迎来到今天的直播。"}],
+          "events": [
+            {"at_milliseconds": 500, "kind": "completed", "item_id": "item-1",
+             "event_id": "e0", "revision": 1, "text": "欢迎来到今天的直播。"}
+          ],
+          "labels": [
+            {"event_index": 0, "intent": "read", "expected_segment_index": 0},
+            {"event_index": 0, "intent": "reRead", "expected_segment_index": 0},
+            {"event_index": 0, "intent": "manualJump", "expected_segment_index": null}
+          ]
+        }
+        """
+
+    @Test func manifestIntentStringsRoundTripThroughJSON() throws {
+        // Pin the spelling so a Swift rename cannot silently break manifests
+        // that live outside the repository. Every other test builds intents in
+        // Swift, which is exactly why the runner shipped help text advertising
+        // `re_read` / `manual_jump` for a decoder that only accepted
+        // `reRead` / `manualJump` without any test noticing.
+        #expect(
+            TeleprompterReplayManifest.Intent.manifestValues
+                == ["read", "improvise", "reRead", "manualJump"]
+        )
+        let decoded = try JSONDecoder().decode(
+            TeleprompterReplayManifest.self,
+            from: Data(Self.manifestJSON.utf8)
+        )
+        #expect(decoded.labels.map(\.intent) == [.read, .reRead, .manualJump])
+    }
+
+    @Test func manifestRejectsTheSnakeCaseSpellingTheHelpTextUsedToAdvertise() {
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(
+                TeleprompterReplayManifest.self,
+                from: Data(
+                    Self.manifestJSON
+                        .replacingOccurrences(of: "reRead", with: "re_read")
+                        .utf8
+                )
+            )
+        }
+    }
+
     @Test func reportCarriesOnlyAggregatesAndNoScriptText() throws {
         let report = try TeleprompterReplayEvaluator.evaluate(
             manifest(

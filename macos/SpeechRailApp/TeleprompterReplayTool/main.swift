@@ -23,7 +23,15 @@ private let usage = """
     素材要求（schema teleprompter.replay.v1）：
       dataset_revision / baseline_commit / candidate_commit / policy_revision 必填，
       segments 为冻结稿件，events 为按接收顺序记录的事件，labels 为人工标注的
-      意图（read / improvise / re_read / manual_jump）与阅读位置。
+      意图与阅读位置。
+
+      labels[].intent 取值：\(TeleprompterReplayManifest.Intent.manifestValues.joined(separator: " / "))
+      （区分大小写，按上面写法）。
+      labels[].expected_segment_index 标的是**读者当时已经读到的段落**，不是系统
+      确认到的段落：正常跟随时，把它挂在读者刚进入该段的那个事件上，系统在
+      后续事件才追上来的那一段差值才计入跟随延迟。挂到系统已追上的那个事件
+      会让延迟恒为 0，看起来「没有延迟」其实是没有样本。
+      segment 0 是回放起点，系统一开始就在 0，因此第 0 段不会产生延迟样本。
 
     输出（schema teleprompter.eval.v1）：仅聚合计数与版本信息，不含音频、完整正文或转写。
     未运行的状态是 not_run，不会用 0 冒充没有错误。
@@ -32,6 +40,35 @@ private let usage = """
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data(("teleprompter-replay: " + message + "\n").utf8))
     exit(2)
+}
+
+/// Foundation's `localizedDescription` for a decoding failure is the same
+/// sentence for every malformed manifest, so a typo in one field gives the
+/// caller nothing to act on. Name the field and, for the enumerated intents,
+/// the accepted values.
+private func describeDecodingFailure(_ error: Error) -> String {
+    guard let decodingError = error as? DecodingError else {
+        return error.localizedDescription
+    }
+    let context: DecodingError.Context? = switch decodingError {
+    case let .keyNotFound(_, context),
+         let .typeMismatch(_, context),
+         let .valueNotFound(_, context),
+         let .dataCorrupted(context):
+        context
+    @unknown default:
+        nil
+    }
+    guard let context else { return error.localizedDescription }
+    let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+    let location = path.isEmpty ? "manifest 顶层" : "字段 \(path)"
+    var description = "\(location)：\(context.debugDescription)"
+    if path.hasSuffix("intent") {
+        let accepted = TeleprompterReplayManifest.Intent.manifestValues
+            .joined(separator: " / ")
+        description += "（接受的取值：\(accepted)）"
+    }
+    return description
 }
 
 private func parseArguments(_ arguments: [String]) throws -> (manifest: URL, output: URL?) {
@@ -82,7 +119,7 @@ do {
     do {
         manifest = try JSONDecoder().decode(TeleprompterReplayManifest.self, from: data)
     } catch {
-        fail("素材 manifest 不是合法的 \(TeleprompterReplayManifest.schemaVersion)：\(error.localizedDescription)")
+        fail("素材 manifest 不是合法的 \(TeleprompterReplayManifest.schemaVersion)：\(describeDecodingFailure(error))")
     }
     let report: TeleprompterReplayEvaluator.Report
     do {

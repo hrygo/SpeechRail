@@ -68,13 +68,19 @@ public struct TeleprompterReplayManifest: Codable, Equatable, Sendable {
     /// describes the human behaviour, not the model output.
     public enum Intent: String, Codable, Equatable, Sendable {
         /// Normal reading: the system is expected to follow along.
-        case read
+        case read = "read"
         /// Ad-libbing or pausing: holding is fine, jumping ahead is not.
-        case improvise
+        case improvise = "improvise"
         /// Genuinely re-reading an earlier sentence.
-        case reRead
+        case reRead = "reRead"
         /// The reader navigated manually; voice must not take the stage back.
-        case manualJump
+        case manualJump = "manualJump"
+
+        /// The exact strings a manifest may carry. Raw values are pinned
+        /// explicitly so a Swift rename cannot silently change the on-disk
+        /// contract, and the runner's help text and error message both read
+        /// this list so documentation cannot drift from the decoder.
+        public static let manifestValues = ["read", "improvise", "reRead", "manualJump"]
     }
 
     public struct Label: Codable, Equatable, Sendable {
