@@ -671,6 +671,55 @@ struct TeleprompterSessionLifecycleTests {
                 "试读不占用语音跟读生命周期")
     }
 
+    @Test("closing the stage during a speech trial still gives the microphone back")
+    func closingTheStageDuringASpeechTrialReleasesTheDevice() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+
+        #expect(await harness.session.startSpeechTrial())
+        #expect(harness.coordinator.occupancy != nil)
+
+        // 舞台窗口在试读期间被关掉。语音跟随的生命周期此时是 `.off`，
+        // 它的 `beginStop` 对 `.off` 返回 nil——试读必须另有归处，
+        // 否则麦克风与设备租约会一直挂着。
+        await harness.session.closeStage()
+
+        #expect(harness.coordinator.occupancy == nil, "关闭舞台必须归还设备租约")
+        #expect(harness.sourceFactory.sources.first?.stopCount == 1, "采集必须停止")
+        #expect(harness.session.speechTrialStage == .idle, "试读状态必须收尾")
+        #expect(harness.session.speechTrialEvidence != nil, "已听到的内容要留下证据")
+    }
+
+    @Test("voice assist refuses to start on top of a running speech trial")
+    func voiceAssistRefusesToStartDuringASpeechTrial() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+
+        #expect(await harness.session.startSpeechTrial())
+        let trialClient = try #require(harness.clientFactory.clients.first)
+
+        // 试读期间再请求语音跟随：占用方本来就是提词器，coordinator 会认为
+        // 「已经在跑同一个会话」而什么都不做，于是新管线会复用在试读那一套
+        // client/source 上。必须明确拒绝，而不是让两套泵同时跑。
+        await harness.session.enableVoiceAssist()
+
+        #expect(harness.session.voiceAssistState != .following,
+                "试读进行中不得进入跟读")
+        #expect(harness.session.blocked == .speechTrialActive,
+                "受阻原因要说对：占用麦克风的就是提词器自己的试读，写成「会议助手正在使用」会把责任推给一个根本没参与的功能")
+        #expect(harness.session.speechTrialStage == .listening,
+                "被拒绝的启动不得打断试读")
+        #expect(harness.clientFactory.clients.count == 1, "不得另建第二条连接")
+        #expect(await trialClient.currentCounters().closeCount == 0,
+                "试读自己的连接不得被提前关掉")
+
+        await harness.session.stopSpeechTrial()
+    }
+
     @Test("manual display-line positioning preserves UTF-16 offsets and takes over voice assist")
     func manualDisplayLinePositionUsesExistingTakeover() async throws {
         let harness = try TeleprompterSessionHarness()

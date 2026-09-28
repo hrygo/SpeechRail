@@ -28,6 +28,9 @@ public final class TeleprompterSession {
         case streamFailed(String)
         case aiUnavailable(String)
         case storeUnavailable(String)
+        /// 语音辅助试读正占着麦克风。它也是提词器自己的功能，所以不能拿
+        /// `occupiedBy(.teleprompter)` 顶替——那会把原因说成「别的功能」。
+        case speechTrialActive
 
         public var title: String {
             switch self {
@@ -38,8 +41,9 @@ public final class TeleprompterSession {
             case .serviceBusy: "语音识别正在被其他功能占用"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
             case .streamFailed: "语音跟读连接中断"
-            case .aiUnavailable: "AI 整理暂时不可用"
-            case .storeUnavailable: "稿件保存失败"
+        case .aiUnavailable: "AI 整理暂时不可用"
+        case .storeUnavailable: "稿件保存失败"
+        case .speechTrialActive: "语音辅助试读正在进行"
             }
         }
 
@@ -61,9 +65,11 @@ public final class TeleprompterSession {
                 Self.friendlyAIMessage(message)
             case .storeUnavailable(let message):
                 message
-            case .occupiedBy(let kind):
-                "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
-            }
+        case .occupiedBy(let kind):
+            "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
+        case .speechTrialActive:
+            "先结束语音辅助试读，再开始跟读；现在仍可以手动提词。"
+        }
         }
 
         private static func friendlyAIMessage(_ raw: String) -> String {
@@ -1619,6 +1625,13 @@ public final class TeleprompterSession {
 
     public func enableVoiceAssist() async {
         guard !isResuming, !isStoppingIntentionally else { return }
+        // 试读期间占用方本来就是提词器，coordinator 会把它读成「已经在跑同一个
+        // 会话」而什么都不做；那样新管线会直接复用试读那套 client/source，
+        // 两套泵同时跑。这里明确拒绝。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            blocked = .speechTrialActive
+            return
+        }
         if activeVersion == nil || phase == .draft {
             do { try useDeterministicFallback() }
             catch {
@@ -1904,6 +1917,13 @@ public final class TeleprompterSession {
     /// during this transition so an old drain cannot retire a newer stage.
     func finishStageClose() async {
         guard let token = stageCloseToken else { return }
+        // 语音辅助试读不经过 `voiceLifecycle`（那只服务跟读），试读期间
+        // 生命周期停在 `.off`，而 `beginStop` 对 `.off` 返回 nil——于是
+        // `requestVoiceStop` 与 `disableVoiceAssist` 都不会发起任何停止。
+        // 试读必须在这里单独收尾，否则麦克风与设备租约会一直挂着。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            await coordinator.stopCapture()
+        }
         await disableVoiceAssist()
         guard stageCloseToken == token else { return }
         // `stopCapture` always closes the local client/source even when the

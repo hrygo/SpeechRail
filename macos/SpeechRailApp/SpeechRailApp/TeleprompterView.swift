@@ -1321,6 +1321,17 @@ public struct TeleprompterView: View {
                         }
                         .speechRailButton(.primary)
 
+                    case .speechTrialActive:
+                        // 能真正解决它的是结束试读，不是重试跟读——
+                        // 麦克风正被提词器自己的试读占着。
+                        Button("结束语音试读") {
+                            Task {
+                                await session.stopSpeechTrial()
+                                session.clearBlocked()
+                            }
+                        }
+                        .speechRailButton(.primary)
+
                     case .storeUnavailable:
                         Button("重试保存") {
                             try? session.save()
