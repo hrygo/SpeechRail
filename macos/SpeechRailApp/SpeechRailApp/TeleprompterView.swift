@@ -29,10 +29,14 @@ public struct TeleprompterView: View {
     @State private var editingReviewItemText: String = ""
     @State private var narrowComparisonTab: ComparisonTab = .reading
     @State private var pendingAIAction: AIPendingAction = .prepare
+    /// Lossy shortening is never a single tap: it always passes through an
+    /// explicit confirmation that names what it may remove.
+    @State private var isCondenseConfirmationPresented = false
 
     private enum AIPendingAction {
         case prepare
         case annotate
+        case condense
     }
 
     private enum ComparisonTab: String, CaseIterable, Identifiable {
@@ -122,10 +126,24 @@ public struct TeleprompterView: View {
                     startAIAnalysis()
                 case .annotate:
                     startAnnotation()
+                case .condense:
+                    startCondense()
                 }
             }
         } message: {
             Text(TeleprompterAIDataFlowDisclosure.message)
+        }
+        .alert(
+            TeleprompterCondenseDisclosure.title,
+            isPresented: $isCondenseConfirmationPresented
+        ) {
+            Button("取消", role: .cancel) {}
+            Button("确认精简") {
+                UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
+                startCondense()
+            }
+        } message: {
+            Text(TeleprompterCondenseDisclosure.message)
         }
         .onDrop(of: [.fileURL, .plainText], isTargeted: nil) { providers in
             handleDrop(providers)
@@ -1588,6 +1606,18 @@ public struct TeleprompterView: View {
                                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                                                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                                         }
+                                        // A deletion carries no proposal, so the
+                                        // original text is the only account of
+                                        // what would be lost. Without this the
+                                        // card says "this paragraph will be
+                                        // deleted" without showing which one.
+                                        if item.issue == .contentRemoved
+                                            || item.suggestedText.isEmpty,
+                                            !item.sourceSnippet.isEmpty {
+                                            Text("原文：\(item.sourceSnippet)")
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                        }
                                     }
 
                                     Spacer()
@@ -2155,6 +2185,20 @@ public struct TeleprompterView: View {
                 .speechRailButton(.secondary)
                 .disabled(sourceIsEmpty || session.sourceValidationError != nil || !session.canEdit)
 
+                // Lossy on purpose and therefore never a peer of the primary
+                // action: it opens a confirmation that names what it removes.
+                Button("按时长精简…") {
+                    isCondenseConfirmationPresented = true
+                }
+                .speechRailButton(.secondary)
+                .disabled(
+                    sourceIsEmpty
+                        || session.sourceValidationError != nil
+                        || !session.canEdit
+                        || session.isPreparingDraft
+                        || !isTargetMinutesValid
+                )
+
             case .analyzing, .preparing:
                 Button("取消整理") {
                     session.discardPendingVersion()
@@ -2509,6 +2553,14 @@ public struct TeleprompterView: View {
     private func startAIAnalysis() {
         Task {
             await session.analyzeDraft()
+        }
+    }
+
+    /// Lossy shortening is only ever started from an explicit confirmation, so
+    /// there is no "just do it" path into it.
+    private func startCondense() {
+        Task {
+            await session.condenseDraft()
         }
     }
 
