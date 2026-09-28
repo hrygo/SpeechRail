@@ -475,7 +475,7 @@ public enum VoiceOutputCheckState: Equatable, Sendable {
     /// 机器报告未通过（warn/reject）。
     case failed(voiceID: String, voiceRevision: String?, message: String)
     /// 请求本身失败（网络、契约、取消之外的错误）。
-    case error(voiceID: String, message: String)
+    case error(voiceID: String, voiceRevision: String?, message: String)
 
     public var voiceID: String? {
         switch self {
@@ -485,8 +485,20 @@ public enum VoiceOutputCheckState: Equatable, Sendable {
              let .passed(voiceID, _, _),
              let .passedNotPersisted(voiceID, _),
              let .failed(voiceID, _, _),
-             let .error(voiceID, _):
+             let .error(voiceID, _, _):
             voiceID
+        }
+    }
+
+    public var voiceRevision: String? {
+        switch self {
+        case .idle, .running:
+            nil
+        case let .passed(_, voiceRevision, _),
+             let .passedNotPersisted(_, voiceRevision),
+             let .failed(_, voiceRevision, _),
+             let .error(_, voiceRevision, _):
+            voiceRevision
         }
     }
 
@@ -511,7 +523,7 @@ public enum VoiceOutputCheckState: Equatable, Sendable {
             "检查已完成，但结果未保存，请重试。"
         case let .failed(_, _, message):
             message
-        case let .error(_, message):
+        case let .error(_, _, message):
             message
         }
     }
@@ -3285,23 +3297,30 @@ public final class AppModel {
             // 刷新后运行时未知不能把刚结束的检查改判为失败，也不显示「当前生产已确认」。
             _ = await refreshCapabilitySet()
             let refreshedRevision = creatorVoices.first { $0.id == voiceID }?.revision
-            let effectiveRevision = refreshedRevision ?? voiceRevision
             guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
+            guard let voiceRevision, refreshedRevision == voiceRevision else {
+                voiceOutputCheck = .error(
+                    voiceID: voiceID,
+                    voiceRevision: refreshedRevision,
+                    message: "检查期间音色版本发生变化，请重新检查。"
+                )
+                return voiceOutputCheck
+            }
             if response.isRecordedOutputPass {
                 voiceOutputCheck = .passed(
                     voiceID: voiceID,
-                    voiceRevision: effectiveRevision,
+                    voiceRevision: voiceRevision,
                     runID: response.legacyReport.runID
                 )
             } else if response.legacyReport.status == .pass {
                 voiceOutputCheck = .passedNotPersisted(
                     voiceID: voiceID,
-                    voiceRevision: effectiveRevision
+                    voiceRevision: voiceRevision
                 )
             } else {
                 voiceOutputCheck = .failed(
                     voiceID: voiceID,
-                    voiceRevision: effectiveRevision,
+                    voiceRevision: voiceRevision,
                     message: Self.voiceOutputCheckFailureMessage(response.legacyReport)
                 )
             }
@@ -3312,6 +3331,7 @@ public final class AppModel {
             guard voiceOutputCheckGeneration == generation else { return voiceOutputCheck }
             voiceOutputCheck = .error(
                 voiceID: voiceID,
+                voiceRevision: voiceRevision,
                 message: Self.creatorErrorMessage(for: error)
             )
         }

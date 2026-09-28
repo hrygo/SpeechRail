@@ -61,6 +61,17 @@ _MAX_BATCH_PCM_BYTES = 40 * 1024 * 1024
 # Mirrors SpeechRequest.text max_length.
 _MAX_TEXT_CHARS = 100_000
 _MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
+
+_STRICT_VOICE_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "voice_not_production_ready",
+        "voice_validation_runtime_changed",
+        "voice_validation_store_unavailable",
+        "voice_validation_runtime_unavailable",
+    }
+)
+
+
 class LocalFileJobProcessor:
     """Resolve local ``input_ref`` files and produce spooled result artifacts."""
 
@@ -266,12 +277,7 @@ class LocalFileJobProcessor:
                 registry=get_voice_registry(),
             )
         except TtsBackendError as exc:
-            if exc.public_code in {
-                "voice_not_production_ready",
-                "voice_validation_runtime_changed",
-                "voice_validation_store_unavailable",
-                "voice_validation_runtime_unavailable",
-            }:
+            if exc.public_code in _STRICT_VOICE_VALIDATION_ERROR_CODES:
                 raise JobProcessingError(exc.public_code) from None
             raise JobProcessingError("job_processor_failed") from None
         except VoiceRevisionConflictError:
@@ -287,6 +293,8 @@ class LocalFileJobProcessor:
         except TtsBackendError as exc:
             if exc.code in TTS_PARAMETER_ERROR_CODES:
                 raise JobProcessingError("job_input_invalid") from None
+            if exc.public_code in _STRICT_VOICE_VALIDATION_ERROR_CODES:
+                raise JobProcessingError(exc.public_code) from None
             raise JobProcessingError("job_processor_failed") from None
         if not pcm:
             raise JobProcessingError("job_processor_failed")
