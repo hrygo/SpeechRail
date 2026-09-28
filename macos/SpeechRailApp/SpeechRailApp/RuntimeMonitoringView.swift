@@ -1152,8 +1152,19 @@ public struct RuntimeMonitoringView: View {
             return base * 10
         }
 
+        /// 刻度个数取整后**不许越过 `peak`**：两张图都显式声明了
+        /// `.chartYScale(domain: 0 ... countPeak)`，越界的刻度会让那一格的网格线与
+        /// 标签画不出来（`countPeak=7` 时曾得到 `[0,2,4,6,8]`，而域是 `0...7`）。
+        ///
+        /// 不能改成 `Int(floor(peak / step))`：`secondsPeak = secondsStep * 4` 在浮点下
+        /// `peak / step` 可能算成 `3.9999999999999996`，floor 会把**顶端刻度丢掉**，
+        /// 那是新的回归。所以仍按 `.rounded()` 取整，只在越界时回退一格。
         private static func ticks(step: Double, peak: Double) -> [Double] {
-            (0 ... Int((peak / step).rounded())).map { Double($0) * step }
+            var count = Int((peak / step).rounded())
+            if Double(count) * step > peak {
+                count -= 1
+            }
+            return (0 ... max(0, count)).map { Double($0) * step }
         }
     }
 
@@ -1208,17 +1219,28 @@ public struct RuntimeMonitoringView: View {
     /// 折线是每次语音的耗时（右轴，值先换算到左轴域）。
     private var realtimeUsageChart: some View {
         let samples = windowedSamples
+        // `windowedSamples` 每次访问都重新读 `Date()`，所以同一次求值里读两次就可能
+        // 跨过一个 `capturedAt`、拿到两个不同的数组——那样喂给 `Chart` 的 mark 集合
+        // 与决定 y 域、折线换算的数据就不是同一份快照。整张图只读一次，
+        // 耗时序列与两个计数都由它派生。
+        let latency = samples.map {
+            RuntimeLatencySample(
+                capturedAt: $0.capturedAt,
+                asrSeconds: $0.asrLatencySeconds,
+                ttsSeconds: $0.ttsLatencySeconds
+            )
+        }
         let scale = UsageChartScale(
             countPeak: samples
                 .map { Double($0.realtimeActiveRequests + $0.batchActiveRequests) }
                 .max() ?? 0,
-            secondsPeak: latencySamples
+            secondsPeak: latency
                 .flatMap { [$0.asrSeconds, $0.ttsSeconds] }
                 .compactMap { $0 }
                 .max() ?? 0
         )
-        let asrLatencyCount = latencySamples.reduce(0) { $0 + ($1.asrSeconds == nil ? 0 : 1) }
-        let ttsLatencyCount = latencySamples.reduce(0) { $0 + ($1.ttsSeconds == nil ? 0 : 1) }
+        let asrLatencyCount = latency.reduce(0) { $0 + ($1.asrSeconds == nil ? 0 : 1) }
+        let ttsLatencyCount = latency.reduce(0) { $0 + ($1.ttsSeconds == nil ? 0 : 1) }
         return Chart {
             // 稿 `lineChart` 的两条序列：会话式的实时请求与一次一句的请求。
             // 合计值仍在指标条与可访问性摘要里，图上看的是这两类各占多少。
@@ -1279,7 +1301,15 @@ public struct RuntimeMonitoringView: View {
         .accessibilityLabel("使用趋势")
         .accessibilityIdentifier("runtime-chart")
         .accessibilityChartDescriptor(
-            RuntimeMonitoringChartDescriptor(points: visibleChartPoints, latency: latencySamples)
+            RuntimeMonitoringChartDescriptor(
+                points: samples.map {
+                    RuntimeMonitoringChartPoint(
+                        capturedAt: $0.capturedAt,
+                        activeRequests: $0.activeRequests
+                    )
+                },
+                latency: latency
+            )
         )
     }
 
