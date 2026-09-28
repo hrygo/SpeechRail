@@ -133,17 +133,11 @@ public struct TeleprompterView: View {
         } message: {
             Text(TeleprompterAIDataFlowDisclosure.message)
         }
-        .alert(
-            TeleprompterCondenseDisclosure.title,
-            isPresented: $isCondenseConfirmationPresented
-        ) {
-            Button("取消", role: .cancel) {}
-            Button("确认精简") {
+        .sheet(isPresented: $isCondenseConfirmationPresented) {
+            TeleprompterCondenseSheet(session: session) { mustKeepRanges in
                 UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
-                startCondense()
+                startCondense(mustKeepSourceRanges: mustKeepRanges)
             }
-        } message: {
-            Text(TeleprompterCondenseDisclosure.message)
         }
         .onDrop(of: [.fileURL, .plainText], isTargeted: nil) { providers in
             handleDrop(providers)
@@ -2558,9 +2552,9 @@ public struct TeleprompterView: View {
 
     /// Lossy shortening is only ever started from an explicit confirmation, so
     /// there is no "just do it" path into it.
-    private func startCondense() {
+    private func startCondense(mustKeepSourceRanges: [TeleprompterSourceRange] = []) {
         Task {
-            await session.condenseDraft()
+            await session.condenseDraft(mustKeepSourceRanges: mustKeepSourceRanges)
         }
     }
 
@@ -2691,6 +2685,187 @@ public struct TeleprompterView: View {
 }
 
 // MARK: - 开箱即用场景范例数据
+
+/// 「按时长精简」唯一的授权入口。
+///
+/// 有损操作因此不与保真整理并列为常驻主按钮，而是先打开这张 sheet：默认只
+/// 说明后果并要求确认；「标记必讲内容」收在 Disclosure 里，默认路径仍是两次
+/// 点击，标记是可选的进阶动作。段落范围由 session 提供，不在这里重算切段——
+/// `condenseDraft` 按重叠把范围映射到来源单元，切法不一致会锁错文字。
+private struct TeleprompterCondenseSheet: View {
+    @Bindable var session: TeleprompterSession
+    @Environment(\.dismiss) private var dismiss
+    let onConfirm: ([TeleprompterSourceRange]) -> Void
+
+    private struct Paragraph: Identifiable {
+        let id: Int
+        let range: TeleprompterSourceRange
+        let text: String
+    }
+
+    @State private var paragraphs: [Paragraph] = []
+    @State private var mustKeepIndices: Set<Int> = []
+    @State private var isMarkingMustKeep = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            explanation
+            if !paragraphs.isEmpty {
+                mustKeepSection
+            }
+            footer
+        }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetWidth,
+            maxWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetMaximumWidth,
+            minHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetMinimumHeight,
+            idealHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetHeight,
+            maxHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetMaximumHeight
+        )
+        .onAppear(perform: loadParagraphs)
+    }
+
+    // MARK: - 后果说明
+
+    private var explanation: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(TeleprompterCondenseDisclosure.title)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Text(TeleprompterCondenseDisclosure.message)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - 标记必讲（可选）
+
+    private var mustKeepSection: some View {
+        DisclosureGroup(isExpanded: $isMarkingMustKeep) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(mustKeepSummary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button("全部标为必讲") {
+                        mustKeepIndices = Set(paragraphs.indices)
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(mustKeepIndices.count == paragraphs.count)
+
+                    Button("清空标记") {
+                        mustKeepIndices.removeAll()
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(mustKeepIndices.isEmpty)
+
+                    Spacer()
+                }
+
+                ScrollView {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        ForEach(paragraphs) { paragraph in
+                            mustKeepRow(paragraph)
+                        }
+                    }
+                }
+                .frame(maxHeight: SpeechRailDesignTokens.Teleprompter.condenseMustKeepListMaximumHeight)
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        } label: {
+            Text("标记必讲内容（可选）")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+        }
+    }
+
+    private func mustKeepRow(_ paragraph: Paragraph) -> some View {
+        let index = paragraph.id
+        let isMarked = mustKeepIndices.contains(index)
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Toggle(isOn: Binding(
+                get: { isMarked },
+                set: { newValue in
+                    if newValue {
+                        mustKeepIndices.insert(index)
+                    } else {
+                        mustKeepIndices.remove(index)
+                    }
+                }
+            )) {
+                EmptyView()
+            }
+            .toggleStyle(.checkbox)
+            .padding(.top, SpeechRailDesignTokens.Spacing.tight)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("第 \(index + 1) 段")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(
+                        isMarked ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary
+                    )
+                Text(paragraph.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(
+                        isMarked ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkTertiary
+                    )
+                    .lineLimit(3)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            isMarked ? SpeechRailDesignTokens.Color.field : SpeechRailDesignTokens.Color.recessedField.opacity(0.5),
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+    }
+
+    private var mustKeepSummary: String {
+        mustKeepIndices.isEmpty
+            ? "未标记任何段落：所有内容都可能被精简列为删减候选。"
+            : "已标记 \(mustKeepIndices.count) 段必讲，精简不会删除这些内容；其余段落仍可能被删。"
+    }
+
+    // MARK: - 操作
+
+    private var footer: some View {
+        HStack {
+            Button("取消") { dismiss() }
+                .speechRailButton(.secondary)
+
+            Spacer()
+
+            Button("确认精简") {
+                let ranges = paragraphs
+                    .filter { mustKeepIndices.contains($0.id) }
+                    .map(\.range)
+                onConfirm(ranges)
+                dismiss()
+            }
+            .speechRailButton(.primary)
+        }
+    }
+
+    // MARK: - 辅助
+
+    private func loadParagraphs() {
+        guard let source = session.document?.sourceText else { return }
+        let total = source.utf16.count
+        paragraphs = session.mustKeepCandidateRanges().enumerated().map { index, range in
+            // The ranges come from the session's own split of this same text,
+            // but clamp anyway: `String.Index(utf16Offset:in:)` traps on an
+            // out-of-bounds offset and a trap in a sheet is unrecoverable.
+            let lower = max(0, min(range.start, total))
+            let upper = max(lower, min(range.end, total))
+            let start = String.Index(utf16Offset: lower, in: source)
+            let end = String.Index(utf16Offset: upper, in: source)
+            return Paragraph(id: index, range: range, text: String(source[start..<end]))
+        }
+    }
+}
 
 private struct TeleprompterStarterTemplate: Identifiable {
     let id: String

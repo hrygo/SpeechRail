@@ -2652,6 +2652,14 @@ public final class TeleprompterSession {
         }
     }
 
+    /// Paragraph ranges the reader may mark as must-keep before a lossy
+    /// condense. The UI must not re-derive these from its own split of the
+    /// source: `condenseDraft` maps ranges onto source units by overlap, so a
+    /// differently-computed range would silently lock the wrong text.
+    public func mustKeepCandidateRanges() -> [TeleprompterSourceRange] {
+        paragraphRanges(in: document?.sourceText ?? "")
+    }
+
     private func v2Origin(_ origin: TeleprompterBlockOrigin) -> TeleprompterBlockOrigin {
         origin
     }

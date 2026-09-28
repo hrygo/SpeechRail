@@ -521,6 +521,55 @@ struct TeleprompterSessionLifecycleTests {
         #expect(!harness.session.canAcceptPendingVersion, "删除未确认前不能采用")
     }
 
+    @Test("condense fails the whole round when a must-keep paragraph would be deleted")
+    func condenseFailsClosedWhenAMarkedParagraphWouldBeDeleted() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "精简稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
+        }
+
+        let ranges = harness.session.mustKeepCandidateRanges()
+        #expect(ranges.count == 3, "每个空行分隔的段落都应可被标记为必讲")
+
+        // The fake omits the last unit, which is exactly the paragraph marked
+        // must-keep. The pipeline must refuse the whole round rather than ship
+        // a version that deletes it.
+        await harness.session.condenseDraft(mustKeepSourceRanges: [try #require(ranges.last)])
+
+        #expect(harness.session.pendingVersion == nil, "锁定内容被删时不得产出候选版本")
+        #expect(harness.session.blocked != nil, "整轮必须失败关闭并给出提示")
+        #expect(
+            !harness.session.reviewItems.contains { $0.issue == .contentRemoved },
+            "失败关闭时不应留下任何删减审阅项"
+        )
+    }
+
+    @Test("marking one paragraph does not lock the others")
+    func condenseStillReviewsDeletionsOutsideTheMarkedParagraphs() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "精简稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
+        }
+
+        let ranges = harness.session.mustKeepCandidateRanges()
+        await harness.session.condenseDraft(mustKeepSourceRanges: [try #require(ranges.first)])
+
+        #expect(harness.session.phase == .review)
+        let item = try #require(harness.session.reviewItems.first { $0.issue == .contentRemoved })
+        #expect(
+            item.sourceSnippet.contains("丙段"),
+            "未标记的段落仍应进入删减审阅，且原文可见"
+        )
+        #expect(
+            !item.sourceSnippet.contains("甲段"),
+            "标记为必讲的段落不应出现在删减审阅里"
+        )
+    }
+
     @Test("editing the script invalidates the previous AI review state")
     func editingSourceInvalidatesReviewState() async throws {
         let harness = try TeleprompterSessionHarness()

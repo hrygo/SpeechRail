@@ -1342,6 +1342,16 @@ public enum SpeechRailDesignTokens {
         public static let contentSelectionSheetMinimumHeight: CGFloat = 420
         public static let contentSelectionSheetHeight: CGFloat = 540
         public static let contentSelectionSheetMaximumHeight: CGFloat = 760
+        /// 精简确认窗口尺寸：默认只显示说明与操作，「标记必讲」展开后才占满高度，
+        /// 因此理想高度低于内容选择窗口，上下限仍留出大字体的自适应空间。
+        public static let condenseSheetMinimumWidth: CGFloat = 480
+        public static let condenseSheetWidth: CGFloat = 620
+        public static let condenseSheetMaximumWidth: CGFloat = 800
+        public static let condenseSheetMinimumHeight: CGFloat = 300
+        public static let condenseSheetHeight: CGFloat = 420
+        public static let condenseSheetMaximumHeight: CGFloat = 720
+        /// 「标记必讲」展开后段落列表的可视高度上限。
+        public static let condenseMustKeepListMaximumHeight: CGFloat = 240
         /// 审阅对照分栏最小宽度
         public static let diffColumnMinimumWidth: CGFloat = 320
         /// 待确认事项提示图标尺寸
