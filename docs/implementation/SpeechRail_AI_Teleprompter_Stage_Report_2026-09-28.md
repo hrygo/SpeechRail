@@ -256,6 +256,21 @@
     - **六个「新建」按钮同时补了 `.disabled(!session.canEdit)`**（顶栏 `PageActionsMenu`、空状态主按钮、模板卡片、卡片菜单、空状态次按钮、拖放提示区）。依据不是审美判断，而是**同文件既有做法**：标题与正文编辑器早已用这个模式，读者得到的是灰显而不是静默。第 50 条把这一族留作「等 U-10 走查再定」，本轮把它按既有约定统一了——灰显与否是视觉判断，**是否与同文件既有约定一致**不是。
     - **刻意没改的一处**：视图在 `case .analyzing, .preparing` 分支显示的「取消整理」按钮**不能**加 `.disabled(!session.canEdit)`。它是「取消正在进行的 AI 整理」，而 `prepareDraft` 只设 `phase = .analyzing`、不动 `isTightening`／`isAnnotating`，所以 `.analyzing` 期间 `canEdit` 为 true、取消本该可用；灰显它会直接破坏取消功能。但由此暴露一个**真缺陷留给 U-10**：`.preparing` 是语音启动瞬态（`canEdit` 为 false），该分支此时也显示「取消整理」，点了静默无效，且标签与场景不符。**本轮只记录不改**——它需要授权走查才能确认正确形态。
 
+### 2.1 第十五轮的扫描覆盖与**排除**结论
+
+第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
+
+| 扫描维度 | 命中 | 结论 |
+|---|---|---|
+| 会话层全部 `guard … else { return }` | 5 处公开入口 | 2 处编辑器（`updateTitle`／`updateSourceText`）**排除**：视图已有 `.disabled`，守卫只是纵深防御。3 处（`analyzeDraft`／`condenseDraft`／`discardPendingVersion`）**排除**：前两者的按钮在 `.draft` 分支已带 `!session.canEdit` 门控，后者只出现在 `canEdit` 恒为 true 的 phase。其余为越界／代数／生命周期守卫，非用户可触发的拒绝 |
+| 全部 `try saveBundle()` 调用点 | 8 处 | **全部排除**：接受候选与丢弃候选两处有回滚并重新抛出，读法别名增删与朗读标注有 `do`／`catch`，运行态保存写 `lastFailure`，`save()` 是第 48 条已修的那处，`persistDraft()` 是定义处。**没有发现第 43 条的同族** |
+| 全部 `operationMessage =` 赋值 | 46 处 | 逐条判「成功／失败是否走对分支」。**只有第 51 条走错**。`tightenReadingBlocks` 与 `annotateActiveVersion` 的 `nil` 返回**排除**：两者对每种拒绝都返回明确文案，不会让视图误报成功 |
+| `lastFailure` 是否是只写不读的死状态 | 1 处疑似 | **排除**：`TeleprompterStageView.swift` 三处消费它并弹错误提示 |
+| 导出路径 `exportDataDocument` | 1 处 | **排除**：`try data.write` 有 `do`／`catch`，失败给「导出失败：」 |
+| 「恢复默认语速」`applyTrialCalibration` | 1 处 | **排除**：`scheduleDraftSave` → `persistDraft` 会设 `blocked = .storeUnavailable`，横幅可见 |
+
+**这一轮没有找到第 52 条**。但按第 50 条的教训，如实写下边界：以上是**这几个维度的实际覆盖范围**，不等于全仓无遗漏——本轮**没有**重扫台账的具名证据引用（那套脚本仍在 `/tmp`，见 §5 第 10 条），也**没有**触及提词器五个文件以外的其他会话类（`AssistantSession`／`MeetingSession`／`CaptionSession` 有各自的 `lastFailure` 与 `storeUnavailable` 机制，未纳入本轮范围）。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
