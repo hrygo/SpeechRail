@@ -283,13 +283,29 @@
 
 **一次测量错误，如实记**：查尾行兜底分支是否执行时，我把 `print` 插在了 `if nextUTF16Start < sourceLength` 的**外面**，数到 1584 次命中，差点据此认定「分支在跑、只是杀不死」。把 print 挪进 `if` 内部后是 **0 次**。随后用 12 段候选文本 × 3 档列宽 × 3 档字号共 108 组去构造触发条件，全部行区间连续、没有缺口——**这条兜底分支在本机复现不出触发条件**。它在 `TeleprompterStageLineLayout` 里是纵深防御，代码注释说它防的是「TextKit 省掉尾部空行片段」。因此那条变异**没有被判为等价**，而是记为「触发条件未复现」：分支若真的触发，吞掉尾行会丢正文，这是真实风险，只是本机测不到。**这是本轮唯一没有钉死的点，交给承接团队。**
 
+### 2.3 「迁移失败保留原数据」：实现本来就在，证据一条都没有
+
+第 3 条剩下的唯一缺口。查下来结论和上一句相反——**这次不是缺实现，是缺证据**：机制已经是对的，而且做得挺完整：
+
+- `TeleprompterV2Store.listDocuments()` 对每个解不开的文件返回 `isAvailable: false` 并带上具体 `error`（`corruptBundle`／`unsupportedVersion`／`invalidBundle` 三类可分），**不是跳过**；
+- 会话层把它们收进 `unavailableDocuments`，**不混进可用列表**；
+- 视图 542 行有明确提示：「有 N 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。」并逐条列出。
+
+问题是**这三条没有一条有回归钉住**。按第 46 条的教训（「命中过、读过、判为假阳性、没回头」），这里必须钉住的恰恰是最毒的那个假设：**「保留原数据」如果只是「先不报错」，而文件其实被清掉或改写，那就是丢数据。** 而这一条从代码上看完全正常——`listDocuments` 根本没有任何写操作，正是最难靠读代码发现问题的形态。
+
+新增回归 `unreadableBundlesArePreservedAndIsolated`，用三种「这个 build 读不动」的真实形态一起验：更高格式版本（未来 App 写的）、损坏的 JSON、结构不合法。四条断言同时成立才算达标：读不动的稿件不污染可用列表、每份都带失败原因、**三个文件原样留在磁盘上且内容未被改写**、单独打开必须抛错且不换掉读者当前正在用的稿件。
+
+**一次通过**——因为实现本来就是对的。但它同样此前没有证据能证明它对。变异 4 条全部被杀：读不动的稿件从列表里消失（杀）、读不动时顺手删掉原文件（杀）、不带失败原因（杀）、会话层不再记录不可用稿件（杀）。探针同样带基线自检。
+
+**顺带查清并记下的一件事**：仓库里**没有 v1→v2 的文件迁移**。`TeleprompterStore`（v1，214 行）是另一套扁平 bundle 存储，提词器在这条路径上不用它；所谓「迁移」是 `applyV2Bundle` 在内存里把 v2 bundle 投影回旧模型（`legacyVersion`／`legacyBlocks`／`legacySelection`）。而 store 的 `validate` 很严——悬挂的 `sourceRevisionID`、正文与朗读稿不一致、段区间不连续都在**读入时**就拒收，所以 `legacyVersion` 里那两处兜底（`source?.sourceText ?? version.readingText`、长度为 0 的 `sourceRange`）**是纵深防御，生产不可达**。这一点接手方不必再查。
+
 ## 3. 验证证据
 
 ### 3.1 已执行
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **269 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 第十六轮复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 12 条，导入拒绝一轮再新增 1 条，字号列宽全值域扫描再新增 1 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
+| Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **270 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 第十六轮复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 12 条，导入拒绝一轮再新增 1 条，字号列宽全值域扫描与迁移失败各再新增 1 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
 | 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
@@ -298,7 +314,7 @@
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
 | 交接文档引用可解析性 | 抽出 §4 台账与 §4.2 对照表里的具名标识，回到代码里逐个查 | **141 个标识全部可解析**（2026-09-29）。首轮查无此条 1 处：#111 引用了 `theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`，而实际函数名是 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`、显示名是带空格的 `the adopt decision pins recognition and duration separately`，报告写的是第三种形式，已改。详见 §2 第 45 条 |
-| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，19 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条、原稿回退回滚 3 条、切稿拒绝 2 条、重试保存 1 条、复制兜底 1 条、删除拒绝 1 条，全部被新回归杀死，无存活，详见 §2 第 41–44、46–50 条。**第十五轮（导入拒绝，1 次变异）**：把 `createDocument(title:importedSource:)` 的守卫改回静默 `return`（杀），见 §2 第 51 条。**第十六轮（字号列宽全值域，6 次变异）**：5 条被杀，1 条**未复现触发条件**（`TeleprompterStageLineLayout` 的尾行兜底分支本机进不去；既不是等价变异，也不是测试盲区，见 §2.2），不计入杀数。**累计有效变异 105 次、72 杀 / 33 存活；累计新增 31 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6、导入拒绝 1、字号列宽扫描 1） |
+| 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，19 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条、原稿回退回滚 3 条、切稿拒绝 2 条、重试保存 1 条、复制兜底 1 条、删除拒绝 1 条，全部被新回归杀死，无存活，详见 §2 第 41–44、46–50 条。**第十五轮（导入拒绝，1 次变异）**：把 `createDocument(title:importedSource:)` 的守卫改回静默 `return`（杀），见 §2 第 51 条。**第十六轮（验收第 3 条补证，10 次变异）**：字号列宽扫描 5 条被杀，1 条**未复现触发条件**（`TeleprompterStageLineLayout` 的尾行兜底分支本机进不去；既不是等价变异，也不是测试盲区，见 §2.2），不计入杀数；「迁移失败保留原数据」4 条全杀（读不动的稿件从列表消失／读不动时删掉原文件／不带失败原因／会话层不再记录）。**累计有效变异 109 次、77 杀 / 32 存活；累计新增 32 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6、导入拒绝 1、字号列宽扫描 1、迁移失败 1） |
 
 ### 3.2 未执行（需要逐次授权）
 

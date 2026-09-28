@@ -1637,6 +1637,64 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.phase == .following, "拒绝导入不得把舞台带下去")
     }
 
+    /// 验收第 3 条「迁移失败保留原数据」此前**一条回归都没有**。这条把它
+    /// 钉住，覆盖三种「这个 build 读不动」的真实形态：更高格式版本（未来的
+    /// App 写的）、损坏的 JSON、结构不合法。
+    ///
+    /// 三条要求同时成立才算达标：读不动的稿件**不能拖垮其他稿件**、**必须
+    /// 带上原因**（否则界面只能说「有几份打不开」而读者无法判断该备份什么）、
+    /// **原文件必须原样留在磁盘上**——这一条最要紧，「保留原数据」如果只是
+    /// 「先不报错」，而文件其实被清掉或改写，那就是丢数据。
+    @Test("bundles this build cannot read keep their files and do not take the other documents down")
+    func unreadableBundlesArePreservedAndIsolated() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        let goodID = try #require(harness.session.document?.id)
+
+        let futureBytes = Data(#"{"format_version":3}"#.utf8)
+        let future = harness.documentBundleURL(documentID: "future-format")
+        try futureBytes.write(to: future)
+        let corrupt = harness.documentBundleURL(documentID: "corrupt")
+        try Data("{ 这不是 JSON".utf8).write(to: corrupt)
+        let invalid = harness.documentBundleURL(documentID: "invalid")
+        try Data(#"{"format_version":2}"#.utf8).write(to: invalid)
+
+        let listed = try harness.session.listDocuments()
+
+        #expect(listed.map(\.id) == [goodID], "读不动的稿件不得污染可用列表")
+        #expect(
+            harness.session.unavailableDocuments.map(\.id).sorted()
+                == ["corrupt", "future-format", "invalid"],
+            "三份读不动的稿件都要被单列出来，而不是从列表里消失"
+        )
+        for item in harness.session.unavailableDocuments {
+            #expect(item.error != nil, "\(item.id) 必须带失败原因")
+            #expect(item.isAvailable == false)
+        }
+
+        // 原数据保留：文件既没被删，也没被改写。
+        for url in [future, corrupt, invalid] {
+            #expect(
+                FileManager.default.fileExists(atPath: url.path),
+                "\(url.lastPathComponent) 必须原样留在磁盘上"
+            )
+        }
+        #expect(
+            try Data(contentsOf: future) == futureBytes,
+            "读不动的稿件文件内容不得被改写"
+        )
+
+        // 单独打开读不动的稿件必须报错，而不是静默返回一份空稿。
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try harness.session.load(documentID: "future-format")
+        }
+        #expect(
+            harness.session.document?.id == goodID,
+            "打开失败不得换掉读者当前正在用的稿件"
+        )
+    }
+
     @Test("every stage cycle releases its capture, connection and occupancy")
     func repeatedStageCyclesReleaseResources() async throws {
         let harness = try TeleprompterSessionHarness()
