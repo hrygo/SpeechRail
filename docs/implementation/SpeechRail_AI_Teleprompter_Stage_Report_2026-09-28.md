@@ -286,6 +286,22 @@
     **这一条我自己先写错了，被既有回归当场抓住，值得单独记**：第一版按「素材里有没有 `reRead` 标注」判断，而 `reanchorLatencyIsMeasuredFromTheDetour` 的素材**一条 `reRead` 都没有，却量出了 1_100ms 恢复延迟**——因为恢复样本来自 `reanchorStartedAt`，`improvise` 事件在没有推进时也会设它。也就是说标签存在性是个**错误的代理**，真判据是分位有没有样本。
     这条能被抓到，靠的是既有回归里恰好有一份「无 `reRead` 标注但有恢复样本」的素材。**如果那条回归当初用的是纯直读素材，这个错会一路活到验收。** 变异探针里专门放了一条「用 reRead 标签存在性当判据」，确认它会被既有脱稿回归杀掉——探针不只用来证明新测试有牙齿，也用来钉住**实现依据的判据本身**。
 
+### 2.4 验收标准逐条证据审计（第十八轮）
+
+不再问「还有没有缺陷」，改问一个更基础的问题：**验收标准里写的每一句，证据够不够**。逐条过完，结果如下。
+
+| 验收条 | 结论 | 说明 |
+|---|---|---|
+| 1 稿件可信 | 证据充分 | 数值／单位／正负号／重复内容、主体关系与限定条件、有损精简单独授权与删减展示，各有具名回归（`subjectValueSwapIsRejectedByHardGateAndKeepsSource`、`droppingANumberSignIsRejectedByTheHardGate`、`protectedLiteralExtractorPreservesOccurrencesAndUnicodeBoundaries`、`semanticRiskBecomesReviewItems`、`condenseCreatesDeletionReviewItems` 等） |
+| 2 跟随可控 | 证据充分 | `partialMovesProvisionallyAndFinalReplacesIt`、`stableHypothesisPrefixLimitsPreviewToProvenText`、`rereadDoesNotRollBackAcrossDistantParagraphs`、`revisedSnapshotCannotMoveBackWithinTheCurrentSegment`、`eventsAfterManualTakeoverCannotMovePosition` |
+| 3 体验与数据安全 | **本轮补齐两处缺口** | 「字号、列宽变化保持位置」此前只钉了两个预设取值 → §2.2 补全值域扫描；「迁移失败保留原数据」此前**零回归** → §2.3 补齐。其余各项（手动阅读兜底、设备异常、关闭释放资源）本就有回归 |
+| 4 证据可信 | **台账成立，但真实时延基线仍未执行** | 台账复核：69 项编号唯一、无重复、**每项都有状态且都有证据引用**（65 通过／3 部分／1 未执行）。4 项非通过与 §5 已知缺口一一对应：U-07 无障碍、U-10 窗口走查、R-04 真实拔插、R-07 内存上限。本轮另修掉两处「报告在数字为真时沉默」→ §2 第 52、53 条 |
+| 5 交付完整 | 成立 | 回归、契约与文档、回退说明、阶段报告齐全；真实音频／UI／发布三项授权分别独立，未执行项均如实标注 |
+
+**台账复核的可复现口径**（供承接方重跑）：表头在 `## 4. 69 项场景台账` 与 `### 4.1` 之间；每行首格是「编号 + 标题」（如 `P-02 数值被改写`），第二格是状态，第三格是证据。
+
+**这一轮的方法教训值得单记**：用关键词扫测试显示名来估覆盖率，**连续错了三次**——先用中文词（测试名是英文，全 0 命中）、改英文词（漏掉大量用 `@Test func name()` 无显示名的用例）、再改成搜函数名（才发现 `#104`／`106`／`107` 的回归一直都在）。前两次的错误结论都是「这条验收项零覆盖」，而真实情况是覆盖很扎实。**扫描工具的口径必须先验证它能不能找到已知存在的东西，再拿它下「不存在」的结论**；这与第 45 条是同一个错误的两种形态。收尾时改用直接读函数名，一次就看清了。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -343,7 +359,7 @@
 | Xcode 单元测试 target | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**（2026-09-29 复跑），XCTest **346 项** 0 failures，进程正常退出，`test-unit: passed`，exit 0。首轮曾因测试闸门竞态挂死并被 1800 s 超时终止，已定位并修复，见 §2 第 9 条 |
 | 工程文件一致性 | `plutil -lint project.pbxproj` | OK；新增源码在 SwiftPM 与 Xcode 两个 target 均已登记 |
 | 差异卫生 | `git diff --check` | 通过 |
-| 交接文档引用可解析性 | 抽出 §4 台账与 §4.2 对照表里的具名标识，回到代码里逐个查 | **141 个标识全部可解析**（2026-09-29）。首轮查无此条 1 处：#111 引用了 `theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`，而实际函数名是 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`、显示名是带空格的 `the adopt decision pins recognition and duration separately`，报告写的是第三种形式，已改。详见 §2 第 45 条 |
+| 交接文档引用可解析性 | 抽出 §4 台账与 §4.2 对照表里的具名标识，回到代码里逐个查 | **141 个标识全部可解析**（2026-09-29）。首轮查无此条 1 处：#111 引用了 `theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately`，而实际函数名是 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately`、显示名是带空格的 `the adopt decision pins recognition and duration separately`，报告写的是第三种形式，已改。详见 §2 第 45 条。**复核时（2026-09-29 第十八轮）脚本报 1 条「缺失」，经查是误报，报告无需改动**：`theSpeechTrialAdoptDecisionPinsRecognitionAndDurationSeparately` 现在只出现在 §2 第 45 条与本行**叙述当年那次修正的文字里**，不是活引用；真正被引用的 `theSpeechTrialAdoptDecisionPinsBothConditionsSeparately` 在代码中确实存在。脚本按标识全文匹配，分不清「引用」与「讲这个错名的故事」。**接手方不要为了让脚本归零而去删那段叙述**——那会把一条修正记录删掉。同批复核：台账标识数因本轮新增引用由 141 涨到 191，其余 190 条全部可解析 |
 | 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，19 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条、原稿回退回滚 3 条、切稿拒绝 2 条、重试保存 1 条、复制兜底 1 条、删除拒绝 1 条，全部被新回归杀死，无存活，详见 §2 第 41–44、46–50 条。**第十五轮（导入拒绝，1 次变异）**：把 `createDocument(title:importedSource:)` 的守卫改回静默 `return`（杀），见 §2 第 51 条。**第十六轮（验收第 3 条补证，10 次变异）**：字号列宽扫描 5 条被杀，1 条**未复现触发条件**（`TeleprompterStageLineLayout` 的尾行兜底分支本机进不去；既不是等价变异，也不是测试盲区，见 §2.2），不计入杀数；「迁移失败保留原数据」4 条全杀（读不动的稿件从列表消失／读不动时删掉原文件／不带失败原因／会话层不再记录）。**第十七轮（零推进不得报成干净结果，4 次变异）**：4 条全部被杀，详见 §2 第 52 条。**同轮续（恢复门槛，3 次变异）**：3 条全部被杀，其中一条复现了本轮真实犯的判据错误。**累计有效变异 116 次、84 杀 / 32 存活；累计新增 34 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6、导入拒绝 1、字号列宽扫描 1、迁移失败 1、零推进 1、恢复门槛 1） |
 
 ### 3.2 未执行（需要逐次授权）
