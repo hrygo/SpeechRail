@@ -1971,7 +1971,10 @@ def create_system_router(services: AppServices) -> APIRouter:
                 voice_id=vid_str,
                 duration_seconds=canonical_duration,
                 quality=report.to_dict(),
-                create_only=idempotency_key is not None,
+                # A caller may omit Idempotency-Key, but an explicit voice id
+                # must still be create-only. The conflict handler below
+                # reconciles keyed retries; unkeyed collisions return 409.
+                create_only=True,
             )
             if idempotency_key and fingerprint is not None:
                 result_id = _clone_idempotency_journal.complete(

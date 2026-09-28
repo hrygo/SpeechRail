@@ -2973,7 +2973,10 @@ public struct VoiceLibraryView: View {
 
     private func voiceOutputCheckStatusText(_ voice: CreatorVoice) -> String {
         let state = model.voiceOutputCheck
-        if state.voiceID == voice.id, let message = state.resultMessage {
+        if state.voiceID == voice.id,
+           state.voiceRevision == voice.revision,
+           let message = state.resultMessage
+        {
             return message
         }
         if voice.productionReady == true {
