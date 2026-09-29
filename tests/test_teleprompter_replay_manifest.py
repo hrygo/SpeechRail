@@ -129,6 +129,28 @@ def test_aligner_treats_a_re_delivery_as_a_duplicate_not_a_re_read() -> None:
     assert snapshot.segment_index == 0
 
 
+def test_aligner_does_not_manufacture_confidence_for_a_re_delivered_hallucination() -> None:
+    """Repeated words are still off-script words.
+
+    The recognizer emits the same short hallucination on consecutive partials.
+    Noticing that the fragment repeats says nothing about whether it is in the
+    script, so the re-delivery path must not report full confidence for it: a
+    fabricated `read` position is what produces a fabricated latency sample.
+    """
+
+    aligner = ScriptAligner(index=SegmentIndex.build(SEGMENTS))
+    first = aligner.align("嗯嗯", cumulative=False)
+    again = aligner.align("嗯嗯", cumulative=False)
+
+    assert (first.intent, first.segment_index) == ("read", None)
+    assert again.segment_index is None, (
+        "a repeated off-script fragment must not be given a reading position"
+    )
+    assert again.ratio < 0.72
+    assert again.intent not in {"improvise", "reRead"}
+    assert aligner.high_water == 0
+
+
 def test_aligner_flags_a_genuine_re_read() -> None:
     aligner = ScriptAligner(index=SegmentIndex.build(SEGMENTS))
     aligner.align("大家好，欢迎来到", cumulative=True)

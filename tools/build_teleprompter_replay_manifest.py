@@ -282,7 +282,17 @@ class ScriptAligner:
             # against the whole utterance instead would swallow every re-read,
             # since a repeated sentence is by definition already in the text.
             # A re-delivery advances nothing and is not a re-read.
-            return Alignment(self.index.segment_of(self.high_water), INTENT_READ, 1.0)
+            #
+            # It still has to be *scored*. "These words repeat" says nothing
+            # about whether they are in the script, and the recognizer really
+            # does emit the same short hallucination on consecutive partials
+            # when the recording holds no speech. Reporting full confidence
+            # here hands that hallucination a reading position, and a reading
+            # position is what turns into a latency sample.
+            best_ratio, _, _ = self._best_match(needle)
+            if best_ratio < ALIGN_MIN_RATIO:
+                return Alignment(None, INTENT_READ, best_ratio)
+            return Alignment(self.index.segment_of(self.high_water), INTENT_READ, best_ratio)
         best_ratio, best_start, best_end = self._best_match(needle)
         if best_ratio < ALIGN_MIN_RATIO:
             self.previous = needle
