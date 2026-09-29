@@ -20,6 +20,7 @@ from speechrail.config.model_catalog import (
     RuntimeLock,
     SourceLocation,
 )
+from speechrail.config.model_locations import ModelLocations
 from speechrail.domain.model_spec import required_spec_bindings
 from speechrail.service import model_store
 from speechrail.service.model_store import (
@@ -323,6 +324,220 @@ async def _prepare(
         downloader=downloader,
         **kwargs,
     )
+
+
+def _seed_snapshot(
+    catalog: ModelCatalog,
+    payloads: Mapping[tuple[str, str], bytes],
+    key: str,
+    root: Path,
+) -> Path:
+    """Write one artifact's fixture files into an arbitrary directory."""
+    artifact = next(item for item in catalog.artifacts if item.key == key)
+    repository = artifact.sources[0].repository
+    for item in artifact.files:
+        target = root / item.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payloads[(repository, item.path)])
+    return root
+
+
+def _external(
+    catalog: ModelCatalog,
+    payloads: Mapping[tuple[str, str], bytes],
+    tmp_path: Path,
+    key: str,
+) -> Path:
+    root = tmp_path / "omlx" / f"external--{key}"
+    root.mkdir(parents=True)
+    return _seed_snapshot(catalog, payloads, key, root)
+
+
+def _bound(key: str, root: Path) -> ModelLocations:
+    return ModelLocations(bindings={key: root})
+
+
+def test_external_binding_is_verified_without_a_prepared_entry(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+
+    statuses = {
+        item.key: item
+        for item in inspect_prepared_artifacts(
+            tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+            locations=_bound("tts-1.7b-custom-q8", external),
+        )
+    }
+
+    assert statuses["tts-1.7b-custom-q8"].state == "verified"
+    assert statuses["tts-1.7b-custom-q8"].location == "external"
+    assert statuses["tts-1.7b-custom-q8"].duplicate is False
+    assert statuses["asr-1.7b-q8"].location == "app_home"
+
+
+def test_external_binding_with_a_managed_copy_is_invalid(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+    _seed_snapshot(
+        catalog,
+        payloads,
+        "tts-1.7b-custom-q8",
+        model_store_root(tmp_path) / "tts-1.7b-custom-q8",
+    )
+
+    statuses = {
+        item.key: item
+        for item in inspect_prepared_artifacts(
+            tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+            locations=_bound("tts-1.7b-custom-q8", external),
+        )
+    }
+
+    assert statuses["tts-1.7b-custom-q8"].state == "invalid"
+    assert statuses["tts-1.7b-custom-q8"].duplicate is True
+    assert statuses["tts-1.7b-custom-q8"].integrity == "mismatch"
+
+
+def test_missing_external_root_is_invalid_not_not_downloaded(tmp_path: Path) -> None:
+    catalog, _ = _catalog()
+    lock = _runtime_lock()
+
+    statuses = {
+        item.key: item
+        for item in inspect_prepared_artifacts(
+            tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+            locations=_bound("tts-1.7b-custom-q8", tmp_path / "omlx" / "absent"),
+        )
+    }
+
+    assert statuses["tts-1.7b-custom-q8"].state == "invalid"
+    assert statuses["tts-1.7b-custom-q8"].location == "external"
+
+
+def test_corrupt_external_root_is_invalid(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+    (external / "config.json").write_bytes(b"corrupt")
+
+    statuses = {
+        item.key: item
+        for item in inspect_prepared_artifacts(
+            tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+            locations=_bound("tts-1.7b-custom-q8", external),
+        )
+    }
+
+    assert statuses["tts-1.7b-custom-q8"].state == "invalid"
+    assert statuses["tts-1.7b-custom-q8"].integrity == "mismatch"
+
+
+@pytest.mark.anyio
+async def test_prepare_never_downloads_a_bound_artifact(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+    downloader = FakeDownloader(payloads)
+
+    await _prepare(
+        tmp_path,
+        catalog,
+        lock,
+        downloader,
+        locations=_bound("tts-1.7b-custom-q8", external),
+    )
+
+    assert all(call[1] != "fixture/tts-1.7b-custom-q8" for call in downloader.calls)
+    assert not (model_store_root(tmp_path) / "tts-1.7b-custom-q8").exists()
+    assert external.is_dir()
+
+
+@pytest.mark.anyio
+async def test_prepare_resolves_a_bound_artifact_to_its_external_path(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+
+    prepared_id = await _prepare(
+        tmp_path,
+        catalog,
+        lock,
+        FakeDownloader(payloads),
+        locations=_bound("tts-1.7b-custom-q8", external),
+    )
+    prepared = resolve_prepared_models(
+        prepared_id,
+        app_home=tmp_path,
+        catalog=catalog,
+        runtime_lock=lock,
+        locations=_bound("tts-1.7b-custom-q8", external),
+    )
+
+    assert prepared.tts.path == external
+    assert prepared.asr.path == model_store_root(tmp_path) / "asr-1.7b-q8"
+
+
+@pytest.mark.anyio
+async def test_prepare_rejects_a_managed_copy_beside_a_binding(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+    _seed_snapshot(
+        catalog,
+        payloads,
+        "tts-1.7b-custom-q8",
+        model_store_root(tmp_path) / "tts-1.7b-custom-q8",
+    )
+
+    with pytest.raises(ModelStoreError, match="managed copy"):
+        await _prepare(
+            tmp_path,
+            catalog,
+            lock,
+            FakeDownloader(payloads),
+            locations=_bound("tts-1.7b-custom-q8", external),
+        )
+
+
+@pytest.mark.anyio
+async def test_prepare_rejects_a_corrupt_external_root(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    external = _external(catalog, payloads, tmp_path, "tts-1.7b-custom-q8")
+    (external / "model.safetensors").write_bytes(b"corrupt")
+
+    with pytest.raises(ModelStoreError, match="integrity"):
+        await _prepare(
+            tmp_path,
+            catalog,
+            lock,
+            FakeDownloader(payloads),
+            locations=_bound("tts-1.7b-custom-q8", external),
+        )
+
+
+@pytest.mark.anyio
+async def test_prepare_without_bindings_is_unchanged(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    downloader = FakeDownloader(payloads)
+
+    await _prepare(tmp_path, catalog, lock, downloader)
+
+    assert (model_store_root(tmp_path) / "tts-1.7b-custom-q8").is_dir()
+    assert any(call[1] == "fixture/tts-1.7b-custom-q8" for call in downloader.calls)
 
 
 def test_model_store_root_is_resolved_app_home_models(tmp_path: Path) -> None:

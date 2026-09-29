@@ -26,6 +26,12 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.config.model_locations import (
+    ModelLocationError,
+    ModelLocations,
+    load_model_locations,
+    resolve_artifact_dir,
+)
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.runtime.server_lock import ServerInstanceError, ServerInstanceLock
 from speechrail.service.bootstrap import (
@@ -237,20 +243,19 @@ def _copy_config_exclusive(source: Path, destination: Path) -> None:
 def _managed_config(
     layout: ServiceLayout,
     *,
-    asr_key: str,
-    tts_key: str,
+    asr_dir: Path,
+    tts_dir: Path,
     diarization_assets: DiarizationInstallPaths | None = None,
 ) -> str:
     """Render the minimal loopback configuration for a catalog selection."""
-    model_root = layout.models_root
     vendor_python = layout.vendor_current / "bin" / "python"
     vendor_ffmpeg = layout.vendor_current / "ffmpeg" / "bin" / "ffmpeg"
     lines: tuple[str, ...] = (
         "SPEECHRAIL_HOST=127.0.0.1",
         "SPEECHRAIL_PORT=8201",
-        f"SPEECHRAIL_QWEN3_MODEL_DIR={model_root / asr_key}",
+        f"SPEECHRAIL_QWEN3_MODEL_DIR={asr_dir}",
         f"SPEECHRAIL_QWEN3_PYTHON={vendor_python}",
-        f"SPEECHRAIL_QWEN3_TTS_MODEL_DIR={model_root / tts_key}",
+        f"SPEECHRAIL_QWEN3_TTS_MODEL_DIR={tts_dir}",
         f"SPEECHRAIL_QWEN3_TTS_PYTHON={vendor_python}",
         f"SPEECHRAIL_FFMPEG_PATH={vendor_ffmpeg}",
         "SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false",
@@ -448,6 +453,7 @@ def _prepare_models_for_install(
     catalog: ModelCatalog,
     runtime_lock: RuntimeLock,
     progress: Callable[[dict[str, object]], None] | None = None,
+    locations: ModelLocations | None = None,
 ) -> str:
     try:
         return asyncio.run(
@@ -459,6 +465,7 @@ def _prepare_models_for_install(
                 catalog=catalog,
                 runtime_lock=runtime_lock,
                 progress=progress,
+                locations=locations,
             )
         )
     except asyncio.CancelledError:
@@ -555,6 +562,17 @@ def install_managed(
         raise InstallerError("configuration already exists and will not be overwritten")
     service_port = _configured_service_port(layout, env_file)
     _assert_service_port_free(service_port, server_lock_directory)
+    try:
+        bound_locations = load_model_locations(layout.app_home)
+    except ModelLocationError as exc:
+        raise InstallerError(str(exc)) from exc
+    asr_dir = resolve_artifact_dir(layout.app_home, asr_key, bound_locations)
+    tts_dir = resolve_artifact_dir(layout.app_home, tts_key, bound_locations)
+    for label, key, directory in (("ASR", asr_key, asr_dir), ("TTS", tts_key, tts_dir)):
+        if bound_locations.root_for(key) is not None and not directory.is_dir():
+            raise InstallerError(
+                f"{label} external model directory is missing: {directory}"
+            )
     current_selection = recover_selection(layout.app_home)
     previous_generation = current_selection.get("generation", 0) if current_selection else 0
     if type(previous_generation) is not int:
@@ -614,6 +632,7 @@ def install_managed(
             catalog=selected_catalog,
             runtime_lock=selected_lock,
             progress=progress,
+            locations=bound_locations,
         )
         if not isinstance(prepared_id, str) or not prepared_id.strip():
             raise InstallerError("model preparation returned an invalid prepared ID")
@@ -639,8 +658,8 @@ def install_managed(
                 layout.config_file,
                 _managed_config(
                     layout,
-                    asr_key=asr_key,
-                    tts_key=tts_key,
+                    asr_dir=asr_dir,
+                    tts_dir=tts_dir,
                     diarization_assets=diarization_assets,
                 ),
             )

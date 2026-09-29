@@ -27,6 +27,7 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.config.model_locations import ModelLocations, load_model_locations
 from speechrail.domain.model_spec import ModelRole, SpecTier, required_spec_artifact
 
 _REGISTRY_SCHEMA_VERSION = 1
@@ -41,6 +42,7 @@ ProgressCallback = Callable[[dict[str, object]], None]
 DiskUsage = Callable[[Path], object]
 ModelIntegrity = Literal["verified", "mismatch", "not_checked"]
 ModelState = Literal["not_downloaded", "verified", "invalid"]
+ModelLocation = Literal["app_home", "external"]
 
 
 class Downloader(Protocol):
@@ -63,6 +65,8 @@ class PreparedArtifactStatus:
     integrity: ModelIntegrity
     verified_file_count: int
     total_file_count: int
+    location: ModelLocation = "app_home"
+    duplicate: bool = False
 
 
 class _DownloadStreamCloseError(ModelStoreError):
@@ -667,11 +671,35 @@ def _artifact_integrity(
         return "mismatch", verified
 
 
+def _bound_locations(app_home: Path, locations: ModelLocations | None) -> ModelLocations:
+    """Return the declared bindings, loading this app home's config when omitted."""
+    if locations is not None:
+        return locations
+    return load_model_locations(app_home)
+
+
+def _verify_bound_artifact(artifact: ModelArtifact, root: Path, models_root: Path) -> None:
+    """Fail closed when a bound artifact is missing, shadowed, or corrupt."""
+    managed = models_root / artifact.key
+    if managed.exists() or managed.is_symlink():
+        raise ModelStoreError(
+            f"{artifact.key} is bound to an external location but a managed copy "
+            f"still exists at {managed}"
+        )
+    if not root.is_dir():
+        raise ModelStoreError(f"{artifact.key} external model directory is missing: {root}")
+    if not _verify_snapshot(root, artifact):
+        raise ModelStoreError(
+            f"{artifact.key} external model directory failed integrity verification: {root}"
+        )
+
+
 def inspect_prepared_artifacts(
     app_home: Path,
     *,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
+    locations: ModelLocations | None = None,
 ) -> tuple[PreparedArtifactStatus, ...]:
     """Return registry- and manifest-backed model states without local paths."""
     del runtime_lock  # Reserved for callers that already resolved the runtime lock.
@@ -679,6 +707,7 @@ def inspect_prepared_artifacts(
     selected_catalog = load_catalog() if catalog is None else catalog
     if not isinstance(selected_catalog, ModelCatalog):
         raise ModelStoreError("catalog must be a ModelCatalog")
+    bound_locations = _bound_locations(resolved_app_home, locations)
 
     registry_path = _registry_path(resolved_app_home)
     registry_error = False
@@ -718,11 +747,17 @@ def inspect_prepared_artifacts(
                     matching_entry = True
                     break
 
-        destination = models_root / artifact.key
+        managed_destination = models_root / artifact.key
+        bound_root = bound_locations.root_for(artifact.key)
+        destination = bound_root if bound_root is not None else managed_destination
+        if bound_root is not None:
+            duplicate = managed_destination.exists() or managed_destination.is_symlink()
+        else:
+            duplicate = False
         if destination.exists() or destination.is_symlink():
             evidence = True
         inspected_path = destination
-        if not inspected_path.exists() and entry is not None:
+        if bound_root is None and not inspected_path.exists() and entry is not None:
             candidate_path = _entry_path(entry, resolved_app_home)
             if candidate_path is not None:
                 inspected_path = candidate_path
@@ -734,8 +769,15 @@ def inspect_prepared_artifacts(
             integrity, verified_count = _artifact_integrity(
                 inspected_path, artifact, persistent_cache=persistent_cache
             )
-        if not evidence and integrity == "not_checked":
-            state: ModelState = "not_downloaded"
+        state: ModelState
+        if bound_root is not None:
+            state = "verified" if integrity == "verified" and not duplicate else "invalid"
+            if state == "invalid" and integrity == "not_checked":
+                integrity = "mismatch"
+            if duplicate:
+                integrity = "mismatch"
+        elif not evidence and integrity == "not_checked":
+            state = "not_downloaded"
         elif matching_entry and integrity == "verified":
             state = "verified"
         else:
@@ -749,6 +791,8 @@ def inspect_prepared_artifacts(
                 integrity=integrity,
                 verified_file_count=verified_count,
                 total_file_count=_runtime_file_count(artifact),
+                location="external" if bound_root is not None else "app_home",
+                duplicate=duplicate,
             )
         )
     if len(persistent_cache) != initial_cache_len:
@@ -762,6 +806,7 @@ def registered_prepared_artifacts(
     selection_id: str,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
+    locations: ModelLocations | None = None,
 ) -> tuple[str, ...]:
     """Return the selection's artifact keys a registered snapshot already covers.
 
@@ -779,10 +824,11 @@ def registered_prepared_artifacts(
         raise ModelStoreError(f"unknown selection: {selection_id}") from exc
     artifacts_by_key = {artifact.key: artifact for artifact in resolved_artifacts}
     keys = [artifact.key for artifact in resolved_artifacts]
+    bound_locations = _bound_locations(resolved_app_home, locations)
     registry = _read_registry(_registry_path(resolved_app_home))
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
-        return ()
+        prepared = {}
     models_root = model_store_root(resolved_app_home)
     covered: list[str] = []
     for key in keys:
@@ -792,6 +838,11 @@ def registered_prepared_artifacts(
             raise ModelStoreError(
                 f"selection {selection_id} references an unknown artifact"
             ) from exc
+        external_root = bound_locations.root_for(key)
+        if external_root is not None:
+            if external_root.is_dir() and not external_root.is_symlink():
+                covered.append(key)
+            continue
         destination = models_root / artifact.key
         if destination.is_symlink() or not destination.is_dir():
             continue
@@ -864,6 +915,8 @@ def _prepared_entry_is_complete(
     artifacts: tuple[ModelArtifact, ...],
     lock: RuntimeLock,
     selection_id: str,
+    *,
+    locations: ModelLocations | None = None,
 ) -> bool:
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
@@ -876,7 +929,17 @@ def _prepared_entry_is_complete(
     candidate_artifacts = candidate.get("artifacts")
     if not isinstance(candidate_artifacts, dict):
         return False
+    bound_locations = _bound_locations(app_home, locations)
+    managed_keys = {
+        artifact.key
+        for artifact in artifacts
+        if bound_locations.root_for(artifact.key) is None
+    }
+    if set(candidate_artifacts) != managed_keys:
+        return False
     for artifact in artifacts:
+        if artifact.key not in managed_keys:
+            continue
         entry = candidate_artifacts.get(artifact.key)
         if not _entry_matches_artifact(entry, artifact):
             return False
@@ -1080,6 +1143,7 @@ def _resolve_prepared_candidate(
     app_home: Path,
     catalog: ModelCatalog,
     runtime_lock: RuntimeLock,
+    locations: ModelLocations | None = None,
 ) -> tuple[str, tuple[PreparedArtifact, ...]]:
     """Strictly validate one registry entry and return immutable artifacts."""
     prepared = registry.get("prepared")
@@ -1102,14 +1166,32 @@ def _resolve_prepared_candidate(
     if _prepared_id(selection_id, runtime_lock, artifacts) != prepared_id:
         raise ModelStoreError("prepared model identity is invalid")
     candidate_artifacts = candidate.get("artifacts")
-    if not isinstance(candidate_artifacts, dict) or set(candidate_artifacts) != {
-        artifact.key for artifact in artifacts
-    }:
+    if not isinstance(candidate_artifacts, dict):
+        raise ModelStoreError("prepared model identity is invalid")
+    bound_locations = _bound_locations(app_home, locations)
+    bound = {
+        artifact.key: cast(Path, bound_locations.root_for(artifact.key))
+        for artifact in artifacts
+        if bound_locations.root_for(artifact.key) is not None
+    }
+    if set(candidate_artifacts) != {artifact.key for artifact in artifacts} - set(bound):
         raise ModelStoreError("prepared model identity is invalid")
 
     paths: list[Path] = []
     entries: list[Mapping[str, object]] = []
     for artifact in artifacts:
+        external_root = bound.get(artifact.key)
+        if external_root is not None:
+            bound_entry = _artifact_entry(
+                artifact,
+                path=f"models/{artifact.key}",
+                source=artifact.sources[0],
+            )
+            if not _verify_snapshot(external_root, artifact):
+                raise ModelStoreError("prepared model snapshot is not verified")
+            paths.append(external_root)
+            entries.append(bound_entry)
+            continue
         entry = candidate_artifacts.get(artifact.key)
         path = _strict_prepared_entry(entry, artifact, app_home)
         if path is None or not isinstance(entry, dict):
@@ -1118,7 +1200,13 @@ def _resolve_prepared_candidate(
         entries.append(entry)
 
     if not _prepared_entry_is_complete(
-        registry, prepared_id, app_home, artifacts, runtime_lock, selection_id
+        registry,
+        prepared_id,
+        app_home,
+        artifacts,
+        runtime_lock,
+        selection_id,
+        locations=bound_locations,
     ):
         raise ModelStoreError("prepared model snapshot is not verified")
     return (
@@ -1136,6 +1224,7 @@ def resolve_prepared_models(
     app_home: Path,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
+    locations: ModelLocations | None = None,
 ) -> PreparedModelSet:
     """Resolve a registered prepared ID into two verified immutable model paths."""
     if not isinstance(prepared_id, str) or not prepared_id.strip():
@@ -1151,6 +1240,7 @@ def resolve_prepared_models(
             app_home=resolved_app_home,
             catalog=resolved_catalog,
             runtime_lock=resolved_runtime_lock,
+            locations=locations,
         )
     except Exception as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -1172,6 +1262,7 @@ def resolve_prepared_selection(
     app_home: Path,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
+    locations: ModelLocations | None = None,
 ) -> PreparedModelSet:
     """Resolve a validated independent ASR/TTS selection to a verified model set."""
     try:
@@ -1193,6 +1284,7 @@ def resolve_prepared_selection(
             app_home=resolved_app_home,
             catalog=resolved_catalog,
             runtime_lock=resolved_runtime_lock,
+            locations=locations,
         )
     except Exception as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -1501,6 +1593,7 @@ async def _prepare_models_impl(
     cancel_event: asyncio.Event | None = None,
     max_retries: int = 2,
     disk_usage: DiskUsage | None = None,
+    locations: ModelLocations | None = None,
 ) -> str:
     """Download one explicit artifact set into verified snapshots."""
     if not isinstance(selection_id, str) or not selection_id:
@@ -1531,25 +1624,39 @@ async def _prepare_models_impl(
             raise ModelStoreError(f"artifact {artifact.key} has no locked source or files")
 
     resolved_app_home = _resolve_app_home(app_home)
+    bound_locations = _bound_locations(resolved_app_home, locations)
 
     prepared_id = _prepared_id(selection_id, runtime_lock, artifacts)
     models_root = model_store_root(resolved_app_home)
     registry_path = _registry_path(resolved_app_home)
     registry = _read_registry(registry_path)
     if _prepared_entry_is_complete(
-        registry, prepared_id, resolved_app_home, artifacts, runtime_lock, selection_id
+        registry,
+        prepared_id,
+        resolved_app_home,
+        artifacts,
+        runtime_lock,
+        selection_id,
+        locations=bound_locations,
     ):
         return prepared_id
 
     _ensure_directory(resolved_app_home)
     _ensure_directory(models_root)
+    bound: dict[str, Path] = {}
+    for artifact in artifacts:
+        root = bound_locations.root_for(artifact.key)
+        if root is not None:
+            _verify_bound_artifact(artifact, root, models_root)
+            bound[artifact.key] = root
+    downloadable = tuple(artifact for artifact in artifacts if artifact.key not in bound)
     cache_paths = {
         artifact.key: _cache_path(registry, resolved_app_home, models_root, artifact)
-        for artifact in artifacts
+        for artifact in downloadable
     }
     _check_disk_space(
         models_root,
-        artifacts,
+        downloadable,
         cache_paths,
         disk_usage,
     )
@@ -1566,7 +1673,7 @@ async def _prepare_models_impl(
     publication_started = False
 
     try:
-        for artifact in artifacts:
+        for artifact in downloadable:
             destination = models_root / artifact.key
             if cache_paths[artifact.key] is not None:
                 stage_artifacts[artifact.key] = safe_artifact_path(operation_root, artifact.key)
@@ -1614,7 +1721,7 @@ async def _prepare_models_impl(
             raise ModelStoreError("model preparation registry schema is invalid")
         try:
             entries: dict[str, object] = {}
-            for artifact in artifacts:
+            for artifact in downloadable:
                 destination = models_root / artifact.key
                 stage_directory = stage_artifacts[artifact.key]
                 cache_hit = cache_paths[artifact.key]
@@ -1686,6 +1793,7 @@ async def prepare_spec_models(
     cancel_event: asyncio.Event | None = None,
     max_retries: int = 2,
     disk_usage: DiskUsage | None = None,
+    locations: ModelLocations | None = None,
 ) -> str:
     """Prepare only the ASR and primary TTS artifacts named by two explicit specs."""
 
@@ -1706,6 +1814,7 @@ async def prepare_spec_models(
         cancel_event=cancel_event,
         max_retries=max_retries,
         disk_usage=disk_usage,
+        locations=locations,
     )
 
 

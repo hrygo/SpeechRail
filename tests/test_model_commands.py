@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY, load_catalog
+from speechrail.config.model_locations import ModelLocations
 from speechrail.domain.model_spec import required_spec_bindings
 from speechrail.service.diarization_assets import inspect_diarization_assets
 from speechrail.service.model_commands import model_catalog_payload, model_status_payload
@@ -98,10 +99,56 @@ def test_model_status_marks_missing_artifacts_without_exposing_paths(tmp_path: P
     )
 
     assert payload["status"] == "ok"
-    assert payload["disk"] == {"model_bytes": 0, "free_bytes": 1234}
+    assert payload["disk"] == {
+        "model_bytes": 0,
+        "external_bytes": 0,
+        "free_bytes": 1234,
+    }
     assert all(item["state"] == "not_downloaded" for item in payload["artifacts"])
     assert all(item["state"] == "not_downloaded" for item in payload["diarization"])
     assert all("path" not in item for item in payload["artifacts"])
+
+
+def test_model_status_reports_external_location_and_keeps_managed_bytes(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "omlx" / "external--asr-1.7b-bf16"
+    external.mkdir(parents=True)
+    (external / "model.safetensors").write_bytes(b"0123456789")
+    locations = ModelLocations(bindings={"asr-1.7b-bf16": external})
+
+    payload = model_status_payload(
+        tmp_path,
+        catalog=load_catalog(),
+        disk_usage=lambda _: SimpleNamespace(free=1234),
+        locations=locations,
+    )
+
+    row = next(item for item in payload["artifacts"] if item["key"] == "asr-1.7b-bf16")
+    assert row["location"] == "external"
+    assert row["duplicate"] is False
+    assert payload["disk"]["external_bytes"] == 10
+    assert payload["disk"]["model_bytes"] == 0
+    assert "path" not in row
+    assert str(external) not in str(payload)
+
+
+def test_model_status_flags_a_managed_copy_beside_a_binding(tmp_path: Path) -> None:
+    external = tmp_path / "omlx" / "external--asr-1.7b-bf16"
+    external.mkdir(parents=True)
+    managed = model_store_root(tmp_path) / "asr-1.7b-bf16"
+    managed.mkdir(parents=True)
+
+    payload = model_status_payload(
+        tmp_path,
+        catalog=load_catalog(),
+        disk_usage=lambda _: SimpleNamespace(free=1234),
+        locations=ModelLocations(bindings={"asr-1.7b-bf16": external}),
+    )
+
+    row = next(item for item in payload["artifacts"] if item["key"] == "asr-1.7b-bf16")
+    assert row["duplicate"] is True
+    assert row["state"] == "invalid"
 
 
 def test_model_payloads_leave_the_envelope_version_to_the_cli(tmp_path: Path) -> None:

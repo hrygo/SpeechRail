@@ -16,6 +16,7 @@ from speechrail.config.model_catalog import (
     load_runtime_lock,
 )
 from speechrail.domain.model_spec import ModelRole, required_spec_artifact, required_spec_bindings
+from speechrail.config.model_locations import ModelLocations
 from speechrail.service.diarization_assets import inspect_diarization_assets
 from speechrail.service.model_store import (
     DiskUsage,
@@ -178,12 +179,37 @@ def _read_disk_usage(
     return free, _model_bytes(models_root)
 
 
+def _external_bytes(locations: ModelLocations | None) -> int:
+    """Sum real-directory bytes behind external bindings without following symlinks."""
+    if locations is None:
+        return 0
+    total = 0
+    for root in locations.bindings.values():
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            directories[:] = [
+                name for name in directories if not (current_path / name).is_symlink()
+            ]
+            for name in files:
+                path = current_path / name
+                if path.is_symlink():
+                    continue
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
+    return total
+
+
 def model_status_payload(
     app_home: Path,
     *,
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
     disk_usage: DiskUsage | None = None,
+    locations: ModelLocations | None = None,
 ) -> dict[str, object]:
     """Return current preparation state and disk summary without local paths."""
     selected = _selected_catalog(catalog)
@@ -196,6 +222,7 @@ def model_status_payload(
         resolved_home,
         catalog=selected,
         runtime_lock=runtime_lock,
+        locations=locations,
     )
     diarization_by_key = {}
     for aligner_key in sorted(
@@ -225,6 +252,8 @@ def model_status_payload(
                 "integrity": item.integrity,
                 "verified_file_count": item.verified_file_count,
                 "total_file_count": item.total_file_count,
+                "location": item.location,
+                "duplicate": item.duplicate,
             }
             for item in statuses
         ],
@@ -238,7 +267,11 @@ def model_status_payload(
             }
             for item in diarization_by_key.values()
         ],
-        "disk": {"model_bytes": model_bytes, "free_bytes": free_bytes},
+        "disk": {
+            "model_bytes": model_bytes,
+            "external_bytes": _external_bytes(locations),
+            "free_bytes": free_bytes,
+        },
     }
 
 
@@ -253,6 +286,7 @@ async def prepare_selected_models(
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
     disk_usage: DiskUsage | None = None,
+    locations: ModelLocations | None = None,
 ) -> str:
     """Prepare only the two explicitly selected spec artifacts, opt-in only."""
     if downloader is None:
@@ -273,6 +307,7 @@ async def prepare_selected_models(
         runtime_lock=selected_lock,
         cancel_event=cancel_event,
         disk_usage=disk_usage,
+        locations=locations,
     )
 
 

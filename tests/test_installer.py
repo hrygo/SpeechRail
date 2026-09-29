@@ -178,6 +178,95 @@ def test_managed_state_remains_outside_release(tmp_path: Path) -> None:
     assert layout.vendor_root == tmp_path / "vendor"
 
 
+def _write_locations(app_home: Path, bindings: dict[str, Path]) -> None:
+    config = app_home / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "model_locations.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "bindings": {key: str(value) for key, value in bindings.items()},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_managed_install_renders_env_from_bound_external_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    external_asr = tmp_path / "omlx" / "external--asr-1.7b-q8"
+    external_tts = tmp_path / "omlx" / "external--tts-0.6b-custom-q8"
+    for directory in (external_asr, external_tts):
+        directory.mkdir(parents=True)
+    _write_locations(
+        app_home, {"asr-1.7b-q8": external_asr, "tts-0.6b-custom-q8": external_tts}
+    )
+    calls: list[tuple[str, ...]] = []
+    runtime = _fake_runtime(tmp_path)
+    runtime_lock = load_runtime_lock().model_copy(update={"python": "3.14.9"})
+
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
+    monkeypatch.setattr(
+        install_macos, "prepare_runtime", lambda lock, home, runner: runtime
+    )
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        asr_spec="quality",
+        tts_spec="fast",
+        downloader=object(),
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=_runner_that_creates_python(calls),
+        runtime_lock=runtime_lock,
+    )
+
+    config_text = (app_home / "config" / ".env").read_text(encoding="utf-8")
+    assert f"SPEECHRAIL_QWEN3_MODEL_DIR={external_asr}" in config_text
+    assert f"SPEECHRAIL_QWEN3_TTS_MODEL_DIR={external_tts}" in config_text
+
+
+def test_managed_install_fails_when_a_bound_root_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding that points nowhere fails the install before any staging work.
+
+    The config loader rejects the missing root; the installer's own directory
+    check is the second line of defence for a root that disappears between
+    loading the config and using it.
+    """
+    wheel, app_home = _inputs(tmp_path)
+    _write_locations(app_home, {"asr-1.7b-q8": tmp_path / "omlx" / "absent"})
+
+    async def fake_prepare_models(asr_spec: str, tts_spec: str, **kwargs: object) -> str:
+        del asr_spec, tts_spec, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_spec_models", fake_prepare_models)
+
+    with pytest.raises(install_macos.InstallerError, match=r"asr-1\.7b-q8"):
+        install_macos.install_managed(
+            wheel,
+            app_home=app_home,
+            asr_spec="quality",
+            tts_spec="fast",
+            downloader=object(),
+        )
+
+
 def test_managed_install_prepares_selection_and_keeps_service_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
