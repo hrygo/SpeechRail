@@ -183,6 +183,13 @@ public enum TeleprompterReplayEvaluator {
         public var trackingLatencyP95Milliseconds: Int?
         public var reanchorLatencyP50Milliseconds: Int?
         public var reanchorLatencyP95Milliseconds: Int?
+        /// §11.6 要求每个延迟分位都带样本数。分位本身不说明它由几个样本算出:
+        /// 4 个样本的 P95 与 80 个样本的 P95 在 JSON 里长得一模一样, 而顶层那个
+        /// `sampleCount` 是**事件数**, 不是延迟样本数——两者并排时读的人只会
+        /// 拿事件数当分母。探针侧的 `timing_summary` 一直带 `count`, 回放侧是
+        /// 另一半, 这一对把它补上。
+        public var trackingLatencySampleCount: Int
+        public var reanchorLatencySampleCount: Int
         public var reanchorTimeoutCount: Int
         public var manualCorrectionCount: Int
         public var stalledEventCount: Int
@@ -232,10 +239,12 @@ public enum TeleprompterReplayEvaluator {
                         .map { NSNumber(value: $0) } as Any,
                     "tracking_latency_p95_ms": metrics.trackingLatencyP95Milliseconds
                         .map { NSNumber(value: $0) } as Any,
+                    "tracking_latency_sample_count": metrics.trackingLatencySampleCount,
                     "reanchor_latency_p50_ms": metrics.reanchorLatencyP50Milliseconds
                         .map { NSNumber(value: $0) } as Any,
                     "reanchor_latency_p95_ms": metrics.reanchorLatencyP95Milliseconds
                         .map { NSNumber(value: $0) } as Any,
+                    "reanchor_latency_sample_count": metrics.reanchorLatencySampleCount,
                     "reanchor_timeout_count": metrics.reanchorTimeoutCount,
                     "manual_correction_count": metrics.manualCorrectionCount,
                     "stalled_event_count": metrics.stalledEventCount,
@@ -298,6 +307,8 @@ public enum TeleprompterReplayEvaluator {
             trackingLatencyP95Milliseconds: nil,
             reanchorLatencyP50Milliseconds: nil,
             reanchorLatencyP95Milliseconds: nil,
+            trackingLatencySampleCount: 0,
+            reanchorLatencySampleCount: 0,
             reanchorTimeoutCount: 0,
             manualCorrectionCount: 0,
             stalledEventCount: 0,
@@ -446,6 +457,8 @@ public enum TeleprompterReplayEvaluator {
         metrics.trackingLatencyP95Milliseconds = percentile(0.95, of: latencies)
         metrics.reanchorLatencyP50Milliseconds = percentile(0.5, of: reanchorLatencies)
         metrics.reanchorLatencyP95Milliseconds = percentile(0.95, of: reanchorLatencies)
+        metrics.trackingLatencySampleCount = latencies.count
+        metrics.reanchorLatencySampleCount = reanchorLatencies.count
         metrics.failedSampleCount = failedEventCount
         metrics.failureShare = manifest.events.isEmpty
             ? 0
@@ -535,6 +548,37 @@ public enum TeleprompterReplayEvaluator {
         }
         if !labels.contains(where: { $0.intent == .read && $0.expectedSegmentIndex != nil }) {
             caveats.append("本次素材没有带 expected_segment_index 的 read 标注：跟随与恢复延迟没有样本，分位为 null 只说明未测量，不表示延迟为零。")
+        }
+        // 上一条管的是「素材没问」。这一条管的是「素材问了、跟随没答上」：标注里
+        // 带着阅读位置，所以上面那条不触发；跟随在段内动过，所以「一次都没有
+        // 推进」也不触发。于是分位是 null、报告读起来像「延迟不用测」。
+        //
+        // 注意措辞：**不是「从未到达」**。跟随控制器构造时就在第 0 段，所以任何
+        // 标注为第 0 段的位置都开不出「到达」那一刻——它不是没到，是一开始就在。
+        // 这类位置和真没到达的位置一样，都不产出样本，且都不被判为失败。分位自
+        // 己不会说它由几个样本算出，所以样本数与没产出样本的位置数都要写出来。
+        let labelledPositions = Set(
+            labels.lazy
+                .filter { $0.intent == .read }
+                .compactMap(\.expectedSegmentIndex)
+        )
+        if metrics.trackingLatencySampleCount < labelledPositions.count {
+            let unreached = labelledPositions.count - metrics.trackingLatencySampleCount
+            if metrics.trackingLatencySampleCount == 0 {
+                caveats.append(
+                    "本次回放没有量到跟随延迟：素材标注了 \(labelledPositions.count) 个阅读位置，"
+                        + "但没有一个产出延迟样本，分位为 null 只说明这份素材没答上，"
+                        + "不表示延迟为零。"
+                )
+            } else {
+                caveats.append(
+                    "跟随延迟分位只来自 \(metrics.trackingLatencySampleCount) 个样本，"
+                        + "而素材标注了 \(labelledPositions.count) 个阅读位置："
+                        + "另有 \(unreached) 个标注位置整段回放里没有产出延迟样本"
+                        + "（跟随一开始就在该段上，或一直没到达），"
+                        + "它们既没有贡献样本、也没有被判为失败。"
+                )
+            }
         }
         // 方案 §11.7 把「回稿恢复 P95」列为质量门槛。恢复样本的来源是
         // `reanchorStartedAt`——**`reRead` 与「`improvise` 但没有推进」都会设它**，

@@ -223,6 +223,116 @@ struct TeleprompterReplayEvaluatorTests {
         )
     }
 
+    /// 方案 §11.6 结尾一句是「所有延迟报告 P50／P95、**样本数**、语言、
+    /// 设备、模型与运行条件」。回放报告原来只给分位，**样本数一个字都没有**——
+    /// 而顶层那个 `sample_count` 是**事件数**，不是延迟样本数。41 秒真实素材上
+    /// 两者是 82 与 4：并排放着，读的人只会把 P95 = 10993 ms 当成 82 个样本的
+    /// 结论。探针侧的 `timing_summary` 一直带 `count`，回放侧是另一半。
+    @Test func everyLatencyPercentileTravelsWithItsSampleCount() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 800),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 2_600, item: "item-2"),
+                    completed(
+                        "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。",
+                        at: 4_400,
+                        item: "item-3"
+                    )
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 2)
+                ]
+            )
+        )
+
+        #expect(
+            report.metrics.trackingLatencySampleCount == 2,
+            "两个段的阅读窗口各自闭合一次，跟随延迟就该有 2 个样本"
+        )
+        #expect(report.metrics.reanchorLatencySampleCount == 0)
+        #expect(report.metrics.trackingLatencyP50Milliseconds != nil)
+        #expect(
+            report.jsonObject["metrics"] as? [String: Any] != nil,
+            "报告必须仍然是可序列化的"
+        )
+        let metrics = try #require(report.jsonObject["metrics"] as? [String: Any])
+        #expect(
+            metrics["tracking_latency_sample_count"] as? Int
+                == report.metrics.trackingLatencySampleCount,
+            "分位旁边的样本数必须真的出现在 JSON 里，不能只活在 Swift 结构体上"
+        )
+        #expect(metrics["reanchor_latency_sample_count"] != nil)
+    }
+
+    /// 同一族的另一半：**标注给了位置，跟随却一次没到**。此时分位是 null，
+    /// 而「没有带 expected_segment_index 的 read 标注」那条不触发（标注有位置）、
+    /// 「一次都没有推进」也不触发（跟随在段内动过）。报告读起来是「延迟未测量」
+    /// ——但它没有说**为什么**：是这份素材没问，还是问了没答上。
+    @Test func aLabelledPositionTheFollowerNeverReachedIsNotReportedAsSilence() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。", at: 1_200, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 1)
+                ]
+            )
+        )
+
+        #expect(report.metrics.advancedEventCount > 0, "前提: 跟随在段内确实动过")
+        #expect(report.metrics.trackingLatencyP50Milliseconds == nil, "前提: 分位确实没量到")
+        #expect(
+            !report.caveats.contains { $0.contains("没有带 expected_segment_index") },
+            "前提: 这条 caveat 不该触发——标注是带位置的"
+        )
+        #expect(
+            report.caveats.contains { $0.contains("没有量到跟随延迟") },
+            "标注要求的位置一次没到，报告必须说这是没答上而不是没问：\(report.caveats)"
+        )
+    }
+
+    /// 上一条的**反向对照**。覆盖面 caveat 必须只在真有缺口时出现：把
+    /// `<` 写成 `<=` 就能让「全部标注位置都产出了样本」的干净素材也开始报
+    /// 缺口，而这种多出来的提醒和常开噪音一样有害。
+    ///
+    /// 标注刻意从第 1 段起：跟随控制器构造时就在第 0 段，所以第 0 段的位置
+    /// 开不出「到达」那一刻——**素材自己选择不标第 0 段**才能量到完整覆盖。
+    @Test func aFullyCoveredMaterialReportsNoLatencyCoverageGap() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 2_000, item: "item-2"),
+                    completed(
+                        "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。",
+                        at: 3_600,
+                        item: "item-3"
+                    )
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 2)
+                ]
+            )
+        )
+
+        #expect(
+            report.metrics.trackingLatencySampleCount == 2,
+            "前提: 两个标注位置都产出了样本"
+        )
+        #expect(
+            !report.caveats.contains { $0.contains("跟随延迟") },
+            "标注位置全部产出样本时不得报覆盖面缺口: \(report.caveats)"
+        )
+    }
+
     @Test func reportStaysQuietWhenBothDetectorsAreExercised() throws {
         let exercised = try TeleprompterReplayEvaluator.evaluate(
             manifest(
@@ -397,6 +507,10 @@ struct TeleprompterReplayEvaluatorTests {
 
         #expect(report.metrics.reanchorLatencyP50Milliseconds == 1_100, "恢复延迟从脱稿那一刻算起")
         #expect(report.metrics.reanchorTimeoutCount == 0)
+        #expect(
+            report.metrics.reanchorLatencySampleCount == 1,
+            "恢复延迟分位必须带着它的样本数一起走，否则 null 与 0ms 长得一样"
+        )
         // 恢复这一路该测的都测到了，不该有恢复类 caveat。样本上界那条不算噪音：
         // 2.6 秒素材对误跳率几乎什么都没说，报告必须说出来（第 58 条）。
         #expect(
@@ -433,6 +547,7 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(
             report.caveats.allSatisfy {
                 $0.contains("未经人工确认") || $0.contains("95% 上界")
+                    || $0.contains("跟随延迟")
             },
             "除草稿声明外不应再有其他 caveat: \(report.caveats)"
         )
@@ -461,11 +576,14 @@ struct TeleprompterReplayEvaluatorTests {
 
         // 反向对照：去掉后缀后草稿声明必须消失，否则这条 caveat 就成了常开
         // 噪音，真出问题时反而被忽略。报告**不再完全沉默**——零误推进的样本
-        // 上界是常开的（第 58 条），所以这里断言的是「剩下的caveat只有它」。
+        // 上界是常开的（第 58 条），跟随延迟的样本覆盖面也是常开的（第 62 条：
+        // 跟随控制器从第 0 段起步，所以标注为第 0 段的位置开不出「到达」那一刻，
+        // 这份 fixture 的 2 个标注位置里只有 1 个产出样本），所以这里断言的是
+        // 「剩下的 caveat 只有这两类」。
         #expect(!report.caveats.contains { $0.contains("未经人工确认") })
         #expect(
-            report.caveats.allSatisfy { $0.contains("95% 上界") },
-            "复核过的素材只剩样本上界一条: \(report.caveats)"
+            report.caveats.allSatisfy { $0.contains("95% 上界") || $0.contains("跟随延迟") },
+            "复核过的素材只剩样本上界与延迟覆盖面两条: \(report.caveats)"
         )
     }
 
