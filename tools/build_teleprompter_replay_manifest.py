@@ -76,6 +76,12 @@ ALIGN_PREFILTER_CHARS = 2
 # recovers events whose anchor was mangled by a recognition error.
 ALIGN_FALLBACK_BACKTRACK_CHARS = 16
 ALIGN_FALLBACK_FORWARD_CHARS = 96
+# 方案 F-04「后文唯一短语出现在前文脱稿中 → 不跨远距自动推进」在素材侧的对应
+# 闸门. 与 Swift 跟随控制器的 localAdvanceTokenRadius 默认值一致(24); 真实
+# 41 秒素材实测单次推进最大 17 字, 中位数 5, 没有任何一次超过 24.
+# 误挡的代价是少一个延迟样本(交给人工确认), 误放行的代价是把延迟基线建在
+# 读者从未到达的位置上——两者不对称, 所以宁可挡.
+ALIGN_MAX_ADVANCE_CHARS = 24
 # How far behind the reading position a fragment must match before the aligner
 # calls it a re-read. Re-deliveries are filtered separately, so anything left
 # landing this far back was spoken out of order.
@@ -240,6 +246,7 @@ class Alignment:
     segment_index: int | None
     intent: str
     ratio: float
+    advance_chars: int = 0
 
 
 @dataclass(slots=True)
@@ -256,6 +263,13 @@ class ScriptAligner:
     harmful jump, so inferring it from a weak text match would manufacture the
     safety number this dataset exists to measure. Low confidence yields ``read``
     with no reading position plus a line in the review sidecar.
+
+    A *confident* match is not enough on its own. ``ALIGN_PREFILTER_CHARS`` is
+    two characters, so a fragment from the far end of the script matches
+    perfectly and used to hand the reader a reading position they never
+    reached -- silently, because a full-confidence match cleared the review
+    sidecar. A match further than ``ALIGN_MAX_ADVANCE_CHARS`` past the
+    confirmed cursor now yields no position, and the cursor does not move.
     """
 
     index: SegmentIndex
@@ -304,6 +318,14 @@ class ScriptAligner:
             return Alignment(
                 self.index.segment_of(self.high_water), INTENT_RE_READ, best_ratio
             )
+        advance_chars = max(0, best_start - self.cursor)
+        if advance_chars > ALIGN_MAX_ADVANCE_CHARS:
+            # Matching far ahead of the confirmed position is the F-04
+            # signature, and the ratio cannot tell it apart from real
+            # progress. The cursor deliberately stays put so the next event is
+            # still compared against where the reader demonstrably was.
+            self.previous = needle
+            return Alignment(None, INTENT_READ, best_ratio, advance_chars)
         self.cursor = max(self.cursor, best_end)
         self.high_water = max(self.high_water, best_end)
         self.previous = needle
@@ -683,6 +705,18 @@ def build_manifest(
             )
             if alignment.intent == INTENT_RE_READ:
                 reason = "匹配位置早于已读高水位：疑似回读，需人工确认"
+            elif (
+                alignment.segment_index is None
+                and alignment.advance_chars > ALIGN_MAX_ADVANCE_CHARS
+            ):
+                # 远距匹配与匹配不足是两回事, 对复核的人也是两种不同的动作:
+                # 前者要去稿件里找「这句话本来出现在哪一段」, 后者要考虑
+                # 这是不是一次脱稿. 混成同一句「对齐不足」会把人引向错的检查.
+                reason = (
+                    f"匹配距离 {alignment.advance_chars} 字, 超过 "
+                    f"{ALIGN_MAX_ADVANCE_CHARS} 字半径: 疑为后文短语被误匹配, "
+                    "未给出阅读位置, 需人工确认"
+                )
             elif alignment.segment_index is None:
                 reason = "对齐不足，读者位置未知：若确为脱稿或停顿，请手工改为 improvise"
             elif alignment.ratio < ALIGN_MIN_RATIO + ALIGN_REVIEW_MARGIN:
@@ -706,6 +740,7 @@ def build_manifest(
                     "proposed_intent": alignment.intent,
                     "expected_segment_index": label.get("expected_segment_index"),
                     "ratio": round(alignment.ratio, 3),
+                    "advance_chars": alignment.advance_chars,
                     "reason": reason,
                 }
             )
@@ -767,12 +802,18 @@ def render_review(
     if not review:
         lines.append("机器未标记存疑项；这**不等于**标注正确，仍需抽查。")
     else:
-        lines.append("| event_index | at_ms | 提议 intent | 提议 segment | 对齐度 | 原因 |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        # 对齐度只说明「这段文字确实在稿件里」, 不说明「读者到了那么远的地方」.
+        # 远距跳过是方案 F-04 标 P0 的形态, 所以距离必须和匹配质量并排列出来,
+        # 否则复核的人只看得见那个让人放心的数字.
+        lines.append(
+            "| event_index | at_ms | 提议 intent | 提议 segment | 对齐度 | 匹配距离 | 原因 |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for note in review:
             lines.append(
                 "| {event_index} | {at_milliseconds} | {proposed_intent} "
-                "| {expected_segment_index} | {ratio} | {reason} |".format(**note)
+                "| {expected_segment_index} | {ratio} | {advance_chars} "
+                "| {reason} |".format(**note)
             )
     lines.extend(
         [

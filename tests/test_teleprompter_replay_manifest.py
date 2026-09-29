@@ -393,6 +393,118 @@ def test_build_manifest_never_invents_an_improvise_label() -> None:
     assert "improvise" not in intents
 
 
+def test_a_distant_confident_match_never_becomes_a_reading_position() -> None:
+    """A distant match must not become a reading position (plan F-04).
+
+    素材构建器此前**没有任何距离闸门**, 而 `ALIGN_FORWARD_CHARS = 600` 在一份
+    128 字的脚本上等于全文都在前向窗口内. 实测: 读者的确认位置还在第 0 段时,
+    识别器只送来第 2 段的一个 12 字片段, 工具就给出 `expected_segment_index = 2`
+    且 `ratio = 1.0`——**匹配质量满分, 于是连人工确认清单都不进**.
+
+    Swift 跟随控制器有 `localAdvanceTokenRadius`(默认 24)挡着这一族, 素材侧
+    缺了对应的一道. 真实 41 秒素材实测单次推进最大 17 字, 中位数 5, **没有任何
+    一次超过 24**, 所以这道闸门不会动到正常素材.
+    """
+
+    far_fragment = "促销价是 2599 元"
+
+    # 前提必须先钉住, 否则本例会「因为错误的原因通过」: 这一条要证明的是
+    # 「匹配很自信但离得远」, 不是「匹配模糊」.
+    aligner = ScriptAligner(index=SegmentIndex.build(SEGMENTS))
+    assert aligner.align(SEGMENTS[0], cumulative=True).segment_index == 0
+    ratio, start, _ = aligner._best_match(normalize_text(far_fragment))
+    assert ratio >= _TOOL.ALIGN_MIN_RATIO, "前提：匹配质量是过关的"
+    assert start - aligner.cursor > 24, "前提：这一条确实远在半径之外"
+
+    manifest, review = build_manifest(
+        _capture(SEGMENTS[0], far_fragment),
+        SEGMENTS,
+        dataset_revision="A_v1-draft",
+        baseline_commit="base",
+        candidate_commit="candidate",
+        policy_revision="policy-1",
+        language_lane="zh",
+        device_class="macbook-builtin-mic",
+    )
+    labels = manifest["labels"]
+    assert isinstance(labels, list)
+    assert labels[0]["expected_segment_index"] == 0, "前提：第一条确实建立了位置"
+    assert "expected_segment_index" not in labels[1], "远距匹配不得给出阅读位置"
+    assert labels[1]["intent"] == "read", "拒绝位置不等于拒绝这条事件"
+
+    # 拒绝之后必须让人看见: 否则复核的人无从判断这条标注为什么没有位置.
+    flagged = [note for note in review if note["event_index"] == 1]
+    assert len(flagged) == 1, f"远距匹配必须进人工确认清单: {review}"
+    reason = str(flagged[0]["reason"])
+    assert "匹配距离" in reason and "后文短语被误匹配" in reason, reason
+
+    # 拒绝位置还不够, 游标也必须留在原地: 否则下一个事件会拿去和一个从未
+    # 到达过的位置比较, 正常片段就会被安到读者没去过的段上.
+    after = _capture(SEGMENTS[0], far_fragment, "大家好，欢迎来到")
+    manifest_after, _ = build_manifest(
+        after,
+        SEGMENTS,
+        dataset_revision="A_v1-draft",
+        baseline_commit="base",
+        candidate_commit="candidate",
+        policy_revision="policy-1",
+        language_lane="zh",
+        device_class="macbook-builtin-mic",
+    )
+    labels_after = manifest_after["labels"]
+    assert isinstance(labels_after, list)
+    assert (
+        labels_after[2].get("expected_segment_index") == 0
+    ), "游标被远距匹配推走之后, 正常片段会被安到读者没去过的段上"
+
+
+def test_a_near_confident_match_still_claims_its_position() -> None:
+    """Reverse control: the gate must not block ordinary following too."""
+
+    manifest, _ = build_manifest(
+        _capture(SEGMENTS[0], "先看几组数字"),
+        SEGMENTS,
+        dataset_revision="A_v1-draft",
+        baseline_commit="base",
+        candidate_commit="candidate",
+        policy_revision="policy-1",
+        language_lane="zh",
+        device_class="macbook-builtin-mic",
+    )
+    labels = manifest["labels"]
+    assert isinstance(labels, list)
+    assert labels[1].get("expected_segment_index") == 1
+
+
+def test_the_review_sidecar_shows_how_far_each_flagged_match_reached() -> None:
+    """The sidecar showed match quality but not match distance.
+
+    对齐度只说明「这段文字确实在稿件里」. 匹配离已确认位置多远, 才是判断
+    有没有远距跳过的关键维度.
+    """
+
+    manifest, review = build_manifest(
+        _capture(SEGMENTS[0], "今天风有点大"),
+        SEGMENTS,
+        dataset_revision="A_v1-draft",
+        baseline_commit="base",
+        candidate_commit="candidate",
+        policy_revision="policy-1",
+        language_lane="zh",
+        device_class="macbook-builtin-mic",
+    )
+    assert review, "前提：这份素材确实有存疑项"
+    text = render_review(
+        manifest,
+        review,
+        draft=True,
+        profile="quality",
+        capture_counts={"completed": 2},
+    )
+    assert "匹配距离" in text
+    assert "对齐度" in text
+
+
 def test_build_manifest_marks_terminal_failures_for_review() -> None:
     capture = _capture("大家好，欢迎来到")
     capture.events.append(
