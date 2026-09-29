@@ -316,6 +316,33 @@ public enum TeleprompterReplayEvaluator {
         var manualJumpPending = false
         var reanchorDeadline: Int?
         var reanchorStartedAt: Int?
+        // Latched once a reanchor window has run past its deadline. Without it
+        // only the window still open at the end of the run was ever inspected,
+        // so an episode that later recovered was indistinguishable from one
+        // that never stalled — §11.6 counts timeouts as failures instead of
+        // deleting the sample.
+        var reanchorTimedOut = false
+        // The read branch keeps a deadline of its own to count at most one
+        // stall per threshold window. Sharing the reanchor deadline let a
+        // stall overwrite a pending reanchor deadline, so the timeout that
+        // deadline existed to raise could never fire.
+        var stallGateDeadline: Int?
+        // Failures are counted per event so the numerator shares the unit of
+        // `sampleCount`. Counting episodes against an event denominator meant
+        // one unrecovered stall spread over a long tail scored better than the
+        // same stall in a short run.
+        var failedEventCount = 0
+        let endReanchorWindow: () -> Void = {
+            if reanchorTimedOut { metrics.reanchorTimeoutCount += 1 }
+            reanchorTimedOut = false
+            reanchorDeadline = nil
+            reanchorStartedAt = nil
+            // A recovery means the follower caught up, so the next read window
+            // must be able to count its own stall. The gate used to be cleared
+            // here as a side effect of sharing the reanchor deadline; losing
+            // that reset cost one stall on the 41-second material (12 → 11).
+            stallGateDeadline = nil
+        }
 
         for (index, event) in manifest.events.enumerated() {
             let label = labelsByIndex[index]
@@ -327,7 +354,11 @@ public enum TeleprompterReplayEvaluator {
                 segments: segments,
                 to: &controller
             )
-            if case .terminalFailure = outcome { metrics.terminalFailureCount += 1 }
+            var eventFailed = false
+            if case .terminalFailure = outcome {
+                metrics.terminalFailureCount += 1
+                eventFailed = true
+            }
             let after = controller.viewportAnchor
             let advanced = after.segmentIndex > before.segmentIndex
                 || (after.segmentIndex == before.segmentIndex
@@ -351,21 +382,19 @@ public enum TeleprompterReplayEvaluator {
                         if let reanchorStart = reanchorStartedAt {
                             reanchorLatencies.append(event.atMilliseconds - reanchorStart)
                         }
-                        reanchorDeadline = nil
-                        reanchorStartedAt = nil
+                        endReanchorWindow()
                     } else if let start = readWindowStart[expected] {
                         // A stall only counts once the threshold has actually
                         // elapsed, then once per threshold window.
                         let thresholdAt = start + Self.stallThresholdMilliseconds
                         if event.atMilliseconds >= thresholdAt,
-                           event.atMilliseconds >= (reanchorDeadline ?? 0) {
+                           event.atMilliseconds >= (stallGateDeadline ?? 0) {
                             metrics.stalledEventCount += 1
-                            reanchorDeadline = thresholdAt + Self.stallThresholdMilliseconds
+                            stallGateDeadline = thresholdAt + Self.stallThresholdMilliseconds
                         }
                     }
                 } else {
-                    reanchorDeadline = nil
-                    reanchorStartedAt = nil
+                    endReanchorWindow()
                 }
             case .improvise:
                 manualJumpPending = false
@@ -378,8 +407,7 @@ public enum TeleprompterReplayEvaluator {
             case .reRead:
                 manualJumpPending = false
                 if reversed {
-                    reanchorDeadline = nil
-                    reanchorStartedAt = nil
+                    endReanchorWindow()
                 } else if reanchorDeadline == nil {
                     reanchorDeadline = event.atMilliseconds + Self.stallThresholdMilliseconds
                     reanchorStartedAt = event.atMilliseconds
@@ -401,20 +429,27 @@ public enum TeleprompterReplayEvaluator {
             if manualJumpPending, advanced {
                 metrics.harmfulJumpCount += 1
             }
+            // Checked after the label switch so a recovery closing the window
+            // on this very event is not retroactively counted as a failure.
+            if let deadline = reanchorDeadline, event.atMilliseconds >= deadline {
+                reanchorTimedOut = true
+            }
+            if eventFailed || reanchorTimedOut { failedEventCount += 1 }
         }
 
-        if let deadline = reanchorDeadline, let last = manifest.events.last {
-            if last.atMilliseconds >= deadline { metrics.reanchorTimeoutCount += 1 }
-        }
+        // A window still open when the material ends never recovered, so it is
+        // a timeout even though no later event was there to observe the
+        // deadline being passed. Without this the worst case — the follower
+        // never came back at all — was the one case that reported zero.
+        endReanchorWindow()
         metrics.trackingLatencyP50Milliseconds = percentile(0.5, of: latencies)
         metrics.trackingLatencyP95Milliseconds = percentile(0.95, of: latencies)
         metrics.reanchorLatencyP50Milliseconds = percentile(0.5, of: reanchorLatencies)
         metrics.reanchorLatencyP95Milliseconds = percentile(0.95, of: reanchorLatencies)
-        let failedSampleCount = metrics.terminalFailureCount + metrics.reanchorTimeoutCount
-        metrics.failedSampleCount = failedSampleCount
+        metrics.failedSampleCount = failedEventCount
         metrics.failureShare = manifest.events.isEmpty
             ? 0
-            : Double(failedSampleCount) / Double(manifest.events.count)
+            : Double(failedEventCount) / Double(manifest.events.count)
         metrics.failureShareExceedsThreshold = metrics.failureShare > Self.failureShareThreshold
 
         return Report(
@@ -525,11 +560,18 @@ public enum TeleprompterReplayEvaluator {
         }
         if metrics.failureShareExceedsThreshold {
             caveats.append(
-                "失败样本占比 \(formatPercent(metrics.failureShare))（\(metrics.failedSampleCount)/\(sampleCount)）超过 5%；延迟分位只覆盖成功子集，不能单独引用。"
+                "失败样本占比 \(formatPercent(metrics.failureShare))"
+                    + "（\(metrics.failedSampleCount)/\(sampleCount) 个事件）超过 5%；"
+                    + "延迟分位只覆盖成功子集，不能单独引用。"
             )
         }
         if metrics.reanchorTimeoutCount > 0 {
-            caveats.append("回稿恢复超时 \(metrics.reanchorTimeoutCount) 次，按失败计入，未删除样本。")
+            // 超时按「次」记，未恢复窗口内的每个事件按「样本」记：分子分母
+            // 同为事件，失败拖得越久占比只会越高，不会被更长的素材稀释。
+            caveats.append(
+                "回稿恢复超时 \(metrics.reanchorTimeoutCount) 次；"
+                    + "未恢复窗口内的 \(metrics.failedSampleCount) 个事件按失败样本计入，未删除样本。"
+            )
         }
         if metrics.unlabelledEventCount > 0 {
             caveats.append("\(metrics.unlabelledEventCount) 个事件没有人工标注，未计入延迟样本。")

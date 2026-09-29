@@ -549,4 +549,147 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(stalled.metrics.reanchorTimeoutCount >= 1)
         #expect(stalled.caveats.contains { $0.contains("回稿恢复超时") })
     }
+
+    /// 失败占比的分母是事件数，分子却只记「最后一次未恢复」：同一次未恢复，
+    /// 拖尾事件越多分母越大、占比越低——**恢复失败拖得越久，评分反而越好**。
+    @Test func aLongerUnrecoveredTailCannotImproveTheFailureShare() throws {
+        func replay(trailing: Int) throws -> TeleprompterReplayEvaluator.Report {
+            var events: [TeleprompterReplayManifest.Event] = [
+                completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 500)
+            ]
+            var labels: [TeleprompterReplayManifest.Label] = [
+                .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1)
+            ]
+            for i in 0...trailing {
+                events.append(
+                    completed("现场观众提问互动。", at: 1_000 + i * 600, item: "tail-\(i)")
+                )
+                labels.append(.init(eventIndex: events.count - 1, intent: .improvise))
+            }
+            return try TeleprompterReplayEvaluator.evaluate(
+                manifest(events: events, labels: labels)
+            )
+        }
+
+        let short = try replay(trailing: 5)
+        let long = try replay(trailing: 40)
+
+        // 前提：跟随确实建立过锚点并推进过，测的是失败分母而不是「压根没动」。
+        #expect(short.metrics.advancedEventCount > 0)
+        #expect(long.metrics.advancedEventCount > 0)
+        #expect(short.metrics.reanchorTimeoutCount == 1, "前提：素材末尾仍未恢复")
+        #expect(
+            long.metrics.reanchorTimeoutCount == 1,
+            "同一次未恢复，不因为拖尾变长而被算成多次"
+        )
+
+        #expect(
+            long.metrics.failureShare > short.metrics.failureShare,
+            "同一次未恢复，拖尾越长失败占比必须越高，不能被更大的分母稀释"
+        )
+        #expect(
+            long.metrics.failureShareExceedsThreshold,
+            "未恢复窗口覆盖了 40 个事件里的 36 个，必须超过 5% 门槛"
+        )
+        #expect(
+            long.metrics.failedSampleCount > 1,
+            "未恢复窗口内的每个事件都是失败样本，不能整段只记 1"
+        )
+    }
+
+    /// 未恢复的回稿窗口只有「最后那个」会被记进超时：中间只要恢复一次，
+    /// 之前真实发生过的超时就被抹掉——§11.6 要求超时算失败、不删样本。
+    @Test func everyUnrecoveredReanchorEpisodeIsCountedNotOnlyTheLast() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 500),
+                    completed("现场观众提问互动。", at: 1_000, item: "item-2"),
+                    completed("现场观众提问互动。", at: 5_000, item: "item-3"),
+                    completed("最后演示照片导出。", at: 5_200, item: "item-4"),
+                    completed("现场观众提问互动。", at: 6_000, item: "item-5"),
+                    completed("现场观众提问互动。", at: 10_000, item: "item-6"),
+                    completed("今天我们介绍相机设置。", at: 10_500, item: "item-7"),
+                    completed("今天我们介绍相机设置。", at: 11_000, item: "item-8")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .improvise),
+                    .init(eventIndex: 3, intent: .read, expectedSegmentIndex: 2),
+                    .init(eventIndex: 4, intent: .improvise),
+                    .init(eventIndex: 5, intent: .improvise),
+                    .init(eventIndex: 6, intent: .reRead),
+                    .init(eventIndex: 7, intent: .read, expectedSegmentIndex: 1)
+                ]
+            )
+        )
+
+        #expect(report.metrics.advancedEventCount > 0, "前提：跟随建立过锚点")
+        #expect(
+            report.metrics.reanchorTimeoutCount == 2,
+            "两次未恢复各记一次；最后一次恢复了也不能把前一次抹掉"
+        )
+        #expect(report.metrics.failedSampleCount >= 2)
+        #expect(report.caveats.contains { $0.contains("回稿恢复超时 2 次") })
+    }
+
+    /// 停顿门槛与回稿窗口是两个独立概念，共用一个 deadline 会让「跟随还没回来」
+    /// 期间的正确停顿不计数：§11.7 的错误停滞比例因此被系统性低估。
+    @Test func aStallDuringAnUnrecoveredReanchorWindowStillCounts() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("现场观众提问互动。", at: 1_000, item: "item-2"),
+                    completed("欢迎来到今天的直播。", at: 3_600, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 0)
+                ]
+            )
+        )
+
+        // 3.6s 距该段开始朗读已过 3s 门槛，即使回稿窗口要到 4.0s 才到期。
+        #expect(
+            report.metrics.stalledEventCount == 1,
+            "停顿门槛不得被尚未到期的回稿 deadline 挡住"
+        )
+        #expect(report.metrics.reanchorTimeoutCount == 0, "前提：回稿窗口本身还没超时")
+    }
+
+    /// 上一条的解耦有过一次副作用：把停顿门槛从回稿 deadline 上摘下来之后，
+    /// 它再也不随「恢复成功」重置，一个**在旧停顿之前就打开**的读窗口会被
+    /// 旧门槛挡住。41 秒真实素材上错误停顿因此从 12 掉到 11。
+    @Test func aRecoveryReleasesTheStallGateForWindowsOpenedEarlier() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 400),
+                    completed("现场观众提问互动。", at: 500, item: "item-2"),
+                    completed("现场观众提问互动。", at: 1_000, item: "item-3"),
+                    completed("现场观众提问互动。", at: 4_000, item: "item-4"),
+                    completed("最后演示照片导出。", at: 4_100, item: "item-5"),
+                    completed("现场观众提问互动。", at: 4_200, item: "item-6")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 3, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 4, intent: .read, expectedSegmentIndex: 2),
+                    .init(eventIndex: 5, intent: .read, expectedSegmentIndex: 0)
+                ]
+            )
+        )
+
+        // index 1 的窗口在 1.0s 打开、4.0s 停顿；index 0 的窗口在 0.5s 就打开了，
+        // 4.2s 时也已过 3s 门槛。4.1s 的回稿恢复必须把门槛释放掉。
+        #expect(
+            report.metrics.stalledEventCount == 2,
+            "恢复之后，先前打开的读窗口仍应能计自己的停顿"
+        )
+    }
 }
