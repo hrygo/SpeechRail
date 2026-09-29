@@ -729,6 +729,46 @@ struct TeleprompterPreparationPromptsTests {
         }
     }
 
+    @Test func semanticReviewDoesNotReadANonNegationWordAsNegation() {
+        // `未` is the only single-character negation marker, and it also opens
+        // 未来 / 未必. 未来 -> 将来 is one of the most common Chinese
+        // paraphrases a 口语化 rewrite makes, so every occurrence blocked a
+        // block from being spoken automatically.
+        for (source, candidate) in [
+            ("未来的计划不变。", "将来的计划不变。"),
+            ("这项未必需要复核。", "这项不一定需要复核。"),
+        ] {
+            #expect(
+                !TeleprompterSemanticRiskDetector.findings(
+                    source: source,
+                    candidate: candidate
+                ).contains { $0.issue == .negationChanged },
+                "误报否定变化: \(source)"
+            )
+        }
+    }
+
+    @Test func semanticReviewStillSeesTheRealNegations() {
+        // Reverse controls: the corpus has 4086 of these against 47 for
+        // 未来 / 未必, and 未知 is kept on purpose — 原因未知 -> 原因已知 is a
+        // real change of meaning even though 未知 is a state, not an action.
+        for (source, candidate) in [
+            ("这项未验证。", "这项已验证。"),
+            ("未", "已"),
+            ("改动尚未提交。", "改动已经提交。"),
+            ("原因未知。", "原因已知。"),
+            ("这项不得上线。", "这项可以上线。"),
+        ] {
+            #expect(
+                TeleprompterSemanticRiskDetector.findings(
+                    source: source,
+                    candidate: candidate
+                ).contains { $0.issue == .negationChanged },
+                "漏报否定变化: \(source)"
+            )
+        }
+    }
+
     @Test func semanticReviewStillMissesGeneralChineseNounPhraseSubjects() {
         // Measured and deliberately not fixed. Every bounded heuristic for a
         // Chinese noun phrase produced mostly fragments on the real corpus:

@@ -1127,6 +1127,25 @@ public enum TeleprompterSemanticRiskDetector {
         "不超过", "不低于", "至少", "最多", "高于", "低于", "等于",
         "超过", "不足", "以内", "以上", "以下",
     ]
+    /// Characters that may not directly follow a marker, because the marker
+    /// also opens a word that is not the risk class it stands for.
+    ///
+    /// `未` is the only single-character negation marker, and it opens 未来
+    /// (44 occurrences) and 未必 (3) in the repository corpus, against 4086
+    /// real negations of the form 未验证 / 未执行 / 尚未提交. 未来 -> 将来 is
+    /// one of the most common paraphrases a 口语化 rewrite makes, so each of
+    /// those turned a faithful rewrite into a manual review. 未知 (362) is
+    /// deliberately **not** listed: 原因未知 -> 原因已知 is a real change of
+    /// meaning even though 未知 names a state rather than an action.
+    ///
+    /// This is a guard on the literal substring search rather than a regex,
+    /// because the marker list is matched with `range(of:)`; turning the whole
+    /// list into patterns would make every other marker's meaning depend on
+    /// regex syntax.
+    private static let markerForbiddenFollowers: [String: Set<Character>] = [
+        "未": ["来", "必"],
+    ]
+
     private static let certaintyMarkers = [
         "必须", "一定", "必然", "已经", "可能", "也许", "预计", "应当", "应该",
     ]
@@ -1299,8 +1318,13 @@ public enum TeleprompterSemanticRiskDetector {
             var count = 0
             while searchStart < text.endIndex,
                   let range = text.range(of: marker, range: searchStart..<text.endIndex) {
-                count += 1
                 searchStart = range.upperBound
+                if let forbidden = markerForbiddenFollowers[marker],
+                   range.upperBound < text.endIndex,
+                   forbidden.contains(text[range.upperBound]) {
+                    continue
+                }
+                count += 1
             }
             result.append(contentsOf: Array(repeating: marker, count: count))
         }
