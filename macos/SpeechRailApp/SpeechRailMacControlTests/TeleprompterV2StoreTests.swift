@@ -388,6 +388,261 @@ struct TeleprompterV2StoreTests {
         #expect(try store.listDocuments().count == 1)
     }
 
+    // MARK: - 存盘守卫（V2 store 的最后一道防线）
+    //
+    // 上面那些用例守的是「往返、别名、迁移、损坏列举」。而 `validate` 本身
+    // 有二十多道守卫，此前**一条都没有被观察过**：把它们逐条摘掉，747 项测试
+    // 全绿。它们平时挡住的是被改坏或被截断的磁盘文件——也就是读者已经遇到
+    // 的那种稿件——所以每条都补一条「构造出来就必须被拒」的回归。
+
+    /// 段序是 UI 里朗读位置的排序依据。ordinal 与实际下标不符时，界面上的
+    /// 序号与真正的阅读顺序会分叉，而这种稿件看上去完全正常。
+    @Test @MainActor func aSegmentWhoseOrdinalDisagreesWithItsPositionIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var segments = fixture.bundle.versions[0].segments
+        segments[1] = segment(segments[1], ordinal: 0)
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], segments: segments)))
+        }
+    }
+
+    /// 关键词是喂给识别偏置的。段级上限 5 是为了让偏置仍有区分度——放进去
+    /// 一段十几个词，识别器会把它们全当成可能的热词，跟随反而更容易被带偏。
+    @Test @MainActor func aSegmentCarryingMoreThanFiveKeywordsIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var segments = fixture.bundle.versions[0].segments
+        segments[0] = segment(segments[0], keywords: ["一", "二", "三", "四", "五", "六"])
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], segments: segments)))
+        }
+    }
+
+    /// 方案 §5.6：读法别名只能由读者登记（`acceptedReadings`），模型不得注入。
+    /// `matchPhrases` 是旧通道，混进已确认的朗读段等于让一份旁本别名参与跟随，
+    /// 而且它不会出现在读者确认过的那份清单里。
+    @Test @MainActor func aConfirmedSegmentCannotCarryReadingAliasesOnTheLegacyChannel() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var segments = fixture.bundle.versions[0].segments
+        segments[0] = segment(segments[0], matchPhrases: ["一段"])
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], segments: segments)))
+        }
+    }
+
+    /// 朗读正文是读者真正看到的那份，而 blocks 记的是「哪段要念、哪段只是提示」。
+    /// 两者对不上时，读者看到的字与将来被对齐的句子不是同一份——审阅通过的
+    /// 东西和上台念的东西不是同一个东西。
+    @Test @MainActor func aBundleWhoseReadingTextDisagreesWithItsSpeakBlocksIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var blocks = fixture.bundle.versions[0].blocks
+        blocks[0].text = "被改过的第一段。"
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], blocks: blocks)))
+        }
+    }
+
+    /// `readingHash` 是这份朗读正文的身份凭据：它让「这一版念的是什么」可以被
+    /// 单独核验，而不必重新朗读全文。哈希与正文脱钩时，那条凭据只能证明
+    /// 「曾经有某个哈希」，证明不了任何东西。
+    @Test @MainActor func aBundleWhoseReadingHashDoesNotMatchItsTextIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let wrongHash = TeleprompterV2Hash.sha256("另一份正文")
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(
+                bundle(fixture.bundle, version: version(fixture.bundle.versions[0], readingHash: wrongHash))
+            )
+        }
+    }
+
+    /// 一个没有朗读段的版本在界面上就是「打开后什么都没有」，而它能通过其余
+    /// 全部守卫：正文哈希、区间连续性、块一致性都对得上，因为根本没有段可查。
+    @Test @MainActor func aVersionWithNoReadingSegmentsIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(
+                bundle(fixture.bundle, version: version(fixture.bundle.versions[0], segments: []))
+            )
+        }
+
+        // 空段列表本身还会被区间连续性挡住（reduce 得 0，而正文非空）。真正
+        // 只有这条守卫能拦的是「正文也为空、块也为空」的那种全空版本——它是
+        // `!segments.isEmpty` 与「打开后有东西可念」这条产品要求之间唯一
+        // 的连接点。
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(
+                bundle(
+                    fixture.bundle,
+                    version: version(
+                        fixture.bundle.versions[0],
+                        readingText: "",
+                        blocks: [],
+                        segments: []
+                    )
+                )
+            )
+        }
+    }
+
+    /// 段 id 重复时，审阅、别名与进度都按 id 挂载——两段共用一个 id 时，读者
+    /// 在第一段登记的读法会落到第二段头上。
+    @Test @MainActor func aVersionWithTwoSegmentsSharingAnIdentifierIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var segments = fixture.bundle.versions[0].segments
+        segments[1] = segment(segments[1], id: segments[0].id)
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], segments: segments)))
+        }
+    }
+
+    /// 块引用的来源单元重复或乱序时，按单元归位的那一步会拿到互相矛盾的
+    /// 位置集合；「去重且升序」是这道守卫唯一能表达成一句话的约束。
+    @Test @MainActor func aBlockRepeatingOneSourceUnitIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        var blocks = fixture.bundle.versions[0].blocks
+        let first = blocks[0]
+        blocks[0] = TeleprompterV2ReadingBlock(
+            id: first.id,
+            revision: first.revision,
+            sourceUnitIDs: [first.sourceUnitIDs[0], first.sourceUnitIDs[0]],
+            text: first.text,
+            disposition: first.disposition,
+            origin: first.origin,
+            budgetShare: first.budgetShare
+        )
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(bundle(fixture.bundle, version: version(fixture.bundle.versions[0], blocks: blocks)))
+        }
+    }
+
+    /// 0 秒目标会让按目标时长分摊的那一步拿不到任何预算分配：读者的稿件要么
+    /// 全被排进「没时间念」，要么在界面上显示成一个看似合法的目标。
+    @Test @MainActor func aVersionWithAZeroSecondTargetIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let goal = TeleprompterV2DurationGoal(targetSeconds: 0, goalRevision: 1)
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(
+                bundle(fixture.bundle, version: version(fixture.bundle.versions[0], goal: goal))
+            )
+        }
+    }
+
+    /// 选区引用了这份来源里不存在的单元时，后续按单元取原文会取到空——稿子
+    /// 看上去能打开，念到那里就断了。
+    @Test @MainActor func aSelectionNamingASourceUnitThatDoesNotExistIsRejected() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        let template = fixture.bundle.versions[0].selectionSnapshot
+        let selection = TeleprompterV2SelectionRevision(
+            id: template.id,
+            sourceUnitRevision: template.sourceUnitRevision,
+            selectedUnitIDs: template.selectedUnitIDs + [9_999],
+            selectedRanges: template.selectedRanges,
+            userExcludedRanges: template.userExcludedRanges
+        )
+        #expect(throws: TeleprompterV2StoreError.self) {
+            try store.save(
+                bundle(fixture.bundle, version: version(fixture.bundle.versions[0], selection: selection))
+            )
+        }
+    }
+
+    /// `TeleprompterV2ReadingVersion` 的字段全是 `let`：违反某道守卫的 bundle
+    /// 只能像 app 那样重新构造出来。辅助函数把那几道守卫逐个参数化，好让一次
+    /// 失败只指向一条规则，而不是「保存被拒了」。
+    private func version(
+        _ template: TeleprompterV2ReadingVersion,
+        readingHash: String? = nil,
+        readingText: String? = nil,
+        selection: TeleprompterV2SelectionRevision? = nil,
+        blocks: [TeleprompterV2ReadingBlock]? = nil,
+        segments: [TeleprompterV2ReadingSegment]? = nil,
+        goal: TeleprompterV2DurationGoal? = nil,
+        estimate: TeleprompterDurationEstimate? = nil
+    ) -> TeleprompterV2ReadingVersion {
+        TeleprompterV2ReadingVersion(
+            id: template.id,
+            documentID: template.documentID,
+            sourceRevisionID: template.sourceRevisionID,
+            selectionSnapshot: selection ?? template.selectionSnapshot,
+            readingText: readingText ?? template.readingText,
+            readingHash: readingHash,
+            blocks: blocks ?? template.blocks,
+            segments: segments ?? template.segments,
+            goalSnapshot: goal ?? template.goalSnapshot,
+            paceSnapshot: template.paceSnapshot,
+            estimate: estimate ?? template.estimate,
+            analysisSource: template.analysisSource,
+            createdAt: template.createdAt
+        )
+    }
+
+    private func bundle(
+        _ source: TeleprompterV2DocumentBundle,
+        version: TeleprompterV2ReadingVersion
+    ) -> TeleprompterV2DocumentBundle {
+        var bundle = source
+        bundle.versions = [version]
+        return bundle
+    }
+
+    private func segment(
+        _ template: TeleprompterV2ReadingSegment,
+        id: String? = nil,
+        ordinal: Int? = nil,
+        keywords: [String]? = nil,
+        matchPhrases: [String]? = nil
+    ) -> TeleprompterV2ReadingSegment {
+        TeleprompterV2ReadingSegment(
+            id: id ?? template.id,
+            ordinal: ordinal ?? template.ordinal,
+            readingRange: template.readingRange,
+            text: template.text,
+            keywords: keywords ?? template.keywords,
+            matchPhrases: matchPhrases ?? template.matchPhrases,
+            acceptedReadings: template.acceptedReadings,
+            pauseHint: template.pauseHint
+        )
+    }
+
     private struct Fixture {
         var bundle: TeleprompterV2DocumentBundle
         let sourceText: String

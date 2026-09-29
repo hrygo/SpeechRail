@@ -2,11 +2,11 @@
   "package": "macos/SpeechRailApp",
   "filter": "",
   "sanity": {
-    "id": "V0",
-    "note": "isCurrent 恒真（已知应被杀）",
-    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
-    "find": "        token == generation",
-    "replace": "        true"
+    "id": "D0",
+    "note": "朗读段 ordinal 全体 +1（收紧核心不变量，已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+    "find": "            segment.ordinal == index",
+    "replace": "            segment.ordinal == index + 1"
   },
   "mutations": [
     {
@@ -690,7 +690,7 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
       "find": "    ) -> UUID {\n        generation = UUID()\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
       "replace": "    ) -> UUID {\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
-      "expect": "KILLED",
+      "expect": "SURVIVED",
       "rationale": "等价变异（纵深防御）。`generation` 的唯一无状态检查消费者是 `TeleprompterSession.startPipeline` 的 4 处 generation 守卫（2364／2382／2394／2397），它们只在 `.starting` 窗口内运行；该窗口内 `startPump` 尚未执行，唯一的 `invalidateAfterFailure` 调用点 `enterManual` 只能由 pump 的 `upload`／`handle` 触发，故不可达。`acceptsVoiceEvents` 自带 `.starting`／`.following` 状态检查，不依赖换代。"
     },
     {
@@ -699,7 +699,7 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
       "find": "    public mutating func resetToOff() -> UUID {\n        generation = UUID()",
       "replace": "    public mutating func resetToOff() -> UUID {",
-      "expect": "KILLED",
+      "expect": "SURVIVED",
       "rationale": "等价变异（纵深防御）。`resetToOff` 唯一调用点是 `TeleprompterSession.finishStageClose`，其前置 `requestVoiceStop` 在 `.starting` 下必经 `beginStop` 换代；若状态本就是 `.off`，则无在途 `startPipeline` 可复活。"
     },
     {
@@ -753,7 +753,7 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
       "find": "        generation = UUID()\n        pendingStopDestination = nil\n        state = .starting",
       "replace": "        generation = UUID()\n        state = .starting",
-      "expect": "KILLED",
+      "expect": "SURVIVED",
       "rationale": "等价变异（纵深防御）。`pendingStopDestination` 的读点只有 `markStopped`（守卫 `state == .stopping`，而进入 `.stopping` 的唯一路径 `beginStop` 必先写入它）与 `retryStopVoiceAssist`（守卫 `.stopFailed`，从该态 `canStart` 为 false，故 `beginStart` 不可达）。"
     },
     {
@@ -771,8 +771,161 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
       "find": "        state = pendingStopDestination ?? .off\n        pendingStopDestination = nil\n        return true",
       "replace": "        state = pendingStopDestination ?? .off\n        return true",
-      "expect": "KILLED",
+      "expect": "SURVIVED",
       "rationale": "等价变异（纵深防御）。停止成功后残留的 `pendingStopDestination` 不可被读到：唯一无状态守卫的写入口 `beginStop` 总会覆写，`markFollowing`／`markStartFailed`／`markUnavailable`／`beginStart` 均会清空。"
+    },
+    {
+      "id": "D1",
+      "note": "朗读段不再校验 ordinal 与数组下标一致（段序可错位）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            segment.ordinal == index\n                && segment.keywords",
+      "replace": "            true\n                && segment.keywords",
+      "expect": "KILLED",
+      "rationale": "被 aSegmentWhoseOrdinalDisagreesWithItsPositionIsRejected 杀掉。"
+    },
+    {
+      "id": "D2",
+      "note": "每段关键词上限从 5 放宽到 6",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                && segment.keywords.count <= 5\n",
+      "replace": "                && segment.keywords.count <= 6\n",
+      "expect": "KILLED",
+      "rationale": "被 aSegmentCarryingMoreThanFiveKeywordsIsRejected 杀掉。"
+    },
+    {
+      "id": "D3",
+      "note": "已确认朗读段不再禁止 matchPhrases（读法别名可写进朗读段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                && segment.matchPhrases.isEmpty\n",
+      "replace": "                && true\n",
+      "expect": "KILLED",
+      "rationale": "被 aConfirmedSegmentCannotCarryReadingAliasesOnTheLegacyChannel 杀掉。这是方案 §5.6「读法别名只能由读者登记」在**持久化层**的执行点，与第 63 轮的 A6（解码器那侧）是一对：两侧都不允许模型注入，此前两侧都没有测试观察。"
+    },
+    {
+      "id": "D4",
+      "note": "段间分隔符不再计入连续性（段与段直接相接也算合法）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            return segment.readingRange.end + (item.offset + 1 < version.segments.count ? 2 : 0)",
+      "replace": "            return segment.readingRange.end",
+      "expect": "KILLED",
+      "rationale": "被 57 条既有的往返与坐标回归杀掉。"
+    },
+    {
+      "id": "D5",
+      "note": "朗读正文与 blocks 的 speak 内容不再要求一致",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        guard speakingText == version.readingText else {",
+      "replace": "        guard true else {",
+      "expect": "KILLED",
+      "rationale": "被 aBundleWhoseReadingTextDisagreesWithItsSpeakBlocksIsRejected 杀掉。"
+    },
+    {
+      "id": "D6",
+      "note": "朗读正文哈希不再校验（证据链与内容脱钩）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              version.readingHash == TeleprompterV2Hash.sha256(version.readingText) else {",
+      "replace": "              true else {",
+      "expect": "KILLED",
+      "rationale": "被 aBundleWhoseReadingHashDoesNotMatchItsTextIsRejected 杀掉。"
+    },
+    {
+      "id": "D7",
+      "note": "空段列表被接受（没有任何朗读段也算合法版本）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        guard !version.segments.isEmpty,",
+      "replace": "        guard true,",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：空段列表会被区间连续性的 reduce 顺带挡住（reduce 得 0，而正文非空），所以最初那条断言根本区分不出两者。补上「正文也为空、块也为空」的全空版本后转杀——那一格只有 `!segments.isEmpty` 能拦，它是这道守卫与「打开后有东西可念」之间唯一的连接点。"
+    },
+    {
+      "id": "D8",
+      "note": "朗读段 id 唯一性不再校验",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              segmentIDs.count == Set(segmentIDs).count,",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "被 aVersionWithTwoSegmentsSharingAnIdentifierIsRejected 杀掉。"
+    },
+    {
+      "id": "D9",
+      "note": "读法别名的重叠检查被摘掉（同一段内两条别名可覆盖同一处文字）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            if let previousEnd, previousEnd > alias.displayRange.start { return false }",
+      "replace": "            if let previousEnd, false { return false }",
+      "expect": "KILLED",
+      "rationale": "被既有的 aBundleCarryingTwoOverlappingReadingsIsRejected 杀掉。"
+    },
+    {
+      "id": "D10",
+      "note": "读法别名不再校验是否落在本段文字内",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            if alias.rejection(inSegmentText: segment.text) != nil { return false }",
+      "replace": "            if false { return false }",
+      "expect": "KILLED",
+      "rationale": "被既有的 aBundleWhoseReadingNoLongerMatchesItsSegmentIsRejected 杀掉。"
+    },
+    {
+      "id": "D11",
+      "note": "documentID 的 \".\"／\"..\" 守卫被摘掉（目录穿越）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              documentID != \".\",\n              documentID != \"..\" else {",
+      "replace": "              true else {",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。documentID 全部来自 `UUID().uuidString`（`createDocument`／`duplicate`）或磁盘文件名（`listDocuments`），从不来自用户输入；而 `documentID == \".\"` 拼上扩展名是 `\"...json\"`，在 `appendingPathComponent` 下不构成目录穿越。"
+    },
+    {
+      "id": "D12",
+      "note": "导出原稿时不再补 BOM",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        return source.hasBOM ? Data([0xEF, 0xBB, 0xBF]) + body : body",
+      "replace": "        return body",
+      "expect": "KILLED",
+      "rationale": "被既有的 exportsSourceWithBomAndReadingTextWithoutCueOrSkippedContent 杀掉。"
+    },
+    {
+      "id": "D13",
+      "note": "朗读块的来源单元 ID 不再要求去重且升序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                  block.sourceUnitIDs == Array(Set(block.sourceUnitIDs)).sorted(),",
+      "replace": "                  true,",
+      "expect": "KILLED",
+      "rationale": "被 aBlockRepeatingOneSourceUnitIsRejected 杀掉。"
+    },
+    {
+      "id": "D14",
+      "note": "目标时长不再要求大于 0（0 秒目标被接受）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              version.goalSnapshot.targetSeconds > 0,",
+      "replace": "              version.goalSnapshot.targetSeconds >= 0,",
+      "expect": "SURVIVED",
+      "rationale": "等价变异。`TeleprompterTimingPlanner.validateTargetMinutes` 只接受 1…N 分钟，0 在更早的规划器范围检查处就已被拒——`> 0` 与它冗余。"
+    },
+    {
+      "id": "D15",
+      "note": "时长区间的上下界不再要求有序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": " && $0.lowerBound >= 0 && $0.upperBound >= $0.lowerBound }",
+      "replace": " && $0.lowerBound >= 0 }",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达。`ClosedRange` 不允许下界大于上界：进程内构造会 trap（**实测 `ClosedRange(uncheckedBounds:)` 在本工具链下同样 trap**），Codable 解码也会先崩。这道守卫永不触发，属纵深防御。"
+    },
+    {
+      "id": "D16",
+      "note": "选区不再要求是来源单元的子集",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              selectedIDs.isSubset(of: sourceUnitIDs),",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "被 aSelectionNamingASourceUnitThatDoesNotExistIsRejected 杀掉。"
+    },
+    {
+      "id": "D17",
+      "note": "documentID 的斜杠守卫被摘掉（路径穿越）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              documentID.rangeOfCharacter(from: CharacterSet(charactersIn: \"/\\\\\")) == nil,",
+      "replace": "              true,",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，理由同 D11。在 macOS 上 `\\` 也不是路径分隔符，承重的只是「ID 不来自用户输入」这个前提。"
     }
   ]
 }
