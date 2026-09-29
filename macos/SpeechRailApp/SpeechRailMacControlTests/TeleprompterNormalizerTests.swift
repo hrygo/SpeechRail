@@ -355,17 +355,16 @@ struct TeleprompterCanonicalizerTests {
             ("一点五", "1.5"),
         ] {
             #expect(
-                TeleprompterCanonicalizer.values(spoken) == [written],
+                TeleprompterCanonicalizer.values(spoken).joined(separator: "|") == written,
                 "\(spoken) 应读成 \(written)，实际 \(TeleprompterCanonicalizer.values(spoken))"
             )
         }
         // 反向对照：点前点后的数词都还认，`点` 作为单位表成员的判断本条不碰。
         #expect(TeleprompterCanonicalizer.values("三点五") == ["3.5"])
         #expect(TeleprompterCanonicalizer.values("零点八五") == ["0.85"])
-        // 口语小数不带单位组（`三点五秒` 与 `2.5秒` 对不上），那是另一处缺陷，
-        // 与本条无关，不能塞进同一条断言——否则将来两处里只修好一处，
-        // 这条回归会因为另一处而变红，把两件事搅在一起。
-        #expect(TeleprompterCanonicalizer.values("两点五秒") == ["2.5", "秒"])
+        // 口语小数不带单位组是第 73 条修掉的缺陷；这里留一条把它钉住，
+        // 免得将来有人为了别的目的把单位组拿掉。
+        #expect(TeleprompterCanonicalizer.values("两点五秒") == ["2.5秒"])
 
         // 点前点后的成员是**量出来的边界**，不是完备规则：语料上点前用 `〇` 0 处、
         // 点后用 `〇` 0 处、点后用 `两` 仅 1 处且是假阳性（`落点两块`）。当前成员
@@ -376,5 +375,36 @@ struct TeleprompterCanonicalizerTests {
                 "点前不认 `〇`，与服务端一致")
         #expect(TeleprompterCanonicalizer.values("三点两") == ["3点", "两"],
                 "点后不认 `两`：语料上唯一一处是假阳性")
+    }
+
+    /// `.arabic` 带单位组、`.spokenDecimal` 不带，于是同一个数量写成阿拉伯数字
+    /// 是一个 token、写成中文口语数字是两个——**与第 70 条那两张分叉的单位表同一
+    /// 形状，只是这次分叉的是「规则带不带单位组」而不是「表里有哪些成员」**。
+    /// 探针上 12 个单位形状**无一例外**全部拆开。
+    ///
+    /// 修法不是给口语小数单配一张表，是复用第 70 条已经合成的那一张
+    /// `unitAlternation`——**再配一张就是把这个缺陷重新造一遍**。
+    @Test func spokenDecimalsCarryTheSameUnitSuffixesArabicOnesDo() {
+        for (spoken, written) in [
+            ("三点五秒", "3.5秒"),
+            ("三点一四秒", "3.14秒"),
+            ("零点八五秒", "0.85秒"),
+            ("十点五秒", "10.5秒"),
+            ("九点九分", "9.9分"),
+            ("三点五 元", "3.5元"),
+            ("三点五个月", "3.5个|月"),
+            ("三点五个人", "3.5个|人"),
+        ] {
+            #expect(
+                TeleprompterCanonicalizer.values(spoken).joined(separator: "|") == written,
+                "\(spoken) 应读成 \(written)，实际 \(TeleprompterCanonicalizer.values(spoken))"
+            )
+        }
+        // 量级词仍然接不上：`三点五万元` 的 `万` 不在单位表里（`万` 由 .arabic 的
+        // 量级分支处理），与 `五台`／`5 台` 属于同一族已记录缺口，本条不碰。
+        #expect(TeleprompterCanonicalizer.values("三点五万元") == ["3.5", "10000元"])
+        // 不带单位的小数不受影响。
+        #expect(TeleprompterCanonicalizer.values("三点五") == ["3.5"])
+        #expect(TeleprompterCanonicalizer.values("两点五。") == ["2.5"])
     }
 }

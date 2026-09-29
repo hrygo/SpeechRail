@@ -133,7 +133,13 @@ public enum TeleprompterCanonicalizer {
         // that did claim it was `.spokenUnit` reading `点` as a unit -- so a
         // decimal came out as "2 o'clock, five". The trailing class keeps the
         // server's membership: it has 零 but not 两, and 〇 stays out of both.
-        .init(expression: expression(#"[零一二两三四五六七八九十百千万"# + digitClass + #"]+点[零一二三四五六七八九"# + digitClass + #"]+"#), kind: .spokenDecimal),
+        // The unit group is the same `unitAlternation` the Arabic rule uses, and
+        // deliberately not a second list: `三点五秒` used to canonicalise as
+        // `3.5` + `秒` while `3.5秒` was one token, so the same quantity written
+        // two ways never matched. All twelve unit shapes probed split, without
+        // exception. Giving spoken decimals their own list would rebuild the
+        // defect 第 70 条 just fixed one rule earlier.
+        .init(expression: expression(#"[零一二两三四五六七八九十百千万"# + digitClass + #"]+点[零一二三四五六七八九"# + digitClass + #"]+\s*(?:"# + unitAlternation + #")?"#), kind: .spokenDecimal),
         // 十分钟 is untouched by the 分 guard: 钟 is not in the set, so
         // 四十分钟 still canonicalises to 40分 + 钟.
         .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:"# + unitAlternation + #"#)"#), kind: .spokenUnit),
@@ -308,11 +314,30 @@ public enum TeleprompterCanonicalizer {
             return "\(digits)年"
 
         case .spokenDecimal:
-            guard let point = raw.firstIndex(of: "点"),
-                  let integer = chineseInteger(String(raw[..<point])) else { return nil }
-            let decimal = asciiDigits(String(raw[raw.index(after: point)...]))
+            // The rule may carry a unit suffix, and `点` is in the unit list --
+            // so the suffix has to come off before the decimal point is looked
+            // for, or `三点五点` would find the wrong one: the trailing `点` is
+            // the unit and the earlier one is the decimal point. Requiring a
+            // `点` to survive that step rejects shapes like `三点四点` being
+            // read as `3.4` instead of `3.40`.
+            //
+            // The space is layout, exactly as in `.arabic`: the rule admits at
+            // most one optional space inside this token, so dropping it here
+            // cannot merge two separate tokens.
+            let collapsed = String(raw.filter { !$0.isWhitespace })
+            var body = collapsed
+            var suffix = ""
+            if let unit = unitSuffixes.first(where: { collapsed.hasSuffix($0) }),
+               collapsed.count > unit.count {
+                body = String(collapsed.dropLast(unit.count))
+                suffix = unit
+            }
+            guard body.contains("点"),
+                  let point = body.firstIndex(of: "点"),
+                  let integer = chineseInteger(String(body[..<point])) else { return nil }
+            let decimal = asciiDigits(String(body[body.index(after: point)...]))
             guard !decimal.isEmpty else { return nil }
-            return "\(integer).\(decimal)"
+            return "\(integer).\(decimal)\(suffix)"
 
         case .spokenUnit:
             guard let suffix = unitSuffixes.first(where: raw.hasSuffix) else { return nil }
