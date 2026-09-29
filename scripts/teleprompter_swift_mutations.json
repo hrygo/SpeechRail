@@ -116,6 +116,42 @@
       "replace": "        \"零\": \"0\", \"〇\": \"0\", \"一\": \"1\", \"二\": \"2\", \"三\": \"3\", \"四\": \"4\",",
       "expect": "KILLED",
       "rationale": "「两」此前是共享表里唯一漏掉的字：两处各维护一张数字表，已经分叉（第 70 条在单位表上重演）。已改为共用 `TeleprompterCanonicalizer.chineseDigits`，并补 `aBareLiangMatchesTwo`。"
+    },
+    {
+      "id": "M13",
+      "note": "停滞阈值 3 秒放宽到 30 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterReplayEvaluator.swift",
+      "find": "    public static let stallThresholdMilliseconds = 3_000",
+      "replace": "    public static let stallThresholdMilliseconds = 30_000",
+      "expect": "KILLED",
+      "rationale": "停滞必须计入阅读体验而不是从均值里消失（§11.6 口径）。放宽到 30 秒后 24 条用例变红，覆盖真实素材。"
+    },
+    {
+      "id": "M14",
+      "note": "失败分母阈值 0.05 放宽到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterReplayEvaluator.swift",
+      "find": "    public static let failureShareThreshold = 0.05",
+      "replace": "    public static let failureShareThreshold = 0.5",
+      "expect": "KILLED",
+      "rationale": "§11.6：失败分母超过此值时，时延分位只描述成功子集，不得单独引用。放宽到 0.5 后 6 条变红。"
+    },
+    {
+      "id": "M15",
+      "note": "数值指纹只留长度不留数值，读法别名的数值门禁彻底失效",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterDomain.swift",
+      "find": "        TeleprompterCanonicalizer.units(text)\n            .filter(\\.isNumeric)\n            .map(\\.value)",
+      "replace": "        TeleprompterCanonicalizer.units(text)\n            .filter(\\.isNumeric)\n            .map { _ in \"\" }",
+      "expect": "KILLED",
+      "rationale": "读法别名的数值门禁是第 1 条「数值不得静默通过」在别名通道上的落点；指纹只留长度不留数值时 `50 瓦` 与 `500 千瓦` 会判成一致，14 条变红。**这一条此前从未被变异验证过**，本轮补上。"
+    },
+    {
+      "id": "M16",
+      "note": "别名接受比当前更新的规则版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterDomain.swift",
+      "find": "        guard ruleRevision <= Self.currentRuleRevision else { return .unknownRuleRevision }",
+      "replace": "        guard ruleRevision >= Self.currentRuleRevision else { return .unknownRuleRevision }",
+      "expect": "KILLED",
+      "rationale": "别名必须拒绝比当前更新的规则版本——那意味着它是用未来的口径写的，本机无法复核。3 条变红。"
     }
   ]
 }
