@@ -2,11 +2,11 @@
   "package": "macos/SpeechRailApp",
   "filter": "",
   "sanity": {
-    "id": "M0",
-    "note": "稳定前缀上界守卫撤掉（已知应被杀）",
-    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
-    "find": "guard stablePrefixCodepoints >= 0, stablePrefixCodepoints <= rawScalarCount else {",
-    "replace": "guard stablePrefixCodepoints >= 0 else {"
+    "id": "V0",
+    "note": "isCurrent 恒真（已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+    "find": "        token == generation",
+    "replace": "        true"
   },
   "mutations": [
     {
@@ -638,6 +638,141 @@
       "replace": "            let window = Array(units[start..<min(start + 12, units.count + 1)])",
       "expect": "INVALID",
       "rationale": "最后一个窗口越界，`units[start..<]` 直接 trap，测试进程在 633 项处中断、0 失败。与 A4／A5 同族。"
+    },
+    {
+      "id": "V2",
+      "note": "markFollowing 不再要求处于 starting（迟到回调可把已失败会话拉回跟随）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .starting else { return false }\n        state = .following",
+      "replace": "        guard isCurrent(token) else { return false }\n        state = .following",
+      "expect": "KILLED",
+      "rationale": "被 markFollowing 的状态守卫与 staleConnectionIsRejectedAfterStopAndRestart、lateStartCallbackCannotResurrectAFailedStart 共同杀掉。"
+    },
+    {
+      "id": "V3",
+      "note": "beginStop 不再接受 stopFailed（停机失败后无法重试，死路）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .starting, .following, .stopFailed:\n            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping\n            return generation\n        case .off, .stopping, .pausedByUser, .unavailable:\n            return nil",
+      "replace": "        case .starting, .following:\n            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping\n            return generation\n        case .off, .stopping, .pausedByUser, .unavailable, .stopFailed:\n            return nil",
+      "expect": "KILLED",
+      "rationale": "被 retryStopVoiceAssist 的真实调用形态与 deviceErrorDuringStopKeepsTheStopInFlight 杀掉：`.stopFailed` 是「停机失败后重试」的唯一入口，撤掉后 `TeleprompterSession.retryStopVoiceAssist` 的 `guard case .stopFailed` 与 `beginStop` 同时落空，停止成为死路。"
+    },
+    {
+      "id": "V4",
+      "note": "markStopped 不再要求处于 stopping（重复回调能把读者的暂停改成停止）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .stopping else { return false }",
+      "replace": "        guard isCurrent(token) else { return false }",
+      "expect": "KILLED",
+      "rationale": "被 duplicateStopCallbackCannotMoveTheDestination 杀掉。"
+    },
+    {
+      "id": "V5",
+      "note": "空的停止失败原因又被当成停止成功（回到第 86 条修复前的 fail-open）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        if let failureReason {",
+      "replace": "        if let failureReason, !failureReason.isEmpty {",
+      "expect": "KILLED",
+      "rationale": "这是第 86 条缺陷的回归护栏：撤掉后 `emptyStopFailureReasonIsNotRecordedAsSuccess` 立即失败。"
+    },
+    {
+      "id": "V6",
+      "note": "markStartFailed 不再要求处于 starting（迟到的失败回调可掀翻正在跟随的会话）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .starting else { return false }\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "replace": "        guard isCurrent(token) else { return false }\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "expect": "KILLED",
+      "rationale": "被 lateStartFailureCannotOverwriteAFollowingSession 杀掉。"
+    },
+    {
+      "id": "V7",
+      "note": "invalidateAfterFailure 不再作废当前代",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "    ) -> UUID {\n        generation = UUID()\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "replace": "    ) -> UUID {\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "expect": "KILLED",
+      "rationale": "等价变异（纵深防御）。`generation` 的唯一无状态检查消费者是 `TeleprompterSession.startPipeline` 的 4 处 generation 守卫（2364／2382／2394／2397），它们只在 `.starting` 窗口内运行；该窗口内 `startPump` 尚未执行，唯一的 `invalidateAfterFailure` 调用点 `enterManual` 只能由 pump 的 `upload`／`handle` 触发，故不可达。`acceptsVoiceEvents` 自带 `.starting`／`.following` 状态检查，不依赖换代。"
+    },
+    {
+      "id": "V8",
+      "note": "resetToOff 不再作废当前代",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "    public mutating func resetToOff() -> UUID {\n        generation = UUID()",
+      "replace": "    public mutating func resetToOff() -> UUID {",
+      "expect": "KILLED",
+      "rationale": "等价变异（纵深防御）。`resetToOff` 唯一调用点是 `TeleprompterSession.finishStageClose`，其前置 `requestVoiceStop` 在 `.starting` 下必经 `beginStop` 换代；若状态本就是 `.off`，则无在途 `startPipeline` 可复活。"
+    },
+    {
+      "id": "V9",
+      "note": "markUnavailable 不再拒绝停止进行中（设备报错会丢掉待定目的地并让停止卡死）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard state != .stopping else { return false }",
+      "replace": "        guard true else { return false }",
+      "expect": "KILLED",
+      "rationale": "被 deviceErrorDuringStopKeepsTheStopInFlight 杀掉。"
+    },
+    {
+      "id": "V10",
+      "note": "acceptsVoiceEvents 不再校验代（旧连接的音频块与识别事件都会被采纳）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        isCurrent(token) && (state == .starting || state == .following)",
+      "replace": "        state == .starting || state == .following",
+      "expect": "KILLED",
+      "rationale": "被 staleConnectionIsRejectedAfterStopAndRestart 杀掉。"
+    },
+    {
+      "id": "V11",
+      "note": "用户暂停后不再允许重新开启",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .off, .pausedByUser, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed:\n            false",
+      "replace": "        case .off, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed, .pausedByUser:\n            false",
+      "expect": "KILLED",
+      "rationale": "被 lateStartCallbackCannotResurrectAFailedStart 杀掉。"
+    },
+    {
+      "id": "V12",
+      "note": "设备不可用后不再允许重新开启",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .off, .pausedByUser, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed:\n            false",
+      "replace": "        case .off, .pausedByUser:\n            true\n        case .starting, .following, .stopping, .stopFailed, .unavailable:\n            false",
+      "expect": "KILLED",
+      "rationale": "被 lateStartFailureCannotOverwriteAFollowingSession 杀掉。"
+    },
+    {
+      "id": "V13",
+      "note": "停止进行中不再算忙",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        self == .starting || self == .stopping",
+      "replace": "        self == .starting",
+      "expect": "KILLED",
+      "rationale": "被 busyCoversStopAndPauseRemainsStartable 杀掉。"
+    },
+    {
+      "id": "V14",
+      "note": "beginStart 不再清空待定停止目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        generation = UUID()\n        pendingStopDestination = nil\n        state = .starting",
+      "replace": "        generation = UUID()\n        state = .starting",
+      "expect": "KILLED",
+      "rationale": "等价变异（纵深防御）。`pendingStopDestination` 的读点只有 `markStopped`（守卫 `state == .stopping`，而进入 `.stopping` 的唯一路径 `beginStop` 必先写入它）与 `retryStopVoiceAssist`（守卫 `.stopFailed`，从该态 `canStart` 为 false，故 `beginStart` 不可达）。"
+    },
+    {
+      "id": "V15",
+      "note": "beginStop 不再记录目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping",
+      "replace": "            generation = UUID()\n            state = .stopping",
+      "expect": "KILLED",
+      "rationale": "被 duplicateStopCallbackCannotMoveTheDestination 与既有暂停/恢复用例共同杀掉（21 项）。"
+    },
+    {
+      "id": "V16",
+      "note": "停止成功后不再清空待定目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        state = pendingStopDestination ?? .off\n        pendingStopDestination = nil\n        return true",
+      "replace": "        state = pendingStopDestination ?? .off\n        return true",
+      "expect": "KILLED",
+      "rationale": "等价变异（纵深防御）。停止成功后残留的 `pendingStopDestination` 不可被读到：唯一无状态守卫的写入口 `beginStop` 总会覆写，`markFollowing`／`markStartFailed`／`markUnavailable`／`beginStart` 均会清空。"
     }
   ]
 }
