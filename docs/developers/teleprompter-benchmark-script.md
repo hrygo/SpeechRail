@@ -1,7 +1,7 @@
 ---
 title: "提词器时延基线朗读稿与标注模板"
 status: active
-version: "0.1.0"
+version: "0.2.0"
 date: 2026-09-29
 ---
 
@@ -127,6 +127,13 @@ date: 2026-09-29
 > 这与阶段报告 §2 第 11 条记录的「帮助文本与解码器不一致」是同一类坑。接线前请以
 > `Intent.manifestValues` 为准，不要凭直觉拼字符串。
 
+> **第二版修正了 `kind`**：第一版把 `speechrail.transcription.hypothesis` 标成了 `partial`。
+> 那是错的。回放器把 `partial` 映射成 `RealtimeASRClient.Event.partial(itemID:delta:)`——
+> **增量语义，`revision` 与 `stable_prefix_codepoints` 会被直接丢弃**；而线上真实发的是
+> 「整句已修订的快照」，对应 `snapshot` → `partialSnapshot(revision:text:evidence:)`。
+> 写错的后果不是解码失败，而是**回放跑得出来、却少了一整类推进判定**。见
+> `TeleprompterReplayEvaluator.wireEvent(for:)`。
+
 一份最小可用的 manifest（值均为占位，需按真实录制填写）：
 
 ```json
@@ -144,9 +151,9 @@ date: 2026-09-29
     { "id": "s2", "text": "价格方面，标称为 2999 元，促销价是 2599 元。" }
   ],
   "events": [
-    { "at_milliseconds": 0,    "kind": "partial",   "item_id": "i0", "event_id": "e0", "revision": 1, "text": "大家" },
+    { "at_milliseconds": 0,    "kind": "snapshot",  "item_id": "i0", "event_id": "e0", "revision": 1, "text": "大家", "stable_prefix_codepoints": 0 },
     { "at_milliseconds": 320,  "kind": "completed", "item_id": "i0", "event_id": "e1", "revision": 1, "text": "大家好，欢迎来到本期节目。" },
-    { "at_milliseconds": 900,  "kind": "partial",   "item_id": "i1", "event_id": "e2", "revision": 1, "text": "先看几组" }
+    { "at_milliseconds": 900,  "kind": "snapshot",  "item_id": "i1", "event_id": "e2", "revision": 1, "text": "先看几组", "stable_prefix_codepoints": 0 }
   ],
   "labels": [
     { "event_index": 0, "intent": "read", "expected_segment_index": 0 },
@@ -180,35 +187,82 @@ date: 2026-09-29
 **接手方若只改素材、不改字段名，可以直接复用这份模板**；若要动结构，先用上面的
 「snake_case 应当被拒」做一次自检，确认自己接的还是同一个解码器。
 
-## `events[]` 从哪来：目前必须人工誊写（一个真实的工具缺口）
+## `events[]` 从哪来：已由 `tools/build_teleprompter_replay_manifest.py` 补上
 
-这一节值得单独写，因为**它不是 obvious 的**，第一版模板也没讲清。
+> **这一节改过两次，请注意时序。** 第一版结论是「只能人工誊写」，第二版补上了工具。
+> 保留旧结论是因为它解释了一个真实的设计约束，不是因为它还成立。
 
-manifest 的 `labels[]` 标注意味着「读者做了什么」，容易以为 `events[]`（系统收到了什么）
-是自动来的。**它不是。** 核查结论：
+### 为什么当初会缺
+
+manifest 的 `labels[]` 表达「读者做了什么」，容易以为 `events[]`（系统收到了什么）是自动来的。
+核查时确认不是，理由有三条，且前两条**至今仍然成立**：
 
 - `tools/probe_teleprompter_latency.py` 的文件头写明它 **never writes transcript text,
   item IDs, event IDs**——这是**有意为之**的隐私设计（探针只输出时序、计数与时长）。
 - 服务端 `/metrics` 只有聚合计数，**不落任何转写文本**。
-- 仓库里**没有**任何工具能把一次真实会话导出成 `TeleprompterReplayManifest`。
+- （已作废）当时仓库里没有任何工具能把一次真实会话导出成 `TeleprompterReplayManifest`。
 
-**结论**：`events[]` 与 `labels[]` 目前都**只能由录测者手工誊写**。这是真实基线路上的一道
-人工工序，不是 bug，但**必须写进交接文档**，否则接手方会以为跑个命令就能拿到素材。
+前两条不能靠「让探针顺便落文本」绕过：那样会把一份完整转写塞进探针结果，而探针结果是要长期
+留存、会被引用和比较的证据。**所以解法是新增一个独立的素材工具，而不是改探针。**
 
-誊写时至少要记全解码器要求的每个字段，缺一个就解码失败：
+### 工具做什么
+
+```bash
+uv run python tools/build_teleprompter_replay_manifest.py <外部素材>.wav \
+  --script <朗读稿>.txt --output <外部素材>-manifest.json \
+  --review-output <外部素材>-review.md --profile quality \
+  --dataset-revision A_v1 --baseline-commit <sha> \
+  --candidate-commit <sha> --policy-revision <rev> --app-home "$SPEECHRAIL_APP_HOME"
+```
+
+它按真实 100 ms 节奏推流，把整条 Realtime 事件流录下来，再拿**冻结稿件**做单调对齐，直接产出
+`events[]` 与一版 `labels[]` 草稿，外加一份人工确认清单。省略 `--script` 则只落原始采集结果。
+
+事件映射（`kind` 的选择理由见上文「第二版修正了 `kind`」）：
+
+| wire 事件 | manifest `kind` | 说明 |
+|---|---|---|
+| `speechrail.transcription.hypothesis` | `snapshot` | 带 `revision` 与 `stable_prefix_codepoints` |
+| `conversation.item.input_audio_transcription.delta` | `partial` | 增量片段 |
+| `conversation.item.input_audio_transcription.completed` | `completed` | 终态 |
+| `conversation.item.input_audio_transcription.failed` | `failed` | 终态失败 |
+
+### 三条不许它越界的线
+
+1. **产物一律出仓库。** 输出路径解析后落在检出目录内直接拒绝——转写按 §11.5 与项目约束不进 Git。
+   stdout／stderr 也不打印任何转写文本。
+2. **草稿不能冒充已确认。** 不加 `--confirm-reviewed` 时，`dataset_revision` 会被强制加上
+   `-draft` 后缀；机器拿不准的条目全部列进 review 清单（**只给事件下标，不给文本**）。
+3. **机器不发明 `improvise`。** 这条最要紧：回放器把「`improvise` 且系统发生推进」直接计成
+   **严重误推进**（`harmful_jump_count`）。若机器仅因文本对不上就断言脱稿，等于**凭空制造
+   它本该测量的那个安全数字**。因此低对齐度只会得到「`read` + 位置未知 + 进人工清单」，
+   `improvise` 只能由人写。`reRead` 同理收紧到「非重复投递、且明显落在已读位置之后」的片段。
+
+> **对齐口径上踩过的两个坑，都留了回归**（`tests/test_teleprompter_replay_manifest.py`）：
+> ① 只取**最长**匹配块打分，会让「整句已确认 + 尾部新增」的快照看起来像脱稿——必须**所有块累加**；
+> ② 重复投递（hypothesis 与它的 delta 携带同样文字）曾被误判成**回读**——必须先按**紧邻的上一条**
+> 去重，且不能拿整段累计文本去比，否则真回读会被吞掉。
+
+### 人工确认清单怎么用
+
+清单列出每个存疑事件的 `event_index`、时间、机器提议的 `intent`／段落、对齐度与原因。
+逐条核对后就地改 manifest 的 `labels`，确认完毕另存正式版并去掉 `-draft` 后缀。
+**未确认的草稿不要提交，也不要用它出的报告做质量结论。**
+
+字段口径仍然照旧（人工改标签时要看）：
 
 | 字段 | 来源 | 注意 |
 |---|---|---|
 | `at_milliseconds` | 事件相对**第一个**事件的偏移 | 虚拟时钟，回放不真的 sleep；不是音频绝对时间 |
-| `kind` | 事件类型 | `partial` / `snapshot` / `completed` / `failed` |
+| `kind` | 事件类型 | `partial` / `snapshot` / `completed` / `failed`，映射见上表 |
 | `item_id` | 会话内 item 标识 | 同一次朗读的多个事件共用一个 |
 | `event_id` | 每个事件唯一 | 重复会被 sequence validator 判为异常 |
 | `revision` | 同 item 内的修订号 | 应单调递增 |
 | `text` | 该次识别的文本 | **仅存在于外部素材，不入库、不入日志** |
 | `stable_prefix_codepoints` | 稳定前缀长度 | 可选；越界会在解码层被拒 |
 
-**边界提醒**：`text` 属于转写内容，按 §11.5 与项目约束，誊写好的 manifest 只能放仓库外受控
-目录，**不得提交进 Git**。仓库里保留的只有本模板与聚合结果。
+**边界提醒**：manifest 与清单都只能放仓库外受控目录，**不得提交进 Git**。仓库里保留的只有本
+文档、工具代码与聚合结果。
 
 ## 录音与重采样要求
 
@@ -225,12 +279,21 @@ CURRENT_PYTHON="$APP_HOME/runtime/current/.venv/bin/python"
 "$CURRENT_PYTHON" tools/probe_teleprompter_latency.py <外部素材>.wav \
   --profile quality --output <外部结果>-probe.json --app-home "$APP_HOME"
 
-# 2) 确定性回放：跟随／回稿延迟、失败分母、caveats
+# 2) 素材：录事件流 + 生成 manifest 草稿 + 人工确认清单
+"$CURRENT_PYTHON" tools/build_teleprompter_replay_manifest.py <外部素材>.wav \
+  --script <朗读稿>.txt --output <外部结果>-manifest.json \
+  --review-output <外部结果>-review.md --profile quality \
+  --dataset-revision A_v1 --baseline-commit <sha> \
+  --candidate-commit <sha> --policy-revision <rev> --app-home "$APP_HOME"
+
+# 3) 确定性回放：跟随／回稿延迟、失败分母、caveats
 swift run --package-path macos/SpeechRailApp teleprompter-replay \
   --manifest <外部素材>-manifest.json --output <外部结果>-report.json
 ```
 
-manifest 的 `id` 与 `language` 只能用安全标签，**不得写入原始路径、文本、音频或 token**。
+第 2 步产出的是**草稿**：按 review 清单逐条确认标签、去掉 `-draft` 后缀之后，第 3 步的报告
+才可用于质量结论。manifest 的 `id` 与 `language` 只能用安全标签，**不得写入原始路径、文本、
+音频或 token**。
 
 ## 怎么算通过
 

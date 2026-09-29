@@ -20,7 +20,7 @@
 | #111 | 独立有损精简 | **实现完成，界面未走查** | `condense` 操作、锁定项、删除转 `skip` 与 `contentRemoved` 审阅、语速校准来源与未校准标注；有损确认入口、删减原文展示、**精简前的必讲段落标记**均已交付（§2 第 20、21 条）。方案 §5.7 的四步流程至此完整，**但全部界面只通过编译，未做视觉走查** |
 | #112 | language／keywords 接线与语音辅助试读 | **实现完成，界面未走查** | Realtime `transcription.keywords` 真正下发；`transcription.language` 本轮补上生产写入者——语音跟随控制旁的识别语言菜单，持久化并在恢复时按契约清洗（§2 第 22 条）；**语音辅助试读**补上（此前只有手动秒表）：`startSpeechTrial()`／`stopSpeechTrial()` 走既有 coordinator 与 client 构造，证据分开记识别与定位、无识别不产出倍率（§2 第 36 条） |
 | #113 | 场景预设、列宽与快捷恢复 | 完成（视觉走查未执行） | `TeleprompterStagePreset`、正文列宽与窗口宽度分离、`TeleprompterStageLayoutPolicy`、“回到朗读位置” |
-| #114 | 确定性回放与阶段证据 | 部分完成 | 回放评估器与 runner 已交付；真实时延基线未执行 |
+| #114 | 确定性回放与阶段证据 | 部分完成 | 回放评估器与 runner 已交付；**素材采集与标注工具已补上**（`tools/build_teleprompter_replay_manifest.py`，§2.11）；真实时延基线未执行 |
 
 ## 2. 实施中发现并修复的既有缺陷
 
@@ -72,7 +72,7 @@
     - **既无文档声称、也无产品消费**：跟随诊断的 `queueAgeP95Milliseconds`／`matchP95Milliseconds`／`captureToSendP95Milliseconds`。控制器在生产中确实采集这些样本，但没有任何界面读取；方案与本报告都未声称它们对用户可见，因此**不记为缺陷**，只作为未认领范围提示承接团队。
 
 18. **旧稿的句内恢复落点此前没有任何回归覆盖（第四轮审查验收标准 3 时发现并补上）**：验收标准 3 要求「迁移失败保留原数据」。本轮实际只新增了两个持久化字段，且都可选——`TeleprompterV2RunSummary.lastSegmentOffset`（键 `last_segment_offset`）与 `TeleprompterRunState.currentSegmentOffset`。逐条核实后：
-    - **确认没有不可逆迁移**：两个字段都是 `Int?` 且带默认值，Swift 合成解码器对可选属性用 `decodeIfPresent`，旧 bundle 缺键即解为 `nil`。`current_segment_offset` 实际上根本不落盘——它只存在于 `TeleprompterRunState` 这个内存桥接类型里，加载时由 `applyV2Bundle` 从 `lastRun.lastSegmentOffset` 重建。真正跨版本落盘的只有 `last_segment_offset`，§6 的回退声明成立。
+    - **确认没有不可逆迁移**：两个字段都是 `Int?` 且带默认值，Swift 合成解码器对可选属性用 `decodeIfPresent`，旧 bundle 缺键即解为 `nil`。`currentSegmentOffset` 实际上根本不落盘——它是 `TeleprompterRunState` 这个内存桥接类型上的 Swift 属性，**因此连同名的 JSON 键都不存在**（此前本报告误写过一个下划线形式的键名，第二十六轮做引用可解析性核查时查出并改正），加载时由 `applyV2Bundle` 从 `lastRun.lastSegmentOffset` 重建。真正跨版本落盘的只有 `last_segment_offset`，§6 的回退声明成立。
     - **已有的旧格式回归只验了一半**：`runSummaryWrittenBeforeIntraSegmentProgressStillLoads` 删掉 `last_segment_offset` 后断言解出 `nil`，但**没有断言读者随后落在哪里**。而 `lastSegmentOffset` 的文档注释明确承诺「older payloads simply omit it … which restores the segment start」——这个承诺当时没有任何测试钉住。
     - **恢复器的 nil 分支此前完全无覆盖**：`TeleprompterReadingProgressRestorer.position` 有三条测试，分别覆盖偏移 4、跨版本改文回落、跨版本同文迁移与越界钳制，**全部带非 nil 偏移**。而 `saved.currentSegmentOffset ?? 0` 这个 `?? 0` 正是每个升级前文档都会走的分支。
     - **补上的回归**：`readingProgressRestoresTheRecordedSegmentStartWhenNoOffsetWasEverSaved` 用第二段（`segment-1`）而不是第一段做记录点，因此它能区分「回到该记录段的开头」与「盲目回退到全文开头」——后者是这个分支最自然的写错方式。
@@ -406,6 +406,39 @@
 
 **剩下的真问题不是工程，是产品与设置**：Tab 路径依赖系统「键盘导航／全键盘访问」开关（默认关闭），这正是报告反复记的那一处。把它变成开箱即用，要么改系统默认（越界），要么给每个操作都配快捷键（违背第 101 行）。**这是一个需要产品拍板取舍的点，不是我能单方面决定的**，已并入 §5 第 1 条走查与本节。
 
+### 2.11 第二十六轮：把「人工誊写」换成工具，并修掉模板里一处会**静默失真**的 `kind`
+
+第二十五轮查出的那道人工工序已补上：新增 `tools/build_teleprompter_replay_manifest.py`。它按真实
+100 ms 节奏推流、录下整条 Realtime 事件流，拿冻结稿件做单调对齐，产出 `events[]` 与一版 `labels[]`
+草稿加人工确认清单；省略 `--script` 则只落原始采集结果。
+
+**为什么新增工具而不改探针**：探针文件头写明它 never writes transcript text, item IDs, event IDs
+——那是刻意的隐私设计，而探针结果是要长期留存、会被引用与比较的证据，让它顺手落一份完整转写等于
+把转写塞进证据文件。服务端 `/metrics` 同样只有聚合计数。所以解法只能是独立的素材工具。
+
+本轮同时查出**模板一处会静默失真的错误**（第一版模板，不是代码缺陷）：
+`speechrail.transcription.hypothesis` 被标成了 `partial`。回放器把 `partial` 映射为
+`.partial(itemID:delta:)`——**增量语义，`revision` 与 `stable_prefix_codepoints` 被直接丢弃**；
+而线上真实发的是「整句已修订的快照」，对应 `snapshot` → `partialSnapshot(revision:text:evidence:)`。
+写错的后果**不是解码失败，而是回放照样跑得出来、却少了一整类推进判定**。已修正文档并写明理由。
+
+三条不许它越界的线：
+
+1. **产物一律出仓库**：输出路径解析后落在检出目录内直接拒绝；stdout／stderr 不打印任何转写文本。
+2. **草稿不冒充已确认**：不给 `--confirm-reviewed` 时 `dataset_revision` 被强制加 `-draft` 后缀，
+   机器存疑的条目全部列进 review 清单，**只给事件下标，不给文本**。
+3. **机器不发明 `improvise`**。这条最要紧：回放器把「`improvise` 且系统发生推进」直接计成
+   **严重误推进**（`harmful_jump_count`）。若机器仅因文本对不上就断言脱稿，等于**凭空制造它本该
+   测量的那个安全数字**。因此低对齐度只得到「`read` + 位置未知 + 进人工清单」，`improvise` 只能
+   由人写。`reRead` 同样收紧到「非重复投递、且明显落在已读位置之后」的片段。
+
+对齐口径踩到两个坑，都留了回归（`tests/test_teleprompter_replay_manifest.py`）：
+
+- ① 只取**最长**匹配块打分，会让「整句已确认 + 尾部新增」的快照看起来像脱稿——真实采集里
+  ratio 掉到 **0.07**。必须**所有匹配块累加**。
+- ② 重复投递（hypothesis 与它的 delta 携带同样文字）曾被判成**回读**，一轮跑出 3 个假 `reRead`。
+  必须先按**紧邻的上一条**去重；且不能拿整段累计文本去比，否则真回读会被吞掉。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -492,6 +525,22 @@
 **这些数字证明什么、不证明什么，必须说清**：它们证明探针能真正驱动线上 Realtime ASR 路径，且给出**首个 ASR partial 用户可见延迟**与**终态 commit 延迟**在真机流量上的首个真实量级——正是 #83 一直跟踪的那两个量。**但它不构成 §11.7 的跟随时延基线**：素材是 TTS 合成而非真人朗读（§11.5 禁止用 TTS 生成主质量集），且没有人工核验的阅读位置标注，因此 §11.6 的「正常跟随延迟」与「回稿恢复延迟」分位**仍未测量**。这些数字目前只作为链路与量级参考，不得当作达标结论。
 
 原始制品与结果 JSON 全部落在仓库外 `/tmp`（`tp_run_*.json` 等），探针未向仓库写入任何内容（运行后 `git status` 干净）。素材与结果按 §11.5 只存受控位置，Git 不收音频、结果只含时序与计数、无转写文本。
+
+### 3.1.1 第二十六轮：素材工具的端到端实测（2026-09-29）
+
+- **链路打通**：真实服务、quality 档、仓库外素材，采集 9 个事件（4 hypothesis / 4 delta /
+  1 completed）→ 对齐 → 契约合法 manifest → `swift run teleprompter-replay` 解码出
+  `teleprompter.eval.v1` 报告（`sample_count: 9`、`advanced_event_count: 4`、
+  `unintentional_backjump_count: 0`、`unlabelled_event_count: 0`）。
+- **报告自己把「没测」说成「没测」**：两条 caveat 正确触发——「本次素材没有 improvise 标注：
+  严重误推进只在该标注下计数，因此 0 表示该检测项未被触发」「本次回放没有量到回稿恢复延迟：
+  分位为 null、超时为 0」。**这正是要的性质**：工具不生产安全数字，只保证没测的不显示成达标。
+- **修正口径后重跑同一素材**：9 条标签全为 `read`，阅读位置单调 0→1，无假 `reRead`、无假
+  `improvise`（修正前是 read 3／improvise 3／reRead 3，6 条存疑）。
+- **门禁**：新增回归 20 项通过；`ruff check` 与 `mypy` 对新工具均无告警。
+- **边界**：这批素材是 **TTS 合成音**（音色 audition 素材，源文本见
+  `tests/test_voice_design_workflow.py` 的 `CONTROLLED_TEST_TEXT`），按 §11.5 **不得作主质量集**。
+  本轮只验证工具与契约链路，**不构成时延基线，也不改变「真实基线未建立」这个结论**。
 
 ### 3.2 未执行（需要逐次授权）
 
@@ -738,7 +787,7 @@
      - 「回到朗读位置」与字号调整在工作台侧是否有键位。
    - 同时确认**焦点可见性**：纯键盘走完上述路径，焦点环是否始终可见、是否有焦点陷阱。策略层只有 `readingShortcutFocusPolicy` 一条回归（管的是「输入框有焦点时不截获阅读键」），**焦点环本身与上述任何一项都没有回归**。
 2. **真实质量基线**：取得授权后按 §11.5 准备仓库外素材，先跑 #108 修复后的探针，再用 `teleprompter-replay` 与保留集做冻结验收；在此之前所有语音质量声明保持“未验证”。**第二十五轮已把前置工作做完**：`docs/developers/teleprompter-benchmark-script.md` 提供三份朗读稿（连续朗读／含停顿重读脱稿／中英混合技术）、按 `TeleprompterReplayManifest` 真实契约写的 manifest 模板与标注口径，并**已跑通 `teleprompter-replay` 验证过字段名**。接手方只需录制真人朗读、按模板标注即可开跑，无需再从零理解素材格式。**仍然只缺真人录音这一项**——模板不能替代素材。
-   - **第二十五轮续：查出真实基线还有一道人工工序，第一版模板没写清**。manifest 的 `labels[]`（读者做了什么）容易让人以为 `events[]`（系统收到了什么）是自动产出的——**它不是**。核查：探针文件头写明它 **never writes transcript text, item IDs, event IDs**（这是有意的隐私设计，只输出时序、计数与时长）；服务端 `/metrics` 只有聚合计数、不落转写；**仓库里没有任何工具能把一次真实会话导出成 `TeleprompterReplayManifest`**。因此 `events[]` 与 `labels[]` **目前都只能由录测者手工誊写**。这不是缺陷，但**必须写进交接**，否则接手方会以为跑个命令就能拿到素材。已补进 `teleprompter-benchmark-script.md`，并列出誊写时每个必填字段（`at_milliseconds` 是相对第一个事件的偏移而非音频绝对时间、`event_id` 重复会被判异常、`text` 只能存仓库外不得入库）。**接手方若要自动化这一步，属于新增工具、需要另行授权。**
+   - **第二十五轮续：查出真实基线还有一道人工工序，第一版模板没写清**。manifest 的 `labels[]`（读者做了什么）容易让人以为 `events[]`（系统收到了什么）是自动产出的——**它不是**。核查：探针文件头写明它 **never writes transcript text, item IDs, event IDs**（这是有意的隐私设计，只输出时序、计数与时长）；服务端 `/metrics` 只有聚合计数、不落转写；**仓库里没有任何工具能把一次真实会话导出成 `TeleprompterReplayManifest`**。因此 `events[]` 与 `labels[]` **目前都只能由录测者手工誊写**。这不是缺陷，但**必须写进交接**，否则接手方会以为跑个命令就能拿到素材。已补进 `teleprompter-benchmark-script.md`，并列出誊写时每个必填字段（`at_milliseconds` 是相对第一个事件的偏移而非音频绝对时间、`event_id` 重复会被判异常、`text` 只能存仓库外不得入库）。**第二十六轮已把这道工序做成工具**：`tools/build_teleprompter_replay_manifest.py` 采集事件流、对齐冻结稿件、产出 manifest 草稿与人工确认清单（详见 §2.11 与 `docs/developers/teleprompter-benchmark-script.md`）。**接手方现在只需录真人朗读、跑一条命令、按清单确认标签**，不必再手工誊写。仍然只缺的只有真人录音本身——工具不能替代素材。
 3. **两项“部分”场景**：R-04 需要真实拔插／蓝牙重连，R-07 需要长时连续运行；两者都无法用 fake 证明，不接受用单测冒充。
 4. **#110 读法别名通道已交付，界面仍未走查**：`match_phrases` 仍被解码器拒绝，因此别名只能由用户显式确认产生，不放开模型注入——这与方案要求一致。已交付：`TeleprompterAcceptedReading` 绑定段内一处 UTF-16 范围并记下当时的显示文本；对齐时用读法的值匹配、位置仍落在显示文本上，稿件／导出／逐字记录一字不改；同值数值校验拒绝「大约一半」这类无损外的替换；就绪页「读法标注」入口经会话层解析段内出现位置，同段重复出现时要求用户用更长词组限定而不猜。**剩下的仍不是功能，是验证**：弹窗的呈现、两个输入框的窄窗排版、错误文案的可达性，全部只有编译与单测证据，须并入 U-10 同一次走查。另有一条**已知代价**要记在走查 checklist 里：加了别名后，念显示文本的置信度从 1.0 降到 0.875（仍高于 0.72 前进门槛）。
 5. **有损精简的实现已齐，但一步都没在窗口里看过（#111，见 §2 第 20、21 条）**：入口、有损确认、删减原文展示与精简前的必讲段落标记都已交付，方案 §5.7 的流程在代码层面完整，锁定映射也补上了此前完全缺失的 session 层回归。**剩下的不是功能，是验证**：确认 sheet 的默认高度、必讲标记的 Disclosure 展开态、段落列表的滚动与勾选可访问性、删减原文行在窄窗下的表现，全部只有编译证据。走查时顺带确认两件容易错的事——必讲标记默认应全部不勾选且文案要说清「未标记＝可能被删」，以及有损确认不得复用保真整理那段写着「不会删」的文案。
@@ -779,6 +828,9 @@ swift test --package-path macos/SpeechRailApp
 
 # 探针回归（使用主仓库虚拟环境）
 PYTHONPATH="$PWD:$PWD/src" python -m pytest -o addopts= -q tests/test_teleprompter_latency_probe.py
+
+# 回放素材工具回归（第二十六轮新增）
+PYTHONPATH="$PWD:$PWD/src" python -m pytest -o addopts= -q tests/test_teleprompter_replay_manifest.py
 
 # 共享准入回归
 PYTHONPATH="$PWD:$PWD/src" python -m pytest -o addopts= -q tests/test_resource_governor.py
