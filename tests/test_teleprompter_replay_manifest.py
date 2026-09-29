@@ -20,6 +20,7 @@ sys.modules[_SPEC.name] = _TOOL
 _SPEC.loader.exec_module(_TOOL)
 
 ManifestDraftError = _TOOL.ManifestDraftError
+ALIGN_BACKTRACK_CHARS = _TOOL.ALIGN_BACKTRACK_CHARS
 ScriptAligner = _TOOL.ScriptAligner
 SegmentIndex = _TOOL.SegmentIndex
 build_manifest = _TOOL.build_manifest
@@ -141,6 +142,46 @@ def test_aligner_scores_a_revisioned_hypothesis_as_a_whole() -> None:
     assert drifted.segment_index == 0
     assert drifted.ratio >= 0.72
     assert advanced.segment_index == 1
+
+
+def test_aligner_scores_a_long_cumulative_event_by_its_tail() -> None:
+    """Regression: a long utterance's opening froze the reading position.
+
+    A revisioned hypothesis repeats everything said so far. Once the reader is
+    more than one backtrack window past the opening, an anchor on those opening
+    words falls outside the search window, every match is rejected and the
+    cursor stops advancing for the rest of the session.
+    """
+
+    segments = [
+        "先看几组数字，这台设备的标称功率是 50 瓦。",
+        "价格方面，标称为 2999 元，促销价是 2599 元。",
+        "温度的指标也一样，工作温度是 0 到 35 摄氏度。",
+        "保修期是 12 个月，易损件不在保修范围内。",
+    ]
+    aligner = ScriptAligner(index=SegmentIndex.build(segments))
+    spoken = ""
+    for segment in segments:
+        spoken += segment
+        alignment = aligner.align(spoken, cumulative=True)
+    # The fourth revision carries the first segment's opening, which by now sits
+    # well behind the reading position.
+    assert len(normalize_text(spoken)) > ALIGN_BACKTRACK_CHARS
+    assert alignment.intent == "read"
+    assert alignment.segment_index == 3
+    assert alignment.ratio >= 0.72
+
+
+def test_aligner_recovers_when_the_anchor_was_mangled() -> None:
+    """An unrecognised leading token must not throw the event away."""
+
+    aligner = ScriptAligner(index=SegmentIndex.build(SEGMENTS))
+    # "呃" is a hesitation the engine invented, so the anchor "呃欢" appears
+    # nowhere in the script and the anchored pass rejects every offset.
+    recovered = aligner.align("呃欢迎来到本期节目", cumulative=False)
+    assert recovered.intent == "read"
+    assert recovered.segment_index == 0
+    assert recovered.ratio >= 0.72
 
 
 def test_to_captured_event_maps_hypothesis_to_snapshot() -> None:

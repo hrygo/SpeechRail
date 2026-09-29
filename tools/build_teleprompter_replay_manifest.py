@@ -71,10 +71,21 @@ ALIGN_REVIEW_MARGIN = 0.1
 ALIGN_BACKTRACK_CHARS = 48
 ALIGN_FORWARD_CHARS = 600
 ALIGN_PREFILTER_CHARS = 2
+# When the anchor scan finds nothing, the expected match is still close to the
+# reading position, so one narrow unanchored pass over this band is cheap and
+# recovers events whose anchor was mangled by a recognition error.
+ALIGN_FALLBACK_BACKTRACK_CHARS = 16
+ALIGN_FALLBACK_FORWARD_CHARS = 96
 # How far behind the reading position a fragment must match before the aligner
 # calls it a re-read. Re-deliveries are filtered separately, so anything left
 # landing this far back was spoken out of order.
 RE_READ_MIN_GAP_CHARS = 4
+# A revisioned hypothesis carries the whole utterance so far, so scoring all of
+# it would compare the reader's opening sentence -- which sits far behind the
+# reading position -- against a window that no longer contains it, and would
+# divide by a denominator that grows with every recognition error. Only the
+# newest text decides where the reader is now, so that is what gets scored.
+ALIGN_TAIL_CHARS = 24
 
 INTENT_READ = "read"
 INTENT_IMPROVISE = "improvise"
@@ -225,7 +236,8 @@ class ScriptAligner:
     def align(self, text: str, *, cumulative: bool) -> Alignment:
         """Align one recognised text; ``cumulative`` marks whole-utterance events."""
 
-        needle = normalize_text(text)
+        normalized = normalize_text(text)
+        needle = normalized[-ALIGN_TAIL_CHARS:] if cumulative else normalized
         if not needle:
             return Alignment(None, INTENT_READ, 0.0)
         script = self.index.script_text
@@ -266,19 +278,34 @@ class ScriptAligner:
         an on-script sentence look off-script.
         """
 
+        best = self._scan(needle, self.cursor, anchored=True)
+        if best[0] == 0.0:
+            best = self._scan(needle, self.cursor, anchored=False, narrow=True)
+        return best
+
+    def _scan(
+        self, needle: str, cursor: int, *, anchored: bool, narrow: bool = False
+    ) -> tuple[float, int, int]:
+        """Score one needle against the script, optionally anchored or narrowed."""
+
         script = self.index.script_text
-        window_start = max(0, self.cursor - ALIGN_BACKTRACK_CHARS)
-        window_end = min(len(script), self.cursor + ALIGN_FORWARD_CHARS)
+        back = ALIGN_FALLBACK_BACKTRACK_CHARS if narrow else ALIGN_BACKTRACK_CHARS
+        forward = ALIGN_FALLBACK_FORWARD_CHARS if narrow else ALIGN_FORWARD_CHARS
+        window_start = max(0, cursor - back)
+        window_end = min(len(script), cursor + forward)
         window = script[window_start:window_end]
-        head = needle[:ALIGN_PREFILTER_CHARS]
+        # The anchor must sit at the *start* of what is being scored: the
+        # matcher aligns the whole needle to the window from the offset, so an
+        # anchor elsewhere would leave the rest of the needle unconstrained.
+        anchor = needle[:ALIGN_PREFILTER_CHARS]
         best_matched = 0
-        best_start = self.cursor
-        best_end = self.cursor
-        # The reader advances monotonically, so only offsets whose first
-        # characters match are worth scoring. Without this prefilter the search
-        # would build one SequenceMatcher per offset per event.
-        for offset in range(0, max(1, len(window) - len(head) + 1)):
-            if window[offset:offset + len(head)] != head:
+        best_start = cursor
+        best_end = cursor
+        # The reader advances monotonically, so only offsets carrying the anchor
+        # are worth scoring. Without this prefilter the search would build one
+        # SequenceMatcher per offset per event.
+        for offset in range(0, max(1, len(window) - len(anchor) + 1)):
+            if anchored and window[offset:offset + len(anchor)] != anchor:
                 continue
             tail = window[offset:]
             matched = 0
@@ -297,7 +324,7 @@ class ScriptAligner:
             best_start = window_start + offset
             best_end = window_start + offset + reach
         if best_matched == 0:
-            return (0.0, self.cursor, self.cursor)
+            return (0.0, cursor, cursor)
         return (min(1.0, best_matched / len(needle)), best_start, best_end)
 
 
