@@ -133,6 +133,51 @@ struct TeleprompterPositionTests {
                 "别名不得把 50% 变成 60%")
     }
 
+    /// The sheet tells the reader 读法只能改发音，不能改数值. That promise is
+    /// kept by comparing numeric fingerprints, so its strength is exactly the
+    /// canonicalizer's number recognition: a magnitude nobody recognises is a
+    /// quantity the gate cannot see. `3万` and `三万` both fingerprinted as
+    /// "3" and "nothing", which let `3万` → `3` and `三万` → `三千` through
+    /// while refusing the two spellings of the same number.
+    @Test func aliasGateSeesMagnitudeOnBothSides() {
+        func alias(_ display: String, _ spoken: String) -> TeleprompterAcceptedReading {
+            TeleprompterAcceptedReading(
+                displayRange: .init(start: 0, end: (display as NSString).length),
+                displayText: display,
+                spokenText: spoken
+            )
+        }
+
+        for (display, spoken) in [
+            ("3万", "三万"),
+            ("5千", "五千"),
+            ("2亿", "两亿"),
+            ("2万元", "两万元"),
+            ("1亿元", "一亿元"),
+            ("50", "五十"),
+        ] {
+            #expect(
+                alias(display, spoken).rejection(inSegmentText: display) == nil,
+                "\(display) 与 \(spoken) 是同一个数，读法必须被接受"
+            )
+        }
+
+        for (display, spoken) in [
+            ("3万", "3"),
+            ("5千", "5"),
+            ("2亿", "2"),
+            ("2万元", "2元"),
+            ("三万", "三千"),
+            ("三万", "三"),
+        ] {
+            #expect(
+                alias(display, spoken).rejection(inSegmentText: display)
+                    == .numericValuesDiffer,
+                "\(display) → \(spoken) 改了数值，必须拒绝"
+            )
+        }
+    }
+
     @Test func anAliasStopsApplyingOnceTheSegmentTextMoves() {
         let alias = TeleprompterAcceptedReading(
             displayRange: .init(start: 3, end: 5),

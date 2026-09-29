@@ -115,4 +115,78 @@ struct TeleprompterCanonicalizerTests {
                 != TeleprompterCanonicalizer.values("相机设置")
         )
     }
+
+    /// A Chinese numeral only reached a rule when a unit suffix followed it, so
+    /// `三万` produced no numeric unit at all while `3万` produced a bare `3` and
+    /// dropped the magnitude. Two failures came out of the same gap: the same
+    /// quantity written two ways compared unequal, and an alias could drop the
+    /// magnitude outright (`三万` → `三千`) because the gate had nothing to
+    /// compare and two empty fingerprints look equal.
+    @Test func recognisesMagnitudeCarriedByTheNumeralItself() {
+        for (spoken, written) in [
+            ("三万", "30000"),
+            ("五千", "5000"),
+            ("两亿", "200000000"),
+            ("十万", "100000"),
+            ("五十", "50"),
+            ("一百二十", "120"),
+            ("三万零五百", "30500"),
+        ] {
+            #expect(
+                TeleprompterCanonicalizer.values(spoken)
+                    == TeleprompterCanonicalizer.values(written),
+                "\(spoken) 与 \(written) 是同一个数，归一结果必须相同"
+            )
+        }
+    }
+
+    /// `2万元` used to be split into `2` plus a leftover `万元` that the spoken
+    /// rule then parsed on its own, and a bare magnitude word evaluates to zero —
+    /// so the canonical form of "两万元" claimed the text said `0元`.
+    @Test func arabicMagnitudeWordsFoldIntoTheNumber() {
+        #expect(TeleprompterCanonicalizer.values("2万元") == ["20000元"])
+        #expect(TeleprompterCanonicalizer.values("20万元") == ["200000元"])
+        #expect(TeleprompterCanonicalizer.values("1亿元") == ["100000000元"])
+        #expect(TeleprompterCanonicalizer.values("3万") == ["30000"])
+        #expect(TeleprompterCanonicalizer.values("2元") == ["2元"], "无量级词时行为不变")
+        #expect(TeleprompterCanonicalizer.values("50%") == ["50%"], "无量级词时行为不变")
+        #expect(TeleprompterCanonicalizer.values("2026年") == ["2026年"], "无量级词时行为不变")
+    }
+
+    /// 百分之、百分比、个百分点、百分号 and 百分位 each own the 分 character.
+    /// When no digits follow 百分之 the percentage rule never fires, and these
+    /// words were read as "100分" -- 69 times in this repository's own documents
+    /// before the guard. 四十分钟 is the other side of the same coin and must
+    /// stay readable, so the guard cannot simply be "分 is never a unit here".
+    @Test func wordsThatOwnTheFractionCharacterAreNotReadAsQuantities() {
+        for word in ["百分比", "百分点", "百分号", "百分位"] {
+            #expect(
+                !TeleprompterCanonicalizer.values(word).contains("100分"),
+                "\(word) 是一个词，不是 100 分"
+            )
+        }
+        #expect(TeleprompterCanonicalizer.values("四十分钟") == ["40分", "钟"])
+        #expect(TeleprompterCanonicalizer.values("一百分") == ["100分"], "一百分确实是 100 分")
+    }
+
+    /// A bare magnitude stands for its own power — 万 alone is 10000, which is
+    /// what makes 「融资额以亿元为单位」 readable at all. The same two large
+    /// magnitudes in a row are a word, not a numeral: 万亿 is a word and 万亿元
+    /// is a unit, and the positional algorithm has already folded the first into
+    /// `total` by the time it reaches the second.
+    @Test func aBareMagnitudeIsItsOwnPowerAndTwoInARowAreAWord() {
+        #expect(TeleprompterCanonicalizer.values("万元") == ["10000元"])
+        #expect(TeleprompterCanonicalizer.values("亿元") == ["100000000元"])
+        #expect(
+            TeleprompterAcceptedReading.numericFingerprint(of: "融资额以亿元为单位")
+                == ["100000000元"]
+        )
+        #expect(
+            TeleprompterAcceptedReading.numericFingerprint(of: "万亿").isEmpty,
+            "万亿是一个词，不该被读成任何数量"
+        )
+        #expect(!TeleprompterCanonicalizer.values("万亿元").contains("10000元"),
+                "万亿元是单位而不是数字，不能读成 10000 元")
+        #expect(TeleprompterCanonicalizer.values("十万") == ["100000"], "小量级相邻不受影响")
+    }
 }

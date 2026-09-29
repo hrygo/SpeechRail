@@ -115,6 +115,7 @@ public enum TeleprompterCanonicalizer {
         case year
         case spokenDecimal
         case spokenUnit
+        case spokenMagnitude
         case arabic
     }
 
@@ -127,8 +128,24 @@ public enum TeleprompterCanonicalizer {
         .init(expression: expression(#"百分之[零一二三四五六七八九十百千万点0-9]+"#), kind: .percentage),
         .init(expression: expression(#"[零〇一二三四五六七八九]{4}年"#), kind: .year),
         .init(expression: expression(#"[零一二三四五六七八九十百千万0-9]+点[零一二三四五六七八九0-9]+"#), kind: .spokenDecimal),
-        .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:公里|美元|元|米|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点)"#), kind: .spokenUnit),
-        .init(expression: expression(#"[0-9]+(?:\.[0-9]+)?(?:年|美元|公里|元|米|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点|%)?"#), kind: .arabic),
+        // 百分之、百分比、个百分点、百分号 and 百分位 each own the 分 character as
+        // part of one word. When no digits follow 百分之 the percentage rule never
+        // fires, and without this guard 百分比 was read as "100分" -- 69 times in
+        // this repository's own documents before the guard. The list is measured,
+        // not exhaustive by construction: a future 百分X word needs one more
+        // entry, and 一百分 (100 points) must stay readable as a number.
+        // 十分钟 is untouched: 钟 is not in the set, so 四十分钟 still
+        // canonicalises to 40分 + 钟.
+        .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:公里|美元|元|米|岁|号|楼|月|日|倍|个|人|次|天|分(?![之比点号位])|秒|点)"#), kind: .spokenUnit),
+        // A numeral that carries its own magnitude needs no unit suffix to be a
+        // number. Without this rule `三万` fell through to per-character tokens
+        // and fingerprinted as *no number at all*, while `3万` fingerprinted as a
+        // bare `3` -- so the alias gate could not tell 30000 from 3.
+        .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]*[十百千万亿][零一二两三四五六七八九十百千万亿]*"#), kind: .spokenMagnitude),
+        // The arabic rule has to know the Chinese magnitude words for the same
+        // reason: `2万元` used to stop at the digits, and the leftover `万元` was
+        // then parsed on its own into `0元`.
+        .init(expression: expression(#"[0-9]+(?:\.[0-9]+)?(?:[万亿千百])?(?:年|美元|公里|元|米|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点|%)?"#), kind: .arabic),
     ]
 
     private static let chineseDigits: [Character: String] = [
@@ -138,6 +155,10 @@ public enum TeleprompterCanonicalizer {
     private static let smallUnits: [Character: Int] = ["十": 10, "百": 100, "千": 1_000]
     private static let largeUnits: [Character: Int] = ["万": 10_000, "亿": 100_000_000]
     private static let unitSuffixes = ["公里", "美元", "元", "米", "岁", "号", "楼", "月", "日", "倍", "个", "人", "次", "天", "分", "秒", "点"]
+    private static let largeUnitCharacters = Set("万亿")
+    private static let arabicMagnitudes: [Character: Decimal] = [
+        "百": 100, "千": 1_000, "万": 10_000, "亿": 100_000_000,
+    ]
 
     public static func values(_ text: String) -> [String] {
         units(text).map(\.value)
@@ -231,12 +252,61 @@ public enum TeleprompterCanonicalizer {
         case .spokenUnit:
             guard let suffix = unitSuffixes.first(where: raw.hasSuffix) else { return nil }
             let number = String(raw.dropLast(suffix.count))
+            guard isNumeralRun(number) else { return nil }
             guard let integer = chineseInteger(number) else { return nil }
             return "\(integer)\(suffix)"
 
         case .arabic:
+            return arabicValue(raw)
+
+        case .spokenMagnitude:
+            guard isNumeralRun(raw) else { return nil }
+            guard let integer = chineseInteger(raw) else { return nil }
+            return String(integer)
+        }
+    }
+
+    /// 万亿 and 亿万 are words, not numerals, and 万亿元 is a unit rather than a
+    /// number. Two *large* magnitudes in a row are the one case the positional
+    /// algorithm cannot honour: it has already folded the first into `total`, so
+    /// the second starts from zero and invents a quantity nobody wrote -- 万亿
+    /// became 10000 and 万亿元 became 10000元, which is a trillion. 十万 is fine
+    /// and must stay that way: 十 is a small magnitude, and the tens are still
+    /// sitting in `section` when 万 scales them.
+    private static func isNumeralRun(_ text: String) -> Bool {
+        var previousWasLarge = false
+        for character in text {
+            let isLarge = largeUnitCharacters.contains(character)
+            if isLarge && previousWasLarge { return false }
+            previousWasLarge = isLarge
+        }
+        return true
+    }
+
+    /// Folds a Chinese magnitude word written after Arabic digits into the number
+    /// it belongs to, so `2万元` and `两万元` reach the same canonical form. Text
+    /// with no magnitude word is returned folded exactly as before.
+    private static func arabicValue(_ raw: String) -> String {
+        guard let boundary = raw.firstIndex(where: { !("0"..."9").contains($0) }) else {
             return fold(raw)
         }
+        let digits = String(raw[raw.startIndex..<boundary])
+        let rest = String(raw[boundary...])
+        guard let magnitude = rest.first.flatMap({ arabicMagnitudes[$0] }),
+              let number = Decimal(string: digits, locale: Locale(identifier: "en_US_POSIX"))
+        else {
+            return fold(raw)
+        }
+        return integralString(number * magnitude) + String(rest.dropFirst())
+    }
+
+    /// `Decimal` keeps a scale it was never handed: 2 x 10000 has to print
+    /// `20000`, not `20000.0`, or one quantity written two ways stops matching.
+    private static func integralString(_ value: Decimal) -> String {
+        var source = value
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &source, 0, .plain)
+        return rounded == source ? "\(rounded)" : "\(value)"
     }
 
     private static func chineseInteger(_ text: String) -> Int? {
@@ -252,10 +322,17 @@ public enum TeleprompterCanonicalizer {
             if let digit = chineseDigits[character], let value = Int(digit) {
                 number = value
             } else if let unit = smallUnits[character] {
-                if character == "十", number == 0 { number = 1 }
+                // A magnitude with no digit in front of it is the number itself:
+                // 百 is 100, not zero. Only 十 used to get this, which is why
+                // `万元` canonicalised to `0元`. It may only stand in when the run
+                // has produced nothing yet -- imputing a 1 in the middle of a run
+                // turns 九十百 into 190 and reads a character class as a number.
+                if number == 0, section == 0, total == 0 { number = 1 }
                 section += number * unit
                 number = 0
             } else if let unit = largeUnits[character] {
+                // Same rule for 万: in 十万 the tens already sit in `section`.
+                if number == 0, section == 0, total == 0 { number = 1 }
                 section = (section + number) * unit
                 total += section
                 section = 0
