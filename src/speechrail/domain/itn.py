@@ -24,6 +24,22 @@ _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万
 _DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 
+# `点` is deliberately absent. In the repository corpus 46 of the 86 `X点`
+# matches are ordinary words (`这一点`, `短一点`, `有一点`), while the numeric
+# ones are ambiguous (`三点开会` is a clock time, `十点` is either 10:00 or
+# "ten points"). Dropping a unit only loses conversions; keeping it corrupts
+# sentences. `分` survives behind the guard in `_convert_with_unit` because
+# `三分钟` is a duration while `十分满意` / `百分百` / `百分之` are not numbers.
+# `分之` is a fraction marker, so 分 is excluded in front of it. The leading
+# lookbehind keeps 数十秒 / 几十秒 / 数十万个 out: 数 and 几 are not numerals,
+# so the match used to start at the magnitude and report 10. The numeral
+# characters are in the lookbehind too, so a blocked run cannot restart at a
+# later magnitude (`数十万个` used to fall through to `万个` -> 10000个).
+_UNIT_RE = re.compile(
+    r"(?<![数几零一二两三四五六七八九十百千万亿])([零一二两三四五六七八九十百千万亿]+)"
+    r"(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|秒|分(?![之]))"
+)
+
 
 def _chinese_year_to_arabic(match: re.Match[str]) -> str:
     digits = match.group(1)
@@ -43,27 +59,34 @@ def _chinese_to_int(cn_str: str) -> int:
     total = 0
     section = 0
     num = 0
+    # A magnitude with no digit in front of it stands for one: 十个人 is 10
+    # people, 百分之 is 100 percent. Only 十 had this rule, so 百/千/万/亿
+    # evaluated to 0 on their own and rewrote 百分之 to 0分百. `seen_any`
+    # stops the rule from firing a second time inside one numeral, which is
+    # what made 万亿 come out as 1000100000000.
+    seen_any = False
 
     for char in cn_str:
         if char in _DIGITS_MAP:
             num = _DIGITS_MAP[char]
-        elif char == "十":
-            if num == 0:
+            seen_any = True
+        elif char in units:
+            if num == 0 and not seen_any:
                 num = 1
-            section += num * 10
-            num = 0
-        elif char in ("百", "千"):
-            section += num * units[char]
-            num = 0
-        elif char == "万":
-            section = (section + num) * 10000
-            total += section
-            section = 0
-            num = 0
-        elif char == "亿":
-            section = (section + num) * 100000000
-            total += section
-            section = 0
+            if char == "亿":
+                # 亿 scales everything accumulated so far, not just the open
+                # section. Scaling only the section made 万亿 come out as
+                # 100010000 instead of 1e12.
+                total = (total + section + num) * units[char]
+                section = 0
+            else:
+                if char == "万":
+                    section = (section + num) * units[char]
+                    total += section
+                    section = 0
+                else:
+                    section += num * units[char]
+            seen_any = True
             num = 0
 
     return total + section + num
@@ -108,16 +131,15 @@ def apply_light_itn(text: str) -> str:
     def _convert_with_unit(m: re.Match[str]) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
-        try:
-            num = _chinese_to_int(cn_num)
-            return f"{num}{unit}"
-        except Exception:
+        # A bare magnitude in front of 分 is a quantity word, not a number:
+        # 十分满意, 百分百, 百分之, 百分点. `三分钟` still converts because 三
+        # carries a digit.
+        if unit == "分" and not any(char in _DIGITS_MAP for char in cn_num):
             return m.group(0)
+        num = _chinese_to_int(cn_num)
+        return f"{num}{unit}"
 
-    unit_pattern = re.compile(
-        r"([零一二两三四五六七八九十百千万亿]+)(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点)"
-    )
-    return unit_pattern.sub(_convert_with_unit, text)
+    return _UNIT_RE.sub(_convert_with_unit, text)
 
 
 def compose_hotword_prompt(prompt: str, keywords: Sequence[str] | None) -> str:
