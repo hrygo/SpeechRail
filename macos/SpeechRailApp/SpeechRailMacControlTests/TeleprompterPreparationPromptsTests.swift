@@ -400,6 +400,66 @@ struct TeleprompterPreparationPromptsTests {
         )
     }
 
+    /// The unit group of the number pattern is an enumeration, so a unit that is
+    /// not listed produces no atom on either side and the exact-sequence
+    /// comparison reports "unchanged". `50 瓦` → `50 千瓦` and `3 米` → `3 厘米`
+    /// both used to pass a gate whose entire job is to stop exactly that, and
+    /// the missing coverage is invisible: nothing in the result says the gate
+    /// never looked at the unit.
+    @Test func extractorSeesCjkUnitsThatWereNotEnumerated() {
+        let silentlyPassing: [(String, String)] = [
+            ("额定功率 50 瓦", "额定功率 50 千瓦"),
+            ("发射距离 3 米", "发射距离 3 厘米"),
+            ("容器容量 2 升", "容器容量 2 毫升"),
+            ("载重 5 吨", "载重 5 千克"),
+        ]
+        for (source, candidate) in silentlyPassing {
+            #expect(
+                !TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                    candidate: candidate
+                ),
+                "\(source) → \(candidate) 换了单位，门禁必须拒绝"
+            )
+        }
+    }
+
+    /// Binding a unit must not glue the particle after it into the atom either:
+    /// `50 瓦` and `50 千瓦` are quantities, `瓦的` is a word. The unit list is
+    /// matched longest-first and stops at the first character that is not a
+    /// unit, so a following particle stays outside the protected atom.
+    @Test func unitBindingStopsBeforeAParticle() {
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "功率 50 瓦的峰值")
+                .map(\.rawValue) == ["50 瓦"]
+        )
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "重量 5 千克的样品")
+                .map(\.rawValue) == ["5 千克"]
+        )
+    }
+
+    /// `\s*` in the number pattern puts the gap between the digits and the unit
+    /// inside the atom while canonicalization only trimmed the ends, so
+    /// dropping that space — a pure typography change with no semantic
+    /// content — was reported as a changed protected literal and sent a
+    /// lossless rewrite to manual review.
+    @Test func gateAcceptsWhitespaceOnlyChangesAroundAUnit() {
+        for (source, candidate) in [
+            ("价格 50 元", "价格 50元"),
+            ("延迟 200 ms", "延迟 200ms"),
+            ("时长 3 分钟", "时长 3分钟"),
+        ] {
+            #expect(
+                TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                    candidate: candidate
+                ),
+                "\(source) → \(candidate) 只差空白，必须放行"
+            )
+        }
+    }
+
     @Test func extractorStillLeavesDigitsInsideIdentifiersAlone() {
         // The leading lookbehind is what keeps model and product names out of
         // the number set; widening the number pattern must not erode it.

@@ -967,7 +967,19 @@ public enum TeleprompterProtectedLiteralExtractor {
             // both used to take that path. The leading lookbehind still keeps
             // digits that are part of an identifier (`A1`, `GPT4`, `ISO8601`)
             // out of the number set, so model names are unaffected.
-            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|分钟|小时|公里|千克|元|秒|天|年|月|日|倍|个|次|台|人|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
+            //
+            // The unit group is the same story one level down. A unit that is
+            // not listed produces no atom on either side, so `50 瓦` → `50 千瓦`
+            // and `3 米` → `3 厘米` reported "unchanged" just as quietly as
+            // `1080p` → `4K` did. The list below therefore covers the units the
+            // corpus actually produces. Chinese does not delimit units with
+            // spaces, so a naive CJK tail would swallow the particle after the
+            // unit (`50 瓦的功率` → `瓦的功`) and reject lossless rewrites. Two
+            // properties keep that out: the alternation is anchored, so a
+            // one-character unit can never win over a two-character one that
+            // starts at the same position, and the group ends at the first
+            // character that is not a unit, which leaves 的/之/里 outside.
+            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|微秒|分钟|小时|公里|千米|千克|公斤|毫升|厘米|毫米|焦耳|赫兹|欧姆|比特|字节|字符|元|秒|天|年|月|日|倍|个|次|台|人|米|吨|瓦|度|条|行|项|字|段|根|张|份|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
             kind: .number,
             priority: 3
         ),
@@ -1056,6 +1068,15 @@ public enum TeleprompterProtectedLiteralExtractor {
                 case "＋":
                     return String("+")
                 default:
+                    // The only pattern that can put a space inside an atom is
+                    // the number pattern's `\s*` before a unit, and no other
+                    // pattern can match across whitespace. Dropping it makes
+                    // `50 元` and `50元` the same atom; keeping it reported a
+                    // pure typography change as a changed protected literal
+                    // and sent the rewrite to manual review.
+                    if scalar.properties.isWhitespace {
+                        return ""
+                    }
                     return String(scalar)
                 }
             }
