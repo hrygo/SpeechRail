@@ -169,7 +169,7 @@
       "find": "        provisionalMinimumConfidence: Double = 0.72,",
       "replace": "        provisionalMinimumConfidence: Double = 0.3,",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮未修**：`provisionalMinimumConfidence` 的默认值 0.72 从未被喂过边界值——既有素材里暂定推进要么远高于它、要么远低于它。与上一轮的 M8 同类，补它需要先造出落在 (0.3, 0.72) 的暂定推进材料。**已记为开放项，不假装已覆盖。**"
+      "rationale": "第六十一轮判为**等价变异**，不是缺口，理由是代码路径穷举而非样本不足：`mayAdvance` 里这个阈值只以 `match.confidence >= policy.provisionalMinimumConfidence` 的形式被读，而同一个 `Match` 的 position 非 nil 当且仅当它来自 `TeleprompterAligner.locate` 的末尾那条 return——那条路径在 `TeleprompterAligner.swift:217` 已经先做了 `best.confidence >= configuration.minimumConfidence`；`Configuration.minimumConfidence` 全仓只有声明处与那一处读取，**没有任何调用方传过别的值**（控制器传的是 `.init(advanceMargin:)`，另一处用 `TeleprompterAligner()`），于是它恒为 0.72，与本阈值相等。因此凡是能走到这个比较的 match，置信度必然 >= 0.72，把阈值放宽到 0.3 不改变任何一次判定。另一条提前返回（歧义分支）position 为 nil，`mayAdvance` 第一行就挡掉了。**代价要说清**：这层判断目前是死的，且它让「弱匹配」无法作为 uncertainty 暴露——aligner 在 0.72 以下直接返回 `none`（confidence 0），所以 uncertainty 只可能是 0 或 >= 0.72。要让它变成活阈值需要改动对齐器的产出策略（属于产品行为变更），本轮不做，只登记。"
     },
     {
       "id": "M19",
@@ -186,8 +186,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
       "find": "        relocalizationMinimumMatches: Int = 4",
       "replace": "        relocalizationMinimumMatches: Int = 1",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮未修**：`relocalizationMinimumMatches` 默认 4，降到 1 无人变红。重定位只在自由发挥态可达，而既有素材里没有走进那个状态的用例。"
+      "expect": "KILLED",
+      "rationale": "第六十一轮补齐。既有两条自由发挥用例的重锚短语在脚本里唯一，于 `mayAdvance` 前两行就短路了；`distantUniquePhraseCannotAdvanceThroughPartialOrFinal` 又只匹配 1 个 token，在 `provisionalMinimumMatches` 就被拦下——三条都没走到 `relocalizationMinimumMatches` 那一行。新增 `freePlayReanchorsOnADistantPhraseOnlyWithEnoughEvidence` 用「先脱稿、再在远处读到同一句话的短版与长版」把阈值夹在中间：3 token 不推进、5 token 推进。降到 1 后 4 条变红。"
     },
     {
       "id": "M21",
@@ -204,8 +204,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
       "find": "        reanchorMargin: Double = 0.12,",
       "replace": "        reanchorMargin: Double = 0.0,",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮未修**：`reanchorMargin` 是歧义判定的余量，归零后无人变红。与远距误跳同源——余量为零时「略差一点的第二候选」会被当成竞争者而放弃推进，或者反过来被放过。既有素材里没有真正歧义的两条候选。"
+      "expect": "KILLED",
+      "rationale": "第六十一轮补齐。新增 `aPhraseWrittenTwiceIsNotAnUnambiguousAdvance`：同一句话在稿里出现两次，两次打分完全相同（cost 0、confidence 1.0），差值 0 < 0.12，于是走歧义分支返回 position 为 nil，锚点不动。归零后 0 < 0 不成立，tie-break 挑近的那次并推进——余量正是「不许凭一句重复的话把读者拽走」的唯一依据。"
     },
     {
       "id": "M23",

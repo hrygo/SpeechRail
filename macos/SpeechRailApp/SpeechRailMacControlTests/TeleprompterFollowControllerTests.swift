@@ -773,6 +773,60 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.currentIndex == 2)
     }
 
+    @Test func freePlayReanchorsOnADistantPhraseOnlyWithEnoughEvidence() throws {
+        // The two existing free-play tests both re-anchor on a phrase unique in
+        // the script, which short-circuits `mayAdvance` before the relocation
+        // threshold is ever read. This one is about the band in between: far
+        // past the local advance radius, matching more than the provisional
+        // minimum, but short of what a relocation is supposed to require.
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(String(repeating: "甲", count: 100))。稳定性良好。\(String(repeating: "乙", count: 100))。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "a", transcript: "我先回答观众问题", segments: segments)
+        controller.receiveCompleted(itemID: "b", transcript: "这个问题和稿件无关", segments: segments)
+        #expect(controller.followState == .freePlaying)
+        let parkedAt = controller.position
+
+        // Three matching tokens, well outside the local radius. That clears the
+        // provisional bar, so it counts as evidence -- but relocating the script
+        // on three tokens is how a passing mention yanks the reader somewhere
+        // they were not reading.
+        controller.receiveCompleted(itemID: "c", transcript: "稳定性", segments: segments)
+        #expect(controller.position == parkedAt)
+        #expect(controller.followState == .freePlaying)
+
+        // The same sentence with more of it actually spoken does relocate, so
+        // the assertion above is about the evidence and not about the phrase
+        // being unreachable.
+        controller.receiveCompleted(itemID: "d", transcript: "稳定性良好", segments: segments)
+        #expect(controller.position != parkedAt)
+    }
+
+    @Test func aPhraseWrittenTwiceIsNotAnUnambiguousAdvance() throws {
+        // `reanchorMargin` is the only thing between "this sentence is in the
+        // script twice" and "the reader gets teleported to whichever copy the
+        // tie-break happened to pick". Both copies score identically, so the
+        // margin is precisely the difference between advancing and holding.
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "今天介绍三脚架。中间插一段别的内容。今天介绍三脚架。"
+        )
+        var controller = TeleprompterFollowController()
+        let parkedAt = controller.position
+
+        controller.receiveCompleted(itemID: "a", transcript: "今天介绍三脚架", segments: segments)
+
+        #expect(controller.position == parkedAt)
+        #expect(controller.followState != .tracking)
+
+        // A phrase that occurs exactly once does move the reader, so the two
+        // assertions above are about the tie and not about a controller that
+        // has stopped following.
+        controller.receiveCompleted(itemID: "b", transcript: "中间插一段别的内容", segments: segments)
+        #expect(controller.followState == .tracking)
+        #expect(controller.position != parkedAt)
+    }
+
     @Test func isolatedFinalMismatchKeepsLastConfirmedPosition() throws {
         let segments = try script()
         var controller = TeleprompterFollowController()
