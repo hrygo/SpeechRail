@@ -117,6 +117,8 @@ flowchart TD
 |---|---|---|
 | `/health` 连接拒绝 | 服务未启动或端口被占用 | 检查 `lsof -i :8201`，确保只有一个服务实例在运行 |
 | `/readyz` 返回 503 | 外部 Snapshot 缺失关键权重文件或 Python 环境异常 | 校验 `validate_snapshot` 报错日志，补齐模型文件 |
+| 启动或 `model prepare` 报 `model location config invalid: … external root is missing` | `config/model_locations.json` 绑定的外部目录已被移动或删除 | 恢复该目录到原路径，或删除 `config/model_locations.json` 回滚到默认受管目录 |
+| `model status` 报 `invalid` 且 `duplicate: true` | 同一 artifact 同时存在外部绑定与 `app_home/models/<key>` 受管副本 | 确认外部副本内容正确后删除受管副本；两处都存在时服务 fail-closed，不会静默选一个 |
 | 转写请求返回 422 | 上传文件不是合法音频或系统缺失 `ffmpeg` | 确认系统 `ffmpeg` 存在，并尝试使用标准 WAV/MP3 重试 |
 | 请求返回 429 `queue_full` | 并发请求超出 `MAX_QUEUE_SIZE` 配额 | 检查客户端是否发起了无界请求，按 `Retry-After` 指数退避 |
 | TTS 提示 503 `backend_not_ready` | 未同时配置 TTS 模型目录与 Dedicated Python | 检查 `.env` 中 `SPEECHRAIL_QWEN3_TTS_*` 两项配置并重启服务 |

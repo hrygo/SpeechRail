@@ -54,10 +54,36 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
 | `reference` | `asr-1.7b-bf16`（bf16） | `tts-1.7b-custom-bf16`（bf16） | `tts-1.7b-base-bf16`（bf16） | `tts-1.7b-design-bf16`（bf16） | `aligner-bf16`（bf16，opt-in） |
 
 `prepare` 按所选组合取 `asr` + `tts_custom_voice` + `tts_base` 三项，落在仓库外
-`app_home/models/<artifact_key>`；`voice_design` 与 aligner 不在准备集合内——缺 `voice_design`
+`app_home/models/<artifact_key>`（默认；可用外部绑定覆盖，见下节）；`voice_design` 与 aligner 不在准备集合内——缺 `voice_design`
 快照时规格仍可激活，只是不声明设计能力。按 catalog 锁定清单估算，三项准备集约为 `fast/fast`
 5.0 GB、`quality/quality` 8.7 GB、`reference/reference` 13.2 GB；这是目录字节合计，不是每次
 应用的实际下载量或磁盘增量，已校验制品不会重下。
+
+### 外部模型位置绑定
+
+`config/model_locations.json` 可以把指定 `artifact_key` 的权重声明到 operator 自选的外部目录
+（例如由 oMLX 统一管理的 `~/.omlx/models/<leaf>`）。没有该文件的安装行为与从前完全一致。
+
+```json
+{
+  "schema_version": 1,
+  "bindings": {
+    "asr-1.7b-bf16": "/absolute/path/to/external/snapshot"
+  }
+}
+```
+
+- 未声明的制品行为完全不变，仍由 SpeechRail 下载、校验、发布与清理；
+- 声明后的制品是**只读外部**：SpeechRail 不向它下载、写入、替换或删除任何文件，也不把它
+  计入 `model status` 的 `disk.model_bytes`（单列在 `disk.external_bytes`）；
+- 外部根必须是绝对路径下的真实目录：不能是软链，不能位于 `app_home/models`、
+  `app_home/diarization` 或任何 `.staging` 路径内，也不能是相对路径；
+- 外部制品不写受管准备登记（`state/model-preparations.json` 只记录受管快照），其身份与完整性
+  在读取时由 catalog 锁定清单逐文件哈希校验；
+- 同一 key 同时存在外部绑定与 `app_home/models/<key>` 托管副本时状态判为 `invalid`
+  （`duplicate: true`），准备与安装都会 fail-closed，需人工删除托管副本；
+- 绑定的 key 必须存在于当前 catalog，否则加载即报错，不会静默忽略；
+- 删除 `config/model_locations.json` 即完全回滚到默认行为。
 
 - aligner 是**分人专用 opt-in 制品**，不进入三档准备集合；它由安装器与 `profile apply` 经
   `diarization_assets.prepare_diarization_assets(app_home, aligner_key=..., downloader=...)` 供给到
@@ -91,9 +117,9 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | 键 | 用途 |
 |---|---|
 | `SPEECHRAIL_HOST` / `PORT` | 默认 `127.0.0.1:8201` |
-| `SPEECHRAIL_QWEN3_MODEL_DIR` | 仓库外完整 snapshot 的绝对路径 |
+| `SPEECHRAIL_QWEN3_MODEL_DIR` | 仓库外完整 snapshot 的绝对路径；声明外部绑定时指向绑定目录 |
 | `SPEECHRAIL_QWEN3_PYTHON` | 专用 worker Python 可执行文件 |
-| `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的默认 TTS snapshot/runtime |
+| `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的默认 TTS snapshot/runtime；声明外部绑定时 snapshot 指向绑定目录 |
 | `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | 所选 TTS 档位 `tts_base` 角色的 snapshot；managed selection 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
 | `SPEECHRAIL_TTS_VOICE_IDS` | 服务器登记的 TTS preset 列表 |
 | `SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；TTS worker 仅使用外部完整 snapshot |
