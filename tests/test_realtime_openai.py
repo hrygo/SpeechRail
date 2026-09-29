@@ -757,6 +757,197 @@ def test_realtime_first_hypothesis_metrics_record_cancelled_and_failed() -> None
     ] == 1
 
 
+def test_realtime_partial_metrics_tally_withheld_rewrite_without_emitting_a_delta() -> None:
+    """A hypothesis that rewrites the prefix is counted, never delta-sent.
+
+    The append-only delta wire cannot express a changed prefix, so the
+    rewrite stays private until the terminal event replaces the transcript.
+    The rewrite is deliberately longer than the prefix it replaces: an
+    equal-length rewrite slices to an empty delta and would pass by
+    accident.
+    """
+
+    async def scenario() -> tuple[dict[str, object], list[dict[str, object]]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(partials=("abc", "wbcd")),
+            ),
+        )
+        sent: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            sent.append(event)
+            return 1
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_rewrite_withheld_metrics",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return services.metrics.render_json(), sent
+
+    metrics, sent = asyncio.run(scenario())
+    counters = metrics["counters"]
+    assert isinstance(counters, dict)
+    assert counters[
+        'speechrail_realtime_partial_events_total{outcome="rewrite_withheld"}'
+    ] == 1
+    # The append-only prefix "abc" is the only delta; the rewrite contributes none.
+    assert counters['speechrail_realtime_partial_events_total{outcome="delta_sent"}'] == 1
+    deltas = [
+        event["delta"]
+        for event in sent
+        if event["type"] == "conversation.item.input_audio_transcription.delta"
+    ]
+    assert deltas == ["abc"]
+    # The revisioned hypothesis still carries every upstream revision, so a
+    # snapshot consumer sees the rewrite that the delta stream withheld.
+    hypotheses = [
+        event["text"]
+        for event in sent
+        if event["type"] == "speechrail.transcription.hypothesis"
+    ]
+    assert hypotheses == ["abc", "wbcd"]
+
+
+def test_realtime_first_hypothesis_metrics_survive_a_slow_client() -> None:
+    """A slow socket stretches one observation; it never duplicates or drops it."""
+
+    send_delay_seconds = 0.02
+
+    async def scenario() -> dict[str, object]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(partials=("abc", "abcd")),
+            ),
+        )
+
+        async def send(event: dict[str, object]) -> int:
+            del event
+            await asyncio.sleep(send_delay_seconds)
+            return 1
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_slow_client_metrics",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        )
+        await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        rendered: dict[str, Any] = services.metrics.render_json()
+        return rendered
+
+    metrics = asyncio.run(scenario())
+    counters = metrics["counters"]
+    assert isinstance(counters, dict)
+    assert counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="partial"}'
+    ] == 1
+    histograms = metrics["histograms"]
+    assert isinstance(histograms, dict)
+    latency = histograms["speechrail_realtime_first_hypothesis_seconds"]
+    assert isinstance(latency, dict)
+    assert all(reading["count"] == 1 for reading in latency.values())
+    # The client stall lands in the socket stage, and stays visible as the
+    # server-side upper bound rather than being reported as ASR latency.
+    worker_to_socket = latency['{stage="worker_to_socket"}']
+    assert isinstance(worker_to_socket, dict)
+    assert worker_to_socket["avg"] >= send_delay_seconds
+    upstream = latency['{stage="upstream_to_worker"}']
+    assert isinstance(upstream, dict)
+    assert upstream["sum"] < send_delay_seconds
+
+
+def test_realtime_first_hypothesis_metrics_record_at_most_once_per_turn() -> None:
+    """Deduplication is per input item: three partials per turn count once.
+
+    Two turns in one session must record exactly two observations, so the
+    per-turn guard resets without leaking into the next item.
+    """
+
+    async def scenario() -> tuple[dict[str, object], list[dict[str, object]]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(
+                    partials=("abc", "abcd", "abcde")
+                ),
+            ),
+        )
+        sent: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            sent.append(event)
+            return 1
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_once_per_turn_metrics",
+            send=send,
+        )
+        await session.start()
+        for _ in range(2):
+            await session.handle(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+            )
+            await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return services.metrics.render_json(), sent
+
+    metrics, sent = asyncio.run(scenario())
+    counters = metrics["counters"]
+    assert isinstance(counters, dict)
+    # Six upstream partials across two turns, but one observation per turn.
+    assert counters[
+        'speechrail_realtime_first_hypothesis_total{outcome="partial"}'
+    ] == 2
+    histograms = metrics["histograms"]
+    assert isinstance(histograms, dict)
+    latency = histograms["speechrail_realtime_first_hypothesis_seconds"]
+    assert isinstance(latency, dict)
+    assert latency
+    assert all(reading["count"] == 2 for reading in latency.values())
+    audio = histograms["speechrail_realtime_first_hypothesis_audio_seconds"]
+    assert isinstance(audio, dict)
+    assert next(iter(audio.values()))["count"] == 2
+    hypotheses = [
+        event
+        for event in sent
+        if event["type"] == "speechrail.transcription.hypothesis"
+    ]
+    assert len(hypotheses) == 6
+
+
 def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
