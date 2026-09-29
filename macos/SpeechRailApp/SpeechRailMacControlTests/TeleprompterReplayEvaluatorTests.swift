@@ -167,6 +167,106 @@ struct TeleprompterReplayEvaluatorTests {
         }
         """
 
+    /// 方案 §11.6：「回稿恢复延迟 = 第一个可辨识回稿片段结束，到**恢复可靠跟随**」，
+    /// 「超时算失败，不删除样本」。
+    ///
+    /// 标注为 `read` 但**没有阅读位置**的事件，对「跟随有没有跟上」这件事
+    /// 不提供任何证据——它既没说跟上，也没说没跟上。评估器此前却把它当作
+    /// 恢复：`.read` 分支的 `else` 直接调 `endReanchorWindow()`。
+    ///
+    /// 后果是可复现的：读者在 0.5 秒脱稿，之后两个**完全对不上稿**的事件一路
+    /// 走到 6 秒（远超 3 秒超时门槛），报告说 **0 次超时、0 个失败样本**——
+    /// 一次也没恢复的跟随，被两个「读不懂」的事件抹平了。真实素材上这一路径
+    /// 占比不小：22 次窗口释放里只有 4 次是跟随真的到达，18 次是「对不上稿」。
+    @Test func anUnmatchedEventIsNotEvidenceThatTheFollowerRecovered() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("完全对不上稿的即兴内容", at: 500),
+                    completed("完全不相关的旁白内容", at: 2_000, item: "item-2"),
+                    completed("另一段也匹配不上的话", at: 6_000, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .improvise),
+                    .init(eventIndex: 1, intent: .read),
+                    .init(eventIndex: 2, intent: .read)
+                ]
+            )
+        )
+
+        #expect(report.metrics.reanchorLatencySampleCount == 0, "前提: 从来没量到恢复延迟")
+        #expect(
+            report.metrics.reanchorTimeoutCount == 1,
+            "脱稿后 5.5 秒仍未恢复，必须按 §11.6 记一次超时而不是删掉样本"
+        )
+        #expect(
+            report.metrics.failedSampleCount > 0,
+            "超时窗口内的事件按失败样本计入，未删除"
+        )
+    }
+
+    /// 同一个洞的另一半：**没有阅读位置的事件本来就不该悄悄消失**。
+    /// §11.6 结尾要求「超时和**未匹配**数量单列」，而修复前报告里没有任何字段
+    /// 说明有多少事件没能落到位置上。真实素材上 82 个事件里有 18 个（22%）。
+    @Test func eventsWithoutAReadingPositionAreCountedSeparately() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 900),
+                    completed("完全不相关的旁白内容", at: 1_800, item: "item-2"),
+                    completed("另一段也匹配不上的话", at: 2_700, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                    .init(eventIndex: 1, intent: .read),
+                    .init(eventIndex: 2, intent: .read)
+                ]
+            )
+        )
+
+        #expect(report.metrics.unmatchedEventCount == 2, "两个事件没有阅读位置")
+        #expect(
+            report.metrics.sampleCount == 3,
+            "样本数仍是事件数——它与未匹配数是两个口径，不能互相顶替"
+        )
+        #expect(
+            report.caveats.contains { $0.contains("未匹配") && $0.contains("2") },
+            "未匹配数量必须单列：\(report.caveats)"
+        )
+        // 这条 caveat 的**全部价值就是这句话**。把它反过来写成「这些事件已按失败
+        // 样本计入」，报告会主动误导读报告的人，而只检查「caveat 存在且带数字」
+        // 的断言照样通过——所以这里逐半句钉住。
+        #expect(
+            report.caveats.contains { $0.contains("既不产生延迟样本") && $0.contains("也不计为失败") },
+            "必须说清未匹配事件在两个方向上都退出了统计：\(report.caveats)"
+        )
+        let metrics = try #require(report.jsonObject["metrics"] as? [String: Any])
+        #expect(metrics["unmatched_event_count"] as? Int == 2)
+    }
+
+    /// 反向对照：每条 caveat 都得钉住「不该报警时不报警」。全部事件都有阅读
+    /// 位置时，未匹配数是 0、caveat 不出现。
+    @Test func aFullyPositionedMaterialReportsNoUnmatchedEvents() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 2_000, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 1)
+                ]
+            )
+        )
+
+        #expect(report.metrics.unmatchedEventCount == 0)
+        #expect(
+            !report.caveats.contains { $0.contains("未匹配") },
+            "每个事件都有阅读位置时不得报未匹配：\(report.caveats)"
+        )
+    }
+
     @Test func manifestIntentStringsRoundTripThroughJSON() throws {
         // Pin the spelling so a Swift rename cannot silently break manifests
         // that live outside the repository. Every other test builds intents in

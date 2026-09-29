@@ -190,6 +190,10 @@ public enum TeleprompterReplayEvaluator {
         /// 另一半, 这一对把它补上。
         public var trackingLatencySampleCount: Int
         public var reanchorLatencySampleCount: Int
+        /// §11.6 结尾要求「超时和**未匹配**数量单列」。一个事件没有阅读位置，
+        /// 就既产不出延迟样本、也不算失败——它从两个方向同时退出统计。修复前
+        /// 报告里没有任何字段说明这类事件有多少，真实素材上 82 个里有 18 个。
+        public var unmatchedEventCount: Int
         public var reanchorTimeoutCount: Int
         public var manualCorrectionCount: Int
         public var stalledEventCount: Int
@@ -245,6 +249,7 @@ public enum TeleprompterReplayEvaluator {
                     "reanchor_latency_p95_ms": metrics.reanchorLatencyP95Milliseconds
                         .map { NSNumber(value: $0) } as Any,
                     "reanchor_latency_sample_count": metrics.reanchorLatencySampleCount,
+                    "unmatched_event_count": metrics.unmatchedEventCount,
                     "reanchor_timeout_count": metrics.reanchorTimeoutCount,
                     "manual_correction_count": metrics.manualCorrectionCount,
                     "stalled_event_count": metrics.stalledEventCount,
@@ -309,6 +314,7 @@ public enum TeleprompterReplayEvaluator {
             reanchorLatencyP95Milliseconds: nil,
             trackingLatencySampleCount: 0,
             reanchorLatencySampleCount: 0,
+            unmatchedEventCount: 0,
             reanchorTimeoutCount: 0,
             manualCorrectionCount: 0,
             stalledEventCount: 0,
@@ -405,7 +411,21 @@ public enum TeleprompterReplayEvaluator {
                         }
                     }
                 } else {
-                    endReanchorWindow()
+                    // 标注说这是正常朗读，却**没有给出阅读位置**。这件事对「跟随
+                    // 有没有跟上」不提供任何证据：它既没说跟上，也没说没跟上。
+                    //
+                    // 此前这里调 `endReanchorWindow()`，等于把「读不懂」当成
+                    // 「跟上了」。可复现的后果：读者脱稿后连着两个对不上稿的事件
+                    // 一路走过超时门槛，报告给出 0 次超时、0 个失败样本——一次也
+                    // 没恢复的跟随被抹平。§11.6 说超时算失败、不删除样本，那就
+                    // 不能在没有证据的时候宣布恢复。
+                    //
+                    // 停顿门槛同理：它由**恢复**释放，门槛的意义是「一个阈值窗口
+                    // 只记一次停顿」。真实素材上 22 次释放里有 18 次来自这里，
+                    // 修好后停顿数 12 → 11，少掉的那次出现在 t=27009ms——它能计上
+                    // 只因为同一时刻一个对不上稿的事件把门槛提前释放了，正是这条
+                    // 规则要防的重复计数。
+                    metrics.unmatchedEventCount += 1
                 }
             case .improvise:
                 manualJumpPending = false
@@ -579,6 +599,16 @@ public enum TeleprompterReplayEvaluator {
                         + "它们既没有贡献样本、也没有被判为失败。"
                 )
             }
+        }
+        if metrics.unmatchedEventCount > 0 {
+            // §11.6 的「未匹配数量单列」。这类事件最容易在报告里消失：它既不是
+            // 延迟样本（没有位置就算不出延迟），也不是失败样本（没有位置就没法说
+            // 跟随违约），所以两个分位和失败占比都不覆盖它。数字必须自己站出来。
+            caveats.append(
+                "本次回放的未匹配事件有 \(metrics.unmatchedEventCount)/\(sampleCount) 个"
+                    + "（标注为 read 但未给出 expected_segment_index，因而没有阅读位置）："
+                    + "它们既不产生延迟样本、也不计为失败，延迟分位与失败占比都不覆盖这部分事件。"
+            )
         }
         // 方案 §11.7 把「回稿恢复 P95」列为质量门槛。恢复样本的来源是
         // `reanchorStartedAt`——**`reRead` 与「`improvise` 但没有推进」都会设它**，
