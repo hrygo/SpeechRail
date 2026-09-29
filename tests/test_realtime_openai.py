@@ -274,6 +274,24 @@ class FakeStreamingFactory:
         self.released.append(session)
 
 
+def _wait_for_releases(
+    released: list[RealtimeAsrSession], count: int, timeout: float = 2.0
+) -> None:
+    """Wait for the server-side release to land after the socket closes.
+
+    Releasing the session happens in the application's own task, so an
+    assertion placed immediately after the ``with`` block races it. One test in
+    this file already waited (see the deadline loop near the end); the ones that
+    came first were simply never exercised under load. Measured 2026-09-29:
+    ``test_openai_append_commit_produces_transcription_completed`` failed this
+    way once across two full-suite runs and passed 5/5 in isolation, which is
+    the signature of a teardown race rather than a behaviour change.
+    """
+    deadline = time.monotonic() + timeout
+    while len(released) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 class RejectingLanguageStreamingFactory(FakeStreamingFactory):
     """Mirrors the native factory that raises RuntimeError for unsupported languages."""
 
@@ -592,6 +610,7 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
         assert completed["commit_event_id"] == "commit-tail-1"
         assert len(factory.sessions) == 1
         assert factory.sessions[0].language is None
+        _wait_for_releases(factory.released, 1)
         assert len(factory.released) == 1
 
 
@@ -1302,6 +1321,7 @@ def test_openai_non_string_event_type_is_recoverable_and_releases_asr() -> None:
 
     assert len(factory.sessions) == 1
     assert factory.sessions[0].closes == 1
+    _wait_for_releases(factory.released, 1)
     assert factory.released == factory.sessions
 
 
@@ -1346,6 +1366,7 @@ def test_openai_session_release_called_on_disconnect() -> None:
         )
     # after context exit the session should be released
     assert len(factory.sessions) == 1
+    _wait_for_releases(factory.released, 1)
     assert len(factory.released) == 1
 
 
@@ -1380,6 +1401,7 @@ def test_openai_disconnect_releases_slot_even_when_commit_blocks() -> None:
         socket.send_json({"type": "input_audio_buffer.commit"})
 
     assert len(factory.sessions) == 1
+    _wait_for_releases(factory.released, 1)
     assert len(factory.released) == 1
 
 

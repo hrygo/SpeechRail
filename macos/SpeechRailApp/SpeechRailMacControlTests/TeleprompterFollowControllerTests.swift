@@ -438,6 +438,35 @@ struct TeleprompterFollowControllerTests {
         )
     }
 
+    /// `mayConfirm` 的向后确认是三项合取：置信 ≥ 0.95、命中 ≥ 6、距离在局部半径内。
+    /// `rereadRollsBackOnlyWhenTheBackwardMatchIsStrong` 钉住的是**命中数**那一半
+    /// （「直播」只命中两个 token），**置信度那一半此前没有任何用例**——
+    /// 门槛从 0.95 降到 0.5 时全量 716 项无人变红。
+    @Test func aBackwardMoveNeedsTheStrongConfidenceHalfToo() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(
+            itemID: "forward", transcript: "最后演示照片导出", segments: segments
+        )
+        #expect(controller.position.segmentIndex == 2)
+        let anchored = controller.position
+
+        // 「相机置」比「相机设置」少一个字：命中 9 个 token（≥ 6 成立），
+        // 置信 0.889（< 0.95）。两项各成立一半，合取必须不成立。
+        controller.receiveCompleted(
+            itemID: "near-miss", transcript: "今天我们介绍相机置", segments: segments
+        )
+        #expect(controller.lastMatchedCount >= 6, "这条用例要证明的是命中数那一半已经满足")
+        #expect(
+            (controller.lastMatchConfidence ?? 0) < 0.95,
+            "这条用例要证明的是置信度那一半不满足"
+        )
+        #expect(
+            controller.position == anchored,
+            "两项各成立一半仍然不得回退：证据不足的整句复述留在原地"
+        )
+    }
+
     /// 命中再准也不能跨段落倒退：远处的整句复述更可能是旁人声或口误，
     /// 自动跳回四段之前比留在原地更糟。
     @Test func rereadDoesNotRollBackAcrossDistantParagraphs() throws {

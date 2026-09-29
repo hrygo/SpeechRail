@@ -52,6 +52,85 @@ struct TeleprompterPositionTests {
         #expect(result.position?.segmentIndex == 1)
     }
 
+    @Test func aCandidateBelowTheConfidenceFloorIsNotOfferedAtAll() throws {
+        // 三个 token 里错一个，置信度是 1 - 1/3 ≈ 0.667，落在对齐器 0.72 的
+        // 门槛之下，因此**连候选都不该出现**。此前没有任何用例落在 (0.5, 0.72)
+        // 这一档——门槛从 0.72 降到 0.5 时全量 716 项无人变红。
+        let segments = try TeleprompterSegmenter.segment(sourceText: "春眠晓")
+        let result = TeleprompterAligner().locate(
+            transcript: "春眠觉", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(result.position == nil)
+        #expect(result.confidence == 0)
+        #expect(result.matchedCount == 0)
+    }
+
+    @Test func aShortExactContinuationIsNotContinuityEvidence() throws {
+        // `isUniqueExactContinuation` 的匹配数下限是 8。这条用例给出的是一个
+        // 置信 1.0、跨过锚点、长度 6 的精确续接——它**不**算续接证据，只算
+        // 锚点附近的普通匹配。下限从 8 降到 3 时这一条会翻红。
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "开场。今天我们介绍相机设置。下一段。"
+        )
+        let result = TeleprompterAligner().locate(
+            transcript: "今天我们介绍", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(result.confidence == 1.0)
+        #expect(result.matchedCount == 6)
+        #expect(result.isUniqueNearAnchor)
+        #expect(
+            !result.isUniqueExactContinuation,
+            "6 个 token 的精确续接不构成跨锚点的续接证据"
+        )
+    }
+
+    // MARK: - 裸中文数字（第 82 条）
+
+    @Test func aBareChineseNumeralMatchesItsArabicForm() throws {
+        // 归一化只把「数字 + 已登记单位」转成阿拉伯数字，裸数字会原样留下来：
+        // `第三季度` → ["第","三","季","度"]，`这里是两` → ["这","里","是","两"]。
+        // 它们与阿拉伯数字等价靠的是对齐器自己那张数字表——而那张表此前没有任何
+        // 断言：把「七」映成 8 时全量 713 项无人变红。
+        let segments = try TeleprompterSegmenter.segment(sourceText: "这里是七成")
+        let result = TeleprompterAligner().locate(
+            transcript: "这里是7成", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        // 断言的是**精确匹配**：conf 1.0 表示五个 token 全部对上。若「七」不再
+        // 等价于 7，这里会掉到 0.8。
+        #expect(result.confidence == 1.0)
+        #expect(result.matchedCount == 5)
+    }
+
+    @Test func aBareLiangMatchesTwo() throws {
+        // `两` 是这张表此前唯一漏掉的字。表一多映射一个数字，「两」就会被读成别的
+        // 数，或者干脆与 2 不再等价——而「两难」「这里是两」在真实口语里并不罕见。
+        // 这条与上一条同源：两处各维护一张表，已经分叉（第 70 条在单位表上重演）。
+        let segments = try TeleprompterSegmenter.segment(sourceText: "这里是两难")
+        let result = TeleprompterAligner().locate(
+            transcript: "这里是2难", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(result.confidence == 1.0)
+        #expect(result.matchedCount == 5)
+    }
+
+    @Test func aChineseNumeralDoesNotMatchADifferentArabicDigit() throws {
+        // 反向一侧：表只能让同一个数字对上，不能让邻近的数字互相等价。
+        // 少了这条，把「七」映成 8 这种变异仍然会显得「无害」。
+        // 断言的是**不是精确匹配**而不是「无位置」——单个 token 对不上时对齐器
+        // 仍会给出一个低置信度的候选（0.8），那正是跟随控制器该拒掉的东西。
+        let segments = try TeleprompterSegmenter.segment(sourceText: "这里是七成")
+        let result = TeleprompterAligner().locate(
+            transcript: "这里是8成", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        #expect(result.confidence < 1.0)
+        #expect(result.matchedCount == 4)
+    }
+
     // MARK: - 用户确认的读法（#110）
 
     private func aliasedSegment(

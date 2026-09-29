@@ -185,7 +185,13 @@ public enum TeleprompterCanonicalizer {
     /// width the way the two unit lists had drifted on membership.
     private static let digitClass = #"[0-9０-９]"#
 
-    private static let chineseDigits: [Character: String] = [
+    /// The one Chinese-digit table in the app. The aligner used to keep a
+    /// second copy and it had already drifted: the copy there was missing
+    /// `两`, so a transcript saying `2` never matched a script saying
+    /// `这里是两` — the one numeral the table silently dropped. Bare digits
+    /// do reach the aligner (`两难`, `第三季度` both survive canonicalisation),
+    /// so the second table was not harmless duplication.
+    static let chineseDigits: [Character: String] = [
         "零": "0", "〇": "0", "一": "1", "二": "2", "两": "2", "三": "3", "四": "4",
         "五": "5", "六": "6", "七": "7", "八": "8", "九": "9",
     ]

@@ -53,6 +53,69 @@
       "replace": "public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 30...90",
       "expect": "KILLED",
       "rationale": "建议时长此前是 sheet 里的硬编码字面量，策略里那个常量全仓无人读取；本轮把文案改为由策略生成，两者从此不可能再漂移。"
+    },
+    {
+      "id": "M6",
+      "note": "远距重定位不再要求处于自由发挥状态",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        return followState == .freePlaying\n            && match.matchedCount >= policy.relocalizationMinimumMatches",
+      "replace": "        return match.matchedCount >= policy.relocalizationMinimumMatches",
+      "expect": "KILLED",
+      "rationale": "远距重定位必须仍处于自由发挥状态，否则一次远处误识别就能把视口拽到另一段。"
+    },
+    {
+      "id": "M7",
+      "note": "回退确认的置信度门槛 0.95 降到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        return match.confidence >= 0.95\n            && match.matchedCount >= 6",
+      "replace": "        return match.confidence >= 0.5\n            && match.matchedCount >= 6",
+      "expect": "KILLED",
+      "rationale": "mayConfirm 的三项合取里置信度那一半此前无用例：`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong` 只钉住命中数（两个 token），门槛 0.95 降到 0.5 全量无人变红。已补 `aBackwardMoveNeedsTheStrongConfidenceHalfToo`。"
+    },
+    {
+      "id": "M8",
+      "note": "对齐最低置信度 0.72 降到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "            minimumConfidence: Double = 0.72,",
+      "replace": "            minimumConfidence: Double = 0.5,",
+      "expect": "KILLED",
+      "rationale": "对齐器的 0.72 置信度门槛此前没有用例落在 (0.5, 0.72) 这一档：素材要么精确匹配（1.0）、要么只错一个 token（0.8）、要么全不匹配（0.0）。已补 `aCandidateBelowTheConfidenceFloorIsNotOfferedAtAll`（3 token 错 1 个 ⇒ 0.667）。"
+    },
+    {
+      "id": "M9",
+      "note": "中文数字表把「七」映成 8",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift",
+      "find": "\"五\": \"5\", \"六\": \"6\", \"七\": \"7\", \"八\": \"8\", \"九\": \"9\",",
+      "replace": "\"五\": \"5\", \"六\": \"6\", \"七\": \"8\", \"八\": \"8\", \"九\": \"9\",",
+      "expect": "KILLED",
+      "rationale": "裸中文数字会活着到达对齐器（`第三季度`、`这里是两` 归一化后原样保留），那张表此前没有任何断言。已补 `aBareChineseNumeralMatchesItsArabicForm` 与反向的 `aChineseNumeralDoesNotMatchADifferentArabicDigit`。"
+    },
+    {
+      "id": "M10",
+      "note": "唯一精确续接的匹配数下限 8 降到 3",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "        let uniqueExactContinuation = best.confidence == 1 && best.matches >= 8 && continuesAnchor",
+      "replace": "        let uniqueExactContinuation = best.confidence == 1 && best.matches >= 3 && continuesAnchor",
+      "expect": "KILLED",
+      "rationale": "唯一精确续接的匹配数下限 8 此前没有 3–7 这个区间的用例。已补 `aShortExactContinuationIsNotContinuityEvidence`（置信 1.0、跨锚点、6 个 token，但不构成续接证据）。"
+    },
+    {
+      "id": "M11",
+      "note": "候选最少匹配数不再留一个输入 token 的余量",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "        let minimumMatches = max(1, min(3, input.count - 1))",
+      "replace": "        let minimumMatches = max(1, min(3, input.count))",
+      "expect": "SURVIVED",
+      "rationale": "**有条件等价**：这条只在输入恰好 2–3 个 token 时与原实现不同（原 `min(3, count-1)` vs 变异 `min(3, count)`），而那种长度下能被放行的候选（命中 count-1）置信度只有 0.5／0.667，**都低于 0.72 的对齐门槛**，在 line 217 就已经被拒掉了。两个常量是耦合的——一旦下调 `minimumConfidence`，这条立刻变成活的；按第 27/33 条规矩作废不计入存活，但耦合关系写在这里，不留给记忆。"
+    },
+    {
+      "id": "M12",
+      "note": "共享数字表拿掉「两」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift",
+      "find": "        \"零\": \"0\", \"〇\": \"0\", \"一\": \"1\", \"二\": \"2\", \"两\": \"2\", \"三\": \"3\", \"四\": \"4\",",
+      "replace": "        \"零\": \"0\", \"〇\": \"0\", \"一\": \"1\", \"二\": \"2\", \"三\": \"3\", \"四\": \"4\",",
+      "expect": "KILLED",
+      "rationale": "「两」此前是共享表里唯一漏掉的字：两处各维护一张数字表，已经分叉（第 70 条在单位表上重演）。已改为共用 `TeleprompterCanonicalizer.chineseDigits`，并补 `aBareLiangMatchesTwo`。"
     }
   ]
 }

@@ -252,8 +252,15 @@ public struct TeleprompterAligner: Sendable {
         )
     }
 
-    private static let digits = ["零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
-                      "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"]
+    /// Shares the canonicalizer's table rather than keeping a second copy. The
+    /// copy that used to live here had already drifted — it was missing `两` —
+    /// and a bare numeral does reach this code (`两难`, `第三季度` both survive
+    /// canonicalisation), so the drift was reachable and not cosmetic.
+    private static let digits = Dictionary(
+        uniqueKeysWithValues: TeleprompterCanonicalizer.chineseDigits
+            .map { (String($0.key), $0.value) }
+    )
+
     private func equivalent(_ lhs: String, _ rhs: String) -> Bool {
         (Self.digits[lhs] ?? lhs) == (Self.digits[rhs] ?? rhs)
     }
