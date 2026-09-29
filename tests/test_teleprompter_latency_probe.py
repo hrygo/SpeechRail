@@ -137,7 +137,11 @@ def test_media_origin_is_established_after_session_configuration() -> None:
 
 
 def test_media_origin_refuses_to_start_before_the_configuration_ack() -> None:
-    """时钟回退必须硬失败，而不是让媒体起点早于 ACK 算出负延迟。"""
+    """A backwards clock must fail hard instead of yielding negative latency.
+
+    Starting the media origin before the configuration ACK would make every
+    later measurement negative, so the probe refuses instead of reporting it.
+    """
 
     backwards = _Clock([11.5])
 
@@ -246,9 +250,11 @@ def test_receive_loop_fails_instead_of_growing_an_unbounded_queue() -> None:
             _Clock([1.0, 2.0]),
             1,
         ),
-        # 必须守护：一旦有界投递退化成阻塞投递，这个线程会永久卡在 put 上，
-        # 非守护线程会让整个 pytest 进程无法退出——本项目已经吃过一次测试挂死
-        # 拖垮闸门的亏（阶段报告 §2 第 9 条）。守护化后，退化只会让断言失败。
+        # Daemonized on purpose: if the bounded put degrades into a blocking
+        # put, this thread would park forever and a non-daemon thread would
+        # keep the whole pytest process from exiting.  This project already
+        # lost a gate to exactly that hang (stage report section 2, item 9).
+        # As a daemon the degradation can only fail the assertion below.
         daemon=True,
     )
     thread.start()
