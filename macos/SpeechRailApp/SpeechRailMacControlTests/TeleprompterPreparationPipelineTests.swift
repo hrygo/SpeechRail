@@ -493,7 +493,10 @@ struct TeleprompterPreparationPipelineTests {
         #expect(await groupingCalls.value == 1)
         #expect(await rewriteCalls.value == 2)
         let rewritePrompts = await prompts.values.filter { $0.schemaVersion == "teleprompter.rewrite.v1" }
-        #expect(rewritePrompts.count == 2)
+        // 致命断言：下一行按 0／1 取下标，非致命断言失败后不会停，测试会越界
+        // trap 把整个测试进程带崩，变异探针只能记成 INVALID——真回归就此变成
+        // 「什么都没证明」。
+        try #require(rewritePrompts.count == 2)
         #expect(rewritePrompts[0].input == rewritePrompts[1].input)
         #expect(rewritePrompts[1].instructions.contains("schema_keys"))
     }
@@ -514,7 +517,11 @@ struct TeleprompterPreparationPipelineTests {
         _ = try await pipeline.prepare(fixture.input)
 
         let values = await timestamps.values
-        #expect(values.count >= 3)
+        // 计数必须用 `#require`（致命）而不是 `#expect`：下面紧接着按 3 个元素
+        // 取下标，非致命断言失败后不会停，测试会越界 trap 把整个测试进程带崩。
+        // 崩掉的那一轮在变异探针里被记成 INVALID——**真回归因此变成「什么都没
+        // 证明」**，比直接失败糟得多。
+        try #require(values.count >= 3)
         #expect(values[1].timeIntervalSince(values[0]) >= 0.04)
     }
 

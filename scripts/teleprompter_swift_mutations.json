@@ -2,11 +2,11 @@
   "package": "macos/SpeechRailApp",
   "filter": "",
   "sanity": {
-    "id": "E0",
-    "note": "窗口宽度夹取被摘掉（已知应被杀）",
-    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
-    "find": "            let clamped = min(\n                max(newValue, Double(SpeechRailDesignTokens.Teleprompter.stageMinimumWidth)),\n                Double(SpeechRailDesignTokens.Teleprompter.stageMaximumWidth)\n            )",
-    "replace": "            let clamped = newValue"
+    "id": "F0",
+    "note": "窗口结果的空判被取反（要求结果必须为空，已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+    "find": "            guard let states, !states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+    "replace": "            guard let states, states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }"
   },
   "mutations": [
     {
@@ -1133,6 +1133,168 @@
       "replace": "        return value",
       "expect": "KILLED",
       "rationale": "被 scriptPointSizeStopsAtTheDesignMinimum 杀掉。实测 `38 × 0.67 = 25.46 < 28`，**下界夹取是承重的**（读者把字号拉到最小时会拿到越界的 25.46pt）；上界那半边与 `38 × 1.52 = 57.76` 之间有余量，属冗余。"
+    },
+    {
+      "id": "F1",
+      "note": "选区里缺单元时不再报错（compactMap 静默丢单元后照样往下走）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard targets.count == window.sourceUnitIDs.count else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
+      "replace": "            guard true else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：`targets` 由 `compactMap` 得到，少一个源单元时稿子会**静默少一段**，而窗口照常成功。"
+    },
+    {
+      "id": "F2",
+      "note": "窗口结果为空时不再报错（空 states 被当作一次成功的窗口）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let states, !states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+      "replace": "            guard let states else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型返回空结果时该窗口被记成一次成功，产出缺一段的稿子且状态仍是「完成」。"
+    },
+    {
+      "id": "F3",
+      "note": "边界合并不再要求两侧都是 speak（提示块／跳过块也送去合并）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard left.block.disposition == .speak, right.block.disposition == .speak else {",
+      "replace": "            guard true else {",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：提示块／跳过块之间的接缝也会送去合并，合并结果会把非朗读内容接进朗读正文。"
+    },
+    {
+      "id": "F4",
+      "note": "恢复预算不再受窗口数约束（单窗口稿件也能用满 3 次恢复请求）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))",
+      "replace": "        let recoveryBudget = policy.maxRecoveryRequests",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：单窗口稿件可以用满 3 次恢复请求，与「按窗口数收敛」的初衷相反，多花调用也拉长等待。"
+    },
+    {
+      "id": "F5",
+      "note": "分组的单元区间不再要求首尾相接（模型可跳过中间单元而不被发现）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let first = IDs.first,\n                  IDs.last == group.endUnit - 1,\n                  IDs.count == group.endUnit - group.startUnit,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
+      "replace": "            guard let first = IDs.first,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型可以跳过中间单元而不被发现——**与第 63 轮 A3（分组必须首尾相接）同一族**，只是那一族在解码器侧、这一族在 pipeline 侧。"
+    },
+    {
+      "id": "F6",
+      "note": "改写块不再要求引用一个已存在的分组（模型可凭空造块）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let group = allowed[block.blockID],",
+      "replace": "            guard let group = allowed[block.blockID] ?? groups.first,",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型可凭空造一个不存在的分组块，块里的文字没有对应的源单元。"
+    },
+    {
+      "id": "F7",
+      "note": "本地兜底不再要求错误可本地恢复（任何失败都静默降级为原文朗读）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard isLocallyRecoverable(error) else { return nil }",
+      "replace": "        guard true else { return nil }",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：**配置类错误（`notConfigured` 等）也会静默降级成「按原文朗读」**，读者以为 AI 不可用，却拿到一份看起来正常的稿子。"
+    },
+    {
+      "id": "F8",
+      "note": "本地兜底不再校验产出的段数（漏单元时静默交付一份残缺稿）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard states.count == window.sourceUnitIDs.count else { return nil }",
+      "replace": "        guard true else { return nil }",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：本地兜底漏单元时照样交付，残缺稿没有任何标记。"
+    },
+    {
+      "id": "F9",
+      "note": "可本地恢复的错误种类被收窄（漏掉传输层与流中断的兜底）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        case .invalidStructuredResponse, .outputTruncated, .transport,\n            .streamEndedEarly, .malformedStreamEvent:",
+      "replace": "        case .invalidStructuredResponse:\n            return true\n        case .outputTruncated, .transport, .streamEndedEarly, .malformedStreamEvent:\n            return false",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：网络抖动、流提前结束不再降级为「按原文朗读」，而是整篇准备失败。"
+    },
+    {
+      "id": "F10",
+      "note": "重试延迟不再夹到 60 秒（服务器给出 1 小时就真的等 1 小时）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        return min(max(retryAfter, 0), 60)",
+      "replace": "        return retryAfter",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：服务端给出 1 小时的 `Retry-After` 就真的等 1 小时，界面停在准备中。"
+    },
+    {
+      "id": "F11",
+      "note": "瞬时失败判定不再认 429（限流被当成不可重试直接失败）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            return status == 429 || (500...599).contains(status)",
+      "replace": "            return (500...599).contains(status)",
+      "expect": "KILLED",
+      "rationale": "被 `transientRateLimitGetsOneBoundedRetry` 杀掉。**首轮这条被记成 INVALID——崩溃掩盖了一次真实检出**：同文件里 `transientRetryWaitsForRetryAfterBeforeTheNextStageRequest` 先 `#expect(values.count >= 3)` 再取 `values[1]`，断言失败后不停止、越界 trap 把整个测试进程带崩。把那处改成致命的 `#require` 之后，本条干净转杀（6 条失败）。"
+    },
+    {
+      "id": "F12",
+      "note": "瞬时失败判定不再认 5xx（服务端错误被当成不可重试直接失败）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            return status == 429 || (500...599).contains(status)",
+      "replace": "            return status == 429",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：**429 的重试有用例（`transientRateLimitGetsOneBoundedRetry`），5xx 没有**——服务端 5xx 不再触发重试，读者多等一次完整往返。"
+    },
+    {
+      "id": "F13",
+      "note": "结构化失败判定不再认 invalidPromptResponseDetailed",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        case .invalidPromptResponse, .invalidPromptResponseDetailed:\n            return true",
+      "replace": "        case .invalidPromptResponse:\n            return true",
+      "expect": "KILLED",
+      "rationale": "被 `rewriteFailureRetriesOnlyRewriteWithTheOriginalGrouping` 杀掉。**首轮同样被记成 INVALID**：该用例先 `#expect(rewritePrompts.count == 2)` 再取 `rewritePrompts[1]`，断言失败后越界 trap。改成致命的 `#require` 之后干净转杀（12 条失败）。"
+    },
+    {
+      "id": "F14",
+      "note": "窗口切分不再要求中点落在区间内（单元数为 0 时切出两个空窗口）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard midpoint > 0, midpoint < window.sourceUnitIDs.count else {",
+      "replace": "        guard true else {",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：单元数为 0 或 1 的窗口切分出空窗口，切分不再收敛。"
+    },
+    {
+      "id": "F15",
+      "note": "重试等待不再要求延迟为正（0 也照样 sleep）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard let delay = retryAfterDelay(for: error), delay > 0 else { return }",
+      "replace": "        guard let delay = retryAfterDelay(for: error) else { return }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异。`Task.sleep(for: .seconds(0))` 本身就是空操作，去掉 `delay > 0` 不改变可观测行为。"
+    },
+    {
+      "id": "F16",
+      "note": "可观测性不再要求耗时非负（负耗时会落进第一个桶）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard let elapsed = observation.elapsedMilliseconds, elapsed >= 0,",
+      "replace": "        guard let elapsed = observation.elapsedMilliseconds,",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：负耗时（本机时钟回退）会落进第一个延迟桶，把时延分布画错。"
+    },
+    {
+      "id": "F17",
+      "note": "本地兜底的预算分摊不再兜住 0（总预算为 0 时除零）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            let budget = totalBudgetUnits > 0\n                ? window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)\n                : 0",
+      "replace": "            let budget = window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：窗口总预算单元为 0 时除零，兜底段拿到无穷大的预算秒数。"
+    },
+    {
+      "id": "F18",
+      "note": "分组阶段的截断失败也允许重试（截断是确定性的，重试只是再截断一次）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard !isTruncatedMapFailure(error),\n                  recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
+      "replace": "            guard recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：输出被截断是确定性失败，重试只会再截断一次，白花一次调用并推迟失败暴露。"
     }
   ]
 }

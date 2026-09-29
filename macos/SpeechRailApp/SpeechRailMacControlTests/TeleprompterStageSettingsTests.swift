@@ -232,14 +232,17 @@ struct TeleprompterStageSettingsTests {
             pointSize: 20,
             availableWidth: 70
         )
-        #expect(lines.count > 1)
+        // 致命断言：下面按 0／1 下标取值并对 `last` 强制解包，非致命断言失败后
+        // 测试不会停，会越界 trap 把整个测试进程带崩——在变异探针里那会被记成
+        // INVALID，真回归就变成了「什么都没证明」。
+        try #require(lines.count > 1)
 
         let firstPosition = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines[0].utf16Start)
         let secondPosition = TeleprompterStagePresentation.positionByMovingLine(by: 1, from: firstPosition, lines: lines)
         #expect(secondPosition == TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines[1].utf16Start))
         #expect(TeleprompterStagePresentation.positionByMovingLine(by: -1, from: firstPosition, lines: lines) == nil)
 
-        let lastPosition = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: lines.last!.utf16Start)
+        let lastPosition = TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: try #require(lines.last).utf16Start)
         #expect(TeleprompterStagePresentation.positionByMovingLine(by: 1, from: lastPosition, lines: lines) == nil)
     }
 
