@@ -100,6 +100,12 @@ RE_READ_MIN_GAP_CHARS = 4
 # newest text decides where the reader is now, so that is what gets scored.
 ALIGN_TAIL_CHARS = 24
 
+# 引擎对「这段文本有几分确定」的回答里, 素材侧只认一种: 越界. 方案 §3.6 与
+# F-15 要求稳定前缀越界是**契约不一致**, 必须可见并停止推进, 不能夹取成「合法」.
+# 其余情况素材侧仍按整段文本对齐——标注的锚点是「人说过的话」(§11.6), 不是
+# 「引擎确认到哪」(§6.6), 详见 §2.22 里量过又否掉的那一版.
+EVIDENCE_CONFIRMED = ""
+EVIDENCE_OUT_OF_RANGE = "out-of-range"
 INTENT_READ = "read"
 INTENT_IMPROVISE = "improvise"
 INTENT_RE_READ = "reRead"
@@ -255,6 +261,7 @@ class Alignment:
     ratio: float
     advance_chars: int = 0
     matched_chars: int = 0
+    evidence: str = EVIDENCE_CONFIRMED
 
 
 @dataclass(slots=True)
@@ -285,13 +292,47 @@ class ScriptAligner:
     high_water: int = 0
     previous: str = ""
 
-    def align(self, text: str, *, cumulative: bool) -> Alignment:
-        """Align one recognised text; ``cumulative`` marks whole-utterance events."""
+    def align(
+        self,
+        text: str,
+        *,
+        cumulative: bool,
+        stable_prefix_codepoints: int | None = None,
+    ) -> Alignment:
+        """Align one recognised text; ``cumulative`` marks whole-utterance events.
 
+        ``stable_prefix_codepoints`` 是引擎给出的**已停止修订**的前缀长度
+        (Unicode scalar, 方案 §3.6). 这里**只用它做一件事**: 越界时拒绝这个事件.
+        范围内的前缀**不**用来截断待对齐文本 —— 标注的锚点是「人说过的话」
+        (§11.6 的正常跟随延迟从「人工标注的可识别片段结束」算起), 不是「引擎
+        确认到哪」(§6.6). 按前缀截断的那一版量过: 82 条标注改 26 条, 失败占比
+        从 0 涨到 48.8%, 量完就否掉了, 理由见下面那段注释与阶段报告 §2.22.
+        """
+
+        if stable_prefix_codepoints is not None and (
+            stable_prefix_codepoints < 0 or stable_prefix_codepoints > len(text)
+        ):
+            # 方案 §3.6 与 F-15: 越界是**契约不一致**, 必须让它可见并停止推进,
+            # 不能夹取成「合法」, 也不能当成「没有稳定前缀」然后拿全文继续对齐
+            # ——那比不推进更宽松.
+            #
+            # 这里**只**拒绝越界, 不按稳定前缀截断. 截断那一版量过: 82 条标注改
+            # 26 条, 失败占比从 0 涨到 48.8%——但那是把标注锚点从「人说过的话」
+            # 搬到了「引擎确认到哪」. §11.6 写明正常跟随延迟从「人工标注的可识别
+            # 片段结束」算起, 锚点是人; §6.6 的稳定前缀规则治的是**跟随器的推进
+            # 决策**, 不是这份标注. 详见阶段报告 §2.22.
+            self.previous = ""
+            return Alignment(
+                None, INTENT_READ, 0.0, evidence=EVIDENCE_OUT_OF_RANGE
+            )
         normalized = normalize_text(text)
         needle = normalized[-ALIGN_TAIL_CHARS:] if cumulative else normalized
         if not needle:
-            return Alignment(None, INTENT_READ, 0.0)
+            return Alignment(
+                None,
+                INTENT_READ,
+                0.0,
+            )
         script = self.index.script_text
         if not script:
             return Alignment(None, INTENT_READ, 0.0)
@@ -738,9 +779,20 @@ def build_manifest(
             reason = "终态失败没有可对齐文本，intent 需人工确认"
         else:
             alignment = aligner.align(
-                event.text, cumulative=event.kind in {"snapshot", "completed"}
+                event.text,
+                cumulative=event.kind in {"snapshot", "completed"},
+                stable_prefix_codepoints=(
+                    event.stable_prefix_codepoints if event.kind == "snapshot" else None
+                ),
             )
-            if alignment.intent == INTENT_RE_READ:
+            if alignment.evidence == EVIDENCE_OUT_OF_RANGE:
+                # 与「对齐不足」是两回事, 对复核的人也是两种动作: 这一条要人去看
+                # 引擎与客户端之间的契约, 混进「对齐不足」会把人引到错的地方.
+                reason = (
+                    "稳定前缀越界或为负: 契约不一致, 未使用该事件对齐, "
+                    "需人工确认引擎与客户端之间的一致性"
+                )
+            elif alignment.intent == INTENT_RE_READ:
                 reason = "匹配位置早于已读高水位：疑似回读，需人工确认"
             elif (
                 alignment.segment_index is None
@@ -789,6 +841,7 @@ def build_manifest(
                     "ratio": round(alignment.ratio, 3),
                     "advance_chars": alignment.advance_chars,
                     "matched_chars": alignment.matched_chars,
+                    "stable_prefix_codepoints": event.stable_prefix_codepoints,
                     "reason": reason,
                 }
             )

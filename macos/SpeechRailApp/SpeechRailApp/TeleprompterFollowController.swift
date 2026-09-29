@@ -130,6 +130,9 @@ public struct TeleprompterFollowController: Sendable {
     public private(set) var followState: TeleprompterFollowState
     public private(set) var lastMatchConfidence: Double?
     public private(set) var lastMatchedCount = 0
+    /// F-15 要求稳定前缀的契约异常**可见**。修复前越界被折成 nil，异常从外面
+    /// 完全看不出来——报告、回放与界面都以为那只是一段没有稳定前缀的话。
+    public private(set) var stablePrefixContractAnomalies = 0
 
     private struct Item: Sendable {
         var text: String
@@ -216,12 +219,36 @@ public struct TeleprompterFollowController: Sendable {
         var item = item(for: itemID)
         guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }
         item.snapshotRevision = revision
+        // 稳定前缀是**当前原始 ASR 文本**的 Unicode scalar 数（方案 §3.6），
+        // 所以契约校验对着进来的原文做，而不是 `suffix(2048)` 之后存下来的文本。
+        //
+        // 这里要把话说准：改这一处**本身不改变任何匹配结果**。前缀只要不小于存
+        // 下来的长度，取稳定前缀与直接对齐整段存文本得到的是同一段字符串；小于
+        // 时两种写法取的也是同一个数。真正改变行为的只有下面那个 guard——**越界**。
+        let rawScalarCount = text.unicodeScalars.count
         item.text = String(text.suffix(2048))
-        item.stablePrefixCodepoints = stablePrefixCodepoints.flatMap {
-            $0 >= 0 && $0 <= item.text.unicodeScalars.count ? $0 : nil
-        }
+        // 这两行放在守卫之前：契约异常也要**能指到是哪段音频**，否则「可见」只剩
+        // 一个计数器, 复核的人拿不到对应的 sample span.
         item.sampleSpan = sampleSpan
         partialPreview = item.text
+        if let stablePrefixCodepoints {
+            // F-15：「稳定前缀越界或改写 → 契约异常可见，暂停推进而非伪造稳定性」。
+            // 修复前把越界一律折成 nil，于是 else 分支拿**全文**对齐——比「不推进」
+            // 更宽松，方向正好相反。
+            guard stablePrefixCodepoints >= 0, stablePrefixCodepoints <= rawScalarCount else {
+                item.stablePrefixCodepoints = nil
+                stablePrefixContractAnomalies += 1
+                uncertainty = 1
+                if followState != .freePlaying { followState = .catchingUp }
+                items[itemID] = item
+                return
+            }
+            // 越过契约校验之后仍要夹一次——夹的是**我们自己的 2048 截断**，不是
+            // 契约。存下来的是原文的后缀，原前缀落在它里面的部分就是两者的较小值。
+            item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)
+        } else {
+            item.stablePrefixCodepoints = nil
+        }
         if followState == .waitingForSpeech { followState = .listening }
         let match: TeleprompterAligner.Match
         if let stablePrefixCodepoints = item.stablePrefixCodepoints,

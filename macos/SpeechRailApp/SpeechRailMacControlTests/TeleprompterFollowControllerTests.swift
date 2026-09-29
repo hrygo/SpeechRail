@@ -227,6 +227,102 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.position.utf16Offset == 6)
     }
 
+    /// 方案 §3.6 与 F-15：「稳定前缀越界或改写 → 契约异常可见，**暂停推进而非
+    /// 伪造稳定性**」，以及「不静默夹取成『合法』」。
+    ///
+    /// 修复前把越界一律折成 `nil`，于是走 else 分支拿**整段仍在修订的文本**去
+    /// 对齐——比「不推进」更宽松，方向正好相反，而且异常从外面完全看不出来。
+    @Test func anOutOfRangeStablePrefixPausesInsteadOfAligningUnrevisedText() throws {
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "今天我们介绍相机设置。后文稳定性。"
+        )
+
+        func run(_ stablePrefix: Int) throws -> TeleprompterFollowController {
+            var controller = TeleprompterFollowController()
+            let adapter = TeleprompterRealtimeFollowAdapter()
+            _ = adapter.apply(
+                .partialSnapshot(
+                    itemID: "i",
+                    revision: 1,
+                    // 全文 14 个 scalar，稳定前缀只确认前 6 个——后 8 个仍在修订
+                    text: "今天我们介绍相机设置。后文稳定性。",
+                    evidence: .init(stablePrefixCodepoints: stablePrefix)
+                ),
+                metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+                segments: segments,
+                to: &controller
+            )
+            return controller
+        }
+
+        // 前提：合法前缀下跟随只走到第 0 段的第 6 个字，不会因为越界而"没动"
+        // 是被别的原因挡住的。
+        let legal = try run(6)
+        #expect(legal.stablePrefixContractAnomalies == 0)
+        #expect(legal.position.utf16Offset == 6)
+
+        for bogus in [999, -1] {
+            let controller = try run(bogus)
+            #expect(
+                controller.stablePrefixContractAnomalies == 1,
+                "稳定前缀 \(bogus) 越界必须被记成契约异常"
+            )
+            #expect(
+                controller.position.utf16Offset == 0,
+                "越界时必须暂停推进，而不是拿仍在修订的全文去对齐（\(bogus)）"
+            )
+            #expect(
+                controller.followState == .catchingUp,
+                "越界时必须离开跟读咬合，回到「正在跟上」：\(controller.followState)"
+            )
+            #expect(
+                controller.uncertainty == 1,
+                "越界时必须把不确定性顶满，不能让界面显示成跟上了"
+            )
+        }
+    }
+
+    /// 契约校验必须对着**进来的原文**做，不能对着 `suffix(2048)` 之后存下来的
+    /// 文本做——否则一段 2100 字、整段都已稳定的合法假设，会因为「比存下来的文本
+    /// 长」被判成越界：既不推进，又平白记一次契约异常。
+    ///
+    /// 这条同时说明为什么不能只把校验留在存文本上：两条路径在**匹配结果**上一致
+    /// （前缀不小于存文本长度时，取前缀与取整段存文本是同一段字符串），差的是
+    /// **越界判定**，而越界判定决定要不要推进。
+    @Test func aLongHypothesisWhoseStablePrefixExceedsTheStoredBoundIsNotAnAnomaly() throws {
+        // 重复同一句，让「超长」与「尾部可对齐」同时成立。填充异质文字不行：
+        // 对齐器最多只看尾部 72 个 token，一片填充会让它合理地对不上——那测的是
+        // 对齐器，不是这道守卫。
+        let line = "今天我们介绍相机设置。"
+        let text = String(repeating: line, count: 210)
+        let prefix = text.unicodeScalars.count
+        #expect(prefix > 2048, "前提: 稳定前缀确实长于存储上限")
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: text)
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+        _ = adapter.apply(
+            .partialSnapshot(
+                itemID: "i",
+                revision: 1,
+                text: text,
+                evidence: .init(stablePrefixCodepoints: prefix)
+            ),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(
+            controller.stablePrefixContractAnomalies == 0,
+            "稳定前缀落在原文范围内就不是契约异常：\(controller.stablePrefixContractAnomalies)"
+        )
+        #expect(
+            controller.lastMatchedCount > 0,
+            "合法长假设必须照常对齐，不能被 2048 截断误判成越界而停下"
+        )
+    }
+
     /// 目标第 1 条的另一面：一段**远处**的短语不得把视口拽到后面的段落。
     /// 既有回归钉住了远处短语不得向后拖（`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`）
     /// 与整句复述不得倒退（`distantFullSentenceCannotDragTheViewportBackwards`），

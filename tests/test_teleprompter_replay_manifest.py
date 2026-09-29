@@ -42,9 +42,23 @@ SEGMENTS = [
 ]
 
 
-def _capture(*texts: str, kind: str = "snapshot") -> _SESSION_CAPTURE:
+_UNSET = object()
+
+
+def _capture(
+    *texts: str, kind: str = "snapshot", stable_prefix: object = _UNSET
+) -> _SESSION_CAPTURE:
+    """Build a capture; ``stable_prefix`` overrides the per-event prefix length.
+
+    The default stays ``len(text)`` -- a fully confirmed utterance -- so every
+    existing case keeps its meaning. ``None`` builds an event that carries no
+    stable-prefix evidence at all, which is what ``partial`` and ``completed``
+    look like on the wire.
+    """
+
     capture = _SESSION_CAPTURE()
     for ordinal, text in enumerate(texts):
+        prefix = len(text) if stable_prefix is _UNSET else stable_prefix
         capture.events.append(
             _TOOL.CapturedEvent(
                 offset_milliseconds=100 * ordinal,
@@ -53,7 +67,7 @@ def _capture(*texts: str, kind: str = "snapshot") -> _SESSION_CAPTURE:
                 event_id=f"utterance-{ordinal}.1",
                 revision=1,
                 text=text,
-                stable_prefix_codepoints=len(text),
+                stable_prefix_codepoints=prefix,  # type: ignore[arg-type]
             )
         )
     return capture
@@ -642,3 +656,115 @@ def test_load_wave_fixture_requires_24khz_mono_pcm16(tmp_path: Path) -> None:
         output.writeframes(b"\x00\x00" * 100)
     with pytest.raises(ManifestDraftError):
         load_wave_fixture(wrong)
+
+def test_a_stable_prefix_out_of_range_is_a_contract_anomaly_not_a_weak_match() -> None:
+    """F-15: 越界的稳定前缀是契约不一致, 不能夹取成「合法」。
+
+    方案 §3.6: ``stable_prefix_codepoints`` 是**当前原始 ASR 文本**的 Unicode
+    scalar 数。素材侧此前完全不看这个字段, 所以引擎与客户端一旦对不齐, 报告里
+    没有任何痕迹——标注照样给出去, 只是那个数字本身是假的。
+
+    这里刻意**不**按稳定前缀截断标注: 标注的锚点是「人说过的话」——§11.6 写明
+    正常跟随延迟从「人工标注的可识别片段结束」算起——而不是「引擎确认到哪」。
+    按前缀截断那一版量过: 82 条标注改 26 条、失败占比从 0 涨到 48.8%。量完就
+    否掉了, 详见阶段报告 §2.22。这里只保留越界这道契约守卫。
+    """
+
+    line = SEGMENTS[0]
+    bogus_prefix = len(line) + 985
+
+    def build(stable: object) -> tuple[dict, list]:
+        return build_manifest(
+            _capture(line, kind="snapshot", stable_prefix=stable),
+            SEGMENTS,
+            dataset_revision="A_v1-draft",
+            baseline_commit="base",
+            candidate_commit="candidate",
+            policy_revision="policy-1",
+            language_lane="zh",
+            device_class="macbook-builtin-mic",
+        )
+
+    # 前提: 同一段文本在合法前缀下确实拿得到位置, 所以下面断言的不是「匹配不上」
+    legal, _ = build(len(line))
+    legal_labels = legal["labels"]
+    assert isinstance(legal_labels, list)
+    assert "expected_segment_index" in legal_labels[0], "前提: 这段文本本身是可对齐的"
+
+    manifest, review = build(bogus_prefix)
+    labels = manifest["labels"]
+    assert isinstance(labels, list)
+    assert "expected_segment_index" not in labels[0], "越界时不得给出阅读位置"
+
+    flagged = [note for note in review if note["event_index"] == 0]
+    assert len(flagged) == 1, f"越界必须进人工确认清单: {review}"
+    reason = str(flagged[0]["reason"])
+    assert "契约不一致" in reason, reason
+    # 这条与「对齐不足」是两种不同的检查, 混成一句会把人引向错的地方。
+    assert "对齐不足" not in reason, reason
+    assert flagged[0]["stable_prefix_codepoints"] == bogus_prefix, "清单要带上原始数值供核对"
+
+
+def test_a_stable_prefix_within_range_does_not_change_the_labels() -> None:
+    """收窄后的守卫必须是惰性的: 合法前缀下标注一条都不许变。
+
+    这一条是上一条的**反向对照**, 同时钉住「别顺手把标注截断到稳定前缀」——那是
+    量过之后否掉的方案(§2.22)。合法前缀下若有人把标注截到前缀, 位置会掉下来,
+    这里立刻变红。
+    """
+
+    def capture(second_prefix: object) -> _SESSION_CAPTURE:
+        """Event 1 carries text reaching into segment 1, but only part of it is
+        confirmed. Under the rejected truncation variant its label would fall
+        back to segment 0 -- which is exactly what this pins shut."""
+
+        cap = _SESSION_CAPTURE()
+        whole = SEGMENTS[0] + SEGMENTS[1]
+        cap.events.append(
+            _TOOL.CapturedEvent(
+                offset_milliseconds=0,
+                kind="snapshot",
+                item_id="utterance-0",
+                event_id="utterance-0.1",
+                revision=1,
+                text=SEGMENTS[0],
+                stable_prefix_codepoints=len(SEGMENTS[0]),
+            )
+        )
+        cap.events.append(
+            _TOOL.CapturedEvent(
+                offset_milliseconds=900,
+                kind="snapshot",
+                item_id="utterance-1",
+                event_id="utterance-1.1",
+                revision=1,
+                text=whole,
+                stable_prefix_codepoints=second_prefix,  # type: ignore[arg-type]
+            )
+        )
+        return cap
+
+    def build(second_prefix: object) -> dict:
+        manifest, _ = build_manifest(
+            capture(second_prefix),
+            SEGMENTS,
+            dataset_revision="A_v1-draft",
+            baseline_commit="base",
+            candidate_commit="candidate",
+            policy_revision="policy-1",
+            language_lane="zh",
+            device_class="macbook-builtin-mic",
+        )
+        return manifest
+
+    partial = build(len(SEGMENTS[0]))
+    absent = build(None)
+    assert (
+        partial["labels"] == absent["labels"]
+    ), "合法前缀下标注必须与不看该字段时完全一致"
+    labels = partial["labels"]
+    assert isinstance(labels, list)
+    assert labels[1].get("expected_segment_index") == 1, (
+        "前提: 全文对齐能把第二个事件放到第 1 段——"
+        "若有人把标注截断到稳定前缀, 这里会掉回第 0 段"
+    )
