@@ -156,4 +156,34 @@ struct TeleprompterTimingPolicyTests {
             Issue.record("Expected tight, got \(tightConclusion)")
         }
     }
+
+    @Test func anOutOfRangeCalibrationFactorIsClampedToThePolicyBounds() {
+        // 校准倍率来自试读实测，异常值必须夹在策略区间内。断言钉的是**算出来的秒数**
+        // 而不是「夹取后等于边界值」——后者在边界本身被改动时两边一起动，永远成立。
+        // 变异探针 M4 把下界从 0.5 放到 0.0 时，此前全量 712 项无人变红：
+        // 没有任何用例传过区间外的倍率。
+        let metrics = TeleprompterTimingPolicy.countMetrics(
+            in: String(repeating: "中", count: 220)
+        )
+        // 220 汉字、自然档 220 字/分 ⇒ 基准 60 秒；下界 0.5 ⇒ 30 秒，上界 2.0 ⇒ 120 秒。
+        let tooFast = TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics, pace: .natural, calibrationFactor: 0.1
+        )
+        #expect(abs((tooFast.pointSeconds ?? 0) - 30.0) < 0.1)
+
+        let tooSlow = TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics, pace: .natural, calibrationFactor: 9.0
+        )
+        #expect(abs((tooSlow.pointSeconds ?? 0) - 120.0) < 0.1)
+    }
+
+    @Test func theTrialGuidanceComesFromThePolicyRatherThanBeingHardcoded() {
+        // 「建议 60–90 秒」此前是 sheet 里的字面量，而策略里那个 60 是全仓无人读取的
+        // 孤立常量。变异 M5 把常量改成 30 全量无人变红，说明二者从未连在一起。
+        #expect(TeleprompterTimingPolicy.trialGuidanceText == "建议 60–90 秒")
+        #expect(
+            TeleprompterTimingPolicy.minimumTrialDurationSeconds
+                < TeleprompterTimingPolicy.suggestedTrialDurationRange.lowerBound
+        )
+    }
 }

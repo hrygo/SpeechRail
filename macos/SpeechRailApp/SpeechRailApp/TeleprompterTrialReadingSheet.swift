@@ -88,7 +88,10 @@ public struct TeleprompterTrialReadingSheet: View {
                     .font(SpeechRailDesignTokens.Typography.display)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                Text("大声朗读一段代表性文字（建议 60–90 秒），系统将测定你的个人语速并校准预测。")
+                Text(
+                    "大声朗读一段代表性文字（\(TeleprompterTimingPolicy.trialGuidanceText)），"
+                        + "系统将测定你的个人语速并校准预测。"
+                )
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }

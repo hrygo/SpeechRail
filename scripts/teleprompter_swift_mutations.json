@@ -1,0 +1,58 @@
+{
+  "package": "macos/SpeechRailApp",
+  "filter": "",
+  "sanity": {
+    "id": "M0",
+    "note": "稳定前缀上界守卫撤掉（已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+    "find": "guard stablePrefixCodepoints >= 0, stablePrefixCodepoints <= rawScalarCount else {",
+    "replace": "guard stablePrefixCodepoints >= 0 else {"
+  },
+  "mutations": [
+    {
+      "id": "M1",
+      "note": "2048 截断后的稳定前缀不再夹一次",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)",
+      "replace": "item.stablePrefixCodepoints = stablePrefixCodepoints",
+      "expect": "SURVIVED",
+      "rationale": "语义等价，按第 27/33 条规矩作废不计入：唯一的读取点是下一行的 prefix(n)，而 n 大于集合长度时 prefix 返回整个集合，两侧拿到同一段字符串；该字段也不出仓、不落盘、不进评测证据。夹取保留作纵深防御。"
+    },
+    {
+      "id": "M2",
+      "note": "快照修订号改用 >=，同修订重复事件被放行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }",
+      "replace": "guard item.sequence > finalizedSequence, revision >= item.snapshotRevision else { return }",
+      "expect": "KILLED",
+      "rationale": "同修订重复事件必须被丢弃，否则一次重发就会二次推进。"
+    },
+    {
+      "id": "M3",
+      "note": "篇幅预算比 0.95 放到 1.0",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let budgetRatio: Double = 0.95",
+      "replace": "public static let budgetRatio: Double = 1.0",
+      "expect": "KILLED",
+      "rationale": "余量必须留在计划里，否则分段预算会顶满目标时长。窄过滤下这条曾误报存活——过滤范围本身就是结论的一部分。"
+    },
+    {
+      "id": "M4",
+      "note": "校准倍率下界 0.5 放到 0.0",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let minimumCalibrationFactor: Double = 0.5",
+      "replace": "public static let minimumCalibrationFactor: Double = 0.0",
+      "expect": "KILLED",
+      "rationale": "区间外的试读实测值必须夹住；本轮补的回归钉的是夹取后算出的秒数，不是「等于边界值」。"
+    },
+    {
+      "id": "M5",
+      "note": "试读建议时长下界 60 降到 30",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 60...90",
+      "replace": "public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 30...90",
+      "expect": "KILLED",
+      "rationale": "建议时长此前是 sheet 里的硬编码字面量，策略里那个常量全仓无人读取；本轮把文案改为由策略生成，两者从此不可能再漂移。"
+    }
+  ]
+}

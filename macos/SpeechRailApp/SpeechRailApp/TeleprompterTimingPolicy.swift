@@ -18,9 +18,20 @@ public enum TeleprompterTimingPolicy {
 
     /// 试读有效范围
     public static let minimumTrialDurationSeconds: TimeInterval = 30
-    public static let suggestedTrialDurationSeconds: TimeInterval = 60
+    /// 试读建议时长。方案要求 60–90 秒：短于 60 秒样本稳不下来，长于 90 秒
+    /// 用户难以坚持。这段区间此前是 `suggestedTrialDurationSeconds` 一个孤立的
+    /// 下界常量，而 sheet 里显示的「建议 60–90 秒」是另一处硬编码字面量——
+    /// 两者并没有连在一起，变异探针把它从 60 改成 30 时全量 712 项无人变红。
+    /// 现在区间是唯一事实源，文案由它生成。
+    public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 60...90
     public static let minimumCalibrationFactor: Double = 0.5
     public static let maximumCalibrationFactor: Double = 2.0
+
+    /// 试读引导文案。放在策略里而不是 sheet 里，是为了让「建议时长」只有一个
+    /// 事实源；改文案时不必记得同步常量。
+    public static var trialGuidanceText: String {
+        "建议 \(Int(suggestedTrialDurationRange.lowerBound))–\(Int(suggestedTrialDurationRange.upperBound)) 秒"
+    }
 
     /// 快捷目标时长选项（分钟）
     public static let quickTargets: [Int] = [5, 10, 15, 20, 30, 60, 120]
