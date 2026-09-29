@@ -276,4 +276,70 @@ struct TeleprompterCanonicalizerTests {
                 "万亿元是单位而不是数字，不能读成 10000 元")
         #expect(TeleprompterCanonicalizer.values("十万") == ["100000"], "小量级相邻不受影响")
     }
+
+    /// 验收标准第 1 条要求数值变化不得静默通过，而全角数字是从旁边绕过去的：
+    /// `.arabic` 只写 `[0-9]`，`５０` 匹配不上就被 `indexedTokens` 切成 5 / 0 两个
+    /// 单字，数值指纹里**一个数都没有**——提词器不会误跳，但数值保真闸也再也
+    /// 看不见它。`TeleprompterProtectedAtom` 从一开始就同时收 `0-9０-９` 与
+    /// `%|％`，所以这不是排版偏好问题，是同一层里两处规则对「什么算一个数字」
+    /// 已经不一致。
+    ///
+    /// 语料上本仓库只有 22 个全角数字、文档里 0 处，所以量不大；`百分之５０`
+    /// 那一条才是要紧的：百分号一不匹配，规则表里就没有百分比规则接住它，
+    /// 裸量级规则接手把 `百` 读成 100，于是「百分之五十」被读成「100 分」——
+    /// 和第 67 条修掉的量级缺陷是同一类，只是从全角这条缝里又钻进来一次。
+    @Test func fullWidthDigitsAndPercentSignAreTheSameNumber() {
+        for (full, half) in [
+            ("延迟５０毫秒。", "延迟50毫秒。"),
+            ("准确率 99％。", "准确率 99%。"),
+            ("准确率５０％。", "准确率50%。"),
+            // 配对的两侧只差宽度。`三点１４秒` 与 `3.14秒` 不能拿来配对：
+            // 口语小数规则不带单位组，那条差异半角下同样存在，是另一处缺陷。
+            ("三点１４秒。", "三点14秒。"),
+            ("百分之５０。", "百分之50%。"),
+            ("２０２６年。", "2026年。"),
+            ("５万元。", "5万元。"),
+        ] {
+            #expect(
+                TeleprompterCanonicalizer.units(full).map(\.value)
+                    == TeleprompterCanonicalizer.units(half).map(\.value),
+                "全角与半角不是同一个数: \(full) vs \(half)"
+            )
+        }
+
+        #expect(
+            TeleprompterAcceptedReading.numericFingerprint(of: "准确率５０％") == ["50%"],
+            "全角数字必须仍然进得了数值闸"
+        )
+        #expect(
+            TeleprompterAcceptedReading.numericFingerprint(of: "百分之５０。") == ["50%"],
+            "百分之五十不能被读成 100 分"
+        )
+    }
+
+    /// 值可以折，区间不可以。`Script.tokens(forSegmentAt:)` 把每个 token 锚在
+    /// 显示区间上，对齐器返回的位置直接驱动舞台滚动，所以 canonical 值的长度
+    /// 永远不能拿去当源区间的长度——两个方向都会错：全角折半角时值变短
+    /// （`５０毫秒` 值 4 字、源 4 字，恰好相同，所以这一条曾侥幸通过变异），
+    /// 量级词折进数字时值变长（`2万元` → `20000元`，6 字对 3 字，区间会越过
+    /// 数字本身锚到后面的文字上）。两条都由变异 M8 暴露：把区间长度改成
+    /// `value.count`，314 条既有测试没有一条会红。
+    @Test func canonicalValuesFoldButRangesStayOnTheSourceText() {
+        let units = TeleprompterCanonicalizer.units("延迟５０毫秒。")
+        let numeric = units.filter(\.isNumeric)
+        #expect(numeric.count == 1, "全角数字仍是一个数值 token，而不是 5 和 0")
+        #expect(numeric.first?.value == "50毫秒")
+        #expect(numeric.first?.range.start == 2, "区间指向原稿里的 ５")
+        #expect(numeric.first?.range.end == 6, "区间在 秒 之后结束")
+
+        // 归一也不能把两处数字并成一个：句号仍然断得开。
+        let separate = TeleprompterCanonicalizer.units("５０毫秒。５秒")
+        #expect(separate.filter(\.isNumeric).map(\.value) == ["50毫秒", "5秒"])
+
+        // 量级词折进数字后值比源串长，区间仍按源串算。
+        let magnitude = TeleprompterCanonicalizer.units("延迟2万元。").filter(\.isNumeric)
+        #expect(magnitude.first?.value == "20000元")
+        #expect(magnitude.first?.range.start == 2)
+        #expect(magnitude.first?.range.end == 5, "`2万元` 在原稿里只占 3 个 UTF-16 单位")
+    }
 }

@@ -125,9 +125,9 @@ public enum TeleprompterCanonicalizer {
     }
 
     private static let rules: [Rule] = [
-        .init(expression: expression(#"百分之[零一二三四五六七八九十百千万点0-9]+"#), kind: .percentage),
+        .init(expression: expression(#"百分之[零一二三四五六七八九十百千万点"# + digitClass + #"]+"#), kind: .percentage),
         .init(expression: expression(#"[零〇一二三四五六七八九]{4}年"#), kind: .year),
-        .init(expression: expression(#"[零一二三四五六七八九十百千万0-9]+点[零一二三四五六七八九0-9]+"#), kind: .spokenDecimal),
+        .init(expression: expression(#"[零一二三四五六七八九十百千万"# + digitClass + #"]+点[零一二三四五六七八九"# + digitClass + #"]+"#), kind: .spokenDecimal),
         // 十分钟 is untouched by the 分 guard: 钟 is not in the set, so
         // 四十分钟 still canonicalises to 40分 + 钟.
         .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:"# + unitAlternation + #"#)"#), kind: .spokenUnit),
@@ -148,8 +148,30 @@ public enum TeleprompterCanonicalizer {
         // The fidelity gate already treated the two as equivalent; the
         // canonicalizer did not. Fixed here rather than in the aligner so that
         // every consumer of the canonical form benefits at once.
-        .init(expression: expression(#"[0-9]+(?:\.[0-9]+)?(?:[万亿千百])?\s*(?:"# + unitAlternation + #"|%)?"#), kind: .arabic),
+        //
+        // Full-width digits and a full-width percent sign are the same number as
+        // their half-width spellings. A script drafted with a Chinese IME, or
+        // pasted out of a spreadsheet, carries `５０` and `％`; the recogniser
+        // transcribes the spoken form in ASCII. `TeleprompterProtectedAtom` has
+        // accepted both widths from the start, so the canonicalizer was the
+        // only layer still disagreeing -- and it disagreed by cutting the
+        // number into single characters, which put it past the numeric
+        // fidelity gate entirely rather than merely reading it differently.
+        // The `％` matters most: with it unmatched, no percentage rule claims
+        // `百分之５０`, the bare-magnitude rule takes the `百`, and 50 percent
+        // was read as "100 分" -- the same class of defect as 第 67 条, coming
+        // back through the full-width seam.
+        //
+        // Width is normalised in the *value*, never in the source: matching a
+        // pre-folded copy of the text would move every later UTF-16 offset,
+        // and the token ranges anchor the follower's scroll position.
+        .init(expression: expression(digitClass + #"+(?:\."# + digitClass + #"+)?(?:[万亿千百])?\s*(?:"# + unitAlternation + #"|%|％)?"#), kind: .arabic),
     ]
+
+    /// Half-width and full-width digits, declared once. Every pattern that takes
+    /// a digit reads this, so the three numeral rules cannot drift apart on
+    /// width the way the two unit lists had drifted on membership.
+    private static let digitClass = #"[0-9０-９]"#
 
     private static let chineseDigits: [Character: String] = [
         "零": "0", "〇": "0", "一": "1", "二": "2", "两": "2", "三": "3", "四": "4",
@@ -330,10 +352,12 @@ public enum TeleprompterCanonicalizer {
     /// it belongs to, so `2万元` and `两万元` reach the same canonical form. Text
     /// with no magnitude word is returned folded exactly as before.
     private static func arabicValue(_ raw: String) -> String {
-        guard let boundary = raw.firstIndex(where: { !("0"..."9").contains($0) }) else {
+        guard let boundary = raw.firstIndex(where: { asciiDigit($0) == nil }) else {
             return fold(raw)
         }
-        let digits = String(raw[raw.startIndex..<boundary])
+        // `Decimal(string:)` reads ASCII only, so the width has to come off here
+        // rather than being left to `fold` on the fallback path.
+        let digits = String(raw[raw.startIndex..<boundary].map { asciiDigit($0)! })
         let rest = String(raw[boundary...])
         guard let magnitude = rest.first.flatMap({ arabicMagnitudes[$0] }),
               let number = Decimal(string: digits, locale: Locale(identifier: "en_US_POSIX"))
@@ -354,8 +378,8 @@ public enum TeleprompterCanonicalizer {
 
     private static func chineseInteger(_ text: String) -> Int? {
         guard !text.isEmpty else { return nil }
-        if text.utf8.allSatisfy({ (48...57).contains($0) }) {
-            return Int(text)
+        if text.allSatisfy({ asciiDigit($0) != nil }) {
+            return Int(String(text.map { asciiDigit($0)! }))
         }
 
         var total = 0
@@ -388,7 +412,24 @@ public enum TeleprompterCanonicalizer {
     }
 
     private static func asciiDigits(_ text: String) -> String {
-        text.map { chineseDigits[$0] ?? String($0) }.joined()
+        text.map { chineseDigits[$0] ?? asciiDigit($0).map(String.init) ?? String($0) }.joined()
+    }
+
+    /// The ASCII digit a character denotes, in either width. Full-width digits
+    /// are U+FF10–FF19, ten codepoints above ASCII, so the offset is exact
+    /// rather than a table.
+    private static func asciiDigit(_ character: Character) -> Character? {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1
+        else { return nil }
+        switch scalar.value {
+        case 0x30...0x39:
+            return character
+        case 0xFF10...0xFF19:
+            return Character(UnicodeScalar(0x30 + (scalar.value - 0xFF10))!)
+        default:
+            return nil
+        }
     }
 
     private static func fold(_ value: String) -> String {
