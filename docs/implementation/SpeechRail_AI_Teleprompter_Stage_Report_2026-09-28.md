@@ -970,6 +970,10 @@ Python 里更常见的是「调用一个不点名的清理函数」（`_release_
 - 设备异常文案：`BlockReason.inputDeviceUnavailable` 是新增枚举分支，回退到上一版即可；旧分支 `serviceNotReady` 保持原样，不涉及持久化数据。
 - 改稿失效修复：`updateSourceText` 现在清空 `readingBlocks`／`reviewItems`，与 `updateContentSelection` 一致；这两项本来就来自上一轮候选，回退不会恢复错误状态，也不需要迁移。
 - 第二十一／二十二轮新增的两处键盘快捷键（`⌘⌥V` 手动接管、`⌘⏎` 采用候选）**彼此独立、删一行即回退**，不涉及会话层或持久化。其中 `⌘⌥V` 与舞台规格第 101 行有张力（详见 §2.10），若接手方决定严格回到「只用 Tab」路线，回退方式与功能影响已写在该节。
+- 第二十七至三十轮改的三处**只在工具链里，不在 App 运行路径上**，回退互不影响：
+  - 第 55 条（报告的草稿声明）：只加 caveat、不改 `teleprompter.eval.v1` schema。回退＝删掉 `caveats(for:…)` 里那一段；代价是退回「机器草稿读起来像一次测量」。
+  - 第 56 条（对齐器重投递打分）：只改 `tools/build_teleprompter_replay_manifest.py` 的 `ScriptAligner.align`。回退＝把重投递分支还原成 `ratio = 1.0`；代价是噪声与稿件外重复片段重新拿到阅读位置，停顿计数被抬高。**已复核过的人工标注 manifest 不受影响**——回放器只读 `labels`，不重跑对齐。
+  - 视图层与前向推进的两条回归：纯新增用例，回退＝删测试，生产代码一行未动。
 
 ## 7. 复现方式
 
