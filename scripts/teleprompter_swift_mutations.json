@@ -260,6 +260,105 @@
       "replace": "        self.provisionalMinimumMatches = provisionalMinimumMatches",
       "expect": "SURVIVED",
       "rationale": "**生产不可达的纵深防御**，与 M23 同因：全仓没有任何生产代码带参构造 `TeleprompterFollowPolicy`，默认值永远走 init 里的字面量，这个下界夹取只对「有人注入 0 或负数」有意义。留着作纵深防御，按第 27/33 条规矩不计入存活。"
+    },
+    {
+      "id": "M29",
+      "note": "候选稿把含保护字面量的整段删空时不再报差异",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        return expected == actual",
+      "replace": "        return expected == actual || actual.isEmpty",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条「数值、单位、正负号变化不得静默通过」。原句里的 50 瓦被 AI 整段删掉后，候选侧一个原子都没有，两侧不等必须报出；加上 actual.isEmpty 之后删除反而被当成一致。"
+    },
+    {
+      "id": "M30",
+      "note": "保护字面量按集合比较，重复次数变化被折叠",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        return expected == actual",
+      "replace": "        return Set(expected) == Set(actual)",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条明写「重复内容变化不得静默通过」。原句「50 瓦…50 瓦」被改成只留一处时，序列比较必须报出；集合比较把两个相同的 50 瓦折叠成一个，于是重复次数的变化静默通过。"
+    },
+    {
+      "id": "M31",
+      "note": "Unicode 负号不再归一，改用另一种写法即可绕过闸门",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "                case \"−\", \"﹣\", \"–\", \"—\":\n                    return String(\"-\")",
+      "replace": "                case \"−\", \"﹣\", \"–\", \"—\":\n                    return String(scalar)",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条点名「正负号」。−(U+2212) 与 ASCII - 必须归一成同一个原子，否则 AI 只把减号换成排版相近的短划就绕过整道闸门；两侧会得到不同的 canonicalValue。"
+    },
+    {
+      "id": "M32",
+      "note": "数字与单位之间的空格不再丢弃",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "                    if scalar.properties.isWhitespace {\n                        return \"\"\n                    }",
+      "replace": "                    if scalar.properties.isWhitespace {\n                        return String(scalar)\n                    }",
+      "expect": "KILLED",
+      "rationale": "这是 canonicalize 里唯一会把空白放进原子的地方（数字 pattern 的单位前 \\s*）。丢掉它之后 50 元 与 50元 会变成两个不同原子，纯排版改写被误判成数值变化并送人工审阅；该注释已写明保留空白曾造成的后果。"
+    },
+    {
+      "id": "M33",
+      "note": "去掉重叠抑制，同一段文本里相交的匹配都会被收进原子表",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard !acceptedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {",
+      "replace": "            guard !acceptedRanges.contains(where: { NSIntersectionRange($0, match.range).length < 0 }) else {",
+      "expect": "KILLED",
+      "rationale": "重叠抑制按匹配位置与优先级决定谁胜出（url 0、标识符 2、数字 3）。去掉之后 50 瓦 会同时贡献 50 与 50瓦 两个原子，原子序列凭空多一项，两侧比较因此恒不相等——正常稿件会被整片误拒。"
+    },
+    {
+      "id": "M34",
+      "note": "原子值不再剥离句尾标点",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            let rawValue = String(text[swiftRange]).trimmingCharacters(in: trailingPunctuation)",
+      "replace": "            let rawValue = String(text[swiftRange])",
+      "expect": "KILLED",
+      "rationale": "句末的 https://example.com。 必须与句中的同一个 URL 归成同一个原子，否则仅因为标点位置不同就报成变化并送人工审阅。**这里只影响 URL 一类**：数字 pattern 的结尾 lookahead 使它从不越过标点，剥离对数字是空操作——这一点是补回归时才发现的，首轮我先拿「50 瓦。」写用例，结果该用例在变异下依然全绿，才暴露出我选错了输入。已改为 URL 用例，变异被杀 4 条。"
+    },
+    {
+      "id": "M35",
+      "note": "分组区间只查重叠、不查缺口",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.startUnit == next else {",
+      "replace": "            guard group.startUnit >= next else {",
+      "expect": "KILLED",
+      "rationale": "start_unit 必须严格接上一组的 end_unit。写成 >= 之后 group.startUnit > next 的缺口被放过，被跳过的分片在这轮分组里彻底消失，而它们后面还要逐块送去改写——漏掉的段落会静默保留原文却仍被算进结果。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.rangeGap` 来自循环内那道守卫（既有用例的缺口恰好被循环末尾的总覆盖兜底接住）。"
+    },
+    {
+      "id": "M36",
+      "note": "分组区间不再校验上界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.endUnit > group.startUnit, group.endUnit <= targets.count else {",
+      "replace": "            guard group.endUnit > group.startUnit else {",
+      "expect": "KILLED",
+      "rationale": "end_unit 越过 targets.count 会让后面的 sourceUnit 取下标越界。去掉上界不是「更宽松」而是把一个明确的拒绝换成崩溃或错位取值。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.rangeBounds` 这条诊断码。"
+    },
+    {
+      "id": "M37",
+      "note": "单组分片数上限形同虚设",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.endUnit - group.startUnit <= maxGroupUnits else {",
+      "replace": "            guard group.endUnit - group.startUnit <= Int.max else {",
+      "expect": "KILLED",
+      "rationale": "maxGroupUnits 是单次请求的分片上限，超限必须以 group_limit 明确拒绝。放宽到 Int.max 之后超限稿件会一路走到请求 LLM 的一侧才失败，错误从「稿件过大」退化成传输失败。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.groupLimit` 这条诊断码。"
+    },
+    {
+      "id": "M38",
+      "note": "接受一个不认识的 grouping schema 版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        guard payload.schemaVersion == \"teleprompter.grouping.v1\" else {",
+      "replace": "        guard payload.schemaVersion == \"teleprompter.grouping.v2\" else {",
+      "expect": "INVALID",
+      "rationale": "声明为 INVALID 而非 KILLED，且**首轮的分类理由是错的**：把 schema_version 改成 v2 之后，测试进程在 490 项（基线 722）处 `Fatal error: Index out of range` 中断，而探针的 `classify()` 对测试输出跑编译错误正则，崩溃行里 `error: Process ... signal code 5` 恰好被命中，于是记成「does not compile」。结论对、理由错，已据此修探针（见本轮提交）。手动单验确认它是崩溃而不是干净击杀：同一变异手动跑完整结束、15 条失败、0 编译错误。"
+    },
+    {
+      "id": "M39",
+      "note": "源分片 id 的连续性不再校验",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        guard targets.enumerated().allSatisfy({ $0.element.id == targets[0].id + $0.offset }) else {",
+      "replace": "        guard targets.enumerated().allSatisfy({ _ in true }) else {",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御，但比 M23／M28 更值得盯**：全仓只有 4 处构造 `TeleprompterSourceUnit`（PreparationDomain:277、Session:3009／3025、V2Store:572），id 分别是 `units.count`、builder 给的 `unit.id` 与常量 0，全部连续，因此这道守卫在产品路径上不可观测。它抛的 `invalidSourceUnits` 在整个测试目录里**一次都没出现过**，补它的前提是先造出非连续 id 的素材。\n\n**这条变异给过相反读数，凶手已定位**：全量探针 5 次里有 3 次记 KILLED，隔离跑 6/6 全绿、干净树 5/5 全绿、8 倍 CPU 负载下全量 6/6 全绿。逐条抓失败用例名后，凶手是**`observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics`**，它报的断言是 `eventText.split(separator: \"\\n\").count == 4` 实测 5 或 8、`metricLines.count == 1` 实测 2——一个全新 UUID 临时目录里的文件多出若干行，且每次行数不同。**它与提词器分组、源分片、本变异毫无关系**，因此本变异是存活。该失败只在紧跟 M38（会崩溃的变异）之后出现，机制未确定，已登记为开放缺陷。**对探针的影响要写清楚**：一个无关测试的间歇失败会把存活读成击杀，与第 33 条「探针没跑起来导致全部假报 KILLED」是镜像情形。据此得到的校准是：**失败数 ≥5 的击杀不能由单个 flaky 测试解释，失败数 1–4 的击杀需要复跑确认**。"
     }
   ]
 }

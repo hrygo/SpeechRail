@@ -210,6 +210,83 @@ struct TeleprompterPreparationPromptsTests {
         }
     }
 
+    /// Four units with contiguous ids, built explicitly rather than derived from
+    /// a fixture so that gap arithmetic below lands on exact numbers.
+    private func fourUnits() -> [TeleprompterSourceUnit] {
+        (0..<4).map { index in
+            .init(
+                id: index,
+                ordinal: index,
+                sourceRevisionID: "r",
+                sourceRange: .init(start: index * 2, end: index * 2 + 2),
+                rawText: "句\(index)。",
+                continuation: false,
+                budgetUnits: 12
+            )
+        }
+    }
+
+    @Test func aGapThatALaterGroupCompensatesForIsRejectedWithItsOwnBlockIndex() throws {
+        let units = fourUnits()
+        // Unit 1 is skipped, but the second group ends exactly at the last unit,
+        // so a decoder that only checks total coverage after the loop would
+        // accept this response and silently drop unit 1 from the rewrite. The
+        // in-loop guard has to be the one that fires, which is why the
+        // diagnostic has to carry this group's own index.
+        let compensated = """
+        {"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":1},{"start_unit":2,"end_unit":4}]}
+        """
+        do {
+            _ = try TeleprompterGroupingDecoder().decode(compensated, targets: units, maxGroupUnits: 8)
+            Issue.record("a skipped source unit must be rejected even when the totals add up")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .rangeGap)
+            #expect(error.diagnostic?.fieldPath == "groups[1].start_unit")
+            #expect(error.diagnostic?.sourceUnit == 2)
+        }
+    }
+
+    @Test func aGroupRunningPastTheLastSourceUnitReportsRangeBounds() throws {
+        let units = fourUnits()
+        let overrun = """
+        {"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":99}]}
+        """
+        do {
+            _ = try TeleprompterGroupingDecoder().decode(overrun, targets: units, maxGroupUnits: 8)
+            Issue.record("an end_unit past the last source unit must be rejected")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .rangeBounds)
+            #expect(error.diagnostic?.fieldPath == "groups[0]")
+        }
+    }
+
+    @Test func aGroupLargerThanTheRequestLimitReportsGroupLimit() throws {
+        let units = fourUnits()
+        let oversized = """
+        {"schema_version":"teleprompter.grouping.v1","groups":[{"start_unit":0,"end_unit":4}]}
+        """
+        do {
+            _ = try TeleprompterGroupingDecoder().decode(oversized, targets: units, maxGroupUnits: 1)
+            Issue.record("a group wider than the per-request limit must be rejected")
+        } catch let error as TeleprompterPreparationError {
+            #expect(error.diagnostic?.code == .groupLimit)
+            #expect(error.diagnostic?.fieldPath == "groups[0]")
+        }
+    }
+
+    @Test func aTrailingFullStopIsNotAbsorbedIntoAProtectedAtom() {
+        // The number pattern stops before punctuation, so it can never carry a
+        // full stop into the atom and trimming is a no-op there. The URL
+        // pattern is `[^\s]+` and does swallow it, so that is where the
+        // trimming has to hold: without it a URL at the end of a sentence
+        // becomes a different atom from the same URL mid-sentence, and a
+        // lossless rewrite gets sent to manual review.
+        let atEnd = TeleprompterProtectedLiteralExtractor.atoms(from: "详见 https://example.com。")
+        let midSentence = TeleprompterProtectedLiteralExtractor.atoms(from: "详见 https://example.com 然后")
+        #expect(atEnd.map(\.rawValue) == ["https://example.com"])
+        #expect(atEnd.map(\.canonicalValue) == midSentence.map(\.canonicalValue))
+    }
+
     @Test func rewriteRejectsUnknownAndDuplicateBlockIDs() throws {
         let groups = [
             TeleprompterRewriteGroup(

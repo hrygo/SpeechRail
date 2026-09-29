@@ -102,3 +102,35 @@ def test_an_undeclared_invalid_mutation_fails_the_run() -> None:
     # result it cannot interpret, and that must not pass silently.
     aborted = _PROBE.Verdict(_PROBE.INVALID, "process aborted", 456, 0)
     assert _PROBE.unexplained_invalid([(_mutation("surprise", ""), aborted)]) == ["surprise"]
+
+
+def test_a_crash_is_not_reported_as_a_build_failure() -> None:
+    # Round 59: the guard the mutation removed was being read as "does not
+    # compile" when the run had actually trapped. The crash line reads
+    # `... error: Process '...' exited with unexpected signal code 5`, and the
+    # compile-error regex matched the `error: ` inside it. The verdict was
+    # right by accident; the reason is what tells a reader whether anything
+    # was actually exercised, so it has to name the crash.
+    output = (
+        "\u2718 Test groupingRejects() failed after 0.011 seconds with 1 issue.\n"
+        "Swift/ContiguousArrayBuffer.swift:695: Fatal error: Index out of range\n"
+        "\u2718 helper error: Process 'swiftpm-testing-helper' exited with "
+        "unexpected signal code 5\n"
+    )
+    verdict = _PROBE.classify(1, output)
+    assert verdict.status == _PROBE.INVALID
+    assert "crashed" in verdict.detail
+    assert "compile" not in verdict.detail
+    # The failures seen before the trap are still reported rather than dropped.
+    assert verdict.failed == 1
+
+
+def test_a_failure_message_containing_error_is_still_a_kill() -> None:
+    # The other half: a genuine kill whose assertion text happens to contain
+    # `error: ` must not be downgraded to INVALID, or a real kill is lost.
+    output = (
+        "\u2718 Test rejectsABadPayload() failed after 0.011 seconds with 1 issue.\n"
+        "  error: unexpected schema_version in the grouping response\n"
+        "\u2718 Test run with 4 tests in 1 suite failed after 0.2 seconds.\n"
+    )
+    assert _PROBE.classify(1, output).status == _PROBE.KILLED

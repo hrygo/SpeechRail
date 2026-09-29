@@ -53,6 +53,17 @@ _SWIFT_TESTING_PASSED = re.compile("^✔ Test .* passed", re.MULTILINE)
 _XCTEST_FAILED = re.compile("^Test Case '.*' failed", re.MULTILINE)
 _XCTEST_PASSED = re.compile("^Test Case '.*' passed", re.MULTILINE)
 _COMPILE_ERROR = re.compile(r"^(?:.*:\d+:\d+: )?error: ", re.MULTILINE)
+# A trap inside the test process is not a build failure, but its report line
+# reads `... exited with unexpected signal code 5`, and `_COMPILE_ERROR`
+# matches the `error: ` inside it. Checking the build is `_measure`'s job --
+# `compiles()` already refuses to run tests at all when the build fails -- so
+# a crash reaching `classify` has to be recognised before the compile rule
+# gets to mislabel it "does not compile". Round 59: M38 was recorded with the
+# right verdict and the wrong reason, and the reason is what tells a reader
+# whether the guard the mutation removed is being exercised at all.
+_TEST_CRASH = re.compile(
+    r"Fatal error:|exited with unexpected signal code|Trace/BPT trap"
+)
 # swift-testing closes with a summary line -- "Test run with 322 tests in 16
 # suites passed" -- that the pattern above also matches. It is a total, not a
 # test, and counting it inflates every tally in the report by one per run.
@@ -91,7 +102,16 @@ def _run(command: list[str], cwd: Path) -> tuple[int, str]:
 
 
 def classify(exit_code: int, output: str) -> Verdict:
-    """Turn one test run into a verdict without guessing."""
+    """Turn one test run into a verdict without guessing.
+
+    The tally is a count of output lines, not of tests, and it is *not* bounded
+    by the number of tests in the suite: a run that kills N tests reports
+    `passed + N + 5` against a baseline of `passed`. The constant 5 shows up on
+    every observed run here, including the sanity mutation, so `passed + failed
+    <= baseline` is not a valid invariant and an earlier attempt to enforce it
+    refused the sanity kill. What the numbers *can* be used for is the
+    pass/fail split itself; the absolute total is context, not a bound.
+    """
     tallied = _SWIFT_TESTING_SUMMARY.sub("", output)
     passed = len(_SWIFT_TESTING_PASSED.findall(tallied)) + len(
         _XCTEST_PASSED.findall(tallied)
@@ -99,6 +119,17 @@ def classify(exit_code: int, output: str) -> Verdict:
     failed = len(_SWIFT_TESTING_FAILED.findall(output)) + len(
         _XCTEST_FAILED.findall(output)
     )
+    if _TEST_CRASH.search(output):
+        # Checked before the failure tally on purpose: a run that dies partway
+        # never reached the tests after it, so its failures are not evidence
+        # that anything was caught. The count is kept in the detail so nothing
+        # is lost.
+        return Verdict(
+            INVALID,
+            f"test process crashed after {failed} failing",
+            passed,
+            failed,
+        )
     if _COMPILE_ERROR.search(output):
         return Verdict(INVALID, "does not compile", passed, failed)
     if passed == 0 and failed == 0:
@@ -176,9 +207,40 @@ _CLASSIFY_FIXTURES: tuple[tuple[str, int, str, str, str, int, int], ...] = (
         "\u2714 Test run with 38 tests in 2 suites passed after 0.5 seconds.\n"
         "Fatal error: Unexpectedly found nil\n",
         INVALID,
-        "no failure line",
+        "crashed",
         1,
         0,
+    ),
+    (
+        # The round-59 lesson: this run is genuinely invalid, but the reason
+        # the probe used to record was "does not compile" -- the crash report
+        # reads `... error: Process '...' exited with unexpected signal code
+        # 5`, and the compile-error regex matched the `error: ` inside it.
+        "test process crashes partway through",
+        1,
+        "\u2718 Test groupingRejects() failed after 0.011 seconds with 1 issue.\n"
+        "\u2718 Test run with 4 tests in 1 suite failed after 0.2 seconds.\n"
+        "Swift/ContiguousArrayBuffer.swift:695: Fatal error: Index out of range\n"
+        "\u2718 result.fallbackBlockCountererror: Process 'swiftpm-testing-helper' "
+        "exited with unexpected signal code 5\n",
+        INVALID,
+        "crashed after 2 failing",
+        0,
+        2,
+    ),
+    (
+        # The other half of the same lesson: a failure message that happens to
+        # contain `error: ` is still a kill. Without the crash rule ordered
+        # first this run is reported INVALID, and a real kill is lost.
+        "failure text containing the word error",
+        1,
+        "\u2718 Test rejectsABadPayload() failed after 0.011 seconds with 1 issue.\n"
+        "  error: unexpected schema_version in the grouping response\n"
+        "\u2718 Test run with 4 tests in 1 suite failed after 0.2 seconds.\n",
+        KILLED,
+        "failing",
+        0,
+        2,
     ),
 )
 
