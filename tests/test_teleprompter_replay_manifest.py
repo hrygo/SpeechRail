@@ -476,6 +476,49 @@ def test_a_near_confident_match_still_claims_its_position() -> None:
     assert labels[1].get("expected_segment_index") == 1
 
 
+def test_a_keyword_sized_match_never_moves_the_reading_position() -> None:
+    """F-19: a two-character match is not evidence of a reading position.
+
+    比例是 `matched / len(needle)`, 所以一个两字的碎片只要出现在稿件里就拿到
+    `ratio = 1.0`. Swift 跟随控制器有 `provisionalMinimumMatches` 挡住这一族,
+    素材侧此前没有对应的一道.
+
+    真实 41 秒素材实测: 82 个事件里 21 个匹配只有 1-3 字, 它们**一个字符都没
+    推进游标**; 29 次真正的推进里最小匹配是 5 字. 所以 4 字这道闸门拦得住
+    「仅凭关键词推进」, 且不碰真实素材.
+    """
+
+    keyword = "先看"
+
+    aligner = ScriptAligner(index=SegmentIndex.build(SEGMENTS))
+    assert aligner.align(SEGMENTS[0], cumulative=True).segment_index == 0
+    ratio, start, end = aligner._best_match(normalize_text(keyword))
+    assert ratio == 1.0, "前提: 这两个字确实完整地出现在稿件里"
+    assert start - aligner.cursor <= _TOOL.ALIGN_MAX_ADVANCE_CHARS, "前提: 它并不远"
+    assert end - aligner.cursor > 0, "前提: 它确实落在已确认位置之前, 有能力推进"
+
+    manifest, review = build_manifest(
+        _capture(SEGMENTS[0], keyword),
+        SEGMENTS,
+        dataset_revision="A_v1-draft",
+        baseline_commit="base",
+        candidate_commit="candidate",
+        policy_revision="policy-1",
+        language_lane="zh",
+        device_class="macbook-builtin-mic",
+    )
+    labels = manifest["labels"]
+    assert isinstance(labels, list)
+    # 位置仍然给「读者确实到达的地方」, 而不是不给位置: 事件本身是有效朗读证据.
+    assert labels[1].get("expected_segment_index") == 0
+    assert labels[1]["intent"] == "read"
+
+    flagged = [note for note in review if note["event_index"] == 1]
+    assert len(flagged) == 1, f"关键词级匹配必须进人工确认清单: {review}"
+    reason = str(flagged[0]["reason"])
+    assert "匹配仅 2 字" in reason, reason
+
+
 def test_the_review_sidecar_shows_how_far_each_flagged_match_reached() -> None:
     """The sidecar showed match quality but not match distance.
 
