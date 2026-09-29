@@ -321,6 +321,18 @@ def recover_after_crash(package: Path, test_filter: str) -> tuple[bool, str | No
     Reading that run as a kill would be a false verdict, and the probe only
     ever checked for a clean baseline once, at the start.
 
+    The residue turned out to be stale build products, not a flaky test or a
+    product defect. Dumping the file that test asserts on showed records in two
+    different JSON shapes: some carrying `schemaVersion` and `component`, some
+    carrying neither and ordering their keys differently -- i.e. an object file
+    compiled against an older `TeleprompterAIObservationRecorder`. The abort
+    interrupted the build, and the next `swift test` linked a mixture, so the
+    recorder wrote records the current struct no longer produces. That also
+    explains the otherwise baffling parts: a freshly created UUID directory
+    still gained whole extra lines, the count varied run to run, and it never
+    happened on a clean build. Re-running rebuilds and the suite is consistent
+    again, which is why one retry is the right amount.
+
     Returns `(ok, note)`. `ok` is False when the suite never went back to
     green, and the caller must not interpret anything after it. `note` is
     None when the run after the crash was already clean, and otherwise
