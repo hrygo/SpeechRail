@@ -2169,6 +2169,16 @@ M38 把 grouping 的 `schemaVersion` 守卫改成 v2，于是分组提示词带 
 
 本轮因此把 M38 由 `INVALID` 升级为 `KILLED` 并重写了它的 `rationale`。**这不是把读数改成好看的，而是把「当时观测不到」换成「现在观测得到」。**
 
+## 变异验证的 CI 形态：**按需触发，不进常规门禁**
+
+探针此前只能在本机跑，接手方拿到的是一个脚本和一份 spec，却没有任何「怎么跑、要跑多久、退出码怎么读」的入口。本轮补上 `.github/workflows/teleprompter-mutation.yml`，但**它只有 `workflow_dispatch`，刻意不挂 push／pull_request**：
+
+- **耗时**：143 条在本机约 45 分钟，CI runner 更慢，因此 job 超时给到 120 分钟；
+- **工作区不干净**：探针按设计会真实改写 Swift 源码再还原，运行期间工作区一直是脏的；
+- **并发语义**：`cancel-in-progress: false`。挂上常规触发会让每一次提交都等它，也会让两次长跑互相取消。
+
+常规门禁仍然只有 `ci.yml`；这条 workflow 是它的**补充，不是替代**。同时 `docs/developers/testing-acceptance.md` 补了退出码语义表（0 可引用 / 1 不可引用 / 2 拒绝解读）与「不要接管道」的跑法——`ci.yml` 里那步同样不接管道，退出码直接从探针收下来。
+
 ## 16 条存活：一条按形态判等价，其余全是真缺口
 
 - **F15（重试等待不再要求延迟为正）等价变异**：`Task.sleep(for: .seconds(0))` 本身就是空操作，去掉判断不改变可观测行为。

@@ -1,0 +1,91 @@
+name: Teleprompter Mutation
+
+# 按需触发，**不进常规门禁**。
+#
+# 这条 workflow 跑 `scripts/swift_mutation_probe.py`：它对每个 Swift 变异
+# 真实改一次源码、重跑整套 `swift test`，所以**耗时以小时计**（143 条在本机
+# 约 45 分钟，CI runner 更慢），而且它的工作区在运行期间一直是脏的。把它挂在
+# push / pull_request 上会同时拖慢每一次提交、并让长跑互相取消，因此这里只保留
+# `workflow_dispatch`。
+#
+# 常规门禁仍然是 `.github/workflows/ci.yml`；本 workflow 是它的补充，不是替代。
+# 需要刷新变异证据时手工触发，并按 §5 的登记项核对读数。
+#
+# 退出码语义（探针自己的纪律，改动前先读 scripts/swift_mutation_probe.py）：
+#   0  基线绿、sanity 被杀，且每条变异的实测与 spec 的 expect 一致；
+#   1  有变异不再符合 spec 的声明（读数变了或 rationale 过期）；
+#   2  基线不绿或 sanity 未被杀——**拒绝解读全部结果**，此时不得引用任何读数。
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "变异 spec 路径（留空则跑全量）"
+        required: false
+        default: "scripts/teleprompter_swift_mutations.json"
+
+permissions:
+  contents: read
+
+# 不自动取消：一次变异全量要跑很久，被中途取消的读数没有价值。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.12.13"
+
+jobs:
+  mutation:
+    name: Swift mutation probe
+    runs-on: macos-26
+    # 143 条在本机约 45 分钟；CI runner 更慢，超时给到两小时。
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify Apple toolchain and arm64 runner
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -F 'macOS 26'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      # 探针只用标准库，`--no-project` 是为了不去同步项目、也不去触发
+      # 构建原生 worker 的 hook——本 job 只改 Swift 源码、跑 swift test，
+      # 不需要 Python 侧的任何依赖或构建产物。
+      - name: Set up Python 3.14.7
+        run: uv python install 3.14.7
+
+      - name: Run mutation probe
+        run: |
+          # 不接管道：接了管道，$? 取到的是 tee 的退出码，而 tee 永远成功——
+          # 阶段报告 §2.51 记的就是这一次自我 mistake（曾据此把 exit 1 写成 exit 0）。
+          # 这里把退出码直接从探针收下来，和 ci.yml 里等 wheel 构建用的是同一个形态。
+          set +e
+          uv run --no-project --python 3.14.7 \
+            python scripts/swift_mutation_probe.py "${{ inputs.spec }}" \
+            > probe.log 2>&1
+          status=$?
+          set -e
+          cat probe.log
+          echo "probe exit code: ${status}"
+          exit "${status}"
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: teleprompter-mutation-probe-log
+          path: probe.log
+          if-no-files-found: warn
+          retention-days: 7

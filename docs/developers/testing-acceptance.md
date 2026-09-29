@@ -26,6 +26,33 @@ GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy�
 
 版本 tag release 还会并行构建 unsigned arm64 DMG。发布前核对 tag、App bundle 版本、App 架构、DMG 可挂载内容和 wheel/DMG checksum；最终 Release 资产为 wheel、`SpeechRail-<version>-macOS-arm64.dmg` 和 `SHA256SUMS`。GitHub 上生成的 DMG 不做 Developer ID、notarization 或 staple，因此不能替代本机正式分发验收。
 
+### AI 提词器变异验证（**按需触发，不进常规门禁**）
+
+Swift 侧的定向变异验证由 `scripts/swift_mutation_probe.py` + `scripts/teleprompter_swift_mutations.json`
+承担，跑在 `.github/workflows/teleprompter-mutation.yml`。**这条 workflow 只有 `workflow_dispatch`：**
+它对每条变异真实改一次源码、重跑整套 `swift test`，耗时以小时计（runner 上限设为 120 分钟），
+且运行期间工作区一直是脏的。挂在 push／pull_request 上会拖慢每一次提交，并让长跑互相取消。
+**常规门禁仍然只有 `ci.yml`；需要刷新变异证据时在 Actions 页手工触发。**
+
+退出码即结论，改动脚本前先读它自己的文档串：
+
+| 退出码 | 含义 | 允许的引用 |
+|---|---|---|
+| 0 | 基线全绿、`sanity` 变异被杀，且每条变异的实测与 spec 的 `expect` 一致 | 可以引用全部读数 |
+| 1 | 有变异不再符合 spec 声明（读数变了，或 `rationale` 过期） | **不可**引用任何读数，先修 spec 或修被测代码 |
+| 2 | 基线不绿或 `sanity` 未被杀 | **不可**引用任何读数；探针拒绝解读是有意的 |
+
+本地跑法与 CI 相同，且**退出码必须取自探针本身**：
+
+```bash
+cd <path-to-SpeechRail>
+python3 scripts/swift_mutation_probe.py scripts/teleprompter_swift_mutations.json > probe.log 2>&1
+echo "exit=$?"
+```
+
+**不要把探针接管道**（`| tail`、`| tee`）：那样 `$?` 取到的是最后一个管道的退出码，而它永远成功。
+阶段报告 §2.51 记的就是这一次自我 mistake——曾据此把 `exit 1` 写成 `exit 0`。
+
 官方 Node SDK 的分人 multipart wire contract 单独锁定在 `tests/openai-sdk-node/`，不参与服务的
 运行时依赖：
 
