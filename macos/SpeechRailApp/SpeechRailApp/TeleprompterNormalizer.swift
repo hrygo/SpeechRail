@@ -215,10 +215,26 @@ public enum TeleprompterCanonicalizer {
     /// reads this list to prove every unit here is also a protected literal.
     /// Adding a unit here without teaching `TeleprompterProtectedAtom` about it
     /// would let a rewrite change that unit silently.
+    ///
+    /// `点` is deliberately **not** here, matching the server's `_UNIT_RE`.
+    /// Of the 109 `X点` occurrences in this repository's documents, the
+    /// overwhelming majority are ordinary words — `这一点`, `短一点`,
+    /// `第二点`, `同一点` — and reading those as quantities invents numbers the
+    /// author never wrote, straight into the numeric fingerprint. What the
+    /// choice costs is recorded rather than glossed: a bare clock hour
+    /// (`三点`, `十点`) stops being a number. Keeping `点` would not have
+    /// recovered a time reading either — `七点半` canonicalised as `7点` + `半`,
+    /// which is a quantity, not a clock. The same misreading is registered
+    /// against the model in #95's certification (`synth-zh-number-10`), and the
+    /// server reached this decision earlier; the reasoning is in §2.25 of the
+    /// stage report.
+    ///
+    /// `点` still serves as the decimal separator inside `.spokenDecimal` and
+    /// `.percentage`, which do not read this list. `三点五` is still `3.5`.
     static let unitSuffixes = [
         "公斤", "千克", "毫升", "厘米", "毫米", "毫秒", "小时", "美元", "公里",
         "年", "元", "米", "岁", "号", "楼", "月", "日", "倍", "个", "人", "次",
-        "天", "分", "秒", "点", "份", "吨",
+        "天", "分", "秒", "份", "吨",
     ]
 
     /// The same list as a regex alternation. `分` is the one member that needs

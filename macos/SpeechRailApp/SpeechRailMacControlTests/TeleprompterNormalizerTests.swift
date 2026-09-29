@@ -368,13 +368,68 @@ struct TeleprompterCanonicalizerTests {
 
         // 点前点后的成员是**量出来的边界**，不是完备规则：语料上点前用 `〇` 0 处、
         // 点后用 `〇` 0 处、点后用 `两` 仅 1 处且是假阳性（`落点两块`）。当前成员
-        // 与服务端 `_DECIMAL_RE` 逐字一致。变异 N2（把 `两` 也放进点后类）与
+        // 点前类里的 `两` 是本仓比服务端 `_DECIMAL_RE` 多出来的一处（服务端
+        // 点前类没有 `两`，所以 `两点五` 在服务端原样不动）—— 理由见 §2.30。
+        // 变异 N2（把 `两` 也放进点后类）与
         // N3（把 `〇` 放进点前类）在 1170 条小数矩阵上各改变 72 条行为，
         // 两者都能让本套件全绿——所以边界必须写死，否则它是意外而不是决定。
         #expect(TeleprompterCanonicalizer.values("〇点五") == ["〇", "点", "五"],
                 "点前不认 `〇`，与服务端一致")
-        #expect(TeleprompterCanonicalizer.values("三点两") == ["3点", "两"],
+        // `点` 移出单位表后这条仍然咬得住：若 `两` 进了点后类，它会变成 `3.2`。
+        #expect(TeleprompterCanonicalizer.values("三点两") == ["三", "点", "两"],
                 "点后不认 `两`：语料上唯一一处是假阳性")
+    }
+
+    /// `点` 同时是十进制点、钟点和普通词，本仓语料 109 处 `X点` 里压倒性是
+    /// 普通词（`这一点`／`短一点`／`第二点`／`同一点`）。留着它就把这些词读成
+    /// 数量——**凭空造出作者没写下的数**，还会进数值指纹。
+    ///
+    /// 服务端 `itn.py` 早已把 `点` 整个排除出单位表，理由写在它自己的注释里：
+    /// 「丢掉一个单位只是少转，保留它会改坏句子」。两侧对同一个字符的判断相反，
+    /// 这一条把 Swift 侧对齐到服务端。
+    ///
+    /// **代价是明确写下来的**，不是「顺手修好」：裸钟点 `三点`／`十点` 从此
+    /// 不再是数字。留着它也换不来时间读法——`七点半` 得到的是 `7点`+`半`，
+    /// 仍然不是钟点。
+    @Test func dianIsNotAUnitSoOrdinaryWordsAreNotReadAsQuantities() {
+        // 主体：普通词不再被读成数量。
+        for word in ["这一点", "短一点", "有一点", "同一点", "新词一点"] {
+            #expect(
+                !TeleprompterCanonicalizer.values(word).contains("1点"),
+                "\(word) 是一个词，不是「1 点」"
+            )
+            #expect(
+                TeleprompterAcceptedReading.numericFingerprint(of: word).isEmpty,
+                "\(word) 不该产生任何数值"
+            )
+        }
+        #expect(TeleprompterCanonicalizer.values("第二点") == ["第", "二", "点"])
+        // `7点40分` 仍被读成小数 `7.40分`——但**这不是本条能修的**：错读来自
+        // `.spokenDecimal` 把 `点` 当十进制点，与单位表无关；服务端
+        // `apply_light_itn("7点40分")` 同样返回 `7.40分`，#95 认证里模型 ASR 也
+        // 独立犯过同一个错（`synth-zh-number-10`）。两侧一致，且这是已登记的
+        // 共享边界，不在缺陷范围内擅自改。钉在这里是为了让下一个人知道
+        // 「移出 `点`」没有、也不应该顺带修掉它。
+        #expect(TeleprompterCanonicalizer.values("7点40分") == ["7.40分"])
+
+        // 保留：十进制点由 `.spokenDecimal` 自己处理，与单位表无关。
+        #expect(TeleprompterCanonicalizer.values("三点五") == ["3.5"])
+        #expect(TeleprompterCanonicalizer.values("两点五") == ["2.5"])
+        #expect(TeleprompterCanonicalizer.values("百分之三点五") == ["3.5%"])
+        #expect(TeleprompterCanonicalizer.values("3.5") == ["3.5"])
+
+        // 写下来的代价：裸钟点不再是数字。两侧一致，只是都不再当数字。
+        #expect(TeleprompterCanonicalizer.values("三点") == ["三", "点"])
+        // `十` 是量级，所以 `十点` 仍产生 10——服务端则整词不动。这一处两侧
+        // 仍不一致，且方向是 Swift 更接近量词本义，记录而不抹平。
+        #expect(TeleprompterCanonicalizer.values("十点") == ["10", "点"])
+        #expect(TeleprompterCanonicalizer.values("两点") == ["两", "点"])
+        #expect(TeleprompterCanonicalizer.values("七点半") == ["七", "点", "半"])
+        #expect(
+            TeleprompterCanonicalizer.units("10 点").map(\.value)
+                == TeleprompterCanonicalizer.units("十点").map(\.value),
+            "两侧仍然一致，只是不再当数字"
+        )
     }
 
     /// `.arabic` 带单位组、`.spokenDecimal` 不带，于是同一个数量写成阿拉伯数字
