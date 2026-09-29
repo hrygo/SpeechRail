@@ -1,15 +1,15 @@
 # SpeechRail AI 提词器：详细可执行优化方案
 
-> 文档版本：1.5  
-> 编制日期：2026-09-28  
+> 文档版本：1.5<br>
+> 编制日期：2026-09-28<br>
 > 本次修订：文首状态段与 §12.1「Issue 同步状态」按实际结果更新（2026-09-29）；正文规格未变。
 >
 > #104–#114 共 11 项 Issue 现全部关闭。其中 6 项凭正文证据关闭；另 5 项在复审时按正文证据判据保留 OPEN，后经用户指示于 2026-09-29 关闭，缺口逐条写入关闭评论，并固化在阶段报告 §4.2 与 §5。关闭不代表全部验收通过。
-> 适用仓库：`hrygo/SpeechRail`  
-> 原分析基线：`186e5430058dc31bf888d7000654cd2e44a53b44`  
-> 本轮源码复核：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；Issue 基线：`074b6fd59f480e71dd342a829de2eb39823e92e4`  
-> 复核日期：2026-09-28（Asia/Shanghai；19:47 开始，源码静态审阅与 GitHub 只读查询）；状态段与 Issue 处置结果更新于 2026-09-29  
-> 文档状态：**规格文档**。实施已在分支 `codex/teleprompter-implementation`（工作树 `.worktrees/teleprompter-implementation`，基线 `7468efb8…`）进行到「部分交付」，改动已分 6 个提交落在该分支、**尚未 push**；实际状态以该分支上的 `docs/implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md`（阶段实施报告）为准，本文不记录实施结果。  
+> 适用仓库：`hrygo/SpeechRail`<br>
+> 原分析基线：`186e5430058dc31bf888d7000654cd2e44a53b44`<br>
+> 本轮源码复核：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；Issue 基线：`074b6fd59f480e71dd342a829de2eb39823e92e4`<br>
+> 复核日期：2026-09-28（Asia/Shanghai；19:47 开始，源码静态审阅与 GitHub 只读查询）；状态段与 Issue 处置结果更新于 2026-09-29<br>
+> 文档状态：**规格文档**。实施已在分支 `codex/teleprompter-implementation`（工作树 `.worktrees/teleprompter-implementation`，基线 `7468efb8…`）进行到「部分交付」，改动落在该分支并经 PR #115 推送；实际状态以该分支上的 `docs/implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md`（阶段实施报告）为准，本文不记录实施结果。<br>
 > 覆盖范围：产品与交互、提词稿加工、智能语音跟随、数据与协议、测试验收、任务拆分、迁移与回退。
 
 **产品目标：让用户拿着可信的稿件，以自己的节奏自然讲述；系统能跟上、会等待、可恢复，不确定时不乱跳，任何时候都能手动接管。**

@@ -1,9 +1,9 @@
 # SpeechRail AI 提词器：阶段实施报告
 
-> 对应方案：`SpeechRail_AI_Teleprompter_Implementation_Plan_2026-09-28.md` v1.5  
-> 报告日期：2026-09-28（Asia/Shanghai）；复审与收尾续至 2026-09-29  
-> 实施分支：`codex/teleprompter-implementation`（worktree `.worktrees/teleprompter-implementation`）  
-> 基线：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；改动已提交到 `codex/teleprompter-implementation`，未推送、未发布  
+> 对应方案：`SpeechRail_AI_Teleprompter_Implementation_Plan_2026-09-28.md` v1.5<br>
+> 报告日期：2026-09-28（Asia/Shanghai）；复审与收尾续至 2026-09-29<br>
+> 实施分支：`codex/teleprompter-implementation`（worktree `.worktrees/teleprompter-implementation`）<br>
+> 基线：`7468efb8c8282b119650fcb8e987a0d74f141e6a`；改动已提交到 `codex/teleprompter-implementation` 并经 PR #115 推送，**未发布**<br>
 > 状态：**部分交付**。安全、正确性与体验工作包均有确定性证据（69 项场景：通过 65、部分 3、未执行 1）；真实音频、真人表达与 UI 视觉验收未执行。**功能侧原以为已无已知缺口**：#110 读法别名与 #111／#112 语音辅助试读已于第十至十二轮补齐。但 2026-09-29 继续审查时，在**已关闭 issue 的交付范围内又找出 43 个真缺陷**（§2 第 41–83 条、§4.3）（其中第 83 条是**共享测试闸门**的间歇失败，不属提词器交付范围，但它直接动摇本报告引用的「全量 pytest 全绿」这条证据，因此一并记在这里），均为「先改状态后可能失败而失败不回滚」与「多个原因压成一个返回值或文案」。已全部修复并配回归与变异验证。第二十轮做了完成度审计（逐条核实 §2.4 证据是否支撑其结论），**未发现新缺陷**，新增两处经核实的排除（§2.7）。第二十七／二十八轮把这一族先后扩到 Python 跟随路径（§2.12）与 Swift 视图层与 sheet（§2.13），**两侧结论都是「已逐条读过的范围内未发现新缺陷」，且都写明了覆盖边界**；视图层那侧的函数归属仍是启发式，**零命中不足以证明干净**。**同类形态是否还有第五处，本轮仍没有证据能保证没有**。
 
 ## 1. 本轮实际完成的工作包
