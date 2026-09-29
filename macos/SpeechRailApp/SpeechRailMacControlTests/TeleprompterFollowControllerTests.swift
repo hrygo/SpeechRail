@@ -227,6 +227,79 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.position.utf16Offset == 6)
     }
 
+    /// 目标第 1 条的另一面：一段**远处**的短语不得把视口拽到后面的段落。
+    /// 既有回归钉住了远处短语不得向后拖（`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`）
+    /// 与整句复述不得倒退（`distantFullSentenceCannotDragTheViewportBackwards`），
+    /// **向前这一向没有用例**。
+    ///
+    /// 写这条用例时踩了两个坑，都写在前置断言里：
+    /// 一是脚本太短——`localAdvanceTokenRadius` 是**绝对** token 数（默认 24），
+    /// 三段玩具脚本只有 46 个 token，半径几乎覆盖整篇，测出来的是口径不是性质；
+    /// 二是两段用了同一句 filler，**重复跨度让匹配变歧义**，锚点根本没建立，
+    /// 于是「视口没动」是因为压根没匹配上，不是因为远处短语被拦——这种通过毫无意义。
+    /// 所以先断言锚点真的建立了，再断言远处短语没推动它。
+    @Test func aDistantForwardPhraseCannotDragTheViewportAhead() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(opening)。\n\n\(bridge)。\n\n远端短语出现在第三段"
+        )
+        var controller = TeleprompterFollowController()
+
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        // 前置条件：锚点必须真的建立起来，否则后面两条断言会因为「压根没匹配」而恒真。
+        #expect(controller.followState == .tracking, "开场白必须先跟上，否则这条用例测不到半径")
+        #expect(controller.position.segmentIndex == 0 && controller.position.utf16Offset > 0)
+        let anchored = controller.position
+
+        // 这四个字完整、唯一、置信 1.0 地落在第 3 段，距锚点 30 个 token——
+        // 刚好在默认局部半径 24 之外。识别准确不构成跳过两段的许可。
+        controller.receiveCompleted(itemID: "distant", transcript: "远端短语", segments: segments)
+        #expect(controller.lastMatchConfidence == 1.0, "这条用例要证明的是「匹配成功但不许跳」")
+        #expect(controller.lastMatchedCount == 4)
+        #expect(
+            controller.position == anchored,
+            "远处短语不得把视口拽到后面的段落"
+        )
+        #expect(
+            controller.committedPosition == anchored,
+            "被拒绝的越位推进不得改写已确认位置"
+        )
+    }
+
+    /// 「至少两个 token 才允许试探性推进」这道门禁此前没有任何用例
+    /// （`provisionalMinimumMatches` 在整个测试目录里零命中）。它挡的是最现实的
+    /// 一种误听：识别器把一个杂音听成脚本里恰好存在、且在附近唯一的**单字**。
+    /// 这种匹配置信度是满分、位置是唯一的，距离也落在局部半径内——只有 token 数
+    /// 这道门禁拦得住它。
+    @Test func aLoneStrayTokenMatchDoesNotMoveTheViewport() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: opening + "。\n\n" + bridge + "。\n\n鸥"
+        )
+        var controller = TeleprompterFollowController()
+
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        #expect(controller.followState == .tracking, "开场白必须先跟上")
+        let anchored = controller.position
+
+        controller.receiveCompleted(itemID: "stray", transcript: "鸥", segments: segments)
+        // 前置条件：这个匹配在其它维度上都是「合格」的——满分置信、唯一位置、
+        // 距离 10 个 token 落在默认局部半径 24 之内、且在近锚窗口之外。
+        // 唯一不够的是它只有一个 token。
+        #expect(controller.lastMatchConfidence == 1.0)
+        #expect(controller.lastMatchedCount == 1)
+        #expect(
+            controller.position == anchored,
+            "单个误听 token 不得把视口拽到后面的段落"
+        )
+        #expect(
+            controller.committedPosition == anchored,
+            "被拒绝的越位推进不得改写已确认位置"
+        )
+    }
+
     /// 重读回退必须由跟随控制器裁决，而不是由对齐器"能不能找到上一段"决定：
     /// 证据充分的整句重读要真的回退，只有几个 token 的远处短语必须留在原位。
     @Test func rereadRollsBackOnlyWhenTheBackwardMatchIsStrong() throws {
