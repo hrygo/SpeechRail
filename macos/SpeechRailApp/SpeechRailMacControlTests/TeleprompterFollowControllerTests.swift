@@ -325,7 +325,7 @@ struct TeleprompterFollowControllerTests {
 
     /// 目标第 1 条的另一面：一段**远处**的短语不得把视口拽到后面的段落。
     /// 既有回归钉住了远处短语不得向后拖（`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`）
-    /// 与整句复述不得倒退（`distantFullSentenceCannotDragTheViewportBackwards`），
+    /// 与整句复述不得倒退（`rereadDoesNotRollBackAcrossDistantParagraphs`），
     /// **向前这一向没有用例**。
     ///
     /// 写这条用例时踩了两个坑，都写在前置断言里：
