@@ -2,11 +2,11 @@
   "package": "macos/SpeechRailApp",
   "filter": "",
   "sanity": {
-    "id": "D0",
-    "note": "朗读段 ordinal 全体 +1（收紧核心不变量，已知应被杀）",
-    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
-    "find": "            segment.ordinal == index",
-    "replace": "            segment.ordinal == index + 1"
+    "id": "E0",
+    "note": "窗口宽度夹取被摘掉（已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+    "find": "            let clamped = min(\n                max(newValue, Double(SpeechRailDesignTokens.Teleprompter.stageMinimumWidth)),\n                Double(SpeechRailDesignTokens.Teleprompter.stageMaximumWidth)\n            )",
+    "replace": "            let clamped = newValue"
   },
   "mutations": [
     {
@@ -926,6 +926,213 @@
       "replace": "              true,",
       "expect": "SURVIVED",
       "rationale": "等价变异，理由同 D11。在 macOS 上 `\\` 也不是路径分隔符，承重的只是「ID 不来自用户输入」这个前提。"
+    },
+    {
+      "id": "E1",
+      "note": "排版宽度不再拒绝非有限值（NaN／无穷宽度直接进布局）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let safeWidth = availableWidth.isFinite ? max(1, availableWidth) : 1",
+      "replace": "        let safeWidth = max(1, availableWidth)",
+      "expect": "KILLED",
+      "rationale": "被 nonFiniteLayoutWidthStillTilesTheSource 杀掉。夹具断言退化宽度与「按 1 排版」的结果逐条相同——只断言「拼得回原文」区分不出来，排版器在 NaN 宽度下同样能把整段塞进一行。注释里记着 `max(1, .nan)` 在 Swift 里返回 nan（`max` 的实现是 `y < x ? x : y`，而 `nan < 1` 为假），所以这道守卫是唯一让退化宽度退回 1 的地方。"
+    },
+    {
+      "id": "E2",
+      "note": "排版字号不再拒绝非有限值",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let safePointSize = pointSize.isFinite ? max(1, pointSize) : 1",
+      "replace": "        let safePointSize = max(1, pointSize)",
+      "expect": "KILLED",
+      "rationale": "被 nonFinitePointSizeStillTilesTheSource 杀掉。**首轮夹具只试 `.nan`，而 AppKit 对 NaN 字号与 1 号字体给出同样的排版结果，断言区分不出来**；补上 `.infinity`（超大字号会把整段挤成一行，与按 1 排版的结果不同）后转杀。"
+    },
+    {
+      "id": "E3",
+      "note": "阅读位置恰好落在末行末尾时不再回落到该行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        if position.utf16Offset >= lines[lastIndex].utf16End {",
+      "replace": "        if position.utf16Offset > lines[lastIndex].utf16End {",
+      "expect": "KILLED",
+      "rationale": "被 offsetExactlyAtLastRowEndResolvesToIt 杀掉。既有那条「offset past the end」用例用的是**严格越过末尾**的值，所以 `>=` 改成 `>` 照样通过。"
+    },
+    {
+      "id": "E4",
+      "note": "阅读位置早于首行时不再回落到首行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        if position.utf16Offset < lines[firstIndex].utf16Start {",
+      "replace": "        if false {",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（纵深防御）。`TeleprompterStageDisplayLine` 的 init 是 `fileprivate`，全仓只有 `TeleprompterStageLineLayout.layout` 的两处构造它，而每个段的首行恒从 0 开始——`lines[firstIndex].utf16Start > 0` 不可能成立，这道回落永不触发。"
+    },
+    {
+      "id": "E5",
+      "note": "上下移动不再被夹在可用行范围内",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let boundedDelta = min(max(delta, -currentIndex), lastIndex - currentIndex)",
+      "replace": "        let boundedDelta = max(delta, -currentIndex)",
+      "expect": "INVALID",
+      "rationale": "崩溃型 INVALID。去掉上界夹取后 `lines[currentIndex + boundedDelta]` 越界，Swift trap 让测试进程在 662 项处中断（0 失败）。与 A4／A5／M26 同族：守卫的作用是挡 trap，不是一条会变红的断言。"
+    },
+    {
+      "id": "E6",
+      "note": "可见行数不再夹住下界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),",
+      "replace": "            visibleCount,",
+      "expect": "KILLED",
+      "rationale": "被既有的 visibleLineSlots 夹取用例杀掉。"
+    },
+    {
+      "id": "E7",
+      "note": "可见行数不再夹住上界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let count = min(\n            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n        )",
+      "replace": "        let count = max(\n            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n        )",
+      "expect": "KILLED",
+      "rationale": "被既有的那条「`switch` 对任何 ≥3 的入参都走 default」用例杀掉（13 条）。"
+    },
+    {
+      "id": "E8",
+      "note": "三行模式的上一行不再判空（首行时会给出 -1 这个不存在的槽位）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "                current > 0 ? current - 1 : nil,",
+      "replace": "                current - 1,",
+      "expect": "KILLED",
+      "rationale": "被既有的 atStart 槽位用例杀掉。"
+    },
+    {
+      "id": "E9",
+      "note": "三行模式的下一行不再判空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "                current + 1 < totalCount ? current + 1 : nil,",
+      "replace": "                current + 1,",
+      "expect": "KILLED",
+      "rationale": "被既有的 atEnd 槽位用例杀掉。"
+    },
+    {
+      "id": "E10",
+      "note": "两行模式的下一行不再判空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            return [current, current + 1 < totalCount ? current + 1 : nil]",
+      "replace": "            return [current, current + 1]",
+      "expect": "KILLED",
+      "rationale": "被既有的两行模式边界用例杀掉。"
+    },
+    {
+      "id": "E11",
+      "note": "配速状态不再要求至少 10 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard totalCount > 0, elapsedSeconds >= 10 else {",
+      "replace": "        guard totalCount > 0, elapsedSeconds >= 0 else {",
+      "expect": "KILLED",
+      "rationale": "被既有的 paceStatusCalculatesStates 杀掉。"
+    },
+    {
+      "id": "E12",
+      "note": "配速状态不再要求进度超过 5%（刚开口就报成跟得上）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard progressRatio > 0.05 else {",
+      "replace": "        guard progressRatio > 0 else {",
+      "expect": "KILLED",
+      "rationale": "被 justStartedSessionReportsEstablishing 杀掉。`> 0` 会让刚开口（1/100）直接进入偏差比较，而此时时间比远大于进度比，于是**刚开口就报偏慢**。"
+    },
+    {
+      "id": "E13",
+      "note": "配速偏差的 ±0.12 死区被摘掉（任何微小偏差都报偏快或偏慢）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            if delta > 0.12 {",
+      "replace": "            if delta > 0 {",
+      "expect": "KILLED",
+      "rationale": "被既有的 paceStatusCalculatesStates 杀掉。"
+    },
+    {
+      "id": "E14",
+      "note": "配速差值不再要求进度超过 2%",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard progressRatio > 0.02 else { return nil }",
+      "replace": "        guard progressRatio > 0 else { return nil }",
+      "expect": "KILLED",
+      "rationale": "被 paceDeltaStaysSilentAtNegligibleProgress 杀掉。"
+    },
+    {
+      "id": "E15",
+      "note": "「需要校准」不再要求与当前倍率相差 0.02 以上",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let needsCalibration = canCalibrate && abs(clampedK - currentCalibrationFactor) > 0.02",
+      "replace": "        let needsCalibration = canCalibrate && abs(clampedK - currentCalibrationFactor) > 0",
+      "expect": "KILLED",
+      "rationale": "被 calibrationIsNotSuggestedWhenItAlreadyMatches 杀掉。**首轮夹具取差值 0，而 `abs(0) > 0` 与 `abs(0) > 0.02` 同为 false，死区改不掉**；改成落在死区内的 0.01 后转杀，并附一条「两次实测倍率必须一致」的前提断言。"
+    },
+    {
+      "id": "E16",
+      "note": "可校准不再要求已读满 30 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let canCalibrate = elapsedSeconds >= 30 && totalUnits >= 50",
+      "replace": "        let canCalibrate = totalUnits >= 50",
+      "expect": "KILLED",
+      "rationale": "被 calibrationStaysUnavailableBeforeThirtySeconds 杀掉。**既有的「Accidental start」用例之所以绿，是因为它只读了第 1 段（29 个单元），`totalUnits >= 50` 先一步把它挡住了**——断言存在、名字正确、也真的绿了，只是它断言的那件事与 30 秒那道门无关。本条用「读得够多但时间不够」的素材才咬住它，并带一条过 30 秒的正向对照。"
+    },
+    {
+      "id": "E17",
+      "note": "已完成段数不再夹住上界（段数会超过总段数）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let completed = min(max(currentSegmentIndex + 1, 0), totalCount)",
+      "replace": "        let completed = max(currentSegmentIndex + 1, 0)",
+      "expect": "KILLED",
+      "rationale": "被 completedSegmentCountStaysInRange 杀掉。"
+    },
+    {
+      "id": "E18",
+      "note": "窗口宽度不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, Double(SpeechRailDesignTokens.Teleprompter.stageMinimumWidth)),\n                Double(SpeechRailDesignTokens.Teleprompter.stageMaximumWidth)\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的 stageSettingsClampAndPersist 杀掉。"
+    },
+    {
+      "id": "E19",
+      "note": "字号不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale),\n                SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的 quickZoomMethodsChangeFontScale 杀掉。"
+    },
+    {
+      "id": "E20",
+      "note": "可见行数不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n                SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的可见行数夹取用例杀掉。"
+    },
+    {
+      "id": "E21",
+      "note": "手动改动不再回落到 custom 预设",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard !isApplyingPreset, presetStorage != .custom else { return }",
+      "replace": "        guard true else { return }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异。`apply(_:)` 是同步的 `@MainActor` 方法：预设期间 `markCustomized` 会把 `presetStorage` 写成 `.custom`，但方法末尾的 `self.preset = preset` 紧接着把它覆盖成目标预设并重写 defaults，**中间没有任何观察者能看见那个瞬态**（无 await、无 reentrant 观察点）。"
+    },
+    {
+      "id": "E22",
+      "note": "背景透明度不再取反（方向反了）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        set { opacity = 1 - newValue }",
+      "replace": "        set { opacity = newValue }",
+      "expect": "KILLED",
+      "rationale": "被既有的 quickOpacityMethodsChangeOpacity 杀掉（11 条）。"
+    },
+    {
+      "id": "E23",
+      "note": "脚本文号不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        return min(\n            max(value, SpeechRailDesignTokens.Teleprompter.stageScriptMinimumPointSize),\n            SpeechRailDesignTokens.Teleprompter.stageScriptMaximumPointSize\n        )",
+      "replace": "        return value",
+      "expect": "KILLED",
+      "rationale": "被 scriptPointSizeStopsAtTheDesignMinimum 杀掉。实测 `38 × 0.67 = 25.46 < 28`，**下界夹取是承重的**（读者把字号拉到最小时会拿到越界的 25.46pt）；上界那半边与 `38 × 1.52 = 57.76` 之间有余量，属冗余。"
     }
   ]
 }

@@ -900,4 +900,291 @@ struct TeleprompterStageSettingsTests {
         #expect(TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion: true) == nil)
         #expect(TeleprompterStageMotionPolicy.scrollAnimation(reduceMotion: false) != nil)
     }
+
+    // MARK: - 边界与退化输入（变异覆盖补齐，第六十六轮）
+    //
+    // 上面 33 条用例覆盖的是「典型值下的行为」。本轮把定向变异落到这个文件
+    // 上，23 条里 12 条存活——存活的几乎全是**边界**：非有限输入、恰好等于
+    // 末行末尾、刚开口的第一段、以及「差一点点就不该报」的那几道死区。
+
+    /// 窗口在 macOS 上被拖到极端尺寸、或 Stage 在首次布局时拿到 0 宽，都可能
+    /// 交出非有限的排版参数。`max(1, .nan)` 在 Swift 里返回 `.nan` 而不是 1
+    /// （`max` 实现是 `y < x ? x : y`，而 `nan < 1` 为假），所以这道守卫是
+    /// 唯一让退化输入退回 1 的地方。
+    @Test("a non-finite layout width still produces a complete tiling of the text")
+    func nonFiniteLayoutWidthStillTilesTheSource() {
+        let source = "开场😀欢迎来到SpeechRail提词器，今天介绍快捷翻行。"
+        let segment = TeleprompterSegment(
+            id: "degenerate-width",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+
+        for width in [CGFloat.nan, .infinity] {
+            let lines = TeleprompterStageLineLayout.layout(
+                segments: [segment],
+                pointSize: 20,
+                availableWidth: width
+            )
+            // 退化宽度必须按 1 处理。只断言「拼得回原文」区分不出来——排版器
+            // 在 NaN 宽度下同样能把整段塞进一行，那三条断言照样成立。
+            let fallback = TeleprompterStageLineLayout.layout(
+                segments: [segment],
+                pointSize: 20,
+                availableWidth: 1
+            )
+            #expect(
+                lines.count == fallback.count,
+                "宽度 \(width) 必须退回按 1 排版，而不是被当成无限宽"
+            )
+            #expect(lines.first?.utf16Start == 0, "宽度 \(width) 下必须仍从 0 开始")
+            #expect(lines.last?.utf16End == source.utf16.count, "宽度 \(width) 下必须仍盖到末尾")
+            #expect(lines.map(\.text).joined() == source, "宽度 \(width) 下不得丢字")
+        }
+    }
+
+    /// 同一道退化输入，字号侧的守卫是独立的：字号退化会先影响 `NSFont`，
+    /// 症状与宽度侧完全不同（宽度侧表现为整段挤成一行或排版循环不收敛）。
+    @Test("a non-finite point size still produces a complete tiling of the text")
+    func nonFinitePointSizeStillTilesTheSource() {
+        let source = "开场😀欢迎来到SpeechRail提词器，今天介绍快捷翻行。"
+        let segment = TeleprompterSegment(
+            id: "degenerate-point-size",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+
+        // 同样必须按字号 1 处理，而不是把退化值交给 `NSFont.systemFont`。
+        // 宽度侧的用例已经证明 NaN 在 `max` 里会原样传下去，字号侧必须单独立
+        // 一条：无穷大字号若真被采纳，整段会挤成一行，与按 1 排版的结果不同。
+        let fallback = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: 1,
+            availableWidth: 82
+        )
+        for pointSize in [CGFloat.nan, .infinity] {
+            let lines = TeleprompterStageLineLayout.layout(
+                segments: [segment],
+                pointSize: pointSize,
+                availableWidth: 82
+            )
+            #expect(
+                lines.count == fallback.count,
+                "字号 \(pointSize) 必须退回按 1 排版"
+            )
+            #expect(lines.first?.utf16Start == 0)
+            #expect(lines.last?.utf16End == source.utf16.count)
+            #expect(lines.map(\.text).joined() == source)
+        }
+    }
+
+    /// 跟随器给出的偏移**恰好等于**末行末尾时（最后一段读完、但还没切段），
+    /// 舞台必须停在末行而不是「找不到对应行」。既有那条「offset past the end」
+    /// 的用例用的是严格越过末尾的值，`>=` 改成 `>` 照样通过。
+    @Test("a reading offset exactly at the last row end still resolves to that row")
+    func offsetExactlyAtLastRowEndResolvesToIt() throws {
+        let source = "第一行内容比较长一些用于触发换行，第二行短。"
+        let segment = TeleprompterSegment(
+            id: "exact-end",
+            ordinal: 0,
+            sourceRange: TeleprompterSourceRange(start: 0, end: source.utf16.count),
+            text: source
+        )
+        let lines = TeleprompterStageLineLayout.layout(
+            segments: [segment],
+            pointSize: 20,
+            availableWidth: 120
+        )
+        let last = try #require(lines.last)
+
+        #expect(
+            TeleprompterStagePresentation.displayLineIndex(
+                for: TeleprompterAligner.Position(
+                    segmentIndex: 0,
+                    utf16Offset: last.utf16End
+                ),
+                lines: lines
+            ) == lines.count - 1
+        )
+    }
+
+    /// 刚开口时（1 段 / 100 段）不该报「跟得上」。`progressRatio > 0` 会让它
+    /// 直接进入偏差比较，而此时时间比必然远大于进度比，于是**刚开口就报偏慢**。
+    @Test("a session that just started still reports establishing")
+    func justStartedSessionReportsEstablishing() {
+        #expect(
+            TeleprompterStagePresentation.paceStatus(
+                currentIndex: 0,
+                totalCount: 100,
+                elapsedSeconds: 300,
+                targetSeconds: 600
+            ) == .establishing
+        )
+    }
+
+    /// 同理，配速差值在进度 1% 时不该给出「落后 54 秒」这种读数。
+    @Test("pace delta stays silent while progress is still negligible")
+    func paceDeltaStaysSilentAtNegligibleProgress() {
+        #expect(
+            TeleprompterStagePresentation.paceDeltaSeconds(
+                currentIndex: 0,
+                totalCount: 100,
+                elapsedSeconds: 60,
+                targetSeconds: 600
+            ) == nil
+        )
+    }
+
+    /// 「需要校准」是一条**死区**而不是「可校准就建议」：实测倍率与当前倍率
+    /// 完全一致时不该反复提示读者去改一个已经正确的设置。
+    @Test("calibration is not suggested when the measured factor already matches")
+    func calibrationIsNotSuggestedWhenItAlreadyMatches() {
+        let segments = [
+            TeleprompterSegment(
+                id: "cal-1",
+                ordinal: 0,
+                sourceRange: TeleprompterSourceRange(start: 0, end: 30),
+                text: "欢迎大家来到今天的发布会现场，非常高兴能够与各位相聚。"
+            ),
+            TeleprompterSegment(
+                id: "cal-2",
+                ordinal: 1,
+                sourceRange: TeleprompterSourceRange(start: 30, end: 60),
+                text: "今天我们将正式带来全新的产品架构与全栈本地化能力演进。"
+            ),
+            TeleprompterSegment(
+                id: "cal-3",
+                ordinal: 2,
+                sourceRange: TeleprompterSourceRange(start: 60, end: 90),
+                text: "在过去的一年里，我们的团队攻克了数十项技术难关，力求完美。"
+            ),
+            TeleprompterSegment(
+                id: "cal-4",
+                ordinal: 3,
+                sourceRange: TeleprompterSourceRange(start: 90, end: 120),
+                text: "接下来让我们深入了解各个核心子系统的突破与实际体验细节。"
+            )
+        ]
+        let first = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 3,
+            elapsedSeconds: 32,
+            targetSeconds: 35,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+        #expect(first.canCalibrate)
+        #expect(first.needsCalibration)
+
+        // 差值 0.01——落在 0.02 的死区里。**不能取 0**：`abs(0) > 0.02` 与
+        // `abs(0) > 0` 同为 false，那样的夹具改不掉这道死区。
+        let matched = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 3,
+            elapsedSeconds: 32,
+            targetSeconds: 35,
+            pace: .natural,
+            currentCalibrationFactor: first.suggestedCalibrationFactor - 0.01
+        )
+        #expect(matched.canCalibrate)
+        #expect(
+            abs(matched.suggestedCalibrationFactor - first.suggestedCalibrationFactor) < 0.0001,
+            "前提：两次实测的倍率必须一致，否则下面证明的不是死区"
+        )
+        #expect(
+            matched.needsCalibration == false,
+            "倍率已经一致时不得再提示读者调整"
+        )
+    }
+
+    /// 未读满 30 秒就**不允许**给出校准建议——样本太少，测出来的倍率没有意义。
+    /// 既有那条「Accidental start」用例之所以绿，是因为它只读了第 1 段
+    /// （29 个单元），`totalUnits >= 50` 这条已经先把它挡住了；本条用**读得够多
+    /// 但时间不够**的素材，才真正咬住 30 秒这道门。
+    @Test("calibration stays unavailable before thirty seconds even with enough text")
+    func calibrationStaysUnavailableBeforeThirtySeconds() {
+        let segments = (0..<4).map { index in
+            TeleprompterSegment(
+                id: "early-\(index)",
+                ordinal: index,
+                sourceRange: TeleprompterSourceRange(start: index * 30, end: index * 30 + 30),
+                text: [
+                    "欢迎大家来到今天的发布会现场，非常高兴能够与各位相聚。",
+                    "今天我们将正式带来全新的产品架构与全栈本地化能力演进。",
+                    "在过去的一年里，我们的团队攻克了数十项技术难关，力求完美。",
+                    "接下来让我们深入了解各个核心子系统的突破与实际体验细节。"
+                ][index]
+            )
+        }
+
+        // 时间不够（20 秒 < 30 秒），但读到的单元数已经过 50。
+        let tooEarly = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 2,
+            elapsedSeconds: 20,
+            targetSeconds: 60,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+        #expect(tooEarly.totalSpokenUnits >= 50, "本条的前提是单元数已经够")
+        #expect(tooEarly.canCalibrate == false, "未满 30 秒不得允许校准")
+        #expect(tooEarly.needsCalibration == false)
+
+        // 同样的素材、过 30 秒后应当可以校准——否则上面的断言可能因为别的原因通过。
+        let soonEnough = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 2,
+            elapsedSeconds: 32,
+            targetSeconds: 60,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+        #expect(soonEnough.canCalibrate, "过 30 秒后应当可以校准")
+    }
+
+    /// 阅读位置被外部改到总段数之外时，「已完成 N 段」不能跟着越界——
+    /// 界面上的「已完成 8 / 共 4 段」与逐段高亮都会跟着错。
+    @Test("a reading position past the last segment still reports a completed count in range")
+    func completedSegmentCountStaysInRange() {
+        let segments = [
+            TeleprompterSegment(
+                id: "only",
+                ordinal: 0,
+                sourceRange: TeleprompterSourceRange(start: 0, end: 12),
+                text: "只有一段稿子。"
+            )
+        ]
+        let summary = TeleprompterStagePresentation.computeSummary(
+            segments: segments,
+            currentSegmentIndex: 99,
+            elapsedSeconds: 30,
+            targetSeconds: 60,
+            pace: .natural,
+            currentCalibrationFactor: 1.0
+        )
+        #expect(summary.completedSegments == summary.totalSegments)
+        #expect(summary.completedSegments == 1)
+    }
+
+    /// 脚本文号的下界夹取是承重的：`38 × 0.67 = 25.46`，低于 28 的设计下限。
+    /// 读者把字号拉到最小时应当停在 28pt，而不是拿到一个越界的 25.46pt。
+    /// （上界 60 与 `38 × 1.52 = 57.76` 之间有余量，那半边是冗余的。）
+    @Test("the script point size stops at the design minimum at the smallest font scale")
+    func scriptPointSizeStopsAtTheDesignMinimum() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = TeleprompterStageSettings(defaults: defaults)
+
+        settings.fontScale = SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale
+        #expect(
+            settings.scriptPointSize == SpeechRailDesignTokens.Teleprompter.stageScriptMinimumPointSize,
+            "最小字号时脚本文号必须停在设计下限"
+        )
+
+        settings.fontScale = SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
+        #expect(settings.scriptPointSize <= SpeechRailDesignTokens.Teleprompter.stageScriptMaximumPointSize)
+    }
 }
