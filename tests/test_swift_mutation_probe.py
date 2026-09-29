@@ -140,7 +140,7 @@ def _stub_run_tests(monkeypatch, verdicts: list[object]) -> list[int]:
     """Replaces run_tests with a scripted sequence and records the call count."""
     calls: list[int] = []
 
-    def fake(package: Path, test_filter: str) -> object:  # noqa: ARG001
+    def fake(package: Path, test_filter: str) -> object:
         calls.append(1)
         return verdicts[min(len(calls) - 1, len(verdicts) - 1)]
 
@@ -157,7 +157,7 @@ def test_a_crash_does_not_need_a_retry_when_the_next_run_is_clean(
     calls = _stub_run_tests(
         monkeypatch, [_PROBE.Verdict(_PROBE.SURVIVED, "all green", 726, 0)]
     )
-    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    ok, note = _PROBE.recover_after_crash(Path(), "")
     assert ok and note is None
     assert len(calls) == 1
 
@@ -173,7 +173,7 @@ def test_a_dirty_run_after_a_crash_is_retried_and_reported(monkeypatch) -> None:
             _PROBE.Verdict(_PROBE.SURVIVED, "all green", 726, 0),
         ],
     )
-    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    ok, note = _PROBE.recover_after_crash(Path(), "")
     assert ok and note is not None and "one-run residue" in note
     assert len(calls) == 2
 
@@ -187,6 +187,6 @@ def test_a_suite_that_stays_dirty_after_a_crash_is_not_reinterpreted(
         monkeypatch,
         [_PROBE.Verdict(_PROBE.KILLED, "1 failing", 725, 1)],
     )
-    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    ok, note = _PROBE.recover_after_crash(Path(), "")
     assert not ok and note is not None and "still not clean" in note
     assert len(calls) == 2
