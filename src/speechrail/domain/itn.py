@@ -36,7 +36,14 @@ _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 # characters are in the lookbehind too, so a blocked run cannot restart at a
 # later magnitude (`数十万个` used to fall through to `万个` -> 10000个).
 _UNIT_RE = re.compile(
-    r"(?<![数几零一二两三四五六七八九十百千万亿])([零一二两三四五六七八九十百千万亿]+)"
+    # The lookbehind keeps the numeral run from starting where one already
+    # precedes it. It has to exclude **ASCII digits too**: a recogniser that
+    # normalises speech to digits emits `50万元`, and without `0-9` here the
+    # `万元` matched on its own -- `chinese_to_int("万")` is 10000, and that was
+    # concatenated in front of the `50`, so the transcript read `5010000元`,
+    # two orders of magnitude off. A number that is already written needs no
+    # conversion, which is also what `20万台` and `1000公里` already relied on.
+    r"(?<![0-9数几零一二两三四五六七八九十百千万亿])([零一二两三四五六七八九十百千万亿]+)"
     r"(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|秒|分(?![之]))"
 )
 

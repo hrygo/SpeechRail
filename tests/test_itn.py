@@ -89,3 +89,33 @@ def test_itn_does_not_read_an_approximate_magnitude_as_a_value() -> None:
 def test_itn_still_converts_minutes_and_bare_ten_with_a_measure_word() -> None:
     assert apply_light_itn("耗时三分钟") == "耗时3分钟"
     assert apply_light_itn("一共十个人") == "一共10个人"
+
+
+def test_itn_does_not_glue_an_ascii_magnitude_onto_the_digits_before_it() -> None:
+    # `50万元` came back as `5010000元`. `_UNIT_RE`'s lookbehind excluded
+    # Chinese numerals and 数/几 but never ASCII digits, so a Chinese magnitude
+    # sitting directly after an already-written number matched on its own:
+    # `万元` -> `10000元` was concatenated in front of the `50` in front of it.
+    # A recogniser that normalises speech to digits emits exactly this shape, so
+    # a number two orders of magnitude off reached the transcript, the batch and
+    # realtime payloads, and every text comparison built on them.
+    # 9 and 7 are here on purpose: a lookbehind written as [0-8] would still let
+    # `9亿元` and `7万吨` through, and the first three digits are not special.
+    for text in ["50万元", "2万元", "3万个", "10亿元", "5万美元", "30亿人",
+                 "9亿元", "7万吨", "8千万个"]:
+        assert apply_light_itn(text) == text, f"{text} 不该被改写"
+
+    # Reverse controls: the number written out in Chinese is still converted.
+    for spoken, written in [
+        ("五十万元", "500000元"),
+        ("三万个", "30000个"),
+        ("十亿元", "1000000000元"),
+        ("五万美元", "50000美元"),
+    ]:
+        assert apply_light_itn(spoken) == written, f"{spoken} 应读成 {written}"
+
+    # Already-correct digits, and digit+unit with no Chinese magnitude, were
+    # never affected and must stay that way. `1000万台` is here for a different
+    # reason: 台 is not in the server's unit list at all.
+    for text in ["3小时", "8吨", "1000公里", "20万台", "1000万台", "两万五千"]:
+        assert apply_light_itn(text) == text, f"{text} 本来就不该被改写"
