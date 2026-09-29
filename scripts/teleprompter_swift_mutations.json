@@ -348,8 +348,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
       "find": "        guard payload.schemaVersion == \"teleprompter.grouping.v1\" else {",
       "replace": "        guard payload.schemaVersion == \"teleprompter.grouping.v2\" else {",
-      "expect": "INVALID",
-      "rationale": "声明为 INVALID 而非 KILLED，且**首轮的分类理由是错的**：把 schema_version 改成 v2 之后，测试进程在 490 项（基线 722）处 `Fatal error: Index out of range` 中断，而探针的 `classify()` 对测试输出跑编译错误正则，崩溃行里 `error: Process ... signal code 5` 恰好被命中，于是记成「does not compile」。结论对、理由错，已据此修探针（见本轮提交）。手动单验确认它是崩溃而不是干净击杀：同一变异手动跑完整结束、15 条失败、0 编译错误。"
+      "expect": "KILLED",
+      "rationale": "**第六十七轮由 INVALID 升级为 KILLED，原因是测试侧修好了一处会让真检出失效的写法。**本变异把 grouping 的 schemaVersion 守卫改成 v2，于是分组提示词带 v2，`rewriteFailureRetriesOnlyRewriteWithTheOriginalGrouping` 里按 schemaVersion 过滤出来的 `rewritePrompts` 变成 0 条。改之前那句是非致命的 `#expect(rewritePrompts.count == 2)`，断言红了却不停止，下一行 `rewritePrompts[0]` 直接越界 trap 把整个测试进程带崩——探针按既定纪律不得解读崩溃，于是记成 INVALID，**一个已经产生的真实检出被崩溃吃掉了**。第六十七轮把那处改成致命的 `try #require`，测试在 require 处干净停下，整轮跑完变成 72 条失败（基线 766），是干净击杀。隔离复跑 3 次读数 72／73／73 failing，**确定性复现，不是间歇**。这是本轮那处测试修复的第三个受益变异（另两个是 F11、F13）：**崩溃一旦消失，原本被它掩盖的读数会自己变干净**，所以「INVALID」这个结论必须随证据更新，不能一直沿用。此前关于分类规则的那段记录仍然有效——首轮把它读成「does not compile」确实是错的，崩溃行里的 `error: Process ... signal code 5` 被编译错误正则命中，据此给 `classify()` 加了崩溃规则。"
     },
     {
       "id": "M39",
