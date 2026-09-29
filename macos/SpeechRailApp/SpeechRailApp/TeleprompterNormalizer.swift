@@ -127,7 +127,13 @@ public enum TeleprompterCanonicalizer {
     private static let rules: [Rule] = [
         .init(expression: expression(#"百分之[零一二三四五六七八九十百千万点"# + digitClass + #"]+"#), kind: .percentage),
         .init(expression: expression(#"[零〇一二三四五六七八九]{4}年"#), kind: .year),
-        .init(expression: expression(#"[零一二三四五六七八九十百千万"# + digitClass + #"]+点[零一二三四五六七八九"# + digitClass + #"]+"#), kind: .spokenDecimal),
+        // `两` belongs in the leading class for the same reason the server's
+        // `_CN_NUM_RE` lists it first: it is the numeral `chineseDigits`
+        // already knows. Without it `两点五` matched nothing, and the match
+        // that did claim it was `.spokenUnit` reading `点` as a unit -- so a
+        // decimal came out as "2 o'clock, five". The trailing class keeps the
+        // server's membership: it has 零 but not 两, and 〇 stays out of both.
+        .init(expression: expression(#"[零一二两三四五六七八九十百千万"# + digitClass + #"]+点[零一二三四五六七八九"# + digitClass + #"]+"#), kind: .spokenDecimal),
         // 十分钟 is untouched by the 分 guard: 钟 is not in the set, so
         // 四十分钟 still canonicalises to 40分 + 钟.
         .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:"# + unitAlternation + #"#)"#), kind: .spokenUnit),

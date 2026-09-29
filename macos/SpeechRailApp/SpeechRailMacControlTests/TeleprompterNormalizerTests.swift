@@ -342,4 +342,39 @@ struct TeleprompterCanonicalizerTests {
         #expect(magnitude.first?.range.start == 2)
         #expect(magnitude.first?.range.end == 5, "`2万元` 在原稿里只占 3 个 UTF-16 单位")
     }
+
+    /// `两` 是 `chineseDigits` 认得的数词，服务端 `_CN_NUM_RE` 也把它列在首位，
+    /// 唯独口语小数的点前字符类漏了它。规则匹配不上就落到 `.spokenUnit`——而
+    /// `点` 在单位表里，于是 `两点五` 被读成「2 点」加一个孤零零的「五」，也就是
+    /// 「两点钟」。与第 67 条同形：看起来是完备规则，实际是枚举式的，而漏掉的那
+    /// 一个恰好让整条规则失效、交给另一条规则按错的读法接手。
+    @Test func spokenDecimalsAcceptTwoTheSameWayTheRestOfTheNumeralRulesDo() {
+        for (spoken, written) in [
+            ("两点五", "2.5"),
+            ("二点五", "2.5"),
+            ("一点五", "1.5"),
+        ] {
+            #expect(
+                TeleprompterCanonicalizer.values(spoken) == [written],
+                "\(spoken) 应读成 \(written)，实际 \(TeleprompterCanonicalizer.values(spoken))"
+            )
+        }
+        // 反向对照：点前点后的数词都还认，`点` 作为单位表成员的判断本条不碰。
+        #expect(TeleprompterCanonicalizer.values("三点五") == ["3.5"])
+        #expect(TeleprompterCanonicalizer.values("零点八五") == ["0.85"])
+        // 口语小数不带单位组（`三点五秒` 与 `2.5秒` 对不上），那是另一处缺陷，
+        // 与本条无关，不能塞进同一条断言——否则将来两处里只修好一处，
+        // 这条回归会因为另一处而变红，把两件事搅在一起。
+        #expect(TeleprompterCanonicalizer.values("两点五秒") == ["2.5", "秒"])
+
+        // 点前点后的成员是**量出来的边界**，不是完备规则：语料上点前用 `〇` 0 处、
+        // 点后用 `〇` 0 处、点后用 `两` 仅 1 处且是假阳性（`落点两块`）。当前成员
+        // 与服务端 `_DECIMAL_RE` 逐字一致。变异 N2（把 `两` 也放进点后类）与
+        // N3（把 `〇` 放进点前类）在 1170 条小数矩阵上各改变 72 条行为，
+        // 两者都能让本套件全绿——所以边界必须写死，否则它是意外而不是决定。
+        #expect(TeleprompterCanonicalizer.values("〇点五") == ["〇", "点", "五"],
+                "点前不认 `〇`，与服务端一致")
+        #expect(TeleprompterCanonicalizer.values("三点两") == ["3点", "两"],
+                "点后不认 `两`：语料上唯一一处是假阳性")
+    }
 }
