@@ -638,6 +638,113 @@ struct TeleprompterPreparationPromptsTests {
         #expect(benign.isEmpty)
     }
 
+    @Test func semanticReviewSeesChineseOrdinalSubjects() {
+        // `nearestSubject` only matched ASCII labels, so on a Chinese script
+        // the subject-value pairs were always empty and the whole check was
+        // silent. Ordinal labels are the one Chinese shape the corpus supports
+        // without a segmenter: 2330 files, 38 hits, every one readable.
+        let swapped = TeleprompterSemanticRiskDetector.findings(
+            source: "第一批采购 50 台，第二批采购 80 台。",
+            candidate: "第一批采购 80 台，第二批采购 50 台。"
+        )
+        #expect(swapped.contains { $0.issue == .subjectValueChanged })
+        #expect(swapped.contains { $0.sourceRange != nil && $0.candidateRange != nil })
+
+        // Reverse control: the same order must stay silent, otherwise the rule
+        // would fire on every ordinal in the script.
+        let sameOrder = TeleprompterSemanticRiskDetector.findings(
+            source: "第一批采购 50 台，第二批采购 80 台。",
+            candidate: "第一批采购 50 台，第二批采购 80 台。"
+        )
+        #expect(!sameOrder.contains { $0.issue == .subjectValueChanged })
+    }
+
+    @Test func semanticReviewSeesEveryOrdinalQuantifierTheCorpusProduces() {
+        // 轮 is 30 of the 38 corpus hits, 批 4, 组 1. Pinning only 批 would let
+        // the highest-frequency shape regress unnoticed.
+        for (source, candidate) in [
+            ("第九轮实测 280 ms。", "第九轮实测 160 ms。"),
+            ("第一组回放 12 项。", "第一组回放 8 项。"),
+        ] {
+            #expect(
+                TeleprompterSemanticRiskDetector.findings(
+                    source: source,
+                    candidate: candidate
+                ).contains { $0.issue == .subjectValueChanged },
+                "未检出: \(source)"
+            )
+        }
+    }
+
+    @Test func semanticReviewOnlyReadsAnOrdinalThatStartsItsClause() {
+        // The lookbehind is what keeps 第N from being picked out of the middle
+        // of a neighbouring clause. Conservative by design: a mid-clause
+        // ordinal yields no subject, so a plain value change is reported by
+        // the fidelity gate rather than as a subject-value mismatch.
+        let midClause = TeleprompterSemanticRiskDetector.findings(
+            source: "我们计划第一批采购 50 台。",
+            candidate: "我们计划第一批采购 80 台。"
+        )
+        #expect(!midClause.contains { $0.issue == .subjectValueChanged })
+
+        // Same text, but the ordinal does start its clause.
+        let clauseInitial = TeleprompterSemanticRiskDetector.findings(
+            source: "第一批采购 50 台。",
+            candidate: "第一批采购 80 台。"
+        )
+        #expect(clauseInitial.contains { $0.issue == .subjectValueChanged })
+    }
+
+    @Test func semanticReviewIgnoresASubjectThatOnlyOneSideFinds() {
+        // Comparing the two pair lists instead of the shared subjects made a
+        // lost pair read as a changed one. Deleting the comma stops the
+        // ordinal from starting its clause, so this pure punctuation rewrite
+        // was reported as a swapped value.
+        let punctuationOnly = TeleprompterSemanticRiskDetector.findings(
+            source: "第一批采购 50 台，第二批 80 台。",
+            candidate: "第一批采购 50 台第二批 80 台。"
+        )
+        #expect(!punctuationOnly.contains { $0.issue == .subjectValueChanged })
+
+        // The same shape on the ASCII side, which had the same latent gap.
+        let asciiPunctuationOnly = TeleprompterSemanticRiskDetector.findings(
+            source: "方案 A 的成本 50 元，方案 B 的成本 80 元。",
+            candidate: "方案 A 的成本 50 元方案 B 的成本 80 元。"
+        )
+        #expect(!asciiPunctuationOnly.contains { $0.issue == .subjectValueChanged })
+    }
+
+    @Test func semanticReviewKeepsTheOrdinalNumeralSetToWhatTheCorpusHas() {
+        // 两 and 零 never precede an ordinal quantifier in the corpus. Adding
+        // them is unmeasured surface, so the set stays exactly
+        // 一二三四五六七八九十百千.
+        for text in ["第两批采购 50 台。", "第零批采购 50 台。"] {
+            #expect(
+                !TeleprompterSemanticRiskDetector.findings(
+                    source: text,
+                    candidate: text.replacingOccurrences(of: "50", with: "80")
+                ).contains { $0.issue == .subjectValueChanged },
+                "不应视为序数主体: \(text)"
+            )
+        }
+    }
+
+    @Test func semanticReviewStillMissesGeneralChineseNounPhraseSubjects() {
+        // Measured and deliberately not fixed. Every bounded heuristic for a
+        // Chinese noun phrase produced mostly fragments on the real corpus:
+        // anchoring on 的 yields 350 hits of which the top ones are 稿 / 我 /
+        // 零事件 / 帧, a leading 天干 stem collides with 未 (not) and 子
+        // (subtask), and requiring parallel labels leaves 稿 / 我 / 与帧 alive.
+        // A false finding forces the block to .unresolved, so narrow beats
+        // noisy. This test pins the gap: if a future change widens the rule,
+        // this turns red and the widening has to be argued for.
+        let chineseSwap = TeleprompterSemanticRiskDetector.findings(
+            source: "方案甲的单次成本不超过 50 元。方案乙的单次成本不超过 80 元。",
+            candidate: "方案乙的单次成本不超过 50 元。方案甲的单次成本不超过 80 元。"
+        )
+        #expect(!chineseSwap.contains { $0.issue == .subjectValueChanged })
+    }
+
     @Test func semanticReviewMapsRisksIntoExistingReviewIssues() {
         let issues = TeleprompterSemanticRiskDetector.reviewIssues(
             modelIssues: [.readingChoice],

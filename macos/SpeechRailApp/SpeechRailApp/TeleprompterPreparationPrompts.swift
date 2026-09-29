@@ -1113,6 +1113,14 @@ public struct TeleprompterSemanticFinding: Equatable, Sendable {
 /// Bounded, deterministic risk signals for review. These are prompts for a human,
 /// never proof that a rewrite is semantically equivalent.
 public enum TeleprompterSemanticRiskDetector {
+    /// `第N` + a quantifier the corpus actually produces, anchored to the
+    /// start of its clause. `(?<![^。；，\n])` is a one-character lookbehind
+    /// asserting the preceding character *is* a clause break (or that we are
+    /// at the start), which is what keeps the label from being read out of the
+    /// middle of a neighbouring clause.
+    private static let chineseOrdinalSubject =
+        #"(?<![^。；，\n])(第[一二三四五六七八九十百千]+[轮次批组条版项])[^。；，\n]{0,24}$"#
+
     private static let conditionMarkers = ["仅当", "只有", "仅在", "除非", "前提是"]
     private static let negationMarkers = ["不得", "不能", "不会", "并非", "禁止", "没有", "未"]
     private static let comparisonMarkers = [
@@ -1129,21 +1137,28 @@ public enum TeleprompterSemanticRiskDetector {
         let candidateAtoms = TeleprompterProtectedLiteralExtractor.atoms(from: candidate)
         let sourcePairs = subjectValuePairs(in: source, atoms: sourceAtoms)
         let candidatePairs = subjectValuePairs(in: candidate, atoms: candidateAtoms)
-        if sourcePairs.map(\.identity) != candidatePairs.map(\.identity),
-           !sourcePairs.isEmpty,
-           !candidatePairs.isEmpty {
-            let index = zip(sourcePairs, candidatePairs).enumerated().first {
-                $0.element.0.identity != $0.element.1.identity
-            }?.offset ?? 0
+        // Compare the subjects that appear on *both* sides. Comparing the two
+        // pair lists instead made a lost pair read as a changed one: dropping
+        // the comma in `第一批采购 50 台，第二批 80 台` stops the ordinal from
+        // starting its clause, so the candidate yields one pair and the source
+        // two, and a pure punctuation rewrite was reported as a swapped
+        // value. Whether a clause was removed is not this check's job — the
+        // fidelity gate owns that.
+        let sourceBySubject = Dictionary(
+            sourcePairs.map { ($0.subject, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let candidateBySubject = Dictionary(
+            candidatePairs.map { ($0.subject, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let shared = Set(sourceBySubject.keys).intersection(candidateBySubject.keys)
+        if let changed = shared.sorted().first(where: {
+            sourceBySubject[$0]?.value != candidateBySubject[$0]?.value
+        }) {
             results.append(
                 .init(
                     issue: .subjectValueChanged,
-                    sourceRange: sourcePairs.indices.contains(index)
-                        ? sourcePairs[index].range
-                        : fullRange(of: source),
-                    candidateRange: candidatePairs.indices.contains(index)
-                        ? candidatePairs[index].range
-                        : fullRange(of: candidate)
+                    sourceRange: sourceBySubject[changed]?.range ?? fullRange(of: source),
+                    candidateRange: candidateBySubject[changed]?.range ?? fullRange(of: candidate)
                 )
             )
         }
@@ -1193,7 +1208,8 @@ public enum TeleprompterSemanticRiskDetector {
     }
 
     private struct SubjectValuePair {
-        let identity: String
+        let subject: String
+        let value: String
         let range: TeleprompterSourceRange
     }
 
@@ -1208,7 +1224,8 @@ public enum TeleprompterSemanticRiskDetector {
                       beforeUTF16Offset: atom.utf16Offset
                   ) else { return nil }
             return SubjectValuePair(
-                identity: "\(subject)|\(atom.canonicalValue)",
+                subject: subject,
+                value: atom.canonicalValue,
                 range: .init(
                     start: atom.utf16Offset,
                     end: atom.utf16Offset + atom.utf16Length
@@ -1227,6 +1244,23 @@ public enum TeleprompterSemanticRiskDetector {
         let patterns = [
             #"([A-Za-z][A-Za-z0-9+#-]*)\s*的[^。；\n]{0,24}$"#,
             #"\b([A-Z][A-Za-z0-9+#-]*)\b[^.。\n]{0,24}$"#,
+            // Ordinal batch labels are the one Chinese subject shape that
+            // survives the corpus without a segmenter. Both earlier patterns
+            // require an ASCII label, so on a Chinese script every pair was
+            // empty and `subjectValueChanged` could not fire at all — the
+            // check was silent on the language the product is written in.
+            //
+            // The quantifier list is exactly the set the corpus exercises
+            // (轮 30, 次 4, 批 4, 组 1, 条 1, 版 1, 项 1 over 2330 files,
+            // 38 hits, every one a readable label). A general Chinese noun
+            // phrase is deliberately not handled: see
+            // `semanticReviewStillMissesGeneralChineseNounPhraseSubjects` for
+            // the measurements that ruled it out. It is appended last so the
+            // ASCII precedence above is left exactly as it was; the two
+            // families are disjoint (one needs a Latin token, the other a
+            // leading 第 plus a Chinese numeral), so the order is not load
+            // bearing today.
+            Self.chineseOrdinalSubject,
         ]
         for pattern in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
