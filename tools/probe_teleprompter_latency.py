@@ -20,12 +20,13 @@ import argparse
 import base64
 import contextlib
 import json
+import platform
 import queue
 import threading
 import time
 import wave
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ SAMPLE_RATE = 24_000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 MAX_RECEIVE_QUEUE_EVENTS = 2_048
+# 方案 §11.6 要求每份延迟报告都带语言. 会话配置与证据文件必须用同一个常量,
+# 否则「探针跑的是哪条语言」这件事会只存在于一个没人复查的字面量里.
+LANGUAGE = "zh"
 
 
 class ProbeInputError(ValueError):
@@ -100,6 +104,43 @@ class _ProbeMeasurements:
 class WaveFixture:
     pcm: bytes
     duration_seconds: float
+
+
+def probe_condition(model: str) -> dict[str, str]:
+    """The language, device and model every latency report must carry (plan 11.6).
+
+    The device label stays limited to system and architecture. Host name, user
+    name and absolute paths would make the evidence file identify somebody.
+    """
+
+    return {
+        "language": LANGUAGE,
+        "device": f"{platform.system()}-{platform.machine()}",
+        "model": model,
+    }
+
+
+def session_update_payload(model: str) -> dict[str, object]:
+    """The single session configuration this probe ever sends.
+
+    抽出来是为了让「会话用的语言」和「证据文件里写的语言」共用同一个常量这件
+    事可测: 内联字面量时, 改了一处忘了另一处不会让任何用例变红.
+    """
+
+    return {
+        "type": "session.update",
+        "session": {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
+                    "transcription": {"model": model, "language": LANGUAGE},
+                    "turn_detection": "manual",
+                }
+            },
+            "speechrail": {"task": "caption"},
+        },
+    }
 
 
 def load_wave_fixture(path: Path) -> WaveFixture:
@@ -260,6 +301,61 @@ def _wait_for_terminal(
             return received_at, event, event_type
 
 
+def build_evidence(
+    *,
+    model: str,
+    fixture: WaveFixture,
+    created_at: float,
+    configured_at: float,
+    stream_started: float,
+    completed_at: float | None,
+    measurements: _ProbeMeasurements,
+    upload_lateness: Sequence[float],
+    event_counts: Mapping[str, int],
+    chunk_count: int,
+) -> dict[str, object]:
+    """Project one probe run into the JSON-safe evidence file.
+
+    抽成纯函数是为了让证据文件的形状本身可测. 它此前只是 run_probe 末尾的
+    一个字典字面量, 没有任何测试碰过, 于是「方案 §11.6 要求带的语言与设备没
+    带出去」这类问题不会让任何用例变红.
+    """
+
+    audio_ms = fixture.duration_seconds * 1_000
+    completed_ms = None if completed_at is None else (completed_at - stream_started) * 1_000
+    return {
+        # 4: 新增 condition(语言/设备/模型, 方案 §11.6 要求) 与
+        # completed_after_audio_ms; 顶层 model 移入 condition. #108 的验收标准
+        # 就是「JSON 明确版本演进」, 所以形状变了必须升版本, 不能悄悄改.
+        "schema_version": 4,
+        "tool": "speechrail-probe-teleprompter-latency",
+        "evidence_mode": "real",
+        "condition": probe_condition(model),
+        "partial_mode": "hypothesis",
+        "upload_chunk_ms": UPLOAD_CHUNK_MILLISECONDS,
+        "audio_seconds": fixture.duration_seconds,
+        "setup_ms": (configured_at - created_at) * 1_000,
+        "upload_lateness": timing_summary(upload_lateness),
+        "partial_gap": timing_summary(measurements.partial_gaps),
+        "first_partial_ms": (
+            None
+            if measurements.first_partial_at is None
+            else (measurements.first_partial_at - stream_started) * 1_000
+        ),
+        "completed_ms": completed_ms,
+        # completed_ms 相对媒体起点, 整段音频时长是它的下界: 41 秒素材配 40 秒
+        # commit 往返, 它读起来仍像「延迟」. 这一项才是 commit 往返.
+        "completed_after_audio_ms": (
+            None if completed_ms is None else completed_ms - audio_ms
+        ),
+        "partial_count": measurements.revisions.partial_count,
+        "utterance_count": measurements.revisions.utterance_count,
+        "revision_regressions": measurements.revisions.revision_regressions,
+        "event_counts": dict(sorted(event_counts.items())),
+        "audio_chunks": chunk_count,
+    }
+
+
 def run_probe(
     fixture: WaveFixture,
     *,
@@ -292,22 +388,7 @@ def run_probe(
             events, errors, "session.created", timeout_seconds=15
         )
         event_counts["session.created"] += 1
-        connection.send(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "transcription",
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-                            "transcription": {"model": model, "language": "zh"},
-                            "turn_detection": "manual",
-                        }
-                    },
-                    "speechrail": {"task": "caption"},
-                },
-            }
-        )
+        connection.send(session_update_payload(model))
         configured_at, _ = _receive_until(
             events, errors, "session.updated", timeout_seconds=15
         )
@@ -360,31 +441,18 @@ def run_probe(
             connection.close()
 
     assert stream_started is not None
-    return {
-        "schema_version": 3,
-        "tool": "speechrail-probe-teleprompter-latency",
-        "evidence_mode": "real",
-        "model": model,
-        "partial_mode": "hypothesis",
-        "upload_chunk_ms": UPLOAD_CHUNK_MILLISECONDS,
-        "audio_seconds": fixture.duration_seconds,
-        "setup_ms": (configured_at - created_at) * 1_000,
-        "upload_lateness": timing_summary(upload_lateness),
-        "partial_gap": timing_summary(measurements.partial_gaps),
-        "first_partial_ms": (
-            None
-            if measurements.first_partial_at is None
-            else (measurements.first_partial_at - stream_started) * 1_000
-        ),
-        "completed_ms": (
-            None if completed_at is None else (completed_at - stream_started) * 1_000
-        ),
-        "partial_count": measurements.revisions.partial_count,
-        "utterance_count": measurements.revisions.utterance_count,
-        "revision_regressions": measurements.revisions.revision_regressions,
-        "event_counts": dict(sorted(event_counts.items())),
-        "audio_chunks": chunk_count,
-    }
+    return build_evidence(
+        model=model,
+        fixture=fixture,
+        created_at=created_at,
+        configured_at=configured_at,
+        stream_started=stream_started,
+        completed_at=completed_at,
+        measurements=measurements,
+        upload_lateness=upload_lateness,
+        event_counts=event_counts,
+        chunk_count=chunk_count,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

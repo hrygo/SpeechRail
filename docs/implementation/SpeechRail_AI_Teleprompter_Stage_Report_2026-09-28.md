@@ -10,7 +10,7 @@
 
 | Issue | 工作包 | 结果 | 主要改动 |
 |---|---|---|---|
-| #108 | 探针计时、终态与有界性 | 完成 | `tools/probe_teleprompter_latency.py`、schema 3、11 项回归 |
+| #108 | 探针计时、终态与有界性 | 完成 | `tools/probe_teleprompter_latency.py`、schema 4、14 项回归 |
 | #104 | 出现级保真门禁 | 完成 | `TeleprompterProtectedAtom`、完整 canonical 序列比对、rewrite/map/reduce 共用门禁 |
 | #105 | partial/final 统一推进权限 | 完成 | 本地推进半径与 reanchor 门槛，partial 与 final 走同一 `mayAdvance` |
 | #106 | hypothesis 证据透传 | 完成 | 内部 `RealtimeHypothesisEvidence`，wire 协议未新增事件 |
@@ -387,6 +387,14 @@
 
     修法：`harmfulJumpCount == 0` 且素材时长 > 0 时，按 `3 / 观测小时数` 输出 95% 上界，并写明该数字只提醒样本边界、不作为产品性能宣称。真的观测到事件时不输出——那时候该报的是次数。代价是**报告不再有「完全沉默」这个状态**，两条既有反向对照（第 53、55 条）因此改了断言，见 §2.16。
 
+59. **延迟探针的证据文件不带方案 §11.6 要求的语言与设备，而它的形状从来没有任何测试碰过（第三十二轮，真缺陷，根因是「证据文件本身不可测」）**：§11.6 结尾一句是「所有延迟报告 P50／P95、**样本数、语言、设备、模型**与运行条件」。逐条对到 `tools/probe_teleprompter_latency.py` 的输出上：模型有（顶层 `model`），样本数有（每个 `timing_summary` 带 `count`），**语言没有、设备没有**。而语言并不是「探不出来」——它就硬编码在会话配置里：`"transcription": {"model": model, "language": "zh"}`。数字一旦写进 JSON 离开文件，就没有语言标签，跨语言比较无从谈起；设备则连采集都没做。
+
+    同一处还坐着第二个问题：`completed_ms = completed_at - stream_started`，**相对媒体起点**，而整段音频时长是它的结构性下界。41 秒素材配 40 秒的 commit 往返，这个字段是 41.4 秒——读起来仍像「延迟」，实际含义是「音频有多长 + commit 花了多久」。
+
+    **根因不是漏写了两个字段，是 `run_probe` 末尾那个字典字面量没有任何测试碰过**。探针的 12 条旧用例覆盖了时钟、ACK、序号、终态、队列有界性、revision 单调性——**唯独没有一条断言证据文件的形状**。于是「§11.6 要求带的条件缺了两项」不会让任何用例变红。
+
+    修法三步：把结果构造抽成纯函数 `build_evidence`（形状从此可测）；新增 `condition{language, device, model}`，设备标签只用 `platform.system()-platform.machine()`，**不含主机名、用户名或绝对路径**（项目隐私约定）；新增 `completed_after_audio_ms` 把 commit 往返单独拆出来。会话配置也抽成 `session_update_payload`，与 `probe_condition` 共用同一个 `LANGUAGE` 常量——**「探针跑的是 A 语言、报告的是 B 语言」这种分叉不许存在**。证据形状变了，`schema_version` 由 3 升到 4（#108 的验收标准原文就是「JSON 明确版本演进」）。
+
 ### 2.6 第十九轮扫了舞台与三个 sheet（含三条排除）
 
 前十八轮的扫描集中在会话层、工作台和评估器，**舞台与三个 sheet 一直是盲区**。这一轮补上，同样逐条记录结论——排除也是结论。
@@ -681,6 +689,22 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
 
 `swift test` **285 项 / 16 套件**通过（新增 2 条）。真实素材修复前后 `metrics` 逐字段零差异，只多了一条 caveat。
 
+### 2.17 第三十二轮：探针的证据文件本身不可测（第 59 条）
+
+前两轮都在评估器（Swift）上。第 52–58 条这七条缺陷里，**有五条的根因是同一个**：不是逻辑写错了，是**「报告／证据文件长什么样」这件事从来没有被断言过**。评估器那边本轮之前有 caveat 反向对照（第 53、55 条）兜着，探针这边一条都没有——所以这一轮换个对象，把同一判据用上去。
+
+**怎么查出来的**：把 §11.6 结尾那句「所有延迟报告 P50／P95、样本数、语言、设备、模型与运行条件」逐项对到 `tools/probe_teleprompter_latency.py` 的输出字典上。模型有，样本数有（`timing_summary` 每个都带 `count`），**语言没有、设备没有**。而语言不是探不出来——它硬编码在第 303 行的会话配置里。
+
+顺着「单位／参照系」这条判据又看到第二个：`completed_ms = completed_at - stream_started` 相对**媒体起点**，整段音频时长是它的结构性下界。41 秒素材 + 40 秒 commit 往返 = 41.4 秒，这个字段读起来像「延迟」，实际是「音频有多长 + commit 花了多久」。
+
+**修法**：`run_probe` 末尾的字典字面量抽成纯函数 `build_evidence`（形状从此可测），新增 `condition{language, device, model}` 与 `completed_after_audio_ms`，会话配置抽成 `session_update_payload` 并与 `probe_condition` 共用 `LANGUAGE`。设备标签只用 `platform.system()-platform.machine()`——**项目隐私约定禁止证据文件带主机名、用户名或绝对路径**，所以这条不是可选项。`schema_version` 3 → 4。
+
+**这一轮顺手量了一件此前没人量的事，如实记下来**：`first_partial_ms` 同样相对媒体起点，所以**素材开头的静音会被算进「首个 partial 延迟」**。听起来像个真缺陷，于是量了那份 41 秒素材：前置静音只有 **80 ms**（20 ms 窗、峰值阈值 200，总长 41040 ms，有声段 31380 ms）。**80 ms 对一个秒级数字可以忽略，这条不构成对已记录数字的推翻**。探针的接收线程在事件到达时打时间戳、主线程在上传结束后才消费队列，所以「首个 partial 到达时已上传了多少音频」无法从现有结构里取出来——要拆开得重建上传进度快照。本轮**不做**：它对现有素材影响可忽略，而重建会引入一个比原问题更容易出错的推导。**如实记下边界，不假装已修**。
+
+变异 **8 条全部被杀**：删掉整个 `condition`、`probe_condition` 报另一种语言、设备标签置空、会话语言与证据语言分叉、commit 往返不做相减、commit 往返恒为 `null`、形状变了不升版本、顶层 `model` 与 `condition.model` 重复。
+
+探针回归 **15 项通过**（新增 3 条）。`ruff check .`、`mypy src` 154 文件全绿。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -731,7 +755,7 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
 | 验证 | 命令 | 结果 |
 |---|---|---|
 | Swift 单元与回归 | `swift test --package-path macos/SpeechRailApp` | Swift Testing **275 项 / 16 套件** + XCTest **171 项**全部通过（2026-09-29 第十六轮复跑；两轮证据审计新增 8 条，读法别名通道与语音辅助试读再新增 20 条，错误归因与回滚一轮再新增 12 条，导入拒绝一轮再新增 1 条，字号列宽全值域扫描与迁移失败、零推进、恢复门槛与内容范围各再新增 1 条）。**更正**：本节此前写的「XCTest 389 项」无法复现，实测为 171 项；389 应是 Xcode target 侧的另一组计数，两条门禁的 XCTest 集合并不相同，比较时不要混用。**注意**：`swift test` **不编译** `TeleprompterView.swift` 与各 sheet，视图层编译证据只有 Xcode 一条，见 §2 第 34 条 |
-| 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **12 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
+| 探针回归 | `pytest tests/test_teleprompter_latency_probe.py` | **15 项通过**（新增时钟回退守卫用例）。**注意**：本 worktree 的 `.venv` 未安装 `dev` extra，须用主检出的 venv 并把本 worktree 的 `src` 置于 `PYTHONPATH` 之前；单文件运行还须加 `--no-cov`，否则 `--cov-fail-under=80` 会让退出码恒为非零。见 §2 第 33 条 |
 | 共享准入回归 | `pytest tests/test_resource_governor.py` | 25 项通过（同 key 串行、共享单一 worker 槽位、重叠串行） |
 | 回放 runner 端到端 | `swift run teleprompter-replay --manifest <外部 manifest>` | 产出 `teleprompter.eval.v1` 报告（P50／P95、恢复延迟、失败占比与 caveats 齐备）；缺 manifest、缺版本记录、素材字段非法均以退出码 2 拒绝。**CLI 与单测同形核对**：用与 `trackingLatencyIsMeasuredFromTheStartOfTheReadNotTheRun`／`reanchorLatencyIsMeasuredFromTheDetour` 同形的素材跑 CLI，复现了单测断言的数值（跟随延迟 p50=p95=400 ms；恢复延迟 p50=1100 ms），确认 runner 驱动的确实是生产跟随路径，而不是另写一套转写充当验收 |
 | Xcode App target 编译 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED**（2026-09-29 复跑）；17 条 warning 全部落在既有代码（`RealtimeASRClient` 的 `withStageTimeout` 未用结果、`LLMProvider` 弃用项等），本轮新增文件 0 条 |
@@ -745,6 +769,7 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
 | 回归有效性（变异验证） | 对生产代码施加定向变异，检查是否有测试变红 | 三轮累计。**第 18 条**（前序）：`TeleprompterReadingProgressRestorer` 两次变异，其中只破坏 nil 分支的那次**既有 13 条同套件测试全绿、仅新增用例变红**。**第 24–33 条（本轮）**：有效变异 **79 次**，覆盖台账全部六段——跟随控制器 18、保真门禁与语义检测 12、`RealtimeASRClient` 事件闸门 6、sequence validator 4、存储与舞台 11、回放评估 caveat 7、Python 探针 6、以及若干对照。结果 **47 杀 / 32 存活**；作废 14 次（锚点写错 2、探针缺陷 8、语义等价 2、探针环境错误 6，见第 27、33 条），均不计入。**32 次存活逐个查因**：12 次补回归后转杀掉，20 次判为纵深防御外层、生产不可达或不可观测（§2 第 19、24、25、28、31 条）。新增 12 条回归，其中 **11 条经变异验证**；`longRunsStayCorrectAcrossHundredsOfItems` 经变异验证确认**钉不住内存上限**，只声称它固定长跑后行为不漂移 |。**第十轮（读法别名，22 次变异）与第十一轮（语音辅助试读，8 次变异）**：每轮都带基线自检与一条已知应杀变异，探针本身先证明有效。别名轮首轮 5 条存活，查因后 4 条补回归转杀掉，1 条（`updatePendingSegment` 清空别名）判为**当前不可达**——两处 `pendingVersion` 都从零重建段落，走不到，按纵深防御保留并在注释里写明不可达原因。试读轮首轮 4 条存活，其中 3 条是**测试盲区**（试读不推进阅读位置、采用闸门、沿用同一套识别配置），补断言后杀掉；1 条（把试读事件也喂给 `followAdapter`）定位为**结构性失效**：`TeleprompterFollowController` 每条接收路径都有 `guard mode == .following`，试读从不进入该模式，控制器会 retire 每个 item。**第十二轮（错误归因与回滚，19 次变异）**：新增路径 3 条、移除路径 3 条、采用回滚 3 条、朗读标注回滚 2 条、原稿回退回滚 3 条、切稿拒绝 2 条、重试保存 1 条、复制兜底 1 条、删除拒绝 1 条，全部被新回归杀死，无存活，详见 §2 第 41–44、46–50 条。**第十五轮（导入拒绝，1 次变异）**：把 `createDocument(title:importedSource:)` 的守卫改回静默 `return`（杀），见 §2 第 51 条。**第十六轮（验收第 3 条补证，10 次变异）**：字号列宽扫描 5 条被杀，1 条**未复现触发条件**（`TeleprompterStageLineLayout` 的尾行兜底分支本机进不去；既不是等价变异，也不是测试盲区，见 §2.2），不计入杀数；「迁移失败保留原数据」4 条全杀（读不动的稿件从列表消失／读不动时删掉原文件／不带失败原因／会话层不再记录）。**第十七轮（零推进不得报成干净结果，4 次变异）**：4 条全部被杀，详见 §2 第 52 条。**同轮续（恢复门槛，3 次变异）**：3 条全部被杀，其中一条复现了本轮真实犯的判据错误。**第十九轮（改范围不得静默丢弃审阅，7 次变异）**：7 条全部被杀，无存活无作废，详见 §2 第 54 条。**累计有效变异 123 次、91 杀 / 32 存活；累计新增 37 条回归**（别名 15、试读 5 条中 3 条为补盲区另 2 条为新增场景、错误归因与回滚 6、导入拒绝 1、字号列宽扫描 1、迁移失败 1、零推进 1、恢复门槛 1、内容范围 3） |
 | 第三十轮（失败分母，5 次变异） | 对 `TeleprompterReplayEvaluator` 的失败计数与停顿门槛施加 5 条定向变异 | 5 条全部被杀。**「停顿门槛复用回稿 deadline」首轮存活**——它是本轮新引入的解耦、没有用例覆盖，补 `aStallDuringAnUnrecoveredReanchorWindowStillCounts` 后转杀。另 4 条（去掉逐事件 latch、窗口关闭时不结算次数、分子改回「次数」、恢复时不再释放停顿门槛）首轮即杀；其中最后一条杀的是**本轮自己引入的回归**——它让 41 秒真实素材的错误停顿从 12 掉到 11，283 项单测全绿都没发现，是靠修复前后两份报告逐指标对比才看出来的。详见 §2.15 与 §2 第 57 条。**累计有效变异 128 次、96 杀 / 32 存活；累计新增 41 条回归**（本轮 4 条：拖尾稀释、多次未恢复、停顿门槛解耦、恢复释放门槛） |
 | 第三十一轮（零误推进样本上界，5 次变异） | 对新增的零观测 caveat 施加 5 条定向变异 | 4 条首轮即杀（删掉整条、把上界写成常数 1、假设观测 8 小时、只对长素材输出）。**1 条作废**：`let hours = 8` 让 `hours` 推成 `Int`，`.rounded()` 编译不过——按第 27、33 条的规矩**探针缺陷不计入杀数**，改成 `8.0` 后成为有效变异并被杀掉。另一条「让它在已观测到误推进时也输出」由反向对照 `aMaterialWithHarmfulJumpsReportsTheCountNotTheSampleBound` 杀掉。详见 §2.16 与 §2 第 58 条。**累计有效变异 133 次、101 杀 / 32 存活；累计新增 43 条回归**（本轮 2 条：样本上界存在、上界随时长收紧） |
+| 第三十二轮（探针证据文件，8 次变异） | 对 `tools/probe_teleprompter_latency.py` 的 `build_evidence`／`probe_condition`／`session_update_payload` 施加 8 条定向变异 | 8 条全部被杀：删掉整个 `condition`、`probe_condition` 报另一种语言、设备标签置空、会话语言与证据语言分叉、commit 往返不做相减、commit 往返恒为 `null`、形状变了不升版本、顶层 `model` 与 `condition.model` 重复。详见 §2.17 与 §2 第 59 条。**累计有效变异 141 次、109 杀 / 32 存活；累计新增 46 条回归**（本轮 3 条：§11.6 条件齐备、commit 往返与音频时长分离、会话与证据语言同源） |
 
 **交接前的最终门禁复跑（第二十四轮，2026-09-29）**：上面各行是开发过程中分轮跑的；为了让接手方拿到**一个当前时点、覆盖整条分支的绿证据**（而不是拼凑各轮旧记录），在最终交接状态（**61 个提交**，HEAD `92fad46f`，已含第二十一／二十二轮的两处视图改动）把三条门禁完整重跑一遍：
 
@@ -918,7 +943,7 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
 | #108 | 冷／慢握手后仍按 1 倍速发送，不追赶；上传迟到单独报告 | 满足 | `test_media_origin_is_established_after_session_configuration` |
 | #108 | 多 utterance、无 partial 直 final、旧 final、failed、断连、缺 terminal | 满足 | `test_revision_tracker_scopes_regressions_to_one_utterance`、`test_commit_terminal_requires_the_matching_event_id`、`test_wait_for_terminal_ignores_other_commit_and_surfaces_errors`、`test_probe_measurements_record_hypothesis_without_losing_first_partial` |
 | #108 | revision 重置只在同 utterance 判错 | 满足 | `test_revision_tracker_scopes_regressions_to_one_utterance` |
-| #108 | JSON 明确版本演进；错误不标 PASS；历史结果不重写 | 满足 | 探针输出 `schema_version: 3`；任何 `ProbeInputError`／`RealtimeProbeError`／队列溢出／超时都走退出码 2 且不落报告（`main()` `tools/probe_teleprompter_latency.py:404-427`）；输出文件已存在即拒绝覆盖，历史结果不重写（同上 `:404-405`）；`test_cli_reports_queue_overflow_as_input_error` |
+| #108 | JSON 明确版本演进；错误不标 PASS；历史结果不重写 | 满足 | 探针输出 `schema_version: 4`（第三十二轮因证据形状变化升版：新增 `condition` 与 `completed_after_audio_ms`，顶层 `model` 移入 `condition`）；任何 `ProbeInputError`／`RealtimeProbeError`／队列溢出／超时都走退出码 2 且不落报告（`main()` `tools/probe_teleprompter_latency.py:404-427`）；输出文件已存在即拒绝覆盖，历史结果不重写（同上 `:404-405`）；`test_cli_reports_queue_overflow_as_input_error` |
 | #108 | 报告只含匿名计数／耗时／版本 | 满足 | `observationsCorrelateCallAndRedactedFailure`、`reportCarriesOnlyAggregatesAndNoScriptText` |
 | #109 | A/B 互换、否定消失、条件删减、可能→会、主体变化可定位审阅 | 满足 | `semanticReviewDetectsSubjectValueAndQualifierChanges`、`qualifierLossInRewriteBecomesUnresolvedReview` |
 | #109 | 无损拆句、代词补足、列表改口语报告误报；不能一律阻塞 | 满足 | `unchangedRewriteStaysSpeakWithoutReviewIssues`（逐例，非汇总误报率） |
@@ -1021,8 +1046,9 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
 | 第 56 条 对齐器重投递路径凭空自评满分，噪声拿到阅读位置 | 判据第 4 条（证据可信）与 #114 素材工具 | 一段纯噪声能向验收人提供一个跟随延迟数字；与工具 docstring 的承诺直接矛盾 |
 | 第 57 条 失败占比用「次数」除以「事件数」，恢复失败拖得越久评分越好 | 判据第 4 条（证据可信）与方案 §11.6 门槛 | 跟随 30 秒没回稿，报告给 2.5% 失败占比并判「不超门槛」；两次各 5 秒的未恢复在报告里是 0 次。**方向反了**：失败越持久，验收越像通过 |
 | 第 58 条 零严重误推进时报告完全沉默，把短素材读成安全结论 | 判据第 4 条（证据可信）与方案 §11.6／§11.7「不声称真实发生率为零」 | 41 秒素材的 `harmful_jump_count: 0` 单独躺在 JSON 里，按方案自己给的算法上界是 **263 次／小时**。素材越短，证据越弱，报告读起来却越可信 |
+| 第 59 条 延迟探针的证据文件不带 §11.6 要求的语言与设备，形状从无测试 | 判据第 4 条（证据可信）与 §11.6 指标定义／#108「JSON 明确版本演进」 | 语言硬编码在会话配置里却不进输出，设备根本没采集；`completed_ms` 把整段音频时长算进「延迟」。根因是探针 12 条旧用例没有一条断言证据文件形状 |
 
-**给接手方的判断**：这十八个缺陷的共同形态是「**先改状态、后可能失败，而失败路径没有把状态放回去**」，加上「**把多个原因压成一个返回值或一句文案**」，以及「**拒绝之后仍然走成功路径的显示分支**」（第 51 条独有）、「**该报警时沉默**」「**该测量时沉默**」「**该确认时直接做**」（第 52、53、54 条独有）、「**分子分母不同单位**」（第 57 条独有）与「**零观测时报成达标**」（第 58 条独有，与第 52、53 条同族）。它们都不影响正常路径，只在磁盘写失败、用户重复操作、舞台已开启、跟随长时间没回稿、素材太短这类边界上暴露。已全部修复并各配回归与变异验证，但**同类形态是否还有第五处，本轮没有证据能保证没有**——第 43 条那次静态扫描在 `TeleprompterSession.swift` 命中 12 处、其余四个提词器文件全部为假阳性，这是本轮实际查到的范围，不等于全仓无遗漏。第 51 条的发现方式值得接手方沿用：**不是读代码读出来的，是把「读者点了这个按钮，接下来会看到什么」逐个问完六个创建入口问出来的**；第 57、58 条各补一条同样省事的：**看到「占比」就去核对分子分母的单位，看到「0 次」就去问「0 次是在多长的观测上得到的」**。
+**给接手方的判断**：这十九个缺陷的共同形态是「**先改状态、后可能失败，而失败路径没有把状态放回去**」，加上「**把多个原因压成一个返回值或一句文案**」，以及「**拒绝之后仍然走成功路径的显示分支**」（第 51 条独有）、「**该报警时沉默**」「**该测量时沉默**」「**该确认时直接做**」（第 52、53、54 条独有）、「**分子分母不同单位**」（第 57 条独有）、「**零观测时报成达标**」（第 58 条独有，与第 52、53 条同族）与「**证据文件本身从不被断言**」（第 59 条独有）。它们都不影响正常路径，只在磁盘写失败、用户重复操作、舞台已开启、跟随长时间没回稿、素材太短这类边界上暴露。已全部修复并各配回归与变异验证，但**同类形态是否还有第五处，本轮没有证据能保证没有**——第 43 条那次静态扫描在 `TeleprompterSession.swift` 命中 12 处、其余四个提词器文件全部为假阳性，这是本轮实际查到的范围，不等于全仓无遗漏。第 51 条的发现方式值得接手方沿用：**不是读代码读出来的，是把「读者点了这个按钮，接下来会看到什么」逐个问完六个创建入口问出来的**；第 57–59 条各补一条同样省事的：**看到「占比」就去核对分子分母的单位，看到「0 次」就去问「0 次是在多长的观测上得到的」，看到「证据文件」就去问「它的形状有测试吗」**。
 
 另需注意：**UI 走查缺口由 #89 跟踪，首个 ASR partial 的用户可见延迟由 #83 跟踪，两条至今 OPEN**。§3.2 列的两项未执行验证并非无人认领。
 
@@ -1077,6 +1103,7 @@ metrics.failureShare = Double(failedSampleCount) / Double(manifest.events.count)
   - 第 56 条（对齐器重投递打分）：只改 `tools/build_teleprompter_replay_manifest.py` 的 `ScriptAligner.align`。回退＝把重投递分支还原成 `ratio = 1.0`；代价是噪声与稿件外重复片段重新拿到阅读位置，停顿计数被抬高。**已复核过的人工标注 manifest 不受影响**——回放器只读 `labels`，不重跑对齐。
   - 第 57 条（失败分母与超时计数）：只改 `macos/SpeechRailApp/SpeechRailApp/TeleprompterReplayEvaluator.swift` 的评估循环与两条 caveat 文本，**不改 `teleprompter.eval.v1` schema、不改 5% 阈值**。回退＝还原 `endReanchorWindow()` 与逐事件失败计数；代价是退回「拖尾越长失败占比越低、跟随彻底没回来时报 0 次」。注意 `failed_sample_count` 的语义由「次数」变为「事件数」——**已产出的历史报告会与此不一致**，重跑旧素材即可，不要混用。**`stallGateDeadline` 不要单独回退**：它与 `endReanchorWindow()` 里那句 `stallGateDeadline = nil` 是一对，拆开会让 41 秒素材的错误停顿从 12 掉到 11（§2.15）。
   - 第 58 条（零误推进的样本上界）：同样只改 `TeleprompterReplayEvaluator.swift` 的 `caveats(for:)`，**只增一条 caveat，不动任何 metrics 字段、不改 schema**。回退＝删掉 `harmfulJumpCount == 0` 分支；代价是退回「41 秒素材的 0 次误推进读起来像安全结论」。回退时**必须同时回退三条测试断言**（`zeroHarmfulJumpsOverShortMaterialReportsItsSampleBound`、`aMaterialWithHarmfulJumpsReportsTheCountNotTheSampleBound`，以及 `reanchorLatencyIsMeasuredFromTheDetour` 里改窄后的那条），否则测试会红——这三条断言本身就是这条 caveat 的契约。
+  - 第 59 条（探针证据文件）：只改 `tools/probe_teleprompter_latency.py` 与 `tests/test_teleprompter_latency_probe.py`。**这是本分支唯一改动探针输出 schema 的一条**：`schema_version` 3 → 4，`condition` 为新增字段，顶层 `model` 移除。已产出的历史结果文件**仍是合法的 schema 3**，回退代码后仍可读；但**不要把 schema 3 的文件当 schema 4 解析**。回退＝还原 `run_probe` 的字典字面量；代价是退回「证据文件不带语言与设备、`completed_ms` 含整段音频时长」，且三条新回归会红。`LANGUAGE` 与 `session_update_payload` 可以保留——它们不改变输出形状，只是把字面量收成单一来源。
   - 视图层与前向推进的两条回归：纯新增用例，回退＝删测试，生产代码一行未动。
 
 ## 7. 复现方式

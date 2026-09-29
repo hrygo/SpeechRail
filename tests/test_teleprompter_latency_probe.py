@@ -29,6 +29,7 @@ _wait_for_terminal = _PROBE._wait_for_terminal
 load_wave_fixture = _PROBE.load_wave_fixture
 percentile = _PROBE.percentile
 timing_summary = _PROBE.timing_summary
+build_evidence = getattr(_PROBE, "build_evidence", None)
 
 
 def test_percentile_and_timing_summary_are_deterministic() -> None:
@@ -290,3 +291,80 @@ def test_cli_reports_queue_overflow_as_input_error(
         ]
     ) == 2
     assert "RealtimeQueueOverflowError" in capsys.readouterr().out
+
+
+def test_evidence_carries_the_conditions_the_plan_requires() -> None:
+    """Every latency report must carry language, device and model (plan 11.6).
+
+    语言此前是会话配置里的字面量 "zh", 模型有, 而语言和设备都没有进证据文件:
+    数字离开文件后就没有语言标签, 跨语言比较无从谈起.
+    """
+
+    assert build_evidence is not None, "结果构造必须是可测的纯函数"
+    measurements = _ProbeMeasurements()
+    measurements.record_hypothesis(1.5, {"utterance_id": "u1", "revision": 1})
+    evidence = build_evidence(
+        model="whisper-1",
+        fixture=_PROBE.WaveFixture(pcm=b"\x00\x00" * 48_000, duration_seconds=1.0),
+        created_at=0.0,
+        configured_at=0.2,
+        stream_started=0.3,
+        completed_at=2.5,
+        measurements=measurements,
+        upload_lateness=[1.0, 2.0],
+        event_counts={"session.created": 1},
+        chunk_count=2,
+    )
+
+    condition = evidence["condition"]
+    assert isinstance(condition, dict)
+    assert condition["language"] == "zh", "会话用的语言必须原样出现在证据里"
+    assert condition["model"] == "whisper-1"
+    # 形状变了就得升版本: #108 的验收标准是「JSON 明确版本演进」。
+    assert evidence["schema_version"] == 4
+    assert "model" not in evidence, "模型已移入 condition，顶层不再重复一份"
+    device = condition["device"]
+    assert isinstance(device, str) and device, "设备不能为空"
+    # 隐私: 设备标签不得带用户名, 主机名或绝对路径.
+    assert "/" not in device, device
+    assert str(Path.home()) not in device, device
+
+
+def test_evidence_separates_the_commit_round_trip_from_the_audio_length() -> None:
+    """completed_ms is measured from the media origin, so the audio length is
+    a lower bound for it. 41 seconds of audio plus a 40 second commit round
+    trip still reads like a plain "latency", so the round trip needs its own
+    field.
+    """
+
+    assert build_evidence is not None, "结果构造必须是可测的纯函数"
+    fixture = _PROBE.WaveFixture(pcm=b"\x00\x00" * 24_000 * 41, duration_seconds=41.0)
+    evidence = build_evidence(
+        model="whisper-1",
+        fixture=fixture,
+        created_at=0.0,
+        configured_at=0.2,
+        stream_started=0.3,
+        completed_at=41.4,
+        measurements=_ProbeMeasurements(),
+        upload_lateness=[],
+        event_counts={},
+        chunk_count=410,
+    )
+
+    assert evidence["audio_seconds"] == 41.0
+    assert evidence["completed_ms"] == pytest.approx(41_100.0)
+    assert evidence["completed_after_audio_ms"] == pytest.approx(100.0)
+
+
+def test_session_language_and_evidence_language_cannot_diverge() -> None:
+    """Language has exactly one source.
+
+    会话配置里写死一个字面量, 证据文件里写另一个, 探针就会「跑的是 A 语言,
+    报告的是 B 语言」, 而没有任何用例会红.
+    """
+
+    payload = _PROBE.session_update_payload("whisper-1")
+    session_language = payload["session"]["audio"]["input"]["transcription"]["language"]
+    assert session_language == _PROBE.LANGUAGE
+    assert _PROBE.probe_condition("whisper-1")["language"] == session_language
