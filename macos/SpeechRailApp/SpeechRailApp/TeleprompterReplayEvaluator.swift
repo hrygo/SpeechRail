@@ -581,6 +581,19 @@ public enum TeleprompterReplayEvaluator {
         }
         if metrics.harmfulJumpCount > 0 {
             caveats.append("严重误推进 \(metrics.harmfulJumpCount) 次，总时长 \(durationMilliseconds) ms。")
+        } else if durationMilliseconds > 0 {
+            // 方案 §11.6 给出「零事件的 95% 上界约为 3 / 总小时数」，§11.7 的判定
+            // 方式一栏要求「不声称真实发生率为零」。此前 0 次时整份报告没有任何
+            // 说明——**素材越短，证据越弱，报告读起来却越像一次干净的安全结论**。
+            // 这条只在真的观测到事件时不输出：那时候该报的是次数，不是样本上界。
+            let hours = Double(durationMilliseconds) / 3_600_000
+            let upperBoundPerHour = Int((3 / hours).rounded())
+            caveats.append(
+                "本次回放未观察到严重误推进（0 次／素材时长 \(durationMilliseconds / 1_000) 秒）："
+                    + "零事件不等于零发生率。按方案 §11.6 的独立稳定事件过程近似，"
+                    + "零事件的 95% 上界约为 \(upperBoundPerHour) 次／小时（3 / 观测小时数）；"
+                    + "该数字用于提醒样本边界，不作为产品性能宣称。"
+            )
         }
         return caveats
     }

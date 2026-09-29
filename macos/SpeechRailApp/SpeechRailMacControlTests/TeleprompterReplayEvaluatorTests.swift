@@ -397,7 +397,12 @@ struct TeleprompterReplayEvaluatorTests {
 
         #expect(report.metrics.reanchorLatencyP50Milliseconds == 1_100, "恢复延迟从脱稿那一刻算起")
         #expect(report.metrics.reanchorTimeoutCount == 0)
-        #expect(report.caveats.isEmpty)
+        // 恢复这一路该测的都测到了，不该有恢复类 caveat。样本上界那条不算噪音：
+        // 2.6 秒素材对误跳率几乎什么都没说，报告必须说出来（第 58 条）。
+        #expect(
+            report.caveats.filter { $0.contains("回稿") || $0.contains("恢复") }.isEmpty,
+            "恢复延迟已量到，不应再有恢复类 caveat: \(report.caveats)"
+        )
     }
 
     /// 素材工具在没人确认过时给 `dataset_revision` 加 `-draft` 后缀。报告此前
@@ -422,11 +427,13 @@ struct TeleprompterReplayEvaluatorTests {
             )
         )
 
-        // 前置条件：这份 fixture 的其他 caveat 全部沉默，所以下面那条只可能
+        // 前置条件：这份 fixture 除样本上界外没有其他 caveat，所以下面那条只可能
         // 由 draft 后缀触发。把 fixture 换成有缺口的素材会让本条恒真。
         #expect(report.metrics.advancedEventCount > 0, "先确认跟随确实推进了")
         #expect(
-            report.caveats.filter { !$0.contains("未经人工确认") }.isEmpty,
+            report.caveats.allSatisfy {
+                $0.contains("未经人工确认") || $0.contains("95% 上界")
+            },
             "除草稿声明外不应再有其他 caveat: \(report.caveats)"
         )
         #expect(
@@ -452,9 +459,14 @@ struct TeleprompterReplayEvaluatorTests {
             )
         )
 
-        // 反向对照：去掉后缀后必须恢复安静，否则这条 caveat 就成了常开噪音，
-        // 真出问题时反而被忽略。
+        // 反向对照：去掉后缀后草稿声明必须消失，否则这条 caveat 就成了常开
+        // 噪音，真出问题时反而被忽略。报告**不再完全沉默**——零误推进的样本
+        // 上界是常开的（第 58 条），所以这里断言的是「剩下的caveat只有它」。
         #expect(!report.caveats.contains { $0.contains("未经人工确认") })
+        #expect(
+            report.caveats.allSatisfy { $0.contains("95% 上界") },
+            "复核过的素材只剩样本上界一条: \(report.caveats)"
+        )
     }
 
     @Test func failureShareAboveFivePercentFlagsPartialPercentiles() throws {
@@ -690,6 +702,77 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(
             report.metrics.stalledEventCount == 2,
             "恢复之后，先前打开的读窗口仍应能计自己的停顿"
+        )
+    }
+
+    /// 方案 §11.6／§11.7 把「零事件的 95% 上界约为 3 / 总小时数」写进指标定义，
+    /// 判定方式一栏还要求「不声称真实发生率为零」。报告此前只在**误推进 > 0** 时
+    /// 才输出 caveat——0 次时整份报告读起来像一次干净的安全结论。
+    @Test func zeroHarmfulJumpsOverShortMaterialReportsItsSampleBound() throws {
+        func replay(lastAtMilliseconds: Int) throws -> TeleprompterReplayEvaluator.Report {
+            try TeleprompterReplayEvaluator.evaluate(
+                manifest(
+                    events: [
+                        completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 500),
+                        completed("最后演示照片导出。", at: lastAtMilliseconds, item: "item-2")
+                    ],
+                    labels: [
+                        .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 1),
+                        .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 2)
+                    ]
+                )
+            )
+        }
+
+        let short = try replay(lastAtMilliseconds: 10_000)
+        let long = try replay(lastAtMilliseconds: 100_000)
+
+        #expect(short.metrics.harmfulJumpCount == 0)
+        #expect(short.metrics.advancedEventCount > 0, "前提：跟随推进过，不是压根没动")
+
+        func bound(_ report: TeleprompterReplayEvaluator.Report) -> Int? {
+            for caveat in report.caveats where caveat.contains("95% 上界") {
+                guard let marker = caveat.range(of: "约为 ") else { return nil }
+                let tail = caveat[marker.upperBound...]
+                    .prefix { $0.isNumber }
+                return Int(tail)
+            }
+            return nil
+        }
+
+        #expect(
+            short.caveats.contains { $0.contains("不作为产品性能宣称") },
+            "零事件必须自己说明它不是零发生率"
+        )
+        let shortBound = try #require(bound(short))
+        let longBound = try #require(bound(long))
+        #expect(
+            longBound < shortBound,
+            "上界必须随时长收紧：10 秒素材给 \(shortBound)、100 秒素材给 \(longBound)"
+        )
+        #expect(shortBound == 1_080, "3 / (10 / 3600) 小时 = 1080 次／小时")
+    }
+
+    /// 反向对照：真的误推进过时报的是次数与总时长，不是样本上界。
+    @Test func aMaterialWithHarmfulJumpsReportsTheCountNotTheSampleBound() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("最后演示照片导出。", at: 4_000, item: "item-2")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise)
+                ]
+            )
+        )
+
+        #expect(report.metrics.harmfulJumpCount == 1, "前提：确实发生了一次误推进")
+        #expect(report.caveats.contains { $0.contains("严重误推进 1 次") })
+        #expect(
+            !report.caveats.contains { $0.contains("95% 上界") },
+            "已经观测到事件时，样本上界不是该说的那句话"
         )
     }
 }
