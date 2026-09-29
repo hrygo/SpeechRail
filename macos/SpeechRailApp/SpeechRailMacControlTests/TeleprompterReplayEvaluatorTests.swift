@@ -400,6 +400,63 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(report.caveats.isEmpty)
     }
 
+    /// 素材工具在没人确认过时给 `dataset_revision` 加 `-draft` 后缀。报告此前
+    /// 只解释「素材没问」与「系统没动」，**没有解释「这些标注根本没人看过」**：
+    /// 拿一段无人值守的机器草稿跑回放，标注齐全、指标全真，报告读起来仍像
+    /// 一次测量。实测把 5.4 秒环境声喂进去就能得到这种素材——识别器对静音
+    /// 照样吐出事件，工具照样把它们全标成 `read`。
+    @Test func unreviewedDraftDatasetSaysSoEvenWhenEveryOtherCaveatStaysSilent() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。", at: 1_500, item: "item-2"),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 2_600, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 1)
+                ],
+                datasetRevision: "dataset-1-draft"
+            )
+        )
+
+        // 前置条件：这份 fixture 的其他 caveat 全部沉默，所以下面那条只可能
+        // 由 draft 后缀触发。把 fixture 换成有缺口的素材会让本条恒真。
+        #expect(report.metrics.advancedEventCount > 0, "先确认跟随确实推进了")
+        #expect(
+            report.caveats.filter { !$0.contains("未经人工确认") }.isEmpty,
+            "除草稿声明外不应再有其他 caveat: \(report.caveats)"
+        )
+        #expect(
+            report.caveats.contains { $0.contains("未经人工确认") && $0.contains("机器") },
+            "报告必须自己声明标注是机器草稿: \(report.caveats)"
+        )
+    }
+
+    @Test func reviewedDatasetKeepsTheSilenceItEarned() throws {
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    completed("欢迎来到今天的直播。", at: 500),
+                    completed("欢迎来到今天的直播。", at: 1_500, item: "item-2"),
+                    completed("欢迎来到今天的直播。今天我们介绍相机设置。", at: 2_600, item: "item-3")
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .improvise),
+                    .init(eventIndex: 2, intent: .read, expectedSegmentIndex: 1)
+                ],
+                datasetRevision: "dataset-1"
+            )
+        )
+
+        // 反向对照：去掉后缀后必须恢复安静，否则这条 caveat 就成了常开噪音，
+        // 真出问题时反而被忽略。
+        #expect(!report.caveats.contains { $0.contains("未经人工确认") })
+    }
+
     @Test func failureShareAboveFivePercentFlagsPartialPercentiles() throws {
         let report = try TeleprompterReplayEvaluator.evaluate(
             manifest(

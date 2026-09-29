@@ -435,7 +435,8 @@ public enum TeleprompterReplayEvaluator {
                 for: metrics,
                 sampleCount: manifest.events.count,
                 durationMilliseconds: manifest.events.last?.atMilliseconds ?? 0,
-                labels: manifest.labels
+                labels: manifest.labels,
+                datasetRevision: manifest.datasetRevision
             ),
             status: "deterministic_replay"
         )
@@ -473,9 +474,23 @@ public enum TeleprompterReplayEvaluator {
         for metrics: Metrics,
         sampleCount: Int,
         durationMilliseconds: Int,
-        labels: [TeleprompterReplayManifest.Label]
+        labels: [TeleprompterReplayManifest.Label],
+        datasetRevision: String
     ) -> [String] {
         var caveats: [String] = []
+        // 素材工具在没人逐条确认过时给 `dataset_revision` 加 `-draft` 后缀。
+        // 这一条必须排在最前面：下面几条解释的都是「这份素材没有问某个问题」，
+        // 而草稿的问题更靠前——**所有标注都还不是证据**。少了它，一份机器草稿
+        // 只要标注恰好齐全、指标恰好全真，读起来就与一次人工确认过的测量完全
+        // 一样。实测把 5.4 秒环境声喂进识别器就能得到这种素材：识别器对静音
+        // 照样吐事件，工具照样把它们全标成 `read`。
+        if datasetRevision.hasSuffix("-draft") {
+            caveats.append(
+                "本次素材是未经人工确认的机器草稿（dataset_revision 以 -draft 结尾）："
+                    + "所有 intent 与阅读位置都由机器提议，未被逐条核对过，"
+                    + "本报告的数字不能作为质量结论。"
+            )
+        }
         // Every safety number below is derived from human labels, so a zero has
         // two very different meanings: "the system did not do this" or "the
         // material never asked". Publishing the second as the first is how a
