@@ -217,8 +217,12 @@ def test_serve_uses_one_shot_startup_claim(
     monkeypatch.setattr("speechrail.config.model_catalog.load_catalog", lambda: object())
     monkeypatch.setattr(
         "speechrail.config.selection.resolve_selection",
-        lambda settings, selection, catalog, app_home: captured.update(
-            {"selection": selection, "selection_app_home": app_home}
+        lambda settings, selection, catalog, app_home, **kwargs: captured.update(
+            {
+                "selection": selection,
+                "selection_app_home": app_home,
+                "selection_locations": kwargs.get("locations"),
+            }
         ) or settings,
     )
     monkeypatch.setattr("speechrail.app.create_app", lambda settings: settings)

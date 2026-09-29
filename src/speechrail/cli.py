@@ -61,12 +61,19 @@ def run_server(env_file: Path | None = None, app_home: Path | None = None) -> No
     settings = Settings.from_env_file(effective_env)
 
     from speechrail.config.model_catalog import load_catalog
+    from speechrail.config.model_locations import load_model_locations
     from speechrail.config.selection import resolve_selection
     from speechrail.service.profile_store import claim_startup_selection
 
     selection = claim_startup_selection(app_home)
     if selection is not None:
-        settings = resolve_selection(settings, selection, load_catalog(), app_home)
+        settings = resolve_selection(
+            settings,
+            selection,
+            load_catalog(),
+            app_home,
+            locations=load_model_locations(app_home),
+        )
 
     _apply_observability_defaults(settings, app_home)
     logging_handles = configure_logging(settings.log_dir or default_log_directory())

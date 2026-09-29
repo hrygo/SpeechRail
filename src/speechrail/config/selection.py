@@ -14,6 +14,11 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.config.model_locations import (
+    ModelLocationError,
+    ModelLocations,
+    resolve_artifact_dir,
+)
 from speechrail.domain.model_spec import ModelRole, SpecTier, required_spec_artifact
 from speechrail.service.profile_store import SelectionRecord
 
@@ -171,6 +176,7 @@ def resolve_selection(
     app_home: Path,
     *,
     runtime_lock: RuntimeLock | None = None,
+    locations: ModelLocations | None = None,
 ) -> Settings:
     """Overlay one v2 selection while preserving unrelated user configuration."""
 
@@ -207,16 +213,32 @@ def resolve_selection(
     resolved_app_home = Path(app_home).resolve()
     if not resolved_app_home.is_absolute():
         raise ValueError("app_home must be an absolute path")
-    models_dir = (resolved_app_home / "models").resolve()
-    asr_dir = _require_directory(models_dir / asr.key, label="ASR model")
-    tts_dir = _require_directory(models_dir / tts.key, label="TTS model")
+    if locations is not None:
+        known_keys = {artifact.key for artifact in catalog.artifacts}
+        unknown_keys = sorted(set(locations.bindings) - known_keys)
+        if unknown_keys:
+            raise ModelLocationError(
+                "model location config references unknown artifact keys: "
+                f"{unknown_keys}"
+            )
+    asr_dir = _require_directory(
+        resolve_artifact_dir(resolved_app_home, asr.key, locations), label="ASR model"
+    )
+    tts_dir = _require_directory(
+        resolve_artifact_dir(resolved_app_home, tts.key, locations), label="TTS model"
+    )
     clone_dir = (
-        _require_directory(models_dir / tts_base.key, label="TTS clone model")
+        _require_directory(
+            resolve_artifact_dir(resolved_app_home, tts_base.key, locations),
+            label="TTS clone model",
+        )
         if tts_base is not None
         else None
     )
     design_dir = (
-        _optional_directory(models_dir / voice_design.key)
+        _optional_directory(
+            resolve_artifact_dir(resolved_app_home, voice_design.key, locations)
+        )
         if voice_design is not None
         else None
     )

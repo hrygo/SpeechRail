@@ -333,12 +333,19 @@ def run_preflight(
         try:
             settings = Settings.from_env_file(layout.config_file)
             from speechrail.config.model_catalog import load_catalog
+            from speechrail.config.model_locations import load_model_locations
             from speechrail.config.selection import resolve_selection
             from speechrail.service.profile_store import recover_selection
 
             selection = recover_selection(layout.app_home)
             if selection is not None:
-                settings = resolve_selection(settings, selection, load_catalog(), layout.app_home)
+                settings = resolve_selection(
+                    settings,
+                    selection,
+                    load_catalog(),
+                    layout.app_home,
+                    locations=load_model_locations(layout.app_home),
+                )
         except Exception:
             settings = None
 

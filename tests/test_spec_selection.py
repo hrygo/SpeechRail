@@ -7,6 +7,7 @@ import pytest
 import speechrail.config.selection as selection_module
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+from speechrail.config.model_locations import ModelLocationError, ModelLocations
 from speechrail.config.selection import SelectionError, active_model_catalog, resolve_selection
 from speechrail.domain.model_spec import required_spec_artifact
 
@@ -38,6 +39,10 @@ def _directory(tmp_path: Path, artifact_key: str) -> Path:
     return path
 
 
+def _locations(bindings: dict[str, Path]) -> ModelLocations:
+    return ModelLocations(bindings=dict(bindings))
+
+
 def test_selection_resolves_only_from_the_explicit_v2_spec_fields(tmp_path: Path) -> None:
     asr_dir = _directory(tmp_path, "asr-0.6b-q8")
     tts_dir = _directory(tmp_path, "tts-0.6b-custom-q8")
@@ -66,6 +71,63 @@ def test_active_catalog_never_infers_identity_from_directory_names(tmp_path: Pat
     assert active.profile is None
     assert active.asr is None
     assert active.tts is None
+
+
+def test_selection_resolves_bound_artifacts_from_external_directories(
+    tmp_path: Path,
+) -> None:
+    external_asr = tmp_path / "omlx" / "mlx-community--Qwen3-ASR-1.7B-bf16"
+    external_tts = tmp_path / "omlx" / "mlx-community--Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
+    external_base = tmp_path / "omlx" / "mlx-community--Qwen3-TTS-12Hz-1.7B-Base-bf16"
+    for directory in (external_asr, external_tts, external_base):
+        directory.mkdir(parents=True)
+
+    resolved = resolve_selection(
+        _settings(),
+        _selection(asr_spec="reference", tts_spec="reference"),
+        load_catalog(),
+        tmp_path,
+        locations=_locations(
+            {
+                "asr-1.7b-bf16": external_asr,
+                "tts-1.7b-custom-bf16": external_tts,
+                "tts-1.7b-base-bf16": external_base,
+            }
+        ),
+    )
+
+    assert resolved.qwen3_model_dir == external_asr.resolve()
+    assert resolved.qwen3_tts_model_dir == external_tts.resolve()
+    assert resolved.qwen3_tts_clone_model_dir == external_base.resolve()
+    assert resolved.asr_artifact_key == "asr-1.7b-bf16"
+
+
+def test_selection_rejects_binding_key_absent_from_catalog(tmp_path: Path) -> None:
+    _directory(tmp_path, "asr-0.6b-q8")
+    _directory(tmp_path, "tts-0.6b-custom-q8")
+    _directory(tmp_path, "tts-0.6b-base-q8")
+    external = tmp_path / "omlx"
+    external.mkdir()
+
+    with pytest.raises(ModelLocationError, match="unknown artifact key"):
+        resolve_selection(
+            _settings(),
+            _selection(),
+            load_catalog(),
+            tmp_path,
+            locations=_locations({"tts-9.9b-imaginary": external}),
+        )
+
+
+def test_selection_without_locations_keeps_managed_directories(tmp_path: Path) -> None:
+    asr_dir = _directory(tmp_path, "asr-0.6b-q8")
+    tts_dir = _directory(tmp_path, "tts-0.6b-custom-q8")
+    _directory(tmp_path, "tts-0.6b-base-q8")
+
+    resolved = resolve_selection(_settings(), _selection(), load_catalog(), tmp_path)
+
+    assert resolved.qwen3_model_dir == asr_dir.resolve()
+    assert resolved.qwen3_tts_model_dir == tts_dir.resolve()
 
 
 def test_resolved_active_catalog_uses_recorded_artifact_keys(tmp_path: Path) -> None:
