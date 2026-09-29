@@ -476,6 +476,168 @@
       "replace": "        if result.count > 1,\n           let last = result.last {",
       "expect": "KILLED",
       "rationale": "合并条件必须排除有内容的尾段，否则会吞掉真实阅读材料——这条守着修复本身的边界。"
+    },
+    {
+      "id": "P1",
+      "note": "阅读快捷键不再要求控件区没有焦点（Space 被控件抢走）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        readingAreaFocused && !menuOrPopoverPresented",
+      "expect": "KILLED",
+      "rationale": "判据第 3 条「常用操作键盘可达」：焦点在控件上时 Space 必须归控件，否则「回到朗读位置」这类按钮会被空格误触发。3 条变红。"
+    },
+    {
+      "id": "P2",
+      "note": "阅读快捷键在 popover 打开时仍然生效",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        readingAreaFocused && !controlFocusInside",
+      "expect": "KILLED",
+      "rationale": "显示设置弹层打开时，↓／Space 必须归弹层而不是翻动朗读位置。"
+    },
+    {
+      "id": "P3",
+      "note": "阅读快捷键不再要求阅读区有焦点",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        !controlFocusInside && !menuOrPopoverPresented",
+      "expect": "KILLED",
+      "rationale": "焦点在窗口别处时按方向键不应移动阅读位置。"
+    },
+    {
+      "id": "P4",
+      "note": "VoiceOver 不再让控件常驻",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "            || input.voiceOverEnabled\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "VoiceOver 用户没有指针悬停，控件会永久消失——判据第 3 条的无障碍子项。"
+    },
+    {
+      "id": "P5",
+      "note": "键盘 reveal 请求不再让控件常驻",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "            || input.keyboardRevealRequested\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "纯键盘用户必须能把控件叫出来；这条与 P4 一起保证「隐藏的高级操作不得让键盘用户失去常用能力」。"
+    },
+    {
+      "id": "A1",
+      "note": "顶层对象不再要求封闭（模型可多返回同级字段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            guard Set(object.keys) == [\"schema_version\", \"segments\"],\n                  let raw = object[\"segments\"] as? [[String: Any]], !raw.isEmpty,\n                  raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] }) else {",
+      "replace": "            guard let raw = object[\"segments\"] as? [[String: Any]], !raw.isEmpty,\n                  raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] }) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：封闭对象这道检查在单元层有测试、在顶层一条都没有，于是模型多返回一个同级键照样收下。补 `rejectsUnknownTopLevelFields` 后转杀。"
+    },
+    {
+      "id": "A2",
+      "note": "单元对象不再要求封闭（模型可自造字段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] })",
+      "replace": "raw.allSatisfy({ _ in true })",
+      "expect": "KILLED",
+      "rationale": "模型自造的 `text` 字段若被收下，读者的稿件就多了一份「模型说这段是什么」的旁本。"
+    },
+    {
+      "id": "A3",
+      "note": "分组不再要求首尾相接（允许中间跳过单元）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard annotation.start_unit == next, annotation.end_unit > next,",
+      "replace": "                guard annotation.start_unit >= next, annotation.end_unit > next,",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而既有那条「漏单元」夹具是被另一道守卫挡住的**——它把 end_unit 改成 3，越界检查先报错，因此相接性本身从未被观察。`(0,1)` 后接 `(2,4)` 能同时满足上界与末尾覆盖，中间那个单元静默拿不到关键词与停顿提示。补 `rejectsGapsBetweenGroups` 后转杀。"
+    },
+    {
+      "id": "A4",
+      "note": "分组不再要求非空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard annotation.start_unit == next, annotation.end_unit > next,",
+      "replace": "                guard annotation.start_unit == next, annotation.end_unit >= next,",
+      "expect": "INVALID",
+      "rationale": "去掉非空检查后模型可以返回 `start_unit == end_unit`，紧接着的 `units[end_unit - firstUnit - 1]` 取到 -1，**Swift 越界 trap 让整个测试进程中断**（0 失败、直接崩）。与 M26／M38 同族：守卫的作用是挡 trap，不是一条会变红的断言。"
+    },
+    {
+      "id": "A5",
+      "note": "分组越界检查放宽一格",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      annotation.end_unit <= firstUnit + units.count,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "replace": "                      annotation.end_unit <= firstUnit + units.count + 1,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "expect": "INVALID",
+      "rationale": "同 A4：越界后 `units[...]` 直接 trap，测试进程中断，0 失败。"
+    },
+    {
+      "id": "A6",
+      "note": "模型 match_phrases 不再被拒（别名可由模型注入）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "replace": "                      annotation.keywords.count <= 5, annotation.match_phrases.allSatisfy({ $0.count <= 120 }) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而这是本轮最要紧的一条零覆盖**：`TeleprompterSession` 把 `annotation.matchPhrases` 直接写进已确认版本（`updatedSegments[index].matchPhrases = annotation.matchPhrases`），这些短语正是对齐器匹配时用的读法别名。方案 §5.6 写明别名只能由读者登记、模型不得注入，**而唯一执行这条的守卫没有任何测试观察它**。补 `rejectsModelInjectedReadingAliases` 后转杀。"
+    },
+    {
+      "id": "A7",
+      "note": "合并长度上限被摘掉（模型可把整篇合成一段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard text.count <= 180 || mergedNothing,",
+      "replace": "                guard true || mergedNothing,",
+      "expect": "KILLED",
+      "rationale": "180 字这道上限是给模型的分组规模约束；摘掉后一次请求可以把十几个单元合成一段，审阅界面上那一段会肿到无法逐句核对。"
+    },
+    {
+      "id": "A8",
+      "note": "第 85 条的修复被撤掉（长单元重新不可标注）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                let mergedNothing = annotation.end_unit == annotation.start_unit + 1\n                guard text.count <= 180 || mergedNothing,",
+      "replace": "                let mergedNothing = false\n                guard text.count <= 180 || mergedNothing,",
+      "expect": "KILLED",
+      "rationale": "第 85 条的直接回归：撤掉豁免后，任何含长于 180 字单元的稿件重新变成「AI 标注必然失败」，且失败被报成 AI 失败。"
+    },
+    {
+      "id": "A9",
+      "note": "关键词不再要求出现在原文里（模型可自造关键词）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      keywordsAppearInOrder(annotation.keywords, in: text),",
+      "replace": "                      annotation.keywords.allSatisfy({ !$0.isEmpty }),",
+      "expect": "KILLED",
+      "rationale": "段关键词会被 `TeleprompterSession.swift:2643` 收集起来当作 ASR 的 `audio.input.transcription.keywords` 下发——模型自造的词会直接进入识别偏置。"
+    },
+    {
+      "id": "A10",
+      "note": "末尾单元未被覆盖也不再拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            guard next == firstUnit + units.count else { throw TeleprompterTextError.invalidAnalysis }",
+      "replace": "            guard next <= firstUnit + units.count else { throw TeleprompterTextError.invalidAnalysis }",
+      "expect": "KILLED",
+      "rationale": "漏掉末尾若干单元时，模型返回的内容被原样采纳，尾部单元静默没有提示，而调用方看不出来。"
+    },
+    {
+      "id": "A11",
+      "note": "关键词不再要求按出现顺序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                    of: keyword,\n                    options: [.caseInsensitive, .diacriticInsensitive],\n                    range: lowerBound..<text.endIndex\n                  ) else {",
+      "replace": "                    of: keyword,\n                    options: [.caseInsensitive, .diacriticInsensitive]\n                  ) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：推进 `lowerBound` 是这道检查成为「顺序检查」而不是「成员检查」的唯一原因——「文」吃掉中文里唯一的文之后，排在前面的「中」再也匹配不上第二条。摘掉区间后模型可以返回任意顺序。补 `rejectsKeywordsThatDoNotAppearInReadingOrder`（带一条顺序正确的正向对照）后转杀。"
+    },
+    {
+      "id": "A12",
+      "note": "窗口从 12 个单元放大到 24（单次请求规模失控）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "        for start in stride(from: 0, to: units.count, by: 12) {",
+      "replace": "        for start in stride(from: 0, to: units.count, by: 24) {",
+      "expect": "KILLED",
+      "rationale": "窗口是单次请求的规模边界；放大后 9 条变红（既有的窗口切分用例直接数错单元）。"
+    },
+    {
+      "id": "A13",
+      "note": "窗口切片与步长不再一致（漏掉一半单元）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            let window = Array(units[start..<min(start + 12, units.count)])",
+      "replace": "            let window = Array(units[start..<min(start + 12, units.count + 1)])",
+      "expect": "INVALID",
+      "rationale": "最后一个窗口越界，`units[start..<]` 直接 trap，测试进程在 633 项处中断、0 失败。与 A4／A5 同族。"
     }
   ]
 }
