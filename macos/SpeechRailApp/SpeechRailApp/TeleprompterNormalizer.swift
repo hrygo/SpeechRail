@@ -128,15 +128,9 @@ public enum TeleprompterCanonicalizer {
         .init(expression: expression(#"百分之[零一二三四五六七八九十百千万点0-9]+"#), kind: .percentage),
         .init(expression: expression(#"[零〇一二三四五六七八九]{4}年"#), kind: .year),
         .init(expression: expression(#"[零一二三四五六七八九十百千万0-9]+点[零一二三四五六七八九0-9]+"#), kind: .spokenDecimal),
-        // 百分之、百分比、个百分点、百分号 and 百分位 each own the 分 character as
-        // part of one word. When no digits follow 百分之 the percentage rule never
-        // fires, and without this guard 百分比 was read as "100分" -- 69 times in
-        // this repository's own documents before the guard. The list is measured,
-        // not exhaustive by construction: a future 百分X word needs one more
-        // entry, and 一百分 (100 points) must stay readable as a number.
-        // 十分钟 is untouched: 钟 is not in the set, so 四十分钟 still
-        // canonicalises to 40分 + 钟.
-        .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:公里|美元|元|米|岁|号|楼|月|日|倍|个|人|次|天|分(?![之比点号位])|秒|点)"#), kind: .spokenUnit),
+        // 十分钟 is untouched by the 分 guard: 钟 is not in the set, so
+        // 四十分钟 still canonicalises to 40分 + 钟.
+        .init(expression: expression(#"[零一二两三四五六七八九十百千万亿]+(?:"# + unitAlternation + #"#)"#), kind: .spokenUnit),
         // A numeral that carries its own magnitude needs no unit suffix to be a
         // number. Without this rule `三万` fell through to per-character tokens
         // and fingerprinted as *no number at all*, while `3万` fingerprinted as a
@@ -145,7 +139,16 @@ public enum TeleprompterCanonicalizer {
         // The arabic rule has to know the Chinese magnitude words for the same
         // reason: `2万元` used to stop at the digits, and the leftover `万元` was
         // then parsed on its own into `0元`.
-        .init(expression: expression(#"[0-9]+(?:\.[0-9]+)?(?:[万亿千百])?(?:年|美元|公里|元|米|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点|%)?"#), kind: .arabic),
+        // The space between digits and a CJK unit is layout, not content.
+        // 98% of the digit + unit occurrences in this repository's own
+        // documents carry one (6650 against 138 without), so a script drafted
+        // from them has a space at nearly every number while the recogniser
+        // transcribes the spoken form without any -- and the two sides landed
+        // on different token streams, so the follower never matched there.
+        // The fidelity gate already treated the two as equivalent; the
+        // canonicalizer did not. Fixed here rather than in the aligner so that
+        // every consumer of the canonical form benefits at once.
+        .init(expression: expression(#"[0-9]+(?:\.[0-9]+)?(?:[万亿千百])?\s*(?:"# + unitAlternation + #"|%)?"#), kind: .arabic),
     ]
 
     private static let chineseDigits: [Character: String] = [
@@ -154,7 +157,41 @@ public enum TeleprompterCanonicalizer {
     ]
     private static let smallUnits: [Character: Int] = ["十": 10, "百": 100, "千": 1_000]
     private static let largeUnits: [Character: Int] = ["万": 10_000, "亿": 100_000_000]
-    private static let unitSuffixes = ["公里", "美元", "元", "米", "岁", "号", "楼", "月", "日", "倍", "个", "人", "次", "天", "分", "秒", "点"]
+    /// One unit list for both numeral rules, **longest alternative first**.
+    ///
+    /// They used to be two separately kept lists and had already drifted: the
+    /// Arabic rule had 年 while the spoken rule had none of 条/项/字, and the
+    /// spoken rule had 台 which the Arabic rule did not. So `三年` matched
+    /// nothing at all and `5 台` disagreed with `五台` — one list removes the
+    /// possibility of the two drifting again.
+    ///
+    /// The order matters for the `hasSuffix` lookup below: given `5厘米`, a
+    /// `米` that came first would win and leave `5厘`, which is not a numeral
+    /// run, so the token would silently stop being a number. Longest first
+    /// also makes the same string safe as a regex alternation.
+    ///
+    /// Membership is measured, not chosen. Units that would swallow the next
+    /// word are left out even when they are common: 条→件 (条件, 500),
+    /// 字→段 (字段, 883), 页→面 (页面, 807), 版→本 (版本, 1072),
+    /// 项→目 (项目, 330), 周→期 (周期, 350), 段→落 (段落, 131),
+    /// 克→风/隆 (克服/克隆, 620), 台→账/窗 (台账, 56), 根→因/据,
+    /// 章→节 (章节, 33), 张→卡/表. `五台` therefore still canonicalises apart
+    /// from `5 台`; that gap is recorded rather than papered over.
+    private static let unitSuffixes = [
+        "公斤", "千克", "毫升", "厘米", "毫米", "毫秒", "小时", "美元", "公里",
+        "年", "元", "米", "岁", "号", "楼", "月", "日", "倍", "个", "人", "次",
+        "天", "分", "秒", "点", "份", "吨",
+    ]
+
+    /// The same list as a regex alternation. `分` is the one member that needs
+    /// a guard: 百分之、百分比、个百分点、百分号 and 百分位 each own that
+    /// character, and without the lookahead 百分比 was read as `100分` -- 69
+    /// times in this repository's own documents before the guard. The set is
+    /// measured, not exhaustive by construction, and 一百分 (100 points) must
+    /// stay readable as a number.
+    private static let unitAlternation = unitSuffixes
+        .map { $0 == "分" ? "分(?![之比点号位])" : $0 }
+        .joined(separator: "|")
     private static let largeUnitCharacters = Set("万亿")
     private static let arabicMagnitudes: [Character: Decimal] = [
         "百": 100, "千": 1_000, "万": 10_000, "亿": 100_000_000,
@@ -257,7 +294,13 @@ public enum TeleprompterCanonicalizer {
             return "\(integer)\(suffix)"
 
         case .arabic:
-            return arabicValue(raw)
+            // `fold` keeps interior whitespace, so `50 元` and `50元` would
+            // still be two different canonical values. The rule shape admits at
+            // most one optional space, inside this token, so dropping
+            // whitespace here cannot merge two separate tokens.
+            return arabicValue(
+                String(raw.filter { !$0.isWhitespace })
+            )
 
         case .spokenMagnitude:
             guard isNumeralRun(raw) else { return nil }

@@ -74,6 +74,93 @@ final class TeleprompterNormalizerTests: XCTestCase {
 
 
 struct TeleprompterCanonicalizerTests {
+
+    @Test func aSpaceBetweenDigitsAndAUnitIsLayoutNotContent() {
+        // 98% of the digit + CJK unit occurrences in this repository's own
+        // documents carry a space (6650 against 138 without). A script drafted
+        // from those documents therefore has a space at nearly every number,
+        // while the recogniser transcribes the spoken form without one -- and
+        // the two sides landed on different token streams, so the follower
+        // never matched at that number. The fidelity gate already treats the
+        // two as equivalent (`gateAcceptsWhitespaceOnlyChangesAroundAUnit`);
+        // the canonicalizer did not.
+        for (spaced, tight) in [
+            ("50 元", "五十元"),
+            ("3 米", "三米"),
+            ("10 点", "十点"),
+            ("30 秒", "三十秒"),
+            ("2 小时", "两小时"),
+            ("2026 年", "二〇二六年"),
+            ("5 份", "五份"),
+        ] {
+            #expect(
+                TeleprompterCanonicalizer.units(spaced).map(\.value)
+                    == TeleprompterCanonicalizer.units(tight).map(\.value),
+                "空白导致不匹配: \(spaced) vs \(tight)"
+            )
+        }
+    }
+
+    @Test func bothNumeralRulesReadTheSameUnitList() {
+        // The Arabic and the spoken rule used to carry two separately kept
+        // lists, and they had already drifted: the Arabic one had 年 and the
+        // spoken one had 台/条/项/字, so `三年` matched nothing while `5 台` and
+        // `五台` disagreed. One list, used by both.
+        #expect(
+            TeleprompterCanonicalizer.units("3 年").map(\.value)
+                == TeleprompterCanonicalizer.units("三年").map(\.value)
+        )
+        #expect(
+            TeleprompterCanonicalizer.units("5 份").map(\.value)
+                == TeleprompterCanonicalizer.units("五份").map(\.value)
+        )
+    }
+
+    @Test func unitsThatWouldSwallowTheNextWordAreLeftOut() {
+        // Measured on the corpus: every one of these is followed far more often
+        // by a character that forms a different word than by a boundary, so
+        // binding it would rewrite the neighbouring word. 条→件 (条件, 500),
+        // 字→段 (字段, 883), 页→面 (页面, 807), 版→本 (版本, 1072),
+        // 项→目 (项目, 330), 周→期 (周期, 350), 段→落 (段落, 131),
+        // 克→风/隆 (克服/克隆, 620), 台→账/窗 (台账, 56), 根→因/据,
+        // 章→节 (章节, 33), 张→卡/表. `五台` therefore still canonicalises
+        // apart from `5 台`; that gap is measured and recorded, not an
+        // oversight, and it is the reason the fix was a shared list rather than
+        // a longer one.
+        // Asserting only that the two sides *differ* is not enough: adding 台
+        // to the list keeps them different but flips the failure into a worse
+        // one, where the Arabic side binds the unit and the spoken side does
+        // not. Pin the exact token streams instead, so "left out" means both
+        // sides stay unbound.
+        #expect(TeleprompterCanonicalizer.units("5 台").map(\.value) == ["5", "台"])
+        #expect(TeleprompterCanonicalizer.units("五台").map(\.value) == ["五", "台"])
+        #expect(TeleprompterCanonicalizer.units("3 项").map(\.value) == ["3", "项"])
+        #expect(TeleprompterCanonicalizer.units("4 页").map(\.value) == ["4", "页"])
+    }
+
+    @Test func aLongerUnitWinsOverTheCharacterItEndsWith() {
+        // `unitSuffixes` is consumed by a `hasSuffix` lookup that takes the
+        // first hit, so the order is load bearing: with 米 ahead of 厘米, `五厘米`
+        // would match 米, leave `五厘` as the number, fail the numeral-run check
+        // and silently stop being a number at all.
+        #expect(TeleprompterCanonicalizer.units("五厘米").map(\.value) == ["5厘米"])
+        #expect(TeleprompterCanonicalizer.units("5厘米").map(\.value) == ["5厘米"])
+        #expect(TeleprompterCanonicalizer.units("三毫升").map(\.value) == ["3毫升"])
+        #expect(TeleprompterCanonicalizer.units("2 毫秒").map(\.value) == ["2毫秒"])
+    }
+
+    @Test func aUnitOnItsOwnIsStillSeparateFromTheNumber() {
+        // Reverse control: the optional space belongs to the numeric token, so
+        // it must not let a number swallow a following CJK character that is
+        // not one of the shared units.
+        #expect(
+            TeleprompterCanonicalizer.units("3 米").map(\.value).count == 1
+        )
+        #expect(
+            TeleprompterCanonicalizer.units("3 斤").map(\.value).count == 2
+        )
+    }
+
     @Test func mirrorsServerITNEquivalences() {
         let pairs = [
             ("二零二六年", "2026年"),
