@@ -311,6 +311,38 @@ def run_tests(package: Path, test_filter: str) -> Verdict:
     return classify(code, output)
 
 
+def recover_after_crash(package: Path, test_filter: str) -> tuple[bool, str | None]:
+    """Re-establishes a green unmutated run after a mutation crashed the suite.
+
+    A crash does not end cleanly. Round 60 measured what it leaves behind: the
+    run immediately after a crashing mutation failed on
+    `observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics` with
+    no mutation applied at all, and the two runs after that were green again.
+    Reading that run as a kill would be a false verdict, and the probe only
+    ever checked for a clean baseline once, at the start.
+
+    Returns `(ok, note)`. `ok` is False when the suite never went back to
+    green, and the caller must not interpret anything after it. `note` is
+    None when the run after the crash was already clean, and otherwise
+    describes what had to be recovered -- a residue the record should carry.
+    """
+    first = run_tests(package, test_filter)
+    if first.status == SURVIVED:
+        return True, None
+    second = run_tests(package, test_filter)
+    if second.status == SURVIVED:
+        return True, (
+            f"the run right after the crash was {first.status} "
+            f"({first.failed} failing); re-running it gave a clean run, so the "
+            f"crash left a one-run residue"
+        )
+    return False, (
+        f"the suite is still not clean two runs after a crashing mutation: "
+        f"{first.status} ({first.failed} failing), then "
+        f"{second.status} ({second.failed} failing)"
+    )
+
+
 def _status_of(paths: list[Path]) -> str:
     """Snapshot git's view of the touched paths so parallel edits stay visible."""
     completed = subprocess.run(
@@ -430,10 +462,22 @@ def main() -> int:
     for index, mutation in enumerate(mutations, start=1):
         print(f"[{index}/{len(mutations)}] {mutation.identifier} ...", flush=True)
         verdict = _measure(mutation, package, originals)
+        residue = ""
+        if verdict.status == INVALID and "crashed" in verdict.detail:
+            recovered, note = recover_after_crash(package, mutation.test_filter)
+            if not recovered:
+                print(
+                    f"error: {mutation.identifier} crashed the suite and the "
+                    f"runs after it cannot be trusted: {note}",
+                    file=sys.stderr,
+                )
+                return 2
+            if note:
+                residue = f" -- {note}"
         verdicts.append((mutation, verdict))
         print(
             f"    {verdict.status}: {verdict.detail} "
-            f"({verdict.passed} passed, {verdict.failed} failed)"
+            f"({verdict.passed} passed, {verdict.failed} failed){residue}"
         )
 
     after = _status_of(paths)

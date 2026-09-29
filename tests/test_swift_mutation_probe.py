@@ -134,3 +134,59 @@ def test_a_failure_message_containing_error_is_still_a_kill() -> None:
         "\u2718 Test run with 4 tests in 1 suite failed after 0.2 seconds.\n"
     )
     assert _PROBE.classify(1, output).status == _PROBE.KILLED
+
+
+def _stub_run_tests(monkeypatch, verdicts: list[object]) -> list[int]:
+    """Replaces run_tests with a scripted sequence and records the call count."""
+    calls: list[int] = []
+
+    def fake(package: Path, test_filter: str) -> object:  # noqa: ARG001
+        calls.append(1)
+        return verdicts[min(len(calls) - 1, len(verdicts) - 1)]
+
+    monkeypatch.setattr(_PROBE, "run_tests", fake)
+    return calls
+
+
+def test_a_crash_does_not_need_a_retry_when_the_next_run_is_clean(
+    monkeypatch,
+) -> None:
+    # Round 60: a crashing mutation leaves the *next* run failing even with no
+    # mutation applied. When that run is already clean there is nothing to
+    # recover, and re-running would only cost a full suite.
+    calls = _stub_run_tests(
+        monkeypatch, [_PROBE.Verdict(_PROBE.SURVIVED, "all green", 726, 0)]
+    )
+    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    assert ok and note is None
+    assert len(calls) == 1
+
+
+def test_a_dirty_run_after_a_crash_is_retried_and_reported(monkeypatch) -> None:
+    # The measured case: one bad run, then green. The probe may continue, but
+    # the residue has to reach the record -- otherwise the next mutation's
+    # verdict silently rests on a suite that was not trustworthy.
+    calls = _stub_run_tests(
+        monkeypatch,
+        [
+            _PROBE.Verdict(_PROBE.KILLED, "1 failing", 725, 1),
+            _PROBE.Verdict(_PROBE.SURVIVED, "all green", 726, 0),
+        ],
+    )
+    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    assert ok and note is not None and "one-run residue" in note
+    assert len(calls) == 2
+
+
+def test_a_suite_that_stays_dirty_after_a_crash_is_not_reinterpreted(
+    monkeypatch,
+) -> None:
+    # Two dirty runs is not something to retry past: the probe must refuse the
+    # remaining verdicts rather than explain them away.
+    calls = _stub_run_tests(
+        monkeypatch,
+        [_PROBE.Verdict(_PROBE.KILLED, "1 failing", 725, 1)],
+    )
+    ok, note = _PROBE.recover_after_crash(Path("."), "")
+    assert not ok and note is not None and "still not clean" in note
+    assert len(calls) == 2
