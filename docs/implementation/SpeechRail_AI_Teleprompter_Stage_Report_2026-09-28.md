@@ -550,6 +550,28 @@ Python 里更常见的是「调用一个不点名的清理函数」（`_release_
 
 **覆盖边界（如实记下）**：23 条候选全部读过，但**函数归属是启发式的**——深度跟踪不区分 `init`、计算属性与顶层代码，因此会把后续函数的 `try` 归到前一个函数名下（上述两处误判即由此而来）。这意味着**「零命中」比「有命中」更不可信**：扫描器可能因为找不到 `try` 而漏掉整段函数。因此本轮结论是「已逐条读过的 23 条里没有同族缺陷」，**不是「视图层干净」**。视图层真正的证据缺口仍是编译与运行，那属于 U-10，本轮没有改变这一点。
 
+### 2.14 第二十九轮续：目标第 1 条的**向前**那一向此前一条用例都没有（不是缺陷，是证据缺口）
+
+第 41–54 条那一族之外还有一类不同的问题：**实现本来就在，证据一条都没有**。§2.3 记过一次（「迁移失败保留原数据」），本轮又撞上一处，而且正落在成功目标第 1 条上。
+
+「远处短语不得擅自跨句跳转」此前只钉住了**向后**那一向——`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong` 与 `distantFullSentenceCannotDragTheViewportBackwards` 测的都是回退。**向前没有用例**，而 `mayAdvance` 的四道门禁里有两道从未被任何测试碰过：`localAdvanceTokenRadius` 与 `provisionalMinimumMatches` 在整个测试目录里都是零命中。计划 §11.7 把「旧 generation／手动接管：零越权推进」列为门槛，台账 F-04 也只挂了一条距离约 100 个 token 的用例。
+
+补两条：
+
+| 用例 | 补的是什么 |
+|---|---|
+| `aDistantForwardPhraseCannotDragTheViewportAhead` | 距离 **30** 个 token 的四字短语（刚好在默认半径 24 之外），断言视口与 `committedPosition` 都不动。既有 F-04 用例距离约 100，且只断言 `position`，**没有钉住已确认位置不被改写** |
+| `aLoneStrayTokenMatchDoesNotMoveTheViewport` | **单个 token** 在距锚点 10 处（落在局部半径内、近锚窗口外）。置信满分、位置唯一，**只有 token 数这道门禁拦得住**——而这道门禁此前无人验证。这是误听一个杂音的最现实形态 |
+
+**写这两条用例时踩了两个坑，都写进了注释，因为它们会让用例「因为错误的原因通过」**，值得留给接手方：
+
+1. `localAdvanceTokenRadius` 是**绝对** token 数（默认 24）。三段玩具脚本只有 46 个 token，半径几乎覆盖整篇——**测出来的是口径不是性质**。第一版夹具因此直接失败（视口从第 1 段跳到第 3 段），看起来像发现了缺陷，其实是夹具写坏了。
+2. 两段用同一句 filler 填充，**重复跨度让匹配变歧义**，锚点根本没建立。此时「视口没动」是因为压根没匹配上，不是因为远处短语被拦。这种通过毫无意义，却会让变异验证**误报存活**（半径放宽到 40 都不翻面）。
+
+因此两条用例都先断言锚点真的建立（`followState == .tracking` 且位置已推进），再断言远处短语没推动它；前者还额外断言 `lastMatchConfidence == 1.0` 与 `lastMatchedCount == 4`——要证明的是「**匹配成功但不许跳**」，不是「没匹配上所以没跳」。
+
+变异 **4 条全部被杀**：去掉半径检查、半径放宽到 100000、半径放宽到 40、`strongMatch` 去掉 `matchedCount` 合取项。前三条两条用例一起验；第四条只有单 token 那条能杀——**对半径外的短语，半径检查支配结果，去掉 `matchedCount` 是结构等价变异**，这一条不计入杀数。`swift test` **279 项 / 16 套件**通过。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -696,7 +718,7 @@ Python 里更常见的是「调用一个不点名的清理函数」（`_release_
 | F-01 连续朗读不跳读 | 通过 | `bodyAloneMatchesWithProductionDefaults`、`tracksInsideSentenceAndAcrossSegments` |
 | F-02 长停顿不抢跑 | 通过 | `detourHoldsAndFollowingSpeechRecovers`、`sustainedDetourEntersFreePlayAndLaterReanchors` |
 | F-03 口头禅与插词 | 通过 | `toleratesSubstitutedTailAndShortInput`、`snapshotCompletedSequenceDrivesFollowPosition` |
-| F-04 远处唯一短语 | 通过 | `distantUniquePhraseCannotAdvanceThroughPartialOrFinal` |
+| F-04 远处唯一短语 | 通过 | `distantUniquePhraseCannotAdvanceThroughPartialOrFinal`（距离约 100，只查视口）＋`aDistantForwardPhraseCannotDragTheViewportAhead`（距离 30，贴住半径边界，连 `committedPosition` 一起钉）＋`aLoneStrayTokenMatchDoesNotMoveTheViewport`（单 token，钉住 `provisionalMinimumMatches` 这道门禁）。三条均为第二十九轮续补，**向前这一向此前一条都没有** |
 | F-05 相同开场短语消歧 | 通过 | `unrelatedSpeechAndRepeatedShortPhrasesDoNotMove`、`explicitManualSelectionMakesTheSamePhraseALocalAnchor` |
 | F-06 修订不引发整行往返 | 通过 | `partialMovesProvisionallyAndFinalReplacesIt`、`partialCanPreviewForwardWithoutImmediateFinalRollback` |
 | F-07 真实重读受控回退 | 通过 | `rereadRollsBackOnlyWhenTheBackwardMatchIsStrong`、`rereadDoesNotRollBackAcrossDistantParagraphs`（均经变异验证；此前引用的 `localRepeatCanReturnToPreviousSentence` 只证明对齐器找得到上一段，删掉 `mayConfirm` 回退门禁它仍全绿，见 §2 第 24 条） |
