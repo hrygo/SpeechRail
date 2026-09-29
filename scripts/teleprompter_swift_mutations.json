@@ -359,6 +359,123 @@
       "replace": "        guard targets.enumerated().allSatisfy({ _ in true }) else {",
       "expect": "SURVIVED",
       "rationale": "**生产不可达的纵深防御，但比 M23／M28 更值得盯**：全仓只有 4 处构造 `TeleprompterSourceUnit`（PreparationDomain:277、Session:3009／3025、V2Store:572），id 分别是 `units.count`、builder 给的 `unit.id` 与常量 0，全部连续，因此这道守卫在产品路径上不可观测。它抛的 `invalidSourceUnits` 在整个测试目录里**一次都没出现过**，补它的前提是先造出非连续 id 的素材。\n\n**这条变异给过相反读数，凶手已定位**：全量探针 5 次里有 3 次记 KILLED，隔离跑 6/6 全绿、干净树 5/5 全绿、8 倍 CPU 负载下全量 6/6 全绿。逐条抓失败用例名后，凶手是**`observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics`**，它报的断言是 `eventText.split(separator: \"\\n\").count == 4` 实测 5 或 8、`metricLines.count == 1` 实测 2——一个全新 UUID 临时目录里的文件多出若干行，且每次行数不同。**它与提词器分组、源分片、本变异毫无关系**，因此本变异是存活。该失败只在紧跟 M38（会崩溃的变异）之后出现，机制未确定，已登记为开放缺陷。**对探针的影响要写清楚**：一个无关测试的间歇失败会把存活读成击杀，与第 33 条「探针没跑起来导致全部假报 KILLED」是镜像情形。据此得到的校准是：**失败数 ≥5 的击杀不能由单个 flaky 测试解释，失败数 1–4 的击杀需要复跑确认**。"
+    },
+    {
+      "id": "N1",
+      "note": "分段软上限 60 收紧到 20",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "    private static let maxCharactersPerSegment = 60",
+      "replace": "    private static let maxCharactersPerSegment = 20",
+      "expect": "KILLED",
+      "rationale": "软上限是「超长单元需要切分」的触发条件本身；收紧到 20 后 3 条变红。"
+    },
+    {
+      "id": "N2",
+      "note": "长句不再优先切在空白/逗号边界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {\n                    end = sourceText.index(after: boundary)\n                }",
+      "replace": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2,\n                   false {\n                    end = sourceText.index(after: boundary)\n                }",
+      "expect": "KILLED",
+      "rationale": "第 62 条新增的回归钉住「切在最后一个自然停顿」：两个逗号的素材，第一段必须是 46 字且以逗号收尾。让这段偏好永不生效后第一段变成 60 字，停在从句中间。写成 `false` 而不是整段删掉，是为了让 `candidates` 仍然被读到——删掉整段会留下一条「初始化的值从未被使用」的警告，那是另一类噪声，不该混进变异读数里。"
+    },
+    {
+      "id": "N3",
+      "note": "边界回退不再要求至少走完一半",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {\n                    end = sourceText.index(after: boundary)\n                }",
+      "replace": "                if let boundary = candidates.last {\n                    end = sourceText.index(after: boundary)\n                }",
+      "expect": "KILLED",
+      "rationale": "这道守卫的作用是「10 字处的逗号不该把首段切成 11 字」。回归的不变量写在**非末段**上——句子的余量可以短，开头的一段不可以。"
+    },
+    {
+      "id": "N4",
+      "note": "不再为了不切断英文单词而越过分段软上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            while end < range.upperBound,\n                  let previous = end > start ? sourceText.index(before: end) : nil,\n                  isWordCharacter(sourceText[previous]),\n                  isWordCharacter(sourceText[end]) {\n                end = sourceText.index(after: end)\n            }",
+      "replace": "            while false {\n                end = sourceText.index(after: end)\n            }",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而存活的理由是那条回归本身没写到被保护的分支上**（第 78 条同族）。既有 `testLongLatinIdentifierIsNotSplitAtTheSoftTarget` 的素材是 61 字：有保护时词内循环把 `end` 顶到句末，无保护时 `end` 停在 60，两侧都再被本轮新增的尾段合并收拾成同一段——断言恒真。素材换成真正跨过上限的 73 字版本后转杀。"
+    },
+    {
+      "id": "N5",
+      "note": "小数点不再被当成句界（小数被切开）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if let previous, let next,\n           isDigit(previous), isDigit(next) {\n            return false\n        }",
+      "replace": "        if false {\n            return false\n        }",
+      "expect": "SURVIVED",
+      "rationale": "**等价变异，判据是判据集合的包含关系而不是样本不足**：`isDigit` 的判据是 `CharacterSet.decimalDigits`，`isWordCharacter` 的判据是 letters OR decimalDigits OR `_` OR `#`，所以 `isDigit(p) && isDigit(n)` 恒蕴含 `isWordCharacter(p) && isWordCharacter(n)`。这道守卫的结论已被下一道完全覆盖，删掉它不改变任何一次判定（实测 733 项全绿）。保留原样是为了让「小数不切开」这个意图留在代码里；真要合并成一道，应连注释一起改并重跑本条。"
+    },
+    {
+      "id": "N6",
+      "note": "英文句中的句点不再被当成句界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if let previous, let next,\n           isWordCharacter(previous), isWordCharacter(next) {\n            return false\n        }",
+      "replace": "        if false {\n            return false\n        }",
+      "expect": "KILLED",
+      "rationale": "URL 与域名必须留在一个阅读单元内，否则「https://example.com。」会被切成两段，而域名的后半段对读者毫无意义。"
+    },
+    {
+      "id": "N8",
+      "note": "句末收尾引号不再跟随本句",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        var end = sourceText.index(after: boundary)\n        while end < upperBound && isClosingCharacter(sourceText[end]) {\n            end = sourceText.index(after: end)\n        }\n        return end",
+      "replace": "        return sourceText.index(after: boundary)",
+      "expect": "KILLED",
+      "rationale": "「他说：‘现在开始。’」的收尾引号必须跟着本句，否则下一段以一个孤立引号开头，而这一段在对齐器眼里永远匹配不上。"
+    },
+    {
+      "id": "N9",
+      "note": "换行不再切分段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            if sourceText[cursor].isNewline {",
+      "replace": "            if false {",
+      "expect": "KILLED",
+      "rationale": "换行只通过 `sectionEnds` 影响 pauseHint，不影响段边界——这正是它此前零覆盖的原因。去掉后段落末句与句中句的停顿提示无法区分。"
+    },
+    {
+      "id": "N10",
+      "note": "尾部空白不再裁掉",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        while upper > lower {\n            let previous = sourceText.index(before: upper)\n            guard sourceText[previous].isWhitespace else { break }\n            upper = previous\n        }",
+      "replace": "        while false {\n            break\n        }",
+      "expect": "KILLED",
+      "rationale": "段落末尾的空格会把段落真实末尾推后，于是末句拿不到「长停顿」而被降级成「句间停顿」——**首轮我声明错了方向**：最初断言的是「段文本不含尾随空白」，而句级 `trimmedRange` 早就保证了那一条，所以断言恒真、变异存活。正确的不变量是「加不加尾部空格，段文本与停顿提示都不变」，与第 43 条「断言不等不等于断言了想要的那件事」同一次复发，这次漏的是「谁来读这个字段」。"
+    },
+    {
+      "id": "N11",
+      "note": "段末停顿提示不再按段落收尾给长停顿",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            if sectionEnds.contains(range.upperBound) {\n                pauseHint = .long\n            } else if",
+      "replace": "            if false {\n                pauseHint = .long\n            } else if",
+      "expect": "KILLED",
+      "rationale": "pauseHint 在 `TeleprompterView` 里渲染成「长停顿」/「句间停顿」，是用户可见的标签；本轮之前它一条断言都没有。"
+    },
+    {
+      "id": "N12",
+      "note": "长句切分改用第一个空白/逗号而不是最后一个",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {",
+      "replace": "                if let boundary = candidates.first,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {",
+      "expect": "KILLED",
+      "rationale": "同 N2 的素材：两个逗号，first 与 last 给出不同的答案（21 字 vs 46 字）。取第一个等于每次都切在最近的停顿上，长句被切成大量碎片。"
+    },
+    {
+      "id": "N13",
+      "note": "不再把纯标点的尾段并回上一段（回到第 84 条修复前的行为）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if result.count > 1,\n           let last = result.last,\n           !sourceText[last].contains(where: { $0.isLetter || $0.isNumber }) {",
+      "replace": "        if false {\n            let last = result.last ?? range",
+      "expect": "KILLED",
+      "rationale": "第 84 条的直接回归：没有它，每个略超软上限的句子都会在句末留下一个只含「。」的段，舞台为它渲染一行。"
+    },
+    {
+      "id": "N14",
+      "note": "尾段合并不再要求「不含文字数字」，有内容的尾段也被吞掉",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if result.count > 1,\n           let last = result.last,\n           !sourceText[last].contains(where: { $0.isLetter || $0.isNumber }) {",
+      "replace": "        if result.count > 1,\n           let last = result.last {",
+      "expect": "KILLED",
+      "rationale": "合并条件必须排除有内容的尾段，否则会吞掉真实阅读材料——这条守着修复本身的边界。"
     }
   ]
 }

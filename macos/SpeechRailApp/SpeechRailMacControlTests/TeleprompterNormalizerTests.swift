@@ -62,13 +62,97 @@ final class TeleprompterNormalizerTests: XCTestCase {
     }
 
     func testLongLatinIdentifierIsNotSplitAtTheSoftTarget() throws {
-        let source = "请检查 super_long_identifier_that_should_stay_together_then继续说明。"
+        // 61 characters, the previous fixture, produced one 60-character
+        // segment plus a stranded "。" -- the same output with and without the
+        // word-internal protection, so the assertion never reached the code it
+        // names. This one puts the identifier well past the soft target.
+        let source = "请检查 super_long_identifier_that_should_stay_together_then_keep_going_继续说明。"
 
         let segments = try TeleprompterSegmenter.segment(sourceText: source)
 
-        let identifier = "super_long_identifier_that_should_stay_together"
+        let identifier = "super_long_identifier_that_should_stay_together_then_keep_going"
+        XCTAssertGreaterThan(source.count, 70)
         XCTAssertEqual(segments.filter { $0.text.contains(identifier) }.count, 1)
         XCTAssertTrue(segments.map(\.text).joined().contains(identifier))
+    }
+
+    func testSentenceEndingJustOverTheSoftTargetDoesNotStrandItsPunctuation() throws {
+        // Every sentence longer than the soft target used to be cut at exactly
+        // the target, which left the sentence-final full stop as a segment of
+        // its own -- a stage line holding nothing but "。", once per over-long
+        // sentence. The existing long-identifier fixture is 61 characters, so
+        // it produced exactly that and asserted only that the identifier
+        // survived, walking straight past it.
+        for length in [61, 62, 63, 70, 121] {
+            let source = String(repeating: "字", count: length - 1) + "。"
+
+            let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+            XCTAssertFalse(
+                segments.contains { $0.text.allSatisfy { !$0.isLetter && !$0.isNumber } },
+                "a punctuation-only segment survived for a \(length)-character sentence"
+            )
+            XCTAssertTrue(segments.last?.text.hasSuffix("。") == true)
+        }
+    }
+
+    func testALongSentenceIsCutAtItsLastNaturalBoundaryRatherThanMidWord() throws {
+        // Two commas, so "last" and "first" are different answers. Cutting at
+        // the soft target instead leaves the reader on a line that stops in the
+        // middle of a clause.
+        let source = String(repeating: "字", count: 20) + "，"
+            + String(repeating: "字", count: 24) + "，"
+            + String(repeating: "字", count: 30) + "。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].text.count, 46)
+        XCTAssertTrue(segments[0].text.hasSuffix("，"))
+    }
+
+    func testANaturalBoundaryTooEarlyToReachHalfTheTargetIsNotUsed() throws {
+        // The only comma sits at 10, well short of the half-target. Honouring it
+        // would produce an 11-character leading segment followed by a page of
+        // very short ones, so the boundary is declined. The invariant is on
+        // every segment but the last: the remainder of a sentence is allowed to
+        // be short, a leading one is not.
+        let source = String(repeating: "字", count: 10) + "，"
+            + String(repeating: "字", count: 80) + "。"
+        XCTAssertGreaterThan(source.count, 60)
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        for segment in segments.dropLast() {
+            XCTAssertGreaterThanOrEqual(segment.text.count, 30)
+        }
+    }
+
+    func testParagraphEndGetsALongPauseAndSentenceEndOnlyAMediumOne() throws {
+        // `pauseHint` is what the stage renders as 「长停顿」/「句间停顿」, so the
+        // paragraph split is user-visible and not merely structural.
+        let source = "第一段第一句。第一段第二句。\n第二段第一句。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertEqual(
+            segments.map(\.pauseHint),
+            [.medium, .long, .long]
+        )
+    }
+
+    func testTrailingSpacesBeforeALineBreakChangeNothing() throws {
+        // Trailing spaces used to survive the paragraph range, pushing the
+        // paragraph's real end past its last sentence. The end of a paragraph
+        // is what earns 「长停顿」, so every space-padded paragraph had its
+        // closing sentence demoted to 「句间停顿」 -- the padding, not the
+        // writing, changed what the reader is told.
+        let plain = try TeleprompterSegmenter.segment(sourceText: "第一段第一句。\n第二段第一句。")
+        let padded = try TeleprompterSegmenter.segment(sourceText: "第一段第一句。   \n第二段第一句。")
+
+        XCTAssertEqual(padded.map(\.text), plain.map(\.text))
+        XCTAssertEqual(padded.map(\.pauseHint), plain.map(\.pauseHint))
+        XCTAssertEqual(padded.map(\.pauseHint), [.long, .long])
     }
 }
 
