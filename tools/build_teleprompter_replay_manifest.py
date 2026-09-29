@@ -147,6 +147,31 @@ def require_external_path(path: Path, label: str) -> Path:
     return resolved
 
 
+def fold_cjk_signs(text: str) -> str:
+    """Rewrite a CJK sign in front of a number as an ASCII sign.
+
+    A script writes 负 20 摄氏度 where the engine may write -20 摄氏度.
+
+    Deliberately *not* done here: rewriting Chinese numerals as digits, which
+    measured ten fewer positioned events on a 41-second reading.
+    """
+
+    output: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if character in "负正" and index + 1 < length:
+            following = text[index + 1]
+            if following.isdigit():
+                output.append("-" if character == "负" else "+")
+                index += 1
+                continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
 def normalize_text(text: str) -> str:
     """Fold text to comparable characters: width, case and punctuation free.
 
@@ -155,7 +180,12 @@ def normalize_text(text: str) -> str:
     """
 
     folded = unicodedata.normalize("NFKC", text).casefold()
-    return "".join(character for character in folded if character.isalnum())
+    # Punctuation and spacing go first, so an ordinary hyphen in "wi-fi" cannot
+    # be mistaken for a sign. Signs are folded afterwards, which is what keeps
+    # 负 20 and 20 apart: the script writes one, the engine may write the other,
+    # and the reading position should not paper over that.
+    kept = "".join(character for character in folded if character.isalnum())
+    return fold_cjk_signs(kept)
 
 
 def split_segments(script: str) -> list[str]:

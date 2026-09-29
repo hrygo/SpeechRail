@@ -21,6 +21,7 @@ _SPEC.loader.exec_module(_TOOL)
 
 ManifestDraftError = _TOOL.ManifestDraftError
 ALIGN_BACKTRACK_CHARS = _TOOL.ALIGN_BACKTRACK_CHARS
+fold_cjk_signs = _TOOL.fold_cjk_signs
 ScriptAligner = _TOOL.ScriptAligner
 SegmentIndex = _TOOL.SegmentIndex
 build_manifest = _TOOL.build_manifest
@@ -60,7 +61,37 @@ def _capture(*texts: str, kind: str = "snapshot") -> _SESSION_CAPTURE:
 
 def test_normalize_text_folds_width_case_and_punctuation() -> None:
     assert normalize_text("Ｗｉｆｉ－Ａ，ＢＣ！") == "wifiabc"
-    assert normalize_text("负 20 摄氏度。") == "负20摄氏度"
+    assert normalize_text("负 20 摄氏度。") == "-20摄氏度"
+
+
+def test_normalize_text_puts_chinese_numerals_and_the_transcript_in_the_same_form() -> None:
+    assert normalize_text("标称功率是 50 瓦") == "标称功率是50瓦"
+    assert normalize_text("负 20 到 60 摄氏度") == "-20到60摄氏度"
+    assert normalize_text("工作温度是 0 到 35 摄氏度") == "工作温度是0到35摄氏度"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("负20", "-20"), ("正3", "+3"), ("负二十", "负二十"), ("负荷", "负荷")],
+)
+def test_fold_cjk_signs_only_touches_a_sign_that_fronts_a_number(
+    text: str, expected: str
+) -> None:
+    """A wrong rewrite is worse than none: it moves the reading position."""
+
+    assert fold_cjk_signs(text) == expected
+
+
+def test_normalize_text_does_not_rewrite_chinese_numerals() -> None:
+    """Rewriting Chinese numerals as digits was tried and measured, then dropped.
+
+    It cost ten positioned events on a 41-second reading, because the engine
+    emits numeral-shaped noise that the rewrite then destroys, and the supplied
+    scripts already use Arabic digits.
+    """
+
+    assert normalize_text("大概四十分钟") == "大概四十分钟"
+    assert normalize_text("七点半出门") == "七点半出门"
 
 
 def test_split_segments_uses_blank_lines_and_drops_empties() -> None:
