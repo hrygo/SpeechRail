@@ -95,6 +95,85 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.mode == .manual)
     }
 
+    /// 时钟回退守卫有**两半**：队列年龄与匹配年龄。既有那条
+    /// `latencyDiagnosticsReportsBoundedPercentiles` 四次调用喂的全是合法值，
+    /// 所以「匹配年龄为负」这一侧从未被走过——去掉它全量 719 项无人变红。
+    /// 负值不是噪声，是时钟回退的信号，放进去会让 P95 凭空变好。
+    @Test func aRolledBackMatchClockIsNotRecordedAsALatencySample() {
+        var diagnostics = TeleprompterLatencyDiagnostics()
+        diagnostics.recordAlignment(queueAgeMilliseconds: 10, matchMilliseconds: 20)
+        #expect(diagnostics.alignmentSampleCount == 1)
+
+        diagnostics.recordAlignment(queueAgeMilliseconds: 10, matchMilliseconds: -5)
+        #expect(
+            diagnostics.alignmentSampleCount == 1,
+            "匹配年龄为负说明时钟回退过，这一整次采样都得作废"
+        )
+        #expect(diagnostics.matchP95Milliseconds == 20)
+
+        diagnostics.recordAlignment(queueAgeMilliseconds: 10, matchMilliseconds: .nan)
+        #expect(diagnostics.alignmentSampleCount == 1)
+    }
+
+    /// `manualMove` 在按段索引 `segmentUTF16Lengths` 之前校验它够长。
+    /// 字号或列宽变化时长度表可能短暂落后一版，越界就是崩溃而不是「保持位置」。
+    /// 去掉这道校验全量 719 项无人变红。
+    @Test func manualMoveWithAStaleLengthTableIsANoOpRatherThanACrash() {
+        var controller = TeleprompterFollowController()
+        controller.manualMove(
+            to: TeleprompterAligner.Position(segmentIndex: 0, utf16Offset: 0),
+            segmentCount: 3,
+            segmentUTF16Lengths: [10, 10, 10]
+        )
+        let before = controller.position
+
+        // 长度表只给到第 2 段，却要移动到第 3 段——越界会被夹住，不该崩。
+        controller.manualMove(
+            to: TeleprompterAligner.Position(segmentIndex: 2, utf16Offset: 4),
+            segmentCount: 3,
+            segmentUTF16Lengths: [10, 10]
+        )
+        #expect(
+            controller.position == before,
+            "长度表不齐全时必须原地不动，而不是越界崩溃"
+        )
+    }
+
+    /// 切稿时 `prepare` 重建对齐脚本并清空 `history`；那一行比较写反之后，
+    /// 换稿不重置、重复传同一份稿反而清空。`history` 是恢复与去重的记忆，
+    /// 带着它跨稿就是让上一篇的证据替这一篇做判断。
+    @Test func anEventFromThePreviousScriptCannotAdvanceAfterTheScriptChanges() throws {
+        let oldScript = try TeleprompterSegmenter.segment(
+            sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。"
+        )
+        let newScript = try TeleprompterSegmenter.segment(
+            sourceText: "这一篇讲导出流程与色彩管理。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(
+            itemID: "old-1", transcript: "今天我们介绍相机设置", segments: oldScript
+        )
+        #expect(controller.position.segmentIndex == 1)
+        let beforeSwitch = controller.position
+
+        // 切稿：任何一条带新稿分段的事件都会触发 prepare(新稿)。
+        controller.receiveCompleted(
+            itemID: "new-1", transcript: "这一篇讲导出流程", segments: newScript
+        )
+
+        let afterSwitch = controller.position
+        #expect(afterSwitch != beforeSwitch, "切稿本身必须真的把位置带走")
+
+        // 上一篇的转写随后到达——对齐器面对的已经应该是新稿，它匹配不上。
+        controller.receiveCompleted(
+            itemID: "stale", transcript: "今天我们介绍相机设置", segments: newScript
+        )
+        #expect(
+            controller.position == afterSwitch,
+            "上一篇的转写不得在新稿上推进位置"
+        )
+    }
+
     @Test func latencyDiagnosticsReportsBoundedPercentiles() {
         var diagnostics = TeleprompterLatencyDiagnostics(maxSamples: 3)
         diagnostics.recordAlignment(queueAgeMilliseconds: 1, matchMilliseconds: 4)

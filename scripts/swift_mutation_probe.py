@@ -216,6 +216,22 @@ def self_check() -> list[str]:
     return problems
 
 
+def unexplained_invalid(verdicts: list[tuple[Mutation, Verdict]]) -> list[str]:
+    """Names the INVALID results the spec did not predict.
+
+    Removing a bounds guard can abort the whole test process rather than fail
+    an assertion. The probe is right to refuse to call that a clean kill, but
+    a spec that declared the outcome in advance has recorded a known property
+    of that mutation, not a defect in the probe -- so only the *undeclared*
+    ones fail the run.
+    """
+    return [
+        mutation.identifier
+        for mutation, verdict in verdicts
+        if verdict.status == INVALID and mutation.declared != INVALID
+    ]
+
+
 def compiles(package: Path) -> tuple[bool, str]:
     code, output = _run(["swift", "build", "--build-tests"], cwd=package)
     return code == 0 and not _COMPILE_ERROR.search(output), output
@@ -389,7 +405,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    invalid = [m.identifier for m, v in verdicts if v.status == INVALID]
+    invalid = unexplained_invalid(verdicts)
     if invalid:
         print(
             f"error: {len(invalid)} mutation(s) are INVALID and prove nothing: "

@@ -71,3 +71,34 @@ def test_a_declared_survivor_carries_its_reason() -> None:
             assert len(entry.get("rationale", "")) > 40, (
                 f"{entry['id']}: declared survivor without a reason"
             )
+
+
+def _mutation(identifier: str, declared: str) -> object:
+    return _PROBE.Mutation(
+        identifier=identifier,
+        file="unused",
+        find="x",
+        replace="y",
+        test_filter="",
+        note="",
+        declared=declared,
+        rationale="because",
+    )
+
+
+def test_a_declared_invalid_mutation_does_not_fail_the_run() -> None:
+    # Removing a bounds guard can abort the whole test process instead of
+    # failing an assertion -- Swift traps on the out-of-range index, so the
+    # suite dies mid-run with hundreds of passes and no failure line. The probe
+    # is right to refuse to call that a clean kill, but a spec that declared
+    # the outcome has recorded a known property of that mutation rather than a
+    # defect in the probe.
+    aborted = _PROBE.Verdict(_PROBE.INVALID, "process aborted", 456, 0)
+    assert _PROBE.unexplained_invalid([(_mutation("declared", _PROBE.INVALID), aborted)]) == []
+
+
+def test_an_undeclared_invalid_mutation_fails_the_run() -> None:
+    # The other half: something the spec did not predict means the probe met a
+    # result it cannot interpret, and that must not pass silently.
+    aborted = _PROBE.Verdict(_PROBE.INVALID, "process aborted", 456, 0)
+    assert _PROBE.unexplained_invalid([(_mutation("surprise", ""), aborted)]) == ["surprise"]

@@ -152,6 +152,114 @@
       "replace": "        guard ruleRevision >= Self.currentRuleRevision else { return .unknownRuleRevision }",
       "expect": "KILLED",
       "rationale": "别名必须拒绝比当前更新的规则版本——那意味着它是用未来的口径写的，本机无法复核。3 条变红。"
+    },
+    {
+      "id": "M17",
+      "note": "局部推进半径 24 放大到 240（远距误跳）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        localAdvanceTokenRadius: Int = 24,",
+      "replace": "        localAdvanceTokenRadius: Int = 240,",
+      "expect": "KILLED",
+      "rationale": "局部推进半径就是「远处短语不得擅自跨句跳转」那道闸门；放大十倍后 9 条变红。"
+    },
+    {
+      "id": "M18",
+      "note": "暂定推进置信度 0.72 降到 0.3",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        provisionalMinimumConfidence: Double = 0.72,",
+      "replace": "        provisionalMinimumConfidence: Double = 0.3,",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮未修**：`provisionalMinimumConfidence` 的默认值 0.72 从未被喂过边界值——既有素材里暂定推进要么远高于它、要么远低于它。与上一轮的 M8 同类，补它需要先造出落在 (0.3, 0.72) 的暂定推进材料。**已记为开放项，不假装已覆盖。**"
+    },
+    {
+      "id": "M19",
+      "note": "暂定推进命中数 2 降到 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        provisionalMinimumMatches: Int = 2,",
+      "replace": "        provisionalMinimumMatches: Int = 1,",
+      "expect": "KILLED",
+      "rationale": "暂定推进的命中数下限，降到 1 后 4 条变红。"
+    },
+    {
+      "id": "M20",
+      "note": "重定位命中数 4 降到 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        relocalizationMinimumMatches: Int = 4",
+      "replace": "        relocalizationMinimumMatches: Int = 1",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮未修**：`relocalizationMinimumMatches` 默认 4，降到 1 无人变红。重定位只在自由发挥态可达，而既有素材里没有走进那个状态的用例。"
+    },
+    {
+      "id": "M21",
+      "note": "连续未命中 2 次进入自由发挥，降到 1 次",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        freePlayAfterMisses: Int = 2,",
+      "replace": "        freePlayAfterMisses: Int = 1,",
+      "expect": "KILLED",
+      "rationale": "连续未命中次数决定何时转入自由发挥；降到 1 后 5 条变红。"
+    },
+    {
+      "id": "M22",
+      "note": "歧义判定余量 0.12 归零",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        reanchorMargin: Double = 0.12,",
+      "replace": "        reanchorMargin: Double = 0.0,",
+      "expect": "SURVIVED",
+      "rationale": "**真缺口，本轮未修**：`reanchorMargin` 是歧义判定的余量，归零后无人变红。与远距误跳同源——余量为零时「略差一点的第二候选」会被当成竞争者而放弃推进，或者反过来被放过。既有素材里没有真正歧义的两条候选。"
+    },
+    {
+      "id": "M23",
+      "note": "去掉局部推进半径的 320 上限夹取",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        self.localAdvanceTokenRadius = max(0, min(320, localAdvanceTokenRadius))",
+      "replace": "        self.localAdvanceTokenRadius = max(0, localAdvanceTokenRadius)",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御**：全仓没有任何生产代码带参构造 `TeleprompterFollowPolicy`，夹取只对「有人注入越界值」有意义。留作纵深防御，不计入存活。"
+    },
+    {
+      "id": "M24",
+      "note": "重复事件由「拒绝」改为「放行」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard !eventIDs.contains(id) else { return false }",
+      "replace": "        guard !eventIDs.contains(id) else { return true }",
+      "expect": "KILLED",
+      "rationale": "重复事件必须被拒绝，否则一次重发就会二次推进。6 条变红。"
+    },
+    {
+      "id": "M25",
+      "note": "切稿后不重置对齐状态（比较方向翻转）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard script == nil || scriptSegments != segments else { return }",
+      "replace": "        guard script == nil || scriptSegments == segments else { return }",
+      "expect": "KILLED",
+      "rationale": "验收第 2 条「切稿后旧事件不能推进」的直接落点。比较方向写反后换稿不重置、重复传同一份稿反而清空 history。已补 `anEventFromThePreviousScriptCannotAdvanceAfterTheScriptChanges`。"
+    },
+    {
+      "id": "M26",
+      "note": "列宽扫描不再校验逐段长度表是否齐全",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard segmentCount > 0, segmentUTF16Lengths.count >= segmentCount else { return }",
+      "replace": "        guard segmentCount > 0 else { return }",
+      "expect": "INVALID",
+      "rationale": "**去掉这道守卫不会让断言变红，而是让整个测试进程崩溃**——Swift 对越界索引直接 trap，跑到 456 项时整条 suite 中断，没有失败行。探针拒绝把崩溃记成 kill 是对的，但这道守卫确实被守住：没有它，新加的 `manualMoveWithAStaleLengthTableIsANoOpRatherThanACrash` 会当场把进程带走。声明为 INVALID 而非 KILLED，如实记录这一差别。"
+    },
+    {
+      "id": "M27",
+      "note": "时钟回退守卫只留队列年龄、丢掉匹配年龄（稳定证据）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard valid(queueAgeMilliseconds), valid(matchMilliseconds) else { return }",
+      "replace": "        guard valid(queueAgeMilliseconds) else { return }",
+      "expect": "KILLED",
+      "rationale": "验收「稳定证据丢失」的直接落点。时钟回退守卫有队列年龄与匹配年龄两半，既有那条 `latencyDiagnosticsReportsBoundedPercentiles` 四次调用喂的全是合法值，匹配年龄那一侧从未被走过。已补 `aRolledBackMatchClockIsNotRecordedAsALatencySample`。"
+    },
+    {
+      "id": "M28",
+      "note": "暂定推进命中数不再兜底下界 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        self.provisionalMinimumMatches = max(1, provisionalMinimumMatches)",
+      "replace": "        self.provisionalMinimumMatches = provisionalMinimumMatches",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御**，与 M23 同因：全仓没有任何生产代码带参构造 `TeleprompterFollowPolicy`，默认值永远走 init 里的字面量，这个下界夹取只对「有人注入 0 或负数」有意义。留着作纵深防御，按第 27/33 条规矩不计入存活。"
     }
   ]
 }
