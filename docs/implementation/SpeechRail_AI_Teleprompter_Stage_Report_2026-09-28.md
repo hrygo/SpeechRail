@@ -467,6 +467,42 @@ TTS 按材料 B 合成 41 秒素材（**仅验证工具，不是质量集**）�
 - ② 重复投递（hypothesis 与它的 delta 携带同样文字）曾被判成**回读**，一轮跑出 3 个假 `reRead`。
   必须先按**紧邻的上一条**去重；且不能拿整段累计文本去比，否则真回读会被吞掉。
 
+### 2.12 第二十七轮：把缺陷族扫描首次扩到 **Python 服务侧**（结论：未发现新缺陷）
+
+第 41–54 条那一族（先改状态、后面才出现失败而失败不回滚）此前**只在 Swift 侧扫过**——第十三轮的
+静态脚本命中的是 `TeleprompterSession.swift` 12 处。而提词器跟随所依赖的事件**源头在 Python**：
+hypothesis 的修订号、稳定前缀、utterance 生命周期都由 `application/realtime_openai.py` 生成。
+**这一侧此前没有被同一口径审过。** 本轮补上。
+
+**先自证扫描口径**（这一步本身失败过一次，值得记）：第一版扫描器把「回滚了」的样例也报成命中，
+因为它只在 `raise` 的表达式里找属性名，而回滚通常是 raise **之前**的一条语句。修正为
+「mutation 与其后的第一个退出点之间，是否存在针对同一容器的恢复操作（重新赋值／pop／clear／
+remove）」，并植入两个对照样例（一个该报、一个该不报、一个回滚、一个无退出路径），
+四种情形全部分类正确后才拿去扫真实代码。**口径没自证就解读「零命中」，等于什么都没说。**
+
+结果：`application/realtime_openai.py` 32 条线索，`compatibility/openai_realtime.py` 0 条。
+**逐条读过的部分（跟随路径）全部是良性的**：
+
+| 线索 | 读出来的结论 |
+|---|---|
+| `_drain_asr_events` 6 条（`_hypothesis_revision`、`_stable_prefix_codepoints` 等先改后发） | 退出点是 `except asyncio.CancelledError: raise`，会话正在终止；且 `_last_hypothesis_text` 在**发送成功之后**才推进。不构成缺陷 |
+| delta 分支「`_last_partial_text` 先推进再发 delta，且**忽略返回值**」 | **一度以为是真缺陷**。查 `SendEvent = Callable[..., Awaitable[int \| None]]` 与 transport 实现：返回 `None` **只发生在已断开**（`disconnected = True`）。客户端已经不在，缺一个 delta 无人察觉，**假阳性** |
+| `_ensure_diarization`（`_ledger`/`_diarization` 先赋值后 `start()`） | **恰恰是回滚写得对的那一处**：`except BaseException: await self._release_diarization(); raise`。扫描器不认识这种回滚形式 |
+| `_commit_audio_once` 4 条 | 「设好新 `_current_item_id` 后正常返回」的正常路径 |
+| `_append_audio` 的 `_input_generation` 先自增再 `buffer_too_large` | 客户端违约的硬拒绝，会话随即拆掉；计数与时间戳描述的都是「客户端确实发了东西」，回滚反而会失真 |
+| `_finish_alignment` 的 `_metadata_revision` 先自增 | 取消只造成序号跳空，客户端下一次收到的是**完整**单元集，不损坏内容 |
+| `_send_diarization_updates` 的 `_speaker_by_unit` 先写 | 它是缓存而非已发布状态，`metadata_revision` 在空 payload 时并未自增，下次成功更新会带上它，无信息丢失 |
+
+**覆盖边界（如实记下）**：32 条里我逐条读过的是**跟随路径**那几组
+（`_drain_asr_events`、`_commit_audio_once`、`_append_audio` 的拒绝分支、`_finish_alignment`、
+`_ensure_diarization`、`_send_diarization_updates`）。**未逐条读的是 TTS 流式那几组**
+（`_on_stream_event`、`_settle_stream_terminal`、`_finalize_tts`）——提词器不走 TTS，
+不在本轮范围内。**因此本轮结论是「跟随路径未发现新缺陷」，不是「整个 Python 侧干净」。**
+
+方法上补一条：这一族在 Python 侧的形态与 Swift 不同——Swift 里回滚通常是显式赋值，
+Python 里更常见的是「调用一个不点名的清理函数」（`_release_diarization`），
+按属性名找回滚的扫描器**必然漏报**。所以扫描器在这里只能当线索来源。
+
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
