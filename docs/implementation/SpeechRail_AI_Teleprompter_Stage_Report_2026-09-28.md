@@ -1540,6 +1540,42 @@ PROBE [三点五 元] -> ["3.5@0-3", "元@4-5"]  vs  [2.5 元] -> ["2.5元@0-5"]
 新增 `tests/test_teleprompter_swift_evidence_refs.py` 4 条回归，
 其中一条按上面的收紧判据守住这个文件里每一个反引号名字都能解析，
 另外两条把具体实例与「两个方向都有回归」钉住，**免得有人改名后注释又悄悄指空**。
+### 2.38 第五十三轮：把第 78 条那一族扫完全部 Swift 测试文件（**零新缺陷**）
+
+第 78 条是在**一个**文件里查出来的。既然这一族是「注释点名一条自己也不存在的回归」，
+那只查一个文件就没有意义——**同一句话可能落在另外 13 个提词器测试文件里的任何一处**。
+这一轮把同一判据扫到全部 **37 个** Swift 测试文件（`SpeechRailMacControlTests` 36 个 + `SpeechRailAppUITests`）。
+
+**结论是零新缺陷**：唯一的真悬空就是第 78 条那一处，已修。
+剩下的全部是**判据自身的误报**，逐类量过：
+
+- **9 个是 Apple SDK 与 XCTest 的符号**（`AVAudioEngine`／`AsyncThrowingStream`／
+  `URLProtocol`／`isHittable`／`hasSuffix`／`addTeardownBlock` 等）——它们不在本仓任何文件里，按定义解析不到；
+- **22 个是 snake_case 的 manifest JSON 键**（`sample_count`／`dataset_revision`／`pitch_band` 等）
+  ——那是 `teleprompter.replay.v1` 的线上字段，本来就不该在 Swift 源码里找；
+- **1 个是外部工具**（`xcodebuild`）。
+
+**这一轮真正的收获不是「没找到」，而是判据被逼着改了三版，每一版都是被自己的误报打回来的**：
+
+1. **第一版只认「本文件的 `@Test func`」**——误报 4 条控制器字段；
+2. **第二版加上「被测源码里的标识符」**——4 条消失，却又把
+   `gateAcceptsWhitespaceOnlyChangesAroundAUnit` 报成悬空，**而它确实存在**，
+   只是在**另一个测试文件**里（`TeleprompterPreparationPromptsTests.swift`）——
+   测试文件当然可以引用兄弟文件的回归，这一版把范围收得太窄；
+3. **第三版再放宽到「整个测试 target 的 `@Test func`」**，并补上 snake_case 排除；
+   同时发现我前两版**都漏了类型声明关键字**（`struct`／`class`／`enum`／`actor`），
+   于是 `TeleprompterCanonicalizer`、`TeleprompterV2Store`、`AssistantSession` 全被误报——
+   而且**只扫了 `SpeechRailApp/` 一个模块**，漏了 `SpeechRailControlKit/`，`SafeVoiceEntry` 因此也误报。
+
+**这三次改动的方向和 §5 第 10 条记的那次完全一致：每一次都是先误报、再放宽。**
+报告在那里写下的结论在这里得到了第二次印证——**口径本身就是交付物，比第一条结果更值钱**；
+而**判据最终只敢覆盖提词器那 14 个测试文件**，其余 25 个明确不覆盖，
+**因为要覆盖它们就得放进一张宽到足以藏住真问题的白名单。** 边界写进测试的 docstring，不留给记忆。
+
+**留下的守卫**：`tests/test_teleprompter_swift_evidence_refs.py` 从守 1 个文件扩到守 14 个，
+白名单只收 2 个名字（`hasSuffix`、`xcodebuild`）并注明理由；
+另有一条断言专门盯住**范围本身**（`len(SCOPED) >= 14`），
+**免得以后新增提词器测试文件时这条守卫悄悄只覆盖老的那批**——这正是第 45 条与第 78 条反复示范的那一课。
 ### 2.1 第十五轮的扫描覆盖与**排除**结论
 
 第 51 条是扫出来的，不是读出来的。为了让接手方知道这一轮**查过什么、排除过什么**（否则下一轮会重复查同一批地方），逐条记录如下。**排除也是结论**——第 46 条的教训正是「命中过、读过、判为假阳性、没回头」，而它和第 43 条是同一个缺陷。
@@ -1635,7 +1671,7 @@ PROBE [三点五 元] -> ["3.5@0-3", "元@4-5"]  vs  [2.5 元] -> ["2.5元@0-5"]
 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED** |
 | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**，`test-unit: passed`，exit 0 |
 | `pytest`（探针／素材／operator 文档／user 文档） | **57 项通过**（15 + 36 + 6） |
-| `pytest`（**全量**，`PYTHONPATH=<worktree>/src`） | **2713 项通过**，0 失败 0 跳过（第五十二轮，2026-09-29 复跑；第五十一轮为 2709，第 78 条的注释引用检查带 4 条回归）。**必须显式设 `PYTHONPATH`**，否则测的是主检出的源码（见本节下方更正） |
+| `pytest`（**全量**，`PYTHONPATH=<worktree>/src`） | **2715 项通过**，0 失败 0 跳过（第五十三轮，2026-09-29 复跑；第五十二轮为 2713，第 78 条的守卫扩到 14 个提词器测试文件，带 2 条新回归）。**必须显式设 `PYTHONPATH`**，否则测的是主检出的源码（见本节下方更正） |
 | `ruff check .` | 全绿 |
 | `mypy src` | 154 个源文件无问题 |
 | 文档自检（替换字符／表格列数／标识可解析） | **通过**（exit 0，`scripts/check_teleprompter_report.py`）。检查替换字符、表格未转义竖线、页首计数与自身区间是否自洽；每个检查器先对自己的坏夹具证明非空转，空转则 exit 2 且拒绝解读报告。回归 `tests/test_teleprompter_report_check.py` 8 项。**标识可解析性不在其中**，理由见 §2.36 |

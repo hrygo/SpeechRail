@@ -21,14 +21,21 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONTROLLER_TESTS = (
-    REPO_ROOT
-    / "macos/SpeechRailApp/SpeechRailMacControlTests/TeleprompterFollowControllerTests.swift"
-)
-SOURCE_ROOT = REPO_ROOT / "macos/SpeechRailApp/SpeechRailApp"
+MACOS_ROOT = REPO_ROOT / "macos"
+TESTS_ROOT = REPO_ROOT / "macos/SpeechRailApp/SpeechRailMacControlTests"
+SCOPED = sorted(TESTS_ROOT.glob("Teleprompter*Tests.swift"))
+CONTROLLER_TESTS = TESTS_ROOT / "TeleprompterFollowControllerTests.swift"
 
 _TEST_FUNC_RE = re.compile(r"@Test\s+func\s+([A-Za-z0-9_]+)")
 _BACKTICK_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_]{6,})`")
+
+
+def _swift_sources() -> list[Path]:
+    return [
+        path
+        for path in sorted(MACOS_ROOT.rglob("*.swift"))
+        if ".build" not in path.parts
+    ]
 
 
 def _declared_test_names() -> set[str]:
@@ -47,15 +54,87 @@ def _production_names() -> set[str]:
     pinned down.
     """
     names: set[str] = set()
-    for path in sorted(SOURCE_ROOT.rglob("*.swift")):
+    for path in _swift_sources():
         text = path.read_text(encoding="utf-8", errors="replace")
-        names.update(re.findall(r"\b(?:let|var|func|case)\s+([A-Za-z_][A-Za-z0-9_]*)", text))
+        names.update(
+            re.findall(
+                r"\b(?:let|var|func|case|struct|class|enum|actor|protocol|"
+                r"extension|typealias)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                text,
+            )
+        )
         names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_]", text))
     return names
 
 
+def _target_test_names() -> set[str]:
+    names: set[str] = set()
+    for path in sorted(TESTS_ROOT.glob("*.swift")):
+        names.update(_TEST_FUNC_RE.findall(path.read_text(encoding="utf-8", errors="replace")))
+    return names
+
+
+# Names a comment may legitimately cite that resolve to nothing in this
+# repository: Apple SDK types/methods and one external tool. They are listed
+# rather than pattern-matched because every attempt at a pattern (a leading
+# capital, a `lowerCamel` shape) also matches real project identifiers, and a
+# gate that cries wolf gets ignored -- the failure mode this whole check exists
+# to prevent.
+SDK_OR_TOOL_NAMES = frozenset({"hasSuffix", "xcodebuild"})
+
+
+def _is_manifest_key(name: str) -> bool:
+    """Report the snake_case names as out of scope, and say why.
+
+    The evaluator tests cite the replay manifest's own JSON fields
+    (`sample_count`, `dataset_revision`, ...). Those are wire keys, not Swift
+    identifiers, so they resolve to nothing in the source by design. Swift
+    naming makes the two shapes easy to separate: a manifest key is
+    snake_case, and no Swift declaration in this project is.
+    """
+    return "_" in name
+
+
 def test_the_controller_test_file_exists() -> None:
     assert CONTROLLER_TESTS.is_file(), CONTROLLER_TESTS
+
+
+def test_every_teleprompter_test_file_cites_only_names_that_resolve() -> None:
+    """The teleprompter test surface is the one this check guards.
+
+    Condition 78 found a comment in ``TeleprompterFollowControllerTests.swift``
+    citing a regression that had never existed. Checking that one file left the
+    other 13 teleprompter test files unguarded, so the same rot could land in
+    any of them unnoticed.
+
+    Scope is deliberately the teleprompter files only. A sweep of all 37 Swift
+    test files found no further dangling citation, but it also surfaced nine
+    names that belong to the Apple SDK or to external tools; folding those in
+    would mean an allowlist wide enough to hide real misses. The 25 non-
+    teleprompter files are therefore **not covered**, and saying so here is the
+    point -- an unstated boundary reads as coverage that does not exist.
+    """
+    production = _production_names()
+    target_tests = _target_test_names()
+    problems: dict[str, list[str]] = {}
+    for path in SCOPED:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        dangling = sorted(
+            name
+            for name in set(_BACKTICK_RE.findall(text))
+            if name not in production
+            and name not in target_tests
+            and name not in SDK_OR_TOOL_NAMES
+            and not _is_manifest_key(name)
+        )
+        if dangling:
+            problems[path.name] = dangling
+    assert problems == {}, f"comments cite names that resolve to nothing: {problems}"
+
+
+def test_the_scope_actually_covers_every_teleprompter_test_file() -> None:
+    assert len(SCOPED) >= 14, [p.name for p in SCOPED]
+    assert CONTROLLER_TESTS in SCOPED
 
 
 def test_no_comment_cites_a_name_that_resolves_to_nothing() -> None:
