@@ -15,8 +15,8 @@ from speechrail.config.model_catalog import (
     load_catalog,
     load_runtime_lock,
 )
-from speechrail.domain.model_spec import ModelRole, required_spec_artifact, required_spec_bindings
 from speechrail.config.model_locations import ModelLocations
+from speechrail.domain.model_spec import ModelRole, required_spec_artifact, required_spec_bindings
 from speechrail.service.diarization_assets import inspect_diarization_assets
 from speechrail.service.model_store import (
     DiskUsage,
