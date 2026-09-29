@@ -2058,7 +2058,7 @@ M39 随即给出它真实的读数。全量 39 条重跑 **exit 0**，29 杀 / 8
 | `scripts/macos_app_build.sh --configuration Debug` | **BUILD SUCCEEDED** |
 | `scripts/macos_app_build.sh --configuration Debug --test-unit` | **TEST SUCCEEDED**，`test-unit: passed`，exit 0 |
 | `pytest`（探针／素材／operator 文档／user 文档） | **57 项通过**（15 + 36 + 6） |
-| `pytest`（**全量**，`PYTHONPATH=<worktree>/src`） | **2735 项通过**，0 失败 0 跳过（第六十轮，2026-09-29 复跑；本轮为探针的崩溃恢复补 3 条 Python 回归。**顺带修掉一处 CI 红灯**：上一轮新增的测试显式传 `Path(".")` 触发 `PTH201`，而那轮最后跑的是 swift 与文档门禁、ruff 是在加测试之前跑的——门禁要在最后一步跑。)**修复第 83 条的 teardown 竞态后连跑 5 次全量，均 0 失败**）。**必须显式设 `PYTHONPATH`**，否则测的是主检出的源码（见本节下方更正） |
+| `pytest`（**全量**，`PYTHONPATH=<worktree>/src`） | **2735 项通过**，0 失败 0 跳过（第六十轮，2026-09-29 复跑；第六十一轮同日再复跑一次，数字不变——本轮只动了 Swift 侧，Python 侧一条未改；本轮为探针的崩溃恢复补 3 条 Python 回归。**顺带修掉一处 CI 红灯**：上一轮新增的测试显式传 `Path(".")` 触发 `PTH201`，而那轮最后跑的是 swift 与文档门禁、ruff 是在加测试之前跑的——门禁要在最后一步跑。)**修复第 83 条的 teardown 竞态后连跑 5 次全量，均 0 失败**）。**必须显式设 `PYTHONPATH`**，否则测的是主检出的源码（见本节下方更正） |
 | `ruff check .` | 全绿 |
 | `mypy src` | 154 个源文件无问题 |
 | 文档自检（替换字符／表格列数／表格完整性／标识可解析） | **通过**（exit 0，`scripts/check_teleprompter_report.py`）。四项：替换字符、表格未转义竖线、页首计数与自身区间是否自洽、**§4.3 表是否一行对一条**。每个检查器先对自己的坏夹具证明**因正确理由**触发（夹具自带期望消息，空转或答非所问都 exit 2 拒绝解读报告），另配干净夹具证明它不会对正常文档乱报。回归 `tests/test_teleprompter_report_check.py` 15 项。**标识可解析性不在其中**，理由见 §2.36 |
