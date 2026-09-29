@@ -979,7 +979,12 @@ public enum TeleprompterProtectedLiteralExtractor {
             // one-character unit can never win over a two-character one that
             // starts at the same position, and the group ends at the first
             // character that is not a unit, which leaves 的/之/里 outside.
-            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|微秒|分钟|小时|公里|千米|千克|公斤|毫升|厘米|毫米|焦耳|赫兹|欧姆|比特|字节|字符|元|秒|天|年|月|日|倍|个|次|台|人|米|吨|瓦|度|条|行|项|字|段|根|张|份|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
+            // `分/点/号/楼/岁` are here because `TeleprompterCanonicalizer` reads
+            // them as numeric units, and every one of them was missing: changing
+            // `10 分` to `10 号` produced the same atom list on both sides and
+            // passed the hard gate. The alternation is ordered, so `分钟` above
+            // still wins over the bare `分` below it.
+            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|微秒|分钟|小时|公里|千米|千克|公斤|毫升|厘米|毫米|焦耳|赫兹|欧姆|比特|字节|字符|元|秒|天|年|月|日|倍|个|次|台|人|米|吨|瓦|度|分|点|号|楼|岁|条|行|项|字|段|根|张|份|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
             kind: .number,
             priority: 3
         ),

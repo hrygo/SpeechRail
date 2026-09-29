@@ -795,6 +795,80 @@ struct TeleprompterPreparationPromptsTests {
         #expect(issues == [.readingChoice, .certaintyChanged])
     }
 
+    /// 判据第 1 条：「数值、单位、正负号及重复内容变化不得静默通过」。
+    /// `TeleprompterCanonicalizer` 把 `分/号/岁/楼/点` 读成数值单位，而硬门禁的
+    /// 单位组里没有这五个，于是**它们之间的每一次互相替换都静默放行**——把
+    /// 「10 分」改成「10 号」，用户听到的就是另一个东西。系统扫描 31 个单位两两
+    /// 替换：静默放行恰好 20 对，全部落在这五个之间；反方向误拦 0 对。
+    ///
+    /// 这不是「门禁漏了几个单位」，是同一个概念在两处各写一遍：第 70 条刚把
+    /// canonicalizer 内部的两张单位表合成一张，**却没有把保真门禁接到那一张上**。
+    @Test func hardGateRejectsUnitSubstitutionsTheCanonicalizerCanSee() {
+        let units = ["分", "号", "岁", "楼", "点"]
+        for a in units {
+            for b in units where a != b {
+                let source = "指标是 10\(a) 以内。"
+                let candidate = "指标是 10\(b) 以内。"
+                #expect(
+                    !TeleprompterProtectedContentValidator.matches(
+                        protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                        candidate: candidate
+                    ),
+                    "10\(a) 改成 10\(b) 是换了一个单位，门禁必须拦下"
+                )
+            }
+        }
+        // 反向对照：没改动的稿子、以及只差空白的无损改写，都必须放行。
+        for (source, candidate) in [
+            ("指标是 10分 以内。", "指标是 10分 以内。"),
+            ("指标是 10分 以内。", "指标是 10 分以内。"),
+        ] {
+            #expect(
+                TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                    candidate: candidate
+                ),
+                "不应误拦: \(source) → \(candidate)"
+            )
+        }
+    }
+
+    /// 交替里的顺序是**承重**的：`分钟` 排在裸 `分` 前面，`10分钟` 才被保护成
+    /// `10分钟`。顺序一旦调换（变异 R7），canonicalizer 读成 `10分`+`钟` 的两半
+    /// 在门禁眼里会变成同一个原子，`10分钟`↔`10分` 两个方向的改写随即静默通过，
+    /// 而两侧的 canonical 读法确实不同。注释里写「`分钟` 排在前面所以赢」是一句
+    /// **没有任何测试保护的话**——本条把它变成受保护的断言。
+    @Test func theLongerMinuteUnitWinsOverTheBareFenInTheGate() {
+        #expect(
+            TeleprompterProtectedLiteralExtractor.atoms(from: "10分钟")
+                .map(\.canonicalValue) == ["10分钟"]
+        )
+        for (source, candidate) in [("10分钟", "10分"), ("10分", "10分钟")] {
+            #expect(
+                !TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: source),
+                    candidate: candidate
+                ),
+                "\(source) → \(candidate) 两侧 canonical 读法不同，门禁必须拦下"
+            )
+        }
+    }
+
+    /// 治本的那一半：上面那条钉住的是**今天**漏的那几个，这一条钉住的是**不再
+    /// 漏下一个**。canonicalizer 的单位表是模块内可见的，门禁必须覆盖它的每一项
+    /// ——新增单位而忘记同步门禁时，本条立刻变红。
+    @Test func everyUnitTheCanonicalizerReadsIsAlsoAProtectedLiteral() {
+        for unit in TeleprompterCanonicalizer.unitSuffixes {
+            let text = "10\(unit)"
+            let covered = TeleprompterProtectedLiteralExtractor.atoms(from: text)
+                .contains { $0.canonicalValue == TeleprompterProtectedLiteralExtractor.canonicalize(text) }
+            #expect(
+                covered,
+                "canonicalizer 把 \(text) 当成一个数值单位，保真门禁却没有保护它：改写它会静默通过"
+            )
+        }
+    }
+
     @Test func reviewCopyKeepsTheDefaultPathPlainAndHidesInternalTerms() {
         #expect(TeleprompterReviewCopy.successTitle == "AI 已完成整理")
         #expect(TeleprompterReviewCopy.successMessage.contains("原稿未被覆盖"))

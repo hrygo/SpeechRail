@@ -211,7 +211,11 @@ public enum TeleprompterCanonicalizer {
     /// 克→风/隆 (克服/克隆, 620), 台→账/窗 (台账, 56), 根→因/据,
     /// 章→节 (章节, 33), 张→卡/表. `五台` therefore still canonicalises apart
     /// from `5 台`; that gap is recorded rather than papered over.
-    private static let unitSuffixes = [
+    /// Module-internal rather than private: the fidelity gate's invariant test
+    /// reads this list to prove every unit here is also a protected literal.
+    /// Adding a unit here without teaching `TeleprompterProtectedAtom` about it
+    /// would let a rewrite change that unit silently.
+    static let unitSuffixes = [
         "公斤", "千克", "毫升", "厘米", "毫米", "毫秒", "小时", "美元", "公里",
         "年", "元", "米", "岁", "号", "楼", "月", "日", "倍", "个", "人", "次",
         "天", "分", "秒", "点", "份", "吨",
