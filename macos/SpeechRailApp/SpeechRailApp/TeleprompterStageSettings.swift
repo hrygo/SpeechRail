@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SwiftUI
 
 /// The stage is a reading surface, not a miniature editor. Keep the visible
 /// window semantic (current segment plus a small look-ahead) instead of
@@ -410,21 +411,61 @@ public enum TeleprompterStagePresentation {
     }
 }
 
+/// 面向任务的舞台显示预设。只收敛「读起来舒服」的参数，不代替用户选择
+/// 窗口位置与透明度；任何手动微调都会落到 `.custom`。
+public enum TeleprompterStagePreset: String, CaseIterable, Identifiable, Sendable {
+    case camera
+    case podium
+    case custom
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .camera: "镜头口播"
+        case .podium: "讲台阅读"
+        case .custom: "自定义"
+        }
+    }
+
+    public var guidance: String {
+        switch self {
+        case .camera: "舒适窄栏，当前行固定，可看镜头。"
+        case .podium: "更大字号与更宽行距，照顾远距离阅读。"
+        case .custom: "保留你自己的列宽、字号与行数。"
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class TeleprompterStageSettings {
     private let defaults: UserDefaults
     private var widthStorage: Double
+    private var contentWidthStorage: Double
     private var fontScaleStorage: Double
     private var opacityStorage: Double
     private var lineSpacingStorage: Double
     private var visibleLineCountStorage: Int
+    private var presetStorage: TeleprompterStagePreset
+    /// Presets write these same properties; without the guard every
+    /// programmatic application would immediately fall back to `.custom`.
+    private var isApplyingPreset = false
     public var alwaysShowControls: Bool {
         didSet { defaults.set(alwaysShowControls, forKey: Key.alwaysShowControls) }
     }
 
     public var showClockAndProgress: Bool {
         didSet { defaults.set(showClockAndProgress, forKey: Key.showClockAndProgress) }
+    }
+
+    public var preset: TeleprompterStagePreset {
+        get { presetStorage }
+        set {
+            guard newValue != presetStorage else { return }
+            presetStorage = newValue
+            defaults.set(newValue.rawValue, forKey: Key.preset)
+        }
     }
 
     public var width: Double {
@@ -441,6 +482,22 @@ public final class TeleprompterStageSettings {
         }
     }
 
+    /// 正文最大列宽，与窗口宽度分开保存：窗口可以继续拉宽，正文行长不变。
+    public var contentWidth: Double {
+        get { contentWidthStorage }
+        set {
+            let clamped = min(
+                max(newValue, Double(SpeechRailDesignTokens.Teleprompter.stageMinimumContentWidth)),
+                Double(SpeechRailDesignTokens.Teleprompter.stageMaximumContentWidth)
+            )
+            if contentWidthStorage != clamped {
+                contentWidthStorage = clamped
+                markCustomized()
+            }
+            defaults.set(clamped, forKey: Key.contentWidth)
+        }
+    }
+
     public var fontScale: Double {
         get { fontScaleStorage }
         set {
@@ -450,6 +507,7 @@ public final class TeleprompterStageSettings {
             )
             if fontScaleStorage != clamped {
                 fontScaleStorage = clamped
+                markCustomized()
             }
             defaults.set(clamped, forKey: Key.fontScale)
         }
@@ -519,9 +577,37 @@ public final class TeleprompterStageSettings {
             )
             if visibleLineCountStorage != clamped {
                 visibleLineCountStorage = clamped
+                markCustomized()
             }
             defaults.set(clamped, forKey: Key.visibleLineCount)
         }
+    }
+
+    /// 应用场景预设。只改列宽、字号与行数，不动窗口位置、透明度和行距；
+    /// 预设被用户微调后自动落到 `.custom`，不与手动设置互相覆盖。
+    public func apply(_ preset: TeleprompterStagePreset) {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        isApplyingPreset = true
+        switch preset {
+        case .camera:
+            contentWidth = Double(tokens.stageCameraContentWidth)
+            fontScale = tokens.stageCameraFontScale
+            visibleLineCount = tokens.stageDefaultVisibleLineCount
+        case .podium:
+            contentWidth = Double(tokens.stagePodiumContentWidth)
+            fontScale = tokens.stagePodiumFontScale
+            visibleLineCount = tokens.stagePodiumVisibleLineCount
+        case .custom:
+            break
+        }
+        isApplyingPreset = false
+        self.preset = preset
+    }
+
+    private func markCustomized() {
+        guard !isApplyingPreset, presetStorage != .custom else { return }
+        presetStorage = .custom
+        defaults.set(TeleprompterStagePreset.custom.rawValue, forKey: Key.preset)
     }
 
     public var scriptPointSize: CGFloat {
@@ -541,6 +627,14 @@ public final class TeleprompterStageSettings {
                 Double(SpeechRailDesignTokens.Teleprompter.stageMinimumWidth)
             ),
             Double(SpeechRailDesignTokens.Teleprompter.stageMaximumWidth)
+        )
+        self.contentWidthStorage = min(
+            max(
+                defaults.object(forKey: Key.contentWidth) as? Double
+                    ?? Double(SpeechRailDesignTokens.Teleprompter.stageDefaultContentWidth),
+                Double(SpeechRailDesignTokens.Teleprompter.stageMinimumContentWidth)
+            ),
+            Double(SpeechRailDesignTokens.Teleprompter.stageMaximumContentWidth)
         )
         self.fontScaleStorage = min(
             max(
@@ -573,17 +667,22 @@ public final class TeleprompterStageSettings {
             ),
             SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount
         )
+        self.presetStorage = TeleprompterStagePreset(
+            rawValue: defaults.string(forKey: Key.preset) ?? ""
+        ) ?? .camera
         self.alwaysShowControls = defaults.bool(forKey: Key.alwaysShowControls)
         self.showClockAndProgress = defaults.bool(forKey: Key.showClockAndProgress)
     }
 
     private enum Key {
         static let width = "speechrail.teleprompter.stage.width"
+        static let contentWidth = "speechrail.teleprompter.stage.contentWidth"
         static let fontScale = "speechrail.teleprompter.stage.fontScale"
         static let opacity = "speechrail.teleprompter.stage.opacity"
         static let lineSpacing = "speechrail.teleprompter.stage.lineSpacing"
         // Retain the existing key so users keep their selected 1/2/3 count.
         static let visibleLineCount = "speechrail.teleprompter.stage.visibleSegmentCount"
+        static let preset = "speechrail.teleprompter.stage.preset"
         static let alwaysShowControls = "speechrail.teleprompter.stage.alwaysShowControls"
         static let showClockAndProgress = "speechrail.teleprompter.stage.showClockAndProgress"
     }
@@ -650,5 +749,45 @@ enum TeleprompterStageGeometryPolicy {
                 min(SpeechRailDesignTokens.Teleprompter.stageMaximumHeight, visibleFrameHeight)
             )
         )
+    }
+}
+
+enum TeleprompterStageLayoutPolicy {
+    /// 正文列宽永远不超过窗口可用宽度；窗口变窄时跟随收窄，
+    /// 窗口变宽时保持预设列宽，不让一行铺满超宽屏。
+    static func contentLayoutWidth(
+        windowContentWidth: CGFloat,
+        requestedContentWidth: CGFloat
+    ) -> CGFloat {
+        let tokens = SpeechRailDesignTokens.Teleprompter.self
+        let available = windowContentWidth.isFinite ? max(1, windowContentWidth) : 1
+        let requested = requestedContentWidth.isFinite ? requestedContentWidth : available
+        let lowerBound = min(
+            Double(tokens.stageMinimumContentWidth),
+            available
+        )
+        let bounded = min(
+            max(requested, lowerBound),
+            Double(tokens.stageMaximumContentWidth)
+        )
+        return floor(min(available, bounded))
+    }
+}
+
+/// 「回到朗读位置」只在用户离开朗读位置时出现：查阅全稿或手动滚动之后，
+/// 语音跟随已让位，此时给一个可键盘触达的恢复入口。
+enum TeleprompterStageRecoveryPresentation {
+    static func shouldOfferRecovery(isBrowsingAll: Bool, isFollowing: Bool) -> Bool {
+        isBrowsingAll && !isFollowing
+    }
+
+    static let recoveryTitle = "回到朗读位置"
+    static let recoveryHelp = "返回当前朗读行并继续按手动阅读。"
+}
+
+/// Reduce Motion 开启时舞台不做位移动画：阅读位置照常更新，但不滚动画面。
+enum TeleprompterStageMotionPolicy {
+    static func scrollAnimation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)
     }
 }

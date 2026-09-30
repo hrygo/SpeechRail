@@ -462,7 +462,24 @@ public enum TeleprompterDurationEstimator {
             }
         }
 
-        if hasDigit || hasURLMarker { reasons.insert("unresolvedPronunciation") }
+        // Two URL rules run here on purpose, and this is deliberately *stricter*
+        // than `TeleprompterTimingPolicy.countMetrics`:
+        //
+        // 1. ASCII `:` or `/` anywhere — catches `mailto:`, `tel:`, paths and
+        //    `data:` URIs, none of which contain a digit.
+        // 2. The scheme / `www.` form — catches `www.example.com`, which has
+        //    neither `:` nor `/` and would otherwise be handed a confident point
+        //    estimate even though its pronunciation is unknown.
+    //
+    // Rule 2 closes that fail-open direction. Rule 1 is intentionally *not*
+    // mirrored into `TeleprompterTimingPolicy`: doing so would turn the stage
+    // settings, content-selection and trial-reading sheets from "uncertain"
+    // to "confident" for the same text, which is a product decision, not a
+    // defect fix. See the stage report §2.57.
+        let hasSchemeForm = text.range(of: #"(?:https?://|www\.)"#, options: .regularExpression) != nil
+        if hasDigit || hasURLMarker || hasSchemeForm {
+            reasons.insert("unresolvedPronunciation")
+        }
         return (hanCount, latinWordCount, reasons.sorted())
     }
 

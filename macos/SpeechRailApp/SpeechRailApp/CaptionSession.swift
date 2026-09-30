@@ -588,7 +588,7 @@ public final class CaptionSession {
         case .partial(_, let delta):
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
-        case .partialSnapshot(_, _, let text):
+        case .partialSnapshot(_, _, let text, _):
             partialText = text.isEmpty ? nil : text
         case .completed(let itemID, let transcript):
             // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：

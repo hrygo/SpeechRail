@@ -220,6 +220,7 @@ public struct TeleprompterV2ReadingSegment: Codable, Equatable, Identifiable, Se
     public var text: String
     public var keywords: [String]
     public var matchPhrases: [String]
+    public var acceptedReadings: [TeleprompterAcceptedReading]
     public var pauseHint: TeleprompterPauseHint
 
     public init(
@@ -229,6 +230,7 @@ public struct TeleprompterV2ReadingSegment: Codable, Equatable, Identifiable, Se
         text: String,
         keywords: [String] = [],
         matchPhrases: [String] = [],
+        acceptedReadings: [TeleprompterAcceptedReading] = [],
         pauseHint: TeleprompterPauseHint = .short
     ) {
         self.id = id
@@ -237,6 +239,7 @@ public struct TeleprompterV2ReadingSegment: Codable, Equatable, Identifiable, Se
         self.text = text
         self.keywords = keywords
         self.matchPhrases = matchPhrases
+        self.acceptedReadings = acceptedReadings
         self.pauseHint = pauseHint
     }
 
@@ -247,7 +250,24 @@ public struct TeleprompterV2ReadingSegment: Codable, Equatable, Identifiable, Se
         case text
         case keywords
         case matchPhrases = "match_phrases"
+        case acceptedReadings = "accepted_readings"
         case pauseHint = "pause_hint"
+    }
+
+    /// Bundles written before the alias channel existed simply have no
+    /// `accepted_readings` key, and must keep loading (M-01).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        ordinal = try container.decode(Int.self, forKey: .ordinal)
+        readingRange = try container.decode(TeleprompterSourceRange.self, forKey: .readingRange)
+        text = try container.decode(String.self, forKey: .text)
+        keywords = try container.decodeIfPresent([String].self, forKey: .keywords) ?? []
+        matchPhrases = try container.decodeIfPresent([String].self, forKey: .matchPhrases) ?? []
+        acceptedReadings = try container.decodeIfPresent(
+            [TeleprompterAcceptedReading].self, forKey: .acceptedReadings
+        ) ?? []
+        pauseHint = try container.decodeIfPresent(TeleprompterPauseHint.self, forKey: .pauseHint) ?? .short
     }
 }
 
@@ -364,6 +384,9 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
     public let targetSeconds: TimeInterval
     public let elapsedSeconds: TimeInterval
     public let lastSegmentID: String?
+    /// UTF-16 offset inside `lastSegmentID`'s text. Absent in bundles written
+    /// before intra-segment progress existed; decoding yields `nil`.
+    public let lastSegmentOffset: Int?
     public let endedReason: String
     public let completedReading: Bool
 
@@ -372,6 +395,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         targetSeconds: TimeInterval,
         elapsedSeconds: TimeInterval,
         lastSegmentID: String?,
+        lastSegmentOffset: Int? = nil,
         endedReason: String,
         completedReading: Bool
     ) {
@@ -379,6 +403,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         self.targetSeconds = targetSeconds
         self.elapsedSeconds = elapsedSeconds
         self.lastSegmentID = lastSegmentID
+        self.lastSegmentOffset = lastSegmentOffset
         self.endedReason = endedReason
         self.completedReading = completedReading
     }
@@ -388,6 +413,7 @@ public struct TeleprompterV2RunSummary: Codable, Equatable, Sendable {
         case targetSeconds = "target_seconds"
         case elapsedSeconds = "elapsed_seconds"
         case lastSegmentID = "last_segment_id"
+        case lastSegmentOffset = "last_segment_offset"
         case endedReason = "ended_reason"
         case completedReading = "completed_reading"
     }
@@ -586,6 +612,7 @@ public final class TeleprompterV2Store {
                     text: segment.text,
                     keywords: segment.keywords,
                     matchPhrases: segment.matchPhrases,
+                    acceptedReadings: segment.acceptedReadings,
                     pauseHint: segment.pauseHint
                 )
             }
@@ -840,6 +867,7 @@ private extension TeleprompterV2Store {
             segment.ordinal == index
                 && segment.keywords.count <= 5
                 && segment.matchPhrases.isEmpty
+                && Self.acceptedReadingsAreValid(segment)
                 && segment.readingRange.isValid(in: version.readingText)
                 && Range(NSRange(location: segment.readingRange.start, length: segment.readingRange.end - segment.readingRange.start), in: version.readingText).map { String(version.readingText[$0]) == segment.text } ?? false
         }),
@@ -858,6 +886,20 @@ private extension TeleprompterV2Store {
               version.estimate.rangeSeconds.map({ $0.lowerBound.isFinite && $0.upperBound.isFinite && $0.lowerBound >= 0 && $0.upperBound >= $0.lowerBound }) ?? true else {
             throw TeleprompterV2StoreError.invalidBundle
         }
+    }
+
+    /// Aliases are written inside the same atomic save as the segment they belong
+    /// to, so one that no longer describes its segment means the caller built the
+    /// bundle wrong. Rejecting the save is safer than storing an alias that would
+    /// later be silently dropped — or worse, honoured against the wrong words.
+    static func acceptedReadingsAreValid(_ segment: TeleprompterV2ReadingSegment) -> Bool {
+        var previousEnd: Int?
+        for alias in segment.acceptedReadings.sorted(by: { $0.displayRange.start < $1.displayRange.start }) {
+            if let previousEnd, previousEnd > alias.displayRange.start { return false }
+            if alias.rejection(inSegmentText: segment.text) != nil { return false }
+            previousEnd = alias.displayRange.end
+        }
+        return true
     }
 
     func validate(

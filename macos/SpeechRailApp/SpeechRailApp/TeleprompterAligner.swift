@@ -43,6 +43,7 @@ public struct TeleprompterAligner: Sendable {
         public let matchedCount: Int
         public let isUniqueExactContinuation: Bool
         public let isUniqueNearAnchor: Bool
+        public let tokenDistanceFromAnchor: Int
 
         public init(
             position: Position?,
@@ -50,7 +51,8 @@ public struct TeleprompterAligner: Sendable {
             confidence: Double,
             matchedCount: Int,
             isUniqueExactContinuation: Bool = false,
-            isUniqueNearAnchor: Bool = false
+            isUniqueNearAnchor: Bool = false,
+            tokenDistanceFromAnchor: Int = 0
         ) {
             self.position = position
             self.startPosition = startPosition
@@ -58,6 +60,7 @@ public struct TeleprompterAligner: Sendable {
             self.matchedCount = matchedCount
             self.isUniqueExactContinuation = isUniqueExactContinuation
             self.isUniqueNearAnchor = isUniqueNearAnchor
+            self.tokenDistanceFromAnchor = max(0, tokenDistanceFromAnchor)
         }
     }
 
@@ -72,14 +75,86 @@ public struct TeleprompterAligner: Sendable {
         let tokens: [Token]
         public init(segments: [TeleprompterSegment]) {
             tokens = segments.enumerated().flatMap { index, segment in
-                TeleprompterCanonicalizer.units(segment.text).map {
-                    Token(
-                        value: $0.value,
-                        start: .init(segmentIndex: index, utf16Offset: $0.range.start),
-                        end: .init(segmentIndex: index, utf16Offset: $0.range.end)
-                    )
+                Script.tokens(
+                    forSegmentAt: index,
+                    segment: segment
+                )
+            }
+        }
+
+        /// Builds the matchable token stream for one segment.
+        ///
+        /// A confirmed alias contributes the tokens of what the reader will *say*,
+        /// but keeps the UTF-16 span of the text it stands in for. That is the whole
+        /// point of the type: matching gets the spoken form, while the position the
+        /// stage scrolls to stays anchored to the displayed text.
+        static func tokens(forSegmentAt index: Int, segment: TeleprompterSegment) -> [Token] {
+            let units = TeleprompterCanonicalizer.units(segment.text)
+            let aliases = Script.usableAliases(in: segment)
+            guard !aliases.isEmpty else {
+                return units.map { Script.token(for: $0, at: index) }
+            }
+
+            var result: [Token] = []
+            var unitIndex = 0
+            for alias in aliases {
+                // Units that end before the alias starts stay as they are.
+                while unitIndex < units.count, units[unitIndex].range.end <= alias.displayRange.start {
+                    result.append(Script.token(for: units[unitIndex], at: index))
+                    unitIndex += 1
+                }
+                // A unit straddling the alias boundary would leave the span ambiguous,
+                // so the alias is skipped rather than half-applied.
+                guard unitIndex >= units.count || units[unitIndex].range.start >= alias.displayRange.start else {
+                    continue
+                }
+                // The display tokens under this span are replaced, not appended to.
+                // Carrying both variants was measured and is worse: the duplicated
+                // tokens inflate the window the scorer divides by, dropping a match
+                // that used to be exact (confidence 1.0 -> 0.75) for *both* readings.
+                // Rewriting the incoming transcript instead would need a global
+                // substitution, which the design explicitly forbids — an alias is
+                // bound to one source range, never applied everywhere.
+                while unitIndex < units.count, units[unitIndex].range.end <= alias.displayRange.end {
+                    unitIndex += 1
+                }
+                let start = Position(segmentIndex: index, utf16Offset: alias.displayRange.start)
+                let end = Position(segmentIndex: index, utf16Offset: alias.displayRange.end)
+                for spoken in TeleprompterCanonicalizer.units(alias.spokenText) {
+                    result.append(Token(value: spoken.value, start: start, end: end))
                 }
             }
+            while unitIndex < units.count {
+                result.append(Script.token(for: units[unitIndex], at: index))
+                unitIndex += 1
+            }
+            return result
+        }
+
+        private static func token(for unit: TeleprompterCanonicalizer.Unit, at index: Int) -> Token {
+            Token(
+                value: unit.value,
+                start: .init(segmentIndex: index, utf16Offset: unit.range.start),
+                end: .init(segmentIndex: index, utf16Offset: unit.range.end)
+            )
+        }
+
+        /// Keeps only the aliases that still describe the segment as it stands.
+        ///
+        /// When two of them overlap, the earlier one wins and the later one is
+        /// dropped: the reader confirmed them in some order, and honouring the
+        /// first is both deterministic and the only choice that leaves the other
+        /// words in the segment still matchable. The store rejects an overlapping
+        /// pair outright, so this only decides what happens to a bundle that
+        /// reached the matcher another way.
+        static func usableAliases(in segment: TeleprompterSegment) -> [TeleprompterAcceptedReading] {
+            var accepted: [TeleprompterAcceptedReading] = []
+            for alias in segment.acceptedReadings.sorted(by: { $0.displayRange.start < $1.displayRange.start }) {
+                guard alias.rejection(inSegmentText: segment.text) == nil else { continue }
+                if let last = accepted.last, last.displayRange.end > alias.displayRange.start { continue }
+                accepted.append(alias)
+            }
+            return accepted
         }
     }
 
@@ -161,21 +236,31 @@ public struct TeleprompterAligner: Sendable {
                 position: nil,
                 startPosition: window[best.start].start,
                 confidence: best.confidence,
-                matchedCount: best.matches
+                matchedCount: best.matches,
+                tokenDistanceFromAnchor: abs(lower + best.start - anchorIndex)
             )
         }
+        let tokenDistanceFromAnchor = abs(lower + best.start - anchorIndex)
         return Match(
             position: window[best.end - 1].position,
             startPosition: window[best.start].start,
             confidence: best.confidence,
             matchedCount: best.matches,
             isUniqueExactContinuation: uniqueExactContinuation,
-            isUniqueNearAnchor: uniqueNearAnchor
+            isUniqueNearAnchor: uniqueNearAnchor,
+            tokenDistanceFromAnchor: tokenDistanceFromAnchor
         )
     }
 
-    private static let digits = ["零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
-                      "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"]
+    /// Shares the canonicalizer's table rather than keeping a second copy. The
+    /// copy that used to live here had already drifted — it was missing `两` —
+    /// and a bare numeral does reach this code (`两难`, `第三季度` both survive
+    /// canonicalisation), so the drift was reachable and not cosmetic.
+    private static let digits = Dictionary(
+        uniqueKeysWithValues: TeleprompterCanonicalizer.chineseDigits
+            .map { (String($0.key), $0.value) }
+    )
+
     private func equivalent(_ lhs: String, _ rhs: String) -> Bool {
         (Self.digits[lhs] ?? lhs) == (Self.digits[rhs] ?? rhs)
     }

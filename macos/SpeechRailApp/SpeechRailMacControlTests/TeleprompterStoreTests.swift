@@ -108,37 +108,207 @@ final class TeleprompterStoreTests: XCTestCase {
         }
     }
 
-    private func makeBundle() -> TeleprompterDocumentBundle {
-        let document = TeleprompterDocument(
-            id: "document-1",
-            title: "直播稿",
-            sourceText: "欢迎来到直播。\n今天介绍三个重点。"
+    /// `.markdown` 是文件选择器里能选到的扩展名（T1）。它与 `TeleprompterSourceImporter`
+    /// 的那道白名单是**同一族约束的两个副本**，两处此前都只测了 `.md`。
+    func testTextImporterAcceptsTheDotMarkdownExtensionToo() throws {
+        let url = directory.appendingPathComponent("draft.markdown")
+        try "# 标题".write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try TeleprompterTextImporter.load(from: url), "# 标题")
+    }
+
+    /// 首次启动时目录还不存在（T2）。这条路径此前从未被构造过——每条用例都先
+    /// 建目录再用，于是「第一次打开提词器」这个最常见的入口是裸的。
+    func testListingAMissingDirectoryReturnsAnEmptyList() throws {
+        let missing = directory.appendingPathComponent("not-created-yet", isDirectory: true)
+        let fresh = try TeleprompterStore(directoryURL: missing)
+
+        XCTAssertEqual(try fresh.listDocuments().count, 0)
+    }
+
+    /// 目录里可能有 macOS 放下的 `.DS_Store`（T3）。它不是稿子，也不该让整份列表报错。
+    func testListingIgnoresNonBundleFilesInTheDirectory() throws {
+        let bundle = makeBundle()
+        try store.saveBundle(bundle)
+        try Data("junk".utf8).write(to: directory.appendingPathComponent(".DS_Store"))
+        try Data("junk".utf8).write(to: directory.appendingPathComponent("notes.txt"))
+
+        XCTAssertEqual(try store.listDocuments().map(\.id), [bundle.document.id])
+    }
+
+    /// 最近编辑的稿子排在最前（T4）。此前每条用例只存一份稿子，比较器从未被比较过。
+    func testListingSortsByMostRecentlyUpdated() throws {
+        let base = Date()
+        try store.saveBundle(makeBundle(id: "document-old", updatedAt: base))
+        try store.saveBundle(makeBundle(id: "document-new", updatedAt: base.addingTimeInterval(600)))
+
+        XCTAssertEqual(try store.listDocuments().map(\.id), ["document-new", "document-old"])
+    }
+
+    /// 运行态只能挂在**这份稿子里确实存在**的版本上（T7）。
+    func testRunStateRejectsAVersionThisDocumentDoesNotOwn() throws {
+        let bundle = makeBundle()
+        try store.saveBundle(bundle)
+        let state = TeleprompterRunState(
+            documentID: bundle.document.id,
+            versionID: "version-does-not-exist",
+            currentSegmentID: bundle.versions[0].segments[0].id,
+            mode: .paused
         )
-        let segments = [
-            TeleprompterSegment(
-                id: "segment-1",
-                ordinal: 0,
-                sourceRange: .init(start: 0, end: 8),
-                text: "欢迎来到直播。"
-            ),
-            TeleprompterSegment(
-                id: "segment-2",
-                ordinal: 1,
-                sourceRange: .init(start: 8, end: 17),
-                text: "今天介绍三个重点。"
-            ),
-        ]
-        let version = TeleprompterVersion(
-            id: "version-1",
-            documentID: document.id,
-            sourceText: document.sourceText,
-            segments: segments,
+
+        XCTAssertThrowsError(try store.updateRunState(state)) { error in
+            XCTAssertEqual(error as? TeleprompterStoreError, .invalidBundle)
+        }
+    }
+
+    /// 删一份不存在的稿子要报「找不到」，而不是 Foundation 的底层错误（T8）。
+    /// 同一道约束在读取侧已被 `testDeleteAndDuplicateDocument` 覆盖，删除侧此前没有。
+    func testDeletingAMissingDocumentReportsNotFound() {
+        XCTAssertThrowsError(try store.deleteDocument(documentID: "never-existed")) { error in
+            XCTAssertEqual(error as? TeleprompterStoreError, .notFound)
+        }
+    }
+
+    /// 导出的是**正在读的那一版**，不是列表里的第一版（T9）。AI 改过稿之后，
+    /// 导出拿到旧稿是用户直接看得见的错。
+    func testExportPrefersTheActiveVersionOverTheFirst() throws {
+        let bundle = makeBundle()
+        let older = TeleprompterVersion(
+            id: "version-old",
+            documentID: bundle.document.id,
+            sourceText: "旧的第一版。",
+            segments: [TeleprompterSegment(id: "s-old", ordinal: 0, sourceRange: .init(start: 0, end: 6), text: "旧的第一版。")],
             analysisSource: .deterministic
         )
-        var activeDocument = document
-        activeDocument.activeVersionID = version.id
+        let active = TeleprompterVersion(
+            id: "version-active",
+            documentID: bundle.document.id,
+            sourceText: "AI 改过的新版。",
+            segments: [TeleprompterSegment(id: "s-new", ordinal: 0, sourceRange: .init(start: 0, end: 8), text: "AI 改过的新版。")],
+            analysisSource: .ai
+        )
+        var document = bundle.document
+        document.activeVersionID = active.id
+        let twoVersions = TeleprompterDocumentBundle(
+            document: document,
+            versions: [older, active],
+            runState: nil
+        )
+
+        let markdown = store.exportMarkdown(twoVersions)
+
+        XCTAssertTrue(markdown.contains("AI 改过的新版。"))
+        XCTAssertFalse(markdown.contains("旧的第一版。"))
+    }
+
+    /// 导出时段落之间是空行（T10）。此前只断言「包含某段文字」，没断言分隔。
+    func testExportSeparatesParagraphsWithABlankLine() {
+        let markdown = store.exportMarkdown(makeBundle())
+
+        XCTAssertTrue(markdown.contains("欢迎来到直播。\n\n今天介绍三个重点。"))
+    }
+
+    /// bundle 校验的六道守卫此前只有「正常 bundle」被存过（T11–T16）。
+    func testBundleValidationRejectsStructurallyBrokenDocuments() throws {
+        let base = makeBundle()
+
+        func expectRejected(
+            _ bundle: TeleprompterDocumentBundle,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) {
+            XCTAssertThrowsError(try store.saveBundle(bundle), file: file, line: line) { error in
+                XCTAssertEqual(error as? TeleprompterStoreError, .invalidBundle, file: file, line: line)
+            }
+        }
+
+        expectRejected(makeBundle(id: "", title: "空 ID", versionID: "", omitActiveVersionID: true))
+
+        expectRejected(makeBundle(title: "   \n  "))
+
+        expectRejected(makeBundle(versionDocumentID: "another-document"))
+
+        expectRejected(makeBundle(activeVersionID: "version-gone"))
+
+        let noSegments = makeBundle(versionID: "version-empty", segments: [])
+        expectRejected(noSegments)
+
+        let badOrdinals = makeBundle(
+            versionID: "version-bad-ordinals",
+            segments: [
+                TeleprompterSegment(id: "s-a", ordinal: 0, sourceRange: .init(start: 0, end: 8), text: "欢迎来到直播。"),
+                TeleprompterSegment(id: "s-b", ordinal: 5, sourceRange: .init(start: 8, end: 17), text: "今天介绍三个重点。"),
+            ]
+        )
+        expectRejected(badOrdinals)
+    }
+
+    /// 路径穿越防护此前零观察（T17–T19）。`documentID` 里的 `/`、`.` 与 `..`
+    /// 都会让路径落到 documents 目录之外，而读取和删除都能作用于那个路径。
+    func testDocumentIDCannotEscapeTheStoreDirectory() throws {
+        let bundle = makeBundle()
+        try store.saveBundle(bundle)
+        let outside = directory.deletingLastPathComponent()
+            .appendingPathComponent("outside-\(UUID().uuidString).json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try encoder.encode(bundle).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        for hostileID in ["../\(outside.lastPathComponent)", "..", ".", "sub/dir", "\\"] {
+            XCTAssertThrowsError(try store.loadBundle(documentID: hostileID), hostileID) { error in
+                XCTAssertEqual(error as? TeleprompterStoreError, .invalidDocumentID, hostileID)
+            }
+            XCTAssertThrowsError(try store.deleteDocument(documentID: hostileID), hostileID) { error in
+                XCTAssertEqual(error as? TeleprompterStoreError, .invalidDocumentID, hostileID)
+            }
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path), "越界尝试不得动到目录外的文件")
+    }
+
+    private func makeBundle(
+        id: String = "document-1",
+        title: String = "直播稿",
+        versionID: String = "version-1",
+        activeVersionID: String? = nil,
+        omitActiveVersionID: Bool = false,
+        versionDocumentID: String? = nil,
+        segments: [TeleprompterSegment]? = nil,
+        updatedAt: Date? = nil
+    ) -> TeleprompterDocumentBundle {
+        let sourceText = "欢迎来到直播。\n今天介绍三个重点。"
+        var document = TeleprompterDocument(
+            id: id,
+            title: title,
+            sourceText: sourceText
+        )
+        if let updatedAt {
+            document.updatedAt = updatedAt
+        }
+        let version = TeleprompterVersion(
+            id: versionID,
+            documentID: versionDocumentID ?? id,
+            sourceText: sourceText,
+            segments: segments ?? [
+                TeleprompterSegment(
+                    id: "segment-1",
+                    ordinal: 0,
+                    sourceRange: .init(start: 0, end: 8),
+                    text: "欢迎来到直播。"
+                ),
+                TeleprompterSegment(
+                    id: "segment-2",
+                    ordinal: 1,
+                    sourceRange: .init(start: 8, end: 17),
+                    text: "今天介绍三个重点。"
+                ),
+            ],
+            analysisSource: .deterministic
+        )
+        document.activeVersionID = omitActiveVersionID ? nil : (activeVersionID ?? versionID)
         return TeleprompterDocumentBundle(
-            document: activeDocument,
+            document: document,
             versions: [version],
             runState: nil
         )

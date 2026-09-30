@@ -21,23 +21,29 @@ public final class TeleprompterSession {
     public enum BlockReason: Equatable, Sendable {
         case noActiveVersion
         case microphoneDenied
+        case inputDeviceUnavailable(String)
         case serviceNotReady(String)
         case serviceBusy(String)
         case occupiedBy(SessionKind)
         case streamFailed(String)
         case aiUnavailable(String)
         case storeUnavailable(String)
+        /// 语音辅助试读正占着麦克风。它也是提词器自己的功能，所以不能拿
+        /// `occupiedBy(.teleprompter)` 顶替——那会把原因说成「别的功能」。
+        case speechTrialActive
 
         public var title: String {
             switch self {
             case .noActiveVersion: "还没有可跟读的稿子"
             case .microphoneDenied: "麦克风权限受限"
+            case .inputDeviceUnavailable: "麦克风不可用"
             case .serviceNotReady: "语音识别服务未就绪"
             case .serviceBusy: "语音识别正在被其他功能占用"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
             case .streamFailed: "语音跟读连接中断"
-            case .aiUnavailable: "AI 整理暂时不可用"
-            case .storeUnavailable: "稿件保存失败"
+        case .aiUnavailable: "AI 整理暂时不可用"
+        case .storeUnavailable: "稿件保存失败"
+        case .speechTrialActive: "语音辅助试读正在进行"
             }
         }
 
@@ -47,6 +53,8 @@ public final class TeleprompterSession {
                 "先确认一份用于跟读的稿子，或直接按原文分段。"
             case .microphoneDenied:
                 "请在系统设置中允许 SpeechRail 使用麦克风，然后再试。你也可以先手动提词。"
+            case .inputDeviceUnavailable(let message):
+                "当前输入设备没有继续工作（\(message)）。换回设备后重试，或继续手动看稿。"
             case .serviceNotReady:
                 "语音识别服务暂不可用。稍后重试，或选择手动看稿。"
             case .serviceBusy:
@@ -57,9 +65,11 @@ public final class TeleprompterSession {
                 Self.friendlyAIMessage(message)
             case .storeUnavailable(let message):
                 message
-            case .occupiedBy(let kind):
-                "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
-            }
+        case .occupiedBy(let kind):
+            "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
+        case .speechTrialActive:
+            "先结束语音辅助试读，再开始跟读；现在仍可以手动提词。"
+        }
         }
 
         private static func friendlyAIMessage(_ raw: String) -> String {
@@ -95,10 +105,26 @@ public final class TeleprompterSession {
     /// In-memory timing evidence for diagnosing follow lag; no text or IDs are retained.
     public private(set) var followLatencyDiagnostics = TeleprompterLatencyDiagnostics()
 
+    // MARK: - 语音辅助试读（#112）
+    //
+    // 单独显式动作，不是手动秒表的替代品，也不是「打开试读页就申请麦克风」。
+    // 采集与识别走既有 coordinator 与 client 构造路径，因此权限、设备租约与
+    // 释放只有一套；试读期间不建 SessionStore 行、不动阅读位置、不起运行计时。
+    public private(set) var speechTrialStage: TeleprompterSpeechTrialStage = .idle
+    public private(set) var speechTrialEvidence: TeleprompterSpeechTrialEvidence?
+    private var isSpeechTrialRequested = false
+    private var trialPump: Task<Void, Never>?
+    private var trialStartedAt: ContinuousClock.Instant?
+    private var trialRecognizedUnits = 0
+    private var trialMatchedUnits = 0
+    private var trialGeneration: UUID?
+
     // MARK: - 终版规格状态与参数
     public var targetMinutes: Int = TeleprompterTimingPolicy.defaultTargetMinutes
     public var pace: TeleprompterPace = .natural
     public var calibrationFactor: Double = 1.0
+    /// 倍率的来源。默认 1.0 不是测量结果，时长估计必须据此标明未校准（#111 步骤 5）。
+    public private(set) var calibrationSource: TeleprompterCalibrationSource = .uncalibrated
     public var contentSelection: TeleprompterContentSelection = TeleprompterContentSelection()
     public private(set) var reviewItems: [TeleprompterReviewItem] = []
     public private(set) var readingBlocks: [TeleprompterReadingBlock] = []
@@ -167,9 +193,13 @@ public final class TeleprompterSession {
             text: effectiveSourceText,
             targetMinutes: targetMinutes,
             pace: pace,
-            calibrationFactor: calibrationFactor
+            calibrationFactor: calibrationFactor,
+            calibrationSource: calibrationSource
         )
     }
+
+    /// 预检结论里的分钟数是否来自一次真实试读。没试读过就只是按默认语速推的。
+    public var isPaceCalibrated: Bool { calibrationSource != .uncalibrated }
 
     public var effectiveSourceText: String {
         guard let sourceText = document?.sourceText else { return "" }
@@ -208,7 +238,10 @@ public final class TeleprompterSession {
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
     /// Transport injection keeps the production lifecycle testable without a
     /// socket, model, microphone, or audio file.
-    public var realtimeClientFactory: (@MainActor (Int, String?) -> any TeleprompterRealtimeClientProtocol)?
+    public var realtimeClientFactory: (@MainActor (Int, String?, TeleprompterRealtimeConfiguration) -> any TeleprompterRealtimeClientProtocol)?
+    /// Optional recognition language hint. `nil` keeps the server default; an
+    /// out-of-contract value is dropped instead of failing the connection.
+    public var preferredSpeechLanguage: String?
     /// MapReduce preparation is injected so the session never knows provider,
     /// endpoint, credential, or response transport details.
     public var preparationClient: TeleprompterPreparationClient?
@@ -244,6 +277,7 @@ public final class TeleprompterSession {
     private var clockSampleStartElapsed = 0.0
     private var savedRunState: TeleprompterRunState?
     private var importedSource: TeleprompterImportedSource?
+    private var condenseLockedRanges: [TeleprompterSourceRange] = []
 
     public init(
         coordinator: SessionCoordinator,
@@ -271,7 +305,11 @@ public final class TeleprompterSession {
     }
 
     public func load(documentID: String) throws {
-        guard canEdit else { return }
+        // 拒绝切稿是对的（判据第 2 条：切稿后旧事件不能推进），但**必须有声音**。
+        // 原来这里 `guard canEdit else { return }` 静默返回，界面上那份文档行
+        // 又没有 `disabled` 门控，读者点了另一份稿子什么都没发生，连提示区都被
+        // 同一支 `do`/`catch` 清成了 nil。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         invalidateAnalysis()
         applyV2Bundle(try v2Store.load(documentID: documentID))
     }
@@ -305,12 +343,19 @@ public final class TeleprompterSession {
     /// Validates pasted/drop text through the same strict importer as files.
     /// Blank documents remain available through `createDocument` for the empty editor state.
     public func createDocumentValidated(title: String, sourceText: String) throws {
+        // 门控放在导入之前：舞台开着时，「正在解析内容」是次要事实，
+        // 读者需要先知道的是现在不能换稿。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         let imported = try TeleprompterSourceImporter.importData(Data(sourceText.utf8))
-        createDocument(title: title, importedSource: imported)
+        try createDocument(title: title, importedSource: imported)
     }
 
-    public func createDocument(title: String, importedSource: TeleprompterImportedSource) {
-        guard canEdit else { return }
+    /// 导入入口一律 `throws`，不静默返回：调用方（剪贴板、拖拽、文件导入）
+    /// 拿到成功才会提示「已导入」。原先这里是 `guard canEdit else { return }`，
+    /// 而 `importFromURL` 在调用**之后无条件**显示「已导入」——舞台开着时
+    /// 导入文件，界面谎报成功，读者以为换好了稿子，实际还在旧稿上。
+    public func createDocument(title: String, importedSource: TeleprompterImportedSource) throws {
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         invalidateAnalysis()
         savedRunState = nil
         let now = Date()
@@ -336,8 +381,13 @@ public final class TeleprompterSession {
     }
 
     public func deleteDocument(documentID: String) throws {
-        guard canEdit else { return }
-        guard phase != .following, phase != .paused, phase != .uncertain else { return }
+        // 破坏性操作上的「静默」比不做这个按钮更让人不安：读者点删除、在确认框
+        // 里点了「删除」、然后什么都没发生，界面那支 `do`/`catch` 还会把提示区
+        // 清成 nil。拒绝是对的（判据第 2、3 条），但必须有声音。
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        guard phase != .following, phase != .paused, phase != .uncertain else {
+            throw TeleprompterTextError.sessionBusy
+        }
         try v2Store.delete(documentID: documentID)
         if document?.id == documentID {
             let remaining = try listDocuments()
@@ -375,6 +425,19 @@ public final class TeleprompterSession {
         }
     }
 
+    /// The text the workbench puts on the clipboard for 「复制稿件内容」.
+    ///
+    /// Unlike `exportMarkdown()` this never gives up just because the store is
+    /// unreachable: a draft that failed to persist still exists in memory, and
+    /// refusing to copy it leaves the reader with no way to get their text out.
+    /// The two export paths already fall back to the raw source; this makes the
+    /// copy path consistent with them. Returns nil only when there is no
+    /// document at all.
+    public func copyableDocumentText() -> String? {
+        guard let document else { return nil }
+        return exportMarkdown() ?? document.sourceText
+    }
+
     public func exportSourceData() -> Data? {
         guard let document else { return nil }
         return try? v2Store.exportSource(v2Store.load(documentID: document.id))
@@ -397,12 +460,53 @@ public final class TeleprompterSession {
         importedSource = nil
         contentSelection = TeleprompterContentSelection()
         pendingVersion = nil
+        // Blocks and review items describe the previous text. Keeping them after
+        // an edit would attribute old risks to sentences the reader never wrote.
+        readingBlocks = []
+        reviewItems = []
         phase = .draft
         scheduleDraftSave()
     }
 
     public func useDeterministicFallback() throws {
-        guard canEdit else { return }
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        // 「直接使用原稿」是 AI 不可用时的主恢复路径，也是成功目标里「用户能直接
+        // 用原稿开讲」那句话的落点。这个函数推进的状态和 `acceptPendingVersion()`
+        // 一样多，存盘失败时必须整体退回：否则界面上两个按钮用的是 `try?`，
+        // 错误被整个吞掉，用户点了没有任何反馈，而内存已经推进到 `.ready`、
+        // 在审的 AI 结果已被清空、磁盘还是原样。
+        //
+        // `invalidateAnalysis()` 不进快照——取消在途任务、推进 generation 是有意
+        // 的一次性动作，退回去反而会让已经作废的分析结果重新生效。
+        let previousVersions = versions
+        let previousDocument = document
+        let previousSavedRunState = savedRunState
+        let previousReadingBlocks = readingBlocks
+        let previousReviewItems = reviewItems
+        let previousPendingVersion = pendingVersion
+        let previousFollowController = followController
+        let previousSegmentIndex = currentSegmentIndex
+        let previousPhase = phase
+        let previousBlocked = blocked
+        var didPersist = false
+
+        defer {
+            // 只有存盘失败才回滚；成功路径不动任何东西。
+            if !didPersist {
+                versions = previousVersions
+                self.document = previousDocument
+                savedRunState = previousSavedRunState
+                readingBlocks = previousReadingBlocks
+                reviewItems = previousReviewItems
+                pendingVersion = previousPendingVersion
+                followController = previousFollowController
+                currentSegmentIndex = previousSegmentIndex
+                phase = previousPhase
+                blocked = previousBlocked
+                syncFollowState()
+            }
+        }
+
         invalidateAnalysis()
         savedRunState = nil
         guard var document else { throw TeleprompterTextError.emptySource }
@@ -447,6 +551,7 @@ public final class TeleprompterSession {
         phase = .ready
         blocked = nil
         try saveBundle()
+        didPersist = true
     }
 
     public func analyzeDraft() async {
@@ -462,9 +567,33 @@ public final class TeleprompterSession {
         await prepareDraft(document: document, preparationClient: preparationClient)
     }
 
+    /// Explicitly lossy shortening, kept separate from the fidelity operations:
+    /// only this path may drop source content, every omission comes back as a
+    /// reviewable skip, and the ranges the reader marked as must-keep are
+    /// rejected as deletions rather than silently dropped.
+    public func condenseDraft(mustKeepSourceRanges: [TeleprompterSourceRange] = []) async {
+        guard canEdit, phase != .analyzing else { return }
+        guard let document else {
+            blocked = .aiUnavailable("请先创建一份稿子。")
+            return
+        }
+        guard let preparationClient else {
+            blocked = .aiUnavailable("AI 精简服务不可用；你可以继续使用当前稿件。")
+            return
+        }
+        condenseLockedRanges = mustKeepSourceRanges
+        await prepareDraft(
+            document: document,
+            preparationClient: preparationClient,
+            operation: .condense
+        )
+        condenseLockedRanges = []
+    }
+
     private func prepareDraft(
         document: TeleprompterDocument,
-        preparationClient: TeleprompterPreparationClient
+        preparationClient: TeleprompterPreparationClient,
+        operation: TeleprompterPreparationOperation = .prepare
     ) async {
         phase = .analyzing
         preparationProgress = nil
@@ -489,13 +618,22 @@ public final class TeleprompterSession {
                 targetMinutes: targetMinutes,
                 selectedUnitIDs: selectedUnitIDs
             )
+            let lockedUnitIDs: Set<Int> = operation == .condense
+                ? Set(sourceUnits.lazy.filter { unit in
+                    self.condenseLockedRanges.contains { range in
+                        unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
+                    }
+                }.map(\.id))
+                : []
             let input = TeleprompterPreparationInput(
                 source: source,
                 sourceUnits: sourceUnits,
                 timingPlan: timingPlan,
                 pace: pace,
                 calibrationFactor: calibrationFactor,
-                selectedUnitIDs: selectedUnitIDs
+                operation: operation,
+                selectedUnitIDs: selectedUnitIDs,
+                lockedUnitIDs: lockedUnitIDs
             )
             let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
                 Task { @MainActor [weak self] in
@@ -540,15 +678,22 @@ public final class TeleprompterSession {
         readingBlocks = result.draft.blocks
         reviewItems = []
         for block in readingBlocks where block.disposition == .unresolved || !block.reviewIssues.isEmpty {
-            let issue = block.reviewIssues.first ?? .uncertainMeaning
-            reviewItems.append(
-                TeleprompterReviewItem(
-                    blockID: block.id,
-                    issue: issue,
-                    suggestedText: block.text,
-                    sourceSnippet: block.rawSourceText
+            let reported = block.disposition == .skip
+                ? [TeleprompterReviewIssue.contentRemoved]
+                : block.reviewIssues
+            let issues = reported.isEmpty
+                ? [TeleprompterReviewIssue.uncertainMeaning]
+                : reported
+            for issue in issues {
+                reviewItems.append(
+                    TeleprompterReviewItem(
+                        blockID: block.id,
+                        issue: issue,
+                        suggestedText: block.text,
+                        sourceSnippet: block.rawSourceText
+                    )
                 )
-            )
+            }
         }
         for boundary in result.boundaries where !boundary.reviewBlockIDs.isEmpty {
             for blockID in boundary.reviewBlockIDs
@@ -576,16 +721,31 @@ public final class TeleprompterSession {
     }
 
     public func acceptPendingVersion() throws {
-        guard canEdit, let pendingVersion, var document,
-              pendingVersion.documentID == document.id else {
+        guard canEdit, let candidate = pendingVersion, var document,
+              candidate.documentID == document.id else {
             throw TeleprompterTextError.invalidAnalysis
         }
         guard canAcceptPendingVersion else {
             throw TeleprompterTextError.invalidAnalysis
         }
-        versions.append(pendingVersion)
+        // 采用候选版本是这个界面里唯一一件**读者没法重做**的编辑：`pendingVersion`
+        // 一旦置 nil，审阅结果就从这个窗口里消失了。此时若 store 拒绝写入，读者看到
+        // 的是 `.atomicWriteFailed` 那句「原版本仍然保留」——而他们的工作在磁盘和
+        // 界面上都不在了；`canAcceptPendingVersion` 又依赖 `pendingVersion != nil`，
+        // 按钮随之变灰，连重试都不行。
+        //
+        // 所以这里把这次改动碰到的每一项都存下来：写失败就整体放回去，让审阅留在
+        // 屏幕上、按钮留着可按，读者腾出磁盘空间后还能再试一次。
+        let previousVersions = versions
+        let previousDocument = self.document
+        let previousSavedRunState = savedRunState
+        let previousFollowController = followController
+        let previousPhase = phase
+        let previousBlocked = blocked
+
+        versions.append(candidate)
         savedRunState = nil
-        document.activeVersionID = pendingVersion.id
+        document.activeVersionID = candidate.id
         document.updatedAt = Date()
         self.document = document
         self.pendingVersion = nil
@@ -595,7 +755,21 @@ public final class TeleprompterSession {
         phase = .ready
         blocked = nil
         cancelScheduledDraftSave()
-        try saveBundle()
+        do {
+            try saveBundle()
+        } catch {
+            versions = previousVersions
+            self.document = previousDocument
+            savedRunState = previousSavedRunState
+            followController = previousFollowController
+            phase = previousPhase
+            blocked = previousBlocked
+            pendingVersion = candidate
+            // 位置、跟随状态这些是从控制器推出来的，恢复控制器后重算一次，
+            // 而不是逐字段猜回去。
+            syncFollowState()
+            throw error
+        }
     }
 
     public func discardPendingVersion() {
@@ -626,7 +800,8 @@ public final class TeleprompterSession {
         let estimate = TeleprompterTimingPolicy.estimateDuration(
             metrics: metrics,
             pace: pace,
-            calibrationFactor: calibrationFactor
+            calibrationFactor: calibrationFactor,
+            calibrationSource: calibrationSource
         )
         guard let duration = estimate.pointSeconds, duration > 0 else { return nil }
         return max(1, Int(ceil(duration / 60.0)))
@@ -638,13 +813,67 @@ public final class TeleprompterSession {
         scheduleDraftSave()
     }
 
-    public func applyTrialCalibration(k: Double) {
+    /// 采用一次试读结果。`source` 记录倍率是怎么来的：`.uncalibrated` 表示
+    /// 「恢复默认语速」——倍率回到 1.0，但它是选择的结果，不是一次测量。
+    public func applyTrialCalibration(
+        k: Double,
+        source: TeleprompterCalibrationSource = .uncalibrated
+    ) {
         calibrationFactor = min(max(k, TeleprompterTimingPolicy.minimumCalibrationFactor), TeleprompterTimingPolicy.maximumCalibrationFactor)
+        calibrationSource = source
         recalculateCurrentDraftBudget()
         scheduleDraftSave()
     }
 
-    public func updateContentSelection(_ selection: TeleprompterContentSelection) {
+    /// 采用一次语音辅助试读。
+    ///
+    /// 只有真的识别出内容才返回倍率并写入来源：#112 要求「不能只以输入电平证明
+    /// 识别和定位成功」，一个没听到东西的试读如果也产出倍率，就等于用一次失败的
+    /// 采集冒充一次测量——这正是方案里反复强调的「不自动编造语速」红线。
+    @discardableResult
+    public func applySpeechTrialCalibration(
+        baseEstimateSeconds: TimeInterval
+    ) -> TeleprompterSpeechTrialEvidence? {
+        guard let evidence = speechTrialEvidence,
+              let factor = evidence.calibrationFactor(baseEstimateSeconds: baseEstimateSeconds)
+        else { return nil }
+        applyTrialCalibration(
+            k: factor,
+            source: .speechTrial(
+                durationSeconds: evidence.durationSeconds,
+                recognizedUnits: evidence.recognizedUnits
+            )
+        )
+        return evidence
+    }
+
+    /// True when changing the content range would throw away review the reader
+    /// has already worked through. That work cannot be recovered without
+    /// another AI round and another pass over every item, so the caller asks
+    /// before calling `updateContentSelection`.
+    public var hasReviewDecisionsAtRisk: Bool {
+        pendingVersion != nil && reviewItems.contains(where: \.isResolved)
+    }
+
+    /// Narrows the material this reading covers. The segmentation built for the
+    /// old range no longer applies, so it is rebuilt from scratch — but if the
+    /// reader has already resolved review items, that is unrecoverable work and
+    /// this refuses rather than dropping it in silence. The caller confirms and
+    /// then uses `applyContentSelectionAfterConfirmation`.
+    public func updateContentSelection(_ selection: TeleprompterContentSelection) throws {
+        guard !hasReviewDecisionsAtRisk else {
+            throw TeleprompterTextError.reviewDecisionsWouldBeDiscarded
+        }
+        try applyContentSelectionAfterConfirmation(selection)
+    }
+
+    /// The confirmed path. Callers reach this only after the reader has agreed
+    /// to lose the review work, so the discard is a choice rather than a side
+    /// effect.
+    public func applyContentSelectionAfterConfirmation(
+        _ selection: TeleprompterContentSelection
+    ) throws {
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
         self.contentSelection = selection
         if pendingVersion != nil || !readingBlocks.isEmpty {
             invalidateAnalysis()
@@ -654,6 +883,184 @@ public final class TeleprompterSession {
             phase = activeVersion == nil ? .draft : .ready
         }
         scheduleDraftSave()
+    }
+
+    // MARK: - 用户确认的读法
+
+    /// Records a reading the reader confirmed they will say instead of the words on
+    /// screen, bound to one occurrence inside one segment.
+    ///
+    /// Deliberately narrow: it never rewrites the script, never touches other
+    /// segments, and refuses any alias whose numbers or units would not survive
+    /// deterministic normalisation. An alias is a pronunciation hint for the
+    /// matcher — never a way to display or record a different quantity.
+    @discardableResult
+    public func confirmReading(
+        segmentID: String,
+        displayRange: TeleprompterSourceRange,
+        spokenText: String
+    ) -> TeleprompterAcceptedReadingRejection? {
+        // 三种「写不进去」的原因必须分开报。笼统回一句「正文变了」会让磁盘写
+        // 失败被说成正文问题，用户去重新打开窗口，白等一场。
+        guard canEdit else { return .notEditable }
+        guard document != nil else { return .segmentUnavailable }
+        guard let versionIndex = versions.firstIndex(where: { version in
+                  version.segments.contains { $0.id == segmentID }
+              }),
+              let segmentIndex = versions[versionIndex].segments
+                  .firstIndex(where: { $0.id == segmentID })
+        else { return .segmentUnavailable }
+
+        let segment = versions[versionIndex].segments[segmentIndex]
+        let alias = TeleprompterAcceptedReading(
+            displayRange: displayRange,
+            displayText: text(in: displayRange, source: segment.text) ?? "",
+            spokenText: spokenText
+        )
+        if let rejection = alias.rejection(inSegmentText: segment.text) { return rejection }
+
+        // Re-confirming the same occurrence replaces the previous reading rather
+        // than stacking a second one on the same words.
+        var aliases = segment.acceptedReadings.filter { $0.displayRange != displayRange }
+        aliases.append(alias)
+        let previous = version(at: versionIndex, withSegmentAt: segmentIndex, acceptedReadings: aliases)
+        versions[versionIndex] = previous
+        let previousUpdatedAt = document?.updatedAt ?? Date()
+        document?.updatedAt = Date()
+        do {
+            try saveBundle()
+            return nil
+        } catch {
+            // Roll back so the interface never shows a reading the store would
+            // refuse to load again.
+            versions[versionIndex] = version(
+                at: versionIndex,
+                withSegmentAt: segmentIndex,
+                acceptedReadings: segment.acceptedReadings
+            )
+            document?.updatedAt = previousUpdatedAt
+            return .saveFailed
+        }
+    }
+
+    /// Removes one confirmed reading. The script itself is untouched.
+    ///
+    /// Reports the same typed reasons as `confirmReading` rather than a bare
+    /// `Bool`: "the stage is live", "that reading is already gone" and "the
+    /// store refused the write" are different problems, and the interface
+    /// tells the reader to do different things about each.
+    @discardableResult
+    public func removeConfirmedReading(
+        segmentID: String,
+        displayRange: TeleprompterSourceRange
+    ) -> TeleprompterAcceptedReadingRejection? {
+        guard canEdit else { return .notEditable }
+        guard document != nil else { return .segmentUnavailable }
+        guard let versionIndex = versions.firstIndex(where: { version in
+                  version.segments.contains { $0.id == segmentID }
+              }),
+              let segmentIndex = versions[versionIndex].segments
+                  .firstIndex(where: { $0.id == segmentID })
+        else { return .segmentUnavailable }
+        let before = versions[versionIndex].segments[segmentIndex].acceptedReadings
+        let remaining = before.filter { $0.displayRange != displayRange }
+        guard remaining.count != before.count else { return .noSuchReading }
+        let original = versions[versionIndex]
+        versions[versionIndex] = version(
+            at: versionIndex,
+            withSegmentAt: segmentIndex,
+            acceptedReadings: remaining
+        )
+        let previousUpdatedAt = document?.updatedAt ?? Date()
+        document?.updatedAt = Date()
+        do {
+            try saveBundle()
+            return nil
+        } catch {
+            versions[versionIndex] = original
+            document?.updatedAt = previousUpdatedAt
+            return .saveFailed
+        }
+    }
+
+    /// Resolves a term the reader typed to the one place it occurs in a segment.
+    ///
+    /// An alias belongs to a single occurrence, so a term that appears twice
+    /// cannot be resolved by typing alone. Rather than binding the reading to
+    /// whichever match happened to come first, this refuses and lets the caller
+    /// ask the reader to narrow it down.
+    public func resolveDisplayTerm(
+        _ term: String,
+        inSegmentID segmentID: String
+    ) -> Result<TeleprompterSourceRange, TeleprompterAcceptedReadingRejection> {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let segment = currentSegment(withID: segmentID) else {
+            return .failure(.termNotFound)
+        }
+        let nsText = segment.text as NSString
+        var found: [TeleprompterSourceRange] = []
+        var search = NSRange(location: 0, length: nsText.length)
+        while search.length > 0 {
+            let hit = nsText.range(of: trimmed, options: [], range: search)
+            guard hit.location != NSNotFound else { break }
+            found.append(.init(start: hit.location, end: hit.location + hit.length))
+            let next = hit.location + hit.length
+            // `trimmed` is non-empty, so every hit advances the cursor and the
+            // walk terminates; the length check is only a bound on the last one.
+            guard next < nsText.length else { break }
+            search = NSRange(location: next, length: nsText.length - next)
+        }
+        switch found.count {
+        case 0: return .failure(.termNotFound)
+        case 1: return .success(found[0])
+        default: return .failure(.termAmbiguousOccurrences(found.count))
+        }
+    }
+
+    /// Confirms a reading for a term the reader typed, resolving the occurrence
+    /// first. This is the entry point the interface uses; the range-based overload
+    /// stays for callers that already know exactly where the words are.
+    @discardableResult
+    public func confirmReading(
+        segmentID: String,
+        displayTerm: String,
+        spokenText: String
+    ) -> TeleprompterAcceptedReadingRejection? {
+        switch resolveDisplayTerm(displayTerm, inSegmentID: segmentID) {
+        case let .failure(rejection):
+            return rejection
+        case let .success(range):
+            return confirmReading(
+                segmentID: segmentID,
+                displayRange: range,
+                spokenText: spokenText
+            )
+        }
+    }
+
+    private func currentSegment(withID segmentID: String) -> TeleprompterSegment? {
+        versions.first { version in
+            version.segments.contains { $0.id == segmentID }
+        }?.segments.first { $0.id == segmentID }
+    }
+
+    private func version(
+        at index: Int,
+        withSegmentAt segmentIndex: Int,
+        acceptedReadings: [TeleprompterAcceptedReading]
+    ) -> TeleprompterVersion {
+        var segments = versions[index].segments
+        segments[segmentIndex].acceptedReadings = acceptedReadings
+        let existing = versions[index]
+        return TeleprompterVersion(
+            id: existing.id,
+            documentID: existing.documentID,
+            sourceText: existing.sourceText,
+            segments: segments,
+            analysisSource: existing.analysisSource,
+            createdAt: existing.createdAt
+        )
     }
 
     // MARK: - 待确认事项处理
@@ -1161,6 +1568,10 @@ public final class TeleprompterSession {
             guard let versionIndex = versions.firstIndex(where: { $0.id == active.id }) else {
                 return "找不到当前朗读版本。"
             }
+            let previousVersion = versions[versionIndex]
+            // 读副本、写回 `self.document`：`TeleprompterDocument` 是结构体，
+            // 直接改局部 `document` 不会生效。
+            let previousUpdatedAt = document.updatedAt
             versions[versionIndex] = TeleprompterVersion(
                 id: active.id,
                 documentID: active.documentID,
@@ -1170,8 +1581,22 @@ public final class TeleprompterSession {
                 createdAt: active.createdAt
             )
             self.document?.updatedAt = Date()
-            try saveBundle()
-            return nil
+            // The AI call already succeeded by this point, so a save failure is
+            // not an AI failure. Roll the in-memory version back: leaving it
+            // applied would show the reader cues as live while the next
+            // unrelated save — a target-minutes tweak, an accepted review, the
+            // progress written when the stage closes — writes them to disk.
+            // Reporting a failure that quietly takes effect anyway is harder to
+            // chase than a plain error.
+            do {
+                try saveBundle()
+                return nil
+            } catch {
+                versions[versionIndex] = previousVersion
+                self.document?.updatedAt = previousUpdatedAt
+                return "朗读提示已经算好，但没有保存成功，稿件内容未改动。"
+                    + "检查磁盘空间或文件夹权限后重试。"
+            }
         } catch is CancellationError {
             return "朗读提示已取消。"
         } catch {
@@ -1285,6 +1710,11 @@ public final class TeleprompterSession {
         segments[index].text = text
         segments[index].keywords = []
         segments[index].matchPhrases = []
+        // 正文一改，按原文确认的读法就不再指向同一片字，和 keywords /
+        // matchPhrases 一样必须跟着作废。目前两处 pendingVersion 都从零重建
+        // 段落、不会带别名过来，所以这一行还够不着；留着是因为同一函数里
+        // 「文本变了就清掉派生数据」的约定不能只对两个字段成立。
+        segments[index].acceptedReadings = []
         self.pendingVersion = TeleprompterVersion(
             id: pendingVersion.id,
             documentID: pendingVersion.documentID,
@@ -1339,6 +1769,13 @@ public final class TeleprompterSession {
 
     public func enableVoiceAssist() async {
         guard !isResuming, !isStoppingIntentionally else { return }
+        // 试读期间占用方本来就是提词器，coordinator 会把它读成「已经在跑同一个
+        // 会话」而什么都不做；那样新管线会直接复用试读那套 client/source，
+        // 两套泵同时跑。这里明确拒绝。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            blocked = .speechTrialActive
+            return
+        }
         if activeVersion == nil || phase == .draft {
             do { try useDeterministicFallback() }
             catch {
@@ -1417,6 +1854,12 @@ public final class TeleprompterSession {
     /// Coordinator starter. The generation was issued synchronously by the
     /// voice lifecycle before ownership was requested.
     public func beginCapture() async throws {
+        // 语音辅助试读是单独显式动作，但它仍走同一个 coordinator starter，
+        // 所以设备 owner 只有这一个（#112 步骤 4／6）。
+        if isSpeechTrialRequested {
+            try await beginSpeechTrialCapture()
+            return
+        }
         guard client == nil,
               voiceLifecycle.state == .starting,
               let activeVersion else {
@@ -1618,6 +2061,13 @@ public final class TeleprompterSession {
     /// during this transition so an old drain cannot retire a newer stage.
     func finishStageClose() async {
         guard let token = stageCloseToken else { return }
+        // 语音辅助试读不经过 `voiceLifecycle`（那只服务跟读），试读期间
+        // 生命周期停在 `.off`，而 `beginStop` 对 `.off` 返回 nil——于是
+        // `requestVoiceStop` 与 `disableVoiceAssist` 都不会发起任何停止。
+        // 试读必须在这里单独收尾，否则麦克风与设备租约会一直挂着。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            await coordinator.stopCapture()
+        }
         await disableVoiceAssist()
         guard stageCloseToken == token else { return }
         // `stopCapture` always closes the local client/source even when the
@@ -1667,10 +2117,239 @@ public final class TeleprompterSession {
         pump?.cancel()
         pump = nil
         partialText = nil
+        // 试读收尾：不写进度、不碰跟读状态、不动阅读位置，只把证据定下来。
+        if speechTrialStage.isActive || isSpeechTrialRequested {
+            finishSpeechTrial()
+            return
+        }
         followController.enterManual()
         syncFollowState()
         saveProgress()
         runningVersion = nil
+    }
+
+    // MARK: - 语音辅助试读（#112）
+
+    /// 主动开始一次语音辅助试读。
+    ///
+    /// 与 `enableVoiceAssist()` 的区别是不接管跟读：不进 `.following`、不移动
+    /// 阅读位置、不起运行计时、不写进度、不建 `SessionStore` 行。它只验证
+    /// #112 点名的那条真实链路——采集、识别、定位——并把证据留下来。
+    ///
+    /// 设备租约、权限与功能切换确认全部走既有 `coordinator`，因此本机麦克风
+    /// 同一时刻仍只有一个 owner，试读结束走同一条释放路径。
+    @discardableResult
+    public func startSpeechTrial() async -> Bool {
+        guard !speechTrialStage.isActive else { return false }
+        guard client == nil, source == nil else { return false }
+        guard activeVersion != nil, phase != .draft else {
+            speechTrialStage = .failed("先准备好朗读稿，再开始语音试读。")
+            return false
+        }
+        if let occupancy = coordinator.occupancy, occupancy.kind != .teleprompter {
+            speechTrialStage = .failed("麦克风正在被\(occupancy.kind.title)使用，请先结束那个会话。")
+            return false
+        }
+
+        speechTrialEvidence = nil
+        trialRecognizedUnits = 0
+        trialMatchedUnits = 0
+        speechTrialStage = .preparing
+        isStoppingIntentionally = false
+        isSpeechTrialRequested = true
+        await coordinator.requestStart(.teleprompter)
+        return speechTrialStage.isActive
+    }
+
+    /// 结束语音辅助试读并释放设备。设备释放复用 `stopCapture()`，
+    /// 因此停止失败、权限撤销与切稿都只有一条处理路径。
+    public func stopSpeechTrial() async {
+        guard speechTrialStage.isActive || isSpeechTrialRequested else { return }
+        // 释放必须走 coordinator：它才是设备租约的持有者。直接停自己的
+        // client/source 只会关掉采集，租约仍被占着，麦克风再也开不了下一次。
+        // coordinator 会经 stopper 回调到 `stopCapture()` 完成实际收尾。
+        await coordinator.stopCapture()
+    }
+
+    /// Coordinator starter 的试读分支。`beginCapture()` 在请求带着试读标记时
+    /// 走这里，因此调用方不需要新增第二套设备 owner 接线。
+    private func beginSpeechTrialCapture() async throws {
+        guard isSpeechTrialRequested, let activeVersion else {
+            throw Blocked(reason: .noActiveVersion)
+        }
+        do {
+            try await startSpeechTrialPipeline(segments: activeVersion.segments)
+            speechTrialStage = .listening
+        } catch {
+            let reason = Self.blockReason(for: error)
+            speechTrialStage = .failed(reason.title)
+            isSpeechTrialRequested = false
+            throw Blocked(reason: reason)
+        }
+    }
+
+    /// 与 `startPipeline(generation:)` 共用同一套能力校验、client 构造与
+    /// 显式语言／术语配置——试读要验证的正是这条真实链路，用另一条构造路径
+    /// 等于什么也没验证。区别只是不接管跟读状态。
+    private func startSpeechTrialPipeline(segments: [TeleprompterSegment]) async throws {
+        let binding = await realtimeCapabilityBindingProvider?()
+        if realtimeCapabilityBindingProvider != nil, binding == nil {
+            throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
+        }
+        _ = await serviceReadiness?()
+
+        let generation = UUID()
+        let configuration = realtimeConfiguration()
+        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey, configuration)
+            ?? RealtimeASRClient(
+                port: port,
+                language: configuration.language,
+                keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
+                silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
+                diarizationEnabled: false,
+                apiKey: apiKey,
+                expectedASRRevision: binding?.asrModelRevision
+            )
+        do {
+            try await client.connect()
+        } catch {
+            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+        }
+
+        let source = audioSourceFactory()
+        let stream: AsyncStream<AudioChunk>
+        do {
+            stream = try await source.start()
+        } catch {
+            await client.close()
+            throw Blocked(reason: Self.blockReason(for: error))
+        }
+
+        // 与跟读共用这两个持有者：设备被占住这件事，所有既有判据都看得见。
+        self.client = client
+        self.source = source
+        self.trialGeneration = generation
+        self.trialStartedAt = ContinuousClock().now
+        startSpeechTrialPump(stream: stream, client: client, segments: segments, generation: generation)
+    }
+
+    private func startSpeechTrialPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any TeleprompterRealtimeClientProtocol,
+        segments: [TeleprompterSegment],
+        generation: UUID
+    ) {
+        trialPump?.cancel()
+        trialPump = Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { [weak self] in
+                    for await chunk in stream {
+                        guard let self else { return }
+                        await self.uploadTrialChunk(chunk, to: client, generation: generation)
+                    }
+                }
+                group.addTask { [weak self] in
+                    let events = await client.events()
+                    for await envelope in events {
+                        guard let self else { return }
+                        await self.handleTrialEvent(
+                            envelope,
+                            segments: segments,
+                            generation: generation
+                        )
+                    }
+                }
+                await group.waitForAll()
+            }
+        }
+    }
+
+    private func uploadTrialChunk(
+        _ chunk: AudioChunk,
+        to client: any TeleprompterRealtimeClientProtocol,
+        generation: UUID
+    ) async {
+        guard isCurrentTrial(generation), !isStoppingIntentionally else { return }
+        do {
+            try await client.append(chunk.pcm)
+        } catch {
+            guard isCurrentTrial(generation) else { return }
+            speechTrialStage = .failed("语音连接中断，可以手动继续或重新开始。")
+        }
+    }
+
+    /// 只累计证据，不推进任何位置。
+    ///
+    /// 「识别」与「定位」分开计数是有意的：#112 明确不能只以输入电平证明
+    /// 识别和定位成功。听到了但对不上正文（`matchedUnits == 0`）必须能和
+    /// 什么都没听到区分开，否则界面只能说「试过了」，说不上证明了什么。
+    private func handleTrialEvent(
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        segments: [TeleprompterSegment],
+        generation: UUID
+    ) async {
+        guard isCurrentTrial(generation), !isStoppingIntentionally else { return }
+        let text: String
+        switch envelope.payload {
+        case .partial(_, let delta):
+            text = delta
+        case .partialSnapshot(_, _, let snapshot, _):
+            text = snapshot
+        case .completed(_, let transcript):
+            text = transcript
+        case .serverError(let code, let message, _):
+            if code == "backend_busy" {
+                speechTrialStage = .failed(BlockReason.serviceBusy(message).title)
+            } else {
+                speechTrialStage = .failed(message)
+            }
+            return
+        default:
+            return
+        }
+
+        let units = TeleprompterCanonicalizer.units(text)
+        guard !units.isEmpty else { return }
+        trialRecognizedUnits += units.count
+        let match = TeleprompterAligner().locate(
+            transcript: text,
+            segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
+        )
+        trialMatchedUnits += match.matchedCount
+        // 证据边听边更新，界面才能显示真实链路走到哪一步，而不是只在结束后
+        // 给一个结论。
+        speechTrialEvidence = TeleprompterSpeechTrialEvidence(
+            durationSeconds: trialStartedAt.map { Self.seconds(since: $0) } ?? 0,
+            recognizedUnits: trialRecognizedUnits,
+            matchedUnits: trialMatchedUnits
+        )
+    }
+
+    private func isCurrentTrial(_ generation: UUID) -> Bool {
+        speechTrialStage.isActive && trialGeneration == generation
+    }
+
+    /// 把这次试读留下的证据定下来。只记计数，不留转写正文。
+    private func finishSpeechTrial() {
+        trialPump?.cancel()
+        trialPump = nil
+        let duration = trialStartedAt.map { Self.seconds(since: $0) } ?? 0
+        speechTrialEvidence = TeleprompterSpeechTrialEvidence(
+            durationSeconds: duration,
+            recognizedUnits: trialRecognizedUnits,
+            matchedUnits: trialMatchedUnits
+        )
+        speechTrialStage = .idle
+        isSpeechTrialRequested = false
+        trialGeneration = nil
+        trialStartedAt = nil
+    }
+
+    private static func seconds(since start: ContinuousClock.Instant) -> TimeInterval {
+        let elapsed = start.duration(to: ContinuousClock.now)
+        return Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
     }
 
     private func startPipeline(generation: UUID) async throws {
@@ -1684,9 +2363,12 @@ public final class TeleprompterSession {
 
         guard generation == voiceLifecycle.generation else { throw CancellationError() }
 
-        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey)
+        let configuration = realtimeConfiguration()
+        let client: any TeleprompterRealtimeClientProtocol = realtimeClientFactory?(port, apiKey, configuration)
             ?? RealtimeASRClient(
                 port: port,
+                language: configuration.language,
+                keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
                 silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
                 diarizationEnabled: false,
                 apiKey: apiKey,
@@ -1797,7 +2479,7 @@ public final class TeleprompterSession {
             }
         }
         switch envelope.payload {
-        case .partial(_, _), .partialSnapshot(_, _, _):
+        case .partial(_, _), .partialSnapshot(_, _, _, _):
             guard !isResuming, let activeVersion else { return }
             _ = followAdapter.apply(
                 envelope.payload,
@@ -1873,8 +2555,8 @@ public final class TeleprompterSession {
 
     private func syncFollowState() {
         let previousIndex = currentSegmentIndex
-        currentSegmentIndex = followController.currentIndex
-        readingOffset = followController.position.utf16Offset
+        currentSegmentIndex = followController.viewportAnchor.segmentIndex
+        readingOffset = followController.viewportAnchor.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
         followState = followController.followState
@@ -1939,6 +2621,7 @@ public final class TeleprompterSession {
                     documentID: document.id,
                     versionID: activeVersion.id,
                     currentSegmentID: currentSegment?.id,
+                    currentSegmentOffset: followController.viewportAnchor.utf16Offset,
                     mode: followController.mode
                 )
             savedRunState = state
@@ -1947,6 +2630,22 @@ public final class TeleprompterSession {
         } catch {
             lastFailure = error.localizedDescription
         }
+    }
+
+    /// Recognition hints for the segment the reader is about to speak. The
+    /// keywords come from the frozen running version, so what the recognizer
+    /// is told matches the text actually on stage.
+    private func realtimeConfiguration() -> TeleprompterRealtimeConfiguration {
+        let version = runningVersion ?? activeVersion
+        let upcoming = version?.segments.dropFirst(currentSegmentIndex).prefix(8) ?? []
+        var keywords: [String] = []
+        for segment in upcoming {
+            keywords.append(contentsOf: segment.keywords)
+        }
+        return .init(
+            language: preferredSpeechLanguage,
+            keywords: keywords
+        ).sanitized
     }
 
     private func saveBundle() throws {
@@ -1960,6 +2659,11 @@ public final class TeleprompterSession {
     /// 显式保存当前稿件，供工作台的失败恢复动作使用。
     public func save() throws {
         try saveBundle()
+        // 「重试保存」按钮存在的**前提**就是上次存盘失败了。存盘既然成功，横幅
+        // 就不能继续宣称失败——否则这个恢复入口永远恢复不了，读者只能去按旁边
+        // 的 ✕ 手动关掉，而那等于让应用继续断言一件已经不成立的事。
+        // `persistDraft()` 一直有这一行，只有显式 `save()` 漏了。
+        if case .storeUnavailable = blocked { blocked = nil }
     }
 
     // MARK: - v2 持久化桥接
@@ -2001,6 +2705,7 @@ public final class TeleprompterSession {
                 documentID: bundle.document.id,
                 versionID: run.versionID,
                 currentSegmentID: run.lastSegmentID,
+                currentSegmentOffset: run.lastSegmentOffset,
                 mode: mode
             )
         }
@@ -2062,19 +2767,38 @@ public final class TeleprompterSession {
             }
         }
 
-        let restoredIndex = savedRunState.flatMap { state in
-            versions.first { $0.id == state.versionID }?.segments.firstIndex {
-                $0.id == state.currentSegmentID
-            }
-        } ?? 0
+        let restoredPosition = restoredReadingPosition()
+        let restoredIndex = restoredPosition?.segmentIndex ?? 0
         currentSegmentIndex = restoredIndex
         followController = TeleprompterFollowController(
             currentIndex: restoredIndex,
             mode: savedRunState?.mode ?? .manual
         )
+        if let restoredPosition, restoredPosition.utf16Offset > 0,
+           let activeVersion {
+            followController.manualMove(
+                to: restoredPosition,
+                segmentCount: activeVersion.segments.count,
+                segmentUTF16Lengths: activeVersion.segments.map(\.text.utf16.count)
+            )
+        }
         blocked = nil
         lastFailure = nil
         syncFollowState()
+    }
+
+    /// Restores the saved reading position. The exact UTF-16 offset is only
+    /// reused inside the same frozen version; across versions the offset is
+    /// migrated solely when the segment text is byte-identical, otherwise the
+    /// reader returns to the start of that segment instead of reusing an offset
+    /// that now points into different text.
+    private func restoredReadingPosition() -> TeleprompterAligner.Position? {
+        guard let savedRunState else { return nil }
+        return TeleprompterReadingProgressRestorer.position(
+            saved: savedRunState,
+            versions: versions,
+            activeVersion: activeVersion
+        )
     }
 
     private func legacyDocument(from bundle: TeleprompterV2DocumentBundle) throws -> TeleprompterDocument {
@@ -2114,6 +2838,9 @@ public final class TeleprompterSession {
                 text: segment.text,
                 keywords: segment.keywords,
                 matchPhrases: segment.matchPhrases,
+                // Aliases are bound to a confirmed segment's exact text; the stored
+                // text is what the reader confirmed against, so they carry over.
+                acceptedReadings: segment.acceptedReadings,
                 pauseHint: segment.pauseHint
             )
         }
@@ -2230,6 +2957,7 @@ public final class TeleprompterSession {
                 targetSeconds: runClock.targetSeconds,
                 elapsedSeconds: runClock.elapsedSeconds,
                 lastSegmentID: state.currentSegmentID,
+                lastSegmentOffset: state.currentSegmentOffset,
                 endedReason: state.mode.rawValue,
                 completedReading: activeVersion.map {
                     currentSegmentIndex >= max(0, $0.segments.count - 1)
@@ -2413,6 +3141,7 @@ public final class TeleprompterSession {
                 text: segment.text,
                 keywords: segment.keywords,
                 matchPhrases: segment.matchPhrases,
+                acceptedReadings: segment.acceptedReadings,
                 pauseHint: segment.pauseHint
             )
         }
@@ -2546,6 +3275,14 @@ public final class TeleprompterSession {
         }
     }
 
+    /// Paragraph ranges the reader may mark as must-keep before a lossy
+    /// condense. The UI must not re-derive these from its own split of the
+    /// source: `condenseDraft` maps ranges onto source units by overlap, so a
+    /// differently-computed range would silently lock the wrong text.
+    public func mustKeepCandidateRanges() -> [TeleprompterSourceRange] {
+        paragraphRanges(in: document?.sourceText ?? "")
+    }
+
     private func v2Origin(_ origin: TeleprompterBlockOrigin) -> TeleprompterBlockOrigin {
         origin
     }
@@ -2584,6 +3321,14 @@ public final class TeleprompterSession {
     private static func blockReason(for error: Error) -> BlockReason {
         if let failure = error as? MicrophoneCapture.Failure, failure == .permissionDenied {
             return .microphoneDenied
+        }
+        // A vanished or unusable input device is a microphone problem, not an
+        // ASR service problem: say which one, and keep manual reading offered.
+        if case .engineFailed(let message)? = error as? MicrophoneCapture.Failure {
+            return .inputDeviceUnavailable(message)
+        }
+        if case .converterUnavailable? = error as? MicrophoneCapture.Failure {
+            return .inputDeviceUnavailable("输入设备格式不兼容")
         }
         if let blocked = error as? Blocked { return blocked.reason }
         return .serviceNotReady(error.localizedDescription)

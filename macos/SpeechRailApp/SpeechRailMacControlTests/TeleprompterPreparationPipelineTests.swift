@@ -258,6 +258,194 @@ struct TeleprompterPreparationPipelineTests {
         #expect((await calls.schemaVersions) == ["teleprompter.grouping.v1", "teleprompter.rewrite.v1"])
     }
 
+    @Test func qualifierLossInRewriteBecomesUnresolvedReview() async throws {
+        let fixture = try makeFixture(
+            text: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
+        )
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "方案 A 的单次成本是 50 元。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.fallbackBlockCount == 0, "数值未变，硬门禁应放行到语义审阅而非本地回退")
+        #expect(result.status == .reviewRequired, "语义风险块必须进入待审阅")
+        let block = try #require(result.draft.blocks.first)
+        #expect(block.disposition == .unresolved)
+        #expect(block.reviewIssues.contains(.conditionRemoved))
+        #expect(block.reviewIssues.contains(.comparisonChanged))
+    }
+
+    /// 否定词丢失（「不得」变成「会」）不改任何数字，硬门禁必须放行到语义审阅，
+    /// 并把这一条单独标成待审阅——它是四类限定语变化里唯一会翻转含义方向的。
+    @Test func negationLossBecomesUnresolvedReview() async throws {
+        let fixture = try makeFixture(
+            text: "本功能不得自动上传观众的原始录音。"
+        )
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: "本功能会自动上传观众的原始录音。",
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.fallbackBlockCount == 0, "数值未变，硬门禁应放行到语义审阅")
+        #expect(result.status == .reviewRequired, "否定词被删必须进入待审阅")
+        let block = try #require(result.draft.blocks.first)
+        #expect(block.disposition == .unresolved)
+        #expect(block.reviewIssues.contains(.negationChanged))
+    }
+
+    @Test func subjectValueSwapIsRejectedByHardGateAndKeepsSource() async throws {
+        let fixture = try makeFixture(
+            text: "方案 A 的成本是 50 元，方案 B 的成本是 80 元。"
+        )
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: Self.swappedPrices(group.sourceUnits.map(\.rawText).joined()),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.status != .complete, "出现级顺序不一致必须被硬门禁拦下")
+        #expect(result.fallbackBlockCount == result.draft.blocks.count)
+        #expect(
+            result.draft.blocks.map(\.text).joined() == "方案 A 的成本是 50 元，方案 B 的成本是 80 元。",
+            "回退必须逐字保留原文"
+        )
+    }
+
+    @Test func unchangedRewriteStaysSpeakWithoutReviewIssues() async throws {
+        let fixture = try makeFixture(
+            text: "方案 A 的成本是 50 元，方案 B 的成本是 80 元。"
+        )
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.status == .complete)
+        let block = try #require(result.draft.blocks.first)
+        #expect(block.disposition == .speak)
+        #expect(block.reviewIssues.isEmpty, "未变化块不增加审阅负担")
+    }
+
+    @Test func condenseReportsOmittedContentAsSkippedAndReviewable() async throws {
+        let fixture = try makeFixture(text: "甲段。乙段。")
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.condenseResponse(for: prompt, omittingLastGroup: true)
+        })
+        let input = TeleprompterPreparationInput(
+            source: fixture.source,
+            sourceUnits: fixture.units,
+            timingPlan: try TeleprompterTimingPlanner.plan(
+                sourceUnits: fixture.units,
+                estimates: Array(repeating: nil, count: fixture.units.count),
+                targetMinutes: 20
+            ),
+            pace: .natural,
+            operation: .condense
+        )
+
+        let result = try await pipeline.prepare(input)
+
+        #expect(result.status == .reviewRequired)
+        let spoken = try #require(result.draft.blocks.first)
+        let removed = try #require(result.draft.blocks.last)
+        #expect(spoken.disposition == .speak)
+        #expect(removed.disposition == .skip, "精简删除必须是显式跳过而不是待确认改写")
+        #expect(removed.text.isEmpty)
+        #expect(removed.rawSourceText.contains("乙段"), "删减必须保留可审阅的原文")
+        #expect(
+            result.draft.blocks.allSatisfy { $0.disposition != .skip || $0.reviewIssues == [.nonspokenContent] }
+        )
+    }
+
+    @Test func condenseRefusesToDeleteLockedContent() async throws {
+        let fixture = try makeFixture(text: "甲段。乙段。")
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.condenseResponse(for: prompt, omittingLastGroup: true)
+        })
+        let input = TeleprompterPreparationInput(
+            source: fixture.source,
+            sourceUnits: fixture.units,
+            timingPlan: try TeleprompterTimingPlanner.plan(
+                sourceUnits: fixture.units,
+                estimates: Array(repeating: nil, count: fixture.units.count),
+                targetMinutes: 20
+            ),
+            pace: .natural,
+            operation: .condense,
+            lockedUnitIDs: [fixture.units.count - 1]
+        )
+
+        await #expect(throws: TeleprompterPreparationError.self) {
+            try await pipeline.prepare(input)
+        }
+    }
+
+    @Test func fidelityOperationsStillRejectOmissionsAsUnresolved() async throws {
+        let fixture = try makeFixture(text: "甲段。乙段。")
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.condenseResponse(for: prompt, omittingLastGroup: true)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        let removed = try #require(result.draft.blocks.last)
+        #expect(removed.disposition == .unresolved, "保真操作没有删除权限")
+    }
+
     @Test func malformedMapResponseUsesOneBoundedRecoveryRequest() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()
@@ -305,7 +493,10 @@ struct TeleprompterPreparationPipelineTests {
         #expect(await groupingCalls.value == 1)
         #expect(await rewriteCalls.value == 2)
         let rewritePrompts = await prompts.values.filter { $0.schemaVersion == "teleprompter.rewrite.v1" }
-        #expect(rewritePrompts.count == 2)
+        // 致命断言：下一行按 0／1 取下标，非致命断言失败后不会停，测试会越界
+        // trap 把整个测试进程带崩，变异探针只能记成 INVALID——真回归就此变成
+        // 「什么都没证明」。
+        try #require(rewritePrompts.count == 2)
         #expect(rewritePrompts[0].input == rewritePrompts[1].input)
         #expect(rewritePrompts[1].instructions.contains("schema_keys"))
     }
@@ -326,7 +517,11 @@ struct TeleprompterPreparationPipelineTests {
         _ = try await pipeline.prepare(fixture.input)
 
         let values = await timestamps.values
-        #expect(values.count >= 3)
+        // 计数必须用 `#require`（致命）而不是 `#expect`：下面紧接着按 3 个元素
+        // 取下标，非致命断言失败后不会停，测试会越界 trap 把整个测试进程带崩。
+        // 崩掉的那一轮在变异探针里被记成 INVALID——**真回归因此变成「什么都没
+        // 证明」**，比直接失败糟得多。
+        try #require(values.count >= 3)
         #expect(values[1].timeIntervalSince(values[0]) >= 0.04)
     }
 
@@ -570,8 +765,388 @@ struct TeleprompterPreparationPipelineTests {
         }
     }
 
+    @Test func tableRowsKeepTheirOwnPricesAcrossRewrite() async throws {
+        let fixture = try makeFixture(
+            text: """
+            | 套餐 | 价格 |
+            | 标准版 | 99 元 |
+            | 专业版 | 199 元 |
+            """
+        )
+        let sourceText = fixture.units.map(\.rawText).joined()
+
+        let faithful = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.response(for: prompt)
+        })
+        let kept = try await faithful.prepare(fixture.input)
+
+        #expect(kept.status == .complete)
+        let spoken = kept.draft.blocks.map(\.text).joined()
+        #expect(spoken.contains("标准版") && spoken.contains("专业版"))
+        let standardPrice = try #require(spoken.range(of: "99"))
+        let proPrice = try #require(spoken.range(of: "199"))
+        let standardName = try #require(spoken.range(of: "标准版"))
+        let proName = try #require(spoken.range(of: "专业版"))
+        #expect(
+            standardName.upperBound <= standardPrice.lowerBound
+                && standardPrice.upperBound <= proName.lowerBound
+                && proName.upperBound <= proPrice.lowerBound,
+            "忠实改写后每个价格仍属于自己那一行"
+        )
+
+        let crossed = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: Self.swappedTablePrices(group.sourceUnits.map(\.rawText).joined()),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+        let rejected = try await crossed.prepare(fixture.input)
+
+        #expect(rejected.status != .complete, "跨行调换价格必须被出现级门禁拦下")
+        #expect(
+            rejected.draft.blocks.map(\.text).joined() == sourceText,
+            "回退必须逐字保留表格原文"
+        )
+    }
+
+    @Test func unterminatedCodeAndFormulaSurviveTheFidelityGate() async throws {
+        let fixture = try makeFixture(
+            text: """
+            配置示例：
+            ```
+            latency_ms = 200
+            公式：T = L / R，其中 L 为 200 ms。
+            """
+        )
+        let sourceText = fixture.units.map(\.rawText).joined()
+        #expect(sourceText.contains("latency_ms = 200"), "未闭合代码块不能丢内容")
+        #expect(sourceText.contains("T = L / R"), "公式不能被吞掉")
+
+        let faithful = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.response(for: prompt)
+        })
+        let kept = try await faithful.prepare(fixture.input)
+        #expect(kept.status == .complete)
+        let spoken = kept.draft.blocks.map(\.text).joined()
+        #expect(spoken.contains("latency_ms = 200"))
+        #expect(spoken.contains("200 ms"))
+
+        let mutated = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: Self.rewrittenLatency(group.sourceUnits.map(\.rawText).joined()),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+        let rejected = try await mutated.prepare(fixture.input)
+
+        #expect(rejected.status != .complete, "改写代码里的数值必须被硬门禁拦下")
+        #expect(rejected.draft.blocks.map(\.text).joined() == sourceText)
+    }
+
+    @Test func droppingANumberSignIsRejectedByTheHardGate() async throws {
+        let fixture = try makeFixture(
+            text: "毛利 -3 万元，误差 +5 %，环比 −7 个百分点。"
+        )
+
+        let faithful = TeleprompterPreparationPipeline(completion: { prompt in
+            try Self.response(for: prompt)
+        })
+        let kept = try await faithful.prepare(fixture.input)
+        #expect(kept.status == .complete, "带符号的原文必须能原样通过")
+
+        let unsigned = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = input.groups.map { group in
+                    TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: Self.strippedNumberSigns(group.sourceUnits.map(\.rawText).joined()),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+        let rejected = try await unsigned.prepare(fixture.input)
+
+        #expect(rejected.status != .complete, "去掉正负号会改变含义，必须被拦下")
+        #expect(
+            rejected.draft.blocks.map(\.text).joined() == fixture.units.map(\.rawText).joined(),
+            "回退必须逐字保留带符号的原文"
+        )
+    }
+
+    private static func swappedTablePrices(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "99", with: "\u{1}")
+            .replacingOccurrences(of: "199", with: "99")
+            .replacingOccurrences(of: "\u{1}", with: "199")
+    }
+
+    private static func strippedNumberSigns(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "-3", with: "3")
+            .replacingOccurrences(of: "+5", with: "5")
+            .replacingOccurrences(of: "\u{2212}7", with: "7")
+    }
+
+    private static func rewrittenLatency(_ text: String) -> String {
+        text.replacingOccurrences(of: "200", with: "250")
+    }
+
+    // MARK: - 第六十八轮：素材构建管线的「模型不规矩」素材
+    //
+    // 这一组此前**一条变异都杀不掉**（F 组首轮 18 条零击杀）。共同原因不是
+    // 「没测」，而是既有 87 条用例只喂规规矩矩的模型输出：分组首尾相接、
+    // 改写块都指向真实分组、窗口结果非空、服务端只回 429。
+    //
+    // 下面每一条都只做一件事：**造出一种具体的「模型不规矩」**，然后钉住
+    // 管线必须拒绝它，而不是把它悄悄变成一份看起来正常的稿子。
+
+    @Test func groupingThatSkipsMiddleUnitsIsRejected() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                // 第 1 号单元被跳过：分组从 2 开始，0 号和 1 号都不在任何区间里。
+                let units = try JSONDecoder().decode(
+                    TeleprompterPreparationMapInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = [
+                    TeleprompterGroupingBlock(startUnit: 0, endUnit: 1),
+                    TeleprompterGroupingBlock(
+                        startUnit: 2,
+                        endUnit: units.targets.count + 8
+                    )
+                ]
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterGroupingOutput(groups: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 守卫抛出的错会被本地兜底接住，所以**可观察的差别不在抛不抛错，而在
+        // 交付的稿子还全不全**。「跳过中间单元」与第 63 轮 A3 同一族，只是那一族
+        // 在解码器侧、这一族在管线侧：去掉区间守卫，第 1 号单元就此消失，
+        // 而状态仍然是「完成」。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func rewriteBlockReferencingAnUnknownGroupIsRejected() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                // 凭空造一个不存在的分组：块里的文字没有对应的源单元。
+                let blocks = [TeleprompterRewriteBlock(
+                    blockID: "block-9000-9001",
+                    mode: .speak,
+                    text: "模型自己编出来的一段话。",
+                    issues: []
+                )]
+                _ = input
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 凭空造块被拒后同样走本地兜底，因此钉的是「一个源单元都不许少」：
+        // 去掉守卫后这个块会去认第一个分组，其余分组的内容全部落空。
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func emptyGroupingOutputIsRejectedInsteadOfBecomingACompletedWindow() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                return #"{"schema_version":"teleprompter.grouping.v1","groups":[]}"#
+            }
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                return #"{"schema_version":"teleprompter.rewrite.v1","blocks":[]}"#
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 空结果不能被记成「一次成功的窗口」：那会让这一窗的内容凭空消失，
+        // 而对外仍然是 complete。守卫把它变成一次本地兜底，读者拿到的是
+        // 标着 unresolved 的完整原稿，而不是一份少了一整窗的稿子。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func configurationFailureIsNotSilentlyDowngradedToReadingTheSource() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { _ in
+            // 未配置模型属于「重试也没用」的一类。读者以为 AI 不可用、却拿到一份
+            // 看起来完全正常的稿子，是判据 1「稿件可信」的直接违反：降级本身
+            // 没有告诉读者发生过。
+            throw LLMError.notConfigured
+        })
+
+        await #expect(throws: LLMError.self) {
+            try await pipeline.prepare(fixture.input)
+        }
+    }
+
+    @Test func serverErrorGetsOneBoundedRetryJustLikeRateLimit() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
+               await attempts.next() == 1 {
+                throw LLMError.http(status: 503, body: "upstream unavailable")
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 429 的重试用例早就有，5xx 此前没有——服务端 5xx 不再触发重试时，
+        // 读者要多白等一次完整往返。
+        #expect(result.mapRequestCount == 1)
+        #expect(await attempts.value == 2)
+    }
+
+    @Test func seamNextToAnOmittedBlockIsNotSentToTheReduceStage() async throws {
+        // 接缝只存在于**窗口之间**，所以这条要 4 个窗口才构造得出来
+        // （96 个单元 × 每窗 24 个 = 4 窗 3 缝）。
+        let fixture = try makeFixture(lineCount: 96)
+        let reduceCalls = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.reduction.v1" {
+                _ = await reduceCalls.next()
+                return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
+            }
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                // 把第 0 号窗口的最后一个块（单元 23）改成省略块：于是第 0 条接缝
+                // 的左侧不再是 speak。
+                let blocks = input.groups.map { group -> TeleprompterRewriteBlock in
+                    if group.sourceUnits.contains(where: { $0.id == 23 }) {
+                        return TeleprompterRewriteBlock(
+                            blockID: group.id,
+                            mode: .omit,
+                            text: "",
+                            issues: [.nonspokenContent]
+                        )
+                    }
+                    return TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: group.sourceUnits.map(\.rawText).joined(),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 省略块不含朗读内容，送去做接缝合并会把非朗读内容接进朗读正文，
+        // 所以那一条接缝必须留在原地不查。
+        #expect(result.boundaries.count == 3)
+        #expect(result.reduceRequestCount == 2)
+        #expect(await reduceCalls.value == 2)
+        #expect(result.boundaries.map(\.isChecked) == [false, true, true])
+    }
+
+    @Test func truncatedGroupingIsNotRetriedBecauseTruncationIsDeterministic() async throws {
+        let fixture = try makeFixture(lineCount: 1)
+        let groupingCalls = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                _ = await groupingCalls.next()
+                throw LLMError.outputTruncated
+            }
+            return try Self.response(for: prompt)
+        })
+
+        _ = try? await pipeline.prepare(fixture.input)
+
+        // 输出被截断是**确定性**失败：同样的请求再发一次还是被截断。重试只是
+        // 白花一次调用并推迟失败暴露，正确的处置是切窗或本地兜底。
+        #expect(await groupingCalls.value == 1)
+    }
+
+    @Test func transportFailureFallsBackLocallyInsteadOfFailingTheWholeDraft() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                throw LLMError.transport("simulated transport failure")
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 传输层抖动和流提前结束都属于「本机可以自己兜住」的一类：整篇准备失败
+        // 等于一次网络抖动让读者开不了讲。降级必须给出**完整的原稿**并标成
+        // 待复核，而不是少一段。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+        #expect(result.status == .reviewRequired)
+    }
+
     private func makeFixture(lineCount: Int) throws -> Fixture {
-        let text = (0..<lineCount).map { "第\($0)段。\n" }.joined()
+        try makeFixture(text: (0..<lineCount).map { "第\($0)段。\n" }.joined())
+    }
+
+    private func makeFixture(text: String) throws -> Fixture {
         let source = try TeleprompterSourceImporter.importData(Data(text.utf8), fileExtension: "txt")
         let units = try TeleprompterSourceUnitBuilder(maxBudgetUnits: 12).build(source)
         let plan = try TeleprompterTimingPlanner.plan(
@@ -589,6 +1164,13 @@ struct TeleprompterPreparationPipelineTests {
                 pace: .natural
             )
         )
+    }
+
+    private static func swappedPrices(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "50", with: "\u{1}")
+            .replacingOccurrences(of: "80", with: "50")
+            .replacingOccurrences(of: "\u{1}", with: "80")
     }
 
     private static func response(for prompt: TeleprompterPreparationPrompt) throws -> String {
@@ -657,5 +1239,82 @@ struct TeleprompterPreparationPipelineTests {
         }
         let output = TeleprompterMapOutput(blocks: blocks)
         return String(decoding: try JSONEncoder().encode(output), as: UTF8.self)
+    }
+
+    /// One group per source unit, with the last group omitted, so condense
+    /// deletion can be exercised through the real grouping and rewrite stages.
+    private static func condenseResponse(
+        for prompt: TeleprompterPreparationPrompt,
+        omittingLastGroup: Bool
+    ) throws -> String {
+        if prompt.schemaVersion == "teleprompter.reduction.v1" {
+            return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
+        }
+        if prompt.schemaVersion == "teleprompter.preparation.v2" {
+            let input = try JSONDecoder().decode(
+                TeleprompterPreparationMapInput.self,
+                from: Data(prompt.input.utf8)
+            )
+            let blocks = input.targets.indices.map { index in
+                if omittingLastGroup, index == input.targets.count - 1 {
+                    return TeleprompterMapBlock(
+                        startUnit: index,
+                        endUnit: index + 1,
+                        mode: .omit,
+                        text: "",
+                        issues: [.nonspokenContent]
+                    )
+                }
+                return TeleprompterMapBlock(
+                    startUnit: index,
+                    endUnit: index + 1,
+                    mode: .speak,
+                    text: input.targets[index].rawText,
+                    issues: []
+                )
+            }
+            return String(decoding: try JSONEncoder().encode(
+                TeleprompterMapOutput(blocks: blocks)
+            ), as: UTF8.self)
+        }
+        if prompt.schemaVersion == "teleprompter.grouping.v1" {
+            let input = try JSONDecoder().decode(
+                TeleprompterPreparationMapInput.self,
+                from: Data(prompt.input.utf8)
+            )
+            let groups = input.targets.indices.map { index in
+                TeleprompterGroupingBlock(startUnit: index, endUnit: index + 1)
+            }
+            return String(decoding: try JSONEncoder().encode(
+                TeleprompterGroupingOutput(groups: groups)
+            ), as: UTF8.self)
+        }
+        guard prompt.schemaVersion == "teleprompter.rewrite.v1" else {
+            throw TestFailure.mapUnavailable
+        }
+        let input = try JSONDecoder().decode(
+            TeleprompterRewriteInput.self,
+            from: Data(prompt.input.utf8)
+        )
+        let lastIndex = input.groups.indices.last
+        let blocks = input.groups.enumerated().map { offset, group in
+            if omittingLastGroup, offset == lastIndex {
+                return TeleprompterRewriteBlock(
+                    blockID: group.id,
+                    mode: .omit,
+                    text: "",
+                    issues: [.nonspokenContent]
+                )
+            }
+            return TeleprompterRewriteBlock(
+                blockID: group.id,
+                mode: .speak,
+                text: group.sourceUnits.map(\.rawText).joined(),
+                issues: []
+            )
+        }
+        return String(decoding: try JSONEncoder().encode(
+            TeleprompterRewriteOutput(blocks: blocks)
+        ), as: UTF8.self)
     }
 }

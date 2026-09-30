@@ -903,6 +903,31 @@ public actor RealtimeASRClient {
         }
     }
 
+    public struct RealtimeSampleSpan: Sendable, Equatable {
+        public let startSample: Int
+        public let endSample: Int
+
+        public init(startSample: Int, endSample: Int) {
+            self.startSample = startSample
+            self.endSample = endSample
+        }
+    }
+
+    /// Typed hypothesis evidence already validated from the current wire event.
+    /// `nil` means unknown; zero is an explicit "no proven stable prefix".
+    public struct RealtimeHypothesisEvidence: Sendable, Equatable {
+        public let stablePrefixCodepoints: Int?
+        public let sampleSpan: RealtimeSampleSpan?
+
+        public init(
+            stablePrefixCodepoints: Int? = nil,
+            sampleSpan: RealtimeSampleSpan? = nil
+        ) {
+            self.stablePrefixCodepoints = stablePrefixCodepoints
+            self.sampleSpan = sampleSpan
+        }
+    }
+
     /// 服务端事件里**会话层真正需要的那一部分**。
     public enum Event: Sendable {
         /// `session.created`：握手完成，服务端声明了实际能力。
@@ -913,7 +938,12 @@ public actor RealtimeASRClient {
         case partial(itemID: String, delta: String)
         /// 可修订 partial 的最新全文（`speechrail.transcription.hypothesis`）。
         /// 调用点必须替换 item 文本，不得追加。
-        case partialSnapshot(itemID: String, revision: Int, text: String)
+        case partialSnapshot(
+            itemID: String,
+            revision: Int,
+            text: String,
+            evidence: RealtimeHypothesisEvidence = .init()
+        )
         /// 文本终态。当前 wire 的 final 只承载正文；对齐与匿名声归属**随后独立到达**，
         /// 不得等待它们、也不得用它们改写正文。
         case completed(itemID: String, transcript: String)
@@ -964,6 +994,11 @@ public actor RealtimeASRClient {
     private let url: URL
     private let apiKey: String?
     private let model: String
+    /// `audio.input.transcription.language`. `nil` leaves the server default.
+    private let language: String?
+    /// `audio.input.transcription.keywords`: proper nouns and hard terms from
+    /// the current script, so the recognizer prefers the script's wording.
+    private let keywords: [String]?
     /// 静音窗口由 App 的场景预设选择；服务端据此确定句末。
     private let silenceDurationMilliseconds: Int
     private let threshold: Double
@@ -1029,6 +1064,8 @@ public actor RealtimeASRClient {
     public init(
         port: Int = 8201,
         model: String = RealtimeASRClient.canonicalASRModel,
+        language: String? = nil,
+        keywords: [String]? = nil,
         silenceDurationMilliseconds: Int = 400,
         threshold: Double = 0.5,
         diarizationEnabled: Bool = false,
@@ -1054,6 +1091,8 @@ public actor RealtimeASRClient {
         // 以 1008 关掉（契约「连接与认证」）。这里不自己读环境变量。
         self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
         self.model = model
+        self.language = language
+        self.keywords = keywords
         self.silenceDurationMilliseconds = silenceDurationMilliseconds
         self.threshold = threshold
         self.diarizationEnabled = diarizationEnabled
@@ -1321,6 +1360,8 @@ public actor RealtimeASRClient {
         SpeechRailSessionUpdate(
             model: model,
             task: sessionTask,
+            language: language,
+            keywords: keywords,
             endpointing: SpeechRailSessionUpdate.Endpointing(
                 threshold: threshold,
                 silenceDurationMilliseconds: silenceDurationMilliseconds
@@ -1522,6 +1563,40 @@ public actor RealtimeASRClient {
                 await emit(.failed(itemID: itemID, code: "invalid_hypothesis", message: "流式转写快照格式无效"))
                 return
             }
+            let stablePrefixCodepoints: Int?
+            if let rawStablePrefix = object["stable_prefix_codepoints"] {
+                guard let value = Self.int(rawStablePrefix),
+                      value >= 0,
+                      value <= text.unicodeScalars.count else {
+                    await emit(
+                        .failed(
+                            itemID: itemID,
+                            code: "invalid_hypothesis",
+                            message: "稳定前缀超出当前快照范围"
+                        )
+                    )
+                    return
+                }
+                stablePrefixCodepoints = value
+            } else {
+                stablePrefixCodepoints = nil
+            }
+            let sampleSpan: RealtimeSampleSpan?
+            if let rawSampleSpan = object["sample_span"] {
+                guard let value = Self.span(rawSampleSpan) else {
+                    await emit(
+                        .failed(
+                            itemID: itemID,
+                            code: "invalid_hypothesis",
+                            message: "采样范围格式无效"
+                        )
+                    )
+                    return
+                }
+                sampleSpan = .init(startSample: value.start, endSample: value.end)
+            } else {
+                sampleSpan = nil
+            }
             guard !itemID.isEmpty, let epoch else { break }
             guard eventState.acceptHypothesis(
                     itemID: itemID,
@@ -1537,7 +1612,17 @@ public actor RealtimeASRClient {
                 break
             }
             await flushExpiredItems()
-            await emit(.partialSnapshot(itemID: itemID, revision: revision, text: text))
+            await emit(
+                .partialSnapshot(
+                    itemID: itemID,
+                    revision: revision,
+                    text: text,
+                    evidence: .init(
+                        stablePrefixCodepoints: stablePrefixCodepoints,
+                        sampleSpan: sampleSpan
+                    )
+                )
+            )
         case "conversation.item.input_audio_transcription.completed":
             let itemID = object["item_id"] as? String ?? ""
             let transcript = object["transcript"] as? String ?? ""

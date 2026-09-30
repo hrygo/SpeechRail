@@ -137,6 +137,7 @@ public final class TeleprompterStore {
                     text: s.text,
                     keywords: s.keywords,
                     matchPhrases: s.matchPhrases,
+                    acceptedReadings: s.acceptedReadings,
                     pauseHint: s.pauseHint
                 )
             }
