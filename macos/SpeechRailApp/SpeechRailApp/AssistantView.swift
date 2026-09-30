@@ -1571,6 +1571,18 @@ public struct AssistantView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
             }
+            // 识别 / 朗读失败的软提示。少了这一条，用户看到的是"字消失了、
+            // 什么都没发生"——既不知道出了事，也不知道下一步该做什么。
+            if let failure = assistant.lastFailure {
+                NoticeBar(
+                    tone: .warning,
+                    message: failure,
+                    actionTitle: "知道了",
+                    action: { assistant.clearFailure() }
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             liveChatIntegratedControls
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

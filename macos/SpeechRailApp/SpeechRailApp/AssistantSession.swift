@@ -166,6 +166,13 @@ public final class AssistantSession {
     public private(set) var turns: [Turn] = []
     /// 正在识别的那一句（未定稿，只进内存）。
     public private(set) var partialText: String?
+    /// `partialText` 槽位的**归属 item**。
+    ///
+    /// 一条连接上可以有多个并发 item（服务端 rollover commit），
+    /// 客户端 `RealtimeEventState` 也按最多 128 个 item 追踪。槽位只绑定
+    /// 一个 item：迟到的事件不许覆盖或清掉当前正在显示的那一句。
+    /// 与 `partialText` 同生共死——非 nil 时 `partialText` 必然非 nil。
+    private var partialItemID: String?
     /// 正在生成的那一句助手回复（流式累加）。
     public private(set) var streamingReply: String?
     public private(set) var level: Double = 0
@@ -567,6 +574,15 @@ public final class AssistantSession {
         isMuted.toggle()
     }
 
+    /// 关掉界面上的失败提示（用户点了「知道了」）。
+    ///
+    /// `lastFailure` 与 `blocked` 是两件事：`blocked` 是硬受阻卡，带重试出口与
+    /// 占用语义，不在这里动。打字发送失败也不走它——那是 View 侧自己的
+    /// `sendFailure`（`AssistantView.send()`）。
+    public func clearFailure() {
+        lastFailure = nil
+    }
+
     /// 主动停止当前助手的朗读或思考（打断当前回答），但不结束会话。
     /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
     public func stopSpeaking() async {
@@ -908,6 +924,7 @@ public final class AssistantSession {
         turns = []
         history = []
         partialText = nil
+        partialItemID = nil
         streamingReply = nil
         committedItemIDs = []
         currentOrdinal = 0
@@ -1054,6 +1071,7 @@ public final class AssistantSession {
         phase = .idle
         level = 0
         partialText = nil
+        partialItemID = nil
         streamingReply = nil
         // 场次都结束了，两轮回复的身份也一并作废：下一次开始会重新分配。
         currentReply = nil
@@ -1132,6 +1150,22 @@ public final class AssistantSession {
         return wall
     }
 
+    /// 这个 item 能不能动 `partialText` 这个**单槽位**。
+    ///
+    /// 槽位为空时先到者绑定；绑定之后只认同一个 item。空 itemID 是异常形状
+    /// （`RealtimeASRClient` 的 `invalid_hypothesis` 就是空串），认不出身份
+    /// 就返回 false——只报告失败，不去动当前正在显示的那一句。
+    private func ownsPartial(_ itemID: String) -> Bool {
+        guard !itemID.isEmpty else { return false }
+        return partialItemID == nil || partialItemID == itemID
+    }
+
+    /// 清空"正在识别的那一句"这个槽位（正文与归属必须一起清）。
+    private func clearPartialSlot() {
+        partialText = nil
+        partialItemID = nil
+    }
+
     private func durationSeconds(_ d: Duration) -> Double {
         let c = d.components
         return Double(c.seconds) + Double(c.attoseconds) / 1e18
@@ -1152,19 +1186,32 @@ public final class AssistantSession {
             guard !delta.isEmpty else { return }
             _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             await noteSpeechEvidence()
+            // 别的 item 的增量不进来：它是**那一句**的证据，不是当前槽位的。
+            guard ownsPartial(itemID) else { return }
+            partialItemID = itemID
             partialText = (partialText ?? "") + delta
         case .partialSnapshot(let itemID, _, let text, _):
             if !text.isEmpty {
                 _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             }
             await noteSpeechEvidence()
+            guard ownsPartial(itemID) else { return }
+            // hypothesis 是**可改写全文**，必须整段替换，不能追加（契约 §5.1）。
+            // 空快照是"这一句现在没有可展示的正文"：清掉可见文字，并把归属一起
+            // 放开——槽位空着的时候，下一个 item 才能接上，不会被这一句占住。
+            partialItemID = text.isEmpty ? nil : itemID
             partialText = text.isEmpty ? nil : text
         case .completed(let itemID, let transcript):
             // final-only 的 item 到这里才有第一个证据，用它自己的接收时刻。
             let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             await commitUserTurn(itemID: itemID, transcript: transcript, observedAt: observed)
-        case .failed(_, let code, let message):
-            partialText = nil
+        case .failed(let itemID, let code, let message):
+            // 空 itemID 认不出身份（例如 `invalid_hypothesis`），
+            // 只报告失败，不去动别人的可见文字。
+            if ownsPartial(itemID) {
+                partialText = nil
+                partialItemID = nil
+            }
             lastFailure = "\(code)：\(message)"
         case .ttsStarted(let requestID, let taskID, let limits):
             _ = ttsStream?.handleStarted(
@@ -1235,6 +1282,70 @@ public final class AssistantSession {
         }
     }
 
+    /// 服务端给回空 final、而这一轮**确实说过话**：把已经显示出来的那半句留住。
+    ///
+    /// 它以 `status: .partial` 落库，因此在记录库句数与导出里不算一句正式的话
+    /// （`lines(includePartial: false)` 与 `listSessions` 的口径不变），
+    /// 但用户能看见自己说过什么，不会遇到"字突然没了、什么都没发生"。
+    ///
+    /// 刻意**不进 LLM / TTS**：`speechrail.transcription.hypothesis` 是可改写的
+    /// 全文，不是权威文本。拿它去问模型等于把未确认内容当事实，而且用户无法
+    /// 分清哪句是真的。要让用户知道的是"这句没定稿"，不是让它自己往下走。
+    private func keepUnfinalizedUtterance(
+        itemID: String,
+        partial: String?,
+        observedAt observed: Date
+    ) async {
+        // 没说话时的空 final 是正常路径（`clear` 之后的那一次 commit），
+        // 不该凭空造出一句"没能识别完整"。
+        guard let partial else { return }
+        let trimmed = partial.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let sessionID = sessionID else { return }
+        if !itemID.isEmpty {
+            guard !committedItemIDs.contains(itemID) else { return }
+            committedItemIDs.insert(itemID)
+        }
+        do {
+            // ordinal 取 appendLine 的返回值，不自行 +1：库里的自增序号才是权威，
+            // 自行推算会与它错位，影响首句标题判定与音色 atOrdinal 回推。
+            let ordinal = try await coordinator.appendLine(
+                LineDraft(
+                    sessionID: sessionID,
+                    role: .user,
+                    text: trimmed,
+                    source: .microphone,
+                    // 和定稿路径同一口径：wire 上没有 sample span，
+                    // 精确的声学起止存 NULL（D09）。
+                    tStart: nil,
+                    tEnd: nil,
+                    status: .partial,
+                    isInterrupted: true,
+                    timingQuality: .unavailable,
+                    createdAt: observed
+                )
+            )
+            currentOrdinal = ordinal
+            turns.append(
+                Turn(
+                    id: UUID().uuidString,
+                    ordinal: ordinal,
+                    role: .user,
+                    text: trimmed,
+                    source: .microphone,
+                    isInterrupted: true,
+                    speakerLabel: nil,
+                    createdAt: observed
+                )
+            )
+            lastFailure = "这一句没能识别完整，请再说一次。"
+        } catch {
+            // 写失败就如实说写失败，不留"界面有、库里没有"的行，
+            // 也不让 committedItemIDs 把它记成已经提交过。
+            if !itemID.isEmpty { committedItemIDs.remove(itemID) }
+            lastFailure = error.localizedDescription
+        }
+    }
+
     /// 用户说完一句：落库 → 调大模型 → 逐句合成。
     private func commitUserTurn(
         itemID: String,
@@ -1242,9 +1353,25 @@ public final class AssistantSession {
         observedAt observed: Date
     ) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        partialText = nil
         defer { if !itemID.isEmpty { itemObservedAt.removeValue(forKey: itemID) } }
-        guard !text.isEmpty, let sessionID, let startedAt = sessionStartedAt else { return }
+        // 先把"槽位上是不是它"和"槽位上是什么"取到手，再清：
+        // 空 final 的保留分支要用这份正文，不能在判断之前就把它抹掉。
+        let ownsSlot = ownsPartial(itemID)
+        let visible = ownsSlot ? partialText : nil
+        if ownsSlot { clearPartialSlot() }
+        // 空 final 是契约允许的正常事件（`clear` 之后的那一次 commit）。
+        // 但"用户确实说过话、服务端却没能定稿"不是正常路径：这句话已经显示在
+        // 界面上了，先清 `partialText` 再无声 `return` 会让它连同用户的话一起消失，
+        // 不落库、不问模型、不报错。保留它，并明确告诉用户没定稿。
+        guard !text.isEmpty else {
+            await keepUnfinalizedUtterance(
+                itemID: itemID,
+                partial: visible,
+                observedAt: observed
+            )
+            return
+        }
+        guard let sessionID, let startedAt = sessionStartedAt else { return }
         if !itemID.isEmpty {
             guard !committedItemIDs.contains(itemID) else { return }
             committedItemIDs.insert(itemID)
@@ -1294,6 +1421,8 @@ public final class AssistantSession {
         if appendedOrdinal == 1, let name = SessionTitleSuggestion.suggest(from: text) {
             try? await coordinator.setSessionTitle(id: sessionID, title: name)
         }
+        // 这一句成功定稿了：上一次留下的软提示（比如"没能识别完整"）已经过期。
+        clearFailure()
         beginReply(spoken: true)
     }
 
@@ -1694,6 +1823,7 @@ public final class AssistantSession {
         }
         level = 0
         partialText = nil
+        partialItemID = nil
         blocked = .streamFailed(reason)
         phase = .paused
         if coordinator.occupancy?.kind == .assistant {
