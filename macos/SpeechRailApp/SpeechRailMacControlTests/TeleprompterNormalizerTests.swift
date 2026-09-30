@@ -76,6 +76,63 @@ final class TeleprompterNormalizerTests: XCTestCase {
         XCTAssertTrue(segments.map(\.text).joined().contains(identifier))
     }
 
+    func testLongChineseSentenceIsSplitInsteadOfKeptWhole() throws {
+        let clause = "首先我们检查相机的曝光设置然后确认白平衡"
+        let source = String(repeating: clause + "，", count: 5)
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertGreaterThan(
+            segments.count, 1,
+            "A \(source.count)-character Chinese clause chain must not stay in one reading unit"
+        )
+        XCTAssertTrue(
+            segments.allSatisfy { $0.text.count <= 60 },
+            "Every unit must respect the soft target, got \(segments.map(\.text.count))"
+        )
+    }
+
+    func testChineseSentenceWithoutPunctuationFallsBackToTheHardTarget() throws {
+        let source = String(repeating: "一", count: 200)
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertGreaterThan(segments.count, 1)
+        XCTAssertTrue(
+            segments.allSatisfy { $0.text.count <= 60 },
+            "With no boundary to prefer, the 60-character cap must still apply"
+        )
+    }
+
+    func testChineseClausesAreCutJustAfterAPunctuation() throws {
+        let source = String(repeating: "甲乙丙丁戊己庚辛壬癸，", count: 4)
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertTrue(
+            segments.allSatisfy { $0.text.hasSuffix("，") },
+            "Each cut should land just after a comma, got \(segments.map(\.text))"
+        )
+    }
+
+    func testLongLatinIdentifierInsideChineseTextStillSurvivesTheSoftTarget() throws {
+        let identifier = "super_long_identifier_that_should_stay_together_then_keep_going"
+        let source = identifier + String(repeating: "内容", count: 40) + "。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        let identifierSegments = segments.filter { $0.text.contains(identifier) }
+        XCTAssertEqual(identifierSegments.count, 1, "The identifier itself must stay whole")
+        XCTAssertEqual(
+            identifierSegments.first?.text, identifier,
+            "The unit holding the identifier must end with it, not run on into the Chinese after it"
+        )
+        XCTAssertTrue(
+            segments.dropFirst().allSatisfy { $0.text.count <= 60 },
+            "Only the identifier unit may exceed the soft target, got \(segments.map(\.text.count))"
+        )
+    }
+
     func testSentenceEndingJustOverTheSoftTargetDoesNotStrandItsPunctuation() throws {
         // Every sentence longer than the soft target used to be cut at exactly
         // the target, which left the sentence-final full stop as a segment of

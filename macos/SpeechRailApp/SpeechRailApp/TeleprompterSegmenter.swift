@@ -115,8 +115,8 @@ public enum TeleprompterSegmenter {
             // longer than the target, but remains pronounceable and traceable.
             while end < range.upperBound,
                   let previous = end > start ? sourceText.index(before: end) : nil,
-                  isWordCharacter(sourceText[previous]),
-                  isWordCharacter(sourceText[end]) {
+                  isLatinWordCharacter(sourceText[previous]),
+                  isLatinWordCharacter(sourceText[end]) {
                 end = sourceText.index(after: end)
             }
             result.append(start..<end)
@@ -218,6 +218,20 @@ public enum TeleprompterSegmenter {
         character.unicodeScalars.allSatisfy {
             CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
                 || $0.value == 0x5F || $0.value == 0x23
+        }
+    }
+
+    /// Deliberately narrower than `isWordCharacter`: that one matches
+    /// `CharacterSet.letters`, which also matches CJK, so reusing it here made
+    /// the "do not split a Latin word" guard swallow whole Chinese runs.
+    /// It is the correct predicate for the soft-target loop and the wrong one
+    /// for the decimal/version and abbreviation protections above, which do
+    /// need to treat Han characters as word characters.
+    private static func isLatinWordCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { scalar in
+            (0x41...0x5A).contains(scalar.value) || (0x61...0x7A).contains(scalar.value)
+                || (0x30...0x39).contains(scalar.value)
+                || scalar.value == 0x5F || scalar.value == 0x23
         }
     }
 }

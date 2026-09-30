@@ -97,12 +97,17 @@ struct TeleprompterAnalysisTests {
 
     @Test func aUnitLongerThanTheMergeBoundIsAcceptedOnItsOwn() throws {
         // The 180-character bound stops the model from *merging* units into one
-        // oversized annotation. The segmenter's soft target does not bound CJK
-        // sentences -- a 500-character Chinese sentence is a single unit -- so
-        // before this, such a script could not be annotated at all and the
-        // session reported the model's perfectly valid response as an AI
-        // failure.
-        let long = String(repeating: "字", count: 240) + "。"
+        // oversized annotation. A unit can still exceed the segmenter's 60-
+        // character soft target on purpose -- an unbreakable Latin identifier
+        // is never cut -- so such a script must remain annotatable, and the
+        // session must not report the model's perfectly valid response as an
+        // AI failure.
+        //
+        // This used to be written as 240 Chinese characters, back when a long
+        // CJK sentence stayed in one unit. The segmenter no longer does that
+        // (see TeleprompterNormalizerTests), so the fixture had to move to the
+        // case that still legitimately produces an oversized unit.
+        let long = String(repeating: "a", count: 240) + "。"
         let oneUnit = #"{"schema_version":"teleprompter.analysis.v2","segments":[{"start_unit":0,"end_unit":1,"keywords":[],"match_phrases":[],"pause_hint":"long"}]}"#
 
         let result = try TeleprompterAnalysisDecoder().decode(oneUnit, sourceText: long)
@@ -125,7 +130,7 @@ struct TeleprompterAnalysisTests {
     }
 
     @Test @MainActor func aScriptWithAnOverlongUnitStillAnnotatesEndToEnd() async throws {
-        let long = String(repeating: "字", count: 240) + "。"
+        let long = String(repeating: "a", count: 240) + "。"
         let response = #"{"schema_version":"teleprompter.analysis.v2","segments":[{"start_unit":0,"end_unit":1,"keywords":[],"match_phrases":[],"pause_hint":"long"}]}"#
         let client = TeleprompterAIClient { _ in response }
 
