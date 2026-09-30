@@ -391,10 +391,19 @@
       "id": "N4",
       "note": "不再为了不切断英文单词而越过分段软上限",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
-      "find": "            while end < range.upperBound,\n                  let previous = end > start ? sourceText.index(before: end) : nil,\n                  isWordCharacter(sourceText[previous]),\n                  isWordCharacter(sourceText[end]) {\n                end = sourceText.index(after: end)\n            }",
+      "find": "            while end < range.upperBound,\n                  let previous = end > start ? sourceText.index(before: end) : nil,\n                  isLatinWordCharacter(sourceText[previous]),\n                  isLatinWordCharacter(sourceText[end]) {\n                end = sourceText.index(after: end)\n            }",
       "replace": "            while false {\n                end = sourceText.index(after: end)\n            }",
       "expect": "KILLED",
-      "rationale": "**首轮存活，而存活的理由是那条回归本身没写到被保护的分支上**（第 78 条同族）。既有 `testLongLatinIdentifierIsNotSplitAtTheSoftTarget` 的素材是 61 字：有保护时词内循环把 `end` 顶到句末，无保护时 `end` 停在 60，两侧都再被本轮新增的尾段合并收拾成同一段——断言恒真。素材换成真正跨过上限的 73 字版本后转杀。"
+      "rationale": "**首轮存活，而存活的理由是那条回归本身没写到被保护的分支上**（第 78 条同族）。既有 `testLongLatinIdentifierIsNotSplitAtTheSoftTarget` 的素材是 61 字：有保护时词内循环把 `end` 顶到句末，无保护时 `end` 停在 60，两侧都再被本轮新增的尾段合并收拾成同一段——断言恒真。素材换成真正跨过上限的 73 字版本后转杀。**#117 落地后判据已换成 `isLatinWordCharacter`**：原先这里调用的 `isWordCharacter` 用 `CharacterSet.letters`，而 `letters` 含汉字，于是这道「不切断英文单词」的保护在中文上照样生效，把切点一路推到句末——200 字无标点中文实测被切成 1 段。`find` 已同步为新判据，`expect` 不变。"
+    },
+    {
+      "id": "N15",
+      "note": "软上限的「不切断单词」保护重新把汉字也算成词字符",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "    private static func isLatinWordCharacter(_ character: Character) -> Bool {\n        character.unicodeScalars.allSatisfy { scalar in\n            (0x41...0x5A).contains(scalar.value) || (0x61...0x7A).contains(scalar.value)\n                || (0x30...0x39).contains(scalar.value)\n                || scalar.value == 0x5F || scalar.value == 0x23\n        }\n    }",
+      "replace": "    private static func isLatinWordCharacter(_ character: Character) -> Bool {\n        isWordCharacter(character)\n    }",
+      "expect": "KILLED",
+      "rationale": "**这条就是 #117 缺陷本身**：`isLatinWordCharacter` 若退回含汉字的判据，中文长句会重新被当成一个不可切的词。回归有两条真的咬住——`testChineseSentenceWithoutPunctuationFallsBackToTheHardTarget`（200 字无标点，退回后合成 1 段）与 `testLongLatinIdentifierInsideChineseTextStillSurvivesTheSoftTarget`（标识符之后的汉字被粘进同一段，末段长度断言变红）。另两条中文用例（带逗号的长句、按标点切）**修复前后都绿**，它们是守卫不是证据：带标点时 `boundedRanges` 先走「优先切到逗号」那一道，词内循环根本没被触发。"
     },
     {
       "id": "N5",
