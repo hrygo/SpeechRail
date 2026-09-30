@@ -53,6 +53,22 @@ echo "exit=$?"
 **不要把探针接管道**（`| tail`、`| tee`）：那样 `$?` 取到的是最后一个管道的退出码，而它永远成功。
 阶段报告 §2.51 记的就是这一次自我 mistake——曾据此把 `exit 1` 写成 `exit 0`。
 
+### 「先改状态、后可能失败」静态扫描（**按需触发，不进常规门禁**）
+
+`tools/scan_state_before_failure.py` 列出「改了状态、后面有 `try`／`throw`／`guard ... else`」
+的 Swift 函数，分成 `unprotected`（此后没有 `catch`／`defer`）与 `guarded`（有，但**不代表
+回滚写全了**）。这是阶段报告 §2 第 43 条那次一次性扫描的可复用版本（issue #121）；50 个真缺陷
+里有 41 个属于这一族。
+
+```bash
+tools/scan_state_before_failure.py --self-check          # 先证明分类不是恒真
+tools/scan_state_before_failure.py macos/SpeechRailApp/SpeechRailApp
+```
+
+**输出是候选，不是结论；零命中不等于干净。** 引用「某处扫过没有命中」之前必须先跑
+`--self-check`（阶段报告 §2.52 记着扫描器在自己身上恒真过的一次）。脚本按花括号配对切函数体、
+不做完整解析，已知的假阳性类别与逐条排除结论写在它自己的文档串里。
+
 官方 Node SDK 的分人 multipart wire contract 单独锁定在 `tests/openai-sdk-node/`，不参与服务的
 运行时依赖：
 
