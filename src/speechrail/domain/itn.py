@@ -39,6 +39,11 @@ def _chinese_to_int(cn_str: str) -> int:
     if cn_str.isdigit():
         return int(cn_str)
 
+    # Spoken digit sequences such as ``二零`` are positional, not additive.  The
+    # unit-based accumulator below would otherwise keep only the final digit.
+    if not any(char in cn_str for char in "十百千万亿"):
+        return int("".join(str(_DIGITS_MAP[char]) for char in cn_str))
+
     units = {"十": 10, "百": 100, "千": 1000, "万": 10000, "亿": 100000000}
     total = 0
     section = 0

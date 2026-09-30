@@ -2,13 +2,13 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.3.0"
-date: 2026-09-26
+version: "2.3.1"
+date: 2026-09-30
 ---
 
 # 🛠️ SpeechRail 开发者文档
 
-本目录面向参与代码开发、架构演进、Worker 协议扩展和测试门禁维护的工程师。公共行为以代码、测试和 `contracts/` 为准；本目录中的设计说明不自动扩大产品能力。
+本目录面向参与代码开发、架构演进、Worker 协议扩展和测试门禁维护的工程师。公共行为的预期以 `contracts/` 为准，当前实现与实测以代码和测试为准；本目录中的设计说明不自动扩大产品能力。
 
 ---
 
@@ -22,7 +22,7 @@ graph TD
     D --> E[📜 5. 架构决策记录<br/>../decisions/README.md]
 ```
 
-1. **[🚀 开发者上手指南 (development-guide.md)](development-guide.md)**：开发环境搭建、5分钟本地启动、目录代码规范与 Worker 扩展流程。
+1. **[🚀 开发者上手指南 (development-guide.md)](development-guide.md)**：开发环境搭建、5 分钟本地启动、目录代码规范与 Worker 扩展流程。
 2. **[🧪 测试与质量验收规范 (testing-acceptance.md)](testing-acceptance.md)**：确定性测试、Fake Backend 模式、真实模型 Smoke 与质量门禁。
 3. **[📡 公共 API 契约手册](../users/api-contract.md)**：REST 端点定义、WebSocket 协议与 OpenAI 兼容层实现标准。
 4. **[🖥️ macOS App 开发与测试](macos-app-development.md)**：SwiftUI 控制面、XPC helper、测试隔离与服务边界。

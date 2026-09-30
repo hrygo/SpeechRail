@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
 
 
@@ -20,11 +22,18 @@ def test_itn_decimals() -> None:
     assert apply_light_itn("温度是零点八五度") == "温度是0.85度"
 
 
-def test_itn_numbers_with_units() -> None:
-    assert apply_light_itn("售价一百二十五元") == "售价125元"
-    assert apply_light_itn("价值五百美元") == "价值500美元"
-    assert apply_light_itn("跑了三万米") == "跑了30000米"
-    assert apply_light_itn("他今年二十八岁") == "他今年28岁"
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("售价一百二十五元", "售价125元"),
+        ("价值五百美元", "价值500美元"),
+        ("跑了三万米", "跑了30000米"),
+        ("他今年二十八岁", "他今年28岁"),
+        ("二零号座位", "20号座位"),
+    ],
+)
+def test_itn_numbers_with_units(source: str, expected: str) -> None:
+    assert apply_light_itn(source) == expected
 
 
 def test_itn_empty_and_passthrough() -> None:
