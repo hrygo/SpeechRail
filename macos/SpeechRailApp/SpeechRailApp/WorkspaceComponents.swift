@@ -2591,9 +2591,43 @@ public struct DeveloperInspector<Content: View>: View {
  }
  .scrollIndicators(.automatic)
  .scrollBounceBehavior(.basedOnSize)
- .speechRailInspectorColumn(alignment: .topLeading)
- .background(SpeechRailDesignTokens.Color.field)
+    .speechRailInspectorColumn(alignment: .topLeading)
+    .background(SpeechRailDesignTokens.Color.field)
  }
+}
+
+/// 「开发者详情」右侧面板的**唯一开关**。
+///
+/// 面板本身由各页面的 `.inspector(isPresented:)` 承载，开关却曾各写各的、甚至缺席：
+/// 2026-09-30 用户反馈「详情打开后无法关闭，只能去设置里关」。`showDeveloperDetails`
+/// 是全 App 共享的一个偏好，所以任何一页打开它，服务状态 / 运行监控 / 诊断 /
+/// 音色克隆这四页的右侧面板都会跟着亮起，而这四页页内**没有任何开关**——
+/// 唯一可发现的关闭路径退化成「设置 ▸ 通用」或没人知道的 ⌘⌥I
+/// （模型组合页有卡头那一枚，所以只有它关得掉）。
+///
+/// 声明点放在这里：叫什么、什么形状、快捷键是哪一条，只写一次；需要在页内开合的
+/// 页面接上它，开关与面板标题（`DeveloperInspector` 的「开发者详情」）也就不会漂移。
+public struct DeveloperInspectorToggle: View {
+    @Binding private var isPresented: Bool
+    private let helpText: String
+
+    public init(isPresented: Binding<Bool>, helpText: String) {
+        self._isPresented = isPresented
+        self.helpText = helpText
+    }
+
+    public var body: some View {
+        PageActionButton(
+            title: isPresented ? "收起详情" : "开发者详情",
+            icon: isPresented
+                ? SpeechRailDesignTokens.Icon.Symbol.sidebarRight
+                : SpeechRailDesignTokens.Icon.Symbol.infoCircle,
+            helpText: helpText
+        ) {
+            isPresented.toggle()
+        }
+        .accessibilityIdentifier("developer-inspector-toggle")
+    }
 }
 
 /// 目录页（音色库 / 我的作品）右侧详情面板的**唯一结构声明点**。

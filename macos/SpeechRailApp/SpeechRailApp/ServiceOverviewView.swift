@@ -5,7 +5,8 @@ import SwiftUI
 public struct ServiceOverviewView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var pendingAction: ControlCommand?
 
@@ -20,6 +21,14 @@ public struct ServiceOverviewView: View {
                 ControlAgentStatusView()
                 serviceBody
             }
+        } trailing: {
+            // 这一页原先只有 `⌘⌥I` 和「设置 ▸ 通用」能关掉右侧详情面板，用户反馈
+            // 「打开后无法关闭，只能去设置关闭」（2026-09-30）。开关是面板的一部分，
+            // 与其内容一样必须在页内可发现。
+            DeveloperInspectorToggle(
+                isPresented: $showInspector,
+                helpText: "查看服务、档位与控制通道的技术事实 (⌘⌥I)"
+            )
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

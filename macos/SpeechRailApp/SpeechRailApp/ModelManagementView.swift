@@ -6,7 +6,8 @@ public struct ModelManagementView: View {
     @Environment(AppNavigationState.self) private var navigation
     /// 助手还在听/想/说时不能切档：切档会重启服务，等于把这一轮打断。
     @Environment(AssistantSession.self) private var assistant
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     /// 识别与配音是两条**独立**的轴，任何一档都能配任何一档（九种组合）。
     /// 三张档位卡只是其中三种最常用的预设，写这两项相同的值。
@@ -591,20 +592,13 @@ public struct ModelManagementView: View {
                 // 两者口径不同，所以分开写。
                 accessory: artifactReadinessAccessory
             ) {
-                Button {
-                    withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
-                        showInspector.toggle()
-                    }
-                } label: {
-                    Label(
-                        showInspector ? "收起详情" : "模型详情",
-                        systemImage: showInspector ? "sidebar.right" : "info.circle"
-                    )
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                }
-                .buttonStyle(.borderless)
-                .speechRailPointerCursor()
-                .help("查看所选模型的来源、哈希与校验详情 (⌘⌥I)")
+                // 面板本体是 `DeveloperInspector`（标题「开发者详情」），开关曾经
+                // 写成「模型详情」，同一件事两种叫法，也让人对不上「设置 ▸ 通用 ▸
+                // 显示开发者详情」那个真正控制它的开关（2026-09-30 用户反馈）。
+                DeveloperInspectorToggle(
+                    isPresented: $showInspector,
+                    helpText: "查看所选模型的来源、哈希与校验详情 (⌘⌥I)"
+                )
             }
             Divider()
             if model.modelCatalog != nil {
@@ -639,6 +633,9 @@ public struct ModelManagementView: View {
                             .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .speechRailPointerCursor()
                             .accessibilityIdentifier("artifact-\(artifact.key)")
+                            // 双击是**打开并查看这一项**，不是开/关切换（Finder 同款约定）：
+                            // 面板已开时双击另一行应当换内容而不是把它关掉。关闭走同一张
+                            // 卡片卡头右上角的开关，那里现在与其它页面同名同形。
                             .simultaneousGesture(
                                 TapGesture(count: 2).onEnded {
                                     withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {

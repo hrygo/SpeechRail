@@ -7,7 +7,8 @@ import SwiftUI
 public struct RuntimeMonitoringView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var timeWindow = MonitoringTimeWindow.fiveMinutes
     @State private var reportMessage: String?
@@ -125,7 +126,13 @@ public struct RuntimeMonitoringView: View {
                 metricsDetailSection
             }
         } trailing: {
-            timeWindowPicker
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                timeWindowPicker
+                DeveloperInspectorToggle(
+                    isPresented: $showInspector,
+                    helpText: "查看采样口径、指标定义与资源明细 (⌘⌥I)"
+                )
+            }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
