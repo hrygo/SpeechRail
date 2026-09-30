@@ -19,6 +19,24 @@ public struct TeleprompterTrialReadingSheet: View {
     @State private var guidanceMessage: String?
     @State private var sampleText: String = ""
 
+    /// 手动秒表与语音辅助试读是两次独立动作，不是同一个开关的两端。
+    /// 打开这个窗口本身不碰麦克风——必须由用户按下试读按钮。
+    private enum TrialMode: String, CaseIterable, Identifiable {
+        case manual
+        case speech
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .manual: "手动计时"
+            case .speech: "语音辅助"
+            }
+        }
+    }
+
+    @State private var trialMode: TrialMode = .manual
+
     public init(session: TeleprompterSession) {
         self.session = session
     }
@@ -27,7 +45,11 @@ public struct TeleprompterTrialReadingSheet: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             header
             sampleScriptSection
+            modePicker
             timerAndControls
+            if trialMode == .speech {
+                speechTrialSection
+            }
             if let trialResult {
                 resultBanner(trialResult)
             } else if let guidanceMessage {
@@ -50,6 +72,10 @@ public struct TeleprompterTrialReadingSheet: View {
         }
         .onDisappear {
             stopTimer()
+            // 关闭窗口必须归还麦克风：试读不是常驻功能。
+            if session.speechTrialStage.isActive {
+                Task { await session.stopSpeechTrial() }
+            }
         }
     }
 
@@ -62,7 +88,10 @@ public struct TeleprompterTrialReadingSheet: View {
                     .font(SpeechRailDesignTokens.Typography.display)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                Text("大声朗读一段代表性文字（建议 60–90 秒），系统将测定你的个人语速并校准预测。")
+                Text(
+                    "大声朗读一段代表性文字（\(TeleprompterTimingPolicy.trialGuidanceText)），"
+                        + "系统将测定你的个人语速并校准预测。"
+                )
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -119,6 +148,122 @@ public struct TeleprompterTrialReadingSheet: View {
 
     // MARK: - 计时与控制
 
+    private var modePicker: some View {
+        Picker("试读方式", selection: $trialMode) {
+            ForEach(TrialMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityLabel("试读方式")
+        .accessibilityHint("手动计时只测时长；语音辅助还会验证采集、识别与定位")
+        .onChange(of: trialMode) { _, newMode in
+            // 换方式等于换一次动作：停掉秒表与上一次试读，不留半截状态。
+            stopTimer()
+            elapsedSeconds = 0
+            guidanceMessage = nil
+            trialResult = nil
+            if newMode == .speech, session.speechTrialStage.isActive {
+                Task { await session.stopSpeechTrial() }
+            }
+        }
+    }
+
+    /// 语音辅助试读区。
+    ///
+    /// 三段链路分开报，是为了不把「麦克风在响」说成「识别没问题」——
+    /// #112 明确不能只以输入电平证明识别和定位成功。
+    @ViewBuilder
+    private var speechTrialSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                chainStep("麦克风", done: session.speechTrialStage.isActive)
+                chainStep("识别", done: session.speechTrialEvidence?.provesRecognition == true)
+                chainStep("定位", done: session.speechTrialEvidence?.provesAlignment == true)
+                Spacer()
+            }
+
+            if let evidence = session.speechTrialEvidence {
+                Text(
+                    "识别到 \(evidence.recognizedUnits) 个单位，其中 \(evidence.matchedUnits) 个能在稿件里对上。"
+                )
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            switch session.speechTrialStage {
+            case .preparing:
+                Text("正在打开麦克风并连接识别服务…")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            case let .failed(reason):
+                Text(reason)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .listening:
+                Text("正在听你朗读这段文字，读完后按「读完了」。这段文字不会写进记录。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .idle:
+                Text("开始后才会使用麦克风。识别内容只用来验证链路，不保存文字。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                if session.speechTrialStage.isActive {
+                    Button("结束语音试读") {
+                        Task { await session.stopSpeechTrial() }
+                    }
+                    .speechRailButton(.primary)
+                } else {
+                    Button {
+                        elapsedSeconds = 0
+                        guidanceMessage = nil
+                        trialResult = nil
+                        Task { await session.startSpeechTrial() }
+                    } label: {
+                        Label("开始语音试读", systemImage: "mic.fill")
+                    }
+                    .speechRailButton(.primary)
+                    .accessibilityHint("会打开麦克风并连接识别服务，用来验证采集、识别与定位")
+                }
+                Spacer()
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(
+                cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                style: .continuous
+            )
+        )
+    }
+
+    private func chainStep(_ title: String, done: Bool) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle.dashed")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(
+                    done ? SpeechRailDesignTokens.Color.ready : SpeechRailDesignTokens.Color.inkTertiary
+                )
+                .accessibilityHidden(true)
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(
+                    done ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkTertiary
+                )
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title)\(done ? "已通过" : "尚未通过")")
+    }
+
     private var timerAndControls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -157,7 +302,10 @@ public struct TeleprompterTrialReadingSheet: View {
 
     @ViewBuilder
     private var trialControls: some View {
-        if !isRunning {
+        if trialMode == .speech {
+            // 语音试读有自己的开始/结束，不能和手动秒表同时可点。
+            EmptyView()
+        } else if !isRunning {
             Button {
                 startTimer()
             } label: {
@@ -257,9 +405,27 @@ public struct TeleprompterTrialReadingSheet: View {
 
             Spacer()
 
-            if let result = trialResult, result.isWithinValidRange {
+            if trialMode == .speech {
+                // 采用语音试读只在真的识别出内容时才有意义；否则按钮不出现，
+                // 而不是按下去再告诉用户「这次不算」。
+                if session.speechTrialEvidence?.isAdoptable == true,
+                   let baseEstimateSeconds,
+                   (session.speechTrialEvidence?.durationSeconds ?? 0)
+                    >= TeleprompterTimingPolicy.minimumTrialDurationSeconds {
+                    Button("采用这次试读") {
+                        guard session.applySpeechTrialCalibration(
+                            baseEstimateSeconds: baseEstimateSeconds
+                        ) != nil else { return }
+                        dismiss()
+                    }
+                    .speechRailButton(.primary)
+                }
+            } else if let result = trialResult, result.isWithinValidRange {
                 Button("采用此校准") {
-                    session.applyTrialCalibration(k: result.calibrationFactor)
+                    session.applyTrialCalibration(
+                        k: result.calibrationFactor,
+                        source: .manualTrial(durationSeconds: result.durationSeconds)
+                    )
                     dismiss()
                 }
                 .speechRailButton(.primary)

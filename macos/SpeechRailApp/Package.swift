@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "SpeechRailControlKit", targets: ["SpeechRailControlKit"]),
         .library(name: "SpeechRailControlAgentCore", targets: ["SpeechRailControlAgentCore"]),
         .executable(name: "SpeechRailControlAgent", targets: ["SpeechRailControlAgent"]),
+        .executable(name: "teleprompter-replay", targets: ["TeleprompterReplayTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/MacPaw/OpenAI.git", exact: "0.5.1"),
@@ -111,6 +112,7 @@ let package = Package(
                 "TeleprompterAnalysis.swift",
                 "TeleprompterStore.swift",
                 "TeleprompterFollowController.swift",
+                "TeleprompterReplayEvaluator.swift",
                 "TeleprompterStageSettings.swift",
                 "TeleprompterStageInteractionPolicy.swift",
                 "TeleprompterVoiceAssistLifecycle.swift",
@@ -120,6 +122,13 @@ let package = Package(
                 "SessionStore.swift",
                 "SessionCoordinator.swift",
             ]
+        ),
+        // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。
+        // 不录音、不下载模型、不联网；缺失素材或版本记录时直接失败。
+        .executableTarget(
+            name: "TeleprompterReplayTool",
+            dependencies: ["SpeechRailAppSupport"],
+            path: "TeleprompterReplayTool"
         ),
         .testTarget(
             name: "SpeechRailMacControlTests",

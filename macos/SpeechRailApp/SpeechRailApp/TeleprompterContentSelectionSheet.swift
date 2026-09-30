@@ -18,6 +18,10 @@ public struct TeleprompterContentSelectionSheet: View {
 
     @State private var paragraphs: [Paragraph] = []
     @State private var selectedIndices: Set<Int> = []
+    /// 改范围会作废当前分段，读者已逐条处理过的审阅也随之消失、且不可重做。
+    /// 会话层因此拒绝静默丢弃，这里先问一句再走确认路径。
+    @State private var isConfirmingReviewDiscard = false
+    @State private var failureMessage: String?
 
     public init(session: TeleprompterSession) {
         self.session = session
@@ -29,6 +33,28 @@ public struct TeleprompterContentSelectionSheet: View {
             statsAndBatchBar
             paragraphList
             footerActions
+        }
+        .alert(
+            "改范围会作废已审阅内容",
+            isPresented: $isConfirmingReviewDiscard
+        ) {
+            Button("继续改范围", role: .destructive) {
+                applySelectionAfterConfirmation()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("你已经审阅过的内容会消失，需要重新整理并重新审阅一遍。原稿不受影响。")
+        }
+        .alert(
+            "没能改范围",
+            isPresented: Binding(
+                get: { failureMessage != nil },
+                set: { if !$0 { failureMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(failureMessage ?? "")
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(
@@ -114,7 +140,7 @@ public struct TeleprompterContentSelectionSheet: View {
             Text("·")
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-            Text("预计用时 \(formatMinutes(selectedEstimateMinutes))")
+            Text(estimatedDurationText)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
@@ -165,6 +191,7 @@ public struct TeleprompterContentSelectionSheet: View {
                             EmptyView()
                         }
                         .toggleStyle(.checkbox)
+                        .accessibilityLabel("选择第 \(index + 1) 段，加入本次要讲的内容")
                         .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -216,16 +243,38 @@ public struct TeleprompterContentSelectionSheet: View {
             Spacer()
 
             Button("确定本次范围") {
-                session.updateContentSelection(
-                    TeleprompterContentSelection(
-                        totalParagraphCount: paragraphs.count,
-                        selectedParagraphIndices: selectedIndices
-                    )
-                )
-                dismiss()
+                applySelection()
             }
             .speechRailButton(.primary)
             .disabled(selectedIndices.isEmpty)
+        }
+    }
+
+    private func currentSelection() -> TeleprompterContentSelection {
+        TeleprompterContentSelection(
+            totalParagraphCount: paragraphs.count,
+            selectedParagraphIndices: selectedIndices
+        )
+    }
+
+    private func applySelection() {
+        do {
+            try session.updateContentSelection(currentSelection())
+            dismiss()
+        } catch TeleprompterTextError.reviewDecisionsWouldBeDiscarded {
+            isConfirmingReviewDiscard = true
+        } catch {
+            // 其余拒绝同样要有声音：确认之后若舞台已开，范围不该被静默丢掉。
+            failureMessage = error.localizedDescription
+        }
+    }
+
+    private func applySelectionAfterConfirmation() {
+        do {
+            try session.applyContentSelectionAfterConfirmation(currentSelection())
+            dismiss()
+        } catch {
+            failureMessage = error.localizedDescription
         }
     }
 
@@ -257,12 +306,26 @@ public struct TeleprompterContentSelectionSheet: View {
     }
 
     private var selectedEstimateMinutes: Double {
+        selectedEstimate.pointMinutes ?? 0
+    }
+
+    private var selectedEstimate: TeleprompterTimingPolicy.EstimateResult {
         let selectedText = selectedIndices.compactMap { index in
             paragraphs.first(where: { $0.id == index })?.text
         }.joined(separator: "\n\n")
         let metrics = TeleprompterTimingPolicy.countMetrics(in: selectedText)
-        let est = TeleprompterTimingPolicy.estimateDuration(metrics: metrics, pace: session.pace, calibrationFactor: session.calibrationFactor)
-        return (est.pointSeconds ?? 0) / 60.0
+        return TeleprompterTimingPolicy.estimateDuration(
+            metrics: metrics,
+            pace: session.pace,
+            calibrationFactor: session.calibrationFactor,
+            calibrationSource: session.calibrationSource
+        )
+    }
+
+    /// 没试读过的时长只是按默认语速推出来的，必须说出来，否则它和实测估计长得一样。
+    private var estimatedDurationText: String {
+        let base = "预计用时 \(formatMinutes(selectedEstimateMinutes))"
+        return selectedEstimate.isCalibrated ? base : "\(base)（未试读校准）"
     }
 
     private func formatMinutes(_ minutes: Double) -> String {

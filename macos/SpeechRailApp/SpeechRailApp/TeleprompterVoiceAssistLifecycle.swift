@@ -93,7 +93,12 @@ public struct TeleprompterVoiceAssistLifecycle: Sendable {
         failureReason: String?
     ) -> Bool {
         guard isCurrent(token), state == .stopping else { return false }
-        if let failureReason, !failureReason.isEmpty {
+        // Fail closed: a non-nil reason means the stop did not complete, even if
+        // the caller could not say why. Recording an empty reason as a clean
+        // stop tells the reader the microphone is released when it may not be,
+        // and the session shows `.stopFailed` with a fixed message rather than
+        // the reason text, so nothing is lost by keeping the failure.
+        if let failureReason {
             state = .stopFailed(failureReason)
             return true
         }

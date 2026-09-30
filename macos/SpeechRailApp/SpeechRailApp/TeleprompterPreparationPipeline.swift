@@ -532,6 +532,9 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
     public let operation: TeleprompterPreparationOperation
     public let selectedUnitIDs: Set<Int>?
     public let currentBlocks: [TeleprompterMapCurrentBlock]
+    /// Source units the reader marked as must-keep. Only `.condense` may omit
+    /// anything, and never these.
+    public let lockedUnitIDs: Set<Int>
 
     public init(
         source: TeleprompterImportedSource,
@@ -541,7 +544,8 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         calibrationFactor: Double = 1.0,
         operation: TeleprompterPreparationOperation = .prepare,
         selectedUnitIDs: Set<Int>? = nil,
-        currentBlocks: [TeleprompterMapCurrentBlock] = []
+        currentBlocks: [TeleprompterMapCurrentBlock] = [],
+        lockedUnitIDs: Set<Int> = []
     ) {
         self.source = source
         self.sourceUnits = sourceUnits
@@ -551,6 +555,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         self.operation = operation
         self.selectedUnitIDs = selectedUnitIDs
         self.currentBlocks = currentBlocks
+        self.lockedUnitIDs = lockedUnitIDs
     }
 }
 
@@ -792,6 +797,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                     calibrationFactor: input.calibrationFactor,
                     operation: input.operation,
                     readOnlyContext: readOnlyContext,
+                    lockedUnitIDs: lockedUnitIDs(in: input, window: window, targets: targets),
                     maxGroupUnits: policy.maxGroupUnits
                 )
             } else {
@@ -809,6 +815,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                             && $0.endUnit > (window.sourceUnitIDs.first ?? 0)
                     },
                     readOnlyContext: readOnlyContext,
+                    lockedUnitIDs: lockedUnitIDs(in: input, window: window, targets: targets),
                     maxGroupUnits: policy.maxGroupUnits
                 )
             }
@@ -1082,6 +1089,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
         if boundaries.contains(where: { $0.state == .unchecked }) {
             status = .boundaryUnchecked
         } else if draft.blocks.contains(where: { $0.disposition == .unresolved })
+                    || draft.blocks.contains(where: { $0.disposition == .skip })
                     || boundaries.contains(where: { !$0.reviewBlockIDs.isEmpty }) {
             status = .reviewRequired
         } else {
@@ -1451,7 +1459,8 @@ private extension TeleprompterPreparationPipeline {
             pace: input.pace,
             calibrationFactor: input.calibrationFactor,
             operation: input.operation,
-            readOnlyContext: readOnlyContext
+            readOnlyContext: readOnlyContext,
+            lockedUnitIDs: Array(input.lockedUnitIDs)
         )
         let rewriteContext = stageContext(from: context, stage: .rewrite, attempt: context.attempt)
         do {
@@ -1584,13 +1593,19 @@ private extension TeleprompterPreparationPipeline {
             }
             let units = IDs.compactMap { sourceUnits[$0] }
             let rawUnits = units.map { TeleprompterMapContextItem(id: $0.id, rawText: $0.rawText) }
-            let protected = units.flatMap { TeleprompterProtectedLiteralExtractor.extract(from: $0.rawText) }
+            // Extract from the joined source text so protected atoms see the same
+            // context the decoder sees on the candidate. Per-unit extraction drops
+            // number+unit pairs that straddle a unit boundary and would reject
+            // faithful rewrites.
+            let protected = TeleprompterProtectedLiteralExtractor.extract(
+                from: units.map(\.rawText).joined()
+            )
             let budgetUnits = units.reduce(0) { $0 + $1.budgetUnits }
             return GroupState(
                 id: "block-\(first)-\(group.endUnit)",
                 sourceUnitIDs: IDs,
                 sourceUnits: rawUnits,
-                protectedLiterals: Array(Set(protected)).sorted(),
+                protectedLiterals: protected,
                 budgetSeconds: totalBudgetUnits > 0
                     ? window.localBudgetSeconds * Double(budgetUnits) / Double(totalBudgetUnits)
                     : 0
@@ -1626,6 +1641,12 @@ private extension TeleprompterPreparationPipeline {
                 text = ""
                 disposition = .unresolved
             }
+            let reviewed = withSemanticReview(
+                source: rawText,
+                candidate: text,
+                issues: block.issues,
+                disposition: disposition
+            )
             return BlockState(
                 block: .init(
                     id: group.id,
@@ -1633,9 +1654,9 @@ private extension TeleprompterPreparationPipeline {
                     sourceRange: .init(start: firstUnit.sourceRange.start, end: lastUnit.sourceRange.end),
                     text: text,
                     rawSourceText: rawText,
-                    disposition: disposition,
+                    disposition: reviewed.disposition,
                     origin: .ai,
-                    reviewIssues: block.issues,
+                    reviewIssues: reviewed.issues,
                     budgetSeconds: group.budgetSeconds
                 ),
                 sourceUnitIDs: group.sourceUnitIDs,
@@ -1831,7 +1852,12 @@ private extension TeleprompterPreparationPipeline {
                 text = ""
                 disposition = .unresolved
             }
-            let reviewIssues = block.issues
+            let reviewed = withSemanticReview(
+                source: rawText,
+                candidate: text,
+                issues: block.issues,
+                disposition: disposition
+            )
             return BlockState(
                 block: .init(
                     id: "block-\(first)-\(block.endUnit)",
@@ -1839,9 +1865,9 @@ private extension TeleprompterPreparationPipeline {
                     sourceRange: .init(start: firstUnit.sourceRange.start, end: lastUnit.sourceRange.end),
                     text: text,
                     rawSourceText: rawText,
-                    disposition: disposition,
+                    disposition: reviewed.disposition,
                     origin: .ai,
-                    reviewIssues: reviewIssues,
+                    reviewIssues: reviewed.issues,
                     budgetSeconds: window.localBudgetSeconds * Double(IDs.reduce(0) { $0 + sourceUnits[$1]!.budgetUnits })
                         / Double(max(1, window.sourceUnitIDs.reduce(0) { $0 + sourceUnits[$1]!.budgetUnits }))
                 ),
@@ -1929,7 +1955,54 @@ private extension TeleprompterPreparationPipeline {
         for (index, patch) in patches {
             states[index].block.text = patch.text
             states[index].revision += 1
+            let reviewed = withSemanticReview(
+                source: states[index].block.rawSourceText,
+                candidate: patch.text,
+                issues: states[index].block.reviewIssues,
+                disposition: states[index].block.disposition
+            )
+            states[index].block.reviewIssues = reviewed.issues
+            states[index].block.disposition = reviewed.disposition
         }
+    }
+
+    /// Locks are stored as global source unit ids, while the grouping and map
+    /// prompts address units with window-local ids, so rebase before sending.
+    func lockedUnitIDs(
+        in input: TeleprompterPreparationInput,
+        window: TeleprompterPreparationMapWindow,
+        targets: [TeleprompterSourceUnit]
+    ) -> [Int] {
+        guard input.operation == .condense, let base = targets.first?.id else { return [] }
+        let windowIDs = Set(window.sourceUnitIDs)
+        return input.lockedUnitIDs
+            .filter { windowIDs.contains($0) }
+            .map { $0 - base }
+            .sorted()
+    }
+
+    /// High-risk semantic changes are surfaced for human review. This never
+    /// rewrites or drops content on its own, and unchanged blocks stay
+    /// untouched so review burden does not grow with every passage.
+    func withSemanticReview(
+        source: String,
+        candidate: String,
+        issues: [TeleprompterReviewIssue],
+        disposition: TeleprompterBlockDisposition
+    ) -> (issues: [TeleprompterReviewIssue], disposition: TeleprompterBlockDisposition) {
+        guard disposition == .speak, !candidate.isEmpty else {
+            return (issues, disposition)
+        }
+        let findings = TeleprompterSemanticRiskDetector.findings(
+            source: source,
+            candidate: candidate
+        )
+        guard !findings.isEmpty else { return (issues, disposition) }
+        var merged = issues
+        for finding in findings where !merged.contains(finding.issue) {
+            merged.append(finding.issue)
+        }
+        return (merged, .unresolved)
     }
 
     func estimateSeconds(
@@ -1958,6 +2031,22 @@ private extension TeleprompterPreparationPipeline {
             throw TeleprompterPreparationError.invalidPromptResponse
         }
         var blocks = states.map(\.block)
+        if input.operation == .condense {
+            // A deletion is only ever an explicit, reviewable skip. Fidelity
+            // operations keep the same shape as an unresolved block, because
+            // dropping content is not authorized there.
+            for index in blocks.indices where blocks[index].text.isEmpty
+                && blocks[index].reviewIssues == [.nonspokenContent] {
+                blocks[index].disposition = .skip
+            }
+            let removedLockedContent = zip(states, blocks).contains { state, block in
+                block.disposition == .skip
+                    && !Set(state.sourceUnitIDs).isDisjoint(with: input.lockedUnitIDs)
+            }
+            if removedLockedContent {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
+        }
         for index in blocks.indices { blocks[index].ordinal = index }
         let revisions = Dictionary(uniqueKeysWithValues: states.map { ($0.block.id, $0.revision) })
         let readingText = blocks

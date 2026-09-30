@@ -3,6 +3,10 @@ import Foundation
 public enum TeleprompterPreparationOperation: String, Codable, Equatable, Sendable {
     case prepare
     case tighten
+    /// Explicitly lossy shortening. Only this operation may drop source
+    /// content, every omission must be reported for review, and locked units
+    /// still have to be spoken.
+    case condense
 }
 
 public enum TeleprompterMapMode: String, Codable, Equatable, Sendable {
@@ -166,6 +170,9 @@ public struct TeleprompterPreparationMapInput: Codable, Equatable, Sendable {
     public let readOnlyContext: TeleprompterMapReadOnlyContext
     public let targets: [TeleprompterMapTarget]
     public let currentBlocks: [TeleprompterMapCurrentBlock]
+    /// Window-local unit ids the reader marked as must-keep. Only meaningful
+    /// for `.condense`; empty for fidelity operations.
+    public let lockedUnitIDs: [Int]
 
     public init(
         operation: TeleprompterPreparationOperation,
@@ -174,7 +181,8 @@ public struct TeleprompterPreparationMapInput: Codable, Equatable, Sendable {
         timing: TeleprompterMapTiming,
         readOnlyContext: TeleprompterMapReadOnlyContext,
         targets: [TeleprompterMapTarget],
-        currentBlocks: [TeleprompterMapCurrentBlock]
+        currentBlocks: [TeleprompterMapCurrentBlock],
+        lockedUnitIDs: [Int] = []
     ) {
         self.operation = operation
         self.formatHint = formatHint
@@ -183,6 +191,7 @@ public struct TeleprompterPreparationMapInput: Codable, Equatable, Sendable {
         self.readOnlyContext = readOnlyContext
         self.targets = targets
         self.currentBlocks = currentBlocks
+        self.lockedUnitIDs = lockedUnitIDs.sorted()
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -193,6 +202,7 @@ public struct TeleprompterPreparationMapInput: Codable, Equatable, Sendable {
         case readOnlyContext = "read_only_context"
         case targets
         case currentBlocks = "current_blocks"
+        case lockedUnitIDs = "locked_unit_ids"
     }
 }
 
@@ -313,17 +323,21 @@ public struct TeleprompterRewriteInput: Codable, Equatable, Sendable {
     public let timing: TeleprompterMapTiming
     public let readOnlyContext: TeleprompterMapReadOnlyContext
     public let groups: [TeleprompterRewriteGroup]
+    /// Global source unit ids the reader marked as must-keep.
+    public let lockedUnitIDs: [Int]
 
     public init(
         operation: TeleprompterPreparationOperation,
         timing: TeleprompterMapTiming,
         readOnlyContext: TeleprompterMapReadOnlyContext = .init(),
-        groups: [TeleprompterRewriteGroup]
+        groups: [TeleprompterRewriteGroup],
+        lockedUnitIDs: [Int] = []
     ) {
         self.operation = operation
         self.timing = timing
         self.readOnlyContext = readOnlyContext
         self.groups = groups
+        self.lockedUnitIDs = lockedUnitIDs.sorted()
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -331,6 +345,7 @@ public struct TeleprompterRewriteInput: Codable, Equatable, Sendable {
         case timing
         case readOnlyContext = "read_only_context"
         case groups
+        case lockedUnitIDs = "locked_unit_ids"
     }
 }
 
@@ -640,6 +655,7 @@ public enum TeleprompterPreparationPromptBuilder {
         operation: TeleprompterPreparationOperation = .prepare,
         currentBlocks: [TeleprompterMapCurrentBlock] = [],
         readOnlyContext: TeleprompterMapReadOnlyContext = .init(),
+        lockedUnitIDs: [Int] = [],
         maxGroupUnits: Int = 8
     ) throws -> TeleprompterPreparationPrompt {
         guard !targets.isEmpty, maxGroupUnits > 0 else {
@@ -680,10 +696,11 @@ public enum TeleprompterPreparationPromptBuilder {
                 let end = min(targets.last!.id + 1, block.endUnit)
                 guard start < end else { return nil }
                 return .init(startUnit: start - sourceStart, endUnit: end - sourceStart, text: block.text)
-            }
+            },
+            lockedUnitIDs: lockedUnitIDs
         )
         return .init(
-            instructions: mapInstructions,
+            instructions: instructions(for: operation, base: mapInstructions),
             input: try encode(input),
             schemaVersion: "teleprompter.preparation.v2",
             promptVersion: "preparation.prompt.v4"
@@ -700,6 +717,7 @@ public enum TeleprompterPreparationPromptBuilder {
         calibrationFactor: Double = 1.0,
         operation: TeleprompterPreparationOperation = .prepare,
         readOnlyContext: TeleprompterMapReadOnlyContext = .init(),
+        lockedUnitIDs: [Int] = [],
         maxGroupUnits: Int = 8
     ) throws -> TeleprompterPreparationPrompt {
         guard !targets.isEmpty, maxGroupUnits > 0 else {
@@ -739,10 +757,11 @@ public enum TeleprompterPreparationPromptBuilder {
                     protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: target.rawText)
                 )
             },
-            currentBlocks: []
+            currentBlocks: [],
+            lockedUnitIDs: lockedUnitIDs
         )
         return .init(
-            instructions: groupingInstructions,
+            instructions: instructions(for: operation, base: groupingInstructions),
             input: try encode(input),
             schemaVersion: "teleprompter.grouping.v1",
             promptVersion: "grouping.prompt.v1"
@@ -757,7 +776,8 @@ public enum TeleprompterPreparationPromptBuilder {
         pace: TeleprompterPace,
         calibrationFactor: Double = 1.0,
         operation: TeleprompterPreparationOperation = .prepare,
-        readOnlyContext: TeleprompterMapReadOnlyContext = .init()
+        readOnlyContext: TeleprompterMapReadOnlyContext = .init(),
+        lockedUnitIDs: [Int] = []
     ) throws -> TeleprompterPreparationPrompt {
         guard !groups.isEmpty,
               localBudgetSeconds.isFinite,
@@ -775,10 +795,11 @@ public enum TeleprompterPreparationPromptBuilder {
                 calibrationFactor: calibrationFactor
             ),
             readOnlyContext: readOnlyContext,
-            groups: groups
+            groups: groups,
+            lockedUnitIDs: lockedUnitIDs
         )
         return .init(
-            instructions: rewriteInstructions,
+            instructions: instructions(for: operation, base: rewriteInstructions),
             input: try encode(input),
             schemaVersion: "teleprompter.rewrite.v1",
             promptVersion: "rewrite.prompt.v1"
@@ -846,6 +867,24 @@ public enum TeleprompterPreparationPromptBuilder {
         必须为每个输入 group 恰好返回一个 block，block_id 必须完全匹配，不能返回未知或重复 ID。只返回 teleprompter.rewrite.v1 的 JSON Schema，不返回来源区间、source_units、解释、推理或 Markdown 包装。
         """
 
+    /// Condense is the only operation allowed to drop content, and it is only
+    /// allowed to drop what the reader did not lock. Fidelity operations keep
+    /// the original instruction text unchanged.
+    private static func instructions(
+        for operation: TeleprompterPreparationOperation,
+        base: String
+    ) -> String {
+        guard operation == .condense else { return base }
+        return base + """
+
+        operation=condense：这是用户显式授权的有损精简。只允许为了贴近 local_budget_seconds \
+        删减未锁定内容，不得改变保留内容的数值、主体、条件、否定或归属，也不得新增原文没有的事实。\
+        locked_unit_ids 内的单元必须完整讲出，mode 只能是 speak 或 review；只有未锁定且可删的连续内容\
+        才能用 mode=omit 且 text 为空、issues 为 ["nonspoken_content"] 标注。\
+        每一处删除都必须整块标注，不得静默截断句子，不得用省略号代替原文。
+        """
+    }
+
     private static let mapInstructions = """
         你负责把原稿整理成用户可以直接朗读的候选稿。目标顺序固定为：忠实完整、表达自然、方便阅读；已经适合朗读的文字保留原措辞，不强行润色。
         输入是 JSON。targets[].raw_text 是本次唯一的原文事实来源，可能是纯文本、Markdown、不标准标记或混合格式；format_hint 只是线索，编号只是程序切片，不代表完整句子。read_only_context 只可用于理解标题、表头、指代和相邻关系，不能把背景复制成新正文。current_blocks 只有 operation=tighten 时可参考，仍必须以 targets 为事实来源。
@@ -871,27 +910,435 @@ public enum TeleprompterPreparationPromptBuilder {
         """
 }
 
+public struct TeleprompterProtectedAtom: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case url
+        case identifier
+        case technicalSymbol
+        case number
+    }
+
+    public let rawValue: String
+    public let canonicalValue: String
+    public let kind: Kind
+    public let utf16Offset: Int
+    public let utf16Length: Int
+
+    public init(
+        rawValue: String,
+        canonicalValue: String,
+        kind: Kind,
+        utf16Offset: Int = 0,
+        utf16Length: Int = 0
+    ) {
+        self.rawValue = rawValue
+        self.canonicalValue = canonicalValue
+        self.kind = kind
+        self.utf16Offset = max(0, utf16Offset)
+        self.utf16Length = max(0, utf16Length)
+    }
+}
+
 public enum TeleprompterProtectedLiteralExtractor {
+    private struct Pattern {
+        let expression: NSRegularExpression
+        let kind: TeleprompterProtectedAtom.Kind
+        let priority: Int
+    }
+
+    private static let patterns: [Pattern] = [
+        pattern(#"(?i)(?:https?://|www\.)[^\s]+"#, kind: .url, priority: 0),
+        pattern(
+            #"(?<![A-Za-z0-9])(?:C\+\+|C#|F#)(?![A-Za-z0-9])"#,
+            kind: .technicalSymbol,
+            priority: 1
+        ),
+        pattern(
+            #"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:[/#._-][A-Za-z0-9_#.-]+)+(?![A-Za-z0-9])"#,
+            kind: .identifier,
+            priority: 2
+        ),
+        pattern(
+            // The trailing `[A-Za-z]{1,4}` and the exponent and radix groups exist
+            // because the validator compares the *sequence* of protected atoms.
+            // A number the extractor cannot see produces no atom on either side,
+            // so an exact-sequence comparison reports "nothing changed" and a
+            // changed number passes silently. `1080p` → `4K` and `1e10` → `2e10`
+            // both used to take that path. The leading lookbehind still keeps
+            // digits that are part of an identifier (`A1`, `GPT4`, `ISO8601`)
+            // out of the number set, so model names are unaffected.
+            //
+            // The unit group is the same story one level down. A unit that is
+            // not listed produces no atom on either side, so `50 瓦` → `50 千瓦`
+            // and `3 米` → `3 厘米` reported "unchanged" just as quietly as
+            // `1080p` → `4K` did. The list below therefore covers the units the
+            // corpus actually produces. Chinese does not delimit units with
+            // spaces, so a naive CJK tail would swallow the particle after the
+            // unit (`50 瓦的功率` → `瓦的功`) and reject lossless rewrites. Two
+            // properties keep that out: the alternation is anchored, so a
+            // one-character unit can never win over a two-character one that
+            // starts at the same position, and the group ends at the first
+            // character that is not a unit, which leaves 的/之/里 outside.
+            // `分/点/号/楼/岁` are here because `TeleprompterCanonicalizer` reads
+            // them as numeric units, and every one of them was missing: changing
+            // `10 分` to `10 号` produced the same atom list on both sides and
+            // passed the hard gate. The alternation is ordered, so `分钟` above
+            // still wins over the bare `分` below it.
+            #"(?<![A-Za-z0-9])(?:0[xXbBoO])?[-−+＋]?[0-9０-９]+(?:[0-9０-９.,:/_-]*[0-9０-９])?(?:[eE][-−+＋]?[0-9０-９]+)?(?:\s*(?:%|％|个百分点|百分点|亿元|万元|美元|美金|人民币|RMB|USD|毫秒|微秒|分钟|小时|公里|千米|千克|公斤|毫升|厘米|毫米|焦耳|赫兹|欧姆|比特|字节|字符|元|秒|天|年|月|日|倍|个|次|台|人|米|吨|瓦|度|分|点|号|楼|岁|条|行|项|字|段|根|张|份|GB|MB|KB|TB|kg|mg|ms|°C|°F))?(?:[A-Za-z]{1,4})?(?![A-Za-z0-9])"#,
+            kind: .number,
+            priority: 3
+        ),
+    ]
+
+    private static func pattern(
+        _ expression: String,
+        kind: TeleprompterProtectedAtom.Kind,
+        priority: Int
+    ) -> Pattern {
+        // The expressions are compile-time constants; a failure is a programmer error.
+        let regex = try! NSRegularExpression(pattern: expression)
+        return Pattern(expression: regex, kind: kind, priority: priority)
+    }
+
+    public static func atoms(from text: String) -> [TeleprompterProtectedAtom] {
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let trailingPunctuation = CharacterSet(charactersIn: ".,;:!?)]}，。；：！？、）】》」』")
+        var matches: [(range: NSRange, pattern: Pattern)] = []
+        for pattern in patterns {
+            matches.append(
+                contentsOf: pattern.expression.matches(in: text, range: fullRange).map {
+                    (range: $0.range, pattern: pattern)
+                }
+            )
+        }
+        matches.sort {
+            if $0.range.location != $1.range.location {
+                return $0.range.location < $1.range.location
+            }
+            if $0.pattern.priority != $1.pattern.priority {
+                return $0.pattern.priority < $1.pattern.priority
+            }
+            return $0.range.length > $1.range.length
+        }
+
+        var acceptedRanges: [NSRange] = []
+        var atoms: [TeleprompterProtectedAtom] = []
+        for match in matches {
+            guard !acceptedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
+                continue
+            }
+            guard let swiftRange = Range(match.range, in: text) else { continue }
+            let rawValue = String(text[swiftRange]).trimmingCharacters(in: trailingPunctuation)
+            guard !rawValue.isEmpty else { continue }
+            acceptedRanges.append(match.range)
+            atoms.append(
+                .init(
+                    rawValue: rawValue,
+                    canonicalValue: canonicalize(rawValue),
+                    kind: match.pattern.kind,
+                    utf16Offset: text.utf16.distance(
+                        from: text.utf16.startIndex,
+                        to: String.Index(utf16Offset: match.range.location, in: text)
+                    ),
+                    utf16Length: rawValue.utf16.count
+                )
+            )
+        }
+        return atoms
+    }
+
     public static func extract(from text: String) -> [String] {
+        atoms(from: text).map(\.rawValue)
+    }
+
+    public static func canonicalize(_ value: String) -> String {
+        let normalized = value
+            .unicodeScalars
+            .map { scalar -> String in
+                switch scalar {
+                case "０": return "0"
+                case "１": return "1"
+                case "２": return "2"
+                case "３": return "3"
+                case "４": return "4"
+                case "５": return "5"
+                case "６": return "6"
+                case "７": return "7"
+                case "８": return "8"
+                case "９": return "9"
+                case "％":
+                    return String("%")
+                case "−", "﹣", "–", "—":
+                    return String("-")
+                case "＋":
+                    return String("+")
+                default:
+                    // The only pattern that can put a space inside an atom is
+                    // the number pattern's `\s*` before a unit, and no other
+                    // pattern can match across whitespace. Dropping it makes
+                    // `50 元` and `50元` the same atom; keeping it reported a
+                    // pure typography change as a changed protected literal
+                    // and sent the rewrite to manual review.
+                    if scalar.properties.isWhitespace {
+                        return ""
+                    }
+                    return String(scalar)
+                }
+            }
+            .joined()
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+public enum TeleprompterProtectedContentValidator {
+    public static func matches(protectedLiterals: [String], candidate: String) -> Bool {
+        let expected = protectedLiterals.map(TeleprompterProtectedLiteralExtractor.canonicalize)
+        let actual = TeleprompterProtectedLiteralExtractor.atoms(from: candidate)
+            .map(\.canonicalValue)
+        return expected == actual
+    }
+}
+
+public struct TeleprompterSemanticFinding: Equatable, Sendable {
+    public let issue: TeleprompterReviewIssue
+    public let sourceRange: TeleprompterSourceRange?
+    public let candidateRange: TeleprompterSourceRange?
+
+    public init(
+        issue: TeleprompterReviewIssue,
+        sourceRange: TeleprompterSourceRange? = nil,
+        candidateRange: TeleprompterSourceRange? = nil
+    ) {
+        self.issue = issue
+        self.sourceRange = sourceRange
+        self.candidateRange = candidateRange
+    }
+}
+
+/// Bounded, deterministic risk signals for review. These are prompts for a human,
+/// never proof that a rewrite is semantically equivalent.
+public enum TeleprompterSemanticRiskDetector {
+    /// `第N` + a quantifier the corpus actually produces, anchored to the
+    /// start of its clause. `(?<![^。；，\n])` is a one-character lookbehind
+    /// asserting the preceding character *is* a clause break (or that we are
+    /// at the start), which is what keeps the label from being read out of the
+    /// middle of a neighbouring clause.
+    private static let chineseOrdinalSubject =
+        #"(?<![^。；，\n])(第[一二三四五六七八九十百千]+[轮次批组条版项])[^。；，\n]{0,24}$"#
+
+    private static let conditionMarkers = ["仅当", "只有", "仅在", "除非", "前提是"]
+    private static let negationMarkers = ["不得", "不能", "不会", "并非", "禁止", "没有", "未"]
+    private static let comparisonMarkers = [
+        "不超过", "不低于", "至少", "最多", "高于", "低于", "等于",
+        "超过", "不足", "以内", "以上", "以下",
+    ]
+    /// Characters that may not directly follow a marker, because the marker
+    /// also opens a word that is not the risk class it stands for.
+    ///
+    /// `未` is the only single-character negation marker, and it opens 未来
+    /// (44 occurrences) and 未必 (3) in the repository corpus, against 4086
+    /// real negations of the form 未验证 / 未执行 / 尚未提交. 未来 -> 将来 is
+    /// one of the most common paraphrases a 口语化 rewrite makes, so each of
+    /// those turned a faithful rewrite into a manual review. 未知 (362) is
+    /// deliberately **not** listed: 原因未知 -> 原因已知 is a real change of
+    /// meaning even though 未知 names a state rather than an action.
+    ///
+    /// This is a guard on the literal substring search rather than a regex,
+    /// because the marker list is matched with `range(of:)`; turning the whole
+    /// list into patterns would make every other marker's meaning depend on
+    /// regex syntax.
+    private static let markerForbiddenFollowers: [String: Set<Character>] = [
+        "未": ["来", "必"],
+    ]
+
+    private static let certaintyMarkers = [
+        "必须", "一定", "必然", "已经", "可能", "也许", "预计", "应当", "应该",
+    ]
+
+    public static func findings(source: String, candidate: String) -> [TeleprompterSemanticFinding] {
+        var results: [TeleprompterSemanticFinding] = []
+        let sourceAtoms = TeleprompterProtectedLiteralExtractor.atoms(from: source)
+        let candidateAtoms = TeleprompterProtectedLiteralExtractor.atoms(from: candidate)
+        let sourcePairs = subjectValuePairs(in: source, atoms: sourceAtoms)
+        let candidatePairs = subjectValuePairs(in: candidate, atoms: candidateAtoms)
+        // Compare the subjects that appear on *both* sides. Comparing the two
+        // pair lists instead made a lost pair read as a changed one: dropping
+        // the comma in `第一批采购 50 台，第二批 80 台` stops the ordinal from
+        // starting its clause, so the candidate yields one pair and the source
+        // two, and a pure punctuation rewrite was reported as a swapped
+        // value. Whether a clause was removed is not this check's job — the
+        // fidelity gate owns that.
+        let sourceBySubject = Dictionary(
+            sourcePairs.map { ($0.subject, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let candidateBySubject = Dictionary(
+            candidatePairs.map { ($0.subject, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let shared = Set(sourceBySubject.keys).intersection(candidateBySubject.keys)
+        if let changed = shared.sorted().first(where: {
+            sourceBySubject[$0]?.value != candidateBySubject[$0]?.value
+        }) {
+            results.append(
+                .init(
+                    issue: .subjectValueChanged,
+                    sourceRange: sourceBySubject[changed]?.range ?? fullRange(of: source),
+                    candidateRange: candidateBySubject[changed]?.range ?? fullRange(of: candidate)
+                )
+            )
+        }
+
+        appendMarkerFinding(
+            .conditionRemoved,
+            markers: conditionMarkers,
+            source: source,
+            candidate: candidate,
+            into: &results
+        )
+        appendMarkerFinding(
+            .negationChanged,
+            markers: negationMarkers,
+            source: source,
+            candidate: candidate,
+            into: &results
+        )
+        appendMarkerFinding(
+            .comparisonChanged,
+            markers: comparisonMarkers,
+            source: source,
+            candidate: candidate,
+            into: &results
+        )
+        appendMarkerFinding(
+            .certaintyChanged,
+            markers: certaintyMarkers,
+            source: source,
+            candidate: candidate,
+            into: &results
+        )
+        return results
+    }
+
+    public static func reviewIssues(
+        modelIssues: [TeleprompterReviewIssue],
+        source: String,
+        candidate: String
+    ) -> [TeleprompterReviewIssue] {
+        var result = modelIssues
+        for finding in findings(source: source, candidate: candidate)
+        where !result.contains(finding.issue) {
+            result.append(finding.issue)
+        }
+        return result
+    }
+
+    private struct SubjectValuePair {
+        let subject: String
+        let value: String
+        let range: TeleprompterSourceRange
+    }
+
+    private static func subjectValuePairs(
+        in text: String,
+        atoms: [TeleprompterProtectedAtom]
+    ) -> [SubjectValuePair] {
+        atoms.compactMap { atom in
+            guard atom.kind == .number,
+                  let subject = nearestSubject(
+                      in: text,
+                      beforeUTF16Offset: atom.utf16Offset
+                  ) else { return nil }
+            return SubjectValuePair(
+                subject: subject,
+                value: atom.canonicalValue,
+                range: .init(
+                    start: atom.utf16Offset,
+                    end: atom.utf16Offset + atom.utf16Length
+                )
+            )
+        }
+    }
+
+    private static func nearestSubject(
+        in text: String,
+        beforeUTF16Offset offset: Int
+    ) -> String? {
+        guard offset > 0 else { return nil }
+        let index = String.Index(utf16Offset: offset, in: text)
+        let prefix = String(text[..<index])
         let patterns = [
-            #"(?:https?://|www\.)[^\s]+"#,
-            #"(?<![A-Za-z0-9])[-+]?\d[\d.,:/-]*(?:\s*[A-Za-z%°]+)?\b"#,
-            #"\b[A-Za-z][A-Za-z0-9]*(?:[_#][A-Za-z0-9_#]*)+\b"#,
-            #"(?<![A-Za-z0-9])(?:C#|F#|C\+\+)(?![A-Za-z0-9])"#
+            #"([A-Za-z][A-Za-z0-9+#-]*)\s*的[^。；\n]{0,24}$"#,
+            #"\b([A-Z][A-Za-z0-9+#-]*)\b[^.。\n]{0,24}$"#,
+            // Ordinal batch labels are the one Chinese subject shape that
+            // survives the corpus without a segmenter. Both earlier patterns
+            // require an ASCII label, so on a Chinese script every pair was
+            // empty and `subjectValueChanged` could not fire at all — the
+            // check was silent on the language the product is written in.
+            //
+            // The quantifier list is exactly the set the corpus exercises
+            // (轮 30, 次 4, 批 4, 组 1, 条 1, 版 1, 项 1 over 2330 files,
+            // 38 hits, every one a readable label). A general Chinese noun
+            // phrase is deliberately not handled: see
+            // `semanticReviewStillMissesGeneralChineseNounPhraseSubjects` for
+            // the measurements that ruled it out. It is appended last so the
+            // ASCII precedence above is left exactly as it was; the two
+            // families are disjoint (one needs a Latin token, the other a
+            // leading 第 plus a Chinese numeral), so the order is not load
+            // bearing today.
+            Self.chineseOrdinalSubject,
         ]
-        var values = Set<String>()
         for pattern in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(text.startIndex..<text.endIndex, in: text)
-            for match in expression.matches(in: text, range: range) {
-                guard let swiftRange = Range(match.range, in: text) else { continue }
-                let value = String(text[swiftRange]).trimmingCharacters(
-                    in: CharacterSet(charactersIn: ".,;:!?)]}\"'")
-                )
-                if !value.isEmpty { values.insert(value) }
-            }
+            let range = NSRange(prefix.startIndex..<prefix.endIndex, in: prefix)
+            guard let match = expression.matches(in: prefix, range: range).last,
+                  let subjectRange = Range(match.range(at: 1), in: prefix) else { continue }
+            return String(prefix[subjectRange])
         }
-        return values.sorted()
+        return nil
+    }
+
+    private static func appendMarkerFinding(
+        _ issue: TeleprompterReviewIssue,
+        markers: [String],
+        source: String,
+        candidate: String,
+        into results: inout [TeleprompterSemanticFinding]
+    ) {
+        let sourceMarkers = markerCounts(markers, in: source)
+        let candidateMarkers = markerCounts(markers, in: candidate)
+        guard !sourceMarkers.isEmpty || !candidateMarkers.isEmpty,
+              sourceMarkers != candidateMarkers else { return }
+        results.append(
+            .init(
+                issue: issue,
+                sourceRange: fullRange(of: source),
+                candidateRange: fullRange(of: candidate)
+            )
+        )
+    }
+
+    private static func markerCounts(_ markers: [String], in text: String) -> [String] {
+        var result: [String] = []
+        for marker in markers {
+            var searchStart = text.startIndex
+            var count = 0
+            while searchStart < text.endIndex,
+                  let range = text.range(of: marker, range: searchStart..<text.endIndex) {
+                searchStart = range.upperBound
+                if let forbidden = markerForbiddenFollowers[marker],
+                   range.upperBound < text.endIndex,
+                   forbidden.contains(text[range.upperBound]) {
+                    continue
+                }
+                count += 1
+            }
+            result.append(contentsOf: Array(repeating: marker, count: count))
+        }
+        return result.sorted()
+    }
+
+    private static func fullRange(of text: String) -> TeleprompterSourceRange? {
+        guard !text.isEmpty else { return nil }
+        return .init(start: 0, end: text.utf16.count)
     }
 }
 
@@ -1103,19 +1550,22 @@ public struct TeleprompterRewriteDecoder: Sendable {
             guard let group = allowed[block.blockID] else {
                 throw reject(.unknownBlock, fieldPath: "blocks[\(index)].block_id", blockIndex: index)
             }
-            let protectedLiterals = Set(group.protectedLiterals)
+            let protectedContentIsSafe = TeleprompterProtectedContentValidator.matches(
+                protectedLiterals: group.protectedLiterals,
+                candidate: block.text
+            )
             switch block.mode {
             case .speak:
                 guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       block.issues.isEmpty else {
                     throw reject(.modeMismatch, fieldPath: "blocks[\(index)]", blockIndex: index)
                 }
-                guard protectedLiterals.allSatisfy({ block.text.contains($0) }) else {
+                guard protectedContentIsSafe else {
                     throw reject(.protectedLiteral, fieldPath: "blocks[\(index)].text", blockIndex: index)
                 }
             case .review:
                 let reviewTextIsSafe = block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || protectedLiterals.allSatisfy({ block.text.contains($0) })
+                    || protectedContentIsSafe
                 guard !block.issues.isEmpty, !block.issues.contains(.nonspokenContent), reviewTextIsSafe else {
                     throw reject(.modeMismatch, fieldPath: "blocks[\(index)]", blockIndex: index)
                 }
@@ -1221,8 +1671,15 @@ public struct TeleprompterMapDecoder: Sendable {
                         sourceUnit: block.startUnit
                     )
                 }
-                let protectedLiterals = Set(targets[block.startUnit..<block.endUnit]
-                    .flatMap { TeleprompterProtectedLiteralExtractor.extract(from: $0.rawText) })
+                let protectedLiterals = TeleprompterProtectedLiteralExtractor.extract(
+                    from: targets[block.startUnit..<block.endUnit]
+                        .map(\.rawText)
+                        .joined()
+                )
+                let protectedContentIsSafe = TeleprompterProtectedContentValidator.matches(
+                    protectedLiterals: protectedLiterals,
+                    candidate: block.text
+                )
                 switch block.mode {
                 case .speak:
                     guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1231,12 +1688,12 @@ public struct TeleprompterMapDecoder: Sendable {
                     guard block.issues.isEmpty else {
                         throw reject(.modeMismatch, fieldPath: "blocks[\(blockIndex)].issues", blockIndex: blockIndex)
                     }
-                    guard protectedLiterals.allSatisfy({ block.text.contains($0) }) else {
+                    guard protectedContentIsSafe else {
                         throw reject(.protectedLiteral, fieldPath: "blocks[\(blockIndex)].text", blockIndex: blockIndex)
                     }
                 case .review:
                     let reviewTextIsSafe = block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || protectedLiterals.allSatisfy({ block.text.contains($0) })
+                        || protectedContentIsSafe
                     guard !block.issues.isEmpty, !block.issues.contains(.nonspokenContent) else {
                         throw reject(.modeMismatch, fieldPath: "blocks[\(blockIndex)].issues", blockIndex: blockIndex)
                     }
@@ -1299,7 +1756,10 @@ public struct TeleprompterReduceDecoder: Sendable {
                 guard let editable = allowed[patch.blockID],
                       editable.revision == patch.revision,
                       !patch.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      editable.protectedLiterals.allSatisfy({ patch.text.contains($0) }) else {
+                      TeleprompterProtectedContentValidator.matches(
+                          protectedLiterals: editable.protectedLiterals,
+                          candidate: patch.text
+                      ) else {
                     throw TeleprompterPreparationError.invalidPromptResponse
                 }
             }

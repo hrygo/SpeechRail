@@ -1,0 +1,1786 @@
+{
+  "package": "macos/SpeechRailApp",
+  "filter": "",
+  "sanity": {
+    "id": "F0",
+    "note": "窗口结果的空判被取反（要求结果必须为空，已知应被杀）",
+    "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+    "find": "            guard let states, !states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+    "replace": "            guard let states, states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }"
+  },
+  "mutations": [
+    {
+      "id": "M1",
+      "note": "2048 截断后的稳定前缀不再夹一次",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)",
+      "replace": "item.stablePrefixCodepoints = stablePrefixCodepoints",
+      "expect": "SURVIVED",
+      "rationale": "语义等价，按第 27/33 条规矩作废不计入：唯一的读取点是下一行的 prefix(n)，而 n 大于集合长度时 prefix 返回整个集合，两侧拿到同一段字符串；该字段也不出仓、不落盘、不进评测证据。夹取保留作纵深防御。"
+    },
+    {
+      "id": "M2",
+      "note": "快照修订号改用 >=，同修订重复事件被放行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }",
+      "replace": "guard item.sequence > finalizedSequence, revision >= item.snapshotRevision else { return }",
+      "expect": "KILLED",
+      "rationale": "同修订重复事件必须被丢弃，否则一次重发就会二次推进。"
+    },
+    {
+      "id": "M3",
+      "note": "篇幅预算比 0.95 放到 1.0",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let budgetRatio: Double = 0.95",
+      "replace": "public static let budgetRatio: Double = 1.0",
+      "expect": "KILLED",
+      "rationale": "余量必须留在计划里，否则分段预算会顶满目标时长。窄过滤下这条曾误报存活——过滤范围本身就是结论的一部分。"
+    },
+    {
+      "id": "M4",
+      "note": "校准倍率下界 0.5 放到 0.0",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let minimumCalibrationFactor: Double = 0.5",
+      "replace": "public static let minimumCalibrationFactor: Double = 0.0",
+      "expect": "KILLED",
+      "rationale": "区间外的试读实测值必须夹住；本轮补的回归钉的是夹取后算出的秒数，不是「等于边界值」。"
+    },
+    {
+      "id": "M5",
+      "note": "试读建议时长下界 60 降到 30",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterTimingPolicy.swift",
+      "find": "public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 60...90",
+      "replace": "public static let suggestedTrialDurationRange: ClosedRange<TimeInterval> = 30...90",
+      "expect": "KILLED",
+      "rationale": "建议时长此前是 sheet 里的硬编码字面量，策略里那个常量全仓无人读取；本轮把文案改为由策略生成，两者从此不可能再漂移。"
+    },
+    {
+      "id": "M6",
+      "note": "远距重定位不再要求处于自由发挥状态",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        return followState == .freePlaying\n            && match.matchedCount >= policy.relocalizationMinimumMatches",
+      "replace": "        return match.matchedCount >= policy.relocalizationMinimumMatches",
+      "expect": "KILLED",
+      "rationale": "远距重定位必须仍处于自由发挥状态，否则一次远处误识别就能把视口拽到另一段。"
+    },
+    {
+      "id": "M7",
+      "note": "回退确认的置信度门槛 0.95 降到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        return match.confidence >= 0.95\n            && match.matchedCount >= 6",
+      "replace": "        return match.confidence >= 0.5\n            && match.matchedCount >= 6",
+      "expect": "KILLED",
+      "rationale": "mayConfirm 的三项合取里置信度那一半此前无用例：`rereadRollsBackOnlyWhenTheBackwardMatchIsStrong` 只钉住命中数（两个 token），门槛 0.95 降到 0.5 全量无人变红。已补 `aBackwardMoveNeedsTheStrongConfidenceHalfToo`。"
+    },
+    {
+      "id": "M8",
+      "note": "对齐最低置信度 0.72 降到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "            minimumConfidence: Double = 0.72,",
+      "replace": "            minimumConfidence: Double = 0.5,",
+      "expect": "KILLED",
+      "rationale": "对齐器的 0.72 置信度门槛此前没有用例落在 (0.5, 0.72) 这一档：素材要么精确匹配（1.0）、要么只错一个 token（0.8）、要么全不匹配（0.0）。已补 `aCandidateBelowTheConfidenceFloorIsNotOfferedAtAll`（3 token 错 1 个 ⇒ 0.667）。"
+    },
+    {
+      "id": "M9",
+      "note": "中文数字表把「七」映成 8",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift",
+      "find": "\"五\": \"5\", \"六\": \"6\", \"七\": \"7\", \"八\": \"8\", \"九\": \"9\",",
+      "replace": "\"五\": \"5\", \"六\": \"6\", \"七\": \"8\", \"八\": \"8\", \"九\": \"9\",",
+      "expect": "KILLED",
+      "rationale": "裸中文数字会活着到达对齐器（`第三季度`、`这里是两` 归一化后原样保留），那张表此前没有任何断言。已补 `aBareChineseNumeralMatchesItsArabicForm` 与反向的 `aChineseNumeralDoesNotMatchADifferentArabicDigit`。"
+    },
+    {
+      "id": "M10",
+      "note": "唯一精确续接的匹配数下限 8 降到 3",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "        let uniqueExactContinuation = best.confidence == 1 && best.matches >= 8 && continuesAnchor",
+      "replace": "        let uniqueExactContinuation = best.confidence == 1 && best.matches >= 3 && continuesAnchor",
+      "expect": "KILLED",
+      "rationale": "唯一精确续接的匹配数下限 8 此前没有 3–7 这个区间的用例。已补 `aShortExactContinuationIsNotContinuityEvidence`（置信 1.0、跨锚点、6 个 token，但不构成续接证据）。"
+    },
+    {
+      "id": "M11",
+      "note": "候选最少匹配数不再留一个输入 token 的余量",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAligner.swift",
+      "find": "        let minimumMatches = max(1, min(3, input.count - 1))",
+      "replace": "        let minimumMatches = max(1, min(3, input.count))",
+      "expect": "SURVIVED",
+      "rationale": "**有条件等价**：这条只在输入恰好 2–3 个 token 时与原实现不同（原 `min(3, count-1)` vs 变异 `min(3, count)`），而那种长度下能被放行的候选（命中 count-1）置信度只有 0.5／0.667，**都低于 0.72 的对齐门槛**，在 line 217 就已经被拒掉了。两个常量是耦合的——一旦下调 `minimumConfidence`，这条立刻变成活的；按第 27/33 条规矩作废不计入存活，但耦合关系写在这里，不留给记忆。"
+    },
+    {
+      "id": "M12",
+      "note": "共享数字表拿掉「两」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterNormalizer.swift",
+      "find": "        \"零\": \"0\", \"〇\": \"0\", \"一\": \"1\", \"二\": \"2\", \"两\": \"2\", \"三\": \"3\", \"四\": \"4\",",
+      "replace": "        \"零\": \"0\", \"〇\": \"0\", \"一\": \"1\", \"二\": \"2\", \"三\": \"3\", \"四\": \"4\",",
+      "expect": "KILLED",
+      "rationale": "「两」此前是共享表里唯一漏掉的字：两处各维护一张数字表，已经分叉（第 70 条在单位表上重演）。已改为共用 `TeleprompterCanonicalizer.chineseDigits`，并补 `aBareLiangMatchesTwo`。"
+    },
+    {
+      "id": "M13",
+      "note": "停滞阈值 3 秒放宽到 30 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterReplayEvaluator.swift",
+      "find": "    public static let stallThresholdMilliseconds = 3_000",
+      "replace": "    public static let stallThresholdMilliseconds = 30_000",
+      "expect": "KILLED",
+      "rationale": "停滞必须计入阅读体验而不是从均值里消失（§11.6 口径）。放宽到 30 秒后 24 条用例变红，覆盖真实素材。"
+    },
+    {
+      "id": "M14",
+      "note": "失败分母阈值 0.05 放宽到 0.5",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterReplayEvaluator.swift",
+      "find": "    public static let failureShareThreshold = 0.05",
+      "replace": "    public static let failureShareThreshold = 0.5",
+      "expect": "KILLED",
+      "rationale": "§11.6：失败分母超过此值时，时延分位只描述成功子集，不得单独引用。放宽到 0.5 后 6 条变红。"
+    },
+    {
+      "id": "M15",
+      "note": "数值指纹只留长度不留数值，读法别名的数值门禁彻底失效",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterDomain.swift",
+      "find": "        TeleprompterCanonicalizer.units(text)\n            .filter(\\.isNumeric)\n            .map(\\.value)",
+      "replace": "        TeleprompterCanonicalizer.units(text)\n            .filter(\\.isNumeric)\n            .map { _ in \"\" }",
+      "expect": "KILLED",
+      "rationale": "读法别名的数值门禁是第 1 条「数值不得静默通过」在别名通道上的落点；指纹只留长度不留数值时 `50 瓦` 与 `500 千瓦` 会判成一致，14 条变红。**这一条此前从未被变异验证过**，本轮补上。"
+    },
+    {
+      "id": "M16",
+      "note": "别名接受比当前更新的规则版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterDomain.swift",
+      "find": "        guard ruleRevision <= Self.currentRuleRevision else { return .unknownRuleRevision }",
+      "replace": "        guard ruleRevision >= Self.currentRuleRevision else { return .unknownRuleRevision }",
+      "expect": "KILLED",
+      "rationale": "别名必须拒绝比当前更新的规则版本——那意味着它是用未来的口径写的，本机无法复核。3 条变红。"
+    },
+    {
+      "id": "M17",
+      "note": "局部推进半径 24 放大到 240（远距误跳）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        localAdvanceTokenRadius: Int = 24,",
+      "replace": "        localAdvanceTokenRadius: Int = 240,",
+      "expect": "KILLED",
+      "rationale": "局部推进半径就是「远处短语不得擅自跨句跳转」那道闸门；放大十倍后 9 条变红。"
+    },
+    {
+      "id": "M18",
+      "note": "暂定推进置信度 0.72 降到 0.3",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        provisionalMinimumConfidence: Double = 0.72,",
+      "replace": "        provisionalMinimumConfidence: Double = 0.3,",
+      "expect": "SURVIVED",
+      "rationale": "第六十一轮判为**等价变异**，不是缺口，理由是代码路径穷举而非样本不足：`mayAdvance` 里这个阈值只以 `match.confidence >= policy.provisionalMinimumConfidence` 的形式被读，而同一个 `Match` 的 position 非 nil 当且仅当它来自 `TeleprompterAligner.locate` 的末尾那条 return——那条路径在 `TeleprompterAligner.swift:217` 已经先做了 `best.confidence >= configuration.minimumConfidence`；`Configuration.minimumConfidence` 全仓只有声明处与那一处读取，**没有任何调用方传过别的值**（控制器传的是 `.init(advanceMargin:)`，另一处用 `TeleprompterAligner()`），于是它恒为 0.72，与本阈值相等。因此凡是能走到这个比较的 match，置信度必然 >= 0.72，把阈值放宽到 0.3 不改变任何一次判定。另一条提前返回（歧义分支）position 为 nil，`mayAdvance` 第一行就挡掉了。**代价要说清**：这层判断目前是死的，且它让「弱匹配」无法作为 uncertainty 暴露——aligner 在 0.72 以下直接返回 `none`（confidence 0），所以 uncertainty 只可能是 0 或 >= 0.72。要让它变成活阈值需要改动对齐器的产出策略（属于产品行为变更），本轮不做，只登记。"
+    },
+    {
+      "id": "M19",
+      "note": "暂定推进命中数 2 降到 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        provisionalMinimumMatches: Int = 2,",
+      "replace": "        provisionalMinimumMatches: Int = 1,",
+      "expect": "KILLED",
+      "rationale": "暂定推进的命中数下限，降到 1 后 4 条变红。"
+    },
+    {
+      "id": "M20",
+      "note": "重定位命中数 4 降到 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        relocalizationMinimumMatches: Int = 4",
+      "replace": "        relocalizationMinimumMatches: Int = 1",
+      "expect": "KILLED",
+      "rationale": "第六十一轮补齐。既有两条自由发挥用例的重锚短语在脚本里唯一，于 `mayAdvance` 前两行就短路了；`distantUniquePhraseCannotAdvanceThroughPartialOrFinal` 又只匹配 1 个 token，在 `provisionalMinimumMatches` 就被拦下——三条都没走到 `relocalizationMinimumMatches` 那一行。新增 `freePlayReanchorsOnADistantPhraseOnlyWithEnoughEvidence` 用「先脱稿、再在远处读到同一句话的短版与长版」把阈值夹在中间：3 token 不推进、5 token 推进。降到 1 后 4 条变红。"
+    },
+    {
+      "id": "M21",
+      "note": "连续未命中 2 次进入自由发挥，降到 1 次",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        freePlayAfterMisses: Int = 2,",
+      "replace": "        freePlayAfterMisses: Int = 1,",
+      "expect": "KILLED",
+      "rationale": "连续未命中次数决定何时转入自由发挥；降到 1 后 5 条变红。"
+    },
+    {
+      "id": "M22",
+      "note": "歧义判定余量 0.12 归零",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        reanchorMargin: Double = 0.12,",
+      "replace": "        reanchorMargin: Double = 0.0,",
+      "expect": "KILLED",
+      "rationale": "第六十一轮补齐。新增 `aPhraseWrittenTwiceIsNotAnUnambiguousAdvance`：同一句话在稿里出现两次，两次打分完全相同（cost 0、confidence 1.0），差值 0 < 0.12，于是走歧义分支返回 position 为 nil，锚点不动。归零后 0 < 0 不成立，tie-break 挑近的那次并推进——余量正是「不许凭一句重复的话把读者拽走」的唯一依据。"
+    },
+    {
+      "id": "M23",
+      "note": "去掉局部推进半径的 320 上限夹取",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        self.localAdvanceTokenRadius = max(0, min(320, localAdvanceTokenRadius))",
+      "replace": "        self.localAdvanceTokenRadius = max(0, localAdvanceTokenRadius)",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御**：全仓没有任何生产代码带参构造 `TeleprompterFollowPolicy`，夹取只对「有人注入越界值」有意义。留作纵深防御，不计入存活。"
+    },
+    {
+      "id": "M24",
+      "note": "重复事件由「拒绝」改为「放行」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard !eventIDs.contains(id) else { return false }",
+      "replace": "        guard !eventIDs.contains(id) else { return true }",
+      "expect": "KILLED",
+      "rationale": "重复事件必须被拒绝，否则一次重发就会二次推进。6 条变红。"
+    },
+    {
+      "id": "M25",
+      "note": "切稿后不重置对齐状态（比较方向翻转）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard script == nil || scriptSegments != segments else { return }",
+      "replace": "        guard script == nil || scriptSegments == segments else { return }",
+      "expect": "KILLED",
+      "rationale": "验收第 2 条「切稿后旧事件不能推进」的直接落点。比较方向写反后换稿不重置、重复传同一份稿反而清空 history。已补 `anEventFromThePreviousScriptCannotAdvanceAfterTheScriptChanges`。"
+    },
+    {
+      "id": "M26",
+      "note": "列宽扫描不再校验逐段长度表是否齐全",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard segmentCount > 0, segmentUTF16Lengths.count >= segmentCount else { return }",
+      "replace": "        guard segmentCount > 0 else { return }",
+      "expect": "INVALID",
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `manualMoveWithAStaleLengthTableIsANoOpRatherThanACrash`，trap 是 `TeleprompterFollowController.manualMove` 内部按越界下标去读 `segmentUTF16Lengths`。**测试断言的恰恰是安全行为**（长度表只给到第 2 段却要移动到第 3 段时必须原地不动），它的用例名里就写着 `...RatherThanACrash`。也就是说这条变异揭示的是产品缺陷本身，而守卫正是它的修复；测试跟着一起崩是忠实结果，不是测试的毛病。**与 M38／F11／F13 那一类（崩溃在测试里、可通过改断言挽回）相反。**"
+    },
+    {
+      "id": "M27",
+      "note": "时钟回退守卫只留队列年龄、丢掉匹配年龄（稳定证据）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        guard valid(queueAgeMilliseconds), valid(matchMilliseconds) else { return }",
+      "replace": "        guard valid(queueAgeMilliseconds) else { return }",
+      "expect": "KILLED",
+      "rationale": "验收「稳定证据丢失」的直接落点。时钟回退守卫有队列年龄与匹配年龄两半，既有那条 `latencyDiagnosticsReportsBoundedPercentiles` 四次调用喂的全是合法值，匹配年龄那一侧从未被走过。已补 `aRolledBackMatchClockIsNotRecordedAsALatencySample`。"
+    },
+    {
+      "id": "M28",
+      "note": "暂定推进命中数不再兜底下界 1",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
+      "find": "        self.provisionalMinimumMatches = max(1, provisionalMinimumMatches)",
+      "replace": "        self.provisionalMinimumMatches = provisionalMinimumMatches",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御**，与 M23 同因：全仓没有任何生产代码带参构造 `TeleprompterFollowPolicy`，默认值永远走 init 里的字面量，这个下界夹取只对「有人注入 0 或负数」有意义。留着作纵深防御，按第 27/33 条规矩不计入存活。"
+    },
+    {
+      "id": "M29",
+      "note": "候选稿把含保护字面量的整段删空时不再报差异",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        return expected == actual",
+      "replace": "        return expected == actual || actual.isEmpty",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条「数值、单位、正负号变化不得静默通过」。原句里的 50 瓦被 AI 整段删掉后，候选侧一个原子都没有，两侧不等必须报出；加上 actual.isEmpty 之后删除反而被当成一致。"
+    },
+    {
+      "id": "M30",
+      "note": "保护字面量按集合比较，重复次数变化被折叠",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        return expected == actual",
+      "replace": "        return Set(expected) == Set(actual)",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条明写「重复内容变化不得静默通过」。原句「50 瓦…50 瓦」被改成只留一处时，序列比较必须报出；集合比较把两个相同的 50 瓦折叠成一个，于是重复次数的变化静默通过。"
+    },
+    {
+      "id": "M31",
+      "note": "Unicode 负号不再归一，改用另一种写法即可绕过闸门",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "                case \"−\", \"﹣\", \"–\", \"—\":\n                    return String(\"-\")",
+      "replace": "                case \"−\", \"﹣\", \"–\", \"—\":\n                    return String(scalar)",
+      "expect": "KILLED",
+      "rationale": "验收第 1 条点名「正负号」。−(U+2212) 与 ASCII - 必须归一成同一个原子，否则 AI 只把减号换成排版相近的短划就绕过整道闸门；两侧会得到不同的 canonicalValue。"
+    },
+    {
+      "id": "M32",
+      "note": "数字与单位之间的空格不再丢弃",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "                    if scalar.properties.isWhitespace {\n                        return \"\"\n                    }",
+      "replace": "                    if scalar.properties.isWhitespace {\n                        return String(scalar)\n                    }",
+      "expect": "KILLED",
+      "rationale": "这是 canonicalize 里唯一会把空白放进原子的地方（数字 pattern 的单位前 \\s*）。丢掉它之后 50 元 与 50元 会变成两个不同原子，纯排版改写被误判成数值变化并送人工审阅；该注释已写明保留空白曾造成的后果。"
+    },
+    {
+      "id": "M33",
+      "note": "去掉重叠抑制，同一段文本里相交的匹配都会被收进原子表",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard !acceptedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {",
+      "replace": "            guard !acceptedRanges.contains(where: { NSIntersectionRange($0, match.range).length < 0 }) else {",
+      "expect": "KILLED",
+      "rationale": "重叠抑制按匹配位置与优先级决定谁胜出（url 0、标识符 2、数字 3）。去掉之后 50 瓦 会同时贡献 50 与 50瓦 两个原子，原子序列凭空多一项，两侧比较因此恒不相等——正常稿件会被整片误拒。"
+    },
+    {
+      "id": "M34",
+      "note": "原子值不再剥离句尾标点",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            let rawValue = String(text[swiftRange]).trimmingCharacters(in: trailingPunctuation)",
+      "replace": "            let rawValue = String(text[swiftRange])",
+      "expect": "KILLED",
+      "rationale": "句末的 https://example.com。 必须与句中的同一个 URL 归成同一个原子，否则仅因为标点位置不同就报成变化并送人工审阅。**这里只影响 URL 一类**：数字 pattern 的结尾 lookahead 使它从不越过标点，剥离对数字是空操作——这一点是补回归时才发现的，首轮我先拿「50 瓦。」写用例，结果该用例在变异下依然全绿，才暴露出我选错了输入。已改为 URL 用例，变异被杀 4 条。"
+    },
+    {
+      "id": "M35",
+      "note": "分组区间只查重叠、不查缺口",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.startUnit == next else {",
+      "replace": "            guard group.startUnit >= next else {",
+      "expect": "KILLED",
+      "rationale": "start_unit 必须严格接上一组的 end_unit。写成 >= 之后 group.startUnit > next 的缺口被放过，被跳过的分片在这轮分组里彻底消失，而它们后面还要逐块送去改写——漏掉的段落会静默保留原文却仍被算进结果。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.rangeGap` 来自循环内那道守卫（既有用例的缺口恰好被循环末尾的总覆盖兜底接住）。"
+    },
+    {
+      "id": "M36",
+      "note": "分组区间不再校验上界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.endUnit > group.startUnit, group.endUnit <= targets.count else {",
+      "replace": "            guard group.endUnit > group.startUnit else {",
+      "expect": "KILLED",
+      "rationale": "end_unit 越过 targets.count 会让后面的 sourceUnit 取下标越界。去掉上界不是「更宽松」而是把一个明确的拒绝换成崩溃或错位取值。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.rangeBounds` 这条诊断码。"
+    },
+    {
+      "id": "M37",
+      "note": "单组分片数上限形同虚设",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "            guard group.endUnit - group.startUnit <= maxGroupUnits else {",
+      "replace": "            guard group.endUnit - group.startUnit <= Int.max else {",
+      "expect": "KILLED",
+      "rationale": "maxGroupUnits 是单次请求的分片上限，超限必须以 group_limit 明确拒绝。放宽到 Int.max 之后超限稿件会一路走到请求 LLM 的一侧才失败，错误从「稿件过大」退化成传输失败。 **首轮存活，已补回归转杀**：`TeleprompterPreparationPromptsTests` 此前没有任何用例断言 `.groupLimit` 这条诊断码。"
+    },
+    {
+      "id": "M38",
+      "note": "接受一个不认识的 grouping schema 版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        guard payload.schemaVersion == \"teleprompter.grouping.v1\" else {",
+      "replace": "        guard payload.schemaVersion == \"teleprompter.grouping.v2\" else {",
+      "expect": "KILLED",
+      "rationale": "**第六十七轮由 INVALID 升级为 KILLED，原因是测试侧修好了一处会让真检出失效的写法。**本变异把 grouping 的 schemaVersion 守卫改成 v2，于是分组提示词带 v2，`rewriteFailureRetriesOnlyRewriteWithTheOriginalGrouping` 里按 schemaVersion 过滤出来的 `rewritePrompts` 变成 0 条。改之前那句是非致命的 `#expect(rewritePrompts.count == 2)`，断言红了却不停止，下一行 `rewritePrompts[0]` 直接越界 trap 把整个测试进程带崩——探针按既定纪律不得解读崩溃，于是记成 INVALID，**一个已经产生的真实检出被崩溃吃掉了**。第六十七轮把那处改成致命的 `try #require`，测试在 require 处干净停下，整轮跑完变成 72 条失败（基线 766），是干净击杀。隔离复跑 3 次读数 72／73／73 failing，**确定性复现，不是间歇**。这是本轮那处测试修复的第三个受益变异（另两个是 F11、F13）：**崩溃一旦消失，原本被它掩盖的读数会自己变干净**，所以「INVALID」这个结论必须随证据更新，不能一直沿用。此前关于分类规则的那段记录仍然有效——首轮把它读成「does not compile」确实是错的，崩溃行里的 `error: Process ... signal code 5` 被编译错误正则命中，据此给 `classify()` 加了崩溃规则。"
+    },
+    {
+      "id": "M39",
+      "note": "源分片 id 的连续性不再校验",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPrompts.swift",
+      "find": "        guard targets.enumerated().allSatisfy({ $0.element.id == targets[0].id + $0.offset }) else {",
+      "replace": "        guard targets.enumerated().allSatisfy({ _ in true }) else {",
+      "expect": "SURVIVED",
+      "rationale": "**生产不可达的纵深防御，但比 M23／M28 更值得盯**：全仓只有 4 处构造 `TeleprompterSourceUnit`（PreparationDomain:277、Session:3009／3025、V2Store:572），id 分别是 `units.count`、builder 给的 `unit.id` 与常量 0，全部连续，因此这道守卫在产品路径上不可观测。它抛的 `invalidSourceUnits` 在整个测试目录里**一次都没出现过**，补它的前提是先造出非连续 id 的素材。\n\n**这条变异给过相反读数，凶手已定位**：全量探针 5 次里有 3 次记 KILLED，隔离跑 6/6 全绿、干净树 5/5 全绿、8 倍 CPU 负载下全量 6/6 全绿。逐条抓失败用例名后，凶手是**`observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics`**，它报的断言是 `eventText.split(separator: \"\\n\").count == 4` 实测 5 或 8、`metricLines.count == 1` 实测 2——一个全新 UUID 临时目录里的文件多出若干行，且每次行数不同。**它与提词器分组、源分片、本变异毫无关系**，因此本变异是存活。该失败只在紧跟 M38（会崩溃的变异）之后出现，机制未确定，已登记为开放缺陷。**对探针的影响要写清楚**：一个无关测试的间歇失败会把存活读成击杀，与第 33 条「探针没跑起来导致全部假报 KILLED」是镜像情形。据此得到的校准是：**失败数 ≥5 的击杀不能由单个 flaky 测试解释，失败数 1–4 的击杀需要复跑确认**。"
+    },
+    {
+      "id": "N1",
+      "note": "分段软上限 60 收紧到 20",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "    private static let maxCharactersPerSegment = 60",
+      "replace": "    private static let maxCharactersPerSegment = 20",
+      "expect": "KILLED",
+      "rationale": "软上限是「超长单元需要切分」的触发条件本身；收紧到 20 后 3 条变红。"
+    },
+    {
+      "id": "N2",
+      "note": "长句不再优先切在空白/逗号边界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {\n                    end = sourceText.index(after: boundary)\n                }",
+      "replace": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2,\n                   false {\n                    end = sourceText.index(after: boundary)\n                }",
+      "expect": "KILLED",
+      "rationale": "第 62 条新增的回归钉住「切在最后一个自然停顿」：两个逗号的素材，第一段必须是 46 字且以逗号收尾。让这段偏好永不生效后第一段变成 60 字，停在从句中间。写成 `false` 而不是整段删掉，是为了让 `candidates` 仍然被读到——删掉整段会留下一条「初始化的值从未被使用」的警告，那是另一类噪声，不该混进变异读数里。"
+    },
+    {
+      "id": "N3",
+      "note": "边界回退不再要求至少走完一半",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {\n                    end = sourceText.index(after: boundary)\n                }",
+      "replace": "                if let boundary = candidates.last {\n                    end = sourceText.index(after: boundary)\n                }",
+      "expect": "KILLED",
+      "rationale": "这道守卫的作用是「10 字处的逗号不该把首段切成 11 字」。回归的不变量写在**非末段**上——句子的余量可以短，开头的一段不可以。"
+    },
+    {
+      "id": "N4",
+      "note": "不再为了不切断英文单词而越过分段软上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            while end < range.upperBound,\n                  let previous = end > start ? sourceText.index(before: end) : nil,\n                  isWordCharacter(sourceText[previous]),\n                  isWordCharacter(sourceText[end]) {\n                end = sourceText.index(after: end)\n            }",
+      "replace": "            while false {\n                end = sourceText.index(after: end)\n            }",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而存活的理由是那条回归本身没写到被保护的分支上**（第 78 条同族）。既有 `testLongLatinIdentifierIsNotSplitAtTheSoftTarget` 的素材是 61 字：有保护时词内循环把 `end` 顶到句末，无保护时 `end` 停在 60，两侧都再被本轮新增的尾段合并收拾成同一段——断言恒真。素材换成真正跨过上限的 73 字版本后转杀。"
+    },
+    {
+      "id": "N5",
+      "note": "小数点不再被当成句界（小数被切开）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if let previous, let next,\n           isDigit(previous), isDigit(next) {\n            return false\n        }",
+      "replace": "        if false {\n            return false\n        }",
+      "expect": "SURVIVED",
+      "rationale": "**等价变异，判据是判据集合的包含关系而不是样本不足**：`isDigit` 的判据是 `CharacterSet.decimalDigits`，`isWordCharacter` 的判据是 letters OR decimalDigits OR `_` OR `#`，所以 `isDigit(p) && isDigit(n)` 恒蕴含 `isWordCharacter(p) && isWordCharacter(n)`。这道守卫的结论已被下一道完全覆盖，删掉它不改变任何一次判定（实测 733 项全绿）。保留原样是为了让「小数不切开」这个意图留在代码里；真要合并成一道，应连注释一起改并重跑本条。"
+    },
+    {
+      "id": "N6",
+      "note": "英文句中的句点不再被当成句界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if let previous, let next,\n           isWordCharacter(previous), isWordCharacter(next) {\n            return false\n        }",
+      "replace": "        if false {\n            return false\n        }",
+      "expect": "KILLED",
+      "rationale": "URL 与域名必须留在一个阅读单元内，否则「https://example.com。」会被切成两段，而域名的后半段对读者毫无意义。"
+    },
+    {
+      "id": "N8",
+      "note": "句末收尾引号不再跟随本句",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        var end = sourceText.index(after: boundary)\n        while end < upperBound && isClosingCharacter(sourceText[end]) {\n            end = sourceText.index(after: end)\n        }\n        return end",
+      "replace": "        return sourceText.index(after: boundary)",
+      "expect": "KILLED",
+      "rationale": "「他说：‘现在开始。’」的收尾引号必须跟着本句，否则下一段以一个孤立引号开头，而这一段在对齐器眼里永远匹配不上。"
+    },
+    {
+      "id": "N9",
+      "note": "换行不再切分段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            if sourceText[cursor].isNewline {",
+      "replace": "            if false {",
+      "expect": "KILLED",
+      "rationale": "换行只通过 `sectionEnds` 影响 pauseHint，不影响段边界——这正是它此前零覆盖的原因。去掉后段落末句与句中句的停顿提示无法区分。"
+    },
+    {
+      "id": "N10",
+      "note": "尾部空白不再裁掉",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        while upper > lower {\n            let previous = sourceText.index(before: upper)\n            guard sourceText[previous].isWhitespace else { break }\n            upper = previous\n        }",
+      "replace": "        while false {\n            break\n        }",
+      "expect": "KILLED",
+      "rationale": "段落末尾的空格会把段落真实末尾推后，于是末句拿不到「长停顿」而被降级成「句间停顿」——**首轮我声明错了方向**：最初断言的是「段文本不含尾随空白」，而句级 `trimmedRange` 早就保证了那一条，所以断言恒真、变异存活。正确的不变量是「加不加尾部空格，段文本与停顿提示都不变」，与第 43 条「断言不等不等于断言了想要的那件事」同一次复发，这次漏的是「谁来读这个字段」。"
+    },
+    {
+      "id": "N11",
+      "note": "段末停顿提示不再按段落收尾给长停顿",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "            if sectionEnds.contains(range.upperBound) {\n                pauseHint = .long\n            } else if",
+      "replace": "            if false {\n                pauseHint = .long\n            } else if",
+      "expect": "KILLED",
+      "rationale": "pauseHint 在 `TeleprompterView` 里渲染成「长停顿」/「句间停顿」，是用户可见的标签；本轮之前它一条断言都没有。"
+    },
+    {
+      "id": "N12",
+      "note": "长句切分改用第一个空白/逗号而不是最后一个",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "                if let boundary = candidates.last,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {",
+      "replace": "                if let boundary = candidates.first,\n                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {",
+      "expect": "KILLED",
+      "rationale": "同 N2 的素材：两个逗号，first 与 last 给出不同的答案（21 字 vs 46 字）。取第一个等于每次都切在最近的停顿上，长句被切成大量碎片。"
+    },
+    {
+      "id": "N13",
+      "note": "不再把纯标点的尾段并回上一段（回到第 84 条修复前的行为）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if result.count > 1,\n           let last = result.last,\n           !sourceText[last].contains(where: { $0.isLetter || $0.isNumber }) {",
+      "replace": "        if false {\n            let last = result.last ?? range",
+      "expect": "KILLED",
+      "rationale": "第 84 条的直接回归：没有它，每个略超软上限的句子都会在句末留下一个只含「。」的段，舞台为它渲染一行。"
+    },
+    {
+      "id": "N14",
+      "note": "尾段合并不再要求「不含文字数字」，有内容的尾段也被吞掉",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSegmenter.swift",
+      "find": "        if result.count > 1,\n           let last = result.last,\n           !sourceText[last].contains(where: { $0.isLetter || $0.isNumber }) {",
+      "replace": "        if result.count > 1,\n           let last = result.last {",
+      "expect": "KILLED",
+      "rationale": "合并条件必须排除有内容的尾段，否则会吞掉真实阅读材料——这条守着修复本身的边界。"
+    },
+    {
+      "id": "P1",
+      "note": "阅读快捷键不再要求控件区没有焦点（Space 被控件抢走）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        readingAreaFocused && !menuOrPopoverPresented",
+      "expect": "KILLED",
+      "rationale": "判据第 3 条「常用操作键盘可达」：焦点在控件上时 Space 必须归控件，否则「回到朗读位置」这类按钮会被空格误触发。3 条变红。"
+    },
+    {
+      "id": "P2",
+      "note": "阅读快捷键在 popover 打开时仍然生效",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        readingAreaFocused && !controlFocusInside",
+      "expect": "KILLED",
+      "rationale": "显示设置弹层打开时，↓／Space 必须归弹层而不是翻动朗读位置。"
+    },
+    {
+      "id": "P3",
+      "note": "阅读快捷键不再要求阅读区有焦点",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "        readingAreaFocused && !controlFocusInside && !menuOrPopoverPresented",
+      "replace": "        !controlFocusInside && !menuOrPopoverPresented",
+      "expect": "KILLED",
+      "rationale": "焦点在窗口别处时按方向键不应移动阅读位置。"
+    },
+    {
+      "id": "P4",
+      "note": "VoiceOver 不再让控件常驻",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "            || input.voiceOverEnabled\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "VoiceOver 用户没有指针悬停，控件会永久消失——判据第 3 条的无障碍子项。"
+    },
+    {
+      "id": "P5",
+      "note": "键盘 reveal 请求不再让控件常驻",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageInteractionPolicy.swift",
+      "find": "            || input.keyboardRevealRequested\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "纯键盘用户必须能把控件叫出来；这条与 P4 一起保证「隐藏的高级操作不得让键盘用户失去常用能力」。"
+    },
+    {
+      "id": "A1",
+      "note": "顶层对象不再要求封闭（模型可多返回同级字段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            guard Set(object.keys) == [\"schema_version\", \"segments\"],\n                  let raw = object[\"segments\"] as? [[String: Any]], !raw.isEmpty,\n                  raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] }) else {",
+      "replace": "            guard let raw = object[\"segments\"] as? [[String: Any]], !raw.isEmpty,\n                  raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] }) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：封闭对象这道检查在单元层有测试、在顶层一条都没有，于是模型多返回一个同级键照样收下。补 `rejectsUnknownTopLevelFields` 后转杀。"
+    },
+    {
+      "id": "A2",
+      "note": "单元对象不再要求封闭（模型可自造字段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "raw.allSatisfy({ Set($0.keys) == [\"start_unit\", \"end_unit\", \"keywords\", \"match_phrases\", \"pause_hint\"] })",
+      "replace": "raw.allSatisfy({ _ in true })",
+      "expect": "KILLED",
+      "rationale": "模型自造的 `text` 字段若被收下，读者的稿件就多了一份「模型说这段是什么」的旁本。"
+    },
+    {
+      "id": "A3",
+      "note": "分组不再要求首尾相接（允许中间跳过单元）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard annotation.start_unit == next, annotation.end_unit > next,",
+      "replace": "                guard annotation.start_unit >= next, annotation.end_unit > next,",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而既有那条「漏单元」夹具是被另一道守卫挡住的**——它把 end_unit 改成 3，越界检查先报错，因此相接性本身从未被观察。`(0,1)` 后接 `(2,4)` 能同时满足上界与末尾覆盖，中间那个单元静默拿不到关键词与停顿提示。补 `rejectsGapsBetweenGroups` 后转杀。"
+    },
+    {
+      "id": "A4",
+      "note": "分组不再要求非空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard annotation.start_unit == next, annotation.end_unit > next,",
+      "replace": "                guard annotation.start_unit == next, annotation.end_unit >= next,",
+      "expect": "INVALID",
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `rejectsOmissionsOverlapAndUnknownFields`，崩在 `TeleprompterAnalysisDecoder` 内部。去掉「分组非空」判定后，空分组会被解码器接受，随后按空数组继续切分并越界读 `units`。**测试断言的正是「这份输入必须被拒绝」**，所以它随产品一起崩是忠实结果。"
+    },
+    {
+      "id": "A5",
+      "note": "分组越界检查放宽一格",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      annotation.end_unit <= firstUnit + units.count,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "replace": "                      annotation.end_unit <= firstUnit + units.count + 1,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "expect": "INVALID",
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 同一个用例 `rejectsOmissionsOverlapAndUnknownFields`，trap 同样在 `TeleprompterAnalysisDecoder` 内部：把 `end_unit` 的上界放宽一格后，越界的标注被放行，随后按越界下标去取单元。**测试喂的正是「越界必须被拒」的素材**（`end_unit` 从 2 改成 3）。"
+    },
+    {
+      "id": "A6",
+      "note": "模型 match_phrases 不再被拒（别名可由模型注入）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
+      "replace": "                      annotation.keywords.count <= 5, annotation.match_phrases.allSatisfy({ $0.count <= 120 }) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活，而这是本轮最要紧的一条零覆盖**：`TeleprompterSession` 把 `annotation.matchPhrases` 直接写进已确认版本（`updatedSegments[index].matchPhrases = annotation.matchPhrases`），这些短语正是对齐器匹配时用的读法别名。方案 §5.6 写明别名只能由读者登记、模型不得注入，**而唯一执行这条的守卫没有任何测试观察它**。补 `rejectsModelInjectedReadingAliases` 后转杀。"
+    },
+    {
+      "id": "A7",
+      "note": "合并长度上限被摘掉（模型可把整篇合成一段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                guard text.count <= 180 || mergedNothing,",
+      "replace": "                guard true || mergedNothing,",
+      "expect": "KILLED",
+      "rationale": "180 字这道上限是给模型的分组规模约束；摘掉后一次请求可以把十几个单元合成一段，审阅界面上那一段会肿到无法逐句核对。"
+    },
+    {
+      "id": "A8",
+      "note": "第 85 条的修复被撤掉（长单元重新不可标注）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                let mergedNothing = annotation.end_unit == annotation.start_unit + 1\n                guard text.count <= 180 || mergedNothing,",
+      "replace": "                let mergedNothing = false\n                guard text.count <= 180 || mergedNothing,",
+      "expect": "KILLED",
+      "rationale": "第 85 条的直接回归：撤掉豁免后，任何含长于 180 字单元的稿件重新变成「AI 标注必然失败」，且失败被报成 AI 失败。"
+    },
+    {
+      "id": "A9",
+      "note": "关键词不再要求出现在原文里（模型可自造关键词）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                      keywordsAppearInOrder(annotation.keywords, in: text),",
+      "replace": "                      annotation.keywords.allSatisfy({ !$0.isEmpty }),",
+      "expect": "KILLED",
+      "rationale": "段关键词会被 `TeleprompterSession.swift:2643` 收集起来当作 ASR 的 `audio.input.transcription.keywords` 下发——模型自造的词会直接进入识别偏置。"
+    },
+    {
+      "id": "A10",
+      "note": "末尾单元未被覆盖也不再拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            guard next == firstUnit + units.count else { throw TeleprompterTextError.invalidAnalysis }",
+      "replace": "            guard next <= firstUnit + units.count else { throw TeleprompterTextError.invalidAnalysis }",
+      "expect": "KILLED",
+      "rationale": "漏掉末尾若干单元时，模型返回的内容被原样采纳，尾部单元静默没有提示，而调用方看不出来。"
+    },
+    {
+      "id": "A11",
+      "note": "关键词不再要求按出现顺序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "                    of: keyword,\n                    options: [.caseInsensitive, .diacriticInsensitive],\n                    range: lowerBound..<text.endIndex\n                  ) else {",
+      "replace": "                    of: keyword,\n                    options: [.caseInsensitive, .diacriticInsensitive]\n                  ) else {",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：推进 `lowerBound` 是这道检查成为「顺序检查」而不是「成员检查」的唯一原因——「文」吃掉中文里唯一的文之后，排在前面的「中」再也匹配不上第二条。摘掉区间后模型可以返回任意顺序。补 `rejectsKeywordsThatDoNotAppearInReadingOrder`（带一条顺序正确的正向对照）后转杀。"
+    },
+    {
+      "id": "A12",
+      "note": "窗口从 12 个单元放大到 24（单次请求规模失控）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "        for start in stride(from: 0, to: units.count, by: 12) {",
+      "replace": "        for start in stride(from: 0, to: units.count, by: 24) {",
+      "expect": "KILLED",
+      "rationale": "窗口是单次请求的规模边界；放大后 9 条变红（既有的窗口切分用例直接数错单元）。"
+    },
+    {
+      "id": "A13",
+      "note": "窗口切片与步长不再一致（漏掉一半单元）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterAnalysis.swift",
+      "find": "            let window = Array(units[start..<min(start + 12, units.count)])",
+      "replace": "            let window = Array(units[start..<min(start + 12, units.count + 1)])",
+      "expect": "INVALID",
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `aScriptWithAnOverlongUnitStillAnnotatesEndToEnd`，trap 在 `TeleprompterAnalysisDecoder.decode` 内部。把窗口切片改成与步长不一致（切片取 6 而步长仍是 12）后，`firstUnit` 仍在按 12 前进，而解码器拿到的 `units` 只有一半，于是 `annotation.end_unit <= firstUnit + units.count` 这道上界按错误的长度放行，随后越界读单元。**测试用例名断言的正是「超长单元也要端到端标注成功」**，随产品一起崩是忠实结果。"
+    },
+    {
+      "id": "V2",
+      "note": "markFollowing 不再要求处于 starting（迟到回调可把已失败会话拉回跟随）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .starting else { return false }\n        state = .following",
+      "replace": "        guard isCurrent(token) else { return false }\n        state = .following",
+      "expect": "KILLED",
+      "rationale": "被 markFollowing 的状态守卫与 staleConnectionIsRejectedAfterStopAndRestart、lateStartCallbackCannotResurrectAFailedStart 共同杀掉。"
+    },
+    {
+      "id": "V3",
+      "note": "beginStop 不再接受 stopFailed（停机失败后无法重试，死路）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .starting, .following, .stopFailed:\n            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping\n            return generation\n        case .off, .stopping, .pausedByUser, .unavailable:\n            return nil",
+      "replace": "        case .starting, .following:\n            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping\n            return generation\n        case .off, .stopping, .pausedByUser, .unavailable, .stopFailed:\n            return nil",
+      "expect": "KILLED",
+      "rationale": "被 retryStopVoiceAssist 的真实调用形态与 deviceErrorDuringStopKeepsTheStopInFlight 杀掉：`.stopFailed` 是「停机失败后重试」的唯一入口，撤掉后 `TeleprompterSession.retryStopVoiceAssist` 的 `guard case .stopFailed` 与 `beginStop` 同时落空，停止成为死路。"
+    },
+    {
+      "id": "V4",
+      "note": "markStopped 不再要求处于 stopping（重复回调能把读者的暂停改成停止）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .stopping else { return false }",
+      "replace": "        guard isCurrent(token) else { return false }",
+      "expect": "KILLED",
+      "rationale": "被 duplicateStopCallbackCannotMoveTheDestination 杀掉。"
+    },
+    {
+      "id": "V5",
+      "note": "空的停止失败原因又被当成停止成功（回到第 86 条修复前的 fail-open）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        if let failureReason {",
+      "replace": "        if let failureReason, !failureReason.isEmpty {",
+      "expect": "KILLED",
+      "rationale": "这是第 86 条缺陷的回归护栏：撤掉后 `emptyStopFailureReasonIsNotRecordedAsSuccess` 立即失败。"
+    },
+    {
+      "id": "V6",
+      "note": "markStartFailed 不再要求处于 starting（迟到的失败回调可掀翻正在跟随的会话）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard isCurrent(token), state == .starting else { return false }\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "replace": "        guard isCurrent(token) else { return false }\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "expect": "KILLED",
+      "rationale": "被 lateStartFailureCannotOverwriteAFollowingSession 杀掉。"
+    },
+    {
+      "id": "V7",
+      "note": "invalidateAfterFailure 不再作废当前代",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "    ) -> UUID {\n        generation = UUID()\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "replace": "    ) -> UUID {\n        pendingStopDestination = nil\n        state = .unavailable(reason)",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。`generation` 的唯一无状态检查消费者是 `TeleprompterSession.startPipeline` 的 4 处 generation 守卫（2364／2382／2394／2397），它们只在 `.starting` 窗口内运行；该窗口内 `startPump` 尚未执行，唯一的 `invalidateAfterFailure` 调用点 `enterManual` 只能由 pump 的 `upload`／`handle` 触发，故不可达。`acceptsVoiceEvents` 自带 `.starting`／`.following` 状态检查，不依赖换代。"
+    },
+    {
+      "id": "V8",
+      "note": "resetToOff 不再作废当前代",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "    public mutating func resetToOff() -> UUID {\n        generation = UUID()",
+      "replace": "    public mutating func resetToOff() -> UUID {",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。`resetToOff` 唯一调用点是 `TeleprompterSession.finishStageClose`，其前置 `requestVoiceStop` 在 `.starting` 下必经 `beginStop` 换代；若状态本就是 `.off`，则无在途 `startPipeline` 可复活。"
+    },
+    {
+      "id": "V9",
+      "note": "markUnavailable 不再拒绝停止进行中（设备报错会丢掉待定目的地并让停止卡死）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        guard state != .stopping else { return false }",
+      "replace": "        guard true else { return false }",
+      "expect": "KILLED",
+      "rationale": "被 deviceErrorDuringStopKeepsTheStopInFlight 杀掉。"
+    },
+    {
+      "id": "V10",
+      "note": "acceptsVoiceEvents 不再校验代（旧连接的音频块与识别事件都会被采纳）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        isCurrent(token) && (state == .starting || state == .following)",
+      "replace": "        state == .starting || state == .following",
+      "expect": "KILLED",
+      "rationale": "被 staleConnectionIsRejectedAfterStopAndRestart 杀掉。"
+    },
+    {
+      "id": "V11",
+      "note": "用户暂停后不再允许重新开启",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .off, .pausedByUser, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed:\n            false",
+      "replace": "        case .off, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed, .pausedByUser:\n            false",
+      "expect": "KILLED",
+      "rationale": "被 lateStartCallbackCannotResurrectAFailedStart 杀掉。"
+    },
+    {
+      "id": "V12",
+      "note": "设备不可用后不再允许重新开启",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        case .off, .pausedByUser, .unavailable:\n            true\n        case .starting, .following, .stopping, .stopFailed:\n            false",
+      "replace": "        case .off, .pausedByUser:\n            true\n        case .starting, .following, .stopping, .stopFailed, .unavailable:\n            false",
+      "expect": "KILLED",
+      "rationale": "被 lateStartFailureCannotOverwriteAFollowingSession 杀掉。"
+    },
+    {
+      "id": "V13",
+      "note": "停止进行中不再算忙",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        self == .starting || self == .stopping",
+      "replace": "        self == .starting",
+      "expect": "KILLED",
+      "rationale": "被 busyCoversStopAndPauseRemainsStartable 杀掉。"
+    },
+    {
+      "id": "V14",
+      "note": "beginStart 不再清空待定停止目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        generation = UUID()\n        pendingStopDestination = nil\n        state = .starting",
+      "replace": "        generation = UUID()\n        state = .starting",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。`pendingStopDestination` 的读点只有 `markStopped`（守卫 `state == .stopping`，而进入 `.stopping` 的唯一路径 `beginStop` 必先写入它）与 `retryStopVoiceAssist`（守卫 `.stopFailed`，从该态 `canStart` 为 false，故 `beginStart` 不可达）。"
+    },
+    {
+      "id": "V15",
+      "note": "beginStop 不再记录目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "            generation = UUID()\n            pendingStopDestination = destination\n            state = .stopping",
+      "replace": "            generation = UUID()\n            state = .stopping",
+      "expect": "KILLED",
+      "rationale": "被 duplicateStopCallbackCannotMoveTheDestination 与既有暂停/恢复用例共同杀掉（21 项）。"
+    },
+    {
+      "id": "V16",
+      "note": "停止成功后不再清空待定目的地",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterVoiceAssistLifecycle.swift",
+      "find": "        state = pendingStopDestination ?? .off\n        pendingStopDestination = nil\n        return true",
+      "replace": "        state = pendingStopDestination ?? .off\n        return true",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。停止成功后残留的 `pendingStopDestination` 不可被读到：唯一无状态守卫的写入口 `beginStop` 总会覆写，`markFollowing`／`markStartFailed`／`markUnavailable`／`beginStart` 均会清空。"
+    },
+    {
+      "id": "D1",
+      "note": "朗读段不再校验 ordinal 与数组下标一致（段序可错位）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            segment.ordinal == index\n                && segment.keywords",
+      "replace": "            true\n                && segment.keywords",
+      "expect": "KILLED",
+      "rationale": "被 aSegmentWhoseOrdinalDisagreesWithItsPositionIsRejected 杀掉。"
+    },
+    {
+      "id": "D2",
+      "note": "每段关键词上限从 5 放宽到 6",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                && segment.keywords.count <= 5\n",
+      "replace": "                && segment.keywords.count <= 6\n",
+      "expect": "KILLED",
+      "rationale": "被 aSegmentCarryingMoreThanFiveKeywordsIsRejected 杀掉。"
+    },
+    {
+      "id": "D3",
+      "note": "已确认朗读段不再禁止 matchPhrases（读法别名可写进朗读段）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                && segment.matchPhrases.isEmpty\n",
+      "replace": "                && true\n",
+      "expect": "KILLED",
+      "rationale": "被 aConfirmedSegmentCannotCarryReadingAliasesOnTheLegacyChannel 杀掉。这是方案 §5.6「读法别名只能由读者登记」在**持久化层**的执行点，与第 63 轮的 A6（解码器那侧）是一对：两侧都不允许模型注入，此前两侧都没有测试观察。"
+    },
+    {
+      "id": "D4",
+      "note": "段间分隔符不再计入连续性（段与段直接相接也算合法）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            return segment.readingRange.end + (item.offset + 1 < version.segments.count ? 2 : 0)",
+      "replace": "            return segment.readingRange.end",
+      "expect": "KILLED",
+      "rationale": "被 57 条既有的往返与坐标回归杀掉。"
+    },
+    {
+      "id": "D5",
+      "note": "朗读正文与 blocks 的 speak 内容不再要求一致",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        guard speakingText == version.readingText else {",
+      "replace": "        guard true else {",
+      "expect": "KILLED",
+      "rationale": "被 aBundleWhoseReadingTextDisagreesWithItsSpeakBlocksIsRejected 杀掉。"
+    },
+    {
+      "id": "D6",
+      "note": "朗读正文哈希不再校验（证据链与内容脱钩）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              version.readingHash == TeleprompterV2Hash.sha256(version.readingText) else {",
+      "replace": "              true else {",
+      "expect": "KILLED",
+      "rationale": "被 aBundleWhoseReadingHashDoesNotMatchItsTextIsRejected 杀掉。"
+    },
+    {
+      "id": "D7",
+      "note": "空段列表被接受（没有任何朗读段也算合法版本）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        guard !version.segments.isEmpty,",
+      "replace": "        guard true,",
+      "expect": "KILLED",
+      "rationale": "**首轮存活**：空段列表会被区间连续性的 reduce 顺带挡住（reduce 得 0，而正文非空），所以最初那条断言根本区分不出两者。补上「正文也为空、块也为空」的全空版本后转杀——那一格只有 `!segments.isEmpty` 能拦，它是这道守卫与「打开后有东西可念」之间唯一的连接点。"
+    },
+    {
+      "id": "D8",
+      "note": "朗读段 id 唯一性不再校验",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              segmentIDs.count == Set(segmentIDs).count,",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "被 aVersionWithTwoSegmentsSharingAnIdentifierIsRejected 杀掉。"
+    },
+    {
+      "id": "D9",
+      "note": "读法别名的重叠检查被摘掉（同一段内两条别名可覆盖同一处文字）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            if let previousEnd, previousEnd > alias.displayRange.start { return false }",
+      "replace": "            if let previousEnd, false { return false }",
+      "expect": "KILLED",
+      "rationale": "被既有的 aBundleCarryingTwoOverlappingReadingsIsRejected 杀掉。"
+    },
+    {
+      "id": "D10",
+      "note": "读法别名不再校验是否落在本段文字内",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "            if alias.rejection(inSegmentText: segment.text) != nil { return false }",
+      "replace": "            if false { return false }",
+      "expect": "KILLED",
+      "rationale": "被既有的 aBundleWhoseReadingNoLongerMatchesItsSegmentIsRejected 杀掉。"
+    },
+    {
+      "id": "D11",
+      "note": "documentID 的 \".\"／\"..\" 守卫被摘掉（目录穿越）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              documentID != \".\",\n              documentID != \"..\" else {",
+      "replace": "              true else {",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（纵深防御）。documentID 全部来自 `UUID().uuidString`（`createDocument`／`duplicate`）或磁盘文件名（`listDocuments`），从不来自用户输入；而 `documentID == \".\"` 拼上扩展名是 `\"...json\"`，在 `appendingPathComponent` 下不构成目录穿越。"
+    },
+    {
+      "id": "D12",
+      "note": "导出原稿时不再补 BOM",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "        return source.hasBOM ? Data([0xEF, 0xBB, 0xBF]) + body : body",
+      "replace": "        return body",
+      "expect": "KILLED",
+      "rationale": "被既有的 exportsSourceWithBomAndReadingTextWithoutCueOrSkippedContent 杀掉。"
+    },
+    {
+      "id": "D13",
+      "note": "朗读块的来源单元 ID 不再要求去重且升序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "                  block.sourceUnitIDs == Array(Set(block.sourceUnitIDs)).sorted(),",
+      "replace": "                  true,",
+      "expect": "KILLED",
+      "rationale": "被 aBlockRepeatingOneSourceUnitIsRejected 杀掉。"
+    },
+    {
+      "id": "D14",
+      "note": "目标时长不再要求大于 0（0 秒目标被接受）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              version.goalSnapshot.targetSeconds > 0,",
+      "replace": "              version.goalSnapshot.targetSeconds >= 0,",
+      "expect": "SURVIVED",
+      "rationale": "等价变异。`TeleprompterTimingPlanner.validateTargetMinutes` 只接受 1…N 分钟，0 在更早的规划器范围检查处就已被拒——`> 0` 与它冗余。"
+    },
+    {
+      "id": "D15",
+      "note": "时长区间的上下界不再要求有序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": " && $0.lowerBound >= 0 && $0.upperBound >= $0.lowerBound }",
+      "replace": " && $0.lowerBound >= 0 }",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达。`ClosedRange` 不允许下界大于上界：进程内构造会 trap（**实测 `ClosedRange(uncheckedBounds:)` 在本工具链下同样 trap**），Codable 解码也会先崩。这道守卫永不触发，属纵深防御。"
+    },
+    {
+      "id": "D16",
+      "note": "选区不再要求是来源单元的子集",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              selectedIDs.isSubset(of: sourceUnitIDs),",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "被 aSelectionNamingASourceUnitThatDoesNotExistIsRejected 杀掉。"
+    },
+    {
+      "id": "D17",
+      "note": "documentID 的斜杠守卫被摘掉（路径穿越）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
+      "find": "              documentID.rangeOfCharacter(from: CharacterSet(charactersIn: \"/\\\\\")) == nil,",
+      "replace": "              true,",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，理由同 D11。在 macOS 上 `\\` 也不是路径分隔符，承重的只是「ID 不来自用户输入」这个前提。"
+    },
+    {
+      "id": "E1",
+      "note": "排版宽度不再拒绝非有限值（NaN／无穷宽度直接进布局）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let safeWidth = availableWidth.isFinite ? max(1, availableWidth) : 1",
+      "replace": "        let safeWidth = max(1, availableWidth)",
+      "expect": "KILLED",
+      "rationale": "被 nonFiniteLayoutWidthStillTilesTheSource 杀掉。夹具断言退化宽度与「按 1 排版」的结果逐条相同——只断言「拼得回原文」区分不出来，排版器在 NaN 宽度下同样能把整段塞进一行。注释里记着 `max(1, .nan)` 在 Swift 里返回 nan（`max` 的实现是 `y < x ? x : y`，而 `nan < 1` 为假），所以这道守卫是唯一让退化宽度退回 1 的地方。"
+    },
+    {
+      "id": "E2",
+      "note": "排版字号不再拒绝非有限值",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let safePointSize = pointSize.isFinite ? max(1, pointSize) : 1",
+      "replace": "        let safePointSize = max(1, pointSize)",
+      "expect": "KILLED",
+      "rationale": "被 nonFinitePointSizeStillTilesTheSource 杀掉。**首轮夹具只试 `.nan`，而 AppKit 对 NaN 字号与 1 号字体给出同样的排版结果，断言区分不出来**；补上 `.infinity`（超大字号会把整段挤成一行，与按 1 排版的结果不同）后转杀。"
+    },
+    {
+      "id": "E3",
+      "note": "阅读位置恰好落在末行末尾时不再回落到该行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        if position.utf16Offset >= lines[lastIndex].utf16End {",
+      "replace": "        if position.utf16Offset > lines[lastIndex].utf16End {",
+      "expect": "KILLED",
+      "rationale": "被 offsetExactlyAtLastRowEndResolvesToIt 杀掉。既有那条「offset past the end」用例用的是**严格越过末尾**的值，所以 `>=` 改成 `>` 照样通过。"
+    },
+    {
+      "id": "E4",
+      "note": "阅读位置早于首行时不再回落到首行",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        if position.utf16Offset < lines[firstIndex].utf16Start {",
+      "replace": "        if false {",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（纵深防御）。`TeleprompterStageDisplayLine` 的 init 是 `fileprivate`，全仓只有 `TeleprompterStageLineLayout.layout` 的两处构造它，而每个段的首行恒从 0 开始——`lines[firstIndex].utf16Start > 0` 不可能成立，这道回落永不触发。"
+    },
+    {
+      "id": "E5",
+      "note": "上下移动不再被夹在可用行范围内",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let boundedDelta = min(max(delta, -currentIndex), lastIndex - currentIndex)",
+      "replace": "        let boundedDelta = max(delta, -currentIndex)",
+      "expect": "INVALID",
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `reading position resolves and steps across display lines without wrapping`，trap 在 `TeleprompterStagePresentation.positionByMovingLine` 内部：去掉夹取后 `boundedDelta` 可以越过末行，紧接着按该下标读 `lines`。**测试断言的正是「越过末行返回 nil 而不是崩溃」**（`positionByMovingLine(by: 1, from: lastPosition, ...) == nil`），而第六十七轮已把该用例里的计数断言改成了致命的 `#require`，所以这一条**排除了「测试自己越界」的可能**：崩溃点确实在产品函数里。"
+    },
+    {
+      "id": "E6",
+      "note": "可见行数不再夹住下界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),",
+      "replace": "            visibleCount,",
+      "expect": "KILLED",
+      "rationale": "被既有的 visibleLineSlots 夹取用例杀掉。"
+    },
+    {
+      "id": "E7",
+      "note": "可见行数不再夹住上界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let count = min(\n            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n        )",
+      "replace": "        let count = max(\n            max(visibleCount, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n            SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n        )",
+      "expect": "KILLED",
+      "rationale": "被既有的那条「`switch` 对任何 ≥3 的入参都走 default」用例杀掉（13 条）。"
+    },
+    {
+      "id": "E8",
+      "note": "三行模式的上一行不再判空（首行时会给出 -1 这个不存在的槽位）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "                current > 0 ? current - 1 : nil,",
+      "replace": "                current - 1,",
+      "expect": "KILLED",
+      "rationale": "被既有的 atStart 槽位用例杀掉。"
+    },
+    {
+      "id": "E9",
+      "note": "三行模式的下一行不再判空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "                current + 1 < totalCount ? current + 1 : nil,",
+      "replace": "                current + 1,",
+      "expect": "KILLED",
+      "rationale": "被既有的 atEnd 槽位用例杀掉。"
+    },
+    {
+      "id": "E10",
+      "note": "两行模式的下一行不再判空",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            return [current, current + 1 < totalCount ? current + 1 : nil]",
+      "replace": "            return [current, current + 1]",
+      "expect": "KILLED",
+      "rationale": "被既有的两行模式边界用例杀掉。"
+    },
+    {
+      "id": "E11",
+      "note": "配速状态不再要求至少 10 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard totalCount > 0, elapsedSeconds >= 10 else {",
+      "replace": "        guard totalCount > 0, elapsedSeconds >= 0 else {",
+      "expect": "KILLED",
+      "rationale": "被既有的 paceStatusCalculatesStates 杀掉。"
+    },
+    {
+      "id": "E12",
+      "note": "配速状态不再要求进度超过 5%（刚开口就报成跟得上）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard progressRatio > 0.05 else {",
+      "replace": "        guard progressRatio > 0 else {",
+      "expect": "KILLED",
+      "rationale": "被 justStartedSessionReportsEstablishing 杀掉。`> 0` 会让刚开口（1/100）直接进入偏差比较，而此时时间比远大于进度比，于是**刚开口就报偏慢**。"
+    },
+    {
+      "id": "E13",
+      "note": "配速偏差的 ±0.12 死区被摘掉（任何微小偏差都报偏快或偏慢）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            if delta > 0.12 {",
+      "replace": "            if delta > 0 {",
+      "expect": "KILLED",
+      "rationale": "被既有的 paceStatusCalculatesStates 杀掉。"
+    },
+    {
+      "id": "E14",
+      "note": "配速差值不再要求进度超过 2%",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard progressRatio > 0.02 else { return nil }",
+      "replace": "        guard progressRatio > 0 else { return nil }",
+      "expect": "KILLED",
+      "rationale": "被 paceDeltaStaysSilentAtNegligibleProgress 杀掉。"
+    },
+    {
+      "id": "E15",
+      "note": "「需要校准」不再要求与当前倍率相差 0.02 以上",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let needsCalibration = canCalibrate && abs(clampedK - currentCalibrationFactor) > 0.02",
+      "replace": "        let needsCalibration = canCalibrate && abs(clampedK - currentCalibrationFactor) > 0",
+      "expect": "KILLED",
+      "rationale": "被 calibrationIsNotSuggestedWhenItAlreadyMatches 杀掉。**首轮夹具取差值 0，而 `abs(0) > 0` 与 `abs(0) > 0.02` 同为 false，死区改不掉**；改成落在死区内的 0.01 后转杀，并附一条「两次实测倍率必须一致」的前提断言。"
+    },
+    {
+      "id": "E16",
+      "note": "可校准不再要求已读满 30 秒",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let canCalibrate = elapsedSeconds >= 30 && totalUnits >= 50",
+      "replace": "        let canCalibrate = totalUnits >= 50",
+      "expect": "KILLED",
+      "rationale": "被 calibrationStaysUnavailableBeforeThirtySeconds 杀掉。**既有的「Accidental start」用例之所以绿，是因为它只读了第 1 段（29 个单元），`totalUnits >= 50` 先一步把它挡住了**——断言存在、名字正确、也真的绿了，只是它断言的那件事与 30 秒那道门无关。本条用「读得够多但时间不够」的素材才咬住它，并带一条过 30 秒的正向对照。"
+    },
+    {
+      "id": "E17",
+      "note": "已完成段数不再夹住上界（段数会超过总段数）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        let completed = min(max(currentSegmentIndex + 1, 0), totalCount)",
+      "replace": "        let completed = max(currentSegmentIndex + 1, 0)",
+      "expect": "KILLED",
+      "rationale": "被 completedSegmentCountStaysInRange 杀掉。"
+    },
+    {
+      "id": "E18",
+      "note": "窗口宽度不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, Double(SpeechRailDesignTokens.Teleprompter.stageMinimumWidth)),\n                Double(SpeechRailDesignTokens.Teleprompter.stageMaximumWidth)\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的 stageSettingsClampAndPersist 杀掉。"
+    },
+    {
+      "id": "E19",
+      "note": "字号不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumFontScale),\n                SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的 quickZoomMethodsChangeFontScale 杀掉。"
+    },
+    {
+      "id": "E20",
+      "note": "可见行数不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "            let clamped = min(\n                max(newValue, SpeechRailDesignTokens.Teleprompter.stageMinimumVisibleLineCount),\n                SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleLineCount\n            )",
+      "replace": "            let clamped = newValue",
+      "expect": "KILLED",
+      "rationale": "被既有的可见行数夹取用例杀掉。"
+    },
+    {
+      "id": "E21",
+      "note": "手动改动不再回落到 custom 预设",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        guard !isApplyingPreset, presetStorage != .custom else { return }",
+      "replace": "        guard true else { return }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异。`apply(_:)` 是同步的 `@MainActor` 方法：预设期间 `markCustomized` 会把 `presetStorage` 写成 `.custom`，但方法末尾的 `self.preset = preset` 紧接着把它覆盖成目标预设并重写 defaults，**中间没有任何观察者能看见那个瞬态**（无 await、无 reentrant 观察点）。"
+    },
+    {
+      "id": "E22",
+      "note": "背景透明度不再取反（方向反了）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        set { opacity = 1 - newValue }",
+      "replace": "        set { opacity = newValue }",
+      "expect": "KILLED",
+      "rationale": "被既有的 quickOpacityMethodsChangeOpacity 杀掉（11 条）。"
+    },
+    {
+      "id": "E23",
+      "note": "脚本文号不再夹住取值范围",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStageSettings.swift",
+      "find": "        return min(\n            max(value, SpeechRailDesignTokens.Teleprompter.stageScriptMinimumPointSize),\n            SpeechRailDesignTokens.Teleprompter.stageScriptMaximumPointSize\n        )",
+      "replace": "        return value",
+      "expect": "KILLED",
+      "rationale": "被 scriptPointSizeStopsAtTheDesignMinimum 杀掉。实测 `38 × 0.67 = 25.46 < 28`，**下界夹取是承重的**（读者把字号拉到最小时会拿到越界的 25.46pt）；上界那半边与 `38 × 1.52 = 57.76` 之间有余量，属冗余。"
+    },
+    {
+      "id": "F1",
+      "note": "选区里缺单元时不再报错（compactMap 静默丢单元后照样往下走）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard targets.count == window.sourceUnitIDs.count else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
+      "replace": "            guard true else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达的纵深防御（**第六十八轮更正**：此前把它写成「会静默交付一份缺段的稿子」，是过重的判断）。可达性论证：`validate(_:)` 要求 `selectedIDs.allSatisfy({ unitsByID[$0] != nil })`，而 `makeWindows` 对每个入选 ID 直接 `selection.unitsByID[id]!` 强制解包——也就是说**每个 `window.sourceUnitIDs` 按构造必然能在 `unitsByID` 里查到**，`compactMap` 永远不会丢东西。同一条不变式也让 F8、F17 不可达。"
+    },
+    {
+      "id": "F2",
+      "note": "窗口结果为空时不再报错（空 states 被当作一次成功的窗口）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let states, !states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+      "replace": "            guard let states else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
+      "expect": "SURVIVED",
+      "rationale": "冗余的纵深防御，被更早的一道守卫遮挡（第六十八轮更正）。空分组确实能通过分组解码器（`rawGroups.allSatisfy` 对空数组平凡成立，且没有「必须铺满 targets」的收尾检查），但随后 `TeleprompterPreparationPromptBuilder.rewrite` 的 `guard !groups.isEmpty`（TeleprompterPreparationPrompts.swift:782）会先抛 `invalidPromptResponse`，根本走不到 `states` 为空的那一步。**实测**：让模型对 grouping 与 rewrite 都返回空结果，交付的稿子两种读数下都是完整原稿 + 本地兜底，新增用例 `emptyGroupingOutputIsRejectedInsteadOfBecomingACompletedWindow` 在去掉本守卫后仍然全绿。"
+    },
+    {
+      "id": "F3",
+      "note": "边界合并不再要求两侧都是 speak（提示块／跳过块也送去合并）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard left.block.disposition == .speak, right.block.disposition == .speak else {",
+      "replace": "            guard true else {",
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `seamNextToAnOmittedBlockIsNotSentToTheReduceStage` 用 96 个单元（4 窗 3 缝）把第 0 号窗口的最后一个块改成省略块，于是第 0 条接缝左侧不再是 speak。断言 `reduceRequestCount == 2`、`boundaries.map(\\.isChecked) == [false, true, true]`。去掉守卫后第 0 条接缝也会被送去合并，非朗读内容会接进朗读正文——被本用例与 4 条既有用例杀掉。"
+    },
+    {
+      "id": "F4",
+      "note": "恢复预算不再受窗口数约束（单窗口稿件也能用满 3 次恢复请求）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))",
+      "replace": "        let recoveryBudget = policy.maxRecoveryRequests",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（第六十八轮判定，限于默认 policy）。`maxRecoveryRequests` 默认 3，本变异把预算直接设成 `policy.maxRecoveryRequests`。原式 `min(3, max(2, min(windows.count, 3)))` 与它在所有可达窗口数下都相同：windows ≤ 2 时原式给 2，而**每个窗口最多消耗一次恢复请求**（分组/改写各只重试一次，重试失败就本地兜底或抛错），所以预算 2 与 3 都不构成约束；windows ≥ 3 时两式恒等。仅当调用方传入 `maxRecoveryRequests > 3` **且**窗口数 ≥ 4 时才会分叉——生产走默认 policy，该分支不可达。"
+    },
+    {
+      "id": "F5",
+      "note": "分组的单元区间不再要求首尾相接（模型可跳过中间单元而不被发现）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let first = IDs.first,\n                  IDs.last == group.endUnit - 1,\n                  IDs.count == group.endUnit - group.startUnit,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
+      "replace": "            guard let first = IDs.first,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
+      "expect": "SURVIVED",
+      "rationale": "冗余的纵深防御，被解码器侧同一道约束遮挡（第六十八轮更正）。「模型跳过中间单元」在**解码器**里就被拒了：`TeleprompterMapDecoder` 的分组校验有 `guard group.startUnit == next`（TeleprompterPreparationPrompts.swift:1451），跳段会以 `.rangeGap` 被拒，根本走不到 `makeGroupStates`。**这正是第 63 轮 A3 那条变异所在的位置**，所以本条是 A3 在管线侧的重复守卫。**实测**：造出 `[0,1)` + `[2, 远超窗口)` 的跳段分组，去掉本守卫后交付的稿子仍是完整原稿（走本地兜底）。由此得到本轮的一条纪律：**同一道约束在两层各写一遍时，上层那道要按「冗余」记账，不能按独立防线记。**"
+    },
+    {
+      "id": "F6",
+      "note": "改写块不再要求引用一个已存在的分组（模型可凭空造块）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard let group = allowed[block.blockID],",
+      "replace": "            guard let group = allowed[block.blockID] ?? groups.first,",
+      "expect": "SURVIVED",
+      "rationale": "冗余的纵深防御，被改写解码器遮挡（第六十八轮更正）。凭空造块在解码器里就已被拒，而且是被**两道**检查拒的：`guard IDs.count == allowed.count`（TeleprompterPreparationPrompts.swift:1545，保证恰好一个块对一分组）与随后的 `guard let group = allowed[block.blockID]`（:1550）。**实测**：让模型返回一个 `block_id` 完全不存在的块，去掉本守卫后交付的稿子仍是完整原稿（本地兜底）。"
+    },
+    {
+      "id": "F7",
+      "note": "本地兜底不再要求错误可本地恢复（任何失败都静默降级为原文朗读）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard isLocallyRecoverable(error) else { return nil }",
+      "replace": "        guard true else { return nil }",
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `configurationFailureIsNotSilentlyDowngradedToReadingTheSource`：让 completion 抛 `LLMError.notConfigured`，断言整篇准备**失败**。去掉守卫后配置类错误也会静默降级成「按原文朗读」——读者以为 AI 不可用，却拿到一份看起来完全正常的稿子，这是判据 1「稿件可信」的直接违反。杀掉 3 条。"
+    },
+    {
+      "id": "F8",
+      "note": "本地兜底不再校验产出的段数（漏单元时静默交付一份残缺稿）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard states.count == window.sourceUnitIDs.count else { return nil }",
+      "replace": "        guard true else { return nil }",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达的纵深防御（**第六十八轮更正**）。`makeLocalFallback` 的 `states` 由 `window.sourceUnitIDs.enumerated().compactMap` 得到，每个 ID 按 F1 的同一条不变式必然命中 `sourceUnits`，因此 `states.count` 恒等于 `window.sourceUnitIDs.count`，这道段数校验永远成立。"
+    },
+    {
+      "id": "F9",
+      "note": "可本地恢复的错误种类被收窄（漏掉传输层与流中断的兜底）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        case .invalidStructuredResponse, .outputTruncated, .transport,\n            .streamEndedEarly, .malformedStreamEvent:",
+      "replace": "        case .invalidStructuredResponse:\n            return true\n        case .outputTruncated, .transport, .streamEndedEarly, .malformedStreamEvent:\n            return false",
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `transportFailureFallsBackLocallyInsteadOfFailingTheWholeDraft`：让分组阶段抛 `LLMError.transport`，断言仍拿到**完整原稿**的本地兜底稿且状态为 `reviewRequired`。去掉守卫后传输层抖动不再兜底，一次网络抖动会让整篇准备失败、读者开不了讲。杀掉 2 条。"
+    },
+    {
+      "id": "F10",
+      "note": "重试延迟不再夹到 60 秒（服务器给出 1 小时就真的等 1 小时）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        return min(max(retryAfter, 0), 60)",
+      "replace": "        return retryAfter",
+      "expect": "SURVIVED",
+      "rationale": "一半等价、一半不可经济观测（第六十八轮判定）。下界 `max(retryAfter, 0)` 是等价变异：唯一的消费者 `waitBeforeRetryIfNeeded` 已经要求 `delay > 0`，负值在那里就被挡住了。上界 `min(retryAfter, 60)` 是真实的防御，但**只能在真的等超过 60 秒时才可观测**，而 `retryAfterDelay` 是 `fileprivate`，测试无法直接调用（实测编译期报 `inaccessible due to fileprivate protection level`）。本轮试过写成行为断言，跑出来要么让整套测试多花 60 秒、要么断言不到边界，**按纪律如实记作未覆盖，而不是硬凑一条跑得慢的用例。**"
+    },
+    {
+      "id": "F11",
+      "note": "瞬时失败判定不再认 429（限流被当成不可重试直接失败）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            return status == 429 || (500...599).contains(status)",
+      "replace": "            return (500...599).contains(status)",
+      "expect": "KILLED",
+      "rationale": "被 `transientRateLimitGetsOneBoundedRetry` 杀掉。**首轮这条被记成 INVALID——崩溃掩盖了一次真实检出**：同文件里 `transientRetryWaitsForRetryAfterBeforeTheNextStageRequest` 先 `#expect(values.count >= 3)` 再取 `values[1]`，断言失败后不停止、越界 trap 把整个测试进程带崩。把那处改成致命的 `#require` 之后，本条干净转杀（6 条失败）。"
+    },
+    {
+      "id": "F12",
+      "note": "瞬时失败判定不再认 5xx（服务端错误被当成不可重试直接失败）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            return status == 429 || (500...599).contains(status)",
+      "replace": "            return status == 429",
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `serverErrorGetsOneBoundedRetryJustLikeRateLimit` 用 503 复刻既有的 429 用例，断言分组阶段被调用两次。去守卫后服务端 5xx 不再触发重试，读者多白等一次完整往返。杀掉 4 条。"
+    },
+    {
+      "id": "F13",
+      "note": "结构化失败判定不再认 invalidPromptResponseDetailed",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        case .invalidPromptResponse, .invalidPromptResponseDetailed:\n            return true",
+      "replace": "        case .invalidPromptResponse:\n            return true",
+      "expect": "KILLED",
+      "rationale": "被 `rewriteFailureRetriesOnlyRewriteWithTheOriginalGrouping` 杀掉。**首轮同样被记成 INVALID**：该用例先 `#expect(rewritePrompts.count == 2)` 再取 `rewritePrompts[1]`，断言失败后越界 trap。改成致命的 `#require` 之后干净转杀（12 条失败）。"
+    },
+    {
+      "id": "F14",
+      "note": "窗口切分不再要求中点落在区间内（单元数为 0 时切出两个空窗口）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard midpoint > 0, midpoint < window.sourceUnitIDs.count else {",
+      "replace": "        guard true else {",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（第六十八轮判定）。`split` 只在 `canSplitWindow` 为真时被调用，而那要求 `window.sourceUnitIDs.count > 1`；对 count ≥ 2，`midpoint = count / 2` 恒满足 `0 < midpoint < count`（整数除法下 count/2 ≥ 1 且 ≤ count-1）。所以这道守卫在任何可达输入上都不会触发。"
+    },
+    {
+      "id": "F15",
+      "note": "重试等待不再要求延迟为正（0 也照样 sleep）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard let delay = retryAfterDelay(for: error), delay > 0 else { return }",
+      "replace": "        guard let delay = retryAfterDelay(for: error) else { return }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异（形态判定）。`Task.sleep(for: .seconds(0))` 本身就是空操作，去掉 `delay > 0` 不改变任何可观测行为。"
+    },
+    {
+      "id": "F16",
+      "note": "可观测性不再要求耗时非负（负耗时会落进第一个桶）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "        guard let elapsed = observation.elapsedMilliseconds, elapsed >= 0,",
+      "replace": "        guard let elapsed = observation.elapsedMilliseconds,",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达的纵深防御（第六十八轮判定）。`elapsedMilliseconds` 只有两个产地，两个都已经夹住下界：LLMProvider.swift:1219 写的是 `max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))`，管线自己的 `elapsedMilliseconds(since:)`（:1740）同样以 `max(0, ...)` 收尾。因此 `elapsed >= 0` 恒成立，负耗时不可能到达这道守卫。"
+    },
+    {
+      "id": "F17",
+      "note": "本地兜底的预算分摊不再兜住 0（总预算为 0 时除零）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            let budget = totalBudgetUnits > 0\n                ? window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)\n                : 0",
+      "replace": "            let budget = window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（第六十八轮判定）。`budgetUnits` 在构造时就是 `max(1, rawText.utf8.count)`（TeleprompterPreparationDomain.swift:284），且持久化层读取时另有 `unit.budgetUnits > 0` 的校验（TeleprompterV2Store.swift:809）。任何非空窗口的 `totalBudgetUnits` 恒 ≥ 1，除零不可达。"
+    },
+    {
+      "id": "F18",
+      "note": "分组阶段的截断失败也允许重试（截断是确定性的，重试只是再截断一次）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
+      "find": "            guard !isTruncatedMapFailure(error),\n                  recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
+      "replace": "            guard recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，被 `canRetryStage` 遮挡（第六十八轮判定）。守卫去掉 `!isTruncatedMapFailure(error)` 之后，重试条件只剩 `recoveryRequestsUsed < recoveryBudget` 与 `canRetryStage(error)`。而 `canRetryStage` = 结构化失败或瞬时失败：`isStructuralMapFailure` 只认 `.invalidStructuredResponse` 与 `.invalidPromptResponse*`，`isTransientProviderFailure` 只认 http 429/5xx。**截断（`.outputTruncated`）两者都不是**，所以它本来就不可重试——「截断是确定性失败、不该重试」这条产品判断是对的，但**执行它的是 `canRetryStage`，不是这道守卫**。**实测**：`truncatedGroupingIsNotRetriedBecauseTruncationIsDeterministic` 去掉本守卫后分组调用次数仍是 1。"
+    },
+    {
+      "id": "S1",
+      "note": "手动移动时不再把「正在启动」当作需要停语音的状态",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if voiceLifecycle.state == .starting || voiceLifecycle.state == .following {\n            _ = requestVoiceStop(destination: .pausedByUser)\n        }",
+      "replace": "        if voiceLifecycle.state == .following {\n            _ = requestVoiceStop(destination: .pausedByUser)\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀，无需补回归）。`beginManualMovement` 的 `.starting` 分支被既有回归 `lateConnectAfterManualTakeoverIsReleased` 覆盖：连接被闸门挡住时读者移动阅读位置，必须同步换掉本次启动的 generation，迟到的 connect 只能被关掉。去掉该分支后启动照常完成，`pausedByUser` 与 `closeCount == 1` 两条断言同时失败。"
+    },
+    {
+      "id": "S2",
+      "note": "手动滚动的快速路径不再排除「正在启动」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if phase == .manual,\n           voiceLifecycle.state != .starting,\n           voiceLifecycle.state != .following {",
+      "replace": "        if phase == .manual,\n           voiceLifecycle.state != .following {",
+      "expect": "SURVIVED",
+      "rationale": "真缺口（缺自动化护栏），不是等价变异。去掉 `.starting` 排除后，**只要 `phase == .manual` 且 `state == .starting`，快速路径就会吃掉这次接管、不再 `requestVoiceStop`**，正在启动的麦克风不会被停。这个组合在生产里确实存在：`beginCapture()` 的 catch（1884 行）在 `voiceLifecycle.state` 仍是 `.starting` 时把 `phase` 置为 `.manual`，错误再抛给 `startVoiceAssistPipeline`／`enableVoiceAssist` 的 catch 才 `markStartFailed`。存活原因是那条 throw 到收尾之间没有可稳定控制的挂起点，测试无法确定性地落在窗口里——与阶段报告 V7／V8「`.starting` 窗口内无 pump、无自动化护栏」是同一族结构性缺口。"
+    },
+    {
+      "id": "S3",
+      "note": "手动接管的主路径不再要求语音处于启动或跟随中",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard voiceLifecycle.state == .starting || voiceLifecycle.state == .following else {",
+      "replace": "        guard true else {",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（静态可达性推断，未执行验证）。else 分支只在 `phase != .manual` 且 `state ∈ {off, pausedByUser, unavailable, stopping, stopFailed}` 时才会执行。逐个回查写 `phase` 的位置：暂停/停止收尾都写 `.manual`；`markStartFailed`、`markUnavailable` 两条失败路径都在同一函数里紧接着写 `.manual`；`finishStageClose` 写 `.ready` 时舞台已关、不会再有滚动手势。因此该分支当前无人走。**注意**：若它可达，变异是有后果的——`state == .stopFailed` 时 `beginStop` 会成功，读者一次滚动手势就会静默重试停止并把 `blocked` 清空。这条留作后续护栏参考。"
+    },
+    {
+      "id": "S4",
+      "note": "请求停止语音时不再让跟随控制器进入手动",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        followController.enterManual()\n        syncFollowState()\n        phase = .manual\n        blocked = nil\n        saveProgress()\n        let task = Task { @MainActor [weak self] in",
+      "replace": "        syncFollowState()\n        phase = .manual\n        blocked = nil\n        saveProgress()\n        let task = Task { @MainActor [weak self] in",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `pausingFollowReportsManualBeforeDrainCompletes` 转杀。`requestVoiceStop` 里的 `followController.enterManual()` + `syncFollowState()` 是**同步交付给界面的**：读者按下暂停那一刻状态条就必须是「手动浏览中」，不能等 8 秒排空跑完。去掉后 `syncFollowState()` 读到的仍是 `.following`，`followState` 与 `followStatusText` 都停留在「跟读咬合」。新回归用 `drainGate` 把排空卡住，在停止仍在飞行时断言这两个值，因此杀掉的是同步语义而不是收尾后的最终状态。"
+    },
+    {
+      "id": "S5",
+      "note": "执行停止时不再校验令牌是否仍是当前这一次停止",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard voiceLifecycle.isCurrent(token) else { return }\n        if coordinator.occupancy?.kind == .teleprompter {",
+      "replace": "        if coordinator.occupancy?.kind == .teleprompter {",
+      "expect": "SURVIVED",
+      "rationale": "冗余防御／当前无可达交错路径（静态可达性推断，未执行验证）。要让 `isCurrent(token)` 为假，必须在 `beginStop` 发出令牌之后、`performVoiceStop` 读取之前换掉 generation。逐个回查四个换 generation 的入口：`beginStart` 要求 `canStart`（`.stopping` 为 false）；`beginStop` 对 `.stopping` 返回 nil，所以不会发出第二个停止任务；`invalidateAfterFailure` 只从 `enterManual` 调用，而 `handle`／`upload` 的 `acceptsVoiceEvents` 在 `.stopping` 下为 false；`resetToOff` 在 `finishStageClose` 里顺序 await 之后。coordinator 直接停采集（如「结束当前会话」）不换 generation，所以无差别。这条守卫本身是对的，缺的是能证明「不存在该交错」的护栏。"
+    },
+    {
+      "id": "S6",
+      "note": "停止收尾不再要求状态机接受这次停止",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard accepted else { return }\n        switch voiceLifecycle.state {",
+      "replace": "        switch voiceLifecycle.state {",
+      "expect": "SURVIVED",
+      "rationale": "与 S5 同一族（token 失效窗口当前不可达）。`accepted` 为假只有两种可能：令牌失效，或 `markStopped` 撞上 `state != .stopping`。前者的可达性与 S5 完全相同；后者要求在停止在途时改状态，而 `markStopped` 自身就是唯一会把 `.stopping` 迁走的入口。因此去掉这道 `guard` 后，switch 与 `saveProgress()` 在当前代码里不会在错误的状态上执行。"
+    },
+    {
+      "id": "S7",
+      "note": "下一段不再夹到末段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        takeOverAndMove(to: min(count - 1, currentSegmentIndex + 1))",
+      "replace": "        takeOverAndMove(to: currentSegmentIndex + 1)",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，被 `TeleprompterFollowController.manualMove` 遮挡。该函数第一行就是 `let target = min(max(0, index), segmentCount - 1)`，会话层的 `min(count - 1, ...)` 是同一夹取的重复实现；去掉外层后内层照样把位置夹回边界。第七十轮新增 `segmentSteppingStopsAtBothEnds` 把交付行为（段尾不越界、段首不下探）钉在会话层，作为双层夹取的回归护栏。"
+    },
+    {
+      "id": "S8",
+      "note": "上一段不再夹到第 0 段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        takeOverAndMove(to: max(0, currentSegmentIndex - 1))",
+      "replace": "        takeOverAndMove(to: currentSegmentIndex - 1)",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，与 S7 同一遮挡：`manualMove` 的 `min(max(0, index), segmentCount - 1)` 同时兜住上越界与下越界，两侧都只在一处实现。"
+    },
+    {
+      "id": "S9",
+      "note": "打开手动阅读不再要求当前可编辑",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard canEdit else {\n            throw TeleprompterStageOpenError.busy\n        }",
+      "replace": "        guard true else {\n            throw TeleprompterStageOpenError.busy\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。`canEdit` 排除 `phase == .preparing`，所以语音正在准备时打开手动阅读必须报 `.busy`；既有回归 `manualOpenRejectsWhileSessionIsPreparing` 用被闸门挡住的 connect 稳定复现了这个窗口。"
+    },
+    {
+      "id": "S10",
+      "note": "打开手动阅读不再拒绝正在关闭中的舞台",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if isClosingStage {\n            throw TeleprompterStageOpenError.closing\n        }",
+      "replace": "        if false {\n            throw TeleprompterStageOpenError.closing\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。关闭中的舞台必须先拒绝打开，否则旧 drain 收尾会与新一次打开交错；既有回归 `manualOpenRejectsDuringClose` 覆盖。"
+    },
+    {
+      "id": "S11",
+      "note": "启用语音辅助不再拒绝「正在有意停止」期间的重入",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard !isResuming, !isStoppingIntentionally else { return }",
+      "replace": "        guard !isResuming else { return }",
+      "expect": "SURVIVED",
+      "rationale": "冗余防御，被同一函数里更靠后的两道守卫遮挡（结构性判断，已逐条回查）。`isStoppingIntentionally` 只在 `stopCapture()` 内为真，而该窗口要有可观测后果必须存在 `await`：语音跟读在途时 `voiceLifecycle.state` 是 `.following`／`.starting`／`.stopping`，`beginStart()` 一律返回 nil（`canStart` 为 false），启动根本发不出去；试读在途时 `isSpeechTrialRequested` 仍为 true，`speechTrialStage.isActive || isSpeechTrialRequested` 先一步把请求挡成 `blocked = .speechTrialActive`（这正是 S12 被杀的原因）。所以本守卫在当前调用图里不改变任何可达行为。"
+    },
+    {
+      "id": "S12",
+      "note": "启用语音辅助不再因试读占用而拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if speechTrialStage.isActive || isSpeechTrialRequested {\n            blocked = .speechTrialActive\n            return\n        }",
+      "replace": "        if false {\n            blocked = .speechTrialActive\n            return\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。试读占用设备期间再请求语音跟随，若不在这里拒绝，coordinator 会读成「已经在跑同一个会话」而什么都不做，新管线直接复用试读的 client/source，两套泵同时跑；既有回归 `voiceAssistRefusesToStartDuringASpeechTrial` 断言 `blocked == .speechTrialActive` 且不新建连接。"
+    },
+    {
+      "id": "S13",
+      "note": "重试停止不再要求当前处于「停止失败」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard case .stopFailed = voiceLifecycle.state,\n              let destination = voiceLifecycle.pendingStopDestination,\n              let task = requestVoiceStop(destination: destination) else {\n            return\n        }",
+      "replace": "        guard let destination = voiceLifecycle.pendingStopDestination,\n              let task = requestVoiceStop(destination: destination) else {\n            return\n        }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，被 `beginStop` 对 `.stopping` 返回 nil 遮挡（结构性判断，已回查写 `pendingStopDestination` 的全部位置）。`pendingStopDestination` 只在 `beginStop` 里被置位，只在 `markStopped` 成功、`beginStart`、`markStartFailed`、`invalidateAfterFailure`、`resetToOff` 里被清空；`markStopped` 失败时保留它。因此它非空的状态只有 `.stopping` 与 `.stopFailed` 两个：`.stopFailed` 与原守卫一致，`.stopping` 时 `beginStop` 返回 nil 使 `requestVoiceStop` 返回 nil，`let task = ...` 落空后 guard 的 else 照样 return。"
+    },
+    {
+      "id": "S14",
+      "note": "开始关闭舞台不再要求当前没有正在进行的关闭",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard stageCloseToken == nil else { return false }",
+      "replace": "        guard true else { return false }",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `secondCloseRequestDuringCloseIsRefused` 转杀。`stageCloseToken` 是一次性的：窗口关闭委托与菜单里的关闭可能都到一次，第二次 `beginStageClose()` 若换掉令牌，第一次的 `finishStageClose()` 就会在 `stageCloseToken == token` 处提前返回，`stageCloseToken` 永不清空，`isClosingStage` 恒为真，舞台从此再也打不开。新回归直接断言第二次 `beginStageClose()` 必须返回 false。"
+    },
+    {
+      "id": "S15",
+      "note": "停止采集后不再让跟随控制器进入手动",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        followController.enterManual()\n        syncFollowState()\n        saveProgress()\n        runningVersion = nil",
+      "replace": "        syncFollowState()\n        saveProgress()\n        runningVersion = nil",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `coordinatorStopReturnsFollowStateToManual` 转杀。「结束当前会话」走 `coordinator.stopCapture` → `stopper` → `TeleprompterSession.stopCapture()`，**不经过 `requestVoiceStop`**，所以把跟读收回手动是 `stopCapture()` 自己的职责。少了那一步，采集已释放而 `followState`／`followStatusText` 仍停在「跟读咬合」，并且 `saveProgress()` 落盘的 `mode` 也是 `.following`，重开时会按跟读态恢复。新回归走 coordinator 这条真实路径断言两个交付值。"
+    },
+    {
+      "id": "R1",
+      "note": "导入不再检查字节上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard data.count <= limits.maxBytes else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
+      "replace": "        guard data.count <= Int.max else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importRejectsOversizedAndOverlongSources` 转杀（实测 2–5 failing）。去掉守卫后 7200 字节的稿件被读进内存，报错点从「导入」后移到分片／预算阶段。"
+    },
+    {
+      "id": "R2",
+      "note": "markdown 扩展名不再被接受",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            case \"md\", \"markdown\": formatHint = .markdown\n",
+      "replace": "            case \"md\": formatHint = .markdown\n",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importAcceptsBothMarkdownExtensions` 转杀（实测 2–5 failing）。只认 `.md` 时选 `.markdown` 文件报「请选择 TXT 或 Markdown 文本」——文案说支持，行为只认一种。"
+    },
+    {
+      "id": "R3",
+      "note": "不再拒绝含 NUL 的稿件",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard !sourceText.unicodeScalars.contains(where: { $0.value == 0 }) else {\n            throw TeleprompterPreparationError.containsNUL\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`rejectsInvalidUTF8NULAndEmptySource` 直接用 `Data(\"a\\0b\".utf8)` 断言抛错，去掉守卫后那句用例会红。"
+    },
+    {
+      "id": "R4",
+      "note": "全空白稿件不再被拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {\n            throw TeleprompterPreparationError.emptySource\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`rejectsInvalidUTF8NULAndEmptySource` 用 `Data(\" \\r\\n\".utf8)` 断言抛错。注意去掉守卫后**不会**一路畅通——`build()` 的 `characters.isEmpty` 拦不住空白，所以错误类型会从 `emptySource` 变成别的，断言仍然变红。"
+    },
+    {
+      "id": "R5",
+      "note": "导入不再检查参考时长上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard referenceSeconds <= limits.maxReferenceSeconds else {\n            throw TeleprompterPreparationError.referenceDurationExceeded\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importRejectsOversizedAndOverlongSources` 转杀（实测 2–5 failing）。超过 2 小时的稿件不再被导入拒绝，而是被继续分片并分配预算，容量限制名存实亡。"
+    },
+    {
+      "id": "R6",
+      "note": "分片预算窗口少算一个字节",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                  prefixBytes[hardEnd] - prefixBytes[start] <= maxBudgetUnits {",
+      "replace": "                  prefixBytes[hardEnd] - prefixBytes[start] < maxBudgetUnits {",
+      "expect": "KILLED",
+      "rationale": "实测 KILLED（20 failing），**我原先的假设被推翻**：以为「每段少一个字节」不会违反任何断言，实际它改的是每一个分段结果——分片位置一变，下游所有钉住 `rawText`、`sourceRange`、段数与阅读位置的用例一起变红。这与第六十六轮「舞台设置是『没测到边』」、第六十七轮「只测模型规规矩矩的情况」是同一族：**边界值一改，被钉住的就不是边界而是全部产物**，所以杀伤面看起来远大于被摘掉的那一个字符。"
+    },
+    {
+      "id": "R7",
+      "note": "续写标记不再要求紧邻非空白",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                    continuation: start > 0 && !isWhitespace(characters[start - 1]),",
+      "replace": "                    continuation: start > 0,",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `unitsAfterWhitespaceAreNotMarkedAsContinuation` 转杀（实测 2–5 failing）。凡不是首段的单元一律标记为续写，标点之后起段也被当成句子中间被截断。"
+    },
+    {
+      "id": "R8",
+      "note": "分片数量上限少算一个",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            guard units.count <= maxSourceUnits else {",
+      "replace": "            guard units.count < maxSourceUnits else {",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `sourceUnitLimitRejectsOnlyBeyondTheLimit` 转杀（实测 2–5 failing）。上限实际变成 `maxSourceUnits - 1`，恰好等于上限的合法稿件被误拒。"
+    },
+    {
+      "id": "R9",
+      "note": "段落边界只看窗口末尾三格",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let suffixStart = max(0, end - 4)",
+      "replace": "        let suffixStart = max(0, end - 3)",
+      "expect": "SURVIVED",
+      "rationale": "存活 = **等价变异（冗余的纵深防御）**，第七十一轮补 CRLF 回归后仍存活，已把「它是什么」查清而不是留着猜：`isParagraphBoundary` 的窗口从 4 格缩到 3 格后，`\"\\r\\n\\r\\n\"` 那条 4 字符规则确实再也匹配不上，**但它本来就没有生效的机会**——同一个 `for end in (start + 1)...hardEnd` 正向循环里，2 字符的 `\"\\n\\r\"` 在 CRLFCRLF 的**前一个位置**（即 `\\r\\n\\r` 之后）就已经命中并 `return`，4 字符那条永远排在后面。按本分支的记账规矩，上层那道按纵深防御记账、不按独立防线记——**这不是一处待修的缺口，删掉它不会改变任何一次分片结果。**"
+    },
+    {
+      "id": "R11",
+      "note": "语义边界改为从最早处取",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        for end in stride(from: hardEnd, through: start + 1, by: -1) {",
+      "replace": "        for end in stride(from: start + 1, through: hardEnd, by: 1) {",
+      "expect": "KILLED",
+      "rationale": "实测 KILLED（30 failing），**假设被推翻**：我以为段落循环会先短路、语义循环没有决策空间。实际并非如此——现有夹具里大量文本**没有段落边界**（`\\n\\n`），段落循环全部落空，语义回扫的方向就是唯一的决策来源。**教训与本分支已登记的「先问『它是被哪条别的守卫挡住的』」是同一条的另一面**：我先验地认定有另一条分支会遮挡，却没有先核对夹具里那条分支是否真的存在。**「以为被遮挡」必须实测，不能推理。**"
+    },
+    {
+      "id": "R12",
+      "note": "有不确定性时也给出点估计",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard metrics.uncertaintyReasons.isEmpty else {\n            return TeleprompterDurationEstimate(\n                pointSeconds: nil,\n                rangeSeconds: nil,\n                knownPartSeconds: knownPartSeconds,\n                uncertaintyReasons: metrics.uncertaintyReasons\n            )\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`durationSeparatesKnownEnglishAndHanFromUncertainDigits` 断言含数字文本的 `pointSeconds == nil`，去掉守卫后 `pointSeconds` 变成非 nil。"
+    },
+    {
+      "id": "R13",
+      "note": "时长下界收紧到 0.5 倍",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let lower = knownPartSeconds * 0.8",
+      "replace": "        let lower = knownPartSeconds * 0.5",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `durationRangeIsDerivedFromTheKnownPart` 转杀（实测 2–5 failing）。区间下界被无声收窄 20%，界面仍显示区间，用户看到的是「估得准」而不是「估得偏保守」。"
+    },
+    {
+      "id": "R14",
+      "note": "校准系数不再夹下界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            max(calibrationFactor, TeleprompterTimingPolicy.minimumCalibrationFactor),",
+      "replace": "            calibrationFactor,",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `calibrationFactorIsClampedToThePolicyRange` 转杀（实测 2–5 failing）。语速调到极慢时估算不被夹住，`pointSeconds` 小到与「这段话念不完」同量级，界面照常显示为可用估算。"
+    },
+    {
+      "id": "R15",
+      "note": "非拉丁字母不再算作外来语",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            } else if value < 128 && CharacterSet.letters.contains(scalar) {",
+      "replace": "            } else if CharacterSet.letters.contains(scalar) {",
+      "expect": "KILLED",
+      "rationale": "假设：`unknownEstimateFallsBackToProxyWithoutClaimingDuration` 用含阿拉伯文的文本断言 `pointSeconds == nil` 且 `weightMode == .proxyCharacters`。去掉 ASCII 限制后阿拉伯字母被当成 latin 词计数，不再产生 `nonLatinLanguage`，`pointSeconds` 变为非 nil。"
+    },
+    {
+      "id": "R16",
+      "note": "目标时长不再要求整数分钟",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard minutes.isFinite, minutes.rounded() == minutes else {",
+      "replace": "        guard minutes.isFinite else {",
+      "expect": "KILLED",
+      "rationale": "假设：`targetMinutesMustBeIntegerBetweenOneAndOneHundredTwenty` 断言 `validateTargetMinutes(1.5)` 抛错；去掉整数检查后 `Int(1.5)` 截断成 1 并返回 60。"
+    },
+    {
+      "id": "R17",
+      "note": "预算余数给到第一个选中段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            } else if index == selectedIndexes.last {",
+      "replace": "            } else if index == selectedIndexes.first {",
+      "expect": "KILLED",
+      "rationale": "实测 KILLED（59 failing，是本组杀伤最大的一条），**假设被推翻**：我以为两条预算用例只断言「合计等于 `budgetSeconds`」，余数给首段还是末段不改变这两项。实际下游有 59 条用例断言**逐段的预算值**（跟随分配、剩余时间、段落配速），余数归属一改这些值全部偏移。**这是本分支第 84 条／A3／D7／E16 那一族「断言与被保护的分支无关」的镜像**：那次是断言没咬住被摘掉的守卫，这次是我以为断言没咬住、实际咬得很紧。**两种误判都源于没数清断言覆盖面。**"
+    },
+    {
+      "id": "R18",
+      "note": "估算权重不再设下限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                weight = max(0.001, estimates[index] ?? 0.001)",
+      "replace": "                weight = estimates[index] ?? 0.001",
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `zeroEstimatesStillProduceAPlan` 转杀（实测 2–5 failing）。总权重变 0 后撞上 `totalWeight > 0`，用户看到「无法为这份稿件建立时间预算」，而真实原因是稿件没估出时长。"
+    },
+    {
+      "id": "R19",
+      "note": "URL 标记不再只看斜杠",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "replace": "        if hasDigit || hasSchemeForm {",
+      "expect": "KILLED",
+      "rationale": "存活（首轮）＝**真缺口**，第七十一轮补回归 `aColonAloneIsTreatedAsAURLMarker` 转杀。`mailto:`／`tel:` 这类地址不含数字、也不含 `https?://` 或 `www.` 前缀，去掉 ASCII 冒号／斜杠这一路后它们会被判成「可精确估算」。**注**：本条的 `find` 随第 90 条的修复改过一次锚点（那一行由单个 `if` 变成三行），改锚点时必须重跑本条，否则探针会以「anchor appears 0 times」中止整轮——这正是探针拒绝在半途失效的 spec 上给出读数的机制。"
+    },
+    {
+      "id": "R20",
+      "note": "小数点两侧的保护整道去掉",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        if value == \".\", end >= 2, end < characters.count {\n            let previous = characters[end - 2]\n            let next = characters[end]\n            if isWordCharacter(previous) && isWordCharacter(next) {\n                return false\n            }\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "**这条才是 R10 那一族真正要问的问题**：R10 只摘掉 `next` 一侧，而「3.14」的 `next` 仍是词字符，所以 R10 削弱的是编号列表边界、并不触及这道守卫要防的事——把它单列出来等于自欺。整道摘掉后，「3.14」「v1.2」「example.com」会在点后被切开，**分片里出现以 `.` 结尾或以 `.` 开头的单元**，而对齐器与保真门禁都按单元处理，跨单元切开的小数会被当成两段文本。补回归 `sourceUnitsDoNotSplitDecimalsOrVersions` 转杀。"
+    },
+    {
+      "id": "R21",
+      "note": "www 前缀不再算作 URL 标记（第 90 条的修复本身）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let hasSchemeForm = text.range(of: #\"(?:https?://|www\\.)\"#, options: .regularExpression) != nil\n        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "replace": "        let hasSchemeForm = false\n        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "expect": "KILLED",
+      "rationale": "**这一条钉的正是第 90 条的修复。** 修复前 `www.example.com`（既无 `:` 也无 `/`）在会话侧拿到可信点估计，而同一时刻 `TeleprompterTimingPolicy` 说「不确定」。回归 `wwwURLsAreTreatedAsUncertainOnBothSides` 断言两侧都判不确定。**没有这条变异，修复会被静默撤销而全部测试照样全绿**——这正是本分支反复登记的那条纪律：「有测试」和「这道门被守住了」不是一回事。"
+    },
+    {
+      "id": "T1",
+      "note": "导入不再接受 .markdown 扩展名",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard extensionName == \"txt\" || extensionName == \"md\" || extensionName == \"markdown\" else {",
+      "replace": "        guard extensionName == \"txt\" || extensionName == \"md\" else {",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testTextImporterAcceptsTheDotMarkdownExtensionToo` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。选 `.markdown` 文件报「请选择文本文件（TXT 或 Markdown）」——文案说的是支持，行为只认两种扩展名。"
+    },
+    {
+      "id": "T2",
+      "note": "目录不存在时不再返回空列表",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard fileManager.fileExists(atPath: directoryURL.path) else { return [] }",
+      "replace": "        guard fileManager.fileExists(atPath: directoryURL.path) else { throw TeleprompterStoreError.corruptBundle }",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingAMissingDirectoryReturnsAnEmptyList` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。首次启动时目录还不存在，用户看到的是「某份稿子已损坏」而不是空列表。"
+    },
+    {
+      "id": "T3",
+      "note": "列表不再按扩展名过滤",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "            .filter { $0.pathExtension == \"json\" }",
+      "replace": "            .filter { _ in true }",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingIgnoresNonBundleFilesInTheDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。目录里的 `.DS_Store` 或任何非稿文件会被当成稿子解码，**整个列表直接报错打不开**。"
+    },
+    {
+      "id": "T4",
+      "note": "列表不再按更新时间倒序",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "            .sorted { $0.updatedAt > $1.updatedAt }",
+      "replace": "            .sorted { $0.updatedAt < $1.updatedAt }",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingSortsByMostRecentlyUpdated` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。「最近编辑的排在最前」反过来，用户每次都要翻到列表底部找刚改的稿。"
+    },
+    {
+      "id": "T5",
+      "note": "读取不存在的稿子不再报「找不到」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard fileManager.fileExists(atPath: url.path) else {\n            throw TeleprompterStoreError.notFound\n        }\n        return try loadBundle(at: url)",
+      "replace": "        return try loadBundle(at: url)",
+      "expect": "KILLED",
+      "rationale": "实测 KILLED，**我原先判 SURVIVED 是错的**：我以为「读一份不存在的稿子」零观察，实际 `testDeleteAndDuplicateDocument` 在 `deleteDocument` 之后紧接着 `loadBundle` 并断言 `.notFound`——这正是它对 T8（删除侧的同一道守卫）**没有**覆盖的原因，两条长得几乎一样却只有一条被测到。去掉守卫后错误从「找不到这份稿子」变成 `loadBundle` 的 catch 兜底的「这份稿子已损坏」，**把两个原因压成另一个**，与第 41 条同族。这条也说明：同一道约束在两个入口各写一遍时，一条被测到不代表另一条被测到。"
+    },
+    {
+      "id": "T6",
+      "note": "覆盖保存时不再走原子替换",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "            if fileManager.fileExists(atPath: destination.path) {\n                _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)\n            } else {",
+      "replace": "            if false {\n                _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)\n            } else {",
+      "expect": "KILLED",
+      "rationale": "假设：**这条最要紧**——去掉后第二次保存走 `moveItem`，而 `moveItem` 在目标已存在时会抛错，**用户的编辑静默保存失败**。`testSaveListLoadAndUpdateRunState` 里有「保存 → updateRunState 再保存」这条二次写路径，预计直接转杀。"
+    },
+    {
+      "id": "T7",
+      "note": "更新运行态不再校验版本归属",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard bundle.versions.contains(where: { $0.id == state.versionID }) else {\n            throw TeleprompterStoreError.invalidBundle\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testRunStateRejectsAVersionThisDocumentDoesNotOwn` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。运行态可以挂到这份稿子里不存在的版本上，重开时恢复到一个打不开的版本。"
+    },
+    {
+      "id": "T8",
+      "note": "删除不存在的稿子不再报「找不到」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard fileManager.fileExists(atPath: url.path) else {\n            throw TeleprompterStoreError.notFound\n        }\n        try fileManager.removeItem(at: url)",
+      "replace": "        try fileManager.removeItem(at: url)",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDeletingAMissingDocumentReportsNotFound` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。错误从「找不到这份稿子」变成 Foundation 的底层错误文案。"
+    },
+    {
+      "id": "T9",
+      "note": "导出不再优先使用当前版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        let version = bundle.versions.first { $0.id == bundle.document.activeVersionID }\n            ?? bundle.versions.first",
+      "replace": "        let version = bundle.versions.first",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testExportPrefersTheActiveVersionOverTheFirst` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**用户直接看得见的错**：AI 改过稿之后导出拿到的是旧稿。"
+    },
+    {
+      "id": "T10",
+      "note": "导出的段落不再用空行分隔",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        let body = version?.segments.map(\\.text).joined(separator: \"\\n\\n\") ?? bundle.document.sourceText",
+      "replace": "        let body = version?.segments.map(\\.text).joined(separator: \"\\n\") ?? bundle.document.sourceText",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testExportSeparatesParagraphsWithABlankLine` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。导出稿的段落挤成一行，段落结构丢失。"
+    },
+    {
+      "id": "T11",
+      "note": "文档 ID 为空也不再拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "        guard !bundle.document.id.isEmpty,",
+      "replace": "        guard true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。空 ID 的稿子被接受，随后任何按 ID 的操作都指向同一个路径。"
+    },
+    {
+      "id": "T12",
+      "note": "标题全空白也不再拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              !bundle.document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。空白标题的稿子被接受，稿库里出现一条无名稿。"
+    },
+    {
+      "id": "T13",
+      "note": "版本可以属于别的稿子",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              bundle.versions.allSatisfy({ $0.documentID == bundle.document.id }),",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**这条挡的正是 `duplicateDocument` 不串稿**：版本可以声明自己属于另一份稿子。"
+    },
+    {
+      "id": "T14",
+      "note": "当前版本可以指向不存在的版本",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              bundle.document.activeVersionID == nil\n                  || bundle.versions.contains(where: { $0.id == bundle.document.activeVersionID }) else {",
+      "replace": "              true else {",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。`activeVersionID` 可以悬空，打开稿件时「正在读的那一版」找不到。"
+    },
+    {
+      "id": "T15",
+      "note": "版本可以没有段落",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "            guard !version.segments.isEmpty,",
+      "replace": "            guard true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。零段落的版本被接受，而它正是**第 85 条**（含长单元稿件的 AI 标注必然失败）的下游——那样的稿件没有一个能念的段落。"
+    },
+    {
+      "id": "T16",
+      "note": "段落序号可以不连续",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "                  version.segments.enumerated().allSatisfy({ $0.element.ordinal == $0.offset }) else {",
+      "replace": "                  true else {",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。段落序号可以不连续，而阅读位置、跟随与对齐都按序号推进——**序号错乱直接错位**。"
+    },
+    {
+      "id": "T17",
+      "note": "文档 ID 不再拒绝路径分隔符",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              documentID.rangeOfCharacter(from: CharacterSet(charactersIn: \"/\\\\\")) == nil,",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**安全控制失效**：`documentID` 里的 `/` 让读取与删除都能落到 documents 目录之外的任意路径。"
+    },
+    {
+      "id": "T18",
+      "note": "文档 ID 不再拒绝 \".\"",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              documentID != \".\",",
+      "replace": "              true,",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。同族，`.` 让路径解析回目录本身。"
+    },
+    {
+      "id": "T19",
+      "note": "文档 ID 不再拒绝 \"..\"",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
+      "find": "              documentID != \"..\" else {",
+      "replace": "              true else {",
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。同族且危害最大的一条：**`..` 就是路径穿越本身**。"
+    }
+  ]
+}

@@ -125,6 +125,18 @@ public enum TeleprompterSegmenter {
                 start = sourceText.index(after: start)
             }
         }
+        // A sentence that lands just past the soft target used to leave its
+        // final punctuation as a segment of its own, so every over-long
+        // sentence ended with a stage line holding nothing but a full stop.
+        // The tail carries no reading material, so it belongs with the unit it
+        // was cut from. Merging keeps the segment slightly over the soft
+        // target, which the loop above is already allowed to do.
+        if result.count > 1,
+           let last = result.last,
+           !sourceText[last].contains(where: { $0.isLetter || $0.isNumber }) {
+            result.removeLast()
+            result[result.count - 1] = result[result.count - 1].lowerBound..<last.upperBound
+        }
         return result
     }
 

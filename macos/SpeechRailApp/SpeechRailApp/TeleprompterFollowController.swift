@@ -95,38 +95,52 @@ public struct TeleprompterFollowPolicy: Equatable, Sendable {
     public let provisionalMinimumMatches: Int
     public let freePlayAfterMisses: Int
     public let reanchorMargin: Double
+    public let localAdvanceTokenRadius: Int
+    public let relocalizationMinimumMatches: Int
 
     public init(
         provisionalMinimumConfidence: Double = 0.72,
         provisionalMinimumMatches: Int = 2,
         freePlayAfterMisses: Int = 2,
-        reanchorMargin: Double = 0.12
+        reanchorMargin: Double = 0.12,
+        localAdvanceTokenRadius: Int = 24,
+        relocalizationMinimumMatches: Int = 4
     ) {
         self.provisionalMinimumConfidence = provisionalMinimumConfidence.isFinite
             ? min(1, max(0, provisionalMinimumConfidence)) : 0.72
         self.provisionalMinimumMatches = max(1, provisionalMinimumMatches)
         self.freePlayAfterMisses = max(1, freePlayAfterMisses)
         self.reanchorMargin = reanchorMargin.isFinite ? min(1, max(0, reanchorMargin)) : 0.12
+        self.localAdvanceTokenRadius = max(0, min(320, localAdvanceTokenRadius))
+        self.relocalizationMinimumMatches = max(1, relocalizationMinimumMatches)
     }
 }
 
 /// Pure event reducer. ASR text is bounded, in-memory only, and scoped to item IDs.
 public struct TeleprompterFollowController: Sendable {
-    public private(set) var position: TeleprompterAligner.Position
-    public var currentIndex: Int { position.segmentIndex }
+    public private(set) var committedPosition: TeleprompterAligner.Position
+    public private(set) var viewportAnchor: TeleprompterAligner.Position
+    public var position: TeleprompterAligner.Position { viewportAnchor }
+    public var currentIndex: Int { viewportAnchor.segmentIndex }
     public private(set) var candidatePosition: TeleprompterAligner.Position?
+    public var hypothesisPosition: TeleprompterAligner.Position? { candidatePosition }
     public private(set) var mode: TeleprompterRunMode
     public private(set) var uncertainty: Double?
     public private(set) var partialPreview: String?
     public private(set) var followState: TeleprompterFollowState
     public private(set) var lastMatchConfidence: Double?
     public private(set) var lastMatchedCount = 0
+    /// F-15 要求稳定前缀的契约异常**可见**。修复前越界被折成 nil，异常从外面
+    /// 完全看不出来——报告、回放与界面都以为那只是一段没有稳定前缀的话。
+    public private(set) var stablePrefixContractAnomalies = 0
 
     private struct Item: Sendable {
         var text: String
         let anchor: TeleprompterAligner.Position
         let sequence: Int
         var snapshotRevision = 0
+        var stablePrefixCodepoints: Int?
+        var sampleSpan: RealtimeASRClient.RealtimeSampleSpan?
     }
     private var items: [String: Item] = [:]
     private var retired: [String] = []
@@ -136,7 +150,6 @@ public struct TeleprompterFollowController: Sendable {
     private var scriptSegments: [TeleprompterSegment] = []
     private let policy: TeleprompterFollowPolicy
     private let aligner: TeleprompterAligner
-    private var lastConfirmedPosition: TeleprompterAligner.Position
     private var lowConfidenceStreak = 0
     private var nextSequence = 0
     private var finalizedSequence = -1
@@ -148,8 +161,8 @@ public struct TeleprompterFollowController: Sendable {
         policy: TeleprompterFollowPolicy = .init()
     ) {
         let initialPosition = TeleprompterAligner.Position(segmentIndex: max(0, currentIndex), utf16Offset: 0)
-        position = initialPosition
-        lastConfirmedPosition = initialPosition
+        committedPosition = initialPosition
+        viewportAnchor = initialPosition
         self.mode = mode
         self.policy = policy
         aligner = TeleprompterAligner(configuration: .init(advanceMargin: policy.reanchorMargin))
@@ -194,7 +207,9 @@ public struct TeleprompterFollowController: Sendable {
         revision: Int,
         text: String,
         segments: [TeleprompterSegment],
-        eventID: String? = nil
+        eventID: String? = nil,
+        stablePrefixCodepoints: Int? = nil,
+        sampleSpan: RealtimeASRClient.RealtimeSampleSpan? = nil
     ) {
         guard acceptEvent(eventID) else { return }
         guard revision > 0, !itemID.isEmpty, !retired.contains(itemID) else { return }
@@ -204,10 +219,54 @@ public struct TeleprompterFollowController: Sendable {
         var item = item(for: itemID)
         guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }
         item.snapshotRevision = revision
+        // 稳定前缀是**当前原始 ASR 文本**的 Unicode scalar 数（方案 §3.6），
+        // 所以契约校验对着进来的原文做，而不是 `suffix(2048)` 之后存下来的文本。
+        //
+        // 这里要把话说准：改这一处**本身不改变任何匹配结果**。前缀只要不小于存
+        // 下来的长度，取稳定前缀与直接对齐整段存文本得到的是同一段字符串；小于
+        // 时两种写法取的也是同一个数。真正改变行为的只有下面那个 guard——**越界**。
+        let rawScalarCount = text.unicodeScalars.count
         item.text = String(text.suffix(2048))
+        // 这两行放在守卫之前：契约异常也要**能指到是哪段音频**，否则「可见」只剩
+        // 一个计数器, 复核的人拿不到对应的 sample span.
+        item.sampleSpan = sampleSpan
         partialPreview = item.text
+        if let stablePrefixCodepoints {
+            // F-15：「稳定前缀越界或改写 → 契约异常可见，暂停推进而非伪造稳定性」。
+            // 修复前把越界一律折成 nil，于是 else 分支拿**全文**对齐——比「不推进」
+            // 更宽松，方向正好相反。
+            guard stablePrefixCodepoints >= 0, stablePrefixCodepoints <= rawScalarCount else {
+                item.stablePrefixCodepoints = nil
+                stablePrefixContractAnomalies += 1
+                uncertainty = 1
+                if followState != .freePlaying { followState = .catchingUp }
+                items[itemID] = item
+                return
+            }
+            // 越过契约校验之后仍要夹一次——夹的是**我们自己的 2048 截断**，不是
+            // 契约。存下来的是原文的后缀，原前缀落在它里面的部分就是两者的较小值。
+            item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)
+        } else {
+            item.stablePrefixCodepoints = nil
+        }
         if followState == .waitingForSpeech { followState = .listening }
-        let match = locate(TeleprompterCanonicalizer.values(item.text), script: script, anchor: position)
+        let match: TeleprompterAligner.Match
+        if let stablePrefixCodepoints = item.stablePrefixCodepoints,
+           stablePrefixCodepoints > 0 {
+            let stableScalars = item.text.unicodeScalars.prefix(stablePrefixCodepoints)
+            let stableText = String(stableScalars)
+            match = locate(
+                TeleprompterCanonicalizer.values(stableText),
+                script: script,
+                anchor: position
+            )
+        } else {
+            match = locate(
+                TeleprompterCanonicalizer.values(item.text),
+                script: script,
+                anchor: position
+            )
+        }
         applyPreviewMatch(match, itemID: itemID)
         items[itemID] = item
         if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key {
@@ -235,7 +294,6 @@ public struct TeleprompterFollowController: Sendable {
         if followState == .waitingForSpeech { followState = .listening }
 
         guard !tokens.isEmpty else {
-            if provisionalItemID != nil { position = lastConfirmedPosition }
             provisionalItemID = nil
             candidatePosition = nil
             retire(itemID)
@@ -251,17 +309,24 @@ public struct TeleprompterFollowController: Sendable {
         lastMatchConfidence = match.confidence
         lastMatchedCount = match.matchedCount
 
-        if let candidate = match.position {
-            position = candidate
-            lastConfirmedPosition = candidate
+        if let candidate = match.position, mayConfirm(match, candidate: candidate) {
+            let movesViewportForward = isForward(candidate, from: viewportAnchor)
+            let isControlledReread = !movesViewportForward
+            committedPosition = candidate
+            if movesViewportForward || isControlledReread {
+                viewportAnchor = candidate
+            }
             provisionalItemID = nil
             uncertainty = nil
             lowConfidenceStreak = 0
             followState = .tracking
             history = Array((history + tokens).suffix(48))
+        } else if match.position != nil {
+            uncertainty = match.confidence
+            provisionalItemID = nil
+            if followState != .freePlaying { followState = .catchingUp }
         } else if tokens.count + history.count < 3 {
             history = Array((history + tokens).suffix(24))
-            position = lastConfirmedPosition
             provisionalItemID = nil
             candidatePosition = nil
             uncertainty = nil
@@ -297,10 +362,7 @@ public struct TeleprompterFollowController: Sendable {
             return
         }
 
-        let sufficientEvidence = match.isUniqueNearAnchor
-            || (match.confidence >= policy.provisionalMinimumConfidence
-                && match.matchedCount >= policy.provisionalMinimumMatches)
-        guard sufficientEvidence else {
+        guard mayAdvance(match) else {
             uncertainty = match.confidence
             if followState != .freePlaying { followState = .catchingUp }
             return
@@ -308,7 +370,7 @@ public struct TeleprompterFollowController: Sendable {
 
         uncertainty = nil
         if isForward(candidate, from: position) {
-            position = candidate
+            viewportAnchor = candidate
             provisionalItemID = itemID
             if followState != .freePlaying { followState = .tracking }
         } else if candidate == position {
@@ -318,8 +380,30 @@ public struct TeleprompterFollowController: Sendable {
         }
     }
 
+    private func mayAdvance(_ match: TeleprompterAligner.Match) -> Bool {
+        guard match.position != nil else { return false }
+        if match.isUniqueNearAnchor || match.isUniqueExactContinuation { return true }
+        let strongMatch = match.confidence >= policy.provisionalMinimumConfidence
+            && match.matchedCount >= policy.provisionalMinimumMatches
+        guard strongMatch else { return false }
+        if match.tokenDistanceFromAnchor <= policy.localAdvanceTokenRadius { return true }
+        return followState == .freePlaying
+            && match.matchedCount >= policy.relocalizationMinimumMatches
+    }
+
+    private func mayConfirm(
+        _ match: TeleprompterAligner.Match,
+        candidate: TeleprompterAligner.Position
+    ) -> Bool {
+        if isForward(candidate, from: viewportAnchor) {
+            return mayAdvance(match)
+        }
+        return match.confidence >= 0.95
+            && match.matchedCount >= 6
+            && match.tokenDistanceFromAnchor <= policy.localAdvanceTokenRadius
+    }
+
     private mutating func recordFinalMiss(_ match: TeleprompterAligner.Match) {
-        position = lastConfirmedPosition
         provisionalItemID = nil
         candidatePosition = nil
         history = []
@@ -372,7 +456,7 @@ public struct TeleprompterFollowController: Sendable {
         candidatePosition = nil
         provisionalItemID = nil
         uncertainty = nil
-        lastConfirmedPosition = position
+        committedPosition = viewportAnchor
         lastMatchConfidence = nil
         lastMatchedCount = 0
         lowConfidenceStreak = 0
@@ -393,8 +477,12 @@ public struct TeleprompterFollowController: Sendable {
     public mutating func move(to index: Int, segmentCount: Int) {
         guard segmentCount > 0 else { return }
         invalidatePending()
-        position = .init(segmentIndex: min(max(0, index), segmentCount - 1), utf16Offset: 0)
-        lastConfirmedPosition = position
+        let target = TeleprompterAligner.Position(
+            segmentIndex: min(max(0, index), segmentCount - 1),
+            utf16Offset: 0
+        )
+        viewportAnchor = target
+        committedPosition = target
         mode = .manual
         followState = .manual
     }
@@ -431,8 +519,8 @@ public struct TeleprompterFollowController: Sendable {
         }
 
         invalidatePending()
-        position = clamped
-        lastConfirmedPosition = clamped
+        viewportAnchor = clamped
+        committedPosition = clamped
         mode = .manual
         followState = .manual
     }
@@ -480,7 +568,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
             return controller.position != previousPosition || controller.partialPreview != previousPreview
                 ? .previewed : .ignored
 
-        case .partialSnapshot(let itemID, let revision, let text):
+        case .partialSnapshot(let itemID, let revision, let text, let evidence):
             controller.noteSpeechStarted()
             let previousPosition = controller.position
             let previousPreview = controller.partialPreview
@@ -489,7 +577,9 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 revision: revision,
                 text: text,
                 segments: segments,
-                eventID: metadata.eventID
+                eventID: metadata.eventID,
+                stablePrefixCodepoints: evidence.stablePrefixCodepoints,
+                sampleSpan: evidence.sampleSpan
             )
             return controller.position != previousPosition || controller.partialPreview != previousPreview
                 ? .previewed : .ignored

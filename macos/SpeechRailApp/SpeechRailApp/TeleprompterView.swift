@@ -22,6 +22,7 @@ public struct TeleprompterView: View {
     // 终版规格 Sheet 状态
     @State private var isTrialReadingPresented = false
     @State private var isContentSelectionPresented = false
+    @State private var isReadingAliasPresented = false
     @State private var isComparingWithSource = false
     @State private var targetMinutesInput = "20"
     @State private var selectedReviewItemIDs: Set<String> = []
@@ -29,10 +30,14 @@ public struct TeleprompterView: View {
     @State private var editingReviewItemText: String = ""
     @State private var narrowComparisonTab: ComparisonTab = .reading
     @State private var pendingAIAction: AIPendingAction = .prepare
+    /// Lossy shortening is never a single tap: it always passes through an
+    /// explicit confirmation that names what it may remove.
+    @State private var isCondenseConfirmationPresented = false
 
     private enum AIPendingAction {
         case prepare
         case annotate
+        case condense
     }
 
     private enum ComparisonTab: String, CaseIterable, Identifiable {
@@ -110,6 +115,9 @@ public struct TeleprompterView: View {
         .sheet(isPresented: $isContentSelectionPresented) {
             TeleprompterContentSelectionSheet(session: session)
         }
+        .sheet(isPresented: $isReadingAliasPresented) {
+            TeleprompterReadingAliasSheet(session: session)
+        }
         .alert(
             TeleprompterAIDataFlowDisclosure.title,
             isPresented: $isAIDataFlowDisclosurePresented
@@ -122,14 +130,23 @@ public struct TeleprompterView: View {
                     startAIAnalysis()
                 case .annotate:
                     startAnnotation()
+                case .condense:
+                    startCondense()
                 }
             }
         } message: {
             Text(TeleprompterAIDataFlowDisclosure.message)
         }
+        .sheet(isPresented: $isCondenseConfirmationPresented) {
+            TeleprompterCondenseSheet(session: session) { mustKeepRanges in
+                UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
+                startCondense(mustKeepSourceRanges: mustKeepRanges)
+            }
+        }
         .onDrop(of: [.fileURL, .plainText], isTargeted: nil) { providers in
             handleDrop(providers)
         }
+        .onAppear(perform: restorePreferredSpeechLanguage)
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [
@@ -288,6 +305,7 @@ public struct TeleprompterView: View {
                     Button("新建空白稿") {
                         session.createDocument(title: "未命名稿子", sourceText: "")
                     }
+                    .disabled(!session.canEdit)
                     Button("从剪贴板创建") {
                         createFromClipboard()
                     }
@@ -374,6 +392,7 @@ public struct TeleprompterView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.extraLarge)
+                    .disabled(!session.canEdit)
 
                     Button {
                         createFromClipboard()
@@ -468,6 +487,7 @@ public struct TeleprompterView: View {
                         }
                         .buttonStyle(.plain)
                         .speechRailPointerCursor()
+                        .disabled(!session.canEdit)
                     }
                 }
             }
@@ -661,6 +681,7 @@ public struct TeleprompterView: View {
                         Button("新建空白稿") {
                             session.createDocument(title: "未命名稿子", sourceText: "")
                         }
+                        .disabled(!session.canEdit)
                         Button("从剪贴板创建") {
                             createFromClipboard()
                         }
@@ -854,6 +875,7 @@ public struct TeleprompterView: View {
                 Button("新建空白稿") {
                     session.createDocument(title: "未命名稿子", sourceText: "")
                 }
+                .disabled(!session.canEdit)
                 .buttonStyle(.borderedProminent)
                 Button("从剪贴板创建") {
                     createFromClipboard()
@@ -912,6 +934,7 @@ public struct TeleprompterView: View {
                     Button("新建空白稿") {
                         session.createDocument(title: "未命名稿子", sourceText: "")
                     }
+                    .disabled(!session.canEdit)
                     Button("从剪贴板创建") {
                         createFromClipboard()
                     }
@@ -1141,28 +1164,32 @@ public struct TeleprompterView: View {
             .pickerStyle(.menu)
             .labelsHidden()
 
-            if session.calibrationFactor != 1.0 {
-                Menu {
-                    Button("重新计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
-                        isTrialReadingPresented = true
-                    }
+            Menu {
+                Button("计时试读…", systemImage: SpeechRailDesignTokens.Icon.Symbol.timer.systemName) {
+                    isTrialReadingPresented = true
+                }
+                if session.calibrationSource != .uncalibrated {
                     Divider()
                     Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
-                        session.applyTrialCalibration(k: 1.0)
+                        session.applyTrialCalibration(k: 1.0, source: .uncalibrated)
                         operationMessage = "已恢复为默认自然语速 (1.0x)"
                     }
-                } label: {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        StatusPill(
-                            tone: .healthy,
-                            label: "\(String(format: "%.2fx", session.calibrationFactor))"
-                        )
-                        SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    }
                 }
-                .menuStyle(.borderlessButton)
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                    StatusPill(
+                        tone: session.calibrationSource == .uncalibrated
+                            ? .neutral
+                            : .healthy,
+                        label: session.calibrationSource == .uncalibrated
+                            ? "未试读校准"
+                            : "\(String(format: "%.2fx", session.calibrationFactor))"
+                    )
+                    SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
             }
+            .menuStyle(.borderlessButton)
         }
     }
 
@@ -1173,11 +1200,20 @@ public struct TeleprompterView: View {
                 label: preflight.badgeTitle
             )
 
-            Text(preflight.userGuidance)
+            Text(preflightGuidance(preflight))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
         }
+    }
+
+    /// 预检结论里的「预计 N 分钟」来自预检计算。没试读校准时它只是按默认语速推的，
+    /// 与「无内容」这类结论不同，不加标注会被当成量出来的判断。
+    private func preflightGuidance(_ preflight: TeleprompterTimingPolicy.PreflightConclusion) -> String {
+        guard preflight.showsDurationEstimate, !session.isPaceCalibrated else {
+            return preflight.userGuidance
+        }
+        return "\(preflight.userGuidance)（未试读校准）"
     }
 
     private var quickToolsGroup: some View {
@@ -1256,7 +1292,7 @@ public struct TeleprompterView: View {
                         }
                         .speechRailButton(.secondary)
 
-                    case .serviceNotReady, .serviceBusy, .streamFailed:
+                    case .inputDeviceUnavailable, .serviceNotReady, .serviceBusy, .streamFailed:
                         Button("打开提词器") {
                             showStage()
                         }
@@ -1275,13 +1311,25 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
 
                         Button("直接使用原稿") {
-                            try? session.useDeterministicFallback()
+                            do {
+                                try session.useDeterministicFallback()
+                                operationMessage = nil
+                            } catch {
+                                // 静默 `try?` 会让读者以为按钮坏了：状态已回滚，
+                                // 按钮还能再按，但必须告诉他为什么这次没成。
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.secondary)
 
                     case .noActiveVersion:
                         Button("直接使用原稿") {
-                            try? session.useDeterministicFallback()
+                            do {
+                                try session.useDeterministicFallback()
+                                operationMessage = nil
+                            } catch {
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.primary)
 
@@ -1291,9 +1339,27 @@ public struct TeleprompterView: View {
                         }
                         .speechRailButton(.primary)
 
+                    case .speechTrialActive:
+                        // 能真正解决它的是结束试读，不是重试跟读——
+                        // 麦克风正被提词器自己的试读占着。
+                        Button("结束语音试读") {
+                            Task {
+                                await session.stopSpeechTrial()
+                                session.clearBlocked()
+                            }
+                        }
+                        .speechRailButton(.primary)
+
                     case .storeUnavailable:
                         Button("重试保存") {
-                            try? session.save()
+                            do {
+                                try session.save()
+                                operationMessage = nil
+                            } catch {
+                                // 重试再次失败时不能一声不吭：读者刚腾出磁盘空间，
+                                // 看不到结果就只会以为按钮坏了。
+                                operationMessage = error.localizedDescription
+                            }
                         }
                         .speechRailButton(.primary)
                     }
@@ -1562,6 +1628,7 @@ public struct TeleprompterView: View {
                                         EmptyView()
                                     }
                                     .toggleStyle(.checkbox)
+                                    .accessibilityLabel("选中这条待确认事项，用于批量处理")
                                     .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
                                     StatusPill(tone: .attention, label: item.issue.title)
@@ -1574,6 +1641,18 @@ public struct TeleprompterView: View {
                                             Text("建议：\(item.suggestedText)")
                                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                                                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                        }
+                                        // A deletion carries no proposal, so the
+                                        // original text is the only account of
+                                        // what would be lost. Without this the
+                                        // card says "this paragraph will be
+                                        // deleted" without showing which one.
+                                        if item.issue == .contentRemoved
+                                            || item.suggestedText.isEmpty,
+                                            !item.sourceSnippet.isEmpty {
+                                            Text("原文：\(item.sourceSnippet)")
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                         }
                                     }
 
@@ -1921,9 +2000,19 @@ public struct TeleprompterView: View {
 
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.md)
 
-                    Text("点击段落设定起讲位置")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text("点击段落设定起讲位置")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                        // 读法标注是进阶操作：默认路径只留「选起讲段」一件事，
+                        // 术语登记放在命名明确的次级按钮里，不占首屏。
+                        Button("读法标注") {
+                            isReadingAliasPresented = true
+                        }
+                        .speechRailButton(.secondary)
+                        .accessibilityHint("登记识别器容易听错的词，跟读时按你的实际读法匹配")
+                    }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
@@ -2142,6 +2231,20 @@ public struct TeleprompterView: View {
                 .speechRailButton(.secondary)
                 .disabled(sourceIsEmpty || session.sourceValidationError != nil || !session.canEdit)
 
+                // Lossy on purpose and therefore never a peer of the primary
+                // action: it opens a confirmation that names what it removes.
+                Button("按时长精简…") {
+                    isCondenseConfirmationPresented = true
+                }
+                .speechRailButton(.secondary)
+                .disabled(
+                    sourceIsEmpty
+                        || session.sourceValidationError != nil
+                        || !session.canEdit
+                        || session.isPreparingDraft
+                        || !isTargetMinutesValid
+                )
+
             case .analyzing, .preparing:
                 Button("取消整理") {
                     session.discardPendingVersion()
@@ -2149,7 +2252,7 @@ public struct TeleprompterView: View {
                 .speechRailButton(.secondary)
 
             case .review:
-                Button(TeleprompterReviewCopy.acceptAction) {
+                Button {
                     do {
                         try session.acceptPendingVersion()
                         operationMessage = nil
@@ -2157,7 +2260,23 @@ public struct TeleprompterView: View {
                     } catch {
                         operationMessage = error.localizedDescription
                     }
+                } label: {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text(TeleprompterReviewCopy.acceptAction)
+                        ButtonShortcutHint("⌘⏎")
+                    }
                 }
+                // 「采用候选版本」是审阅相位唯一不可重做的一步，走查清单点名
+                // 「必须键盘可达」。`⌘⏎` 沿用「各相位主操作」的模式：草稿相位
+                // 是「整理朗读稿」，审阅相位是「采用」——两个按钮分处
+                // `case .draft` 与 `case .review`，互斥因而不会同时注册。
+                //
+                // 快捷键挂在**常驻底座**这一个 accept 上，而不是审阅面板里的
+                // 同名按钮（两处处理器相同，见 1879）：同屏挂两个 `⌘⏎` 会冲突。
+                // 挂在按钮上而非做成菜单命令，是因为按钮处理器会 `reloadDocuments()`
+                // 刷新侧栏，而 `documents` 是视图本地 `@State`，菜单命令够不着——
+                // 另做一份会漏掉刷新，正是本仓库要避免的「同一件事两处实现」。
+                .keyboardShortcut(.return, modifiers: .command)
                 .speechRailButton(.primary)
                 .disabled(!session.canAcceptPendingVersion)
 
@@ -2213,6 +2332,7 @@ public struct TeleprompterView: View {
                 .speechRailButton(.primary)
 
                 workbenchVoiceAssistControl
+                speechLanguageMenu
             }
 
             Spacer()
@@ -2413,6 +2533,51 @@ public struct TeleprompterView: View {
         return String(format: "%02d:%02d", mins, secs)
     }
 
+    // MARK: - 识别语言（进阶设置）
+
+    /// `preferredSpeechLanguage` 只有在这里才会被写入生产路径。契约、连接配置
+    /// 与降级都已就绪，但在此之前它没有任何写入者，真实连接恒用服务端默认。
+    private var speechLanguageMenu: some View {
+        Menu {
+            Picker("识别语言", selection: Binding(
+                get: { session.preferredSpeechLanguage ?? "" },
+                set: { newValue in
+                    session.preferredSpeechLanguage = newValue.isEmpty ? nil : newValue
+                    UserDefaults.standard.set(
+                        newValue,
+                        forKey: TeleprompterRealtimeConfiguration.preferredSpeechLanguageDefaultsKey
+                    )
+                }
+            )) {
+                Text("自动（服务默认）").tag("")
+                ForEach(TeleprompterRealtimeConfiguration.speechLanguageChoices) { choice in
+                    Text(choice.label).tag(choice.code)
+                }
+            }
+        } label: {
+            Label(speechLanguageLabel, systemImage: "globe")
+        }
+        .speechRailButton(.secondary)
+        .help("脚本语言与识别默认不一致时才需要改；自动会沿用服务端的默认语言。")
+    }
+
+    private var speechLanguageLabel: String {
+        guard let code = session.preferredSpeechLanguage else { return "识别语言：自动" }
+        let name = TeleprompterRealtimeConfiguration.label(forSpeechLanguage: code) ?? code
+        return "识别语言：\(name)"
+    }
+
+    /// 恢复上次选择。存的是清洗后的值，非法值一律退回「自动」而不是带进连接。
+    private func restorePreferredSpeechLanguage() {
+        let stored = UserDefaults.standard.string(
+            forKey: TeleprompterRealtimeConfiguration.preferredSpeechLanguageDefaultsKey
+        )
+        session.preferredSpeechLanguage = TeleprompterRealtimeConfiguration(
+            language: stored,
+            keywords: []
+        ).sanitized.language
+    }
+
     // MARK: - 剪贴板与数据辅助
 
     private var pasteboardSnippet: (text: String, count: Int)? {
@@ -2460,12 +2625,19 @@ public struct TeleprompterView: View {
     private func reloadDocuments() {
         do {
             documents = try session.listDocuments()
-            if session.document == nil, let first = documents.first {
-                try? session.load(documentID: first.id)
-            }
         } catch {
             documents = []
             operationMessage = error.localizedDescription
+            return
+        }
+        // 自动打开第一份稿件失败时，列表本身仍然有用——不能把两者混在同一个
+        // `catch` 里连列表一起清空，那会让读者看到一份空工作台且没有任何说明。
+        if session.document == nil, let first = documents.first {
+            do {
+                try session.load(documentID: first.id)
+            } catch {
+                operationMessage = error.localizedDescription
+            }
         }
     }
 
@@ -2499,6 +2671,14 @@ public struct TeleprompterView: View {
         }
     }
 
+    /// Lossy shortening is only ever started from an explicit confirmation, so
+    /// there is no "just do it" path into it.
+    private func startCondense(mustKeepSourceRanges: [TeleprompterSourceRange] = []) {
+        Task {
+            await session.condenseDraft(mustKeepSourceRanges: mustKeepSourceRanges)
+        }
+    }
+
     private func requestReadingCues() {
         pendingAIAction = .annotate
         guard UserDefaults.standard.bool(forKey: aiDataFlowAcknowledgementKey) else {
@@ -2521,11 +2701,13 @@ public struct TeleprompterView: View {
     // MARK: - 导出、拖拽与朗读提示辅助
 
     private func copyDocumentContent() {
-        if let markdown = session.exportMarkdown() {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(markdown, forType: .string)
-            operationMessage = "已复制稿件内容"
+        guard let text = session.copyableDocumentText() else {
+            operationMessage = "还没有可复制的稿件内容。"
+            return
         }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        operationMessage = "已复制稿件内容"
     }
 
     private func exportSourceDocument() {
@@ -2613,7 +2795,7 @@ public struct TeleprompterView: View {
     private func importFromURL(_ url: URL) {
         do {
             let imported = try TeleprompterSourceImporter.load(from: url)
-            session.createDocument(
+            try session.createDocument(
                 title: url.deletingPathExtension().lastPathComponent,
                 importedSource: imported
             )
@@ -2626,6 +2808,188 @@ public struct TeleprompterView: View {
 }
 
 // MARK: - 开箱即用场景范例数据
+
+/// 「按时长精简」唯一的授权入口。
+///
+/// 有损操作因此不与保真整理并列为常驻主按钮，而是先打开这张 sheet：默认只
+/// 说明后果并要求确认；「标记必讲内容」收在 Disclosure 里，默认路径仍是两次
+/// 点击，标记是可选的进阶动作。段落范围由 session 提供，不在这里重算切段——
+/// `condenseDraft` 按重叠把范围映射到来源单元，切法不一致会锁错文字。
+private struct TeleprompterCondenseSheet: View {
+    @Bindable var session: TeleprompterSession
+    @Environment(\.dismiss) private var dismiss
+    let onConfirm: ([TeleprompterSourceRange]) -> Void
+
+    private struct Paragraph: Identifiable {
+        let id: Int
+        let range: TeleprompterSourceRange
+        let text: String
+    }
+
+    @State private var paragraphs: [Paragraph] = []
+    @State private var mustKeepIndices: Set<Int> = []
+    @State private var isMarkingMustKeep = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            explanation
+            if !paragraphs.isEmpty {
+                mustKeepSection
+            }
+            footer
+        }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetWidth,
+            maxWidth: SpeechRailDesignTokens.Teleprompter.condenseSheetMaximumWidth,
+            minHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetMinimumHeight,
+            idealHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetHeight,
+            maxHeight: SpeechRailDesignTokens.Teleprompter.condenseSheetMaximumHeight
+        )
+        .onAppear(perform: loadParagraphs)
+    }
+
+    // MARK: - 后果说明
+
+    private var explanation: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(TeleprompterCondenseDisclosure.title)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Text(TeleprompterCondenseDisclosure.message)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - 标记必讲（可选）
+
+    private var mustKeepSection: some View {
+        DisclosureGroup(isExpanded: $isMarkingMustKeep) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(mustKeepSummary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button("全部标为必讲") {
+                        mustKeepIndices = Set(paragraphs.indices)
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(mustKeepIndices.count == paragraphs.count)
+
+                    Button("清空标记") {
+                        mustKeepIndices.removeAll()
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(mustKeepIndices.isEmpty)
+
+                    Spacer()
+                }
+
+                ScrollView {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        ForEach(paragraphs) { paragraph in
+                            mustKeepRow(paragraph)
+                        }
+                    }
+                }
+                .frame(maxHeight: SpeechRailDesignTokens.Teleprompter.condenseMustKeepListMaximumHeight)
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        } label: {
+            Text("标记必讲内容（可选）")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+        }
+    }
+
+    private func mustKeepRow(_ paragraph: Paragraph) -> some View {
+        let index = paragraph.id
+        let isMarked = mustKeepIndices.contains(index)
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Toggle(isOn: Binding(
+                get: { isMarked },
+                set: { newValue in
+                    if newValue {
+                        mustKeepIndices.insert(index)
+                    } else {
+                        mustKeepIndices.remove(index)
+                    }
+                }
+            )) {
+                EmptyView()
+            }
+            .toggleStyle(.checkbox)
+            .accessibilityLabel("把第 \(index + 1) 段标记为必讲，精简不会删除它")
+            .padding(.top, SpeechRailDesignTokens.Spacing.tight)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("第 \(index + 1) 段")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(
+                        isMarked ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary
+                    )
+                Text(paragraph.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(
+                        isMarked ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkTertiary
+                    )
+                    .lineLimit(3)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            isMarked ? SpeechRailDesignTokens.Color.field : SpeechRailDesignTokens.Color.recessedField.opacity(0.5),
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+    }
+
+    private var mustKeepSummary: String {
+        mustKeepIndices.isEmpty
+            ? "未标记任何段落：所有内容都可能被精简列为删减候选。"
+            : "已标记 \(mustKeepIndices.count) 段必讲，精简不会删除这些内容；其余段落仍可能被删。"
+    }
+
+    // MARK: - 操作
+
+    private var footer: some View {
+        HStack {
+            Button("取消") { dismiss() }
+                .speechRailButton(.secondary)
+
+            Spacer()
+
+            Button("确认精简") {
+                let ranges = paragraphs
+                    .filter { mustKeepIndices.contains($0.id) }
+                    .map(\.range)
+                onConfirm(ranges)
+                dismiss()
+            }
+            .speechRailButton(.primary)
+        }
+    }
+
+    // MARK: - 辅助
+
+    private func loadParagraphs() {
+        guard let source = session.document?.sourceText else { return }
+        let total = source.utf16.count
+        paragraphs = session.mustKeepCandidateRanges().enumerated().map { index, range in
+            // The ranges come from the session's own split of this same text,
+            // but clamp anyway: `String.Index(utf16Offset:in:)` traps on an
+            // out-of-bounds offset and a trap in a sheet is unrecoverable.
+            let lower = max(0, min(range.start, total))
+            let upper = max(lower, min(range.end, total))
+            let start = String.Index(utf16Offset: lower, in: source)
+            let end = String.Index(utf16Offset: upper, in: source)
+            return Paragraph(id: index, range: range, text: String(source[start..<end]))
+        }
+    }
+}
 
 private struct TeleprompterStarterTemplate: Identifiable {
     let id: String

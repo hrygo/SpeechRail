@@ -1275,6 +1275,18 @@ public enum SpeechRailDesignTokens {
         public static let sourceEditorMaximumHeight: CGFloat = 360
         public static let stageDefaultWidth: CGFloat = 760
         public static let stageMinimumWidth: CGFloat = 500
+        /// 正文最大列宽与窗口宽度分开：窗口再宽，正文也保持可读的行长，
+        /// 避免在超宽屏上把一行拉得过长而增加视线回扫。
+        public static let stageDefaultContentWidth: CGFloat = 680
+        public static let stageMinimumContentWidth: CGFloat = 360
+        public static let stageMaximumContentWidth: CGFloat = 1_200
+        /// 「镜头口播」预设：靠近镜头阅读的舒适窄栏。
+        public static let stageCameraContentWidth: CGFloat = 680
+        public static let stageCameraFontScale: Double = 1.0
+        /// 「讲台阅读」预设：更大的正文与更宽的列，照顾远距离可读性。
+        public static let stagePodiumContentWidth: CGFloat = 820
+        public static let stagePodiumFontScale: Double = 1.25
+        public static let stagePodiumVisibleLineCount = 2
         public static let stageDefaultHeight: CGFloat = 236
         public static let stageMinimumHeight: CGFloat = 168
         public static let stagePadding: CGFloat = Spacing.sm
@@ -1330,6 +1342,25 @@ public enum SpeechRailDesignTokens {
         public static let contentSelectionSheetMinimumHeight: CGFloat = 420
         public static let contentSelectionSheetHeight: CGFloat = 540
         public static let contentSelectionSheetMaximumHeight: CGFloat = 760
+        /// 精简确认窗口尺寸：默认只显示说明与操作，「标记必讲」展开后才占满高度，
+        /// 因此理想高度低于内容选择窗口，上下限仍留出大字体的自适应空间。
+        public static let condenseSheetMinimumWidth: CGFloat = 480
+        public static let condenseSheetWidth: CGFloat = 620
+        public static let condenseSheetMaximumWidth: CGFloat = 800
+        public static let condenseSheetMinimumHeight: CGFloat = 300
+        public static let condenseSheetHeight: CGFloat = 420
+        public static let condenseSheetMaximumHeight: CGFloat = 720
+        /// 「标记必讲」展开后段落列表的可视高度上限。
+        public static let condenseMustKeepListMaximumHeight: CGFloat = 240
+        /// 读法标注窗口尺寸：只放一个段落的读法与新增表单，比内容选择窗口窄。
+        public static let readingAliasSheetMinimumWidth: CGFloat = 440
+        public static let readingAliasSheetWidth: CGFloat = 520
+        public static let readingAliasSheetMaximumWidth: CGFloat = 680
+        public static let readingAliasSheetMinimumHeight: CGFloat = 380
+        public static let readingAliasSheetHeight: CGFloat = 460
+        public static let readingAliasSheetMaximumHeight: CGFloat = 680
+        /// 读法标注窗口里，已确认读法列表的可视高度上限；超出后列表内部滚动。
+        public static let readingAliasListMaximumHeight: CGFloat = 200
         /// 审阅对照分栏最小宽度
         public static let diffColumnMinimumWidth: CGFloat = 320
         /// 待确认事项提示图标尺寸
