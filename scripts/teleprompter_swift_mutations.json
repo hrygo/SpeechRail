@@ -1588,10 +1588,10 @@
       "id": "R19",
       "note": "URL 标记不再只看斜杠",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
-      "find": "        if hasDigit || hasURLMarker { reasons.insert(\"unresolvedPronunciation\") }",
-      "replace": "        if hasDigit { reasons.insert(\"unresolvedPronunciation\") }",
+      "find": "        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "replace": "        if hasDigit || hasSchemeForm {",
       "expect": "KILLED",
-      "rationale": "真缺口，第七十一轮补回归 `aColonAloneIsTreatedAsAURLMarker` 转杀（实测 2–5 failing）。`mailto:`／`tel:` 这类地址不含数字也不含斜杠，去掉冒号判断后被判成「可精确估算」。"
+      "rationale": "存活（首轮）＝**真缺口**，第七十一轮补回归 `aColonAloneIsTreatedAsAURLMarker` 转杀。`mailto:`／`tel:` 这类地址不含数字、也不含 `https?://` 或 `www.` 前缀，去掉 ASCII 冒号／斜杠这一路后它们会被判成「可精确估算」。**注**：本条的 `find` 随第 90 条的修复改过一次锚点（那一行由单个 `if` 变成三行），改锚点时必须重跑本条，否则探针会以「anchor appears 0 times」中止整轮——这正是探针拒绝在半途失效的 spec 上给出读数的机制。"
     },
     {
       "id": "R20",
@@ -1601,6 +1601,15 @@
       "replace": "",
       "expect": "KILLED",
       "rationale": "**这条才是 R10 那一族真正要问的问题**：R10 只摘掉 `next` 一侧，而「3.14」的 `next` 仍是词字符，所以 R10 削弱的是编号列表边界、并不触及这道守卫要防的事——把它单列出来等于自欺。整道摘掉后，「3.14」「v1.2」「example.com」会在点后被切开，**分片里出现以 `.` 结尾或以 `.` 开头的单元**，而对齐器与保真门禁都按单元处理，跨单元切开的小数会被当成两段文本。补回归 `sourceUnitsDoNotSplitDecimalsOrVersions` 转杀。"
+    },
+    {
+      "id": "R21",
+      "note": "www 前缀不再算作 URL 标记（第 90 条的修复本身）",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let hasSchemeForm = text.range(of: #\"(?:https?://|www\\.)\"#, options: .regularExpression) != nil\n        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "replace": "        let hasSchemeForm = false\n        if hasDigit || hasURLMarker || hasSchemeForm {",
+      "expect": "KILLED",
+      "rationale": "**这一条钉的正是第 90 条的修复。** 修复前 `www.example.com`（既无 `:` 也无 `/`）在会话侧拿到可信点估计，而同一时刻 `TeleprompterTimingPolicy` 说「不确定」。回归 `wwwURLsAreTreatedAsUncertainOnBothSides` 断言两侧都判不确定。**没有这条变异，修复会被静默撤销而全部测试照样全绿**——这正是本分支反复登记的那条纪律：「有测试」和「这道门被守住了」不是一回事。"
     }
   ]
 }
