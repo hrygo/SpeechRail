@@ -1653,8 +1653,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard fileManager.fileExists(atPath: url.path) else {\n            throw TeleprompterStoreError.notFound\n        }\n        return try loadBundle(at: url)",
       "replace": "        return try loadBundle(at: url)",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例读一份不存在的稿子。去掉后错误从「找不到这份稿子」变成「这份稿子已损坏」——**把两个原因压成另一个**，与第 41 条同族。"
+      "expect": "KILLED",
+      "rationale": "实测 KILLED，**我原先判 SURVIVED 是错的**：我以为「读一份不存在的稿子」零观察，实际 `testDeleteAndDuplicateDocument` 在 `deleteDocument` 之后紧接着 `loadBundle` 并断言 `.notFound`——这正是它对 T8（删除侧的同一道守卫）**没有**覆盖的原因，两条长得几乎一样却只有一条被测到。去掉守卫后错误从「找不到这份稿子」变成 `loadBundle` 的 catch 兜底的「这份稿子已损坏」，**把两个原因压成另一个**，与第 41 条同族。这条也说明：同一道约束在两个入口各写一遍时，一条被测到不代表另一条被测到。"
     },
     {
       "id": "T6",
@@ -1742,9 +1742,9 @@
       "note": "版本可以没有段落",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "            guard !version.segments.isEmpty,",
-      "replace": "            true,",
+      "replace": "            guard true,",
       "expect": "SURVIVED",
-      "rationale": "假设：`TeleprompterDraftStoreTests` 存的是**零个版本**（`versions: []`），不是**零个段落**——`for` 循环直接落空，**「一个版本但零段落」这条从未被构造过**。"
+      "rationale": "**这条最初写成 INVALID，是我的锚点写错而不是产品缺陷**：替换时把 `guard` 关键字一起吃掉了，留下 `true, <条件> else {`，语法不成立。改回 `guard true,` 后探针才能给出读数。首轮实测存活：`TeleprompterDraftStoreTests` 存的是**零个版本**（`versions: []`），`for` 循环直接落空，**「一个版本但零段落」这条从未被构造过**。若存活属真缺口。"
     },
     {
       "id": "T16",
