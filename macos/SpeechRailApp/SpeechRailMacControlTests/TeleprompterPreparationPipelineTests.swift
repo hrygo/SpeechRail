@@ -929,6 +929,219 @@ struct TeleprompterPreparationPipelineTests {
         text.replacingOccurrences(of: "200", with: "250")
     }
 
+    // MARK: - 第六十八轮：素材构建管线的「模型不规矩」素材
+    //
+    // 这一组此前**一条变异都杀不掉**（F 组首轮 18 条零击杀）。共同原因不是
+    // 「没测」，而是既有 87 条用例只喂规规矩矩的模型输出：分组首尾相接、
+    // 改写块都指向真实分组、窗口结果非空、服务端只回 429。
+    //
+    // 下面每一条都只做一件事：**造出一种具体的「模型不规矩」**，然后钉住
+    // 管线必须拒绝它，而不是把它悄悄变成一份看起来正常的稿子。
+
+    @Test func groupingThatSkipsMiddleUnitsIsRejected() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                // 第 1 号单元被跳过：分组从 2 开始，0 号和 1 号都不在任何区间里。
+                let units = try JSONDecoder().decode(
+                    TeleprompterPreparationMapInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                let blocks = [
+                    TeleprompterGroupingBlock(startUnit: 0, endUnit: 1),
+                    TeleprompterGroupingBlock(
+                        startUnit: 2,
+                        endUnit: units.targets.count + 8
+                    )
+                ]
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterGroupingOutput(groups: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 守卫抛出的错会被本地兜底接住，所以**可观察的差别不在抛不抛错，而在
+        // 交付的稿子还全不全**。「跳过中间单元」与第 63 轮 A3 同一族，只是那一族
+        // 在解码器侧、这一族在管线侧：去掉区间守卫，第 1 号单元就此消失，
+        // 而状态仍然是「完成」。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func rewriteBlockReferencingAnUnknownGroupIsRejected() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                // 凭空造一个不存在的分组：块里的文字没有对应的源单元。
+                let blocks = [TeleprompterRewriteBlock(
+                    blockID: "block-9000-9001",
+                    mode: .speak,
+                    text: "模型自己编出来的一段话。",
+                    issues: []
+                )]
+                _ = input
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 凭空造块被拒后同样走本地兜底，因此钉的是「一个源单元都不许少」：
+        // 去掉守卫后这个块会去认第一个分组，其余分组的内容全部落空。
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func emptyGroupingOutputIsRejectedInsteadOfBecomingACompletedWindow() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                return #"{"schema_version":"teleprompter.grouping.v1","groups":[]}"#
+            }
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                return #"{"schema_version":"teleprompter.rewrite.v1","blocks":[]}"#
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 空结果不能被记成「一次成功的窗口」：那会让这一窗的内容凭空消失，
+        // 而对外仍然是 complete。守卫把它变成一次本地兜底，读者拿到的是
+        // 标着 unresolved 的完整原稿，而不是一份少了一整窗的稿子。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+    }
+
+    @Test func configurationFailureIsNotSilentlyDowngradedToReadingTheSource() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { _ in
+            // 未配置模型属于「重试也没用」的一类。读者以为 AI 不可用、却拿到一份
+            // 看起来完全正常的稿子，是判据 1「稿件可信」的直接违反：降级本身
+            // 没有告诉读者发生过。
+            throw LLMError.notConfigured
+        })
+
+        await #expect(throws: LLMError.self) {
+            try await pipeline.prepare(fixture.input)
+        }
+    }
+
+    @Test func serverErrorGetsOneBoundedRetryJustLikeRateLimit() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
+               await attempts.next() == 1 {
+                throw LLMError.http(status: 503, body: "upstream unavailable")
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 429 的重试用例早就有，5xx 此前没有——服务端 5xx 不再触发重试时，
+        // 读者要多白等一次完整往返。
+        #expect(result.mapRequestCount == 1)
+        #expect(await attempts.value == 2)
+    }
+
+    @Test func seamNextToAnOmittedBlockIsNotSentToTheReduceStage() async throws {
+        // 接缝只存在于**窗口之间**，所以这条要 4 个窗口才构造得出来
+        // （96 个单元 × 每窗 24 个 = 4 窗 3 缝）。
+        let fixture = try makeFixture(lineCount: 96)
+        let reduceCalls = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.reduction.v1" {
+                _ = await reduceCalls.next()
+                return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
+            }
+            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
+                let input = try JSONDecoder().decode(
+                    TeleprompterRewriteInput.self,
+                    from: Data(prompt.input.utf8)
+                )
+                // 把第 0 号窗口的最后一个块（单元 23）改成省略块：于是第 0 条接缝
+                // 的左侧不再是 speak。
+                let blocks = input.groups.map { group -> TeleprompterRewriteBlock in
+                    if group.sourceUnits.contains(where: { $0.id == 23 }) {
+                        return TeleprompterRewriteBlock(
+                            blockID: group.id,
+                            mode: .omit,
+                            text: "",
+                            issues: [.nonspokenContent]
+                        )
+                    }
+                    return TeleprompterRewriteBlock(
+                        blockID: group.id,
+                        mode: .speak,
+                        text: group.sourceUnits.map(\.rawText).joined(),
+                        issues: []
+                    )
+                }
+                return String(decoding: try JSONEncoder().encode(
+                    TeleprompterRewriteOutput(blocks: blocks)
+                ), as: UTF8.self)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 省略块不含朗读内容，送去做接缝合并会把非朗读内容接进朗读正文，
+        // 所以那一条接缝必须留在原地不查。
+        #expect(result.boundaries.count == 3)
+        #expect(result.reduceRequestCount == 2)
+        #expect(await reduceCalls.value == 2)
+        #expect(result.boundaries.map(\.isChecked) == [false, true, true])
+    }
+
+    @Test func truncatedGroupingIsNotRetriedBecauseTruncationIsDeterministic() async throws {
+        let fixture = try makeFixture(lineCount: 1)
+        let groupingCalls = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                _ = await groupingCalls.next()
+                throw LLMError.outputTruncated
+            }
+            return try Self.response(for: prompt)
+        })
+
+        _ = try? await pipeline.prepare(fixture.input)
+
+        // 输出被截断是**确定性**失败：同样的请求再发一次还是被截断。重试只是
+        // 白花一次调用并推迟失败暴露，正确的处置是切窗或本地兜底。
+        #expect(await groupingCalls.value == 1)
+    }
+
+    @Test func transportFailureFallsBackLocallyInsteadOfFailingTheWholeDraft() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1" {
+                throw LLMError.transport("simulated transport failure")
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        // 传输层抖动和流提前结束都属于「本机可以自己兜住」的一类：整篇准备失败
+        // 等于一次网络抖动让读者开不了讲。降级必须给出**完整的原稿**并标成
+        // 待复核，而不是少一段。
+        #expect(result.fallbackBlockCount == fixture.units.count)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+        #expect(result.status == .reviewRequired)
+    }
+
     private func makeFixture(lineCount: Int) throws -> Fixture {
         try makeFixture(text: (0..<lineCount).map { "第\($0)段。\n" }.joined())
     }

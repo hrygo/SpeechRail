@@ -1141,7 +1141,7 @@
       "find": "            guard targets.count == window.sourceUnitIDs.count else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
       "replace": "            guard true else {\n                throw TeleprompterPreparationError.invalidSourceUnits\n            }",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：`targets` 由 `compactMap` 得到，少一个源单元时稿子会**静默少一段**，而窗口照常成功。"
+      "rationale": "生产不可达的纵深防御（**第六十八轮更正**：此前把它写成「会静默交付一份缺段的稿子」，是过重的判断）。可达性论证：`validate(_:)` 要求 `selectedIDs.allSatisfy({ unitsByID[$0] != nil })`，而 `makeWindows` 对每个入选 ID 直接 `selection.unitsByID[id]!` 强制解包——也就是说**每个 `window.sourceUnitIDs` 按构造必然能在 `unitsByID` 里查到**，`compactMap` 永远不会丢东西。同一条不变式也让 F8、F17 不可达。"
     },
     {
       "id": "F2",
@@ -1150,7 +1150,7 @@
       "find": "            guard let states, !states.isEmpty else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
       "replace": "            guard let states else {\n                throw TeleprompterPreparationError.invalidPromptResponse\n            }",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型返回空结果时该窗口被记成一次成功，产出缺一段的稿子且状态仍是「完成」。"
+      "rationale": "冗余的纵深防御，被更早的一道守卫遮挡（第六十八轮更正）。空分组确实能通过分组解码器（`rawGroups.allSatisfy` 对空数组平凡成立，且没有「必须铺满 targets」的收尾检查），但随后 `TeleprompterPreparationPromptBuilder.rewrite` 的 `guard !groups.isEmpty`（TeleprompterPreparationPrompts.swift:782）会先抛 `invalidPromptResponse`，根本走不到 `states` 为空的那一步。**实测**：让模型对 grouping 与 rewrite 都返回空结果，交付的稿子两种读数下都是完整原稿 + 本地兜底，新增用例 `emptyGroupingOutputIsRejectedInsteadOfBecomingACompletedWindow` 在去掉本守卫后仍然全绿。"
     },
     {
       "id": "F3",
@@ -1158,8 +1158,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
       "find": "            guard left.block.disposition == .speak, right.block.disposition == .speak else {",
       "replace": "            guard true else {",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：提示块／跳过块之间的接缝也会送去合并，合并结果会把非朗读内容接进朗读正文。"
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `seamNextToAnOmittedBlockIsNotSentToTheReduceStage` 用 96 个单元（4 窗 3 缝）把第 0 号窗口的最后一个块改成省略块，于是第 0 条接缝左侧不再是 speak。断言 `reduceRequestCount == 2`、`boundaries.map(\\.isChecked) == [false, true, true]`。去掉守卫后第 0 条接缝也会被送去合并，非朗读内容会接进朗读正文——被本用例与 4 条既有用例杀掉。"
     },
     {
       "id": "F4",
@@ -1168,7 +1168,7 @@
       "find": "        let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))",
       "replace": "        let recoveryBudget = policy.maxRecoveryRequests",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：单窗口稿件可以用满 3 次恢复请求，与「按窗口数收敛」的初衷相反，多花调用也拉长等待。"
+      "rationale": "等价变异（第六十八轮判定，限于默认 policy）。`maxRecoveryRequests` 默认 3，本变异把预算直接设成 `policy.maxRecoveryRequests`。原式 `min(3, max(2, min(windows.count, 3)))` 与它在所有可达窗口数下都相同：windows ≤ 2 时原式给 2，而**每个窗口最多消耗一次恢复请求**（分组/改写各只重试一次，重试失败就本地兜底或抛错），所以预算 2 与 3 都不构成约束；windows ≥ 3 时两式恒等。仅当调用方传入 `maxRecoveryRequests > 3` **且**窗口数 ≥ 4 时才会分叉——生产走默认 policy，该分支不可达。"
     },
     {
       "id": "F5",
@@ -1177,7 +1177,7 @@
       "find": "            guard let first = IDs.first,\n                  IDs.last == group.endUnit - 1,\n                  IDs.count == group.endUnit - group.startUnit,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
       "replace": "            guard let first = IDs.first,\n                  IDs.allSatisfy({ sourceUnits[$0] != nil }) else {",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型可以跳过中间单元而不被发现——**与第 63 轮 A3（分组必须首尾相接）同一族**，只是那一族在解码器侧、这一族在 pipeline 侧。"
+      "rationale": "冗余的纵深防御，被解码器侧同一道约束遮挡（第六十八轮更正）。「模型跳过中间单元」在**解码器**里就被拒了：`TeleprompterMapDecoder` 的分组校验有 `guard group.startUnit == next`（TeleprompterPreparationPrompts.swift:1451），跳段会以 `.rangeGap` 被拒，根本走不到 `makeGroupStates`。**这正是第 63 轮 A3 那条变异所在的位置**，所以本条是 A3 在管线侧的重复守卫。**实测**：造出 `[0,1)` + `[2, 远超窗口)` 的跳段分组，去掉本守卫后交付的稿子仍是完整原稿（走本地兜底）。由此得到本轮的一条纪律：**同一道约束在两层各写一遍时，上层那道要按「冗余」记账，不能按独立防线记。**"
     },
     {
       "id": "F6",
@@ -1186,7 +1186,7 @@
       "find": "            guard let group = allowed[block.blockID],",
       "replace": "            guard let group = allowed[block.blockID] ?? groups.first,",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：模型可凭空造一个不存在的分组块，块里的文字没有对应的源单元。"
+      "rationale": "冗余的纵深防御，被改写解码器遮挡（第六十八轮更正）。凭空造块在解码器里就已被拒，而且是被**两道**检查拒的：`guard IDs.count == allowed.count`（TeleprompterPreparationPrompts.swift:1545，保证恰好一个块对一分组）与随后的 `guard let group = allowed[block.blockID]`（:1550）。**实测**：让模型返回一个 `block_id` 完全不存在的块，去掉本守卫后交付的稿子仍是完整原稿（本地兜底）。"
     },
     {
       "id": "F7",
@@ -1194,8 +1194,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
       "find": "        guard isLocallyRecoverable(error) else { return nil }",
       "replace": "        guard true else { return nil }",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：**配置类错误（`notConfigured` 等）也会静默降级成「按原文朗读」**，读者以为 AI 不可用，却拿到一份看起来正常的稿子。"
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `configurationFailureIsNotSilentlyDowngradedToReadingTheSource`：让 completion 抛 `LLMError.notConfigured`，断言整篇准备**失败**。去掉守卫后配置类错误也会静默降级成「按原文朗读」——读者以为 AI 不可用，却拿到一份看起来完全正常的稿子，这是判据 1「稿件可信」的直接违反。杀掉 3 条。"
     },
     {
       "id": "F8",
@@ -1204,7 +1204,7 @@
       "find": "        guard states.count == window.sourceUnitIDs.count else { return nil }",
       "replace": "        guard true else { return nil }",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：本地兜底漏单元时照样交付，残缺稿没有任何标记。"
+      "rationale": "生产不可达的纵深防御（**第六十八轮更正**）。`makeLocalFallback` 的 `states` 由 `window.sourceUnitIDs.enumerated().compactMap` 得到，每个 ID 按 F1 的同一条不变式必然命中 `sourceUnits`，因此 `states.count` 恒等于 `window.sourceUnitIDs.count`，这道段数校验永远成立。"
     },
     {
       "id": "F9",
@@ -1212,8 +1212,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
       "find": "        case .invalidStructuredResponse, .outputTruncated, .transport,\n            .streamEndedEarly, .malformedStreamEvent:",
       "replace": "        case .invalidStructuredResponse:\n            return true\n        case .outputTruncated, .transport, .streamEndedEarly, .malformedStreamEvent:\n            return false",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：网络抖动、流提前结束不再降级为「按原文朗读」，而是整篇准备失败。"
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `transportFailureFallsBackLocallyInsteadOfFailingTheWholeDraft`：让分组阶段抛 `LLMError.transport`，断言仍拿到**完整原稿**的本地兜底稿且状态为 `reviewRequired`。去掉守卫后传输层抖动不再兜底，一次网络抖动会让整篇准备失败、读者开不了讲。杀掉 2 条。"
     },
     {
       "id": "F10",
@@ -1222,7 +1222,7 @@
       "find": "        return min(max(retryAfter, 0), 60)",
       "replace": "        return retryAfter",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：服务端给出 1 小时的 `Retry-After` 就真的等 1 小时，界面停在准备中。"
+      "rationale": "一半等价、一半不可经济观测（第六十八轮判定）。下界 `max(retryAfter, 0)` 是等价变异：唯一的消费者 `waitBeforeRetryIfNeeded` 已经要求 `delay > 0`，负值在那里就被挡住了。上界 `min(retryAfter, 60)` 是真实的防御，但**只能在真的等超过 60 秒时才可观测**，而 `retryAfterDelay` 是 `fileprivate`，测试无法直接调用（实测编译期报 `inaccessible due to fileprivate protection level`）。本轮试过写成行为断言，跑出来要么让整套测试多花 60 秒、要么断言不到边界，**按纪律如实记作未覆盖，而不是硬凑一条跑得慢的用例。**"
     },
     {
       "id": "F11",
@@ -1239,8 +1239,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
       "find": "            return status == 429 || (500...599).contains(status)",
       "replace": "            return status == 429",
-      "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：**429 的重试有用例（`transientRateLimitGetsOneBoundedRetry`），5xx 没有**——服务端 5xx 不再触发重试，读者多等一次完整往返。"
+      "expect": "KILLED",
+      "rationale": "第六十八轮转杀。新增用例 `serverErrorGetsOneBoundedRetryJustLikeRateLimit` 用 503 复刻既有的 429 用例，断言分组阶段被调用两次。去守卫后服务端 5xx 不再触发重试，读者多白等一次完整往返。杀掉 4 条。"
     },
     {
       "id": "F13",
@@ -1258,7 +1258,7 @@
       "find": "        guard midpoint > 0, midpoint < window.sourceUnitIDs.count else {",
       "replace": "        guard true else {",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：单元数为 0 或 1 的窗口切分出空窗口，切分不再收敛。"
+      "rationale": "生产不可达（第六十八轮判定）。`split` 只在 `canSplitWindow` 为真时被调用，而那要求 `window.sourceUnitIDs.count > 1`；对 count ≥ 2，`midpoint = count / 2` 恒满足 `0 < midpoint < count`（整数除法下 count/2 ≥ 1 且 ≤ count-1）。所以这道守卫在任何可达输入上都不会触发。"
     },
     {
       "id": "F15",
@@ -1267,7 +1267,7 @@
       "find": "        guard let delay = retryAfterDelay(for: error), delay > 0 else { return }",
       "replace": "        guard let delay = retryAfterDelay(for: error) else { return }",
       "expect": "SURVIVED",
-      "rationale": "等价变异。`Task.sleep(for: .seconds(0))` 本身就是空操作，去掉 `delay > 0` 不改变可观测行为。"
+      "rationale": "等价变异（形态判定）。`Task.sleep(for: .seconds(0))` 本身就是空操作，去掉 `delay > 0` 不改变任何可观测行为。"
     },
     {
       "id": "F16",
@@ -1276,7 +1276,7 @@
       "find": "        guard let elapsed = observation.elapsedMilliseconds, elapsed >= 0,",
       "replace": "        guard let elapsed = observation.elapsedMilliseconds,",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：负耗时（本机时钟回退）会落进第一个延迟桶，把时延分布画错。"
+      "rationale": "生产不可达的纵深防御（第六十八轮判定）。`elapsedMilliseconds` 只有两个产地，两个都已经夹住下界：LLMProvider.swift:1219 写的是 `max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))`，管线自己的 `elapsedMilliseconds(since:)`（:1740）同样以 `max(0, ...)` 收尾。因此 `elapsed >= 0` 恒成立，负耗时不可能到达这道守卫。"
     },
     {
       "id": "F17",
@@ -1285,7 +1285,7 @@
       "find": "            let budget = totalBudgetUnits > 0\n                ? window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)\n                : 0",
       "replace": "            let budget = window.localBudgetSeconds * Double(unit.budgetUnits) / Double(totalBudgetUnits)",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：窗口总预算单元为 0 时除零，兜底段拿到无穷大的预算秒数。"
+      "rationale": "生产不可达（第六十八轮判定）。`budgetUnits` 在构造时就是 `max(1, rawText.utf8.count)`（TeleprompterPreparationDomain.swift:284），且持久化层读取时另有 `unit.budgetUnits > 0` 的校验（TeleprompterV2Store.swift:809）。任何非空窗口的 `totalBudgetUnits` 恒 ≥ 1，除零不可达。"
     },
     {
       "id": "F18",
@@ -1294,7 +1294,7 @@
       "find": "            guard !isTruncatedMapFailure(error),\n                  recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
       "replace": "            guard recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
       "expect": "SURVIVED",
-      "rationale": "**真缺口，本轮已定位未补**（见阶段报告 §5 第 16 条）。后果：输出被截断是确定性失败，重试只会再截断一次，白花一次调用并推迟失败暴露。"
+      "rationale": "等价变异，被 `canRetryStage` 遮挡（第六十八轮判定）。守卫去掉 `!isTruncatedMapFailure(error)` 之后，重试条件只剩 `recoveryRequestsUsed < recoveryBudget` 与 `canRetryStage(error)`。而 `canRetryStage` = 结构化失败或瞬时失败：`isStructuralMapFailure` 只认 `.invalidStructuredResponse` 与 `.invalidPromptResponse*`，`isTransientProviderFailure` 只认 http 429/5xx。**截断（`.outputTruncated`）两者都不是**，所以它本来就不可重试——「截断是确定性失败、不该重试」这条产品判断是对的，但**执行它的是 `canRetryStage`，不是这道守卫**。**实测**：`truncatedGroupingIsNotRetriedBecauseTruncationIsDeterministic` 去掉本守卫后分组调用次数仍是 1。"
     }
   ]
 }
