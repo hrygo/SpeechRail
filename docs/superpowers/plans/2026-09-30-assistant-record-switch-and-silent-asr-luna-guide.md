@@ -22,6 +22,7 @@ date: 2026-09-30
 | U6 列表行隔离重绘 | 暂缓 | 按 §9.1：M1 未测，不得先改 |
 | M2–M4 行为层验收 | 暂缓 | 需真机麦克风与在跑的服务 |
 | §7 离屏渲染用例 | 不可行 | 见下 |
+| **服务端根因修复** | **代码已提交** | `06b3570e`，见附录 A'；**重装 runtime 才生效，未授权** |
 
 **§7「`AssistantView` 离屏渲染夹具用例」在本 target 不可行**，已实测确认而非推测：
 `SpeechRailAppTests` 没有 `TEST_HOST`／`BUNDLE_LOADER`，进程里没有 `NSApplication`。
@@ -531,6 +532,65 @@ U1–U6 互相独立、都是本地 commit。任一单元可通过 `git revert <
 | 9 | 交付报告 | 列出实际 commit hash、实测结果、**未验证项**（服务端 ASR 终态缺失根因、字幕 / 会议同构问题）、回退方式 |
 
 **偏差处理**：任何一步与本方案不符时，先核实来源与意图，不覆盖他人改动，不扩大写入范围。
+
+---
+
+## 附录 A' · 服务端根因与修复（2026-09-30 实测）
+
+客户端的「保留未定稿文本」只是兜底。真正让单句语音无法定稿的是服务端：
+commit 在大多数情况下整体失败成 `worker_inference_error`，Realtime 侧只
+收到 `transcription.failed`，根本不存在 `completed`。
+
+### 复现（确定性约 3 秒）
+
+本地 TTS 合成一句 → `/v1/audio/speech` → 转 24 kHz 单声道 →
+`input_audio_buffer.append`（不带 `.audio`，需 `event_id`）→
+`input_audio_buffer.commit`。
+
+| 输入 | 现象 |
+|---|---|
+| 单句「今天天气怎么样？」 | 出 `hypothesis` rev1/rev2，commit → `transcription.failed: worker_inference_error` |
+| 双句 + 1 秒停顿 | `completed: "今天天气怎么样？好的，我知道。大了。"` ✅ |
+
+对照说明触发条件：**句中有停顿**，尾块解码才会带出新文字，从而绕开出问题的分支。
+
+### 根因
+
+vendor `mlx_qwen3_asr/streaming.py:273` `finish_streaming()`：
+
+```python
+if merged == prev_text and state.enable_tail_refine:
+    from .transcribe import transcribe
+    refined = transcribe(audio=refine_audio, model=decode_model, ...)  # 抛异常
+```
+
+`transcribe()` → `_resolve_model_components()` 收到的是**已加载对象**而非路径，
+于是 `model_path` 退回 `DEFAULT_MODEL_ID`（`"Qwen/Qwen3-ASR-0.6B"`）→
+`_TokenizerHolder.get()` 联网拉取 → 离线环境抛
+`LocalEntryNotFoundError: Cannot find an appropriate cached snapshot folder`。
+
+`qwen3_worker.py:1009` 调 `init_streaming()` 未传 `enable_tail_refine`，
+默认 `True`（`streaming.py:79`）。单句末尾通常无新文字 → 必进精修 → 必炸。
+该异常不在 `_EXCEPTION_TYPES` 白名单内，故日志只显示 `exception_type=None`。
+
+### 修复（commit `06b3570e`）
+
+| 改动 | 文件 | 作用 |
+|---|---|---|
+| `init_streaming(..., enable_tail_refine=False)` | `src/speechrail/backends/qwen3_worker.py` | 止血，一行可回退 |
+| 接入 `error_frame_message` | `src/speechrail/backends/qwen3_streaming.py` | 补齐诊断（见下） |
+
+精修仅用于补回漏字，committed text 本身已完整，关闭它不影响定稿内容。
+
+**顺带修好的诊断缺陷**：`error_frame_message()`（嵌入 worker stderr 尾巴）
+已被 `qwen3_native`(2)、`qwen3_alignment`(3)、`qwen3_shared` 使用，但
+`qwen3_streaming` 一处都没有——流式 ASR 是唯一丢弃 stderr 细节的后端，
+这正是本问题此前只能看到 `exception_type=None` 的原因。
+
+`error.code` 仍保持短机器码（保住 Realtime 契约 128 字符上限），
+stderr tail 只进服务端日志。
+
+**未验证**：修复需重装 runtime 才生效；重装属运行态变更，需单独授权。
 
 ---
 
