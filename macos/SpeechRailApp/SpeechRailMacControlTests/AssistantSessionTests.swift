@@ -2119,4 +2119,105 @@ final class AssistantSessionTests: XCTestCase {
         XCTAssertNil(harness.session.partialText, "同一 item 的失败要清掉它自己的半句")
         XCTAssertNotNil(harness.session.lastFailure)
     }
+
+    /// 没定稿的那半句**不许**去问模型。
+    ///
+    /// `speechrail.transcription.hypothesis` 是可改写的全文，不是权威文本。
+    /// 拿它驱动模型与朗读等于把未确认内容当事实，而且用户无法分辨哪句是真的。
+    /// 所以"保留并提示"是对的，"回退用 partial 送 LLM"是错的——这一条钉住取舍。
+    func testUnfinalizedUtteranceNeverReachesTheModel() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["这一句不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "空 final 之后没有给出任何可读结论"
+        )
+        let streams = await harness.llm.streamCount
+        XCTAssertEqual(streams, 0, "未定稿的文字不许驱动模型与朗读")
+    }
+
+    /// 同一个 item 的终态重放（重连、重复 commit）不该在库里留下两行。
+    func testRepeatedEmptyFinalForTheSameItemDoesNotDuplicateThePreservedLine() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "第一次空 final 没有保留那句话"
+        )
+        // 同一个 item 的终态再来一次（重连或重复 commit）。
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertEqual(
+            lines.filter { $0.role == .user }.count,
+            1,
+            "同一个 item 不该被保留两次"
+        )
+        XCTAssertEqual(
+            harness.session.turns.filter { $0.role == .user }.count,
+            1,
+            "对话流里也不该出现两行同一句"
+        )
+    }
+
+    /// 成功定稿一句之后，上一次留下的"没能识别完整"提示必须自己退场——
+    /// 否则用户已经说清楚了，界面上还挂着一句过期警告。
+    func testASuccessfulTurnClearsTheStaleFailureNotice() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["今天晴，最高 28 度。"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "空 final 之后没有给出任何可读结论"
+        )
+
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i2", revision: 1, text: "那明天呢")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i2", transcript: "那明天呢"))
+
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "这一次定稿没有走到模型回复"
+        )
+        XCTAssertNil(
+            harness.session.lastFailure,
+            "这一句已经成功定稿，上一次的软提示就该退场"
+        )
+    }
 }

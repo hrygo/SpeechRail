@@ -21,8 +21,23 @@ date: 2026-09-30
 | M1 卡顿测量 | 未做 | 需用户单独授权接管前台窗口 |
 | U6 列表行隔离重绘 | 暂缓 | 按 §9.1：M1 未测，不得先改 |
 | M2–M4 行为层验收 | 暂缓 | 需真机麦克风与在跑的服务 |
+| §7 离屏渲染用例 | 不可行 | 见下 |
 
-验证：`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）371 项 0 failures / exit 0；
+**§7「`AssistantView` 离屏渲染夹具用例」在本 target 不可行**，已实测确认而非推测：
+`SpeechRailAppTests` 没有 `TEST_HOST`／`BUNDLE_LOADER`，进程里没有 `NSApplication`。
+探针把一个含 `Text` 与 `Button` 的 `NSHostingView` 离屏渲染并遍历无障碍树，实测
+`accessibilityChildren()` 为 0、标签为空——`NSHostingView` 在无 `NSApplication` 时
+根本不建无障碍树。因此"断言提示文案出现在 AX 树中"这条断言在本 bundle 里恒为空，
+写了也只是假绿。这与项目自己的记录一致：历次离屏走查都是用 `/tmp` 下的独立
+`NSHostingView` 工装做的，不是单测 target。U4 的等价验证改为两条结构性判据：
+`AssistantSession` 侧注入 `.failed` 后 `lastFailure` 非 nil（有测试），
+`AssistantView` 侧 `grep -c lastFailure` ≥ 1 且绑定了提示条；"提示真的出现在屏幕上"
+属于 M2–M4 的真机走查范围。
+
+补充的三例取舍回归（`AssistantSessionTests`）：未定稿的半句不进模型
+（`streamCount == 0`）、同一 item 的终态重放不重复落库、成功定稿后软提示自己退场。
+
+验证：`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）374 项 0 failures / exit 0；
 四个契约检查脚本（realtime / openapi / user-doc / version consistency）全部 exit 0。
 **未跑 UI 自动化**（AGENTS.md 硬约束）。
 
