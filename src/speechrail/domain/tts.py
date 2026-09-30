@@ -1188,7 +1188,18 @@ class VoiceRegistry:
             return system + custom
 
     def get_profile(self, voice: str) -> VoiceProfile:
+        """Return one voice profile, including an unpublished design candidate.
+
+        An unpublished VoiceDesign candidate is exposed to internal synthesis
+        through :func:`use_voice_profile` only.  Every in-process consumer of a
+        voice must therefore resolve candidates here as well, exactly like
+        :meth:`lease_profile` does, or a design id that is not in the durable
+        store fails closed with ``unknown preset voice``.
+        """
         resolved = resolve_voice(voice)
+        ephemeral = _EPHEMERAL_VOICE_PROFILES.get().get(resolved)
+        if ephemeral is not None:
+            return ephemeral
         if resolved in SYSTEM_VOICE_PROFILES:
             return SYSTEM_VOICE_PROFILES[resolved]
         with self._lock, self._process_lock():
@@ -1689,11 +1700,7 @@ def get_voice_registry() -> VoiceRegistry:
 
 def get_voice_profile(voice: str) -> VoiceProfile:
     """Return a registered preset or custom profile, or raise a stable lookup error."""
-    resolved = resolve_voice(voice)
-    ephemeral = _EPHEMERAL_VOICE_PROFILES.get().get(resolved)
-    if ephemeral is not None:
-        return ephemeral
-    return _GLOBAL_VOICE_REGISTRY.get_profile(resolved)
+    return _GLOBAL_VOICE_REGISTRY.get_profile(voice)
 
 
 _ABBREVIATIONS = frozenset(
