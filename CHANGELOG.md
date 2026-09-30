@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-09-30
+
+### Fixed
+
+- 修复单句语音无法定稿：Realtime 流式 ASR 在 commit 时几乎必然整体失败成
+  `worker_inference_error`，客户端只收到 `transcription.failed` 而从不收到
+  `conversation.item.input_audio_transcription.completed`，因此已经识别出来的文字
+  无法进入后续 LLM/TTS。根因是 vendor 在尾块解码没有新增文字时会走一次 tail refine，
+  以已加载的 model 对象调用 `transcribe()`，导致 tokenizer 解析退回上游默认 repo id，
+  离线环境下抛 `LocalEntryNotFoundError`。精修只用于补回漏字，committed text 本身
+  已完整，现在关闭该分支。句中留有停顿时尾块会带出新文字而不进精修，所以此前表现为
+  偶发成功。
+- 修复流式 ASR 丢弃 worker 诊断细节：`error_frame_message()` 提供的 stderr 尾巴此前
+  只有 `qwen3_native`、`qwen3_alignment`、`qwen3_shared` 三个后端在用，流式后端是唯一
+  不记录的一处，导致这类失败只显示 `exception_type=None` 而看不到真实异常。现在
+  stderr 尾巴进入服务端日志，Realtime `error.code` 仍保持短机器码。
+- 修复语音助手「切换对话记录」卡顿：打开一条记录此前分四次串行读库并分四次更新
+  SwiftUI 状态，界面逐段跳变；现在改为一次快照读、一次状态更新。
+- 修复语音助手把已经识别出来的一句话静默吞掉：服务端返回空 final 时，客户端此前
+  直接丢弃可见文字且不提示，用户看到「说完话文字一闪就没了」。现在保留该句并以
+  `partial` 状态留在对话流，同时给出「这一句没能识别完整，请再说一次」的提示；
+  该句不进入 LLM/TTS，因为未定稿文本可被后续改写，不适合作为权威输入。
+
+### Changed
+
+- Realtime 契约 4.2.0 → 4.3.0：补充第三条语音准入语义——空 final 不等于用户没有说话，
+  客户端必须区分「没有语音」与「有语音但未能定稿」。
+
 ## [3.4.0] - 2026-09-30
 
 ### Added
