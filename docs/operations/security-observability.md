@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 安全与可观测性"
 status: active
-version: "3.1.4"
-date: 2026-09-25
+version: "3.1.5"
+date: 2026-09-30
 ---
 
 # SpeechRail 安全与可观测性
@@ -43,6 +43,24 @@ HTTP access 记录在响应完成或异常退出时各写一条，字段固定�
 
 目录为 `0700`、文件为 `0600`；`SPEECHRAIL_LOG_DIR` 可改位置。uvicorn 自带的 access 行被关闭，
 避免与 `http_access` 重复；日志目录不可写时退回控制台输出，不影响服务。
+
+### VoiceDesign 故障归因
+
+普通 `/v1/audio/speech` 成功而设计试听失败时，分别查看 `/health` 的
+`tts_ready` / `tts_warm` 与独立的 `tts_design`。后者的 `cold` 表示尚未加载；
+`failed` 与 `last_error` 表示设计 lane 最近一次失败，成功重试后清除。
+健康检查只读取状态，不启动模型。
+
+TTS 错误响应与 `speechrail.log` 记录安全的故障类别和 worker 归因：
+`role`、`stage`、`attempt_id`，以及已观测到的退出码和允许列表中的异常类型。
+用 request ID 与 attempt ID 关联同一次请求和启动尝试。`initialize` 指启动握手，
+`deliver` 指音频交付；EOF、帧大小错误、帧解码错误等各有独立的
+`diagnostic_class`，不从 vendor 异常正文猜测业务错误。
+
+TTS worker 的 Python stdout 与原生 fd 1 输出转至 stderr，二进制协议使用独立描述符。
+共享 transport 持续排空 stderr，内部环形缓冲最多保留 16 KiB，长单行也有界；
+原始 stderr 不进入 HTTP 响应、健康状态或 transport 的服务日志。此诊断只表明
+观测到的失败阶段和进程事实，不替代真实模型质量或稳定性验收。
 
 ## 指标与可观测性
 
@@ -86,7 +104,7 @@ VAD/manual、排队时间与样本数必须在任何性能对比中并列说明�
 
 `AdmissionQueue` 限制 REST / commit 后推理的排队量；满载响应为 `429 queue_full` 并带
 `Retry-After`。worker 一次只处理一个模型实例，MPS profile 拒绝静默 CPU fallback。运营上
-应监控进程存活、readyz、队列满、worker stderr、内存压力与磁盘空间，并可通过 `/metrics`
+应监控进程存活、readyz、队列满、安全 worker 诊断、内存压力与磁盘空间，并可通过 `/metrics`
 观测 RTF、TTFA、队列饱和度与 worker 生命周期状态。
 
 `SPEECHRAIL_MLX_CACHE_LIMIT_MB` 与 `SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 是 vendor runtime 的

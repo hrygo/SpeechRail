@@ -27,6 +27,7 @@ from speechrail.domain.idempotency import (
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 from speechrail.domain.tts import VoiceRegistry
+from speechrail.domain.tts_errors import TtsBackendError
 
 REFERENCE_TEXT = "这是用于音色设计的参考语句，请保持自然清晰的表达方式。"
 EDITED_TEXT = "重新确认之后的参考文本，语气依旧自然清晰并且停顿合理。"
@@ -248,6 +249,44 @@ def human_review(
 
 def published_voice_ids(client: TestClient) -> set[str]:
     return {entry["id"] for entry in client.get("/v1/voices").json()["data"]}
+
+
+@pytest.mark.parametrize("code", ["tts_initialization_failed", "tts_transport_failed"])
+def test_base_validation_preserves_service_failure_status_and_safe_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _created = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    asr_count = len(asr.requests)
+
+    async def failed_synthesis(request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        raise TtsBackendError(
+            code,
+            stage="initialize",
+            detail="private-model-path-must-not-leak",
+            worker_attempt_id="tts_attempt_" + "a" * 32,
+        )
+        yield  # pragma: no cover - preserves the worker's async generator interface
+
+    monkeypatch.setattr(synth, "synthesize", failed_synthesis)
+    response = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"test_text": CONTROLLED_TEST_TEXT},
+    )
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == code
+    assert error["type"] == "server_error"
+    assert error["worker"] == {
+        "stage": "initialize",
+        "role": "tts_base",
+        "attempt_id": "tts_attempt_" + "a" * 32,
+    }
+    assert "private-model-path" not in response.text
+    assert len(asr.requests) == asr_count
 
 
 def test_candidate_lifecycle_publishes_only_after_base_and_human_review(

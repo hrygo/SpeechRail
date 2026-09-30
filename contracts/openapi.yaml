@@ -59,6 +59,11 @@ paths:
                 asr_runtime_revision: null
                 tts_ready: true
                 tts_warm: true
+                tts_design:
+                  configured: true
+                  ready: false
+                  state: cold
+                  last_error: null
                 diarization_ready: false
                 diarization:
                   configured: false
@@ -312,6 +317,11 @@ paths:
         audition and publication are separate calls. Existing voice IDs,
         aliases and system voices cannot be reserved or overwritten. Only
         language=zh is accepted.
+
+        Design uses conservative TTS resource admission. TTS initialization
+        and transport failures return 503, inference/output failures return 502,
+        and parameter failures return 400. Errors may include safe worker
+        attribution; raw stderr is never returned.
       security:
         - BearerAuth: []
         - {}
@@ -635,6 +645,10 @@ paths:
         Human mode (`human_review`) attaches an explicit audition verdict to an
         existing machine result. It is refused unless that result already passed
         the machine gate for the current candidate revision.
+
+        Base initialization and transport failures return 503, inference/output
+        failures return 502, and TTS parameter failures return 400. Existing
+        validation conflicts retain 409. Errors may include safe worker attribution.
       security:
         - BearerAuth: []
         - {}
@@ -651,6 +665,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VoiceDesignCandidateEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -905,9 +921,13 @@ paths:
       description: |
         Generates a short-lived audio preview from a natural-language voice
         instruction. The request does not create or persist a VoiceProfile or
-        reference audio. This endpoint is available only when the active TTS
-        artifact has variant=voice_design. Availability follows the active
-        runtime capability and is not tied to a profile name.
+        reference audio. This endpoint is available only when the active
+        selection resolves the independent VoiceDesign role. Availability
+        follows the active capability and is not tied to a profile name.
+        Design uses conservative TTS resource admission. Initialization and
+        transport failures return 503, inference/output failures return 502,
+        and parameter failures return 400. Errors may include safe worker
+        attribution; raw stderr is never returned.
       security:
         - BearerAuth: []
         - {}
@@ -2612,6 +2632,7 @@ components:
         - asr_runtime_revision
         - tts_ready
         - tts_warm
+        - tts_design
         - diarization_ready
         - diarization
         - realtime_vad
@@ -2652,6 +2673,8 @@ components:
         tts_warm:
           type: [boolean, 'null']
           description: TTS worker is loaded and ready without a load transition; null when the injected backend does not expose this signal.
+        tts_design:
+          $ref: '#/components/schemas/TtsDesignStatus'
         diarization_ready:
           type: boolean
         diarization:
@@ -2675,6 +2698,58 @@ components:
         job_spool_ready:
           type: boolean
           description: True when a job spool repository is configured and available.
+    TtsDesignStatus:
+      type: object
+      additionalProperties: false
+      required: [configured, ready, state, last_error]
+      description: >
+        Independent lazy VoiceDesign worker status. Reading health never loads
+        a worker; a cold configured worker is available to load on demand.
+        Failures do not invalidate ordinary runtime TTS. A successful retry
+        clears last_error.
+      properties:
+        configured:
+          type: boolean
+        ready:
+          type: [boolean, 'null']
+          description: True after a live worker's successful handshake; null if the injected backend cannot report readiness.
+        state:
+          type: string
+          enum: [unconfigured, cold, loading, ready, failed, unknown]
+        last_error:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [code, diagnostic_class, worker]
+              properties:
+                code:
+                  type: string
+                diagnostic_class:
+                  type: string
+                worker:
+                  $ref: '#/components/schemas/TtsWorkerDiagnostics'
+    TtsWorkerDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [stage]
+      description: Safe worker attribution; excludes vendor text, stderr, paths and request content.
+      properties:
+        stage:
+          type: string
+          enum: [initialize, validate, infer, decode, deliver]
+        role:
+          type: string
+          enum: [voice_design, tts_custom_voice, tts_base]
+        attempt_id:
+          type: string
+          pattern: '^tts_attempt_[0-9a-f]{32}$'
+        exit_code:
+          type: integer
+          description: Observed subprocess exit code; negative values indicate a signal.
+        exception_type:
+          type: string
+          enum: [ModuleNotFoundError, ImportError, FileNotFoundError, PermissionError, MemoryError, ValueError, RuntimeError, OSError, TypeError]
     DiarizationStatus:
       type: object
       required: [configured, ready, code, message, profile]
@@ -4306,6 +4381,8 @@ components:
         diagnostic_class:
           type: [string, 'null']
           description: Safe backend diagnostic class; raw exception details are never returned.
+        worker:
+          $ref: '#/components/schemas/TtsWorkerDiagnostics'
   responses:
     BadRequest:
       description: Invalid request

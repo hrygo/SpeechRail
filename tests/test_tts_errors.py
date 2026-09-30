@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from speechrail.domain.tts_errors import TtsBackendError, from_worker_frame
 
 
@@ -39,3 +41,14 @@ def test_clone_parameter_error_is_not_reclassified_from_message_text() -> None:
     assert failure.stage == "validate"
     assert failure.retryable is False
     assert str(failure) == "clone_speed_unsupported"
+
+
+@pytest.mark.parametrize("stage", ["initialize", "deliver"])
+def test_worker_transport_error_preserves_the_observed_stage(stage: str) -> None:
+    failure = from_worker_frame(
+        {"type": "error", "code": "worker_transport_error"},
+        fallback_code="worker_start_failed",
+        stage=stage,  # type: ignore[arg-type]
+    )
+    assert failure.public_code == "tts_transport_failed"
+    assert failure.stage == stage

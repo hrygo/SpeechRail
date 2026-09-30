@@ -138,19 +138,27 @@ def _worker_unavailable_response(
 def _tts_backend_error_response(
     request_id: str,
     exc: BaseException,
+    *,
+    worker_role: str | None = None,
 ) -> JSONResponse | None:
-    """Map a typed TTS failure without exposing worker diagnostics."""
+    """Map a typed TTS failure with safe worker attribution."""
 
     if not isinstance(exc, TtsBackendError):
         return None
+    if exc.worker_role is None:
+        exc.worker_role = worker_role
+    worker = exc.worker_diagnostics
     _LOGGER.warning(
         "tts request failed: request_id=%s code=%s stage=%s diagnostic_class=%s "
-        "worker_attempt_id=%s",
+        "worker_attempt_id=%s role=%s exit_code=%s exception_type=%s",
         request_id,
         exc.code,
         exc.stage,
         exc.diagnostic_class,
-        exc.worker_attempt_id,
+        worker.get("attempt_id"),
+        worker.get("role"),
+        worker.get("exit_code"),
+        worker.get("exception_type"),
     )
     if exc.code in TTS_PARAMETER_ERROR_CODES:
         status_code = 400
@@ -173,6 +181,9 @@ def _tts_backend_error_response(
     elif exc.public_code == "tts_transport_failed":
         status_code = 503
         message = "TTS worker transport failed"
+    elif exc.public_code == "backend_timeout":
+        status_code = 503
+        message = "Inference timed out"
     else:
         status_code = 502
         message = "TTS backend failed to synthesize audio"
@@ -183,6 +194,8 @@ def _tts_backend_error_response(
         message,
         retryable=exc.retryable,
         diagnostic_class=exc.diagnostic_class,
+        worker=worker,
+        error_type="server_error" if status_code >= 500 else "invalid_request_error",
     )
 
 
@@ -1335,7 +1348,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             async with services.governor.reserve(
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
-                resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                resource_key="tts",
                 purpose=WorkPurpose.VOICE_CREATION,
             ):
                 async for chunk in iter_until(
@@ -1384,7 +1397,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            if (response := _tts_backend_error_response(request_id, exc)) is not None:
+            if (response := _tts_backend_error_response(
+                request_id, exc, worker_role="voice_design"
+            )) is not None:
                 return response
             raise
         except RuntimeError as exc:

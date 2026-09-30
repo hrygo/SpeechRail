@@ -67,7 +67,7 @@ from speechrail.domain.tts import (
     use_voice_profile,
     voice_revision_for_clone,
 )
-from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
+from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_creation import VoiceCreation
 from speechrail.domain.voice_validation import (
@@ -76,6 +76,7 @@ from speechrail.domain.voice_validation import (
 )
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
+from speechrail.http.routes.audio import _tts_backend_error_response
 from speechrail.http.routes.system import (
     _TRANSCRIPT_PASS_SCORE,
     _empty_synthesis,
@@ -827,17 +828,11 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            status_code = 400 if exc.code in TTS_PARAMETER_ERROR_CODES else 502
-            if exc.public_code == "tts_initialization_failed":
-                status_code = 503
-            return error_response(
-                status_code,
-                request_id,
-                exc.public_code,
-                "TTS backend failed during candidate generation",
-                retryable=exc.retryable,
-                diagnostic_class=exc.diagnostic_class,
+            backend_response = _tts_backend_error_response(
+                request_id, exc, worker_role="voice_design"
             )
+            assert backend_response is not None
+            return backend_response
         except VoiceDesignActionError as exc:
             return _action_error(request_id, exc)
         except IdempotencyStoreUnavailableError:
@@ -1517,14 +1512,9 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            return error_response(
-                502,
-                request_id,
-                exc.public_code,
-                "TTS backend failed during Base validation",
-                retryable=exc.retryable,
-                diagnostic_class=exc.diagnostic_class,
-            )
+            response = _tts_backend_error_response(request_id, exc, worker_role="tts_base")
+            assert response is not None
+            return response
         except (OSError, ValueError, TTSDeliveryError, OverflowError):
             logger.exception(
                 "voice design Base validation produced invalid output",

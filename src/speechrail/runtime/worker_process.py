@@ -29,7 +29,40 @@ from speechrail.runtime.worker_protocol import (
 logger = logging.getLogger(__name__)
 
 _TERMINATE_GRACE_SECONDS = 2.0
-_STDERR_RING_LINES: int = 64  # keep last N lines of stderr
+_STDERR_CHUNK_BYTES = 1024
+_STDERR_RING_CHUNKS = 16  # at most 16 KiB, including a single unbroken vendor line
+_EXCEPTION_TYPES = frozenset(
+    {
+        "ModuleNotFoundError", "ImportError", "FileNotFoundError", "PermissionError",
+        "MemoryError", "ValueError", "RuntimeError", "OSError", "TypeError",
+    }
+)
+
+
+class WorkerTransportError(ProtocolError):
+    """A protocol failure with safe attribution separate from its private message."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic_class: str,
+        exit_code: int | None = None,
+        exception_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostic_class = diagnostic_class
+        self.exit_code = exit_code
+        self.exception_type = exception_type
+
+
+def _stderr_exception_type(tail: str) -> str | None:
+    """Recognize a bounded exception name; never return the exception's text."""
+    for line in reversed(tail.splitlines()):
+        name, separator, _ = line.partition(":")
+        if separator and name.strip() in _EXCEPTION_TYPES:
+            return name.strip()
+    return None
 
 
 def error_frame_message(frame: Mapping[str, object], fallback: str) -> str:
@@ -97,7 +130,7 @@ class AsyncFramedWorkerProcess:
         self._spec = spec
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_ring: collections.deque[bytes] = collections.deque(
-            maxlen=_STDERR_RING_LINES,
+            maxlen=_STDERR_RING_CHUNKS,
         )
         self._stderr_task: asyncio.Task[None] | None = None
         self._read_lock = asyncio.Lock()
@@ -134,11 +167,11 @@ class AsyncFramedWorkerProcess:
             )
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
-        """Read *proc.stderr* line-by-line into the bounded ring buffer."""
+        """Drain even very long lines without blocking a noisy vendor process."""
         assert proc.stderr is not None
         try:
-            async for line in proc.stderr:
-                self._stderr_ring.append(line)
+            while chunk := await proc.stderr.read(_STDERR_CHUNK_BYTES):
+                self._stderr_ring.append(chunk)
         except (asyncio.CancelledError, ValueError):
             pass
 
@@ -147,6 +180,17 @@ class AsyncFramedWorkerProcess:
         if not self._stderr_ring:
             return "(no stderr captured)"
         return b"".join(self._stderr_ring).decode("utf-8", errors="replace").rstrip()
+
+    def _protocol_error(
+        self, message: str, diagnostic_class: str
+    ) -> WorkerTransportError:
+        process = self._process
+        return WorkerTransportError(
+            message,
+            diagnostic_class=diagnostic_class,
+            exit_code=process.returncode if process is not None else None,
+            exception_type=_stderr_exception_type(self._format_stderr_tail()),
+        )
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
@@ -197,9 +241,13 @@ class AsyncFramedWorkerProcess:
         if process.stdin is None:
             raise RuntimeError("worker_transport_invalid")
         frame = encode_frame(payload, binary_payload=binary_payload)
-        async with asyncio.timeout(deadline):
-            process.stdin.write(frame)
-            await process.stdin.drain()
+        try:
+            async with asyncio.timeout(deadline):
+                process.stdin.write(frame)
+                await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            await self._drain_stderr_tail()
+            raise self._protocol_error("worker pipe closed", "worker_pipe_closed") from exc
 
     async def _drain_stderr_tail(self) -> None:
         """Briefly yield control to let the stderr drain task capture trailing lines on exit."""
@@ -229,40 +277,52 @@ class AsyncFramedWorkerProcess:
                 header = first + await process.stdout.readexactly(4 - len(first))
         except TimeoutError as exc:
             if wait_for_frame:
-                raise ProtocolError("incomplete worker frame timed out") from exc
+                raise self._protocol_error(
+                    "incomplete worker frame timed out", "worker_frame_timeout"
+                ) from exc
             raise
         except IncompleteReadError as exc:
             await self._drain_stderr_tail()
             stderr_tail = self._format_stderr_tail()
-            raise ProtocolError(
+            raise self._protocol_error(
                 f"truncated worker frame (read {len(first) + len(exc.partial)} of "
-                f"4 header bytes); worker stderr tail:\n{stderr_tail}"
+                f"4 header bytes); worker stderr tail:\n{stderr_tail}",
+                "worker_eof",
             ) from exc
         size = struct.unpack(">I", header)[0]
         if not 0 < size <= MAX_FRAME_BYTES:
-            raise ProtocolError("invalid worker frame size")
+            raise self._protocol_error("invalid worker frame size", "worker_frame_size_invalid")
         try:
             async with asyncio.timeout(effective_timeout):
                 body = await process.stdout.readexactly(size)
         except TimeoutError as exc:
             if wait_for_frame:
-                raise ProtocolError("incomplete worker frame timed out") from exc
+                raise self._protocol_error(
+                    "incomplete worker frame timed out", "worker_frame_timeout"
+                ) from exc
             raise
         except IncompleteReadError as exc:
             await self._drain_stderr_tail()
             stderr_tail = self._format_stderr_tail()
-            raise ProtocolError(
+            raise self._protocol_error(
                 f"truncated worker frame payload (read {len(exc.partial)} of "
-                f"{size} bytes); worker stderr tail:\n{stderr_tail}"
+                f"{size} bytes); worker stderr tail:\n{stderr_tail}",
+                "worker_frame_incomplete",
             ) from exc
-        frame = decode_frame_body(body)
+        try:
+            frame = decode_frame_body(body)
+        except ProtocolError as exc:
+            raise self._protocol_error(
+                "invalid worker frame body", "worker_frame_decode_invalid"
+            ) from exc
         if frame.get("type") == "error":
             await self._drain_stderr_tail()
             frame["stderr_tail"] = self._format_stderr_tail()
+            frame["worker_exception_type"] = _stderr_exception_type(str(frame["stderr_tail"]))
             logger.warning(
-                "worker reported error frame %s; worker stderr tail:\n%s",
-                frame.get("code", "unknown"),
-                frame["stderr_tail"],
+                "worker error frame received: exception_type=%s exit_code=%s",
+                frame["worker_exception_type"],
+                process.returncode,
             )
         return frame
 

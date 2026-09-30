@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -24,6 +24,7 @@ def error(
     retryable: bool,
     param: str | None = None,
     diagnostic_class: str | None = None,
+    worker: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "message": message,
@@ -36,6 +37,8 @@ def error(
         value["param"] = param
     if diagnostic_class is not None:
         value["diagnostic_class"] = diagnostic_class
+    if worker is not None:
+        value["worker"] = dict(worker)
     return {"error": value}
 
 
@@ -48,18 +51,21 @@ def error_response(
     retryable: bool = False,
     param: str | None = None,
     diagnostic_class: str | None = None,
+    worker: Mapping[str, object] | None = None,
+    error_type: str | None = None,
 ) -> JSONResponse:
-    error_type = "server_error" if retryable else "invalid_request_error"
+    resolved_type = error_type or ("server_error" if retryable else "invalid_request_error")
     return JSONResponse(
         status_code=status,
         content=error(
             message=message,
-            error_type=error_type,
+            error_type=resolved_type,
             code=code,
             request_id=request_id,
             retryable=retryable,
             param=param,
             diagnostic_class=diagnostic_class,
+            worker=worker,
         ),
         headers={"X-SpeechRail-Error-Code": code},
     )

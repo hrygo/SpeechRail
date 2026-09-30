@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import hashlib
 import math
+import os
 import sys
 import traceback
 from collections import Counter, OrderedDict
@@ -1503,6 +1504,26 @@ def _decode_synthesis_request(frame: dict[str, object]) -> _SynthesisFields:
     return _decode_synthesis_fields(frame, expected_type="synthesize")
 
 
+@contextlib.contextmanager
+def _protocol_output() -> Iterator[BinaryIO]:
+    """Reserve the original stdout pipe for IPC before importing vendor code.
+
+    Python prints and native writes to fd 1 both belong on stderr.  The framed
+    writer owns a separate descriptor, so redirecting the ordinary descriptor
+    cannot corrupt a ready/audio frame. Restore it for in-process callers.
+    """
+    stdout = sys.stdout
+    stdout.flush()
+    with os.fdopen(os.dup(stdout.fileno()), "wb", buffering=0) as protocol:
+        os.dup2(sys.stderr.fileno(), stdout.fileno())
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                yield protocol
+        finally:
+            sys.stderr.flush()
+            os.dup2(protocol.fileno(), stdout.fileno())
+
+
 def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None = None) -> None:
     """Run the private local IPC service; public ASGI workers never import Qwen TTS."""
 
@@ -1518,7 +1539,6 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
     parser.add_argument("--memory-limit-mb", type=int, default=0)
     parser.add_argument("--no-warmup", action="store_true")
     args = parser.parse_args(argv)
-    _apply_metal_limits(args.cache_limit_mb, args.memory_limit_mb)
     model_dir = Path(args.model_dir).resolve(strict=True)
     device: Literal["mps", "cpu"] = args.device
     selected_factory = engine_factory or _default_engine_factory(
@@ -1530,14 +1550,16 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
         top_p=args.top_p,
         warmup=not args.no_warmup,
     )
-    serve(
-        sys.stdin.buffer,
-        sys.stdout.buffer,
-        model_dir=model_dir,
-        device=device,
-        sample_rate=args.sample_rate,
-        engine_factory=selected_factory,
-    )
+    with _protocol_output() as protocol:
+        _apply_metal_limits(args.cache_limit_mb, args.memory_limit_mb)
+        serve(
+            sys.stdin.buffer,
+            protocol,
+            model_dir=model_dir,
+            device=device,
+            sample_rate=args.sample_rate,
+            engine_factory=selected_factory,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - subprocess entrypoint.

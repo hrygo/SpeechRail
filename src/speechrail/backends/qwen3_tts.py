@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 import os
 import time
 from collections import deque
@@ -28,7 +29,7 @@ from speechrail.backends.qwen3_tts_stream_client import (
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceProfile, VoiceStoreUnavailableError
-from speechrail.domain.tts_errors import TtsBackendError, from_worker_frame
+from speechrail.domain.tts_errors import TtsBackendError, TtsErrorStage, from_worker_frame
 from speechrail.domain.tts_request import validate_tts_parameters
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
@@ -48,6 +49,7 @@ from speechrail.runtime.registry import (
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
+    WorkerTransportError,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
 
 DeliveryEventRecorder = Callable[[str, int], None]
 TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
+_LOGGER = logging.getLogger(__name__)
 
 
 class TtsWorkerBusyError(RuntimeError):
@@ -200,6 +203,8 @@ class Qwen3TtsWorker:
         self.model_variant: str = config.model_variant
         self._runtime_revision: str | None = None
         self._worker_attempt_id: str | None = None
+        self._initializing = False
+        self._last_error: TtsBackendError | None = None
 
     @property
     def alive(self) -> bool:
@@ -209,6 +214,68 @@ class Qwen3TtsWorker:
     def ready(self) -> bool:
         """Return whether the supervised worker can accept another request."""
         return self._started and self._transport.alive
+
+    @property
+    def diagnostic_status(self) -> dict[str, object]:
+        """Inspect this lane without loading it or disclosing private worker text."""
+        state = (
+            "loading" if self._initializing
+            else "failed" if self._last_error is not None
+            else "ready" if self.ready
+            else "failed" if self._started
+            else "cold"
+        )
+        failure = self._last_error
+        return {
+            "configured": True,
+            "ready": self.ready,
+            "state": state,
+            "last_error": (
+                {
+                    "code": failure.public_code,
+                    "diagnostic_class": failure.diagnostic_class,
+                    "worker": failure.worker_diagnostics,
+                }
+                if failure is not None else None
+            ),
+        }
+
+    def _record_failure(self, failure: TtsBackendError) -> None:
+        failure.worker_role = {
+            "voice_design": "voice_design",
+            "custom_voice": "tts_custom_voice",
+            "base": "tts_base",
+        }[self.model_variant]
+        if failure.worker_attempt_id is None:
+            failure.worker_attempt_id = self._worker_attempt_id
+        if failure.stage != "validate":
+            self._last_error = failure
+        worker = failure.worker_diagnostics
+        _LOGGER.warning(
+            "tts worker failed: role=%s code=%s stage=%s diagnostic_class=%s "
+            "worker_attempt_id=%s exit_code=%s exception_type=%s",
+            failure.worker_role, failure.code, failure.stage, failure.diagnostic_class,
+            worker.get("attempt_id"), worker.get("exit_code"), worker.get("exception_type"),
+        )
+
+    def _transport_failure(
+        self, exc: ProtocolError, *, stage: TtsErrorStage, request_id: str | None = None
+    ) -> TtsBackendError:
+        return TtsBackendError(
+            "worker_frame_invalid",
+            stage=stage,
+            public_code="tts_transport_failed",
+            diagnostic_class=(
+                exc.diagnostic_class if isinstance(exc, WorkerTransportError)
+                else "worker_protocol_invalid"
+            ),
+            request_id=request_id,
+            worker_attempt_id=self._worker_attempt_id,
+            worker_exit_code=exc.exit_code if isinstance(exc, WorkerTransportError) else None,
+            worker_exception_type=(
+                exc.exception_type if isinstance(exc, WorkerTransportError) else None
+            ),
+        )
 
     @property
     def runtime_revision(self) -> str | None:
@@ -273,8 +340,10 @@ class Qwen3TtsWorker:
             return revision
 
     async def _start_locked(self) -> None:
-        if self._started:
+        if self.ready:
             return
+        self._started = False
+        self._initializing = True
         is_reload = self._epoch > 0
         self._supports_profile_snapshot = False
         self._stream_protocol = None
@@ -291,7 +360,7 @@ class Qwen3TtsWorker:
                     "sample_rate": self.config.sample_rate,
                 }
             )
-            ready = await self._receive_profile_frame()
+            ready = await self._receive_profile_frame(stage="initialize")
             if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
                 if ready.get("type") == "error":
                     raise from_worker_frame(
@@ -300,7 +369,11 @@ class Qwen3TtsWorker:
                         stage="initialize",
                         worker_attempt_id=self._worker_attempt_id,
                     )
-                raise RuntimeError("worker_start_failed")
+                raise TtsBackendError(
+                    "worker_start_failed", stage="initialize",
+                    public_code="tts_initialization_failed",
+                    diagnostic_class="worker_ready_invalid",
+                )
             if (
                 ready.get("backend") != TTS_BACKEND_ID
                 or ready.get("device") != self.config.device
@@ -331,10 +404,31 @@ class Qwen3TtsWorker:
                 self._reload_count += 1
                 self._record_delivery_event("reload")
             self.last_active = time.monotonic()
-        except BaseException:
+            self._last_error = None
+        except BaseException as exc:
             self._runtime_revision = None
+            failure: TtsBackendError | None = None
+            if isinstance(exc, TtsBackendError):
+                failure = exc
+            elif isinstance(exc, ProtocolError):
+                failure = self._transport_failure(exc, stage="initialize")
+            elif isinstance(exc, TimeoutError):
+                failure = self._timeout_failure(stage="initialize")
+            elif isinstance(exc, OSError):
+                failure = TtsBackendError(
+                    "worker_start_failed", stage="initialize",
+                    public_code="tts_initialization_failed",
+                    diagnostic_class="worker_process_start_failed",
+                    worker_exception_type=type(exc).__name__,
+                )
+            if failure is not None:
+                self._record_failure(failure)
             await self._transport.abort()
+            if failure is not None:
+                raise failure from None
             raise
+        finally:
+            self._initializing = False
 
     def synthesize(self, request: SpeechRequest) -> AsyncGenerator[AudioChunk]:
         """Yield ordered public PCM chunks while serializing private worker access."""
@@ -363,7 +457,7 @@ class Qwen3TtsWorker:
                     seed=request.seed,
                 )
                 async with self._incremental_slot, self._lock:
-                    if not self._started:
+                    if not self.ready:
                         await self._start_locked()
                     if (
                         request.expected_runtime_revision is not None
@@ -413,12 +507,12 @@ class Qwen3TtsWorker:
                     if binding.is_clone and binding.ref_audio_path:
                         frame_payload["ref_audio"] = binding.ref_audio_path
                         frame_payload["ref_text"] = binding.ref_text or ""
-                    await self._transport.send(frame_payload)
                     expected_chunk_index = 0
                     completed = False
                     try:
+                        await self._transport.send(frame_payload)
                         while True:
-                            frame = await self._receive_profile_frame()
+                            frame = await self._receive_profile_frame(request_id=response_id)
                             if frame.get("request_id") != response_id:
                                 raise TtsBackendError(
                                     "worker_response_id_mismatch",
@@ -427,12 +521,14 @@ class Qwen3TtsWorker:
                                     retryable=False,
                                     request_id=response_id,
                                     worker_attempt_id=self._worker_attempt_id,
+                                    diagnostic_class="worker_response_id_mismatch",
                                 )
                             if frame.get("type") == "completed":
                                 self._record_completion_stats(frame)
                                 if request.timing_mode == "chunk":
                                     self._store_timing_sidecar(response_id, frame)
                                 completed = True
+                                self._last_error = None
                                 return
                             if frame.get("type") == "error":
                                 if frame.get("code") == "voice_store_unavailable":
@@ -454,6 +550,7 @@ class Qwen3TtsWorker:
                                     retryable=False,
                                     request_id=response_id,
                                     worker_attempt_id=self._worker_attempt_id,
+                                    diagnostic_class="worker_frame_type_invalid",
                                 )
                             chunk_index = frame.get("chunk_index")
                             raw_binary = frame.get("_binary")
@@ -502,6 +599,21 @@ class Qwen3TtsWorker:
                                 audio=audio,
                             )
                             expected_chunk_index += 1
+                    except TtsBackendError as exc:
+                        self._record_failure(exc)
+                        raise
+                    except ProtocolError as exc:
+                        failure = self._transport_failure(
+                            exc, stage="deliver", request_id=response_id
+                        )
+                        self._record_failure(failure)
+                        raise failure from None
+                    except TimeoutError:
+                        failure = self._timeout_failure(
+                            stage="deliver", request_id=response_id
+                        )
+                        self._record_failure(failure)
+                        raise failure from None
                     finally:
                         self.last_active = time.monotonic()
                         if not completed and self._epoch == epoch:
@@ -512,6 +624,18 @@ class Qwen3TtsWorker:
                             await self._transport.abort()
 
         return stream()
+
+    def _timeout_failure(
+        self, *, stage: TtsErrorStage, request_id: str | None = None
+    ) -> TtsBackendError:
+        return TtsBackendError(
+            "backend_timeout",
+            stage=stage,
+            retryable=True,
+            diagnostic_class="worker_timeout",
+            request_id=request_id,
+            worker_attempt_id=self._worker_attempt_id,
+        )
 
     async def open_incremental_stream(
         self,
@@ -705,17 +829,13 @@ class Qwen3TtsWorker:
         if callback is not None:
             callback(event, amount)
 
-    async def _receive_profile_frame(self) -> dict[str, object]:
+    async def _receive_profile_frame(
+        self, *, stage: TtsErrorStage = "deliver", request_id: str | None = None
+    ) -> dict[str, object]:
         try:
             return await self._transport.receive()
         except ProtocolError as exc:
-            raise TtsBackendError(
-                "worker_frame_invalid",
-                stage="deliver",
-                public_code="tts_transport_failed",
-                retryable=False,
-                worker_attempt_id=self._worker_attempt_id,
-            ) from exc
+            raise self._transport_failure(exc, stage=stage, request_id=request_id) from None
 
     async def trim_memory(self) -> None:
         # A trim frame arriving mid-utterance would be misread as a stream
@@ -944,6 +1064,23 @@ class Qwen3TtsCapabilityRouter:
 
         worker = self._workers.get(VOICE_DESIGN_ROLE)
         return worker is not None and worker.ready
+
+    @property
+    def design_status(self) -> dict[str, object]:
+        """Expose the optional design lane independently of runtime TTS."""
+        worker = self._workers.get(VOICE_DESIGN_ROLE)
+        if worker is None:
+            return {
+                "configured": False, "ready": False,
+                "state": "unconfigured", "last_error": None,
+            }
+        status = getattr(worker, "diagnostic_status", None)
+        if isinstance(status, dict):
+            return status
+        return {
+            "configured": True, "ready": worker.ready,
+            "state": "ready" if worker.ready else "cold", "last_error": None,
+        }
 
     def resource_key_for_voice(self, voice: str) -> str:
         """Map a validated public voice to the plan-role lane that serves it.

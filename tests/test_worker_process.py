@@ -13,6 +13,7 @@ import pytest
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
+    WorkerTransportError,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import ProtocolError
@@ -233,8 +234,9 @@ def test_child_exit_closes_the_stream_without_orphan_frames(tmp_path: Path) -> N
             await transport.send({"action": "exit"})
             with pytest.raises(ProtocolError, match="truncated worker frame"):
                 await transport.receive()
-            with pytest.raises((BrokenPipeError, ConnectionResetError, RuntimeError)):
+            with pytest.raises(WorkerTransportError) as caught:
                 await transport.send({"action": "echo", "text": "late"})
+            assert caught.value.diagnostic_class == "worker_pipe_closed"
         finally:
             await transport.close()
 

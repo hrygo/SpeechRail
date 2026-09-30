@@ -204,6 +204,27 @@ def _tts_lifecycle_diagnostics(
     }
 
 
+def _tts_design_diagnostics(services: AppServices) -> dict[str, object]:
+    """Read optional design-lane diagnostics; discovery never starts a worker."""
+    synthesizer = services.tts_synthesizer
+    status = getattr(synthesizer, "design_status", None)
+    if isinstance(status, dict):
+        return {
+            key: status[key]
+            for key in ("configured", "ready", "state", "last_error")
+        }
+    configured = (
+        active_model_catalog(services.settings).voice_design is not None
+        and callable(getattr(synthesizer, "synthesize_design", None))
+    )
+    return {
+        "configured": configured,
+        "ready": None if configured else False,
+        "state": "unknown" if configured else "unconfigured",
+        "last_error": None,
+    }
+
+
 def _model_entry(
     model_id: str,
     active: ActiveModelCatalog,
@@ -901,6 +922,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "asr_state": states.get("asr", "unconfigured"),
             "tts_state": states.get("tts", "unconfigured"),
             "tts_lifecycle": _tts_lifecycle_diagnostics(services),
+            "tts_design": _tts_design_diagnostics(services),
             "streaming_state": states.get("streaming", "unconfigured"),
             "realtime_vad": services.realtime_vad_status,
             "job_spool_ready": services.job_repository is not None,

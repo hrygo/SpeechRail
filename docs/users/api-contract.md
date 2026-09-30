@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.9.0"
-date: 2026-09-28
+version: "3.10.0"
+date: 2026-09-30
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -102,6 +102,13 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。`tts_state` 提供
 `active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
 不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
+
+`tts_design` 独立报告辅助 VoiceDesign worker 的 `configured`、`ready`、`state` 和
+`last_error`。状态为 `unconfigured`、`cold`、`loading`、`ready`、`failed` 或 `unknown`；
+`cold` 且 `configured=true` 表示可以按需加载，不表示缺少模型。注入的 backend 无法报告
+驻留状态时，`ready=null`、`state=unknown`。读取 `/health` 不加载模型，VoiceDesign
+失败不改变普通 TTS 的配置与驻留状态。`last_error` 仅含安全的 `code`、
+`diagnostic_class` 和 `worker` 归因，成功重试后清除。
 
 启用完整性回执时，`model.runtime_revision` 只有在首个 PCM 已由 worker 产生且 ready
 handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `null`。该值是当前加载 worker
@@ -476,7 +483,8 @@ Authorization: Bearer <TOKEN>
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
-该接口仅在当前 TTS artifact variant 为 `voice_design` 且对应服务能力可用时接受请求；`voice_design` 不绑定档位，该快照缺失或未就绪时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
+该接口仅在当前选择解析出独立的 `voice_design` 角色且对应服务能力可用时接受请求；
+`voice_design` 不绑定 TTS 档位，快照缺失或预检未通过时接口不可用。它用于声音工坊在用户保存 VoiceProfile 前试听
 一个自然语言音色配方。请求期间的 instruction 和 seed 通过内部类型化 TTS 请求传入 worker；接口
 不会创建 VoiceProfile、写入 `custom_voices.json` 或保存音频文件。
 
@@ -494,8 +502,18 @@ Authorization: Bearer <TOKEN>
 
 `instruction` 最长 10000 字符，`input` 最长 4096 字符，`seed` 范围为 `0`–`4294967295`。
 支持 `mp3`、`opus`、`aac`、`flac`、`wav` 和 `pcm`；预览接口先在内存中完成生成与编码，
-因此后端或编码失败时仍能返回统一错误 envelope。未绑定 `voice_design` 的档位（`fast`、`quality`）
-或设计快照未就绪时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
+因此后端或编码失败时仍能返回统一错误 envelope。未配置 `voice_design` 或设计快照未通过
+预检时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
+预览与候选创建使用保守的 `tts` 资源准入，避免将设计计算误记为默认系统音色的运行 lane。
+
+预览、候选创建与候选 Base 验证共用 TTS 错误映射：初始化失败为
+`503 tts_initialization_failed`，传输失败为 `503 tts_transport_failed`，推理或输出失败为
+502，参数不受支持或校验失败为 400，既有音色状态冲突仍为 409；
+worker 超时仍返回可重试的 `503 backend_timeout`。
+`diagnostic_class` 区分安全的故障原因；可选 `worker` 对象给出 `role`、`stage`、
+`attempt_id`，以及已观测到的 `exit_code` 和允许列表中的 `exception_type`。
+启动握手失败的 `stage=initialize`，音频交付失败的 `stage=deliver`。响应不包含原始
+stderr、vendor 异常正文、模型路径或请求文本；可用 request ID 和 attempt ID 关联日志。
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 
