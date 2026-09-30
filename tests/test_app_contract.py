@@ -35,13 +35,19 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "3.3.4",
+        "version": "3.4.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
         "asr_runtime_revision": None,
         "tts_ready": False,
         "tts_warm": False,
+        "tts_design": {
+            "configured": False,
+            "ready": False,
+            "state": "unconfigured",
+            "last_error": None,
+        },
         "diarization_ready": False,
         "diarization": {
             "configured": False,
@@ -380,13 +386,19 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "3.3.4",
+        "version": "3.4.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
         "asr_runtime_revision": None,
         "tts_ready": True,
         "tts_warm": True,
+        "tts_design": {
+            "configured": False,
+            "ready": False,
+            "state": "unconfigured",
+            "last_error": None,
+        },
         "diarization_ready": False,
         "diarization": {
             "configured": False,
