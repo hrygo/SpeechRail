@@ -1012,6 +1012,14 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             chunk_size_sec=chunk_duration_ms / 1_000,
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
+            # The vendor tail-refine fallback calls ``transcribe()`` with an
+            # already-loaded model object, which makes it resolve the tokenizer
+            # from the upstream default repo id instead of the local snapshot.
+            # Offline that raises ``LocalEntryNotFoundError`` and turns every
+            # commit whose tail decode adds no text into
+            # ``worker_inference_error``.  The committed text is already
+            # complete without the refinement pass, so keep it off.
+            enable_tail_refine=False,
         )
 
     def append_audio(self, session_id: str, audio: bytes) -> str:

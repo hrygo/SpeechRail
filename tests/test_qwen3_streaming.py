@@ -572,6 +572,50 @@ def test_session_maps_worker_error_to_error_event() -> None:
     asyncio.run(scenario())
 
 
+def test_session_logs_worker_stderr_tail_without_widening_the_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Realtime ``error.code`` stays a short stable code, but the operator
+    log must carry the worker stderr tail that explains the failure."""
+
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+        worker.push(
+            "sess_test",
+            {
+                "type": "error",
+                "session_id": "sess_test",
+                "code": "worker_inference_error",
+                "stderr_tail": "LocalEntryNotFoundError: no cached snapshot",
+            },
+        )
+        events: list[StreamingAsrEvent] = []
+        task = asyncio.create_task(_collect(session, events, until=1))
+        await task
+        assert events[0].kind == "error"
+        assert events[0].error_code == "worker_inference_error"
+        await session.close()
+
+    with caplog.at_level("ERROR", logger="speechrail.backends.qwen3_streaming"):
+        asyncio.run(scenario())
+
+    assert "LocalEntryNotFoundError: no cached snapshot" in caplog.text
+    assert "worker_inference_error" in caplog.text
+
+
 def test_session_close_unregisters_its_queue() -> None:
     async def scenario() -> None:
         worker = FakeStreamingWorker()

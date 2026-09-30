@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease, AsrModeSchedu
 from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
+    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
@@ -41,6 +43,8 @@ _SUPPORTED_LANGUAGES = {
     "swedish", "danish", "finnish", "polish", "czech", "filipino", "persian",
     "greek", "romanian", "hungarian", "macedonian",
 }
+
+logger = logging.getLogger(__name__)
 
 
 class StreamingWorkerProtocol(Protocol):
@@ -385,6 +389,15 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                         return
                 elif kind == "error":
                     code = frame.get("code")
+                    # The public ``error.code`` stays the stable machine code so
+                    # the Realtime contract keeps its 128-character bound, but
+                    # the worker's stderr tail is what actually explains a
+                    # backend failure, so log it here.  Without this the
+                    # streaming path was the only backend that dropped it.
+                    logger.error(
+                        "streaming ASR worker error frame: %s",
+                        error_frame_message(frame, "backend_error"),
+                    )
                     queue_full = self._events_queue.full()
                     if queue_full:
                         self._replace_events_with_error("session_queue_full")

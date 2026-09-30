@@ -408,6 +408,7 @@ def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
             "chunk_size_sec": 2.0,
             "max_context_sec": 9.5,
             "max_new_tokens": 128,
+            "enable_tail_refine": False,
         }
     ]
 
