@@ -2261,6 +2261,102 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.calibrationFactor == 1.0)
         #expect(!harness.session.isPaceCalibrated)
     }
+
+    /// 读者按下暂停的那一刻，跟读指示就必须已经是「手动浏览中」——不能等到
+    /// 排空与关闭（最多 8 秒）跑完才改。等待窗口期间 drain 被闸门挡住，
+    /// 所以这里断言的是同步交付的状态，不是收尾后的最终状态。
+    @Test("pausing follow reports manual browsing before the drain finishes")
+    func pausingFollowReportsManualBeforeDrainCompletes() async throws {
+        let drainGate = TestGate()
+        let harness = try TeleprompterSessionHarness(
+            clientFactory: FakeTeleprompterClientFactory(drainGate: drainGate)
+        )
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.followState != .manual)
+
+        harness.session.pauseFollowing()
+
+        #expect(harness.session.voiceAssistState == .stopping)
+        #expect(harness.session.followState == .manual)
+        #expect(harness.session.followStatusText == "手动浏览中")
+
+        await drainGate.open()
+        await waitFor { harness.session.voiceAssistState == .pausedByUser }
+        await harness.session.closeStage()
+    }
+
+    /// 舞台关闭的令牌是一次性的：窗口关闭委托与菜单里的「关闭」可能都到一次。
+    /// 第二次 `beginStageClose()` 若换了令牌，第一次的 `finishStageClose()` 就会
+    /// 在 `stageCloseToken == token` 处返回，`stageCloseToken` 永远不会被清掉，
+    /// 舞台从此再也打不开。
+    @Test("a second close request while closing is refused and the first still finishes")
+    func secondCloseRequestDuringCloseIsRefused() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+
+        #expect(harness.session.beginStageClose())
+        #expect(!harness.session.beginStageClose(), "关闭令牌必须一次只发一次")
+
+        await harness.session.finishStageClose()
+        #expect(!harness.session.isClosingStage)
+        #expect(!harness.session.isStageOpen)
+        #expect(harness.session.voiceAssistState == .off)
+        try harness.session.openForManualReading()
+        #expect(harness.session.phase == .manual)
+        await harness.session.closeStage()
+    }
+
+    /// 「结束当前会话」走 coordinator，不经过 `requestVoiceStop`，所以把跟读
+    /// 收回手动是 `stopCapture()` 自己的职责。少了那一步，采集已经释放、
+    /// 指示却还停在「跟读咬合」，并且落盘的 `mode` 也是 `.following`。
+    @Test("ending the session from the coordinator returns follow state to manual")
+    func coordinatorStopReturnsFollowStateToManual() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+        #expect(harness.session.followState != .manual)
+        let client = try #require(harness.clientFactory.clients.first)
+
+        await harness.coordinator.stopCapture(endingWith: .user)
+
+        #expect(harness.session.followState == .manual)
+        #expect(harness.session.followStatusText == "手动浏览中")
+        #expect(harness.coordinator.occupancy == nil)
+        #expect(await client.currentCounters().closeCount == 1)
+        await harness.session.closeStage()
+    }
+
+    /// 段首不能再往前、段尾不能再往后。夹取写在会话里一层，也写在
+    /// `TeleprompterFollowController.manualMove` 里一层；这里钉住的是交付
+    /// 行为——无论从哪一层夹，越界的那一步都停在边界上。
+    @Test("segment stepping stops at both ends of the script")
+    func segmentSteppingStopsAtBothEnds() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        let segments = try #require(harness.session.activeVersion?.segments)
+        let lastIndex = segments.count - 1
+
+        harness.session.moveToSegment(lastIndex)
+        for _ in 0..<3 {
+            harness.session.moveToNext()
+        }
+        #expect(harness.session.currentSegmentIndex == lastIndex)
+
+        for _ in 0..<(lastIndex + 3) {
+            harness.session.moveToPrevious()
+        }
+        #expect(harness.session.currentSegmentIndex == 0)
+    }
 }
 
 /// Condense runs through the map stage: one block per source unit, with the

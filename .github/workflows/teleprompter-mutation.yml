@@ -3,9 +3,9 @@ name: Teleprompter Mutation
 # 按需触发，**不进常规门禁**。
 #
 # 这条 workflow 跑 `scripts/swift_mutation_probe.py`：它对每个 Swift 变异
-# 真实改一次源码、重跑整套 `swift test`，所以**耗时以小时计**（143 条在本机
-# 约 45 分钟，CI runner 更慢），而且它的工作区在运行期间一直是脏的。把它挂在
-# push / pull_request 上会同时拖慢每一次提交、并让长跑互相取消，因此这里只保留
+# 真实改一次源码、重跑整套 `swift test`，所以**耗时以小时计**（本机全量约一小时，
+# CI runner 更慢），而且它的工作区在运行期间一直是脏的。把它挂在 push /
+# pull_request 上会同时拖慢每一次提交、并让长跑互相取消，因此这里只保留
 # `workflow_dispatch`。
 #
 # 常规门禁仍然是 `.github/workflows/ci.yml`；本 workflow 是它的补充，不是替代。

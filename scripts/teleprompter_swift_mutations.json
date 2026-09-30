@@ -1295,6 +1295,141 @@
       "replace": "            guard recoveryRequestsUsed < recoveryBudget,\n                  canRetryStage(error) else {\n                throw WindowStageFailure(underlying: error, recoveryRequestsUsed: recoveryRequestsUsed)\n            }\n            try await waitBeforeRetryIfNeeded(error)\n            recoveryRequestsUsed += 1\n            do {\n                groups = try await groupingStates(",
       "expect": "SURVIVED",
       "rationale": "等价变异，被 `canRetryStage` 遮挡（第六十八轮判定）。守卫去掉 `!isTruncatedMapFailure(error)` 之后，重试条件只剩 `recoveryRequestsUsed < recoveryBudget` 与 `canRetryStage(error)`。而 `canRetryStage` = 结构化失败或瞬时失败：`isStructuralMapFailure` 只认 `.invalidStructuredResponse` 与 `.invalidPromptResponse*`，`isTransientProviderFailure` 只认 http 429/5xx。**截断（`.outputTruncated`）两者都不是**，所以它本来就不可重试——「截断是确定性失败、不该重试」这条产品判断是对的，但**执行它的是 `canRetryStage`，不是这道守卫**。**实测**：`truncatedGroupingIsNotRetriedBecauseTruncationIsDeterministic` 去掉本守卫后分组调用次数仍是 1。"
+    },
+    {
+      "id": "S1",
+      "note": "手动移动时不再把「正在启动」当作需要停语音的状态",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if voiceLifecycle.state == .starting || voiceLifecycle.state == .following {\n            _ = requestVoiceStop(destination: .pausedByUser)\n        }",
+      "replace": "        if voiceLifecycle.state == .following {\n            _ = requestVoiceStop(destination: .pausedByUser)\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀，无需补回归）。`beginManualMovement` 的 `.starting` 分支被既有回归 `lateConnectAfterManualTakeoverIsReleased` 覆盖：连接被闸门挡住时读者移动阅读位置，必须同步换掉本次启动的 generation，迟到的 connect 只能被关掉。去掉该分支后启动照常完成，`pausedByUser` 与 `closeCount == 1` 两条断言同时失败。"
+    },
+    {
+      "id": "S2",
+      "note": "手动滚动的快速路径不再排除「正在启动」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if phase == .manual,\n           voiceLifecycle.state != .starting,\n           voiceLifecycle.state != .following {",
+      "replace": "        if phase == .manual,\n           voiceLifecycle.state != .following {",
+      "expect": "SURVIVED",
+      "rationale": "真缺口（缺自动化护栏），不是等价变异。去掉 `.starting` 排除后，**只要 `phase == .manual` 且 `state == .starting`，快速路径就会吃掉这次接管、不再 `requestVoiceStop`**，正在启动的麦克风不会被停。这个组合在生产里确实存在：`beginCapture()` 的 catch（1884 行）在 `voiceLifecycle.state` 仍是 `.starting` 时把 `phase` 置为 `.manual`，错误再抛给 `startVoiceAssistPipeline`／`enableVoiceAssist` 的 catch 才 `markStartFailed`。存活原因是那条 throw 到收尾之间没有可稳定控制的挂起点，测试无法确定性地落在窗口里——与阶段报告 V7／V8「`.starting` 窗口内无 pump、无自动化护栏」是同一族结构性缺口。"
+    },
+    {
+      "id": "S3",
+      "note": "手动接管的主路径不再要求语音处于启动或跟随中",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard voiceLifecycle.state == .starting || voiceLifecycle.state == .following else {",
+      "replace": "        guard true else {",
+      "expect": "SURVIVED",
+      "rationale": "生产不可达（静态可达性推断，未执行验证）。else 分支只在 `phase != .manual` 且 `state ∈ {off, pausedByUser, unavailable, stopping, stopFailed}` 时才会执行。逐个回查写 `phase` 的位置：暂停/停止收尾都写 `.manual`；`markStartFailed`、`markUnavailable` 两条失败路径都在同一函数里紧接着写 `.manual`；`finishStageClose` 写 `.ready` 时舞台已关、不会再有滚动手势。因此该分支当前无人走。**注意**：若它可达，变异是有后果的——`state == .stopFailed` 时 `beginStop` 会成功，读者一次滚动手势就会静默重试停止并把 `blocked` 清空。这条留作后续护栏参考。"
+    },
+    {
+      "id": "S4",
+      "note": "请求停止语音时不再让跟随控制器进入手动",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        followController.enterManual()\n        syncFollowState()\n        phase = .manual\n        blocked = nil\n        saveProgress()\n        let task = Task { @MainActor [weak self] in",
+      "replace": "        syncFollowState()\n        phase = .manual\n        blocked = nil\n        saveProgress()\n        let task = Task { @MainActor [weak self] in",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `pausingFollowReportsManualBeforeDrainCompletes` 转杀。`requestVoiceStop` 里的 `followController.enterManual()` + `syncFollowState()` 是**同步交付给界面的**：读者按下暂停那一刻状态条就必须是「手动浏览中」，不能等 8 秒排空跑完。去掉后 `syncFollowState()` 读到的仍是 `.following`，`followState` 与 `followStatusText` 都停留在「跟读咬合」。新回归用 `drainGate` 把排空卡住，在停止仍在飞行时断言这两个值，因此杀掉的是同步语义而不是收尾后的最终状态。"
+    },
+    {
+      "id": "S5",
+      "note": "执行停止时不再校验令牌是否仍是当前这一次停止",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard voiceLifecycle.isCurrent(token) else { return }\n        if coordinator.occupancy?.kind == .teleprompter {",
+      "replace": "        if coordinator.occupancy?.kind == .teleprompter {",
+      "expect": "SURVIVED",
+      "rationale": "冗余防御／当前无可达交错路径（静态可达性推断，未执行验证）。要让 `isCurrent(token)` 为假，必须在 `beginStop` 发出令牌之后、`performVoiceStop` 读取之前换掉 generation。逐个回查四个换 generation 的入口：`beginStart` 要求 `canStart`（`.stopping` 为 false）；`beginStop` 对 `.stopping` 返回 nil，所以不会发出第二个停止任务；`invalidateAfterFailure` 只从 `enterManual` 调用，而 `handle`／`upload` 的 `acceptsVoiceEvents` 在 `.stopping` 下为 false；`resetToOff` 在 `finishStageClose` 里顺序 await 之后。coordinator 直接停采集（如「结束当前会话」）不换 generation，所以无差别。这条守卫本身是对的，缺的是能证明「不存在该交错」的护栏。"
+    },
+    {
+      "id": "S6",
+      "note": "停止收尾不再要求状态机接受这次停止",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard accepted else { return }\n        switch voiceLifecycle.state {",
+      "replace": "        switch voiceLifecycle.state {",
+      "expect": "SURVIVED",
+      "rationale": "与 S5 同一族（token 失效窗口当前不可达）。`accepted` 为假只有两种可能：令牌失效，或 `markStopped` 撞上 `state != .stopping`。前者的可达性与 S5 完全相同；后者要求在停止在途时改状态，而 `markStopped` 自身就是唯一会把 `.stopping` 迁走的入口。因此去掉这道 `guard` 后，switch 与 `saveProgress()` 在当前代码里不会在错误的状态上执行。"
+    },
+    {
+      "id": "S7",
+      "note": "下一段不再夹到末段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        takeOverAndMove(to: min(count - 1, currentSegmentIndex + 1))",
+      "replace": "        takeOverAndMove(to: currentSegmentIndex + 1)",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，被 `TeleprompterFollowController.manualMove` 遮挡。该函数第一行就是 `let target = min(max(0, index), segmentCount - 1)`，会话层的 `min(count - 1, ...)` 是同一夹取的重复实现；去掉外层后内层照样把位置夹回边界。第七十轮新增 `segmentSteppingStopsAtBothEnds` 把交付行为（段尾不越界、段首不下探）钉在会话层，作为双层夹取的回归护栏。"
+    },
+    {
+      "id": "S8",
+      "note": "上一段不再夹到第 0 段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        takeOverAndMove(to: max(0, currentSegmentIndex - 1))",
+      "replace": "        takeOverAndMove(to: currentSegmentIndex - 1)",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，与 S7 同一遮挡：`manualMove` 的 `min(max(0, index), segmentCount - 1)` 同时兜住上越界与下越界，两侧都只在一处实现。"
+    },
+    {
+      "id": "S9",
+      "note": "打开手动阅读不再要求当前可编辑",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard canEdit else {\n            throw TeleprompterStageOpenError.busy\n        }",
+      "replace": "        guard true else {\n            throw TeleprompterStageOpenError.busy\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。`canEdit` 排除 `phase == .preparing`，所以语音正在准备时打开手动阅读必须报 `.busy`；既有回归 `manualOpenRejectsWhileSessionIsPreparing` 用被闸门挡住的 connect 稳定复现了这个窗口。"
+    },
+    {
+      "id": "S10",
+      "note": "打开手动阅读不再拒绝正在关闭中的舞台",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if isClosingStage {\n            throw TeleprompterStageOpenError.closing\n        }",
+      "replace": "        if false {\n            throw TeleprompterStageOpenError.closing\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。关闭中的舞台必须先拒绝打开，否则旧 drain 收尾会与新一次打开交错；既有回归 `manualOpenRejectsDuringClose` 覆盖。"
+    },
+    {
+      "id": "S11",
+      "note": "启用语音辅助不再拒绝「正在有意停止」期间的重入",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard !isResuming, !isStoppingIntentionally else { return }",
+      "replace": "        guard !isResuming else { return }",
+      "expect": "SURVIVED",
+      "rationale": "冗余防御，被同一函数里更靠后的两道守卫遮挡（结构性判断，已逐条回查）。`isStoppingIntentionally` 只在 `stopCapture()` 内为真，而该窗口要有可观测后果必须存在 `await`：语音跟读在途时 `voiceLifecycle.state` 是 `.following`／`.starting`／`.stopping`，`beginStart()` 一律返回 nil（`canStart` 为 false），启动根本发不出去；试读在途时 `isSpeechTrialRequested` 仍为 true，`speechTrialStage.isActive || isSpeechTrialRequested` 先一步把请求挡成 `blocked = .speechTrialActive`（这正是 S12 被杀的原因）。所以本守卫在当前调用图里不改变任何可达行为。"
+    },
+    {
+      "id": "S12",
+      "note": "启用语音辅助不再因试读占用而拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        if speechTrialStage.isActive || isSpeechTrialRequested {\n            blocked = .speechTrialActive\n            return\n        }",
+      "replace": "        if false {\n            blocked = .speechTrialActive\n            return\n        }",
+      "expect": "KILLED",
+      "rationale": "真缺陷（第七十轮首跑即被杀）。试读占用设备期间再请求语音跟随，若不在这里拒绝，coordinator 会读成「已经在跑同一个会话」而什么都不做，新管线直接复用试读的 client/source，两套泵同时跑；既有回归 `voiceAssistRefusesToStartDuringASpeechTrial` 断言 `blocked == .speechTrialActive` 且不新建连接。"
+    },
+    {
+      "id": "S13",
+      "note": "重试停止不再要求当前处于「停止失败」",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard case .stopFailed = voiceLifecycle.state,\n              let destination = voiceLifecycle.pendingStopDestination,\n              let task = requestVoiceStop(destination: destination) else {\n            return\n        }",
+      "replace": "        guard let destination = voiceLifecycle.pendingStopDestination,\n              let task = requestVoiceStop(destination: destination) else {\n            return\n        }",
+      "expect": "SURVIVED",
+      "rationale": "等价变异，被 `beginStop` 对 `.stopping` 返回 nil 遮挡（结构性判断，已回查写 `pendingStopDestination` 的全部位置）。`pendingStopDestination` 只在 `beginStop` 里被置位，只在 `markStopped` 成功、`beginStart`、`markStartFailed`、`invalidateAfterFailure`、`resetToOff` 里被清空；`markStopped` 失败时保留它。因此它非空的状态只有 `.stopping` 与 `.stopFailed` 两个：`.stopFailed` 与原守卫一致，`.stopping` 时 `beginStop` 返回 nil 使 `requestVoiceStop` 返回 nil，`let task = ...` 落空后 guard 的 else 照样 return。"
+    },
+    {
+      "id": "S14",
+      "note": "开始关闭舞台不再要求当前没有正在进行的关闭",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        guard stageCloseToken == nil else { return false }",
+      "replace": "        guard true else { return false }",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `secondCloseRequestDuringCloseIsRefused` 转杀。`stageCloseToken` 是一次性的：窗口关闭委托与菜单里的关闭可能都到一次，第二次 `beginStageClose()` 若换掉令牌，第一次的 `finishStageClose()` 就会在 `stageCloseToken == token` 处提前返回，`stageCloseToken` 永不清空，`isClosingStage` 恒为真，舞台从此再也打不开。新回归直接断言第二次 `beginStageClose()` 必须返回 false。"
+    },
+    {
+      "id": "S15",
+      "note": "停止采集后不再让跟随控制器进入手动",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterSession.swift",
+      "find": "        followController.enterManual()\n        syncFollowState()\n        saveProgress()\n        runningVersion = nil",
+      "replace": "        syncFollowState()\n        saveProgress()\n        runningVersion = nil",
+      "expect": "KILLED",
+      "rationale": "真缺陷，第七十轮补回归 `coordinatorStopReturnsFollowStateToManual` 转杀。「结束当前会话」走 `coordinator.stopCapture` → `stopper` → `TeleprompterSession.stopCapture()`，**不经过 `requestVoiceStop`**，所以把跟读收回手动是 `stopCapture()` 自己的职责。少了那一步，采集已释放而 `followState`／`followStatusText` 仍停在「跟读咬合」，并且 `saveProgress()` 落盘的 `mode` 也是 `.following`，重开时会按跟读态恢复。新回归走 coordinator 这条真实路径断言两个交付值。"
     }
   ]
 }
