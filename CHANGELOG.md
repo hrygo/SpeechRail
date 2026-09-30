@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-09-30
+
 ### Fixed
 
 - 修复语音助手播放回答时末尾出现突兀杂音：Realtime 流式 TTS 的最后一个 codec 帧
