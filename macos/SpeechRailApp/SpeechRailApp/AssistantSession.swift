@@ -1371,7 +1371,11 @@ public final class AssistantSession {
             )
             return
         }
-        guard let sessionID, let startedAt = sessionStartedAt else { return }
+        // 两个都得有：没有会话 ID 没有地方写，没有会话起点则说明这一轮还没真正
+        // 开始。起点本身**只判存在、不绑定**——D09 起这一行不再拿它冒充声学起止
+        //（`tStart`/`tEnd` 存 NULL、`timingQuality = .unavailable`），绑一个从不
+        // 读的局部值只会在编译期留一条 `#NoUsage` 告警。
+        guard let sessionID, sessionStartedAt != nil else { return }
         if !itemID.isEmpty {
             guard !committedItemIDs.contains(itemID) else { return }
             committedItemIDs.insert(itemID)

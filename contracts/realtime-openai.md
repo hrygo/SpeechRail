@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`4.2.0`；生效日期：2026-09-28。唯一机器 schema 是
+> 契约版本：`4.3.0`；生效日期：2026-09-30。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -134,7 +134,7 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `commit_event_id`；对齐与匿名 speaker 归属随后以独立的
 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
 
-两条准入语义是调用方可以依赖的：
+三条准入语义是调用方可以依赖的：
 
 - **分包方式不改变内容。** 同一段音频无论整包发送、按 32 ms 切片还是不齐整的分包，
   admitted PCM 与样本顺序必须一致；句末（VAD 或显式 commit）之后**同一包内剩余的完整帧**
@@ -143,6 +143,12 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 - **每个 utterance 恰好一个终态。** commit 已 ACK 但后续读取挂起时，utterance 必须在
   deadline 后以 `failed` 收尾并释放资源，不得既无终态也不释放；读取成功后的错误不再产生
   矛盾的第二个终态。
+- **空 final 不等于"用户没说话"。** 空 `transcript` 有两个来源：`clear` 之后的那一次
+  commit（此时确实没有可提交的语音），以及语音已经准入、但 ASR 终态文本经轻量 ITN
+  之后为空。调用方无法从事件本身区分这两者，因此**已经向用户展示过该 item 的
+  hypothesis 文字时，不得在空 final 上静默丢弃它**：要么按未完成保留并明确告知用户，
+  要么给出可读的失败提示。把"用户说过的话"连同界面上的半句一起清掉且不给任何提示，
+  是调用方实现错误，不是本契约允许的正常路径。
 
 ### 5.2 Alignment 与 Diarization
 
