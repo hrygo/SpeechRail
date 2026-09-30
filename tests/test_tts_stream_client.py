@@ -11,6 +11,7 @@ through ``asyncio.run`` exactly like the existing worker tests.
 from __future__ import annotations
 
 import asyncio
+import struct
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import Any
 
@@ -244,9 +245,15 @@ def test_append_is_acknowledged_and_audio_arrives_before_finish() -> None:
 
         assert events[0].kind is TtsStreamEventKind.STARTED
         audio = [event for event in events if event.kind is TtsStreamEventKind.AUDIO]
-        assert [event.sample_offset for event in audio] == [0, 120]
-        assert [event.chunk_index for event in audio] == [0, 1]
-        assert [event.pcm16 for event in audio] == [_pcm(120), _pcm(80)]
+        # Two streamed chunks plus the terminal fade-to-silence frame.
+        assert [event.sample_offset for event in audio] == [0, 120, 200]
+        assert [event.chunk_index for event in audio] == [0, 1, 2]
+        assert [event.pcm16 for event in audio][:2] == [_pcm(120), _pcm(80)]
+        fade = audio[-1].pcm16
+        fade_samples = struct.unpack(f"<{len(fade) // 2}h", fade)
+        # `_pcm` here is 0x0100 little-endian, so the ramp starts at 256.
+        assert fade_samples[0] == 256
+        assert fade_samples[-1] == 0
         assert events[-1].kind is TtsStreamEventKind.COMPLETED
         assert events[-1].terminal is TtsStreamTerminal.COMPLETED
         assert transport.host is not None

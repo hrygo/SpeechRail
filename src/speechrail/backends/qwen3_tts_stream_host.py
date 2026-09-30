@@ -46,6 +46,9 @@ from speechrail.runtime.worker_protocol import (
 
 TTS_STREAM_PROTOCOL_VERSION: Final[int] = 1
 
+# Tail fade length, kept identical to the batch TTS path in `qwen3_tts_worker`.
+TAIL_FADE_MS: Final[int] = 5
+
 FRAME_STREAM_START: Final[str] = "tts_stream_start"
 FRAME_STREAM_TEXT: Final[str] = "tts_stream_text"
 FRAME_STREAM_FINISH: Final[str] = "tts_stream_finish"
@@ -141,6 +144,20 @@ def _require_int(value: object, *, name: str) -> int:
     return value
 
 
+def _fade_ramp_from(last_sample: int, sample_rate: int) -> bytes:
+    """Linear PCM16 ramp from ``last_sample`` down to silence over the tail fade."""
+
+    samples = max(1, (sample_rate * TAIL_FADE_MS) // 1000)
+    if last_sample == 0:
+        # Already at silence: emit the window anyway so every finished
+        # utterance ends in the same explicit quiet, never mid-step.
+        return b"\x00\x00" * samples
+    import numpy as np
+
+    curve = np.linspace(float(last_sample), 0.0, samples, dtype=np.float32)
+    return np.clip(curve, -32768.0, 32767.0).astype("<i2").tobytes()
+
+
 def parse_stream_command(frame: Mapping[str, object]) -> StreamCommand:
     """Validate one incremental control frame without touching model state.
 
@@ -214,6 +231,9 @@ class TtsStreamHost:
         self._consumed_codepoints = 0
         self._consumed_sequence = -1
         self._pcm_remainder = b""
+        # Last int16 sample actually handed to the transport, so the terminal
+        # fade can continue the waveform instead of stepping from silence.
+        self._last_audio_sample: int | None = None
 
     @property
     def options(self) -> TtsStreamOptions:
@@ -458,6 +478,9 @@ class TtsStreamHost:
                 return (*frames, *error)
             chunk = self._pcm_remainder[:byte_length]
             self._pcm_remainder = self._pcm_remainder[byte_length:]
+            self._last_audio_sample = int.from_bytes(
+                chunk[-2:], "little", signed=True
+            )
             frames.append(
                 StreamFrame(
                     {
@@ -484,9 +507,54 @@ class TtsStreamHost:
     def _complete(self) -> tuple[StreamFrame, ...]:
         if self._state.terminal is not None:
             return ()
+        fade = self._emit_tail_fade()
         self._state.complete()
         self._release_session(cancel=False)
-        return self._terminal_frames()
+        return (*fade, *self._terminal_frames())
+
+    def _emit_tail_fade(self) -> tuple[StreamFrame, ...]:
+        """Append a short fade-to-silence ramp ahead of the terminal.
+
+        The last codec frame ends wherever the model stopped, and that is often
+        mid-vowel at a large sample value, so the speaker reproduces the step
+        as an audible click. The batch TTS path has always faded its final
+        chunk (`qwen3_tts_worker`); without the same step here the two paths
+        disagree about what a finished utterance sounds like.
+
+        The ramp starts from the last sample that was actually sent, so it
+        continues the waveform rather than stepping away from it. Emitting it
+        as one more ordinary audio frame keeps chunk indices and sample
+        offsets contiguous, and costs no latency: nothing is held back during
+        synthesis, unlike reserving a tail that would also delay short
+        utterances.
+        """
+
+        if self._last_audio_sample is None:
+            return ()
+        ramp = _fade_ramp_from(self._last_audio_sample, self._session.sample_rate)
+        available = self._limits.max_pending_audio_bytes - self._state.pending_audio_bytes
+        if available < len(ramp):
+            # A truncated ramp would reintroduce the step this removes, and the
+            # budget is about to be released anyway; drop it and still finish.
+            return ()
+        try:
+            position = self._state.enqueue_audio(len(ramp))
+        except TtsStreamError:
+            return ()
+        return (
+            StreamFrame(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": FRAME_STREAM_AUDIO,
+                    "request_id": self._options.request_id,
+                    "chunk_index": position.chunk_index,
+                    "sample_offset": position.sample_offset,
+                    "sample_rate": self._session.sample_rate,
+                },
+                binary=ramp,
+                on_sent=self._audio_sent(position.byte_length),
+            ),
+        )
 
     def _recoverable_or_terminal(
         self, error: TtsStreamError, *, sequence: int | None = None
