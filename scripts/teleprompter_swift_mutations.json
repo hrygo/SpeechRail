@@ -1617,8 +1617,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard extensionName == \"txt\" || extensionName == \"md\" || extensionName == \"markdown\" else {",
       "replace": "        guard extensionName == \"txt\" || extensionName == \"md\" else {",
-      "expect": "SURVIVED",
-      "rationale": "与 R2 同一族的**第二处**：上一轮在 `TeleprompterSourceImporter.importData` 补过 `.markdown`，这里 `TeleprompterTextImporter.load` 是另一条独立的 UI 导入路径，**同一族约束的两个副本各写一遍、此前都只测了 `.md`**。按冗余记账不算独立防线，但两处都要各自有回归。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testTextImporterAcceptsTheDotMarkdownExtensionToo` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。选 `.markdown` 文件报「请选择文本文件（TXT 或 Markdown）」——文案说的是支持，行为只认两种扩展名。"
     },
     {
       "id": "T2",
@@ -1626,8 +1626,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard fileManager.fileExists(atPath: directoryURL.path) else { return [] }",
       "replace": "        guard fileManager.fileExists(atPath: directoryURL.path) else { throw TeleprompterStoreError.corruptBundle }",
-      "expect": "SURVIVED",
-      "rationale": "假设：现有用例全部先 `createDirectory` 再用（`setUpWithError` 建了目录），**「首次启动、目录还不存在」这条路径零观察**。去掉后用户第一次打开提词器看到的是「某份稿子已损坏」而不是空列表。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingAMissingDirectoryReturnsAnEmptyList` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。首次启动时目录还不存在，用户看到的是「某份稿子已损坏」而不是空列表。"
     },
     {
       "id": "T3",
@@ -1635,8 +1635,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "            .filter { $0.pathExtension == \"json\" }",
       "replace": "            .filter { _ in true }",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例往目录里放非 `.json` 文件。去掉后目录里的任何文件（比如 macOS 的 `.DS_Store`）都会被当成稿子去解码，报「已损坏」。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingIgnoresNonBundleFilesInTheDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。目录里的 `.DS_Store` 或任何非稿文件会被当成稿子解码，**整个列表直接报错打不开**。"
     },
     {
       "id": "T4",
@@ -1644,8 +1644,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "            .sorted { $0.updatedAt > $1.updatedAt }",
       "replace": "            .sorted { $0.updatedAt < $1.updatedAt }",
-      "expect": "SURVIVED",
-      "rationale": "假设：每条用例只存**一份**稿子，排序比较器从未被真正比较过。去掉后「最近编辑的排在最前」变成最旧的在前。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testListingSortsByMostRecentlyUpdated` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。「最近编辑的排在最前」反过来，用户每次都要翻到列表底部找刚改的稿。"
     },
     {
       "id": "T5",
@@ -1671,8 +1671,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard bundle.versions.contains(where: { $0.id == state.versionID }) else {\n            throw TeleprompterStoreError.invalidBundle\n        }\n",
       "replace": "",
-      "expect": "SURVIVED",
-      "rationale": "假设：`updateRunState` 的用例传的 `versionID` 总是存在的版本。去掉后把运行态挂到**这份稿子里不存在的版本**上也会被接受。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testRunStateRejectsAVersionThisDocumentDoesNotOwn` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。运行态可以挂到这份稿子里不存在的版本上，重开时恢复到一个打不开的版本。"
     },
     {
       "id": "T8",
@@ -1680,8 +1680,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard fileManager.fileExists(atPath: url.path) else {\n            throw TeleprompterStoreError.notFound\n        }\n        try fileManager.removeItem(at: url)",
       "replace": "        try fileManager.removeItem(at: url)",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例删一份不存在的稿子。去掉后错误从「找不到这份稿子」变成 Foundation 的底层错误文案。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDeletingAMissingDocumentReportsNotFound` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。错误从「找不到这份稿子」变成 Foundation 的底层错误文案。"
     },
     {
       "id": "T9",
@@ -1689,8 +1689,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        let version = bundle.versions.first { $0.id == bundle.document.activeVersionID }\n            ?? bundle.versions.first",
       "replace": "        let version = bundle.versions.first",
-      "expect": "SURVIVED",
-      "rationale": "假设：现有导出用例只有**一个**版本，「按 `activeVersionID` 找」和「取第一个」结果相同。去掉后用户导出的是**第一版而不是正在读的那一版**——AI 改过稿之后导出拿到旧稿。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testExportPrefersTheActiveVersionOverTheFirst` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**用户直接看得见的错**：AI 改过稿之后导出拿到的是旧稿。"
     },
     {
       "id": "T10",
@@ -1698,8 +1698,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        let body = version?.segments.map(\\.text).joined(separator: \"\\n\\n\") ?? bundle.document.sourceText",
       "replace": "        let body = version?.segments.map(\\.text).joined(separator: \"\\n\") ?? bundle.document.sourceText",
-      "expect": "SURVIVED",
-      "rationale": "假设：现有导出用例只断言「包含某段文字」，**没有断言段落之间的分隔**。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testExportSeparatesParagraphsWithABlankLine` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。导出稿的段落挤成一行，段落结构丢失。"
     },
     {
       "id": "T11",
@@ -1707,8 +1707,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "        guard !bundle.document.id.isEmpty,",
       "replace": "        guard true,",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例存一份空 ID 的稿子。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。空 ID 的稿子被接受，随后任何按 ID 的操作都指向同一个路径。"
     },
     {
       "id": "T12",
@@ -1716,8 +1716,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              !bundle.document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,",
       "replace": "              true,",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例存一份空白标题的稿子。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。空白标题的稿子被接受，稿库里出现一条无名稿。"
     },
     {
       "id": "T13",
@@ -1725,8 +1725,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              bundle.versions.allSatisfy({ $0.documentID == bundle.document.id }),",
       "replace": "              true,",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例存一份「版本指向另一份稿子」的稿子。这条守卫挡的正是**保存时把别人的版本挂进来**，而 `duplicateDocument` 正是靠它保证副本不串。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**这条挡的正是 `duplicateDocument` 不串稿**：版本可以声明自己属于另一份稿子。"
     },
     {
       "id": "T14",
@@ -1734,8 +1734,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              bundle.document.activeVersionID == nil\n                  || bundle.versions.contains(where: { $0.id == bundle.document.activeVersionID }) else {",
       "replace": "              true else {",
-      "expect": "SURVIVED",
-      "rationale": "假设：没有用例存一份 `activeVersionID` 悬空的稿子。去掉后打开稿件时「正在读的那一版」找不到。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。`activeVersionID` 可以悬空，打开稿件时「正在读的那一版」找不到。"
     },
     {
       "id": "T15",
@@ -1743,8 +1743,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "            guard !version.segments.isEmpty,",
       "replace": "            guard true,",
-      "expect": "SURVIVED",
-      "rationale": "**这条最初写成 INVALID，是我的锚点写错而不是产品缺陷**：替换时把 `guard` 关键字一起吃掉了，留下 `true, <条件> else {`，语法不成立。改回 `guard true,` 后探针才能给出读数。首轮实测存活：`TeleprompterDraftStoreTests` 存的是**零个版本**（`versions: []`），`for` 循环直接落空，**「一个版本但零段落」这条从未被构造过**。若存活属真缺口。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。零段落的版本被接受，而它正是**第 85 条**（含长单元稿件的 AI 标注必然失败）的下游——那样的稿件没有一个能念的段落。"
     },
     {
       "id": "T16",
@@ -1752,8 +1752,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "                  version.segments.enumerated().allSatisfy({ $0.element.ordinal == $0.offset }) else {",
       "replace": "                  true else {",
-      "expect": "SURVIVED",
-      "rationale": "假设：现有夹具的 `ordinal` 都由构造顺序决定，**没有任何用例故意写错序号**。这条守卫挡的是磁盘上被改坏的文件——而它平时挡的正是本分支第 65 轮登记的「`validate` 二十多道守卫一条都没被观察过」的同族。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testBundleValidationRejectsStructurallyBrokenDocuments` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。段落序号可以不连续，而阅读位置、跟随与对齐都按序号推进——**序号错乱直接错位**。"
     },
     {
       "id": "T17",
@@ -1761,8 +1761,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              documentID.rangeOfCharacter(from: CharacterSet(charactersIn: \"/\\\\\")) == nil,",
       "replace": "              true,",
-      "expect": "SURVIVED",
-      "rationale": "**这是本组最要紧的一条守卫**：没有它，`documentID` 里的 `/` 会让 `appendingPathComponent` 拼到 documents 目录**之外**，读取和删除都能落到任意路径。假设：现有用例的 `documentID` 全是 `document-1`／`draft` 这类安全值，**没有任何一条用过 `../` 或 `/`**——一条安全控制零观察。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。**安全控制失效**：`documentID` 里的 `/` 让读取与删除都能落到 documents 目录之外的任意路径。"
     },
     {
       "id": "T18",
@@ -1770,8 +1770,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              documentID != \".\",",
       "replace": "              true,",
-      "expect": "SURVIVED",
-      "rationale": "同族：`.` 会让路径解析回目录本身。同一条约束的两个副本（`/` 与 `.`）此前都没有用例。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。同族，`.` 让路径解析回目录本身。"
     },
     {
       "id": "T19",
@@ -1779,8 +1779,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterStore.swift",
       "find": "              documentID != \"..\" else {",
       "replace": "              true else {",
-      "expect": "SURVIVED",
-      "rationale": "同族，且 `..` 是三者里危害最大的一个——**它就是路径穿越本身**。三条拆成三条变异，是为了让「哪一条真的被测过」这件事在读数里可见，而不是混成一条。"
+      "expect": "KILLED",
+      "rationale": "首轮存活＝**真缺口**，第七十二轮补回归 `testDocumentIDCannotEscapeTheStoreDirectory` 转杀（实测 1 failing）。214 行只有 5 条用例、28 处逻辑，此前**零观察**。同族且危害最大的一条：**`..` 就是路径穿越本身**。"
     }
   ]
 }
