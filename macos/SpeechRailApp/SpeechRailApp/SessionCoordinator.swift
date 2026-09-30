@@ -483,6 +483,11 @@ public final class SessionCoordinator {
         try await store.voiceChanges(sessionID: sessionID)
     }
 
+    /// 记录库"回看这一条"的单次快照读。转发一层，保持"界面不直接持有 Store"这条缝。
+    public func reviewSnapshot(sessionID: String) async throws -> SessionReviewSnapshot? {
+        try await store.reviewSnapshot(sessionID: sessionID)
+    }
+
     public func minutesVersions(sessionID: String) async throws -> [MinutesVersion] {
         try await store.minutesVersions(sessionID: sessionID)
     }
