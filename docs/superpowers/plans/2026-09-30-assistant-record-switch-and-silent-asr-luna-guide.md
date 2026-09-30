@@ -37,9 +37,16 @@ date: 2026-09-30
 补充的三例取舍回归（`AssistantSessionTests`）：未定稿的半句不进模型
 （`streamCount == 0`）、同一 item 的终态重放不重复落库、成功定稿后软提示自己退场。
 
-验证：`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）374 项 0 failures / exit 0；
-四个契约检查脚本（realtime / openapi / user-doc / version consistency）全部 exit 0。
-**未跑 UI 自动化**（AGENTS.md 硬约束）。
+验证（2026-09-30 20:10–20:16 核验）——
+
+- `scripts/macos_app_test.sh --only-testing SpeechRailAppTests`：**374 项 0 failures / exit 0**；
+- `swift test --package-path macos/SpeechRailApp`：**395 tests / 16 suites 通过**（同一批
+  新用例在这条门禁里也跑到了，两条 CI 门禁覆盖的是同一份实现）；
+- `scripts/macos_app_build.sh --configuration Release`：**BUILD SUCCEEDED**（出货配置编译通过）；
+- 四个契约检查脚本（realtime / openapi / user-doc / version consistency）全部 exit 0。
+
+**未跑 UI 自动化**（AGENTS.md 硬约束：未经当次明确授权不运行）。
+**未安装 App**：需要发布动作，用户未授权。
 
 # 语音助手两项缺陷实施方案（Luna）
 
