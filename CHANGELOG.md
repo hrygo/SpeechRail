@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-09-30
+
+### Added
+
+- 支持用 `config/model_locations.json` 把指定制品绑定到 operator 自选的外部模型目录
+  （例如 oMLX 统一管理的 `~/.omlx/models/<leaf>`）。未声明的制品行为完全不变；声明后
+  SpeechRail 只读校验、不下载不写入，外部副本单列 `disk.external_bytes`。同一 key 同时存在
+  外部绑定与受管副本时状态判为 `invalid` 并 fail-closed，删除该文件即完全回滚。
+- `/health` 新增独立的 `tts_design`：报告 VoiceDesign 这一惰性能力自身的 `configured`、
+  `ready`、`state` 与 `last_error`。读取健康检查不会加载模型，设计 lane 失败也不再牵连
+  普通 TTS 的可用状态；一次成功重试即清除 `last_error`。
+- TTS 错误 envelope 新增可选 `worker` 归因对象（`role`、`stage`、`attempt_id`，以及已观测到的
+  `exit_code` 和允许列表中的 `exception_type`），用于把失败定位到具体 worker 与阶段，同时不
+  返回原始 stderr、vendor 异常正文、模型路径或请求文本。
+
+### Fixed
+
+- 修复 TTS worker 的 stdout 可能污染 IPC 帧的问题：Python `print` 与原生 fd 1 输出现在统一
+  转到 stderr，二进制协议改用独立描述符。此前 vendor 或依赖在加载、生成过程中的一行普通
+  输出就足以让 `/v1/voices/previews` 持续返回 503 `tts_transport_failed`。
+- 修复 VoiceDesign 失败不可归因：启动握手失败此前一律记为 `deliver` 阶段，EOF、帧大小、
+  帧解码与管道关闭也没有区分。现在按真实阶段与安全原因分类，长单行 stderr 也按 16 KiB
+  有界环形缓冲截取，不再被整行丢弃。
+- 修复音色试听把资源准入记到默认系统音色 lane 的问题：预览改为保守的 `tts` 准入；候选创建
+  与候选 Base 验证统一使用 TTS 错误映射（初始化/传输 503、推理/输出 502、参数 400），
+  不再各自返回不一致的状态码。
+- 修复进程内音色解析不认识未发布 VoiceDesign 候选的问题：`get_voice_profile` 与
+  `VoiceRegistry.get_profile` 现在与 `lease_profile` 一致地解析临时 profile，未发布候选不再
+  被误判为 `unknown preset voice`。
+
 ## [3.3.4] - 2026-09-28
 
 ### Fixed
