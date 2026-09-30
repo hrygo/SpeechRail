@@ -1430,6 +1430,177 @@
       "replace": "        syncFollowState()\n        saveProgress()\n        runningVersion = nil",
       "expect": "KILLED",
       "rationale": "真缺陷，第七十轮补回归 `coordinatorStopReturnsFollowStateToManual` 转杀。「结束当前会话」走 `coordinator.stopCapture` → `stopper` → `TeleprompterSession.stopCapture()`，**不经过 `requestVoiceStop`**，所以把跟读收回手动是 `stopCapture()` 自己的职责。少了那一步，采集已释放而 `followState`／`followStatusText` 仍停在「跟读咬合」，并且 `saveProgress()` 落盘的 `mode` 也是 `.following`，重开时会按跟读态恢复。新回归走 coordinator 这条真实路径断言两个交付值。"
+    },
+    {
+      "id": "R1",
+      "note": "导入不再检查字节上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard data.count <= limits.maxBytes else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
+      "replace": "        guard data.count <= Int.max else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
+      "expect": "SURVIVED",
+      "rationale": "假设：现有 15 条用例没有一条构造超限输入（`rejectsInvalidUTF8NULAndEmptySource` 只测 UTF-8／NUL／空白），所以这道 1 MiB 的守卫从未被观察过。若存活，按「真缺口」补一条超限回归转杀。"
+    },
+    {
+      "id": "R2",
+      "note": "markdown 扩展名不再被接受",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            case \"md\", \"markdown\": formatHint = .markdown\n",
+      "replace": "            case \"md\": formatHint = .markdown\n",
+      "expect": "SURVIVED",
+      "rationale": "假设：现有用例只传 `\"md\"`，`.markdown` 这个别名没有用例。若存活属真缺口——它是一条用户可选的文件类型。"
+    },
+    {
+      "id": "R3",
+      "note": "不再拒绝含 NUL 的稿件",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard !sourceText.unicodeScalars.contains(where: { $0.value == 0 }) else {\n            throw TeleprompterPreparationError.containsNUL\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`rejectsInvalidUTF8NULAndEmptySource` 直接用 `Data(\"a\\0b\".utf8)` 断言抛错，去掉守卫后那句用例会红。"
+    },
+    {
+      "id": "R4",
+      "note": "全空白稿件不再被拒绝",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {\n            throw TeleprompterPreparationError.emptySource\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`rejectsInvalidUTF8NULAndEmptySource` 用 `Data(\" \\r\\n\".utf8)` 断言抛错。注意去掉守卫后**不会**一路畅通——`build()` 的 `characters.isEmpty` 拦不住空白，所以错误类型会从 `emptySource` 变成别的，断言仍然变红。"
+    },
+    {
+      "id": "R5",
+      "note": "导入不再检查参考时长上限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard referenceSeconds <= limits.maxReferenceSeconds else {\n            throw TeleprompterPreparationError.referenceDurationExceeded\n        }\n",
+      "replace": "",
+      "expect": "SURVIVED",
+      "rationale": "假设：没有任何用例构造超过 2 小时的稿件，这条容量守卫零观察。若存活属真缺口。"
+    },
+    {
+      "id": "R6",
+      "note": "分片预算窗口少算一个字节",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                  prefixBytes[hardEnd] - prefixBytes[start] <= maxBudgetUnits {",
+      "replace": "                  prefixBytes[hardEnd] - prefixBytes[start] < maxBudgetUnits {",
+      "expect": "SURVIVED",
+      "rationale": "假设：现有用例的 `maxBudgetUnits`（24／600）都不贴着边界，`<=` 改成 `<` 只让每段少一个字节，不违反任何断言。属「没测到边」那一族。"
+    },
+    {
+      "id": "R7",
+      "note": "续写标记不再要求紧邻非空白",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                    continuation: start > 0 && !isWhitespace(characters[start - 1]),",
+      "replace": "                    continuation: start > 0,",
+      "expect": "SURVIVED",
+      "rationale": "假设：`TeleprompterSourceUnit.continuation` 在提词器测试里从未被断言过（三处出现全在 `TeleprompterPreparationPromptsTests` 里构造夹具）。若存活属真缺口。"
+    },
+    {
+      "id": "R8",
+      "note": "分片数量上限少算一个",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            guard units.count <= maxSourceUnits else {",
+      "replace": "            guard units.count < maxSourceUnits else {",
+      "expect": "SURVIVED",
+      "rationale": "假设：没有用例把分片数顶到 `maxSourceUnits`，`init` 里的 `max(1, maxSourceUnits)` 也没被观察。"
+    },
+    {
+      "id": "R9",
+      "note": "段落边界只看窗口末尾三格",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let suffixStart = max(0, end - 4)",
+      "replace": "        let suffixStart = max(0, end - 3)",
+      "expect": "SURVIVED",
+      "rationale": "假设：`isParagraphBoundary` 的四个 `hasSuffix` 里只有 `\"\\r\\n\\r\\n\"` 是 4 字符，而现有段落用例全用 `\"\\n\\n\"`（2 字符）。这是一条**只对 Windows 换行稿件失效**的窄缺口。"
+    },
+    {
+      "id": "R10",
+      "note": "小数点前的字符不再参与判断",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            if isWordCharacter(previous) && isWordCharacter(next) {",
+      "replace": "            if isWordCharacter(previous) {",
+      "expect": "SURVIVED",
+      "rationale": "假设：`isSemanticBoundary` 的「点两侧都是词字符就不是安全切点」这条保护，现有分片用例里没有任何一处文本含 ASCII `.`（中文句号是 `。`）。"
+    },
+    {
+      "id": "R11",
+      "note": "语义边界改为从最早处取",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        for end in stride(from: hardEnd, through: start + 1, by: -1) {",
+      "replace": "        for end in stride(from: start + 1, through: hardEnd, by: 1) {",
+      "expect": "SURVIVED",
+      "rationale": "假设：语义回扫方向决定了「同窗口内多个切点取最后一个」。段落用例由 `preferredEnd` 的段落循环先短路掉了，语义循环在这批夹具上根本没有决策空间。"
+    },
+    {
+      "id": "R12",
+      "note": "有不确定性时也给出点估计",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard metrics.uncertaintyReasons.isEmpty else {\n            return TeleprompterDurationEstimate(\n                pointSeconds: nil,\n                rangeSeconds: nil,\n                knownPartSeconds: knownPartSeconds,\n                uncertaintyReasons: metrics.uncertaintyReasons\n            )\n        }\n",
+      "replace": "",
+      "expect": "KILLED",
+      "rationale": "假设：`durationSeparatesKnownEnglishAndHanFromUncertainDigits` 断言含数字文本的 `pointSeconds == nil`，去掉守卫后 `pointSeconds` 变成非 nil。"
+    },
+    {
+      "id": "R13",
+      "note": "时长下界收紧到 0.5 倍",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        let lower = knownPartSeconds * 0.8",
+      "replace": "        let lower = knownPartSeconds * 0.5",
+      "expect": "SURVIVED",
+      "rationale": "假设：`rangeSeconds` 的下界在全部用例里从未被断言，只断言了 `pointSeconds` 与 `uncertaintyReasons`。"
+    },
+    {
+      "id": "R14",
+      "note": "校准系数不再夹下界",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            max(calibrationFactor, TeleprompterTimingPolicy.minimumCalibrationFactor),",
+      "replace": "            calibrationFactor,",
+      "expect": "SURVIVED",
+      "rationale": "假设：`estimate(_:pace:calibrationFactor:)` 的 `calibrationFactor` 参数在准备域的用例里从未被传过非默认值。"
+    },
+    {
+      "id": "R15",
+      "note": "非拉丁字母不再算作外来语",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            } else if value < 128 && CharacterSet.letters.contains(scalar) {",
+      "replace": "            } else if CharacterSet.letters.contains(scalar) {",
+      "expect": "KILLED",
+      "rationale": "假设：`unknownEstimateFallsBackToProxyWithoutClaimingDuration` 用含阿拉伯文的文本断言 `pointSeconds == nil` 且 `weightMode == .proxyCharacters`。去掉 ASCII 限制后阿拉伯字母被当成 latin 词计数，不再产生 `nonLatinLanguage`，`pointSeconds` 变为非 nil。"
+    },
+    {
+      "id": "R16",
+      "note": "目标时长不再要求整数分钟",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        guard minutes.isFinite, minutes.rounded() == minutes else {",
+      "replace": "        guard minutes.isFinite else {",
+      "expect": "KILLED",
+      "rationale": "假设：`targetMinutesMustBeIntegerBetweenOneAndOneHundredTwenty` 断言 `validateTargetMinutes(1.5)` 抛错；去掉整数检查后 `Int(1.5)` 截断成 1 并返回 60。"
+    },
+    {
+      "id": "R17",
+      "note": "预算余数给到第一个选中段",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "            } else if index == selectedIndexes.last {",
+      "replace": "            } else if index == selectedIndexes.first {",
+      "expect": "SURVIVED",
+      "rationale": "假设：两条预算用例都只断言「合计等于 `budgetSeconds`」与「未选中段为 0」，而余数无论给首段还是末段都不改变这两项——**这是一次典型的「断言与被摘掉的分支无关」**。"
+    },
+    {
+      "id": "R18",
+      "note": "估算权重不再设下限",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "                weight = max(0.001, estimates[index] ?? 0.001)",
+      "replace": "                weight = estimates[index] ?? 0.001",
+      "expect": "SURVIVED",
+      "rationale": "假设：没有任何用例传入 0 秒的估算。全部估算为 0 时原实现仍能建出计划（总权重 `n × 0.001`），改后会在 `totalWeight > 0` 处抛 `invalidTimingPlan`。"
+    },
+    {
+      "id": "R19",
+      "note": "URL 标记不再只看斜杠",
+      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
+      "find": "        if hasDigit || hasURLMarker { reasons.insert(\"unresolvedPronunciation\") }",
+      "replace": "        if hasDigit { reasons.insert(\"unresolvedPronunciation\") }",
+      "expect": "SURVIVED",
+      "rationale": "假设：现有用例的 URL 标记都同时带数字或斜杠，没有「只有冒号」的纯文本（如 `mailto:someone`）。"
     }
   ]
 }
