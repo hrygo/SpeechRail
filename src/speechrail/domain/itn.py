@@ -19,6 +19,10 @@ _DIGITS_MAP = {
     "九": 9,
 }
 
+# The ASCII half of `_DIGITS_MAP`, inverted. `两` is deliberately absent: `二`
+# is the positional spelling of 2.
+_DIGIT_SPELLINGS = {str(value): char for value, char in enumerate("零一二三四五六七八九")}
+
 _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
 _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
 _DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
@@ -61,6 +65,21 @@ def _chinese_to_int(cn_str: str) -> int:
     # If already all digits
     if cn_str.isdigit():
         return int(cn_str)
+
+    # Both callers reach this function through `_PERCENT_RE` / `_DECIMAL_RE`,
+    # whose character classes admit ASCII digits, so a recogniser that
+    # normalises only part of a number hands us a mixed run such as `2三点五`
+    # or `百分之2十`. Everything below is written against Chinese numerals, so
+    # the digits are folded into their Chinese spelling first. Indexing
+    # `_DIGITS_MAP` with them raised `KeyError` and aborted normalisation for
+    # every batch and realtime transcript of that shape, and the accumulator
+    # dropped them without a word (`百分之2十` -> `10%`).
+    cn_str = "".join(_DIGIT_SPELLINGS.get(char, char) for char in cn_str)
+
+    # Spoken digit sequences such as ``二零`` are positional, not additive.  The
+    # unit-based accumulator below would otherwise keep only the final digit.
+    if not any(char in cn_str for char in "十百千万亿"):
+        return int("".join(str(_DIGITS_MAP[char]) for char in cn_str))
 
     units = {"十": 10, "百": 100, "千": 1000, "万": 10000, "亿": 100000000}
     total = 0

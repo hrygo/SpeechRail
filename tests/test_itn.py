@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
 
 
@@ -20,11 +22,18 @@ def test_itn_decimals() -> None:
     assert apply_light_itn("温度是零点八五度") == "温度是0.85度"
 
 
-def test_itn_numbers_with_units() -> None:
-    assert apply_light_itn("售价一百二十五元") == "售价125元"
-    assert apply_light_itn("价值五百美元") == "价值500美元"
-    assert apply_light_itn("跑了三万米") == "跑了30000米"
-    assert apply_light_itn("他今年二十八岁") == "他今年28岁"
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("售价一百二十五元", "售价125元"),
+        ("价值五百美元", "价值500美元"),
+        ("跑了三万米", "跑了30000米"),
+        ("他今年二十八岁", "他今年28岁"),
+        ("二零号座位", "20号座位"),
+    ],
+)
+def test_itn_numbers_with_units(source: str, expected: str) -> None:
+    assert apply_light_itn(source) == expected
 
 
 def test_itn_empty_and_passthrough() -> None:
@@ -119,3 +128,34 @@ def test_itn_does_not_glue_an_ascii_magnitude_onto_the_digits_before_it() -> Non
     # reason: 台 is not in the server's unit list at all.
     for text in ["3小时", "8吨", "1000公里", "20万台", "1000万台", "两万五千"]:
         assert apply_light_itn(text) == text, f"{text} 本来就不该被改写"
+
+
+def test_itn_folds_ascii_digits_inside_a_mixed_numeral_run() -> None:
+    # `_PERCENT_RE` and `_DECIMAL_RE` both admit ASCII digits, so a recogniser
+    # that normalises only part of a number produces a run like `2三点五`. The
+    # positional fast path indexed `_DIGITS_MAP` with every character, so the
+    # lookup raised `KeyError: '2'` and took the whole transcript down with it:
+    # batch and realtime both call `apply_light_itn` without a guard.
+    assert apply_light_itn("2三点五") == "23.5"
+    assert apply_light_itn("2三点五个") == "23.5个"
+    assert apply_light_itn("增长了百分之2三点五") == "增长了23.5%"
+    # `1二` is the same shape in front of a unit: the ASCII digit is part of
+    # the value, so the run stays 12 rather than dropping to 2.
+    assert apply_light_itn("耗时1二点五秒") == "耗时12.5秒"
+
+    # The accumulator dropped the ASCII digit without a word, so `百分之2十`
+    # was reported as 10% rather than 20%.
+    assert apply_light_itn("增长了百分之2十") == "增长了20%"
+
+    # Every digit has to survive the folding, not just the ones the shapes
+    # above happen to use. The zero sits in the middle on purpose, so the
+    # assertion is about the mapping and not about a leading zero.
+    for digit in range(1, 10):
+        assert apply_light_itn(f"{digit}三点五") == f"{digit}3.5"
+    assert apply_light_itn("1零三点五") == "103.5"
+
+    # Controls: a number already written in digits is still left alone, and the
+    # pure-Chinese forms keep the values the positional path was added for.
+    for text in ["2.5", "23.5%", "12.5秒", "3.5", "二零二六"]:
+        assert apply_light_itn(text) == text, f"{text} 不该被改写"
+    assert apply_light_itn("二三点五") == "23.5"
