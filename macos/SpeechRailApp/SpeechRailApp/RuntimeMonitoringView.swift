@@ -1818,7 +1818,7 @@ public struct RuntimeMonitoringView: View {
 
     @ViewBuilder
     private var monitoringInspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             SectionHeading(
                 title: "运行样本",
                 detail: "这些字段面向排障和容量判断，不代表服务质量或模型质量结论。"

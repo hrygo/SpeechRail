@@ -64,7 +64,7 @@ public struct PreflightDiagnosticsView: View {
             }
         )
         .inspector(isPresented: $showInspector) {
-            DeveloperInspector {
+            DeveloperInspector(isPresented: $showInspector) {
                 SectionHeading(
                     title: "诊断上下文",
                     detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"

@@ -2561,20 +2561,18 @@ public struct SpeechRailInspectorColumnModifier: ViewModifier {
 }
 
 public struct DeveloperInspector<Content: View>: View {
- private let content: Content
+  @Binding private var isPresented: Bool
+  private let content: Content
 
- public init(@ViewBuilder content: () -> Content) {
- self.content = content()
- }
+  public init(isPresented: Binding<Bool>, @ViewBuilder content: () -> Content) {
+    self._isPresented = isPresented
+    self.content = content()
+  }
 
  public var body: some View {
  ScrollView(.vertical) {
  VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.sectionSpacing) {
- Text("开发者详情")
- .font(SpeechRailDesignTokens.Typography.sectionTitle)
- .foregroundStyle(SpeechRailDesignTokens.Color.ink)
- .lineLimit(SpeechRailDesignTokens.Inspector.titleMaximumLines)
- .frame(maxWidth: .infinity, alignment: .leading)
+  titleBar
  VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.rowSpacing) {
  content
  .speechRailInspectorContent()
@@ -2594,7 +2592,36 @@ public struct DeveloperInspector<Content: View>: View {
     .speechRailInspectorColumn(alignment: .topLeading)
     .background(SpeechRailDesignTokens.Color.field)
  }
-}
+  /// 面板自己的关闭入口。
+  ///
+  /// 2026-09-30 用户反馈「双击模型列表打开右侧面板后无法关闭」：开关此前只在
+  /// **页面另一处**——模型组合页把它放在「模型文件」卡头，而那张卡头是一条
+  /// HStack（标题 + 一句说明 + 开关 + 弹性空档 + 右端事实），面板一开、内容列
+  /// 被 inspector 压窄，开关就是这条 HStack 里第一个被压掉的东西。面板打开的
+  /// 那一刻正是唯一需要关闭它的那刻，而那一刻它恰好被挤没了。
+  ///
+  /// 关闭入口因此必须长在面板自己身上：它有固定 360pt 宽，永远不被内容列挤压，
+  /// 也不随页面滚动离开视线。
+  private var titleBar: some View {
+  HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+  Text("开发者详情")
+  .font(SpeechRailDesignTokens.Typography.sectionTitle)
+  .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+  .lineLimit(SpeechRailDesignTokens.Inspector.titleMaximumLines)
+  Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+  Button {
+  isPresented = false
+  } label: {
+  SpeechRailButtonIcon(.close, size: SpeechRailDesignTokens.Icon.navigationSize)
+  }
+  .buttonStyle(.borderless)
+  .speechRailPointerCursor()
+  .help("收起开发者详情 (⌘⌥I)")
+  .accessibilityLabel("收起开发者详情")
+  .accessibilityIdentifier("developer-inspector-close")
+  }
+  }
+ }
 
 /// 「开发者详情」右侧面板的**唯一开关**。
 ///
@@ -2603,10 +2630,15 @@ public struct DeveloperInspector<Content: View>: View {
 /// 是全 App 共享的一个偏好，所以任何一页打开它，服务状态 / 运行监控 / 诊断 /
 /// 音色克隆这四页的右侧面板都会跟着亮起，而这四页页内**没有任何开关**——
 /// 唯一可发现的关闭路径退化成「设置 ▸ 通用」或没人知道的 ⌘⌥I
-/// （模型组合页有卡头那一枚，所以只有它关得掉）。
+/// （模型组合页原先在卡头有一枚，但面板一开、内容列被压窄，它就是那条 HStack
+/// 里第一个被挤没的东西，见 `DeveloperInspector.titleBar` 的说明）。
 ///
 /// 声明点放在这里：叫什么、什么形状、快捷键是哪一条，只写一次；需要在页内开合的
 /// 页面接上它，开关与面板标题（`DeveloperInspector` 的「开发者详情」）也就不会漂移。
+///
+/// 它是**打开**面板的入口，一律放在页头动作区（`PageScaffold` 的 `trailing` 槽）——
+/// 那行里的说明文字会换行让位，动作不会被内容列挤没。**关闭**入口在面板自己的标题栏
+/// 上（`DeveloperInspector.titleBar`），固定 360pt 宽，永远在视线里。
 public struct DeveloperInspectorToggle: View {
     @Binding private var isPresented: Bool
     private let helpText: String

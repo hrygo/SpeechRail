@@ -51,7 +51,7 @@ public struct ServiceOverviewView: View {
             }
         )
         .inspector(isPresented: $showInspector) {
-            DeveloperInspector {
+            DeveloperInspector(isPresented: $showInspector) {
                 LabeledContent("服务", value: displayedHealth?.service ?? "未读取")
                 LabeledContent("版本", value: displayedHealth?.version ?? "未读取")
                 LabeledContent("后端", value: displayedHealth?.backend ?? "未读取")

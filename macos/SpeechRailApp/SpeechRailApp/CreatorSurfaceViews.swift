@@ -797,7 +797,7 @@ public struct DubbingDeskView: View {
     }
 
     private var dubbingInspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             SectionHeading(
                 title: "配音技术摘要",
                 detail: "面向开发者的安全运行信息；不展示原始文稿、凭据或本地绝对路径。"
@@ -1278,7 +1278,7 @@ public struct VoiceDesignView: View {
             if case .failed = candidate.status { return true }
             return false
         }.count
-        return DeveloperInspector {
+        return DeveloperInspector(isPresented: $showInspector) {
             SectionHeading(
                 title: "音色创作 · 技术摘要",
                 detail: "候选试听音频只留在这一次打开期间；保存进音色库时，服务会按同样的参数重新生成一份参考音频。"

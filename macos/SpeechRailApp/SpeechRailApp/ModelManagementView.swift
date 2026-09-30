@@ -15,6 +15,11 @@ public struct ModelManagementView: View {
     @State private var ttsSpec: SpeechRailProfile = .quality
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
+    /// 打开面板时锚定的那一行。双击同一行 = 收起（2026-09-30 用户反馈：
+    /// 「双击打开后无法关闭」——双击在他们的预期里本来就是开关）。
+    /// 锚定而不是直接读 `selectedArtifactKey`：双击的 Button 动作会先把选中行
+    /// 改掉，等手势结束时两者已经相等，「是不是同一行」就再也分不出来。
+    @State private var inspectorAnchorKey: String?
 
     public init() {}
 
@@ -27,9 +32,20 @@ public struct ModelManagementView: View {
     public var body: some View {
         PageScaffold(route: .models) {
             mainContent
+        } trailing: {
+            // 开关放在页头而不是「模型文件」卡头：卡头是一条 HStack（标题 + 一句
+            // 说明 + 开关 + 弹性空档 + 右端事实），面板一开、内容列被 inspector
+            // 压窄，开关是这条 HStack 里第一个被压掉的东西——而面板打开的那一刻
+            // 正是唯一需要它的时候（2026-09-30 用户反馈「打开后无法关闭」）。
+            // 页头那行的说明文字会换行让位，动作不会被挤没；关闭入口另有面板
+            // 自身标题栏上那一枚。
+            DeveloperInspectorToggle(
+                isPresented: $showInspector,
+                helpText: "查看所选模型的来源、哈希与校验详情 (⌘⌥I)"
+            )
         }
-        // 这一页的动作全都属于卡片里的制品（下载并校验、应用到档位），所以没有头部动作；
-        // 页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
+        // 头部动作只有右侧详情面板的开关；下载并校验、应用到档位这些本页动作
+        // 全都属于卡片里的制品。页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
         .focusedSceneValue(
             \.reloadPageCommand,
             ReloadPageCommand(title: "重新读取模型目录") {
@@ -591,15 +607,7 @@ public struct ModelManagementView: View {
                 // 整个页面（含按需能力）的差口，这里说的是**这张表**自己的进度，
                 // 两者口径不同，所以分开写。
                 accessory: artifactReadinessAccessory
-            ) {
-                // 面板本体是 `DeveloperInspector`（标题「开发者详情」），开关曾经
-                // 写成「模型详情」，同一件事两种叫法，也让人对不上「设置 ▸ 通用 ▸
-                // 显示开发者详情」那个真正控制它的开关（2026-09-30 用户反馈）。
-                DeveloperInspectorToggle(
-                    isPresented: $showInspector,
-                    helpText: "查看所选模型的来源、哈希与校验详情 (⌘⌥I)"
-                )
-            }
+            )
             Divider()
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
@@ -633,13 +641,18 @@ public struct ModelManagementView: View {
                             .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .speechRailPointerCursor()
                             .accessibilityIdentifier("artifact-\(artifact.key)")
-                            // 双击是**打开并查看这一项**，不是开/关切换（Finder 同款约定）：
-                            // 面板已开时双击另一行应当换内容而不是把它关掉。关闭走同一张
-                            // 卡片卡头右上角的开关，那里现在与其它页面同名同形。
+                            // 双击打开这一项的详情；对**当前正显示的那一行**再双击一次
+                            // 则收起（用户预期里双击本来就是开关，2026-09-30）。
+                            // 双击另一行始终是换内容，不会把面板关掉。
                             .simultaneousGesture(
                                 TapGesture(count: 2).onEnded {
                                     withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
-                                        showInspector = true
+                                        if showInspector, inspectorAnchorKey == artifact.key {
+                                            showInspector = false
+                                        } else {
+                                            showInspector = true
+                                            inspectorAnchorKey = artifact.key
+                                        }
                                     }
                                 }
                             )
@@ -985,7 +998,7 @@ public struct ModelManagementView: View {
 
     @ViewBuilder
     private var modelInspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             if let artifact = selectedArtifact {
                 SectionHeading(title: artifact.variant.replacingOccurrences(of: "_", with: " "))
                 LabeledContent("模型 ID", value: artifact.modelID)

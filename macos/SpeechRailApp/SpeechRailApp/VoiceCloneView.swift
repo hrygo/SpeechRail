@@ -795,7 +795,7 @@ public struct VoiceCloneView: View {
     // MARK: - 开发者详情
 
     private var inspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                 SectionHeading(
                     title: "参考音频",
