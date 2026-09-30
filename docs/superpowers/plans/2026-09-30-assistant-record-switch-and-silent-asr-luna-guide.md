@@ -1,12 +1,30 @@
 ---
 title: "语音助手：记录切换卡顿与识别结果静默丢失"
-status: draft
+status: in_progress
 date: 2026-09-30
 ---
 
 > 修订记录（2026-09-30 review 后修正）：U1 确定性断言（B5）；U2/U3 顺序依赖（B3）与 §6.1 伪代码 fail-close（B1/B2）；
 > 空 itemID 的 failed 策略（B4）；U5 完整引用点清单（B6）；"一次 await 调用"用词（B7）；
 > U4 `clearFailure()` 调用点更正（B8）；U6 主次对调（B9）。
+
+## 执行结果（2026-09-30）
+
+| 单元 | 状态 | 落地 |
+|---|---|---|
+| U1 回归测试 | 已完成 | `AssistantSessionTests` 4 例；修复前 3 红 1 绿，修复后全绿 |
+| U3 片段按 item 隔离 | 已完成 | 随 P1 一起提交（`1e96f77a`；B3 允许 U2/U3 合并） |
+| U2 空 final 保留 | 已完成 | `1e96f77a` |
+| U4 失败在界面可见 | 已完成 | `1e96f77a` |
+| U5 一次快照读 | 已完成 | `60d5d55b`（生产代码）+ `f288e689`（回归测试） |
+| U7 文档同步 | 已完成 | `18f79e9a`：设计系统 §6 验证矩阵一行；契约 §5.1 补第三条准入语义，4.2.0 → 4.3.0 |
+| M1 卡顿测量 | 未做 | 需用户单独授权接管前台窗口 |
+| U6 列表行隔离重绘 | 暂缓 | 按 §9.1：M1 未测，不得先改 |
+| M2–M4 行为层验收 | 暂缓 | 需真机麦克风与在跑的服务 |
+
+验证：`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）371 项 0 failures / exit 0；
+四个契约检查脚本（realtime / openapi / user-doc / version consistency）全部 exit 0。
+**未跑 UI 自动化**（AGENTS.md 硬约束）。
 
 # 语音助手两项缺陷实施方案（Luna）
 
