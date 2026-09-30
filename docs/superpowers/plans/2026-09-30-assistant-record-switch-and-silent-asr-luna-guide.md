@@ -22,7 +22,9 @@ date: 2026-09-30
 | U6 列表行隔离重绘 | 暂缓 | 按 §9.1：M1 未测，不得先改 |
 | M2–M4 行为层验收 | 暂缓 | 需真机麦克风与在跑的服务 |
 | §7 离屏渲染用例 | 不可行 | 见下 |
-| **服务端根因修复** | **代码已提交** | `06b3570e`，见附录 A'；**重装 runtime 才生效，未授权** |
+| **服务端根因修复** | **已发布并装机** | `06b3570e` + `chore(release): 3.4.1`（`9b070aca`），见附录 A' |
+| 服务重装 | 已完成 | 3.4.0 → **3.4.1**；真实 ASR smoke 单句已定稿 |
+| App 重装 | 已完成 | 3.4.0/38 → **3.4.1/39**，已归档旧版，待用户验收 |
 
 **§7「`AssistantView` 离屏渲染夹具用例」在本 target 不可行**，已实测确认而非推测：
 `SpeechRailAppTests` 没有 `TEST_HOST`／`BUNDLE_LOADER`，进程里没有 `NSApplication`。
@@ -590,7 +592,20 @@ if merged == prev_text and state.enable_tail_refine:
 `error.code` 仍保持短机器码（保住 Realtime 契约 128 字符上限），
 stderr tail 只进服务端日志。
 
-**未验证**：修复需重装 runtime 才生效；重装属运行态变更，需单独授权。
+**已验证（2026-09-30 21:31–21:45）**：以 `chore(release): 3.4.1` 发布并重装 managed
+runtime。真实 ASR smoke（本地 TTS 合成单句 → 24 kHz → Realtime 单次 commit）现在返回
+
+```
+conversation.item.input_audio_transcription.completed
+  transcript: "今天天气怎么样？样适合。出门吗？"
+```
+
+修复前同一输入是 `transcription.failed: worker_inference_error`。
+
+**已知代价**：关掉精修后，尾块不再被重新解码，末句偶有错字——上例的
+"样适合。出门吗？" 应为 "适合出门吗？"。这是"送不出去的错字"与"送不出去"之间的
+取舍：精修在本机离线环境下**必然抛异常**（根因见上），无法修好，只能选择交付。
+下游 LLM 对个别错字有足够容错。
 
 ---
 
