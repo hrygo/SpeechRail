@@ -1437,8 +1437,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "        guard data.count <= limits.maxBytes else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
       "replace": "        guard data.count <= Int.max else { throw TeleprompterPreparationError.byteLimitExceeded }\n",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`maxBytes` 默认 1 MiB，是导入路径上唯一的容量闸门；15 条准备域用例没有一条构造超限输入（`rejectsInvalidUTF8NULAndEmptySource` 只覆盖 UTF-8／NUL／空白三种）。去掉守卫后超大稿件会被一路读进内存并在后续分片时才炸，**报错点从「导入」后移到「分片」**。补回归 `importRejectsOversizedAndOverlongSources` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importRejectsOversizedAndOverlongSources` 转杀（实测 2–5 failing）。去掉守卫后 7200 字节的稿件被读进内存，报错点从「导入」后移到分片／预算阶段。"
     },
     {
       "id": "R2",
@@ -1446,8 +1446,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "            case \"md\", \"markdown\": formatHint = .markdown\n",
       "replace": "            case \"md\": formatHint = .markdown\n",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`markdown` 是用户在文件选择器里能选到的扩展名（`UTType` 允许 `.markdown`），而现有用例只传 `\"md\"`。去掉后选 `.markdown` 文件报「请选择 TXT 或 Markdown 文本」——**文案说的是支持 Markdown，行为却只认一种扩展名**。与 F5／A3「同一道约束两个副本」同族。补回归 `importAcceptsBothMarkdownExtensions` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importAcceptsBothMarkdownExtensions` 转杀（实测 2–5 failing）。只认 `.md` 时选 `.markdown` 文件报「请选择 TXT 或 Markdown 文本」——文案说支持，行为只认一种。"
     },
     {
       "id": "R3",
@@ -1473,8 +1473,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "        guard referenceSeconds <= limits.maxReferenceSeconds else {\n            throw TeleprompterPreparationError.referenceDurationExceeded\n        }\n",
       "replace": "",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`maxReferenceSeconds` 默认 7200 秒，是「约 2 小时」这条产品承诺的唯一执行点，且它挡在 `build()` 之前。去掉后超长稿件不是被拒，而是被继续分片并分配预算——**容量限制从「导入时拒绝」变成「导入成功但每段都超长」**。补回归 `importRejectsOversizedAndOverlongSources` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `importRejectsOversizedAndOverlongSources` 转杀（实测 2–5 failing）。超过 2 小时的稿件不再被导入拒绝，而是被继续分片并分配预算，容量限制名存实亡。"
     },
     {
       "id": "R6",
@@ -1491,8 +1491,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "                    continuation: start > 0 && !isWhitespace(characters[start - 1]),",
       "replace": "                    continuation: start > 0,",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`continuation` 标记「本段是上一段句子的延续」，它决定阅读时该段是否需要额外换行提示；全部提词器测试里 `TeleprompterSourceUnit.continuation` 从未被断言（三处出现全在 `TeleprompterPreparationPromptsTests` 构造夹具）。去掉后凡不是首段的单元一律标记为续写，**在标点之后起段也会被当成句子中间被截断**。补回归 `unitsAfterWhitespaceAreNotMarkedAsContinuation` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `unitsAfterWhitespaceAreNotMarkedAsContinuation` 转杀（实测 2–5 failing）。凡不是首段的单元一律标记为续写，标点之后起段也被当成句子中间被截断。"
     },
     {
       "id": "R8",
@@ -1500,8 +1500,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "            guard units.count <= maxSourceUnits else {",
       "replace": "            guard units.count < maxSourceUnits else {",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`units.count <= maxSourceUnits` 与 `init` 里的 `max(1, maxSourceUnits)` 都零观察——没有用例把分片数顶到上限。去掉后上限**实际变成 `maxSourceUnits - 1`**（`<` 与 `<=` 的差一），即合法长度的稿件被误拒。补回归 `sourceUnitLimitRejectsOnlyBeyondTheLimit` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `sourceUnitLimitRejectsOnlyBeyondTheLimit` 转杀（实测 2–5 failing）。上限实际变成 `maxSourceUnits - 1`，恰好等于上限的合法稿件被误拒。"
     },
     {
       "id": "R9",
@@ -1510,7 +1510,7 @@
       "find": "        let suffixStart = max(0, end - 4)",
       "replace": "        let suffixStart = max(0, end - 3)",
       "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口，且窄**。`isParagraphBoundary` 的四个 `hasSuffix` 中只有 `\"\\r\\n\\r\\n\"` 是 4 字符，窗口必须正好 4 格才看得到它；改成 3 格后这条规则**永久失效**，而其余三条（`\"\\n\\n\"`／`\"\\r\\r\"`／`\"\\n\\r\"`）都是 2 字符、不受影响。**后果只落在 Windows 换行的稿件上**：CRLF 空行的段落边界不被识别，单元会跨段落。补回归 `sourceUnitsRespectWindowsParagraphBoundaries` 转杀。"
+      "rationale": "存活 = **等价变异（冗余的纵深防御）**，第七十一轮补 CRLF 回归后仍存活，已把「它是什么」查清而不是留着猜：`isParagraphBoundary` 的窗口从 4 格缩到 3 格后，`\"\\r\\n\\r\\n\"` 那条 4 字符规则确实再也匹配不上，**但它本来就没有生效的机会**——同一个 `for end in (start + 1)...hardEnd` 正向循环里，2 字符的 `\"\\n\\r\"` 在 CRLFCRLF 的**前一个位置**（即 `\\r\\n\\r` 之后）就已经命中并 `return`，4 字符那条永远排在后面。按本分支的记账规矩，上层那道按纵深防御记账、不按独立防线记——**这不是一处待修的缺口，删掉它不会改变任何一次分片结果。**"
     },
     {
       "id": "R11",
@@ -1536,8 +1536,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "        let lower = knownPartSeconds * 0.8",
       "replace": "        let lower = knownPartSeconds * 0.5",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`rangeSeconds` 的 0.8／1.25 是唯一的时长区间来源，而全部准备域用例只断言 `pointSeconds`、`knownPartSeconds` 与 `uncertaintyReasons`，**没有一条断言区间端点**。去掉下界系数后界面仍显示区间，但区间被无声收窄 20%——**用户看到的是「估得准」，而不是「估得偏保守」**。补回归 `durationRangeIsDerivedFromTheKnownPart` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `durationRangeIsDerivedFromTheKnownPart` 转杀（实测 2–5 failing）。区间下界被无声收窄 20%，界面仍显示区间，用户看到的是「估得准」而不是「估得偏保守」。"
     },
     {
       "id": "R14",
@@ -1545,8 +1545,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "            max(calibrationFactor, TeleprompterTimingPolicy.minimumCalibrationFactor),",
       "replace": "            calibrationFactor,",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`calibrationFactor` 的下界夹取（0.5）没有任何用例传入非默认值，而 `TeleprompterSession` 是用真实校准系数调它的。去掉下界后用户把语速调到极慢时，估算不被夹住，**`knownPartSeconds` 与 `pointSeconds` 会小到与「这段话根本念不完」同量级**，而界面照常显示为可用估算。补回归 `calibrationFactorIsClampedToThePolicyRange` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `calibrationFactorIsClampedToThePolicyRange` 转杀（实测 2–5 failing）。语速调到极慢时估算不被夹住，`pointSeconds` 小到与「这段话念不完」同量级，界面照常显示为可用估算。"
     },
     {
       "id": "R15",
@@ -1581,8 +1581,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "                weight = max(0.001, estimates[index] ?? 0.001)",
       "replace": "                weight = estimates[index] ?? 0.001",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口**。`max(0.001, …)` 这个权重下限只在「全部估算都恰好是 0 秒」时可观察，而没有任何用例传入全 0 估算。去掉后 `totalWeight` 变成 0，撞上 `totalWeight > 0` 那道守卫抛 `invalidTimingPlan`——**用户看到的是「无法为这份稿件建立时间预算」，而真实原因是稿件没估出时长**。属第 41 条那一族「把多个原因压成一个返回值」。补回归转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `zeroEstimatesStillProduceAPlan` 转杀（实测 2–5 failing）。总权重变 0 后撞上 `totalWeight > 0`，用户看到「无法为这份稿件建立时间预算」，而真实原因是稿件没估出时长。"
     },
     {
       "id": "R19",
@@ -1590,8 +1590,8 @@
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
       "find": "        if hasDigit || hasURLMarker { reasons.insert(\"unresolvedPronunciation\") }",
       "replace": "        if hasDigit { reasons.insert(\"unresolvedPronunciation\") }",
-      "expect": "SURVIVED",
-      "rationale": "存活 = **真缺口，且与另一处真缺陷同源**。`:` 单独出现时也是 URL 标记（`mailto:`、`tel:`、URN、`data:`），去掉后这类文本被判为「可精确估算」。**本轮同时查明它与 `TeleprompterTimingPolicy.countMetrics` 构成一处真缺陷**：后者用正则 `(?:https?://|www\\.)` 判 URL，而本文件用「ASCII 标点里出现 `:` 或 `/`」判——同一段含 `mailto:` 的文本，一条路径判「不确定」、另一条判「可给出点估计」。详见 §2.57。补回归 `aColonAloneIsTreatedAsAURLMarker` 转杀。"
+      "expect": "KILLED",
+      "rationale": "真缺口，第七十一轮补回归 `aColonAloneIsTreatedAsAURLMarker` 转杀（实测 2–5 failing）。`mailto:`／`tel:` 这类地址不含数字也不含斜杠，去掉冒号判断后被判成「可精确估算」。"
     },
     {
       "id": "R20",

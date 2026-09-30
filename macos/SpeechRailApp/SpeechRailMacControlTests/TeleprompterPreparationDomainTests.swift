@@ -438,6 +438,21 @@ struct TeleprompterPreparationDomainTests {
         #expect(estimate.uncertaintyReasons.contains("unresolvedPronunciation"))
     }
 
+    /// `www.` 形式的网址既没有 `:` 也没有 `/`，会话侧的估算曾因此给出**可信点估计**，
+    /// 而设置侧同时说「不确定」。这里钉住的是「会话侧不比设置侧更宽松」这条底线：
+    /// 两个入口对同一段文本必须至少同样谨慎。
+    @Test func wwwURLsAreTreatedAsUncertainOnBothSides() throws {
+        let text = "请看 www.example.com 这个页面"
+        let durationSide = TeleprompterDurationEstimator.estimate(text)
+        let timingSide = TeleprompterTimingPolicy.estimateDuration(
+            metrics: TeleprompterTimingPolicy.countMetrics(in: text),
+            pace: .natural
+        )
+
+        #expect(durationSide.pointSeconds == nil)
+        #expect(timingSide.isUncertain)
+    }
+
     private func makeVersion(id: String, segmentTexts: [String]) -> TeleprompterVersion {
         TeleprompterVersion(
             id: id,
