@@ -241,7 +241,7 @@
       "find": "        guard segmentCount > 0, segmentUTF16Lengths.count >= segmentCount else { return }",
       "replace": "        guard segmentCount > 0 else { return }",
       "expect": "INVALID",
-      "rationale": "**去掉这道守卫不会让断言变红，而是让整个测试进程崩溃**——Swift 对越界索引直接 trap，跑到 456 项时整条 suite 中断，没有失败行。探针拒绝把崩溃记成 kill 是对的，但这道守卫确实被守住：没有它，新加的 `manualMoveWithAStaleLengthTableIsANoOpRatherThanACrash` 会当场把进程带走。声明为 INVALID 而非 KILLED，如实记录这一差别。"
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `manualMoveWithAStaleLengthTableIsANoOpRatherThanACrash`，trap 是 `TeleprompterFollowController.manualMove` 内部按越界下标去读 `segmentUTF16Lengths`。**测试断言的恰恰是安全行为**（长度表只给到第 2 段却要移动到第 3 段时必须原地不动），它的用例名里就写着 `...RatherThanACrash`。也就是说这条变异揭示的是产品缺陷本身，而守卫正是它的修复；测试跟着一起崩是忠实结果，不是测试的毛病。**与 M38／F11／F13 那一类（崩溃在测试里、可通过改断言挽回）相反。**"
     },
     {
       "id": "M27",
@@ -556,7 +556,7 @@
       "find": "                guard annotation.start_unit == next, annotation.end_unit > next,",
       "replace": "                guard annotation.start_unit == next, annotation.end_unit >= next,",
       "expect": "INVALID",
-      "rationale": "去掉非空检查后模型可以返回 `start_unit == end_unit`，紧接着的 `units[end_unit - firstUnit - 1]` 取到 -1，**Swift 越界 trap 让整个测试进程中断**（0 失败、直接崩）。与 M26／M38 同族：守卫的作用是挡 trap，不是一条会变红的断言。"
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `rejectsOmissionsOverlapAndUnknownFields`，崩在 `TeleprompterAnalysisDecoder` 内部。去掉「分组非空」判定后，空分组会被解码器接受，随后按空数组继续切分并越界读 `units`。**测试断言的正是「这份输入必须被拒绝」**，所以它随产品一起崩是忠实结果。"
     },
     {
       "id": "A5",
@@ -565,7 +565,7 @@
       "find": "                      annotation.end_unit <= firstUnit + units.count,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
       "replace": "                      annotation.end_unit <= firstUnit + units.count + 1,\n                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {",
       "expect": "INVALID",
-      "rationale": "同 A4：越界后 `units[...]` 直接 trap，测试进程中断，0 失败。"
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 同一个用例 `rejectsOmissionsOverlapAndUnknownFields`，trap 同样在 `TeleprompterAnalysisDecoder` 内部：把 `end_unit` 的上界放宽一格后，越界的标注被放行，随后按越界下标去取单元。**测试喂的正是「越界必须被拒」的素材**（`end_unit` 从 2 改成 3）。"
     },
     {
       "id": "A6",
@@ -637,7 +637,7 @@
       "find": "            let window = Array(units[start..<min(start + 12, units.count)])",
       "replace": "            let window = Array(units[start..<min(start + 12, units.count + 1)])",
       "expect": "INVALID",
-      "rationale": "最后一个窗口越界，`units[start..<]` 直接 trap，测试进程在 633 项处中断、0 失败。与 A4／A5 同族。"
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `aScriptWithAnOverlongUnitStillAnnotatesEndToEnd`，trap 在 `TeleprompterAnalysisDecoder.decode` 内部。把窗口切片改成与步长不一致（切片取 6 而步长仍是 12）后，`firstUnit` 仍在按 12 前进，而解码器拿到的 `units` 只有一半，于是 `annotation.end_unit <= firstUnit + units.count` 这道上界按错误的长度放行，随后越界读单元。**测试用例名断言的正是「超长单元也要端到端标注成功」**，随产品一起崩是忠实结果。"
     },
     {
       "id": "V2",
@@ -970,7 +970,7 @@
       "find": "        let boundedDelta = min(max(delta, -currentIndex), lastIndex - currentIndex)",
       "replace": "        let boundedDelta = max(delta, -currentIndex)",
       "expect": "INVALID",
-      "rationale": "崩溃型 INVALID。去掉上界夹取后 `lines[currentIndex + boundedDelta]` 越界，Swift trap 让测试进程在 662 项处中断（0 失败）。与 A4／A5／M26 同族：守卫的作用是挡 trap，不是一条会变红的断言。"
+      "rationale": "**第六十九轮回炉定性：这一条属于「崩溃在产品里」的 INVALID，必须继续记 INVALID。**第六十七轮立过一条纪律——「崩溃一旦消失，原本被它掩盖的读数会自己变干净」，因此每一条 INVALID 都必须回炉查清它是不是又一次被测试自己的写法吃掉了真检出。本条查过了，**不是**：串行复跑（`swift test --no-parallel`）下崩在 `reading position resolves and steps across display lines without wrapping`，trap 在 `TeleprompterStagePresentation.positionByMovingLine` 内部：去掉夹取后 `boundedDelta` 可以越过末行，紧接着按该下标读 `lines`。**测试断言的正是「越过末行返回 nil 而不是崩溃」**（`positionByMovingLine(by: 1, from: lastPosition, ...) == nil`），而第六十七轮已把该用例里的计数断言改成了致命的 `#require`，所以这一条**排除了「测试自己越界」的可能**：崩溃点确实在产品函数里。"
     },
     {
       "id": "E6",
