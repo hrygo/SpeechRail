@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.11.0"
+version: "3.12.0"
 date: 2026-10-01
 ---
 
@@ -673,6 +673,7 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 |---|---|---|
 | `input_audio_buffer.append` | 客户端 → 服务端 | 追加 Base64 24 kHz PCM16 |
 | `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final；`event_id` 在对应终态回显 |
+| `speechrail.input_audio_buffer.committed` | 服务端 → 客户端 | 仅应请求返回，关联 commit ID 与累计24 kHz样本水位的输入完成屏障 |
 | `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
 | `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits |
 | `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
@@ -694,8 +695,12 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 旧 revision 或取消后的结果必须丢弃。辅助失败不会把已发出的 final 改成失败。
 
 客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
-`completed` / `failed` 会回显 `commit_event_id`；结束录音时必须等待该关联终态，不能用
-更早的在途终态判定尾句已经完成。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
+`completed` / `failed` 会回显 `commit_event_id`。结束录音时请给 commit 附带
+`"speechrail":{"request_receipt":true}`，等待 `speechrail.input_audio_buffer.committed` 的
+`commit_event_id` 与本次请求匹配，且 `accepted_samples` 等于本连接累计发送的 24 kHz
+PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文本 final；clear 不重置水位。
+缺省/false 保持旧 wire。旧服务无回执时新 macOS 客户端超时关闭而不 clear，不能用旧终态
+替代完成证据。超时/取消/缺少终态的 EOF 不产生回执，详见 Realtime 契约的可选输入完成屏障。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
 再把对应 delta 追加到同一段临时文本。
 
 `session.speechrail.alignment.enabled` 与 `session.speechrail.diarization.enabled` 相互独立：

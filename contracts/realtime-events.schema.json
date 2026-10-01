@@ -81,6 +81,9 @@
     },
     {
       "$ref": "#/$defs/server_error"
+    },
+    {
+      "$ref": "#/$defs/server_commit_receipt"
     }
   ],
   "$defs": {
@@ -477,6 +480,15 @@
         },
         "event_id": {
           "$ref": "#/$defs/identifier"
+        },
+        "speechrail": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "request_receipt": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -1446,6 +1458,32 @@
           "$ref": "#/$defs/error_object"
         }
       }
+    },
+    "server_commit_receipt": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/server_base"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "speechrail.input_audio_buffer.committed"
+            },
+            "commit_event_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "accepted_samples": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "commit_event_id",
+            "accepted_samples"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
     }
   }
 }

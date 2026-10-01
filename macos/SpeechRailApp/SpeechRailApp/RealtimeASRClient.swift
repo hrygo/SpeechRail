@@ -1041,11 +1041,12 @@ public actor RealtimeASRClient {
     private var finishEventID: String?
     private var finishSent = false
     private var clearSent = false
-    /// 自最后一次文本终态以来上行过的 PCM 字节：决定关闭时是否真的还有一个
-    /// 待终结的输入 item（当前 wire 没有 `input_audio_buffer.committed` 回执）。
-    private var appendedBytesSinceTerminal = 0
-    private var closeBarrier = RealtimeCloseBarrier()
+    /// Cumulative 24 kHz samples sent on this connection; clear does not reset it.
+    private var uploadedSampleCount = 0
     private var expectedDrainCommitEventID: String?
+    private var drainReceiptReceived = false
+    private var drainFailure: Failure?
+    private var expectedDrainSamples = 0
     private var diarizationAcknowledged = false
     /// Per-connection item identity, revisions, and bounded auxiliary snapshots.
     private var eventState = RealtimeEventState()
@@ -1170,7 +1171,10 @@ public actor RealtimeASRClient {
             "event_id": UUID().uuidString,
             "audio": pcm.base64EncodedString()
         ]
-        appendedBytesSinceTerminal += pcm.count
+        guard expectedDrainCommitEventID == nil, pcm.count.isMultiple(of: 2) else {
+            throw Failure.transport("音频输入已在收尾，或音频帧不完整。")
+        }
+        uploadedSampleCount += pcm.count / 2
         try await send(payload)
     }
 
@@ -1191,52 +1195,40 @@ public actor RealtimeASRClient {
         clearSent = true
     }
 
-    /// Closes one logical recording without treating a socket close as an ASR
-    /// receipt.
-    ///
-    /// The single current wire has no `input_audio_buffer.committed` or
-    /// `cleared` acknowledgement: an item becomes observable only through its
-    /// transcription terminal, and `clear` is a local discard. When PCM has
-    /// been uploaded since the last terminal the caller declares one input item,
-    /// tags its commit with a fresh `event_id`, and waits for the terminal that
-    /// echoes that id — a terminal still in flight from an earlier server-side
-    /// commit must not be mistaken for this barrier. Otherwise the server has
-    /// already finalized the last turn.
+    /// Wait for the server to retire all preceding input, even when an older
+    /// transcript terminal arrives before this barrier or input is already empty.
     public func drainAndClear(timeout: Duration = .seconds(8)) async throws {
-        let hasOutstandingInput = appendedBytesSinceTerminal > 0
-        var drainCommitEventID: String?
-        if hasOutstandingInput {
-            drainCommitEventID = UUID().uuidString
-            closeBarrier.expectItem()
-            expectedDrainCommitEventID = drainCommitEventID
+        guard expectedDrainCommitEventID == nil else {
+            throw Failure.transport("音频会话正在收尾。")
         }
-        // Scoped to the whole call: a throwing commit must not leave the
-        // correlation id armed for a later, unrelated terminal.
-        defer {
-            if hasOutstandingInput {
-                expectedDrainCommitEventID = nil
-            }
-        }
-        if let drainCommitEventID {
+        let eventID = UUID().uuidString
+        expectedDrainCommitEventID = eventID
+        expectedDrainSamples = uploadedSampleCount
+        drainReceiptReceived = false
+        drainFailure = nil
+        defer { expectedDrainCommitEventID = nil }
+        do {
             try await withStageTimeout(stage: .commit, timeout: timeout) {
-                try await self.commit(eventID: drainCommitEventID)
+                try await self.send([
+                    "type": "input_audio_buffer.commit", "event_id": eventID,
+                    "speechrail": ["request_receipt": true]
+                ])
             }
-        } else {
-            try await withStageTimeout(stage: .commit, timeout: timeout) {
-                try await self.commit()
-            }
-        }
-        if hasOutstandingInput {
             try await waitForDeclaredItems(timeout: timeout)
-        }
-        if diarizationEnabled {
-            try await withStageTimeout(stage: .diarization, timeout: timeout) {
-                try await self.finishDiarization()
+            if diarizationEnabled {
+                try await withStageTimeout(stage: .diarization, timeout: timeout) {
+                    try await self.finishDiarization()
+                }
+                try await waitForDiarizationAcknowledgement(timeout: timeout)
             }
-            try await waitForDiarizationAcknowledgement(timeout: timeout)
-        }
-        try await withStageTimeout(stage: .clear, timeout: timeout) {
-            try await self.clear()
+            try await withStageTimeout(stage: .clear, timeout: timeout) {
+                try await self.clear()
+            }
+        } catch {
+            // An old server or lost receipt must never cause a speculative clear.
+            // Closing bounds the outstanding worker/session lifetime on failure.
+            await finish(code: nil)
+            throw error
         }
     }
 
@@ -1418,7 +1410,7 @@ public actor RealtimeASRClient {
         }
     }
 
-    /// Wait until every declared input item has reached a terminal.
+    /// Wait for the precise command receipt, not an unrelated transcript terminal.
     private func waitForDeclaredItems(timeout: Duration) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
@@ -1427,7 +1419,8 @@ public actor RealtimeASRClient {
             if didClose {
                 throw Failure.closed(closeCode)
             }
-            if closeBarrier.isReadyToClear {
+            if let drainFailure { throw drainFailure }
+            if drainReceiptReceived {
                 return
             }
             guard clock.now < deadline else {
@@ -1552,6 +1545,19 @@ public actor RealtimeASRClient {
                     delta: delta
                 )
             )
+        case "speechrail.input_audio_buffer.committed":
+            guard let expectedDrainCommitEventID,
+                  object["commit_event_id"] as? String == expectedDrainCommitEventID else { break }
+            guard let samples = object["accepted_samples"] as? NSNumber,
+                  CFGetTypeID(samples) != CFBooleanGetTypeID(),
+                  samples.doubleValue.isFinite,
+                  samples.doubleValue >= 0, samples.doubleValue < Double(Int.max),
+                  samples.doubleValue.rounded(.towardZero) == samples.doubleValue,
+                  samples.int64Value == Int64(expectedDrainSamples) else {
+                await rejectProtocolEvent(code: "invalid_commit_receipt")
+                return
+            }
+            drainReceiptReceived = true
         case "speechrail.transcription.hypothesis":
             // 官方 `delta` 是可证明的稳定前缀；hypothesis 是**可改写全文**。两者分开解码，
             // 调用点用整段替换而不是追加（契约 §5.1）。
@@ -1637,10 +1643,6 @@ public actor RealtimeASRClient {
                 if await rejectItemStateLimitIfNeeded() { return }
                 break
             }
-            settleDeclaredItem(
-                failed: false,
-                commitEventID: object["commit_event_id"] as? String
-            )
             await flushExpiredItems()
             await emit(.completed(itemID: itemID, transcript: transcript))
         case "conversation.item.input_audio_transcription.failed":
@@ -1654,10 +1656,6 @@ public actor RealtimeASRClient {
                   )
             else { break }
             let error = object["error"] as? [String: Any]
-            settleDeclaredItem(
-                failed: true,
-                commitEventID: object["commit_event_id"] as? String
-            )
             await flushExpiredItems()
             await emit(
                 .failed(
@@ -1896,6 +1894,10 @@ public actor RealtimeASRClient {
         case "error":
             let error = object["error"] as? [String: Any]
             let errorMessage = error?["message"] as? String ?? "语音服务返回了一个错误"
+            if let expectedDrainCommitEventID,
+               error?["event_id"] as? String == expectedDrainCommitEventID {
+                drainFailure = .transport(errorMessage)
+            }
             if !configurationAcknowledged {
                 configurationFailure = .transport(errorMessage)
             }
@@ -1969,21 +1971,6 @@ public actor RealtimeASRClient {
             message: violation.message
         )
         return true
-    }
-
-    /// 一个转写终态把"自上次终态以来上行过 PCM"的计数归零，并让**已声明**的
-    /// 输入 item 到达终态。服务端自己按静音提交时我们没有声明过 item，
-    /// 那就只清计数、不动屏障。
-    private func settleDeclaredItem(failed: Bool, commitEventID: String?) {
-        appendedBytesSinceTerminal = 0
-        guard closeBarrier.pendingItems > 0 else { return }
-        guard let expectedDrainCommitEventID,
-              commitEventID == expectedDrainCommitEventID else { return }
-        if failed {
-            closeBarrier.failed()
-        } else {
-            closeBarrier.completed()
-        }
     }
 
     /// 把对齐单元与分人区间按采样重叠合起来，交给会话层（§5.2）。

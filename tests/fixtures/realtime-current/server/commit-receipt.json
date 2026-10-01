@@ -1,0 +1,8 @@
+{
+  "type": "speechrail.input_audio_buffer.committed",
+  "event_id": "evt_1",
+  "session_id": "sess_1",
+  "sequence": 1,
+  "commit_event_id": "commit_1",
+  "accepted_samples": 24000
+}

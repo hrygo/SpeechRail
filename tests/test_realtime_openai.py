@@ -1386,7 +1386,8 @@ class _BlockedCommitFactory(FakeStreamingFactory):
         return _BlockedCommitSession
 
 
-def test_openai_disconnect_releases_slot_even_when_commit_blocks() -> None:
+@pytest.mark.parametrize("request_receipt", [False, True])
+def test_openai_disconnect_releases_slot_even_when_commit_blocks(request_receipt: bool) -> None:
     """A client disconnect must release the ASR factory slot promptly even when
     the backend handler is parked inside commit(), instead of leaking it until
     the backend answers (or forever)."""
@@ -1398,7 +1399,8 @@ def test_openai_disconnect_releases_slot_even_when_commit_blocks() -> None:
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
-        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json({"type": "input_audio_buffer.commit", "event_id": "disconnect-barrier",
+                          "speechrail": {"request_receipt": request_receipt}})
 
     assert len(factory.sessions) == 1
     _wait_for_releases(factory.released, 1)
@@ -2680,14 +2682,15 @@ def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
         # must never be mistaken for the caller's own commit barrier.
         assert "commit_event_id" not in completed
 
-        # The second append started a new turn, verify we can commit it
-        assert len(factory.sessions) == 2
+        # A terminal send precedes rollover teardown/new-session creation.
+        # Wait for the tail's own terminal before inspecting the new session.
         socket.send_json(
             {"type": "input_audio_buffer.commit", "event_id": "rollover-tail"}
         )
         completed2 = socket.receive_json()
         assert completed2["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed2["commit_event_id"] == "rollover-tail"
+        assert len(factory.sessions) == 2
 
 
 def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
@@ -3415,3 +3418,192 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
     assert collector.state == "failed"
     assert collector.result is None
     assert len(factory.released) == 1
+
+
+@pytest.mark.parametrize("with_audio", [False, True])
+def test_optional_commit_receipt_covers_empty_duplicate_and_clear_watermark(
+    with_audio: bool,
+) -> None:
+    async def scenario() -> None:
+        factory = FakeStreamingFactory()
+        services = build_app_services(Settings(), AppOverrides(
+            batch_transcriber=FakeTranscriber(), tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=factory,
+        ))
+        events: list[dict[str, object]] = []
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+        session = OpenAIRealtimeSession(services, session_id="receipt-test", send=send)
+        try:
+            if with_audio:
+                await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+            for event_id in ("first", "repeat", "repeat"):
+                await session.handle({"type": "input_audio_buffer.commit", "event_id": event_id,
+                                      "speechrail": {"request_receipt": True}})
+                assert events[-1] == {
+                    "type": "speechrail.input_audio_buffer.committed", "commit_event_id": event_id,
+                    "accepted_samples": len(_FRAME) // 2 if with_audio else 0,
+                }
+            finals = [e for e in events
+                      if e["type"] == "conversation.item.input_audio_transcription.completed"]
+            assert len(finals) == 1
+            await session.handle({"type": "input_audio_buffer.clear"})
+            await session.handle({"type": "input_audio_buffer.commit", "event_id": "after-clear",
+                                  "speechrail": {"request_receipt": True}})
+            assert events[-1]["accepted_samples"] == (len(_FRAME) // 2 if with_audio else 0)
+            assert all(s.closes == 1 for s in factory.sessions)
+        finally:
+            await session.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("requested", [None, False])
+def test_default_and_false_receipt_preserve_legacy_wire(requested: bool | None) -> None:
+    async def scenario() -> None:
+        services = build_app_services(Settings(), AppOverrides(
+            batch_transcriber=FakeTranscriber(), tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=FakeStreamingFactory(),
+        ))
+        events: list[dict[str, object]] = []
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+        session = OpenAIRealtimeSession(services, session_id="legacy-test", send=send)
+        try:
+            event: dict[str, Any] = {"type": "input_audio_buffer.commit", "event_id": "old"}
+            if requested is not None:
+                event["speechrail"] = {"request_receipt": requested}
+            await session.handle(event)
+            await session.handle(event)
+            assert [e["type"] for e in events] == [
+                "conversation.item.input_audio_transcription.completed"
+            ]
+        finally:
+            await session.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel_before_delivery", [False, True])
+def test_commit_receipt_waits_for_terminal_delivery_and_cancel_never_acknowledges(
+    cancel_before_delivery: bool,
+) -> None:
+    async def scenario() -> None:
+        factory = FakeStreamingFactory()
+        services = build_app_services(Settings(), AppOverrides(
+            batch_transcriber=FakeTranscriber(), tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=factory,
+        ))
+        events: list[dict[str, object]] = []
+        terminal_send_started = asyncio.Event()
+        deliver_terminal = asyncio.Event()
+        async def send(event: dict[str, object]) -> None:
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                terminal_send_started.set()
+                await deliver_terminal.wait()
+            events.append(event)
+        session = OpenAIRealtimeSession(services, session_id="delivery-test", send=send)
+        try:
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+            commit = asyncio.create_task(session.handle({
+                "type": "input_audio_buffer.commit", "event_id": "barrier",
+                "speechrail": {"request_receipt": True},
+            }))
+            await asyncio.wait_for(terminal_send_started.wait(), 1)
+            assert not commit.done()
+            assert not any(e["type"] == "speechrail.input_audio_buffer.committed" for e in events)
+            if cancel_before_delivery:
+                commit.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(commit, 1)
+                assert not any(
+                    e["type"] == "speechrail.input_audio_buffer.committed" for e in events
+                )
+            else:
+                deliver_terminal.set()
+                await asyncio.wait_for(commit, 1)
+                assert [e["type"] for e in events][-2:] == [
+                    "conversation.item.input_audio_transcription.completed",
+                    "speechrail.input_audio_buffer.committed",
+                ]
+        finally:
+            deliver_terminal.set()
+            await session.close()
+        assert all(s.closes == 1 for s in factory.sessions)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("extension", [None, True, {"request_receipt": 1}, {"unknown": True}])
+def test_commit_receipt_rejects_invalid_extension(extension: object) -> None:
+    from speechrail.compatibility.openai_realtime import parse_commit_receipt_request
+    with pytest.raises(RealtimeAdapterError):
+        parse_commit_receipt_request({"event_id": "id", "speechrail": extension})
+
+
+def test_commit_receipt_requires_correlation_id() -> None:
+    from speechrail.compatibility.openai_realtime import parse_commit_receipt_request
+    with pytest.raises(RealtimeAdapterError):
+        parse_commit_receipt_request({"speechrail": {"request_receipt": True}})
+
+
+def test_auto_rollover_terminal_precedes_tail_commit_receipt_on_real_route() -> None:
+    client, factory = _client(settings_kwargs={
+        "max_realtime_buffer_bytes": 3500, "max_realtime_frame_bytes": 8192,
+    })
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        for _ in range(2):
+            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 3000)})
+        old = socket.receive_json()
+        assert old["type"] == "conversation.item.input_audio_transcription.completed"
+        assert "commit_event_id" not in old
+        socket.send_json({"type": "input_audio_buffer.commit", "event_id": "tail-barrier",
+                          "speechrail": {"request_receipt": True}})
+        tail = socket.receive_json()
+        receipt = socket.receive_json()
+        assert tail["type"] == "conversation.item.input_audio_transcription.completed"
+        assert tail["commit_event_id"] == "tail-barrier"
+        assert receipt["type"] == "speechrail.input_audio_buffer.committed"
+        assert receipt["commit_event_id"] == "tail-barrier"
+        assert receipt["accepted_samples"] == 3000
+        assert receipt["sequence"] > tail["sequence"] > old["sequence"]
+        socket.send_json({"type": "input_audio_buffer.commit", "event_id": "repeat-barrier",
+                          "speechrail": {"request_receipt": True}})
+        repeat = socket.receive_json()
+        assert repeat["type"] == "speechrail.input_audio_buffer.committed"
+        assert repeat["accepted_samples"] == 3000
+    assert len(factory.sessions) == 2
+    assert all(s.closes == 1 for s in factory.sessions)
+
+
+@pytest.mark.parametrize("failure", ["missing_terminal", "timeout"])
+def test_unretired_input_never_gets_a_receipt_on_first_or_repeated_commit(failure: str) -> None:
+    async def scenario() -> None:
+        factory = FakeStreamingFactory()
+        services = build_app_services(Settings(), AppOverrides(
+            batch_transcriber=FakeTranscriber(), tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=factory,
+        ))
+        events: list[dict[str, object]] = []
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+        session = OpenAIRealtimeSession(services, session_id="no-terminal", send=send)
+        try:
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+            async def bad_commit(want_segments: bool = False) -> None:
+                if failure == "timeout":
+                    raise TimeoutError
+                await factory.sessions[0].events_queue.put(None)
+            factory.sessions[0].commit = bad_commit  # type: ignore[method-assign]
+            for event_id in ("first", "retry"):
+                with pytest.raises(RealtimeAdapterError):
+                    await session.handle({"type": "input_audio_buffer.commit", "event_id": event_id,
+                                          "speechrail": {"request_receipt": True}})
+            assert not any(e["type"] == "speechrail.input_audio_buffer.committed" for e in events)
+            assert factory.sessions[0].closes == 1
+            # An explicit discard is a new input generation, not a silent retry.
+            await session.handle({"type": "input_audio_buffer.clear"})
+            await session.handle({"type": "input_audio_buffer.commit", "event_id": "after-clear",
+                                  "speechrail": {"request_receipt": True}})
+            assert events[-1]["type"] == "speechrail.input_audio_buffer.committed"
+        finally:
+            await session.close()
+    asyncio.run(scenario())

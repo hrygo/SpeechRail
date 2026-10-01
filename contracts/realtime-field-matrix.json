@@ -265,6 +265,22 @@
       "adapter": "stable error envelope",
       "positive_case": "server_error",
       "reject_case": "missing_error_request_id"
+    },
+    {
+      "path": "speechrail.request_receipt",
+      "validator": "schema:client_commit.speechrail.request_receipt",
+      "task_request": "TaskRequest.commit_barrier",
+      "adapter": "optional input retirement receipt",
+      "positive_case": "client_commit_receipt",
+      "reject_case": null
+    },
+    {
+      "path": "accepted_samples",
+      "validator": "schema:server_commit_receipt.accepted_samples",
+      "task_request": "TaskRequest.commit_barrier",
+      "adapter": "optional input retirement receipt",
+      "positive_case": "server_commit_receipt",
+      "reject_case": null
     }
   ]
 }

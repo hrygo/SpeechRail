@@ -86,15 +86,63 @@ npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
 git diff --check
 ```
 
+## Second batch: acknowledged tail-input barrier
+
+The eleventh corrected root cause is a confirmed tail-drain race: append A and
+B, consume A's old completed event, then call `drainAndClear`. The original
+`settleDeclaredItem` resets the input counter although B remains unconfirmed,
+allowing clear to discard B. A fake-transport XCTest fails deterministically
+against the original implementation.
+
+An additive, opt-in commit extension now requests an input receipt using
+`speechrail.request_receipt: true` and an `event_id`. The server sends
+`speechrail.input_audio_buffer.committed`, with the matching `commit_event_id`
+and cumulative `accepted_samples` in 24 kHz wire samples, only after previous
+input and its actual transcript terminal send complete under the commit lock.
+Empty, repeated and already automatically committed input also receive a
+per-command receipt without inventing another transcript terminal. Default
+commits and explicit false retain the existing wire behavior for older clients.
+
+The Mac client waits for its matching receipt and exact cumulative sample
+watermark before clearing. Unrelated transcript terminals cannot reset this
+barrier. Missing receipts from older servers, timeout, cancellation, correlated
+command errors, and malformed or incorrect watermarks close the transport
+without clearing. Older servers therefore fail closed within a bounded timeout;
+this does not claim successful drain compatibility with servers lacking receipts.
+
+Independent read-only review caught two additional implementation boundaries:
+ASR EOF without a sent transcript terminal, and a repeated commit after a failed
+or timed-out prior commit. Both now fail without a receipt; receipt readiness is
+recorded only after successful retirement. Regression tests cover both first
+attempt and retry. The reviewer rechecked the corrections and reported no new
+high-priority regression.
+
+Tests cover old-A/new-B ordering, empty and duplicate commands, automatic commit,
+wire sample watermarks, cancellation and disconnect, missing terminals and retry,
+wrong IDs, correlated errors, and invalid boolean/string/fractional/oversized
+watermarks. Protocol schema, field matrix, shared fixtures and both API documents
+are updated. One pre-existing rollover test now checks session count after the
+second correlated terminal instead of racing construction after the first send.
+
+### Final combined verification
+
+The final code state, including both batches, passed all full gates on this Mac:
+
+- Python: **2855 passed**, coverage **82.17%**, 76.01 seconds; 708 warnings.
+- Swift Package: **429 XCTest + 395 Swift Testing passed**, zero failures.
+- Ruff: passed. Mypy: passed, 155 files (existing unused configuration note).
+- Version: 3.5.0. OpenAPI: 39 paths / 47 operations. MCP: 18 tools / 3 resources.
+- Redocly 2.52.1, Xcode project plist and diff whitespace checks: passed.
+
+Full Python uses the same temporary-home isolation described above and runs all
+tests without exclusions. Final logs are `batch2-final-python.log`,
+`batch2-final-swift.log` and `batch2-openapi-lint.log` in the parent audit task
+directory. The independent review's focused slice was not a full coverage gate;
+these combined full-suite results are the coverage evidence. Documentation-only
+completion follows the final code gate; no code changes follow it.
+
 ## Remaining investigations
 
-- **Confirmed tail-drain race**, now assigned to a separate follow-up batch:
-  append A and B, consume A's old completed event, then call drainAndClear.
-  `settleDeclaredItem` resets the counter even though B is unconfirmed, so clear
-  is sent before B's correlated terminal. A local fake-transport XCTest failed
-  deterministically. The correction must distinguish an acknowledged input
-  barrier from individual transcript terminal events, including empty/repeated
-  commits. Never fix this by waiting forever for a possibly nonexistent item.
 - **Confirmed numeric semantic weakness**: current quality comparison scores
   `温度22.5℃` versus `温度-22.5℃` as 1.0. Local `3998ab1e` fixes notation false
   rejects, not this issue. A numeric-token/semantic policy needs separate design;

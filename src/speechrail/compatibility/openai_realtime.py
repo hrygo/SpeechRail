@@ -693,6 +693,19 @@ def parse_commit_request(event: dict[str, Any]) -> str | None:
     return event_id
 
 
+def parse_commit_receipt_request(event: dict[str, Any]) -> bool:
+    """Optional SpeechRail barrier, without changing the default OpenAI subset."""
+    extension = event.get("speechrail", {})
+    if not isinstance(extension, dict) or set(extension) - {"request_receipt"}:
+        raise RealtimeAdapterError("invalid_argument", "invalid commit speechrail extension")
+    requested = extension.get("request_receipt", False)
+    if not isinstance(requested, bool):
+        raise RealtimeAdapterError("invalid_argument", "request_receipt must be a boolean")
+    if requested and parse_commit_request(event) is None:
+        raise RealtimeAdapterError("invalid_argument", "commit receipt requires event_id")
+    return requested
+
+
 def transcription_failed(
     *, item_id: str, code: str, message: str, commit_event_id: str | None = None
 ) -> dict[str, object]:

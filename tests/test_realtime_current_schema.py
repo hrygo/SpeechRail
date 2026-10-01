@@ -124,3 +124,18 @@ def test_removed_event_types_are_absent_from_schema(removed_event: str) -> None:
     encoded = json.dumps(schema, sort_keys=True)
     needle = '"const": "{removed_event}"'
     assert needle not in encoded
+
+
+def test_optional_commit_receipt_wire_schema() -> None:
+    validator = Draft202012Validator(_load(SCHEMA_PATH))
+    for requested in (True, False):
+        validator.validate({"type": "input_audio_buffer.commit", "event_id": "barrier",
+                            "speechrail": {"request_receipt": requested}})
+    receipt = {
+        "type": "speechrail.input_audio_buffer.committed", "event_id": "evt_1",
+        "session_id": "sess_1", "sequence": 1,
+        "commit_event_id": "barrier", "accepted_samples": 24000,
+    }
+    validator.validate(receipt)
+    for invalid in (-1, True, "24000", 1.5):
+        assert list(validator.iter_errors({**receipt, "accepted_samples": invalid}))
