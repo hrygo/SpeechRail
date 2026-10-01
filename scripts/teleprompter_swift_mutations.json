@@ -919,15 +919,6 @@
       "rationale": "生产不可达。`ClosedRange` 不允许下界大于上界：进程内构造会 trap（**实测 `ClosedRange(uncheckedBounds:)` 在本工具链下同样 trap**），Codable 解码也会先崩。这道守卫永不触发，属纵深防御。"
     },
     {
-      "id": "D16",
-      "note": "选区不再要求是来源单元的子集",
-      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
-      "find": "              selectedIDs.isSubset(of: sourceUnitIDs),",
-      "replace": "              true,",
-      "expect": "KILLED",
-      "rationale": "被 aSelectionNamingASourceUnitThatDoesNotExistIsRejected 杀掉。"
-    },
-    {
       "id": "D17",
       "note": "documentID 的斜杠守卫被摘掉（路径穿越）",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterV2Store.swift",
@@ -1577,12 +1568,12 @@
     },
     {
       "id": "R17",
-      "note": "预算余数给到第一个选中段",
+      "note": "预算余数给到第一个段而不是最后一段",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationDomain.swift",
-      "find": "            } else if index == selectedIndexes.last {",
-      "replace": "            } else if index == selectedIndexes.first {",
+      "find": "            let budget = index == rawWeights.count - 1",
+      "replace": "            let budget = index == 0",
       "expect": "KILLED",
-      "rationale": "实测 KILLED（59 failing，是本组杀伤最大的一条），**假设被推翻**：我以为两条预算用例只断言「合计等于 `budgetSeconds`」，余数给首段还是末段不改变这两项。实际下游有 59 条用例断言**逐段的预算值**（跟随分配、剩余时间、段落配速），余数归属一改这些值全部偏移。**这是本分支第 84 条／A3／D7／E16 那一族「断言与被保护的分支无关」的镜像**：那次是断言没咬住被摘掉的守卫，这次是我以为断言没咬住、实际咬得很紧。**两种误判都源于没数清断言覆盖面。**"
+      "rationale": "实测 KILLED（59 failing）。余数归属一改，下游断言**逐段预算值**的用例（跟随分配、剩余时间、段落配速）全部偏移。锚点在提词器瘦身重写预算分配后已更新为现形态：`let budget = index == rawWeights.count - 1` 承接余数。"
     },
     {
       "id": "R18",
