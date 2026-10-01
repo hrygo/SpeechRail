@@ -28,6 +28,7 @@ from speechrail.domain.tts import (
 from speechrail.domain.voice_quality import (
     POLICY_VERSION,
     VOICE_QUALITY_V1_ZH_PROBES,
+    VoiceQualityProbeScore,
     VoiceQualityReference,
     VoiceQualityReport,
     VoiceQualityStatus,
@@ -252,6 +253,73 @@ def test_transcript_match_normalizes_itn_punctuation_and_case() -> None:
     assert transcript_match_score("温度是22.5℃", "温度是225℃") < 1.0
 
 
+def test_transcript_match_equates_celsius_symbol_with_spoken_unit() -> None:
+    # A TTS reads `℃` aloud, so a word-for-word synthesis comes back from the
+    # ASR as 摄氏度. Notation alone must not cost the probe enough to sink the
+    # gate: `22.5℃` previously capped at 0.9091, under the 0.92 the output gate
+    # needs for `pass`, so no voice could ever reach `production_ready`.
+    assert (
+        transcript_match_score("温度是22.5℃", "温度是二十二点五摄氏度")
+        == pytest.approx(1.0)
+    )
+    assert (
+        transcript_match_score("温度是22.5℃", "温度是22.5℃") == pytest.approx(1.0)
+    )
+    assert normalize_transcript_for_match("二十二点五摄氏度") == "22.5°c"
+    # The fold is a notation equivalence, not a licence to ignore a wrong unit.
+    assert transcript_match_score("温度是22.5℃", "温度是二十二度") < 0.98
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "asr_text"),
+    [
+        ("self_intro", "请进行自我介绍。"),
+        ("short_sentence", "今天天气真好，我们开个会吧。"),
+        (
+            "long_paragraph",
+            "请先简要介绍你的工作经历和目前关注的项目，并告诉我你今天希望达成的目标，"
+            "以及在执行过程中你会采用哪些优先级策略。",
+        ),
+        (
+            "question_prompt",
+            "你认为人工智能能否真正提升我们的工作效率？为什么？",
+        ),
+        (
+            "numbers_punct",
+            "今天是2026年9月9日，温度是22.5摄氏度，请你告诉我三、六、九的顺序。",
+        ),
+        (
+            "pause_markers",
+            "我们先来先说第一点，然后我们再讨论第二点。",
+        ),
+    ],
+)
+def test_every_fixed_probe_survives_a_real_asr_round_trip(
+    probe_id: str, asr_text: str
+) -> None:
+    # Regression guard for issue #126. `asr_text` is what the real local ASR
+    # actually returned for each probe (voice wom-d2888cc51194ee2e, 3.4.2
+    # runtime), not a hand-written idealisation -- an earlier version of this
+    # test used invented text and so cleared a probe the real ASR never passes.
+    #
+    # A probe whose own text cannot survive the round trip caps the `min()`
+    # aggregate for every voice, so no voice can pass however good it is. Both
+    # offenders were notation the TTS never voices: `℃` comes back as 摄氏度,
+    # and `……` is not pronounced at all, so the ASR drops it entirely.
+    probe = next(p for p in VOICE_QUALITY_V1_ZH_PROBES if p["id"] == probe_id)
+    assert transcript_match_score(probe["text"], asr_text) == pytest.approx(1.0)
+
+
+def test_transcript_match_drops_ellipsis_but_keeps_decimals() -> None:
+    # `……` must not score as six missing characters; `22.5` must not lose its
+    # separator. Both are single dots vs a run of them.
+    assert normalize_transcript_for_match("我们先来……然后") == "我们先来然后"
+    assert normalize_transcript_for_match("温度是22.5℃") == "温度是22.5°c"
+    assert normalize_transcript_for_match("wait... what") == "waitwhat"
+    # A genuinely dropped phrase still costs proportionally.
+    assert transcript_match_score("我们先来——先说第一点", "我们先来说第一点") < 1.0
+
+
 def test_transcript_match_rejects_unrelated_text() -> None:
     assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
 
@@ -319,6 +387,7 @@ def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
         "deterministic",
         "transcript_match",
         "intelligibility_evaluated",
+        "probe_scores",
     }
     assert data["reference"]["transcript_match"] == 0.998
 
@@ -343,6 +412,49 @@ def test_report_from_dict_round_trips_and_ignores_unknown_fields() -> None:
     assert restored.synthesis == report.synthesis
     # unknown failure codes are filtered out by the fixed enum
     assert restored.failure_codes == report.failure_codes
+
+
+def test_probe_scores_round_trip_and_default_to_empty() -> None:
+    # The aggregate `transcript_match` is a `min()`, so the per-probe breakdown
+    # is the only way to attribute a rejection to one probe. It must survive
+    # serialization and must stay optional for reports built without it.
+    assert VoiceQualitySynthesis(
+        probe_count=0,
+        successful_probe_count=0,
+        active_rms_dbfs=0.0,
+        peak_dbfs=0.0,
+        chunk_jump_p95_db=0.0,
+        clipping_ratio=0.0,
+        deterministic=False,
+    ).to_dict()["probe_scores"] == []
+
+    synthesis = VoiceQualitySynthesis(
+        probe_count=6,
+        successful_probe_count=6,
+        active_rms_dbfs=-20.8,
+        peak_dbfs=-3.2,
+        chunk_jump_p95_db=4.6,
+        clipping_ratio=0.0,
+        deterministic=True,
+        transcript_match=0.9091,
+        intelligibility_evaluated=True,
+        probe_scores=[
+            VoiceQualityProbeScore(probe_id="numbers_punct", transcript_match=0.9091),
+            VoiceQualityProbeScore(probe_id="short_sentence", transcript_match=1.0),
+        ],
+    )
+
+    payload = synthesis.to_dict()
+    assert payload["probe_scores"] == [
+        {"probe_id": "numbers_punct", "transcript_match": 0.9091},
+        {"probe_id": "short_sentence", "transcript_match": 1.0},
+    ]
+    assert VoiceQualitySynthesis.from_dict(payload) == synthesis
+
+    # A payload written before `probe_scores` existed must still load.
+    legacy = dict(payload)
+    del legacy["probe_scores"]
+    assert VoiceQualitySynthesis.from_dict(legacy).probe_scores == []
 
 
 def test_report_from_dict_round_trips_synthesis_failure_codes() -> None:

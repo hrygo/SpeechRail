@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 3.4.2
+  version: 3.5.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -52,7 +52,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 3.4.2
+                version: 3.5.0
                 backend: asr-1.7b-q8
                 profile: quality/quality
                 asr_ready: true
@@ -3588,6 +3588,7 @@ components:
         - deterministic
         - transcript_match
         - intelligibility_evaluated
+        - probe_scores
       properties:
         probe_count:
           type: integer
@@ -3615,6 +3616,25 @@ components:
         intelligibility_evaluated:
           type: boolean
           description: Whether independent ASR intelligibility evidence was successfully collected.
+        probe_scores:
+          type: array
+          description: >-
+            Per-probe normalized ASR transcript match, in fixed probe-set order.
+            Empty when intelligibility was not evaluated. `transcript_match` is
+            the minimum of these values, so this breakdown is what attributes an
+            aggregate score to a specific probe.
+          items:
+            type: object
+            required:
+              - probe_id
+              - transcript_match
+            properties:
+              probe_id:
+                type: string
+              transcript_match:
+                type: number
+                minimum: 0
+                maximum: 1
     VoiceQualityReport:
       type: object
       required:

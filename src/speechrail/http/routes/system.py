@@ -796,6 +796,7 @@ def _synthesis_report(
     deterministic: bool,
     transcript_match: float | None = None,
     intelligibility_evaluated: bool = False,
+    probe_scores: list[vq.VoiceQualityProbeScore] | None = None,
 ) -> vq.VoiceQualitySynthesis:
     if not pcm or ok == 0:
         return vq.VoiceQualitySynthesis(
@@ -808,6 +809,7 @@ def _synthesis_report(
             deterministic=False,
             transcript_match=transcript_match,
             intelligibility_evaluated=intelligibility_evaluated,
+            probe_scores=list(probe_scores or ()),
         )
     metrics = compute_output_quality_metrics(
         pcm,
@@ -826,6 +828,7 @@ def _synthesis_report(
         deterministic=cast(bool, metrics["deterministic"]),
         transcript_match=transcript_match,
         intelligibility_evaluated=intelligibility_evaluated,
+        probe_scores=list(probe_scores or ()),
     )
 
 
@@ -868,8 +871,13 @@ async def _evaluate_probe_intelligibility(
     *,
     request_id: str,
     expires_at: float,
-) -> float:
-    """Transcribe one valid sample per fixed probe after the TTS phase completes."""
+) -> tuple[float, list[vq.VoiceQualityProbeScore]]:
+    """Transcribe one valid sample per fixed probe after the TTS phase completes.
+
+    Returns the aggregate the gate grades on together with each probe's own
+    score. The aggregate is a ``min()`` over the probe set, so without the
+    per-probe breakdown a rejection cannot be attributed to a specific probe.
+    """
     scores: list[float] = []
     async with services.governor.reserve(
         WorkClass.BATCH_ASR,
@@ -895,7 +903,11 @@ async def _evaluate_probe_intelligibility(
                 deadline=remaining,
             )
             scores.append(vq.transcript_match_score(probe["text"], result.text))
-    return min(scores) if scores else 0.0
+    probe_scores = [
+        vq.VoiceQualityProbeScore(probe_id=probe["id"], transcript_match=score)
+        for probe, score in zip(vq.VOICE_QUALITY_V1_ZH_PROBES, scores, strict=True)
+    ]
+    return (min(scores) if scores else 0.0), probe_scores
 
 
 def create_system_router(services: AppServices) -> APIRouter:
@@ -2327,6 +2339,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
 
         transcript_match: float | None = None
+        probe_scores: list[vq.VoiceQualityProbeScore] = []
         intelligibility_evaluated = False
         intelligibility_unavailable = False
         if ok == attempted and not probe_failure_codes:
@@ -2344,12 +2357,14 @@ def create_system_router(services: AppServices) -> APIRouter:
                             synthesizer,
                             expires_at=expires_at,
                         )
-                    transcript_match = await _evaluate_probe_intelligibility(
-                        services,
-                        transcriber,
-                        representative_pcm,
-                        request_id=request_id,
-                        expires_at=expires_at,
+                    transcript_match, probe_scores = (
+                        await _evaluate_probe_intelligibility(
+                            services,
+                            transcriber,
+                            representative_pcm,
+                            request_id=request_id,
+                            expires_at=expires_at,
+                        )
                     )
                     intelligibility_evaluated = True
                 except (GovernorQueueFullError, QueueFullError):
@@ -2391,6 +2406,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 deterministic=deterministic,
                 transcript_match=transcript_match,
                 intelligibility_evaluated=intelligibility_evaluated,
+                probe_scores=probe_scores,
             )
         except (ValueError, TypeError):
             synthesis = vq.VoiceQualitySynthesis(
@@ -2403,6 +2419,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 deterministic=False,
                 transcript_match=transcript_match,
                 intelligibility_evaluated=intelligibility_evaluated,
+                probe_scores=probe_scores,
             )
             output_invalid = True
 

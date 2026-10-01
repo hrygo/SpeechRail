@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.10.0"
-date: 2026-09-30
+version: "3.11.0"
+date: 2026-10-01
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -575,10 +575,12 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `run_id` | 本次质量运行的唯一标识 |
 | `tested_at` | 测试时间（ISO 8601 UTC） |
 | `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
-| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`） |
+| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`、`probe_scores`） |
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
 **字段语义**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及未执行质量评估的记录可能不携带该字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
+
+`synthesis.transcript_match` 是全部固定 probe 分数的 `min()`，单看聚合值无法区分“整体不可懂”和“某条 probe 文本不适配”。`synthesis.probe_scores` 按固定 probe 集顺序逐条给出 `probe_id` 与该条 `transcript_match`，未评估可懂度时为空数组；排障时应先看它定位到具体 probe。
 
 #### 5.7.5 克隆幂等状态查询 (`GET /v1/speechrail/voices/clone/idempotency`)
 

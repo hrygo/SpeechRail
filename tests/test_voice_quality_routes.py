@@ -996,6 +996,13 @@ def test_s5_quality_runs_ok_and_bounded(
     assert body["synthesis"]["deterministic"] is True
     assert body["synthesis"]["intelligibility_evaluated"] is True
     assert body["synthesis"]["transcript_match"] == pytest.approx(1.0)
+    assert [score["probe_id"] for score in body["synthesis"]["probe_scores"]] == [
+        probe["id"] for probe in vq.VOICE_QUALITY_V1_ZH_PROBES
+    ]
+    assert all(
+        score["transcript_match"] == pytest.approx(1.0)
+        for score in body["synthesis"]["probe_scores"]
+    )
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
     assert {request.speed for request in synth.requests} == {1.0}
@@ -1100,6 +1107,43 @@ def test_quality_runs_rejects_transcript_mismatch(
     assert "transcript_mismatch" in body["failure_codes"]
 
 
+def test_quality_runs_attributes_a_rejection_to_a_single_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `transcript_match` aggregates the probe set with `min()`, so on its own it
+    # cannot tell "the voice is unintelligible" from "one probe's text does not
+    # survive the round trip" -- the ambiguity behind issue #126. The report has
+    # to name the probe.
+    class OneBadProbeTranscriber(ProbeEchoTranscriber):
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            result = await super().transcribe(request)
+            if request.request_id.endswith(":numbers_punct"):
+                return result.model_copy(update={"text": "今天天气不错适合出门散步"})
+            return result
+
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=OneBadProbeTranscriber(),
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+
+    assert resp.status_code == 200
+    synthesis = resp.json()["synthesis"]
+    scores = {score["probe_id"]: score["transcript_match"] for score in synthesis["probe_scores"]}
+    assert synthesis["transcript_match"] == pytest.approx(min(scores.values()))
+    assert scores["numbers_punct"] < 0.8
+    assert all(
+        scores[probe["id"]] == pytest.approx(1.0)
+        for probe in vq.VOICE_QUALITY_V1_ZH_PROBES
+        if probe["id"] != "numbers_punct"
+    )
+
+
 def test_quality_runs_is_unevaluated_without_asr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1119,6 +1163,7 @@ def test_quality_runs_is_unevaluated_without_asr(
     assert body["status"] == "unevaluated"
     assert body["synthesis"]["intelligibility_evaluated"] is False
     assert body["synthesis"]["transcript_match"] is None
+    assert body["synthesis"]["probe_scores"] == []
     assert body["failure_codes"] == ["transcription_unavailable"]
 
 
