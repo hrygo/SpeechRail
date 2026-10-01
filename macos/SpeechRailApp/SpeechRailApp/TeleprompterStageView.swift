@@ -67,6 +67,7 @@ public struct TeleprompterStageView: View {
             .background { stageBackground }
             .overlay { stageBorder }
             .clipShape(SpeechRailDesignTokens.Corner.containerShape)
+            .scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)
             .animation(
                 reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
                 value: session.currentSegmentIndex
@@ -86,6 +87,20 @@ public struct TeleprompterStageView: View {
 
     private var stageWithPresentation: some View {
         stageBase
+            .contentShape(Rectangle())
+            .onTapGesture {
+                readingAreaFocused = true
+                revealControls(immediate: false)
+            }
+            .onHover { isInside in
+                pointerInsideControls = isInside
+                interactionState.setPointerInside(isInside)
+                if isInside {
+                    revealControls(immediate: false)
+                } else {
+                    scheduleControlsHide()
+                }
+            }
             .focusable()
             .focused($readingAreaFocused)
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -245,7 +260,7 @@ public struct TeleprompterStageView: View {
 
     private var acceptsReadingKeyCommands: Bool {
         TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
-            readingAreaFocused: readingAreaFocused,
+            readingAreaFocused: true,
             controlFocusInside: focusedControl != nil,
             menuOrPopoverPresented: isAppearancePopoverPresented
         )
@@ -521,7 +536,7 @@ public struct TeleprompterStageView: View {
         GeometryReader { geometry in
             let segments = session.activeVersion?.segments ?? []
             let contentWidth = TeleprompterStageLayoutPolicy.contentLayoutWidth(
-                windowContentWidth: geometry.size.width - 2 * SpeechRailDesignTokens.Spacing.md,
+                windowContentWidth: geometry.size.width,
                 requestedContentWidth: settings.contentWidth
             )
             let request = LineLayoutRequest(
@@ -707,9 +722,9 @@ public struct TeleprompterStageView: View {
         if index == currentLineIndex {
             1
         } else if index < currentLineIndex {
-            0.40
+            SpeechRailDesignTokens.Teleprompter.stagePastLineOpacity
         } else {
-            SpeechRailDesignTokens.Teleprompter.stageNextSegmentOpacity
+            SpeechRailDesignTokens.Teleprompter.stageNextLineOpacity
         }
     }
 
@@ -969,6 +984,8 @@ public struct TeleprompterStageView: View {
                     .keyboardShortcut("[", modifiers: [.command])
                 Button("") { settings.increaseOpacity() }
                     .keyboardShortcut("]", modifiers: [.command])
+                Button("") { settings.isMirrored.toggle() }
+                    .keyboardShortcut("m", modifiers: [.command, .option])
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -1136,6 +1153,14 @@ private struct TeleprompterStageAppearancePopover: View {
                     set: { settings.showClockAndProgress = $0 }
                 )
             )
+            Toggle(
+                "水平镜像翻转 (分光镜)",
+                isOn: Binding(
+                    get: { settings.isMirrored },
+                    set: { settings.isMirrored = $0 }
+                )
+            )
+            .help("水平翻转文本显示，供物理分光镜/专业提词玻璃反射阅读（快捷键 ⌘⌥M）")
             Toggle("查阅全稿", isOn: $isBrowsingAll)
         }
         .padding(SpeechRailDesignTokens.Spacing.md)

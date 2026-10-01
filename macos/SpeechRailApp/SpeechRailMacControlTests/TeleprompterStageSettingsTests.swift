@@ -80,6 +80,25 @@ struct TeleprompterStageSettingsTests {
         #expect(reloaded.showClockAndProgress)
     }
 
+    @Test("stage mirror preference defaults off and persists independently")
+    func stageMirrorPreferencePersists() throws {
+        let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TeleprompterStageSettings(defaults: defaults)
+        #expect(!settings.isMirrored)
+
+        settings.isMirrored = true
+        #expect(defaults.bool(forKey: "speechrail.teleprompter.stage.isMirrored"))
+
+        let reloaded = TeleprompterStageSettings(defaults: defaults)
+        #expect(reloaded.isMirrored)
+
+        reloaded.isMirrored = false
+        #expect(!defaults.bool(forKey: "speechrail.teleprompter.stage.isMirrored"))
+    }
+
     @Test("background transparency increases as the stage becomes more see-through")
     func backgroundTransparencyUsesUserFacingDirection() throws {
         let suiteName = "SpeechRail.TeleprompterStageSettingsTests.\(UUID().uuidString)"

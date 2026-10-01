@@ -14,7 +14,7 @@ struct TeleprompterPreparationPromptsTests {
         let prompt = try TeleprompterPreparationPromptBuilder.map(
             targets: targets, formatHint: .plaintext, globalTargetSeconds: 600,
             localBudgetSeconds: 10, weightMode: .estimatedDuration, pace: .natural,
-            operation: .tighten, currentBlocks: [.init(startUnit: 24, endUnit: 26, text: "正文。正文。")],
+            currentBlocks: [.init(startUnit: 24, endUnit: 26, text: "正文。正文。")],
             readOnlyContext: .init(before: [.init(id: 23, rawText: "前文")],
                                    after: [.init(id: 26, rawText: "后文")])
         )
@@ -25,7 +25,7 @@ struct TeleprompterPreparationPromptsTests {
         #expect(input.readOnlyContext.before[0].id == -1)
         #expect(input.readOnlyContext.after[0].id == 2)
         let output = try TeleprompterMapDecoder().decode(
-            #"{"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":2,"mode":"speak","text":"正文。正文。","issues":[]}]}"#,
+            #"{"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":2,"disposition":"speak","text":"正文。正文。"}]}"#,
             targets: targets, maxGroupUnits: 8
         )
         #expect(output.blocks[0].startUnit == 24)
@@ -145,23 +145,6 @@ struct TeleprompterPreparationPromptsTests {
         #expect((TeleprompterPreparationJSONSchema.map["strict"] as? Bool) == true)
     }
 
-    @Test func mapDecoderRestoresSpeakReviewAndOmitAndRequiresCompleteCoverage() throws {
-        let units = try sourceUnits()
-        let first = units[0].id
-        let last = units[units.count - 1].id + 1
-        let json = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[
-          {"start_unit":\(first),"end_unit":\(first + 1),"mode":"speak","text":"上线条件。","issues":[]},
-          {"start_unit":\(first + 1),"end_unit":\(last - 1),"mode":"review","text":"","issues":["format_ambiguity"]},
-          {"start_unit":\(last - 1),"end_unit":\(last),"mode":"omit","text":"","issues":["nonspoken_content"]}
-        ]}
-        """
-
-        let output = try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
-        #expect(output.blocks.map(\.mode) == [.speak, .review, .omit])
-        #expect(output.blocks.map(\.startUnit) == [first, first + 1, last - 1])
-    }
-
     @Test func groupingAndRewriteKeepSourceOwnershipOutsideTheModel() throws {
         let units = try sourceUnits()
         guard units.count >= 4 else { return }
@@ -182,7 +165,7 @@ struct TeleprompterPreparationPromptsTests {
             )
         }
         let rewriteJSON = String(decoding: try JSONEncoder().encode(TeleprompterRewriteOutput(blocks: groups.map {
-            .init(blockID: $0.id, mode: .speak, text: $0.sourceUnits.map(\.rawText).joined(), issues: [])
+            .init(blockID: $0.id, disposition: .speak, text: $0.sourceUnits.map(\.rawText).joined())
         })), as: UTF8.self)
         let output = try TeleprompterRewriteDecoder().decode(
             rewriteJSON,
@@ -280,11 +263,44 @@ struct TeleprompterPreparationPromptsTests {
         // pattern is `[^\s]+` and does swallow it, so that is where the
         // trimming has to hold: without it a URL at the end of a sentence
         // becomes a different atom from the same URL mid-sentence, and a
-        // lossless rewrite gets sent to manual review.
+        // lossless rewrite makes the whole window fall back to the source.
         let atEnd = TeleprompterProtectedLiteralExtractor.atoms(from: "详见 https://example.com。")
         let midSentence = TeleprompterProtectedLiteralExtractor.atoms(from: "详见 https://example.com 然后")
         #expect(atEnd.map(\.rawValue) == ["https://example.com"])
         #expect(atEnd.map(\.canonicalValue) == midSentence.map(\.canonicalValue))
+    }
+
+    /// rewrite 与 map 必须同样收紧：cue/skip 不产出朗读正文，填了正文就是不合规。
+    /// 两边曾经只有 map 有这条不变式，于是 rewrite 侧漏了对称约束。
+    @Test func rewriteRejectsNonEmptyCueAndSkipText() throws {
+        let groups = [
+            TeleprompterRewriteGroup(
+                id: "block-a",
+                sourceUnits: [.init(id: 0, rawText: "第一段。")],
+                budgetSeconds: 10
+            )
+        ]
+        for disposition in ["cue", "skip"] {
+            let json = """
+            {"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"\(disposition)","text":"第一段。"}]}
+            """
+            do {
+                _ = try TeleprompterRewriteDecoder().decode(json, groups: groups)
+                Issue.record("\(disposition) 必须拒绝非空正文")
+            } catch let error as TeleprompterPreparationError {
+                #expect(error.diagnostic?.code == .modeMismatch)
+            }
+        }
+
+        // 合规形状必须能过：cue/skip 的正文留空。
+        for disposition in ["cue", "skip"] {
+            let json = """
+            {"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"\(disposition)","text":""}]}
+            """
+            #expect(throws: Never.self) {
+                try TeleprompterRewriteDecoder().decode(json, groups: groups)
+            }
+        }
     }
 
     @Test func rewriteRejectsUnknownAndDuplicateBlockIDs() throws {
@@ -300,7 +316,7 @@ struct TeleprompterPreparationPromptsTests {
                 budgetSeconds: 10
             )
         ]
-        let unknown = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]},{"block_id":"foreign","mode":"speak","text":"第二段。","issues":[]}]}"#
+        let unknown = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"speak","text":"第一段。"},{"block_id":"foreign","disposition":"speak","text":"第二段。"}]}"#
         do {
             _ = try TeleprompterRewriteDecoder().decode(unknown, groups: groups)
             Issue.record("rewrite must reject unknown IDs")
@@ -308,7 +324,7 @@ struct TeleprompterPreparationPromptsTests {
             #expect(error.diagnostic?.code == .unknownBlock)
         }
 
-        let duplicate = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]},{"block_id":"block-a","mode":"speak","text":"第一段。","issues":[]}]}"#
+        let duplicate = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"speak","text":"第一段。"},{"block_id":"block-a","disposition":"speak","text":"第一段。"}]}"#
         do {
             _ = try TeleprompterRewriteDecoder().decode(duplicate, groups: groups)
             Issue.record("rewrite must reject duplicate IDs")
@@ -317,35 +333,7 @@ struct TeleprompterPreparationPromptsTests {
         }
     }
 
-    /// `omit` 与 `review` 的模式守卫是「精简／保真权限分离」在解码层的落点：
-    /// 声称不朗读就必须真的没有文本，声称要审阅就不能同时声明不朗读。
-    /// 两者都改过稿仍不会留下任何痕迹，因此必须有回归钉住。
-    @Test func rewriteRejectsOmitWithTextAndReviewClaimingNonspokenContent() throws {
-        let groups = [
-            TeleprompterRewriteGroup(
-                id: "block-a",
-                sourceUnits: [.init(id: 0, rawText: "第一段原文。")],
-                budgetSeconds: 10
-            )
-        ]
-        let omitWithText = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"omit","text":"偷偷留下的内容","issues":["nonspoken_content"]}]}"#
-        do {
-            _ = try TeleprompterRewriteDecoder().decode(omitWithText, groups: groups)
-            Issue.record("omit 块不得携带任何文本")
-        } catch let error as TeleprompterPreparationError {
-            #expect(error.diagnostic?.code == .modeMismatch)
-        }
-
-        let reviewClaimingNonspoken = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"review","text":"第一段原文。","issues":["reading_choice","nonspoken_content"]}]}"#
-        do {
-            _ = try TeleprompterRewriteDecoder().decode(reviewClaimingNonspoken, groups: groups)
-            Issue.record("审阅块不得同时声明不朗读")
-        } catch let error as TeleprompterPreparationError {
-            #expect(error.diagnostic?.code == .modeMismatch)
-        }
-    }
-
-    @Test func mapDecoderRejectsUnknownFieldsGapsEmptySpeakAndInvalidIssues() throws {
+    @Test func mapDecoderRejectsUnknownFieldsGapsEmptySpeakAndNonEmptyCue() throws {
         let units = try sourceUnits()
         let sourceText = units.map(\.rawText).joined()
         let escapedSourceText = sourceText
@@ -353,13 +341,21 @@ struct TeleprompterPreparationPromptsTests {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
         let valid = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"\(escapedSourceText)","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"disposition":"speak","text":"\(escapedSourceText)"}]}
+        """
+        // speak 必须交稿，cue/skip 必须不念；两侧都收紧，避免又回到「空段落留给用户猜」。
+        let cueWithText = """
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"disposition":"cue","text":"\(escapedSourceText)"}]}
+        """
+        let skipWithText = """
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"disposition":"skip","text":"\(escapedSourceText)"}]}
         """
         let invalids = [
-            valid.replacingOccurrences(of: "\"issues\":[]", with: "\"issues\":[],\"extra\":true"),
+            valid.replacingOccurrences(of: "\"disposition\":\"speak\"", with: "\"disposition\":\"speak\",\"extra\":true"),
             valid.replacingOccurrences(of: "\"start_unit\":0", with: "\"start_unit\":1"),
             valid.replacingOccurrences(of: "\"text\":\"\(escapedSourceText)\"", with: "\"text\":\" \""),
-            valid.replacingOccurrences(of: "\"issues\":[]", with: "\"issues\":[\"missing_context\"]"),
+            cueWithText,
+            skipWithText,
             valid.replacingOccurrences(of: "\"schema_version\":\"teleprompter.preparation.v2\"", with: "\"schema_version\":\"teleprompter.preparation.v1\"")
         ]
 
@@ -373,7 +369,7 @@ struct TeleprompterPreparationPromptsTests {
     @Test func mapDecoderRejectsDroppingProtectedNumericLiteral() throws {
         let units = try sourceUnits()
         let json = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"上线条件。延迟不得超过。","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"disposition":"speak","text":"上线条件。延迟不得超过。"}]}
         """
 
         #expect(throws: TeleprompterPreparationError.self) {
@@ -384,7 +380,7 @@ struct TeleprompterPreparationPromptsTests {
     @Test func duplicateJSONKeysAreRejectedBeforeDecoding() throws {
         let units = try sourceUnits()
         let json = """
-        {"schema_version":"teleprompter.preparation.v2","schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"mode":"speak","text":"正文","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":\(units.count),"disposition":"speak","text":"正文"}]}
         """
         do {
             _ = try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
@@ -397,7 +393,7 @@ struct TeleprompterPreparationPromptsTests {
     @Test func mapDecoderReportsRangeGapWithoutExposingSourceText() throws {
         let units = try sourceUnits()
         let json = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":1,"end_unit":\(units.count),"mode":"speak","text":"正文","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":1,"end_unit":\(units.count),"disposition":"speak","text":"正文"}]}
         """
         do {
             _ = try TeleprompterMapDecoder().decode(json, targets: units, maxGroupUnits: 8)
@@ -410,34 +406,36 @@ struct TeleprompterPreparationPromptsTests {
     }
 
     @Test func reduceDecoderEnforcesEditableWhitelistAndMutualExclusion() throws {
-        let valid = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"下一段。"}],"review_block_ids":[]}"#
+        let valid = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"下一段。"}]}"#
         let output = try TeleprompterReduceDecoder().decode(
             valid,
-            editableBlocks: [TeleprompterReduceEditableBlock(id: "b2", revision: 3, text: "下一段，下一段。")]
+            editableBlocks: [TeleprompterReduceEditableBlock(id: "b2", revision: 3, text: "下一段，下一段。",
+                                            sourceUnits: [.init(id: 1, rawText: "下一段，下一段。")], protectedLiterals: [])]
         )
         #expect(output.patches.count == 1)
         #expect(output.patches[0].blockID == "b2")
 
         for json in [
             valid.replacingOccurrences(of: "\"b2\"", with: "\"foreign\""),
-            valid.replacingOccurrences(of: "\"revision\":3", with: "\"revision\":2"),
-            valid.replacingOccurrences(of: "\"review_block_ids\":[]", with: "\"review_block_ids\":[\"b2\"]")
+            valid.replacingOccurrences(of: "\"revision\":3", with: "\"revision\":2")
         ] {
             #expect(throws: TeleprompterPreparationError.self) {
                 try TeleprompterReduceDecoder().decode(
                     json,
-                    editableBlocks: [TeleprompterReduceEditableBlock(id: "b2", revision: 3, text: "下一段。")]
+                    editableBlocks: [TeleprompterReduceEditableBlock(id: "b2", revision: 3, text: "下一段。",
+                sourceUnits: [.init(id: 1, rawText: "下一段。")], protectedLiterals: [])]
                 )
             }
         }
     }
 
     @Test func reduceDecoderRejectsDroppingProtectedLiteral() throws {
-        let valid = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"延迟不得超过。"}],"review_block_ids":[]}"#
+        let valid = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"延迟不得超过。"}]}"#
         let editable = TeleprompterReduceEditableBlock(
             id: "b2",
             revision: 3,
             text: "延迟不得超过 200 ms。",
+            sourceUnits: [.init(id: 1, rawText: "延迟不得超过 200 ms。")],
             protectedLiterals: ["200 ms"]
         )
 
@@ -519,8 +517,8 @@ struct TeleprompterPreparationPromptsTests {
     /// `\s*` in the number pattern puts the gap between the digits and the unit
     /// inside the atom while canonicalization only trimmed the ends, so
     /// dropping that space — a pure typography change with no semantic
-    /// content — was reported as a changed protected literal and sent a
-    /// lossless rewrite to manual review.
+    /// content — was reported as a changed protected literal and made the
+    /// whole window fall back to the source.
     @Test func gateAcceptsWhitespaceOnlyChangesAroundAUnit() {
         for (source, candidate) in [
             ("价格 50 元", "价格 50元"),
@@ -619,9 +617,9 @@ struct TeleprompterPreparationPromptsTests {
             ),
             budgetSeconds: 10
         )
-        let changed = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"A costs 150 USD. B costs 80 USD. 50 50","issues":[]}]}"#
-        let droppedOccurrence = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"A costs 50 USD. B costs 80 USD. 50","issues":[]}]}"#
-        let addedValue = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","mode":"speak","text":"A costs 50 USD. B costs 80 USD. 50 50 60","issues":[]}]}"#
+        let changed = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"speak","text":"A costs 150 USD. B costs 80 USD. 50 50"}]}"#
+        let droppedOccurrence = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"speak","text":"A costs 50 USD. B costs 80 USD. 50"}]}"#
+        let addedValue = #"{"schema_version":"teleprompter.rewrite.v1","blocks":[{"block_id":"block-a","disposition":"speak","text":"A costs 50 USD. B costs 80 USD. 50 50 60"}]}"#
 
         for json in [changed, droppedOccurrence, addedValue] {
             do {
@@ -645,13 +643,13 @@ struct TeleprompterPreparationPromptsTests {
             budgetUnits: 12
         )]
         let changed = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"mode":"speak","text":"成本50万元，增长−50.5%。","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"disposition":"speak","text":"成本50万元，增长−50.5%。"}]}
         """
         let equivalentUnicodeMinus = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"mode":"speak","text":"成本50元，增长-50.5%。","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"disposition":"speak","text":"成本50元，增长-50.5%。"}]}
         """
         let changedSign = """
-        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"mode":"speak","text":"成本50元，增长+50.5%。","issues":[]}]}
+        {"schema_version":"teleprompter.preparation.v2","blocks":[{"start_unit":0,"end_unit":1,"disposition":"speak","text":"成本50元，增长+50.5%。"}]}
         """
 
         _ = try TeleprompterMapDecoder().decode(
@@ -674,11 +672,12 @@ struct TeleprompterPreparationPromptsTests {
             id: "b2",
             revision: 3,
             text: "延迟不得超过 200 ms。",
+            sourceUnits: [.init(id: 1, rawText: "延迟不得超过 200 ms。")],
             protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(
                 from: "延迟不得超过 200 ms。"
             )
         )
-        let changed = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"延迟不得超过 250 ms。"}],"review_block_ids":[]}"#
+        let changed = #"{"schema_version":"teleprompter.reduction.v1","patches":[{"block_id":"b2","revision":3,"text":"延迟不得超过 250 ms。"}],}"#
 
         #expect(throws: TeleprompterPreparationError.self) {
             try TeleprompterReduceDecoder().decode(
@@ -686,190 +685,6 @@ struct TeleprompterPreparationPromptsTests {
                 editableBlocks: [editable]
             )
         }
-    }
-
-    @Test func semanticReviewDetectsSubjectValueAndQualifierChanges() {
-        let swapped = TeleprompterSemanticRiskDetector.findings(
-            source: "方案 A 的单次成本不超过 50 元。方案 B 的单次成本不超过 80 元。",
-            candidate: "方案 A 的单次成本不超过 80 元。方案 B 的单次成本不超过 50 元。"
-        )
-        #expect(swapped.contains { $0.issue == .subjectValueChanged })
-        #expect(swapped.contains { $0.sourceRange != nil && $0.candidateRange != nil })
-
-        let condition = TeleprompterSemanticRiskDetector.findings(
-            source: "仅在试运行期间，延迟不超过 200 ms。",
-            candidate: "延迟不超过 200 ms。"
-        )
-        #expect(condition.contains { $0.issue == .conditionRemoved })
-
-        let certainty = TeleprompterSemanticRiskDetector.findings(
-            source: "该功能可能已经生效。",
-            candidate: "该功能已经生效。"
-        )
-        #expect(certainty.contains { $0.issue == .certaintyChanged })
-
-        let benign = TeleprompterSemanticRiskDetector.findings(
-            source: "先介绍背景。再说明结果。",
-            candidate: "先介绍背景，然后说明结果。"
-        )
-        #expect(benign.isEmpty)
-    }
-
-    @Test func semanticReviewSeesChineseOrdinalSubjects() {
-        // `nearestSubject` only matched ASCII labels, so on a Chinese script
-        // the subject-value pairs were always empty and the whole check was
-        // silent. Ordinal labels are the one Chinese shape the corpus supports
-        // without a segmenter: 2330 files, 38 hits, every one readable.
-        let swapped = TeleprompterSemanticRiskDetector.findings(
-            source: "第一批采购 50 台，第二批采购 80 台。",
-            candidate: "第一批采购 80 台，第二批采购 50 台。"
-        )
-        #expect(swapped.contains { $0.issue == .subjectValueChanged })
-        #expect(swapped.contains { $0.sourceRange != nil && $0.candidateRange != nil })
-
-        // Reverse control: the same order must stay silent, otherwise the rule
-        // would fire on every ordinal in the script.
-        let sameOrder = TeleprompterSemanticRiskDetector.findings(
-            source: "第一批采购 50 台，第二批采购 80 台。",
-            candidate: "第一批采购 50 台，第二批采购 80 台。"
-        )
-        #expect(!sameOrder.contains { $0.issue == .subjectValueChanged })
-    }
-
-    @Test func semanticReviewSeesEveryOrdinalQuantifierTheCorpusProduces() {
-        // 轮 is 30 of the 38 corpus hits, 批 4, 组 1. Pinning only 批 would let
-        // the highest-frequency shape regress unnoticed.
-        for (source, candidate) in [
-            ("第九轮实测 280 ms。", "第九轮实测 160 ms。"),
-            ("第一组回放 12 项。", "第一组回放 8 项。"),
-        ] {
-            #expect(
-                TeleprompterSemanticRiskDetector.findings(
-                    source: source,
-                    candidate: candidate
-                ).contains { $0.issue == .subjectValueChanged },
-                "未检出: \(source)"
-            )
-        }
-    }
-
-    @Test func semanticReviewOnlyReadsAnOrdinalThatStartsItsClause() {
-        // The lookbehind is what keeps 第N from being picked out of the middle
-        // of a neighbouring clause. Conservative by design: a mid-clause
-        // ordinal yields no subject, so a plain value change is reported by
-        // the fidelity gate rather than as a subject-value mismatch.
-        let midClause = TeleprompterSemanticRiskDetector.findings(
-            source: "我们计划第一批采购 50 台。",
-            candidate: "我们计划第一批采购 80 台。"
-        )
-        #expect(!midClause.contains { $0.issue == .subjectValueChanged })
-
-        // Same text, but the ordinal does start its clause.
-        let clauseInitial = TeleprompterSemanticRiskDetector.findings(
-            source: "第一批采购 50 台。",
-            candidate: "第一批采购 80 台。"
-        )
-        #expect(clauseInitial.contains { $0.issue == .subjectValueChanged })
-    }
-
-    @Test func semanticReviewIgnoresASubjectThatOnlyOneSideFinds() {
-        // Comparing the two pair lists instead of the shared subjects made a
-        // lost pair read as a changed one. Deleting the comma stops the
-        // ordinal from starting its clause, so this pure punctuation rewrite
-        // was reported as a swapped value.
-        let punctuationOnly = TeleprompterSemanticRiskDetector.findings(
-            source: "第一批采购 50 台，第二批 80 台。",
-            candidate: "第一批采购 50 台第二批 80 台。"
-        )
-        #expect(!punctuationOnly.contains { $0.issue == .subjectValueChanged })
-
-        // The same shape on the ASCII side, which had the same latent gap.
-        let asciiPunctuationOnly = TeleprompterSemanticRiskDetector.findings(
-            source: "方案 A 的成本 50 元，方案 B 的成本 80 元。",
-            candidate: "方案 A 的成本 50 元方案 B 的成本 80 元。"
-        )
-        #expect(!asciiPunctuationOnly.contains { $0.issue == .subjectValueChanged })
-    }
-
-    @Test func semanticReviewKeepsTheOrdinalNumeralSetToWhatTheCorpusHas() {
-        // 两 and 零 never precede an ordinal quantifier in the corpus. Adding
-        // them is unmeasured surface, so the set stays exactly
-        // 一二三四五六七八九十百千.
-        for text in ["第两批采购 50 台。", "第零批采购 50 台。"] {
-            #expect(
-                !TeleprompterSemanticRiskDetector.findings(
-                    source: text,
-                    candidate: text.replacingOccurrences(of: "50", with: "80")
-                ).contains { $0.issue == .subjectValueChanged },
-                "不应视为序数主体: \(text)"
-            )
-        }
-    }
-
-    @Test func semanticReviewDoesNotReadANonNegationWordAsNegation() {
-        // `未` is the only single-character negation marker, and it also opens
-        // 未来 / 未必. 未来 -> 将来 is one of the most common Chinese
-        // paraphrases a 口语化 rewrite makes, so every occurrence blocked a
-        // block from being spoken automatically.
-        for (source, candidate) in [
-            ("未来的计划不变。", "将来的计划不变。"),
-            ("这项未必需要复核。", "这项不一定需要复核。"),
-        ] {
-            #expect(
-                !TeleprompterSemanticRiskDetector.findings(
-                    source: source,
-                    candidate: candidate
-                ).contains { $0.issue == .negationChanged },
-                "误报否定变化: \(source)"
-            )
-        }
-    }
-
-    @Test func semanticReviewStillSeesTheRealNegations() {
-        // Reverse controls: the corpus has 4086 of these against 47 for
-        // 未来 / 未必, and 未知 is kept on purpose — 原因未知 -> 原因已知 is a
-        // real change of meaning even though 未知 is a state, not an action.
-        for (source, candidate) in [
-            ("这项未验证。", "这项已验证。"),
-            ("未", "已"),
-            ("改动尚未提交。", "改动已经提交。"),
-            ("原因未知。", "原因已知。"),
-            ("这项不得上线。", "这项可以上线。"),
-        ] {
-            #expect(
-                TeleprompterSemanticRiskDetector.findings(
-                    source: source,
-                    candidate: candidate
-                ).contains { $0.issue == .negationChanged },
-                "漏报否定变化: \(source)"
-            )
-        }
-    }
-
-    @Test func semanticReviewStillMissesGeneralChineseNounPhraseSubjects() {
-        // Measured and deliberately not fixed. Every bounded heuristic for a
-        // Chinese noun phrase produced mostly fragments on the real corpus:
-        // anchoring on 的 yields 350 hits of which the top ones are 稿 / 我 /
-        // 零事件 / 帧, a leading 天干 stem collides with 未 (not) and 子
-        // (subtask), and requiring parallel labels leaves 稿 / 我 / 与帧 alive.
-        // A false finding forces the block to .unresolved, so narrow beats
-        // noisy. This test pins the gap: if a future change widens the rule,
-        // this turns red and the widening has to be argued for.
-        let chineseSwap = TeleprompterSemanticRiskDetector.findings(
-            source: "方案甲的单次成本不超过 50 元。方案乙的单次成本不超过 80 元。",
-            candidate: "方案乙的单次成本不超过 50 元。方案甲的单次成本不超过 80 元。"
-        )
-        #expect(!chineseSwap.contains { $0.issue == .subjectValueChanged })
-    }
-
-    @Test func semanticReviewMapsRisksIntoExistingReviewIssues() {
-        let issues = TeleprompterSemanticRiskDetector.reviewIssues(
-            modelIssues: [.readingChoice],
-            source: "该功能可能已经生效。",
-            candidate: "该功能已经生效。"
-        )
-
-        #expect(issues == [.readingChoice, .certaintyChanged])
     }
 
     /// 判据第 1 条：「数值、单位、正负号及重复内容变化不得静默通过」。
@@ -946,13 +761,4 @@ struct TeleprompterPreparationPromptsTests {
         }
     }
 
-    @Test func reviewCopyKeepsTheDefaultPathPlainAndHidesInternalTerms() {
-        #expect(TeleprompterReviewCopy.successTitle == "AI 已完成整理")
-        #expect(TeleprompterReviewCopy.successMessage.contains("原稿未被覆盖"))
-        #expect(TeleprompterReviewCopy.readingTitle == "整理后的朗读稿")
-        #expect(!TeleprompterReviewCopy.readingTitle.contains("来源组"))
-        #expect(TeleprompterReviewCopy.compareSourceLabel == "对照原稿")
-        #expect(TeleprompterReviewCopy.advancedEditLabel == "编辑本段")
-        #expect(TeleprompterReviewCopy.blockTitle(ordinal: 0) == "第 1 段")
-    }
 }

@@ -555,22 +555,14 @@ public enum TeleprompterTimingPlanner {
     public static func plan(
         sourceUnits: [TeleprompterSourceUnit],
         estimates: [TimeInterval?],
-        targetMinutes: Int,
-        selectedUnitIDs: Set<Int>? = nil
+        targetMinutes: Int
     ) throws -> TeleprompterTimingPlan {
         let targetSeconds = try validateTargetMinutes(targetMinutes)
         guard !sourceUnits.isEmpty, estimates.count == sourceUnits.count else {
             throw TeleprompterPreparationError.invalidTimingPlan
         }
-        let selectedIDs = selectedUnitIDs ?? Set(sourceUnits.map(\.id))
-        guard !selectedIDs.isEmpty,
-              selectedIDs.isSubset(of: Set(sourceUnits.map(\.id))) else {
-            throw TeleprompterPreparationError.invalidTimingPlan
-        }
-
-        let allEstimated = sourceUnits.enumerated()
-            .filter { selectedIDs.contains($0.element.id) }
-            .map(\.offset)
+        // 整篇都在跟读范围内：每个来源单元都参与估算与分配，没有「未选中」这一档。
+        let allEstimated = sourceUnits.indices
             .allSatisfy { index in
                 let value = estimates[index]
                 guard let value else { return false }
@@ -578,7 +570,6 @@ public enum TeleprompterTimingPlanner {
             }
         let mode: TeleprompterTimingWeightMode = allEstimated ? .estimatedDuration : .proxyCharacters
         let rawWeights = sourceUnits.enumerated().map { index, unit in
-            guard selectedIDs.contains(unit.id) else { return (unit.id, 0.0) }
             let weight: Double
             switch mode {
             case .estimatedDuration:
@@ -597,16 +588,10 @@ public enum TeleprompterTimingPlanner {
         var allocations: [TeleprompterTimingAllocation] = []
         allocations.reserveCapacity(rawWeights.count)
         var assigned = 0.0
-        let selectedIndexes = rawWeights.indices.filter { selectedIDs.contains(rawWeights[$0].0) }
         for (index, item) in rawWeights.enumerated() {
-            let budget: Double
-            if !selectedIDs.contains(item.0) {
-                budget = 0
-            } else if index == selectedIndexes.last {
-                budget = budgetSeconds - assigned
-            } else {
-                budget = budgetSeconds * item.1 / totalWeight
-            }
+            let budget = index == rawWeights.count - 1
+                ? budgetSeconds - assigned
+                : budgetSeconds * item.1 / totalWeight
             assigned += budget
             allocations.append(.init(sourceUnitID: item.0, weight: item.1, budgetSeconds: budget))
         }

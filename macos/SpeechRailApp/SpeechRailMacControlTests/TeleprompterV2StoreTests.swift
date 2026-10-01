@@ -6,7 +6,7 @@ import Testing
 #endif
 
 struct TeleprompterV2StoreTests {
-    @Test @MainActor func v2RoundTripPreservesSourceAndReadingCoordinates() throws {
+    @Test @MainActor func roundTripPreservesSourceAndReadingCoordinates() throws {
         let fixture = try makeFixture()
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -15,7 +15,7 @@ struct TeleprompterV2StoreTests {
         try store.save(fixture.bundle)
         let loaded = try store.load(documentID: fixture.bundle.document.id)
 
-        #expect(loaded.formatVersion == 2)
+        #expect(loaded.formatVersion == 3)
         #expect(loaded.document.currentSourceRevisionID == fixture.sourceRevisionID)
         #expect(loaded.sourceRevisions[0].sourceText == fixture.sourceText)
         #expect(loaded.versions[0].readingText == "第一段。\n\n第二段。")
@@ -37,7 +37,6 @@ struct TeleprompterV2StoreTests {
             id: version.id,
             documentID: version.documentID,
             sourceRevisionID: version.sourceRevisionID,
-            selectionSnapshot: version.selectionSnapshot,
             readingText: version.readingText,
             readingHash: version.readingHash,
             blocks: version.blocks,
@@ -337,7 +336,6 @@ struct TeleprompterV2StoreTests {
             id: "version-2",
             documentID: original.documentID,
             sourceRevisionID: original.sourceRevisionID,
-            selectionSnapshot: original.selectionSnapshot,
             readingText: condensedText,
             blocks: [
                 TeleprompterV2ReadingBlock(
@@ -563,28 +561,6 @@ struct TeleprompterV2StoreTests {
     }
 
     /// 选区引用了这份来源里不存在的单元时，后续按单元取原文会取到空——稿子
-    /// 看上去能打开，念到那里就断了。
-    @Test @MainActor func aSelectionNamingASourceUnitThatDoesNotExistIsRejected() throws {
-        let fixture = try makeFixture()
-        let directory = try makeDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try TeleprompterV2Store(directoryURL: directory)
-
-        let template = fixture.bundle.versions[0].selectionSnapshot
-        let selection = TeleprompterV2SelectionRevision(
-            id: template.id,
-            sourceUnitRevision: template.sourceUnitRevision,
-            selectedUnitIDs: template.selectedUnitIDs + [9_999],
-            selectedRanges: template.selectedRanges,
-            userExcludedRanges: template.userExcludedRanges
-        )
-        #expect(throws: TeleprompterV2StoreError.self) {
-            try store.save(
-                bundle(fixture.bundle, version: version(fixture.bundle.versions[0], selection: selection))
-            )
-        }
-    }
-
     /// `TeleprompterV2ReadingVersion` 的字段全是 `let`：违反某道守卫的 bundle
     /// 只能像 app 那样重新构造出来。辅助函数把那几道守卫逐个参数化，好让一次
     /// 失败只指向一条规则，而不是「保存被拒了」。
@@ -592,7 +568,6 @@ struct TeleprompterV2StoreTests {
         _ template: TeleprompterV2ReadingVersion,
         readingHash: String? = nil,
         readingText: String? = nil,
-        selection: TeleprompterV2SelectionRevision? = nil,
         blocks: [TeleprompterV2ReadingBlock]? = nil,
         segments: [TeleprompterV2ReadingSegment]? = nil,
         goal: TeleprompterV2DurationGoal? = nil,
@@ -602,7 +577,6 @@ struct TeleprompterV2StoreTests {
             id: template.id,
             documentID: template.documentID,
             sourceRevisionID: template.sourceRevisionID,
-            selectionSnapshot: selection ?? template.selectionSnapshot,
             readingText: readingText ?? template.readingText,
             readingHash: readingHash,
             blocks: blocks ?? template.blocks,
@@ -661,13 +635,6 @@ struct TeleprompterV2StoreTests {
             estimates: Array(repeating: nil, count: units.count),
             targetMinutes: 5
         )
-        let selection = TeleprompterV2SelectionRevision(
-            id: "selection-1",
-            sourceUnitRevision: source.sourceRevisionID,
-            selectedUnitIDs: units.map(\.id),
-            selectedRanges: [.init(start: 0, end: sourceText.utf16.count)],
-            userExcludedRanges: []
-        )
         let goal = TeleprompterV2DurationGoal(targetSeconds: 300, goalRevision: 1)
         let allocation = TeleprompterV2TimingAllocationSnapshot(
             allocationRevision: 1,
@@ -719,7 +686,6 @@ struct TeleprompterV2StoreTests {
             id: "version-1",
             documentID: "document-1",
             sourceRevisionID: source.sourceRevisionID,
-            selectionSnapshot: selection,
             readingText: "第一段。\n\n第二段。",
             blocks: blocks,
             segments: segments,
@@ -748,9 +714,7 @@ struct TeleprompterV2StoreTests {
             id: "draft-1",
             draftRevision: 1,
             sourceRevisionID: source.sourceRevisionID,
-            selectionRevisionID: selection.id,
             blocks: blocks,
-            reviewIssues: [],
             goal: goal,
             pace: .natural,
             timingAllocation: allocation
