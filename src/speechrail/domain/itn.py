@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 
 _DIGITS_MAP = {
@@ -41,13 +42,13 @@ _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 # later magnitude (`数十万个` used to fall through to `万个` -> 10000个).
 _UNIT_RE = re.compile(
     # The lookbehind keeps the numeral run from starting where one already
-    # precedes it. It has to exclude **ASCII digits too**: a recogniser that
-    # normalises speech to digits emits `50万元`, and without `0-9` here the
+    # precedes it. It has to exclude **Unicode decimal digits too**: a recogniser that
+    # normalises speech to digits emits `50万元`, and without a digit guard here the
     # `万元` matched on its own -- `chinese_to_int("万")` is 10000, and that was
     # concatenated in front of the `50`, so the transcript read `5010000元`,
     # two orders of magnitude off. A number that is already written needs no
     # conversion, which is also what `20万台` and `1000公里` already relied on.
-    r"(?<![0-9数几零一二两三四五六七八九十百千万亿])([零一二两三四五六七八九十百千万亿]+)"
+    r"(?<![\d数几零一二两三四五六七八九十百千万亿])([零一二两三四五六七八九十百千万亿]+)"
     r"(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|秒|分(?![之]))"
 )
 
@@ -62,12 +63,13 @@ def _chinese_to_int(cn_str: str) -> int:
     """Convert Chinese numeral string to integer (supports up to 亿)."""
     if not cn_str:
         return 0
+    cn_str = _fold_decimal_digits(cn_str)
     # If already all digits
     if cn_str.isdigit():
         return int(cn_str)
 
     # Both callers reach this function through `_PERCENT_RE` / `_DECIMAL_RE`,
-    # whose character classes admit ASCII digits, so a recogniser that
+    # whose character classes admit decimal digits, so a recogniser that
     # normalises only part of a number hands us a mixed run such as `2三点五`
     # or `百分之2十`. Everything below is written against Chinese numerals, so
     # the digits are folded into their Chinese spelling first. Indexing
@@ -118,8 +120,15 @@ def _chinese_to_int(cn_str: str) -> int:
     return total + section + num
 
 
+def _fold_decimal_digits(text: str) -> str:
+    """Fold decimal digits accepted by Unicode digit regexes without rewriting other text."""
+    return "".join(
+        str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text
+    )
+
+
 def _percent_to_arabic(match: re.Match[str]) -> str:
-    raw = match.group(1)
+    raw = _fold_decimal_digits(match.group(1))
     if "点" in raw:
         parts = raw.split("点", 1)
         int_part = _chinese_to_int(parts[0])
@@ -133,7 +142,7 @@ def _percent_to_arabic(match: re.Match[str]) -> str:
 
 
 def _decimal_to_arabic(match: re.Match[str]) -> str:
-    int_str, dec_str = match.group(1), match.group(2)
+    int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
     dec_val = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)
     return f"{int_val}.{dec_val}"

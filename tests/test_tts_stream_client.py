@@ -702,3 +702,129 @@ def test_text_accepted_frame_is_emitted_for_every_append() -> None:
         await session.cancel()
 
     _run(scenario)
+
+
+def test_terminal_error_before_started_fails_open_without_reaping_worker() -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport([
+            _frame(FRAME_STREAM_ERROR, code="tts_backpressure", terminal=True)
+        ])
+        session = Qwen3TtsIncrementalSession(
+            transport=transport, options=_options(), io_timeout_seconds=10.0
+        )
+        with pytest.raises(TtsStreamError) as failure:
+            await asyncio.wait_for(session.open(), timeout=0.2)
+        assert failure.value.code == "tts_backpressure"
+        await session.close()
+        assert transport.aborts == 0
+        assert transport.alive
+    _run(scenario)
+
+
+def test_terminal_error_settles_pending_append_without_waiting_for_timeout() -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport([_frame(FRAME_STREAM_STARTED)])
+        session = Qwen3TtsIncrementalSession(
+            transport=transport, options=_options(), io_timeout_seconds=10.0
+        )
+        await session.open()
+        append = asyncio.create_task(session.append_text(0, "abc"))
+        await asyncio.sleep(0)
+        transport.push(_frame(FRAME_STREAM_ERROR, code="tts_backpressure", terminal=True))
+        with pytest.raises(TtsStreamError) as failure:
+            await asyncio.wait_for(append, timeout=0.2)
+        assert failure.value.code == "tts_backpressure"
+        await session.close()
+        assert transport.aborts == 0
+    _run(scenario)
+
+
+class InterruptedCancelTransport(ScriptedTransport):
+    def __init__(self) -> None:
+        super().__init__([_frame(FRAME_STREAM_STARTED)])
+        self.cancel_sent = asyncio.Event()
+
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
+        await super().send(payload, binary_payload=binary_payload)
+        if payload.get("type") == FRAME_STREAM_CANCEL:
+            self.cancel_sent.set()
+
+
+def test_interrupted_cancel_still_reaps_unretired_worker_on_close() -> None:
+    async def scenario() -> None:
+        transport = InterruptedCancelTransport()
+        session = await _open(transport)
+        cancel = asyncio.create_task(session.cancel())
+        await transport.cancel_sent.wait()
+        cancel.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancel
+        await session.close()
+        assert transport.aborts == 1
+        assert not transport.alive
+    _run(scenario)
+
+
+def test_cancelled_close_waits_for_reaping_before_propagating_cancellation() -> None:
+    class DelayedAbortTransport(InterruptedCancelTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.abort_started = asyncio.Event()
+            self.allow_reap = asyncio.Event()
+
+        async def abort(self) -> None:
+            self.abort_started.set()
+            await self.allow_reap.wait()
+            await super().abort()
+
+    async def scenario() -> None:
+        transport = DelayedAbortTransport()
+        session = await _open(transport)
+        close = asyncio.create_task(session.close())
+        await transport.abort_started.wait()
+        close.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not close.done()
+        assert transport.alive
+        transport.allow_reap.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+        assert transport.aborts == 1
+        assert not transport.alive
+        await session.close()
+        assert transport.aborts == 1
+    _run(scenario)
+
+
+def test_concurrent_close_joins_the_abort_already_started_by_cancel() -> None:
+    class DelayedAbortTransport(InterruptedCancelTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.abort_started = asyncio.Event()
+            self.allow_reap = asyncio.Event()
+
+        async def abort(self) -> None:
+            self.abort_started.set()
+            await self.allow_reap.wait()
+            await super().abort()
+
+    async def scenario() -> None:
+        transport = DelayedAbortTransport()
+        session = await _open(transport)
+        cancel = asyncio.create_task(session.cancel())
+        await transport.abort_started.wait()
+        close = asyncio.create_task(session.close())
+        try:
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not close.done()
+            assert transport.alive
+        finally:
+            transport.allow_reap.set()
+            await asyncio.gather(cancel, close)
+        assert transport.aborts == 1
+        assert not transport.alive
+    _run(scenario)

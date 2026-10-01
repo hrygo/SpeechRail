@@ -173,9 +173,12 @@ class Qwen3TtsIncrementalSession:
         self._fatal: BaseException | None = None
         self._notices: list[str] = []
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._cancelled = False
+        self._worker_terminal_received = False
         self._terminal_published = False
         self._abort_used = False
+        self._abort_task: asyncio.Task[None] | None = None
         self._expected_chunk_index = 0
         self._expected_sample_offset = 0
         self.last_active: float = time.monotonic()
@@ -240,7 +243,8 @@ class Qwen3TtsIncrementalSession:
                 "tts_input_timeout", "the worker never acknowledged the utterance"
             ) from exc
         except BaseException:
-            await self._abort()
+            if not self._worker_terminal_received:
+                await self._abort()
             raise
         return self
 
@@ -344,9 +348,28 @@ class Qwen3TtsIncrementalSession:
     async def close(self) -> None:
         """Release the utterance, aborting the child only if it will not stop."""
 
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close(), name="tts-stream-close")
+        await self._await_cleanup(self._close_task)
+
+    @staticmethod
+    async def _await_cleanup(cleanup: asyncio.Task[None]) -> None:
+        """Join shared cleanup before propagating the caller's cancellation."""
+
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close(self) -> None:
+        """Finish cleanup before a caller can release the shared worker lease."""
+
         if self._state.terminal is None and not self._cancelled:
             # cancel() already bounds how long it waits for the worker's terminal.
             await self.cancel()
@@ -359,7 +382,7 @@ class Qwen3TtsIncrementalSession:
             TtsStreamError("tts_input_closed", "the incremental session was closed")
         )
         self._put_terminal_nowait(None)
-        if self._fatal is not None or self._state.terminal is None:
+        if self._fatal is not None or not self._worker_terminal_received:
             # Either the dispatcher faulted or this utterance ended without the
             # worker's terminal: the shared frame stream is in an unknown state,
             # and the next utterance must not inherit that.
@@ -479,6 +502,9 @@ class Qwen3TtsIncrementalSession:
                     self._state.complete()
                 else:
                     self._state.cancel()
+            self._settle_worker_terminal(
+                TtsStreamError("tts_input_closed", "the worker ended the utterance")
+            )
             await self._publish(
                 TtsStreamEvent(
                     kind=kind, response_id=self._options.response_id, terminal=outcome
@@ -498,6 +524,7 @@ class Qwen3TtsIncrementalSession:
                 return True
             if self._state.terminal is None:
                 self._state.fail(code)
+            self._settle_worker_terminal(TtsStreamError(code, code))
             await self._publish(
                 TtsStreamEvent(
                     kind=TtsStreamEventKind.FAILED,
@@ -576,6 +603,14 @@ class Qwen3TtsIncrementalSession:
         self._ack_waiters.clear()
         self._unacknowledged_appends.clear()
 
+    def _settle_worker_terminal(self, error: TtsStreamError) -> None:
+        """A terminal retires every outstanding start or append acknowledgement."""
+
+        self._worker_terminal_received = True
+        if self._started is not None and not self._started.done():
+            self._started.set_exception(error)
+        self._fail_pending_waiters(error)
+
     def _rollback_unacknowledged(self, sequence: int) -> None:
         codepoints = self._unacknowledged_appends.pop(sequence, None)
         if codepoints is None or self._state.terminal is not None:
@@ -596,9 +631,12 @@ class Qwen3TtsIncrementalSession:
         return True
 
     async def _abort(self) -> None:
-        if self._abort_used:
-            return
-        self._abort_used = True
+        if self._abort_task is None:
+            self._abort_used = True
+            self._abort_task = asyncio.create_task(self._abort_transport(), name="tts-stream-abort")
+        await self._await_cleanup(self._abort_task)
+
+    async def _abort_transport(self) -> None:
         with contextlib.suppress(Exception):
             await self._transport.abort()
 

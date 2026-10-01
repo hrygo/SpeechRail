@@ -28,7 +28,7 @@ import Synchronization
 // `isProcessRestoreEnabled`（来源 App 重启后自动接回）都只是 SDK 标注语义。
 // 这里把"接回"如实实现成**尽力而为**：tap 建立时就打开该开关，之后不再假装知道它生效了。
 
-/// 单生产者 / 单消费者环形缓冲：实时回调写、drain 线程读。容量取 2 的幂。
+/// 单生产者 / 单消费者环形缓冲：实时回调写、drain 线程读。容量按完整帧对齐。
 ///
 /// 它的存在就是为了让 §5.13 那条约束可执行：回调里没有锁、没有分配、没有 ObjC 消息。
 final class InterleavedFloatRing: @unchecked Sendable {
@@ -37,13 +37,14 @@ final class InterleavedFloatRing: @unchecked Sendable {
     private let writeIndex = Atomic<Int>(0)
     private let readIndex = Atomic<Int>(0)
 
-    init(capacity: Int) {
-        // 2 的幂：环形回绕时不需要取模，掩码就够。
+    init(capacity: Int, channels: Int = 1) {
+        precondition(channels > 0)
+        // Align the physical wrap with complete frames, including 3/6 channels.
         var size = 1
         while size < max(capacity, 1024) { size <<= 1 }
-        self.capacity = size
-        self.storage = .allocate(capacity: size)
-        self.storage.initialize(repeating: 0, count: size)
+        self.capacity = ((size + channels - 1) / channels) * channels
+        self.storage = .allocate(capacity: self.capacity)
+        self.storage.initialize(repeating: 0, count: self.capacity)
     }
 
     deinit {
@@ -58,7 +59,7 @@ final class InterleavedFloatRing: @unchecked Sendable {
         let read = readIndex.load(ordering: .acquiring)
         let free = capacity - (write &- read) - 1
         guard free > 0 else { return nil }
-        let offset = write & (capacity - 1)
+        let offset = write % capacity
         let contiguous = min(free, capacity - offset)
         return (storage + offset, contiguous)
     }
@@ -77,7 +78,7 @@ final class InterleavedFloatRing: @unchecked Sendable {
         let write = writeIndex.load(ordering: .acquiring)
         let available = write &- read
         guard available > 0 else { return nil }
-        let offset = read & (capacity - 1)
+        let offset = read % capacity
         let contiguous = min(available, capacity - offset)
         return (UnsafePointer(storage + offset), contiguous)
     }
@@ -199,13 +200,9 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
 
         do {
             let format = try Self.readTapFormat(tapID: createdTap)
+            guard Self.supportsTapFormat(format) else { throw Failure.formatUnavailable }
             guard
-                let input = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32,
-                    sampleRate: format.mSampleRate,
-                    channels: AVAudioChannelCount(max(format.mChannelsPerFrame, 1)),
-                    interleaved: true
-                ),
+                let input = Self.makeInputFormat(format),
                 let output = AVAudioFormat(
                     commonFormat: .pcmFormatInt16,
                     sampleRate: Self.sampleRate,
@@ -220,7 +217,9 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             tapChannels = Int(input.channelCount)
 
             // 环里最多留 1 秒：再多只说明下游卡住，丢掉比堆积好。
-            ring = InterleavedFloatRing(capacity: Int(format.mSampleRate) * max(tapChannels, 1))
+            ring = InterleavedFloatRing(
+                capacity: Int(format.mSampleRate) * tapChannels, channels: tapChannels
+            )
             try createAggregateDevice(tapUID: try Self.readTapUID(tapID: createdTap))
             try startIOProc()
         } catch {
@@ -323,11 +322,56 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
 
     private func receive(_ bufferList: UnsafePointer<AudioBufferList>) {
         guard let ring else { return }
-        let channels = max(tapChannels, 1)
+        Self.copyInputToRing(bufferList, into: ring, channels: tapChannels)
+    }
+
+    static func makeInputFormat(_ format: AudioStreamBasicDescription) -> AVAudioFormat? {
+        guard supportsTapFormat(format) else { return nil }
+        let tag: AudioChannelLayoutTag
+        switch format.mChannelsPerFrame {
+        case 1: tag = kAudioChannelLayoutTag_Mono
+        case 2: tag = kAudioChannelLayoutTag_Stereo
+        default: tag = kAudioChannelLayoutTag_DiscreteInOrder | format.mChannelsPerFrame
+        }
+        guard let layout = AVAudioChannelLayout(layoutTag: tag) else { return nil }
+        return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.mSampleRate,
+                             interleaved: true, channelLayout: layout)
+    }
+
+    static func supportsTapFormat(_ format: AudioStreamBasicDescription) -> Bool {
+        let nonInterleaved = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+        let channels = format.mChannelsPerFrame
+        let bytes = UInt64(nonInterleaved ? 1 : channels) * 4
+        return format.mFormatID == kAudioFormatLinearPCM
+            && format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && format.mFormatFlags & kAudioFormatFlagIsPacked != 0
+            && format.mFormatFlags & (kAudioFormatFlagIsBigEndian | kAudioFormatFlagIsSignedInteger) == 0
+            && format.mBitsPerChannel == 32 && channels > 0
+            && format.mSampleRate.isFinite && format.mSampleRate > 0
+            && format.mSampleRate < Double(Int.max / max(Int(channels), 1))
+            && format.mFramesPerPacket == 1
+            && UInt64(format.mBytesPerFrame) == bytes
+            && UInt64(format.mBytesPerPacket) == bytes
+    }
+
+    /// Validate complete Float32 frames before touching any source samples.
+    static func copyInputToRing(
+        _ bufferList: UnsafePointer<AudioBufferList>,
+        into ring: InterleavedFloatRing,
+        channels: Int
+    ) {
+        guard channels > 0 else { return }
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
-        guard !buffers.isEmpty else { return }
-        // 帧数按第一个缓冲算：tap 的各通道在同一个 buffer list 里长度一致。
-        let frames = Int(buffers[0].mDataByteSize) / MemoryLayout<Float>.size
+        guard !buffers.isEmpty, buffers.count == 1 || buffers.count == channels else { return }
+        var frames = Int.max
+        for buffer in buffers {
+            let expectedChannels = buffers.count == 1 ? channels : 1
+            guard Int(buffer.mNumberChannels) == expectedChannels else { return }
+            let bytesPerFrame = MemoryLayout<Float>.size * expectedChannels
+            let bytes = Int(buffer.mDataByteSize)
+            guard bytes.isMultiple(of: bytesPerFrame) else { return }
+            frames = min(frames, bytes / bytesPerFrame)
+        }
         guard frames > 0 else { return }
 
         var remaining = frames

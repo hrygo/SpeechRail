@@ -66,6 +66,7 @@ let package = Package(
                 "RuntimeMetricsSampler.swift",
                 "RuntimeMonitoringAccessibility.swift",
                 "AudioSampleRing.swift",
+                "CoreAudioTapCapture.swift",
                 "SpeechRailDesignTokens.swift",
                 "RealtimeASRClient.swift",
                 // 助手编排层：生产 AssistantSession 本身进单测目标，
