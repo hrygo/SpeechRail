@@ -190,20 +190,29 @@ class VoiceQualityProbeScore:
 
     probe_id: str
     transcript_match: float
+    # Whether this probe's numbers came back digit-for-digit identical.
+    # `None` means the probe carries no digits and the question does not apply.
+    # Kept separate from ``transcript_match`` so that field keeps meaning plain
+    # character similarity: a wrong digit is a one-character edit inside a long
+    # probe and scores like one, which is exactly why it needed its own verdict.
+    numbers_exact: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "probe_id": self.probe_id,
             "transcript_match": self.transcript_match,
+            "numbers_exact": self.numbers_exact,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> VoiceQualityProbeScore:
         if not isinstance(data, Mapping):
             raise ValueError("probe score must be an object")
+        raw_exact = data.get("numbers_exact")
         return cls(
             probe_id=_require_str(data.get("probe_id"), "probe_id"),
             transcript_match=float(data.get("transcript_match", 0.0)),
+            numbers_exact=raw_exact if isinstance(raw_exact, bool) else None,
         )
 
 
@@ -600,6 +609,33 @@ def normalize_transcript_for_match(text: str) -> str:
     )
 
 
+_TRANSCRIPT_NUMBER_RUN: Final[re.Pattern[str]] = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def probe_carries_digits(text: str) -> bool:
+    """Whether a probe's text contains a number worth comparing digit by digit."""
+    return _TRANSCRIPT_NUMBER_RUN.search(normalize_transcript_for_match(text)) is not None
+
+
+def transcript_numbers_match(expected: str, actual: str) -> bool:
+    """Return whether both sides spell exactly the same numbers.
+
+    Character edit distance is the wrong instrument for a misread digit. The
+    `numbers_punct` probe is 44 characters long, so reading `22.5℃` as `25℃`
+    costs one substitution -- 0.9375, clear of the 0.92 the gate needs for
+    `pass` -- while the number the listener hears is simply wrong. Digit runs
+    are therefore compared exactly and independently of edit distance.
+
+    Both sides are normalized first, so `二十二点五` and `22.5` are the same
+    number by the time they are compared. A side with no digits yields an empty
+    list, and two empty lists are equal: the comparison is vacuously satisfied
+    and callers gate applicability on :func:`probe_carries_digits`.
+    """
+    reference = _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(expected))
+    hypothesis = _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(actual))
+    return reference == hypothesis
+
+
 def transcript_match_score(expected: str, actual: str) -> float:
     """Return normalized character similarity in ``[0, 1]`` using edit distance."""
     reference = normalize_transcript_for_match(expected)
@@ -718,6 +754,8 @@ __all__ = [
     "noise_floor_dbfs",
     "normalize_transcript_for_match",
     "now_iso8601_z",
+    "probe_carries_digits",
     "speech_active_ratio",
     "transcript_match_score",
+    "transcript_numbers_match",
 ]

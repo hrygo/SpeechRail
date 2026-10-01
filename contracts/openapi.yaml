@@ -3621,8 +3621,9 @@ components:
           description: >-
             Per-probe normalized ASR transcript match, in fixed probe-set order.
             Empty when intelligibility was not evaluated. `transcript_match` is
-            the minimum of these values, so this breakdown is what attributes an
-            aggregate score to a specific probe.
+            the aggregate over these values -- their minimum, except that a probe
+            whose `numbers_exact` is `false` counts as 0 -- so this breakdown is
+            what attributes an aggregate score to a specific probe.
           items:
             type: object
             required:
@@ -3633,6 +3634,15 @@ components:
                 type: string
               transcript_match:
                 type: number
+              numbers_exact:
+                type: [boolean, 'null']
+                description: >-
+                  Whether every number in the probe came back digit for digit
+                  identical. `null` when the probe carries no digits and the
+                  question does not apply. A wrong digit is one substitution
+                  inside a long probe and barely moves `transcript_match`, so
+                  this verdict is what keeps a misread number from passing the
+                  gate (issue #127).
                 minimum: 0
                 maximum: 1
     VoiceQualityReport:

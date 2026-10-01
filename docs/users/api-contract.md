@@ -575,12 +575,14 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `run_id` | 本次质量运行的唯一标识 |
 | `tested_at` | 测试时间（ISO 8601 UTC） |
 | `reference` | 参考音频信号指标，或 `null` 表示本次运行未评估参考音频。`quality-runs` 是输出门禁，恒为 `null`；`clone` 与 `clone/validate` 会评估并下发真实值。非 `null` 时含时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；其中 `transcript_match` 始终为 `null`，因为实现未启用参考侧 ASR 文本匹配，从不计算该分数 |
-| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`、`probe_scores`） |
+| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`、`probe_scores`）。`probe_scores[]` 另含 `numbers_exact` |
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
 **字段语义**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及未执行质量评估的记录可能不携带该字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
 
 `synthesis.transcript_match` 是全部固定 probe 分数的 `min()`，单看聚合值无法区分“整体不可懂”和“某条 probe 文本不适配”。`synthesis.probe_scores` 按固定 probe 集顺序逐条给出 `probe_id` 与该条 `transcript_match`，未评估可懂度时为空数组；排障时应先看它定位到具体 probe。
+
+每条 `probe_scores[]` 还带一个 `numbers_exact`：该 probe 里的数字是否逐位原样返回，`null` 表示这条 probe 不含数字、该问题不适用。**聚合时 `numbers_exact: false` 的 probe 记 0 分**，即使它的字符相似度很高。原因是字符编辑距离抓不住「念错数字」——`numbers_punct` 有 44 个字符，把 `22.5℃` 念成 `25℃` 只造成一处替换，相似度 0.9375，照旧高于 `pass` 所需的 0.92，而听到的数字是错的。逐条的 `transcript_match` 仍如实上报真实相似度，所以这条判定既关得住漏放，又能把拒绝归因到具体 probe。两侧在比较前都会归一化，因此 `二十二点五` 与 `22.5` 是同一个数字，不会被误判。
 
 #### 5.7.5 克隆幂等状态查询 (`GET /v1/speechrail/voices/clone/idempotency`)
 

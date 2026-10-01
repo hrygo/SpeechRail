@@ -22,6 +22,7 @@
   `expected_runtime_revision` 钉在请求上，worker 常驻时报出不同运行期身份仍照旧
   判定证据失效。
 - 修复 `quality-runs` 报告的 `reference` 子块恒为全 0 占位：这是**输出门禁**，从不评估参考音频，却下发 `duration_seconds: 0.0`、`noise_floor_dbfs: 0.0`、`estimated_snr_db: 0.0` 等值，而这些 0 对每一项参考指标都恰好是最差读数——单看报告会得出「参考音频 0 秒、噪声 0、信噪比 0」，方向完全反了。同一份报告的判定不受影响（该路径不调 `grade_reference_quality`），但消费方直接读该字段会系统性偏悲观地误读。现在该字段显式下发 `null`。没有选择回填音色档案里克隆当时的参考报告：那会把「本次未测量」表述成「本次测得」，且数值可能已过时。参考侧的真实结果仍由 `clone/validate` 在克隆时测出，经 `GET /v1/voices/{voice_id}` 的 `validation_state.reference` 下发。`VoiceQualityReport.reference` 因此在契约中改为可空（`oneOf: [VoiceQualityReference, null]`），`policy_version` 不变——判定逻辑未改，无需使既有证据失效。
+- 修复可懂度门禁抓不住「念错数字」：字符编辑距离对数字失灵。`numbers_punct` 有 44 个字符，把 `22.5℃` 念成 `25℃` 只造成一处替换，相似度 0.9375，照旧高于 `pass` 所需的 0.92；`9月9日` 念成 `9月19日` 是 0.9697。门禁因此对数字类发音错误几乎无感知，而依赖 `production_ready=true` 的正式合成可能带着错误的数字播报出去。新增 `transcript_numbers_match`：两侧归一化后逐位比对数字串，完全一致才算通过。逐条 `probe_scores[]` 新增 `numbers_exact`（不含数字的 probe 为 `null`，与「查过且不符」区分），聚合时该条记 0 分。逐条 `transcript_match` 仍如实上报真实字符相似度，所以判定既关得住漏放又能归因到具体 probe。适用性由 probe 文本是否含数字决定而非硬编码 probe id——`pause_markers` 的「第一点/第二点」归一化后同样带数字，因此也受约束，念错序数一样会被抓住。归一化先行，所以 `二十二点五` 与 `22.5` 是同一个数字，不会误判。`policy_version` 不变：阈值与判定流程未改，只是同一条 probe 多了一道数字校验。
 
 ## [3.5.0] - 2026-10-01
 

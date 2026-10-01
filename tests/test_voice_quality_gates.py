@@ -41,8 +41,10 @@ from speechrail.domain.voice_quality import (
     make_quality_report,
     noise_floor_dbfs,
     normalize_transcript_for_match,
+    probe_carries_digits,
     speech_active_ratio,
     transcript_match_score,
+    transcript_numbers_match,
 )
 
 # ---------------------------------------------------------------------------
@@ -364,6 +366,71 @@ def test_magnitude_normalization_still_catches_a_misread_number() -> None:
     assert transcript_match_score("五千三百人", "五千三百二十人") < 1
 
 
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # The whole point of the numbers probe: a misread digit must not survive
+        # as a small edit distance. `22.5` read as `25` is one character off in
+        # a 44-character probe -- comfortably `pass` -- while the number itself
+        # is simply wrong.
+        ("温度是22.5℃", "温度是25℃", False),
+        ("今天是9月9日", "今天是9月19日", False),
+        ("温度是22.5℃", "温度是22.5℃", True),
+        # Equivalent spellings normalize to the same digits before comparison.
+        ("温度是22.5℃", "温度是二十二点五摄氏度", True),
+        ("来了五千三百人", "来了5300人", True),
+        # A dropped or invented digit is a mismatch too, even though the
+        # surrounding sentence is intact.
+        ("请按3、6、9的顺序", "请按3、6的顺序", False),
+    ],
+)
+def test_transcript_numbers_match_compares_digits_exactly(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+def test_transcript_numbers_match_ignores_probes_without_digits() -> None:
+    # Nothing to compare must not read as "matched" or "mismatched"; callers
+    # decide applicability from whether the probe text carries digits at all.
+    assert transcript_numbers_match("今天天气真好", "今天天气真好") is True
+    assert probe_carries_digits("今天天气真好，我们开个会吧。") is False
+    assert probe_carries_digits("温度是22.5℃") is True
+
+
+@pytest.mark.parametrize(
+    ("misread", "edit_distance"),
+    [
+        # Both numbers below are the exact readings issue #127 tabulated: a
+        # wrong temperature and a wrong day, each clearing the 0.92 `pass` bar
+        # on character distance alone while the number itself is wrong.
+        ("今天是2026年9月9日，温度是25℃，请你告诉我 3、6、9 的顺序。", 0.9375),
+        ("今天是2026年9月19日，温度是22.5℃，请你告诉我 3、6、9 的顺序。", 0.96969),
+    ],
+)
+def test_a_misread_number_survives_edit_distance_but_not_the_digit_check(
+    misread: str, edit_distance: float
+) -> None:
+    probe = next(p for p in VOICE_QUALITY_V1_ZH_PROBES if p["id"] == "numbers_punct")
+    assert transcript_match_score(probe["text"], misread) == pytest.approx(
+        edit_distance, abs=1e-4
+    )
+    assert transcript_match_score(probe["text"], misread) >= 0.92  # would pass today
+    assert transcript_numbers_match(probe["text"], misread) is False
+
+
+def test_every_fixed_probe_applies_the_digit_check_when_it_carries_digits() -> None:
+    # `pause_markers` reads 第一点 / 第二点, which normalization renders with
+    # digits, so it is covered too: a swapped ordinal is just as wrong as a
+    # swapped temperature. Applicability is derived from the text rather than
+    # from a probe id so a future numeric probe is covered without edits.
+    covered = {
+        probe["id"] for probe in VOICE_QUALITY_V1_ZH_PROBES if probe_carries_digits(probe["text"])
+    }
+    assert "numbers_punct" in covered
+    assert covered == {"numbers_punct", "pause_markers"}
+
+
 def test_transcript_match_rejects_unrelated_text() -> None:
     assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
 
@@ -483,15 +550,21 @@ def test_probe_scores_round_trip_and_default_to_empty() -> None:
         transcript_match=0.9091,
         intelligibility_evaluated=True,
         probe_scores=[
-            VoiceQualityProbeScore(probe_id="numbers_punct", transcript_match=0.9091),
-            VoiceQualityProbeScore(probe_id="short_sentence", transcript_match=1.0),
+            # A numeric probe carries a digit verdict; one without digits stays
+            # `None`, which is a different thing from "checked and mismatched".
+            VoiceQualityProbeScore(
+                probe_id="numbers_punct", transcript_match=0.9375, numbers_exact=False
+            ),
+            VoiceQualityProbeScore(
+                probe_id="short_sentence", transcript_match=1.0, numbers_exact=None
+            ),
         ],
     )
 
     payload = synthesis.to_dict()
     assert payload["probe_scores"] == [
-        {"probe_id": "numbers_punct", "transcript_match": 0.9091},
-        {"probe_id": "short_sentence", "transcript_match": 1.0},
+        {"probe_id": "numbers_punct", "transcript_match": 0.9375, "numbers_exact": False},
+        {"probe_id": "short_sentence", "transcript_match": 1.0, "numbers_exact": None},
     ]
     assert VoiceQualitySynthesis.from_dict(payload) == synthesis
 
@@ -499,6 +572,12 @@ def test_probe_scores_round_trip_and_default_to_empty() -> None:
     legacy = dict(payload)
     del legacy["probe_scores"]
     assert VoiceQualitySynthesis.from_dict(legacy).probe_scores == []
+
+    # A payload written before `numbers_exact` existed must load too, and must
+    # not silently claim a digit verdict that was never made.
+    assert VoiceQualityProbeScore.from_dict(
+        {"probe_id": "numbers_punct", "transcript_match": 0.9375}
+    ).numbers_exact is None
 
 
 def test_report_from_dict_round_trips_synthesis_failure_codes() -> None:

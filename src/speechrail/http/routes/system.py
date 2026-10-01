@@ -864,6 +864,7 @@ async def _evaluate_probe_intelligibility(
     per-probe breakdown a rejection cannot be attributed to a specific probe.
     """
     scores: list[float] = []
+    probe_scores: list[vq.VoiceQualityProbeScore] = []
     async with services.governor.reserve(
         WorkClass.BATCH_ASR,
         expires_at=expires_at,
@@ -887,12 +888,34 @@ async def _evaluate_probe_intelligibility(
                 partial(transcriber.transcribe, request),
                 deadline=remaining,
             )
-            scores.append(vq.transcript_match_score(probe["text"], result.text))
-    probe_scores = [
-        vq.VoiceQualityProbeScore(probe_id=probe["id"], transcript_match=score)
-        for probe, score in zip(vq.VOICE_QUALITY_V1_ZH_PROBES, scores, strict=True)
-    ]
-    return (min(scores) if scores else 0.0), probe_scores
+            score = vq.transcript_match_score(probe["text"], result.text)
+            scores.append(score)
+            # Applicability comes from the probe text, not from a probe id, so a
+            # future numeric probe is covered without editing this loop.
+            probe_scores.append(
+                vq.VoiceQualityProbeScore(
+                    probe_id=probe["id"],
+                    transcript_match=score,
+                    numbers_exact=(
+                        vq.transcript_numbers_match(probe["text"], result.text)
+                        if vq.probe_carries_digits(probe["text"])
+                        else None
+                    ),
+                )
+            )
+    # A probe whose digits came back wrong contributes 0 to the aggregate even
+    # when its character similarity clears the bar: `22.5℃` read as `25℃` is one
+    # substitution in a 44-character probe, so edit distance alone waves it
+    # through. The per-probe `transcript_match` still reports the real similarity
+    # so the rejection stays attributable to this specific probe.
+    return (
+        min(
+            score if entry.numbers_exact is not False else 0.0
+            for score, entry in zip(scores, probe_scores, strict=True)
+        )
+        if scores
+        else 0.0
+    ), probe_scores
 
 
 def create_system_router(services: AppServices) -> APIRouter:

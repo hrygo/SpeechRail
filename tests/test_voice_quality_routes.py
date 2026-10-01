@@ -1140,13 +1140,111 @@ def test_quality_runs_attributes_a_rejection_to_a_single_probe(
     assert resp.status_code == 200
     synthesis = resp.json()["synthesis"]
     scores = {score["probe_id"]: score["transcript_match"] for score in synthesis["probe_scores"]}
-    assert synthesis["transcript_match"] == pytest.approx(min(scores.values()))
+    # The aggregate is still a `min()` over the probe set, except that a probe
+    # failing the digit check counts as 0 -- otherwise a misread number would
+    # ride in on a high character similarity (see issue #127).
+    graded = {
+        probe_id: (
+            0.0
+            if next(
+                score
+                for score in synthesis["probe_scores"]
+                if score["probe_id"] == probe_id
+            )["numbers_exact"]
+            is False
+            else score
+        )
+        for probe_id, score in scores.items()
+    }
+    assert synthesis["transcript_match"] == pytest.approx(min(graded.values()))
     assert scores["numbers_punct"] < 0.8
     assert all(
         scores[probe["id"]] == pytest.approx(1.0)
         for probe in vq.VOICE_QUALITY_V1_ZH_PROBES
         if probe["id"] != "numbers_punct"
     )
+
+
+def test_quality_runs_rejects_a_misread_number_that_edit_distance_would_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Issue #127: the numbers probe exists to catch misread digits, and a wrong
+    # digit is one substitution inside a 44-character probe -- 0.9375, clear of
+    # the 0.92 `pass` bar. On edit distance alone the gate waved a wrong
+    # temperature through and the voice stayed production_ready.
+    class MisreadDigitTranscriber(ProbeEchoTranscriber):
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            result = await super().transcribe(request)
+            if request.request_id.endswith(":numbers_punct"):
+                return result.model_copy(
+                    update={"text": result.text.replace("22.5℃", "25℃")}
+                )
+            return result
+
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=MisreadDigitTranscriber(),
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert "transcript_mismatch" in body["failure_codes"]
+
+    synthesis = body["synthesis"]
+    by_probe = {score["probe_id"]: score for score in synthesis["probe_scores"]}
+    numbers = by_probe["numbers_punct"]
+    # The character similarity is still reported honestly -- it really is that
+    # high -- while the digit verdict is what fails the probe.
+    assert numbers["transcript_match"] >= 0.92
+    assert numbers["numbers_exact"] is False
+    assert synthesis["transcript_match"] == pytest.approx(0.0)
+    # A probe with no digits in it is not judged on a question that does not
+    # apply to it.
+    assert by_probe["self_intro"]["numbers_exact"] is None
+    assert by_probe["self_intro"]["numbers_exact"] is None
+
+
+def test_quality_runs_accepts_the_same_number_spelled_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The digit check must not fire on notation: `二十二点五摄氏度` is the same
+    # number as `22.5℃` once both sides are normalized.
+    class SpelledOutTranscriber(ProbeEchoTranscriber):
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            result = await super().transcribe(request)
+            if request.request_id.endswith(":numbers_punct"):
+                return result.model_copy(
+                    update={"text": result.text.replace("22.5℃", "二十二点五摄氏度")}
+                )
+            return result
+
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=SpelledOutTranscriber(),
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "pass"
+    numbers = next(
+        score
+        for score in body["synthesis"]["probe_scores"]
+        if score["probe_id"] == "numbers_punct"
+    )
+    assert numbers["numbers_exact"] is True
 
 
 def test_quality_runs_is_unevaluated_without_asr(
