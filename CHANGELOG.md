@@ -24,6 +24,15 @@
   `probe_id` 与该条 `transcript_match`。此前只给 `min()` 聚合值，无法区分
   「整体不可懂」和「某条探针文本不适配」，排障只能看到四个音色同分而看不到是哪条
   探针拖的。
+- 修复发布流程能把版本漏 bump 的 wheel 当成成功安装装上去：`speechrail install`
+   在 `/readyz` 返回 200 之后还会比对运行中服务 `/health` 自报的 `version` 与正在
+   安装的 wheel 版本，不一致即 fail closed 并退出 1。此前 `Settings.version` 的
+   硬编码默认值（`src/speechrail/config/__init__.py`）漏 bump 时，构建、preflight、
+   `/readyz` 和安装全部显示成功，而服务自报的是上一个版本号。
+- `check_version_consistency.py` 移进 release skill 的构建代码门（原先只在打 tag
+   前出现），并且 `pytest` 现在直接校验真实仓库树
+   （`test_repository_tree_version_is_consistent`）——此前该脚本的测试全部跑在
+   合成的 `tmp_path` 树上，只能证明检查器本身可用，无法发现当前 checkout 不一致。
 
 ### Added
 

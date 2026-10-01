@@ -907,6 +907,28 @@ def _wait_until_ready(
         time.sleep(2.0)
 
 
+def _package_version() -> str:
+    """Return this interpreter's package version, i.e. the wheel being installed."""
+    from speechrail import __version__
+
+    return __version__
+
+
+def _reported_service_version(base_url: str, *, app_home: Path | None) -> str | None:
+    """Return the version string the freshly started service reports, if any."""
+    headers = {"Accept": "application/json"}
+    api_key = resolve_api_key(app_home=app_home)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        with urlopen(Request(f"{base_url}/health", headers=headers), timeout=5.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, ValueError):
+        return None
+    reported = payload.get("version") if isinstance(payload, dict) else None
+    return reported if isinstance(reported, str) else None
+
+
 def _install_service_base_url(app_home: Path) -> str:
     return f"http://127.0.0.1:{_service_port(app_home)}"
 
@@ -1161,12 +1183,25 @@ def _run_install(args: argparse.Namespace) -> int:
     downloaded_bytes = sum(downloaded.values())
     ready: bool | None = None
     readiness_detail = ""
+    reported_version: str | None = None
+    version_mismatch: str | None = None
     if enable:
         ready, readiness_detail = _wait_until_ready(
             base_url,
             timeout_seconds=60.0,
             app_home=result.app_home,
         )
+        if ready:
+            # `/readyz` returning 200 only proves something is listening. A
+            # wheel whose `Settings.version` default was left on the previous
+            # release answers `/health` with that older string while executing
+            # the new code, so readiness alone reports a broken install as a
+            # success. Compare identities and fail closed instead.
+            reported_version = _reported_service_version(
+                base_url, app_home=result.app_home
+            )
+            if reported_version is not None and reported_version != _package_version():
+                version_mismatch = reported_version
     if machine_output:
         envelope: dict[str, object] = {
             "app_home": str(result.app_home),
@@ -1185,8 +1220,26 @@ def _run_install(args: argparse.Namespace) -> int:
         }
         if ready is not None:
             envelope["readyz"] = ready
+        if reported_version is not None:
+            envelope["service_version"] = reported_version
+        if version_mismatch is not None:
+            envelope["version_mismatch"] = version_mismatch
         _print_machine(envelope)
-        return 0
+        return 1 if version_mismatch is not None else 0
+    if version_mismatch is not None:
+        print(
+            f"Installed {wheel.name}, but the running service reports version "
+            f"{version_mismatch}."
+        )
+        print(
+            "The installed code and the version it advertises disagree, so this "
+            "release is not usable. Usual cause: a hardcoded version default "
+            "(src/speechrail/config/__init__.py, or SPEECHRAIL_VERSION in the "
+            "private config) was not bumped along with the other version "
+            "mirrors; run `uv run python scripts/check_version_consistency.py`."
+        )
+        print(f"Re-check it with: curl -s {base_url}/health")
+        return 1
     print(f"Installed {wheel.name} into {result.app_home}")
     print(f"Runtime: {result.runtime_python}")
     if result.prepared_id is not None:
