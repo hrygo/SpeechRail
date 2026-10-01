@@ -331,7 +331,7 @@ public struct ModelManagementView: View {
                 Image(systemName: axis.systemImage)
                     .font(SpeechRailDesignTokens.Typography.calloutMedium)
                     .foregroundStyle(accent)
-                    .frame(width: 16)
+                    .frame(width: SpeechRailDesignTokens.Icon.axisLabelFrame)
                     .accessibilityHidden(true)
                 Text(axis.title)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -2119,7 +2119,7 @@ private struct ArtifactChoiceRow: View {
                     Image(systemName: artifactIcon)
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(selected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
-                        .frame(width: 14)
+                        .frame(width: SpeechRailDesignTokens.Icon.artifactFrame)
 
                     // 第一列是「机器名 + 模型名」两行：key 留着（它是与诊断输出对照的
                     // 锚点），下面这行才是用户要认的模型本身，并按它所属的档位上色。
@@ -2246,7 +2246,7 @@ private struct OnDemandCapabilityRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: capability.icon)
-                .font(.system(size: 15, weight: .semibold))
+                .font(SpeechRailDesignTokens.Typography.iconMediumSemibold)
                 .foregroundStyle(capability.iconColor)
                 .frame(width: 32, height: 32)
                 .background(
@@ -2316,7 +2316,7 @@ private struct OnDemandCapabilityRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             StatusPill(tone: capability.tone, label: capability.state)
-                .padding(.top, 2)
+                .padding(.top, SpeechRailDesignTokens.Spacing.tight)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -2336,7 +2336,7 @@ private struct UnmanagedArtifactRow: View {
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: statusPresentation.systemImage)
-                .font(.system(size: 15))
+                .font(SpeechRailDesignTokens.Typography.iconMedium)
                 .foregroundStyle(statusPresentation.color)
                 .frame(width: 32, height: 32)
                 .background(

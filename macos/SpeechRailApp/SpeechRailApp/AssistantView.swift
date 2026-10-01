@@ -1003,7 +1003,7 @@ public struct AssistantView: View {
                             )
                     }
                 }
-                .frame(height: 36)
+                .frame(height: SpeechRailDesignTokens.Layout.waveformBarAreaHeight)
             }
         }
 
@@ -1714,9 +1714,10 @@ public struct AssistantView: View {
 
     private var liveChatElapsed: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            let liveDotSize = SpeechRailDesignTokens.Icon.liveIndicatorDotSize
             Circle()
                 .fill(assistant.isMuted ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.ready)
-                .frame(width: 6, height: 6)
+                .frame(width: liveDotSize, height: liveDotSize)
             Text(formatElapsed(session.elapsed))
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .monospacedDigit()
@@ -4115,7 +4116,7 @@ public struct AssistantView: View {
                 .speechRailSingleLineInput(.regular)
             TextEditor(text: $personaDraft.body)
                 .font(SpeechRailDesignTokens.Typography.body)
-                .frame(minHeight: 140)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
                 .overlay {
                     RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
@@ -4255,7 +4256,7 @@ struct InputLevelSheet: View {
                             .frame(width: 3, height: max(3, 20 * shape))
                     }
                 }
-                .frame(height: 22)
+                .frame(height: SpeechRailDesignTokens.Layout.inputLevelMeterHeight)
                 .accessibilityLabel("输入电平")
                 .accessibilityValue("\(Int(level * 100))%")
             }

@@ -130,10 +130,11 @@ public struct ControlMenuView: View {
     @ViewBuilder
     private var sessionActions: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            let dotSize = SpeechRailDesignTokens.Icon.statusDotSize
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Circle()
                     .fill(sessionTone.color)
-                    .frame(width: 8, height: 8)
+                    .frame(width: dotSize, height: dotSize)
                     .accessibilityHidden(true)
                 Text(session.ownershipText)
                     .font(SpeechRailDesignTokens.Typography.callout)

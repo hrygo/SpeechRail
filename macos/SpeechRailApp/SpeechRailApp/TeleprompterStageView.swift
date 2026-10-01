@@ -832,8 +832,8 @@ public struct TeleprompterStageView: View {
                         session.moveToSegment(index)
                     } label: {
                         Image(systemName: "arrow.turn.down.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .frame(width: 14, height: 14)
+                            .font(SpeechRailDesignTokens.Typography.iconMicroSemibold)
+                            .frame(width: SpeechRailDesignTokens.Icon.segmentJumpFrame, height: SpeechRailDesignTokens.Icon.segmentJumpFrame)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)

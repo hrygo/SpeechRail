@@ -115,10 +115,11 @@ public struct SessionStatusBar<Trailing: View>: View {
 
     public var body: some View {
         CardSurface {
+            let dotSize = SpeechRailDesignTokens.Icon.statusDotSize
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Circle()
                     .fill(tone.color)
-                    .frame(width: 8, height: 8)
+                    .frame(width: dotSize, height: dotSize)
                     .accessibilityHidden(true)
 
                 Text(title)

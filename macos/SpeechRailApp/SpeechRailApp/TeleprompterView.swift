@@ -1340,7 +1340,7 @@ public struct TeleprompterView: View {
                         Image(systemName: "xmark")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .frame(width: 20, height: 20)
+                            .frame(width: SpeechRailDesignTokens.Icon.dismissButtonFrame, height: SpeechRailDesignTokens.Icon.dismissButtonFrame)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("关闭提示")

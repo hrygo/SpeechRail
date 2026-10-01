@@ -4,6 +4,20 @@
 
 ### Fixed
 
+### Changed
+
+- 把 14 处散落的裸写视觉常量收进既有 token 家族（`Icon.statusDotSize`、
+  `Icon.liveIndicatorDotSize`、`Icon.axisLabelFrame`、`Icon.artifactFrame`、
+  `Icon.dismissButtonFrame`、`Icon.segmentJumpFrame`、`Typography.iconMicroSemibold`、
+  `Typography.iconMediumSemibold`、`Typography.iconMedium`、
+  `Layout.waveformBarAreaHeight`、`Layout.personaEditorMinimumHeight`、
+  `Layout.inputLevelMeterHeight`），**取值一律保持原样**：本轮只改声明位置，
+  不改渲染结果。收敛过程中暴露出一个此前没人注意的分裂——同一个「实心圆点」
+  语义同时存在 `Icon.statusDotSize`(8) 与 `Menu.menuBarStatusDotSize`(6) 两个尺寸
+  且互不相通；本轮不合并，统一到哪个值需要真机比对，仍记为未验证。
+  Debug 与 Release 均 `BUILD SUCCEEDED`。未做桌面视觉走查、VoiceOver、
+  Reduce Motion 复核，对比度真机结论仍为未验证。
+
 - 修复中文数量级在探针文本比对中不被当作数字：`normalize_transcript_for_match`
   的数字归一化只逐字覆盖 `零`–`九`，`二十二`、`五千三百` 这类含数量级词的读法会以
   字符形式进入编辑距离，逐字忠实的合成因此被扣分（`二十二度` 对 `22度` 仅 0.09）。

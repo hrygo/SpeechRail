@@ -300,6 +300,12 @@ public enum SpeechRailDesignTokens {
         public static let pulseRingLargeSize: CGFloat = 80
         public static let pulseRingMediumSize: CGFloat = 64
         public static let pulseRingSmallSize: CGFloat = 48
+        /// 语音助手波形条的容器高度（issue #90 收敛）。
+        public static let waveformBarAreaHeight: CGFloat = 36
+        /// 人格编辑器正文的最小高度（issue #90 收敛）。
+        public static let personaEditorMinimumHeight: CGFloat = 140
+        /// 语音输入电平表的条高（issue #90 收敛）。
+        public static let inputLevelMeterHeight: CGFloat = 22
     }
 
     /// Native macOS menus stay compact; custom menu-bar rows use the same
@@ -882,6 +888,24 @@ public enum SpeechRailDesignTokens {
 
         /// 选择器触发器唯一的尾部箭头语义；复用同一个 SF Symbol raw value，避免重复绘制。
         public static let choiceChevronDown: Symbol = .expandDown
+        /// 状态点：菜单行与卡片行首的实心小圆点（issue #90 收敛）。
+        ///
+        /// 此前这几处各自写死 `.frame(width: 8, height: 8)`，而 `Menu` 另有
+        /// `menuBarStatusDotSize = 6`。同一个「实心圆点」语义散落两个尺寸，改一处
+        /// 不会带动另一处。取值保持 8 不变——统一到哪个值需要真机比对，在没有实测
+        /// 前不动视觉，只把声明收进 token。
+        public static let statusDotSize: CGFloat = 8
+        /// 实时指示点：会话计时前的静音/活跃小点，比卡片状态点更小（issue #90 收敛）。
+        public static let liveIndicatorDotSize: CGFloat = 6
+        /// 提词器舞台行内「跳到该段」动作的外框；字号见 `Typography.iconMicroSemibold`
+        /// （issue #90 收敛）。
+        public static let segmentJumpFrame: CGFloat = 14
+        /// 阻碍提示条关闭按钮的外框（issue #90 收敛）。
+        public static let dismissButtonFrame: CGFloat = 20
+        /// 模型组合档位轴标签的图标外框（issue #90 收敛）。
+        public static let axisLabelFrame: CGFloat = 16
+        /// 制品列首列图标的外框（issue #90 收敛）。
+        public static let artifactFrame: CGFloat = 14
     }
 
     public enum Stroke {
@@ -1053,6 +1077,15 @@ public enum SpeechRailDesignTokens {
         /// 28pt 半粗等宽：试读计时器数字。
         public static let timerDisplay: Font = .system(size: 28, weight: .semibold, design: .monospaced)
 
+        /// 10pt 语义图标：提词器舞台行内的段落跳转动作（issue #90 收敛）。
+        ///
+        /// 此前是裸写的 `.font(.system(size: 10, weight: .semibold))`。这一档比
+        /// `.caption` 更小，只用于密集行内的单字形动作，因此不复用正文级 token。
+        public static let iconMicroSemibold: Font = .system(size: 10, weight: .semibold)
+        /// 15pt 语义图标：模型组合的能力/状态图标（issue #90 收敛）。
+        public static let iconMediumSemibold: Font = .system(size: 15, weight: .semibold)
+        /// 15pt 语义图标（常规字重）：模型组合的状态图标（issue #90 收敛）。
+        public static let iconMedium: Font = .system(size: 15)
     }
 
     public enum Color {

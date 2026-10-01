@@ -154,6 +154,25 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 `Optional` 类型注入 `.compact` 速记，也不保留未被调用的按钮字体、图标框、突出图标尺寸和旧兼容别名。
 这些清理不改变现有高保真数值、系统语义色、圆角层级或可访问性命中策略。
 
+**2026-10-02 散落视觉常量收敛（issue #90）**：把 14 处裸写的视觉常量收进既有 token 家族，
+**取值一律保持原样**——本轮只改声明位置，不改任何渲染结果，因此不需要真机比对即可判定等价。
+
+- `Icon.statusDotSize`(8)：菜单行与卡片行首的实心状态点。此前两处各写一份
+  `.frame(width: 8, height: 8)`，而 `Menu.menuBarStatusDotSize` 另有一个 6。
+  **同一个「实心圆点」语义现在有两个尺寸且互不相通**：改一处不会带动另一处。
+  本轮不合并成一个值——统一到 8 还是 6 需要真机比对，属未验证项。
+- `Icon.liveIndicatorDotSize`(6)：会话计时前的静音/活跃点。
+- `Icon.axisLabelFrame`(16) / `Icon.artifactFrame`(14) / `Icon.dismissButtonFrame`(20) /
+  `Icon.segmentJumpFrame`(14)：模型档位轴标签、制品列首列、阻碍提示条关闭、提词器舞台段落跳转的外框。
+- `Typography.iconMicroSemibold`(10) / `iconMediumSemibold`(15) / `iconMedium`(15)：
+  行内单字形动作的字号。这三档比 `.caption` 更小或与之同级但字重不同，
+  不复用正文级 token；其余 `.system(size:)` 调用本就已是 token 或用户设置（`scriptPointSize`）。
+- `Layout.waveformBarAreaHeight`(36) / `personaEditorMinimumHeight`(140) /
+  `inputLevelMeterHeight`(22)：语音助手波形条容器、人格编辑器正文下限、输入电平表条高。
+
+**仍未验证**：对比度的真机结论依旧记为未验证；状态点 8 与 6 是否应当合并同理。
+本轮未做任何桌面视觉走查、VoiceOver 或 Reduce Motion 复核。
+
 诊断结论区的用户影响说明使用 `Diagnostics.summaryMessageMaximumLines`，默认最多两行；当动态字体或
 错误文案需要更多垂直空间时，结论区只能自然增高，不得用固定最大高度裁切内容。
 
