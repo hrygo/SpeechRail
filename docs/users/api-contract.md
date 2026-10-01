@@ -556,7 +556,7 @@ stderr、vendor 异常正文、模型路径或请求文本；可用 request ID �
 - 所有 probe 输出必须同时通过格式、非静音、无满幅削波和重复确定性检查；`runs>=2` 时会对同一 probe 的 PCM SHA-256 做重复比较，`runs=1` 不宣称已验证确定性。
 - 信号门全部通过后，服务释放 TTS phase，只取 6 类 probe 各自首个有效 PCM，以现有 Batch ASR 顺序回转录并计算归一化字符相似度；该 ASR phase 独立进入 `BATCH_ASR` governor/admission，避免把 Base TTS 与 ASR 变成未经治理的并行重计算。
 - `synthesis.transcript_match` 为 6 类 probe 的最小匹配分，当前工程初始门为 `>=0.92 pass`、`0.80..0.92 warn`、`<0.80 reject`；该阈值仍需真实 Apple Silicon 语料校准。ASR 不可用时返回 `status=unevaluated` + `transcription_unavailable`，绝不伪装为通过。
-- 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
+- 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为 `null`：该端点是输出门禁，只评合成，从不评估参考音频，因此不产生参考侧失败码。此前它下发一个全 0 的指标对象，而 0 对每一项参考指标都恰好是最差读数，等于把「本次未测量」表述成「参考音频 0 秒、噪声 0、信噪比 0」。参考侧的真实结果在克隆当时由 `clone/validate` 测出，经 `GET /v1/voices/{voice_id}` 的 `validation_state.reference.status` 下发。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
 `/v1/speechrail/voices/{voice_id}/quality-runs` 还返回 `evidence` 命名空间。其
@@ -574,7 +574,7 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `status` | `pass` / `warn` / `reject` / `unevaluated`。当输出信号有效但独立 ASR 可懂度证据不可获得时，`quality-runs` 会显式下发 `unevaluated`，客户端不得把它当作 pass |
 | `run_id` | 本次质量运行的唯一标识 |
 | `tested_at` | 测试时间（ISO 8601 UTC） |
-| `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
+| `reference` | 参考音频信号指标，或 `null` 表示本次运行未评估参考音频。`quality-runs` 是输出门禁，恒为 `null`；`clone` 与 `clone/validate` 会评估并下发真实值。非 `null` 时含时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；其中 `transcript_match` 始终为 `null`，因为实现未启用参考侧 ASR 文本匹配，从不计算该分数 |
 | `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`、`probe_scores`） |
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 

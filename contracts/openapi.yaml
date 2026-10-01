@@ -3658,7 +3658,18 @@ components:
           type: string
           format: date-time
         reference:
-          $ref: '#/components/schemas/VoiceQualityReference'
+          description: >-
+            Reference-audio measurement, or `null` when this run did not evaluate
+            it. `POST /v1/voices/{voice_id}/quality-runs` is an output gate and
+            grades synthesis only, so it reports `null` here; the reference side
+            is measured once at clone time and surfaces through
+            `GET /v1/voices/{voice_id}` as `validation_state.reference`.
+            A zero-valued block is deliberately never emitted: every one of those
+            zeros is the worst possible reading for its metric, so it would read
+            as a measurement of a run that measured nothing.
+          oneOf:
+            - $ref: '#/components/schemas/VoiceQualityReference'
+            - type: 'null'
         synthesis:
           $ref: '#/components/schemas/VoiceQualitySynthesis'
         failure_codes:

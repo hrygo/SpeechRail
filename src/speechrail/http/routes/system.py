@@ -486,21 +486,6 @@ def _safe_revision_entry(
     }
 
 
-def _empty_reference() -> vq.VoiceQualityReference:
-    return vq.VoiceQualityReference(
-        duration_seconds=0.0,
-        sample_rate=24_000,
-        channels=1,
-        speech_active_ratio=0.0,
-        noise_floor_dbfs=0.0,
-        estimated_snr_db=0.0,
-        clipping_ratio=0.0,
-        leading_silence_seconds=0.0,
-        trailing_silence_seconds=0.0,
-        transcript_match=None,
-    )
-
-
 def _empty_synthesis() -> vq.VoiceQualitySynthesis:
     return vq.VoiceQualitySynthesis(
         probe_count=0,
@@ -2450,7 +2435,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             status=status,
             run_id=vq.new_run_id(),
             tested_at=vq.now_iso8601_z(),
-            reference=_empty_reference(),
+            reference=None,
             synthesis=synthesis,
             failure_codes=failure_codes,
         )

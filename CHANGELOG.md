@@ -21,6 +21,7 @@
   生产合成路径不变：`prepare_validated_speech` 仍会启动 worker、观测实时身份并把
   `expected_runtime_revision` 钉在请求上，worker 常驻时报出不同运行期身份仍照旧
   判定证据失效。
+- 修复 `quality-runs` 报告的 `reference` 子块恒为全 0 占位：这是**输出门禁**，从不评估参考音频，却下发 `duration_seconds: 0.0`、`noise_floor_dbfs: 0.0`、`estimated_snr_db: 0.0` 等值，而这些 0 对每一项参考指标都恰好是最差读数——单看报告会得出「参考音频 0 秒、噪声 0、信噪比 0」，方向完全反了。同一份报告的判定不受影响（该路径不调 `grade_reference_quality`），但消费方直接读该字段会系统性偏悲观地误读。现在该字段显式下发 `null`。没有选择回填音色档案里克隆当时的参考报告：那会把「本次未测量」表述成「本次测得」，且数值可能已过时。参考侧的真实结果仍由 `clone/validate` 在克隆时测出，经 `GET /v1/voices/{voice_id}` 的 `validation_state.reference` 下发。`VoiceQualityReport.reference` 因此在契约中改为可空（`oneOf: [VoiceQualityReference, null]`），`policy_version` 不变——判定逻辑未改，无需使既有证据失效。
 
 ## [3.5.0] - 2026-10-01
 

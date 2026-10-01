@@ -1003,6 +1003,11 @@ def test_s5_quality_runs_ok_and_bounded(
         score["transcript_match"] == pytest.approx(1.0)
         for score in body["synthesis"]["probe_scores"]
     )
+    # An output gate never grades the reference audio, so it must say so
+    # rather than shipping a zero-filled block: every one of those zeros is
+    # the worst reading for its metric, so the report read as "reference is
+    # 0s long at 0 dB SNR" for a run that measured nothing.
+    assert body["reference"] is None
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
     assert {request.speed for request in synth.requests} == {1.0}

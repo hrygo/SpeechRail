@@ -273,7 +273,12 @@ class VoiceQualityReport:
     status: str
     run_id: str
     tested_at: str
-    reference: VoiceQualityReference
+    # ``None`` means "this run did not evaluate the reference audio". The output
+    # gate never does; it grades synthesis only, and the reference side is
+    # measured once at clone time into the voice profile. A zero-filled block
+    # would read as a measurement, and every one of those zeros is the worst
+    # possible value for its metric.
+    reference: VoiceQualityReference | None
     synthesis: VoiceQualitySynthesis
     failure_codes: list[str]
 
@@ -283,7 +288,7 @@ class VoiceQualityReport:
             "status": self.status,
             "run_id": self.run_id,
             "tested_at": self.tested_at,
-            "reference": self.reference.to_dict(),
+            "reference": None if self.reference is None else self.reference.to_dict(),
             "synthesis": self.synthesis.to_dict(),
             "failure_codes": list(self.failure_codes),
         }
@@ -294,8 +299,10 @@ class VoiceQualityReport:
             raise ValueError("voice quality report must be an object")
         reference_raw = data.get("reference")
         synthesis_raw = data.get("synthesis")
-        if not isinstance(reference_raw, Mapping) or not isinstance(synthesis_raw, Mapping):
-            raise ValueError("voice quality report must contain reference and synthesis objects")
+        if not isinstance(synthesis_raw, Mapping):
+            raise ValueError("voice quality report must contain a synthesis object")
+        if reference_raw is not None and not isinstance(reference_raw, Mapping):
+            raise ValueError("voice quality report reference must be an object or null")
         raw_codes = data.get("failure_codes", [])
         if not isinstance(raw_codes, list):
             raw_codes = []
@@ -307,7 +314,11 @@ class VoiceQualityReport:
             status=_require_str(data.get("status"), "status"),
             run_id=_require_str(data.get("run_id"), "run_id"),
             tested_at=_require_str(data.get("tested_at"), "tested_at"),
-            reference=VoiceQualityReference.from_dict(reference_raw),
+            reference=(
+                None
+                if reference_raw is None
+                else VoiceQualityReference.from_dict(reference_raw)
+            ),
             synthesis=VoiceQualitySynthesis.from_dict(synthesis_raw),
             failure_codes=codes,
         )

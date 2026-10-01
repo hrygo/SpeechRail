@@ -535,6 +535,30 @@ def test_make_quality_report_grades_into_failure_codes() -> None:
     assert report.failure_codes == ["clipping"]
 
 
+def test_output_gate_report_carries_no_reference_block() -> None:
+    # `POST /v1/voices/{id}/quality-runs` is an output gate: it never grades the
+    # reference audio. It used to fill the block with all-zero placeholders, and
+    # every one of those zeros is the *worst* reading for its metric, so the report
+    # said "reference is 0s long at 0 dB SNR" for a run that measured nothing.
+    # Reporting `null` says the honest thing: not evaluated on this path. The
+    # reference side is graded separately, at clone time, into the profile.
+    report = VoiceQualityReport(
+        policy_version=POLICY_VERSION,
+        status=VoiceQualityStatus.PASS.value,
+        run_id="vqr_0123456789abcdef0123456789abcdef",
+        tested_at="2026-10-02T00:00:00Z",
+        reference=None,
+        synthesis=_synthesis(),
+        failure_codes=[],
+    )
+
+    payload = report.to_dict()
+
+    assert "reference" in payload
+    assert payload["reference"] is None
+    assert VoiceQualityReport.from_dict(payload).reference is None
+
+
 # ---------------------------------------------------------------------------
 # Signal metrics (mono PCM16) sanity checks
 # ---------------------------------------------------------------------------
