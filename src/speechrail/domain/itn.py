@@ -52,6 +52,18 @@ _UNIT_RE = re.compile(
     r"(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|秒|分(?![之]))"
 )
 
+# A Chinese numeral run that contains at least one magnitude word is *arithmetic*:
+# 二十二 is 22 and 五千三百 is 5300. A run with no magnitude word is a positional
+# digit sequence instead -- 三六九 is the digit string 369, 二零二六 is 2026 -- and
+# must be transliterated digit by digit rather than summed. `_chinese_to_int`
+# already draws exactly this line, so the split belongs next to it.
+_CN_MAGNITUDE_RE = re.compile(
+    r"[零一二两三四五六七八九十百千万亿]*[十百千万亿](?![分之])[零一二两三四五六七八九十百千万亿]*"
+    # `分之` is a fraction marker, not a magnitude in front of a unit: 百分之九十九
+    # is 99%, so matching the leading 百 rewrote it to `100分之99`. Same reason
+    # `_UNIT_RE` withholds 分 behind a digit guard.
+)
+
 
 def _chinese_year_to_arabic(match: re.Match[str]) -> str:
     digits = match.group(1)
@@ -177,6 +189,31 @@ def apply_light_itn(text: str) -> str:
     return _UNIT_RE.sub(_convert_with_unit, text)
 
 
+def resolve_chinese_magnitudes(text: str) -> str:
+    """Rewrite magnitude-bearing Chinese numerals as arabic integers.
+
+    ``apply_light_itn`` deliberately leaves a bare magnitude run alone: outside a
+    unit or decimal context, `十点` may be a clock time and `十分` is an ordinary
+    word, so guessing there corrupts transcripts. Probe comparison has no such
+    ambiguity -- both sides of the comparison are the same sentence, one written
+    with arabic digits and one spelled out by the ASR -- so a magnitude run there
+    is unambiguously a number and must be evaluated before it can be compared.
+
+    Only the magnitude run is rewritten; surrounding text is returned unchanged.
+    """
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        run = _fold_decimal_digits(match.group(0))
+        try:
+            return str(_chinese_to_int(run))
+        except (KeyError, ValueError):
+            return match.group(0)
+
+    return _CN_MAGNITUDE_RE.sub(_replace, text)
+
+
 def compose_hotword_prompt(prompt: str, keywords: Sequence[str] | None) -> str:
     """Compose dynamic hotwords/keywords prefix into the transcription prompt."""
     if not keywords:
@@ -204,4 +241,4 @@ def compose_hotword_prompt(prompt: str, keywords: Sequence[str] | None) -> str:
     return combined[:2000]
 
 
-__all__ = ["apply_light_itn", "compose_hotword_prompt"]
+__all__ = ["apply_light_itn", "compose_hotword_prompt", "resolve_chinese_magnitudes"]

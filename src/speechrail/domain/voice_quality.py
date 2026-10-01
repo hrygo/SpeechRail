@@ -37,7 +37,7 @@ from enum import StrEnum
 from typing import Any, Final
 from uuid import uuid4
 
-from speechrail.domain.itn import apply_light_itn
+from speechrail.domain.itn import apply_light_itn, resolve_chinese_magnitudes
 
 POLICY_VERSION: Final[str] = "voice_quality_v1"
 
@@ -572,7 +572,11 @@ def grade_reference_quality(
 
 def normalize_transcript_for_match(text: str) -> str:
     """Normalize ASR/reference text for bounded character-level comparison."""
-    folded = text
+    # Magnitudes first: `二十二点五` is arithmetic that `apply_light_itn` only
+    # resolves when a decimal marker is present, and `五千三百` has no marker at
+    # all, so both would otherwise reach the digit table as characters. Runs with
+    # no magnitude word (`三六九`, `二零二六`) are left alone and stay positional.
+    folded = resolve_chinese_magnitudes(text)
     for spoken, symbol in _TRANSCRIPT_SPOKEN_UNITS:
         folded = folded.replace(spoken, symbol)
     normalized = unicodedata.normalize("NFKC", apply_light_itn(folded)).casefold()

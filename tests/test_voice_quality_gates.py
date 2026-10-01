@@ -320,6 +320,50 @@ def test_transcript_match_drops_ellipsis_but_keeps_decimals() -> None:
     assert transcript_match_score("我们先来——先说第一点", "我们先来说第一点") < 1.0
 
 
+@pytest.mark.parametrize(
+    ("spoken", "normalized"),
+    [
+        # A magnitude word is arithmetic, not a syllable: `二十二` is 22 and
+        # `五千三百` is 5300. Left as characters they scored as edit distance
+        # against the arabic probe text, so a word-for-word synthesis was
+        # penalised for spelling a number the long way round.
+        ("二十二度", "22度"),
+        ("五千三百", "5300"),
+        ("一万两千", "12000"),
+        ("十", "10"),
+        # `百分之` is a fraction marker, not a magnitude before a unit:
+        # 百分之九十九 is 99%, and matching the leading 百 would read it as
+        # `100分之99` and lose the value the percent rule had just computed.
+        ("百分之九十九点九", "99.9%"),
+        # A positional digit sequence carries no magnitude and must stay
+        # positional: `三六九` is the digit string 369, not 3+6+9 arithmetic.
+        ("三六九", "369"),
+        ("二零二六", "2026"),
+    ],
+)
+def test_normalization_resolves_chinese_magnitudes_to_arabic(
+    spoken: str, normalized: str
+) -> None:
+    assert normalize_transcript_for_match(spoken) == normalized
+
+
+def test_chinese_magnitude_spelling_scores_like_the_arabic_spelling() -> None:
+    # `numbers_punct` exists to catch misread digits, so its own reference text
+    # has to compare equal to the way an ASR spells those digits back. Before
+    # magnitudes were resolved, a correct synthesis that said `二十二度` instead
+    # of `22度` lost every character of that number to edit distance.
+    assert transcript_match_score("温度是二十二度", "温度是22度") == pytest.approx(1)
+    assert transcript_match_score("来了五千三百人", "来了5300人") == pytest.approx(1)
+
+
+def test_magnitude_normalization_still_catches_a_misread_number() -> None:
+    # Resolving magnitudes must not become a rubber stamp: 25 and 22 are
+    # different numbers and have to stay different numbers.
+    assert transcript_match_score("温度是22.5℃", "温度是二十五摄氏度") < 0.98
+    assert transcript_match_score("五千三百人", "五千三百人") == pytest.approx(1)
+    assert transcript_match_score("五千三百人", "五千三百二十人") < 1
+
+
 def test_transcript_match_rejects_unrelated_text() -> None:
     assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
 
