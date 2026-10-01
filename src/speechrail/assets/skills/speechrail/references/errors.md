@@ -16,6 +16,10 @@ the category before retrying:
   stable backend/output classes; they are not automatic retry signals unless
   the error explicitly says `retryable=true`.
 
+- `clone_speed_unsupported`: Base clone is fixed at `speed=1.0`. This is a
+  capability mismatch, not a transient error — never retry it by sending a
+  different speed, and never read it as "the voice is broken".
+
 Never parse traceback or stderr text to decide whether clone speed is
 unsupported. Never turn a failed registration or validation into a successful
 voice record. Do not hide a conflict by changing the voice ID automatically.

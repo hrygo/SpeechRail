@@ -367,6 +367,47 @@ def test_server_info_exposes_name_title_and_version() -> None:
     assert app.instructions == server._INSTRUCTIONS
 
 
+@pytest.mark.parametrize(
+    "dropped",
+    [
+        # Operating procedure, not capability statement. Each of these has an
+        # authoritative home under `assets/skills/speechrail/`, so keeping a
+        # copy here costs every session its first-turn context and buys
+        # nothing -- the model reads the skill when the task actually needs it.
+        "clone_speed_unsupported",
+        "file:// URI",
+        "Idempotency-Key",
+        "bounded backoff",
+        "confirm_voice_design",
+    ],
+)
+def test_server_instructions_do_not_restate_skill_procedure(dropped: str) -> None:
+    # Regression guard for issue #100. The server `instructions` field is sent at
+    # initialize on every session, so procedure duplicated there is paid for
+    # constantly. See the skill assets for the authoritative text.
+    assert dropped not in server._INSTRUCTIONS
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        # Reading any of these wrong leads to a wrong action rather than a
+        # slower one, so they stay even though they cost context.
+        "`available=true` means the voice can be routed",
+        "Reference-gate success is not output-gate success",
+        "candidate generation and machine validation never substitute for human review",
+        "never creates a Realtime WebSocket handle",
+    ],
+)
+def test_server_instructions_keep_the_expensive_to_get_wrong_claims(kept: str) -> None:
+    assert kept in server._INSTRUCTIONS
+
+
+def test_server_instructions_point_at_the_skill_for_call_conventions() -> None:
+    # Dropping the procedure is only safe while there is somewhere to read it.
+    assert "`speechrail` skill" in server._INSTRUCTIONS
+
+
 def test_every_tool_has_title_and_expected_annotations() -> None:
     by_name = _tools_by_name()
     assert set(by_name) == set(_TOOL_ANNOTATIONS)
