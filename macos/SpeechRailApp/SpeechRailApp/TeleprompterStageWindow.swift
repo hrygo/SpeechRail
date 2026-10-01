@@ -54,6 +54,7 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             }
         }
         panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         isVisible = true
     }
 
@@ -204,12 +205,58 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
                 panel.center()
             }
         }
+        panel.keyHandler = { [weak self] event in
+            guard let self, self.isVisible else { return false }
+            // 忽略带有 command/control 的组合键，保证系统快捷键不受影响
+            if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
+                return false
+            }
+            switch event.keyCode {
+            case 126, 123, 40: // Up arrow, Left arrow, K
+                self.moveReadingLine(by: -1)
+                return true
+            case 125, 124, 49, 38: // Down arrow, Right arrow, Space, J
+                self.moveReadingLine(by: 1)
+                return true
+            case 9: // V: toggle voice follow
+                Task { @MainActor in
+                    switch self.session.voiceAssistState {
+                    case .following:
+                        await self.session.disableVoiceAssist()
+                    case .stopFailed:
+                        await self.session.retryStopVoiceAssist()
+                    case .off, .pausedByUser, .unavailable:
+                        await self.session.enableVoiceAssist()
+                    case .starting, .stopping:
+                        break
+                    }
+                }
+                return true
+            case 46: // M: toggle mirror
+                self.settings.isMirrored.toggle()
+                return true
+            case 53: // Escape
+                self.close()
+                return true
+            default:
+                return false
+            }
+        }
         self.panel = panel
         return panel
     }
 }
 
 private final class TeleprompterPanel: NSPanel {
+    var keyHandler: ((NSEvent) -> Bool)?
+
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if let keyHandler, keyHandler(event) {
+            return
+        }
+        super.keyDown(with: event)
+    }
 }

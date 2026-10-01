@@ -951,6 +951,83 @@ public final class TeleprompterSession {
         )
     }
 
+    // MARK: - 口述字符稿（统一文本编辑）
+
+    /// AI 整理后的整篇口述稿纯文本。
+    /// 无论底层如何分段，对用户而言都是一份可通读、可直接修改的干净字符稿。
+    public var preparedText: String {
+        if !readingBlocks.isEmpty {
+            let activeTexts = readingBlocks
+                .filter { $0.disposition == .speak }
+                .map(\.text)
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !activeTexts.isEmpty {
+                return activeTexts.joined(separator: "\n\n")
+            }
+        }
+        if let pending = pendingVersion, !pending.segments.isEmpty {
+            return pending.segments.map(\.text).joined(separator: "\n\n")
+        }
+        return effectiveSourceText
+    }
+
+    /// 用户在通读纯文本字符稿并修改后，实时或提交更新。
+    /// 按自然段（空行）切分，重新同步到 readingBlocks 与 pendingVersion。
+    public func updatePreparedDraftText(_ newText: String) {
+        guard canEdit, document != nil else { return }
+        let rawParagraphs = newText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        // 合并连续空行，生成清晰的段落列表
+        var paragraphs: [String] = []
+        var currentPara = ""
+        for line in rawParagraphs {
+            if line.isEmpty {
+                if !currentPara.isEmpty {
+                    paragraphs.append(currentPara)
+                    currentPara = ""
+                }
+            } else {
+                if currentPara.isEmpty {
+                    currentPara = line
+                } else {
+                    currentPara += "\n" + line
+                }
+            }
+        }
+        if !currentPara.isEmpty {
+            paragraphs.append(currentPara)
+        }
+        if paragraphs.isEmpty {
+            paragraphs = [newText.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+
+        var newBlocks: [TeleprompterReadingBlock] = []
+        var runningOffset = 0
+        for (idx, para) in paragraphs.enumerated() {
+            let start = runningOffset
+            let end = start + para.count
+            runningOffset = end + 2 // 预留换行
+            newBlocks.append(
+                TeleprompterReadingBlock(
+                    id: "user-block-\(idx)",
+                    ordinal: idx,
+                    sourceRange: TeleprompterSourceRange(start: start, end: end),
+                    text: para,
+                    rawSourceText: para,
+                    disposition: .speak,
+                    origin: .user,
+                    budgetSeconds: 0
+                )
+            )
+        }
+
+        self.readingBlocks = newBlocks
+        syncPendingVersionFromBlocks()
+        scheduleDraftSave()
+    }
+
     // MARK: - 来源组/块级编辑操作
 
     /// 改一段的跟读方式：照念 / 只作提示 / 不进跟读。

@@ -23,6 +23,8 @@ public struct TeleprompterView: View {
     @State private var isReadingAliasPresented = false
     @State private var targetMinutesInput = "20"
     @State private var pendingAIAction: AIPendingAction = .prepare
+    @State private var localPreparedText = ""
+    @State private var preparedTextSyncTask: Task<Void, Never>?
 
     /// 送模型之前要先说清楚这次发出去的是哪类内容，用户才认得同意按钮在同意什么。
     private enum AIPendingAction {
@@ -1490,193 +1492,68 @@ public struct TeleprompterView: View {
     }
 
     // MARK: - 3.3 整理稿内容视图
-
-    /// AI 整理完成后的页面。
     ///
-    /// 这里没有「待确认事项」也没有原稿分栏对照。AI 的职责到交出一份可念的稿为止，
-    /// 事实是否丢失由通读一遍的人来兜底——所以这一屏只做三件事：读一遍、改几段、
-    /// 然后用。不要在这里重建一套审阅工作流。
+    /// 极简口述字符稿：AI 整理后呈现一份完整的通读稿。
+    /// 用户可以像便签一样通读修改，确认无误直接开讲，无需进行琐碎的段落微操。
     private var workbenchPreparedContent: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-            if session.hasLocalPreparationFallback {
-                NoticeBar(
-                    tone: .warning,
-                    message: session.isFullyLocalPreparationFallback
-                        ? "已保留原稿，可直接开讲。如需 AI 口语化改写请点击「再整理一次」。"
-                        : "有几段保留了原文，下面标了出来。",
-                    actionTitle: session.isPreparingDraft ? nil : "再整理一次",
-                    action: session.isPreparingDraft ? nil : {
-                        startAIAnalysis()
-                    }
-                )
-            } else {
-                NoticeBar(
-                    tone: .success,
-                    message: "口语稿已整理完成，可通读预览或直接开讲。"
-                )
-            }
-
-            if session.hasUncheckedPreparationBoundaries {
-                NoticeBar(
-                    tone: .warning,
-                    message: "部分段落衔接已做就近顺滑，建议通读确认。"
-                )
-            }
-
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             CardSurface {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("口语播报稿")
-                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("口述字符稿")
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                        Text("共 \(session.readingBlocks.count) 段。通读如需调整，可直接编辑正文或在右侧操作段落。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            Text("AI 已将原稿转为自然口述语序。通读核对，可直接修改，满意后直接开讲。")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+
+                        Spacer()
+
+                        Button("恢复原稿") {
+                            session.discardPendingVersion()
+                        }
+                        .buttonStyle(.plain)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .help("放弃 AI 整理，使用导入的原始文本")
                     }
 
                     SessionHairline()
 
-                    ScrollView {
-                        VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                            ForEach(session.readingBlocks) { block in
-                                preparedBlockRow(block)
+                    TextEditor(text: $localPreparedText)
+                        .disabled(!session.canEdit)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .scrollContentBackground(.hidden)
+                        .padding(SpeechRailDesignTokens.Spacing.sm)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(
+                            SpeechRailDesignTokens.Color.recessedField,
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        )
+                        .accessibilityLabel("口述字符稿正文")
+                        .onAppear {
+                            localPreparedText = session.preparedText
+                        }
+                        .onChange(of: session.phase) { _, newPhase in
+                            if newPhase == .prepared {
+                                localPreparedText = session.preparedText
                             }
                         }
-                    }
-                    .frame(maxHeight: SpeechRailDesignTokens.Teleprompter.preparedBlockListMaximumHeight)
+                        .onChange(of: localPreparedText) { _, newText in
+                            preparedTextSyncTask?.cancel()
+                            preparedTextSyncTask = Task { @MainActor in
+                                try? await Task.sleep(for: .milliseconds(350))
+                                guard !Task.isCancelled else { return }
+                                session.updatePreparedDraftText(newText)
+                            }
+                        }
                 }
                 .padding(SpeechRailDesignTokens.Spacing.md)
             }
         }
-    }
-
-    /// 一段稿子 = 一行，行首一个跟读方式标签。
-    ///
-    /// 标签而不是控件：默认「照念」是绝大多数段落的状态，所以它平时只是个小徽标，
-    /// 需要改的那两三段点一下换掉即可。分段标记和逐句标记的手感差别全在这里——
-    /// 前者是「这段怎么处理」，后者会让人以为要对着稿子一句一句过一遍。
-    private func preparedBlockRow(_ block: TeleprompterReadingBlock) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("第 \(block.ordinal + 1) 段")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                if block.origin == .deterministic && block.text == block.rawSourceText {
-                    StatusPill(tone: .neutral, label: "原文")
-                }
-
-                Spacer()
-
-                blockDispositionMenu(block)
-
-                Menu {
-                    Button("在此后新增一段") {
-                        session.insertBlock(after: block.ordinal)
-                    }
-                    Button("拆成两段") {
-                        session.splitBlock(at: block.ordinal)
-                    }
-                    Button("与下一段合并") {
-                        session.mergeBlock(at: block.ordinal)
-                    }
-                    .disabled(block.ordinal + 1 >= session.readingBlocks.count)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
-                .menuStyle(.borderlessButton)
-                .speechRailButton(.secondary)
-                .help("这一段的更多操作")
-                .accessibilityLabel("第 \(block.ordinal + 1) 段的更多操作")
-            }
-
-            if block.disposition == .speak {
-                readingBlockEditor(block)
-            } else {
-                // 提示与跳过不念，但原稿仍然要显示出来：人得看得见排掉的是什么，
-                // 否则「跳过」就成了让内容凭空消失的开关。
-                //
-                // 这里必须读 `rawSourceText` 而不是 `text`：两个 decoder 都强制
-                // cue/skip 的 text 为空（它们不产出朗读正文），读 `text` 只会
-                // 永远命中下面的空态，等于把这段内容从界面上彻底抹掉。
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text(block.rawSourceText.isEmpty ? "（这一段没有原稿）" : block.rawSourceText)
-                        .font(SpeechRailDesignTokens.Typography.body)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .padding(SpeechRailDesignTokens.Spacing.sm)
-        .background(
-            SpeechRailDesignTokens.Color.field,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                .stroke(
-                    block.disposition == .speak
-                        ? SpeechRailDesignTokens.Surface.border
-                        : SpeechRailDesignTokens.Color.attention.opacity(0.35),
-                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                )
-        )
-    }
-
-    private func blockDispositionMenu(_ block: TeleprompterReadingBlock) -> some View {
-        Menu {
-            ForEach(TeleprompterBlockDisposition.allCases, id: \.self) { option in
-                Button {
-                    session.setBlockDisposition(id: block.id, disposition: option)
-                } label: {
-                    if option == block.disposition {
-                        Label(option.preparedTitle, systemImage: "checkmark")
-                    } else {
-                        Text(option.preparedTitle)
-                    }
-                }
-            }
-        } label: {
-            if block.disposition == .speak {
-                HStack(spacing: 2) {
-                    Text(block.disposition.preparedTitle)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-            } else {
-                StatusPill(
-                    tone: .attention,
-                    label: block.disposition.preparedTitle
-                )
-            }
-        }
-        .menuStyle(.borderlessButton)
-        .help("这一段怎么念")
-        .accessibilityLabel("第 \(block.ordinal + 1) 段的跟读方式，当前为\(block.disposition.preparedTitle)")
-    }
-
-
-
-    private func readingBlockEditor(_ block: TeleprompterReadingBlock) -> some View {
-        TextField(
-            "朗读正文",
-            text: Binding(
-                get: { block.text },
-                set: { session.updateBlockText(id: block.id, text: $0) }
-            ),
-            axis: .vertical
-        )
-        .textFieldStyle(.plain)
-        .font(SpeechRailDesignTokens.Typography.body)
-        .lineLimit(2...12)
-        .speechRailRecessedSlot()
     }
 
 
@@ -1932,38 +1809,33 @@ public struct TeleprompterView: View {
             case .prepared:
                 Button {
                     do {
+                        preparedTextSyncTask?.cancel()
+                        session.updatePreparedDraftText(localPreparedText)
                         try session.acceptPendingVersion()
                         operationMessage = nil
                         reloadDocuments()
+                        showStage()
                     } catch {
                         operationMessage = error.localizedDescription
                     }
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("用这份稿")
+                        Image(systemName: "play.rectangle.fill")
+                        Text("打开提词器")
                         ButtonShortcutHint("⌘⏎")
                     }
                 }
-                // 「用这份稿」是整理相位唯一不可重做的一步，走查清单点名
-                // 「必须键盘可达」。`⌘⏎` 沿用「各相位主操作」的模式：草稿相位
-                // 是「整理朗读稿」，整理相位是「用这份稿」——两个按钮分处
-                // `case .draft` 与 `case .prepared`，互斥因而不会同时注册。
-                //
-                // 快捷键挂在**常驻底座**这一个 accept 上，而不是稿子面板里的
-                // 同名按钮：同屏挂两个 `⌘⏎` 会冲突。挂在按钮上而非做成菜单命令，
-                // 是因为按钮处理器会 `reloadDocuments()` 刷新侧栏，而 `documents`
-                // 是视图本地 `@State`，菜单命令够不着——另做一份会漏掉刷新，
-                // 正是本仓库要避免的「同一件事两处实现」。
                 .keyboardShortcut(.return, modifiers: .command)
                 .speechRailButton(.primary)
                 .disabled(!session.canAcceptPendingVersion)
 
-                Button("先试读", systemImage: "stopwatch") {
-                    isTrialReadingPresented = true
+                Button("重新整理", systemImage: "arrow.triangle.2.circlepath") {
+                    startAIAnalysis()
                 }
                 .speechRailButton(.secondary)
+                .disabled(session.isPreparingDraft)
 
-                Button("放弃") {
+                Button("恢复原稿") {
                     session.discardPendingVersion()
                 }
                 .speechRailButton(.secondary)

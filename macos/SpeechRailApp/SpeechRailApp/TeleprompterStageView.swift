@@ -181,6 +181,10 @@ public struct TeleprompterStageView: View {
     private var stageWithKeyboard: some View {
         stageWithSettingsObservation
             .onKeyPress(.tab) { handleTabKey() }
+            .onKeyPress(KeyEquivalent("j"), phases: .down) { handleReadingKeyPress($0, by: 1) }
+            .onKeyPress(KeyEquivalent("k"), phases: .down) { handleReadingKeyPress($0, by: -1) }
+            .onKeyPress(KeyEquivalent("v"), phases: .down) { _ in handleVoiceToggleKey() }
+            .onKeyPress(KeyEquivalent("m"), phases: .down) { _ in handleMirrorToggleKey() }
             .onKeyPress(.space, phases: .down) { handleReadingKeyPress($0, by: 1) }
             .onKeyPress(.leftArrow, phases: .down) { handleReadingKeyPress($0, by: -1) }
             .onKeyPress(.rightArrow, phases: .down) { handleReadingKeyPress($0, by: 1) }
@@ -307,8 +311,20 @@ public struct TeleprompterStageView: View {
     }
 
     private func handleReadingKeyPress(_ keyPress: KeyPress, by delta: Int) -> KeyPress.Result {
-        guard keyPress.modifiers.isEmpty, acceptsReadingKeyCommands else { return .ignored }
+        guard keyPress.modifiers.isEmpty, !isAppearancePopoverPresented else { return .ignored }
         moveByDisplayLine(delta)
+        return .handled
+    }
+
+    private func handleVoiceToggleKey() -> KeyPress.Result {
+        guard !isAppearancePopoverPresented, !voiceAssistBusy else { return .ignored }
+        handleVoiceAssist()
+        return .handled
+    }
+
+    private func handleMirrorToggleKey() -> KeyPress.Result {
+        guard !isAppearancePopoverPresented else { return .ignored }
+        settings.isMirrored.toggle()
         return .handled
     }
 
@@ -583,6 +599,8 @@ public struct TeleprompterStageView: View {
                         }
                     }
                 }
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.bottom, SpeechRailDesignTokens.Teleprompter.stageControlAreaHeight + SpeechRailDesignTokens.Spacing.lg)
                 .frame(width: contentWidth, alignment: .leading)
                 .frame(width: geometry.size.width, alignment: .center)
             }
@@ -645,14 +663,17 @@ public struct TeleprompterStageView: View {
     }
 
     private func moveByDisplayLine(_ delta: Int) {
-        guard let target = TeleprompterStagePresentation.positionByMovingLine(
+        if let target = TeleprompterStagePresentation.positionByMovingLine(
             by: delta,
             from: currentReadingPosition,
             lines: displayLines
-        ) else {
-            return
+        ) {
+            session.moveToReadingPosition(target)
+        } else if delta > 0 {
+            session.moveToNext()
+        } else if delta < 0 {
+            session.moveToPrevious()
         }
-        session.moveToReadingPosition(target)
     }
 
     /// 查阅全稿或手动滚动之后，把舞台收回当前朗读行。
@@ -680,7 +701,10 @@ public struct TeleprompterStageView: View {
         let isCurrent = index == currentLineIndex
 
         return Text(styledText(line, index: index, currentLineIndex: currentLineIndex))
-            .font(.system(size: settings.scriptPointSize, weight: .regular))
+            .font(.system(
+                size: settings.scriptPointSize,
+                weight: isCurrent ? .medium : .regular
+            ))
             .lineSpacing(settings.lineSpacing)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
