@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import ModelArtifact
@@ -29,6 +29,12 @@ from speechrail.domain.voice_validation import (
 
 SCHEMA_VERSION = "effective_capabilities_v1"
 Support = Literal["supported", "unsupported", "unknown"]
+# Runtime identity states that satisfy a current-binding gate. `observed` means a
+# resident worker reported the revision just now; `recorded` means no worker is up
+# and the identity comes from the evidence record's own self-consistent runtime
+# revision. Both answer "which runtime is this evidence from" without making
+# readiness a function of worker occupancy — see issue #129. `unknown` never does.
+_BOUND_RUNTIME_IDENTITY: Final[frozenset[str]] = frozenset({"observed", "recorded"})
 # Declared system preset metadata, not an inference from private instructions.
 _SYSTEM_LOCALES = {
     "serena": "zh-CN",
@@ -106,7 +112,7 @@ def _validation_state(
     validation: Mapping[str, Any] | None = None,
     *,
     runtime_revision: str | None = None,
-    runtime_identity_status: Literal["not_requested", "unknown", "observed"] = (
+    runtime_identity_status: Literal["not_requested", "unknown", "observed", "recorded"] = (
         "not_requested"
     ),
     validation_binding: Mapping[str, Any] | None = None,
@@ -149,7 +155,8 @@ def _validation_state(
                 "status": "unevaluated",
                 "reason": (
                     "model_runtime_identity_unknown"
-                    if binding_required and runtime_identity_status != "observed"
+                    if binding_required
+                    and runtime_identity_status not in _BOUND_RUNTIME_IDENTITY
                     else
                     "legacy_synthesis_validation_not_reused"
                     if isinstance(quality.get("synthesis_validation"), Mapping)
@@ -172,7 +179,10 @@ def _validation_state(
                 stale_reason = "model_artifact_changed"
             elif raw.get("model_catalog_revision") != artifact.revision:
                 stale_reason = "model_catalog_revision_changed"
-            elif binding_required and runtime_identity_status != "observed":
+            elif (
+                binding_required
+                and runtime_identity_status not in _BOUND_RUNTIME_IDENTITY
+            ):
                 stale_reason = "model_runtime_identity_unknown"
             elif binding_required and validation_binding is not None:
                 compared_keys = [
@@ -252,7 +262,10 @@ def _validation_state(
         and synthesis["status"] == "pass"
         and output_validated
         and not stale
-        and (not binding_required or runtime_identity_status == "observed")
+        and (
+            not binding_required
+            or runtime_identity_status in _BOUND_RUNTIME_IDENTITY
+        )
     )
     if production_ready:
         reason = "validated"
@@ -284,7 +297,7 @@ def _voice_entry(
     sample_rate: int,
     validation: Mapping[str, Any] | None = None,
     runtime_revision: str | None = None,
-    runtime_identity_status: Literal["not_requested", "unknown", "observed"] = (
+    runtime_identity_status: Literal["not_requested", "unknown", "observed", "recorded"] = (
         "not_requested"
     ),
     validation_binding: Mapping[str, Any] | None = None,

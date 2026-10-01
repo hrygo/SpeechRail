@@ -11,6 +11,16 @@
   不含量位词的位序串（`三六九`、`二零二六`）仍按位翻译——`_chinese_to_int`
   本就区分这两类。`百分之` 由 `分之` 前瞻排除，否则 `百分之九十九` 会被读成
   `100分之99`。
+- 修复 `production_ready` 随 TTS worker 常驻状态翻转：同一音色、同一
+  `voice_revision`、同一份合成证据 `run_id`，冷态下被判
+  `model_runtime_identity_unknown` 而 `production_ready: false`，合成一次把 worker
+  叫醒后即变成 `true`。`qwen3_tts.runtime_revision` 只在 worker 常驻且 ready 时
+  返回值，于是运行期身份被错误地绑到了 worker 占用上——变的是判定，不是证据。
+  只读上报路径现在在没有常驻 worker 时改用证据记录自带的运行期身份，且只在它
+  具备规范形态**并且**其指纹能由自身绑定维度重算出来时才采信，否则仍然 fail closed。
+  生产合成路径不变：`prepare_validated_speech` 仍会启动 worker、观测实时身份并把
+  `expected_runtime_revision` 钉在请求上，worker 常驻时报出不同运行期身份仍照旧
+  判定证据失效。
 
 ## [3.5.0] - 2026-10-01
 

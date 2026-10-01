@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, replace
+from typing import Any, Literal, cast
 
 from speechrail.application.capability_snapshot import _validation_state
 from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
@@ -35,7 +35,7 @@ from speechrail.domain.voice_validation import (
 
 REFERENCE_PREPROCESS_VERSION = "energy_v1"
 BASE_GENERATION_RECIPE_REVISION = "qwen3_tts_base_clone_v1"
-RuntimeIdentityStatus = Literal["not_requested", "unknown", "observed"]
+RuntimeIdentityStatus = Literal["not_requested", "unknown", "observed", "recorded"]
 
 
 def _preprocess_version(profile: VoiceProfile) -> str:
@@ -193,6 +193,62 @@ def load_validation_evidence(
     )
 
 
+def _binding_from_recorded_runtime(
+    binding: VoiceValidationBinding,
+    repository: VoiceValidationRepository,
+) -> VoiceValidationBinding | None:
+    """Rebuild a binding from the runtime identity the evidence itself records.
+
+    A runtime revision is a property of the loaded model snapshot, not of the
+    worker's residency: ``qwen3_tts.runtime_revision`` reports ``None`` while
+    the worker is cold-evicted, which made ``production_ready`` flip with
+    occupancy while the evidence stayed byte-identical. Reading readiness must
+    therefore not depend on a worker happening to be up.
+
+    The recorded identity is only usable when it is self-consistent: it has to
+    carry the canonical observed shape *and* its fingerprint has to recompute
+    from its own binding dimensions. Anything else — no record, a record from a
+    legacy path without a runtime, a hand-edited fingerprint — returns ``None``
+    so the caller keeps reporting an unknown identity and the voice stays
+    unready. Genuine staleness is unaffected: when a worker *is* resident its
+    live revision is compared against the record exactly as before.
+    """
+
+    if binding.model_runtime_revision is not None:
+        return None
+    candidate = repository.get(
+        voice_id=binding.voice_id,
+        voice_revision=binding.voice_revision,
+        model_artifact=binding.model_artifact,
+        model_catalog_revision=binding.model_catalog_revision,
+        preprocess_version=binding.preprocess_version,
+        generation_recipe_revision=binding.generation_recipe_revision,
+        policy_version=binding.policy_version,
+        capability_key=binding.capability_key,
+    )
+    if candidate is None:
+        return None
+    runtime_revision = candidate.get("model_runtime_revision")
+    if not is_observed_runtime_revision(runtime_revision):
+        return None
+    expected_fingerprint = _runtime_fingerprint(
+        runtime_revision=cast(str, runtime_revision),
+        model_artifact=binding.model_artifact or "",
+        model_catalog_revision=binding.model_catalog_revision or "",
+        preprocess_version=binding.preprocess_version,
+        generation_recipe_revision=binding.generation_recipe_revision,
+        policy_version=binding.policy_version,
+    )
+    if candidate.get("runtime_fingerprint") != expected_fingerprint:
+        return None
+    return replace(
+        binding,
+        model_runtime_revision=cast(str, runtime_revision),
+        runtime_fingerprint=expected_fingerprint,
+        runtime_identity_status="recorded",
+    )
+
+
 def validation_state_for_voice(
     profile: VoiceProfile,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
@@ -218,6 +274,15 @@ def validation_state_for_voice(
         binding,
         require_current_binding=require_current_binding,
     )
+    if evidence is None and require_current_binding:
+        recorded = _binding_from_recorded_runtime(binding, repository)
+        if recorded is not None:
+            binding = recorded
+            evidence = load_validation_evidence(
+                repository,
+                binding,
+                require_current_binding=require_current_binding,
+            )
     state = _validation_state(
         profile,
         artifact,
