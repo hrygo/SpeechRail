@@ -41,6 +41,7 @@ from speechrail.service.bootstrap import (
     restore_runtime_current,
     snapshot_runtime_current,
 )
+from speechrail.service.constants import SERVICE_ENTRY_NAME
 from speechrail.service.installer_errors import InstallerError
 from speechrail.service.model_store import Downloader, prepare_spec_models
 from speechrail.service.paths import ServiceLayout
@@ -369,6 +370,14 @@ def _patch_entry_points(release_dir: Path) -> None:
     release.  Patching them to resolve ``runtime/current`` at startup keeps
     ``~/.local/bin/speechrail[-mcp]`` (which symlinks into the current venv)
     working across releases without client-side changes.
+
+    The managed LaunchAgent cannot use those wrappers: they resolve the app home
+    from ``SPEECHRAIL_APP_HOME`` and the plist deliberately carries no
+    environment, so a non-default app home would start the wrong runtime.  The
+    service entry below is a sibling symlink to the venv interpreter instead, so
+    it is shell-free, app-home independent, follows ``runtime/current`` like every
+    other path under it, and its basename names the macOS "Allow in Background"
+    row after the service rather than after ``python``.
     """
     app_home_default = "$HOME/Library/Application Support/SpeechRail"
     for name, module in (("speechrail-mcp", "speechrail.mcp"), ("speechrail", "speechrail")):
@@ -389,6 +398,13 @@ def _patch_entry_points(release_dir: Path) -> None:
         ]
         script.write_text("\n".join(lines), encoding="utf-8")
         script.chmod(0o755)
+
+    bin_directory = release_dir / ".venv" / "bin"
+    if not (bin_directory / "python").exists():
+        return
+    service_entry = bin_directory / SERVICE_ENTRY_NAME
+    service_entry.unlink(missing_ok=True)
+    service_entry.symlink_to("python")
 
 
 def _stage_wheel(

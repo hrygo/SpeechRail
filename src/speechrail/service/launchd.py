@@ -11,10 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from speechrail.service.constants import SERVICE_LABEL
+from speechrail.service.constants import SERVICE_ENTRY_NAME, SERVICE_LABEL
 
 _THROTTLE_SECONDS = 10
 _LAUNCHCTL_TIMEOUT_SECONDS = 15.0
+_MODULE_ARGUMENTS = ("-m", "speechrail", "serve")
 
 Runner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
 
@@ -45,23 +46,23 @@ class LaunchAgentDefinition:
     """All non-secret values rendered into a LaunchAgent plist."""
 
     working_directory: Path
-    python_executable: Path
+    service_executable: Path
     stdout_path: Path
     stderr_path: Path
 
     def __post_init__(self) -> None:
         working_directory = _require_absolute(self.working_directory, name="working directory")
-        python_executable = _require_absolute_preserving_symlink(
-            self.python_executable, name="python executable"
+        service_executable = _require_absolute_preserving_symlink(
+            self.service_executable, name="service executable"
         )
         stdout_path = _require_absolute(self.stdout_path, name="stdout path")
         stderr_path = _require_absolute(self.stderr_path, name="stderr path")
         if not working_directory.is_dir():
             raise ServiceError("working directory must exist")
-        if not python_executable.is_file():
-            raise ServiceError("python executable must exist and be a file")
+        if not service_executable.is_file():
+            raise ServiceError("service executable must exist and be a file")
         object.__setattr__(self, "working_directory", working_directory)
-        object.__setattr__(self, "python_executable", python_executable)
+        object.__setattr__(self, "service_executable", service_executable)
         object.__setattr__(self, "stdout_path", stdout_path)
         object.__setattr__(self, "stderr_path", stderr_path)
 
@@ -71,10 +72,8 @@ class LaunchAgentDefinition:
             {
                 "Label": SERVICE_LABEL,
                 "ProgramArguments": [
-                    str(self.python_executable),
-                    "-m",
-                    "speechrail",
-                    "serve",
+                    str(self.service_executable),
+                    *_MODULE_ARGUMENTS,
                 ],
                 "WorkingDirectory": str(self.working_directory),
                 "RunAtLoad": True,
@@ -203,6 +202,23 @@ class LaunchAgentManager:
             raise
 
 
+def _resolve_launch_target() -> Path:
+    """Prefer the managed service entry over the bare interpreter.
+
+    macOS names the "Allow in Background" entry after ``basename(ProgramArguments[0])``,
+    so launching the virtualenv interpreter directly surfaces this service as a generic
+    ``python`` row. The managed installer publishes ``SERVICE_ENTRY_NAME`` next to that
+    interpreter for exactly this purpose; it is a plain symlink, so it stays shell-free
+    and app-home independent. The interpreter remains the fallback for environments
+    without a managed release, keeping ``service install`` usable from a source checkout.
+    """
+    interpreter = Path(sys.executable)
+    service_entry = interpreter.parent / SERVICE_ENTRY_NAME
+    if service_entry.is_file():
+        return service_entry.absolute()
+    return interpreter.absolute()
+
+
 def create_launch_agent_manager(*, working_directory: Path | None = None) -> LaunchAgentManager:
     """Build the macOS user-service manager from the local repository context."""
     if sys.platform != "darwin":
@@ -212,7 +228,7 @@ def create_launch_agent_manager(*, working_directory: Path | None = None) -> Lau
     log_directory = home / "Library" / "Logs" / "SpeechRail"
     definition = LaunchAgentDefinition(
         working_directory=root,
-        python_executable=Path(sys.executable),
+        service_executable=_resolve_launch_target(),
         stdout_path=log_directory / "stdout.log",
         stderr_path=log_directory / "stderr.log",
     )
