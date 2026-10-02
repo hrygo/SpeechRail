@@ -116,12 +116,15 @@ def _router(
     *,
     custom: _Worker | None = None,
     base: _Worker | None = None,
+    design: _Worker | None = None,
 ) -> Qwen3TtsCapabilityRouter:
     workers = {
         "tts_custom_voice": custom if custom is not None else _Worker("custom_voice"),
     }
     if base is not None:
         workers["tts_base"] = base
+    if design is not None:
+        workers["voice_design"] = design
     return Qwen3TtsCapabilityRouter(workers)
 
 
@@ -289,3 +292,28 @@ async def test_router_reports_busy_instead_of_evicting_an_active_utterance(
     custom.active_incremental_stream = False  # type: ignore[attr-defined]
     await router.evict_warm_capability()
     assert custom.alive is False
+
+
+@pytest.mark.anyio
+async def test_lifecycle_stats_reports_reloads_per_lane() -> None:
+    """Operations can tell a design-lane load from a production reload (#135).
+
+    The summed `reload_count` alone cannot: a design activation and a
+    production restart look identical in the total.
+    """
+
+    custom = _Worker("custom_voice")
+    base = _Worker("base")
+    design = _Worker("voice_design")
+    custom.lifecycle_stats["reload_count"] = 2
+    design.lifecycle_stats["reload_count"] = 1
+    router = _router(custom=custom, base=base, design=design)
+
+    stats = router.lifecycle_stats
+
+    assert stats["reload_count"] == 3
+    assert stats["reload_count_by_role"] == {
+        "tts_custom_voice": 2,
+        "tts_base": 0,
+        "voice_design": 1,
+    }

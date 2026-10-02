@@ -121,6 +121,7 @@ _TTS_LIFECYCLE_FIELDS = frozenset(
         "cooperative_cancel_supported",
         "fallback_abort_count",
         "reload_count",
+        "reload_count_by_role",
         "warm_capability",
         "warm_capabilities",
     }
@@ -530,6 +531,8 @@ def _grade_clone_audio(wav_bytes: bytes) -> vq.VoiceQualityReport:
         leading_silence_seconds=leading,
         trailing_silence_seconds=trailing,
         transcript_match=None,
+        # Measurement only: design pre-screening (#136). Never gates.
+        f0_median_hz=vq.f0_median_hz(pcm, sample_rate),
     )
     return vq.make_quality_report(reference, _empty_synthesis())
 

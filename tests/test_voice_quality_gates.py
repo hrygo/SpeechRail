@@ -43,6 +43,7 @@ from speechrail.domain.voice_quality import (
     normalize_transcript_for_match,
     probe_carries_digits,
     speech_active_ratio,
+    f0_median_hz,
     transcript_match_score,
     transcript_numbers_match,
 )
@@ -459,8 +460,11 @@ def test_leading_zeros_are_compared_by_value(
         # Both numbers below are the exact readings issue #127 tabulated: a
         # wrong temperature and a wrong day, each clearing the 0.92 `pass` bar
         # on character distance alone while the number itself is wrong.
-        ("今天是2026年9月9日，温度是25℃，请你告诉我 3、6、9 的顺序。", 0.9375),
-        ("今天是2026年9月19日，温度是22.5℃，请你告诉我 3、6、9 的顺序。", 0.96969),
+        # Expected distances were re-pinned when #131 folded `年月日` into the
+        # `/` separator: the normalized strings got shorter, so the same
+        # one-character substitution costs a larger fraction.
+        ("今天是2026年9月9日，温度是25℃，请你告诉我 3、6、9 的顺序。", 0.93548),
+        ("今天是2026年9月19日，温度是22.5℃，请你告诉我 3、6、9 的顺序。", 0.96875),
     ],
 )
 def test_a_misread_number_survives_edit_distance_but_not_the_digit_check(
@@ -488,6 +492,75 @@ def test_every_fixed_probe_applies_the_digit_check_when_it_carries_digits() -> N
 
 def test_transcript_match_rejects_unrelated_text() -> None:
     assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # Issue #131, defect 1: `/` and `-` between digits are number-internal
+        # separators, not glue. `2026/09/09` must not collapse to `20260909`
+        # before the run splitter sees it.
+        ("日期是2026/09/09，请确认。", "日期是2026/09/09，请确认。", True),
+        ("日期是2026/09/09，请确认。", "日期是2026年9月9日，请确认。", True),
+        ("日期是2026年9月9日，请确认。", "二零二六年九月九日，请确认。", True),
+        ("日期是2026/09/09，请确认。", "日期是2026年9月19日，请确认。", False),
+        # Same family: hyphen-joined numbers and fractions/ratios.
+        ("地址是192-168-1-100", "地址是192-168-1-100", True),
+        ("地址是192-168-1-100", "地址是192-168-1-101", False),
+        ("分数是3/6", "分数是3/6", True),
+        ("分数是3/6", "分数是4/6", False),
+        ("比值是1/2", "比值是1/2", True),
+        # A hyphen in ordinary prose is not a separator and must not sprout
+        # a phantom number run.
+        ("well-known fact", "well-known fact", True),
+        # Issue #131, defect 2: a three-segment version is one run, not
+        # `3.5` plus `1`. A genuine misread stays visible instead of
+        # comparing equal (a gate miss is worse than a false reject).
+        ("版本是3.5.1", "版本是3.5点一", True),
+        ("版本是3.5.1", "版本是3.5.1", True),
+        ("版本是3.5.1", "版本是3.5.11", False),
+        ("版本是3.5.1", "版本是3.6.1", False),
+    ],
+)
+def test_issue_131_separators_and_three_segment_runs(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+@pytest.mark.parametrize(
+    ("freq_hz", "low", "high"),
+    [
+        # Issue #136 anchors: adult-male band, mid band, and the 237.6 Hz
+        # R3b reading that exposed the missing pre-screen signal.
+        (88.8, 80, 100),
+        (132.5, 120, 145),
+        (177.5, 165, 190),
+        (237.6, 225, 250),
+    ],
+)
+def test_f0_median_tracks_reference_tones(freq_hz: float, low: float, high: float) -> None:
+    assert low <= (f0_median_hz(_sine_pcm16(1.0, 24_000, frequency_hz=freq_hz), 24_000) or 0.0) <= high
+
+
+def test_f0_median_stays_null_without_voiced_frames() -> None:
+    assert f0_median_hz(b"\x00\x00" * 24_000, 24_000) is None
+    assert f0_median_hz(b"", 24_000) is None
+
+
+def test_reference_round_trips_f0_and_defaults_missing_to_null() -> None:
+    # Historical reports predate the field: absence decodes to null, never a
+    # fabricated 0 Hz (the worst possible reading).
+    assert _passing_reference().to_dict()["f0_median_hz"] is None
+    legacy = _passing_reference().to_dict()
+    del legacy["f0_median_hz"]
+    assert VoiceQualityReference.from_dict(legacy).f0_median_hz is None
+    assert (
+        VoiceQualityReference.from_dict(
+            {**legacy, "f0_median_hz": 237.6}
+        ).f0_median_hz
+        == 237.6
+    )
 
 
 def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
@@ -542,6 +615,7 @@ def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
         "leading_silence_seconds",
         "trailing_silence_seconds",
         "transcript_match",
+        "f0_median_hz",
     }
     assert set(data["synthesis"].keys()) == {
         "probe_count",

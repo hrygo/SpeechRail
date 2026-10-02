@@ -3582,6 +3582,13 @@ components:
           type: [number, 'null']
           minimum: 0
           maximum: 1
+        f0_median_hz:
+          type: [number, 'null']
+          minimum: 0
+          description: >-
+            Median F0 over voiced 20ms frames (Hz), or null when no frame is
+            voiced. Pure measurement for pre-screening design candidates;
+            it never feeds the quality gate.
     VoiceQualitySynthesis:
       type: object
       required:

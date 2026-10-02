@@ -171,6 +171,10 @@ class VoiceQualityReference:
     leading_silence_seconds: float
     trailing_silence_seconds: float
     transcript_match: float | None
+    # Median F0 over voiced 20ms frames (Hz), or None when no frame is
+    # voiced. Pure measurement for pre-screening design candidates (#136);
+    # it never feeds the quality gate.
+    f0_median_hz: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +188,7 @@ class VoiceQualityReference:
             "leading_silence_seconds": self.leading_silence_seconds,
             "trailing_silence_seconds": self.trailing_silence_seconds,
             "transcript_match": self.transcript_match,
+            "f0_median_hz": self.f0_median_hz,
         }
 
     @classmethod
@@ -191,6 +196,7 @@ class VoiceQualityReference:
         if not isinstance(data, Mapping):
             raise ValueError("reference must be an object")
         transcript = data.get("transcript_match")
+        f0 = data.get("f0_median_hz")
         return cls(
             duration_seconds=float(data.get("duration_seconds", 0.0)),
             sample_rate=int(data.get("sample_rate", 0)),
@@ -202,6 +208,9 @@ class VoiceQualityReference:
             leading_silence_seconds=float(data.get("leading_silence_seconds", 0.0)),
             trailing_silence_seconds=float(data.get("trailing_silence_seconds", 0.0)),
             transcript_match=float(transcript) if transcript is not None else None,
+            # Historical reports predate the field; absence stays null rather
+            # than a fabricated zero (0 Hz is the worst possible reading).
+            f0_median_hz=float(f0) if f0 is not None else None,
         )
 
 
@@ -485,6 +494,74 @@ def noise_floor_dbfs(pcm: bytes) -> float:
     return _dbfs(_percentile(magnitudes, _NOISE_PERCENTILE))
 
 
+def _autocorrelation_f0(samples: list[float], sample_rate: int) -> float | None:
+    """Estimate one 20ms frame's F0 by normalized autocorrelation peak-picking.
+
+    The search spans 50-500 Hz (adult speech plus margin, issue #136). Frames
+    with no clear periodic peak (silence, fricatives, octave-ambiguous ties
+    resolved against the lower candidate) return None.
+    """
+    if sample_rate <= 0 or not samples:
+        return None
+    mean = sum(samples) / len(samples)
+    centered = [sample - mean for sample in samples]
+    energy = sum(sample * sample for sample in centered)
+    if energy <= 0.0:
+        return None
+    min_period = max(2, round(sample_rate / 500.0))
+    max_period = min(len(centered) - 1, round(sample_rate / 50.0))
+    if max_period <= min_period:
+        return None
+    best_period = 0
+    best_correlation = 0.0
+    for period in range(min_period, max_period + 1):
+        correlation = (
+            sum(
+                centered[index] * centered[index + period]
+                for index in range(len(centered) - period)
+            )
+            / energy
+        )
+        # Strictly greater keeps the lower (first) period on ties, biasing
+        # away from octave-down errors.
+        if correlation > best_correlation:
+            best_correlation = correlation
+            best_period = period
+    # A 20ms frame holds barely two periods at the floor of the search range,
+    # so the peak is lower there; scale the bar by how many periods fit.
+    periods_in_frame = len(centered) / best_period if best_period else 0.0
+    threshold = 0.5 if periods_in_frame >= 3.0 else 0.35
+    if best_period == 0 or best_correlation < threshold:
+        return None
+    return sample_rate / best_period
+
+
+def f0_median_hz(pcm: bytes, sample_rate: int) -> float | None:
+    """Return the median F0 over voiced 20ms frames, or None when unvoiced.
+
+    Pure measurement for pre-screening design candidates (#136): it never
+    feeds the quality gate, so an adult male cast at 237 Hz is reported, not
+    rejected, here.
+    """
+    if sample_rate <= 0:
+        return None
+    samples = _normalized(pcm)
+    if not samples:
+        return None
+    window_samples = max(1, round(sample_rate * _WINDOW_SECONDS))
+    estimates: list[float] = []
+    for start in range(0, len(samples), window_samples):
+        window = samples[start : start + window_samples]
+        if _rms(window) <= _ACTIVE_THRESHOLD_RMS:
+            continue
+        f0 = _autocorrelation_f0(window, sample_rate)
+        if f0 is not None:
+            estimates.append(f0)
+    if not estimates:
+        return None
+    return _percentile(estimates, 0.5)
+
+
 def estimated_snr_db(pcm: bytes, sample_rate: int) -> float:
     """Estimate signal-to-noise ratio from overall RMS and the noise floor."""
     if sample_rate <= 0:
@@ -630,14 +707,33 @@ def normalize_transcript_for_match(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", apply_light_itn(folded)).casefold()
     normalized = _TRANSCRIPT_ELLIPSIS_RUN.sub("", normalized)
     normalized = normalized.translate(_TRANSCRIPT_DIGIT_TRANSLATION)
-    return "".join(
-        char
-        for char in normalized
-        if char.isalnum() or char in _TRANSCRIPT_SEMANTIC_SYMBOLS
-    )
+    # A date written `2026年9月9日` is the same number as `2026/09/09`: fold
+    # the date units into the `/` separator so both spellings reach the run
+    # splitter identically. Only `年/月` between digits and a trailing `日`
+    # after a digit are folded -- counts like `五年`, `三分钟`, `5岁`, `3号`
+    # never match, and `9月` alone keeps its unit.
+    normalized = re.sub(r"(?<=\d)[年月](?=\d)", "/", normalized)
+    normalized = re.sub(r"(?<=\d)日", "", normalized)
+    # `/` and `-` survive only between digits: a date written `2026/09/09`
+    # must not glue into `20260909` before the run splitter sees it, while a
+    # hyphen in ordinary prose ("well-known") is not a number separator.
+    kept: list[str] = []
+    length = len(normalized)
+    for index, char in enumerate(normalized):
+        if char in {"/", "-"}:
+            prev = normalized[index - 1] if index > 0 else ""
+            nxt = normalized[index + 1] if index + 1 < length else ""
+            if prev.isdigit() and nxt.isdigit():
+                kept.append(char)
+            continue
+        if char.isalnum() or char in _TRANSCRIPT_SEMANTIC_SYMBOLS:
+            kept.append(char)
+    return "".join(kept)
 
 
-_TRANSCRIPT_NUMBER_RUN: Final[re.Pattern[str]] = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_TRANSCRIPT_NUMBER_RUN: Final[re.Pattern[str]] = re.compile(
+    r"[0-9]+(?:[./-][0-9]+)*"
+)
 
 
 def probe_carries_digits(text: str) -> bool:
@@ -667,18 +763,36 @@ def transcript_numbers_match(expected: str, actual: str) -> bool:
 def _number_runs(text: str) -> list[str]:
     """Return the comparable number runs of ``text``, by value not by spelling.
 
-    Leading zeros are dropped from the integer part only: `09` and `9` are the
-    same number and a date spoken as `2026/09/09` must match one heard as
-    `2026年9月9日`.  A fractional part keeps its zeros, because `0.05` and `0.5`
-    are different numbers.
+    A run may carry several digit segments joined by `.`, `/` or `-`
+    (`2026/09/09`, `3.5.1`, `192-168-1-100`): each segment is compared by
+    value, so the three spellings of one date -- `2026/09/09`,
+    `2026年9月9日`, `二零二六年九月九日` -- collapse to the same run, while a
+    genuinely different segment (`3.5.11` vs `3.5.1`) stays visibly different.
+    Leading zeros are dropped from every segment, except a segment after a
+    `.` keeps its zeros, because `0.05` and `0.5` are different numbers but
+    `09` and `9` are the same day.
     """
 
     runs: list[str] = []
     for run in _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(text)):
-        integer, dot, fraction = run.partition(".")
-        runs.append(
-            f"{integer.lstrip('0') or '0'}{dot}{fraction}" if dot else integer.lstrip("0") or "0"
-        )
+        separators = re.findall(r"[./-]", run)
+        segments = re.split(r"[./-]", run)
+        normalized: list[str] = []
+        for segment, separator in zip(segments, ["."] + separators):
+            # A zero after a `.` is significant: `0.05` != `0.5`. After `/`
+            # or `-` the segment is a date/IP part, so `09` and `9` compare
+            # equal there as well.
+            if separator == "." and len(normalized) > 0:
+                normalized.append(segment)
+            else:
+                normalized.append(segment.lstrip("0") or "0")
+        canonical = [normalized[0]]
+        for separator, value in zip(separators, normalized[1:]):
+            # The separator kind is part of the run identity: `3.5.1` and a
+            # hypothetical `3/5/1` never compare equal.
+            canonical.append(separator)
+            canonical.append(value)
+        runs.append("".join(canonical))
     return runs
 
 

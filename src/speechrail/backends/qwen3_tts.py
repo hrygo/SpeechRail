@@ -1022,6 +1022,10 @@ class Qwen3TtsCapabilityRouter:
     @property
     def lifecycle_stats(self) -> dict[str, object]:
         stats = [worker.lifecycle_stats for worker in self._worker_list]
+        by_role = {
+            role: int(worker.lifecycle_stats["reload_count"])
+            for role, worker in self._workers.items()
+        }
         return {
             "cooperative_cancel_supported": bool(
                 stats
@@ -1031,6 +1035,9 @@ class Qwen3TtsCapabilityRouter:
                 int(item["fallback_abort_count"]) for item in stats
             ),
             "reload_count": sum(int(item["reload_count"]) for item in stats),
+            # Per-lane reloads so operations can tell a design-lane load from
+            # a production-lane reload (#135): the total alone cannot.
+            "reload_count_by_role": by_role,
             "warm_capability": self.warm_capability,
             "warm_capabilities": list(self.warm_capabilities),
         }

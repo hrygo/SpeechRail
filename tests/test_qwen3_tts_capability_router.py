@@ -176,6 +176,7 @@ async def test_router_lifecycle_aggregates_every_plan_role() -> None:
         "cooperative_cancel_supported": False,
         "fallback_abort_count": 5,
         "reload_count": 5,
+        "reload_count_by_role": {"tts_custom_voice": 1, "tts_base": 4},
         "warm_capability": None,
         "warm_capabilities": [],
     }

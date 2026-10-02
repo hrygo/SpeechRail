@@ -495,6 +495,14 @@ Authorization: Bearer <TOKEN>
 - **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
 - **Realtime 流式会话**：`WS /v1/realtime` 中通过 `speechrail.tts.start` 的 `voice` 与 `voice_revision` 字段传入 `custom_xxx`；会话更新不保存 voice 状态。
 
+> ⚠️ **确定性声明**：Base / clone 变体合成不保证重复渲染一致。同一 voice ×
+> 同一文本的多次渲染可能在语速、音高、频谱上漂移（实测 rate 相对标准差约
+> 7.5%），且 `POST /v1/audio/speech` 不接受 caller seed（body `extra=forbid`
+> 会拒绝私自附加的 `seed` 字段）。不要基于单次渲染的声学指标做判定（如两两
+> 音色间距筛查、语速差验收）；与噪声带同量级的阈值无法给出稳定判定。
+> 字节级复现承诺仅适用于 instruction 音色（固定 seed + 低温采样），不适用于
+> `mode=clone` 的 Base 变体。
+
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 
 该接口仅在当前选择解析出独立的 `voice_design` 角色且对应服务能力可用时接受请求；

@@ -64,6 +64,26 @@ voice; system voices and voices in use may be protected. Idempotency keys are
 recommended for design/clone creation and required before retrying an unknown
 create outcome.
 
+## Synthesis determinism (Base/clone)
+
+Base/clone synthesis is **not** deterministic across renders. Repeated renders
+of the same voice and text may drift in rate, pitch, and spectrum (observed
+rate RSD ~7.5%), and `POST /v1/audio/speech` accepts no caller seed. Do not
+judge on single-render acoustic metrics (voice spacing, rate deltas); thresholds
+at the noise-band magnitude cannot give stable verdicts. Byte-level
+reproducibility holds only for instruction voices with a fixed seed, never for
+Base `mode=clone` renders.
+
+## Designing adult voices
+
+High F0 + bright timbre + rushed delivery stack upward on pitch. Avoid
+age-loaded adjectives like "boyish" or "childlike" for adult characters;
+describe the age anchor plainly instead. Reference F0 bands (autocorrelation,
+20ms frames, median of voiced frames; estimators vary by a few Hz): adult male
+roughly 85-155 Hz, adult female roughly 165-255 Hz. A design candidate whose
+reference F0 lands far outside its character's band should be re-cast before
+human audition.
+
 Reference audio and text are sensitive. Pass them through the local file
 boundary and the named tool only; do not echo them into chat or invent a
 stable identity from repeatability alone.
