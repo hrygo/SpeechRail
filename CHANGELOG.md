@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [3.5.3] - 2026-10-02
+
+### Fixed
+
+- 修复 Realtime 的 `alignment` 开关**静默吞掉全部结果**：`alignment.done` 与
+  `alignment.failed` 一个都不会发出，客户端开启后只能无限等待。陈旧性守卫原本把
+  `item_id` 与 `transcript_revision` 也当作抑制条件，但这两者恰好会在 commit 清理
+  里被重置（`_reset_turn_observability()` 把 revision 归零、随即推进 item id），
+  而对齐任务就调度在这个时刻前后——真机实测**每一个**结果都因此被判 stale
+  （`fixed_text_stale` 9/9）。守卫本意是拒绝跨连接的陈旧结果，而事件本身带
+  `utterance_id` 与 `transcript_revision`、契约也要求客户端自行丢弃旧 revision，
+  因此改为只在 `task_id`/`epoch` 变化（即连接已失效）时抑制，且此时**仍发
+  `alignment.failed`**，不再静默返回。晚到的结果照常送达，但不再推进下一轮的
+  `metadata_revision`、也不再回写分人账本。
+
+  连带修好分人归属：契约承诺「已 frozen 的文本不会出现有 final 无归属」，而
+  在途对齐结果此前必被丢弃，该保证实际不成立。
+
+  回归测试显式复现 commit 清理后的时序（既有 realtime 用例用同步 fake，
+  对齐任务总能抢在清理前跑起来，覆盖不到这个竞态）。
+
 ## [3.5.2] - 2026-10-02
 
 ### Fixed
