@@ -25,6 +25,8 @@ public struct TeleprompterView: View {
     @State private var pendingAIAction: AIPendingAction = .prepare
     @State private var localPreparedText = ""
     @State private var preparedTextSyncTask: Task<Void, Never>?
+    @State private var quickDraftTitle = "未命名稿件"
+    @State private var quickDraftText = ""
 
     /// 送模型之前要先说清楚这次发出去的是哪类内容，用户才认得同意按钮在同意什么。
     private enum AIPendingAction {
@@ -51,9 +53,9 @@ public struct TeleprompterView: View {
             )
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                // 选中稿件后的各阶段在工作台内部已有对应状态；只在选择稿件前保留全局状态条，
-                // 避免它与稿件状态、阻碍提示重复占据首屏。
-                if documents.isEmpty || session.document == nil {
+                // 选中稿件后的各阶段在工作台内部已有对应状态；只在有多份稿件但尚未选中任何一份时保留全局状态条，
+                // 避免在完全没有稿件（即启工作台）或已有选中国稿件时与工作台内部状态重复占据首屏。
+                if !documents.isEmpty && session.document == nil {
                     SessionStatusBar(
                         title: pageStatusPresentation.title,
                         tone: pageStatusPresentation.tone,
@@ -325,261 +327,227 @@ public struct TeleprompterView: View {
         }
     }
 
-    // MARK: - 首屏欢迎工作台（无稿件时）
+    // MARK: - 即启工作台（无稿件时）
 
     private var welcomeHub: some View {
-        VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
-            VStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
-                ZStack {
-                    Circle()
-                        .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
-                        .frame(
-                            width: SpeechRailDesignTokens.Teleprompter.welcomeIconOuterSize,
-                            height: SpeechRailDesignTokens.Teleprompter.welcomeIconOuterSize
-                        )
-                    Image(systemName: "text.bubble")
-                        .font(.system(size: SpeechRailDesignTokens.Teleprompter.welcomeIconSize, weight: .semibold))
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                }
+        VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            instantDraftWorkbenchCard
+            welcomeSafetyNotice
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
 
-                VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("准备一份提词稿件")
-                        .font(SpeechRailDesignTokens.Typography.display)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+    private var instantDraftWorkbenchCard: some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: 0) {
+                // 1. 顶部稿件信息与快捷导入栏
+                instantDraftHeader
 
-                    Text("在独立悬浮舞台中跟读，视线自然对齐摄像头；支持 AI 时长规划、智能断句与口语化整理。")
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: SpeechRailDesignTokens.Teleprompter.welcomeContentMaxWidth)
-                }
+                SessionHairline()
 
-                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Button {
-                        session.createDocument(title: "未命名稿子", sourceText: "")
-                    } label: {
-                        Label("新建空白稿", systemImage: "square.and.pencil")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.extraLarge)
-                    .disabled(!session.canEdit)
+                // 2. 即启工作台核心编辑区
+                instantDraftEditor
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    Button {
-                        createFromClipboard()
-                    } label: {
-                        if let snippet = pasteboardSnippet {
-                            Label("从剪贴板创建 (\(snippet.count) 字)", systemImage: "doc.on.clipboard")
-                        } else {
-                            Label("从剪贴板创建", systemImage: "doc.on.clipboard")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.extraLarge)
+                SessionHairline()
 
-                    Button {
-                        isImporterPresented = true
-                    } label: {
-                        Label("导入文件…", systemImage: "arrow.down.doc")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.extraLarge)
-                }
-                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                // 3. 底部快捷操作坞（预设场景胶囊 + 启动主操作）
+                instantDraftBottomDock
             }
-            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
 
-            // 开箱即用范例卡片
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+    // MARK: - 即启工作台顶部栏
+
+    private var instantDraftHeader: some View {
+        let titleInput = TextField("稿件名称", text: $quickDraftTitle)
+            .textFieldStyle(.plain)
+            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+            .speechRailSingleLineInput(.regular)
+            .frame(
+                minWidth: SpeechRailDesignTokens.Teleprompter.workbenchDocumentTitleMinimumWidth,
+                maxWidth: .infinity
+            )
+
+        let documentCount = Text("\(quickDraftText.count) 字")
+            .font(SpeechRailDesignTokens.Typography.technicalValue)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+            .background(
+                SpeechRailDesignTokens.Color.recessedField,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+
+        return HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: "square.and.pencil")
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
+            titleInput
+
+            documentCount
+
+            Spacer(minLength: 0)
+
+            // 导入动作
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button {
+                    createFromClipboard()
+                } label: {
+                    if let snippet = pasteboardSnippet {
+                        Label("粘贴剪贴板 (\(snippet.count) 字)", systemImage: "doc.on.clipboard")
+                    } else {
+                        Label("粘贴剪贴板", systemImage: "doc.on.clipboard")
+                    }
+                }
+                .speechRailButton(.secondary)
+
+                Button {
+                    isImporterPresented = true
+                } label: {
+                    Label("导入文件…", systemImage: "arrow.down.doc")
+                }
+                .speechRailButton(.secondary)
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    // MARK: - 即启工作台编辑器
+
+    private var instantDraftEditor: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack {
+                Text("直接在此键入或粘贴文稿，即可开始提词")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                Spacer()
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $quickDraftText)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(
+                        SpeechRailDesignTokens.Color.recessedField,
+                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    )
+                    .accessibilityLabel("原稿正文输入")
+
+                if quickDraftText.isEmpty {
+                    Text("输入你的演讲、口播或汇报稿件；也可以从下方一键载入开箱场景范例…")
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md + 4)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+                        .allowsHitTesting(false)
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+        }
+    }
+
+    // MARK: - 即启工作台底部操作坞
+
+    private var instantDraftBottomDock: some View {
+        VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                // 场景范例快捷芯片
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "sparkles")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                    Text("开箱即用范例")
-                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text("点击任一场景直接载入体验")
+                    Text("快速范例：")
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
-                LazyVGrid(
-                    columns: [
-                        GridItem(
-                            .adaptive(minimum: SpeechRailDesignTokens.Teleprompter.welcomeTemplateMinimumWidth),
-                            spacing: SpeechRailDesignTokens.Spacing.sm
-                        )
-                    ],
-                    alignment: .leading,
-                    spacing: SpeechRailDesignTokens.Spacing.sm
-                ) {
                     ForEach(starterTemplates) { template in
                         Button {
-                            session.createDocument(title: template.title, sourceText: template.content)
+                            loadStarterTemplate(template)
                         } label: {
-                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                    Image(systemName: template.icon)
-                                        .font(SpeechRailDesignTokens.Typography.caption)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                                    Text(template.tag)
-                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                                    Spacer(minLength: 0)
-                                }
-
-                                Text(template.title)
-                                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                    .lineLimit(1)
-
-                                Text(template.subtitle)
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                                Image(systemName: template.icon)
                                     .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                    .lineLimit(1)
-
-                                Text(template.content.trimmingCharacters(in: .whitespacesAndNewlines))
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                    .lineLimit(3)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+                                Text(template.tag)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                             }
-                            .padding(SpeechRailDesignTokens.Spacing.md)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.micro + 1)
                             .background(
-                                SpeechRailDesignTokens.Color.field,
-                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                                SpeechRailDesignTokens.Color.recessedField,
+                                in: Capsule()
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                                Capsule()
                                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                             )
                         }
                         .buttonStyle(.plain)
                         .speechRailPointerCursor()
-                        .disabled(!session.canEdit)
+                        .help("载入「\(template.tag) - \(template.title)」")
                     }
                 }
-            }
 
-            // 提词工作流说明
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+
+                // 核心启停操作
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "checklist")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    Text("提词工作流")
-                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                }
-
-                LazyVGrid(
-                    columns: [
-                        GridItem(
-                            .adaptive(minimum: SpeechRailDesignTokens.Teleprompter.welcomeTemplateMinimumWidth),
-                            spacing: SpeechRailDesignTokens.Spacing.sm
-                        )
-                    ],
-                    alignment: .leading,
-                    spacing: SpeechRailDesignTokens.Spacing.sm
-                ) {
-                    workflowStepCard(
-                        step: "1",
-                        icon: "square.and.pencil",
-                        title: "编排与预检",
-                        detail: "设置目标时长与朗读节奏，实时预检篇幅是否合理，原稿永远不会被覆盖。"
-                    )
-                    workflowStepCard(
-                        step: "2",
-                        icon: "sparkles",
-                        title: "口语化整理",
-                        detail: "把原稿整理成可以直接照念的稿子；哪一段不念，当场点一下就能改。"
-                    )
-                    workflowStepCard(
-                        step: "3",
-                        icon: "macwindow.on.rectangle",
-                        title: "独立悬浮跟读",
-                        detail: "舞台贴近摄像头保持自然视线，等宽计时与语音识别驱动智能滚动。"
-                    )
-                }
-            }
-
-            welcomeSafetyNotice
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private var unavailableDocumentsNotice: some View {
-        CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Label {
-                    Text("有 \(session.unavailableDocuments.count) 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                } icon: {
-                    Image(systemName: "doc.badge.ellipsis")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                }
-
-                ForEach(session.unavailableDocuments, id: \.id) { item in
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text(item.id)
-                            .font(SpeechRailDesignTokens.Typography.technicalValue)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .lineLimit(1)
-                        Spacer()
-                        Button("删除", role: .destructive) {
-                            unavailableDocumentToDelete = item
-                            isUnavailableDeleteAlertPresented = true
+                    Button {
+                        submitInstantDraft(openDirectly: false)
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Label("新建并整理", systemImage: "sparkles")
+                            ButtonShortcutHint("⌘⏎")
                         }
-                        .buttonStyle(.borderless)
-                        .disabled(!session.canEdit)
                     }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .speechRailButton(.primary)
+                    .disabled(quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("直接使用原稿") {
+                        submitInstantDraft(openDirectly: true)
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .padding(SpeechRailDesignTokens.Spacing.md)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         }
+        .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.35))
     }
 
-    private func workflowStepCard(step: String, icon: String, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            ZStack {
-                Circle()
-                    .fill(SpeechRailDesignTokens.Color.recessedField)
-                    .frame(width: SpeechRailDesignTokens.Layout.badgeMediumSize, height: SpeechRailDesignTokens.Layout.badgeMediumSize)
-                Text(step)
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-            }
+    private func loadStarterTemplate(_ template: TeleprompterStarterTemplate) {
+        session.createDocument(title: template.title, sourceText: template.content)
+        reloadDocuments()
+    }
 
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: icon)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    Text(title)
-                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                }
+    private func submitInstantDraft(openDirectly: Bool) {
+        let trimmedTitle = quickDraftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = trimmedTitle.isEmpty ? "未命名稿件" : trimmedTitle
+        let content = quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
 
-                Text(detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineLimit(3)
+        do {
+            try session.createDocumentValidated(title: resolvedTitle, sourceText: content)
+            reloadDocuments()
+            if openDirectly {
+                try session.useDeterministicFallback()
+                showStage()
+            } else {
+                requestAIAnalysis()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        } catch {
+            operationMessage = error.localizedDescription
         }
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            SpeechRailDesignTokens.Color.field,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
-                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-        )
     }
 
     private var welcomeSafetyNotice: some View {
@@ -616,6 +584,38 @@ public struct TeleprompterView: View {
             RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                 .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
         )
+    }
+
+    private var unavailableDocumentsNotice: some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Label {
+                    Text("有 \(session.unavailableDocuments.count) 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                } icon: {
+                    Image(systemName: "doc.badge.ellipsis")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                }
+
+                ForEach(session.unavailableDocuments, id: \.id) { item in
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text(item.id)
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button("删除", role: .destructive) {
+                            unavailableDocumentToDelete = item
+                            isUnavailableDeleteAlertPresented = true
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(!session.canEdit)
+                    }
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+        }
     }
 
     // MARK: - 已有稿件时的工作台
