@@ -448,6 +448,65 @@ struct TeleprompterPreparationPipelineTests {
         #expect(await attempts.value == 2)
     }
 
+    @Test func quotaExhaustionStopsTheRunWithoutWaitingOrFallingBack() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let timestamps = TimestampLog()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            await timestamps.append()
+            await attempts.next()
+            // 14 天后恢复的配额：重试和原文回退都只会把「没整理」说成「整理好了」。
+            throw LLMError.usageLimitExceeded(retryAfter: 1_257_998)
+        })
+
+        let startedAt = Date()
+        await #expect(throws: LLMError.usageLimitExceeded(retryAfter: 1_257_998)) {
+            _ = try await pipeline.prepare(fixture.input)
+        }
+
+        // 不重试：只发过第一次请求。
+        #expect(await attempts.value == 1)
+        // 不等待：真实故障是「睡满 Retry-After 再失败一次」。这里给宽松上界，
+        // 只要求不再是几十秒量级。
+        #expect(Date().timeIntervalSince(startedAt) < 5)
+        let values = await timestamps.values
+        try #require(values.count == 1)
+    }
+
+    @Test func anUnrecognizedButLongRetryAfterIsAlsoTerminal() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            await attempts.next()
+            // 没命中配额措辞，但 Retry-After 长得像配额而不是抖动，同样不该等。
+            throw LLMError.httpWithRetry(status: 429, body: "", retryAfter: 3_600)
+        })
+
+        let startedAt = Date()
+        await #expect(throws: LLMError.httpWithRetry(status: 429, body: "", retryAfter: 3_600)) {
+            _ = try await pipeline.prepare(fixture.input)
+        }
+        #expect(await attempts.value == 1)
+        #expect(Date().timeIntervalSince(startedAt) < 5)
+    }
+
+    @Test func aShortRetryAfterStillWaitsAndRetries() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.grouping.v1",
+               await attempts.next() == 1 {
+                throw LLMError.httpWithRetry(status: 429, body: "", retryAfter: 0.05)
+            }
+            return try Self.response(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+        // 「早失败」不能变成「不再重试」：真正的限流仍要按 Retry-After 退避后重试。
+        #expect(result.fallbackBlockCount == 0)
+        #expect(await attempts.value == 2)
+    }
+
     @Test func transientRateLimitGetsOneBoundedRetry() async throws {
         let fixture = try makeFixture(lineCount: 4)
         let attempts = AttemptCounter()

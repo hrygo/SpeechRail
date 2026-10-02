@@ -479,6 +479,7 @@ public enum TeleprompterAIObservability {
             case .badBaseURL: return "bad_base_url"
             case .transport: return "transport"
             case .http(let status, _), .httpWithRetry(let status, _, _): return "http_\(status)"
+            case .usageLimitExceeded: return "usage_limit_exceeded"
             case .notChatAPI: return "not_chat_api"
             case .notResponsesAPI: return "not_responses_api"
             case .thinkingControlUnavailable: return "thinking_control_unavailable"
@@ -846,6 +847,13 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 let stageFailure = rawError as? WindowStageFailure
                 let initialError = stageFailure?.underlying ?? rawError
                 recoveryRequestCount += stageFailure?.recoveryRequestsUsed ?? 0
+                // 配额耗尽、鉴权失败、模型不可用这类「明确拒绝」：重试没有意义，
+                // 原文回退更有害——读者会拿到一份逐字未改的稿子，却以为整理完成了。
+                // 契约写的是「provider 不可用或明确拒绝时停止该请求」，这里让它成立：
+                // 直接抛出去，由会话层挂出可读的阻碍提示，而不是伪造一次成功的整理。
+                if isTerminalProviderFailure(initialError) {
+                    throw normalizedMapFailure(initialError)
+                }
                 if isTruncatedMapFailure(initialError) {
                     let splitCost = input.operation == .prepare ? 2 : 1
                     let canSplitWindow = window.sourceUnitIDs.count > 1
@@ -1206,8 +1214,40 @@ private extension TeleprompterPreparationPipeline {
         }
     }
 
+    /// 「再发一次也不会变」的失败：配额、鉴权、端点/模型不存在、协议不匹配。
+    ///
+    /// 这些必须与暂态限流分开。原实现把所有 429 一律当可重试，于是配额耗尽时
+    /// 先睡满一个截断后的 Retry-After（上限 60 秒），再失败一次，最后拿原文冒充
+    /// 整理结果——读者白等一分钟，还被告知「AI 已整理」。这里让它们直接失败。
+    func isTerminalProviderFailure(_ error: Error) -> Bool {
+        let underlying = (error as? ProviderCallFailure)?.underlying ?? error
+        guard let providerError = underlying as? LLMError else { return false }
+        switch providerError {
+        case .usageLimitExceeded, .notConfigured, .badBaseURL,
+             .notChatAPI, .notResponsesAPI,
+             .unsupportedStructuredOutput, .thinkingControlUnavailable:
+            return true
+        case let .http(status, _), let .httpWithRetry(status, _, _):
+            if status == 401 || status == 403 { return true }
+            // 没匹配到配额措辞，但 Retry-After 长到超出暂态上限——同样不是「等几秒」。
+            if status == 429 || (500...599).contains(status) {
+                return retryAfterSeconds(of: providerError).map { $0 > Self.maxTransientRetryDelay } ?? false
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// 暂态限流最多等这么久。真正的限流通常在几秒内恢复；再长就是配额或
+    /// 排队问题，等下去只会让读者对着不动的进度条空等。
+    static let maxTransientRetryDelay: TimeInterval = 8
+
     func canRetryStage(_ error: Error) -> Bool {
-        isStructuralMapFailure(error) || isTransientProviderFailure(error)
+        // 终止类失败在**每一层**都不重试。阶段级重试发生在窗口级判定之前，
+        // 只在窗口层拦截会漏掉这一次请求，白等一个截断后的退避。
+        guard !isTerminalProviderFailure(error) else { return false }
+        return isStructuralMapFailure(error) || isTransientProviderFailure(error)
     }
 
     func waitBeforeRetryIfNeeded(_ error: Error) async throws {
@@ -1218,8 +1258,21 @@ private extension TeleprompterPreparationPipeline {
     func retryAfterDelay(for error: Error) -> TimeInterval? {
         let underlying = (error as? ProviderCallFailure)?.underlying ?? error
         guard let providerError = underlying as? LLMError else { return nil }
-        guard case let .httpWithRetry(_, _, retryAfter) = providerError else { return nil }
-        return min(max(retryAfter, 0), 60)
+        guard let retryAfter = retryAfterSeconds(of: providerError) else { return nil }
+        // 超出暂态上限的一律不等：那种等待不会换来成功，只会让失败晚一分钟才出现。
+        guard retryAfter <= Self.maxTransientRetryDelay else { return nil }
+        return retryAfter
+    }
+
+    func retryAfterSeconds(of error: LLMError) -> TimeInterval? {
+        switch error {
+        case let .httpWithRetry(_, _, retryAfter):
+            return max(retryAfter, 0)
+        case let .usageLimitExceeded(retryAfter):
+            return retryAfter.map { max($0, 0) }
+        default:
+            return nil
+        }
     }
 
     func normalizedMapFailure(_ error: Error) -> Error {
@@ -1692,7 +1745,8 @@ private extension TeleprompterPreparationPipeline {
         case .http(let status, _), .httpWithRetry(let status, _, _):
             return status == 408 || status == 409 || status == 425 || status == 429
                 || (500...599).contains(status)
-        case .notConfigured, .badBaseURL, .notResponsesAPI, .notChatAPI,
+        case .usageLimitExceeded,
+             .notConfigured, .badBaseURL, .notResponsesAPI, .notChatAPI,
              .thinkingControlUnavailable,
              .unsupportedStructuredOutput, .refused, .cancelled:
             return false

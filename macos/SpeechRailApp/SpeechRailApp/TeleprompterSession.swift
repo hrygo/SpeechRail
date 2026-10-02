@@ -2964,6 +2964,19 @@ public final class TeleprompterSession {
            error == .unsupportedStructuredOutput {
             return "当前 AI 服务暂时无法整理这份稿子。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
         }
+        if let error = error as? LLMError,
+           case let .usageLimitExceeded(retryAfter) = error {
+            // 配额耗尽要说明白「等多久」，否则读者只会以为是应用卡住，然后反复重试。
+            if let retryAfter, retryAfter >= 3_600 {
+                let days = (retryAfter / 86_400).rounded()
+                return "AI 服务的可用额度已经用尽，约 \(days) 天后恢复。本次没有整理，原稿没有变化；你可以直接用原稿开讲。"
+            }
+            if let retryAfter, retryAfter >= 60 {
+                let minutes = (retryAfter / 60).rounded()
+                return "AI 服务当前繁忙，约 \(minutes) 分钟后可再试。本次没有整理，原稿没有变化；你可以直接用原稿开讲。"
+            }
+            return "AI 服务当前不接受新的请求（额度已用尽）。本次没有整理，原稿没有变化；你可以直接用原稿开讲。"
+        }
         return "AI 暂时没能整理这份稿子，原稿没有变化。你可以重试，或直接按原文分段。"
     }
 

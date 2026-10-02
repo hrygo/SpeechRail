@@ -109,7 +109,10 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
               !value.isEmpty else { return nil }
 
         if let seconds = TimeInterval(value), seconds.isFinite, seconds >= 0 {
-            return min(seconds, 60)
+            // 保留服务给的真实秒数。截断应该发生在「要不要等」的判定层，
+            // 不能发生在这里：配额耗尽时服务会回一个「几天后」，截成 60 秒之后
+            // 既没法判断这是配额（于是白等一轮），也没法告诉读者要等多久。
+            return seconds
         }
 
         let formatter = DateFormatter()
@@ -117,7 +120,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
         guard let date = formatter.date(from: value) else { return nil }
-        return min(max(0, date.timeIntervalSinceNow), 60)
+        return max(0, date.timeIntervalSinceNow)
     }
 }
 
@@ -657,6 +660,14 @@ public enum LLMError: LocalizedError, Equatable {
     case transport(String)
     case http(status: Int, body: String)
     case httpWithRetry(status: Int, body: String, retryAfter: TimeInterval)
+    /// 服务明确回绝了「再来一次」：额度/配额已用尽，或该模型对当前账号不可用。
+    ///
+    /// 这类 429 和「请求太密、等几秒就好」的限流长得一样（都是 429 + Retry-After），
+    /// 但只有前者重试有意义——配额可能几天后才恢复。因此从响应里认出配额标记后单独成类，
+    /// 让调用方直接停止，而不是把 `retryAfter` 截断成几十秒白等一场。
+    ///
+    /// 正文一律不回显：上游报错可能夹带稿件或凭据，只保留我们自己的分类结论。
+    case usageLimitExceeded(retryAfter: TimeInterval?)
     /// 端点没有 Responses API（404/405，或返回里明确说没有）。
     case notResponsesAPI
     /// 端点没有 Chat Completions API（404/405，或返回里明确说没有）。
@@ -684,6 +695,8 @@ public enum LLMError: LocalizedError, Equatable {
             body.isEmpty ? "服务返回了 \(status)。" : "服务返回了 \(status)：\(body)"
         case .httpWithRetry(let status, let body, _):
             body.isEmpty ? "服务返回了 \(status)，请稍后重试。" : "服务返回了 \(status)：\(body)"
+        case .usageLimitExceeded:
+            "AI 服务的可用额度已经用尽，本次没有整理。原稿没有变化。"
         case .notResponsesAPI: "这个服务没有 Responses API。"
         case .notChatAPI: "这个服务没有 Chat Completions API。"
         case .thinkingControlUnavailable:
@@ -1110,6 +1123,11 @@ public actor LLMProvider {
                 if let statusCode = snapshot.statusCode,
                    let retryAfter = snapshot.retryAfter,
                    Self.isTransientHTTPStatus(statusCode) {
+                    // 配额耗尽和普通限流都是 429 + Retry-After，只有前者重试有意义。
+                    // 先按白名单标记认出来，认不出才继续当暂态限流处理。
+                    if Self.reportsUsageLimit(body: snapshot.body) {
+                        throw LLMError.usageLimitExceeded(retryAfter: retryAfter)
+                    }
                     throw LLMError.httpWithRetry(
                         status: statusCode,
                         body: "",
@@ -1176,6 +1194,22 @@ public actor LLMProvider {
     private static func isTransientHTTPStatus(_ status: Int) -> Bool {
         status == 429 || (500...599).contains(status)
     }
+
+    /// 只认上游自己的配额措辞，不做任何语义猜测。命中的标记都是明确的
+    /// 「额度/配额」字样，因此即使正文里同时夹带稿件片段，被认出来之后也只保留分类结论。
+    private static func reportsUsageLimit(body: String) -> Bool {
+        let normalized = body.lowercased()
+        return usageLimitMarkers.contains { normalized.contains($0) }
+    }
+
+    private static let usageLimitMarkers = [
+        "usage limit",
+        "usage_limit",
+        "usagelimit",
+        "insufficient_quota",
+        "quota exceeded",
+        "exceeded your current quota"
+    ]
 
     private static func httpError(
         status: Int,

@@ -390,6 +390,51 @@ final class LLMProviderTests: XCTestCase {
         }
     }
 
+    func testQuotaResponseBecomesUsageLimitInsteadOfARateLimit() async throws {
+        // 配额耗尽长得像限流（都是 429 + Retry-After），但只有前者值得单独成类：
+        // 上游给的 Retry-After 是「几天后」，截断成几十秒会让调用方白等一轮，
+        // 也让界面没法告诉读者到底要等多久。
+        FakeTransport.reset([
+            .init(
+                status: 429,
+                contentType: "application/json",
+                body: #"{"type":"error","error":{"type":"GoUsageLimitError","message":"Go usage limit exceeded"},"metadata":{"limitName":"monthly"}}"#,
+                headers: ["Retry-After": "1257998"]
+            )
+        ])
+
+        do {
+            _ = try await completeJSON()
+            XCTFail("quota exhaustion should fail")
+        } catch let error as LLMError {
+            guard case let .usageLimitExceeded(retryAfter) = error else {
+                return XCTFail("quota exhaustion was misclassified: \(error)")
+            }
+            // 真实秒数必须原样传下去，判定与等待都在更下游做。
+            XCTAssertEqual(try XCTUnwrap(retryAfter), 1_257_998, accuracy: 1)
+        }
+    }
+
+    func testQuotaMessageNeverEchoesTheUpstreamBody() async throws {
+        // 上游报错可能回显稿件或凭据，分类结论可以保留，正文不行。
+        FakeTransport.reset([
+            .init(
+                status: 429,
+                contentType: "application/json",
+                body: #"{"error":{"type":"usage_limit","message":"quota exceeded for sk-live-NOT-A-REAL-KEY"}}}"#,
+                headers: ["Retry-After": "600"]
+            )
+        ])
+
+        do {
+            _ = try await completeJSON()
+            XCTFail("quota exhaustion should fail")
+        } catch let error as LLMError {
+            let text = error.errorDescription ?? ""
+            XCTAssertFalse(text.contains("NOT-A-REAL-KEY"), "upstream body leaked into: \(text)")
+        }
+    }
+
     func testChatJSONDoesNotTreatRateLimitAsStrictCapabilityRejection() async throws {
         FakeTransport.reset([
             .init(
