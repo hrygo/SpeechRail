@@ -550,8 +550,8 @@ def test_get_voice_does_not_expose_private_recipe_or_reference(
 def test_synthesize_posts_speech_and_returns_audio_path(
     make_client: Any, run_async: Any
 ) -> None:
-    # 系统音色走生产 TTS 路由，只能是 custom_voice/base；voice_design 是独立
-    # 设计通道制品 variant，不进入合成入口（synthesize 已不再放行）。
+    # 系统音色走生产 TTS 路由, 只能是 custom_voice/base;voice_design 是独立
+    # 设计通道制品 variant, 不进入合成入口(synthesize 已不再放行).
     voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     audio_bytes = b"ID3-fake-mp3"
 
@@ -868,12 +868,12 @@ def test_synthesize_rejects_out_of_range_speed_before_network(
 def test_synthesize_rejects_voice_design_variant_without_compat_shim(
     make_client: Any, run_async: Any
 ) -> None:
-    """合成入口只接受 custom_voice/base；voice_design 不再放行且无兼容垫片。
+    """The synthesis entrypoint only accepts custom_voice/base (no compat shim).
 
-    生产快照的 ``models["tts"].variant`` 只可能是 ``custom_voice`` 或
-    ``base``（设计通道是独立 peer role）。任何把 ``voice_design`` 塞进合成
-    入口的状态都是伪造的，必须确定性返回 ``tts_variant_unsupported``，
-    不得回退到旧的放行行为。
+    The production snapshot ``models["tts"].variant`` can only be
+    ``custom_voice`` or ``base`` (the design lane is an independent peer
+    role). Any state stuffing ``voice_design`` into synthesis is forged and
+    must deterministically return ``tts_variant_unsupported``.
     """
     voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
 

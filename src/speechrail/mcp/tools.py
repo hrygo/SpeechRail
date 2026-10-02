@@ -458,7 +458,7 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
     )
     # 能力结论只读服务发布的 `capabilities`: `supports_preview` 曾经由这里按
     # `variant == "voice_design"` 重算, 等于把服务端的判定规则抄了第二份; 两份
-    # 规则一旦分叉, agent 会拿到与服务不一致的答案。
+    # 规则一旦分叉, agent 会拿到与服务不一致的答案.
     declared = entry.get("capabilities") if entry is not None else None
     capabilities = declared if isinstance(declared, dict) else {}
     capabilities_consistent = profile_consistency == "consistent"
@@ -779,10 +779,10 @@ async def synthesize(
     )
     variant = _effective_tts_variant(effective)
     variant_value = _text(entry.get("variant")) or variant
-    # 生产合成只有 custom_voice/base。voice_design 是独立设计通道的制品
-    # variant，从不作为合成入口：design-only 音色 available 恒为 False，已在
-    # 上一步 _enforce_available_voice 拒绝。此处不再放行 voice_design，不保留
-    # 兼容垫片；任何漏网的伪造状态都确定性返回 tts_variant_unsupported。
+    # 生产合成只有 custom_voice/base. voice_design 是独立设计通道的制品
+    # variant, 从不作为合成入口: design-only 音色 available 恒为 False, 已在
+    # 上一步 _enforce_available_voice 拒绝. 此处不再放行 voice_design, 不保留
+    # 兼容垫片;任何漏网的伪造状态都确定性返回 tts_variant_unsupported.
     if variant_value not in {"custom_voice", "base"}:
         raise ToolCallError(
             code="tts_variant_unsupported",

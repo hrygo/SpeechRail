@@ -208,8 +208,8 @@ def test_managed_selection_publishes_active_model_identity(
         key: capabilities[key]
         for key in ("supports_preview", "supports_clone", "supports_instruction")
     } == {
-        # 预览/指令走独立 VoiceDesign 通道，不从 tts.variant 推导。
-        # 生产 TTS 路由只能是 custom_voice/base，此处恒为 False 才是正确断言。
+        # 预览/指令走独立 VoiceDesign 通道, 不从 tts.variant 推导.
+        # 生产 TTS 路由只能是 custom_voice/base, 此处恒为 False 才是正确断言.
         "supports_preview": False,
         "supports_clone": clone_key is not None and clone_key in artifacts,
         "supports_instruction": False,
