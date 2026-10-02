@@ -102,8 +102,17 @@ def test_install_uses_the_local_wheel_and_stays_disabled_by_default(
 
 
 def test_install_starts_the_service_only_when_asked(
-    install_calls: list[dict[str, Any]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # `install_managed` is faked, so nothing is really started. Without this
+    # the post-install readiness probe answers from whatever service happens to
+    # be listening on the developer's machine, so the test only passed while
+    # the installed release happened to match the checkout -- and it cost a
+    # 60s wait when nothing was running.
+    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _ReadyResponse())
     _write_wheel(tmp_path, __version__)
 
     assert main(["install", "--yes", "--asr-spec", "fast", "--tts-spec", "fast", "--enable"]) == 0
