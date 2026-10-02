@@ -835,6 +835,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         evictable: list[EvictableWorker] = [
             w for w in (shared_owner, tts_worker, alignment_worker) if w is not None
         ]
+        # The design lane idles out on its own clock while production lanes
+        # stay resident (#135). The router still owns full lifecycle; the
+        # evictor only borrows this handle for per-lane idle close.
+        design_worker = getattr(tts_worker, "design_worker", None)
         if evictable:
             evictor = WorkerIdleEvictor(
                 evictable,
@@ -843,6 +847,21 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 min_uptime_seconds=settings.worker_min_uptime_seconds,
                 on_eviction=metrics.record_eviction,
             )
+        if design_worker is not None and settings.voice_design_idle_timeout_seconds > 0:
+            if evictor is None:
+                evictor = WorkerIdleEvictor(
+                    [design_worker],
+                    idle_timeout_seconds=settings.voice_design_idle_timeout_seconds,
+                    warm_standby_timeout_seconds=settings.voice_design_warm_standby_timeout_seconds,
+                    min_uptime_seconds=settings.worker_min_uptime_seconds,
+                    on_eviction=metrics.record_eviction,
+                )
+            else:
+                evictor.track(
+                    design_worker,
+                    idle_timeout_seconds=settings.voice_design_idle_timeout_seconds,
+                    warm_standby_timeout_seconds=settings.voice_design_warm_standby_timeout_seconds,
+                )
 
     tts_streams = TtsStreamService(
         synthesizer=tts_synthesizer,

@@ -81,6 +81,10 @@ class WorkerIdleEvictor:
         self._was_alive: dict[EvictableWorker, bool] = {}
         self._states: dict[EvictableWorker, WorkerLifecycleState] = {}
         self._lease_locks: dict[EvictableWorker, WorkerLeaseLock] = {}
+        # Per-worker TTL overrides; absent entries fall back to the evictor
+        # defaults above. Only the design lane overrides today (#135).
+        self._idle_timeouts: dict[EvictableWorker, float] = {}
+        self._standby_timeouts: dict[EvictableWorker, float] = {}
         self._task: asyncio.Task[None] | None = None
         now = time.monotonic()
         for worker in self._workers:
@@ -89,6 +93,37 @@ class WorkerIdleEvictor:
             self._was_alive[worker] = getattr(worker, "alive", False)
             self._states[worker] = WorkerLifecycleState.ACTIVE
             self._lease_locks[worker] = WorkerLeaseLock()
+
+    def track(
+        self,
+        worker: EvictableWorker,
+        *,
+        idle_timeout_seconds: float | None = None,
+        warm_standby_timeout_seconds: float | None = None,
+    ) -> None:
+        """Add one worker with its own idle clock (#135: design lane TTL).
+
+        Per-worker timeouts fall back to the evictor defaults when omitted.
+        Tracking a live evictor takes effect on the next monitor tick; the
+        fresh idle stamp gives the newcomer a full TTL window.
+        """
+
+        if worker is None or worker in self._lease_locks:
+            return
+        now = time.monotonic()
+        self._workers = (*self._workers, worker)
+        self._last_active[worker] = now
+        self._loaded_at[worker] = now
+        self._was_alive[worker] = getattr(worker, "alive", False)
+        self._states[worker] = WorkerLifecycleState.ACTIVE
+        self._lease_locks[worker] = WorkerLeaseLock()
+        if idle_timeout_seconds is not None:
+            self._idle_timeouts[worker] = idle_timeout_seconds
+        if warm_standby_timeout_seconds is not None:
+            self._standby_timeouts[worker] = min(
+                warm_standby_timeout_seconds,
+                self._idle_timeouts.get(worker, self._idle_timeout),
+            )
 
     def touch(self, worker: EvictableWorker) -> None:
         """Record activity on a worker at current time."""
@@ -181,8 +216,12 @@ class WorkerIdleEvictor:
                 last_time = self._last_active.get(worker, now)
                 idle_duration = now - last_time
 
+                idle_timeout = self._idle_timeouts.get(worker, self._idle_timeout)
+                standby_timeout = self._standby_timeouts.get(
+                    worker, self._warm_standby_timeout
+                )
                 # Stage 2: Cold Eviction (idle >= _idle_timeout)
-                if idle_duration >= self._idle_timeout:
+                if idle_duration >= idle_timeout:
                     if getattr(worker, "alive", False) or getattr(worker, "ready", False):
                         with contextlib.suppress(Exception):
                             await worker.close()
@@ -193,7 +232,7 @@ class WorkerIdleEvictor:
                     if self._on_eviction is not None:
                         self._on_eviction(type(worker).__name__, "cold_evict")
                 # Stage 1: Warm Standby (idle >= _warm_standby_timeout)
-                elif idle_duration >= self._warm_standby_timeout:
+                elif idle_duration >= standby_timeout:
                     if self._states.get(worker) == WorkerLifecycleState.ACTIVE:
                         trim_fn = getattr(worker, "trim_memory", None) or getattr(
                             worker, "release_cache", None

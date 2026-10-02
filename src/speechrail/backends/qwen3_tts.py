@@ -1073,6 +1073,17 @@ class Qwen3TtsCapabilityRouter:
         return worker is not None and worker.ready
 
     @property
+    def design_worker(self) -> Qwen3TtsWorker | None:
+        """Return the design-lane worker for independent TTL eviction (#135).
+
+        Production lanes stay resident; only this lane idles out. The router
+        still owns lifecycle (start/close cover every lane); the evictor only
+        borrows this handle for per-lane idle close.
+        """
+
+        return self._workers.get(VOICE_DESIGN_ROLE)
+
+    @property
     def design_status(self) -> dict[str, object]:
         """Expose the optional design lane independently of runtime TTS."""
         worker = self._workers.get(VOICE_DESIGN_ROLE)

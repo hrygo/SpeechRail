@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     worker_min_uptime_seconds: float = Field(default=60.0, ge=0.0, le=86_400)
     worker_warm_standby_timeout_seconds: float = Field(default=60.0, ge=0.0, le=86_400)
     worker_idle_timeout_seconds: float = Field(default=300.0, ge=0.0, le=86_400)
+    # The design lane owns a ~4.2 GB worker independent of production TTS, so
+    # it gets its own idle clock (#135). Zero disables design TTL eviction and
+    # restores evict-after-use via the quality-phase evict path.
+    voice_design_warm_standby_timeout_seconds: float = Field(default=60.0, ge=0.0, le=86_400)
+    voice_design_idle_timeout_seconds: float = Field(default=300.0, ge=0.0, le=86_400)
     max_queue_size: int = Field(default=8, ge=1, le=1024)
     max_upload_bytes: int = Field(default=536_870_912, ge=1)
     max_audio_seconds: int = Field(default=3600, ge=1)

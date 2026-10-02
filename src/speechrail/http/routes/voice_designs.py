@@ -710,7 +710,9 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             async with services.governor.reserve(
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
-                resource_key="tts",
+                # The design lane owns its worker; a wildcard key would
+                # serialize design behind every production render (#135).
+                resource_key="voice_design",
                 purpose=WorkPurpose.VOICE_CREATION,
             ):
                 raw_pcm = await _collect_audio(
@@ -733,15 +735,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
 
             with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
                 canonical_pcm = wav.readframes(wav.getnframes())
-            async with services.governor.reserve(
-                WorkClass.BATCH_TTS,
-                expires_at=expires_at,
-                purpose=WorkPurpose.VOICE_CREATION,
-            ):
-                await _evict_quality_tts_if_supported(
-                    synthesizer,
-                    expires_at=expires_at,
-                )
+            # Production workers stay resident across design work: the design
+            # lane idles out on its own TTL instead of evicting them (#135).
             transcript = await _transcribe_pcm(
                 services,
                 canonical_pcm,

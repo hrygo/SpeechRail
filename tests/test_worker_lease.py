@@ -87,6 +87,46 @@ def test_worker_idle_evictor_closes_idle_worker() -> None:
     asyncio.run(run())
 
 
+def test_track_adds_a_worker_with_its_own_ttl() -> None:
+    """The design lane idles out on its own clock; production is untouched (#135)."""
+
+    async def run() -> None:
+        production = _FakeWorker()
+        design = _FakeWorker()
+        evictor = WorkerIdleEvictor(
+            (production,),
+            idle_timeout_seconds=10_000.0,
+            warm_standby_timeout_seconds=10_000.0,
+            check_interval_seconds=0.01,
+        )
+        evictor.track(
+            design,
+            idle_timeout_seconds=0.05,
+            warm_standby_timeout_seconds=0.05,
+        )
+        await evictor.start()
+        try:
+            await asyncio.sleep(0.2)
+            assert design.closed is True
+            assert production.closed is False
+            assert evictor.state_of(design).value == "cold_evicted"
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())
+
+
+def test_track_is_idempotent_for_an_already_tracked_worker() -> None:
+    async def run() -> None:
+        worker = _FakeWorker()
+        evictor = WorkerIdleEvictor((worker,), idle_timeout_seconds=10_000.0)
+        before = len(evictor._workers)
+        evictor.track(worker, idle_timeout_seconds=0.01)
+        assert len(evictor._workers) == before
+
+    asyncio.run(run())
+
+
 def test_worker_idle_evictor_touch_postpones_eviction() -> None:
     async def run() -> None:
         worker = _FakeWorker()

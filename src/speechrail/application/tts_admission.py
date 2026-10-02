@@ -7,7 +7,11 @@ from __future__ import annotations
 # CustomVoice and Base weights in separate lanes.  A stale lane name (for
 # example the retired ``voice_clone``) is rejected instead of silently
 # serializing every request behind one key.
-_ALLOWED_TTS_LANES = frozenset({"tts", "tts_custom_voice", "tts_base"})
+#
+# ``voice_design`` is the tier-independent on-demand design lane. It owns its
+# worker and must not serialize behind (or evict) the production lanes, so it
+# gets its own key; dual residency with per-lane TTL is governed per key.
+_ALLOWED_TTS_LANES = frozenset({"tts", "tts_custom_voice", "tts_base", "voice_design"})
 
 
 def tts_resource_key(synthesizer: object | None, voice: str) -> str | None:

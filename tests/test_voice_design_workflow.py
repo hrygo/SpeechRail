@@ -1058,3 +1058,30 @@ def test_design_routes_require_authentication(
         f"/v1/voice-designs/{candidate_id}/validations/{validation_id}/audio"
     ).status_code == 401
     assert not synth.requests
+
+
+def test_candidate_creation_does_not_evict_production_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design activation must not evict resident production workers (#135).
+
+    The design lane owns its worker and idles out on its own TTL; candidate
+    creation leaves production residency (and therefore `models.tts`
+    resolution) untouched.
+    """
+
+    client, _registry, synth, _asr = make_client(tmp_path, monkeypatch)
+    models_before = {
+        item["id"]: item
+        for item in client.get("/v1/models").json()["data"]
+        if item.get("family") == "qwen3_tts"
+    }
+    _candidate_id, _candidate = create_candidate(client)
+
+    assert "tts.evicted" not in synth.events
+    models_after = {
+        item["id"]: item
+        for item in client.get("/v1/models").json()["data"]
+        if item.get("family") == "qwen3_tts"
+    }
+    assert models_after == models_before
