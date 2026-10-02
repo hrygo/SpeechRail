@@ -198,7 +198,9 @@ def test_create_candidate_keeps_reference_private_and_unpublished(
             24_000,
         )
 
-    assert synth.events == ["tts", "tts.closed", "tts.evicted", "asr"]
+    # #135: candidate creation no longer evicts production workers; the design
+    # lane idles out on its own TTL instead.
+    assert synth.events == ["tts", "tts.closed", "asr"]
     assert synth.requests[0].instruction == "清晰自然的中文声音"
     assert synth.requests[0].seed == 123
     assert asr.requests[0].prompt == ""

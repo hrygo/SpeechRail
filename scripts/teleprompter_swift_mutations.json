@@ -1218,9 +1218,9 @@
     {
       "id": "F10",
       "note": "重试延迟不再夹到 60 秒（服务器给出 1 小时就真的等 1 小时）",
-      "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
-      "find": "        return min(max(retryAfter, 0), 60)",
-      "replace": "        return retryAfter",
+      "file": "macos/SpeechRailApp/SpeechRailApp/LLMProvider.swift",
+      "find": "return max(0, date.timeIntervalSinceNow)",
+      "replace": "return date.timeIntervalSinceNow",
       "expect": "SURVIVED",
       "rationale": "一半等价、一半不可经济观测（第六十八轮判定）。下界 `max(retryAfter, 0)` 是等价变异：唯一的消费者 `waitBeforeRetryIfNeeded` 已经要求 `delay > 0`，负值在那里就被挡住了。上界 `min(retryAfter, 60)` 是真实的防御，但**只能在真的等超过 60 秒时才可观测**，而 `retryAfterDelay` 是 `fileprivate`，测试无法直接调用（实测编译期报 `inaccessible due to fileprivate protection level`）。本轮试过写成行为断言，跑出来要么让整套测试多花 60 秒、要么断言不到边界，**按纪律如实记作未覆盖，而不是硬凑一条跑得慢的用例。**"
     },
