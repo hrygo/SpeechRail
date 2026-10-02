@@ -19,8 +19,10 @@ from speechrail.domain.alignment import (
     AlignmentRequest,
     AlignmentResult,
     AlignmentUnit,
+    AlignTextPort,
 )
-from speechrail.domain.audio_timeline import CORE_SAMPLE_RATE, SampleSpan
+from speechrail.domain.audio_timeline import CORE_SAMPLE_RATE, PCM_SAMPLE_BYTES, SampleSpan
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 
 
 class FixedTextTokenClient(Protocol):
@@ -45,6 +47,112 @@ class FixedTextAligner:
         except (RuntimeError, ValueError):
             return _failed(request, "alignment_unavailable")
         return validate_alignment(request, raw)
+
+
+class TranscriptAlignmentError(RuntimeError):
+    """A finished transcript could not be given a truthful timeline."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_SAMPLES_PER_MILLISECOND = CORE_SAMPLE_RATE // 1000
+
+
+async def align_transcript_timeline(
+    *,
+    aligner: AlignTextPort,
+    pcm16: bytes,
+    result: TranscriptResult,
+    utterance_id: str,
+    granularities: frozenset[AlignmentGranularity],
+) -> TranscriptResult:
+    """Attach segment and word timelines to a finished transcript.
+
+    The ASR owner decodes text only.  Timestamps come from the independent
+    fixed-text aligner over the frozen transcript -- the same owner
+    diarization already uses -- so there is no second ASR decode and the
+    request path never reaches the network.  Qwen3-ASR has no native
+    word-level timing: the vendor resolves an implicit ``Qwen/Qwen3-ForcedAligner``
+    repository whenever ``return_timestamps`` is set, which cannot resolve
+    under the managed offline environment and used to surface as an opaque
+    500.  A granularity the aligner cannot support is reported as a failure,
+    never as evenly split placeholders.
+    """
+    if not result.text:
+        return result.model_copy(update={"segments": (), "words": ()})
+    if not granularities:
+        return result
+
+    segments: tuple[TranscriptSegment, ...] = ()
+    words: tuple[TranscriptWord, ...] = ()
+    for granularity in sorted(granularities):
+        outcome = await aligner.align(
+            AlignmentRequest(
+                task_id="transcribe",
+                epoch=f"batch-{utterance_id}",
+                utterance_id=utterance_id,
+                transcript_revision=1,
+                pcm16=pcm16,
+                span=SampleSpan(0, len(pcm16) // PCM_SAMPLE_BYTES),
+                text=result.text,
+                language=result.language or None,
+                granularity=granularity,
+            )
+        )
+        if outcome.failure is not None:
+            raise TranscriptAlignmentError(
+                "timestamp_alignment_unavailable",
+                "fixed-text alignment could not produce the requested timestamps",
+            )
+        if granularity == "segment":
+            segments = _units_to_segments(result.text, outcome.units)
+        else:
+            words = _units_to_words(result.text, outcome.units)
+    return result.model_copy(update={"segments": segments, "words": words})
+
+
+def _unit_milliseconds(unit: AlignmentUnit) -> tuple[int, int]:
+    if unit.audio_span is None:
+        raise TranscriptAlignmentError(
+            "timestamp_alignment_unavailable",
+            "fixed-text alignment returned a unit without an audio span",
+        )
+    return (
+        unit.audio_span.start // _SAMPLES_PER_MILLISECOND,
+        unit.audio_span.end // _SAMPLES_PER_MILLISECOND,
+    )
+
+
+def _units_to_segments(
+    text: str, units: tuple[AlignmentUnit, ...]
+) -> tuple[TranscriptSegment, ...]:
+    segments: list[TranscriptSegment] = []
+    for unit in units:
+        rendered = text[unit.text_start : unit.text_end].strip()
+        if not rendered:
+            continue
+        start_ms, end_ms = _unit_milliseconds(unit)
+        segments.append(
+            TranscriptSegment(
+                id=len(segments), start_ms=start_ms, end_ms=end_ms, text=rendered
+            )
+        )
+    return tuple(segments)
+
+
+def _units_to_words(
+    text: str, units: tuple[AlignmentUnit, ...]
+) -> tuple[TranscriptWord, ...]:
+    words: list[TranscriptWord] = []
+    for unit in units:
+        rendered = text[unit.text_start : unit.text_end].strip()
+        if not rendered:
+            continue
+        start_ms, end_ms = _unit_milliseconds(unit)
+        words.append(TranscriptWord(word=rendered, start_ms=start_ms, end_ms=end_ms))
+    return tuple(words)
 
 
 def validate_alignment(
@@ -168,4 +276,10 @@ def _failed(request: AlignmentRequest, reason: str) -> AlignmentResult:
     )
 
 
-__all__ = ["FixedTextAligner", "FixedTextTokenClient", "validate_alignment"]
+__all__ = [
+    "FixedTextAligner",
+    "FixedTextTokenClient",
+    "TranscriptAlignmentError",
+    "align_transcript_timeline",
+    "validate_alignment",
+]

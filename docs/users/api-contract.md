@@ -140,6 +140,13 @@ Content-Type: multipart/form-data
 `segments`；省略粒度时保持同时返回两者。OpenAI 的 `timestamp_granularities` 默认值是
 `["segment"]`，SpeechRail 有意在省略时同时返回两套时间戳。
 
+时间戳由**独立的本地 aligner** 在冻结的 ASR 正文上产出，不由 ASR 解码直接给出：本机模型
+Qwen3-ASR 没有原生词级时间戳，ASR 只返回文本。每个请求的粒度各调用 aligner 一次。未配置
+aligner 时，`verbose_json` / `srt` / `vtt` 返回 `503 timestamp_alignment_unavailable`（错误体内含
+`request_id`），既不隐式下载模型，也不返回空时间轴；aligner 无法给出请求粒度时返回
+`502 timestamp_alignment_unavailable`，不用整句均分冒充词级边界。`json`、`text` 与匿名分人的
+`diarized_json` 不需要 aligner。
+
 其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式。
 
 上传大小仍受 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制；解码输出另受 128 MiB 和

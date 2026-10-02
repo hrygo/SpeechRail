@@ -3,12 +3,17 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
-from speechrail.app import create_app
+from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.config import Settings
-from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
+from speechrail.domain.alignment import AlignmentRequest, AlignmentResult, AlignmentUnit
+from speechrail.domain.audio_timeline import SampleSpan
+from speechrail.domain.contracts import TranscriptResult
+from speechrail.http.errors import RequestIdMiddleware
+from speechrail.http.routes.audio import create_audio_router
 
 
 def _backend(
@@ -21,25 +26,42 @@ def _backend(
             text="hello world",
             language="en",
             duration_ms=1_000,
-            segments=(
-                TranscriptSegment(id=0, start_ms=0, end_ms=1_000, text="hello world"),
-            ),
-            words=(
-                TranscriptWord(word="hello", start_ms=0, end_ms=500),
-                TranscriptWord(word="world", start_ms=500, end_ms=1_000),
-            ),
         )
 
     return result()
 
 
-def _client() -> TestClient:
-    return TestClient(
-        create_app(
-            Settings(qwen3_model_dir=None, qwen3_python=None),
-            transcribe=_backend,
+class _FixedTextAligner:
+    """Stand in for the independent aligner that now owns REST timestamps."""
+
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        if request.granularity == "word":
+            units = (
+                AlignmentUnit("w-0", 0, 5, SampleSpan(0, 8_000), "word"),
+                AlignmentUnit("w-1", 6, len(request.text), SampleSpan(8_000, 16_000), "word"),
+            )
+        else:
+            units = (
+                AlignmentUnit("s-0", 0, len(request.text), SampleSpan(0, 16_000), "segment"),
+            )
+        return AlignmentResult(
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=units,
         )
+
+
+def _client() -> TestClient:
+    services = build_app_services(
+        Settings(qwen3_model_dir=None, qwen3_python=None),
+        AppOverrides(transcribe=_backend, text_aligner=_FixedTextAligner()),
     )
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(create_audio_router(services))
+    return TestClient(app)
 
 
 def _multipart(*fields: tuple[str, str]) -> list[tuple[str, object]]:

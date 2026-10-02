@@ -146,7 +146,14 @@ sequenceDiagram
 
 ## 4. Diarization 边界
 
-文件分人使用原生 `gpt-4o-transcribe-diarize` / `diarized_json`，每个 segment 的匿名标签为 A–D。文件与 Realtime 都把 PCM、固定文本单元和活动更新交给同一个 `application.diarization.DiarizationSession` actor：transport 只投影领域事件，正文一经 completed 不会被分人改写。Qwen3 `ForcedAligner` 只在任务显式 opt-in 时使用：独立 `Qwen3AlignmentWorker` 从点名制品供给到 `app_home/diarization/<aligner-key>`（`aligner-q8` 或 `aligner-bf16`），为固定正文提供时间边界，不执行第二次 `Session.transcribe`，也不与 ASR 物理 owner 混用。CoreML Sortformer 与 aligner 都未配置时，分人能力不就绪，不因 ASR/TTS 规格自动供给。词级时间戳来自 ASR 原生输出，与 aligner 无关。Realtime 通过 `session.speechrail.diarization.enabled=true` opt-in；没有开启时不会创建 actor、启动 CoreML worker 或初始化对齐器。实名映射、跨会议声纹库、会议数据库和最终播放仍属于调用方。
+文件分人使用原生 `gpt-4o-transcribe-diarize` / `diarized_json`，每个 segment 的匿名标签为 A–D。文件与 Realtime 都把 PCM、固定文本单元和活动更新交给同一个 `application.diarization.DiarizationSession` actor：transport 只投影领域事件，正文一经 completed 不会被分人改写。Qwen3 `ForcedAligner` 只在任务显式 opt-in 时使用：独立 `Qwen3AlignmentWorker` 从点名制品供给到 `app_home/diarization/<aligner-key>`（`aligner-q8` 或 `aligner-bf16`），为固定正文提供时间边界，不执行第二次 `Session.transcribe`，也不与 ASR 物理 owner 混用。CoreML Sortformer 与 aligner 都未配置时，分人能力不就绪，不因 ASR/TTS 规格自动供给。Realtime 通过 `session.speechrail.diarization.enabled=true` opt-in；没有开启时不会创建 actor、启动 CoreML worker 或初始化对齐器。实名映射、跨会议声纹库、会议数据库和最终播放仍属于调用方。
+
+时间戳与分人共用同一个独立 aligner owner。Qwen3-ASR **没有原生词级时间戳**：上游 `mlx_qwen3_asr` 在
+`return_timestamps` 为真时会解析其默认的 `Qwen/Qwen3-ForcedAligner` 仓库，该仓库不在受管离线环境的
+本地缓存内，因此 ASR owner 永不被要求返回时间戳。`POST /v1/audio/transcriptions` 的
+`verbose_json` / `srt` / `vtt` 在冻结 ASR 正文后调用同一个 `FixedTextAligner` 产出 `segments` 与
+`words`；未配置 aligner 时返回 `503 timestamp_alignment_unavailable`，不隐式下载模型，也不以空数组
+或整句均分冒充词级边界。拿不到请求粒度时按 `granularity_unsupported` 失败。
 
 ## 5. 目录职责映射
 
