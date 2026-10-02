@@ -211,9 +211,12 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 请求体与 OpenAI 一致接受 `stream_format`，但 SpeechRail 只实现完整音频响应：省略或传
 `audio` 正常返回，传 `sse` 返回 `400 stream_format_unsupported`，不会退化成 SSE 分片。
 
-`seed` 仅用于 VoiceDesign preview 的确定性采样；系统 VoiceDesign 音色使用其
-固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
-组合返回稳定错误，不以“已接受”暗示参数生效。
+`seed` 用于 VoiceDesign preview 与 CustomVoice 生产合成的确定性采样：生产
+合成经 `SpeechRail-Seed: 0..4294967295` header 传入（S3-2，#137），同 voice ×
+同文本 × 同 seed 可复现，缺省保持原行为；克隆音色仍不接受调用方 `seed`
+（`400 clone_seed_unsupported`）。OpenAI body 保持 `extra=forbid`，body 内私
+自附加 `seed` 会被拒绝。内部 adapter 对不支持的组合返回稳定错误，不以“已接
+受”暗示参数生效。
 
 ### 4.1 SpeechRail 可选准入扩展
 
@@ -495,13 +498,15 @@ Authorization: Bearer <TOKEN>
 - **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
 - **Realtime 流式会话**：`WS /v1/realtime` 中通过 `speechrail.tts.start` 的 `voice` 与 `voice_revision` 字段传入 `custom_xxx`；会话更新不保存 voice 状态。
 
-> ⚠️ **确定性声明**：Base / clone 变体合成不保证重复渲染一致。同一 voice ×
-> 同一文本的多次渲染可能在语速、音高、频谱上漂移（实测 rate 相对标准差约
-> 7.5%），且 `POST /v1/audio/speech` 不接受 caller seed（body `extra=forbid`
-> 会拒绝私自附加的 `seed` 字段）。不要基于单次渲染的声学指标做判定（如两两
-> 音色间距筛查、语速差验收）；与噪声带同量级的阈值无法给出稳定判定。
-> 字节级复现承诺仅适用于 instruction 音色（固定 seed + 低温采样），不适用于
-> `mode=clone` 的 Base 变体。
+> ⚠️ **确定性声明**：CustomVoice 缺省不保证重复渲染一致；传
+> `SpeechRail-Seed` header（`0..4294967295`）则同 voice × 同文本 × 同 seed
+> 可复现。Base / clone 变体合成不保证重复渲染一致，且不接受 caller seed
+>（`400 clone_seed_unsupported`；body `extra=forbid` 会拒绝私自附加的
+> `seed` 字段）。同一 voice × 同一文本的多次渲染可能在语速、音高、频谱上
+> 漂移（实测 rate 相对标准差约 7.5%）。不要基于单次渲染的声学指标做判定
+>（如两两音色间距筛查、语速差验收）；与噪声带同量级的阈值无法给出稳定判
+> 定。字节级复现承诺仅适用于 instruction 音色（固定 seed + 低温采样），不适
+> 用于 `mode=clone` 的 Base 变体。
 
 ### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
 

@@ -328,7 +328,12 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         ] = None,
         seed: Annotated[
             int | None,
-            Field(description="Caller seed; supported only on explicit VoiceDesign instructions."),
+            Field(
+                description=(
+                    "Caller seed 0..4294967295; custom_voice renders "
+                    "reproducibly per seed, clone voices reject it."
+                )
+            ),
         ] = None,
         validation_policy: Annotated[
             Literal["allow_unverified", "require_output_pass"],

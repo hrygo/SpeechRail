@@ -617,8 +617,16 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     yield pcm
             return
 
+        # S3-2: custom_voice + voice_design(explicit instruction) share the
+        # caller-seed path: seed fixes the MLX sampling stream; missing seed
+        # keeps the legacy behavior. The clone path already rejected seed above.
         if variant == "custom_voice" and seed is not None:
-            raise ValueError("custom_voice_seed_unsupported")
+            try:
+                import mlx.core as mx  # type: ignore[import-not-found]
+
+                mx.random.seed(int(seed))
+            except Exception:
+                pass
         if profile is None and instruction is None and variant == "voice_design":
             profile = get_voice_profile(voice)
         condition = generation_condition(variant, voice, instruction=instruction, profile=profile)

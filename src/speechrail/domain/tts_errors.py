@@ -31,7 +31,6 @@ TTS_PARAMETER_ERROR_CODES = frozenset(
         "invalid_speed",
         "base_clone_required",
         "voice_clone_requires_base_model",
-        "custom_voice_seed_unsupported",
         "voice_design_seed_requires_instruction",
     }
 )

@@ -64,15 +64,18 @@ voice; system voices and voices in use may be protected. Idempotency keys are
 recommended for design/clone creation and required before retrying an unknown
 create outcome.
 
-## Synthesis determinism (Base/clone)
+## Synthesis determinism (custom_voice vs Base/clone)
 
-Base/clone synthesis is **not** deterministic across renders. Repeated renders
-of the same voice and text may drift in rate, pitch, and spectrum (observed
-rate RSD ~7.5%), and `POST /v1/audio/speech` accepts no caller seed. Do not
-judge on single-render acoustic metrics (voice spacing, rate deltas); thresholds
-at the noise-band magnitude cannot give stable verdicts. Byte-level
-reproducibility holds only for instruction voices with a fixed seed, never for
-Base `mode=clone` renders.
+CustomVoice synthesis is reproducible when the caller passes
+`SpeechRail-Seed: 0..4294967295` on `POST /v1/audio/speech` (same voice x
+same text x same seed); omitting it keeps the historical nondeterministic
+behavior. Base/clone synthesis is **not** deterministic across renders and
+rejects a caller seed (`400 clone_seed_unsupported`). Repeated renders of the
+same voice and text may drift in rate, pitch, and spectrum (observed rate RSD
+~7.5%). Do not judge on single-render acoustic metrics (voice spacing, rate
+deltas); thresholds at the noise-band magnitude cannot give stable verdicts.
+Byte-level reproducibility holds for instruction voices with a fixed seed,
+never for Base `mode=clone` renders.
 
 ## Designing adult voices
 

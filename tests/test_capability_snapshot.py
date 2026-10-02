@@ -274,7 +274,16 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
         == "unsupported"
     )
     parameters = entry["operations"]["http_speech"]["parameters"]
-    assert parameters["seed"]["status"] == "unsupported"
+    # S3-2: custom_voice (system) accepts a caller seed via the SpeechRail-Seed
+    # header; the Base clone lane still rejects it (clone_seed_unsupported).
+    # An unpublished instruction draft owns no runtime role, so its seed stays
+    # "unknown" rather than advertised as supported.
+    if mode == "clone":
+        assert parameters["seed"]["status"] == "unsupported"
+    elif mode == "system":
+        assert parameters["seed"]["status"] == "supported"
+    else:
+        assert parameters["seed"]["status"] == "unknown"
     assert parameters["phoneme"]["status"] == "unsupported"
     assert parameters["ssml"]["status"] == "unsupported"
     assert parameters["pronunciation_set"]["status"] == "supported"

@@ -812,7 +812,7 @@ def test_clone_controller_resets_when_generation_raises(
     assert reset_count == 1
 
 
-def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
+def test_mlx_custom_voice_engine_forwards_supported_controls_and_accepts_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = FakeCustomVoiceMlxModel()
@@ -849,16 +849,17 @@ def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
     assert isinstance(call["max_tokens"], int)
     assert "voice" in call
 
-    with pytest.raises(ValueError, match="custom_voice_seed_unsupported"):
-        list(
-            engine.synthesize(
-                "CustomVoice 不接受 seed。",
-                voice="serena",
-                speed=1.0,
-                language="zh",
-                seed=42,
-            )
+    # S3-2: custom_voice 接受 caller seed(SpeechRail-Seed header), worker 按
+    # seed 固定 MLX 采样流;缺省 seed 保持原行为。
+    assert list(
+        engine.synthesize(
+            "CustomVoice 接受 seed。",
+            voice="serena",
+            speed=1.0,
+            language="zh",
+            seed=42,
         )
+    )
 
 
 def test_mlx_base_engine_routes_public_clone_generation(

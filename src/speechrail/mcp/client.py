@@ -408,9 +408,13 @@ class SpeechRailClient:
             body["language"] = language
         if instruction is not None:
             body["instructions"] = instruction
-        if seed is not None:
-            body["seed"] = seed
         headers: dict[str, str] = {}
+        # S3-2: 生产合成 seed 走 SpeechRail-Seed header(OpenAI body 保持
+        # extra=forbid;body 塞 seed 会被服务端以 unsupported_parameter 拒绝)。
+        if seed is not None:
+            if type(seed) is not int or not 0 <= seed <= 2**32 - 1:
+                raise ValueError("seed must be an integer between 0 and 4294967295")
+            headers["SpeechRail-Seed"] = str(int(seed))
         if validation_policy != "allow_unverified":
             # The OpenAI-compatible body forbids extra fields; the service
             # rejects a body-borne `validation_policy` outright. The policy is

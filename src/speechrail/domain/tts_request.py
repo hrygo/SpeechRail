@@ -134,12 +134,12 @@ def validate_tts_parameters(
             "instructions require a VoiceDesign TTS model",
             param="instruction",
         )
-    elif model_variant == "custom_voice" and seed is not None:
-        raise TtsParameterError(
-            "custom_voice_seed_unsupported",
-            "CustomVoice synthesis does not accept a caller seed",
-            param="seed",
-        )
+    # S3-2: custom_voice accepts a caller seed (SpeechRail-Seed header);
+    # the worker fixes the MLX sampling stream on the custom path so the same
+    # seed reproduces, while a missing seed keeps the legacy behavior.
+    # base/clone still rejects a caller seed: the clone path derives its own
+    # seed from voice+ref_text, and the realtime incremental clone path cannot
+    # reuse one caller seed chunk by chunk.
     elif model_variant == "voice_design" and instruction is None and seed is not None:
         raise TtsParameterError(
             "voice_design_seed_requires_instruction",

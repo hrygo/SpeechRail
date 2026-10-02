@@ -1566,6 +1566,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
             default=None,
             alias="SpeechRail-Language",
         ),
+        caller_seed: int | None = Header(
+            default=None,
+            alias="SpeechRail-Seed",
+            ge=0,
+            le=2**32 - 1,
+        ),
         validation_policy: Literal["allow_unverified", "require_output_pass"] | None = Header(
             default=None,
             alias="SpeechRail-Validation-Policy",
@@ -1709,7 +1715,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     speed=body.speed,
                     language=effective_language,
                     instruction=body.instructions,
-                    seed=None,
+                    # S3-2: caller seed 只对 custom_voice 生效;clone 仍拒绝。
+                    seed=caller_seed,
                 )
             except VoiceStoreUnavailableError:
                 return error_response(
@@ -1906,7 +1913,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             speed=validated_tts.speed,
             language=effective_language,
             instruction=body.instructions,
-            seed=None,
+            seed=caller_seed,
             validation_policy=effective_validation_policy,
             expected_voice_revision=effective_revision,
             expected_model_revision=expected_model_revision,

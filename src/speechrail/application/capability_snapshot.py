@@ -370,7 +370,17 @@ def _voice_entry(
         "language": parameter(
             "unknown", default="auto", reason="vendor_language_domain_unverified"
         ),
-        "seed": parameter("unsupported"),
+        # S3-2: custom_voice 接受 caller seed(SpeechRail-Seed header);
+        # clone 仍不支持(clone_seed_unsupported)。
+        "seed": (
+            parameter("unsupported", reason="clone_seed_unsupported")
+            if is_clone
+            else parameter(
+                "supported" if serviceable else "unknown",
+                minimum=0,
+                maximum=2**32 - 1,
+            )
+        ),
         "phoneme": parameter("unsupported"),
         "ssml": parameter("unsupported"),
         "native_expression": parameter(

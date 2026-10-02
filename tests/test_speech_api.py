@@ -1058,6 +1058,30 @@ def test_validation_policy_header_defaults_to_allow_unverified() -> None:
     assert synthesizer.requests[-1].validation_policy == "allow_unverified"
 
 
+def test_caller_seed_header_reaches_the_domain_request() -> None:
+    """S3-2: SpeechRail-Seed carries the custom_voice caller seed (#137)."""
+
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Seed": "7102"},
+        json=_plain_speech_body(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert synthesizer.requests[-1].seed == 7102
+
+
+def test_caller_seed_header_defaults_to_none() -> None:
+    client, synthesizer = _capturing_speech_client()
+
+    response = client.post("/v1/audio/speech", json=_plain_speech_body())
+
+    assert response.status_code == 200, response.text
+    assert synthesizer.requests[-1].seed is None
+
+
 def test_only_the_speech_route_moved_to_400() -> None:
     """The 400 mapping is scoped: other routes keep the surface-wide 422."""
 
