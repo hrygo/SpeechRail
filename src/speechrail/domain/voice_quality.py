@@ -64,6 +64,33 @@ _TRANSCRIPT_DIGIT_TRANSLATION: Final[dict[int, str]] = str.maketrans(
 )
 _TRANSCRIPT_SEMANTIC_SYMBOLS: Final[frozenset[str]] = frozenset({".", "%", "℃", "°"})
 
+# Sinitic digit-clarification characters: a speaker reading a long digit string
+# substitutes these to keep 1/7, 0/O and 3/8 apart, so a phone number comes back
+# as `一三八零零幺三八丁`. They are translated only inside a run of at least
+# three digit characters: `丁` and `幺` also occur in ordinary words (`园丁`,
+# `幺妹`, and the quantifier in `一点丁点`), and a blanket substitution would
+# corrupt them. Two-character runs are the collision zone -- `一丁` in
+# `一点丁点` is a quantifier, not the number thirteen -- while every real
+# digit string this has to catch (`幺幺零`, a phone number, an id) is longer.
+_TRANSCRIPT_DIGIT_CLARIFIERS: Final[dict[int, str]] = str.maketrans(
+    {
+        "幺": "1",
+        "丁": "3",
+        "尜": "9",
+    }
+)
+_TRANSCRIPT_DIGIT_RUN: Final[re.Pattern[str]] = re.compile(
+    r"[零一二两三四五六七八九幺丁尜]{3,}"
+)
+
+
+def _fold_digit_clarifiers(text: str) -> str:
+    """Translate digit-clarification characters that appear inside a digit run."""
+
+    return _TRANSCRIPT_DIGIT_RUN.sub(
+        lambda match: match.group(0).translate(_TRANSCRIPT_DIGIT_CLARIFIERS), text
+    )
+
 # `.` is kept as a semantic symbol so decimals survive, which makes NFKC's
 # rewrite of `……` into `......` a trap: those six dots are an ellipsis, a pause
 # marker the TTS never voices and the ASR never returns. Scored as six missing
@@ -597,6 +624,7 @@ def normalize_transcript_for_match(text: str) -> str:
     # all, so both would otherwise reach the digit table as characters. Runs with
     # no magnitude word (`三六九`, `二零二六`) are left alone and stay positional.
     folded = resolve_chinese_magnitudes(text)
+    folded = _fold_digit_clarifiers(folded)
     for spoken, symbol in _TRANSCRIPT_SPOKEN_UNITS:
         folded = folded.replace(spoken, symbol)
     normalized = unicodedata.normalize("NFKC", apply_light_itn(folded)).casefold()
@@ -631,9 +659,27 @@ def transcript_numbers_match(expected: str, actual: str) -> bool:
     list, and two empty lists are equal: the comparison is vacuously satisfied
     and callers gate applicability on :func:`probe_carries_digits`.
     """
-    reference = _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(expected))
-    hypothesis = _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(actual))
+    reference = _number_runs(expected)
+    hypothesis = _number_runs(actual)
     return reference == hypothesis
+
+
+def _number_runs(text: str) -> list[str]:
+    """Return the comparable number runs of ``text``, by value not by spelling.
+
+    Leading zeros are dropped from the integer part only: `09` and `9` are the
+    same number and a date spoken as `2026/09/09` must match one heard as
+    `2026年9月9日`.  A fractional part keeps its zeros, because `0.05` and `0.5`
+    are different numbers.
+    """
+
+    runs: list[str] = []
+    for run in _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(text)):
+        integer, dot, fraction = run.partition(".")
+        runs.append(
+            f"{integer.lstrip('0') or '0'}{dot}{fraction}" if dot else integer.lstrip("0") or "0"
+        )
+    return runs
 
 
 def transcript_match_score(expected: str, actual: str) -> float:

@@ -399,6 +399,61 @@ def test_transcript_numbers_match_ignores_probes_without_digits() -> None:
 
 
 @pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # A speaker reading a long digit string swaps in the clarification
+        # characters so 1/7 and 0/O stay apart, and the ASR hands them back
+        # verbatim. `幺幺零` and `110` are the same number; before the fold the
+        # clarifiers were dropped as non-numeric and the run compared as `0`
+        # against `110`, rejecting a voice that said the right thing.
+        ("报警电话是110", "报警电话是幺幺零", True),
+        ("我的号码是13800138000", "我的号码是一三八零零一三八零零零", True),
+        # Folding is not a rubber stamp: the clarification characters carry
+        # their own digits, so a wrong one is still a wrong number.
+        ("我的号码是13800138000", "我的号码是一三八零零幺三八丁", False),
+    ],
+)
+def test_digit_clarifiers_fold_inside_a_digit_run(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("园丁在浇水", "园丁在浇水"),
+        ("幺妹回来了", "幺妹回来了"),
+        ("尜尖货", "尜尖货"),
+        # The quantifier in `一点丁点` is two digit characters next to each
+        # other. Reading a run of two as a digit string turned it into `13`.
+        ("这是一丁点", "这是1丁点"),
+    ],
+)
+def test_digit_clarifiers_never_touch_ordinary_words(
+    text: str, expected: str
+) -> None:
+    assert normalize_transcript_for_match(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # `09` and `9` are the same number, so a date spoken with zero padding
+        # has to match one heard without it.
+        ("编号是07", "编号是七", True),
+        ("值是09.5", "值是9.5", True),
+        # Only the integer part loses its padding: these two really differ.
+        ("占比是0.05%", "占比是0.5%", False),
+    ],
+)
+def test_leading_zeros_are_compared_by_value(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+@pytest.mark.parametrize(
     ("misread", "edit_distance"),
     [
         # Both numbers below are the exact readings issue #127 tabulated: a
