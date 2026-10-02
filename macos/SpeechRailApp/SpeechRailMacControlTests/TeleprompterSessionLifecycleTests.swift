@@ -1014,6 +1014,39 @@ struct TeleprompterSessionLifecycleTests {
         await harness.session.closeStage()
     }
 
+    /// cue/skip 不产出朗读正文，`text` 会是空的。切回「照念」时必须用原稿补上，
+    /// 否则会得到一段永远念不出来的「照念」段落——那正是 decoder 对 speak
+    /// 禁止的形状（speak 的正文必须非空）。
+    @Test("switching a block back to speak restores readable text from its source")
+    func switchingDispositionBackToSpeakRestoresText() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+
+        let block = try #require(harness.session.readingBlocks.first)
+        let sourceText = block.rawSourceText
+        #expect(!sourceText.isEmpty)
+        #expect(!block.text.isEmpty)
+
+        harness.session.setBlockDisposition(id: block.id, disposition: .cue)
+        let cued = try #require(harness.session.readingBlocks.first { $0.id == block.id })
+        #expect(cued.disposition == .cue)
+        #expect(cued.text.isEmpty, "cue 不产出朗读正文")
+        #expect(cued.rawSourceText == sourceText, "原稿必须留着，界面上要看得见")
+
+        harness.session.setBlockDisposition(id: block.id, disposition: .speak)
+        let restored = try #require(harness.session.readingBlocks.first { $0.id == block.id })
+        #expect(restored.disposition == .speak)
+        #expect(!restored.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                "切回照念必须有正文可念，否则这段等于凭空消失")
+        #expect(restored.text == sourceText)
+    }
+
     @Test("manual open never adopts an unconfirmed AI draft")
     func manualOpenKeepsAcceptedVersion() async throws {
         let harness = try TeleprompterSessionHarness()
@@ -1028,7 +1061,7 @@ struct TeleprompterSessionLifecycleTests {
         }
         await harness.session.analyzeDraft()
         #expect(harness.session.pendingVersion != nil)
-        #expect(harness.session.phase == .review)
+        #expect(harness.session.phase == .prepared)
 
         try harness.session.openForManualReading()
 
@@ -1046,8 +1079,8 @@ struct TeleprompterSessionLifecycleTests {
     /// 从内存里消失了**，而 `.atomicWriteFailed` 的文案偏偏是「稿件保存失败，原
     /// 版本仍然保留」——这句话在这条路上是假的。更糟的是 `canAcceptPendingVersion`
     /// 依赖 `pendingVersion != nil`，按钮随之变灰，**用户连重试都不行**。
-    @Test("a store failure while accepting a pending version keeps the review on screen")
-    func aStoreFailureWhileAcceptingKeepsTheReview() async throws {
+    @Test("a store failure while accepting a pending version keeps the draft on screen")
+    func aStoreFailureWhileAcceptingKeepsTheDraftOnScreen() async throws {
         try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
         let harness = try TeleprompterSessionHarness()
         defer { harness.cleanup() }
@@ -1079,133 +1112,16 @@ struct TeleprompterSessionLifecycleTests {
         #expect(throws: TeleprompterV2StoreError.atomicWriteFailed) {
             try harness.session.acceptPendingVersion()
         }
-        // 审阅必须还在，按钮必须还能按——用户才有腾出空间后重试的机会。
+        // 整理稿必须还在，按钮必须还能按——用户才有腾出空间后重试的机会。
         #expect(harness.session.pendingVersion != nil, "存盘失败不得销毁候选版本")
         #expect(harness.session.canAcceptPendingVersion, "存盘失败后必须还能重试")
         #expect(harness.session.activeVersion?.id == acceptedVersionID, "未写入的版本不得生效")
-        #expect(harness.session.phase == .review, "必须仍停在审阅页")
+        #expect(harness.session.phase == .prepared, "必须仍停在整理页")
         #expect(try Data(contentsOf: url) == before, "磁盘字节必须逐字节不变")
     }
 
-    @Test("qualifier loss surfaces as locatable review items instead of silent success")
-    func semanticRiskBecomesReviewItems() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(
-            title: "成本稿",
-            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
-        )
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
-                let input = try JSONDecoder().decode(
-                    TeleprompterRewriteInput.self,
-                    from: Data(prompt.input.utf8)
-                )
-                let blocks = input.groups.map { group in
-                    TeleprompterRewriteBlock(
-                        blockID: group.id,
-                        mode: .speak,
-                        text: "方案 A 的单次成本是 50 元。",
-                        issues: []
-                    )
-                }
-                return String(decoding: try JSONEncoder().encode(
-                    TeleprompterRewriteOutput(blocks: blocks)
-                ), as: UTF8.self)
-            }
-            return try TestPreparationResponse.response(for: prompt)
-        }
-
-        await harness.session.analyzeDraft()
-
-        #expect(harness.session.phase == .review)
-        #expect(harness.session.pendingVersion != nil)
-        let item = try #require(harness.session.reviewItems.first {
-            $0.issue == .conditionRemoved
-        })
-        #expect(item.sourceSnippet.contains("不超过"))
-        #expect(harness.session.reviewItems.contains { $0.issue == .comparisonChanged })
-        let block = try #require(harness.session.readingBlocks.first {
-            $0.id == item.blockID
-        })
-        #expect(block.disposition == .unresolved)
-    }
-
-    @Test("condense proposes deletions that must be reviewed before use")
-    func condenseCreatesDeletionReviewItems() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(title: "精简稿", sourceText: "甲段。乙段。丙段。")
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
-        }
-
-        await harness.session.condenseDraft()
-
-        #expect(harness.session.phase == .review)
-        #expect(harness.session.pendingVersion != nil)
-        let item = try #require(harness.session.reviewItems.first {
-            $0.issue == .contentRemoved
-        })
-        #expect(item.sourceSnippet.contains("丙段"), "删除审阅必须展示被删掉的原文")
-        let block = try #require(harness.session.readingBlocks.first {
-            $0.id == item.blockID
-        })
-        #expect(block.disposition == .skip)
-        #expect(!harness.session.canAcceptPendingVersion, "删除未确认前不能采用")
-    }
-
-    @Test("condense fails the whole round when a must-keep paragraph would be deleted")
-    func condenseFailsClosedWhenAMarkedParagraphWouldBeDeleted() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(title: "精简稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
-        }
-
-        let ranges = harness.session.mustKeepCandidateRanges()
-        #expect(ranges.count == 3, "每个空行分隔的段落都应可被标记为必讲")
-
-        // The fake omits the last unit, which is exactly the paragraph marked
-        // must-keep. The pipeline must refuse the whole round rather than ship
-        // a version that deletes it.
-        await harness.session.condenseDraft(mustKeepSourceRanges: [try #require(ranges.last)])
-
-        #expect(harness.session.pendingVersion == nil, "锁定内容被删时不得产出候选版本")
-        #expect(harness.session.blocked != nil, "整轮必须失败关闭并给出提示")
-        #expect(
-            !harness.session.reviewItems.contains { $0.issue == .contentRemoved },
-            "失败关闭时不应留下任何删减审阅项"
-        )
-    }
-
-    @Test("marking one paragraph does not lock the others")
-    func condenseStillReviewsDeletionsOutsideTheMarkedParagraphs() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(title: "精简稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            try TestCondenseResponse.response(for: prompt, omittingLastUnit: true)
-        }
-
-        let ranges = harness.session.mustKeepCandidateRanges()
-        await harness.session.condenseDraft(mustKeepSourceRanges: [try #require(ranges.first)])
-
-        #expect(harness.session.phase == .review)
-        let item = try #require(harness.session.reviewItems.first { $0.issue == .contentRemoved })
-        #expect(
-            item.sourceSnippet.contains("丙段"),
-            "未标记的段落仍应进入删减审阅，且原文可见"
-        )
-        #expect(
-            !item.sourceSnippet.contains("甲段"),
-            "标记为必讲的段落不应出现在删减审阅里"
-        )
-    }
-
     @Test("editing the script invalidates the previous AI review state")
-    func editingSourceInvalidatesReviewState() async throws {
+    func editingSourceInvalidatesPreparedState() async throws {
         let harness = try TeleprompterSessionHarness()
         defer { harness.cleanup() }
         harness.session.createDocument(title: "改稿", sourceText: "甲段。乙段。丙段。")
@@ -1213,15 +1129,14 @@ struct TeleprompterSessionLifecycleTests {
             try TestPreparationResponse.response(for: prompt)
         }
         await harness.session.analyzeDraft()
-        #expect(harness.session.phase == .review)
+        #expect(harness.session.phase == .prepared)
         #expect(harness.session.pendingVersion != nil)
         #expect(!harness.session.readingBlocks.isEmpty)
 
         harness.session.updateSourceText("甲段被改写。乙段。丙段。")
 
         #expect(harness.session.phase == .draft)
-        #expect(harness.session.pendingVersion == nil, "改稿后旧候选必须失效")
-        #expect(harness.session.reviewItems.isEmpty)
+        #expect(harness.session.pendingVersion == nil, "改稿后旧整理稿必须失效")
         #expect(harness.session.readingBlocks.isEmpty)
         #expect(harness.session.preparationResult == nil)
         #expect(harness.session.preparationProgress == nil)
@@ -1245,8 +1160,7 @@ struct TeleprompterSessionLifecycleTests {
         await preparation.value
 
         #expect(harness.session.phase == .draft)
-        #expect(harness.session.pendingVersion == nil, "旧文本的分析结果不得回填")
-        #expect(harness.session.reviewItems.isEmpty)
+        #expect(harness.session.pendingVersion == nil, "旧文本的整理结果不得回填")
         #expect(harness.session.readingBlocks.isEmpty)
     }
 
@@ -1427,10 +1341,10 @@ struct TeleprompterSessionLifecycleTests {
         }
         // 没存住就必须整体退回：审阅结果、版本数、阶段都留在原地，
         // 用户才能再按一次「直接使用原稿」。
-        #expect(harness.session.pendingVersion?.id == pendingID, "存盘失败不得清掉在审的 AI 结果")
+        #expect(harness.session.pendingVersion?.id == pendingID, "存盘失败不得清掉待采用的整理结果")
         #expect(harness.session.versions.count == versionsBefore, "存盘失败不得留下没落盘的版本")
-        #expect(harness.session.readingBlocks == blocksBefore, "审阅页内容必须原样留下")
-        #expect(harness.session.phase == .review, "必须仍停在审阅页而不是假装已就绪")
+        #expect(harness.session.readingBlocks == blocksBefore, "整理页内容必须原样留下")
+        #expect(harness.session.phase == .prepared, "必须仍停在整理页而不是假装已就绪")
         #expect(try Data(contentsOf: url) == onDisk, "磁盘字节必须逐字节不变")
     }
 
@@ -1635,193 +1549,6 @@ struct TeleprompterSessionLifecycleTests {
         }
         #expect(harness.session.document?.id == documentID, "拒绝导入不得换掉当前稿件")
         #expect(harness.session.phase == .following, "拒绝导入不得把舞台带下去")
-    }
-
-    /// 验收第 3 条「迁移失败保留原数据」此前**一条回归都没有**。这条把它
-    /// 钉住，覆盖三种「这个 build 读不动」的真实形态：更高格式版本（未来的
-    /// App 写的）、损坏的 JSON、结构不合法。
-    ///
-    /// 三条要求同时成立才算达标：读不动的稿件**不能拖垮其他稿件**、**必须
-    /// 带上原因**（否则界面只能说「有几份打不开」而读者无法判断该备份什么）、
-    /// **原文件必须原样留在磁盘上**——这一条最要紧，「保留原数据」如果只是
-    /// 「先不报错」，而文件其实被清掉或改写，那就是丢数据。
-    /// 第十九轮。改内容范围会作废当前 AI 分段——这本身是对的——但它连同
-    /// **读者已经逐条处理完的审阅**一起清掉，而且没有确认、没有消息。
-    ///
-    /// 为什么这条要紧：审阅是第 43 条之后唯一剩下的**不可重做**的读者工作。
-    /// 候选版本一旦离开内存，读者花在每一条上的判断就不在屏幕上了；要做回来
-    /// 得重新跑一次 AI、再从头审一遍。而入口（工作台顶栏「选择范围」）在
-    /// `editor()` 里只要有稿件就渲染，**不看阶段**——审阅页上点得到。
-    @Test("changing the content range refuses to silently discard completed review work")
-    func changingContentRangeRefusesToDiscardReviewWorkSilently() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(
-            title: "范围稿",
-            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
-        )
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
-                let input = try JSONDecoder().decode(
-                    TeleprompterRewriteInput.self,
-                    from: Data(prompt.input.utf8)
-                )
-                let blocks = input.groups.map { group in
-                    TeleprompterRewriteBlock(
-                        blockID: group.id,
-                        mode: .speak,
-                        text: "方案 A 的单次成本是 50 元。",
-                        issues: []
-                    )
-                }
-                return String(decoding: try JSONEncoder().encode(
-                    TeleprompterRewriteOutput(blocks: blocks)
-                ), as: UTF8.self)
-            }
-            return try TestPreparationResponse.response(for: prompt)
-        }
-
-        await harness.session.analyzeDraft()
-        #expect(harness.session.phase == .review)
-        let item = try #require(harness.session.reviewItems.first)
-
-        // 读者还没动手时，丢掉的是 AI 的建议、不是读者的工作——不该拦。
-        #expect(
-            !harness.session.hasReviewDecisionsAtRisk,
-            "刚整理完、读者尚未处理任何审阅项时，改范围不该弹确认"
-        )
-
-        // 读者处理了一条——这是不可重做的工作。
-        harness.session.resolveReviewItem(id: item.id, action: .accept)
-        #expect(item.isResolved || harness.session.reviewItems.first?.isResolved == true)
-        #expect(
-            harness.session.hasReviewDecisionsAtRisk,
-            "有已处理过的审阅时，改范围必须先问过读者"
-        )
-
-        // 改范围：不问就吃掉，不行。
-        #expect(throws: TeleprompterTextError.reviewDecisionsWouldBeDiscarded) {
-            try harness.session.updateContentSelection(
-                TeleprompterContentSelection(
-                    totalParagraphCount: 1,
-                    selectedParagraphIndices: [0]
-                )
-            )
-        }
-        #expect(harness.session.phase == .review, "拒绝不得把审阅页带走")
-        #expect(
-            harness.session.reviewItems.contains { $0.isResolved },
-            "拒绝不得弄丢读者已经做过的判断"
-        )
-
-        // 读者确认之后才真的作废——这时候丢失是读者自己选的。
-        try harness.session.applyContentSelectionAfterConfirmation(
-            TeleprompterContentSelection(
-                totalParagraphCount: 1,
-                selectedParagraphIndices: [0]
-            )
-        )
-        #expect(harness.session.reviewItems.isEmpty)
-        #expect(!harness.session.hasReviewDecisionsAtRisk)
-    }
-
-    /// 「该报警时才报警」和「不该报警时不报」是两件事。原来只有前者。
-    ///
-    /// 边界在 `pendingVersion`：采用候选版本之后 `pendingVersion` 为 nil、
-    /// `reviewItems` 可能仍有记录，但那些判断**已经烘进已确认版本**了，
-    /// 再改范围丢掉它们不损失任何工作——这时候弹确认框就是纯粹的打扰。
-    @Test("adopting the candidate makes a later range change safe again")
-    func adoptingTheCandidateEndsTheReviewLossRisk() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(
-            title: "边界稿",
-            sourceText: "仅在试运行期间，方案 A 的单次成本不超过 50 元。"
-        )
-        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
-            if prompt.schemaVersion == "teleprompter.rewrite.v1" {
-                let input = try JSONDecoder().decode(
-                    TeleprompterRewriteInput.self,
-                    from: Data(prompt.input.utf8)
-                )
-                let blocks = input.groups.map { group in
-                    TeleprompterRewriteBlock(
-                        blockID: group.id,
-                        mode: .speak,
-                        text: "方案 A 的单次成本是 50 元。",
-                        issues: []
-                    )
-                }
-                return String(decoding: try JSONEncoder().encode(
-                    TeleprompterRewriteOutput(blocks: blocks)
-                ), as: UTF8.self)
-            }
-            return try TestPreparationResponse.response(for: prompt)
-        }
-
-        await harness.session.analyzeDraft()
-        #expect(!harness.session.reviewItems.isEmpty, "前提：这次整理确实产生了审阅项")
-        // 全部处理完才可采用（`canAcceptPendingVersion` 要求没有未决项）。
-        for item in harness.session.reviewItems {
-            harness.session.resolveReviewItem(id: item.id, action: .accept)
-        }
-        #expect(harness.session.canAcceptPendingVersion, "前提：候选版本本来是可采用的")
-        #expect(harness.session.hasReviewDecisionsAtRisk)
-
-        try harness.session.acceptPendingVersion()
-        #expect(harness.session.phase == .ready)
-        #expect(
-            !harness.session.hasReviewDecisionsAtRisk,
-            "候选版本一旦被采用，审阅判断已经落进已确认版本，不再有丢失风险"
-        )
-        // 因此这一步是普通编辑，不该再拦一次。
-        try harness.session.updateContentSelection(
-            TeleprompterContentSelection(
-                totalParagraphCount: 1,
-                selectedParagraphIndices: [0]
-            )
-        )
-    }
-
-    /// 没有已处理的审阅时，改范围就是普通编辑，不该多问一句。
-    @Test("changing the content range stays a plain edit when no review work is at stake")
-    func changingContentRangeIsPlainWithoutReviewWork() async throws {
-        let harness = try TeleprompterSessionHarness()
-        defer { harness.cleanup() }
-        harness.session.createDocument(title: "范围稿", sourceText: "甲段。\n\n乙段。\n\n丙段。")
-
-        #expect(!harness.session.hasReviewDecisionsAtRisk)
-        try harness.session.updateContentSelection(
-            TeleprompterContentSelection(
-                totalParagraphCount: 3,
-                selectedParagraphIndices: [0, 2]
-            )
-        )
-        #expect(harness.session.contentSelection.selectedParagraphIndices == [0, 2])
-
-        // 确认路径同样要守 canEdit：语音开着时改了范围，旧事件仍可能推进刚
-        // 选定的内容。拒绝必须有声音。
-        //
-        // 注意前提是**语音**开着而不是窗口开着——`.manual` 阶段没有语音时
-        // `canEdit` 为 true，编辑器和范围本来就该可用（这与标题/正文编辑器
-        // 的既有行为一致）。我第一版把前提写成「舞台开着」，实测直接打脸。
-        try harness.session.useDeterministicFallback()
-        try harness.session.openForManualReading()
-        #expect(harness.session.canEdit, "前提：手动阅读时改范围仍然是允许的")
-        await harness.session.enableVoiceAssist()
-        #expect(!harness.session.canEdit, "前提：语音开着时不能改范围")
-        #expect(throws: TeleprompterTextError.sessionBusy) {
-            try harness.session.applyContentSelectionAfterConfirmation(
-                TeleprompterContentSelection(
-                    totalParagraphCount: 3,
-                    selectedParagraphIndices: [0, 1]
-                )
-            )
-        }
-        #expect(
-            harness.session.contentSelection.selectedParagraphIndices == [0, 2],
-            "拒绝不得顺手把范围改掉"
-        )
     }
 
     @Test("bundles this build cannot read keep their files and do not take the other documents down")
@@ -2357,53 +2084,80 @@ struct TeleprompterSessionLifecycleTests {
         }
         #expect(harness.session.currentSegmentIndex == 0)
     }
-}
 
-/// Condense runs through the map stage: one block per source unit, with the
-/// last unit omitted so deletion review can be exercised end to end.
-private enum TestCondenseResponse {
-    enum Failure: Error {
-        case unavailable
+    /// 目标时长属于这份稿，不属于一次运行。
+    ///
+    /// 它以前只活在内存里，唯一的落盘位置是 `last_run.target_seconds`——而载入
+    /// 路径压根不读回那一位。于是重开一个 App 之后，`targetMinutes` 停在
+    /// `defaultTargetMinutes`（20），一份两百字的稿顶着「目标 20 分」。
+    @Test("a document keeps its own target minutes across a reload")
+    func targetMinutesSurviveReload() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        let documentID = try #require(harness.session.document?.id)
+
+        harness.session.setTargetMinutes(3)
+        #expect(harness.session.targetMinutes == 3)
+        try harness.session.save()
+
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: documentID)
+
+        #expect(reloaded.targetMinutes == 3, "重开必须回到这份稿自己的目标时长，而不是全局默认")
+        #expect(reloaded.runClock.targetSeconds == 180)
     }
 
-    static func response(
-        for prompt: TeleprompterPreparationPrompt,
-        omittingLastUnit: Bool
-    ) throws -> String {
-        if prompt.schemaVersion == "teleprompter.reduction.v1" {
-            return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
-        }
-        guard prompt.schemaVersion == "teleprompter.preparation.v2" else {
-            throw Failure.unavailable
-        }
-        let input = try JSONDecoder().decode(
-            TeleprompterPreparationMapInput.self,
-            from: Data(prompt.input.utf8)
+    /// 没有存过目标时长的老文档，按原稿估算补一个，而不是直接吃 20 分钟默认值。
+    @Test("a document without a stored target derives one from its own text")
+    func targetMinutesFallBackToTheEstimateNotTheGlobalDefault() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "长稿",
+            sourceText: String(repeating: "这是一段用来估算时长的中文稿件内容。", count: 40)
         )
-        let blocks = input.targets.indices.map { index in
-            if omittingLastUnit, index == input.targets.count - 1 {
-                return TeleprompterMapBlock(
-                    startUnit: index,
-                    endUnit: index + 1,
-                    mode: .omit,
-                    text: "",
-                    issues: [.nonspokenContent]
-                )
-            }
-            return TeleprompterMapBlock(
-                startUnit: index,
-                endUnit: index + 1,
-                mode: .speak,
-                text: input.targets[index].rawText,
-                issues: []
-            )
+        let documentID = try #require(harness.session.document?.id)
+        let estimate = try #require(harness.session.suggestedTargetMinutes)
+        #expect(estimate < TeleprompterTimingPolicy.defaultTargetMinutes, "用例前提：这份稿明显短于默认目标")
+
+        // 抹掉持久化字段，模拟一份还没有 target_minutes 的旧文档。
+        let url = harness.documentBundleURL(documentID: documentID)
+        var bundle = try JSONDecoder().decode(
+            TeleprompterV2DocumentBundle.self,
+            from: Data(contentsOf: url)
+        )
+        bundle.document.targetMinutes = nil
+        try JSONEncoder().encode(bundle).write(to: url)
+
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: documentID)
+
+        #expect(reloaded.targetMinutes == estimate)
+    }
+
+    /// 估不准的时候不许再报一个分钟数。
+    ///
+    /// `evaluatePreflight` 会因为稿里有数字、网址或非中英文本而给出「无法预估」，
+    /// 同一屏却把目标预填成「1 分」——一个说算不准，一个已经填好了。预填和预检
+    /// 必须用同一个「可靠」判据，否则界面就在自相矛盾。
+    @Test("no target is suggested when the duration estimate is uncertain")
+    func uncertainEstimateYieldsNoTargetSuggestion() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(
+            title: "带数字的稿",
+            sourceText: "马里亚纳海沟最深处是 10994 米。2023 年的记录是 9000 种生物。"
+        )
+
+        #expect(harness.session.suggestedTargetMinutes == nil)
+        if case .uncertain = harness.session.preflightConclusion {
+            // 与预检同源：预检说算不准，建议就不该给数。
+        } else {
+            Issue.record("含数字的稿件应判为无法预估，实际得到 \(harness.session.preflightConclusion)")
         }
-        return String(decoding: try JSONEncoder().encode(
-            TeleprompterMapOutput(blocks: blocks)
-        ), as: UTF8.self)
     }
 }
-
 private enum TestPreparationResponse {
     enum Failure: Error {
         case unavailable
@@ -2411,7 +2165,7 @@ private enum TestPreparationResponse {
 
     static func response(for prompt: TeleprompterPreparationPrompt) throws -> String {
         if prompt.schemaVersion == "teleprompter.reduction.v1" {
-            return #"{"schema_version":"teleprompter.reduction.v1","patches":[],"review_block_ids":[]}"#
+            return #"{"schema_version":"teleprompter.reduction.v1","patches":[],}"#
         }
         if prompt.schemaVersion == "teleprompter.grouping.v1" {
             let input = try JSONDecoder().decode(
@@ -2438,9 +2192,8 @@ private enum TestPreparationResponse {
             let blocks = input.groups.map { group in
                 TeleprompterRewriteBlock(
                     blockID: group.id,
-                    mode: .speak,
+                    disposition: .speak,
                     text: group.sourceUnits.map(\.rawText).joined(),
-                    issues: []
                 )
             }
             return String(decoding: try JSONEncoder().encode(

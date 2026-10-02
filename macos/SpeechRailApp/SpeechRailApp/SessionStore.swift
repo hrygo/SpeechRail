@@ -833,6 +833,23 @@ public actor SessionStore {
         }
     }
 
+    /// 一次读完"回看这一条"要的四份内容（`SessionReviewSnapshot`）。
+    ///
+    /// 复用上面四条语句，不重写 SQL。调用方原来要 4 次 `await`，界面就更新 4 次；
+    /// 这里返回**一个值**，界面只赋值一次，翻记录一次到位。
+    ///
+    /// `lines` 保持 `includePartial: false`——记录库与导出只认已定稿行，口径不变。
+    /// 记录不存在时返回 `nil`，与 `session(id:)` 一致。
+    public func reviewSnapshot(sessionID: String) throws -> SessionReviewSnapshot? {
+        guard let record = try session(id: sessionID) else { return nil }
+        return SessionReviewSnapshot(
+            record: record,
+            lines: try lines(sessionID: sessionID),
+            speakerNames: try speakerNames(sessionID: sessionID),
+            voiceChanges: try voiceChanges(sessionID: sessionID)
+        )
+    }
+
     public func interruptions(sessionID: String) throws -> [SessionInterruption] {
         let sql = "SELECT id, session_id, at_ordinal, reason, resumed_at, created_at FROM session_interruption WHERE session_id = ? ORDER BY at_ordinal ASC;"
         return try withStatement(sql) { statement in

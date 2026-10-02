@@ -2,8 +2,8 @@
 title: "克隆音色输出可懂度与 ASR 复核设计"
 status: active
 audience: "SpeechRail/Sona 维护者、质量工程与架构评审者"
-version: "1.1"
-date: 2026-09-12
+version: "1.2"
+date: 2026-10-01
 ---
 
 # 克隆音色输出可懂度与 ASR 复核设计
@@ -102,7 +102,9 @@ ASR 复核必须满足：
 - Phase A 结束并释放 TTS reservation 后，若 capability router 支持显式 eviction，则先释放当前 warm TTS 模型；
 - Phase C 独立进入 `BATCH_ASR` reservation，并复用现有 `batch_transcriber` 与 `AdmissionQueue`；
 - 24 kHz mono PCM16 使用有界线性重采样转换到 16 kHz，再按已知 probe 文本计算 Unicode/ITN 归一化后的字符编辑相似度；
+- 归一化必须折叠 TTS 不发音的排版符号，否则逐字忠实的合成也会被扣到门下限：TTS 把 `℃` 读出来、ASR 返回「摄氏度」（记法差异）；`……` 根本不发音、ASR 直接丢弃，而 NFKC 把它 rewrite 成 `......`，`.` 又是保留的语义符号，成串省略号按缺失字符计。实测这两条曾把 `min()` 聚合压到 0.76；
 - 六类 probe 取最小 `transcript_match`，当前 provisional 门为：`>=0.92 pass`、`0.80..0.92 warn`、`<0.80 reject`；
+- 报告同时下发 `synthesis.probe_scores`，按固定 probe 集顺序逐条给出分数；`min()` 聚合无法区分「整体不可懂」与「单条 probe 文本不适配」，排查必须落到该字段；
 - ASR 未配置或验证器异常时报告 `unevaluated` / `transcription_unavailable`，绝不冒充 pass；队列饱和与 deadline 超时保持运行时 429/503 语义。
 
 上述 0.92/0.80 是工程初始值，不是已校准的人类感知阈值。真实 Apple Silicon 语料验收必须覆盖数字、日期、单位、长短句和噪声反例，再决定是否调整。

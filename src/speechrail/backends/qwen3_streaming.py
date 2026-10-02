@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease, AsrModeSchedu
 from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
+    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
@@ -41,6 +43,8 @@ _SUPPORTED_LANGUAGES = {
     "swedish", "danish", "finnish", "polish", "czech", "filipino", "persian",
     "greek", "romanian", "hungarian", "macedonian",
 }
+
+logger = logging.getLogger(__name__)
 
 
 class StreamingWorkerProtocol(Protocol):
@@ -249,6 +253,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._mode_context: AbstractAsyncContextManager[None] | None = None
         self._cleanup_lock = asyncio.Lock()
         self._finalized = False
+        self._events_ended = False
 
     @property
     def session_id(self) -> str:
@@ -258,6 +263,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         if self._connected:
             return
         self._finalized = False
+        self._events_ended = False
         self._finished = asyncio.Event()
         scheduler = getattr(self._worker, "mode_scheduler", None)
         if scheduler is None:
@@ -360,7 +366,13 @@ class Qwen3StreamingSession(RealtimeAsrSession):
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
         self._reader = None
-        await self._finalize(cancel=True)
+        try:
+            await self._finalize(cancel=True)
+        finally:
+            # A parked events() consumer must wake even when sending cancel fails.
+            # Preserve an already queued terminal outcome on repeated close.
+            if not self._events_ended:
+                self._put_terminal()
 
     async def _read_loop(self) -> None:
         try:
@@ -385,22 +397,26 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                         return
                 elif kind == "error":
                     code = frame.get("code")
-                    queue_full = self._events_queue.full()
-                    if queue_full:
-                        self._replace_events_with_error("session_queue_full")
+                    # The public ``error.code`` stays the stable machine code so
+                    # the Realtime contract keeps its 128-character bound, but
+                    # the worker's stderr tail is what actually explains a
+                    # backend failure, so log it here.  Without this the
+                    # streaming path was the only backend that dropped it.
+                    logger.error(
+                        "streaming ASR worker error frame: %s",
+                        error_frame_message(frame, "backend_error"),
+                    )
+                    # Error + end marker need two slots. Preserve the worker's
+                    # real cause even if unread partials exhaust the bounded queue.
+                    if self._events_queue.qsize() > self.EVENT_QUEUE_MAXSIZE - 2:
+                        self._replace_events_with_error(str(code or "backend_error"))
                     else:
                         self._events_queue.put_nowait(
-                            StreamingAsrEvent(
-                                kind="error",
-                                error_code=str(code or "backend_error"),
-                            )
+                            StreamingAsrEvent(kind="error", error_code=str(code or "backend_error"))
                         )
                         self._events_queue.put_nowait(None)
-                    if queue_full:
-                        with contextlib.suppress(BaseException):
-                            await self._finalize(cancel=True)
-                    else:
-                        await self._finalize(cancel=False)
+                        self._events_ended = True
+                    await self._finalize(cancel=False)
                     return
         except asyncio.CancelledError:
             raise
@@ -422,12 +438,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
             self._replace_events_with_error("session_queue_full")
             return False
         self._events_queue.put_nowait(None)
+        self._events_ended = True
         return True
 
     def _replace_events_with_error(self, code: str) -> None:
         _clear_event_queue(self._events_queue)
         self._events_queue.put_nowait(StreamingAsrEvent(kind="error", error_code=code))
         self._events_queue.put_nowait(None)
+        self._events_ended = True
 
     async def _finalize(self, *, cancel: bool) -> None:
         async with self._cleanup_lock:

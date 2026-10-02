@@ -327,7 +327,7 @@ class Qwen3TtsWorker:
 
         del expected_voice_revision
         async with self._incremental_slot, self._lock:
-            if not self._started:
+            if not self.ready:
                 await self._start_locked()
             revision = self.runtime_revision
             if revision is None:
@@ -694,7 +694,7 @@ class Qwen3TtsWorker:
                 language=validated.language,
             )
             async with self._lock:
-                if not self._started:
+                if not self.ready:
                     await self._start_locked()
                 if not self.supports_incremental_stream:
                     raise TtsStreamError(

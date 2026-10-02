@@ -1948,4 +1948,276 @@ final class AssistantSessionTests: XCTestCase {
             "重连不该把同一句合并掉"
         )
     }
+
+    // MARK: - 空 final 不得吞掉已经识别出来的那一句
+
+    /// 用户说过话、界面已经显示识别文字，服务端却给回一个空 final 时，
+    /// 那一句话**不许无声消失**：它要留在对话流与库里，并明确告诉用户没定稿。
+    ///
+    /// 修复前：先清 `partialText` 再 `guard !text.isEmpty` 返回——文字被清掉，
+    /// 不落库、不进 LLM/TTS、不报错，界面表现就是"说话→字没了→什么都不发生"。
+    func testEmptyFinalKeepsTheRecognizedUtteranceInsteadOfSwallowingIt() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["这一句不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "空 final 之后没有给出任何可读结论"
+        )
+
+        // 界面上那一半不再显示（没有权威文本就不该继续显示半句），但话本身没丢。
+        XCTAssertNil(harness.session.partialText)
+        let turn = try XCTUnwrap(harness.session.turns.last, "用户说过的话被静默丢掉了")
+        XCTAssertEqual(turn.role, .user)
+        XCTAssertEqual(turn.text, "今天天气")
+        XCTAssertTrue(turn.isInterrupted, "没能定稿的这一句要标成未完成")
+        XCTAssertEqual(turn.source, .microphone)
+        XCTAssertNotNil(turn.createdAt, "观测时刻不能因为没定稿就丢掉")
+
+        // 库里有这一行，但**不是** final：记录库句数与导出仍只认已定稿行。
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        let stored = lines.filter { $0.role == .user }
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored.first?.text, "今天天气")
+        XCTAssertEqual(stored.first?.status, .partial)
+        XCTAssertEqual(
+            turn.ordinal,
+            1,
+            "ordinal 必须取 appendLine 的返回值，不能自行 +1"
+        )
+
+        // 没有权威文本就不进 LLM/TTS：hypothesis 是可改写全文，不是事实。
+        XCTAssertFalse(
+            harness.session.turns.contains { $0.role == .assistant },
+            "空 final 之后不该拿未定稿文字去问模型"
+        )
+    }
+
+    /// 没说话时的空 final 是正常路径（`clear` 之后 commit、纯静音），
+    /// 不该凭空造出一句"没能识别完整"。
+    func testEmptyFinalWithoutAnyRecognizedTextIsSkippedSilently() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(harness.session.turns.isEmpty, "没说话不该产生任何一轮对话")
+        XCTAssertNil(
+            harness.session.lastFailure,
+            "没说话的空 final 是正常路径，不该报失败"
+        )
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertTrue(lines.isEmpty, "没说话不该落库")
+    }
+
+    /// 跨 item：一个还在进行的 item 的可见文字，不能被另一个 item 的事件清掉。
+    ///
+    /// 服务端一条连接上可以有多个并发 item（rollover commit），客户端
+    /// `RealtimeEventState` 也按最多 128 个 item 追踪；`partialText` 曾经是
+    /// 一个不带身份的单槽位，于是迟到事件会把当前句抹掉。
+    func testLateEventFromAnotherItemDoesNotClearTheCurrentPartial() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["回答一"]), .deltas(["回答二"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i2", revision: 1, text: "")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertEqual(
+            harness.session.partialText,
+            "今天天气",
+            "另一个 item 的空快照不该清掉当前这句"
+        )
+
+        // 反向：另一个 item 的非空快照同样不该顶掉当前句。
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i2", revision: 2, text: "别的内容")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(
+            harness.session.partialText,
+            "今天天气",
+            "另一个 item 的正文不该顶掉当前这句"
+        )
+
+        // 当前 item 自己的事件照旧生效。
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 2, text: "今天天气不错")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(harness.session.partialText, "今天天气不错")
+
+        // 它的终态照旧定稿。
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "今天天气不错"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .user } },
+            message: "当前 item 的终态没有落库"
+        )
+        XCTAssertNil(harness.session.partialText)
+    }
+
+    /// 空 itemID 的失败事件拿不到身份：它只报告失败，不得留下半残的可见文字。
+    func testFailedWithoutItemIDReportsTheFailureWithoutTouchingThePartial() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["回答一"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        await harness.clients()[0].emit(
+            .failed(itemID: "", code: "invalid_hypothesis", message: "流式转写快照格式无效")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertNotNil(harness.session.lastFailure, "失败必须可见")
+        XCTAssertEqual(
+            harness.session.partialText,
+            "今天天气",
+            "空 itemID 的失败认不出身份，不该动当前可见文字"
+        )
+
+        // 认得出身份的失败才清自己那一句。
+        await harness.clients()[0].emit(
+            .failed(itemID: "i1", code: "backend_error", message: "流式转写失败")
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertNil(harness.session.partialText, "同一 item 的失败要清掉它自己的半句")
+        XCTAssertNotNil(harness.session.lastFailure)
+    }
+
+    /// 没定稿的那半句**不许**去问模型。
+    ///
+    /// `speechrail.transcription.hypothesis` 是可改写的全文，不是权威文本。
+    /// 拿它驱动模型与朗读等于把未确认内容当事实，而且用户无法分辨哪句是真的。
+    /// 所以"保留并提示"是对的，"回退用 partial 送 LLM"是错的——这一条钉住取舍。
+    func testUnfinalizedUtteranceNeverReachesTheModel() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["这一句不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "空 final 之后没有给出任何可读结论"
+        )
+        let streams = await harness.llm.streamCount
+        XCTAssertEqual(streams, 0, "未定稿的文字不许驱动模型与朗读")
+    }
+
+    /// 同一个 item 的终态重放（重连、重复 commit）不该在库里留下两行。
+    func testRepeatedEmptyFinalForTheSameItemDoesNotDuplicateThePreservedLine() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["不该被问到模型"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "第一次空 final 没有保留那句话"
+        )
+        // 同一个 item 的终态再来一次（重连或重复 commit）。
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertEqual(
+            lines.filter { $0.role == .user }.count,
+            1,
+            "同一个 item 不该被保留两次"
+        )
+        XCTAssertEqual(
+            harness.session.turns.filter { $0.role == .user }.count,
+            1,
+            "对话流里也不该出现两行同一句"
+        )
+    }
+
+    /// 成功定稿一句之后，上一次留下的"没能识别完整"提示必须自己退场——
+    /// 否则用户已经说清楚了，界面上还挂着一句过期警告。
+    func testASuccessfulTurnClearsTheStaleFailureNotice() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["今天晴，最高 28 度。"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i1", revision: 1, text: "今天天气")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: ""))
+
+        await waitUntil(
+            { harness.session.lastFailure != nil },
+            message: "空 final 之后没有给出任何可读结论"
+        )
+
+        await harness.clients()[0].emit(
+            .partialSnapshot(itemID: "i2", revision: 1, text: "那明天呢")
+        )
+        try? await Task.sleep(for: .milliseconds(30))
+        await harness.clients()[0].emit(.completed(itemID: "i2", transcript: "那明天呢"))
+
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "这一次定稿没有走到模型回复"
+        )
+        XCTAssertNil(
+            harness.session.lastFailure,
+            "这一句已经成功定稿，上一次的软提示就该退场"
+        )
+    }
 }

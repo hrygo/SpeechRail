@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`4.2.0`；生效日期：2026-09-28。唯一机器 schema 是
+> 契约版本：`4.4.0`；生效日期：2026-10-01。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -103,9 +103,36 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - `conversation.item.input_audio_transcription.failed`
 
 服务端没有 `input_audio_buffer.speech_started` / `speech_stopped`，也没有
-`input_audio_buffer.committed` / `cleared` 回执：`commit` 的可观察屏障是与该
-`event_id` 关联的随后 transcription 终态。`clear` 是本地丢弃语义（其后的一次 commit
-产生空 final）。
+官方 `input_audio_buffer.committed` / `cleared` 回执。普通 `commit` 保持原有终态行为；
+需要可靠结束录音的调用方应使用下述可选 SpeechRail 完成屏障。
+`clear` 是本地丢弃语义（其后的一次 commit 产生空 final）。
+
+### 可选输入完成屏障
+
+`input_audio_buffer.commit` 可附带 `"speechrail":{"request_receipt":true}`，且必须有
+1–128 字符的 `event_id`。服务端在同一个 commit 锁内处理之前已接受的输入，等待对应
+转写 `completed` 或 `failed` **发送完成**及 ASR 清理后，发送：
+
+```json
+{"type":"speechrail.input_audio_buffer.committed","commit_event_id":"commit_1","accepted_samples":24000}
+```
+
+它仍带公共 envelope 的 `event_id/session_id/sequence`。`accepted_samples` 是当前连接累计
+接受的 **24 kHz 单声道 PCM 样本数**（字节数除以 2），不是 kernel 样本数、音频时长或
+转写成功量；`clear` 不归零，新连接从零开始。调用方收到回执前先处理其前面的文本终态。
+失败转写也可结束输入屏障，不能把回执当作转写成功证明。
+
+空输入、已经自动提交的输入和重复 commit 都返回本次 `event_id` 的回执，**不重复文本 final**。
+相同 ID 的重试可重复回执；调用方以关联 ID 幂等消费。缺省或 `request_receipt:false` 不发新增
+回执，旧客户端 wire 保持不变。未知扩展字段、非布尔值或请求回执却没有 ID 会拒绝。
+
+仅 worker EOF、commit 超时/取消不构成完成证据；没有文本终态的 EOF 返回 `backend_error`。
+失败后同一代输入的重复屏障仍拒绝，直到明确 clear 或新输入开始下一代，不能通过重试伪造回执。
+WebSocket 断开会取消处理并释放资源，未完成屏障不发回执。追加与 commit 在同一入站队列保持
+顺序；客户端开始收尾后必须停止追加，按关联 ID **及累计样本水位**确认，再 clear/close。
+
+新 macOS 客户端始终请求此屏障。旧服务没有该扩展时，客户端有界超时并关闭连接，**不发送
+clear**；不能以旧转写终态替代回执。这是安全失败，并不声称新客户端能在旧服务上成功收尾。
 
 hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
@@ -128,13 +155,13 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 只有可证明的稳定前缀才能映射到官方 append-only delta；无法证明稳定时只发 hypothesis，
 最终统一发 completed。一个 utterance 恰好一个 text final，重复 commit 不产生双 final。
 由客户端 `commit` 触发的 `completed` / `failed` 会带 `commit_event_id`；VAD 或 rollover
-产生的终态不带该字段。调用方结束录音时必须等待与本次
-`input_audio_buffer.commit.event_id` 相同的终态，不能用更早的在途终态判定尾句完成。
+产生的终态不带该字段。结束录音应使用上面的可选输入完成屏障；单个旧文本终态
+不能证明稍后追加的 PCM 已完成，空/重复 commit 也可能没有新文本终态。
 `completed` 只承载 `type`、`item_id`、`content_index`、`transcript` 与可选的
 `commit_event_id`；对齐与匿名 speaker 归属随后以独立的
 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
 
-两条准入语义是调用方可以依赖的：
+三条准入语义是调用方可以依赖的：
 
 - **分包方式不改变内容。** 同一段音频无论整包发送、按 32 ms 切片还是不齐整的分包，
   admitted PCM 与样本顺序必须一致；句末（VAD 或显式 commit）之后**同一包内剩余的完整帧**
@@ -143,6 +170,12 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 - **每个 utterance 恰好一个终态。** commit 已 ACK 但后续读取挂起时，utterance 必须在
   deadline 后以 `failed` 收尾并释放资源，不得既无终态也不释放；读取成功后的错误不再产生
   矛盾的第二个终态。
+- **空 final 不等于"用户没说话"。** 空 `transcript` 有两个来源：`clear` 之后的那一次
+  commit（此时确实没有可提交的语音），以及语音已经准入、但 ASR 终态文本经轻量 ITN
+  之后为空。调用方无法从事件本身区分这两者，因此**已经向用户展示过该 item 的
+  hypothesis 文字时，不得在空 final 上静默丢弃它**：要么按未完成保留并明确告知用户，
+  要么给出可读的失败提示。把"用户说过的话"连同界面上的半句一起清掉且不给任何提示，
+  是调用方实现错误，不是本契约允许的正常路径。
 
 ### 5.2 Alignment 与 Diarization
 

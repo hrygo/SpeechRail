@@ -486,21 +486,6 @@ def _safe_revision_entry(
     }
 
 
-def _empty_reference() -> vq.VoiceQualityReference:
-    return vq.VoiceQualityReference(
-        duration_seconds=0.0,
-        sample_rate=24_000,
-        channels=1,
-        speech_active_ratio=0.0,
-        noise_floor_dbfs=0.0,
-        estimated_snr_db=0.0,
-        clipping_ratio=0.0,
-        leading_silence_seconds=0.0,
-        trailing_silence_seconds=0.0,
-        transcript_match=None,
-    )
-
-
 def _empty_synthesis() -> vq.VoiceQualitySynthesis:
     return vq.VoiceQualitySynthesis(
         probe_count=0,
@@ -796,6 +781,7 @@ def _synthesis_report(
     deterministic: bool,
     transcript_match: float | None = None,
     intelligibility_evaluated: bool = False,
+    probe_scores: list[vq.VoiceQualityProbeScore] | None = None,
 ) -> vq.VoiceQualitySynthesis:
     if not pcm or ok == 0:
         return vq.VoiceQualitySynthesis(
@@ -808,6 +794,7 @@ def _synthesis_report(
             deterministic=False,
             transcript_match=transcript_match,
             intelligibility_evaluated=intelligibility_evaluated,
+            probe_scores=list(probe_scores or ()),
         )
     metrics = compute_output_quality_metrics(
         pcm,
@@ -826,6 +813,7 @@ def _synthesis_report(
         deterministic=cast(bool, metrics["deterministic"]),
         transcript_match=transcript_match,
         intelligibility_evaluated=intelligibility_evaluated,
+        probe_scores=list(probe_scores or ()),
     )
 
 
@@ -868,9 +856,15 @@ async def _evaluate_probe_intelligibility(
     *,
     request_id: str,
     expires_at: float,
-) -> float:
-    """Transcribe one valid sample per fixed probe after the TTS phase completes."""
+) -> tuple[float, list[vq.VoiceQualityProbeScore]]:
+    """Transcribe one valid sample per fixed probe after the TTS phase completes.
+
+    Returns the aggregate the gate grades on together with each probe's own
+    score. The aggregate is a ``min()`` over the probe set, so without the
+    per-probe breakdown a rejection cannot be attributed to a specific probe.
+    """
     scores: list[float] = []
+    probe_scores: list[vq.VoiceQualityProbeScore] = []
     async with services.governor.reserve(
         WorkClass.BATCH_ASR,
         expires_at=expires_at,
@@ -894,8 +888,34 @@ async def _evaluate_probe_intelligibility(
                 partial(transcriber.transcribe, request),
                 deadline=remaining,
             )
-            scores.append(vq.transcript_match_score(probe["text"], result.text))
-    return min(scores) if scores else 0.0
+            score = vq.transcript_match_score(probe["text"], result.text)
+            scores.append(score)
+            # Applicability comes from the probe text, not from a probe id, so a
+            # future numeric probe is covered without editing this loop.
+            probe_scores.append(
+                vq.VoiceQualityProbeScore(
+                    probe_id=probe["id"],
+                    transcript_match=score,
+                    numbers_exact=(
+                        vq.transcript_numbers_match(probe["text"], result.text)
+                        if vq.probe_carries_digits(probe["text"])
+                        else None
+                    ),
+                )
+            )
+    # A probe whose digits came back wrong contributes 0 to the aggregate even
+    # when its character similarity clears the bar: `22.5℃` read as `25℃` is one
+    # substitution in a 44-character probe, so edit distance alone waves it
+    # through. The per-probe `transcript_match` still reports the real similarity
+    # so the rejection stays attributable to this specific probe.
+    return (
+        min(
+            score if entry.numbers_exact is not False else 0.0
+            for score, entry in zip(scores, probe_scores, strict=True)
+        )
+        if scores
+        else 0.0
+    ), probe_scores
 
 
 def create_system_router(services: AppServices) -> APIRouter:
@@ -2327,6 +2347,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
 
         transcript_match: float | None = None
+        probe_scores: list[vq.VoiceQualityProbeScore] = []
         intelligibility_evaluated = False
         intelligibility_unavailable = False
         if ok == attempted and not probe_failure_codes:
@@ -2344,12 +2365,14 @@ def create_system_router(services: AppServices) -> APIRouter:
                             synthesizer,
                             expires_at=expires_at,
                         )
-                    transcript_match = await _evaluate_probe_intelligibility(
-                        services,
-                        transcriber,
-                        representative_pcm,
-                        request_id=request_id,
-                        expires_at=expires_at,
+                    transcript_match, probe_scores = (
+                        await _evaluate_probe_intelligibility(
+                            services,
+                            transcriber,
+                            representative_pcm,
+                            request_id=request_id,
+                            expires_at=expires_at,
+                        )
                     )
                     intelligibility_evaluated = True
                 except (GovernorQueueFullError, QueueFullError):
@@ -2391,6 +2414,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 deterministic=deterministic,
                 transcript_match=transcript_match,
                 intelligibility_evaluated=intelligibility_evaluated,
+                probe_scores=probe_scores,
             )
         except (ValueError, TypeError):
             synthesis = vq.VoiceQualitySynthesis(
@@ -2403,6 +2427,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 deterministic=False,
                 transcript_match=transcript_match,
                 intelligibility_evaluated=intelligibility_evaluated,
+                probe_scores=probe_scores,
             )
             output_invalid = True
 
@@ -2433,7 +2458,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             status=status,
             run_id=vq.new_run_id(),
             tested_at=vq.now_iso8601_z(),
-            reference=_empty_reference(),
+            reference=None,
             synthesis=synthesis,
             failure_codes=failure_codes,
         )

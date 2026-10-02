@@ -1454,10 +1454,164 @@ final class RealtimeContractTests: XCTestCase {
                 ])
             )
         )
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": expectedCommitEventID, "accepted_samples": 1
+        ])))
         try await drain.value
         let finalTypes = await sentEventTypes(transport)
         XCTAssertTrue(finalTypes.contains("input_audio_buffer.clear"))
         await client.close()
+    }
+
+    func testOldTerminalBeforeDrainCannotDiscardNewTail() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+        try await client.connect(using: transport)
+        _ = await events.next()
+        try await client.append(Data([0, 0]))
+        try await client.append(Data([1, 0]))
+        await transport.enqueue(.text(jsonText([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "old-item", "transcript": "old", "commit_event_id": "old-commit"
+        ])))
+        while let event = await events.next() {
+            if case .completed = event.payload { break }
+        }
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        let eventID = try await drainCommitID(transport)
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": "old-commit", "accepted_samples": 2
+        ])))
+        try await Task.sleep(for: .milliseconds(30))
+        let beforeReceipt = await sentEventTypes(transport)
+        XCTAssertFalse(beforeReceipt.contains("input_audio_buffer.clear"))
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": eventID, "accepted_samples": 2
+        ])))
+        try await drain.value
+        let afterReceipt = await sentEventTypes(transport)
+        XCTAssertTrue(afterReceipt.contains("input_audio_buffer.clear"))
+        await client.close()
+    }
+
+    func testEmptyDrainAlsoWaitsForAnExplicitReceipt() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        try await client.connect(using: transport)
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        let eventID = try await drainCommitID(transport)
+        let beforeReceipt = await sentEventTypes(transport)
+        XCTAssertFalse(beforeReceipt.contains("input_audio_buffer.clear"))
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": eventID, "accepted_samples": 0
+        ])))
+        try await drain.value
+        let afterReceipt = await sentEventTypes(transport)
+        XCTAssertTrue(afterReceipt.contains("input_audio_buffer.clear"))
+        await client.close()
+    }
+
+    func testMissingReceiptTimesOutWithoutClearAndClosesTransport() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        try await client.connect(using: transport)
+        try await client.append(Data([0, 0]))
+        let drain = Task { try await client.drainAndClear(timeout: .milliseconds(80)) }
+        let eventID = try await drainCommitID(transport)
+        // An old server emits this, but cannot prove a no-new-item barrier.
+        await transport.enqueue(.text(jsonText([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "tail-item", "transcript": "tail", "commit_event_id": eventID
+        ])))
+        do { try await drain.value; XCTFail("Missing receipt must not succeed") }
+        catch RealtimeASRClient.Failure.drainTimedOut(.terminalItems) { }
+        let types = await sentEventTypes(transport)
+        XCTAssertFalse(types.contains("input_audio_buffer.clear"))
+        let closed = await transport.isClosed()
+        XCTAssertTrue(closed)
+    }
+
+    func testWrongWatermarkAndCancelledDrainNeverClear() async throws {
+        for cancel in [false, true] {
+            let transport = TestRealtimeASRTransport()
+            let client = RealtimeASRClient(apiKey: "")
+            try await client.connect(using: transport)
+            try await client.append(Data([0, 0]))
+            let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+            let eventID = try await drainCommitID(transport)
+            if cancel { drain.cancel() }
+            else {
+                await transport.enqueue(.text(jsonText([
+                    "type": "speechrail.input_audio_buffer.committed",
+                    "commit_event_id": eventID, "accepted_samples": 0
+                ])))
+            }
+            do { try await drain.value; XCTFail("Invalid/cancelled barrier must fail") }
+            catch { }
+            let types = await sentEventTypes(transport)
+            XCTAssertFalse(types.contains("input_audio_buffer.clear"))
+            let closed = await transport.isClosed()
+            XCTAssertTrue(closed)
+        }
+    }
+
+    func testMalformedReceiptWatermarksFailClosed() async throws {
+        for value: Any in [true, "1", 1.5, 1e99, -1] {
+            let transport = TestRealtimeASRTransport()
+            let client = RealtimeASRClient(apiKey: "")
+            try await client.connect(using: transport)
+            try await client.append(Data([0, 0]))
+            let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+            let eventID = try await drainCommitID(transport)
+            await transport.enqueue(.text(jsonText([
+                "type": "speechrail.input_audio_buffer.committed",
+                "commit_event_id": eventID, "accepted_samples": value
+            ])))
+            do { try await drain.value; XCTFail("Malformed receipt must fail") }
+            catch { }
+            let types = await sentEventTypes(transport)
+            XCTAssertFalse(types.contains("input_audio_buffer.clear"))
+            let closed = await transport.isClosed()
+            XCTAssertTrue(closed)
+        }
+    }
+
+    func testRejectedDrainCommitClosesWithoutClear() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(apiKey: "")
+        try await client.connect(using: transport)
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        let eventID = try await drainCommitID(transport)
+        await transport.enqueue(.text(jsonText([
+            "type": "error", "error": ["code": "backend_error", "message": "failed",
+                                        "event_id": eventID]
+        ])))
+        do { try await drain.value; XCTFail("Rejected commit must fail") }
+        catch RealtimeASRClient.Failure.transport(let message) { XCTAssertEqual(message, "failed") }
+        let types = await sentEventTypes(transport)
+        XCTAssertFalse(types.contains("input_audio_buffer.clear"))
+        let closed = await transport.isClosed()
+        XCTAssertTrue(closed)
+    }
+
+    private func drainCommitID(_ transport: TestRealtimeASRTransport) async throws -> String {
+        for _ in 0..<100 {
+            for message in await transport.sentMessages() {
+                if let object = try JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any],
+                   object["type"] as? String == "input_audio_buffer.commit",
+                   let eventID = object["event_id"] as? String {
+                    XCTAssertEqual((object["speechrail"] as? [String: Any])?["request_receipt"] as? Bool, true)
+                    return eventID
+                }
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw RealtimeASRClient.Failure.transport("No commit in test")
     }
 
     func testHypothesisSnapshotSuppressesTheSameItemsDelta() async throws {

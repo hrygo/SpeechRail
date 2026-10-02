@@ -34,11 +34,12 @@ public struct AssistantView: View {
     @State private var inspectorTab: InspectorTab = .session
     @State private var memories: [AssistantMemory] = []
     @State private var recent: [SessionSummary] = []
-    @State private var reviewRecord: SessionRecord?
-    @State private var reviewLines: [TranscriptLine] = []
-    @State private var reviewSpeakerNames: [String: String] = [:]
-    /// 这一条记录里的音色变更点（`session_change`）。回看时每一行的徽标按它回推。
-    @State private var reviewVoiceChanges: [SessionChange] = []
+    /// 记录库回看这一条的**全部内容**：一次库读、一次赋值。
+    ///
+    /// 原来是 4 个 `@State`（记录 / 正文 / 分人名 / 音色变更点），每项各写一次：
+    /// 每次 `await` 返回都触发一次界面更新，于是高亮、页头、正文、元信息分几步
+    /// 跳出来——用户看着像卡住。合成一个值之后，翻记录一次到位。
+    @State private var review: SessionReviewSnapshot?
     @State private var selectedPersonaID = ""
     @State private var selectedVoiceID = ""
     @State private var mode: AssistantMode = .duplex
@@ -140,7 +141,7 @@ public struct AssistantView: View {
 
     /// 四态：未开始 / 运行时受阻 / 对话中 / 记录库回看。
     private var state: PageState {
-        if reviewRecord != nil { return .review }
+        if review != nil { return .review }
         if isLive { return .live }
         return blockedReason == nil ? .ready : .blocked
     }
@@ -435,7 +436,8 @@ public struct AssistantView: View {
     /// 上就是一句谎（`justEndedSessionID` 由 `endConversation()` 写、`openRecord()` 清）。
     @ViewBuilder
     private var justEndedBand: some View {
-        if let record = reviewRecord, record.id == justEndedSessionID {
+        if let review, review.record.id == justEndedSessionID {
+            let record = review.record
             SessionConclusionBand(
                 tone: .healthy,
                 title: "刚结束的这段已经写进记录库",
@@ -1001,7 +1003,7 @@ public struct AssistantView: View {
                             )
                     }
                 }
-                .frame(height: 36)
+                .frame(height: SpeechRailDesignTokens.Layout.waveformBarAreaHeight)
             }
         }
 
@@ -1571,6 +1573,18 @@ public struct AssistantView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
             }
+            // 识别 / 朗读失败的软提示。少了这一条，用户看到的是"字消失了、
+            // 什么都没发生"——既不知道出了事，也不知道下一步该做什么。
+            if let failure = assistant.lastFailure {
+                NoticeBar(
+                    tone: .warning,
+                    message: failure,
+                    actionTitle: "知道了",
+                    action: { assistant.clearFailure() }
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             liveChatIntegratedControls
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1700,9 +1714,10 @@ public struct AssistantView: View {
 
     private var liveChatElapsed: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            let liveDotSize = SpeechRailDesignTokens.Icon.liveIndicatorDotSize
             Circle()
                 .fill(assistant.isMuted ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.ready)
-                .frame(width: 6, height: 6)
+                .frame(width: liveDotSize, height: liveDotSize)
             Text(formatElapsed(session.elapsed))
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .monospacedDigit()
@@ -2267,7 +2282,7 @@ public struct AssistantView: View {
     #if DEBUG
     /// 离屏渲染工装（`/tmp` 的 `NSHostingView`）用的**只写展示状态**夹具。
     ///
-    /// 「记录库 · 刚结束」这一屏靠用户点开一条记录才会出现（`reviewRecord` 与 `inspectorTab`
+    /// 「记录库 · 刚结束」这一屏靠用户点开一条记录才会出现（`review` 与 `inspectorTab`
     /// 都是这一页内部的状态，离屏点不了），所以在 2026-09-19 之前它一次都没有被渲染过——
     /// 而它正是"记录是资产"这句话的落点（记录库那一列、回看的右栏、刚结束的结论条都在这里）。
     /// 口径与 `CaptionSession.applyRenderFixture` 一致：只在 Debug 构建里存在，不读库、
@@ -2291,10 +2306,14 @@ public struct AssistantView: View {
     ) {
         // 必须写全 `SwiftUI.State`：这一页里有个同名的嵌套枚举 `State`（页面的四种态），
         // 它会把这个名字遮住。
-        _reviewRecord = SwiftUI.State(initialValue: record)
-        _reviewLines = SwiftUI.State(initialValue: lines)
-        _reviewSpeakerNames = SwiftUI.State(initialValue: speakerNames)
-        _reviewVoiceChanges = SwiftUI.State(initialValue: voiceChanges)
+        _review = SwiftUI.State(
+            initialValue: SessionReviewSnapshot(
+                record: record,
+                lines: lines,
+                speakerNames: speakerNames,
+                voiceChanges: voiceChanges
+            )
+        )
         _memories = SwiftUI.State(initialValue: memories)
         _recent = SwiftUI.State(initialValue: recent)
         _justEndedSessionID = SwiftUI.State(initialValue: justEnded ? record.id : nil)
@@ -2904,7 +2923,7 @@ public struct AssistantView: View {
     }
 
     private var reviewExchangeCount: Int {
-        reviewLines.filter { $0.role == .user }.count
+        review?.lines.filter { $0.role == .user }.count ?? 0
     }
 
     /// 现在这一路声音是从哪个麦克风进来的（稿：`麦克风 MacBook 麦克风`）。
@@ -2916,7 +2935,7 @@ public struct AssistantView: View {
 
     /// 记录里那一份音色快照（音色被删或改名之后，旧记录仍然说得清当时用的是谁）。
     private var reviewVoiceLabel: String {
-        guard let voice = reviewRecord?.voice else { return Self.defaultVoiceLabel }
+        guard let voice = review?.record.voice else { return Self.defaultVoiceLabel }
         return voice.name ?? (voice.id.isEmpty ? Self.defaultVoiceLabel : voice.id)
     }
 
@@ -2967,14 +2986,15 @@ public struct AssistantView: View {
             // 仍然读取这一条记录自己的快照，而不是此刻还开着的那一轮（§14.4）。
             // 对话方式没进记录（`session` 表没有这一列），所以这里不摆那一行，也不猜。
             [
-                ("大模型", reviewRecord?.llmModel ?? "未记录"),
+                ("大模型", review?.record.llmModel ?? "未记录"),
                 ("音色", reviewVoiceLabel),
-                ("角色", reviewRecord?.persona?.title ?? "默认角色"),
-                ("已聊", "\(reviewExchangeCount) 轮 · 共 \(reviewLines.count) 句"),
+                ("角色", review?.record.persona?.title ?? "默认角色"),
+                ("已聊", "\(reviewExchangeCount) 轮 · 共 \(review?.lines.count ?? 0) 句"),
                 // 记录摘要给的是**结束于 / 轮数 / 时长**：
                 // 翻一条旧记录时先想知道的是"哪一段、多久"，而不是它从几点开始。
-                ("结束于", reviewRecord.map {
-                    ($0.endedAt ?? $0.startedAt).formatted(date: .numeric, time: .shortened)
+                ("结束于", review.map {
+                    ($0.record.endedAt ?? $0.record.startedAt)
+                        .formatted(date: .numeric, time: .shortened)
                 } ?? "—"),
                 ("时长", reviewDurationText)
             ]
@@ -2982,7 +3002,7 @@ public struct AssistantView: View {
     }
 
     private var reviewDurationText: String {
-        guard let record = reviewRecord else { return "—" }
+        guard let record = review?.record else { return "—" }
         let end = record.endedAt ?? record.startedAt
         let seconds = max(0, end.timeIntervalSince(record.startedAt))
         return SessionExporter.clock(seconds)
@@ -3643,7 +3663,7 @@ public struct AssistantView: View {
                 kind: .assistant,
                 title: "对话记录",
                 foot: "搜索标题与正文；记录长期留在记录库，App 重启也在。",
-                selectedID: reviewRecord?.id,
+                selectedID: review?.record.id,
                 reloadToken: libraryReloadToken,
                 onSelect: { summary in Task { await openRecord(summary) } }
             )
@@ -3651,11 +3671,11 @@ public struct AssistantView: View {
             .frame(maxHeight: .infinity)
 
             SessionPanel(expandsVertically: true) {
-                SessionPanelHead(title: reviewRecord?.title ?? "历史对话复盘", detail: nil, trailingDetail: reviewDetail)
+                SessionPanelHead(title: review?.record.title ?? "历史对话复盘", detail: nil, trailingDetail: reviewDetail)
                 SessionHairline()
 
                 // 历史记录摘要状态栏
-                if let record = reviewRecord {
+                if let record = review?.record {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         // 角色微胶囊
                         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -3722,7 +3742,7 @@ public struct AssistantView: View {
 
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        ForEach(Array(reviewLines.enumerated()), id: \.element.id) { _, line in
+                        ForEach(Array((review?.lines ?? []).enumerated()), id: \.element.id) { _, line in
                             SessionTurnRow(
                                 who: line.role == .assistant ? "助手" : "你",
                                 isVoice: line.role == .assistant,
@@ -3735,7 +3755,7 @@ public struct AssistantView: View {
                                 bodyWidth: 760
                             )
                         }
-                        if reviewLines.isEmpty {
+                        if review?.lines.isEmpty != false {
                             SessionEmptyState(
                                 systemImage: "text.alignleft",
                                 title: "这一条记录里还没有正文",
@@ -3779,7 +3799,7 @@ public struct AssistantView: View {
 
     private var copyReviewedRecordButton: some View {
         Button {
-            copy(reviewLines.map(\.text).joined(separator: "\n"))
+            copy((review?.lines ?? []).map(\.text).joined(separator: "\n"))
         } label: {
             Label("复制全文", systemImage: "doc.on.doc")
         }
@@ -3799,7 +3819,7 @@ public struct AssistantView: View {
 
     private var renameReviewedRecordButton: some View {
         Button {
-            renameDraft = reviewRecord?.title ?? ""
+            renameDraft = review?.record.title ?? ""
             isRenamingRecord = true
         } label: {
             Label("重命名", systemImage: "pencil")
@@ -3822,7 +3842,7 @@ public struct AssistantView: View {
     }
 
     private var reviewDetail: String {
-        let rounds = reviewLines.count
+        let rounds = review?.lines.count ?? 0
         return "\(rounds) 句 · 角色与声音随记录一起存"
     }
 
@@ -3832,7 +3852,7 @@ public struct AssistantView: View {
     /// 原来这里读的是 `currentVoiceName`——**此刻**设置里的那个音色，于是翻一条旧记录时
     /// 每一行都顶着今天的设置，而记录里存下来的那份反而没人看（2026-09-19 离屏走查）。
     private func reviewVoiceName(for line: TranscriptLine) -> String? {
-        if let change = reviewVoiceChanges.last(where: { $0.atOrdinal <= line.ordinal }) {
+        if let change = review?.voiceChanges.last(where: { $0.atOrdinal <= line.ordinal }) {
             return voiceName(fromChangeValue: change.value)
         }
         return reviewVoiceLabel
@@ -3844,7 +3864,10 @@ public struct AssistantView: View {
         if let label = line.speakerLabel {
             pills.append(.init(
                 tone: .neutral,
-                label: SpeakerLabeling.chipText(label: label, displayName: reviewSpeakerNames[label])
+                label: SpeakerLabeling.chipText(
+                    label: label,
+                    displayName: review?.speakerNames[label]
+                )
             ))
         }
         if line.isInterrupted {
@@ -3894,20 +3917,16 @@ public struct AssistantView: View {
     private func openRecord(_ summary: SessionSummary) async {
         // 翻记录先把这个标记清掉：下面 `endConversation()` 会在打开之后重新写上它。
         justEndedSessionID = nil
-        guard let record = (try? await session.record(id: summary.id)) ?? nil else { return }
-        reviewRecord = record
-        reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
-        reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        reviewVoiceChanges = (try? await session.voiceChanges(sessionID: summary.id)) ?? []
+        // 一次库读、一次赋值。原来是 4 次串行 `await` + 4 处独立状态写入，
+        // 每次返回都触发一次界面更新，右侧于是分几步跳出来——用户看着像卡住。
+        guard let snapshot = (try? await session.reviewSnapshot(sessionID: summary.id)) ?? nil else { return }
+        review = snapshot
         inspectorTab = .session
     }
 
     private func closeReview() {
         justEndedSessionID = nil
-        reviewRecord = nil
-        reviewLines = []
-        reviewSpeakerNames = [:]
-        reviewVoiceChanges = []
+        review = nil
     }
 
     /// 「结束对话」：结束之后**落到刚结束的这一段**上，不给一个空白的"未开始"。
@@ -3970,7 +3989,7 @@ public struct AssistantView: View {
     ///
     /// 它不把新的一轮接进这一条记录：记录是资产，旧的那条一个字不动（库里另起一条 `session` 行）。
     private func continueFromReview() {
-        guard let record = reviewRecord else { return }
+        guard let record = review?.record else { return }
         preferences.prefill(from: record)
         selectedPersonaID = preferences.defaultPersonaID
         selectedVoiceID = preferences.defaultVoiceID
@@ -3987,11 +4006,14 @@ public struct AssistantView: View {
     /// 重命名只改 `session.title`（列表与页头读它），正文一个字不动。
     /// 库里那一行是唯一权威，所以改完**重新读一遍**，界面不与库脱钩。
     private func renameReviewedRecord() async {
-        guard let id = reviewRecord?.id else { return }
+        guard let id = review?.record.id else { return }
         let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         try? await session.setSessionTitle(id: id, title: name.isEmpty ? nil : name)
-        if let refreshed = (try? await session.record(id: id)) ?? nil {
-            reviewRecord = refreshed
+        // 只改 `session.title`，正文一个字不动：重读这一条换掉快照里的记录行，
+        // 不重新拉正文——改名不需要再等一次库。
+        if let refreshed = (try? await session.record(id: id)) ?? nil, var current = review {
+            current.record = refreshed
+            review = current
         }
         libraryReloadToken += 1
         isRenamingRecord = false
@@ -4000,7 +4022,7 @@ public struct AssistantView: View {
     /// 移除这一条记录。**只在这一页给**（稿），且必须先确认（上面那张 `confirmationDialog`）。
     /// 删完把列表重新读一遍并退出回看——留在"已经不在的那一条"上只会看到空状态。
     private func removeReviewedRecord() async {
-        guard let id = reviewRecord?.id else { return }
+        guard let id = review?.record.id else { return }
         try? await session.removeSession(id: id)
         closeReview()
         libraryReloadToken += 1
@@ -4020,7 +4042,7 @@ public struct AssistantView: View {
                 }
             }
         }
-        .disabled(reviewRecord == nil)
+        .disabled(review == nil)
     }
 
     private var orderedFormats: [SessionExportFormat] {
@@ -4029,7 +4051,7 @@ public struct AssistantView: View {
     }
 
     private func exportReviewedRecord(as format: SessionExportFormat) async {
-        guard let id = reviewRecord?.id else { return }
+        guard let id = review?.record.id else { return }
         guard let record = (try? await session.record(id: id)) ?? nil else { return }
         let rows = (try? await session.lines(sessionID: id)) ?? []
         let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
@@ -4094,7 +4116,7 @@ public struct AssistantView: View {
                 .speechRailSingleLineInput(.regular)
             TextEditor(text: $personaDraft.body)
                 .font(SpeechRailDesignTokens.Typography.body)
-                .frame(minHeight: 140)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
                 .overlay {
                     RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
@@ -4234,7 +4256,7 @@ struct InputLevelSheet: View {
                             .frame(width: 3, height: max(3, 20 * shape))
                     }
                 }
-                .frame(height: 22)
+                .frame(height: SpeechRailDesignTokens.Layout.inputLevelMeterHeight)
                 .accessibilityLabel("输入电平")
                 .accessibilityValue("\(Int(level * 100))%")
             }

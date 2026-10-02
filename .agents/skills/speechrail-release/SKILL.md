@@ -97,6 +97,7 @@ curl --fail http://127.0.0.1:8201/health
 
 ```bash
 env -u SPEECHRAIL_API_KEY uv run --extra dev pytest
+uv run python scripts/check_version_consistency.py
 uv run --extra dev ruff check src tests tools examples/perf .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py
 uv run --extra dev mypy src
 npx @redocly/cli lint contracts/openapi.yaml
@@ -111,6 +112,16 @@ uvx --python 3.14.7 --from dist/speechrail-<version>-py3-none-any.whl speechrail
 测试清除环境中的 `SPEECHRAIL_API_KEY`，但不把任何凭据写入命令或输出。构建后核对文件名、dist-info、worker
 模块、assets 和版本，并确认 wheel 能独立提供安装入口（`speechrail install --help` 在仓库外成功执行，
 macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
+
+**`check_version_consistency.py` 必须在 `uv build` 之前跑**，它以 `pyproject.toml` 为唯一事实来源校验
+全部镜像位置（`src/speechrail/__init__.py`、`src/speechrail/config/__init__.py`、`contracts/openapi.yaml`、
+两个 example 配置、三个测试 fixture、`uv.lock`、以及 App 的三处 `MARKETING_VERSION`）。第 6 节在打 tag
+前还会再跑一次，但那太晚：漏 bump 的镜像会让 wheel 里的 `Settings.version` 停在旧值，安装后
+`/health` 自报旧版本而代码是新的，构建、安装和 `/readyz` 全都显示成功，只有比对版本才发现。
+漏掉的那一处通常是硬编码默认值的 `src/speechrail/config/__init__.py`——它不是 `__version__`，
+按 `__version__` 搜索很容易跳过。现在 `pytest` 也会检查真实仓库树
+（`tests/test_version_consistency.py::test_repository_tree_version_is_consistent`），
+所以这一步即使整个命令块没跑，`pytest` 也会拦下。
 
 ## GitHub 制品安装（默认全套）
 

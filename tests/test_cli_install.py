@@ -102,8 +102,17 @@ def test_install_uses_the_local_wheel_and_stays_disabled_by_default(
 
 
 def test_install_starts_the_service_only_when_asked(
-    install_calls: list[dict[str, Any]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # `install_managed` is faked, so nothing is really started. Without this
+    # the post-install readiness probe answers from whatever service happens to
+    # be listening on the developer's machine, so the test only passed while
+    # the installed release happened to match the checkout -- and it cost a
+    # 60s wait when nothing was running.
+    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _ReadyResponse())
     _write_wheel(tmp_path, __version__)
 
     assert main(["install", "--yes", "--asr-spec", "fast", "--tts-spec", "fast", "--enable"]) == 0
@@ -333,13 +342,21 @@ def test_install_reports_a_rerun_that_downloaded_nothing(
 
 
 class _ReadyResponse:
+    """Stands in for `/readyz` and for the `/health` identity probe."""
+
     status = 200
+
+    def __init__(self, version: str = __version__) -> None:
+        self._body = json.dumps({"status": "ok", "version": version}).encode("utf-8")
 
     def __enter__(self) -> _ReadyResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
         return None
+
+    def read(self) -> bytes:
+        return self._body
 
 
 class _FakeTime:
@@ -389,6 +406,66 @@ def test_install_reports_readiness_after_enabling(
     out = capsys.readouterr().out
     assert "Service is ready" in out
     assert "Change profile later" in out
+
+
+def test_install_fails_closed_when_the_service_advertises_another_version(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`/readyz` returning 200 is not proof the installed code is the new code.
+
+    A wheel whose `Settings.version` default was left on the previous release
+    starts, serves `/readyz` 200 and reports the *old* version from `/health`
+    while executing the new code. The install used to print success anyway.
+    """
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/opt/homebrew/bin/uv")
+    monkeypatch.setattr(
+        cli, "urlopen", lambda request, timeout: _ReadyResponse(version="0.0.1")
+    )
+
+    exit_code = main(
+        ["install", "--yes", "--asr-spec", "fast", "--tts-spec", "fast", "--enable"]
+    )
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "reports version 0.0.1" in out
+    assert "check_version_consistency.py" in out
+    assert "Service is ready" not in out
+
+
+def test_install_reports_the_service_version_in_machine_output(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/opt/homebrew/bin/uv")
+    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _ReadyResponse())
+
+    assert (
+        main(
+            [
+                "install",
+                "--yes",
+                "--asr-spec",
+                "fast",
+                "--tts-spec",
+                "fast",
+                "--enable",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["service_version"] == __version__
+    assert "version_mismatch" not in envelope
 
 
 def test_install_reports_a_service_that_never_becomes_ready(

@@ -9,7 +9,8 @@ public struct PreflightDiagnosticsView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedCheckName: String?
     @State private var reportMessage: String?
@@ -23,18 +24,24 @@ public struct PreflightDiagnosticsView: View {
         PageScaffold(route: .diagnostics, layout: .content) {
             diagnosticWorkspace
         } trailing: {
-            Button {
-                Task { await model.refreshPreflight() }
-            } label: {
-                Label("重新运行诊断", systemImage: "arrow.clockwise")
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button {
+                    Task { await model.refreshPreflight() }
+                } label: {
+                    Label("重新运行诊断", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                // 稿的页头次按钮是 30pt（稿的 `secondaryButton`）；系统 `.large` 是 28。
+                .controlSize(.large)
+                .disabled(model.isBusy || model.isRefreshingPreflight)
+                .help("重新运行诊断")
+                .accessibilityLabel("重新运行诊断")
+                .accessibilityIdentifier("diagnostics-run")
+                DeveloperInspectorToggle(
+                    isPresented: $showInspector,
+                    helpText: "查看诊断上下文与选中检查的技术结果 (⌘⌥I)"
+                )
             }
-            .buttonStyle(.bordered)
-            // 稿的页头次按钮是 30pt（稿的 `secondaryButton`）；系统 `.large` 是 28。
-            .controlSize(.large)
-            .disabled(model.isBusy || model.isRefreshingPreflight)
-            .help("重新运行诊断")
-            .accessibilityLabel("重新运行诊断")
-            .accessibilityIdentifier("diagnostics-run")
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -57,7 +64,7 @@ public struct PreflightDiagnosticsView: View {
             }
         )
         .inspector(isPresented: $showInspector) {
-            DeveloperInspector {
+            DeveloperInspector(isPresented: $showInspector) {
                 SectionHeading(
                     title: "诊断上下文",
                     detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"

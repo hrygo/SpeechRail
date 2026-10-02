@@ -2,6 +2,170 @@
 
 ## [Unreleased]
 
+## [3.5.2] - 2026-10-02
+
+### Fixed
+
+- 修复可懂度数字门禁的两类**误杀**：逐位念长数字串时用于区分 1/7、0/O、3/8 的
+  澄清字（`幺`=1、`丁`=3、`尜`=9）此前被当作非数字丢弃，于是「幺幺零」只剩 `0`，
+  与 `110` 判不等——报警电话念对了却被拒；澄清字现只在长度 ≥3 的数字串内折叠，
+  `园丁`、`幺妹`、`一点丁点` 不受影响（`一点丁点` 的 `一丁` 是量词不是十三，
+  两字串正是歧义区）。另修前导零：`09` 与 `9` 现在按数值相等，只剥整数部分，
+  `0.05` 与 `0.5` 仍然不等。
+
+  依据是 43 条对抗性数字探针的受管 TTS → 受管 ASR → 实际门禁函数实测。
+  这批实测同时**推翻了 #127 原有的判断**：换对抗语料后 `numbers_exact=False`
+  出现 11/41，惩罚项改变判定 6 次，其中 2 次正是 issue 原文描述的
+  「字符相似度过 0.92 但数字错了」，故 `numbers_exact` 予以保留。
+
+  余下两处已知缺陷（斜杠/连字符丢弃致参考侧粘连、三段数 `3.5.1` 被抽成
+  `['3.5','1']` 因而漏放）需重写数字 run 的定义，属契约变更，记于 #131。
+
+## [3.5.1] - 2026-10-02
+
+### Fixed
+
+- 修复带标点或数字的语音拿不到任何时间戳：`verbose_json`、`srt`、`vtt`
+  以及说话人分离的对齐此前会把常规英文与含数字的中文整段判成
+  `502 timestamp_alignment_unavailable / text_mismatch`。对齐器切的是语音而不是
+  排版——它按空白切词并只保留字母、数字和撇号，于是 `3:45` 变成 `345`、
+  `forty-two` 变成 `fortytwo`，这些 token 并不是原文的子串，朴素的子串查找
+  必然落空。改为先字面匹配、失败再退化到去标点投影上匹配并映射回原文码点：
+  偏移仍然逐码点指向调用方已发布的冻结文本，排版差异不再被误判成文本不一致。
+  词粒度的判定同步改用对齐器自身的可保留字符集——厂商保留撇号，旧的全角标点
+  禁令会把 `don't` / `it's` 这类普通英文词判成 `granularity_unsupported`。
+  被剥掉的标点归还给它原本所属的那个 token，否则它会漏进下一个词的前导间隙，
+  对外读成 `". on"`、`", two"`。字面命中路径维持既有规则不变（未读出的排版归
+  后一个词），emoji 的归属由既有测试钉住。
+  回归用例取自真实 `mlx_qwen3_asr` 的 tokenizer 输出而非手写近似。
+
+- 修复 bf16 对齐器永远无法加载：`_normalize_dtype` 只认字符串，而 MLX 的 dtype
+  是枚举对象（`str()` 得到 `mlx.core.bfloat16`），于是每个 bf16 aligner 都被判为
+  「未上报 dtype」而拒绝加载。整条对齐路径（含说话人分离）此前从未真正跑通，
+  既有测试传的是字符串 `"mlx.core.bfloat16"`，正好把这个缺陷盖住了。
+
+- 修复 REST 时间戳请求整段 500：ASR 侧曾隐式带上 `include_timestamps=True`，
+  而厂商在开启时间戳时会无条件解析其默认的 `Qwen/Qwen3-ForcedAligner-0.6B`
+  仓库；该仓库不在本地缓存，worker 又运行在 `HF_HUB_OFFLINE=1` 下，
+  于是每个带时间戳的转写都以不透明的 500 收场。改为 ASR 只出文本，时间戳
+  交由本就已接线的独立 `FixedTextAligner` 在冻结文本上计算——与同一路由中
+  说话人分离所用的是同一个 owner，且不会让 ASR 的物理 owner 混用 aligner 身份。
+
+- 修复音色设计在缺少 `reference` 块时按非空断言崩溃：`VoiceQualityReport.reference`
+  已是可选字段，调用方未同步，导致本轮改动引入的必现崩溃。
+
+### Changed
+
+- 把 14 处散落的裸写视觉常量收进既有 token 家族（`Icon.statusDotSize`、
+  `Icon.liveIndicatorDotSize`、`Icon.axisLabelFrame`、`Icon.artifactFrame`、
+  `Icon.dismissButtonFrame`、`Icon.segmentJumpFrame`、`Typography.iconMicroSemibold`、
+  `Typography.iconMediumSemibold`、`Typography.iconMedium`、
+  `Layout.waveformBarAreaHeight`、`Layout.personaEditorMinimumHeight`、
+  `Layout.inputLevelMeterHeight`），**取值一律保持原样**：本轮只改声明位置，
+  不改渲染结果。收敛过程中暴露出一个此前没人注意的分裂——同一个「实心圆点」
+  语义同时存在 `Icon.statusDotSize`(8) 与 `Menu.menuBarStatusDotSize`(6) 两个尺寸
+  且互不相通；本轮不合并，统一到哪个值需要真机比对，仍记为未验证。
+  Debug 与 Release 均 `BUILD SUCCEEDED`。未做桌面视觉走查、VoiceOver、
+  Reduce Motion 复核，对比度真机结论仍为未验证。
+
+- 修复中文数量级在探针文本比对中不被当作数字：`normalize_transcript_for_match`
+  的数字归一化只逐字覆盖 `零`–`九`，`二十二`、`五千三百` 这类含数量级词的读法会以
+  字符形式进入编辑距离，逐字忠实的合成因此被扣分（`二十二度` 对 `22度` 仅 0.09）。
+  新增 `resolve_chinese_magnitudes`：含数量级词的中文数字串按位值求值成阿拉伯数字，
+  不含量位词的位序串（`三六九`、`二零二六`）仍按位翻译——`_chinese_to_int`
+  本就区分这两类。`百分之` 由 `分之` 前瞻排除，否则 `百分之九十九` 会被读成
+  `100分之99`。
+- 修复 `production_ready` 随 TTS worker 常驻状态翻转：同一音色、同一
+  `voice_revision`、同一份合成证据 `run_id`，冷态下被判
+  `model_runtime_identity_unknown` 而 `production_ready: false`，合成一次把 worker
+  叫醒后即变成 `true`。`qwen3_tts.runtime_revision` 只在 worker 常驻且 ready 时
+  返回值，于是运行期身份被错误地绑到了 worker 占用上——变的是判定，不是证据。
+  只读上报路径现在在没有常驻 worker 时改用证据记录自带的运行期身份，且只在它
+  具备规范形态**并且**其指纹能由自身绑定维度重算出来时才采信，否则仍然 fail closed。
+  生产合成路径不变：`prepare_validated_speech` 仍会启动 worker、观测实时身份并把
+  `expected_runtime_revision` 钉在请求上，worker 常驻时报出不同运行期身份仍照旧
+  判定证据失效。
+- 修复 `quality-runs` 报告的 `reference` 子块恒为全 0 占位：这是**输出门禁**，从不评估参考音频，却下发 `duration_seconds: 0.0`、`noise_floor_dbfs: 0.0`、`estimated_snr_db: 0.0` 等值，而这些 0 对每一项参考指标都恰好是最差读数——单看报告会得出「参考音频 0 秒、噪声 0、信噪比 0」，方向完全反了。同一份报告的判定不受影响（该路径不调 `grade_reference_quality`），但消费方直接读该字段会系统性偏悲观地误读。现在该字段显式下发 `null`。没有选择回填音色档案里克隆当时的参考报告：那会把「本次未测量」表述成「本次测得」，且数值可能已过时。参考侧的真实结果仍由 `clone/validate` 在克隆时测出，经 `GET /v1/voices/{voice_id}` 的 `validation_state.reference` 下发。`VoiceQualityReport.reference` 因此在契约中改为可空（`oneOf: [VoiceQualityReference, null]`），`policy_version` 不变——判定逻辑未改，无需使既有证据失效。
+- 修复可懂度门禁抓不住「念错数字」：字符编辑距离对数字失灵。`numbers_punct` 有 44 个字符，把 `22.5℃` 念成 `25℃` 只造成一处替换，相似度 0.9375，照旧高于 `pass` 所需的 0.92；`9月9日` 念成 `9月19日` 是 0.9697。门禁因此对数字类发音错误几乎无感知，而依赖 `production_ready=true` 的正式合成可能带着错误的数字播报出去。新增 `transcript_numbers_match`：两侧归一化后逐位比对数字串，完全一致才算通过。逐条 `probe_scores[]` 新增 `numbers_exact`（不含数字的 probe 为 `null`，与「查过且不符」区分），聚合时该条记 0 分。逐条 `transcript_match` 仍如实上报真实字符相似度，所以判定既关得住漏放又能归因到具体 probe。适用性由 probe 文本是否含数字决定而非硬编码 probe id——`pause_markers` 的「第一点/第二点」归一化后同样带数字，因此也受约束，念错序数一样会被抓住。归一化先行，所以 `二十二点五` 与 `22.5` 是同一个数字，不会误判。`policy_version` 不变：阈值与判定流程未改，只是同一条 probe 多了一道数字校验。
+- 精简 MCP server `instructions`：该字段在 initialize 时随每个会话下发，其中成段的操作规程与 `assets/skills/speechrail/` 里的权威文本重复，等于让每个会话的首轮上下文重复付费一次而收益为零。规程下沉后只保留能力陈述、边界，以及「读错会做出错误动作」而非「只是慢一点」的断言（`available=true` 不等于 `production_ready=true`、参考门禁不等于输出门禁、机器验证不替代人工试听、MCP 不建会话），末尾指向 `speechrail` 技能。`clone_speed_unsupported` 此前只存在于该字段，技能侧并无对应文本，因此先把「Base clone 固定 speed=1.0、这是能力不匹配而非瞬时错误、不要换 speed 重试」补进`references/errors.md`，再从 `instructions` 移除。回归用例锁住双向：规程不得回流，高代价断言不得删。
+
+## [3.5.0] - 2026-10-01
+
+### Fixed
+
+- 修复音色质量输出门禁把所有克隆音色判为 `transcript_mismatch 0.76`：
+  `synthesis.transcript_match` 是六条固定探针的 `min()`，而其中两条探针的文本含有
+  TTS 根本不发音的排版符号，逐字忠实的合成也会被扣分，于是这一条差异把所有音色
+  一票否决。实测（3.4.2 运行时，voice `wom-d2888cc51194ee2e`）两条元凶是：
+  - `pause_markers` 的 `……`。TTS 不发音、ASR 也不会返回，而 NFKC 把 `……` rewrite
+    成 `......`，`.` 又是保留的语义符号（`22.5` 需要它），于是 25 字参考里凭空多出
+    6 个字符误差，`min()` 聚合被压到 **0.76**（`<0.80`，直接 `reject`）；
+  - `numbers_punct` 的 `22.5℃`。TTS 读出「摄氏度」，ASR 原样写回，两侧只差记法，
+    该条被压到 **0.9091**（低于 `pass` 所需的 0.92）。
+
+  归一化现在折叠口语单位（`摄氏度`→`°C`）并丢弃成串省略号（`\.{2,}`，单个点保留
+  给小数）。实测同一条真实 ASR 输出下 `min()` 聚合由 0.76 回到 1.0，四个音色
+  （三个克隆 + 一个系统）结果一致。回归测试改用真实 ASR 实际输出而非手写理想文本
+  —— 早先用理想文本会放过真实 ASR 根本过不去的探针。
+- 质量报告新增 `synthesis.probe_scores`，按固定探针集顺序逐条下发
+  `probe_id` 与该条 `transcript_match`。此前只给 `min()` 聚合值，无法区分
+  「整体不可懂」和「某条探针文本不适配」，排障只能看到四个音色同分而看不到是哪条
+  探针拖的。
+- 修复发布流程能把版本漏 bump 的 wheel 当成成功安装装上去：`speechrail install`
+   在 `/readyz` 返回 200 之后还会比对运行中服务 `/health` 自报的 `version` 与正在
+   安装的 wheel 版本，不一致即 fail closed 并退出 1。此前 `Settings.version` 的
+   硬编码默认值（`src/speechrail/config/__init__.py`）漏 bump 时，构建、preflight、
+   `/readyz` 和安装全部显示成功，而服务自报的是上一个版本号。
+- `check_version_consistency.py` 移进 release skill 的构建代码门（原先只在打 tag
+   前出现），并且 `pytest` 现在直接校验真实仓库树
+   （`test_repository_tree_version_is_consistent`）——此前该脚本的测试全部跑在
+   合成的 `tmp_path` 树上，只能证明检查器本身可用，无法发现当前 checkout 不一致。
+
+### Added
+
+- `VoiceQualitySynthesis.probe_scores` 进入 `contracts/openapi.yaml` 的
+  `VoiceQualitySynthesis`，作为向后兼容的新增响应字段下发。
+
+## [3.4.2] - 2026-09-30
+
+### Fixed
+
+- 修复语音助手播放回答时末尾出现突兀杂音：Realtime 流式 TTS 的最后一个 codec 帧
+  停在模型收尾的那一刻，常常落在元音中间、样本值很大，扬声器把这个跳变听成一声
+  "咔哒"。实测同一句话 8/8 都在非零振幅处直接切断，末尾静音 0 ms；批式
+  `/v1/audio/speech` 因为一直对最后一块做 5 ms 淡出，0/8 出现。现在流式在终态前
+  补一段同样长度的淡出斜坡，斜坡从实际发出的最后一个样本值起步，因此是延续波形
+  而不是另起一段；它作为一帧普通音频发出，`chunk_index` 与 `sample_offset` 保持连续，
+  合成期间不扣留任何音频，短句不会被推迟。
+
+## [3.4.1] - 2026-09-30
+
+### Fixed
+
+- 修复单句语音无法定稿：Realtime 流式 ASR 在 commit 时几乎必然整体失败成
+  `worker_inference_error`，客户端只收到 `transcription.failed` 而从不收到
+  `conversation.item.input_audio_transcription.completed`，因此已经识别出来的文字
+  无法进入后续 LLM/TTS。根因是 vendor 在尾块解码没有新增文字时会走一次 tail refine，
+  以已加载的 model 对象调用 `transcribe()`，导致 tokenizer 解析退回上游默认 repo id，
+  离线环境下抛 `LocalEntryNotFoundError`。精修只用于补回漏字，committed text 本身
+  已完整，现在关闭该分支。句中留有停顿时尾块会带出新文字而不进精修，所以此前表现为
+  偶发成功。
+- 修复流式 ASR 丢弃 worker 诊断细节：`error_frame_message()` 提供的 stderr 尾巴此前
+  只有 `qwen3_native`、`qwen3_alignment`、`qwen3_shared` 三个后端在用，流式后端是唯一
+  不记录的一处，导致这类失败只显示 `exception_type=None` 而看不到真实异常。现在
+  stderr 尾巴进入服务端日志，Realtime `error.code` 仍保持短机器码。
+- 修复语音助手「切换对话记录」卡顿：打开一条记录此前分四次串行读库并分四次更新
+  SwiftUI 状态，界面逐段跳变；现在改为一次快照读、一次状态更新。
+- 修复语音助手把已经识别出来的一句话静默吞掉：服务端返回空 final 时，客户端此前
+  直接丢弃可见文字且不提示，用户看到「说完话文字一闪就没了」。现在保留该句并以
+  `partial` 状态留在对话流，同时给出「这一句没能识别完整，请再说一次」的提示；
+  该句不进入 LLM/TTS，因为未定稿文本可被后续改写，不适合作为权威输入。
+
+### Changed
+
+- Realtime 契约 4.2.0 → 4.3.0：补充第三条语音准入语义——空 final 不等于用户没有说话，
+  客户端必须区分「没有语音」与「有语音但未能定稿」。
+
 ## [3.4.0] - 2026-09-30
 
 ### Added

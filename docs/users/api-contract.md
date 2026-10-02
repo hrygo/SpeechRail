@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.10.0"
-date: 2026-09-30
+version: "3.12.0"
+date: 2026-10-01
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -139,6 +139,13 @@ Content-Type: multipart/form-data
 `422 invalid_timestamp_granularities`。只请求 `word` 时返回 `words`，只请求 `segment` 时返回
 `segments`；省略粒度时保持同时返回两者。OpenAI 的 `timestamp_granularities` 默认值是
 `["segment"]`，SpeechRail 有意在省略时同时返回两套时间戳。
+
+时间戳由**独立的本地 aligner** 在冻结的 ASR 正文上产出，不由 ASR 解码直接给出：本机模型
+Qwen3-ASR 没有原生词级时间戳，ASR 只返回文本。每个请求的粒度各调用 aligner 一次。未配置
+aligner 时，`verbose_json` / `srt` / `vtt` 返回 `503 timestamp_alignment_unavailable`（错误体内含
+`request_id`），既不隐式下载模型，也不返回空时间轴；aligner 无法给出请求粒度时返回
+`502 timestamp_alignment_unavailable`，不用整句均分冒充词级边界。`json`、`text` 与匿名分人的
+`diarized_json` 不需要 aligner。
 
 其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式。
 
@@ -556,7 +563,7 @@ stderr、vendor 异常正文、模型路径或请求文本；可用 request ID �
 - 所有 probe 输出必须同时通过格式、非静音、无满幅削波和重复确定性检查；`runs>=2` 时会对同一 probe 的 PCM SHA-256 做重复比较，`runs=1` 不宣称已验证确定性。
 - 信号门全部通过后，服务释放 TTS phase，只取 6 类 probe 各自首个有效 PCM，以现有 Batch ASR 顺序回转录并计算归一化字符相似度；该 ASR phase 独立进入 `BATCH_ASR` governor/admission，避免把 Base TTS 与 ASR 变成未经治理的并行重计算。
 - `synthesis.transcript_match` 为 6 类 probe 的最小匹配分，当前工程初始门为 `>=0.92 pass`、`0.80..0.92 warn`、`<0.80 reject`；该阈值仍需真实 Apple Silicon 语料校准。ASR 不可用时返回 `status=unevaluated` + `transcription_unavailable`，绝不伪装为通过。
-- 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
+- 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为 `null`：该端点是输出门禁，只评合成，从不评估参考音频，因此不产生参考侧失败码。此前它下发一个全 0 的指标对象，而 0 对每一项参考指标都恰好是最差读数，等于把「本次未测量」表述成「参考音频 0 秒、噪声 0、信噪比 0」。参考侧的真实结果在克隆当时由 `clone/validate` 测出，经 `GET /v1/voices/{voice_id}` 的 `validation_state.reference.status` 下发。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
 `/v1/speechrail/voices/{voice_id}/quality-runs` 还返回 `evidence` 命名空间。其
@@ -574,11 +581,19 @@ TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获�
 | `status` | `pass` / `warn` / `reject` / `unevaluated`。当输出信号有效但独立 ASR 可懂度证据不可获得时，`quality-runs` 会显式下发 `unevaluated`，客户端不得把它当作 pass |
 | `run_id` | 本次质量运行的唯一标识 |
 | `tested_at` | 测试时间（ISO 8601 UTC） |
-| `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
-| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`） |
+| `reference` | 参考音频信号指标，或 `null` 表示本次运行未评估参考音频。`quality-runs` 是输出门禁，恒为 `null`；`clone` 与 `clone/validate` 会评估并下发真实值。非 `null` 时含时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；其中 `transcript_match` 始终为 `null`，因为实现未启用参考侧 ASR 文本匹配，从不计算该分数 |
+| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`、`probe_scores`）。`probe_scores[]` 另含 `numbers_exact` |
 | `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
 **字段语义**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及未执行质量评估的记录可能不携带该字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
+
+`synthesis.transcript_match` 是全部固定 probe 分数的 `min()`，单看聚合值无法区分“整体不可懂”和“某条 probe 文本不适配”。`synthesis.probe_scores` 按固定 probe 集顺序逐条给出 `probe_id` 与该条 `transcript_match`，未评估可懂度时为空数组；排障时应先看它定位到具体 probe。
+
+每条 `probe_scores[]` 还带一个 `numbers_exact`：该 probe 里的数字是否逐位原样返回，`null` 表示这条 probe 不含数字、该问题不适用。**聚合时 `numbers_exact: false` 的 probe 记 0 分**，即使它的字符相似度很高。原因是字符编辑距离抓不住「念错数字」——`numbers_punct` 有 44 个字符，把 `22.5℃` 念成 `25℃` 只造成一处替换，相似度 0.9375，照旧高于 `pass` 所需的 0.92，而听到的数字是错的。逐条的 `transcript_match` 仍如实上报真实相似度，所以这条判定既关得住漏放，又能把拒绝归因到具体 probe。
+
+两侧在比较前都会归一化，因此按**数值**而非拼写比较，下列写法都判为同一个数字，不会被误判：中文数字与阿拉伯数字（`二十二点五` = `22.5`）、数量级（`五千三百` = `5300`）、逐位念读时用于区分 1/7 与 0/O 的澄清字（`幺`=1、`丁`=3、`尜`=9，如 `幺幺零` = `110`，仅在长度 ≥3 的数字串内折叠，以免误改 `园丁`、`幺妹`、`一点丁点`）、以及整数部分的前导零（`09` = `9`；小数部分不去零，`0.05` ≠ `0.5`）。
+
+已知限制（见 #131）：斜杠与连字符在提取数字前会被丢弃，`2026/09/09` 会粘连成 `20260909`；且数字 run 的正则无法表达三段数，`3.5.1` 与 `3.5点一` 会被抽成同一组而判等。因此带分隔符的日期与语义版本号暂不适用本判定。
 
 #### 5.7.5 克隆幂等状态查询 (`GET /v1/speechrail/voices/clone/idempotency`)
 
@@ -671,6 +686,7 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 |---|---|---|
 | `input_audio_buffer.append` | 客户端 → 服务端 | 追加 Base64 24 kHz PCM16 |
 | `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final；`event_id` 在对应终态回显 |
+| `speechrail.input_audio_buffer.committed` | 服务端 → 客户端 | 仅应请求返回，关联 commit ID 与累计24 kHz样本水位的输入完成屏障 |
 | `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
 | `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits |
 | `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
@@ -692,8 +708,12 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 旧 revision 或取消后的结果必须丢弃。辅助失败不会把已发出的 final 改成失败。
 
 客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
-`completed` / `failed` 会回显 `commit_event_id`；结束录音时必须等待该关联终态，不能用
-更早的在途终态判定尾句已经完成。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
+`completed` / `failed` 会回显 `commit_event_id`。结束录音时请给 commit 附带
+`"speechrail":{"request_receipt":true}`，等待 `speechrail.input_audio_buffer.committed` 的
+`commit_event_id` 与本次请求匹配，且 `accepted_samples` 等于本连接累计发送的 24 kHz
+PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文本 final；clear 不重置水位。
+缺省/false 保持旧 wire。旧服务无回执时新 macOS 客户端超时关闭而不 clear，不能用旧终态
+替代完成证据。超时/取消/缺少终态的 EOF 不产生回执，详见 Realtime 契约的可选输入完成屏障。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
 再把对应 delta 追加到同一段临时文本。
 
 `session.speechrail.alignment.enabled` 与 `session.speechrail.diarization.enabled` 相互独立：

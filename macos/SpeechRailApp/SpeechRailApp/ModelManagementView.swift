@@ -6,7 +6,8 @@ public struct ModelManagementView: View {
     @Environment(AppNavigationState.self) private var navigation
     /// 助手还在听/想/说时不能切档：切档会重启服务，等于把这一轮打断。
     @Environment(AssistantSession.self) private var assistant
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     /// 识别与配音是两条**独立**的轴，任何一档都能配任何一档（九种组合）。
     /// 三张档位卡只是其中三种最常用的预设，写这两项相同的值。
@@ -14,6 +15,11 @@ public struct ModelManagementView: View {
     @State private var ttsSpec: SpeechRailProfile = .quality
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
+    /// 打开面板时锚定的那一行。双击同一行 = 收起（2026-09-30 用户反馈：
+    /// 「双击打开后无法关闭」——双击在他们的预期里本来就是开关）。
+    /// 锚定而不是直接读 `selectedArtifactKey`：双击的 Button 动作会先把选中行
+    /// 改掉，等手势结束时两者已经相等，「是不是同一行」就再也分不出来。
+    @State private var inspectorAnchorKey: String?
 
     public init() {}
 
@@ -26,9 +32,20 @@ public struct ModelManagementView: View {
     public var body: some View {
         PageScaffold(route: .models) {
             mainContent
+        } trailing: {
+            // 开关放在页头而不是「模型文件」卡头：卡头是一条 HStack（标题 + 一句
+            // 说明 + 开关 + 弹性空档 + 右端事实），面板一开、内容列被 inspector
+            // 压窄，开关是这条 HStack 里第一个被压掉的东西——而面板打开的那一刻
+            // 正是唯一需要它的时候（2026-09-30 用户反馈「打开后无法关闭」）。
+            // 页头那行的说明文字会换行让位，动作不会被挤没；关闭入口另有面板
+            // 自身标题栏上那一枚。
+            DeveloperInspectorToggle(
+                isPresented: $showInspector,
+                helpText: "查看所选模型的来源、哈希与校验详情 (⌘⌥I)"
+            )
         }
-        // 这一页的动作全都属于卡片里的制品（下载并校验、应用到档位），所以没有头部动作；
-        // 页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
+        // 头部动作只有右侧详情面板的开关；下载并校验、应用到档位这些本页动作
+        // 全都属于卡片里的制品。页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
         .focusedSceneValue(
             \.reloadPageCommand,
             ReloadPageCommand(title: "重新读取模型目录") {
@@ -314,7 +331,7 @@ public struct ModelManagementView: View {
                 Image(systemName: axis.systemImage)
                     .font(SpeechRailDesignTokens.Typography.calloutMedium)
                     .foregroundStyle(accent)
-                    .frame(width: 16)
+                    .frame(width: SpeechRailDesignTokens.Icon.axisLabelFrame)
                     .accessibilityHidden(true)
                 Text(axis.title)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -590,22 +607,7 @@ public struct ModelManagementView: View {
                 // 整个页面（含按需能力）的差口，这里说的是**这张表**自己的进度，
                 // 两者口径不同，所以分开写。
                 accessory: artifactReadinessAccessory
-            ) {
-                Button {
-                    withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
-                        showInspector.toggle()
-                    }
-                } label: {
-                    Label(
-                        showInspector ? "收起详情" : "模型详情",
-                        systemImage: showInspector ? "sidebar.right" : "info.circle"
-                    )
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                }
-                .buttonStyle(.borderless)
-                .speechRailPointerCursor()
-                .help("查看所选模型的来源、哈希与校验详情 (⌘⌥I)")
-            }
+            )
             Divider()
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
@@ -639,10 +641,18 @@ public struct ModelManagementView: View {
                             .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .speechRailPointerCursor()
                             .accessibilityIdentifier("artifact-\(artifact.key)")
+                            // 双击打开这一项的详情；对**当前正显示的那一行**再双击一次
+                            // 则收起（用户预期里双击本来就是开关，2026-09-30）。
+                            // 双击另一行始终是换内容，不会把面板关掉。
                             .simultaneousGesture(
                                 TapGesture(count: 2).onEnded {
                                     withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
-                                        showInspector = true
+                                        if showInspector, inspectorAnchorKey == artifact.key {
+                                            showInspector = false
+                                        } else {
+                                            showInspector = true
+                                            inspectorAnchorKey = artifact.key
+                                        }
                                     }
                                 }
                             )
@@ -988,7 +998,7 @@ public struct ModelManagementView: View {
 
     @ViewBuilder
     private var modelInspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             if let artifact = selectedArtifact {
                 SectionHeading(title: artifact.variant.replacingOccurrences(of: "_", with: " "))
                 LabeledContent("模型 ID", value: artifact.modelID)
@@ -2109,7 +2119,7 @@ private struct ArtifactChoiceRow: View {
                     Image(systemName: artifactIcon)
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(selected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
-                        .frame(width: 14)
+                        .frame(width: SpeechRailDesignTokens.Icon.artifactFrame)
 
                     // 第一列是「机器名 + 模型名」两行：key 留着（它是与诊断输出对照的
                     // 锚点），下面这行才是用户要认的模型本身，并按它所属的档位上色。
@@ -2236,7 +2246,7 @@ private struct OnDemandCapabilityRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: capability.icon)
-                .font(.system(size: 15, weight: .semibold))
+                .font(SpeechRailDesignTokens.Typography.iconMediumSemibold)
                 .foregroundStyle(capability.iconColor)
                 .frame(width: 32, height: 32)
                 .background(
@@ -2306,7 +2316,7 @@ private struct OnDemandCapabilityRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             StatusPill(tone: capability.tone, label: capability.state)
-                .padding(.top, 2)
+                .padding(.top, SpeechRailDesignTokens.Spacing.tight)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -2326,7 +2336,7 @@ private struct UnmanagedArtifactRow: View {
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: statusPresentation.systemImage)
-                .font(.system(size: 15))
+                .font(SpeechRailDesignTokens.Typography.iconMedium)
                 .foregroundStyle(statusPresentation.color)
                 .frame(width: 32, height: 32)
                 .background(

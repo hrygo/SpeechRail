@@ -459,6 +459,11 @@ public final class TeleprompterStageSettings {
         didSet { defaults.set(showClockAndProgress, forKey: Key.showClockAndProgress) }
     }
 
+    /// 水平镜像翻转：供物理分光镜/专业提词玻璃反射使用，在分光镜中成像为正常文本。
+    public var isMirrored: Bool {
+        didSet { defaults.set(isMirrored, forKey: Key.isMirrored) }
+    }
+
     public var preset: TeleprompterStagePreset {
         get { presetStorage }
         set {
@@ -672,6 +677,7 @@ public final class TeleprompterStageSettings {
         ) ?? .camera
         self.alwaysShowControls = defaults.bool(forKey: Key.alwaysShowControls)
         self.showClockAndProgress = defaults.bool(forKey: Key.showClockAndProgress)
+        self.isMirrored = defaults.bool(forKey: Key.isMirrored)
     }
 
     private enum Key {
@@ -685,6 +691,7 @@ public final class TeleprompterStageSettings {
         static let preset = "speechrail.teleprompter.stage.preset"
         static let alwaysShowControls = "speechrail.teleprompter.stage.alwaysShowControls"
         static let showClockAndProgress = "speechrail.teleprompter.stage.showClockAndProgress"
+        static let isMirrored = "speechrail.teleprompter.stage.isMirrored"
     }
 }
 
@@ -788,6 +795,6 @@ enum TeleprompterStageRecoveryPresentation {
 /// Reduce Motion 开启时舞台不做位移动画：阅读位置照常更新，但不滚动画面。
 enum TeleprompterStageMotionPolicy {
     static func scrollAnimation(reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)
+        reduceMotion ? nil : .timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)
     }
 }

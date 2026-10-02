@@ -530,11 +530,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
     public let pace: TeleprompterPace
     public let calibrationFactor: Double
     public let operation: TeleprompterPreparationOperation
-    public let selectedUnitIDs: Set<Int>?
     public let currentBlocks: [TeleprompterMapCurrentBlock]
-    /// Source units the reader marked as must-keep. Only `.condense` may omit
-    /// anything, and never these.
-    public let lockedUnitIDs: Set<Int>
 
     public init(
         source: TeleprompterImportedSource,
@@ -543,9 +539,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         pace: TeleprompterPace,
         calibrationFactor: Double = 1.0,
         operation: TeleprompterPreparationOperation = .prepare,
-        selectedUnitIDs: Set<Int>? = nil,
-        currentBlocks: [TeleprompterMapCurrentBlock] = [],
-        lockedUnitIDs: Set<Int> = []
+        currentBlocks: [TeleprompterMapCurrentBlock] = []
     ) {
         self.source = source
         self.sourceUnits = sourceUnits
@@ -553,9 +547,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         self.pace = pace
         self.calibrationFactor = calibrationFactor
         self.operation = operation
-        self.selectedUnitIDs = selectedUnitIDs
         self.currentBlocks = currentBlocks
-        self.lockedUnitIDs = lockedUnitIDs
     }
 }
 
@@ -611,7 +603,6 @@ public struct TeleprompterPreparationBoundary: Codable, Equatable, Sendable, Ide
     public let leftBlockID: String
     public let rightBlockID: String
     public var state: TeleprompterPreparationBoundaryState
-    public var reviewBlockIDs: [String]
     public var failureMessage: String?
 
     public init(
@@ -619,14 +610,12 @@ public struct TeleprompterPreparationBoundary: Codable, Equatable, Sendable, Ide
         leftBlockID: String,
         rightBlockID: String,
         state: TeleprompterPreparationBoundaryState,
-        reviewBlockIDs: [String] = [],
         failureMessage: String? = nil
     ) {
         self.id = id
         self.leftBlockID = leftBlockID
         self.rightBlockID = rightBlockID
         self.state = state
-        self.reviewBlockIDs = reviewBlockIDs
         self.failureMessage = failureMessage
     }
 
@@ -635,7 +624,6 @@ public struct TeleprompterPreparationBoundary: Codable, Equatable, Sendable, Ide
 
 public enum TeleprompterPreparationStatus: String, Codable, Equatable, Sendable {
     case complete
-    case reviewRequired
     case boundaryUnchecked
 }
 
@@ -797,7 +785,6 @@ public struct TeleprompterPreparationPipeline: Sendable {
                     calibrationFactor: input.calibrationFactor,
                     operation: input.operation,
                     readOnlyContext: readOnlyContext,
-                    lockedUnitIDs: lockedUnitIDs(in: input, window: window, targets: targets),
                     maxGroupUnits: policy.maxGroupUnits
                 )
             } else {
@@ -815,7 +802,6 @@ public struct TeleprompterPreparationPipeline: Sendable {
                             && $0.endUnit > (window.sourceUnitIDs.first ?? 0)
                     },
                     readOnlyContext: readOnlyContext,
-                    lockedUnitIDs: lockedUnitIDs(in: input, window: window, targets: targets),
                     maxGroupUnits: policy.maxGroupUnits
                 )
             }
@@ -880,8 +866,8 @@ public struct TeleprompterPreparationPipeline: Sendable {
                         // Continue to final assembly with a complete, source-backed window.
                     } else {
                         let children = try split(window: window, timingPlan: input.timingPlan)
-                        // 新协议每个子窗包含 grouping + rewrite，因此两个子窗相对原窗增加两个请求；
-                        // tighten 兼容路径仍只有一个 Map 请求。子窗不递归拆分。
+                        // 每个子窗包含 grouping + rewrite，因此两个子窗相对原窗增加两个请求。
+                        // 子窗不递归拆分。
                         recoveryRequestCount += splitCost
                         splitWindowIDs.formUnion(children.map(\.id))
                         windows.replaceSubrange(windowIndex...windowIndex, with: children)
@@ -1052,7 +1038,6 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 )
                 try apply(output: output, to: &mutableStates)
                 boundary.state = .checked
-                boundary.reviewBlockIDs = output.reviewBlockIDs
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -1085,16 +1070,11 @@ public struct TeleprompterPreparationPipeline: Sendable {
             states: mutableStates,
             boundaries: boundaries
         )
-        let status: TeleprompterPreparationStatus
-        if boundaries.contains(where: { $0.state == .unchecked }) {
-            status = .boundaryUnchecked
-        } else if draft.blocks.contains(where: { $0.disposition == .unresolved })
-                    || draft.blocks.contains(where: { $0.disposition == .skip })
-                    || boundaries.contains(where: { !$0.reviewBlockIDs.isEmpty }) {
-            status = .reviewRequired
-        } else {
-            status = .complete
-        }
+        // 整理成功就是成功。跨窗紧缩没能收窄就算失败并保留原稿兜底，但不再有
+        // 「整理完了、还有几处等你逐条确认」这种中间态——那正是要删掉的东西。
+        let status: TeleprompterPreparationStatus = boundaries.contains(where: { $0.state == .unchecked })
+            ? .boundaryUnchecked
+            : .complete
         onProgress?(.init(phase: .finalizing, completed: 1, total: 1))
         completed = true
         return .init(
@@ -1142,7 +1122,9 @@ private extension TeleprompterPreparationPipeline {
     struct Selection {
         let units: [TeleprompterSourceUnit]
         let unitsByID: [Int: TeleprompterSourceUnit]
-        let selectedIDs: [Int]
+        /// 按原稿顺序处理的全部来源单元 ID。内容范围选择已删除，
+        /// 所以这里不再有任何「选中」的含义。
+        let orderedUnitIDs: [Int]
     }
 
     struct BlockState {
@@ -1460,7 +1442,6 @@ private extension TeleprompterPreparationPipeline {
             calibrationFactor: input.calibrationFactor,
             operation: input.operation,
             readOnlyContext: readOnlyContext,
-            lockedUnitIDs: Array(input.lockedUnitIDs)
         )
         let rewriteContext = stageContext(from: context, stage: .rewrite, attempt: context.attempt)
         do {
@@ -1628,35 +1609,15 @@ private extension TeleprompterPreparationPipeline {
                 throw TeleprompterPreparationError.invalidSourceUnits
             }
             let rawText = group.sourceUnits.map(\.rawText).joined()
-            let text: String
-            let disposition: TeleprompterBlockDisposition
-            switch block.mode {
-            case .speak:
-                text = block.text
-                disposition = .speak
-            case .review:
-                text = block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? rawText : block.text
-                disposition = .unresolved
-            case .omit:
-                text = ""
-                disposition = .unresolved
-            }
-            let reviewed = withSemanticReview(
-                source: rawText,
-                candidate: text,
-                issues: block.issues,
-                disposition: disposition
-            )
             return BlockState(
                 block: .init(
                     id: group.id,
                     ordinal: offset,
                     sourceRange: .init(start: firstUnit.sourceRange.start, end: lastUnit.sourceRange.end),
-                    text: text,
+                    text: block.disposition == .speak ? block.text : "",
                     rawSourceText: rawText,
-                    disposition: reviewed.disposition,
+                    disposition: block.disposition,
                     origin: .ai,
-                    reviewIssues: reviewed.issues,
                     budgetSeconds: group.budgetSeconds
                 ),
                 sourceUnitIDs: group.sourceUnitIDs,
@@ -1688,9 +1649,10 @@ private extension TeleprompterPreparationPipeline {
                     sourceRange: unit.sourceRange,
                     text: unit.rawText,
                     rawSourceText: unit.rawText,
-                    disposition: .unresolved,
+                    // 模型这一窗失败时退回未加工的原稿。原稿本身就能念，
+                    // 标成 speak 让人直接用；标成待审只会把用户拖回逐条确认的旧路。
+                    disposition: .speak,
                     origin: .deterministic,
-                    reviewIssues: [.uncertainMeaning],
                     budgetSeconds: budget
                 ),
                 sourceUnitIDs: [id],
@@ -1751,11 +1713,7 @@ private extension TeleprompterPreparationPipeline {
             throw TeleprompterPreparationError.invalidSourceUnits
         }
         let unitsByID = Dictionary(uniqueKeysWithValues: units.map { ($0.id, $0) })
-        let selectedIDs = input.selectedUnitIDs.map { $0.sorted() } ?? units.map(\.id)
-        guard !selectedIDs.isEmpty,
-              selectedIDs == Array(Set(selectedIDs)).sorted(),
-              selectedIDs.allSatisfy({ unitsByID[$0] != nil }),
-              input.timingPlan.allocations.map(\.sourceUnitID).allSatisfy({ unitsByID[$0] != nil }) else {
+        guard input.timingPlan.allocations.map(\.sourceUnitID).allSatisfy({ unitsByID[$0] != nil }) else {
             throw TeleprompterPreparationError.invalidSourceUnits
         }
         guard input.timingPlan.allocations.count == units.count,
@@ -1763,7 +1721,7 @@ private extension TeleprompterPreparationPipeline {
               input.timingPlan.allocations.allSatisfy({ $0.budgetSeconds.isFinite && $0.budgetSeconds >= 0 }) else {
             throw TeleprompterPreparationError.invalidTimingPlan
         }
-        return Selection(units: units, unitsByID: unitsByID, selectedIDs: selectedIDs)
+        return Selection(units: units, unitsByID: unitsByID, orderedUnitIDs: units.map(\.id))
     }
 
     func makeWindows(
@@ -1786,9 +1744,9 @@ private extension TeleprompterPreparationPipeline {
             currentBudgetUnits = 0
         }
 
-        for (index, id) in selection.selectedIDs.enumerated() {
+        for (index, id) in selection.orderedUnitIDs.enumerated() {
             let unit = selection.unitsByID[id]!
-            let previousID = index > 0 ? selection.selectedIDs[index - 1] : nil
+            let previousID = index > 0 ? selection.orderedUnitIDs[index - 1] : nil
             let isNewRun = previousID.map { $0 + 1 != id } ?? false
             if isNewRun { flush() }
             guard unit.budgetUnits <= policy.maxWindowBudgetUnits else {
@@ -1814,7 +1772,7 @@ private extension TeleprompterPreparationPipeline {
         guard maxUnits > 0, let first = window.sourceUnitIDs.first, let last = window.sourceUnitIDs.last else {
             return .init()
         }
-        let selected = Set(selection.selectedIDs)
+        let selected = Set(selection.orderedUnitIDs)
         var before: [TeleprompterMapContextItem] = []
         var after: [TeleprompterMapContextItem] = []
         if selected.contains(first - 1), let unit = selection.unitsByID[first - 1] {
@@ -1839,35 +1797,15 @@ private extension TeleprompterPreparationPipeline {
                 return nil
             }
             let rawText = IDs.compactMap { sourceUnits[$0]?.rawText }.joined()
-            let text: String
-            let disposition: TeleprompterBlockDisposition
-            switch block.mode {
-            case .speak:
-                text = block.text
-                disposition = .speak
-            case .review:
-                text = block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? rawText : block.text
-                disposition = .unresolved
-            case .omit:
-                text = ""
-                disposition = .unresolved
-            }
-            let reviewed = withSemanticReview(
-                source: rawText,
-                candidate: text,
-                issues: block.issues,
-                disposition: disposition
-            )
             return BlockState(
                 block: .init(
                     id: "block-\(first)-\(block.endUnit)",
                     ordinal: offset,
                     sourceRange: .init(start: firstUnit.sourceRange.start, end: lastUnit.sourceRange.end),
-                    text: text,
+                    text: block.disposition == .speak ? block.text : "",
                     rawSourceText: rawText,
-                    disposition: reviewed.disposition,
+                    disposition: block.disposition,
                     origin: .ai,
-                    reviewIssues: reviewed.issues,
                     budgetSeconds: window.localBudgetSeconds * Double(IDs.reduce(0) { $0 + sourceUnits[$1]!.budgetUnits })
                         / Double(max(1, window.sourceUnitIDs.reduce(0) { $0 + sourceUnits[$1]!.budgetUnits }))
                 ),
@@ -1955,54 +1893,7 @@ private extension TeleprompterPreparationPipeline {
         for (index, patch) in patches {
             states[index].block.text = patch.text
             states[index].revision += 1
-            let reviewed = withSemanticReview(
-                source: states[index].block.rawSourceText,
-                candidate: patch.text,
-                issues: states[index].block.reviewIssues,
-                disposition: states[index].block.disposition
-            )
-            states[index].block.reviewIssues = reviewed.issues
-            states[index].block.disposition = reviewed.disposition
         }
-    }
-
-    /// Locks are stored as global source unit ids, while the grouping and map
-    /// prompts address units with window-local ids, so rebase before sending.
-    func lockedUnitIDs(
-        in input: TeleprompterPreparationInput,
-        window: TeleprompterPreparationMapWindow,
-        targets: [TeleprompterSourceUnit]
-    ) -> [Int] {
-        guard input.operation == .condense, let base = targets.first?.id else { return [] }
-        let windowIDs = Set(window.sourceUnitIDs)
-        return input.lockedUnitIDs
-            .filter { windowIDs.contains($0) }
-            .map { $0 - base }
-            .sorted()
-    }
-
-    /// High-risk semantic changes are surfaced for human review. This never
-    /// rewrites or drops content on its own, and unchanged blocks stay
-    /// untouched so review burden does not grow with every passage.
-    func withSemanticReview(
-        source: String,
-        candidate: String,
-        issues: [TeleprompterReviewIssue],
-        disposition: TeleprompterBlockDisposition
-    ) -> (issues: [TeleprompterReviewIssue], disposition: TeleprompterBlockDisposition) {
-        guard disposition == .speak, !candidate.isEmpty else {
-            return (issues, disposition)
-        }
-        let findings = TeleprompterSemanticRiskDetector.findings(
-            source: source,
-            candidate: candidate
-        )
-        guard !findings.isEmpty else { return (issues, disposition) }
-        var merged = issues
-        for finding in findings where !merged.contains(finding.issue) {
-            merged.append(finding.issue)
-        }
-        return (merged, .unresolved)
     }
 
     func estimateSeconds(
@@ -2025,32 +1916,15 @@ private extension TeleprompterPreparationPipeline {
         boundaries: [TeleprompterPreparationBoundary]
     ) throws -> TeleprompterReadingDraft {
         let covered = states.flatMap(\.sourceUnitIDs)
-        guard covered == selection.selectedIDs,
-              Set(states.map { $0.block.id }).count == states.count,
-              states.allSatisfy({ !$0.block.rawSourceText.isEmpty || $0.block.disposition == .unresolved }) else {
+        guard covered == selection.orderedUnitIDs,
+              Set(states.map { $0.block.id }).count == states.count else {
             throw TeleprompterPreparationError.invalidPromptResponse
         }
         var blocks = states.map(\.block)
-        if input.operation == .condense {
-            // A deletion is only ever an explicit, reviewable skip. Fidelity
-            // operations keep the same shape as an unresolved block, because
-            // dropping content is not authorized there.
-            for index in blocks.indices where blocks[index].text.isEmpty
-                && blocks[index].reviewIssues == [.nonspokenContent] {
-                blocks[index].disposition = .skip
-            }
-            let removedLockedContent = zip(states, blocks).contains { state, block in
-                block.disposition == .skip
-                    && !Set(state.sourceUnitIDs).isDisjoint(with: input.lockedUnitIDs)
-            }
-            if removedLockedContent {
-                throw TeleprompterPreparationError.invalidPromptResponse
-            }
-        }
         for index in blocks.indices { blocks[index].ordinal = index }
         let revisions = Dictionary(uniqueKeysWithValues: states.map { ($0.block.id, $0.revision) })
         let readingText = blocks
-            .filter { $0.disposition == .speak || $0.disposition == .unresolved }
+            .filter { $0.disposition == .speak }
             .map(\.text)
             .joined(separator: "\n\n")
         let durationEstimate = TeleprompterDurationEstimator.estimate(
@@ -2070,5 +1944,100 @@ private extension TeleprompterPreparationPipeline {
             boundaries: boundaries,
             durationEstimate: durationEstimate
         )
+    }
+}
+
+// MARK: - 跨窗紧缩（prepare 内部阶段）
+
+/// 跨窗紧缩是「整理」这一动作内部的最后一道：每个窗各自按 `local_budget_seconds`
+/// 写稿，窗与窗之间仍可能整体超预算，于是对相邻两块再发一次请求把话压短。
+///
+/// 它不是用户可选的加工动作——没有单独的按钮，也没有「必须保留」的人为划区：
+/// 省时长是表达偏好，直接在稿上改一句比再等一次模型更快也更可控。
+struct TeleprompterReduceEditableBlock: Codable, Equatable, Sendable {
+    let id: String
+    let revision: Int
+    let text: String
+    let sourceUnits: [TeleprompterMapContextItem]
+    let protectedLiterals: [String]
+}
+
+struct TeleprompterReducePatch: Codable, Equatable, Sendable {
+    let blockID: String
+    let revision: Int
+    let text: String
+
+    private enum CodingKeys: String, CodingKey {
+        case blockID = "block_id"
+        case revision
+        case text
+    }
+}
+
+struct TeleprompterReduceOutput: Codable, Equatable, Sendable {
+    let schemaVersion: String
+    let patches: [TeleprompterReducePatch]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case patches
+    }
+}
+
+struct TeleprompterReduceInput: Codable, Equatable, Sendable {
+    let timing: TeleprompterReduceTiming
+    let editableBlocks: [TeleprompterReduceEditableBlock]
+    let readOnlyBlocks: [TeleprompterReduceEditableBlock]
+}
+
+struct TeleprompterReduceTiming: Codable, Equatable, Sendable {
+    let editableBudgetSeconds: Double
+    let editableEstimatedSeconds: Double?
+    let pace: TeleprompterPace
+    let calibrationFactor: Double
+}
+
+struct TeleprompterReduceDecoder: Sendable {
+    func decode(
+        _ json: String,
+        editableBlocks: [TeleprompterReduceEditableBlock]
+    ) throws -> TeleprompterReduceOutput {
+        do {
+            let object = try TeleprompterStrictJSON.object(from: Data(json.utf8))
+            guard Set(object.keys) == ["schema_version", "patches"] else {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
+            guard let rawPatches = object["patches"] as? [[String: Any]],
+                  rawPatches.allSatisfy({ Set($0.keys) == ["block_id", "revision", "text"] }) else {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
+            let payload = try JSONDecoder().decode(TeleprompterReduceOutput.self, from: Data(json.utf8))
+            guard payload.schemaVersion == "teleprompter.reduction.v1" else {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
+            let allowed = Dictionary(uniqueKeysWithValues: editableBlocks.map { ($0.id, $0) })
+            let patchIDs = payload.patches.map(\.blockID)
+            guard patchIDs.count == Set(patchIDs).count else {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
+            for patch in payload.patches {
+                guard let editable = allowed[patch.blockID],
+                      editable.revision == patch.revision,
+                      !patch.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      TeleprompterProtectedContentValidator.matches(
+                          protectedLiterals: editable.protectedLiterals,
+                          candidate: patch.text
+                      ) else {
+                    throw TeleprompterPreparationError.invalidPromptResponse
+                }
+            }
+            // 没有 patch 的块保持原样就算成功——原先的 review_block_ids 是让模型
+            // 表达「拿不准」的出口，现在这类内容必须由它自己写成确定的一版。
+            return payload
+        } catch let error as TeleprompterPreparationError {
+            throw error
+        } catch {
+            throw TeleprompterPreparationError.invalidPromptResponse
+        }
     }
 }

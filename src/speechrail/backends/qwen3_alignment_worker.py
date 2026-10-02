@@ -41,10 +41,17 @@ _DTYPE_ALIASES: Final = {
 
 
 def _normalize_dtype(value: object) -> str | None:
-    """把 aligner 自报的 dtype 规范化为 SpeechRail 精度名。缺失时返回 ``None``。"""
+    """把 aligner 自报的 dtype 规范化为 SpeechRail 精度名。缺失时返回 ``None``。
 
-    if not isinstance(value, str):
+    MLX 的 dtype 是枚举对象而不是字符串, 其 ``str()`` 形如
+    ``mlx.core.bfloat16``。两种形态都要接受: 只认字符串会让每个 bf16
+    对齐器都被误判为「未上报 dtype」, worker 拒绝加载, 整条对齐路径不可达。
+    """
+
+    if value is None:
         return None
+    if not isinstance(value, str):
+        value = str(value)
     return _DTYPE_ALIASES.get(value.removeprefix("mlx.core.").strip().lower())
 
 

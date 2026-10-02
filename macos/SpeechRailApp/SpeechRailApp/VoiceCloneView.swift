@@ -10,7 +10,8 @@ import SwiftUI
 public struct VoiceCloneView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    /// 开发者详情是全 App 的一个偏好（View ▸ ⌘⌥I），与其余七页同一条开关。
+    /// 开发者详情是全 App 的一个偏好（View ▸ ⌘⌥I），与其余七页同一条开关，
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @SceneStorage("speechrail.voiceClone.promptID") private var promptID = ""
     /// 自己写的那一段稿件（不覆盖官方提词稿：选了「自己写」才用这个值）。
@@ -35,8 +36,16 @@ public struct VoiceCloneView: View {
                 registerCard
             }
             feedback
+        } trailing: {
+            // 录制与注册才是这一页的主按钮，都留在卡片里；页头只放右侧详情面板的
+            // 开关——它此前全 App 都没有页内入口（2026-09-30 用户反馈）。
+            DeveloperInspectorToggle(
+                isPresented: $showInspector,
+                helpText: "查看录音设备、提词稿来源与注册参数 (⌘⌥I)"
+            )
         }
-        // 这一页没有头部动作：录制与注册是页面里的主按钮，⌘R 留给「重新读取提词稿」。
+        // 头部动作只有详情面板的开关：录制与注册是页面里的主按钮，
+        // ⌘R 留给「重新读取提词稿」。
         .focusedSceneValue(
             \.reloadPageCommand,
             ReloadPageCommand(title: "重新读取提词稿") {
@@ -786,7 +795,7 @@ public struct VoiceCloneView: View {
     // MARK: - 开发者详情
 
     private var inspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                 SectionHeading(
                     title: "参考音频",

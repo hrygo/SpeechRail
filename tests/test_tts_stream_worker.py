@@ -8,6 +8,7 @@ can be pinned exactly.
 from __future__ import annotations
 
 import io
+import struct
 from typing import Any
 
 import pytest
@@ -332,8 +333,19 @@ def test_audio_frames_carry_monotonic_byte_exact_positions() -> None:
     assert second.frames[0].payload["sample_offset"] == 100
     third = host.step()
     assert third.terminal is True
-    assert third.frames[0].payload["type"] == FRAME_STREAM_DONE
-    assert third.frames[0].payload["terminal"] == "completed"
+    # The completed utterance ends with a fade-to-silence frame before the
+    # terminal, so the waveform never stops on a step. It continues from the
+    # last sample that was sent (`_pcm` is all 1s) and reaches zero.
+    fade = third.frames[0]
+    assert fade.payload["type"] == FRAME_STREAM_AUDIO
+    assert fade.payload["chunk_index"] == 2
+    assert fade.payload["sample_offset"] == 340
+    fade_samples = struct.unpack(f"<{len(fade.binary) // 2}h", fade.binary)
+    assert len(fade_samples) == 120
+    assert fade_samples[0] == 1
+    assert fade_samples[-1] == 0
+    assert third.frames[1].payload["type"] == FRAME_STREAM_DONE
+    assert third.frames[1].payload["terminal"] == "completed"
 
 
 def test_audio_budget_is_released_only_after_the_writer_confirms_delivery() -> None:

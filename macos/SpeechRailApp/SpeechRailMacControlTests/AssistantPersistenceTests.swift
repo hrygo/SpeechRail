@@ -329,4 +329,74 @@ final class AssistantPersistenceTests: XCTestCase {
         let after = try await line(speakerLine, in: meetingID)
         XCTAssertEqual(after.status, .partial, "会议的说话人 partial 不受助手封存影响")
     }
+
+    // MARK: - 回看快照：一次读完，四份数据与分别读一致
+
+    /// `reviewSnapshot` 是给"翻一条记录"用的一次性快照。它存在的理由是把
+    /// 4 次串行 `await` 收成 1 次，所以它**必须**和分别读给出同一份结果——
+    /// 否则界面一次到位显示的是一份和库里对不上的内容。
+    func testReviewSnapshotMatchesFourSeparateReads() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        try await store.updateSessionTitle(id: sessionID, title: "今天聊了天气")
+        try await store.renameSpeaker(sessionID: sessionID, label: "S1", name: "我")
+        try await store.noteVoiceChange(
+            sessionID: sessionID,
+            atOrdinal: 2,
+            voice: VoiceSnapshot(id: "v2", name: "温柔讲解")
+        )
+        try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "今天天气怎么样",
+                source: .microphone,
+                speakerLabel: "S1"
+            )
+        )
+        try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .assistant,
+                text: "今天晴，最高 28 度。",
+                source: .microphone
+            )
+        )
+        // 未定稿的行：回看与导出只认已定稿行，快照也不该把它带进来。
+        try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "这句没能定稿",
+                source: .microphone,
+                status: .partial
+            )
+        )
+
+        let loaded = try await store.reviewSnapshot(sessionID: sessionID)
+        let snapshot = try XCTUnwrap(loaded, "记录明明在库里，快照却读不到")
+
+        // 四个字段逐一与"分别读"比对：快照存在的理由是一次到位，
+        // 不是可以读出不一样的内容。`XCTAssertEqual` 的参数是 autoclosure，
+        // await 必须先落到局部值。
+        let record = try await store.session(id: sessionID)
+        let lines = try await store.lines(sessionID: sessionID)
+        let speakerNames = try await store.speakerNames(sessionID: sessionID)
+        let voiceChanges = try await store.voiceChanges(sessionID: sessionID)
+        XCTAssertEqual(snapshot.record, record)
+        XCTAssertEqual(snapshot.lines, lines)
+        XCTAssertEqual(snapshot.speakerNames, speakerNames)
+        XCTAssertEqual(snapshot.voiceChanges, voiceChanges)
+
+        XCTAssertEqual(snapshot.record.title, "今天聊了天气")
+        XCTAssertEqual(snapshot.lines.count, 2, "回看只认已定稿行")
+        XCTAssertEqual(snapshot.speakerNames["S1"], "我")
+        XCTAssertEqual(snapshot.voiceChanges.first?.value, "v2|温柔讲解")
+    }
+
+    func testReviewSnapshotOfAnUnknownSessionIsNil() async throws {
+        let store = try requireStore()
+        let snapshot = try await store.reviewSnapshot(sessionID: "不存在的记录")
+        XCTAssertNil(snapshot, "读不到记录时与 `session(id:)` 一样返回 nil，不返回空快照")
+    }
 }

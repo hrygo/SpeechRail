@@ -28,6 +28,7 @@ from speechrail.domain.tts import (
 from speechrail.domain.voice_quality import (
     POLICY_VERSION,
     VOICE_QUALITY_V1_ZH_PROBES,
+    VoiceQualityProbeScore,
     VoiceQualityReference,
     VoiceQualityReport,
     VoiceQualityStatus,
@@ -40,8 +41,10 @@ from speechrail.domain.voice_quality import (
     make_quality_report,
     noise_floor_dbfs,
     normalize_transcript_for_match,
+    probe_carries_digits,
     speech_active_ratio,
     transcript_match_score,
+    transcript_numbers_match,
 )
 
 # ---------------------------------------------------------------------------
@@ -252,6 +255,237 @@ def test_transcript_match_normalizes_itn_punctuation_and_case() -> None:
     assert transcript_match_score("温度是22.5℃", "温度是225℃") < 1.0
 
 
+def test_transcript_match_equates_celsius_symbol_with_spoken_unit() -> None:
+    # A TTS reads `℃` aloud, so a word-for-word synthesis comes back from the
+    # ASR as 摄氏度. Notation alone must not cost the probe enough to sink the
+    # gate: `22.5℃` previously capped at 0.9091, under the 0.92 the output gate
+    # needs for `pass`, so no voice could ever reach `production_ready`.
+    assert (
+        transcript_match_score("温度是22.5℃", "温度是二十二点五摄氏度")
+        == pytest.approx(1.0)
+    )
+    assert (
+        transcript_match_score("温度是22.5℃", "温度是22.5℃") == pytest.approx(1.0)
+    )
+    assert normalize_transcript_for_match("二十二点五摄氏度") == "22.5°c"
+    # The fold is a notation equivalence, not a licence to ignore a wrong unit.
+    assert transcript_match_score("温度是22.5℃", "温度是二十二度") < 0.98
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "asr_text"),
+    [
+        ("self_intro", "请进行自我介绍。"),
+        ("short_sentence", "今天天气真好，我们开个会吧。"),
+        (
+            "long_paragraph",
+            "请先简要介绍你的工作经历和目前关注的项目，并告诉我你今天希望达成的目标，"
+            "以及在执行过程中你会采用哪些优先级策略。",
+        ),
+        (
+            "question_prompt",
+            "你认为人工智能能否真正提升我们的工作效率？为什么？",
+        ),
+        (
+            "numbers_punct",
+            "今天是2026年9月9日，温度是22.5摄氏度，请你告诉我三、六、九的顺序。",
+        ),
+        (
+            "pause_markers",
+            "我们先来先说第一点，然后我们再讨论第二点。",
+        ),
+    ],
+)
+def test_every_fixed_probe_survives_a_real_asr_round_trip(
+    probe_id: str, asr_text: str
+) -> None:
+    # Regression guard for issue #126. `asr_text` is what the real local ASR
+    # actually returned for each probe (voice wom-d2888cc51194ee2e, 3.4.2
+    # runtime), not a hand-written idealisation -- an earlier version of this
+    # test used invented text and so cleared a probe the real ASR never passes.
+    #
+    # A probe whose own text cannot survive the round trip caps the `min()`
+    # aggregate for every voice, so no voice can pass however good it is. Both
+    # offenders were notation the TTS never voices: `℃` comes back as 摄氏度,
+    # and `……` is not pronounced at all, so the ASR drops it entirely.
+    probe = next(p for p in VOICE_QUALITY_V1_ZH_PROBES if p["id"] == probe_id)
+    assert transcript_match_score(probe["text"], asr_text) == pytest.approx(1.0)
+
+
+def test_transcript_match_drops_ellipsis_but_keeps_decimals() -> None:
+    # `……` must not score as six missing characters; `22.5` must not lose its
+    # separator. Both are single dots vs a run of them.
+    assert normalize_transcript_for_match("我们先来……然后") == "我们先来然后"
+    assert normalize_transcript_for_match("温度是22.5℃") == "温度是22.5°c"
+    assert normalize_transcript_for_match("wait... what") == "waitwhat"
+    # A genuinely dropped phrase still costs proportionally.
+    assert transcript_match_score("我们先来——先说第一点", "我们先来说第一点") < 1.0
+
+
+@pytest.mark.parametrize(
+    ("spoken", "normalized"),
+    [
+        # A magnitude word is arithmetic, not a syllable: `二十二` is 22 and
+        # `五千三百` is 5300. Left as characters they scored as edit distance
+        # against the arabic probe text, so a word-for-word synthesis was
+        # penalised for spelling a number the long way round.
+        ("二十二度", "22度"),
+        ("五千三百", "5300"),
+        ("一万两千", "12000"),
+        ("十", "10"),
+        # `百分之` is a fraction marker, not a magnitude before a unit:
+        # 百分之九十九 is 99%, and matching the leading 百 would read it as
+        # `100分之99` and lose the value the percent rule had just computed.
+        ("百分之九十九点九", "99.9%"),
+        # A positional digit sequence carries no magnitude and must stay
+        # positional: `三六九` is the digit string 369, not 3+6+9 arithmetic.
+        ("三六九", "369"),
+        ("二零二六", "2026"),
+    ],
+)
+def test_normalization_resolves_chinese_magnitudes_to_arabic(
+    spoken: str, normalized: str
+) -> None:
+    assert normalize_transcript_for_match(spoken) == normalized
+
+
+def test_chinese_magnitude_spelling_scores_like_the_arabic_spelling() -> None:
+    # `numbers_punct` exists to catch misread digits, so its own reference text
+    # has to compare equal to the way an ASR spells those digits back. Before
+    # magnitudes were resolved, a correct synthesis that said `二十二度` instead
+    # of `22度` lost every character of that number to edit distance.
+    assert transcript_match_score("温度是二十二度", "温度是22度") == pytest.approx(1)
+    assert transcript_match_score("来了五千三百人", "来了5300人") == pytest.approx(1)
+
+
+def test_magnitude_normalization_still_catches_a_misread_number() -> None:
+    # Resolving magnitudes must not become a rubber stamp: 25 and 22 are
+    # different numbers and have to stay different numbers.
+    assert transcript_match_score("温度是22.5℃", "温度是二十五摄氏度") < 0.98
+    assert transcript_match_score("五千三百人", "五千三百人") == pytest.approx(1)
+    assert transcript_match_score("五千三百人", "五千三百二十人") < 1
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # The whole point of the numbers probe: a misread digit must not survive
+        # as a small edit distance. `22.5` read as `25` is one character off in
+        # a 44-character probe -- comfortably `pass` -- while the number itself
+        # is simply wrong.
+        ("温度是22.5℃", "温度是25℃", False),
+        ("今天是9月9日", "今天是9月19日", False),
+        ("温度是22.5℃", "温度是22.5℃", True),
+        # Equivalent spellings normalize to the same digits before comparison.
+        ("温度是22.5℃", "温度是二十二点五摄氏度", True),
+        ("来了五千三百人", "来了5300人", True),
+        # A dropped or invented digit is a mismatch too, even though the
+        # surrounding sentence is intact.
+        ("请按3、6、9的顺序", "请按3、6的顺序", False),
+    ],
+)
+def test_transcript_numbers_match_compares_digits_exactly(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+def test_transcript_numbers_match_ignores_probes_without_digits() -> None:
+    # Nothing to compare must not read as "matched" or "mismatched"; callers
+    # decide applicability from whether the probe text carries digits at all.
+    assert transcript_numbers_match("今天天气真好", "今天天气真好") is True
+    assert probe_carries_digits("今天天气真好，我们开个会吧。") is False
+    assert probe_carries_digits("温度是22.5℃") is True
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # A speaker reading a long digit string swaps in the clarification
+        # characters so 1/7 and 0/O stay apart, and the ASR hands them back
+        # verbatim. `幺幺零` and `110` are the same number; before the fold the
+        # clarifiers were dropped as non-numeric and the run compared as `0`
+        # against `110`, rejecting a voice that said the right thing.
+        ("报警电话是110", "报警电话是幺幺零", True),
+        ("我的号码是13800138000", "我的号码是一三八零零一三八零零零", True),
+        # Folding is not a rubber stamp: the clarification characters carry
+        # their own digits, so a wrong one is still a wrong number.
+        ("我的号码是13800138000", "我的号码是一三八零零幺三八丁", False),
+    ],
+)
+def test_digit_clarifiers_fold_inside_a_digit_run(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("园丁在浇水", "园丁在浇水"),
+        ("幺妹回来了", "幺妹回来了"),
+        ("尜尖货", "尜尖货"),
+        # The quantifier in `一点丁点` is two digit characters next to each
+        # other. Reading a run of two as a digit string turned it into `13`.
+        ("这是一丁点", "这是1丁点"),
+    ],
+)
+def test_digit_clarifiers_never_touch_ordinary_words(
+    text: str, expected: str
+) -> None:
+    assert normalize_transcript_for_match(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        # `09` and `9` are the same number, so a date spoken with zero padding
+        # has to match one heard without it.
+        ("编号是07", "编号是七", True),
+        ("值是09.5", "值是9.5", True),
+        # Only the integer part loses its padding: these two really differ.
+        ("占比是0.05%", "占比是0.5%", False),
+    ],
+)
+def test_leading_zeros_are_compared_by_value(
+    expected: str, actual: str, matches: bool
+) -> None:
+    assert transcript_numbers_match(expected, actual) is matches
+
+
+@pytest.mark.parametrize(
+    ("misread", "edit_distance"),
+    [
+        # Both numbers below are the exact readings issue #127 tabulated: a
+        # wrong temperature and a wrong day, each clearing the 0.92 `pass` bar
+        # on character distance alone while the number itself is wrong.
+        ("今天是2026年9月9日，温度是25℃，请你告诉我 3、6、9 的顺序。", 0.9375),
+        ("今天是2026年9月19日，温度是22.5℃，请你告诉我 3、6、9 的顺序。", 0.96969),
+    ],
+)
+def test_a_misread_number_survives_edit_distance_but_not_the_digit_check(
+    misread: str, edit_distance: float
+) -> None:
+    probe = next(p for p in VOICE_QUALITY_V1_ZH_PROBES if p["id"] == "numbers_punct")
+    assert transcript_match_score(probe["text"], misread) == pytest.approx(
+        edit_distance, abs=1e-4
+    )
+    assert transcript_match_score(probe["text"], misread) >= 0.92  # would pass today
+    assert transcript_numbers_match(probe["text"], misread) is False
+
+
+def test_every_fixed_probe_applies_the_digit_check_when_it_carries_digits() -> None:
+    # `pause_markers` reads 第一点 / 第二点, which normalization renders with
+    # digits, so it is covered too: a swapped ordinal is just as wrong as a
+    # swapped temperature. Applicability is derived from the text rather than
+    # from a probe id so a future numeric probe is covered without edits.
+    covered = {
+        probe["id"] for probe in VOICE_QUALITY_V1_ZH_PROBES if probe_carries_digits(probe["text"])
+    }
+    assert "numbers_punct" in covered
+    assert covered == {"numbers_punct", "pause_markers"}
+
+
 def test_transcript_match_rejects_unrelated_text() -> None:
     assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
 
@@ -319,6 +553,7 @@ def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
         "deterministic",
         "transcript_match",
         "intelligibility_evaluated",
+        "probe_scores",
     }
     assert data["reference"]["transcript_match"] == 0.998
 
@@ -343,6 +578,61 @@ def test_report_from_dict_round_trips_and_ignores_unknown_fields() -> None:
     assert restored.synthesis == report.synthesis
     # unknown failure codes are filtered out by the fixed enum
     assert restored.failure_codes == report.failure_codes
+
+
+def test_probe_scores_round_trip_and_default_to_empty() -> None:
+    # The aggregate `transcript_match` is a `min()`, so the per-probe breakdown
+    # is the only way to attribute a rejection to one probe. It must survive
+    # serialization and must stay optional for reports built without it.
+    assert VoiceQualitySynthesis(
+        probe_count=0,
+        successful_probe_count=0,
+        active_rms_dbfs=0.0,
+        peak_dbfs=0.0,
+        chunk_jump_p95_db=0.0,
+        clipping_ratio=0.0,
+        deterministic=False,
+    ).to_dict()["probe_scores"] == []
+
+    synthesis = VoiceQualitySynthesis(
+        probe_count=6,
+        successful_probe_count=6,
+        active_rms_dbfs=-20.8,
+        peak_dbfs=-3.2,
+        chunk_jump_p95_db=4.6,
+        clipping_ratio=0.0,
+        deterministic=True,
+        transcript_match=0.9091,
+        intelligibility_evaluated=True,
+        probe_scores=[
+            # A numeric probe carries a digit verdict; one without digits stays
+            # `None`, which is a different thing from "checked and mismatched".
+            VoiceQualityProbeScore(
+                probe_id="numbers_punct", transcript_match=0.9375, numbers_exact=False
+            ),
+            VoiceQualityProbeScore(
+                probe_id="short_sentence", transcript_match=1.0, numbers_exact=None
+            ),
+        ],
+    )
+
+    payload = synthesis.to_dict()
+    assert payload["probe_scores"] == [
+        {"probe_id": "numbers_punct", "transcript_match": 0.9375, "numbers_exact": False},
+        {"probe_id": "short_sentence", "transcript_match": 1.0, "numbers_exact": None},
+    ]
+    assert VoiceQualitySynthesis.from_dict(payload) == synthesis
+
+    # A payload written before `probe_scores` existed must still load.
+    legacy = dict(payload)
+    del legacy["probe_scores"]
+    assert VoiceQualitySynthesis.from_dict(legacy).probe_scores == []
+
+    # A payload written before `numbers_exact` existed must load too, and must
+    # not silently claim a digit verdict that was never made.
+    assert VoiceQualityProbeScore.from_dict(
+        {"probe_id": "numbers_punct", "transcript_match": 0.9375}
+    ).numbers_exact is None
 
 
 def test_report_from_dict_round_trips_synthesis_failure_codes() -> None:
@@ -377,6 +667,30 @@ def test_make_quality_report_grades_into_failure_codes() -> None:
     report = make_quality_report(reference, _synthesis())
     assert report.status == VoiceQualityStatus.REJECT.value
     assert report.failure_codes == ["clipping"]
+
+
+def test_output_gate_report_carries_no_reference_block() -> None:
+    # `POST /v1/voices/{id}/quality-runs` is an output gate: it never grades the
+    # reference audio. It used to fill the block with all-zero placeholders, and
+    # every one of those zeros is the *worst* reading for its metric, so the report
+    # said "reference is 0s long at 0 dB SNR" for a run that measured nothing.
+    # Reporting `null` says the honest thing: not evaluated on this path. The
+    # reference side is graded separately, at clone time, into the profile.
+    report = VoiceQualityReport(
+        policy_version=POLICY_VERSION,
+        status=VoiceQualityStatus.PASS.value,
+        run_id="vqr_0123456789abcdef0123456789abcdef",
+        tested_at="2026-10-02T00:00:00Z",
+        reference=None,
+        synthesis=_synthesis(),
+        failure_codes=[],
+    )
+
+    payload = report.to_dict()
+
+    assert "reference" in payload
+    assert payload["reference"] is None
+    assert VoiceQualityReport.from_dict(payload).reference is None
 
 
 # ---------------------------------------------------------------------------

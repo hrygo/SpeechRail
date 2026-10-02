@@ -67,6 +67,7 @@ public struct TeleprompterStageView: View {
             .background { stageBackground }
             .overlay { stageBorder }
             .clipShape(SpeechRailDesignTokens.Corner.containerShape)
+            .scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)
             .animation(
                 reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
                 value: session.currentSegmentIndex
@@ -86,6 +87,20 @@ public struct TeleprompterStageView: View {
 
     private var stageWithPresentation: some View {
         stageBase
+            .contentShape(Rectangle())
+            .onTapGesture {
+                readingAreaFocused = true
+                revealControls(immediate: false)
+            }
+            .onHover { isInside in
+                pointerInsideControls = isInside
+                interactionState.setPointerInside(isInside)
+                if isInside {
+                    revealControls(immediate: false)
+                } else {
+                    scheduleControlsHide()
+                }
+            }
             .focusable()
             .focused($readingAreaFocused)
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -166,6 +181,10 @@ public struct TeleprompterStageView: View {
     private var stageWithKeyboard: some View {
         stageWithSettingsObservation
             .onKeyPress(.tab) { handleTabKey() }
+            .onKeyPress(KeyEquivalent("j"), phases: .down) { handleReadingKeyPress($0, by: 1) }
+            .onKeyPress(KeyEquivalent("k"), phases: .down) { handleReadingKeyPress($0, by: -1) }
+            .onKeyPress(KeyEquivalent("v"), phases: .down) { _ in handleVoiceToggleKey() }
+            .onKeyPress(KeyEquivalent("m"), phases: .down) { _ in handleMirrorToggleKey() }
             .onKeyPress(.space, phases: .down) { handleReadingKeyPress($0, by: 1) }
             .onKeyPress(.leftArrow, phases: .down) { handleReadingKeyPress($0, by: -1) }
             .onKeyPress(.rightArrow, phases: .down) { handleReadingKeyPress($0, by: 1) }
@@ -245,7 +264,7 @@ public struct TeleprompterStageView: View {
 
     private var acceptsReadingKeyCommands: Bool {
         TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
-            readingAreaFocused: readingAreaFocused,
+            readingAreaFocused: true,
             controlFocusInside: focusedControl != nil,
             menuOrPopoverPresented: isAppearancePopoverPresented
         )
@@ -292,8 +311,20 @@ public struct TeleprompterStageView: View {
     }
 
     private func handleReadingKeyPress(_ keyPress: KeyPress, by delta: Int) -> KeyPress.Result {
-        guard keyPress.modifiers.isEmpty, acceptsReadingKeyCommands else { return .ignored }
+        guard keyPress.modifiers.isEmpty, !isAppearancePopoverPresented else { return .ignored }
         moveByDisplayLine(delta)
+        return .handled
+    }
+
+    private func handleVoiceToggleKey() -> KeyPress.Result {
+        guard !isAppearancePopoverPresented, !voiceAssistBusy else { return .ignored }
+        handleVoiceAssist()
+        return .handled
+    }
+
+    private func handleMirrorToggleKey() -> KeyPress.Result {
+        guard !isAppearancePopoverPresented else { return .ignored }
+        settings.isMirrored.toggle()
         return .handled
     }
 
@@ -521,7 +552,7 @@ public struct TeleprompterStageView: View {
         GeometryReader { geometry in
             let segments = session.activeVersion?.segments ?? []
             let contentWidth = TeleprompterStageLayoutPolicy.contentLayoutWidth(
-                windowContentWidth: geometry.size.width - 2 * SpeechRailDesignTokens.Spacing.md,
+                windowContentWidth: geometry.size.width,
                 requestedContentWidth: settings.contentWidth
             )
             let request = LineLayoutRequest(
@@ -568,6 +599,8 @@ public struct TeleprompterStageView: View {
                         }
                     }
                 }
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.bottom, SpeechRailDesignTokens.Teleprompter.stageControlAreaHeight + SpeechRailDesignTokens.Spacing.lg)
                 .frame(width: contentWidth, alignment: .leading)
                 .frame(width: geometry.size.width, alignment: .center)
             }
@@ -630,14 +663,17 @@ public struct TeleprompterStageView: View {
     }
 
     private func moveByDisplayLine(_ delta: Int) {
-        guard let target = TeleprompterStagePresentation.positionByMovingLine(
+        if let target = TeleprompterStagePresentation.positionByMovingLine(
             by: delta,
             from: currentReadingPosition,
             lines: displayLines
-        ) else {
-            return
+        ) {
+            session.moveToReadingPosition(target)
+        } else if delta > 0 {
+            session.moveToNext()
+        } else if delta < 0 {
+            session.moveToPrevious()
         }
-        session.moveToReadingPosition(target)
     }
 
     /// 查阅全稿或手动滚动之后，把舞台收回当前朗读行。
@@ -665,7 +701,10 @@ public struct TeleprompterStageView: View {
         let isCurrent = index == currentLineIndex
 
         return Text(styledText(line, index: index, currentLineIndex: currentLineIndex))
-            .font(.system(size: settings.scriptPointSize, weight: .regular))
+            .font(.system(
+                size: settings.scriptPointSize,
+                weight: isCurrent ? .medium : .regular
+            ))
             .lineSpacing(settings.lineSpacing)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -707,9 +746,9 @@ public struct TeleprompterStageView: View {
         if index == currentLineIndex {
             1
         } else if index < currentLineIndex {
-            0.40
+            SpeechRailDesignTokens.Teleprompter.stagePastLineOpacity
         } else {
-            SpeechRailDesignTokens.Teleprompter.stageNextSegmentOpacity
+            SpeechRailDesignTokens.Teleprompter.stageNextLineOpacity
         }
     }
 
@@ -793,8 +832,8 @@ public struct TeleprompterStageView: View {
                         session.moveToSegment(index)
                     } label: {
                         Image(systemName: "arrow.turn.down.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .frame(width: 14, height: 14)
+                            .font(SpeechRailDesignTokens.Typography.iconMicroSemibold)
+                            .frame(width: SpeechRailDesignTokens.Icon.segmentJumpFrame, height: SpeechRailDesignTokens.Icon.segmentJumpFrame)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
@@ -969,6 +1008,8 @@ public struct TeleprompterStageView: View {
                     .keyboardShortcut("[", modifiers: [.command])
                 Button("") { settings.increaseOpacity() }
                     .keyboardShortcut("]", modifiers: [.command])
+                Button("") { settings.isMirrored.toggle() }
+                    .keyboardShortcut("m", modifiers: [.command, .option])
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -1136,6 +1177,14 @@ private struct TeleprompterStageAppearancePopover: View {
                     set: { settings.showClockAndProgress = $0 }
                 )
             )
+            Toggle(
+                "水平镜像翻转 (分光镜)",
+                isOn: Binding(
+                    get: { settings.isMirrored },
+                    set: { settings.isMirrored = $0 }
+                )
+            )
+            .help("水平翻转文本显示，供物理分光镜/专业提词玻璃反射阅读（快捷键 ⌘⌥M）")
             Toggle("查阅全稿", isOn: $isBrowsingAll)
         }
         .padding(SpeechRailDesignTokens.Spacing.md)

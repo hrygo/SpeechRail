@@ -220,6 +220,35 @@ def test_aligner_engine_loads_the_bfloat16_snapshot_at_its_own_precision(
     assert engine.identity.quantization_format == "none"
 
 
+class _MlxDtype:
+    """Stand in for an MLX dtype: an object whose ``str()`` carries the name."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __str__(self) -> str:
+        return f"mlx.core.{self._name}"
+
+
+def test_aligner_engine_accepts_an_mlx_dtype_object_and_not_only_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The vendor reports a dtype object, not its name.
+
+    Accepting only strings made every bf16 aligner look like it had reported no
+    dtype at all, so the worker refused to load and the whole alignment path
+    was unreachable.
+    """
+
+    _install_fake_aligner_runtime(monkeypatch, reported_dtype=_MlxDtype("bfloat16"))
+    monkeypatch.setattr(alignment_worker_module, "inspect_model", lambda _: _aligner_snapshot())
+
+    engine = Qwen3AlignerEngine(tmp_path, "mps", "bfloat16")
+
+    assert engine.identity.dtype == "bfloat16"
+    assert engine.identity.quantization_format == "none"
+
+
 def test_aligner_engine_keeps_float16_compute_for_a_quantized_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

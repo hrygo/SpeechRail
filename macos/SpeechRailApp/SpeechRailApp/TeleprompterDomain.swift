@@ -10,12 +10,6 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     /// tighten in flight. Refusing is correct; refusing *silently* is not, so
     /// this is a thrown, user-facing reason rather than a bare `return`.
     case sessionBusy
-    /// Changing the content range invalidates the current segmentation, and
-    /// with it any review the reader already worked through. That work is not
-    /// reproducible without another AI round, so the session refuses instead
-    /// of dropping it; the caller confirms first and then calls
-    /// `applyContentSelectionAfterConfirmation`.
-    case reviewDecisionsWouldBeDiscarded
 
     public var errorDescription: String? {
         switch self {
@@ -29,8 +23,6 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
             "没能准备好 AI 整理请求"
         case .sessionBusy:
             "现在不能切换稿件：提词窗口还开着，或上一步还没收尾。先关掉提词窗口再试。"
-        case .reviewDecisionsWouldBeDiscarded:
-            "改范围会作废你已经审阅过的内容，需要重新整理并重新审阅。确认要继续吗？"
         }
     }
 }
@@ -81,42 +73,6 @@ public enum TeleprompterAIDataFlowDisclosure {
     }
 }
 
-/// 「按时长精简」是唯一被授权删掉正文内容的加工方式，因此它自己带一段确认，
-/// 不复用保真整理的确认文案——那段措辞承诺的是「不会删」。
-public enum TeleprompterCondenseDisclosure {
-    public static let title = "按时长精简会删掉内容"
-    public static let message = """
-        精简会把原稿压缩到接近你设定的目标时长，代价是真的会少讲一些内容。这和「整理朗读稿」不同：整理只改表达，不会删信息。
-
-        删掉的每一段都会单独列出来，写明原文是什么，由你逐条决定「确认删除」还是「保留原文」。确认之前，原稿和已确认的版本都不会被覆盖。
-
-        如果时长和内容冲突，SpeechRail 会直接告诉你冲突在哪，不会靠放慢语速假装达标。
-
-        点击「确认精简」后，选中的稿件文字会发送给设置中的 AI 服务；不会发送麦克风、摄像头或直播画面。
-        """
-}
-
-/// 提词器复核页的用户语言。
-///
-/// 这里集中维护默认路径上的文案，避免把内部数据模型（例如来源组、block）直接暴露给用户。
-/// 高级编辑动作仍然存在，但通过明确的渐进式披露入口进入。
-public enum TeleprompterReviewCopy {
-    public static let successTitle = "AI 已完成整理"
-    public static let successMessage = "已经生成一份适合跟读的稿件。原稿未被覆盖，确认后才会用于跟读。"
-    public static let readingTitle = "整理后的朗读稿"
-    public static let readingSubtitle = "先浏览并按需修改；确认后，这份稿件才会用于跟读。"
-    public static let compareSourceLabel = "对照原稿"
-    public static let advancedEditLabel = "编辑本段"
-    public static let acceptAction = "确认并使用这份稿件"
-    public static let tightenAction = "让表达更简洁"
-    public static let trialAction = "先试读"
-    public static let discardAction = "放弃这次整理"
-
-    public static func blockTitle(ordinal: Int) -> String {
-        "第 \(max(0, ordinal) + 1) 段"
-    }
-}
-
 public struct TeleprompterSourceRange: Codable, Hashable, Sendable {
     public let start: Int
     public let end: Int
@@ -133,96 +89,23 @@ public struct TeleprompterSourceRange: Codable, Hashable, Sendable {
 
 public typealias TeleprompterPace = TeleprompterTimingPolicy.Pace
 
-public enum TeleprompterReviewIssue: String, Codable, Sendable, CaseIterable {
-    case missingContext = "missing_context"
-    case formatAmbiguity = "format_ambiguity"
-    case readingChoice = "reading_choice"
-    case uncertainMeaning = "uncertain_meaning"
-    case nonspokenContent = "nonspoken_content"
-    case subjectValueChanged = "subject_value_changed"
-    case conditionRemoved = "condition_removed"
-    case negationChanged = "negation_changed"
-    case comparisonChanged = "comparison_changed"
-    case certaintyChanged = "certainty_changed"
-    /// A passage the lossy condense operation proposes to drop. Distinct from
-    /// `nonspokenContent`: this content was meant to be spoken.
-    case contentRemoved = "content_removed"
-
-    public var title: String {
-        switch self {
-        case .missingContext: "指代缺失"
-        case .formatAmbiguity: "格式歧义"
-        case .readingChoice: "读法选择"
-        case .uncertainMeaning: "含义存疑"
-        case .nonspokenContent: "建议略过"
-        case .subjectValueChanged: "主体与数值关系变化"
-        case .conditionRemoved: "限定条件变化"
-        case .negationChanged: "否定或禁止含义变化"
-        case .comparisonChanged: "比较范围变化"
-        case .certaintyChanged: "确定程度变化"
-        case .contentRemoved: "这一段将被删除"
-        }
-    }
-
-    public var detail: String {
-        switch self {
-        case .missingContext: "原文存在未指明的代词或前文依赖，请核对是否需要补足主语。"
-        case .formatAmbiguity: "原文包含代码、表格或特殊符号，AI 提出了转述建议，请确认表达方式。"
-        case .readingChoice: "存在多种读法（如按字读或按意译读），请选择你希望的读法。"
-        case .uncertainMeaning: "原文含义模糊或存在歧义，未做臆测，请确认正文。"
-        case .nonspokenContent: "模型建议不朗读此项（如版权声明、未闭合标记或纯排版内容），由你决定是否跳过。"
-        case .subjectValueChanged: "主体与数值的对应关系发生变化，请确认没有互换或错配。"
-        case .conditionRemoved: "原文中的时间、范围或前提条件发生变化，请确认是否保留。"
-        case .negationChanged: "否定、禁止或无边界的含义可能发生变化，请核对。"
-        case .comparisonChanged: "上限、下限、范围或相等关系发生变化，请确认。"
-        case .certaintyChanged: "可能、预计、必须等确定程度发生变化，请确认。"
-        case .contentRemoved: "精简建议不讲这一段，删除后就不会出现在朗读稿里。保留请选择“保留原文”。"
-        }
-    }
-}
-
-public enum TeleprompterReviewAction: String, Codable, Sendable {
-    case accept      // 采用建议
-    case edit        // 修改
-    case keepSource  // 保留原文
-    case convertToCue // 仅作提示
-    case skip        // 跳过
-}
-
-public struct TeleprompterReviewItem: Codable, Equatable, Identifiable, Sendable {
-    public let id: String
-    public let blockID: String
-    public let issue: TeleprompterReviewIssue
-    public var suggestedText: String
-    public var sourceSnippet: String
-    public var resolvedAction: TeleprompterReviewAction?
-
-    public init(
-        id: String = UUID().uuidString,
-        blockID: String,
-        issue: TeleprompterReviewIssue,
-        suggestedText: String,
-        sourceSnippet: String,
-        resolvedAction: TeleprompterReviewAction? = nil
-    ) {
-        self.id = id
-        self.blockID = blockID
-        self.issue = issue
-        self.suggestedText = suggestedText
-        self.sourceSnippet = sourceSnippet
-        self.resolvedAction = resolvedAction
-    }
-
-    public var isResolved: Bool {
-        resolvedAction != nil
-    }
-}
-
-public enum TeleprompterBlockDisposition: String, Codable, Sendable {
+/// 段落在跟读时的处理方式。AI 整理与人工标记都只在这一层发生——
+/// 粒度是「段」，不是「句」：口语稿天然按段落呼吸，逐句标记既费力又没人真会那样用。
+public enum TeleprompterBlockDisposition: String, Codable, CaseIterable, Sendable {
+    /// 照着念。
     case speak
+    /// 自己扫一眼，不念出声。
     case cue
+    /// 不进跟读。
     case skip
-    case unresolved
+
+    public var preparedTitle: String {
+        switch self {
+        case .speak: "照念"
+        case .cue: "只作提示"
+        case .skip: "跳过"
+        }
+    }
 }
 
 public enum TeleprompterBlockOrigin: String, Codable, Sendable {
@@ -239,7 +122,6 @@ public struct TeleprompterReadingBlock: Codable, Equatable, Identifiable, Sendab
     public var rawSourceText: String
     public var disposition: TeleprompterBlockDisposition
     public var origin: TeleprompterBlockOrigin
-    public var reviewIssues: [TeleprompterReviewIssue]
     public var budgetSeconds: Double
 
     public init(
@@ -250,7 +132,6 @@ public struct TeleprompterReadingBlock: Codable, Equatable, Identifiable, Sendab
         rawSourceText: String = "",
         disposition: TeleprompterBlockDisposition = .speak,
         origin: TeleprompterBlockOrigin = .ai,
-        reviewIssues: [TeleprompterReviewIssue] = [],
         budgetSeconds: Double = 0
     ) {
         self.id = id
@@ -260,30 +141,7 @@ public struct TeleprompterReadingBlock: Codable, Equatable, Identifiable, Sendab
         self.rawSourceText = rawSourceText
         self.disposition = disposition
         self.origin = origin
-        self.reviewIssues = reviewIssues
         self.budgetSeconds = budgetSeconds
-    }
-}
-
-public struct TeleprompterContentSelection: Codable, Equatable, Sendable {
-    public var totalParagraphCount: Int
-    public var selectedParagraphIndices: Set<Int>
-
-    public init(totalParagraphCount: Int = 0, selectedParagraphIndices: Set<Int> = []) {
-        self.totalParagraphCount = totalParagraphCount
-        self.selectedParagraphIndices = selectedParagraphIndices
-    }
-
-    public var isAllSelected: Bool {
-        totalParagraphCount > 0 && selectedParagraphIndices.count == totalParagraphCount
-    }
-
-    public var hasExclusions: Bool {
-        !isAllSelected && !selectedParagraphIndices.isEmpty
-    }
-
-    public var selectedCount: Int {
-        selectedParagraphIndices.count
     }
 }
 

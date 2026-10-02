@@ -572,6 +572,50 @@ def test_session_maps_worker_error_to_error_event() -> None:
     asyncio.run(scenario())
 
 
+def test_session_logs_worker_stderr_tail_without_widening_the_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Realtime ``error.code`` stays a short stable code, but the operator
+    log must carry the worker stderr tail that explains the failure."""
+
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+        worker.push(
+            "sess_test",
+            {
+                "type": "error",
+                "session_id": "sess_test",
+                "code": "worker_inference_error",
+                "stderr_tail": "LocalEntryNotFoundError: no cached snapshot",
+            },
+        )
+        events: list[StreamingAsrEvent] = []
+        task = asyncio.create_task(_collect(session, events, until=1))
+        await task
+        assert events[0].kind == "error"
+        assert events[0].error_code == "worker_inference_error"
+        await session.close()
+
+    with caplog.at_level("ERROR", logger="speechrail.backends.qwen3_streaming"):
+        asyncio.run(scenario())
+
+    assert "LocalEntryNotFoundError: no cached snapshot" in caplog.text
+    assert "worker_inference_error" in caplog.text
+
+
 def test_session_close_unregisters_its_queue() -> None:
     async def scenario() -> None:
         worker = FakeStreamingWorker()
@@ -701,5 +745,58 @@ def test_session_commit_times_out_when_worker_never_finishes() -> None:
             await session.commit()
 
         await session.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("queued", [0, 62, 63, 64])
+def test_worker_error_always_delivers_its_cause_and_ends_iterator(queued: int) -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker, language="zh", prompt="", session_id="error-boundary"
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(session.session_id, {"type": "session.opened"})
+        await connect
+        for _ in range(queued):
+            session._events_queue.put_nowait(StreamingAsrEvent(kind="partial", text="x"))
+        worker.push(session.session_id, {"type": "error", "code": "worker_inference_error"})
+        await asyncio.wait_for(session.wait_finalized(), 1)
+        events = [event async for event in session.events()]
+        assert events[-1].error_code == "worker_inference_error"
+        assert sum(event.kind == "error" for event in events) == 1
+        assert worker.mode_gate.active_mode is None
+        await session.close()
+        assert worker.unregister_calls == [session.session_id]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel_error", [False, True])
+def test_close_ends_parked_event_consumer_even_when_cancel_send_fails(cancel_error: bool) -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker, language="zh", prompt="", session_id="close-boundary"
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(session.session_id, {"type": "session.opened"})
+        await connect
+        async def collect() -> list[StreamingAsrEvent]:
+            return [event async for event in session.events()]
+        consumer = asyncio.create_task(collect())
+        await asyncio.sleep(0)
+        if cancel_error:
+            worker.send_error = RuntimeError("cancel failed")
+            with pytest.raises(RuntimeError, match="cancel failed"):
+                await session.close()
+        else:
+            await session.close()
+        assert await asyncio.wait_for(consumer, 0.2) == []
+        assert worker.mode_gate.active_mode is None
+        assert worker.unregister_calls == [session.session_id]
 
     asyncio.run(scenario())

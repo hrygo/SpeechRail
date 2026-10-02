@@ -422,6 +422,37 @@ public struct SessionChange: Identifiable, Hashable, Sendable {
     }
 }
 
+/// 记录库"回看这一条"要显示的全部内容，**一次读完**。
+///
+/// 翻一条记录原本是 4 次串行库读 + 5 处独立状态写入：每次 `await` 返回都触发
+/// 一次界面更新，高亮、页头、正文、元信息分几步跳出来，用户看着像卡住。
+/// 合成一个值之后，界面只被赋值一次。
+///
+/// 它是**快照**，不是事务：四条 SELECT 在 actor 里顺序执行，四份数据来自
+/// 同一个串行化的连接，期间不会有别的写入插进来。不要为它加
+/// `BEGIN/COMMIT`——那会把一次纯读变成一次写事务。
+public struct SessionReviewSnapshot: Hashable, Sendable {
+    public var record: SessionRecord
+    /// 与 `SessionStore.lines` 默认口径一致：**只含已定稿行**。
+    public var lines: [TranscriptLine]
+    /// 匿名标签 → 用户手写的名字。
+    public var speakerNames: [String: String]
+    /// 音色变更点，回看时每一行的徽标按它回推。
+    public var voiceChanges: [SessionChange]
+
+    public init(
+        record: SessionRecord,
+        lines: [TranscriptLine],
+        speakerNames: [String: String],
+        voiceChanges: [SessionChange]
+    ) {
+        self.record = record
+        self.lines = lines
+        self.speakerNames = speakerNames
+        self.voiceChanges = voiceChanges
+    }
+}
+
 /// 纪要的一个版本。重新生成只新增版本，不覆盖旧版。
 public struct MinutesVersion: Identifiable, Hashable, Sendable {
     public var id: String

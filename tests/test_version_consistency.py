@@ -142,3 +142,24 @@ def test_app_version_must_reach_every_build_configuration(tmp_path: Path) -> Non
     problems = check_tree(tmp_path, VERSION)
 
     assert any("MARKETING_VERSION" in problem and "found 2/3" in problem for problem in problems)
+
+
+def test_repository_tree_version_is_consistent() -> None:
+    """Every other test here builds a synthetic tree; only this one reads ours.
+
+    A release bumped `pyproject.toml` and five other mirrors but left
+    `src/speechrail/config/__init__.py` on the old value. The build succeeded,
+    preflight passed, `/readyz` returned 200 and `speechrail install` reported
+    success -- the installed service just answered `/health` with the *previous*
+    version while executing the new code. Nothing in `pytest` noticed, because
+    the synthetic-tree tests prove the checker works, not that the checkout
+    passes it.
+
+    This is the gate that turns that class of mistake into a red test before
+    anything is built, tagged or installed.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+
+    version = _check_module._expected_version(repo_root)
+
+    assert check_tree(repo_root, version) == []

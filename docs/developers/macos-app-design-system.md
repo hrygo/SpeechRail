@@ -154,6 +154,25 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 `Optional` 类型注入 `.compact` 速记，也不保留未被调用的按钮字体、图标框、突出图标尺寸和旧兼容别名。
 这些清理不改变现有高保真数值、系统语义色、圆角层级或可访问性命中策略。
 
+**2026-10-02 散落视觉常量收敛（issue #90）**：把 14 处裸写的视觉常量收进既有 token 家族，
+**取值一律保持原样**——本轮只改声明位置，不改任何渲染结果，因此不需要真机比对即可判定等价。
+
+- `Icon.statusDotSize`(8)：菜单行与卡片行首的实心状态点。此前两处各写一份
+  `.frame(width: 8, height: 8)`，而 `Menu.menuBarStatusDotSize` 另有一个 6。
+  **同一个「实心圆点」语义现在有两个尺寸且互不相通**：改一处不会带动另一处。
+  本轮不合并成一个值——统一到 8 还是 6 需要真机比对，属未验证项。
+- `Icon.liveIndicatorDotSize`(6)：会话计时前的静音/活跃点。
+- `Icon.axisLabelFrame`(16) / `Icon.artifactFrame`(14) / `Icon.dismissButtonFrame`(20) /
+  `Icon.segmentJumpFrame`(14)：模型档位轴标签、制品列首列、阻碍提示条关闭、提词器舞台段落跳转的外框。
+- `Typography.iconMicroSemibold`(10) / `iconMediumSemibold`(15) / `iconMedium`(15)：
+  行内单字形动作的字号。这三档比 `.caption` 更小或与之同级但字重不同，
+  不复用正文级 token；其余 `.system(size:)` 调用本就已是 token 或用户设置（`scriptPointSize`）。
+- `Layout.waveformBarAreaHeight`(36) / `personaEditorMinimumHeight`(140) /
+  `inputLevelMeterHeight`(22)：语音助手波形条容器、人格编辑器正文下限、输入电平表条高。
+
+**仍未验证**：对比度的真机结论依旧记为未验证；状态点 8 与 6 是否应当合并同理。
+本轮未做任何桌面视觉走查、VoiceOver 或 Reduce Motion 复核。
+
 诊断结论区的用户影响说明使用 `Diagnostics.summaryMessageMaximumLines`，默认最多两行；当动态字体或
 错误文案需要更多垂直空间时，结论区只能自然增高，不得用固定最大高度裁切内容。
 
@@ -440,6 +459,11 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
+| 提词器舞台分光镜镜像与景深对比度优化（2026-10-01） | 围绕主播镜头前阅稿和物理提词玻璃场景优化。①**分光镜水平镜像模式**：`stageBase` 接入 `.scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)`，支持 `⌘⌥M` 键盘快捷键与显示设置 Popover 开关，用户偏好持久化。②**当前行景深与层级对比度**：已读行不透明度收缩至 `stagePastLineOpacity` (0.32)，未读行调至 `stageNextLineOpacity` (0.55)，当前行保持 1.0 加细窄导轨，拉大层次对比，暗光与半透明下焦点更聚拢。③**平滑眼动滚动动效**：`TeleprompterStageMotionPolicy` 采用 `.timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)`，兼顾流畅性与 Reduce Motion 兜底。新增 2 项 Token（`stagePastLineOpacity`、`stageNextLineOpacity`），复用既有组件。`swift test --package-path macos/SpeechRailApp --filter Teleprompter` 375 项全部通过（新增 1 项镜像偏好单测）。**未做 UI 自动化测试与真人视觉走查** | 2026-10-01 |
+| 提词器工作台降干扰与目标时长归属（2026-10-01） | 走查后按「加工稿直接给终稿、机制自述不占首屏」收敛四处。①**目标时长改为稿件级持久化**：新增 `TeleprompterV2Document.targetMinutes`（`target_minutes`），定值只发生在 `TeleprompterSession.resolveTargetMinutes(stored:)`，由 `applyV2Bundle` 与两个 `createDocument` 入口调用；视图不再在 `.onChange(of: session.document?.id)` 里替会话做决定——切页再回来文档 ID 未变、`onChange` 不触发，`targetMinutes` 会停在 `defaultTargetMinutes`（20），一份 200 字稿顶着「目标 20 分」。②**预填与预检同源**：`suggestedTargetMinutes` 在 `isUncertain` 时返回 nil，消除「无法预估」徽标旁却填着分钟数的自相矛盾。③**第二行降噪**：预检只留结论徽标，判断依据／计时试读／恢复默认语速收进一个以徽标为标签的菜单（`readingSetupMenu`），「计时试读」原有两处入口合一；就绪页表头的「读法标注」次级按钮移入文档「⋯」菜单，段落级「照念／只作提示／跳过」标签与起讲位置选择不变。④**删除重复与补齐动作**：`.prepared` 面板内那套与常驻底座处理器完全相同的「用这份稿／先试读／放弃」整块删除（`⌘⏎` 只挂底座一处，同屏两个会冲突）；AI 整理回退横幅改说「没能连上 AI 整理服务（最常见的原因是短时间内请求太频繁）」并带「再整理一次」。全部复用既有 `Spacing`/`Typography`/`StatusPill`/`SpeechRailButtonIcon`/`.speechRailButton` 与 `.menuStyle(.borderlessButton)`，未新增 Token。`swift test --package-path macos/SpeechRailApp` 374 项 / 16 套件通过（新增 3 条：目标时长跨重载、按原稿估算兜底、估不准不给建议）。**未做 VoiceOver 朗读与窄窗布局复核** | 2026-10-01 |
+| 语音助手失败可见与记录切换（2026-09-30） | 用户报「说话后识别文字立即消失、不进 LLM/TTS」与「对话记录切换卡顿」。前者根因三处叠加：`commitUserTurn` 先清 `partialText` 再 `guard` 空文本、空 `partial` 的 `partialSnapshot` 会清屏、`AssistantView` 从不渲染 `lastFailure`（会议／字幕／提词器都渲染了）。改为：识别片段按 `item` 归属，迟到事件只报告失败不再清当前句；空 final 且这一轮确实说过话时保留它并提示「这一句没能识别完整，请再说一次。」（以 `status: .partial` 落库，对话流与库里可见，记录库句数与导出口径不变，刻意不进 LLM/TTS）；新增 `clearFailure()` 与失败提示条，放在打字失败提示旁，用既有 `NoticeBar`（`warning` + 「知道了」）。后者把 `openRecord` 的 4 次串行库读 + 4 处独立 `@State` 收成 `SessionReviewSnapshot` 一次读、一次赋值，翻记录一次到位。**未新增任何视觉 Token**，全部复用既有 `NoticeBar` 与 `SpeechRailDesignTokens`。`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）374 项 0 failures / exit 0；`swift test --package-path macos/SpeechRailApp` 395 tests / 16 suites 通过；`scripts/macos_app_build.sh --configuration Release` BUILD SUCCEEDED。方案 §7 的「离屏渲染断言提示文案」经实测判定在本 target 不可行（无 `TEST_HOST`，`NSHostingView` 不建无障碍树，探针实测 `accessibilityChildren()` 为 0），故「提示真的出现在屏幕上」归入真机走查。**未做桌面视觉走查、VoiceOver、Reduce Motion 与 UI 自动化；未安装 App；卡顿未做 Instruments 测量，列表行隔离重绘因此未实施** | 2026-09-30 |
+| 开发者详情面板的关闭入口（2026-09-30，第二轮） | 用户复现：模型组合页双击模型列表打开右侧面板后**仍然无法关闭**（上一轮只补了页头开关）。根因是模型页那枚开关放在「模型文件」卡头，而卡头是一条 HStack（标题 + 一句说明 + 开关 + 弹性空档 + 右端事实）：面板一开、内容列被 inspector 压到约 520pt，开关是这条 HStack 里第一个被压掉的东西——面板打开的那一刻正是唯一需要关闭它的那刻。改为：`DeveloperInspector` 接收 `isPresented` 并在**面板自己的标题栏**上带一枚关闭按钮（固定 360pt 宽，不被内容列挤压、不随页面滚动离开视线）；页头那枚降级为「打开」入口并统一放进 `PageScaffold` 的 `trailing` 槽（该行说明文字会换行让位，动作不会被挤没）；模型列表双击改为对当前显示行再双击即收起（用 `inspectorAnchorKey` 锚定，因为双击的 Button 动作会先改掉 `selectedArtifactKey`，届时无法分辨是否同一行）。7 处 `DeveloperInspector` 调用点同步传 binding。**未新增任何视觉 Token**，复用 `SpeechRailButtonIcon(.close)`、`Icon.navigationSize` 与既有 `Typography`/`Spacing`。`swift build --package-path macos/SpeechRailApp` 通过；`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**。**未做桌面视觉走查、VoiceOver、Reduce Motion 与 UI 自动化；「卡头被压窄」是代码层推断，未在屏幕上实测** | 2026-09-30 |
+| 开发者详情面板开关（2026-09-30） | 用户反馈「详情打开后无法关闭，只能去设置里关」。根因是 `speechrail.showDeveloperDetails` 是全 App 共享偏好：任一页打开后，`.inspector` 在服务状态 / 运行监控 / 诊断 / 音色克隆四页同时亮起，而这四页页内**没有任何开关**，唯一可发现的关闭路径退化成「设置 ▸ 通用」或没人知道的 ⌘⌥I。新增 `DeveloperInspectorToggle` 作为该面板的唯一开关声明点（`DeveloperInspector` 旁边），四页接入页头动作区；模型组合页原卡头按钮改用它，措辞由「模型详情」统一为面板标题同名。**未新增任何视觉 Token**，复用 `PageActionButton` 与既有 `Icon.Symbol.infoCircle` / `.sidebarRight`。双击模型文件行仍是「打开并查看这一项」而非开/关切换（Finder 约定），关闭走同一张卡片的开关。`swift build --package-path macos/SpeechRailApp` 通过；`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**。**未做桌面视觉走查、VoiceOver、Reduce Motion 与 UI 自动化** | 2026-09-30 |
 | 提词器语音辅助试读（2026-09-29） | 试读 sheet 新增「手动计时／语音辅助」分段控件，两者是两次独立动作。语音辅助区用既有 `Spacing`/`Typography`/`Corner` 与 `.speechRailButton` 声明三段链路（麦克风／识别／定位）状态，未新增 Token。打开窗口不碰麦克风，必须按下试读按钮才开始；结束时归还设备租约。`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED；Xcode 单测 target 0 failures / exit 0。**未做 U-10 界面走查、VoiceOver 朗读与真实麦克风验证** | 2026-09-29 |
 | 提词器读法标注窗口（2026-09-29） | 稿件就绪页表头新增「读法标注」次级按钮，弹出 `TeleprompterReadingAliasSheet` 登记识别器易听错的词；入口按进阶操作处理，不占「选起讲段」默认路径。新增 `readingAliasSheet{Minimum,}Width`、`readingAliasSheet{Minimum,}Height`、`readingAliasListMaximumHeight` 七个 `Teleprompter` 命名空间 Token，弹窗复用 `SpeechRailButtonIcon`、`.speechRailButton`、`.speechRailSingleLineInput(.regular)` 与既有 `Spacing`/`Typography`/`Corner`，未新增自绘玻璃或裸视觉常量。就绪列表每段本身已是 Button，故读法入口不内联进段内，避免嵌套按钮破坏键盘与 VoiceOver 可达性。`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED；Xcode 单测 target 0 failures / exit 0。**未做 U-10 界面走查、VoiceOver 朗读、窄窗布局与真实音频验证** | 2026-09-29 |
 | 提词器实施收尾与 Xcode 单测挂死归因（2026-09-28） | 上一行记录的「App 测试宿主跑完后不退出、包装脚本超时」已归因并修复：单测 target 无 `TEST_HOST`／`BUNDLE_LOADER`，UI 测试又被 `-skip-testing` 排除，App 从未启动；真因是测试辅助件 `TestGate` 不记已开启状态，负载下丢失放行信号导致永久挂起。修复后 `scripts/macos_app_build.sh --configuration Debug --test-unit` 以 **TEST SUCCEEDED**、exit 0 结束（XCTest 344 项、Swift Testing 213 项 / 16 套件，均 0 failures），`swift test --package-path macos/SpeechRailApp` 204 项 / 16 套件通过。通用教训：挂死先二分到具体用例再下机制结论。**仍未做桌面视觉走查、UI 自动化与真实麦克风验证** | 2026-09-28 |

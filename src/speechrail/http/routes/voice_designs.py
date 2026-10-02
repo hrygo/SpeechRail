@@ -753,6 +753,17 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 if transcript
                 else None
             )
+            if report.reference is None:
+                # `_grade_clone_audio` always grades against a real reference
+                # block; a missing one is an internal invariant violation, not
+                # a licence to synthesize placeholder metrics.
+                return error_response(
+                    502,
+                    request_id,
+                    "quality_reference_missing",
+                    "Voice quality grading produced no reference block",
+                    retryable=True,
+                )
             reference = (
                 report.reference
                 if score is None

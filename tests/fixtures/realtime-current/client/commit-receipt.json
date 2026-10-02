@@ -1,0 +1,7 @@
+{
+  "type": "input_audio_buffer.commit",
+  "event_id": "commit_1",
+  "speechrail": {
+    "request_receipt": true
+  }
+}

@@ -40,6 +40,10 @@ public struct TeleprompterV2Document: Codable, Equatable, Identifiable, Sendable
     public var title: String
     public var currentSourceRevisionID: String
     public var activeVersionID: String?
+    /// 这份稿自己的目标时长。它属于稿件而不是一次运行：目标时长决定整理时
+    /// 往哪个时长靠，跨相位、跨启动都得跟着这份稿走。旧文档没有这个字段，
+    /// 载入时按原稿重新估算补一个。
+    public var targetMinutes: Int?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -48,6 +52,7 @@ public struct TeleprompterV2Document: Codable, Equatable, Identifiable, Sendable
         title: String,
         currentSourceRevisionID: String,
         activeVersionID: String? = nil,
+        targetMinutes: Int? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -55,6 +60,7 @@ public struct TeleprompterV2Document: Codable, Equatable, Identifiable, Sendable
         self.title = title
         self.currentSourceRevisionID = currentSourceRevisionID
         self.activeVersionID = activeVersionID
+        self.targetMinutes = targetMinutes
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -64,6 +70,7 @@ public struct TeleprompterV2Document: Codable, Equatable, Identifiable, Sendable
         case title
         case currentSourceRevisionID = "current_source_revision_id"
         case activeVersionID = "active_version_id"
+        case targetMinutes = "target_minutes"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -112,36 +119,6 @@ public struct TeleprompterV2SourceRevision: Codable, Equatable, Identifiable, Se
         case builderVersion = "builder_version"
         case sourceUnits = "source_units"
         case createdAt = "created_at"
-    }
-}
-
-public struct TeleprompterV2SelectionRevision: Codable, Equatable, Identifiable, Sendable {
-    public let id: String
-    public let sourceUnitRevision: String
-    public let selectedUnitIDs: [Int]
-    public let selectedRanges: [TeleprompterSourceRange]
-    public let userExcludedRanges: [TeleprompterSourceRange]
-
-    public init(
-        id: String,
-        sourceUnitRevision: String,
-        selectedUnitIDs: [Int],
-        selectedRanges: [TeleprompterSourceRange],
-        userExcludedRanges: [TeleprompterSourceRange]
-    ) {
-        self.id = id
-        self.sourceUnitRevision = sourceUnitRevision
-        self.selectedUnitIDs = selectedUnitIDs
-        self.selectedRanges = selectedRanges
-        self.userExcludedRanges = userExcludedRanges
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case sourceUnitRevision = "source_unit_revision"
-        case selectedUnitIDs = "selected_unit_ids"
-        case selectedRanges = "selected_ranges"
-        case userExcludedRanges = "user_excluded_ranges"
     }
 }
 
@@ -275,7 +252,6 @@ public struct TeleprompterV2ReadingVersion: Codable, Equatable, Identifiable, Se
     public let id: String
     public let documentID: String
     public let sourceRevisionID: String
-    public let selectionSnapshot: TeleprompterV2SelectionRevision
     public let readingText: String
     public let readingHash: String
     public let blocks: [TeleprompterV2ReadingBlock]
@@ -290,7 +266,6 @@ public struct TeleprompterV2ReadingVersion: Codable, Equatable, Identifiable, Se
         id: String,
         documentID: String,
         sourceRevisionID: String,
-        selectionSnapshot: TeleprompterV2SelectionRevision,
         readingText: String,
         readingHash: String? = nil,
         blocks: [TeleprompterV2ReadingBlock],
@@ -304,7 +279,6 @@ public struct TeleprompterV2ReadingVersion: Codable, Equatable, Identifiable, Se
         self.id = id
         self.documentID = documentID
         self.sourceRevisionID = sourceRevisionID
-        self.selectionSnapshot = selectionSnapshot
         self.readingText = readingText
         self.readingHash = readingHash ?? TeleprompterV2Hash.sha256(readingText)
         self.blocks = blocks
@@ -320,7 +294,6 @@ public struct TeleprompterV2ReadingVersion: Codable, Equatable, Identifiable, Se
         case id
         case documentID = "document_id"
         case sourceRevisionID = "source_revision_id"
-        case selectionSnapshot = "selection_snapshot"
         case readingText = "reading_text"
         case readingHash = "reading_hash"
         case blocks
@@ -337,9 +310,7 @@ public struct TeleprompterV2ReadingDraft: Codable, Equatable, Identifiable, Send
     public let id: String
     public let draftRevision: Int
     public let sourceRevisionID: String
-    public let selectionRevisionID: String
     public var blocks: [TeleprompterV2ReadingBlock]
-    public var reviewIssues: [TeleprompterReviewItem]
     public let goal: TeleprompterV2DurationGoal
     public let pace: TeleprompterPace
     public let timingAllocation: TeleprompterV2TimingAllocationSnapshot
@@ -348,9 +319,7 @@ public struct TeleprompterV2ReadingDraft: Codable, Equatable, Identifiable, Send
         id: String,
         draftRevision: Int,
         sourceRevisionID: String,
-        selectionRevisionID: String,
         blocks: [TeleprompterV2ReadingBlock],
-        reviewIssues: [TeleprompterReviewItem],
         goal: TeleprompterV2DurationGoal,
         pace: TeleprompterPace,
         timingAllocation: TeleprompterV2TimingAllocationSnapshot
@@ -358,9 +327,7 @@ public struct TeleprompterV2ReadingDraft: Codable, Equatable, Identifiable, Send
         self.id = id
         self.draftRevision = draftRevision
         self.sourceRevisionID = sourceRevisionID
-        self.selectionRevisionID = selectionRevisionID
         self.blocks = blocks
-        self.reviewIssues = reviewIssues
         self.goal = goal
         self.pace = pace
         self.timingAllocation = timingAllocation
@@ -370,9 +337,7 @@ public struct TeleprompterV2ReadingDraft: Codable, Equatable, Identifiable, Send
         case id
         case draftRevision = "draft_revision"
         case sourceRevisionID = "source_revision_id"
-        case selectionRevisionID = "selection_revision_id"
         case blocks
-        case reviewIssues = "review_issues"
         case goal
         case pace
         case timingAllocation = "timing_allocation"
@@ -428,7 +393,7 @@ public struct TeleprompterV2DocumentBundle: Codable, Equatable, Sendable {
     public var lastRun: TeleprompterV2RunSummary?
 
     public init(
-        formatVersion: Int = 2,
+        formatVersion: Int = 3,
         document: TeleprompterV2Document,
         sourceRevisions: [TeleprompterV2SourceRevision],
         draft: TeleprompterV2ReadingDraft?,
@@ -477,7 +442,7 @@ public struct TeleprompterV2DocumentListItem: Equatable, Sendable {
 
 @MainActor
 public final class TeleprompterV2Store {
-    public static let formatVersion = 2
+    public static let formatVersion = 3
 
     private let directoryURL: URL
     private let fileManager: FileManager
@@ -620,13 +585,6 @@ public final class TeleprompterV2Store {
                 id: versionMap[version.id]!,
                 documentID: newDocumentID,
                 sourceRevisionID: sourceMap[version.sourceRevisionID]!,
-                selectionSnapshot: .init(
-                    id: UUID().uuidString,
-                    sourceUnitRevision: sourceMap[version.selectionSnapshot.sourceUnitRevision]!,
-                    selectedUnitIDs: version.selectionSnapshot.selectedUnitIDs,
-                    selectedRanges: version.selectionSnapshot.selectedRanges,
-                    userExcludedRanges: version.selectionSnapshot.userExcludedRanges
-                ),
                 readingText: version.readingText,
                 readingHash: version.readingHash,
                 blocks: blocks,
@@ -643,7 +601,6 @@ public final class TeleprompterV2Store {
                 id: UUID().uuidString,
                 draftRevision: draft.draftRevision,
                 sourceRevisionID: sourceMap[draft.sourceRevisionID]!,
-                selectionRevisionID: UUID().uuidString,
                 blocks: draft.blocks.map { block in
                     .init(
                         id: UUID().uuidString,
@@ -655,7 +612,6 @@ public final class TeleprompterV2Store {
                         budgetShare: block.budgetShare
                     )
                 },
-                reviewIssues: draft.reviewIssues,
                 goal: draft.goal,
                 pace: draft.pace,
                 timingAllocation: .init(
@@ -824,14 +780,7 @@ private extension TeleprompterV2Store {
             }
             let source = bundle.sourceRevisions.first { $0.id == draft.sourceRevisionID }
             try validate(blocks: draft.blocks, source: source)
-            try validate(timing: draft.timingAllocation.plan, source: source, selectedUnitIDs: nil)
-            let reviewIDs = draft.reviewIssues.map(\.id)
-            guard reviewIDs.count == Set(reviewIDs).count,
-                  draft.reviewIssues.allSatisfy({ item in
-                      draft.blocks.contains(where: { $0.id == item.blockID })
-                  }) else {
-                throw TeleprompterV2StoreError.invalidBundle
-            }
+            try validate(timing: draft.timingAllocation.plan, source: source)
         }
         if let run = bundle.lastRun {
             guard bundle.versions.contains(where: { $0.id == run.versionID }),
@@ -851,7 +800,6 @@ private extension TeleprompterV2Store {
         }
         let source = bundle.sourceRevisions.first { $0.id == version.sourceRevisionID }
         guard let source else { throw TeleprompterV2StoreError.invalidBundle }
-        try validate(selection: version.selectionSnapshot, source: source)
         try validate(blocks: version.blocks, source: source)
         let speakingText = version.blocks
             .filter { $0.disposition == .speak }
@@ -926,40 +874,8 @@ private extension TeleprompterV2Store {
     }
 
     func validate(
-        selection: TeleprompterV2SelectionRevision,
-        source: TeleprompterV2SourceRevision
-    ) throws {
-        let sourceUnitIDs = Set(source.sourceUnits.map(\.id))
-        let selectedIDs = Set(selection.selectedUnitIDs)
-        let allRanges = selection.selectedRanges + selection.userExcludedRanges
-        guard selection.sourceUnitRevision == source.id,
-              !selection.id.isEmpty,
-              selection.selectedUnitIDs.count == selectedIDs.count,
-              selectedIDs.isSubset(of: sourceUnitIDs),
-              allRanges.allSatisfy({ $0.isValid(in: source.sourceText) }) else {
-            throw TeleprompterV2StoreError.invalidBundle
-        }
-        for (index, range) in allRanges.enumerated() {
-            guard !allRanges.dropFirst(index + 1).contains(where: { overlaps(range, $0) }) else {
-                throw TeleprompterV2StoreError.invalidBundle
-            }
-        }
-        for unit in source.sourceUnits {
-            guard unit.rawText.enumerated().allSatisfy({ offset, character in
-                let characterStart = unit.sourceRange.start + unit.rawText[..<unit.rawText.index(unit.rawText.startIndex, offsetBy: offset)].utf16.count
-                let characterEnd = characterStart + String(character).utf16.count
-                return character.isWhitespace
-                    || allRanges.contains(where: { $0.start <= characterStart && characterEnd <= $0.end })
-            }) else {
-                throw TeleprompterV2StoreError.invalidBundle
-            }
-        }
-    }
-
-    func validate(
         timing: TeleprompterTimingPlan,
-        source: TeleprompterV2SourceRevision?,
-        selectedUnitIDs: Set<Int>?
+        source: TeleprompterV2SourceRevision?
     ) throws {
         guard let source,
               (try? TeleprompterTimingPlanner.validateTargetMinutes(timing.targetMinutes)) != nil,
@@ -979,18 +895,9 @@ private extension TeleprompterV2Store {
               abs(timing.allocations.reduce(0) { $0 + $1.budgetSeconds } - timing.budgetSeconds) <= 0.001 else {
             throw TeleprompterV2StoreError.invalidBundle
         }
-        let selectedIDs = selectedUnitIDs ?? Set(sourceIDs)
-        guard timing.allocations.allSatisfy({ allocation in
-            !selectedIDs.contains(allocation.sourceUnitID)
-                || allocation.weight > 0
-        }) else {
+        // 整篇都在跟读范围内，所以每个分配都必须有正权重。
+        guard timing.allocations.allSatisfy({ $0.weight > 0 }) else {
             throw TeleprompterV2StoreError.invalidBundle
-        }
-        if let selectedUnitIDs {
-            guard selectedUnitIDs.isSubset(of: Set(sourceIDs)),
-                  timing.allocations.allSatisfy({ selectedUnitIDs.contains($0.sourceUnitID) || $0.budgetSeconds == 0 }) else {
-                throw TeleprompterV2StoreError.invalidBundle
-            }
         }
     }
 

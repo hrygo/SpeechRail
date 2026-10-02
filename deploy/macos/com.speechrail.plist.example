@@ -8,7 +8,7 @@
   <string>&lt;absolute-path-to-SpeechRail&gt;</string>
   <key>ProgramArguments</key>
   <array>
-    <string>&lt;absolute-path-to-python&gt;</string>
+    <string>&lt;absolute-path-to-speechrail-service&gt;</string>
     <string>-m</string>
     <string>speechrail</string>
     <string>serve</string>

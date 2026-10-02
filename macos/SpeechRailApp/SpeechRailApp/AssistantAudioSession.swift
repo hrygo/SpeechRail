@@ -409,7 +409,8 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
         input.installTap(onBus: 0, bufferSize: inputFrameCapacity, format: inputFormat) { [weak self] buffer, _ in
-            self?.copyInputToRing(buffer)
+            guard let self else { return }
+            Self.copyInputToRing(buffer, into: self.ring)
         }
         engine.prepare()
         do {
@@ -442,164 +443,70 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     /// This function runs on the audio callback and deliberately does no
     /// allocation, locking, conversion or UI/network work.
     @inline(__always)
-    private func copyInputToRing(_ buffer: AVAudioPCMBuffer) {
+    static func copyInputToRing(_ buffer: AVAudioPCMBuffer, into ring: AudioSampleRing) {
         let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0,
-              let destination = ring.writableSpan()
-        else { return }
-
-        let accepted = min(frameCount, destination.count)
-        let channels = max(1, Int(buffer.format.channelCount))
-        if let source = buffer.floatChannelData {
-            copyFloatChannels(source, channels: channels, frames: accepted, to: destination.pointer)
-        } else if let source = buffer.int16ChannelData {
-            copyInt16Channels(source, channels: channels, frames: accepted, to: destination.pointer)
-        } else if let source = buffer.int32ChannelData {
-            copyInt32Channels(source, channels: channels, frames: accepted, to: destination.pointer)
-        } else if buffer.format.isInterleaved {
-            guard buffer.audioBufferList.pointee.mNumberBuffers == 1,
-                  let raw = buffer.audioBufferList.pointee.mBuffers.mData
-            else { return }
-            switch buffer.format.commonFormat {
-            case .pcmFormatFloat32:
-                copyInterleavedFloat(
-                    UnsafePointer(raw.assumingMemoryBound(to: Float.self)),
-                    channels: channels,
-                    frames: accepted,
-                    to: destination.pointer
-                )
-            case .pcmFormatInt16:
-                copyInterleavedInt16(
-                    UnsafePointer(raw.assumingMemoryBound(to: Int16.self)),
-                    channels: channels,
-                    frames: accepted,
-                    to: destination.pointer
-                )
-            case .pcmFormatInt32:
-                copyInterleavedInt32(
-                    UnsafePointer(raw.assumingMemoryBound(to: Int32.self)),
-                    channels: channels,
-                    frames: accepted,
-                    to: destination.pointer
-                )
-            default:
-                return
-            }
-        } else {
-            return
+        let channels = Int(buffer.format.channelCount)
+        guard frameCount > 0, channels > 0 else { return }
+        let stride = buffer.stride
+        var consumed = 0
+        while consumed < frameCount, let destination = ring.writableSpan() {
+            let accepted = min(frameCount - consumed, destination.count)
+            if let source = buffer.floatChannelData {
+                copyFloatChannels(source, channels: channels, stride: stride,
+                                  startFrame: consumed, frames: accepted, to: destination.pointer)
+            } else if let source = buffer.int16ChannelData {
+                copyInt16Channels(source, channels: channels, stride: stride,
+                                  startFrame: consumed, frames: accepted, to: destination.pointer)
+            } else if let source = buffer.int32ChannelData {
+                copyInt32Channels(source, channels: channels, stride: stride,
+                                  startFrame: consumed, frames: accepted, to: destination.pointer)
+            } else { return }
+            ring.commitWrite(accepted)
+            consumed += accepted
         }
-        ring.commitWrite(accepted)
     }
 
     @inline(__always)
-    private func copyFloatChannels(
+    private static func copyFloatChannels(
         _ source: UnsafePointer<UnsafeMutablePointer<Float>>,
-        channels: Int,
-        frames: Int,
+        channels: Int, stride: Int, startFrame: Int, frames: Int,
         to destination: UnsafeMutablePointer<Float>
     ) {
-        if channels == 1 {
-            destination.update(from: source[0], count: frames)
-            return
-        }
         let scale = 1 / Float(channels)
         for frame in 0..<frames {
             var sample: Float = 0
-            for channel in 0..<channels {
-                sample += source[channel][frame]
-            }
-            destination[frame] = sample * scale
+            let offset = (startFrame + frame) * stride
+            for channel in 0..<channels { sample += Float(source[channel][offset]) }
+            destination[frame] = Float(sample) * scale
         }
     }
 
     @inline(__always)
-    private func copyInt16Channels(
+    private static func copyInt16Channels(
         _ source: UnsafePointer<UnsafeMutablePointer<Int16>>,
-        channels: Int,
-        frames: Int,
+        channels: Int, stride: Int, startFrame: Int, frames: Int,
         to destination: UnsafeMutablePointer<Float>
     ) {
-        let scale = 1 / Float(channels * 32_768)
+        let scale = 1 / Float(channels) / 32_768
         for frame in 0..<frames {
-            var sample: Int32 = 0
-            for channel in 0..<channels {
-                sample += Int32(source[channel][frame])
-            }
+            var sample: Int64 = 0
+            let offset = (startFrame + frame) * stride
+            for channel in 0..<channels { sample += Int64(source[channel][offset]) }
             destination[frame] = Float(sample) * scale
         }
     }
 
     @inline(__always)
-    private func copyInt32Channels(
+    private static func copyInt32Channels(
         _ source: UnsafePointer<UnsafeMutablePointer<Int32>>,
-        channels: Int,
-        frames: Int,
+        channels: Int, stride: Int, startFrame: Int, frames: Int,
         to destination: UnsafeMutablePointer<Float>
     ) {
-        let scale = 1 / Float(channels) / (Float(Int32.max) + 1)
+        let scale = 1 / Float(channels) / 2_147_483_648
         for frame in 0..<frames {
             var sample: Int64 = 0
-            for channel in 0..<channels {
-                sample += Int64(source[channel][frame])
-            }
-            destination[frame] = Float(sample) * scale
-        }
-    }
-
-    @inline(__always)
-    private func copyInterleavedFloat(
-        _ source: UnsafePointer<Float>,
-        channels: Int,
-        frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        if channels == 1 {
-            destination.update(from: source, count: frames)
-            return
-        }
-        let scale = 1 / Float(channels)
-        for frame in 0..<frames {
-            var sample: Float = 0
-            let frameOffset = frame * channels
-            for channel in 0..<channels {
-                sample += source[frameOffset + channel]
-            }
-            destination[frame] = sample * scale
-        }
-    }
-
-    @inline(__always)
-    private func copyInterleavedInt16(
-        _ source: UnsafePointer<Int16>,
-        channels: Int,
-        frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        let scale = 1 / Float(channels * 32_768)
-        for frame in 0..<frames {
-            var sample: Int32 = 0
-            let frameOffset = frame * channels
-            for channel in 0..<channels {
-                sample += Int32(source[frameOffset + channel])
-            }
-            destination[frame] = Float(sample) * scale
-        }
-    }
-
-    @inline(__always)
-    private func copyInterleavedInt32(
-        _ source: UnsafePointer<Int32>,
-        channels: Int,
-        frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        let scale = 1 / Float(channels) / (Float(Int32.max) + 1)
-        for frame in 0..<frames {
-            var sample: Int64 = 0
-            let frameOffset = frame * channels
-            for channel in 0..<channels {
-                sample += Int64(source[frameOffset + channel])
-            }
+            let offset = (startFrame + frame) * stride
+            for channel in 0..<channels { sample += Int64(source[channel][offset]) }
             destination[frame] = Float(sample) * scale
         }
     }

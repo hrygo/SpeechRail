@@ -2,13 +2,23 @@ from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import speechrail.http.routes.audio as audio_module
 from speechrail.app import create_app
+from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.config import Settings
+from speechrail.domain.alignment import (
+    AlignmentRequest,
+    AlignmentResult,
+    AlignmentUnit,
+)
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import TranscriptionRequest
+from speechrail.http.errors import RequestIdMiddleware
+from speechrail.http.routes.audio import create_audio_router
 from speechrail.runtime.asr_mode import AsrModeBusy
 
 
@@ -28,22 +38,24 @@ def _backend(
     return result()
 
 
-def _client() -> TestClient:
-    return TestClient(
-        create_app(
-            Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None),
-            transcribe=_backend,
-        )
+def _client(*, transcribe=_backend, text_aligner=None) -> TestClient:
+    settings = Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None)
+    if text_aligner is None and transcribe is _backend:
+        return TestClient(create_app(settings, transcribe=_backend))
+    services = build_app_services(
+        settings,
+        AppOverrides(transcribe=transcribe, text_aligner=text_aligner),
     )
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(create_audio_router(services))
+    return TestClient(app)
 
 
 def test_transcription_formats_results_from_one_domain_result() -> None:
     for response_format, content_type, expected in (
         ("json", "application/json", "hello"),
-        ("verbose_json", "application/json", "hello"),
         ("text", "text/plain", "hello"),
-        ("srt", "application/x-subrip", "hello"),
-        ("vtt", "text/vtt", "hello"),
     ):
         response = _client().post(
             "/v1/audio/transcriptions",
@@ -53,6 +65,104 @@ def test_transcription_formats_results_from_one_domain_result() -> None:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(content_type)
         assert expected in response.text
+
+
+class _FakeAligner:
+    """Stand in for the independent fixed-text aligner owner."""
+
+    def __init__(self, *, granularity_span: int = 16_000) -> None:
+        self.requests: list[AlignmentRequest] = []
+        self._granularity_span = granularity_span
+
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        self.requests.append(request)
+        midpoint = max(1, len(request.text) // 2)
+        boundary = self._granularity_span
+        return AlignmentResult(
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(
+                AlignmentUnit(
+                    "u-0", 0, midpoint, SampleSpan(0, boundary), request.granularity
+                ),
+                AlignmentUnit(
+                    "u-1",
+                    midpoint,
+                    len(request.text),
+                    SampleSpan(boundary, boundary * 2),
+                    request.granularity,
+                ),
+            ),
+        )
+
+
+def test_timestamped_formats_require_the_independent_aligner() -> None:
+    """No aligner means a stable refusal, never an implicit model or empty timeline."""
+    for response_format in ("verbose_json", "srt", "vtt"):
+        response = _client().post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", b"1234", "audio/wav")},
+            data={"response_format": response_format},
+        )
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "timestamp_alignment_unavailable"
+        assert response.json()["error"]["request_id"]
+
+
+def test_verbose_json_timeline_comes_from_the_aligner_not_the_asr_decode() -> None:
+    aligner = _FakeAligner()
+    response = _client(text_aligner=aligner).post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"response_format": "verbose_json"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [segment["text"] for segment in payload["segments"]] == ["he", "llo"]
+    assert [word["word"] for word in payload["words"]] == ["he", "llo"]
+    assert payload["segments"][0]["start"] == 0
+    # One pass per requested granularity, both addressed to the aligner owner.
+    assert sorted(request.granularity for request in aligner.requests) == ["segment", "word"]
+
+
+def test_transcription_never_asks_the_asr_owner_for_timestamps() -> None:
+    """The ASR decode stays text-only so no vendor aligner is resolved implicitly."""
+    seen: list[bool] = []
+
+    async def backend(
+        audio: bytes, language: str | None, prompt: str, include_timestamps: bool = False
+    ) -> TranscriptResult:
+        del audio, language, prompt
+        seen.append(include_timestamps)
+        return TranscriptResult(
+            request_id="backend",
+            model_id="speechrail/qwen3-asr-1.7b",
+            text="hello",
+            language="en",
+            duration_ms=1000,
+        )
+
+    response = _client(transcribe=backend, text_aligner=_FakeAligner()).post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"response_format": "verbose_json"},
+    )
+    assert response.status_code == 200
+    assert seen == [False]
+
+
+def test_srt_and_vtt_render_the_aligned_timeline() -> None:
+    for response_format, prefix in (("srt", "1\n"), ("vtt", "WEBVTT")):
+        response = _client(text_aligner=_FakeAligner()).post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", b"1234", "audio/wav")},
+            data={"response_format": response_format},
+        )
+        assert response.status_code == 200
+        assert response.text.startswith(prefix)
+        assert "he" in response.text and "llo" in response.text
 
 
 def test_busy_asr_mode_returns_stable_429_with_request_id() -> None:

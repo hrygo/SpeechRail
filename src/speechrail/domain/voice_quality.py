@@ -27,16 +27,17 @@ caller (``None`` means "unavailable" and is skipped, never auto-passed).
 from __future__ import annotations
 
 import math
+import re
 import struct
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 from uuid import uuid4
 
-from speechrail.domain.itn import apply_light_itn
+from speechrail.domain.itn import apply_light_itn, resolve_chinese_magnitudes
 
 POLICY_VERSION: Final[str] = "voice_quality_v1"
 
@@ -62,6 +63,54 @@ _TRANSCRIPT_DIGIT_TRANSLATION: Final[dict[int, str]] = str.maketrans(
     }
 )
 _TRANSCRIPT_SEMANTIC_SYMBOLS: Final[frozenset[str]] = frozenset({".", "%", "℃", "°"})
+
+# Sinitic digit-clarification characters: a speaker reading a long digit string
+# substitutes these to keep 1/7, 0/O and 3/8 apart, so a phone number comes back
+# as `一三八零零幺三八丁`. They are translated only inside a run of at least
+# three digit characters: `丁` and `幺` also occur in ordinary words (`园丁`,
+# `幺妹`, and the quantifier in `一点丁点`), and a blanket substitution would
+# corrupt them. Two-character runs are the collision zone -- `一丁` in
+# `一点丁点` is a quantifier, not the number thirteen -- while every real
+# digit string this has to catch (`幺幺零`, a phone number, an id) is longer.
+_TRANSCRIPT_DIGIT_CLARIFIERS: Final[dict[int, str]] = str.maketrans(
+    {
+        "幺": "1",
+        "丁": "3",
+        "尜": "9",
+    }
+)
+_TRANSCRIPT_DIGIT_RUN: Final[re.Pattern[str]] = re.compile(
+    r"[零一二两三四五六七八九幺丁尜]{3,}"
+)
+
+
+def _fold_digit_clarifiers(text: str) -> str:
+    """Translate digit-clarification characters that appear inside a digit run."""
+
+    return _TRANSCRIPT_DIGIT_RUN.sub(
+        lambda match: match.group(0).translate(_TRANSCRIPT_DIGIT_CLARIFIERS), text
+    )
+
+# `.` is kept as a semantic symbol so decimals survive, which makes NFKC's
+# rewrite of `……` into `......` a trap: those six dots are an ellipsis, a pause
+# marker the TTS never voices and the ASR never returns. Scored as six missing
+# characters they capped the `pause_markers` probe at 0.76 on a word-for-word
+# synthesis, and under the `min()` aggregate that rejected every voice. A run of
+# two or more dots is never a decimal separator, so drop the run and keep the
+# single dot that `22.5` needs.
+_TRANSCRIPT_ELLIPSIS_RUN: Final[re.Pattern[str]] = re.compile(r"\.{2,}")
+
+# A TTS engine reads `℃` aloud and the ASR hands the spoken unit back, so the
+# two sides of a probe comparison differ in notation alone. NFKC rewrites `℃`
+# to `°c`, leaving `22.5℃` and `22.5摄氏度` a whole unit word apart: a
+# word-for-word synthesis scored 0.9091 on the `numbers_punct` probe, below the
+# 0.92 the output gate needs for `pass`, so no voice could reach
+# `production_ready`. Folding the spoken unit onto the symbol before
+# normalisation makes both sides meet as `°c`.
+#
+# Multi-character, so this cannot be a `str.maketrans` table: that form only
+# accepts single-character keys. `str.replace` rewrites the whole run at once.
+_TRANSCRIPT_SPOKEN_UNITS: Final[tuple[tuple[str, str], ...]] = (("摄氏度", "°C"),)
 
 
 class VoiceQualityStatus(StrEnum):
@@ -157,6 +206,44 @@ class VoiceQualityReference:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceQualityProbeScore:
+    """Per-probe intelligibility score for one fixed probe.
+
+    ``synthesis.transcript_match`` aggregates the probe set, so on its own it
+    cannot separate "the voice is unintelligible" from "one probe's text does
+    not survive the TTS-to-ASR round trip". Carrying each probe's own score
+    makes an aggregate regression attributable.
+    """
+
+    probe_id: str
+    transcript_match: float
+    # Whether this probe's numbers came back digit-for-digit identical.
+    # `None` means the probe carries no digits and the question does not apply.
+    # Kept separate from ``transcript_match`` so that field keeps meaning plain
+    # character similarity: a wrong digit is a one-character edit inside a long
+    # probe and scores like one, which is exactly why it needed its own verdict.
+    numbers_exact: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "probe_id": self.probe_id,
+            "transcript_match": self.transcript_match,
+            "numbers_exact": self.numbers_exact,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> VoiceQualityProbeScore:
+        if not isinstance(data, Mapping):
+            raise ValueError("probe score must be an object")
+        raw_exact = data.get("numbers_exact")
+        return cls(
+            probe_id=_require_str(data.get("probe_id"), "probe_id"),
+            transcript_match=float(data.get("transcript_match", 0.0)),
+            numbers_exact=raw_exact if isinstance(raw_exact, bool) else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceQualitySynthesis:
     """Synthesis probe metrics (see ``VoiceQualitySynthesis`` in openapi.yaml)."""
 
@@ -169,6 +256,7 @@ class VoiceQualitySynthesis:
     deterministic: bool
     transcript_match: float | None = None
     intelligibility_evaluated: bool = False
+    probe_scores: list[VoiceQualityProbeScore] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,12 +269,16 @@ class VoiceQualitySynthesis:
             "deterministic": self.deterministic,
             "transcript_match": self.transcript_match,
             "intelligibility_evaluated": self.intelligibility_evaluated,
+            "probe_scores": [score.to_dict() for score in self.probe_scores],
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> VoiceQualitySynthesis:
         if not isinstance(data, Mapping):
             raise ValueError("synthesis must be an object")
+        raw_scores = data.get("probe_scores", [])
+        if not isinstance(raw_scores, list):
+            raw_scores = []
         return cls(
             probe_count=int(data.get("probe_count", 0)),
             successful_probe_count=int(data.get("successful_probe_count", 0)),
@@ -201,6 +293,11 @@ class VoiceQualitySynthesis:
                 else None
             ),
             intelligibility_evaluated=bool(data.get("intelligibility_evaluated", False)),
+            probe_scores=[
+                VoiceQualityProbeScore.from_dict(item)
+                for item in raw_scores
+                if isinstance(item, Mapping)
+            ],
         )
 
 
@@ -212,7 +309,12 @@ class VoiceQualityReport:
     status: str
     run_id: str
     tested_at: str
-    reference: VoiceQualityReference
+    # ``None`` means "this run did not evaluate the reference audio". The output
+    # gate never does; it grades synthesis only, and the reference side is
+    # measured once at clone time into the voice profile. A zero-filled block
+    # would read as a measurement, and every one of those zeros is the worst
+    # possible value for its metric.
+    reference: VoiceQualityReference | None
     synthesis: VoiceQualitySynthesis
     failure_codes: list[str]
 
@@ -222,7 +324,7 @@ class VoiceQualityReport:
             "status": self.status,
             "run_id": self.run_id,
             "tested_at": self.tested_at,
-            "reference": self.reference.to_dict(),
+            "reference": None if self.reference is None else self.reference.to_dict(),
             "synthesis": self.synthesis.to_dict(),
             "failure_codes": list(self.failure_codes),
         }
@@ -233,8 +335,10 @@ class VoiceQualityReport:
             raise ValueError("voice quality report must be an object")
         reference_raw = data.get("reference")
         synthesis_raw = data.get("synthesis")
-        if not isinstance(reference_raw, Mapping) or not isinstance(synthesis_raw, Mapping):
-            raise ValueError("voice quality report must contain reference and synthesis objects")
+        if not isinstance(synthesis_raw, Mapping):
+            raise ValueError("voice quality report must contain a synthesis object")
+        if reference_raw is not None and not isinstance(reference_raw, Mapping):
+            raise ValueError("voice quality report reference must be an object or null")
         raw_codes = data.get("failure_codes", [])
         if not isinstance(raw_codes, list):
             raw_codes = []
@@ -246,7 +350,11 @@ class VoiceQualityReport:
             status=_require_str(data.get("status"), "status"),
             run_id=_require_str(data.get("run_id"), "run_id"),
             tested_at=_require_str(data.get("tested_at"), "tested_at"),
-            reference=VoiceQualityReference.from_dict(reference_raw),
+            reference=(
+                None
+                if reference_raw is None
+                else VoiceQualityReference.from_dict(reference_raw)
+            ),
             synthesis=VoiceQualitySynthesis.from_dict(synthesis_raw),
             failure_codes=codes,
         )
@@ -511,13 +619,67 @@ def grade_reference_quality(
 
 def normalize_transcript_for_match(text: str) -> str:
     """Normalize ASR/reference text for bounded character-level comparison."""
-    normalized = unicodedata.normalize("NFKC", apply_light_itn(text)).casefold()
+    # Magnitudes first: `二十二点五` is arithmetic that `apply_light_itn` only
+    # resolves when a decimal marker is present, and `五千三百` has no marker at
+    # all, so both would otherwise reach the digit table as characters. Runs with
+    # no magnitude word (`三六九`, `二零二六`) are left alone and stay positional.
+    folded = resolve_chinese_magnitudes(text)
+    folded = _fold_digit_clarifiers(folded)
+    for spoken, symbol in _TRANSCRIPT_SPOKEN_UNITS:
+        folded = folded.replace(spoken, symbol)
+    normalized = unicodedata.normalize("NFKC", apply_light_itn(folded)).casefold()
+    normalized = _TRANSCRIPT_ELLIPSIS_RUN.sub("", normalized)
     normalized = normalized.translate(_TRANSCRIPT_DIGIT_TRANSLATION)
     return "".join(
         char
         for char in normalized
         if char.isalnum() or char in _TRANSCRIPT_SEMANTIC_SYMBOLS
     )
+
+
+_TRANSCRIPT_NUMBER_RUN: Final[re.Pattern[str]] = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def probe_carries_digits(text: str) -> bool:
+    """Whether a probe's text contains a number worth comparing digit by digit."""
+    return _TRANSCRIPT_NUMBER_RUN.search(normalize_transcript_for_match(text)) is not None
+
+
+def transcript_numbers_match(expected: str, actual: str) -> bool:
+    """Return whether both sides spell exactly the same numbers.
+
+    Character edit distance is the wrong instrument for a misread digit. The
+    `numbers_punct` probe is 44 characters long, so reading `22.5℃` as `25℃`
+    costs one substitution -- 0.9375, clear of the 0.92 the gate needs for
+    `pass` -- while the number the listener hears is simply wrong. Digit runs
+    are therefore compared exactly and independently of edit distance.
+
+    Both sides are normalized first, so `二十二点五` and `22.5` are the same
+    number by the time they are compared. A side with no digits yields an empty
+    list, and two empty lists are equal: the comparison is vacuously satisfied
+    and callers gate applicability on :func:`probe_carries_digits`.
+    """
+    reference = _number_runs(expected)
+    hypothesis = _number_runs(actual)
+    return reference == hypothesis
+
+
+def _number_runs(text: str) -> list[str]:
+    """Return the comparable number runs of ``text``, by value not by spelling.
+
+    Leading zeros are dropped from the integer part only: `09` and `9` are the
+    same number and a date spoken as `2026/09/09` must match one heard as
+    `2026年9月9日`.  A fractional part keeps its zeros, because `0.05` and `0.5`
+    are different numbers.
+    """
+
+    runs: list[str] = []
+    for run in _TRANSCRIPT_NUMBER_RUN.findall(normalize_transcript_for_match(text)):
+        integer, dot, fraction = run.partition(".")
+        runs.append(
+            f"{integer.lstrip('0') or '0'}{dot}{fraction}" if dot else integer.lstrip("0") or "0"
+        )
+    return runs
 
 
 def transcript_match_score(expected: str, actual: str) -> float:
@@ -623,6 +785,7 @@ __all__ = [
     "VOICE_QUALITY_FAILURE_CODES",
     "VOICE_QUALITY_V1_ZH_PROBES",
     "VoiceQualityFailureCode",
+    "VoiceQualityProbeScore",
     "VoiceQualityReference",
     "VoiceQualityReport",
     "VoiceQualityStatus",
@@ -637,6 +800,8 @@ __all__ = [
     "noise_floor_dbfs",
     "normalize_transcript_for_match",
     "now_iso8601_z",
+    "probe_carries_digits",
     "speech_active_ratio",
     "transcript_match_score",
+    "transcript_numbers_match",
 ]

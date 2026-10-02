@@ -8,7 +8,8 @@ public final class TeleprompterSession {
     public enum Phase: String, Sendable, Equatable {
         case draft
         case analyzing
-        case review
+        /// AI 整理稿已就绪：可以直接用，也可以先改。刻意不再有「待审」这一步。
+        case prepared
         case ready
         case preparing
         case following
@@ -125,8 +126,6 @@ public final class TeleprompterSession {
     public var calibrationFactor: Double = 1.0
     /// 倍率的来源。默认 1.0 不是测量结果，时长估计必须据此标明未校准（#111 步骤 5）。
     public private(set) var calibrationSource: TeleprompterCalibrationSource = .uncalibrated
-    public var contentSelection: TeleprompterContentSelection = TeleprompterContentSelection()
-    public private(set) var reviewItems: [TeleprompterReviewItem] = []
     public private(set) var readingBlocks: [TeleprompterReadingBlock] = []
     public private(set) var runClock: TeleprompterRunClockState = TeleprompterRunClockState()
     private var clockTask: Task<Void, Never>?
@@ -136,7 +135,7 @@ public final class TeleprompterSession {
     public var canEdit: Bool {
         source == nil && client == nil && runningVersion == nil
             && phase != .preparing && !isResuming && !isStoppingIntentionally
-            && !isTightening && !isAnnotating
+            && !isAnnotating
     }
     public var isCapturing: Bool { source != nil }
     /// True only while this stage owns the monotonic run clock. Re-fronting a
@@ -151,9 +150,7 @@ public final class TeleprompterSession {
 
     public var hasLocalPreparationFallback: Bool {
         if preparationResult?.hasLocalFallback == true { return true }
-        return phase == .review && readingBlocks.contains {
-            $0.origin == .deterministic && $0.disposition == .unresolved
-        }
+        return phase == .prepared && readingBlocks.contains { $0.origin == .deterministic }
     }
 
     public var isFullyLocalPreparationFallback: Bool {
@@ -180,13 +177,8 @@ public final class TeleprompterSession {
         }
     }
 
-    public var unresolvedReviewItemCount: Int {
-        reviewItems.filter { !$0.isResolved }.count
-    }
-
-    public var canAcceptPendingVersion: Bool {
-        unresolvedReviewItemCount == 0 && pendingVersion != nil
-    }
+    /// 整理稿任何时候都能采用。没有待办清单，也就没有「必须先处理完 N 条」的门禁。
+    public var canAcceptPendingVersion: Bool { pendingVersion != nil }
 
     public var preflightConclusion: TeleprompterTimingPolicy.PreflightConclusion {
         TeleprompterTimingPolicy.evaluatePreflight(
@@ -202,15 +194,7 @@ public final class TeleprompterSession {
     public var isPaceCalibrated: Bool { calibrationSource != .uncalibrated }
 
     public var effectiveSourceText: String {
-        guard let sourceText = document?.sourceText else { return "" }
-        if contentSelection.isAllSelected || !contentSelection.hasExclusions {
-            return sourceText
-        }
-        let paragraphs = sourceText.components(separatedBy: "\n\n")
-        let selected = paragraphs.enumerated().compactMap { offset, element in
-            contentSelection.selectedParagraphIndices.contains(offset) ? element : nil
-        }
-        return selected.joined(separator: "\n\n")
+        document?.sourceText ?? ""
     }
 
     public var activeVersion: TeleprompterVersion? {
@@ -248,7 +232,6 @@ public final class TeleprompterSession {
     public var aiClient: TeleprompterAIClient?
     public private(set) var preparationProgress: TeleprompterPreparationProgress?
     public private(set) var preparationResult: TeleprompterPreparationResult?
-    public private(set) var isTightening = false
     public private(set) var isAnnotating = false
 
     private let coordinator: SessionCoordinator
@@ -267,7 +250,6 @@ public final class TeleprompterSession {
     private var lastVoiceStopFailure: String?
     private var draftGeneration = UUID()
     private var preparationTask: Task<TeleprompterPreparationResult, Error>?
-    private var tightenTask: Task<TeleprompterPreparationResult, Error>?
     private var annotationTask: Task<TeleprompterAnalysis, Error>?
     private var draftSaveTask: Task<Void, Never>?
     private var clockLastInstant: ContinuousClock.Instant?
@@ -277,7 +259,6 @@ public final class TeleprompterSession {
     private var clockSampleStartElapsed = 0.0
     private var savedRunState: TeleprompterRunState?
     private var importedSource: TeleprompterImportedSource?
-    private var condenseLockedRanges: [TeleprompterSourceRange] = []
 
     public init(
         coordinator: SessionCoordinator,
@@ -327,16 +308,15 @@ public final class TeleprompterSession {
             updatedAt: now
         )
         importedSource = nil
-        contentSelection = TeleprompterContentSelection()
         versions = []
         readingBlocks = []
-        reviewItems = []
         pendingVersion = nil
         currentSegmentIndex = 0
         readingOffset = 0
         phase = .draft
         blocked = nil
         lastFailure = nil
+        resolveTargetMinutes(stored: nil)
         persistDraft()
     }
 
@@ -367,16 +347,15 @@ public final class TeleprompterSession {
             updatedAt: now
         )
         self.importedSource = importedSource
-        contentSelection = TeleprompterContentSelection()
         versions = []
         pendingVersion = nil
         readingBlocks = []
-        reviewItems = []
         currentSegmentIndex = 0
         readingOffset = 0
         phase = .draft
         blocked = nil
         lastFailure = nil
+        resolveTargetMinutes(stored: nil)
         persistDraft()
     }
 
@@ -458,12 +437,9 @@ public final class TeleprompterSession {
         document?.sourceText = sourceText
         document?.updatedAt = Date()
         importedSource = nil
-        contentSelection = TeleprompterContentSelection()
         pendingVersion = nil
-        // Blocks and review items describe the previous text. Keeping them after
-        // an edit would attribute old risks to sentences the reader never wrote.
+        // 阅读块描述的是改之前的正文；改完还留着等于把旧内容算到新稿头上。
         readingBlocks = []
-        reviewItems = []
         phase = .draft
         scheduleDraftSave()
     }
@@ -482,7 +458,6 @@ public final class TeleprompterSession {
         let previousDocument = document
         let previousSavedRunState = savedRunState
         let previousReadingBlocks = readingBlocks
-        let previousReviewItems = reviewItems
         let previousPendingVersion = pendingVersion
         let previousFollowController = followController
         let previousSegmentIndex = currentSegmentIndex
@@ -497,7 +472,6 @@ public final class TeleprompterSession {
                 self.document = previousDocument
                 savedRunState = previousSavedRunState
                 readingBlocks = previousReadingBlocks
-                reviewItems = previousReviewItems
                 pendingVersion = previousPendingVersion
                 followController = previousFollowController
                 currentSegmentIndex = previousSegmentIndex
@@ -512,13 +486,8 @@ public final class TeleprompterSession {
         guard var document else { throw TeleprompterTextError.emptySource }
         let imported = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
         let sourceUnits = try TeleprompterSourceUnitBuilder().build(imported)
-        let selectedUnitIDs = try selectedSourceUnitIDs(
-            sourceUnits: sourceUnits,
-            sourceText: imported.sourceText
-        )
         let segments = try deterministicSegments(
             sourceUnits: sourceUnits,
-            selectedUnitIDs: selectedUnitIDs,
             sourceText: imported.sourceText
         )
         self.readingBlocks = segments.map { seg in
@@ -532,7 +501,6 @@ public final class TeleprompterSession {
                 origin: .deterministic
             )
         }
-        self.reviewItems = []
         let version = TeleprompterVersion(
             id: UUID().uuidString,
             documentID: document.id,
@@ -567,29 +535,6 @@ public final class TeleprompterSession {
         await prepareDraft(document: document, preparationClient: preparationClient)
     }
 
-    /// Explicitly lossy shortening, kept separate from the fidelity operations:
-    /// only this path may drop source content, every omission comes back as a
-    /// reviewable skip, and the ranges the reader marked as must-keep are
-    /// rejected as deletions rather than silently dropped.
-    public func condenseDraft(mustKeepSourceRanges: [TeleprompterSourceRange] = []) async {
-        guard canEdit, phase != .analyzing else { return }
-        guard let document else {
-            blocked = .aiUnavailable("请先创建一份稿子。")
-            return
-        }
-        guard let preparationClient else {
-            blocked = .aiUnavailable("AI 精简服务不可用；你可以继续使用当前稿件。")
-            return
-        }
-        condenseLockedRanges = mustKeepSourceRanges
-        await prepareDraft(
-            document: document,
-            preparationClient: preparationClient,
-            operation: .condense
-        )
-        condenseLockedRanges = []
-    }
-
     private func prepareDraft(
         document: TeleprompterDocument,
         preparationClient: TeleprompterPreparationClient,
@@ -604,7 +549,6 @@ public final class TeleprompterSession {
         do {
             let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
             let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
-            let selectedUnitIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
             let estimates = sourceUnits.map { unit in
                 TeleprompterDurationEstimator.estimate(
                     unit.rawText,
@@ -615,25 +559,15 @@ public final class TeleprompterSession {
             let timingPlan = try TeleprompterTimingPlanner.plan(
                 sourceUnits: sourceUnits,
                 estimates: estimates,
-                targetMinutes: targetMinutes,
-                selectedUnitIDs: selectedUnitIDs
+                targetMinutes: targetMinutes
             )
-            let lockedUnitIDs: Set<Int> = operation == .condense
-                ? Set(sourceUnits.lazy.filter { unit in
-                    self.condenseLockedRanges.contains { range in
-                        unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
-                    }
-                }.map(\.id))
-                : []
             let input = TeleprompterPreparationInput(
                 source: source,
                 sourceUnits: sourceUnits,
                 timingPlan: timingPlan,
                 pace: pace,
                 calibrationFactor: calibrationFactor,
-                operation: operation,
-                selectedUnitIDs: selectedUnitIDs,
-                lockedUnitIDs: lockedUnitIDs
+                operation: operation
             )
             let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
                 Task { @MainActor [weak self] in
@@ -676,39 +610,9 @@ public final class TeleprompterSession {
         document: TeleprompterDocument
     ) {
         readingBlocks = result.draft.blocks
-        reviewItems = []
-        for block in readingBlocks where block.disposition == .unresolved || !block.reviewIssues.isEmpty {
-            let reported = block.disposition == .skip
-                ? [TeleprompterReviewIssue.contentRemoved]
-                : block.reviewIssues
-            let issues = reported.isEmpty
-                ? [TeleprompterReviewIssue.uncertainMeaning]
-                : reported
-            for issue in issues {
-                reviewItems.append(
-                    TeleprompterReviewItem(
-                        blockID: block.id,
-                        issue: issue,
-                        suggestedText: block.text,
-                        sourceSnippet: block.rawSourceText
-                    )
-                )
-            }
-        }
-        for boundary in result.boundaries where !boundary.reviewBlockIDs.isEmpty {
-            for blockID in boundary.reviewBlockIDs
-                where !reviewItems.contains(where: { $0.blockID == blockID }) {
-                let block = readingBlocks.first { $0.id == blockID }
-                reviewItems.append(
-                    TeleprompterReviewItem(
-                        blockID: blockID,
-                        issue: .uncertainMeaning,
-                        suggestedText: block?.text ?? "",
-                        sourceSnippet: block?.rawSourceText ?? ""
-                    )
-                )
-            }
-        }
+        // 没有待办清单：整理稿就是稿子。模型判断不了的段落由它在提示词里写下
+        // 一版确定的话，人在页面上通读时自然会发现不对——这比让人逐条点「采用/
+        // 保留原文/跳过」快得多，也不用维护一套审阅状态机。
         let segments = localSegments(from: readingBlocks)
         pendingVersion = TeleprompterVersion(
             id: UUID().uuidString,
@@ -717,7 +621,7 @@ public final class TeleprompterSession {
             segments: segments,
             analysisSource: result.fallbackBlockCount == result.draft.blocks.count ? .deterministic : .ai
         )
-        phase = .review
+        phase = .prepared
     }
 
     public func acceptPendingVersion() throws {
@@ -729,12 +633,12 @@ public final class TeleprompterSession {
             throw TeleprompterTextError.invalidAnalysis
         }
         // 采用候选版本是这个界面里唯一一件**读者没法重做**的编辑：`pendingVersion`
-        // 一旦置 nil，审阅结果就从这个窗口里消失了。此时若 store 拒绝写入，读者看到
+        // 一旦置 nil，整理结果就从这个窗口里消失了。此时若 store 拒绝写入，读者看到
         // 的是 `.atomicWriteFailed` 那句「原版本仍然保留」——而他们的工作在磁盘和
         // 界面上都不在了；`canAcceptPendingVersion` 又依赖 `pendingVersion != nil`，
         // 按钮随之变灰，连重试都不行。
         //
-        // 所以这里把这次改动碰到的每一项都存下来：写失败就整体放回去，让审阅留在
+        // 所以这里把这次改动碰到的每一项都存下来：写失败就整体放回去，让整理稿留在
         // 屏幕上、按钮留着可按，读者腾出磁盘空间后还能再试一次。
         let previousVersions = versions
         let previousDocument = self.document
@@ -776,7 +680,6 @@ public final class TeleprompterSession {
         guard canEdit else { return }
         invalidateAnalysis()
         pendingVersion = nil
-        reviewItems = []
         phase = activeVersion == nil ? .draft : .ready
     }
 
@@ -793,6 +696,11 @@ public final class TeleprompterSession {
     }
 
     /// 根据当前原稿可靠估算得出的建议目标分钟数（预填 max(1, ceil(D/60))）。
+    ///
+    /// 「可靠」是硬条件：含数字、网址或非中英文本时 `estimateDuration` 会标
+    /// `isUncertain`，此时 `pointSeconds` 只是把已知部分按默认语速外推的数字。
+    /// 拿它去预填目标，会和同一屏上的「无法预估」徽标自相矛盾——一个说算不准，
+    /// 一个却已经把分钟数填好了。
     public var suggestedTargetMinutes: Int? {
         guard let text = document?.sourceText, !text.isEmpty else { return nil }
         let metrics = TeleprompterTimingPolicy.countMetrics(in: text)
@@ -803,8 +711,26 @@ public final class TeleprompterSession {
             calibrationFactor: calibrationFactor,
             calibrationSource: calibrationSource
         )
+        guard !estimate.isUncertain else { return nil }
         guard let duration = estimate.pointSeconds, duration > 0 else { return nil }
         return max(1, Int(ceil(duration / 60.0)))
+    }
+
+    /// 打开一份稿时定下它的目标时长：存过就用存的，没存过才按原稿估算。
+    ///
+    /// 这一步以前挂在视图的 `.onChange(of: session.document?.id)` 上。切页再回来
+    /// 时文档 ID 没变，`onChange` 不触发，`targetMinutes` 就停在
+    /// `defaultTargetMinutes`（20），一份两百字的稿顶着「目标 20 分」。判断依据
+    /// 属于「打开哪份稿」，因此放在载入路径上，视图不再替会话做决定。
+    private func resolveTargetMinutes(stored: Int?) {
+        let resolved = stored
+            ?? suggestedTargetMinutes
+            ?? TeleprompterTimingPolicy.minimumTargetMinutes
+        targetMinutes = min(
+            max(resolved, TeleprompterTimingPolicy.minimumTargetMinutes),
+            TeleprompterTimingPolicy.maximumTargetMinutes
+        )
+        runClock.targetSeconds = Double(targetMinutes * 60)
     }
 
     public func setPace(_ pace: TeleprompterPace) {
@@ -845,44 +771,6 @@ public final class TeleprompterSession {
             )
         )
         return evidence
-    }
-
-    /// True when changing the content range would throw away review the reader
-    /// has already worked through. That work cannot be recovered without
-    /// another AI round and another pass over every item, so the caller asks
-    /// before calling `updateContentSelection`.
-    public var hasReviewDecisionsAtRisk: Bool {
-        pendingVersion != nil && reviewItems.contains(where: \.isResolved)
-    }
-
-    /// Narrows the material this reading covers. The segmentation built for the
-    /// old range no longer applies, so it is rebuilt from scratch — but if the
-    /// reader has already resolved review items, that is unrecoverable work and
-    /// this refuses rather than dropping it in silence. The caller confirms and
-    /// then uses `applyContentSelectionAfterConfirmation`.
-    public func updateContentSelection(_ selection: TeleprompterContentSelection) throws {
-        guard !hasReviewDecisionsAtRisk else {
-            throw TeleprompterTextError.reviewDecisionsWouldBeDiscarded
-        }
-        try applyContentSelectionAfterConfirmation(selection)
-    }
-
-    /// The confirmed path. Callers reach this only after the reader has agreed
-    /// to lose the review work, so the discard is a choice rather than a side
-    /// effect.
-    public func applyContentSelectionAfterConfirmation(
-        _ selection: TeleprompterContentSelection
-    ) throws {
-        guard canEdit else { throw TeleprompterTextError.sessionBusy }
-        self.contentSelection = selection
-        if pendingVersion != nil || !readingBlocks.isEmpty {
-            invalidateAnalysis()
-            pendingVersion = nil
-            reviewItems = []
-            readingBlocks = []
-            phase = activeVersion == nil ? .draft : .ready
-        }
-        scheduleDraftSave()
     }
 
     // MARK: - 用户确认的读法
@@ -1063,190 +951,110 @@ public final class TeleprompterSession {
         )
     }
 
-    // MARK: - 待确认事项处理
+    // MARK: - 口述字符稿（统一文本编辑）
 
-    public func resolveReviewItem(id: String, action: TeleprompterReviewAction, customText: String? = nil) {
-        guard let index = reviewItems.firstIndex(where: { $0.id == id }) else { return }
-        reviewItems[index].resolvedAction = action
-        let item = reviewItems[index]
-        if let blockIndex = readingBlocks.firstIndex(where: { $0.id == item.blockID }) {
-            switch action {
-            case .accept:
-                readingBlocks[blockIndex].text = item.suggestedText
-                readingBlocks[blockIndex].disposition = .speak
-            case .edit:
-                if let customText, !customText.isEmpty {
-                    readingBlocks[blockIndex].text = customText
-                }
-                readingBlocks[blockIndex].disposition = .speak
-                readingBlocks[blockIndex].origin = .user
-            case .keepSource:
-                readingBlocks[blockIndex].text = readingBlocks[blockIndex].rawSourceText
-                readingBlocks[blockIndex].disposition = .speak
-            case .convertToCue:
-                readingBlocks[blockIndex].disposition = .cue
-            case .skip:
-                readingBlocks[blockIndex].disposition = .skip
+    /// AI 整理后的整篇口述稿纯文本。
+    /// 无论底层如何分段，对用户而言都是一份可通读、可直接修改的干净字符稿。
+    public var preparedText: String {
+        if !readingBlocks.isEmpty {
+            let activeTexts = readingBlocks
+                .filter { $0.disposition == .speak }
+                .map(\.text)
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !activeTexts.isEmpty {
+                return activeTexts.joined(separator: "\n\n")
             }
         }
+        if let pending = pendingVersion, !pending.segments.isEmpty {
+            return pending.segments.map(\.text).joined(separator: "\n\n")
+        }
+        return effectiveSourceText
+    }
+
+    /// 用户在通读纯文本字符稿并修改后，实时或提交更新。
+    /// 按自然段（空行）切分，重新同步到 readingBlocks 与 pendingVersion。
+    public func updatePreparedDraftText(_ newText: String) {
+        guard canEdit, document != nil else { return }
+        let rawParagraphs = newText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        // 合并连续空行，生成清晰的段落列表
+        var paragraphs: [String] = []
+        var currentPara = ""
+        for line in rawParagraphs {
+            if line.isEmpty {
+                if !currentPara.isEmpty {
+                    paragraphs.append(currentPara)
+                    currentPara = ""
+                }
+            } else {
+                if currentPara.isEmpty {
+                    currentPara = line
+                } else {
+                    currentPara += "\n" + line
+                }
+            }
+        }
+        if !currentPara.isEmpty {
+            paragraphs.append(currentPara)
+        }
+        if paragraphs.isEmpty {
+            paragraphs = [newText.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+
+        var newBlocks: [TeleprompterReadingBlock] = []
+        var runningOffset = 0
+        for (idx, para) in paragraphs.enumerated() {
+            let start = runningOffset
+            let end = start + para.count
+            runningOffset = end + 2 // 预留换行
+            newBlocks.append(
+                TeleprompterReadingBlock(
+                    id: "user-block-\(idx)",
+                    ordinal: idx,
+                    sourceRange: TeleprompterSourceRange(start: start, end: end),
+                    text: para,
+                    rawSourceText: para,
+                    disposition: .speak,
+                    origin: .user,
+                    budgetSeconds: 0
+                )
+            )
+        }
+
+        self.readingBlocks = newBlocks
         syncPendingVersionFromBlocks()
         scheduleDraftSave()
     }
 
-    // MARK: - 再精简表达 (Tighten)
-
-    public var canTighten: Bool {
-        preparationClient != nil
-            && phase == .review
-            && !isTightening
-            && readingBlocks.contains { $0.disposition == .speak && $0.origin == .ai }
-    }
-
-    public func tightenReadingBlocks() async -> String? {
-        guard canTighten else {
-            return "没有符合条件的 AI 整理段落可供自动精简，请手动编辑文本。"
-        }
-        guard let preparationClient, let document else {
-            return "AI 整理服务不可用，请手动编辑文本。"
-        }
-
-        let candidateIndices = readingBlocks.indices.filter {
-            readingBlocks[$0].disposition == .speak && readingBlocks[$0].origin == .ai
-        }
-        guard !candidateIndices.isEmpty else {
-            return "没有符合条件的 AI 整理段落可供自动精简，请手动编辑文本。"
-        }
-
-        isTightening = true
-        let generation = draftGeneration
-        preparationProgress = nil
-        defer {
-            isTightening = false
-            tightenTask = nil
-            preparationProgress = nil
-        }
-
-        do {
-            let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
-            let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
-            let sourceUnitIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
-            let estimates = sourceUnits.map { unit in
-                TeleprompterDurationEstimator.estimate(
-                    unit.rawText,
-                    pace: pace,
-                    calibrationFactor: calibrationFactor
-                ).pointSeconds
-            }
-            let timingPlan = try TeleprompterTimingPlanner.plan(
-                sourceUnits: sourceUnits,
-                estimates: estimates,
-                targetMinutes: targetMinutes,
-                selectedUnitIDs: sourceUnitIDs
-            )
-            let candidates = candidateIndices.compactMap { index -> (Int, [Int])? in
-                let block = readingBlocks[index]
-                let ids = sourceUnits.filter { unit in
-                    unit.sourceRange.start < block.sourceRange.end
-                        && block.sourceRange.start < unit.sourceRange.end
-                }.map(\.id).filter(sourceUnitIDs.contains)
-                guard !ids.isEmpty else { return nil }
-                return (index, ids)
-            }
-            let rankedCandidates = candidates.sorted { lhs, rhs in
-                let leftEstimate = TeleprompterDurationEstimator.estimate(
-                    readingBlocks[lhs.0].text,
-                    pace: pace,
-                    calibrationFactor: calibrationFactor
-                ).pointSeconds ?? 0
-                let rightEstimate = TeleprompterDurationEstimator.estimate(
-                    readingBlocks[rhs.0].text,
-                    pace: pace,
-                    calibrationFactor: calibrationFactor
-                ).pointSeconds ?? 0
-                let leftExcess = max(0, leftEstimate - readingBlocks[lhs.0].budgetSeconds)
-                let rightExcess = max(0, rightEstimate - readingBlocks[rhs.0].budgetSeconds)
-                if leftExcess != rightExcess { return leftExcess > rightExcess }
-                return readingBlocks[lhs.0].ordinal < readingBlocks[rhs.0].ordinal
-            }
-            let selectedCandidates = Array(rankedCandidates.prefix(3))
-            let selectedIDs = Set(selectedCandidates.flatMap(\.1)).intersection(sourceUnitIDs)
-            guard !selectedIDs.isEmpty else {
-                return "当前 AI 段落没有可用来源坐标，请手动编辑文本。"
-            }
-            let currentBlocks = selectedCandidates.map { index, ids in
-                TeleprompterMapCurrentBlock(
-                    startUnit: ids.first!,
-                    endUnit: ids.last! + 1,
-                    text: readingBlocks[index].text
-                )
-            }
-            let input = TeleprompterPreparationInput(
-                source: source,
-                sourceUnits: sourceUnits,
-                timingPlan: timingPlan,
-                pace: pace,
-                calibrationFactor: calibrationFactor,
-                operation: .tighten,
-                selectedUnitIDs: selectedIDs,
-                currentBlocks: currentBlocks
-            )
-            let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
-                Task { @MainActor [weak self] in
-                    guard let self, self.draftGeneration == generation else { return }
-                    self.preparationProgress = progress
-                }
-            }
-            let task = Task.detached(priority: .userInitiated) {
-                try await preparationClient.prepare(input, onProgress: progressSink)
-            }
-            tightenTask = task
-            let result = try await task.value
-            guard generation == draftGeneration, self.document?.id == document.id else { return nil }
-
-            var replacements: [Int: [String]] = [:]
-            for resultBlock in result.draft.blocks where resultBlock.disposition == .speak {
-                    let matching = selectedCandidates.filter { _, ids in
-                    let range = sourceUnits.filter { ids.contains($0.id) }
-                        .map(\.sourceRange)
-                    guard let first = range.map(\.start).min(), let last = range.map(\.end).max() else {
-                        return false
-                    }
-                    return first < resultBlock.sourceRange.end && resultBlock.sourceRange.start < last
-                }.map(\.0)
-                // A candidate spanning two existing blocks is ambiguous; do not
-                // apply a model merge across an explicit user-facing boundary.
-                guard matching.count == 1, let index = matching.first else { continue }
-                replacements[index, default: []].append(resultBlock.text)
-            }
-            for (index, texts) in replacements {
-                let candidate = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !candidate.isEmpty else { continue }
-                let oldEstimate = TeleprompterDurationEstimator.estimate(
-                    readingBlocks[index].text,
-                    pace: pace,
-                    calibrationFactor: calibrationFactor
-                ).pointSeconds
-                let newEstimate = TeleprompterDurationEstimator.estimate(
-                    candidate,
-                    pace: pace,
-                    calibrationFactor: calibrationFactor
-                ).pointSeconds
-                guard let oldEstimate, let newEstimate, newEstimate < oldEstimate else {
-                    continue
-                }
-                readingBlocks[index].text = candidate
-            }
-            syncPendingVersionFromBlocks()
-            scheduleDraftSave()
-            return replacements.isEmpty ? "这次没有找到安全的精简改动。" : nil
-        } catch is CancellationError {
-            return "已取消精简。"
-        } catch {
-            return Self.aiFailureMessage(for: error)
-        }
-    }
-
     // MARK: - 来源组/块级编辑操作
+
+    /// 改一段的跟读方式：照念 / 只作提示 / 不进跟读。
+    ///
+    /// 粒度是「段」而不是「句」：口语稿按段落呼吸，逐句标记既费力，多数人也不会
+    /// 真那么用。AI 已经把这一段归好了，用户多数时候只需要改掉少数几段。
+    public func setBlockDisposition(id: String, disposition: TeleprompterBlockDisposition) {
+        guard let index = readingBlocks.firstIndex(where: { $0.id == id }),
+              readingBlocks[index].disposition != disposition else { return }
+        // 本地编辑绕过 decoder，所以这条不变式必须在这里自己守住：
+        // speak 的正文非空，cue/skip 的正文为空——与两个 decoder 的判定一致。
+        //
+        // 切出去时清空，是因为留着上一版改写会被 `mergeBlock` 拼进相邻段落的
+        // 朗读正文，把标记为「不念」的内容真的念出来；切回来时用原稿补上，
+        // 否则会得到一段永远念不出来的「照念」段落。原稿始终在 rawSourceText。
+        if disposition == .speak {
+            if readingBlocks[index].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                readingBlocks[index].text = readingBlocks[index].rawSourceText
+            }
+        } else {
+            readingBlocks[index].text = ""
+        }
+        readingBlocks[index].disposition = disposition
+        readingBlocks[index].origin = .user
+        syncPendingVersionFromBlocks()
+        scheduleDraftSave()
+    }
 
     public func updateBlockText(id: String, text: String) {
         guard let index = readingBlocks.firstIndex(where: { $0.id == id }) else { return }
@@ -1260,10 +1068,12 @@ public final class TeleprompterSession {
         guard index >= 0, index + 1 < readingBlocks.count else { return }
         var current = readingBlocks[index]
         let next = readingBlocks[index + 1]
-        current.text = current.text + "\n" + next.text
+        // 跳过不念的段落正文是空的，直接拼上去只会留一个游离换行。
+        current.text = next.text.isEmpty
+            ? current.text
+            : current.text + "\n" + next.text
         current.rawSourceText = current.rawSourceText + "\n" + next.rawSourceText
         current.sourceRange = TeleprompterSourceRange(start: current.sourceRange.start, end: next.sourceRange.end)
-        current.reviewIssues.append(contentsOf: next.reviewIssues)
         current.budgetSeconds += next.budgetSeconds
         current.origin = .user
         readingBlocks.remove(at: index + 1)
@@ -1356,7 +1166,6 @@ public final class TeleprompterSession {
         do {
             let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
             let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
-            let selectedIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
             let estimates = sourceUnits.map { unit in
                 TeleprompterDurationEstimator.estimate(
                     unit.rawText,
@@ -1367,8 +1176,7 @@ public final class TeleprompterSession {
             let plan = try TeleprompterTimingPlanner.plan(
                 sourceUnits: sourceUnits,
                 estimates: estimates,
-                targetMinutes: targetMinutes,
-                selectedUnitIDs: selectedIDs
+                targetMinutes: targetMinutes
             )
             for index in readingBlocks.indices {
                 let ids = sourceUnits.filter { unit in
@@ -1436,16 +1244,15 @@ public final class TeleprompterSession {
         return segments
     }
 
+    /// 整篇都在跟读范围内，所以这里没有「选中区间」——全部来源单元按连续区间合并。
     private func deterministicSegments(
         sourceUnits: [TeleprompterSourceUnit],
-        selectedUnitIDs: Set<Int>,
         sourceText: String
     ) throws -> [TeleprompterSegment] {
-        let selectedUnits = sourceUnits.filter { selectedUnitIDs.contains($0.id) }
-        guard !selectedUnits.isEmpty else { throw TeleprompterPreparationError.invalidTimingPlan }
+        guard !sourceUnits.isEmpty else { throw TeleprompterPreparationError.invalidTimingPlan }
 
         var runs: [[TeleprompterSourceUnit]] = []
-        for unit in selectedUnits {
+        for unit in sourceUnits {
             if let lastIndex = runs.indices.last,
                runs[lastIndex].last?.id == unit.id - 1 {
                 runs[lastIndex].append(unit)
@@ -1485,33 +1292,6 @@ public final class TeleprompterSession {
         }
         return result
     }
-
-    private func selectedSourceUnitIDs(
-        sourceUnits: [TeleprompterSourceUnit],
-        sourceText: String
-    ) throws -> Set<Int> {
-        let allIDs = Set(sourceUnits.map(\.id))
-        guard contentSelection.hasExclusions else { return allIDs }
-
-        let paragraphRanges = paragraphRanges(in: sourceText)
-        let selectedRanges = paragraphRanges.enumerated().compactMap { index, range in
-            contentSelection.selectedParagraphIndices.contains(index) ? range : nil
-        }
-        guard !selectedRanges.isEmpty else {
-            throw TeleprompterPreparationError.invalidTimingPlan
-        }
-
-        let selectedIDs = Set(sourceUnits.compactMap { unit in
-            unitContainsOnlySelectedContent(unit, sourceText: sourceText, selectedRanges: selectedRanges)
-                ? unit.id
-                : nil
-        })
-        guard !selectedIDs.isEmpty else {
-            throw TeleprompterPreparationError.invalidTimingPlan
-        }
-        return selectedIDs
-    }
-
     public func annotateActiveVersion() async -> String? {
         guard !isAnnotating else { return "朗读提示正在生成。" }
         guard let aiClient, let active = activeVersion, let document else {
@@ -2681,6 +2461,8 @@ public final class TeleprompterSession {
             updatedAt: bundle.document.updatedAt
         )
         document = loadedDocument
+        // 必须排在 `document` 赋值之后：估算要用这份稿的原稿正文。
+        resolveTargetMinutes(stored: bundle.document.targetMinutes)
         if let currentSource {
             let body = Data(currentSource.sourceText.utf8)
             importedSource = TeleprompterImportedSource(
@@ -2712,18 +2494,7 @@ public final class TeleprompterSession {
 
         if let draft = bundle.draft {
             let source = bundle.sourceRevisions.first { $0.id == draft.sourceRevisionID }
-            readingBlocks = legacyBlocks(
-                from: draft.blocks,
-                reviews: draft.reviewIssues,
-                source: source
-            )
-            reviewItems = draft.reviewIssues
-            if let source {
-                contentSelection = contentSelection(
-                    selectedUnitIDs: Set(draft.blocks.flatMap(\.sourceUnitIDs)),
-                    source: source
-                )
-            }
+            readingBlocks = legacyBlocks(from: draft.blocks, source: source)
             let speakBlocks = readingBlocks.filter { $0.disposition == .speak }
             let segments = speakBlocks.enumerated().map { index, block in
                 TeleprompterSegment(
@@ -2749,22 +2520,11 @@ public final class TeleprompterSession {
                 )
             )
             pace = draft.pace
-            phase = .review
+            phase = .prepared
         } else {
             readingBlocks = []
-            reviewItems = []
-            pendingVersion = nil
+                pendingVersion = nil
             phase = activeVersion == nil ? .draft : .ready
-            if let selectionVersion = bundle.versions.first(where: {
-                $0.id == bundle.document.activeVersionID
-            }), let source = currentSource {
-                contentSelection = legacySelection(
-                    from: selectionVersion.selectionSnapshot,
-                    source: source
-                )
-            } else {
-                contentSelection = TeleprompterContentSelection()
-            }
         }
 
         let restoredPosition = restoredReadingPosition()
@@ -2856,7 +2616,6 @@ public final class TeleprompterSession {
 
     private func legacyBlocks(
         from blocks: [TeleprompterV2ReadingBlock],
-        reviews: [TeleprompterReviewItem],
         source: TeleprompterV2SourceRevision?
     ) -> [TeleprompterReadingBlock] {
         blocks.enumerated().map { index, block in
@@ -2870,46 +2629,9 @@ public final class TeleprompterSession {
                 rawSourceText: rawText,
                 disposition: block.disposition,
                 origin: block.origin,
-                reviewIssues: reviews.filter { $0.blockID == block.id }.map(\.issue),
                 budgetSeconds: block.budgetShare
             )
         }
-    }
-
-    private func legacySelection(
-        from snapshot: TeleprompterV2SelectionRevision,
-        source: TeleprompterV2SourceRevision
-    ) -> TeleprompterContentSelection {
-        let paragraphRanges = paragraphRanges(in: source.sourceText)
-        let selected: Set<Int> = Set(paragraphRanges.enumerated().compactMap { (index, range) -> Int? in
-            snapshot.selectedRanges.contains { selectedRange in
-                selectedRange.start <= range.start && selectedRange.end >= range.end
-            } ? index : nil
-        })
-        guard !paragraphRanges.isEmpty else { return .init() }
-        return TeleprompterContentSelection(
-            totalParagraphCount: paragraphRanges.count,
-            selectedParagraphIndices: selected
-        )
-    }
-
-    private func contentSelection(
-        selectedUnitIDs: Set<Int>,
-        source: TeleprompterV2SourceRevision
-    ) -> TeleprompterContentSelection {
-        let paragraphRanges = paragraphRanges(in: source.sourceText)
-        let selected: Set<Int> = Set(paragraphRanges.enumerated().compactMap { (index, range) -> Int? in
-            let relevantUnits = source.sourceUnits.filter { unit in
-                unit.sourceRange.start < range.end && range.start < unit.sourceRange.end
-            }
-            guard !relevantUnits.isEmpty else { return nil }
-            return relevantUnits.allSatisfy { selectedUnitIDs.contains($0.id) } ? index : nil
-        })
-        guard !paragraphRanges.isEmpty else { return .init() }
-        return TeleprompterContentSelection(
-            totalParagraphCount: paragraphRanges.count,
-            selectedParagraphIndices: selected
-        )
     }
 
     private func makeV2Bundle(document: TeleprompterDocument) throws -> TeleprompterV2DocumentBundle {
@@ -2921,15 +2643,10 @@ public final class TeleprompterSession {
             metadata: importedSource,
             sources: &sources
         )
-        let selection = selectionSnapshot(
-            source: currentSource,
-            sourceText: document.sourceText
-        )
         let v2Versions = try versions.map { version in
             try v2Version(
                 from: version,
                 source: currentSource,
-                selection: selection,
                 existing: existing?.versions.first { $0.id == version.id }
             )
         }
@@ -2937,7 +2654,6 @@ public final class TeleprompterSession {
         if pendingVersion != nil && !readingBlocks.isEmpty {
             draft = try v2Draft(
                 source: currentSource,
-                selection: selection,
                 existing: existing?.draft
             )
         } else {
@@ -2948,6 +2664,7 @@ public final class TeleprompterSession {
             title: document.title,
             currentSourceRevisionID: currentSource.id,
             activeVersionID: document.activeVersionID,
+            targetMinutes: targetMinutes,
             createdAt: document.createdAt,
             updatedAt: Date()
         )
@@ -3043,78 +2760,9 @@ public final class TeleprompterSession {
         return revision
     }
 
-    private func selectionSnapshot(
-        source: TeleprompterV2SourceRevision,
-        sourceText: String
-    ) -> TeleprompterV2SelectionRevision {
-        let allUnits = source.sourceUnits
-        let paragraphRanges = paragraphRanges(in: sourceText)
-        let selectedParagraphs: [TeleprompterSourceRange]
-        let excludedParagraphs: [TeleprompterSourceRange]
-        if contentSelection.isAllSelected || !contentSelection.hasExclusions || paragraphRanges.isEmpty {
-            selectedParagraphs = sourceText.isEmpty
-                ? []
-                : [TeleprompterSourceRange(start: 0, end: sourceText.utf16.count)]
-            excludedParagraphs = []
-        } else {
-            selectedParagraphs = paragraphRanges.enumerated().compactMap { index, range in
-                contentSelection.selectedParagraphIndices.contains(index) ? range : nil
-            }
-            excludedParagraphs = paragraphRanges.enumerated().compactMap { index, range in
-                contentSelection.selectedParagraphIndices.contains(index) ? nil : range
-            }
-        }
-        let selectedIDs = allUnits.compactMap { unit in
-            unitContainsOnlySelectedContent(
-                unit,
-                sourceText: sourceText,
-                selectedRanges: selectedParagraphs
-            ) ? unit.id : nil
-        }
-        return TeleprompterV2SelectionRevision(
-            id: "selection-\(UUID().uuidString)",
-            sourceUnitRevision: source.id,
-            selectedUnitIDs: selectedIDs,
-            selectedRanges: selectedParagraphs,
-            userExcludedRanges: excludedParagraphs
-        )
-    }
-
-    private func unitContainsOnlySelectedContent(
-        _ unit: TeleprompterSourceUnit,
-        sourceText: String,
-        selectedRanges: [TeleprompterSourceRange]
-    ) -> Bool {
-        guard let swiftRange = Range(
-            NSRange(
-                location: unit.sourceRange.start,
-                length: unit.sourceRange.end - unit.sourceRange.start
-            ),
-            in: sourceText
-        ) else { return false }
-
-        var offset = unit.sourceRange.start
-        var containsContent = false
-        for character in sourceText[swiftRange] {
-            let length = String(character).utf16.count
-            let isWhitespace = String(character).rangeOfCharacter(from: .whitespacesAndNewlines) != nil
-            if !isWhitespace {
-                containsContent = true
-                guard selectedRanges.contains(where: {
-                    $0.start <= offset && offset + length <= $0.end
-                }) else {
-                    return false
-                }
-            }
-            offset += length
-        }
-        return containsContent
-    }
-
     private func v2Version(
         from version: TeleprompterVersion,
         source: TeleprompterV2SourceRevision,
-        selection: TeleprompterV2SelectionRevision,
         existing: TeleprompterV2ReadingVersion?
     ) throws -> TeleprompterV2ReadingVersion {
         let blocks = version.segments.map { segment in
@@ -3154,13 +2802,6 @@ public final class TeleprompterSession {
             id: version.id,
             documentID: version.documentID,
             sourceRevisionID: source.id,
-            selectionSnapshot: .init(
-                id: selection.id,
-                sourceUnitRevision: selection.sourceUnitRevision,
-                selectedUnitIDs: selection.selectedUnitIDs,
-                selectedRanges: selection.selectedRanges,
-                userExcludedRanges: selection.userExcludedRanges
-            ),
             readingText: readingText,
             blocks: blocks,
             segments: segments,
@@ -3174,7 +2815,6 @@ public final class TeleprompterSession {
 
     private func v2Draft(
         source: TeleprompterV2SourceRevision,
-        selection: TeleprompterV2SelectionRevision,
         existing: TeleprompterV2ReadingDraft?
     ) throws -> TeleprompterV2ReadingDraft {
         let blocks = readingBlocks.map { block in
@@ -3195,7 +2835,6 @@ public final class TeleprompterSession {
                 calibrationFactor: calibrationFactor
             ).pointSeconds
         }
-        let selectedUnitIDs = Set(selection.selectedUnitIDs)
         let plan: TeleprompterTimingPlan
         if source.sourceUnits.isEmpty {
             plan = .init(
@@ -3209,17 +2848,14 @@ public final class TeleprompterSession {
             plan = try TeleprompterTimingPlanner.plan(
                 sourceUnits: source.sourceUnits,
                 estimates: estimates,
-                targetMinutes: targetMinutes,
-                selectedUnitIDs: selectedUnitIDs
+                targetMinutes: targetMinutes
             )
         }
         return TeleprompterV2ReadingDraft(
             id: pendingVersion?.id ?? existing?.id ?? UUID().uuidString,
             draftRevision: (existing?.draftRevision ?? 0) + 1,
             sourceRevisionID: source.id,
-            selectionRevisionID: selection.id,
             blocks: blocks,
-            reviewIssues: reviewItems,
             goal: .init(
                 targetSeconds: Double(targetMinutes * 60),
                 goalRevision: existing?.goal.goalRevision ?? 0
@@ -3275,14 +2911,6 @@ public final class TeleprompterSession {
         }
     }
 
-    /// Paragraph ranges the reader may mark as must-keep before a lossy
-    /// condense. The UI must not re-derive these from its own split of the
-    /// source: `condenseDraft` maps ranges onto source units by overlap, so a
-    /// differently-computed range would silently lock the wrong text.
-    public func mustKeepCandidateRanges() -> [TeleprompterSourceRange] {
-        paragraphRanges(in: document?.sourceText ?? "")
-    }
-
     private func v2Origin(_ origin: TeleprompterBlockOrigin) -> TeleprompterBlockOrigin {
         origin
     }
@@ -3307,9 +2935,6 @@ public final class TeleprompterSession {
         cancelScheduledDraftSave()
         preparationTask?.cancel()
         preparationTask = nil
-        tightenTask?.cancel()
-        tightenTask = nil
-        isTightening = false
         annotationTask?.cancel()
         annotationTask = nil
         isAnnotating = false

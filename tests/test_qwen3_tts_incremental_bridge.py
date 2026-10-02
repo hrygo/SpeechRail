@@ -534,3 +534,31 @@ def test_vendor_adapter_maps_every_driver_event() -> None:
     assert driver.finished == 1
     assert driver.max_steps == [3, 3, 3, 3]
     assert (driver.cancelled, driver.closed) == (1, 1)
+
+
+@pytest.mark.parametrize("operation", ["prepare", "incremental"])
+def test_idle_worker_death_restarts_in_same_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    worker, transport = _worker(tmp_path, variant="custom_voice", stream_protocol=1)
+    transport.alive = False
+    starts = 0
+
+    async def restart() -> None:
+        nonlocal starts
+        starts += 1
+        transport.alive = True
+        worker._runtime_revision = "rt_restarted"
+
+    monkeypatch.setattr(worker, "_start_locked", restart)
+
+    async def scenario() -> None:
+        if operation == "prepare":
+            assert await worker.prepare() == "rt_restarted"
+        else:
+            session = await worker.open_incremental_stream(_options())
+            await session.close()
+        assert starts == 1
+        assert transport.alive
+
+    asyncio.run(scenario())

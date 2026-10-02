@@ -564,6 +564,7 @@ def test_serve_drives_one_incremental_utterance_over_the_pipe(tmp_path: Path) ->
     started = read_frame(target)
     accepted = read_frame(target)
     audio = read_frame(target)
+    fade = read_frame(target)
     done = read_frame(target)
     assert read_frame(target) is None
 
@@ -576,6 +577,12 @@ def test_serve_drives_one_incremental_utterance_over_the_pipe(tmp_path: Path) ->
     assert accepted["accepted_tokens"] == 2
     assert audio["type"] == "tts_stream_audio"
     assert audio["_binary"] == b"\x00\x00"
+    # The utterance ends on a fade-to-silence frame, so a completed stream
+    # never leaves the speaker on a step. The fake's only sample is already
+    # zero, so the ramp is the explicit quiet window.
+    assert fade["type"] == "tts_stream_audio"
+    assert fade["sample_offset"] == 1
+    assert fade["_binary"] == b"\x00\x00" * 120
     assert done == {
         "version": PROTOCOL_VERSION,
         "type": "tts_stream_done",

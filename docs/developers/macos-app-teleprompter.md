@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.5.15"
-date: 2026-09-29
+version: "0.7.0"
+date: 2026-10-01
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -14,7 +14,7 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 ## 产品边界
 
 - 输入为用户粘贴的纯文本，或导入 `TXT` / `Markdown` 文件。
-- AI 仅由用户主动触发；短稿一次窗口请求，长稿按最多 24 个本地单元逐窗口处理。正常整理每窗分成两个有界请求：`teleprompter.grouping.v1` 只分配连续来源区间，`teleprompter.rewrite.v1` 只按程序分配的 `block_id` 生成朗读候选。原文、UTF-16 范围和来源组由本地程序持有；可恢复的单窗失败会逐字保留原文并标记待确认，不把回退计作 AI 成功。
+- AI 仅由用户主动触发；短稿一次窗口请求，长稿按最多 24 个本地单元逐窗口处理。正常整理每窗分成两个有界请求：`teleprompter.grouping.v1` 只分配连续来源区间，`teleprompter.rewrite.v1` 只按程序分配的 `block_id` 生成朗读候选。原文、UTF-16 范围和来源组由本地程序持有；可恢复的单窗失败会逐字保留原文并标成可直接照念的段落，不把回退计作 AI 成功。
 - 原稿无需 AI 即可开始；草稿自动保存，AI 标注是可选步骤，建议经用户确认后才成为活动版本。跟读期间固定版本，不允许切稿或编辑。
 - 默认手动：打开舞台不申请麦克风、不连接 ASR，也不要求 AI 整理；语音跟随只能由用户显式开启，手动接管后立即撤销旧的语音推进权并释放本功能占用。
 - 运行时复用现有 `MicrophoneCapture`、`RealtimeASRClient` 和 `SessionCoordinator`，但不创建 `SessionStore` 会话行，也不保存 PCM、摄像头画面、直播画面或完整 ASR 文本。
@@ -24,7 +24,7 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 
 1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。「复制稿件内容」在任何时候都必须拿得到内容——存盘失败时稿件只在内存里，此时读者最需要的恰恰是把稿子拿走，因此它像两条导出路径一样回落到原稿正文，不得像 `exportMarkdown()` 那样直接放弃。存盘失败时工作台会给出「重试保存」；**该按钮成功后必须清掉失败态**，否则这个恢复入口永远恢复不了，读者只能去按旁边的 ✕ 手动关掉。「直接使用原稿」是 AI 不可用时的主恢复路径，存盘失败时必须整体回滚——**恢复按钮正是 `blocked` 非空时才渲染的**，把它清空等于把读者唯一的出路也一起收走；按钮本身也不得用 `try?` 吞掉错误，读者需要知道这次为什么没成。
 2. 点击「打开提词器」直接进入可手动阅读的舞台；此动作不会申请麦克风或连接 ASR，AI 朗读标注也不会阻塞开始。舞台或语音会话开着时切换稿件会被拒绝——这是为了不让旧事件推进新稿；**拒绝必须出声**：返回 `TeleprompterTextError.sessionBusy` 并提示先关掉提词窗口，不得静默返回或 `try?` 吞掉，否则读者只会以为应用卡了。
-3. 如使用 AI，先看懂“已经完成什么、原稿有没有被改、下一步要做什么”，再审阅朗读稿；默认路径使用普通用户语言，高级的拆分、合并和来源编辑收进“编辑本段”等渐进式披露入口。确认采用前可查看原文对照、修改、保留原文或跳过；编辑段落时清空对应旧辅助标注。采用候选版本是这条路径上唯一**不可重做**的编辑——候选一旦离开内存，审阅结果就不在屏幕上了。因此存盘失败时必须整体回滚：审阅页与候选版本留在原处、「采用」按钮仍可按，读者腾出磁盘空间后能再试一次，而不是只丢一次工作。**「采用」在审阅相位可用 `⌘⏎`**（常驻底座那一个按钮；与草稿相位的「整理朗读稿 ⌘⏎」互斥，同一相位只注册一个），让这条不可重做的一步纯键盘可达。**同一份不可重做性也约束「选择范围」**：改范围会作废按旧范围算出的分段，读者已逐条处理过的审阅随之消失。因此 `updateContentSelection` 在 `hasReviewDecisionsAtRisk`（候选版本仍在、且已有被处理过的审阅项）时抛 `reviewDecisionsWouldBeDiscarded` 且不动任何状态，由界面先确认再走 `applyContentSelectionAfterConfirmation`；刚整理完尚未处理、或候选已被采用时**不拦**——那时丢掉的是 AI 的建议或已落进确认版本的判断，不是工作。
+3. 如使用 AI，点「整理朗读稿」后拿到的是**可以直接照念的稿子**，不是一堆待办：AI 的职责到交出一份完整可念的稿为止，之后由人整体阅稿兜底。页面按段落列出整理稿，每段右上角是一枚跟读方式标签（照念／只作提示／跳过），点一下就换；默认路径只有这一个动作，高级的拆分、合并和来源编辑收进段落右侧的「⋯」菜单。标签的粒度是**段**而不是句：口语稿按段落呼吸，逐句标记既费力，多数人也不会真那么用；AI 已经把绝大多数段落归好，用户多数时候只需要改掉少数几段。被标成「只作提示」「跳过」的段落正文仍然显示出来（只是不念），否则「跳过」就成了让内容凭空消失的开关。采用候选版本是这条路径上唯一**不可重做**的编辑——候选一旦离开内存，整理结果就不在屏幕上了。因此存盘失败时必须整体回滚：整理稿留在原处、「采用」按钮仍可按，读者腾出磁盘空间后能再试一次，而不是只丢一次工作。**「采用」在整理相位可用 `⌘⏎`**（常驻底座那一个按钮；与草稿相位的「整理朗读稿 ⌘⏎」互斥，同一相位只注册一个），让这条不可重做的一步纯键盘可达。内容范围由用户在草稿相位直接编辑全文确定，不再有独立的「选择范围」窗口，也就不存在改范围作废既有整理结果的路径。
 4. 在显示设置中先选场景：「镜头口播」是舒适窄栏加三行，「讲台阅读」更大字号、更宽行与两行，「自定义」保留用户自己的列宽、字号与行数。预设只改列宽、字号与行数，窗口宽度、透明度和行距不动；手动调过其中任何一项就自动变为「自定义」，预设不会与手动设置互相覆盖。正文列宽与窗口宽度分开：窗口再宽，正文也保持 680pt／820pt 的可读行长，不铺满超宽屏；窗口变窄时列宽跟随收窄。三行模式上方显示已读行、中间显示当前行、下方预览下一行；正文按列宽自然折行并映射回稿件；三行在稿首／稿尾留空槽，避免当前行跳位。舞台按行数与字号调整高度，最多 360pt；绿色缩放横向铺满屏幕可用宽度。控制区首次展示 2 秒，指针进入操作区后显示，离开后 250ms 隐藏；正文布局和键盘可达性不随控制显隐变化。开启 Reduce Motion 时舞台不做位移动画，阅读位置仍照常更新。
 5. 使用空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 首末行；`⌘⌥←/→` 是应用菜单中的上一行／下一行快捷键。控制按钮和所有快捷键统一移动到对应行的原稿位置；「查阅全稿」仍提供完整段落滚动与文本选择。查阅全稿或手动滚动之后，控制栏出现「回到朗读位置」，把舞台收回当前朗读行；它不恢复语音推进权，语音仍需显式开启。短暂脱稿时保持位置，需要语音协助时再点击「开启语音跟随」。
 6. 开启语音后，会话从当前段建立一条 pipeline；任何手动定位立即进入手动态、废弃旧 generation，并异步停止本功能麦克风、上传、drain/clear 和占用。只有明确点击「恢复/重试语音跟随」才可再次启动。
@@ -45,7 +45,7 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 | `TeleprompterStageSettings.swift` | 舞台显示设置：场景预设、正文列宽（与窗口宽度分离）、字号、透明度、行数与 Reduce Motion 动效策略 |
 | `TeleprompterRealtimeClientProtocol.swift` | Session 测试 seam：让生产 Realtime 生命周期可直接注入 fake client |
 | `TeleprompterSession.swift` | MainActor 会话编排、服务/麦克风门禁、Realtime 生命周期和失败降级 |
-| `TeleprompterView.swift` | 准备页、稿件编辑、AI 审阅和舞台设置 |
+| `TeleprompterView.swift` | 准备页、稿件编辑、AI 整理稿和舞台设置 |
 | `TeleprompterStageWindow.swift` / `TeleprompterStageView.swift` | 独立浮动舞台窗口、键盘控制和可访问状态反馈 |
 | `TeleprompterReplayEvaluator.swift` / `TeleprompterReplayTool` | 确定性回放评估器与 CLI：用生产跟随路径重放带版本记录的语料，只输出脱敏聚合 |
 
@@ -100,14 +100,14 @@ ffmpeg -f avfoundation -i ":0" -t 6 -ar 24000 -ac 1 -c:a pcm_s16le /外部路径
 {
   "schema_version": "teleprompter.rewrite.v1",
   "blocks": [
-    {"block_id": "block-0-2", "mode": "speak", "text": "可朗读候选。", "issues": []}
+    {"block_id": "block-0-2", "disposition": "speak", "text": "可朗读候选。"}
   ]
 }
 ```
 
-本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)` 或程序分配的 `block_id`，不得返回字符偏移、来源范围或未知 ID。两个 decoder 都拒绝重复键、未知字段、漏单元、重叠、越界和不完整 envelope；rewrite 还拒绝重复/未知/缺失 block ID、mode 矛盾和 protected literal 丢失。每个窗口成功后才生成 AI 块；可恢复的窗口失败则构造 `origin=deterministic`、`disposition=unresolved` 的逐源单元原文块，必须经过现有待确认操作后才能采用。全部结果统一重算时长，不能把回退显示成“已完成 AI 整理”。
+本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)` 或程序分配的 `block_id`，不得返回字符偏移、来源范围或未知 ID。两个 decoder 都拒绝重复键、未知字段、漏单元、重叠、越界和不完整 envelope；rewrite 还拒绝重复/未知/缺失 block ID、mode 矛盾和 protected literal 丢失。每个窗口成功后才生成 AI 块；可恢复的窗口失败则构造 `origin=deterministic`、`disposition=speak` 的逐源单元原文块——原稿本身就能念，标成待办只会把用户拖回逐条确认。全部结果统一重算时长，不能把回退显示成“已完成 AI 整理”。
 
-`teleprompter.preparation.v2` 仍保留为 `tighten` 兼容路径；`teleprompter.analysis.v2` 只属于已确认稿件的可选朗读标注，不能作为整理结果契约。
+`teleprompter.preparation.v2` 的每段都必须交稿（`disposition` 为 `speak` 时正文非空，为 `cue`/`skip` 时正文为空），模型不再输出任何标记疑问的字段。`teleprompter.reduction.v1` 是「整理」的内部跨窗紧缩阶段，只检查相邻段落的衔接，不是用户可选的加工动作。`teleprompter.analysis.v2` 只属于已确认稿件的可选朗读标注，不能作为整理结果契约。
 
 AI 调用成功之后、本地存盘失败的那一段，责任必须说给磁盘，不能说给 AI：读者若被告知「AI 没能整理、可以重试」，会白等一次同样会失败的调用。此时内存里的改动也必须回滚——留着就会在下一次无关保存（改目标时长、采用候选版本、关闭舞台写进度）时悄悄生效，变成**报告了失败却真的落地**，比一条干脆报错的提示更难查。同理，存盘失败不得让界面显示已生效的朗读提示。
 
@@ -137,7 +137,7 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 
 有些词识别器会稳定听错——产品名、内部术语、人名地名。`TeleprompterAcceptedReading` 允许读者登记「屏幕上写 A，我实际念 B」，**绑定到某个段落内的一处 UTF-16 范围**，并连同当时的显示文本一起保存。对齐时用读法的值去匹配，位置仍落在显示文本上：稿件、导出与逐字记录一个字都不改。方案 §5.6 明确不得全局替换，因此别名只作用于确认的那一段。
 
-入口在稿件就绪页表头的「读法标注」，是渐进式披露的进阶操作，不占「选起讲段」这条默认路径。读者填「屏幕上的词」与「我会念成」两个字段，由会话层解析出现位置，界面不自行计算偏移。
+入口在文档标题右侧「⋯」菜单的「读法标注…」，是渐进式披露的进阶操作。2026-10-01 之前它曾以次级按钮放在就绪页表头，与「点击段落设定起讲位置」并排；逐词登记读法终归是少数人做的事，不该和选起讲段共用一条视线，现已收进文档菜单，就绪页表头只留选起讲段。读者填「屏幕上的词」与「我会念成」两个字段，由会话层解析出现位置，界面不自行计算偏移。
 
 几条规则是实测换来的：
 
@@ -174,6 +174,9 @@ Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`
 - **语音与设置**：语音按钮状态来自 `TeleprompterVoiceAssistLifecycle`；`off`、`starting`、`following`、`stopping`、`stopFailed`、`pausedByUser`、`unavailable` 都必须有明确文案。`alwaysShowControls` 与 `showClockAndProgress` 使用独立 UserDefaults 键，默认关闭，旧版本可忽略；`contentWidth` 与 `preset` 也是独立键，缺省时按「镜头口播」读取，旧设置不需要迁移。
 - **失败归因要说对人**：输入设备启动失败或格式不兼容归入 `BlockReason.inputDeviceUnavailable`，文案说明是麦克风并保留底层错误信息，同时继续提供手动看稿；只有 ASR 服务本身的问题才用 `serviceNotReady`。任何失败都不得推进稿件、不得留在已连接状态，并必须释放本功能的占用、连接与采集。
 - **时长估计要说明它是推的还是量的**：倍率 `1.0` 既是「没人试读过」的默认值，也可能恰好是某次试读的真实结果，只看倍率无法区分。`TeleprompterCalibrationSource` 因此显式记录来源（`.uncalibrated` / `.manualTrial(durationSeconds:)`），`TeleprompterTimingPolicy.estimateDuration` 与 `evaluatePreflight` 据此给出 `EstimateResult.isCalibrated`；试读采用时写入 `.manualTrial`，「恢复默认语速」写回 `.uncalibrated`——那是一次选择，不是一次测量。未校准时两处时长展示都要标注：内容选择页的预计用时，以及工作台预检结论——后者经 `PreflightConclusion.showsDurationEstimate` 区分，带分钟数的结论才标，「无内容」「目标无效」「无法预估」本身没有时长数字，不加标注以免变成噪声。校准入口常驻并显示「未试读校准」，不使用 `.healthy` 语气冒充已测。倍率不落盘，因此没有存储迁移。
+- **目标时长属于稿件，不属于一次运行**：`TeleprompterV2Document.targetMinutes`（`target_minutes`）是这份稿自己的设置，缺字段的旧文档在载入时按原稿估算补齐。定值只发生在 `TeleprompterSession.resolveTargetMinutes(stored:)` 一处，由 `applyV2Bundle` 与两个 `createDocument` 入口调用；视图不再替会话做这件事——它此前挂在 `.onChange(of: session.document?.id)` 上，切页再回来时文档 ID 没变、`onChange` 不触发，`targetMinutes` 就停在 `TeleprompterTimingPolicy.defaultTargetMinutes`（20），一份两百字的稿顶着「目标 20 分」。
+- **预填与预检必须用同一个「可靠」判据**：`suggestedTargetMinutes` 在 `estimateDuration` 标出 `isUncertain`（稿里有数字、网址或非中英文本）时返回 nil，与 `evaluatePreflight` 给出「无法预估」同源。否则界面会一边说算不准、一边把分钟数填好。
+- **工作台第二行只留与时长真正有关的控件**：目标是用户会主动设的一档，节奏是三选一，都留在第二行；预检只留结论徽标，判断依据（「预计 1 分钟，与目标 1 分钟大致匹配，可正常整理。（未试读校准）」这类机制自述）、计时试读与恢复默认语速收进一个菜单，徽标本身就是该菜单的标签。整理相位（`.prepared`）的「用这份稿 / 先试读 / 放弃」只有常驻底座一处：面板内曾有第二套处理器完全相同的按钮，同屏两个 `⌘⏎` 还会互相冲突。AI 整理回退时横幅直说「没能连上 AI 整理服务（最常见的原因是短时间内请求太频繁）」并给出「再整理一次」，不再让用户对着「这次没整理成功」猜是哪一环坏了。
 - **语音辅助试读（#112）**：试读 sheet 有「手动计时 / 语音辅助」两种方式，是两次独立动作。语音辅助走既有 coordinator 与 client 构造路径（同一套权限、设备租约、显式语言与术语），因此本机麦克风仍只有一个 owner；打开窗口本身不碰麦克风，必须按下试读按钮才开始。它不进 `.following`、不移动阅读位置、不起运行计时、不写进度、不建 `SessionStore` 行，结束时经 coordinator 归还租约。证据只记计数不记正文：`TeleprompterSpeechTrialEvidence` 分开记 `recognizedUnits` 与 `matchedUnits`，界面把「麦克风 / 识别 / 定位」三段链路分别报出来——#112 明确不能只以输入电平证明识别和定位成功。`TeleprompterCalibrationSource` 因此新增 `.speechTrial(durationSeconds:recognizedUnits:)`，与 `.manualTrial` 区分：后者只证明读者按了开始和结束，前者还证明采集、识别与定位当时是通的。没识别到内容的试读**不产生倍率**（`TeleprompterSpeechTrialEvidence.calibrationFactor` 返回 nil），一个没听到东西的试读若也产出倍率，等于用一次失败的采集冒充一次测量。
 - **窗口边界**：舞台是独立 `NSPanel`；用户从提词器入口打开时成为 key window 以确保局部快捷键可用，不在正文更新或后台语音回调时抢焦点。最大化经标准 frame 策略横向铺满屏幕可用宽度，高度不超过 `stageMaximumHeight`（360pt），并保留普通尺寸；读取设置时不会重置窗口。窗口只复用系统材质、语义色、系统按钮和既有 `Corner`/`Spacing`/`Typography`，不为隐藏控制新增自绘玻璃或裸视觉常量。
 
@@ -226,3 +229,26 @@ scripts/macos_app_build.sh --configuration Debug
 2026-09-29（第二十九轮）：**修掉素材工具里一处会凭空产生置信度的路径**。`ScriptAligner` 的重投递分支（识别器的 delta 与 revisioned hypothesis 会把同一段文字送来两遍）此前只看「与上一个事件重叠」就直接报 `ratio = 1.0` 并给出阅读位置，**从不把文字拿回稿件核对**。识别器在无语音时恰会连续吐同一段幻觉，两条一撞就满足条件——实测 5.4 秒环境声就有 7 个事件，其中一条本该进人工确认清单的拿到了笃定的 `expected_segment_index: 0`，**而阅读位置正是延迟样本的来源**。改为照样过一遍对齐打分，低于阈值不给位置。修复后同类输入 7 条标注全部不再带位置，人工确认清单从 6/7 变成 7/7。既有重投递回归不受影响（它用的文本本来就在稿件里）。变异 4 条全杀，42 项回归、ruff、mypy 通过。
 
 2026-09-29（第二十九轮续）：补上「远处短语不得擅自跨句跳转」**向前**那一向的两条证据。此前只有向后：`mayAdvance` 的 `localAdvanceTokenRadius` 与 `provisionalMinimumMatches` 两道门禁在整个测试目录里零命中。新增 `aDistantForwardPhraseCannotDragTheViewportAhead`（距锚点 30 个 token 的四字短语，贴在默认半径 24 之外，连 `committedPosition` 一起钉）与 `aLoneStrayTokenMatchDoesNotMoveTheViewport`（单个 token 在距锚点 10 处——置信满分、位置唯一，只有 token 数这道门禁拦得住，是误听杂音最现实的形态）。**两条用例都先断言锚点真的建立再断言远处短语没推动它**：踩过两个坑——半径是绝对 token 数，三段玩具脚本只有 46 个 token，半径几乎覆盖整篇，测的是口径不是性质；两段用同一句 filler 会让重复跨度变成歧义匹配，锚点根本没建立，「视口没动」变成「压根没匹配上」，还会让变异验证误报存活。变异 4 条全杀。`swift test` 279 项 / 16 套件通过。
+
+2026-10-01：**删除逐句对照与审阅层，提词器只保留「整理」一道 AI 加工**。起因是「点击 AI 提词菜单 100% 卡死」，排查途中确认整条审阅链路设计过重：原稿与整理稿的事实一致性本该由人确定，AI 加工的目标只是把原稿整理成适合口语播报的稿，靠提示词与上下文管理尽量不丢事实，但不保障，最终由人整体阅稿兜底。因此一次性重做，不留兼容层。
+
+删除：`TeleprompterReviewIssue` / `ReviewAction` / `ReviewItem` / `ReviewCopy`、`draft.review_issues`、`reviewItems` / `resolveReviewItem` / `unresolvedReviewItemCount` / `hasReviewDecisionsAtRisk`、`TeleprompterMapMode` 的 review/omit 与 map 输出的 `issues`、`TeleprompterContentSelection` 及其 Sheet、`condense` 与 `tighten` 两个加工动作、`phase .review`（改为 `prepared`）、`contentSelection` 取舍机制与锁点机制、`TeleprompterSemanticRiskDetector`。整理结果状态从 `{complete, reviewRequired, boundaryUnchecked}` 收敛为 `{complete, boundaryUnchecked}`——退回原稿就是可念的稿子，不存在「整理完了还有几处等你逐条确认」这种中间态。稿件 JSON `formatVersion` 2 → 3，历史稿件不做迁移（已按用户决定清理，备份在 `~/Library/Application Support/SpeechRail/backups/teleprompter-v2-20261001-000834/`）。
+
+保留：`TeleprompterAligner`（ASR → 屏幕定位）、`keywords`（匹配锚点）、`acceptedReadings` / `matchPhrases`（人类确认的读法）——它们是跟读定位机制，不是事实核对，砍掉会直接伤跟读。`reduce` 跨窗紧缩保留为「整理」的内部阶段（贴近目标时长），类型降级为 Pipeline 私有并去掉 `reviewBlockIDs`。朗读标注 `annotate` 不动。
+
+交互随之改成段落级：每段右上角一枚跟读方式标签（照念／只作提示／跳过），点一下就换；拆分、合并、来源编辑收进段落右侧「⋯」菜单。**粒度是段不是句**——口语稿按段落呼吸，逐句标记既费力，多数人也不会真那么用。被标成 cue/skip 的段落正文仍然显示（只是不念），否则「跳过」就成了让内容凭空消失的开关。
+
+验证：`swift test --package-path macos/SpeechRailApp` 370 项 / 16 套件通过；`scripts/macos_app_build.sh --export-path <仓库外目录>` BUILD SUCCEEDED 并通过本地 XPC 打包校验；`ditto` 安装到 `~/Applications/SpeechRail.app` 后 LaunchServices 唯一登记。**未执行 UI 自动化与界面走查**（未获当次授权），因此「点击 AI 提词菜单 100% 卡死」这一原始报障**尚未复测**——删除审阅与对照 UI 确实大幅减少了 `populatedWorkspace` 需要测量的视图对象，但「变轻所以不卡」不构成结论，仍需用户实测。
+
+2026-10-01（第二轮，审查后修复）：多轮审查查出三处问题并已修复。其一是**真缺陷**：cue/skip 段落在界面上永远看不到正文。pipeline 按 decoder 的不变式把这类块的 `text` 置空，而展示层仍在读同一个 `text` 并显示「（这一段没有正文）」——代码注释声称「正文仍然要显示出来」，而那是一个数据管线不允许存在的状态；旧审阅 UI 有原稿侧分栏所以看不出来，删掉对照栏后就露了出来。改为读 `rawSourceText`。连带修两处相关问题：`setBlockDisposition` 切回「照念」时若正文为空会得到一段永远念不出来的段落（decoder 对 speak 强制正文非空），现在用原稿补上；切离「照念」时清空正文，否则残留改写会被 `mergeBlock` 拼进相邻段落的朗读正文，把标记为「不念」的内容真的念出来。提示词原文写的是「text **可以**为空」而 decoder **强制**为空，口径不一致，按本仓库惯例对齐为「必须留空」。
+
+其二是**内容范围选择的残留**：功能删除后 `TeleprompterV2SelectionRevision` 整套留下，但 `selectedRanges` 恒等于全文、`userExcludedRanges` 恒为空、`selectedUnitIDs` 恒等于全部单元，三个持久化字段不再有任何信息量；`unitContainsOnlySelectedContent` 只剩一个调用点且参数恒为全文范围，逻辑退化成重言式；`selectedSourceUnitIDs` 是两个参数都没用的恒等函数。已整体删除，包括 `TeleprompterV2ReadingVersion.selectionSnapshot`、`TeleprompterV2ReadingDraft.selectionRevisionID`、`validate(selection:source:)`、`TeleprompterTimingPlanner.plan` 与 `TeleprompterPreparationInput` 的 `selectedUnitIDs`（后者曾让「未选中单元预算归零」成为可能）。`TeleprompterPreparationPipeline.Selection.selectedIDs` 不删除而是更名为 `orderedUnitIDs`——它承载的是处理顺序而非选择。持久化 schema 随之变化，但因 `formatVersion 3` 尚未发布、历史稿件已按用户决定清理，此处不构成迁移。
+
+其三是**测试缺口**：map 与 rewrite 两个 decoder 的「cue/skip 正文必须为空」只有 map 一侧有测试，rewrite 侧漏了对称约束；cue/skip 块的原稿可见性与切回「照念」补正文两条更是完全没有覆盖。已补 4 条回归。
+
+2026-10-01（第三轮，提词器舞台优化）：按用户需求完成提词器舞台展示体验与主播控制优化。
+① **分光镜水平镜像翻转 (Mirror Mode)**：为物理提词分光镜/专业反光玻璃提供水平镜像翻转能力（`scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)`），支持 `⌘⌥M` 键盘快捷键快速切换与 `TeleprompterStageAppearancePopover` 显示设置开关，配置通过 `Key.isMirrored = "speechrail.teleprompter.stage.isMirrored"` 持久化到 `UserDefaults`。
+② **当前行聚焦与层级对比度调优**：提升舞台深度景深。已读行不透明度调优为 `SpeechRailDesignTokens.Teleprompter.stagePastLineOpacity = 0.32`，未读行调优为 `stageNextLineOpacity = 0.55`，使焦点行保持清晰视线导轨，拉大前后景深对比，在各种环境光及半透明背景下视觉更分明。
+③ **眼动节奏与平滑滚动动效**：将滚动动画优化为符合眼球自然追踪的眼动缓动曲线 `.timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)`，在开启 Reduce Motion 时仍维持稳定降级为 `nil`。
+
+验证：`swift test --package-path macos/SpeechRailApp --filter Teleprompter` 375 项 / 16 套件全部通过（新增 `stageMirrorPreferencePersists` 单测覆盖镜像默认值与持久化往返）。**未执行 UI 自动化与界面走查**（严格遵守 AGENTS.md 约束）。

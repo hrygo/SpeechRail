@@ -300,6 +300,12 @@ public enum SpeechRailDesignTokens {
         public static let pulseRingLargeSize: CGFloat = 80
         public static let pulseRingMediumSize: CGFloat = 64
         public static let pulseRingSmallSize: CGFloat = 48
+        /// 语音助手波形条的容器高度（issue #90 收敛）。
+        public static let waveformBarAreaHeight: CGFloat = 36
+        /// 人格编辑器正文的最小高度（issue #90 收敛）。
+        public static let personaEditorMinimumHeight: CGFloat = 140
+        /// 语音输入电平表的条高（issue #90 收敛）。
+        public static let inputLevelMeterHeight: CGFloat = 22
     }
 
     /// Native macOS menus stay compact; custom menu-bar rows use the same
@@ -882,6 +888,24 @@ public enum SpeechRailDesignTokens {
 
         /// 选择器触发器唯一的尾部箭头语义；复用同一个 SF Symbol raw value，避免重复绘制。
         public static let choiceChevronDown: Symbol = .expandDown
+        /// 状态点：菜单行与卡片行首的实心小圆点（issue #90 收敛）。
+        ///
+        /// 此前这几处各自写死 `.frame(width: 8, height: 8)`，而 `Menu` 另有
+        /// `menuBarStatusDotSize = 6`。同一个「实心圆点」语义散落两个尺寸，改一处
+        /// 不会带动另一处。取值保持 8 不变——统一到哪个值需要真机比对，在没有实测
+        /// 前不动视觉，只把声明收进 token。
+        public static let statusDotSize: CGFloat = 8
+        /// 实时指示点：会话计时前的静音/活跃小点，比卡片状态点更小（issue #90 收敛）。
+        public static let liveIndicatorDotSize: CGFloat = 6
+        /// 提词器舞台行内「跳到该段」动作的外框；字号见 `Typography.iconMicroSemibold`
+        /// （issue #90 收敛）。
+        public static let segmentJumpFrame: CGFloat = 14
+        /// 阻碍提示条关闭按钮的外框（issue #90 收敛）。
+        public static let dismissButtonFrame: CGFloat = 20
+        /// 模型组合档位轴标签的图标外框（issue #90 收敛）。
+        public static let axisLabelFrame: CGFloat = 16
+        /// 制品列首列图标的外框（issue #90 收敛）。
+        public static let artifactFrame: CGFloat = 14
     }
 
     public enum Stroke {
@@ -1053,6 +1077,15 @@ public enum SpeechRailDesignTokens {
         /// 28pt 半粗等宽：试读计时器数字。
         public static let timerDisplay: Font = .system(size: 28, weight: .semibold, design: .monospaced)
 
+        /// 10pt 语义图标：提词器舞台行内的段落跳转动作（issue #90 收敛）。
+        ///
+        /// 此前是裸写的 `.font(.system(size: 10, weight: .semibold))`。这一档比
+        /// `.caption` 更小，只用于密集行内的单字形动作，因此不复用正文级 token。
+        public static let iconMicroSemibold: Font = .system(size: 10, weight: .semibold)
+        /// 15pt 语义图标：模型组合的能力/状态图标（issue #90 收敛）。
+        public static let iconMediumSemibold: Font = .system(size: 15, weight: .semibold)
+        /// 15pt 语义图标（常规字重）：模型组合的状态图标（issue #90 收敛）。
+        public static let iconMedium: Font = .system(size: 15)
     }
 
     public enum Color {
@@ -1323,6 +1356,8 @@ public enum SpeechRailDesignTokens {
         /// 当前段只用细窄强调线和极轻底色，不制造整块高亮卡片。
         public static let stageCurrentRailWidth: CGFloat = 3
         public static let stageCurrentBackgroundOpacity: Double = 0.08
+        public static let stagePastLineOpacity: Double = 0.32
+        public static let stageNextLineOpacity: Double = 0.55
         public static let stageNextSegmentOpacity: Double = 0.48
         public static let stageAttentionBackgroundOpacity: Double = 0.10
         /// 首屏欢迎工作台：范例卡片最小宽度与图标尺寸
@@ -1335,23 +1370,6 @@ public enum SpeechRailDesignTokens {
         public static let trialReadingSheetMinimumHeight: CGFloat = 420
         public static let trialReadingSheetHeight: CGFloat = 480
         public static let trialReadingSheetMaximumHeight: CGFloat = 720
-        /// 内容范围选择窗口尺寸：理想值沿用历史宽高，新增窄窗与大字体的自适应上下限。
-        public static let contentSelectionSheetMinimumWidth: CGFloat = 480
-        public static let contentSelectionSheetWidth: CGFloat = 620
-        public static let contentSelectionSheetMaximumWidth: CGFloat = 800
-        public static let contentSelectionSheetMinimumHeight: CGFloat = 420
-        public static let contentSelectionSheetHeight: CGFloat = 540
-        public static let contentSelectionSheetMaximumHeight: CGFloat = 760
-        /// 精简确认窗口尺寸：默认只显示说明与操作，「标记必讲」展开后才占满高度，
-        /// 因此理想高度低于内容选择窗口，上下限仍留出大字体的自适应空间。
-        public static let condenseSheetMinimumWidth: CGFloat = 480
-        public static let condenseSheetWidth: CGFloat = 620
-        public static let condenseSheetMaximumWidth: CGFloat = 800
-        public static let condenseSheetMinimumHeight: CGFloat = 300
-        public static let condenseSheetHeight: CGFloat = 420
-        public static let condenseSheetMaximumHeight: CGFloat = 720
-        /// 「标记必讲」展开后段落列表的可视高度上限。
-        public static let condenseMustKeepListMaximumHeight: CGFloat = 240
         /// 读法标注窗口尺寸：只放一个段落的读法与新增表单，比内容选择窗口窄。
         public static let readingAliasSheetMinimumWidth: CGFloat = 440
         public static let readingAliasSheetWidth: CGFloat = 520
@@ -1361,10 +1379,8 @@ public enum SpeechRailDesignTokens {
         public static let readingAliasSheetMaximumHeight: CGFloat = 680
         /// 读法标注窗口里，已确认读法列表的可视高度上限；超出后列表内部滚动。
         public static let readingAliasListMaximumHeight: CGFloat = 200
-        /// 审阅对照分栏最小宽度
-        public static let diffColumnMinimumWidth: CGFloat = 320
-        /// 待确认事项提示图标尺寸
-        public static let reviewBadgeSize: CGFloat = 16
+        /// 工作台编辑区最小可读宽度；低于它时双栏退到全宽排布。
+        public static let workbenchEditorMinimumWidth: CGFloat = 320
         /// 工作台控件定宽与对齐尺寸
         public static let targetMinutesFieldWidth: CGFloat = 36
         /// 工作台稿件名称输入的最小可读宽度；窄窗时其余元数据换到下一行。
@@ -1382,9 +1398,8 @@ public enum SpeechRailDesignTokens {
         public static let analyzingProgressMaxWidth: CGFloat = 360
         /// 计时试读窗口样稿滚动区高度
         public static let trialSampleScrollHeight: CGFloat = 140
-        /// 审阅对照分栏：选择器宽度与滚动区最大高度
-        public static let comparisonPickerWidth: CGFloat = 180
-        public static let reviewDiffScrollMaxHeight: CGFloat = 320
+        /// 整理稿段落列表的可视高度上限，超出后列表内部滚动。
+        public static let preparedBlockListMaximumHeight: CGFloat = 320
         /// 待启动预览滚动区最大高度与稿件行距
         public static let readyPreviewMaxHeight: CGFloat = 180
         public static let previewLineSpacing: CGFloat = 4

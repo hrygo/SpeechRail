@@ -17,6 +17,10 @@ from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
+from speechrail.application.alignment import (
+    TranscriptAlignmentError,
+    align_transcript_timeline,
+)
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
 from speechrail.application.diarization import diarize_transcript
@@ -40,6 +44,7 @@ from speechrail.compatibility.openai_realtime import (
     canonical_tts_model,
 )
 from speechrail.config.selection import active_model_catalog
+from speechrail.domain.alignment import AlignmentGranularity
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationError
 from speechrail.domain.ports import (
@@ -943,9 +948,25 @@ def create_audio_router(services: AppServices) -> APIRouter:
         from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
 
         effective_prompt = compose_hotword_prompt(prompt, keywords)
-        want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
+        # Qwen3-ASR has no native word-level timing: the vendor resolves an
+        # implicit `Qwen/Qwen3-ForcedAligner` repository as soon as the ASR
+        # owner is asked for timestamps, and that cannot resolve under the
+        # managed offline environment.  Timestamps therefore come from the
+        # independent fixed-text aligner over the frozen transcript, never
+        # from the ASR decode.  `diarized_json` derives its segments from
+        # diarization instead, so it does not ask for a timeline here.
+        alignment_requested = response_format in {"verbose_json", "srt", "vtt"}
+        requested_granularities: frozenset[AlignmentGranularity] = frozenset()
+        if alignment_requested:
+            requested_granularities = cast(
+                "frozenset[AlignmentGranularity]",
+                frozenset(timestamp_granularities) or frozenset({"segment", "word"}),
+            )
         audio_bytes = 0
-        diarization_audio = bytearray()
+        # The aligner needs the exact decoded PCM the transcript was produced
+        # from, so retain it whenever a timeline or speakers are derived.
+        retained_audio = bytearray()
+        retain_audio = diarization_requested or alignment_requested
 
         async def run_inference() -> TranscriptResult:
             nonlocal audio_bytes
@@ -966,8 +987,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         audio_bytes = len(buffered)
                         if audio_bytes > _DIARIZATION_UNCHUNKED_MAX_SECONDS * 32_000:
                             raise ValueError("diarization_chunking_required")
-                        if diarization_requested:
-                            diarization_audio.extend(buffered)
+                        if retain_audio:
+                            retained_audio.extend(buffered)
 
                         async def buffered_audio() -> AsyncIterator[bytes]:
                             yield bytes(buffered)
@@ -977,15 +998,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             buffered_audio(),
                             language,
                             effective_prompt,
-                            want_timestamps,
+                            False,
                         )
 
                     async def observed_audio() -> AsyncIterator[bytes]:
                         nonlocal audio_bytes
                         async for chunk in decoded:
                             audio_bytes += len(chunk)
-                            if diarization_requested:
-                                diarization_audio.extend(chunk)
+                            if retain_audio:
+                                retained_audio.extend(chunk)
                             yield chunk
 
                     async with contextlib.aclosing(decoded):
@@ -994,7 +1015,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             observed_audio(),
                             language,
                             effective_prompt,
-                            want_timestamps,
+                            False,
                         )
 
                 audio = await _read_upload(file, resolved.max_upload_bytes)
@@ -1019,8 +1040,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     and audio_bytes > _DIARIZATION_UNCHUNKED_MAX_SECONDS * 32_000
                 ):
                     raise ValueError("diarization_chunking_required")
-                if diarization_requested:
-                    diarization_audio.extend(audio)
+                if retain_audio:
+                    retained_audio.extend(audio)
                 if batch_transcriber is not None:
                     return await batch_transcriber.transcribe(
                         TranscriptionRequest(
@@ -1028,11 +1049,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             audio=audio,
                             language=language,
                             prompt=effective_prompt,
-                            include_timestamps=want_timestamps,
+                            include_timestamps=False,
                         )
                     )
                 assert transcribe is not None
-                return await transcribe(audio, language, effective_prompt, want_timestamps)
+                return await transcribe(audio, language, effective_prompt, False)
             except BaseException:
                 raise
 
@@ -1142,6 +1163,33 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ],
             }
         )
+        if alignment_requested:
+            # Timestamps are an add-on result over frozen text: never a second
+            # recognition, and never a silent downgrade to empty arrays.
+            if text_aligner is None:
+                return error_response(
+                    503,
+                    request_id,
+                    "timestamp_alignment_unavailable",
+                    "timestamped transcription requires a configured local aligner",
+                    retryable=False,
+                )
+            try:
+                result = await align_transcript_timeline(
+                    aligner=text_aligner,
+                    pcm16=bytes(retained_audio),
+                    result=result,
+                    utterance_id=request_id,
+                    granularities=requested_granularities,
+                )
+            except TranscriptAlignmentError as exc:
+                return error_response(
+                    502,
+                    request_id,
+                    exc.code,
+                    str(exc),
+                    retryable=True,
+                )
         if diarization_requested:
             try:
                 assert diarization_engine is not None
@@ -1150,7 +1198,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     result = await diarize_transcript(
                         activity_port=diarization_engine,
                         aligner=text_aligner,
-                        audio=bytes(diarization_audio),
+                        audio=bytes(retained_audio),
                         result=result,
                         epoch=f"batch-{request_id}",
                         new_unit_id=lambda index: f"segment-{index}",

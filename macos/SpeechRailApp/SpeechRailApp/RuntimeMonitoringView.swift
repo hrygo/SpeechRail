@@ -7,7 +7,8 @@ import SwiftUI
 public struct RuntimeMonitoringView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var timeWindow = MonitoringTimeWindow.fiveMinutes
     @State private var reportMessage: String?
@@ -125,7 +126,13 @@ public struct RuntimeMonitoringView: View {
                 metricsDetailSection
             }
         } trailing: {
-            timeWindowPicker
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                timeWindowPicker
+                DeveloperInspectorToggle(
+                    isPresented: $showInspector,
+                    helpText: "查看采样口径、指标定义与资源明细 (⌘⌥I)"
+                )
+            }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1500,7 +1507,7 @@ public struct RuntimeMonitoringView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 if let history, !history.points.isEmpty {
-                    historyUsageChart(points: history.points)
+                    historyUsageChart(history)
                     usageLegendNote("面积读左轴（次） · 折线读右轴（ms）")
                     if !history.points.contains(where: { $0.asrSeconds != nil || $0.ttsSeconds != nil }) {
                         latencyEmptyState
@@ -1545,7 +1552,8 @@ public struct RuntimeMonitoringView: View {
     /// 历史档的使用趋势：面积是每个统计桶的请求次数（左轴），折线是桶里的加权平均耗时（右轴）。
     ///
     /// 与实时档同构（面积「做了多少」、折线「快不快」），只是数据换成服务落盘的区间增量。
-    private func historyUsageChart(points: [MetricsHistoryPoint]) -> some View {
+    private func historyUsageChart(_ history: MetricsHistory) -> some View {
+        let points = history.points
         let scale = UsageChartScale(
             countPeak: points.map { $0.ttsRequests + $0.asrRequests }.max() ?? 0,
             secondsPeak: points.flatMap { [$0.asrSeconds, $0.ttsSeconds] }.compactMap { $0 }.max() ?? 0
@@ -1574,14 +1582,14 @@ public struct RuntimeMonitoringView: View {
                     latencyLine(
                         at: bucketCenter(point),
                         seconds: seconds,
-                        series: "语音识别",
+                        series: "语音识别耗时",
                         scale: scale
                     )
                     if asrSampleCount < 2 {
                         latencyPoint(
                             at: bucketCenter(point),
                             seconds: seconds,
-                            series: "语音识别",
+                            series: "语音识别耗时",
                             scale: scale
                         )
                     }
@@ -1590,14 +1598,14 @@ public struct RuntimeMonitoringView: View {
                     latencyLine(
                         at: bucketCenter(point),
                         seconds: seconds,
-                        series: "语音合成",
+                        series: "语音合成耗时",
                         scale: scale
                     )
                     if ttsSampleCount < 2 {
                         latencyPoint(
                             at: bucketCenter(point),
                             seconds: seconds,
-                            series: "语音合成",
+                            series: "语音合成耗时",
                             scale: scale
                         )
                     }
@@ -1605,13 +1613,28 @@ public struct RuntimeMonitoringView: View {
             }
         }
         .chartForegroundStyleScale([
-            "合成与试听": SpeechRailDesignTokens.Color.voice,
-            "语音识别": SpeechRailDesignTokens.Color.info,
+            // 四类必须各有一个互不相同的颜色：面积两类走中性色（`rail` /
+            // `inkTertiary`），折线两类走彩色（`info` / `voice`），
+            // 与实时图 `realtimeUsageChart` 的配色分工一致——
+            // 一眼能分清「面积是做了多少」和「折线是快不快」。
+            // 若面积与折线同色（曾把折线也叫「语音识别」「语音合成」，
+            // 图例里两条同色的圆点、蓝色折线压在蓝色面积边上）就分不出读哪条。
+            //
+            // 另外，折线的类别必须与面积的区别开、且与面积的一起全部写进色表。
+            // 早先这里沿用「语音识别」当折线名（与上面的面积撞名）、
+            // 而「语音合成」根本没声明，正是这一处让系统 Swift Charts 内部
+            // 读到未初始化的状态、在切到历史档那一刻必崩
+            //（Charts+0x1D4740 / brk #1，2026-09-30 复现，见
+            // docs/superpowers/specs/2026-09-28-monitoring-chart-crash-evidence-design.md）。
+            "合成与试听": SpeechRailDesignTokens.Color.rail,
+            "语音识别": SpeechRailDesignTokens.Color.inkTertiary,
+            "语音识别耗时": SpeechRailDesignTokens.Color.info,
+            "语音合成耗时": SpeechRailDesignTokens.Color.voice,
         ])
         .chartLegend(position: .bottom, alignment: .leading)
         .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
         .chartYScale(domain: 0 ... scale.countPeak)
-        .chartXAxis { historyAxisMarks() }
+        .chartXAxis { historyAxisMarks(coveredSeconds: history.coveredSeconds) }
         .chartYAxis { usageYAxis(scale) }
         .accessibilityLabel("使用趋势（历史）")
         .accessibilityIdentifier("runtime-history-chart")
@@ -1643,22 +1666,26 @@ public struct RuntimeMonitoringView: View {
         point.start.addingTimeInterval(point.end.timeIntervalSince(point.start) / 2)
     }
 
-    /// 历史图的横轴按跨度换标签：一天以内给时刻，再长给日期。
-    private func historyAxisMarks() -> some AxisContent {
+    /// 历史图的横轴按**实际画出来的跨度**换标签：一天以内给时刻，再长给日期。
+    ///
+    /// 用实际覆盖而不是所选时间窗：服务刚装上时 30 天档里可能只有几个小时的数据，
+    /// 按时间窗给日期就会把同一时刻的三个刻度全标成「9/30」，
+    /// 读者既看不出这是哪一段、也读不出横轴的真实跨度。
+    private func historyAxisMarks(coveredSeconds: Double) -> some AxisContent {
         AxisMarks(values: .automatic(desiredCount: 5)) { value in
             AxisGridLine()
                 .foregroundStyle(SpeechRailDesignTokens.Color.separator)
             AxisValueLabel {
                 if let date = value.as(Date.self) {
-                    Text(historyAxisLabel(date))
+                    Text(historyAxisLabel(date, coveredSeconds: coveredSeconds))
                         .font(SpeechRailDesignTokens.Typography.secondary)
                 }
             }
         }
     }
 
-    private func historyAxisLabel(_ date: Date) -> String {
-        let seconds = timeWindow.historySeconds ?? 3_600
+    private func historyAxisLabel(_ date: Date, coveredSeconds: Double) -> String {
+        let seconds = coveredSeconds > 0 ? coveredSeconds : (timeWindow.historySeconds ?? 3_600)
         if seconds <= 86_400 {
             return date.formatted(.dateTime.hour().minute())
         }
@@ -1791,7 +1818,7 @@ public struct RuntimeMonitoringView: View {
 
     @ViewBuilder
     private var monitoringInspector: some View {
-        DeveloperInspector {
+        DeveloperInspector(isPresented: $showInspector) {
             SectionHeading(
                 title: "运行样本",
                 detail: "这些字段面向排障和容量判断，不代表服务质量或模型质量结论。"

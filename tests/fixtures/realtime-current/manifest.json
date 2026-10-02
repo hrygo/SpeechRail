@@ -220,6 +220,16 @@
       "file": "invalid/alignment-unit-missing-granularity.json",
       "valid": false,
       "rejection": "alignment units must state the evidenced granularity"
+    },
+    {
+      "name": "client_commit_receipt",
+      "file": "client/commit-receipt.json",
+      "valid": true
+    },
+    {
+      "name": "server_commit_receipt",
+      "file": "server/commit-receipt.json",
+      "valid": true
     }
   ]
 }

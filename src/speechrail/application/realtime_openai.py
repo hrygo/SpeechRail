@@ -43,6 +43,7 @@ from speechrail.compatibility.openai_realtime import (
     diarization_failed,
     diarization_updated,
     parse_client_event,
+    parse_commit_receipt_request,
     parse_commit_request,
     parse_finish_request,
     parse_tts_append_text,
@@ -172,11 +173,13 @@ class OpenAIRealtimeSession:
         )
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
+        self._asr_terminal_sent = False
         self._asr_resources: AsyncExitStack | None = None
         self._commit_lock = asyncio.Lock()
         self._commit_owner: str | None = None
         self._input_generation = 0
         self._committed_input_generation = -1
+        self._commit_receipt_generation = -1
         # Set only while the current ASR item is being committed.  The reader
         # uses this monotonic anchor to record commit-tail latency without
         # putting a session/request identifier into metrics labels.
@@ -467,7 +470,10 @@ class OpenAIRealtimeSession:
         elif parsed.kind == "append":
             await self._append_audio(event)
         elif parsed.kind == "commit":
-            await self._commit_audio(commit_event_id=parse_commit_request(event))
+            await self._commit_audio(
+                commit_event_id=parse_commit_request(event),
+                request_receipt=parse_commit_receipt_request(event),
+            )
         elif parsed.kind == "diarization_finish":
             await self._handle_finish(event)
         elif parsed.kind == "clear":
@@ -802,6 +808,7 @@ class OpenAIRealtimeSession:
                 busy_reason=busy_reason,
             ) from exc
         self._asr = asr
+        self._asr_terminal_sent = False
         self._alignment_pcm.clear()
         self._alignment_overflow = False
         self._asr_reader = asyncio.create_task(self._drain_asr_events())
@@ -1060,24 +1067,38 @@ class OpenAIRealtimeSession:
                 )
 
     async def _commit_audio(
-        self, reason: str = "client", *, commit_event_id: str | None = None
+        self, reason: str = "client", *, commit_event_id: str | None = None,
+        request_receipt: bool = False,
     ) -> None:
-        """Run at most one commit owner for the current input item."""
+        """Serialize input retirement and its optional per-command receipt."""
 
         async with self._commit_lock:
             item_id = self._current_item_id
-            if (
+            if not (
                 self._commit_owner == item_id
                 or self._committed_input_generation == self._input_generation
             ):
-                return
-            self._commit_owner = item_id
-            self._committed_input_generation = self._input_generation
-            self._active_commit_event_id = commit_event_id
-            try:
-                await self._commit_audio_once(reason)
-            finally:
-                self._active_commit_event_id = None
+                self._commit_owner = item_id
+                self._committed_input_generation = self._input_generation
+                self._active_commit_event_id = commit_event_id
+                try:
+                    await self._commit_audio_once(reason)
+                    self._commit_receipt_generation = self._input_generation
+                finally:
+                    self._active_commit_event_id = None
+            if request_receipt:
+                if self._commit_receipt_generation != self._input_generation:
+                    raise RealtimeAdapterError(
+                        "backend_error", "the input barrier did not reach a transcription terminal"
+                    )
+                # _commit_audio_once awaits the ASR reader, including sending
+                # its text terminal. Empty/already retired input has no new
+                # item, but every explicit barrier still gets its own receipt.
+                await self._send({
+                    "type": "speechrail.input_audio_buffer.committed",
+                    "commit_event_id": commit_event_id,
+                    "accepted_samples": self._wire_timeline.accepted_samples,
+                })
 
     async def _commit_audio_once(self, reason: str) -> None:
         tail = self._resampler.flush()
@@ -1177,6 +1198,10 @@ class OpenAIRealtimeSession:
                         "asr_terminal_wait", time.monotonic() - terminal_started
                     )
                     self._asr_reader = None
+                if not self._asr_terminal_sent:
+                    raise RealtimeAdapterError(
+                        "backend_error", "streaming ASR ended without a transcription terminal"
+                    )
         except TimeoutError as exc:
             await self._discard_failed_commit()
             raise RealtimeAdapterError(
@@ -2326,6 +2351,7 @@ class OpenAIRealtimeSession:
                                 commit_event_id=self._active_commit_event_id,
                             )
                         )
+                        self._asr_terminal_sent = True
                         self._start_alignment_task(
                             task_id=self._task_id,
                             epoch=self._wire_epoch,
@@ -2350,6 +2376,7 @@ class OpenAIRealtimeSession:
                             commit_event_id=self._active_commit_event_id,
                         )
                     )
+                    self._asr_terminal_sent = True
                 elif event.kind == "error":
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
@@ -2362,6 +2389,7 @@ class OpenAIRealtimeSession:
                             commit_event_id=self._active_commit_event_id,
                         )
                     )
+                    self._asr_terminal_sent = True
         except asyncio.CancelledError:
             # The commit deadline cancels this reader while awaiting its
             # terminal event.  Swallowing that cancellation lets the commit
@@ -2382,6 +2410,7 @@ class OpenAIRealtimeSession:
                         commit_event_id=self._active_commit_event_id,
                     )
                 )
+                self._asr_terminal_sent = True
 
     async def _finalize_tts(
         self,

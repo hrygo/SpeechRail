@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from speechrail.service.constants import SERVICE_ENTRY_NAME
 from speechrail.service.launchd import (
     SERVICE_LABEL,
     LaunchAgentDefinition,
@@ -18,12 +19,12 @@ from speechrail.service.launchd import (
 
 
 def _definition(tmp_path: Path) -> LaunchAgentDefinition:
-    python = tmp_path / "venv" / "bin" / "python"
-    python.parent.mkdir(parents=True)
-    python.touch()
+    service_entry = tmp_path / "venv" / "bin" / SERVICE_ENTRY_NAME
+    service_entry.parent.mkdir(parents=True)
+    service_entry.touch()
     return LaunchAgentDefinition(
         working_directory=tmp_path,
-        python_executable=python,
+        service_executable=service_entry,
         stdout_path=tmp_path / "logs" / "stdout.log",
         stderr_path=tmp_path / "logs" / "stderr.log",
     )
@@ -47,7 +48,7 @@ def _manager(tmp_path: Path, calls: list[tuple[str, ...]]) -> LaunchAgentManager
     )
 
 
-def test_launch_agent_plist_uses_current_python_and_never_serializes_environment_secrets(
+def test_launch_agent_plist_uses_self_describing_executable_and_never_serializes_secrets(
     tmp_path: Path,
 ) -> None:
     definition = _definition(tmp_path)
@@ -56,7 +57,7 @@ def test_launch_agent_plist_uses_current_python_and_never_serializes_environment
 
     assert plist["Label"] == SERVICE_LABEL
     assert plist["ProgramArguments"] == [
-        str((tmp_path / "venv" / "bin" / "python").resolve()),
+        str((tmp_path / "venv" / "bin" / SERVICE_ENTRY_NAME).absolute()),
         "-m",
         "speechrail",
         "serve",
@@ -73,54 +74,95 @@ def test_definition_rejects_relative_or_missing_runtime_paths(tmp_path: Path) ->
     with pytest.raises(ServiceError, match="absolute"):
         LaunchAgentDefinition(
             working_directory=Path(),
-            python_executable=tmp_path / "python",
+            service_executable=tmp_path / "speechrail",
             stdout_path=tmp_path / "stdout.log",
             stderr_path=tmp_path / "stderr.log",
         )
 
-    with pytest.raises(ServiceError, match="python executable"):
+    with pytest.raises(ServiceError, match="service executable"):
         LaunchAgentDefinition(
             working_directory=tmp_path,
-            python_executable=tmp_path / "missing-python",
+            service_executable=tmp_path / "missing-entry",
             stdout_path=tmp_path / "stdout.log",
             stderr_path=tmp_path / "stderr.log",
         )
 
 
-def test_launch_agent_preserves_python_venv_symlink_path(tmp_path: Path) -> None:
-    python_target = tmp_path / "uv" / "python3.12"
-    python_target.parent.mkdir(parents=True)
-    python_target.touch()
-    python_link = tmp_path / "venv" / "bin" / "python"
-    python_link.parent.mkdir(parents=True)
-    python_link.symlink_to(python_target)
+def test_launch_agent_preserves_service_executable_symlink_path(tmp_path: Path) -> None:
+    interpreter_target = tmp_path / "uv" / "python3.12"
+    interpreter_target.parent.mkdir(parents=True)
+    interpreter_target.touch()
+    service_entry = tmp_path / "venv" / "bin" / SERVICE_ENTRY_NAME
+    service_entry.parent.mkdir(parents=True)
+    service_entry.symlink_to(interpreter_target)
     definition = LaunchAgentDefinition(
         working_directory=tmp_path,
-        python_executable=python_link,
+        service_executable=service_entry,
         stdout_path=tmp_path / "stdout.log",
         stderr_path=tmp_path / "stderr.log",
     )
 
     plist = plistlib.loads(definition.to_plist())
 
-    assert plist["ProgramArguments"][0] == str(python_link.absolute())
+    assert plist["ProgramArguments"][0] == str(service_entry.absolute())
 
 
-def test_create_manager_preserves_current_python_symlink(
+def test_create_manager_prefers_service_entry_over_bare_interpreter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("speechrail.service.launchd.sys.platform", "darwin")
-    python_target = tmp_path / "uv" / "python3.12"
-    python_target.parent.mkdir(parents=True)
-    python_target.touch()
-    python_link = tmp_path / "venv" / "bin" / "python3"
-    python_link.parent.mkdir(parents=True)
-    python_link.symlink_to(python_target)
-    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(python_link))
+    bin_directory = tmp_path / "venv" / "bin"
+    bin_directory.mkdir(parents=True)
+    interpreter_link = bin_directory / "python3"
+    interpreter_link.touch()
+    service_entry = bin_directory / SERVICE_ENTRY_NAME
+    service_entry.symlink_to("python3")
+    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(interpreter_link))
 
     manager = create_launch_agent_manager(working_directory=tmp_path)
 
-    assert manager.definition.python_executable == python_link.absolute()
+    assert manager.definition.service_executable == service_entry.absolute()
+    assert plistlib.loads(manager.definition.to_plist())["ProgramArguments"] == [
+        str(service_entry.absolute()),
+        "-m",
+        "speechrail",
+        "serve",
+    ]
+
+
+def test_create_manager_never_launches_the_cli_shim_wrapper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``speechrail`` console script resolves its app home from the environment.
+
+    The plist carries no environment, so pointing at it would start the default app
+    home's runtime instead of this one.
+    """
+    monkeypatch.setattr("speechrail.service.launchd.sys.platform", "darwin")
+    bin_directory = tmp_path / "venv" / "bin"
+    bin_directory.mkdir(parents=True)
+    interpreter_link = bin_directory / "python3"
+    interpreter_link.touch()
+    (bin_directory / "speechrail").write_text("#!/bin/sh\nexec python -m speechrail \"$@\"\n")
+    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(interpreter_link))
+
+    manager = create_launch_agent_manager(working_directory=tmp_path)
+
+    assert manager.definition.service_executable == interpreter_link.absolute()
+
+
+def test_create_manager_falls_back_to_interpreter_without_service_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("speechrail.service.launchd.sys.platform", "darwin")
+    interpreter_link = tmp_path / "venv" / "bin" / "python3"
+    interpreter_link.parent.mkdir(parents=True)
+    interpreter_link.touch()
+    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(interpreter_link))
+
+    manager = create_launch_agent_manager(working_directory=tmp_path)
+
+    assert manager.definition.service_executable == interpreter_link.absolute()
 
 
 def test_create_manager_uses_explicit_app_home(
@@ -227,7 +269,7 @@ def test_checked_in_launchagent_template_matches_managed_safety_policy() -> None
         plist = plistlib.load(handle)
 
     assert plist["ProgramArguments"] == [
-        "<absolute-path-to-python>",
+        "<absolute-path-to-speechrail-service>",
         "-m",
         "speechrail",
         "serve",
