@@ -4,14 +4,24 @@ The adapter never re-decodes audio: it hands the frozen text and an exact PCM
 span to an independent aligner owner and maps the returned tokens back onto the
 original code points.  Text is compared without normalization so a returned
 offset always addresses the frozen revision the caller already published.
+
+Matching is literal first and *spoken-form* second.  The aligner timestamps
+speech, not typography: it splits on whitespace and keeps only letters, digits
+and apostrophes, so ``3:45`` comes back as ``345`` and ``forty-two`` as
+``fortytwo``.  Neither is a substring of the frozen text, and a plain
+``str.find`` therefore rejected every ordinary sentence containing a digit or a
+hyphen.  A token that fails the literal search is retried against a
+punctuation-free projection of the same text, and the match is mapped back onto
+the original code points so published offsets still address the frozen revision.
 """
 
 from __future__ import annotations
 
+import bisect
 import math
 import unicodedata
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from speechrail.domain.alignment import (
@@ -156,19 +166,79 @@ def _units_to_words(
     return tuple(words)
 
 
+def _is_spoken_char(character: str) -> bool:
+    """Return whether the pinned aligner keeps ``character`` inside a token.
+
+    Mirrors ``mlx_qwen3_asr.ForcedAlignTextProcessor.is_kept_char``.  The
+    mirror is pinned by ``tests/test_alignment_spoken_projection.py``, which
+    fails if the two rules ever diverge.
+    """
+
+    if character == "'":
+        return True
+    category = unicodedata.category(character)
+    return category.startswith("L") or category.startswith("N")
+
+
+@dataclass(frozen=True, slots=True)
+class _SpokenProjection:
+    """Punctuation-free view of the frozen text plus its code-point origins.
+
+    Whitespace survives verbatim so a token can never be matched across a word
+    boundary, mirroring the aligner's own whitespace split.  Every other
+    unspoken code point is dropped, which is what makes ``345`` locatable in
+    ``"at 3:45 p.m."`` and ``fortytwo`` locatable in ``"forty-two"``.
+    """
+
+    spoken: str
+    origins: tuple[int, ...]
+
+    @classmethod
+    def of(cls, text: str) -> _SpokenProjection:
+        characters: list[str] = []
+        origins: list[int] = []
+        for index, character in enumerate(text):
+            if character.isspace() or _is_spoken_char(character):
+                characters.append(character)
+                origins.append(index)
+        return cls("".join(characters), tuple(origins))
+
+    def locate(self, text: str, token: str, cursor: int) -> tuple[int, int] | None:
+        """Return the frozen code-point range ``token`` spans at or after ``cursor``."""
+
+        if not token or any(character.isspace() for character in token):
+            return None
+        start = self.spoken.find(token, bisect.bisect_left(self.origins, cursor))
+        if start < 0:
+            return None
+        end = self.origins[start + len(token) - 1] + 1
+        # The punctuation the aligner stripped belonged to this token, so the
+        # token keeps it: ``pm`` came from ``p.m.`` and must also carry the
+        # periods, otherwise they fall into the next token's leading gap and a
+        # word renders as ``". on"``.  Claiming only unspoken, non-space
+        # code points stops at the next word, which matters for Chinese where a
+        # whole clause is one whitespace-delimited chunk.
+        while end < len(text) and not text[end].isspace() and not _is_spoken_char(text[end]):
+            end += 1
+        return self.origins[start], end
+
+
 def validate_alignment(
     request: AlignmentRequest, raw: Iterable[tuple[str, float, float]]
 ) -> AlignmentResult:
     """Map aligner tokens onto the frozen text or fail without re-decoding it.
 
-    Tokens must match the frozen text in order at code-point granularity.  When
-    the caller asked for word or character output the returned tokens must
-    actually carry that granularity; evenly splitting a phrase and calling it
-    ``character`` is reported as ``granularity_unsupported`` rather than
-    silently accepted.
+    Tokens must match the frozen text in order at code-point granularity.  A
+    token the aligner stripped punctuation from is matched against the spoken
+    projection and mapped back to the code points it actually covers, so the
+    returned units still address the frozen text verbatim.  When the caller
+    asked for word or character output the returned tokens must actually carry
+    that granularity; evenly splitting a phrase and calling it ``character`` is
+    reported as ``granularity_unsupported`` rather than silently accepted.
     """
 
     cursor = 0
+    projection: _SpokenProjection | None = None
     tokens: list[tuple[str, int, int, SampleSpan]] = []
     for token, start_seconds, end_seconds in raw:
         if (
@@ -179,9 +249,15 @@ def validate_alignment(
         ):
             return _failed(request, "invalid_alignment")
         text_start = request.text.find(token, cursor)
-        if text_start < 0:
-            return _failed(request, "text_mismatch")
-        text_end = text_start + len(token)
+        if text_start >= 0:
+            text_end = text_start + len(token)
+        else:
+            if projection is None:
+                projection = _SpokenProjection.of(request.text)
+            located = projection.locate(request.text, token, cursor)
+            if located is None:
+                return _failed(request, "text_mismatch")
+            text_start, text_end = located
         start = request.span.start + round(start_seconds * CORE_SAMPLE_RATE)
         end = request.span.start + round(end_seconds * CORE_SAMPLE_RATE)
         if start < request.span.start or end > request.span.end or end <= start:
@@ -258,11 +334,15 @@ def _is_character_token(token: str) -> bool:
 
 
 def _is_word_token(token: str) -> bool:
-    """Accept a single unbroken word run, never a phrase with delimiters."""
+    """Accept a single unbroken word run, never a phrase with delimiters.
 
-    return bool(token) and not any(
-        character.isspace() or unicodedata.category(character).startswith("P")
-        for character in token
+    The rule is the aligner's own kept-character set rather than a punctuation
+    ban: the vendor strips ``don't`` down to a word but keeps the apostrophe,
+    and rejecting that would fail ordinary English word timestamps.
+    """
+
+    return bool(token) and all(
+        _is_spoken_char(character) for character in token
     )
 
 
