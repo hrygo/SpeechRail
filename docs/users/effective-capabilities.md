@@ -53,6 +53,28 @@ date: 2026-09-26
 `fast`、`quality` 与 `reference` 分别解析 ASR、固定自定义音色 Base 与内置 speaker CustomVoice 角色；实际可用性以当前有效快照为准。VoiceDesign 只在 `voice_design` 任务中运行，普通 Base clone 与 CustomVoice 路由不接受 Design 音色；它是**与档位无关**的按需制品（唯一 1.7B BF16 设计权重），只要供货快照存在，任何 `tts_spec` 都能进入设计作业。
 普通 HTTP speech 支持 seed。语言完整取值域尚未在固定 vendor 上验证，因此报告 unknown。
 
+### 设计通道是独立角色，不是 tts 变体
+
+`models` 中 `asr` / `tts` / `tts_clone` 各自命名**一个**制品，因此
+`models.tts.variant` 结构上只会是 `custom_voice` 或 `base` —— 它**永远不会**是
+`voice_design`。设计通道作为与 `tts` **平级**的独立角色发布：
+
+- `models.voice_design`：设计制品身份（`artifact` / `variant` / `quantization`）。
+  未绑定供货快照时为 `{"assurance": "unknown", "runtime_revision": null}`。
+  **判定设计能力只看这一项**；从 `models.tts.variant` 读设计结论会得到一个任何部署
+  都不满足的条件。
+- `operations.voice_design`：设计操作本身，`scope` 恒为 `design_period_only`，
+  `affects_production_tts_route` 恒为 `false`，`publishes_to_base_variant` 表示能否
+  发布到 Base。设计**不改变 `tts` 的解析结果**，也不打断在途合成。
+- `operations.voice_preview`：设计期试听。它与 `design_voice` 运行**同一份**设计权重，
+  且对同一 `seed` 逐位确定，因此试听结果可代表候选韵律；差异只在
+  `language`（两者同为 `zh`）与候选音频的规范化（裁首尾静音、归一化增益，只改变总时长，
+  不改变语音有效时长）。
+
+`GET /health` 的 `tts_design` 报告的是**驻留状态而非可用性**：`configured: true` 且
+`state: "cold"` 表示惰性 worker 尚未加载、会在首个设计请求时按需加载。读取 health 永不
+触发加载，因此不能用 `ready` 判断设计通道是否可用。
+
 ASR 侧操作在 `operations` 中按 `transcription`、`alignment_transcription`、
 `realtime_transcription` 与 `jobs` 分别披露真实输入上限（`max_upload_bytes`、
 `max_audio_seconds`）、粒度、语言取值域、输出能力与就绪原因。这些枚举只由配置、

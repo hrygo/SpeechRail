@@ -331,6 +331,12 @@ def _voice_entry(
         if profile.revoked
         else "model_identity_unknown"
         if variant is None
+        else "voice_design_task_required"
+        # A design-only voice resolves to the VoiceDesign artifact and is
+        # therefore a known, compatible variant — but it owns no runtime role, so
+        # no synthesis route can serve it. Advertising it as available hands the
+        # caller a voice whose every render fails with `voice_design_task_required`.
+        if profile.runtime_role is None
         else "voice_incompatible"
         if not compatible
         else "backend_not_ready"
@@ -338,14 +344,21 @@ def _voice_entry(
         else "available"
     )
     is_clone = profile.mode == "clone"
-    instructions: Support = (
-        "supported" if compatible and variant == "voice_design" else "unsupported"
-    )
+    # `/v1/audio/speech` never accepts `instructions`, whatever the voice mode:
+    # a design-only voice is refused earlier with `voice_design_task_required`, a
+    # system voice with `instructions_unsupported`, and a clone voice with
+    # `clone_instruction_unsupported`. The instruction belongs to the design
+    # lane, so this parameter must not be advertised as supported anywhere.
+    instructions: Support = "unsupported"
+    # `compatible` only means the binding resolves. A design-only voice resolves a
+    # VoiceDesign binding yet owns no runtime role, so every synthesis-side
+    # capability below is gated on actual availability instead.
+    serviceable = reason == "available"
     speed = (
         parameter("supported", values=[1.0])
         if is_clone
         else parameter(
-            "supported" if compatible else "unknown",
+            "supported" if serviceable else "unknown",
             minimum=0.25,
             maximum=4.0,
         )
@@ -446,7 +459,7 @@ def _voice_entry(
         "conditional_synthesis": parameter(
             (
                 "supported"
-                if profile.revision is not None and compatible and not profile.revoked
+                if profile.revision is not None and serviceable
                 else "unsupported"
             ),
             reason=(
@@ -470,15 +483,15 @@ def _voice_entry(
             ),
         ),
         "timing_sidecar": parameter(
-            "supported" if compatible else "unsupported",
-            values=["chunk"] if compatible else [],
+            "supported" if serviceable else "unsupported",
+            values=["chunk"] if serviceable else [],
             coordinate_space="normalized_spoken_unicode_codepoints",
             display_mapping="conditional",
             delivery="async_resource",
             reason=(
                 "planner_chunk_sample_conservation"
-                if compatible
-                else "voice_not_available"
+                if serviceable
+                else reason
             ),
         ),
     }
@@ -585,10 +598,25 @@ def build_capability_snapshot(
 ) -> dict[str, Any]:
     """Pure snapshot assembly; no model imports, registry calls, or network access."""
     ordered = sorted(profiles, key=lambda profile: profile.id)
+    # VoiceDesign availability is a property of the design artifact alone. It is
+    # deliberately not derived from `active.tts`: that slot resolves to
+    # tts_custom_voice / tts_base by tier, so a design verdict read from it is
+    # structurally always negative.
+    design_bound = (
+        active.voice_design is not None and active.voice_design.variant == "voice_design"
+    )
+    base_bound = active.tts_clone is not None and active.tts_clone.variant == "base"
     models = {
         "asr": model_identity(active.asr),
         "tts": model_identity(active.tts),
         "tts_clone": model_identity(active.tts_clone),
+        # VoiceDesign is a tier-independent on-demand design lane, not a role of
+        # any tts_spec (see REQUIRED_SPEC_BINDINGS). It is published as a peer of
+        # `tts` so a caller can discover the design artifact and its readiness
+        # without reading the production route: `models["tts"].variant` is only
+        # ever `custom_voice` or `base`, so a design decision can never be
+        # expressed — let alone observed — through that slot.
+        "voice_design": model_identity(active.voice_design),
     }
     # Private recipe changes must invalidate discovery, even though neither the
     # recipe nor its text hash is a public voice identity. Never expose this input.
@@ -669,14 +697,31 @@ def build_capability_snapshot(
         "operations": {
             "tts_text_planner": planner_policy,
             "voice_preview": {
-                "status": "supported"
-                if active.voice_design is not None
-                and active.voice_design.variant == "voice_design"
-                else "unsupported",
+                "status": "supported" if design_bound else "unsupported",
+                "reason": None if design_bound else "voice_design_artifact_not_bound",
                 "instruction": parameter("supported", required=True, maximum_length=10_000),
                 "seed": parameter("supported", minimum=0, maximum=2**32 - 1),
                 "speed": parameter("supported", minimum=0.25, maximum=4.0),
                 "creates_persistent_voice": False,
+            },
+            # Design-period lane: create a private candidate, verify it, then
+            # publish it into Base. It never serves the production route and
+            # never changes how `tts` resolves, so it is declared on its own
+            # operation rather than as a capability of the production TTS model.
+            "voice_design": {
+                "status": "supported" if design_bound else "unsupported",
+                "reason": None if design_bound else "voice_design_artifact_not_bound",
+                "scope": "design_period_only",
+                "affects_production_tts_route": False,
+                "instruction": parameter("supported", required=True, maximum_length=10_000),
+                "reference_text": parameter(
+                    "supported", required=True, minimum_length=20, maximum_length=240
+                ),
+                "seed": parameter("supported", minimum=0, maximum=2**32 - 1),
+                "language": {"status": "supported", "const": "zh"},
+                "creates_candidate": True,
+                "publishes_to_base_variant": base_bound,
+                "terminal_evidence": "voice_design.candidate.created",
             },
             **asr_operations(asr_capabilities),
         },

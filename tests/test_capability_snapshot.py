@@ -78,11 +78,146 @@ def _active(asr_spec: str, tts_spec: str):
         asr=artifacts[catalog.binding(asr_spec, "asr")],
         tts=artifacts[catalog.binding(tts_spec, "tts_custom_voice")],
         tts_clone=artifacts[catalog.binding(tts_spec, "tts_base")],
+        # VoiceDesign is bound independently of the tier, exactly as the shipped
+        # selection binds it.
+        voice_design=artifacts[catalog.voice_design_artifact().key],
         aligner=None,
         diarization=False,
         asr_spec=asr_spec,
         tts_spec=tts_spec,
     )
+
+
+def test_design_only_voice_is_not_advertised_as_a_synthesis_voice() -> None:
+    """A design candidate resolves the VoiceDesign artifact but has no route.
+
+    /v1/audio/speech answers `voice_design_task_required` for any voice whose
+    `runtime_role` is None, so discovery must not report it as available, must not
+    advertise synthesis-side parameters for it, and must say why.
+    """
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    profile = voices.VoiceProfile(
+        id="draft",
+        mode="instruction",
+        instruction="PRIVATE_INSTRUCTION",
+        created_at=0.0,
+    )
+    snapshot = build_capability_snapshot(
+        [profile],
+        _active("quality", "quality"),
+        epoch="e",
+        ready=True,
+        enabled_voices=frozenset(),
+        sample_rate=24_000,
+    )
+    entry = snapshot["voices"][0]
+    # The artifact is known and the binding resolves — this is not an identity
+    # failure, it is a routing fact.
+    assert entry["model"]["variant"] == "voice_design"
+    assert entry["available"] is False
+    assert entry["availability_reason"] == "voice_design_task_required"
+    assert entry["production_ready"] is False
+
+    speech = entry["operations"]["http_speech"]["parameters"]
+    assert speech["instructions"]["status"] == "unsupported"
+    assert entry["timing_sidecar"]["status"] == "unsupported"
+    assert entry["timing_sidecar"]["values"] == []
+    assert entry["conditional_synthesis"]["status"] == "unsupported"
+    assert "PRIVATE_INSTRUCTION" not in str(snapshot)
+
+
+def test_published_clone_voice_stays_available_with_the_design_lane_bound() -> None:
+    """Binding the design lane must not disturb the production route."""
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    profile = voices.VoiceProfile(
+        id="published",
+        mode="clone",
+        instruction=None,
+        created_at=0.0,
+    )
+    snapshot = build_capability_snapshot(
+        [profile],
+        _active("quality", "quality"),
+        epoch="e",
+        ready=True,
+        enabled_voices=frozenset(),
+        sample_rate=24_000,
+    )
+    entry = snapshot["voices"][0]
+    assert entry["available"] is True
+    assert entry["availability_reason"] == "available"
+    assert entry["model"]["variant"] == "base"
+    assert entry["timing_sidecar"]["status"] == "supported"
+    assert entry["operations"]["http_speech"]["parameters"]["instructions"][
+        "status"
+    ] == "unsupported"
+
+
+@pytest.mark.parametrize(("asr_spec", "tts_spec"), _ACTIVE_SELECTIONS)
+def test_voice_design_is_published_as_a_peer_role_not_a_tts_variant(
+    asr_spec: str, tts_spec: str
+) -> None:
+    """The design lane must be discoverable without reading the tts variant.
+
+    `models["tts"]` can only ever name custom_voice or base, so a design verdict
+    read from that slot is unsatisfiable by construction. Publishing design as
+    its own peer role is what makes design admission decidable.
+    """
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    snapshot = build_capability_snapshot(
+        [], _active(asr_spec, tts_spec), epoch="e", ready=True,
+        enabled_voices=frozenset(), sample_rate=24_000,
+    )
+    assert snapshot["models"]["tts"]["variant"] in {"custom_voice", "base"}
+    assert snapshot["models"]["voice_design"]["variant"] == "voice_design"
+    assert snapshot["models"]["voice_design"]["artifact"] == "tts-1.7b-design-bf16"
+
+    operation = snapshot["operations"]["voice_design"]
+    assert operation["status"] == "supported"
+    assert operation["scope"] == "design_period_only"
+    assert operation["affects_production_tts_route"] is False
+    assert operation["publishes_to_base_variant"] is True
+    # Design availability must not leak into or out of the production route.
+    assert snapshot["operations"]["voice_preview"]["status"] == "supported"
+
+
+def test_unbound_design_artifact_degrades_the_design_role_only() -> None:
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+    from speechrail.config.model_catalog import load_catalog
+    from speechrail.config.selection import ActiveModelCatalog
+
+    catalog = load_catalog()
+    artifacts = {item.key: item for item in catalog.artifacts}
+    active = ActiveModelCatalog(
+        profile="quality/quality",
+        asr=artifacts[catalog.binding("quality", "asr")],
+        tts=artifacts[catalog.binding("quality", "tts_custom_voice")],
+        tts_clone=artifacts[catalog.binding("quality", "tts_base")],
+        voice_design=None,
+        aligner=None,
+        diarization=False,
+        asr_spec="quality",
+        tts_spec="quality",
+    )
+    snapshot = build_capability_snapshot(
+        [], active, epoch="e", ready=True,
+        enabled_voices=frozenset(), sample_rate=24_000,
+    )
+    assert snapshot["models"]["voice_design"] == {
+        "assurance": "unknown",
+        "runtime_revision": None,
+    }
+    assert snapshot["operations"]["voice_design"]["status"] == "unsupported"
+    assert (
+        snapshot["operations"]["voice_design"]["reason"]
+        == "voice_design_artifact_not_bound"
+    )
+    # Production TTS is untouched by a missing design artifact.
+    assert snapshot["models"]["tts"]["variant"] == "custom_voice"
+    assert snapshot["operations"]["tts_text_planner"]["max_chars"] > 0
 
 
 @pytest.mark.parametrize(("asr_spec", "tts_spec"), _ACTIVE_SELECTIONS)

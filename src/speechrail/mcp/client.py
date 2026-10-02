@@ -440,6 +440,7 @@ class SpeechRailClient:
         text: str,
         instruction: str,
         response_format: str = "wav",
+        language: str = "zh",
     ) -> bytes:
         """POST /v1/voices/previews and return the raw audio body."""
         body = {
@@ -447,6 +448,7 @@ class SpeechRailClient:
             "input": text,
             "instruction": instruction,
             "response_format": response_format,
+            "language": language,
         }
         response = await self._request("POST", "voices/previews", json=body)
         return response.content

@@ -83,12 +83,21 @@ _CAPABILITY_MESSAGES = {
         "in the active profile {profile}; call describe() to inspect current "
         "voice availability."
     ),
+    # An instruction voice is a design candidate, not a synthesis route. The
+    # design lane may well be available and still not serve this voice, so the
+    # rejection must not claim the capability is missing -- that mirrors the
+    # server's own `voice_design_task_required` on /v1/audio/speech.
     "instruction": (
-        "voice {voice} requires a VoiceDesign capability that is unavailable "
-        "in the active profile {profile}; call describe() to inspect current "
-        "voice availability."
+        "voice {voice} is a VoiceDesign instruction candidate and is served by "
+        "the voice_design task, not by speech synthesis; publish it to Base "
+        "first, then synthesize the published voice. Current profile: {profile}."
     ),
 }
+
+# VoiceDesign candidates are zh-only (POST /v1/voice-designs pins language="zh").
+# Preview must pin the same language or the audition a caller screens is not the
+# audio the design lane will produce.
+_VOICE_DESIGN_LANGUAGE = "zh"
 
 _BASE64_CHARSET = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
@@ -227,6 +236,39 @@ def _require_model_variant(
         message=(
             f"{capability} is unavailable in the current effective profile "
             f"{profile}; {model_name} variant is {actual_variant or 'unknown'}. "
+            "Call describe() to inspect current capabilities."
+        ),
+        hint="call describe() to inspect current capabilities",
+    )
+
+
+def _require_voice_design(
+    effective: dict[str, Any],
+    *,
+    capability: str,
+    code: str = "capability_not_available",
+) -> None:
+    """Gate a design-period tool on the design artifact, never on the tts route.
+
+    VoiceDesign is a tier-independent on-demand artifact and is published as its
+    own ``models["voice_design"]`` peer role. It is deliberately absent from
+    ``REQUIRED_SPEC_BINDINGS``, so ``models["tts"].variant`` is only ever
+    ``custom_voice`` or ``base``: reading a design verdict from that slot yields a
+    condition that no deployment can satisfy, which silently makes every design
+    tool unreachable. Admission therefore tracks artifact resolvability.
+    """
+
+    model = _effective_model(effective, "voice_design")
+    artifact = _text(model.get("artifact")) if isinstance(model, dict) else None
+    if artifact:
+        return
+    profile = _text(effective.get("profile")) or "unknown"
+    raise ToolCallError(
+        code=code,
+        message=(
+            f"{capability} is unavailable: no VoiceDesign artifact is bound to "
+            f"this service instance (profile {profile}). VoiceDesign is an "
+            "on-demand design lane and is independent of the active TTS tier. "
             "Call describe() to inspect current capabilities."
         ),
         hint="call describe() to inspect current capabilities",
@@ -598,11 +640,11 @@ def _enforce_available_voice(
         )
     if mode == "instruction" or supports_instruction:
         raise ToolCallError(
-            code="voice_not_available",
+            code="voice_design_task_required",
             message=_CAPABILITY_MESSAGES["instruction"].format(
                 voice=voice, profile=profile_label
             ),
-            hint="call describe() to inspect current voice availability",
+            hint="publish the candidate to Base with publish_voice_design, then synthesize it",
         )
 
 
@@ -840,7 +882,15 @@ async def preview_voice(
     Lets an agent audition a natural-language voice instruction before
     committing to it.  The binary audio is written to a temporary file and
     returned as ``audio_path``.  Nothing is persisted: call ``create_voice``
-    to register the chosen instruction, then ``synthesize`` by its id.
+    to keep the instruction as a design candidate, or ``design_voice`` to run
+    the full candidate lifecycle and publish it to Base.
+
+    Preview and the design candidate run the *same* VoiceDesign weights and are
+    deterministic per ``seed``, so a preview is a faithful audition of what the
+    design lane will produce. Both are pinned to ``language="zh"`` here, matching
+    ``design_voice``, so screening a recipe here carries over unchanged. A stored
+    candidate's audio is additionally canonicalized (silence trimmed, gain
+    normalized), which shortens total duration without changing delivery rate.
 
     Instruction guidance (Qwen3-TTS VoiceDesign): write in Chinese or
     English only (30-200 words); be specific across gender/age/pitch/speed/
@@ -868,23 +918,17 @@ async def preview_voice(
             message=f"text exceeds the {_MAX_PREVIEW_TEXT} character limit",
         )
     effective = await client.fetch_capabilities()
-    variant = _effective_tts_variant(effective)
-    if variant != "voice_design":
-        profile = _text(effective.get("profile")) or "unknown"
-        raise ToolCallError(
-            code="voice_preview_unsupported",
-            message=(
-                "VoiceDesign preview is unavailable in the current effective "
-                f"profile {profile}; active TTS variant is {variant or 'unknown'}. "
-                "Call describe() to inspect current capabilities."
-            ),
-            hint="call describe() to inspect current capabilities",
-        )
+    _require_voice_design(
+        effective,
+        capability="VoiceDesign preview",
+        code="voice_preview_unsupported",
+    )
     content = await client.voice_preview(
         model=_DEFAULT_TTS_MODEL,
         text=stripped_text,
         instruction=stripped_instruction,
         response_format=_PREVIEW_FORMAT,
+        language=_VOICE_DESIGN_LANGUAGE,
     )
     if not content:
         raise ToolCallError(
@@ -908,12 +952,17 @@ async def create_voice(
     voice_id: str | None = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
-    """Register a persistent instruction-driven voice (``POST /v1/voices``).
+    """Register a VoiceDesign instruction candidate (``POST /v1/voices``).
 
-    Completes the preview → persist → synthesize loop: audition with
-    ``preview_voice`` first, then persist the chosen instruction here and
-    synthesize by the returned ``id``. Registration requires VoiceDesign in
-    the current effective capability snapshot.
+    Audition with ``preview_voice`` first, then persist the chosen instruction
+    here. The result is a *design candidate*, not a synthesis voice: it has no
+    runtime role, so ``synthesize`` refuses it with
+    ``voice_design_task_required``. To obtain a synthesizable voice, run
+    ``design_voice`` and publish the candidate to Base with
+    ``publish_voice_design``, then synthesize the published voice.
+
+    Registration requires a bound VoiceDesign artifact, reported as
+    ``models["voice_design"]`` in the effective capability snapshot.
     """
     stripped_name = name.strip()
     if not stripped_name:
@@ -951,10 +1000,8 @@ async def create_voice(
             message=f"seed must be an integer between 0 and {_MAX_VOICE_SEED}",
         )
     effective = await client.fetch_capabilities()
-    _require_model_variant(
+    _require_voice_design(
         effective,
-        model_name="tts",
-        expected_variant="voice_design",
         capability="Voice creation",
     )
     return _safe_voice_record(
@@ -1018,10 +1065,8 @@ async def design_voice(
             message="the current generated-reference registration gate accepts language=zh",
         )
     effective = await client.fetch_capabilities()
-    _require_model_variant(
+    _require_voice_design(
         effective,
-        model_name="tts",
-        expected_variant="voice_design",
         capability="Generated-reference design",
     )
     raw = await client.design_voice(
@@ -1105,10 +1150,8 @@ async def validate_voice_design(
             )
 
     effective = await client.fetch_capabilities()
-    _require_model_variant(
+    _require_voice_design(
         effective,
-        model_name="tts",
-        expected_variant="voice_design",
         capability="Voice-design candidate validation",
     )
     human_review: dict[str, str] | None = None
@@ -1170,10 +1213,8 @@ async def publish_voice_design(
             message="expected_candidate_revision has an invalid format",
         )
     effective = await client.fetch_capabilities()
-    _require_model_variant(
+    _require_voice_design(
         effective,
-        model_name="tts",
-        expected_variant="voice_design",
         capability="Voice-design publication",
     )
     _require_model_variant(

@@ -2278,7 +2278,13 @@ components:
           description: Configured for on-demand service, not proof of warm residency or quality.
         availability_reason:
           type: string
-          enum: [disabled, model_identity_unknown, voice_incompatible, backend_not_ready, available]
+          enum: [disabled, model_identity_unknown, voice_design_task_required, voice_incompatible, backend_not_ready, available]
+          description: >-
+            Why this voice can or cannot be served by a synthesis route.
+            `voice_design_task_required` marks a design-only candidate: it resolves
+            the VoiceDesign artifact and is a known variant, but owns no runtime
+            role, so /v1/audio/speech answers `voice_design_task_required` until it
+            is published to Base.
         variant:
           type: [string, 'null']
         voice_revision:

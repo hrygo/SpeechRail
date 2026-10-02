@@ -250,7 +250,15 @@ def _model_entry(
             }
         )
         if artifact.family == "qwen3_tts":
-            supports_voice_design = artifact.variant == "voice_design"
+            # Preview and instruction are served by the VoiceDesign lane, which is
+            # a separate artifact from whichever tier produced this entry. Deriving
+            # them from `artifact.variant` reports `false` for every real deployment
+            # (a TTS entry is only ever custom_voice or base) and contradicts the
+            # capability snapshot, which resolves the same facts correctly.
+            supports_voice_design = (
+                active.voice_design is not None
+                and active.voice_design.variant == "voice_design"
+            )
             supports_clone = (
                 active.tts_clone is not None and active.tts_clone.variant == "base"
             )
@@ -292,6 +300,11 @@ def _voice_entry(
         tts_ready
         and enabled
         and not profile.revoked
+        # Design-only voices resolve to the VoiceDesign artifact, so the
+        # artifact check below cannot exclude them. `runtime_role` is the
+        # authority: /v1/audio/speech answers `voice_design_task_required` for
+        # any voice without one, so `available` must not promise otherwise.
+        and profile.runtime_role is not None
         and (artifact is not None or variant is not None)
     )
     validation: dict[str, Any] | None = None
@@ -369,6 +382,8 @@ def _voice_entry(
             if profile.revoked
             else "backend_not_ready"
             if not tts_ready
+            else "voice_design_task_required"
+            if profile.runtime_role is None
             else "binding_unavailable"
             if not binding_resolved
             else "voice_not_available"

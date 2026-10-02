@@ -236,6 +236,9 @@ def test_voice_preview_json_body_and_raw_audio_response(
             "input": "试听这一句。",
             "instruction": "温暖自然的中文女声。",
             "response_format": "wav",
+            # Pinned to match POST /v1/voice-designs, so a preview auditions the
+            # same rendering the design lane will produce.
+            "language": "zh",
         }
         return httpx.Response(status_code=200, content=audio)
 
