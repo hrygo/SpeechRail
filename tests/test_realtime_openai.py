@@ -1878,6 +1878,100 @@ def test_realtime_alignment_runs_without_diarization() -> None:
     assert alignment["units"][0]["timing_quality"] == "aligned"
 
 
+def test_alignment_result_survives_the_turn_moving_on() -> None:
+    """A late aligner result must still reach the client, tagged with its own ids.
+
+    Commit cleanup advances the item id and zeroes the turn's transcript
+    revision as soon as the text final is sent, and the alignment task is
+    scheduled around that same moment -- so on a real service it routinely
+    *starts* after the turn has already moved on.  Measured on 3.5.2 every
+    result was dropped that way and the client received neither
+    `alignment.done` nor `alignment.failed`, leaving it waiting forever.
+
+    The event carries `utterance_id` and `transcript_revision`, so a late
+    result is still attributable and has to be delivered; what it must not do
+    is advance the *next* turn's bookkeeping.
+    """
+
+    async def scenario() -> tuple[list[dict[str, object]], str]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                text_aligner=FakeTextAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+        alignment_done = asyncio.Event()
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event.get("type") == "speechrail.alignment.done":
+                alignment_done.set()
+            return len(events)
+
+        session = OpenAIRealtimeSession(
+            services, session_id="realtime_late_alignment", send=send
+        )
+        await session.start()
+        await session.handle(session_update(alignment={"enabled": True}))
+        pcm = _pcm16(_FRAME)
+        await session.handle({"type": "input_audio_buffer.append", "audio": pcm})
+        await session.handle(
+            {"type": "input_audio_buffer.commit", "event_id": "late-commit"}
+        )
+        await asyncio.wait_for(alignment_done.wait(), timeout=0.5)
+        completed = next(
+            event
+            for event in events
+            if event["type"]
+            == "conversation.item.input_audio_transcription.completed"
+        )
+        item_id = str(completed["item_id"])
+        transcript = str(completed["transcript"])
+
+        # Reproduce what commit cleanup does to the turn an already-scheduled
+        # alignment task is about to look at.
+        session._reset_turn_observability()
+        session._current_item_id = session._new_item_id()
+        assert session._current_item_id != item_id
+
+        events.clear()
+        await session._finish_alignment(
+            task_id=session._task_id,
+            epoch=session._wire_epoch,
+            item_id=item_id,
+            transcript=transcript,
+            transcript_revision=1,
+            item_start_wire=0,
+            item_end_wire=len(pcm) // 2,
+            item_start_kernel=0,
+            item_end_kernel=len(pcm) // 2,
+            pcm16=pcm,
+            overflow=False,
+            degraded_reason=None,
+        )
+        await session.close()
+        return events, item_id
+
+    events, item_id = asyncio.run(scenario())
+    terminal = [
+        event
+        for event in events
+        if event["type"]
+        in ("speechrail.alignment.done", "speechrail.alignment.failed")
+    ]
+    assert terminal, "a late alignment result must still be delivered"
+    assert terminal[0]["type"] == "speechrail.alignment.done"
+    assert terminal[0]["utterance_id"] == item_id
+
+
 def test_realtime_diarization_finish_waits_for_pending_alignment() -> None:
     async def scenario() -> list[dict[str, object]]:
         release = asyncio.Event()

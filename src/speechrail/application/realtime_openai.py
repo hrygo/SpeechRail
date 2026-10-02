@@ -1878,17 +1878,40 @@ class OpenAIRealtimeSession:
         degraded_reason: str | None,
     ) -> None:
         try:
-            # Auxiliary results never cross an epoch or utterance boundary: a
-            # reconnect, a newer turn, or a newer transcript revision makes this
-            # request stale, and stale metadata must never reach the caller.
+            # Only a connection-level change invalidates the result outright: a
+            # reconnect or a new task means there is nobody left to deliver to.
+            #
+            # Turn-level identity must NOT suppress delivery.  The event carries
+            # `utterance_id` and `transcript_revision` itself, and the contract
+            # already tells clients to drop stale revisions, so a result that
+            # lands after the next turn started is still correctly attributable.
+            # Worse, the turn state it would be compared against is gone by then:
+            # commit cleanup calls `_reset_turn_observability`, which zeroes
+            # `_current_transcript_revision`, so that comparison was false for
+            # *every* result and alignment silently produced nothing at all.
             if (
                 task_id != self._task_id
                 or epoch != self._wire_epoch
-                or item_id != self._current_item_id
-                or transcript_revision != self._current_transcript_revision
             ):
                 self._services.metrics.record_alignment_event("fixed_text_stale")
+                # Still terminal: a client that enabled alignment must never
+                # wait forever for an event that cannot arrive.
+                await self._send(
+                    alignment_failed(
+                        task_id=task_id,
+                        epoch=epoch,
+                        utterance_id=item_id,
+                        transcript_revision=transcript_revision,
+                        metadata_revision=self._metadata_revision,
+                        code="alignment_stale",
+                        message="connection changed before alignment completed",
+                    )
+                )
                 return
+            turn_is_current = (
+                item_id == self._current_item_id
+                and transcript_revision == self._current_transcript_revision
+            )
             units, failure = await self._build_alignment_units(
                 item_id=item_id,
                 transcript=transcript,
@@ -1929,9 +1952,12 @@ class OpenAIRealtimeSession:
                         message="fixed-text alignment failed",
                     )
                 )
-            if units:
+            # Turn-scoped bookkeeping belongs to the turn that is still open.  A
+            # late result is delivered with its own ids but must not advance the
+            # next turn's metadata revision or re-enter the diarization ledger.
+            if units and turn_is_current:
                 self._metadata_revision += 1
-            await self._register_units(item_id, units)
+                await self._register_units(item_id, units)
         except asyncio.CancelledError:
             raise
         except Exception:
