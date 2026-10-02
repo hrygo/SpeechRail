@@ -2,7 +2,38 @@
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-10-02
+
 ### Fixed
+
+- 修复带标点或数字的语音拿不到任何时间戳：`verbose_json`、`srt`、`vtt`
+  以及说话人分离的对齐此前会把常规英文与含数字的中文整段判成
+  `502 timestamp_alignment_unavailable / text_mismatch`。对齐器切的是语音而不是
+  排版——它按空白切词并只保留字母、数字和撇号，于是 `3:45` 变成 `345`、
+  `forty-two` 变成 `fortytwo`，这些 token 并不是原文的子串，朴素的子串查找
+  必然落空。改为先字面匹配、失败再退化到去标点投影上匹配并映射回原文码点：
+  偏移仍然逐码点指向调用方已发布的冻结文本，排版差异不再被误判成文本不一致。
+  词粒度的判定同步改用对齐器自身的可保留字符集——厂商保留撇号，旧的全角标点
+  禁令会把 `don't` / `it's` 这类普通英文词判成 `granularity_unsupported`。
+  被剥掉的标点归还给它原本所属的那个 token，否则它会漏进下一个词的前导间隙，
+  对外读成 `". on"`、`", two"`。字面命中路径维持既有规则不变（未读出的排版归
+  后一个词），emoji 的归属由既有测试钉住。
+  回归用例取自真实 `mlx_qwen3_asr` 的 tokenizer 输出而非手写近似。
+
+- 修复 bf16 对齐器永远无法加载：`_normalize_dtype` 只认字符串，而 MLX 的 dtype
+  是枚举对象（`str()` 得到 `mlx.core.bfloat16`），于是每个 bf16 aligner 都被判为
+  「未上报 dtype」而拒绝加载。整条对齐路径（含说话人分离）此前从未真正跑通，
+  既有测试传的是字符串 `"mlx.core.bfloat16"`，正好把这个缺陷盖住了。
+
+- 修复 REST 时间戳请求整段 500：ASR 侧曾隐式带上 `include_timestamps=True`，
+  而厂商在开启时间戳时会无条件解析其默认的 `Qwen/Qwen3-ForcedAligner-0.6B`
+  仓库；该仓库不在本地缓存，worker 又运行在 `HF_HUB_OFFLINE=1` 下，
+  于是每个带时间戳的转写都以不透明的 500 收场。改为 ASR 只出文本，时间戳
+  交由本就已接线的独立 `FixedTextAligner` 在冻结文本上计算——与同一路由中
+  说话人分离所用的是同一个 owner，且不会让 ASR 的物理 owner 混用 aligner 身份。
+
+- 修复音色设计在缺少 `reference` 块时按非空断言崩溃：`VoiceQualityReport.reference`
+  已是可选字段，调用方未同步，导致本轮改动引入的必现崩溃。
 
 ### Changed
 
