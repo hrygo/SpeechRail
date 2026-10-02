@@ -78,11 +78,6 @@ _JOB_RESULT_SUFFIXES = {
 }
 
 _CAPABILITY_MESSAGES = {
-    "clone": (
-        "voice {voice} requires a Base clone capability that is unavailable "
-        "in the active profile {profile}; call describe() to inspect current "
-        "voice availability."
-    ),
     # An instruction voice is a design candidate, not a synthesis route. The
     # design lane may well be available and still not serve this voice, so the
     # rejection must not claim the capability is missing -- that mirrors the
@@ -135,7 +130,7 @@ def _first_tts_model(models: list[dict[str, Any]]) -> dict[str, Any] | None:
             return entry
     for entry in models:
         if (
-            entry.get("variant") in {"voice_design", "custom_voice"}
+            entry.get("variant") in {"custom_voice", "base"}
             and entry.get("resolves_to") is None
         ):
             return entry
@@ -593,7 +588,6 @@ def _enforce_available_voice(
     entry: dict[str, Any],
     voice: str,
     *,
-    variant: str | None,
     profile: str | None,
     validation_policy: str = "allow_unverified",
 ) -> None:
@@ -622,22 +616,11 @@ def _enforce_available_voice(
             ),
             hint="run validate_voice and require a persisted synthesis output pass",
         )
-    if variant == "voice_design":
-        return
     capabilities = entry.get("capabilities")
     caps = capabilities if isinstance(capabilities, dict) else {}
-    supports_clone = _bool_flag(caps.get("supports_clone"))
     supports_instruction = _bool_flag(caps.get("supports_instruction"))
     mode = _text(entry.get("mode"))
     profile_label = profile or "unknown"
-    if mode == "clone" or supports_clone:
-        raise ToolCallError(
-            code="voice_not_available",
-            message=_CAPABILITY_MESSAGES["clone"].format(
-                voice=voice, profile=profile_label
-            ),
-            hint="call describe() to inspect current voice availability",
-        )
     if mode == "instruction" or supports_instruction:
         raise ToolCallError(
             code="voice_design_task_required",
@@ -788,16 +771,19 @@ async def synthesize(
             hint="call describe() and choose a voice from voices",
         )
     profile = _text(effective.get("profile"))
-    variant = _effective_tts_variant(effective)
     _enforce_available_voice(
         entry,
         voice,
-        variant=variant,
         profile=profile,
         validation_policy=validation_policy,
     )
+    variant = _effective_tts_variant(effective)
     variant_value = _text(entry.get("variant")) or variant
-    if variant_value not in {"voice_design", "custom_voice", "base"}:
+    # 生产合成只有 custom_voice/base。voice_design 是独立设计通道的制品
+    # variant，从不作为合成入口：design-only 音色 available 恒为 False，已在
+    # 上一步 _enforce_available_voice 拒绝。此处不再放行 voice_design，不保留
+    # 兼容垫片；任何漏网的伪造状态都确定性返回 tts_variant_unsupported。
+    if variant_value not in {"custom_voice", "base"}:
         raise ToolCallError(
             code="tts_variant_unsupported",
             message="the effective capability snapshot does not publish a supported TTS variant",

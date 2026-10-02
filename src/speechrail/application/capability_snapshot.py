@@ -331,16 +331,18 @@ def _voice_entry(
         if profile.revoked
         else "model_identity_unknown"
         if variant is None
+        else "backend_not_ready"
+        if not ready
         else "voice_design_task_required"
         # A design-only voice resolves to the VoiceDesign artifact and is
         # therefore a known, compatible variant — but it owns no runtime role, so
         # no synthesis route can serve it. Advertising it as available hands the
         # caller a voice whose every render fails with `voice_design_task_required`.
+        # It is checked after backend readiness so discovery reports the same
+        # reason as /v1/voices and /v1/audio/speech, which refuse before routing.
         if profile.runtime_role is None
         else "voice_incompatible"
         if not compatible
-        else "backend_not_ready"
-        if not ready
         else "available"
     )
     is_clone = profile.mode == "clone"
@@ -467,8 +469,12 @@ def _voice_entry(
                 if profile.revision is None
                 else "voice_revoked"
                 if profile.revoked
-                else "voice_not_available"
-                if not compatible
+                # `serviceable` implies the binding resolves, so an unserviceable
+                # voice reports the same voice-level reason as `available` instead
+                # of a synthesis-side placeholder (e.g. a design-only voice reports
+                # `voice_design_task_required`, like `timing_sidecar` already does).
+                else reason
+                if not serviceable
                 else "atomic_registry_lease_pin"
             ),
         ),

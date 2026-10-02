@@ -10,7 +10,7 @@ import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
-from speechrail.config.model_catalog import load_catalog
+from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY, load_catalog
 from speechrail.domain.model_spec import required_spec_artifact
 
 
@@ -208,9 +208,11 @@ def test_managed_selection_publishes_active_model_identity(
         key: capabilities[key]
         for key in ("supports_preview", "supports_clone", "supports_instruction")
     } == {
-        "supports_preview": tts.variant == "voice_design",
+        # 预览/指令走独立 VoiceDesign 通道，不从 tts.variant 推导。
+        # 生产 TTS 路由只能是 custom_voice/base，此处恒为 False 才是正确断言。
+        "supports_preview": False,
         "supports_clone": clone_key is not None and clone_key in artifacts,
-        "supports_instruction": tts.variant == "voice_design",
+        "supports_instruction": False,
     }
     # W8 adds the voice-independent incremental axis at model scope. It must
     # never claim that every voice of this model can stream.
@@ -221,6 +223,51 @@ def test_managed_selection_publishes_active_model_identity(
         "implementation_supported",
         "protocol_negotiated",
     }
+
+
+def test_models_reports_preview_from_the_design_lane_not_the_tts_variant(
+    tmp_path: Path,
+) -> None:
+    """Preview/instruction follow the bound VoiceDesign artifact, not tts.variant.
+
+    A production TTS entry is only ever ``custom_voice`` or ``base``, so any
+    assertion derived from ``tts.variant == "voice_design"`` is
+    indistinguishable from ``False`` and cannot lock the intended behavior.
+    This test binds the design snapshot and pins the real verdict instead.
+    """
+    catalog = load_catalog()
+    asr_key = required_spec_artifact("fast", "asr")
+    tts_key = required_spec_artifact("fast", "tts_custom_voice")
+    clone_key = required_spec_artifact("fast", "tts_base")
+    design = catalog.voice_design_artifact()
+    assert asr_key is not None and tts_key is not None
+    assert design is not None and design.key == VOICE_DESIGN_ARTIFACT_KEY
+    for key in (asr_key, tts_key, clone_key, design.key):
+        assert key is not None
+        (tmp_path / key).mkdir(parents=True, exist_ok=True)
+    settings = Settings(
+        qwen3_model_dir=tmp_path / asr_key,
+        qwen3_python=None,
+        qwen3_tts_model_dir=tmp_path / tts_key,
+        qwen3_tts_clone_model_dir=tmp_path / clone_key,
+        qwen3_tts_design_model_dir=tmp_path / design.key,
+        selection_schema_version=2,
+        selection_asr_spec="fast",
+        selection_tts_spec="fast",
+        asr_artifact_key=asr_key,
+        tts_artifact_key=tts_key,
+        tts_base_artifact_key=clone_key,
+        voice_design_artifact_key=design.key,
+    )
+    client = TestClient(create_app(settings))
+    by_id = {item["id"]: item for item in client.get("/v1/models").json()["data"]}
+    tts_entry = by_id[settings.tts_model_id]
+    # The production route stays custom_voice even with design bound: reading a
+    # design verdict from this slot is what made the old gate unreachable.
+    assert tts_entry["variant"] == "custom_voice"
+    assert tts_entry["capabilities"]["supports_preview"] is True
+    assert tts_entry["capabilities"]["supports_instruction"] is True
+    assert tts_entry["capabilities"]["supports_clone"] is True
 
 
 def test_models_exposes_canonical_model_and_compatibility_aliases() -> None:

@@ -2,8 +2,8 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-version: "3.3.2"
-date: 2026-09-26
+version: "3.3.3"
+date: 2026-10-02
 ---
 
 # 有效能力快照与安全音色目录

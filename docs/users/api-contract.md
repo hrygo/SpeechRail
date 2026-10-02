@@ -407,8 +407,8 @@ Authorization: Bearer <TOKEN>
       "is_system": true,
       "created_at": 1788582000.0,
       "available": true,
-      "variant": "voice_design",
-      "capabilities": {"supports_speaker": false, "supports_instruction": true}
+      "variant": "custom_voice",
+      "capabilities": {"supports_speaker": true, "supports_instruction": false}
     },
     {
       "id": "custom_1788583825_59b3",
@@ -420,13 +420,20 @@ Authorization: Bearer <TOKEN>
       "is_default": false,
       "is_system": false,
       "created_at": 1788583825.0,
-      "available": true,
+      "available": false,
+      "availability_reason": "voice_design_task_required",
       "variant": "voice_design",
       "capabilities": {"supports_speaker": false, "supports_instruction": true}
     }
   ]
 }
 ```
+
+> 说明：系统音色走生产 TTS 路由，`variant` 为 `custom_voice`（Base 克隆为
+> `base`）；`voice_design` 是独立设计通道的制品 variant，只出现在 design-only
+> 候选（`mode=instruction`）的上报中，且这类音色没有运行时合成角色，
+> `available` 恒为 `false`（`voice_design_task_required`），合成入口也不再
+> 放行该 variant。`/v1/audio/speech` 永不接受 `instruction` 参数。
 
 ### 5.3 自然语言设计与创建音色 (`POST /v1/voices`)
 支持使用自然语言描述特征（Prompt）动态创建新音色：
@@ -512,6 +519,11 @@ Authorization: Bearer <TOKEN>
 因此后端或编码失败时仍能返回统一错误 envelope。未配置 `voice_design` 或设计快照未通过
 预检时返回 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 预览与候选创建使用保守的 `tts` 资源准入，避免将设计计算误记为默认系统音色的运行 lane。
+
+试听要能代表候选韵律，`language` 必须与设计通道一致：候选创建（`POST /v1/voice-designs`）
+只接受 `language=zh`，因此预览也请传 `language=zh`。服务端预览的 `language` 默认为 `auto`
+（保留 OpenAI 兼容行为，不做服务端强制改写），传其他语言会让同一配方在两条通道分叉；
+MCP 的 `preview_voice` 已固定 `language="zh"`，与 `design_voice` 一致。
 
 预览、候选创建与候选 Base 验证共用 TTS 错误映射：初始化失败为
 `503 tts_initialization_failed`，传输失败为 `503 tts_transport_failed`，推理或输出失败为

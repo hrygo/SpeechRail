@@ -183,7 +183,7 @@ def test_describe_merges_models_voices_health_for_quality(
     make_client: Any, run_async: Any
 ) -> None:
     models = _model("quality", "custom_voice", design=True)
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     health = {
         "status": "ok",
         "profile": "quality",
@@ -258,7 +258,7 @@ def test_describe_reports_extreme_profile_without_collapsing_it_to_quality(
     make_client: Any, run_async: Any
 ) -> None:
     models = _model("extreme", "custom_voice", design=True)
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     health = {"status": "ok", "profile": "extreme", "diarization_ready": True}
     client, _requests = make_client(_base_handler(models, voices, health))
 
@@ -275,7 +275,7 @@ def test_describe_marks_conflicting_profile_sources_and_suppresses_capabilities(
     make_client: Any, run_async: Any
 ) -> None:
     models = _model("quality", "custom_voice", design=True)
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     health = {"status": "ok", "profile": "extreme", "diarization_ready": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -301,13 +301,13 @@ def test_describe_marks_conflicting_profile_sources_and_suppresses_capabilities(
     assert snapshot["voices"][0]["available"] is False
 
 
-def test_describe_does_not_infer_profile_from_voice_design_variant(
+def test_describe_does_not_infer_profile_from_voice_variant(
     make_client: Any, run_async: Any
 ) -> None:
     models = _model("quality", "custom_voice", design=True)
     for entry in models:
         entry.pop("profile", None)
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     health = {"status": "ok", "diarization_ready": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -550,7 +550,9 @@ def test_get_voice_does_not_expose_private_recipe_or_reference(
 def test_synthesize_posts_speech_and_returns_audio_path(
     make_client: Any, run_async: Any
 ) -> None:
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    # 系统音色走生产 TTS 路由，只能是 custom_voice/base；voice_design 是独立
+    # 设计通道制品 variant，不进入合成入口（synthesize 已不再放行）。
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
     audio_bytes = b"ID3-fake-mp3"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -597,12 +599,19 @@ def test_synthesize_uses_effective_snapshot_to_pin_voice_and_model(
         "profile": profile,
         "models": {
             "tts": {
-                "variant": "voice_design",
+                # The production route is only ever custom_voice or base; design
+                # is a peer `voice_design` role, never a tts variant. Folding it
+                # into this slot fabricates a state no deployment can reach.
+                "variant": "custom_voice",
                 "catalog_revision": "c" * 40,
             },
             "tts_clone": {
                 "variant": "base",
                 "artifact": "tts-base-bf16" if profile == "extreme" else "tts-base-q8",
+            },
+            "voice_design": {
+                "artifact": "tts-1.7b-design-bf16",
+                "variant": "voice_design",
             },
         },
         "voices": [
@@ -652,7 +661,13 @@ def test_synthesize_allows_unverified_diagnostics_but_requires_output_pass_for_p
         "schema_version": "effective_capabilities_v1",
         "snapshot_id": "snap-unverified",
         "profile": "quality",
-        "models": {"tts": {"variant": "voice_design"}},
+        "models": {
+            "tts": {"variant": "custom_voice"},
+            "voice_design": {
+                "artifact": "tts-1.7b-design-bf16",
+                "variant": "voice_design",
+            },
+        },
         "voices": [
             {
                 "id": "clone_1",
@@ -820,7 +835,7 @@ def test_synthesize_hard_blocks_instruction_voice_when_tier_is_not_quality(
 def test_synthesize_rejects_voice_missing_from_effective_snapshot(
     make_client: Any, run_async: Any
 ) -> None:
-    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
@@ -848,6 +863,35 @@ def test_synthesize_rejects_out_of_range_speed_before_network(
         run_async(tools.synthesize(client, text="hi", speed=9.0))
     assert excinfo.value.code == "invalid_speed"
     assert requests == []
+
+
+def test_synthesize_rejects_voice_design_variant_without_compat_shim(
+    make_client: Any, run_async: Any
+) -> None:
+    """合成入口只接受 custom_voice/base；voice_design 不再放行且无兼容垫片。
+
+    生产快照的 ``models["tts"].variant`` 只可能是 ``custom_voice`` 或
+    ``base``（设计通道是独立 peer role）。任何把 ``voice_design`` 塞进合成
+    入口的状态都是伪造的，必须确定性返回 ``tts_variant_unsupported``，
+    不得回退到旧的放行行为。
+    """
+    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            snapshot = _effective_capabilities(
+                "quality", "voice_design", voices, design=True
+            )
+            return _ok(snapshot)
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.synthesize(client, text="hi", voice="serena"))
+    assert excinfo.value.code == "tts_variant_unsupported"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities",
+    ]
 
 
 # ---------------------------------------------------------------------------

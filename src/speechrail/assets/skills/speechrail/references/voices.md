@@ -29,6 +29,10 @@ Two things still differ, and neither is a model difference:
 
 - `preview_voice` pins `language="zh"`, matching `design_voice`. Both are
   zh-only, so a preview never drifts from the candidate it stands in for.
+  When calling `POST /v1/voices/previews` directly (not via MCP), pass
+  `language="zh"` explicitly: the endpoint default is `auto` for OpenAI
+  compatibility, and any other language forks the same recipe across the
+  preview and design lanes.
 - A **stored** candidate's audio is canonicalized (leading/trailing silence
   trimmed, gain normalized). Its total duration is therefore shorter than the
   preview of the same recipe. Compare speech-active delivery rate, not
