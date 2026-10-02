@@ -778,7 +778,12 @@ def _number_runs(text: str) -> list[str]:
         separators = re.findall(r"[./-]", run)
         segments = re.split(r"[./-]", run)
         normalized: list[str] = []
-        for segment, separator in zip(segments, ["."] + separators):
+        # The first segment has no preceding separator in the text; pair it
+        # with "." so a leading `0` there is treated as significant
+        # (`0.05` != `0.5`), exactly like a fractional part. `strict=True`
+        # turns a future regex/shape drift into a failure, never a silent
+        # truncation of a gate comparison (a miss is worse than a reject).
+        for segment, separator in zip(segments, [".", *separators], strict=True):
             # A zero after a `.` is significant: `0.05` != `0.5`. After `/`
             # or `-` the segment is a date/IP part, so `09` and `9` compare
             # equal there as well.
@@ -787,7 +792,7 @@ def _number_runs(text: str) -> list[str]:
             else:
                 normalized.append(segment.lstrip("0") or "0")
         canonical = [normalized[0]]
-        for separator, value in zip(separators, normalized[1:]):
+        for separator, value in zip(separators, normalized[1:], strict=True):
             # The separator kind is part of the run identity: `3.5.1` and a
             # hypothetical `3/5/1` never compare equal.
             canonical.append(separator)

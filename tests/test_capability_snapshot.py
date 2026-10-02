@@ -153,6 +153,12 @@ def test_published_clone_voice_stays_available_with_the_design_lane_bound() -> N
     assert entry["operations"]["http_speech"]["parameters"]["instructions"][
         "status"
     ] == "unsupported"
+    # S3-2: the Base clone lane rejects a caller seed; only custom_voice
+    # advertises it (clone_seed_unsupported at the domain boundary).
+    assert entry["operations"]["http_speech"]["parameters"]["seed"] == {
+        "status": "unsupported",
+        "reason": "clone_seed_unsupported",
+    }
 
 
 @pytest.mark.parametrize(("asr_spec", "tts_spec"), _ACTIVE_SELECTIONS)

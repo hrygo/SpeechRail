@@ -36,6 +36,7 @@ from speechrail.domain.voice_quality import (
     clipping_ratio,
     duration_seconds,
     estimated_snr_db,
+    f0_median_hz,
     grade_reference_quality,
     leading_trailing_silence_seconds,
     make_quality_report,
@@ -43,7 +44,6 @@ from speechrail.domain.voice_quality import (
     normalize_transcript_for_match,
     probe_carries_digits,
     speech_active_ratio,
-    f0_median_hz,
     transcript_match_score,
     transcript_numbers_match,
 )
@@ -539,8 +539,11 @@ def test_issue_131_separators_and_three_segment_runs(
         (237.6, 225, 250),
     ],
 )
-def test_f0_median_tracks_reference_tones(freq_hz: float, low: float, high: float) -> None:
-    assert low <= (f0_median_hz(_sine_pcm16(1.0, 24_000, frequency_hz=freq_hz), 24_000) or 0.0) <= high
+def test_f0_median_tracks_reference_tones(
+    freq_hz: float, low: float, high: float
+) -> None:
+    measured = f0_median_hz(_sine_pcm16(1.0, 24_000, frequency_hz=freq_hz), 24_000)
+    assert low <= (measured or 0.0) <= high
 
 
 def test_f0_median_stays_null_without_voiced_frames() -> None:
