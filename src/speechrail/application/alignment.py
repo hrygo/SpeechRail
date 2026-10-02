@@ -104,7 +104,8 @@ async def align_transcript_timeline(
         if outcome.failure is not None:
             raise TranscriptAlignmentError(
                 "timestamp_alignment_unavailable",
-                "fixed-text alignment could not produce the requested timestamps",
+                "fixed-text alignment could not produce the requested "
+                f"{granularity} timestamps ({outcome.failure})",
             )
         if granularity == "segment":
             segments = _units_to_segments(result.text, outcome.units)

@@ -1187,7 +1187,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     502,
                     request_id,
                     exc.code,
-                    "fixed-text alignment could not produce the requested timestamps",
+                    str(exc),
                     retryable=True,
                 )
         if diarization_requested:
