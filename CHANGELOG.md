@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [3.5.4] - 2026-10-02
+
+### Fixed
+
+- 修复 VoiceDesign 设计通道**整体不可达**：`models["tts"].variant` 结构上只会是
+  `custom_voice` 或 `base`（`REQUIRED_SPEC_BINDINGS` 不含 `voice_design`，设计是
+  与档位无关的按需制品），而 MCP 的设计类工具要求该变体等于 `voice_design`——
+  一个任何部署都无法满足的判断。结果是 `design_voice` / `create_voice` /
+  候选校验 / 发布全部被永久拒绝，同一时刻 `POST /v1/voice-designs` 却能正常出
+  候选，design → Base 发布路径无法经 MCP 走通。快照新增与 `tts` 平级的
+  `models.voice_design` 与 `operations.voice_design`，准入改判设计制品可解析性；
+  `/v1/models` 的 `supports_preview` / `supports_instruction` 改读设计通道，
+  消除 `describe()` 顶层 `preview_supported:false` 与
+  `operations.voice_preview.status:supported` 的自相矛盾。
+
+- 连带修正三处同源误判：`instructions` 在 `/v1/audio/speech` 对任何音色都会被
+  拒绝，却对 design 音色报 `supported`；design-only 音色宣告 `available: true`
+  但合成必然 400 `voice_design_task_required`，其 `timing_sidecar` /
+  `conditional_synthesis` 也按 binding 可解析而非可服务判定。一律改以
+  `runtime_role` 为准，并在契约补 `voice_design_task_required` 原因值。
+
+- `preview_voice` 钉 `language="zh"`，与 `design_voice` 一致；此前默认 `auto` 会让
+  同一配方在两条通道分叉（实测 8.88s / 7.52s）。
+
+### 澄清（实测结论，与既有 issue 的描述不同）
+
+- preview 与 design 运行**同一份** VoiceDesign 权重，对同一 `seed` 逐位确定，
+  韵律**可以**跨通道迁移。此前观察到的「语速 3.71 vs 2.01 syll/s」是**总时长**
+  假象：真实成因是 `language` 默认值不同，加上候选音频规范化会裁剪首尾静音。
+  按语音有效时长复测，两通道仅差约 3%（4.82s / 4.98s）。
+- `health.tts_design` 的 `state:"cold"` + `configured:true` 是**准确**声明，契约
+  已写明「读 health 永不加载 worker，冷但已配置即可按需加载」。不应据 `ready`
+  判断设计通道可用性。
+
+### 回归测试
+
+- 既有 4 个用例靠伪造 `tts.variant=voice_design` 断言「instruction 音色可合成」，
+  该状态任何部署都无法产生，且与 REST 契约直接矛盾，是本缺陷长期潜伏的原因；
+  已改为钉住真实行为。快照矩阵测试此前未绑定设计制品，同样未覆盖生产配置。
+
 ## [3.5.3] - 2026-10-02
 
 ### Fixed
