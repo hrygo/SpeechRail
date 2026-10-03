@@ -103,6 +103,25 @@ App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着�
 音频只由被采用的候选按顺序拼接（重写 WAV header，不做 crossfade、不用静音补时长），
 正文只包含这些段落；只要有一段没采用版本就拒绝导出。
 
+审查中又发现这条链上有四处「文档写了、测试没考」：
+
+- **重做的语速取自 `recipe.effectiveSpeed`，但从不断言。** 测试助手
+  `dubbingRecipe` 把 `effectiveSpeed` 硬编码成 `1.0`，恰好等于实现里的兜底值
+  `?? 1.0`——两边一起退化，把速度换成常量 `1.0` 全套测试仍然全绿。语速对不上时，
+  候选摘要与项目摘要不再相等，采用会被判成「制作条件与当前项目不一致」：用户先看到
+  「已生成新版本」，采用时却被拒。本次用 `1.25` 的配方补上断言，并顺带验证采用能成功。
+- **`clip(fromWAV:)` 不校验 `fmt ` 的 format code。** μ-law / A-law 的
+  `channels=1`、`bitsPerSample=16`，只有 format code 不是 1；放它过去，
+  `makeWAV` 会把压缩字节原样写进一个自称 16 bit PCM 的容器——正是注释里
+  「听起来不对却能播放的成品」。本次补上 format code=7 必须被拒。
+- **`fmt ` 里的位深此前被当作常量 16。** 测试用的 WAV 助手把 format code 写死为 1、
+  且只造 16 bit 的文件，所以「照实读出位深」这条路径没有被考过：把它改成硬编码 `16`
+  全套测试仍然全绿。24 bit 的段落会被当成 16 bit，字节数与采样率都不变，拼出来的成品
+  能播放，只是速度与音色全错。本次补上 24 bit 的读取与拒绝。
+- **`adoptedScript` 与 `undoAdoption()` 的公开契约各缺一条断言。** 前者必须只投影
+  已采用段落的正文；后者在历史为空时必须**什么都不做**——清空采用项会让那一段
+  静默从成品里消失，用户不报错，只是导出的正文短了一段。
+
 header 的采样率、位深、声道**来自候选 WAV 自己的 `fmt ` 声明**，不是导出层的常量：
 拼接前解析各段格式，格式不一致或不是单声道 16 bit 正采样率就显式失败并给出可执行文案，
 不做隐式转换。猜错采样率不会报错，只会让成品语速与音高整体错位，属于最难察觉的一类失败。
@@ -160,7 +179,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 506 XCTest + 379 swift-testing，0 失败
+  → 511 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
