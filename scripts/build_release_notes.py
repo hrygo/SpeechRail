@@ -111,7 +111,9 @@ def _release_body(sections: list[_Section], version: str) -> str:
     raise ValueError(f"changelog has no '## [{version}]' section")
 
 
-def _previous_release(sections: list[_Section], version: str) -> str | None:
+def _previous_release(
+    sections: list[_Section], version: str, published_tags: set[str] | None = None
+) -> str | None:
     """Return the newest released version older than ``version``, if any."""
 
     seen_current = False
@@ -121,17 +123,35 @@ def _previous_release(sections: list[_Section], version: str) -> str | None:
             continue
         if not seen_current or section.version == "Unreleased":
             continue
+        if published_tags is not None and f"v{section.version}" not in published_tags:
+            continue
         return section.version
     return None
 
 
 def render_release_notes(
-    *, version: str, changelog: str, repository: str | None = None
+    *,
+    version: str,
+    changelog: str,
+    repository: str | None = None,
+    published_tags: set[str] | None = None,
 ) -> str:
     """Render the full release body for ``version``."""
 
     sections = _parse_sections(changelog)
     parts = [f"## {version} 变更说明", "", _release_body(sections, version)]
+    previous = _previous_release(sections, version, published_tags)
+    if published_tags is not None:
+        seen_current = False
+        for section in sections:
+            if section.version == version:
+                seen_current = True
+                continue
+            if not seen_current or section.version == "Unreleased":
+                continue
+            if section.version == previous:
+                break
+            parts.extend(["", *section.lines])
 
     notes = _INSTALLATION_NOTES.replace("{version}", version)
     if repository:
@@ -144,7 +164,6 @@ def render_release_notes(
         )
     parts.extend(["", notes])
 
-    previous = _previous_release(sections, version)
     if repository and previous:
         parts.extend(
             [
@@ -158,6 +177,12 @@ def render_release_notes(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--published-tags",
+        type=Path,
+        default=None,
+        help="file of published release tags, one per line; includes intervening changelog entries",
+    )
     parser.add_argument(
         "--version",
         required=True,
@@ -190,9 +215,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         body = render_release_notes(
-            version=args.version, changelog=changelog, repository=args.repository
+            version=args.version,
+            changelog=changelog,
+            repository=args.repository,
+            published_tags=(
+                set(args.published_tags.read_text(encoding="utf-8").splitlines())
+                if args.published_tags is not None
+                else None
+            ),
         )
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         print(f"release notes generation FAILED: {error}", file=sys.stderr)
         return 1
 

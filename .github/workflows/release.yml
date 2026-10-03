@@ -184,10 +184,14 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           notes_file="$RUNNER_TEMP/release-notes.md"
+          published_tags="$RUNNER_TEMP/published-release-tags.txt"
+          gh release list --repo "$REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 100 --json tagName --jq '.[].tagName' >"$published_tags"
           python3 scripts/build_release_notes.py \
             --version "${RELEASE_TAG#v}" \
             --repository "$REPOSITORY" \
             --changelog CHANGELOG.md \
+            --published-tags "$published_tags" \
             --output "$notes_file"
           assets=(release-assets/final/*.whl release-assets/final/*.dmg release-assets/final/SHA256SUMS)
 
