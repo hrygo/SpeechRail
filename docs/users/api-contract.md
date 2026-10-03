@@ -115,6 +115,34 @@ handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `nu
 的低披露结构身份摘要，不是本地路径，也不把 `shape:` 元数据误称为权重内容哈希；只读能力快照
 仍保持 `configured_catalog` / `null`，不会为发现请求启动模型。
 
+### 制作身份与配方 (plan / recipe)
+
+协商了完整性回执（`SpeechRail-Receipt-Mode: integrity`）的渲染会额外带回两样东西：
+
+- `plan.plan_id` 与 `plan.plan_sha256`：请求开始时固定的**执行描述**——选定的音色 revision、
+  制品、有效请求参数、输出格式，以及归一化与分段策略版本。plan 描述"怎么执行"，不描述
+  "说了什么"：两段不同文稿可以共享同一个 `plan_id`，因此它不是内容复用键。
+- `recipe`：这次渲染**实际执行了什么**，只包含可验证事实与哈希，不含原文。事实齐全时
+  `state=complete` 且 `digest` 为规范化摘要；任何一项没观察到就是 `state=partial`，
+  `missing_fields` 列出缺口，`digest` 为 `null`。
+
+worker 上报的两类事实在渲染完成后才会落地：`model.engine_revision` 是首个 PCM 产生后
+才可信的运行时身份，`parameters.seed_policy` 与
+`parameters.observed_sampling_parameters` 是执行侧**实际使用的采样器**
+（`seed_policy` 取 `caller_fixed` / `clone_reference_derived` /
+`voice_profile_fixed` / `unseeded_sampler`，并带 `seed`、`temperature`、`top_p`、
+`repetition_penalty`）。请求里带了 seed 不等于采样流被固定：只有真正下发了 seed 才会
+记为固定策略，运行时装不上确定性采样时如实记为 `unseeded_sampler`。
+
+worker 没有上报时，这些字段保持 `null` 而不是用制品版本或请求参数代替——补造身份会让
+"可追溯"变成"看起来可追溯"。没有使用发音词典是明确事实，记为 `unused`。
+`seed_policy=unseeded_sampler` 的配方同样可以是 `complete`：它陈述采样器事实，不代表
+这次渲染可重现。
+
+`recipe.digest` 为 `null` 时不要把它当作可复用身份：配方齐全只说明必要事实完整，不保证
+逐位可重现，也不代表当前音色仍可用。未协商回执的渲染 `recipe` 为 `null`，含义是"这条
+路径没有组装配方"，而不是"没有配方"。
+
 ---
 
 ## 3. 文件转写 API (`POST /v1/audio/transcriptions`)

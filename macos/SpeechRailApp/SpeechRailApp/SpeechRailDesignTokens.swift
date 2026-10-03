@@ -125,6 +125,13 @@ public enum SpeechRailDesignTokens {
         /// 定宽而不是弹性：弹性会让滑块吃掉整行，控制条就读不出稿上「左侧一组控件 +
         /// 右侧主动作」的构图（REDESIGN-SPEC §11.6 第二十八轮）。
         public static let creatorSpeedSliderWidth: CGFloat = 132
+        /// 段落返修弹层的固定尺寸。
+        ///
+        /// 这一层要同时放下分段卡片、每段的候选展开区与底部导出条，宽度不足以
+        /// 读出候选对比，高度不足以在一屏内完成一次「重做 → 试听 → 采用」。
+        /// 与其他窗口尺寸一样集中在此，页面不得再写裸值。
+        public static let creatorDubbingSheetWidth: CGFloat = 720
+        public static let creatorDubbingSheetHeight: CGFloat = 620
         /// 当前语速取值的定宽槽（`1.0x`），避免数字位数变化时整行左右跳。
         ///
         /// 4x 帧实测：稿的 `speedRow/value` 就是这串文字的**自然宽度**——字串

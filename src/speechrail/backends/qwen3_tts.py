@@ -31,6 +31,7 @@ from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceProfile, VoiceStoreUnavailableError
 from speechrail.domain.tts_errors import TtsBackendError, TtsErrorStage, from_worker_frame
 from speechrail.domain.tts_request import validate_tts_parameters
+from speechrail.domain.tts_sampling import TtsSamplingObservation
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     IncrementalSpeechSession,
@@ -194,6 +195,10 @@ class Qwen3TtsWorker:
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
         self._timing_sidecars: dict[str, TtsTimingSidecar] = {}
+        # What each completed response's sampler actually was. Keyed by
+        # response id so a late or abandoned frame cannot be read as another
+        # request's sampling facts.
+        self._sampling_observations: dict[str, TtsSamplingObservation] = {}
         # Utterances this parent already opened on this worker.  A stream can be
         # torn down before its terminal is read (client disconnect, cancelled
         # teardown), so the frames of a *known* utterance are stale by
@@ -527,6 +532,7 @@ class Qwen3TtsWorker:
                                 self._record_completion_stats(frame)
                                 if request.timing_mode == "chunk":
                                     self._store_timing_sidecar(response_id, frame)
+                                self._store_sampling_observation(response_id, frame)
                                 completed = True
                                 self._last_error = None
                                 return
@@ -804,6 +810,34 @@ class Qwen3TtsWorker:
         """Consume one completed timing result without affecting audio delivery."""
 
         return self._timing_sidecars.pop(response_id, None)
+
+    def _store_sampling_observation(
+        self,
+        response_id: str,
+        frame: dict[str, object],
+    ) -> None:
+        """Keep what the worker says it sampled with, validated at this boundary."""
+
+        raw = frame.get("sampling_observation")
+        if not isinstance(raw, dict):
+            return
+        try:
+            observation = TtsSamplingObservation.model_validate(raw)
+        except ValueError:
+            # An unreadable sampler report is missing metadata, not a failed
+            # render: the audio stays, the recipe just stays partial.
+            return
+        self._sampling_observations[response_id] = observation
+        while len(self._sampling_observations) > 64:
+            self._sampling_observations.pop(next(iter(self._sampling_observations)))
+
+    def take_sampling_observation(
+        self,
+        response_id: str,
+    ) -> TtsSamplingObservation | None:
+        """Consume one completed response's sampling facts, exactly once."""
+
+        return self._sampling_observations.pop(response_id, None)
 
     def _record_completion_stats(self, frame: dict[str, object]) -> None:
         raw = frame.get("delivery_stats")

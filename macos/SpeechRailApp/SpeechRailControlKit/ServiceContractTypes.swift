@@ -165,6 +165,11 @@ public struct JSONValue: Codable, Equatable, Sendable {
 }
 
 public extension JSONValue {
+    /// Optional text for building a recipe section: an unknown fact stays absent.
+    static func text(_ value: String?) -> JSONValue? {
+        value.map { JSONValue(.string($0)) }
+    }
+
     /// 取对象里的一个非空字符串字段；不是对象、字段不是字符串或字符串为空时返回 `nil`。
     func string(_ key: String) -> String? {
         guard case let .object(fields) = storage,
@@ -172,6 +177,29 @@ public extension JSONValue {
               !value.isEmpty
         else { return nil }
         return value
+    }
+
+    /// 这个值本身是不是一个非空字符串。
+    var stringValue: String? {
+        guard case let .string(value) = storage, !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// 数字或可无损转成数字的整数；其他类型返回 `nil`。
+    var doubleValue: Double? {
+        switch storage {
+        case let .number(value): value
+        case let .integer(value): Double(value)
+        default: nil
+        }
+    }
+
+    var intValue: Int? {
+        switch storage {
+        case let .integer(value): Int(exactly: value)
+        case let .number(value): value == value.rounded() ? Int(exactly: value) : nil
+        default: nil
+        }
     }
 }
 
@@ -1424,6 +1452,17 @@ public enum RenderReceiptStatus: Codable, Equatable, Sendable {
         var container = encoder.singleValueContainer()
         try container.encode(value)
     }
+
+    /// The exact wire value, including for statuses this build does not know.
+    public var wireValue: String {
+        switch self {
+        case .pending: "pending"
+        case .completed: "completed"
+        case .cancelled: "cancelled"
+        case .error: "error"
+        case let .unknown(raw): raw
+        }
+    }
 }
 
 public struct RenderReceipt: Codable, Equatable, Sendable {
@@ -1438,6 +1477,9 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
     public let planner: JSONValue?
     /// 服务端为这次渲染固定的 plan 身份：`{"plan_id": "plan_…", "window_index": …, …}`。
     public let plan: JSONValue?
+    /// 这次渲染实际执行了什么。缺失表示这条路径没有组装配方，
+    /// 不等于"没有配方"，更不等于"制作条件已确认"。
+    public let recipe: RenderRecipeSnapshot?
     public let errorCode: String?
     public let createdAt: Double
     public let completedAt: Double?
@@ -1453,6 +1495,7 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
         case text
         case planner
         case plan
+        case recipe
         case errorCode = "error_code"
         case createdAt = "created_at"
         case completedAt = "completed_at"
@@ -1480,6 +1523,7 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
         text = try container.decodeIfPresent(JSONValue.self, forKey: .text)
         planner = try container.decodeIfPresent(JSONValue.self, forKey: .planner)
         plan = try container.decodeIfPresent(JSONValue.self, forKey: .plan)
+        recipe = try container.decodeIfPresent(RenderRecipeSnapshot.self, forKey: .recipe)
         errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
         createdAt = try required(.createdAt)
         guard container.contains(.completedAt) else {
@@ -1498,6 +1542,226 @@ public extension RenderReceipt {
     /// 这次渲染固定的 plan 身份（receipt 里 `plan.plan_id`）。
     var planID: String? {
         plan?.string("plan_id")
+    }
+
+    /// plan_id 背后的完整摘要（receipt 里 `plan.plan_sha256`）。
+    var planSHA256: String? {
+        plan?.string("plan_sha256")
+    }
+
+    /// 服务端在 PCM 传输前算出的音频摘要（receipt 里 `audio.pcm_sha256`）。
+    var pcmSHA256: String? {
+        audio.string("pcm_sha256")
+    }
+}
+
+/// 一次渲染实际执行事实的**强类型投影**：不在 UI 里解释自由 JSON。
+///
+/// 服务端只报告它真正观察到的事实。缺一项就是缺一项，
+/// 不在这里补默认值——`state` 为 `partial` 时 `digest` 必然为空。
+public struct RenderRecipeSnapshot: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = "render_recipe_v1"
+
+    public enum State: String, Codable, Equatable, Sendable {
+        case complete
+        case partial
+    }
+
+    public let schemaVersion: String
+    public let state: State
+    /// 服务端没有观察到的事实，路径与服务端一致（如 `model.engine_revision`）。
+    public let missingFields: [String]
+    /// 事实齐全时的规范化摘要；不齐全时为空。
+    public let digest: String?
+    public let rawTextSHA256: String?
+    public let acousticTextSHA256: String?
+    public let normalizationRevision: String?
+    public let plannerRevision: String?
+    public let pronunciationRevision: String?
+    public let voiceID: String?
+    public let voiceRevision: String?
+    public let voiceMode: String?
+    public let modelRole: String?
+    public let modelArtifact: String?
+    public let modelArtifactRevision: String?
+    public let engineRevision: String?
+    public let effectiveSpeed: Double?
+    public let effectiveLanguage: String?
+    public let seedPolicy: String?
+    public let outputFormat: String?
+    public let sampleRate: Int?
+    public let channels: Int?
+
+    /// The exact sections the server sent. Kept so a saved work round-trips
+    /// byte-for-byte in the service's own vocabulary, including facts this
+    /// build does not know yet.
+    private let content: [String: JSONValue]
+    private let voice: [String: JSONValue]
+    private let model: [String: JSONValue]
+    private let parameters: [String: JSONValue]
+
+    public init(
+        schemaVersion: String = RenderRecipeSnapshot.currentSchemaVersion,
+        state: State,
+        missingFields: [String],
+        digest: String?,
+        rawTextSHA256: String? = nil,
+        acousticTextSHA256: String? = nil,
+        normalizationRevision: String? = nil,
+        plannerRevision: String? = nil,
+        pronunciationRevision: String? = nil,
+        voiceID: String? = nil,
+        voiceRevision: String? = nil,
+        voiceMode: String? = nil,
+        modelRole: String? = nil,
+        modelArtifact: String? = nil,
+        modelArtifactRevision: String? = nil,
+        engineRevision: String? = nil,
+        effectiveSpeed: Double? = nil,
+        effectiveLanguage: String? = nil,
+        seedPolicy: String? = nil,
+        outputFormat: String? = nil,
+        sampleRate: Int? = nil,
+        channels: Int? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.state = state
+        self.missingFields = missingFields
+        self.digest = digest
+        self.rawTextSHA256 = rawTextSHA256
+        self.acousticTextSHA256 = acousticTextSHA256
+        self.normalizationRevision = normalizationRevision
+        self.plannerRevision = plannerRevision
+        self.pronunciationRevision = pronunciationRevision
+        self.voiceID = voiceID
+        self.voiceRevision = voiceRevision
+        self.voiceMode = voiceMode
+        self.modelRole = modelRole
+        self.modelArtifact = modelArtifact
+        self.modelArtifactRevision = modelArtifactRevision
+        self.engineRevision = engineRevision
+        self.effectiveSpeed = effectiveSpeed
+        self.effectiveLanguage = effectiveLanguage
+        self.seedPolicy = seedPolicy
+        self.outputFormat = outputFormat
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.content = Self.section([
+            ("raw_text_sha256", .text(rawTextSHA256)),
+            ("acoustic_text_sha256", .text(acousticTextSHA256)),
+            ("normalization_revision", .text(normalizationRevision)),
+            ("planner_revision", .text(plannerRevision)),
+            ("pronunciation_revision", .text(pronunciationRevision)),
+        ])
+        self.voice = Self.section([
+            ("id", .text(voiceID)),
+            ("revision", .text(voiceRevision)),
+            ("mode", .text(voiceMode)),
+        ])
+        self.model = Self.section([
+            ("role", .text(modelRole)),
+            ("artifact", .text(modelArtifact)),
+            ("artifact_revision", .text(modelArtifactRevision)),
+            ("engine_revision", .text(engineRevision)),
+        ])
+        self.parameters = Self.section([
+            ("effective_speed", effectiveSpeed.map { JSONValue(.number($0)) }),
+            ("effective_language", .text(effectiveLanguage)),
+            ("seed_policy", .text(seedPolicy)),
+            ("output_format", .text(outputFormat)),
+            ("sample_rate", sampleRate.map { JSONValue(.integer(Int64($0))) }),
+            ("channels", channels.map { JSONValue(.integer(Int64($0))) }),
+        ])
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
+        state = try container.decode(State.self, forKey: .state)
+        missingFields = try container.decodeIfPresent([String].self, forKey: .missingFields) ?? []
+        digest = try container.decodeIfPresent(String.self, forKey: .digest)
+        content = try container.decodeIfPresent([String: JSONValue].self, forKey: .content) ?? [:]
+        voice = try container.decodeIfPresent([String: JSONValue].self, forKey: .voice) ?? [:]
+        model = try container.decodeIfPresent([String: JSONValue].self, forKey: .model) ?? [:]
+        parameters = try container
+            .decodeIfPresent([String: JSONValue].self, forKey: .parameters) ?? [:]
+        rawTextSHA256 = content["raw_text_sha256"]?.stringValue
+        acousticTextSHA256 = content["acoustic_text_sha256"]?.stringValue
+        normalizationRevision = content["normalization_revision"]?.stringValue
+        plannerRevision = content["planner_revision"]?.stringValue
+        pronunciationRevision = content["pronunciation_revision"]?.stringValue
+        voiceID = voice["id"]?.stringValue
+        voiceRevision = voice["revision"]?.stringValue
+        voiceMode = voice["mode"]?.stringValue
+        modelRole = model["role"]?.stringValue
+        modelArtifact = model["artifact"]?.stringValue
+        modelArtifactRevision = model["artifact_revision"]?.stringValue
+        engineRevision = model["engine_revision"]?.stringValue
+        effectiveSpeed = parameters["effective_speed"]?.doubleValue
+        effectiveLanguage = parameters["effective_language"]?.stringValue
+        seedPolicy = parameters["seed_policy"]?.stringValue
+        outputFormat = parameters["output_format"]?.stringValue
+        sampleRate = parameters["sample_rate"]?.intValue
+        channels = parameters["channels"]?.intValue
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(state, forKey: .state)
+        try container.encode(missingFields, forKey: .missingFields)
+        try container.encode(digest, forKey: .digest)
+        try container.encode(content, forKey: .content)
+        try container.encode(voice, forKey: .voice)
+        try container.encode(model, forKey: .model)
+        try container.encode(parameters, forKey: .parameters)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case state
+        case missingFields = "missing_fields"
+        case digest
+        case content
+        case voice
+        case model
+        case parameters
+    }
+
+    private static func section(_ pairs: [(String, JSONValue?)]) -> [String: JSONValue] {
+        Dictionary(uniqueKeysWithValues: pairs.compactMap { key, value in
+            value.map { (key, $0) }
+        })
+    }
+
+    /// Two snapshots are the same when the facts this build understands match.
+    ///
+    /// The carried sections are transport, not identity: JSON round-trips an
+    /// integral `1.0` as `1`, and a newer service may add facts this build has
+    /// no field for. Neither difference is a different render.
+    public static func == (lhs: RenderRecipeSnapshot, rhs: RenderRecipeSnapshot) -> Bool {
+        lhs.schemaVersion == rhs.schemaVersion
+            && lhs.state == rhs.state
+            && lhs.missingFields == rhs.missingFields
+            && lhs.digest == rhs.digest
+            && lhs.rawTextSHA256 == rhs.rawTextSHA256
+            && lhs.acousticTextSHA256 == rhs.acousticTextSHA256
+            && lhs.normalizationRevision == rhs.normalizationRevision
+            && lhs.plannerRevision == rhs.plannerRevision
+            && lhs.pronunciationRevision == rhs.pronunciationRevision
+            && lhs.voiceID == rhs.voiceID
+            && lhs.voiceRevision == rhs.voiceRevision
+            && lhs.voiceMode == rhs.voiceMode
+            && lhs.modelRole == rhs.modelRole
+            && lhs.modelArtifact == rhs.modelArtifact
+            && lhs.modelArtifactRevision == rhs.modelArtifactRevision
+            && lhs.engineRevision == rhs.engineRevision
+            && lhs.effectiveSpeed == rhs.effectiveSpeed
+            && lhs.effectiveLanguage == rhs.effectiveLanguage
+            && lhs.seedPolicy == rhs.seedPolicy
+            && lhs.outputFormat == rhs.outputFormat
+            && lhs.sampleRate == rhs.sampleRate
+            && lhs.channels == rhs.channels
     }
 }
 

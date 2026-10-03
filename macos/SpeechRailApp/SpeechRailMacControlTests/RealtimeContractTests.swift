@@ -205,7 +205,6 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertNil(ended)
     }
 
-    #if SWIFT_PACKAGE
     func testRealtimeItemStateValidatesUnicodeSpansAndMergesSameRevisionShards() {
         let clock = ContinuousClock()
         let now = clock.now
@@ -745,7 +744,6 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertNotNil(bounded.snapshot(itemID: "item-\(RealtimeEventState.maxItems)"))
         XCTAssertEqual(bounded.takeExpired().first?.itemID, "item-0")
     }
-    #endif
 
     func testClientClosesBeforeDeliveringEventAfterSequenceGap() async throws {
         let transport = TestRealtimeASRTransport()

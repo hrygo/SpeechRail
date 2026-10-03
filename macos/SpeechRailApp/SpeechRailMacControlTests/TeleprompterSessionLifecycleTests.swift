@@ -2157,6 +2157,96 @@ struct TeleprompterSessionLifecycleTests {
             Issue.record("含数字的稿件应判为无法预估，实际得到 \(harness.session.preflightConclusion)")
         }
     }
+
+    /// 一次真实口播会依次经过有效推进、脱稿、回稿、重读、掉线和手动接管。
+    ///
+    /// 每个场景各自都有回归；这条把它们串成**一次运行**，验证状态不会互相污染。
+    ///
+    /// 这里断言的是**误推进与资源**：会话层拿不到真实 ASR 对齐证据，所以"该推进时
+    /// 确实推进"由 `TeleprompterFollowControllerTests` 在跟随控制器层证明；这一层
+    /// 负责证明无论读到哪一句、无论连不连得上，位置都不会自己乱跑，掉线也不丢位置。
+    @Test("one reading run survives advance, detour, return, reread, disconnect and takeover")
+    func oneReadingRunKeepsPositionHonestAcrossEveryScenario() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+        let client = try #require(harness.clientFactory.clients.first)
+        #expect(harness.session.currentSegmentIndex == 0)
+        #expect(harness.session.voiceAssistState == .following)
+
+        // 每条 completed 事件恰好产生一个对齐样本，因此这个计数是「事件已被消费」的
+        // 确定性证据。否定断言必须先等它涨上去——否则事件还没被处理，"位置没动"
+        // 这句话就没有意义，测试会在负载下空过。
+        func expectConsumed(_ count: Int) async throws {
+            await waitFor("第 \(count) 条转写被会话消费") {
+                harness.session.followLatencyDiagnostics.alignmentSampleCount >= count
+            }
+        }
+
+        // 只听到本段正文时还没有可定位的新锚点：位置不动，而不是乐观地前进。
+        await client.emit(.completed(itemID: "i1", transcript: "第一段内容"))
+        try await expectConsumed(1)
+        #expect(
+            harness.session.currentSegmentIndex == 0,
+            "证据不足时不得前进，实际 \(harness.session.currentSegmentIndex)"
+        )
+
+        // 脱稿：说了稿外的话，位置不许动。
+        await client.emit(.completed(itemID: "i2", transcript: "今天天气不错我们聊聊别的"))
+        try await expectConsumed(2)
+        #expect(harness.session.currentSegmentIndex == 0, "脱稿不得被当成推进")
+
+        // 有效推进 / 回稿：说到下一段正文，锚点成立，照常前进。
+        await client.emit(.completed(itemID: "i3", transcript: "第二段内容"))
+        await waitFor("读到下一段正文后推进到第 2 段") {
+            harness.session.currentSegmentIndex == 1
+        }
+        try await expectConsumed(3)
+        #expect(
+            harness.session.currentSegmentIndex == 1,
+            "读到下一段正文后应继续前进，实际 \(harness.session.currentSegmentIndex)"
+        )
+
+        // 重读与重复识别：重复的句子不是新的推进依据。
+        await client.emit(.completed(itemID: "i4", transcript: "第一段内容"))
+        try await expectConsumed(4)
+        await client.emit(.completed(itemID: "i5", transcript: "第一段内容"))
+        try await expectConsumed(5)
+        #expect(
+            harness.session.currentSegmentIndex <= 1,
+            "重读不得把位置甩到后面，实际 \(harness.session.currentSegmentIndex)"
+        )
+
+        // 掉线：连接关闭后必须释放占用并回到手动，位置留在用户离开的地方。
+        await client.emit(.closed(code: 1006))
+        await waitFor("掉线后释放占用") { harness.coordinator.occupancy == nil }
+        #expect(harness.session.phase == .manual)
+        #expect(harness.session.currentSegmentIndex >= 0, "掉线不得丢掉用户的阅读位置")
+        #expect(await client.currentCounters().closeCount >= 1, "掉线后传输必须已关闭")
+
+        // 手动接管：用户自己挪位置；接管之后到达的任何事件都不得再动它。
+        //
+        // 这里与前面几条不同：传输在掉线时已经关闭，迟到事件不会再被消费成一条
+        // 对齐样本，因此断言的是「接管之后没有任何残留事件改动位置」。先确认连接
+        // 确实关闭，再用有界让出把在途任务排空——不是靠固定睡眠赌它来得及。
+        harness.session.moveToSegment(2)
+        await settleTasks()
+        #expect(harness.session.currentSegmentIndex == 2, "手动接管要落在用户选的位置")
+        #expect(await client.currentCounters().closeCount >= 1, "迟到事件走的是已关闭的传输")
+        await client.emit(.completed(itemID: "i-late", transcript: "第三段内容"))
+        await settleTasks()
+        #expect(harness.session.currentSegmentIndex == 2, "接管后的迟到事件不得推进")
+
+        // 资源释放：关闭舞台后采集与连接都只释放一次。
+        await harness.session.closeStage()
+        #expect(harness.coordinator.occupancy == nil)
+        for closed in harness.clientFactory.clients {
+            #expect(await closed.currentCounters().closeCount >= 1)
+        }
+        #expect(harness.sourceFactory.sources.allSatisfy { $0.stopCount == 1 })
+    }
 }
 private enum TestPreparationResponse {
     enum Failure: Error {
@@ -2214,10 +2304,14 @@ private func settleTasks() async {
 @MainActor
 private func waitFor(
     timeoutIterations: Int = 200,
+    _ description: String = "条件",
     _ condition: @MainActor () async -> Bool
 ) async {
     for _ in 0..<timeoutIterations {
         if await condition() { return }
         await Task.yield()
     }
+    // 超时必须让测试失败。静默返回会把「等到条件成立」变成「等够次数就继续」，
+    // 后面所有依赖它的断言都会在事件根本没被处理的情况下空过。
+    Issue.record("等待超时（\(timeoutIterations) 次让出）：\(description)")
 }

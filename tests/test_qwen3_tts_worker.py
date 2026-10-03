@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -355,6 +356,348 @@ def test_worker_completed_frame_carries_requested_chunk_timing(tmp_path: Path) -
     assert timing["timing_quality"] == "chunk"
     assert timing["total_samples"] == 2
     assert timing["chunks"][0]["audio_end_sample"] == 2
+
+
+class SamplingEngine(FakeEngine):
+    def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        language: str,
+        seed: int | None = None,
+        **_: object,
+    ):
+        assert seed == 101
+        yield b"\x00\x00"
+        yield b"\x01\x00"
+
+    def consume_sampling_observation(self) -> dict[str, object]:
+        return {
+            "seed_policy": "caller_fixed",
+            "seed": 101,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "repetition_penalty": 1.1,
+        }
+
+
+def test_worker_completed_frame_reports_the_sampler_it_used(tmp_path: Path) -> None:
+    """The completed frame carries sampling facts, so the parent never guesses."""
+    source = BytesIO()
+    target = BytesIO()
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "synthesize",
+            "request_id": "req-sampling",
+            "text": "你好。",
+            "voice": "default",
+            "speed": 1.0,
+            "seed": 101,
+        },
+    )
+    source.seek(0)
+
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: SamplingEngine(),
+    )
+
+    target.seek(0)
+    read_frame(target)  # ready
+    read_frame(target)  # first audio
+    read_frame(target)  # second audio
+    completed = read_frame(target)
+
+    assert completed["type"] == "completed"
+    assert completed["sampling_observation"] == {
+        "seed_policy": "caller_fixed",
+        "seed": 101,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "repetition_penalty": 1.1,
+    }
+
+
+def _sampling_engine(variant: str) -> worker_module.MlxQwenTtsEngine:
+    engine = worker_module.MlxQwenTtsEngine.__new__(worker_module.MlxQwenTtsEngine)
+    engine.identity = TtsWorkerIdentity(
+        device="mps",
+        dtype="float16",
+        sample_rate=24_000,
+        model_variant=variant,
+    )
+    engine._numpy = np
+    engine._sample_rate = 24_000
+    engine._delivery_stats = Counter()
+    engine._last_sampling_observation = None
+    engine._repetition_penalty = 1.05
+    engine._temperature = 0.7
+    engine._top_p = 0.95
+    engine._chunk_ms = 200
+    engine._audio_loader_fn = None
+    engine._load_reference_audio = lambda _: "reference-array"
+    engine._model = SimpleNamespace(
+        generate=lambda **_: [
+            SimpleNamespace(
+                sample_rate=24_000,
+                audio=np.zeros(2, dtype=np.float32),
+            )
+        ]
+    )
+    return engine
+
+
+def _fake_mlx_runtime(monkeypatch: pytest.MonkeyPatch, seeded: list[int]) -> None:
+    """Install a minimal importable `mlx.core` that only records seeding."""
+    core = ModuleType("mlx.core")
+    core.random = SimpleNamespace(seed=seeded.append)  # type: ignore[attr-defined]
+    package = ModuleType("mlx")
+    package.__path__ = []  # type: ignore[attr-defined]
+    package.core = core  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+
+
+def _no_mlx_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `import mlx.core` fail even where the real runtime is installed."""
+    for name in ("mlx.core", "mlx"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    # A None entry makes `import mlx.core` raise ImportError without touching
+    # the real runtime on disk.
+    monkeypatch.setitem(sys.modules, "mlx.core", None)
+
+
+def test_caller_seed_is_reported_as_applied_only_when_the_runtime_took_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No vendor runtime means no fixed stream: the policy must say so."""
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("custom_voice")
+
+    list(engine._generate("你好。", voice="default", speed=1.0, language="auto", seed=101))
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+    assert engine.consume_sampling_observation() is None
+
+
+def test_caller_seed_is_reported_as_fixed_when_the_runtime_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("custom_voice")
+
+    list(engine._generate("你好。", voice="default", speed=1.0, language="auto", seed=101))
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == [101]
+    assert observation is not None
+    assert observation["seed_policy"] == "caller_fixed"
+    assert observation["seed"] == 101
+    assert observation["temperature"] == 0.7
+    assert observation["top_p"] == 0.95
+    assert observation["repetition_penalty"] == 1.05
+
+
+def test_clone_path_reports_its_derived_seed_and_fixed_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("base")
+    engine._audio_loader_fn = lambda _: object()
+    # The engine default is 0.95, which is exactly _CLONE_TOP_P. Leaving it
+    # there would make the assertion below pass whether the clone path reports
+    # its own constant or simply echoes the engine setting, so the two are
+    # pulled apart deliberately.
+    engine._top_p = 0.5
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="narrator",
+            speed=1.0,
+            language="auto",
+            ref_audio="/tmp/reference.wav",
+            ref_text="参考文本。",
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "clone_reference_derived"
+    assert observation["seed"] == seeded[0]
+    assert observation["temperature"] == worker_module._CLONE_TEMPERATURE
+    assert observation["top_p"] == worker_module._CLONE_TOP_P
+    assert observation["repetition_penalty"] == 1.5
+
+
+def test_clone_path_reports_no_fixed_sampler_when_the_runtime_cannot_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A derived seed that was never applied must not be reported as one.
+
+    The audio is produced either way; what changes is whether the recipe may
+    later claim this render is reproducible. Reporting `clone_reference_derived`
+    for a stream that nothing seeded would hand a client a seed it can reuse
+    and get different audio from.
+    """
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("base")
+    engine._audio_loader_fn = lambda _: object()
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="narrator",
+            speed=1.0,
+            language="auto",
+            ref_audio="/tmp/reference.wav",
+            ref_text="参考文本。",
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+
+
+def test_voice_design_profile_seed_is_reported_as_applied_only_when_the_runtime_took_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("voice_design")
+    engine._temperature = 0.7
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            profile=SimpleNamespace(
+                id="v",
+                mode="voice_design",
+                instruction="沉稳",
+                seed=202,
+                temperature=0.4,
+            ),
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+    # The profile's own temperature still reached the sampler, so it is still
+    # a fact worth reporting even though the seed was not applied.
+    assert observation["temperature"] == 0.4
+
+
+def test_voice_design_profile_seed_is_reported_as_profile_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("voice_design")
+    engine._temperature = 0.7
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            profile=SimpleNamespace(
+                id="v",
+                mode="voice_design",
+                instruction="沉稳",
+                seed=202,
+                temperature=0.4,
+            ),
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == [202]
+    assert observation is not None
+    assert observation["seed_policy"] == "voice_profile_fixed"
+    assert observation["seed"] == 202
+    assert observation["temperature"] == 0.4
+
+
+def test_voice_design_with_an_instruction_reports_the_callers_own_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seed handed in with an instruction came from the caller, not the profile."""
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("voice_design")
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            instruction="沉稳",
+            seed=303,
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == [303]
+    assert observation is not None
+    assert observation["seed_policy"] == "caller_fixed"
+    assert observation["seed"] == 303
+
+
+def test_voice_design_with_an_instruction_and_no_seed_reports_no_fixed_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("voice_design")
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            instruction="沉稳",
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == []
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
 
 
 def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(

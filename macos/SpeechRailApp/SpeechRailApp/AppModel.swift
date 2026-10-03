@@ -24,6 +24,123 @@ public enum CreatorVoicesLoadState: Equatable, Sendable {
     case failed
 }
 
+/// 配音台结果位现在该显示什么。
+///
+/// 这里**故意没有失败分支**：失败提示与结果是并排的两件事，不是互斥的三选一。
+/// 上一次成功留下的 `lastCreatedWork` 会一直存在到那件作品被删除，若把失败塞进
+/// 同一条互斥链，它会被旧成品遮住——用户按下生成、按钮恢复原样，页面既没有
+/// 新成品也没有任何提示。失败请读 `creatorMessage`，与本投影并排渲染。
+public enum DubbingDeskSlot: Equatable, Sendable {
+    /// 什么都没有：还没生成过，或失败后还没重试。
+    case none
+    /// 已生成但用户还没决定保存还是放弃。
+    case unsaved
+    /// 上一次生成并保存成功的结果。
+    case savedWork(CreativeWork)
+}
+
+/// 配音台音色选择器面对的情况。
+///
+/// 视图不再自己算 `creatorVoices.isEmpty`：空列表同时是「还没读到」「读取失败」
+/// 和「确实没有音色」三种状态，而这三种给用户的动作完全相反——前两种该**重新
+/// 加载**，只有第三种才该去**音色创作**。`refreshCreatorVoices()` 的 catch 分支
+/// 会把 `creatorVoices` 清空并置为 `.failed`，所以这不是理论情形。
+public enum CreatorVoicePickerState: Equatable, Sendable {
+    case reading
+    case unreadable
+    case noneAvailable
+    case available
+
+    /// 胶囊上的标题。选中音色时视图用音色名，不用这里的。
+    public var title: String {
+        switch self {
+        case .reading: return "正在读取音色…"
+        case .unreadable: return "没能读到音色"
+        case .noneAvailable: return "没有可用音色"
+        case .available: return "选择音色"
+        }
+    }
+
+    /// 空态里那句话。`.available` 不会出现空态。
+    public var emptyDescription: String {
+        switch self {
+        case .reading: return "正在从服务读取音色列表。"
+        case .unreadable: return "没能从服务读到音色列表。你可能本来就有音色，先重新加载一次。"
+        case .noneAvailable: return "服务当前没有返回可用于配音的音色。"
+        case .available: return ""
+        }
+    }
+
+    /// 空态该不该把用户送去音色创作。只有「确实没有」才该去。
+    public var suggestsCreatingVoice: Bool { self == .noneAvailable }
+
+    /// 空态该给的恢复动作。只有「没读到」才该重新加载。
+    public var offersReload: Bool { self == .unreadable }
+
+    /// 由加载状态与列表内容决定。抽成静态函数是为了能逐个取值直接测，
+    /// 而不必把 App 真的停在"正在读取"这种瞬时状态上。
+    ///
+    /// `loadState` 的四个取值全部列举，没有 `default`——漏掉一个会被安静地
+    /// 当成"确实没有音色"，也就是 #183 本身。
+    public static func resolve(
+        loadState: CreatorVoicesLoadState,
+        voices: [CreatorVoice]
+    ) -> CreatorVoicePickerState {
+        switch loadState {
+        case .unknown, .loading:
+            return .reading
+        case .failed:
+            return .unreadable
+        case .loaded:
+            return voices.contains(where: \.available) ? .available : .noneAvailable
+        }
+    }
+}
+
+/// 段落返修弹层副标题里关于音色的那半句。
+///
+/// 四种状态必须分开说。把「不知道」说成「原音色」是一句我们**没有依据**的断言
+/// （#184）；尤其在「音色不在列表里」时，副标题会先承诺一个音色，紧接着第一次
+/// 返修就被 `startDubbingSegmentRedo` 拒绝——用户看到的是自相矛盾。
+public enum DubbingProjectVoice: Equatable, Sendable {
+    /// 查到了音色名。
+    case named(String)
+    /// 配方里没有记录音色。
+    case notRecorded
+    /// 音色列表没读到（还没读、正在读或读失败）。
+    case listUnread
+    /// 列表读到了，这件作品用的音色不在其中。
+    case notInLibrary
+
+    /// 直接接在副标题逗号后的那半句。
+    public var text: String {
+        switch self {
+        case .named(let name): return "音色为「\(name)」"
+        case .notRecorded: return "这件作品没有记录使用的音色"
+        case .listUnread: return "音色待确认（还没读到音色列表）"
+        case .notInLibrary: return "音色不在当前的音色列表里"
+        }
+    }
+
+    /// `loadState` 的四个取值全部列举，没有 `default`。
+    public static func resolve(
+        voiceID: String?,
+        voicesLoadState: CreatorVoicesLoadState,
+        voices: [CreatorVoice]
+    ) -> DubbingProjectVoice {
+        guard let voiceID else { return .notRecorded }
+        switch voicesLoadState {
+        case .unknown, .loading, .failed:
+            return .listUnread
+        case .loaded:
+            guard let voice = voices.first(where: { $0.id == voiceID }) else {
+                return .notInLibrary
+            }
+            return .named(voice.name)
+        }
+    }
+}
+
 public enum AppCapabilityAvailability: Equatable, Sendable {
     case available
     case unsupported
@@ -554,6 +671,8 @@ public final class AppModel {
         public let renderRevision: Int
         public let durationSeconds: Double?
         public let audioData: Data
+        /// 生成时就固定的制作配方与追溯状态；保存时原样落盘，不在保存时补算。
+        public let provenance: RenderProvenanceSnapshot
 
         public init(
             renderID: String,
@@ -567,7 +686,8 @@ public final class AppModel {
             responseFormat: String = "wav",
             renderRevision: Int,
             durationSeconds: Double?,
-            audioData: Data
+            audioData: Data,
+            provenance: RenderProvenanceSnapshot = .legacyUnknown
         ) {
             self.renderID = renderID
             self.workID = workID
@@ -581,6 +701,7 @@ public final class AppModel {
             self.renderRevision = renderRevision
             self.durationSeconds = durationSeconds
             self.audioData = audioData
+            self.provenance = provenance
         }
 
         public var generatedTitle: String {
@@ -655,6 +776,23 @@ public final class AppModel {
     public var capabilityFacade: AppCapabilityFacade {
         AppCapabilityFacade(snapshot: effectiveCapabilities, discoveryState: discoveryState)
     }
+    /// 用户距离"第一条真实结果"还差什么。
+    ///
+    /// 只读投影：它读的都是 App 已经知道的事实，不安装、不下载、不改配置。服务
+    /// 探针通过不等于这一步满足——真实结果是用户按下生成后听到的音频。
+    public var firstResultReadiness: FirstResultReadiness {
+        FirstResultReadinessBuilder.evaluate(
+            hasHealth: health != nil,
+            healthFailure: healthFailure,
+            hasProfile: profile != nil,
+            modelAvailability: modelAvailability,
+            modelStatusMessage: modelStatus?.activeOperation?.message
+                ?? operation?.message,
+            voices: creatorVoices,
+            voicesLoadState: creatorVoicesLoadState,
+            discoveryState: discoveryState
+        )
+    }
     public private(set) var creatorVoices: [CreatorVoice] = []
     public private(set) var creatorVoicesLoadState: CreatorVoicesLoadState = .unknown
     public private(set) var isRefreshingCreatorVoiceDetail = false
@@ -668,6 +806,36 @@ public final class AppModel {
     /// 配音台已生成、尚未显式保存的内存音频及制作身份。
     /// 只有用户点击保存后才写入作品库；取消、失败或离开页面即丢弃。
     public private(set) var pendingDubbing: PendingDubbingRender?
+
+    /// 配音台结果位。只描述"有没有结果、是哪一种"，不描述失败——见 `DubbingDeskSlot`。
+    public var dubbingDeskSlot: DubbingDeskSlot {
+        if pendingDubbing != nil { return .unsaved }
+        if let work = lastCreatedWork { return .savedWork(work) }
+        return .none
+    }
+
+    /// 配音台音色选择器的状态。四个取值穷举 `CreatorVoicesLoadState`，
+    /// 不留 `default`：漏掉一个取值会被安静地当成"没有音色"。
+    public var creatorVoicePickerState: CreatorVoicePickerState {
+        CreatorVoicePickerState.resolve(
+            loadState: creatorVoicesLoadState,
+            voices: creatorVoices
+        )
+    }
+
+    // MARK: 段落返修（D）
+
+    /// 当前打开的配音项目：把一件已保存作品按段落拆开，逐段重做、试听、采用。
+    ///
+    /// 项目**不含**原作品音频。它只记录每段当前采用哪个候选，音频一律留在候选里；
+    /// 导出的成品由被采用的候选按顺序拼成，正文与音频因此始终一一对应。
+    public private(set) var dubbingProject: DubbingProject?
+    public private(set) var dubbingCandidates: [DubbingCandidate] = []
+    /// 正在重做的段落 ID。同一时间只允许一段在飞，避免两次生成互相覆盖状态。
+    public private(set) var dubbingBusySegmentID: String?
+    public private(set) var dubbingMessage: String?
+    public private(set) var playingDubbingCandidateID: String?
+    public private(set) var dubbingExportBundle: DubbingExportBundle?
     public private(set) var isCreatingVoicePreview = false
     public private(set) var voiceDesignCandidates: [VoiceDesignCandidateSnapshot] = []
     public private(set) var voiceDesignSavedSlots: Set<String> = []
@@ -747,6 +915,20 @@ public final class AppModel {
     private let creatorClient: any SpeechRailCreatorClient
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
+    private let dubbingProjectStore: DubbingProjectStore
+    /// 拥有 `dubbingRedoTask` 句柄的那一代任务。取消或重新开始都会推进它，
+    /// 使旧任务的收尾无法清空新任务的句柄。
+    ///
+    /// 这是**纵深防御**，不是当前唯一的那道防线：`startDubbingSegmentRedo` 里的
+    /// `guard dubbingBusySegmentID == nil` 已经让两段重做无法并发，
+    /// `cancelDubbingSegmentRedo` 也只取消 task、不清在途标记，
+    /// 所以从取消到 `defer` 执行之间 busy 仍然占位。在 MainActor 上这些步骤串行，
+    /// 代次相等检查因此在当前代码路径上不会被触发。
+    ///
+    /// 若将来放宽并发（例如允许「取消后立即重做」），这道检查才真正开始起作用，
+    /// 且需要配套测试——目前没有测试覆盖它，正是因为触发不了。
+    private var dubbingRedoGeneration: UInt64 = 0
+    private var dubbingRedoTask: Task<Void, Never>?
     private let observabilityLocation: ObservabilityLocation
     private let registration: ControlAgentRegistration?
     private var cloneRegistrationContext: CloneRegistrationContext?
@@ -842,6 +1024,7 @@ public final class AppModel {
         creatorClient: (any SpeechRailCreatorClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
+        dubbingProjectStore: DubbingProjectStore? = nil,
         observabilityLocation: ObservabilityLocation = .default,
         registration: ControlAgentRegistration? = nil
     ) {
@@ -851,6 +1034,11 @@ public final class AppModel {
         self.creatorClient = creatorClient ?? UnavailableCreatorClient()
         self.audioPlaybackController = audioPlaybackController
         self.workStore = workStore
+        self.dubbingProjectStore = dubbingProjectStore ?? DubbingProjectStore(
+            directory: FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("SpeechRail/DubbingProjects", isDirectory: true)
+        )
         self.observabilityLocation = observabilityLocation
         self.registration = registration
         self.controlAgentStatus = registration?.statusSnapshot
@@ -863,6 +1051,7 @@ public final class AppModel {
             self.isAudioPlaying = false
             self.playingWorkID = nil
             self.playingVoiceID = nil
+            self.playingDubbingCandidateID = nil
             self.playbackProgress = 0
             self.playbackLevel = 0
             guard !successfully else { return }
@@ -2989,9 +3178,8 @@ public final class AppModel {
         try? workStore.audioURL(for: work)
     }
 
-    /// Deletes a saved work and the audio file it owns. The audio is gone for
-    /// good, so the caller must confirm before calling this
-    /// (REDESIGN-SPEC §7.4 / D12).
+    /// Deletes a saved work and moves its audio into the managed recovery area.
+    /// The caller must still confirm because the work disappears from the list.
     @discardableResult
     public func deleteWork(_ work: CreativeWork) -> Bool {
         if playingWorkID == work.id {
@@ -3002,7 +3190,7 @@ public final class AppModel {
             works = try workStore.list()
             worksMessage = nil
             workPlaybackMessage = nil
-            workActionMessage = "“\(work.displayTitle)” 及其音频文件已从本机删除。"
+            workActionMessage = "“\(work.displayTitle)”已从作品列表删除；音频已移入本机恢复区。"
             if lastCreatedWork?.id == work.id {
                 lastCreatedWork = nil
             }
@@ -3143,10 +3331,12 @@ public final class AppModel {
             planID: pending.planID,
             renderRevision: pending.renderRevision,
             durationSeconds: pending.durationSeconds,
-            audioFileName: "\(pending.workID).wav"
+            audioFileName: "\(pending.workID).wav",
+            provenance: pending.provenance
         )
+        let committed: CreativeWork
         do {
-            try workStore.save(work, audioData: pending.audioData)
+            committed = try workStore.save(work, audioData: pending.audioData)
         } catch {
             creatorMessage = "作品保存失败，请检查磁盘权限和可用空间后重试"
             return nil
@@ -3158,8 +3348,8 @@ public final class AppModel {
             worksMessage = "作品已保存，但作品列表暂时无法刷新"
         }
         pendingDubbing = nil
-        lastCreatedWork = work
-        return work
+        lastCreatedWork = committed
+        return committed
     }
 
     /// 未保存的配音试听音频：从内存播放，不经过作品库。
@@ -3175,6 +3365,359 @@ public final class AppModel {
             clearPlaybackState()
             workPlaybackMessage = "试听音频无法播放，请重新生成。"
         }
+    }
+
+    // MARK: - 段落返修
+
+    /// 从一件已保存作品打开段落编辑。
+    ///
+    /// 原作品音频原地不动：项目只记录"每段现在用哪个候选"，导出时才按段落顺序拼装。
+    /// 段落边界只来自文稿本身——没有可靠时序，就不推断某段在音频里的位置。
+    @discardableResult
+    public func startDubbingProject(for work: CreativeWork) -> DubbingProject? {
+        closeDubbingProject()
+        let texts = DubbingSegmentPlanner.segments(from: work.scriptText)
+        guard !texts.isEmpty else {
+            dubbingMessage = "这件作品的文稿是空的，无法按段落返修。"
+            return nil
+        }
+        let projectID = "dub_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let project = DubbingProject(
+            id: projectID,
+            title: work.displayTitle,
+            scriptText: work.scriptText,
+            recipe: work.provenance,
+            segments: texts.enumerated().map { index, text in
+                DubbingSegment(id: "\(projectID)_s\(index + 1)", text: text)
+            }
+        )
+        do {
+            let committed = try dubbingProjectStore.save(project)
+            dubbingProject = committed
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: committed.id)
+            dubbingMessage = nil
+            return committed
+        } catch {
+            dubbingMessage = "无法建立段落项目，请检查磁盘权限和可用空间后重试。"
+            return nil
+        }
+    }
+
+    /// 关闭当前段落项目。在途的重做立刻作废，落地结果不会写进下一个项目。
+    public func closeDubbingProject() {
+        dubbingRedoGeneration &+= 1
+        dubbingRedoTask?.cancel()
+        dubbingRedoTask = nil
+        dubbingProject = nil
+        dubbingCandidates = []
+        dubbingBusySegmentID = nil
+        dubbingMessage = nil
+        dubbingExportBundle = nil
+        if playingDubbingCandidateID != nil {
+            stopAudio()
+        }
+        playingDubbingCandidateID = nil
+    }
+
+    /// 当前项目用到的音色。查不到、没记录、不在列表里是三件事，各自照实说——
+    /// 见 `DubbingProjectVoice`。
+    public var dubbingProjectVoice: DubbingProjectVoice {
+        DubbingProjectVoice.resolve(
+            voiceID: dubbingProject?.recipe.recipe?.voiceID,
+            voicesLoadState: creatorVoicesLoadState,
+            voices: creatorVoices
+        )
+    }
+
+    /// 重新生成一段。其余段落、已有候选与采用关系全部原样保留。
+    public func startDubbingSegmentRedo(_ segmentID: String) {
+        guard let project = dubbingProject else { return }
+        guard dubbingBusySegmentID == nil else {
+            dubbingMessage = "已有一段在重做，请等它完成或先取消。"
+            return
+        }
+        guard let segment = project.segments.first(where: { $0.id == segmentID }) else {
+            return
+        }
+        // 没有配方摘要就无法证明"这次重做与原作品是同一制作条件"，因此整段拒绝。
+        guard project.recipe.recipe?.digest != nil else {
+            dubbingMessage = "这件作品没有记录完整的制作配方，无法安全地只重做其中一段。"
+            return
+        }
+        // 「列表没读到」与「音色不在列表里」是两件事：前者是我们还不知道，
+        // 后者才是这件作品的条件变了。把前者说成后者，会让用户去「音色库」
+        // 修一个根本没坏的音色。
+        guard creatorVoicesLoadState == .loaded else {
+            dubbingMessage = "还没读到音色列表，无法确认这件作品用的音色是否可用，请先刷新一次。"
+            return
+        }
+        guard let voiceID = project.recipe.recipe?.voiceID,
+              let voice = creatorVoices.first(where: { $0.id == voiceID })
+        else {
+            dubbingMessage = "这件作品使用的音色不在当前的音色列表里，无法重做段落。"
+            return
+        }
+        guard voice.available else {
+            dubbingMessage = "这件作品使用的音色当前暂不可用，无法重做段落。"
+            return
+        }
+        let speed = project.recipe.recipe?.effectiveSpeed ?? 1.0
+        dubbingBusySegmentID = segmentID
+        dubbingMessage = nil
+        dubbingRedoGeneration &+= 1
+        let generation = dubbingRedoGeneration
+        dubbingRedoTask = Task { @MainActor [weak self] in
+            await self?.performDubbingSegmentRedo(
+                segmentID: segmentID,
+                text: segment.text,
+                voice: voice,
+                speed: speed,
+                generation: generation
+            )
+        }
+    }
+
+    /// 取消进行中的段落重做。已保存的候选与采用关系不受影响。
+    public func cancelDubbingSegmentRedo() {
+        dubbingRedoTask?.cancel()
+    }
+
+    private func performDubbingSegmentRedo(
+        segmentID: String,
+        text: String,
+        voice: CreatorVoice,
+        speed: Double,
+        generation: UInt64
+    ) async {
+        defer { finishDubbingSegmentRedo(generation: generation) }
+        do {
+            let options = try await speechRequestOptions(for: voice.id)
+            let render = try await creatorClient.createSpeechRender(
+                text: text,
+                voiceID: voice.id,
+                speed: speed,
+                options: options.withValidationPolicy("require_output_pass")
+            )
+            try Task.checkCancellation()
+            // 生成期间用户可能已经切换或关闭项目：过期的结果不写进任何项目。
+            guard dubbingRedoGeneration == generation,
+                  let project = dubbingProject,
+                  project.segments.contains(where: { $0.id == segmentID })
+            else { return }
+            let candidateID = "cand_" + UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+            let candidate = DubbingCandidate(
+                id: candidateID,
+                segmentID: segmentID,
+                text: text,
+                audioFileName: "\(candidateID).wav",
+                provenance: RenderProvenanceSnapshot(
+                    state: render.provenance.state,
+                    reason: render.provenance.reason,
+                    planSHA256: render.planSHA256,
+                    recipe: render.recipe,
+                    pcmSHA256: render.pcmSHA256
+                ),
+                durationSeconds: audioPlaybackController.duration(for: render.audioData)
+            )
+            _ = try dubbingProjectStore.addCandidate(
+                candidate,
+                audioData: render.audioData,
+                toProject: project.id
+            )
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            let position = (project.segments.firstIndex { $0.id == segmentID } ?? 0) + 1
+            dubbingMessage = "第 \(position) 段已生成新版本，试听满意后再采用。"
+        } catch is CancellationError {
+            return
+        } catch let error as DubbingProjectError {
+            guard dubbingRedoGeneration == generation else { return }
+            // 音频已经生成、只是落盘失败：说清是本机存储，不要推给创作服务。
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+        } catch {
+            guard dubbingRedoGeneration == generation else { return }
+            dubbingMessage = Self.creatorErrorMessage(for: error)
+        }
+    }
+
+    private func finishDubbingSegmentRedo(generation: UInt64) {
+        guard dubbingRedoGeneration == generation else { return }
+        dubbingBusySegmentID = nil
+        dubbingRedoTask = nil
+    }
+
+    /// 试听一个候选。播放的是候选自己的音频，不动任何采用关系。
+    public func playDubbingCandidate(_ candidate: DubbingCandidate) {
+        do {
+            let data = try dubbingProjectStore.loadAudio(for: candidate)
+            try audioPlaybackController.play(data: data)
+            isAudioPlaying = audioPlaybackController.isPlaying
+            playingDubbingCandidateID = candidate.id
+            playingWorkID = nil
+            playingVoiceID = nil
+            workPlaybackMessage = nil
+        } catch {
+            clearPlaybackState()
+            playingDubbingCandidateID = nil
+            dubbingMessage = "这个候选的音频无法播放，请重新生成这一段。"
+        }
+    }
+
+    /// 采用一个候选：只改引用，旧音频不删除，撤销可以回到上一版。
+    @discardableResult
+    public func adoptDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
+        guard let project = dubbingProject else { return false }
+        do {
+            let updated = try dubbingProjectStore.adopt(
+                candidateID: candidate.id,
+                inSegment: candidate.segmentID,
+                ofProject: project.id
+            )
+            dubbingProject = updated
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            dubbingMessage = "已采用这一段的新版本。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    /// 撤销一步采用。没有可撤销的历史时不改变当前采用项。
+    @discardableResult
+    public func undoDubbingAdoption(inSegment segmentID: String) -> Bool {
+        guard let project = dubbingProject else { return false }
+        let previous = project.segments.first { $0.id == segmentID }?.acceptedCandidateID
+        do {
+            let updated = try dubbingProjectStore.undoAdoption(
+                inSegment: segmentID,
+                ofProject: project.id
+            )
+            dubbingProject = updated
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            guard updated.segments.first(where: { $0.id == segmentID })?.acceptedCandidateID
+                != previous
+            else {
+                dubbingMessage = "这一段已经是最早的版本，没有更早的可回到。"
+                return false
+            }
+            dubbingMessage = "已回到上一个版本。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    /// 准备导出成品。音频与正文出自同一次采用决策，因此必然一一对应。
+    ///
+    /// 还有段落没采用版本时直接拒绝：宁可不出货，也不导出与正文对不上的音频。
+    public func prepareDubbingExport() {
+        guard let project = dubbingProject else { return }
+        do {
+            guard let exported = try dubbingProjectStore.export(projectID: project.id) else {
+                dubbingMessage = "还有段落没有采用版本，全部采用后才能导出成品。"
+                return
+            }
+            dubbingExportBundle = DubbingExportBundle(
+                baseName: Self.exportBaseName(for: project.title),
+                audio: exported.audio,
+                script: exported.script
+            )
+            dubbingMessage = nil
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+        }
+    }
+
+    /// 把准备好的成品写到用户选定的目录：一份 WAV，一份对应正文。
+    @discardableResult
+    public func writeDubbingExport(to directory: URL) -> Bool {
+        guard let bundle = dubbingExportBundle else { return false }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try bundle.audio.write(
+                to: directory.appendingPathComponent(bundle.audioFileName),
+                options: .atomic
+            )
+        } catch {
+            dubbingMessage = "导出失败，请确认目标位置可写后重试。"
+            return false
+        }
+        do {
+            try Data(bundle.script.utf8).write(
+                to: directory.appendingPathComponent(bundle.scriptFileName),
+                options: .atomic
+            )
+        } catch {
+            // 音频已经落地、正文没有。照实说：用户需要知道目标目录里现在有一份
+            // 没有对应文案的成品，而不是被引导去检查一个其实可写的目录。
+            dubbingMessage = "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
+            return false
+        }
+        dubbingExportBundle = nil
+        dubbingMessage = "已导出 \(bundle.audioFileName) 和 \(bundle.scriptFileName)。"
+        return true
+    }
+
+    /// 放弃这次导出准备。用户改了主意时清空，避免下一次导出写出一份旧的成品。
+    public func discardDubbingExport() {
+        dubbingExportBundle = nil
+    }
+
+    private static func exportBaseName(for title: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
+        let cleaned = title
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 以点开头的名字在 macOS 上是隐藏文件：导出明明报了成功，用户在自己选的
+        // 目录里却什么都看不到。去掉前导点，名字仍然是可认的。
+        let visible = cleaned.drop(while: { $0 == "." })
+        return visible.isEmpty ? "SpeechRail-配音" : String(visible.prefix(80))
+    }
+
+    /// 段落返修的错误归属。文案提到的成因必须与用户实际能修的方向一致——
+    /// 把数据异常说成磁盘问题，会把用户送去检查一个没坏的方向（#186）。
+    static func dubbingErrorMessage(for error: Error) -> String {
+        if let projectError = error as? DubbingProjectError {
+            return switch projectError {
+            case .candidateNotAdoptable:
+                "这个候选的制作条件与当前项目不一致，需要重新生成这一段。"
+            case .candidateNotFound, .segmentNotFound:
+                "找不到这一段或这个候选，请刷新后重试。"
+            case .invalidIdentifier:
+                // 这里不是磁盘问题。"检查权限和空间"会把用户送去检查一个没坏的
+                // 方向，而真正的成因是这份段落数据自身不自洽——重试无用，
+                // 要重新生成这一段（#186）。
+                "这件作品的段落数据不一致，无法只重做其中一段。请重新生成这一段后再导出。"
+            case .audioFormatUnsupported:
+                "这一段的音频格式与其它段落不同，不能拼成一个成品。请重新生成这一段后再导出。"
+            case .audioFormatMismatch:
+                "各段的音频格式不一致，不能拼成一个成品。请用同一音色与设置重新生成后再导出。"
+            }
+        }
+        // 真正的存储失败不走 DubbingProjectError：DubbingProjectStore 不包装
+        // 底层 I/O 错误，磁盘满、没权限会以 CocoaError 原样冒出来。
+        if Self.isStorageFailure(error) {
+            return "本机存储写入失败，请检查磁盘权限和可用空间后重试。"
+        }
+        return "段落操作失败，请重试。"
+    }
+
+    /// 只认磁盘满与权限两类——文案里承诺的就是这两件，别把别的失败也
+    /// 说成它们（判据：文案提到的成因必须与实际可修的方向一致）。
+    private static func isStorageFailure(_ error: Error) -> Bool {
+        guard let code = (error as? CocoaError)?.code else { return false }
+        return code == .fileWriteOutOfSpace
+            || code == .fileWriteNoPermission
+            || code == .fileReadNoPermission
     }
 
     public func synthesizeAndSave(
@@ -3239,10 +3782,17 @@ public final class AppModel {
                 renderRevision: (try? workStore.nextRenderRevision(
                     scriptText: scriptText,
                     voiceID: voice.id
-                )) ?? 1,
-                durationSeconds: audioPlaybackController.duration(for: data),
-                audioData: data
-            )
+               )) ?? 1,
+               durationSeconds: audioPlaybackController.duration(for: data),
+               audioData: data,
+               provenance: RenderProvenanceSnapshot(
+                   state: render.provenance.state,
+                   reason: render.provenance.reason,
+                   planSHA256: render.planSHA256,
+                   recipe: render.recipe,
+                   pcmSHA256: render.pcmSHA256
+               )
+           )
             pendingDubbing = pending
             workPlaybackMessage = nil
             do {
@@ -4019,8 +4569,12 @@ public final class AppModel {
                 "生成结果的作品标识无效，请重试"
             case .invalidTitle:
                 "作品名称不能为空"
+            case .workConflict:
+                "作品库已有另一份同名标识的音频，未覆盖现有作品"
             case .storageUnavailable:
                 "音频已生成，但本机作品库未能完成保存；请检查磁盘权限和可用空间后重试"
+            case .recoveryRequired:
+                "作品库需要先完成恢复，请重新打开我的作品后重试"
             case .audioUnavailable:
                 "服务没有返回可保存音频，请检查服务状态后重试"
             }

@@ -224,8 +224,60 @@ public struct ServiceOverviewView: View {
 
     private var serviceBody: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            firstResultCard
             capabilitiesCard
             runtimeCard
+        }
+    }
+
+    /// 首次使用与升级失败后的第一落点：只说"还差什么"和"下一步做什么"。
+    ///
+    /// 这一卡不安装、不下载、不改配置，也不把 `/readyz=200` 当成就绪——就绪的
+    /// 终点是用户按下生成后听到第一条音频。
+    @ViewBuilder
+    private var firstResultCard: some View {
+        let readiness = model.firstResultReadiness
+        // 只在有确定缺口时出现。全是未知的时候，卡片只剩一个标题和一条分隔线，
+        // 而它的文案还在说「先处理下面确定缺的东西」——那下面什么都没有。
+        if readiness.hasActionableSteps {
+            CardSurface {
+                CardHead(
+                    title: "距离第一条真实结果",
+                    detail: readiness.unknownSteps.isEmpty
+                        ? "按顺序做完这几件事，就可以生成第一段配音。"
+                        : "先处理下面确定缺的东西；其余状态还在读取中。"
+                )
+                Divider()
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    ForEach(readiness.blockingSteps) { step in
+                        firstResultRow(step)
+                    }
+                }
+            }
+        }
+    }
+
+    private func firstResultRow(_ step: FirstResultReadiness.StepStatus) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(step.detail)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("去处理") {
+                navigateToOwner(of: step.step)
+            }
+            .speechRailButton(.secondary)
+        }
+    }
+
+    /// 把"下一步"落到用户已经认识的那一页，而不是新造一个流程。
+    private func navigateToOwner(of step: FirstResultReadiness.Step) {
+        switch step {
+        case .voiceAvailable:
+            navigation.request(.voiceLibrary)
+        case .serviceReachable, .profileSelected, .modelsReady:
+            navigation.request(.overview)
         }
     }
 

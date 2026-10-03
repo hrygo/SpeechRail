@@ -268,25 +268,37 @@ public struct DubbingDeskView: View {
 
     private var voicePickerTitle: String {
         if let voice = selectedVoice { return voice.name }
-        return model.isRefreshingCreatorVoices ? "正在读取音色…" : "没有可用音色"
+        return model.creatorVoicePickerState.title
     }
 
     @ViewBuilder
     private var voicePickerPopover: some View {
-        if availableVoices.isEmpty {
+        // 判据 11：这里曾经直接问 `availableVoices.isEmpty`，把「没读到」「读取
+        // 失败」和「确实没有」三种状态都说成"服务没有音色"，再把用户送去音色
+        // 创作——而他很可能本来就有音色。判定已下沉为模型上的投影。
+        switch model.creatorVoicePickerState {
+        case .reading, .unreadable, .noneAvailable:
             ContentUnavailableView {
-                Label("没有可用音色", systemImage: "waveform.slash")
+                Label(model.creatorVoicePickerState.title, systemImage: "waveform.slash")
             } description: {
-                Text("服务当前没有返回可用于配音的音色。")
+                Text(model.creatorVoicePickerState.emptyDescription)
             } actions: {
-                Button("去音色创作") {
-                    isVoicePickerPresented = false
-                    navigation.request(.voiceDesign)
+                if model.creatorVoicePickerState.offersReload {
+                    Button("重新加载音色") {
+                        Task { await model.refreshCreatorVoices() }
+                    }
+                    .speechRailButton(.primary)
                 }
-                .speechRailButton(.primary)
+                if model.creatorVoicePickerState.suggestsCreatingVoice {
+                    Button("去音色创作") {
+                        isVoicePickerPresented = false
+                        navigation.request(.voiceDesign)
+                    }
+                    .speechRailButton(.primary)
+                }
             }
             .frame(width: Self.voicePopoverWidth)
-        } else {
+        case .available:
             VStack(spacing: 0) {
                 ScrollView {
                     LazyVStack(spacing: 2) {
@@ -498,12 +510,21 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
 
-        if let pending = model.pendingDubbing {
-            pendingResultBar(for: pending)
-        } else if let work = model.lastCreatedWork {
-            resultBar(for: work)
-        } else if let creatorMessage = model.creatorMessage {
+        // 失败与结果是并排的两件事，不能塞进同一条互斥链：`lastCreatedWork`
+        // 会一直存在到那件作品被删除，串起来会让上一次成功的成品把这一次的
+        // 失败整个遮住（#182）。
+        if let creatorMessage = model.creatorMessage {
             failureBar(message: creatorMessage)
+        }
+        switch model.dubbingDeskSlot {
+        case .none:
+            EmptyView()
+        case .unsaved:
+            if let pending = model.pendingDubbing {
+                pendingResultBar(for: pending)
+            }
+        case .savedWork(let work):
+            resultBar(for: work)
         }
     }
 
@@ -3230,6 +3251,8 @@ public struct WorksView: View {
     @State private var exportFileName = "SpeechRail-作品"
     @State private var isExporting = false
     @State private var exportMessage: String?
+    /// 段落返修弹层的目标作品。段落项目的生命周期跟这张表走，不跨页面保留。
+    @State private var dubbingWork: CreativeWork?
 
     private enum WorkSortOrder: String, CaseIterable, Identifiable {
         case newestFirst
@@ -3305,6 +3328,9 @@ public struct WorksView: View {
         }
         .sheet(isPresented: $isRenaming) {
             renameSheet
+        }
+        .sheet(item: $dubbingWork) { work in
+            DubbingProjectSheet(work: work)
         }
         .fileExporter(
             isPresented: $isExporting,
@@ -3542,6 +3568,14 @@ public struct WorksView: View {
             .speechRailButton(.primary)
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                // 没有配方摘要的作品点了也一定被拒：入口按事实出现，不做无效动作。
+                if work.provenance.supportsSegmentRedo {
+                    Button("段落返修…") {
+                        dubbingWork = work
+                    }
+                    .speechRailButton(.secondary)
+                }
+
                 Button("在 Finder 中显示") {
                     revealInFinder(work)
                 }
@@ -3896,5 +3930,228 @@ private struct WAVFileDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
+    }
+}
+
+// MARK: - 段落返修（D）
+
+/// 把一件已保存作品按段落拆开，逐段重做、试听、采用，最后导出成品。
+///
+/// 首屏只放"把这段改好"要用的动作：重做、采用、导出。多余的候选版本收在每段的
+/// 展开区里，不去打断只想重做一段的普通路径。原作品音频始终留在作品库原处。
+private struct DubbingProjectSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let work: CreativeWork
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            header
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .frame(
+            width: SpeechRailDesignTokens.Layout.creatorDubbingSheetWidth,
+            height: SpeechRailDesignTokens.Layout.creatorDubbingSheetHeight
+        )
+        .task {
+            model.startDubbingProject(for: work)
+        }
+        .onDisappear {
+            // 关闭弹层即结束这个项目：在途重做的落地结果不会写进下一个项目。
+            model.closeDubbingProject()
+        }
+        .onChange(of: model.dubbingExportBundle) { _, bundle in
+            guard bundle != nil else { return }
+            chooseExportDirectory()
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text("段落返修")
+                .font(SpeechRailDesignTokens.Typography.title3)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Text(subtitle)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var subtitle: String {
+        return "只重做你点的那一段，其余段落保持原样。成品由被采用的段落按顺序拼成，"
+            + "正文只包含这些段落，\(model.dubbingProjectVoice.text)。"
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let project = model.dubbingProject {
+            ScrollView {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    ForEach(Array(project.segments.enumerated()), id: \.element.id) {
+                        index, segment in
+                        segmentCard(segment, index: index)
+                    }
+                }
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            }
+        } else {
+            ContentUnavailableView(
+                "无法按段落返修",
+                systemImage: "exclamationmark.triangle",
+                description: Text(model.dubbingMessage ?? "请稍后重试。")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func segmentCard(_ segment: DubbingSegment, index: Int) -> some View {
+        let candidates = candidates(for: segment.id)
+        let isBusy = model.dubbingBusySegmentID == segment.id
+        let isAdopted = segment.acceptedCandidateID != nil
+        return CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("第 \(index + 1) 段")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer(minLength: 0)
+                    Text(isAdopted ? "已采用" : "尚未采用")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+
+                Text(segment.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if isBusy {
+                        Button("取消重做") {
+                            model.cancelDubbingSegmentRedo()
+                        }
+                        .speechRailButton(.secondary)
+                    } else {
+                        Button("重做这一段") {
+                            model.startDubbingSegmentRedo(segment.id)
+                        }
+                        .speechRailButton(.primary)
+                        .disabled(model.dubbingBusySegmentID != nil)
+                    }
+
+                    if isAdopted {
+                        Button("撤销采用") {
+                            model.undoDubbingAdoption(inSegment: segment.id)
+                        }
+                        .speechRailButton(.secondary)
+                        .disabled(isBusy)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if !candidates.isEmpty {
+                    DisclosureGroup("候选版本 \(candidates.count) 个") {
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            ForEach(candidates.reversed()) { candidate in
+                                candidateRow(candidate, segmentID: segment.id)
+                            }
+                        }
+                        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                    }
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+                }
+            }
+        }
+    }
+
+    private func candidateRow(_ candidate: DubbingCandidate, segmentID: String) -> some View {
+        let isCurrent = model.dubbingProject?.segments
+            .first { $0.id == segmentID }?.acceptedCandidateID == candidate.id
+        let isPlaying = model.playingDubbingCandidateID == candidate.id
+        return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Button {
+                model.playDubbingCandidate(candidate)
+            } label: {
+                RowActionGlyph(isPlaying ? .stop : .play)
+            }
+            .speechRailButton(.quiet)
+            .accessibilityLabel(isPlaying ? "停止试听" : "试听这个候选")
+
+            Text(candidate.createdAt.formatted(date: .omitted, time: .shortened))
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .monospacedDigit()
+
+            Text(candidate.provenance.state == .verified ? "追溯完整" : "追溯不完整")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            Spacer(minLength: 0)
+
+            if isCurrent {
+                Text("当前版本")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            } else {
+                Button("采用") {
+                    model.adoptDubbingCandidate(candidate)
+                }
+                .speechRailButton(.secondary)
+            }
+        }
+    }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            if let message = model.dubbingMessage {
+                Text(message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button("导出成品…") {
+                    model.prepareDubbingExport()
+                }
+                .speechRailButton(.primary)
+                .disabled(model.dubbingProject == nil)
+
+                Spacer(minLength: 0)
+
+                Button("完成") {
+                    dismiss()
+                }
+                .speechRailButton(.secondary)
+            }
+        }
+    }
+
+    /// 成品是两份文件（音频 + 对应正文），所以先让用户选一个存放目录。
+    private func chooseExportDirectory() {
+        let panel = NSOpenPanel()
+        panel.title = "选择成品存放位置"
+        panel.prompt = "导出到这里"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let directory = panel.url else {
+            // 用户改主意了：清掉待导出内容，下次按需重新准备。
+            model.discardDubbingExport()
+            return
+        }
+        model.writeDubbingExport(to: directory)
+    }
+
+    private func candidates(for segmentID: String) -> [DubbingCandidate] {
+        model.dubbingCandidates
+            .filter { $0.segmentID == segmentID }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 }
