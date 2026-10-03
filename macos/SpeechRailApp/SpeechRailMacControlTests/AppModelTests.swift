@@ -3294,6 +3294,63 @@ extension AppModelTests {
         XCTAssertEqual(plain, "正常标题", "普通标题原样用作文件名")
     }
 
+    /// 导出写到一半失败时，必须照实说写到哪一步了。
+    ///
+    /// 音频与正文是一对：正文没落地时，目标目录里躺着的是一份**没有对应文案的
+    /// 成品**。此前无论失败发生在哪一步，文案都是「请确认目标位置可写」——
+    /// 而目标位置可能完全可写，只是正文那个路径被占了、或者磁盘在写第二份时满了。
+    /// 用户会被引导去检查一个没坏的目录。
+    func testExportSaysWhichHalfFailed() async throws {
+        let recipe = Self.dubbingRecipe(digest: "digest-1")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x84, frames: 1_200),
+            recipe: recipe,
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let work = try saveSourceWork(
+            into: works,
+            script: "只有一段。",
+            recipeDigest: "digest-1"
+        )
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let segment = try XCTUnwrap(project.segments.first)
+        model.startDubbingSegmentRedo(segment.id)
+        try await waitUntilDubbing {
+            model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
+        }
+        XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+        model.prepareDubbingExport()
+        let bundle = try XCTUnwrap(model.dubbingExportBundle)
+
+        let target = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-export-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: target) }
+        // 正文那个路径先被一个同名目录占住：写音频会成功，写正文必然失败。
+        try FileManager.default.createDirectory(
+            at: target.appendingPathComponent(bundle.scriptFileName, isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        XCTAssertFalse(model.writeDubbingExport(to: target))
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。",
+            "失败发生在第二步时必须说清楚音频已经落地了"
+        )
+        XCTAssertNotNil(
+            model.dubbingExportBundle,
+            "写了一半也要保留待导出内容，让用户可以换个位置重试"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: target.appendingPathComponent(bundle.audioFileName).path
+            ),
+            "音频确实已经落地——这正是文案要说清的事"
+        )
+    }
+
     /// 没有完整配方摘要的作品不能只重做一段：宁可拒绝，也不假装是同一次制作。
     func testSegmentRedoRefusedWhenRecipeDigestIsUnknown() async throws {
         let recipe = Self.dubbingRecipe(digest: nil)
