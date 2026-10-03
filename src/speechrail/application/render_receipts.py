@@ -121,6 +121,11 @@ class RenderReceiptRegistry:
                 ("voice_revision", recipe.voice_revision, voice_revision),
                 ("model_artifact", recipe.model_artifact, model_artifact),
                 (
+                    "model_artifact_revision",
+                    recipe.model_artifact_revision,
+                    model_catalog_revision,
+                ),
+                (
                     "engine_revision",
                     recipe.engine_revision,
                     model_runtime_revision,

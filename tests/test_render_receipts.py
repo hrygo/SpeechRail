@@ -220,6 +220,7 @@ def test_a_seed_policy_contradicting_the_observed_sampler_is_refused() -> None:
     [
         ("voice_id", "other-voice"),
         ("voice_revision", "vr_" + "f" * 32),
+        ("model_artifact_revision", "catalog-9"),
         ("engine_revision", "rt_" + "f" * 64),
         ("sample_rate", 16_000),
     ],
