@@ -323,6 +323,16 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 reason: "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
             )
         }
+        // 配方齐全只说明服务端描述执行过程的事实齐全，与「App 手里的这段音频就是
+        // 它渲染的那段」是两件事。没有音频摘要就没有任何可追溯的对象——此前
+        // `.verified` 甚至不需要 `audio.pcm_sha256`，于是一个未经校验的摘要会
+        // 跟着作品一起存下来（#188）。
+        //
+        // 注意这里只要求"存在"，不要求"已比对"：比对要在收到的字节上重新计算
+        // 摘要，涉及主线程开销与"verified"的语义边界，属独立决策（#189）。
+        guard receipt.pcmSHA256 != nil else {
+            return RenderProvenance(state: .partial, reason: "audio_digest_missing")
+        }
         return RenderProvenance(state: .verified, reason: nil)
     }
 
