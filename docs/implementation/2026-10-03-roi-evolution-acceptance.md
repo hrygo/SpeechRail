@@ -1,0 +1,170 @@
+---
+title: "SpeechRail 高 ROI 进化 — 实施结果与验收对照"
+status: implemented
+created: 2026-10-03
+reviewed_ref: be75055cc0a5f7f044ae56c955896812a1d69915
+plan: docs/implementation/2026-10-03-roi-evolution-luna-guide.md
+verification_date: 2026-10-03
+---
+
+# 实施结果与验收对照
+
+本文件对照 `2026-10-03-roi-evolution-luna-guide.md` 的八个工作包，逐条说明**实际改了什么**、
+**哪条命令证明它**、以及**哪些结论仍然没有证据**。只写已经跑过的结果；没有实测的一律留在
+"未验证"里，不因为测试全绿就往上抬。
+
+## 1. 工作包状态
+
+| 包 | 状态 | 主要落点 |
+|---|---|---|
+| A 作品库事务与恢复 | 已实施 | `CreativeWorkStore.swift`（journal、隔离区、启动恢复、同 ID 幂等） |
+| B1 服务端配方 | 已实施 | `domain/render_recipe.py`、`application/render_recipe.py`、`application/render_receipts.py` |
+| B2 执行侧采样事实 | 已实施 | `domain/tts_sampling.py`、`backends/qwen3_tts_worker.py`、`backends/qwen3_tts.py` |
+| B3 App/作品投影 | 已实施 | `ServiceContractTypes.swift`、`CreatorServiceClient.swift`、`ServiceAPIClient.swift` |
+| C 文档与事实对齐 | 已实施 | `docs/architecture/current-boundaries.md`、`scripts/check_current_boundaries_contract.py` |
+| D 段落重做与导出 | 已实施 | `DubbingProjectStore.swift`、`AppModel.swift`、`CreatorSurfaceViews.swift` |
+| E 提词器场景 | 确定性部分已实施 | `TeleprompterSessionLifecycleTests.swift` 等；真实设备与真实口播仍未验证 |
+| F 首次结果引导 | 已实施 | `FirstResultReadiness.swift`、`ServiceOverviewView.swift` |
+| G 跨接口一致 | 已实施 | `tests/test_interface_parity.py`、`AppModelTests.swift` |
+| H 职责与错误归属 | 已实施 | 段落返修的存储失败不再被当成创作服务失败（`AppModel.dubbingErrorMessage`） |
+
+## 2. 验收标准逐条对照
+
+### ① 保存、删除、改名与重启恢复
+
+`works.json` 的原子替换是唯一逻辑提交点；`.transactions/<txID>/journal.json` 记录中间态，
+`.recovery/<txID>/` 承接已提交但未完成的删除。启动、读、写都先过恢复。同 ID 同内容返回原
+记录，不同内容返回 `workConflict`。
+
+证明：`CreativeWorkStoreTests`（25 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+
+### ② 制作配方贯通
+
+REST 完整性回执产出 `plan_id` 与 `recipe`；`recipe` 在请求时缺少执行侧事实，因此先为
+`partial`，随后由两处迟到观察补齐：`model.engine_revision`（worker 身份）与
+`parameters.seed_policy` / `observed_sampling_parameters`（**本次实际使用的采样器**）。
+seed 只有真正下发到采样流才记为固定策略；运行时装不上确定性采样时如实记为
+`unseeded_sampler`，配方仍可为 `complete`，但不代表可重现。
+
+App 侧把配方投影成强类型快照随作品冻结，回执缺失时保留完整音频并把 `provenance` 标成
+`partial` / `unavailable`，老作品读作 `legacyUnknown`，不回填历史身份。
+
+证明：`tests/test_render_recipe.py`、`tests/test_render_receipts.py`、
+`tests/test_render_receipt_routes.py`、`tests/test_tts_sampling.py`、
+`tests/test_qwen3_tts_worker.py`、Swift `ServiceContractTests` / `CreativeWorkStoreTests`。
+
+App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着，本次补上三条并实测通过：
+
+- `testMissingReceiptKeepsTheFullAudioAndNeverInventsAnIdentity`：回执 404 时音频完整保留，
+  `provenance` 为 `.unavailable` / `receipt_unavailable`，`planID`、配方与摘要全为 nil；
+- `testPendingReceiptKeepsTheAudioAndNamesTheUnfinishedState`：回执 pending 时音频保留，
+  `provenance` 为 `.partial` / `receipt_status_pending`；
+- `testCompletedReceiptWithAPartialRecipeKeepsTheAudioAndWithholdsTheDigest`：终态但配方
+  partial 时保留已观察到的执行事实，摘要为 nil，并断言缺失字段。
+
+### ③ 段落修改、采用/撤销与导出
+
+项目持有完整配方；候选只有在配方摘要与段落文本都一致时才可采用。段落边界只来自文稿
+（先按换行、再按句末标点、最后按字数），**不产生任何时间戳**，因此也不生成伪字幕。导出
+音频只由被采用的候选按顺序拼接（重写 WAV header，不做 crossfade、不用静音补时长），
+正文只包含这些段落；只要有一段没采用版本就拒绝导出。
+
+App 的「段落返修…」入口在作品详情动作区；重做、采用、撤销、导出在弹层首屏，候选版本收在
+每段的展开区；导出经 `NSOpenPanel` 选目录后写出 WAV + TXT 两份文件。
+
+证明：`DubbingProjectStoreTests`（14）、`DubbingSegmentPlannerTests`（4）、
+`AppModelTests` 中 5 条 D 用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
+
+### ④ 提词器场景
+
+停顿、重读、脱稿、回稿、掉线、手动接管六个场景在**一次运行**里串跑，验证状态不互相污染：
+证据不足时不前进、脱稿不推进、读到下一段才推进、重读不甩到后面、掉线释放占用并保留用户
+位置、接管后迟到事件不再移动位置、关闭后连接与采集各只释放一次。
+
+证明：`TeleprompterSessionLifecycleTests.oneReadingRunKeepsPositionHonestAcrossEveryScenario`；
+各场景的单点回归见 `TeleprompterFollowControllerTests`（44）与
+`TeleprompterReplayEvaluatorTests`（32）。
+
+**未验证**：真实口播录音、蓝牙/USB 拔插重连、长时间运行。这些需要设备与真实模型授权。
+
+### ⑤ 首次结果、升级恢复与跨接口一致
+
+`FirstResultReadiness` 是一份只读投影：每一步只有在有**正面证据**时才算满足，
+`/readyz=200` 不构成任何一步的完成；"还没读到"与"已确认缺失"分开呈现。它不安装、不下载、
+不改配置，缺口直接给出"去处理"的目标页。
+
+跨接口一致由共享拒绝表证明：REST 与 MCP 打同一个 app 实例，7 组样例（空文稿、空音色、
+未知音色、越界语速、未知输出格式、未知校验策略、过期音色 revision）必须在同一事实上被拒绝，
+且都不得触达合成器；合法请求则两个入口都渲染。App 侧在发出请求之前拒绝同一批无效渲染，
+不留下任何"待保存"残留。
+
+**未验证**：升级失败的端到端恢复需要真实安装/回滚授权（见 `.agents/skills/speechrail-release`）。
+本次只交付 App 侧"服务不可达时如实说明缺口"的行为。
+
+### ⑥ 定向测试、契约、构建与文档
+
+见第 3 节的命令与结果。`docs/users/api-contract.md` 已补齐采样事实的语义（含
+`unseeded_sampler` 也可以是 complete）。
+
+## 3. 本次验证结果（2026-10-03）
+
+```text
+swift test --package-path macos/SpeechRailApp --skip-update
+  → 489 XCTest + 379 swift-testing，0 失败
+
+uv run --no-sync --extra dev pytest <14 个定向文件> -q --no-cov
+  → 170 passed
+
+uv run --no-sync --extra dev ruff check src/speechrail tests
+  → All checks passed!
+
+uv run --no-sync python scripts/check_openapi_contract.py       → OK
+uv run --no-sync python scripts/check_user_doc_contract.py       → OK
+uv run --no-sync python scripts/check_version_consistency.py     → OK
+uv run --no-sync python scripts/check_current_boundaries_contract.py → OK
+uv run --no-sync mypy src/speechrail                               → Success, 158 files
+scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCEEDED
+```
+
+`mypy` 2.3.1 已离线安装并通过（158 个文件无问题）。Debug 构建同时修掉了
+`project.pbxproj` 中 `DubbingProjectStore.swift` 在两个 sources phase 的重复条目，
+重建后不再出现 `Skipping duplicate build file` 警告。
+
+补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3103 passed, 1 skipped
+（`--collect-only` 计得 3104 项，运行 exit=0）。
+
+以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
+
+### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」
+
+App 目前能读到服务事实只有 `service_instance_epoch` 与 `catalog_revision`；
+按契约，**服务不暴露自己的 release 版本**，因此 App 无法区分「升级失败并回退到上一
+ runtime」与「正常重启」。用 epoch 变化去推断就属于伪造未知身份，因此没有这样实现。
+
+方案 F 的完成条件是「失败保留旧 runtime/selection，恢复后完成首条真实结果；产品不以
+readyz 200 结束」，由 `FirstResultReadiness` 达成。若要让 App **显式提示**「刚才的升级失败并
+已回退」，需要在能力快照里新增一个服务自报版本字段并同步契约、测试与文档——这属于公共接口
+变更，需要单独授权后再做。
+
+## 4. 数据格式、迁移与回退
+
+- `works.json` 数组格式未变；旧记录缺 `provenance` 时读作 `legacyUnknown`，不补写磁盘。
+- `projects.json`（配音项目）是**新文件**，删掉它只影响段落返修，不影响作品库。
+- `recipe` 为新增可选字段。写入后不要把运行中的旧 App 当作安全回退：旧 App 读得懂未知字段，
+  但在改名重写索引时可能丢掉它们。需要回退时先备份 `~/Library/Application Support/SpeechRail/`。
+- 删除作品的音频进入 `.recovery/`，不自动清理；需要时由用户显式处理。
+
+## 5. 未验证与风险
+
+1. 真实模型音质、真实音色一致性、长时间运行稳定性：全部未验证。
+2. 设备掉线/重连与真实口播的听审：未验证（确定性回归只覆盖状态机）。
+3. 安装、升级、回滚与发布：未执行，需专项授权。
+4. UI 自动化与截图核对：未执行（需逐次授权）。
+5. 段落拼接的响度与韵律是否自然，只能靠听审；本轮只保证"导出的音频就是被采用的样本，
+   按顺序拼接"。
+6. `seed_policy=unseeded_sampler` 的渲染不可逐位重现；不得据此承诺复用或缓存。
+
+## 6. 并行改动与提交状态
+
+全部改动位于分支 `codex/roi-evolution`，以 PR 形式提交（基线 `be75055`）；未合并、未发布、
+未改动任何运行态。主分支工作区在实现期间未被触碰。
