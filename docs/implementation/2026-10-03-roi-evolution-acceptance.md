@@ -185,13 +185,13 @@ scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCE
 `project.pbxproj` 中 `DubbingProjectStore.swift` 在两个 sources phase 的重复条目，
 重建后不再出现 `Skipping duplicate build file` 警告。
 
-补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3128 passed, 1 skipped
-（`--collect-only` 计得 3129 项，运行 exit=0）。
+补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3138 passed, 1 skipped
+（运行 exit=0）。
 
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
-2026-10-04 补跑 `pytest tests/` 全量与上列定向文件：Python 数字按上表更新；
-Swift 侧同日改动 `ServiceAPIClient.provenance(for:)`，已重跑并按上表更新。
-构建、契约脚本与 mypy 当日未重跑，沿用 2026-10-03 的记录。
+2026-10-04 改动集中在 `ServiceAPIClient.provenance(for:)`、`FirstResultReadiness` 相关用例与
+采样/配方测试，上列 Swift、pytest、ruff 与四个契约脚本、mypy 命令已全部重跑并按上表更新。
+`scripts/macos_app_build.sh` 当日未重跑，沿用 2026-10-03 的记录。
 
 ### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」
 
