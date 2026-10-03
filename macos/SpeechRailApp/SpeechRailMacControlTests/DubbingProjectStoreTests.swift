@@ -352,15 +352,43 @@ final class DubbingProjectStoreTests: XCTestCase {
         let store = DubbingProjectStore(directory: directory)
         let project = makeProject()
         try store.save(project)
-        let first = try store.addCandidate(
-            makeCandidate(id: "cand_a", segmentID: "seg_first", text: "第一段。"),
-            audioData: wav(0x11),
-            toProject: project.id
-        )
-        try store.adopt(candidateID: first.id, inSegment: "seg_first", ofProject: project.id)
 
-        // 项目配方变了：旧候选不再代表当前制作条件。
-        try store.save(makeProject(recipeDigest: "b"))
+        // 两段都必须有被采用的候选。否则「导出返回 nil」可能只是因为有一段根本没采用，
+        // 配方变化这条真正要考的原因就被掩盖掉了。
+        for (candidateID, segmentID, text) in [
+            ("cand_a", "seg_first", "第一段。"),
+            ("cand_b", "seg_second", "第二段。"),
+        ] {
+            let candidate = try store.addCandidate(
+                makeCandidate(id: candidateID, segmentID: segmentID, text: text),
+                audioData: wav(0x11),
+                toProject: project.id
+            )
+            try store.adopt(
+                candidateID: candidate.id,
+                inSegment: segmentID,
+                ofProject: project.id
+            )
+        }
+
+        // 先钉住「条件齐备时确实导得出」。少了这一步，后面那个 nil 什么都证明不了。
+        XCTAssertNotNil(try store.export(projectID: project.id))
+
+        // 项目配方变了，但已采用的候选原样保留——这才是本用例要考的场景。
+        // 这里不能用 makeProject(recipeDigest: "b")：save 会整体替换 project，
+        // 新构造出来的段落 acceptedCandidateID 全是 nil，导出会因为「没有采用任何候选」
+        // 而返回 nil，于是配方变化这条原因依然被掩盖。
+        let adopted = try XCTUnwrap(store.list().first { $0.id == project.id })
+        try store.save(
+            DubbingProject(
+                id: adopted.id,
+                title: adopted.title,
+                scriptText: adopted.scriptText,
+                recipe: provenance(digest: "b"),
+                segments: adopted.segments,
+                createdAt: adopted.createdAt
+            )
+        )
 
         XCTAssertNil(try store.export(projectID: project.id))
     }
