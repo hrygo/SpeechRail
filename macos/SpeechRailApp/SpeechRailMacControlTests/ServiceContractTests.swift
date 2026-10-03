@@ -764,6 +764,63 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    /// `state`、`digest`、`missing_fields` 三者任意两个不一致都不是可信的渲染。
+    ///
+    /// 上一个用例只钉住了「`state` 与 `missing_fields` 互相矛盾」这一个方向。
+    /// 另两个方向——自称 `partial` 却列不出任何缺失项、以及自称 `complete`
+    /// 却没有 `digest`——此前没有任何用例走到，于是把 `state` 与 `digest`
+    /// 两个守卫分别去掉，全部测试仍然全绿。
+    func testEveryDisagreementBetweenTheServersOwnSignalsIsPartial() throws {
+        func receipt(recipe: String) throws -> RenderReceipt {
+            try decodeReceipt("""
+            {
+              "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+              "request_id": "req-1",
+              "status": "completed",
+              "voice": {},
+              "model": {},
+              "audio": {
+                "pcm_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              },
+              "recipe": \(recipe),
+              "error_code": null,
+              "created_at": 1,
+              "completed_at": 2
+            }
+            """)
+        }
+
+        // 自称 partial，却一项缺失都列不出来——被 state 拦下。
+        let partialWithNoMissing = try receipt(recipe: """
+        {
+          "schema_version": "render_recipe_v1",
+          "state": "partial",
+          "missing_fields": [],
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+        """)
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: partialWithNoMissing),
+            RenderProvenance(state: .partial, reason: "recipe_state_partial"),
+            "自称 partial 又列不出缺失项时，理由要指向 state 本身"
+        )
+
+        // 自称 complete，缺失清单也空，却没有摘要——被 digest 拦下。
+        let completeWithoutDigest = try receipt(recipe: """
+        {
+          "schema_version": "render_recipe_v1",
+          "state": "complete",
+          "missing_fields": [],
+          "digest": null
+        }
+        """)
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: completeWithoutDigest),
+            RenderProvenance(state: .partial, reason: "recipe_digest_missing"),
+            "自称 complete 却没有摘要时，不得显示为追溯完整"
+        )
+    }
+
     /// 相等关系必须覆盖这一版认识的每一个事实。
     ///
     /// 少比一个字段，后果不是「判得更松」而是「判错」：改了发音词典、
