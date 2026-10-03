@@ -1,3 +1,5 @@
+import asyncio
+import dataclasses
 from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 
@@ -7,7 +9,11 @@ from fastapi.testclient import TestClient
 
 import speechrail.http.routes.audio as audio_module
 from speechrail.app import create_app
-from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.application.services import (
+    AppOverrides,
+    AppServices,
+    build_app_services,
+)
 from speechrail.config import Settings
 from speechrail.domain.alignment import (
     AlignmentRequest,
@@ -19,6 +25,7 @@ from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import TranscriptionRequest
 from speechrail.http.errors import RequestIdMiddleware
 from speechrail.http.routes.audio import create_audio_router
+from speechrail.runtime.alignment_admission import AlignmentAdmission
 from speechrail.runtime.asr_mode import AsrModeBusy
 
 
@@ -38,18 +45,33 @@ def _backend(
     return result()
 
 
-def _client(*, transcribe=_backend, text_aligner=None) -> TestClient:
-    settings = Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None)
-    if text_aligner is None and transcribe is _backend:
-        return TestClient(create_app(settings, transcribe=_backend))
-    services = build_app_services(
+def _services(*, transcribe=_backend, text_aligner=None, **overrides) -> AppServices:
+    settings = Settings(
+        max_upload_bytes=8,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        **overrides,
+    )
+    return build_app_services(
         settings,
         AppOverrides(transcribe=transcribe, text_aligner=text_aligner),
     )
+
+
+def _client_for(services: AppServices) -> TestClient:
     app = FastAPI()
     app.add_middleware(RequestIdMiddleware)
     app.include_router(create_audio_router(services))
     return TestClient(app)
+
+
+def _client(*, transcribe=_backend, text_aligner=None, **overrides) -> TestClient:
+    if text_aligner is None and transcribe is _backend and not overrides:
+        settings = Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None)
+        return TestClient(create_app(settings, transcribe=_backend))
+    return _client_for(
+        _services(transcribe=transcribe, text_aligner=text_aligner, **overrides)
+    )
 
 
 def test_transcription_formats_results_from_one_domain_result() -> None:
@@ -125,6 +147,82 @@ def test_verbose_json_timeline_comes_from_the_aligner_not_the_asr_decode() -> No
     assert payload["segments"][0]["start"] == 0
     # One pass per requested granularity, both addressed to the aligner owner.
     assert sorted(request.granularity for request in aligner.requests) == ["segment", "word"]
+
+
+class _TimeoutAligner:
+    """Stand in for an aligner whose worker exchange timed out."""
+
+    def __init__(self) -> None:
+        self.requests: list[AlignmentRequest] = []
+
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        self.requests.append(request)
+        raise TimeoutError("alignment worker exchange timed out")
+
+
+class _SlowAligner:
+    """Stand in for an aligner that outlives the request deadline."""
+
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        await asyncio.sleep(self._delay)
+        raise AssertionError("the deadline should have cancelled this aligner")
+
+
+def _verbose_json(client: TestClient) -> object:
+    return client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"response_format": "verbose_json"},
+    )
+
+
+def test_aligner_timeout_is_a_stable_retryable_backend_timeout() -> None:
+    """A worker exchange timeout must not escape as an opaque 500."""
+
+    response = _verbose_json(_client(text_aligner=_TimeoutAligner()))
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["X-Request-ID"]
+    assert response.json()["error"]["code"] == "backend_timeout"
+    assert response.json()["error"]["retryable"] is True
+
+
+def test_alignment_shares_the_request_deadline_instead_of_restarting_it() -> None:
+    """Post-processing continues the inference budget; it never gets a new one."""
+
+    response = _verbose_json(
+        _client(text_aligner=_SlowAligner(5), request_timeout_seconds=0.05)
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_timeout"
+
+
+def test_alignment_admission_full_returns_backend_busy() -> None:
+    """The aligner owner is process-local admitted, not queued behind itself."""
+
+    services = _services(text_aligner=_FakeAligner())
+    admitted = dataclasses.replace(
+        services, alignment_admission=AlignmentAdmission(limit=1)
+    )
+    client = _client_for(admitted)
+
+    async def scenario() -> object:
+        async with admitted.alignment_admission.reserve():
+            return await asyncio.to_thread(
+                _verbose_json,
+                client,
+            )
+
+    response = asyncio.run(scenario())
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "backend_busy"
+    assert response.json()["error"]["retryable"] is True
 
 
 def test_transcription_never_asks_the_asr_owner_for_timestamps() -> None:
@@ -365,7 +463,7 @@ def test_transcription_rejects_stream_and_chunking_strategy() -> None:
         data={"model": "speechrail/qwen3-asr-1.7b", "stream": "true"},
         files={"file": ("clip.wav", b"1234", "audio/wav")},
     )
-    assert streamed.status_code == 422
+    assert streamed.status_code == 400
     assert streamed.json()["error"]["code"] == "stream_unsupported"
 
     chunked = client.post(
@@ -376,7 +474,7 @@ def test_transcription_rejects_stream_and_chunking_strategy() -> None:
         },
         files={"file": ("clip.wav", b"1234", "audio/wav")},
     )
-    assert chunked.status_code == 422
+    assert chunked.status_code == 400
     assert chunked.json()["error"]["code"] == "chunking_strategy_unsupported"
 
 
@@ -451,7 +549,7 @@ def test_speech_rejects_unsupported_instructions_and_other_stream_format() -> No
             "stream_format": "sse",
         },
     )
-    assert bad.status_code == 422
+    assert bad.status_code == 400
     assert bad.json()["error"]["code"] == "stream_format_unsupported"
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from openai import OpenAI, UnprocessableEntityError
+from openai import BadRequestError, OpenAI
 
 from test_openai_diarized_batch import FakeDiarizationEngine, _client, _pcm16_wav
 
@@ -77,7 +77,7 @@ def test_native_diarized_sdk_rejects_known_speaker_references() -> None:
     app_client = _client(diarization_engine=FakeDiarizationEngine())
     sdk = _sdk_client(app_client)
     try:
-        with pytest.raises(UnprocessableEntityError) as excinfo:
+        with pytest.raises(BadRequestError) as excinfo:
             sdk.audio.transcriptions.create(
                 model="gpt-4o-transcribe-diarize",
                 file=("clip.wav", _pcm16_wav(2), "audio/wav"),
@@ -118,3 +118,9 @@ def test_native_diarized_sdk_stream_uses_standard_sse_events() -> None:
     segments = [event for event in events if event.type == "transcript.text.segment"]
     done = events[-1]
     assert "".join(event.text for event in segments) == done.text
+    # A diarized consumer reassembles the transcript by following each delta to
+    # the segment it belongs to; without the association the stream is unusable
+    # even though every event arrives in the right order.
+    deltas = [event for event in events if event.type == "transcript.text.delta"]
+    assert [event.segment_id for event in deltas] == [event.id for event in segments]
+    assert len({event.segment_id for event in deltas}) == 2

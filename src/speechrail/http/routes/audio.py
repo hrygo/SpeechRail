@@ -82,6 +82,7 @@ from speechrail.http.formatters import (
     format_vtt,
 )
 from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
@@ -846,7 +847,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if stream and not diarization_requested:
             return error_response(
-                422,
+                400,
                 request_id,
                 "stream_unsupported",
                 "SpeechRail does not support streaming file transcription",
@@ -854,7 +855,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if chunking_strategy is not None and not diarization_requested:
             return error_response(
-                422,
+                400,
                 request_id,
                 "chunking_strategy_unsupported",
                 "SpeechRail transcribes whole files without chunking",
@@ -875,7 +876,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         ]
         if diarization_requested and (known_speaker_names or known_speaker_references):
             return error_response(
-                422,
+                400,
                 request_id,
                 "unsupported_parameter",
                 "known speaker references are not supported by this anonymous diarization service",
@@ -1059,6 +1060,13 @@ def create_audio_router(services: AppServices) -> APIRouter:
 
         try:
             _t0 = _time.monotonic()
+            # One absolute deadline covers decode admission, the ASR decode and
+            # every post-processing pass derived from it.  Timestamps and
+            # speakers are add-ons over the frozen transcript, so they continue
+            # this budget instead of starting a second one.
+            expires_at = (
+                asyncio.get_running_loop().time() + resolved.request_timeout_seconds
+            )
             # Batch REST work flows through the governor so the realtime
             # reservation cannot be starved by concurrent uploads.
             result = await services.governor.run(
@@ -1175,13 +1183,35 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     retryable=False,
                 )
             try:
-                result = await align_transcript_timeline(
-                    aligner=text_aligner,
-                    pcm16=bytes(retained_audio),
-                    result=result,
-                    utterance_id=request_id,
-                    granularities=requested_granularities,
+                async with services.alignment_admission.reserve():
+                    result = await await_until(
+                        align_transcript_timeline(
+                            aligner=text_aligner,
+                            pcm16=bytes(retained_audio),
+                            result=result,
+                            utterance_id=request_id,
+                            granularities=requested_granularities,
+                        ),
+                        expires_at,
+                    )
+            except TimeoutError:
+                return error_response(
+                    503,
+                    request_id,
+                    "backend_timeout",
+                    "Inference timed out",
+                    retryable=True,
                 )
+            except AlignmentAdmissionFullError as exc:
+                response = error_response(
+                    429,
+                    request_id,
+                    "backend_busy",
+                    "another alignment session is active",
+                    retryable=True,
+                )
+                response.headers["SpeechRail-Busy-Reason"] = str(exc)
+                return response
             except TranscriptAlignmentError as exc:
                 return error_response(
                     502,
@@ -1195,14 +1225,25 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 assert diarization_engine is not None
                 assert text_aligner is not None
                 async with services.diarization_admission.reserve():
-                    result = await diarize_transcript(
-                        activity_port=diarization_engine,
-                        aligner=text_aligner,
-                        audio=bytes(retained_audio),
-                        result=result,
-                        epoch=f"batch-{request_id}",
-                        new_unit_id=lambda index: f"segment-{index}",
+                    result = await await_until(
+                        diarize_transcript(
+                            activity_port=diarization_engine,
+                            aligner=text_aligner,
+                            audio=bytes(retained_audio),
+                            result=result,
+                            epoch=f"batch-{request_id}",
+                            new_unit_id=lambda index: f"segment-{index}",
+                        ),
+                        expires_at,
                     )
+            except TimeoutError:
+                return error_response(
+                    503,
+                    request_id,
+                    "backend_timeout",
+                    "Inference timed out",
+                    retryable=True,
+                )
             except DiarizationAdmissionFullError as exc:
                 response = error_response(
                     429,
@@ -1246,6 +1287,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         delta = {
                             "type": "transcript.text.delta",
                             "delta": segment["text"],
+                            # A diarized consumer reassembles the transcript by
+                            # following each delta to the segment it belongs to.
+                            # Without this the stream carries the text but not
+                            # the association, which is the whole point of
+                            # diarization.
+                            "segment_id": segment["id"],
                         }
                         yield f"data: {json.dumps(delta, ensure_ascii=False)}\n\n".encode()
                         yield f"data: {json.dumps(segment, ensure_ascii=False)}\n\n".encode()
@@ -1767,7 +1814,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if body.stream_format not in (None, "audio"):
             return error_response(
-                422,
+                400,
                 request_id,
                 "stream_format_unsupported",
                 "SpeechRail returns a complete audio body; stream_format is not supported",
