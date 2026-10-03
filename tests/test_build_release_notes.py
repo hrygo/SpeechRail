@@ -88,6 +88,58 @@ def test_first_release_has_no_compare_link() -> None:
     assert "**Full Changelog**" not in body
 
 
+def test_unpublished_versions_are_included_until_the_previous_published_release() -> None:
+    changelog = _CHANGELOG + "\n## [3.3.0] - 2026-09-27\n\n- 已发布条目。\n"
+    body = _module.render_release_notes(
+        version="3.3.2",
+        changelog=changelog,
+        repository="acme/rail",
+        published_tags={"v3.3.2", "v3.3.0"},
+    )
+
+    assert "修复甲" in body
+    assert "## [3.3.1]" in body
+    assert "修复丙" in body
+    assert "已发布条目" not in body
+    assert "compare/v3.3.0...v3.3.2" in body
+    assert "compare/v3.3.1" not in body
+
+
+def test_no_published_base_includes_all_entries_without_a_compare_link() -> None:
+    body = _module.render_release_notes(
+        version="3.3.2", changelog=_CHANGELOG, published_tags=set()
+    )
+
+    assert "修复丙" in body
+    assert "**Full Changelog**" not in body
+
+
+def test_cli_reads_the_published_tags_file(tmp_path: Path, capsys) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(_CHANGELOG, encoding="utf-8")
+    tags = tmp_path / "tags.txt"
+    tags.write_text("v3.3.1\n", encoding="utf-8")
+
+    assert _module.main(
+        [
+            "--version", "3.3.2", "--changelog", str(changelog),
+            "--repository", "acme/rail", "--published-tags", str(tags),
+        ]
+    ) == 0
+    body = capsys.readouterr().out
+    assert "修复丙" not in body
+    assert "compare/v3.3.1...v3.3.2" in body
+
+
+def test_missing_published_tags_file_fails_closed(tmp_path: Path) -> None:
+    assert _module.main(
+        [
+            "--version", "3.3.2",
+            "--published-tags", str(tmp_path / "missing-tags.txt"),
+        ]
+    ) == 1
+
+
 def test_manual_link_is_relative_without_a_repository() -> None:
     body = _render("3.3.2", repository=None)
 
