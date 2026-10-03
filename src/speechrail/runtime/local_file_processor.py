@@ -20,8 +20,13 @@ from urllib.request import url2pathname
 
 from fastapi import UploadFile
 
+from speechrail.application.alignment import (
+    TranscriptAlignmentError,
+    align_transcript_timeline,
+)
 from speechrail.application.diarization import diarize_transcript
 from speechrail.application.tts_admission import tts_resource_key
+from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.application.voice_validation_gate import prepare_validated_speech
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.diarization import DiarizationError
@@ -42,6 +47,10 @@ from speechrail.domain.tts import (
 from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
 from speechrail.domain.tts_request import ValidationPolicy, normalize_tts_language
 from speechrail.domain.voice_validation import VoiceValidationArtifact
+from speechrail.runtime.alignment_admission import (
+    AlignmentAdmission,
+    AlignmentAdmissionFullError,
+)
 from speechrail.runtime.diarization_admission import (
     DiarizationAdmission,
     DiarizationAdmissionFullError,
@@ -92,6 +101,7 @@ class LocalFileJobProcessor:
         diarization_engine: StreamingActivityPort | None = None,
         text_aligner: AlignTextPort | None = None,
         diarization_admission: DiarizationAdmission | None = None,
+        alignment_admission: AlignmentAdmission | None = None,
     ) -> None:
         if not spool_dir.is_absolute():
             raise ValueError("job spool directory must be absolute")
@@ -113,6 +123,7 @@ class LocalFileJobProcessor:
         self._diarization_engine = diarization_engine
         self._text_aligner = text_aligner
         self._diarization_admission = diarization_admission or DiarizationAdmission()
+        self._alignment_admission = alignment_admission or AlignmentAdmission()
 
     def resource_key_for_job(self, job: JobRecord) -> str | None:
         """Return the TTS worker lane for a durable speech job when it is known."""
@@ -180,10 +191,18 @@ class LocalFileJobProcessor:
         if transcriber is None:
             raise JobProcessingError("job_backend_not_ready")
         diarize = params.get("diarize") is True
+        timestamps = bool(params.get("timestamps", False))
         # Fail closed before decoding and transcribing: an unavailable
         # capability must not burn a full ASR pass only to reject the job.
         if diarize and (self._diarization_engine is None or self._text_aligner is None):
             raise JobProcessingError("diarization_not_available")
+        # Qwen3-ASR resolves an implicit aligner repository the moment it is
+        # asked for native timestamps, which cannot resolve under the managed
+        # offline environment.  Timestamps therefore come from the independent
+        # fixed-text aligner over the frozen transcript, exactly as the REST
+        # batch route does it, and its absence is refused before any inference.
+        if timestamps and not diarize and self._text_aligner is None:
+            raise JobProcessingError("timestamp_alignment_unavailable")
         pcm = await self._decode_audio(input_path)
         try:
             request = TranscriptionRequest(
@@ -191,7 +210,7 @@ class LocalFileJobProcessor:
                 audio=pcm,
                 language=_optional_str(params.get("language")),
                 prompt=_optional_str(params.get("prompt")) or "",
-                include_timestamps=bool(params.get("timestamps", False)),
+                include_timestamps=False,
             )
         except ValueError:
             raise JobProcessingError("job_input_invalid") from None
@@ -213,6 +232,23 @@ class LocalFileJobProcessor:
                 raise JobProcessingError("backend_busy") from None
             except DiarizationError as exc:
                 raise JobProcessingError(exc.code or "diarization_unresolved") from None
+        elif timestamps:
+            # Diarization already derives its own segment timeline from the
+            # same aligner, so a combined job must not pay for a second pass.
+            assert self._text_aligner is not None
+            try:
+                async with self._alignment_admission.reserve():
+                    result = await align_transcript_timeline(
+                        aligner=self._text_aligner,
+                        pcm16=pcm,
+                        result=result,
+                        utterance_id=job.id,
+                        granularities=frozenset({"segment"}),
+                    )
+            except AlignmentAdmissionFullError:
+                raise JobProcessingError("backend_busy") from None
+            except TranscriptAlignmentError as exc:
+                raise JobProcessingError(exc.code) from None
         payload = {
             "text": result.text,
             "language": result.language,
@@ -286,7 +322,11 @@ class LocalFileJobProcessor:
             raise JobProcessingError("job_input_invalid") from None
         pcm = bytearray()
         try:
-            async for chunk in synthesizer.synthesize(request):
+            # The job path validates the stream exactly like the REST delivery
+            # path: one response ID, indices from zero, even PCM16 bytes.  A
+            # backend that breaks the contract must fail the job rather than
+            # spool a plausible-looking artifact.
+            async for chunk in iter_validated_audio(synthesizer.synthesize(request)):
                 pcm.extend(chunk.audio)
                 if len(pcm) > _MAX_ARTIFACT_BYTES:
                     raise JobProcessingError("job_input_too_large")
@@ -295,6 +335,8 @@ class LocalFileJobProcessor:
                 raise JobProcessingError("job_input_invalid") from None
             if exc.public_code in _STRICT_VOICE_VALIDATION_ERROR_CODES:
                 raise JobProcessingError(exc.public_code) from None
+            raise JobProcessingError("job_processor_failed") from None
+        except TTSDeliveryError:
             raise JobProcessingError("job_processor_failed") from None
         if not pcm:
             raise JobProcessingError("job_processor_failed")

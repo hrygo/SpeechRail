@@ -787,6 +787,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         text_aligner = FixedTextAligner(alignment_worker)
 
     diarization_admission = DiarizationAdmission()
+    # One alignment owner is admitted process-wide: the REST batch route and the
+    # durable job processor contend for the same local aligner, so they must not
+    # each hold an independent budget.
+    alignment_admission = AlignmentAdmission()
     job_active_tts = active_model_catalog(settings)
     job_clone_artifact = job_active_tts.tts_clone
     job_tts_spec = job_active_tts.tts_spec
@@ -816,6 +820,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 diarization_engine=diarization_engine,
                 text_aligner=text_aligner,
                 diarization_admission=diarization_admission,
+                alignment_admission=alignment_admission,
             )
         job_runner = JobRunner(
             repository=job_repository,
@@ -905,6 +910,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         lifecycle=lifecycle,
         text_aligner=text_aligner,
         diarization_admission=diarization_admission,
+        alignment_admission=alignment_admission,
         metrics=metrics,
         render_receipts=render_receipts,
         tts_streams=tts_streams,
