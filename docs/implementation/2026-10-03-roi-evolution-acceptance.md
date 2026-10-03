@@ -21,7 +21,7 @@ verification_date: 2026-10-03
 | B1 服务端配方 | 已实施 | `domain/render_recipe.py`、`application/render_recipe.py`、`application/render_receipts.py` |
 | B2 执行侧采样事实 | 已实施 | `domain/tts_sampling.py`、`backends/qwen3_tts_worker.py`、`backends/qwen3_tts.py` |
 | B3 App/作品投影 | 已实施（两项要求未交付，见 #191 #189） | `ServiceContractTypes.swift`、`CreatorServiceClient.swift`、`ServiceAPIClient.swift` |
-| C 文档与事实对齐 | 已实施 | `docs/architecture/current-boundaries.md`、`scripts/check_current_boundaries_contract.py` |
+| C 文档与事实对齐 | 已实施（门禁只覆盖 current-boundaries，api-contract 侧未扩，见 #192） | `docs/architecture/current-boundaries.md`、`scripts/check_current_boundaries_contract.py`、`docs/users/api-contract.md`、`contracts/openapi.yaml` |
 | D 段落重做与导出 | 已实施 | `DubbingProjectStore.swift`、`AppModel.swift`、`CreatorSurfaceViews.swift` |
 | E 提词器场景 | 确定性部分已实施 | `TeleprompterSessionLifecycleTests.swift` 等；真实设备与真实口播仍未验证 |
 | F 首次结果引导 | 已实施 | `FirstResultReadiness.swift`、`ServiceOverviewView.swift` |
@@ -277,6 +277,23 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 见第 3 节的命令与结果。`docs/users/api-contract.md` 已补齐采样事实的语义（含
 `unseeded_sampler` 也可以是 complete）。
+
+**未交付：这些新字段没有语义门禁。** 方案 §5 C2 的范围包含 `api-contract.md` 与
+`check_user_doc_contract.py`，第 5 条要求「读取 parser 能校验的契约字段，并用坏文档
+fixture 证明它会失败」。实际只扩展了 `check_current_boundaries_contract.py`：
+
+```
+grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
+  scripts/check_openapi_contract.py scripts/check_user_doc_contract.py
+→ 0 / 0
+```
+
+两个门禁分别只校验路径/方法/状态码/security 与路径/错误码/模型别名，**都不读 schema
+属性**。因此本次新增的 `recipe`（`required` 四个键、`schema_version` const、
+`state` enum、`digest` pattern）与文档里的 4 个 `seed_policy` 取值**没有任何自动检查**。
+
+当前**没有实际漂移**——第 ② 节已逐条核实契约与文档的断言与代码一致。缺的是门禁：
+将来一次改动即可让文档与代码静默矛盾而没有测试变红。见 #192。
 
 ## 3. 本次验证结果（2026-10-03，Swift 侧末次复核 2026-10-04）
 
