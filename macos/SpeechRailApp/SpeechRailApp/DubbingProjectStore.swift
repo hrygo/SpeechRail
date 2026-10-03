@@ -715,8 +715,13 @@ public struct DubbingAudioFormat: Equatable, Sendable {
         self.bitsPerSample = bitsPerSample
     }
 
-    /// 拼接只在这一种剖面下有意义：单声道 16 bit 线性 PCM。
-    var isLinearMono16: Bool { channels == 1 && bitsPerSample == 16 }
+    /// 拼接只在这一种剖面下有意义：单声道 16 bit 线性 PCM，且采样率必须为正。
+    ///
+    /// 采样率也要查：声明 0 Hz 的畸形文件如果照写，导出的是一份播放器会拒绝或
+    /// 误读的 header——那正是这次修复要避免的「猜错格式」换了个方向重来。
+    var isLinearMono16: Bool {
+        channels == 1 && bitsPerSample == 16 && sampleRate > 0
+    }
 }
 
 /// 一段候选音频的样本与它自己的格式。
