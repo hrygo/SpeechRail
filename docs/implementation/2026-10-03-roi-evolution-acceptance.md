@@ -20,7 +20,7 @@ verification_date: 2026-10-03
 | A 作品库事务与恢复 | 已实施 | `CreativeWorkStore.swift`（journal、隔离区、启动恢复、同 ID 幂等） |
 | B1 服务端配方 | 已实施 | `domain/render_recipe.py`、`application/render_recipe.py`、`application/render_receipts.py` |
 | B2 执行侧采样事实 | 已实施 | `domain/tts_sampling.py`、`backends/qwen3_tts_worker.py`、`backends/qwen3_tts.py` |
-| B3 App/作品投影 | 已实施 | `ServiceContractTypes.swift`、`CreatorServiceClient.swift`、`ServiceAPIClient.swift` |
+| B3 App/作品投影 | 已实施（两项要求未交付，见 #191 #189） | `ServiceContractTypes.swift`、`CreatorServiceClient.swift`、`ServiceAPIClient.swift` |
 | C 文档与事实对齐 | 已实施 | `docs/architecture/current-boundaries.md`、`scripts/check_current_boundaries_contract.py` |
 | D 段落重做与导出 | 已实施 | `DubbingProjectStore.swift`、`AppModel.swift`、`CreatorSurfaceViews.swift` |
 | E 提词器场景 | 确定性部分已实施 | `TeleprompterSessionLifecycleTests.swift` 等；真实设备与真实口播仍未验证 |
@@ -333,6 +333,19 @@ readyz 200 结束」，由 `FirstResultReadiness` 达成。若要让 App **显�
 - `recipe` 为新增可选字段。写入后不要把运行中的旧 App 当作安全回退：旧 App 读得懂未知字段，
   但在改名重写索引时可能丢掉它们。需要回退时先备份 `~/Library/Application Support/SpeechRail/`。
 - 删除作品的音频进入 `.recovery/`，不自动清理；需要时由用户显式处理。
+
+**未交付：索引的"未来 schema"守卫。** 方案 §5 B3 第 7 条要求「未知未来 snapshot schema
+保留原索引，不覆盖降级保存」。实现里**索引层没有版本概念**——`CreativeWork` 没有版本
+字段，只有 journal 有 `schemaVersion` 守卫——因此程序**无法检测**未来版本。索引走
+「有类型解码 → 重新编码」，Swift `Codable` 按构造丢弃未知键。实测：注入一个当前版本
+不认识的字段，一次改名后即消失（`contains_future_field=false`），无任何提示。
+
+上面那条"不要把旧 App 当作安全回退"是**人的纪律**；这里是**程序行为**，二者不是一回事。
+自动守卫涉及版本字段的位置与失败模式，需单独决策，见 #191。
+
+**未交付：`pcm_sha256` 的字节比对。** 方案 §5 B3 同样要求「保存 `audio_file_sha256`，
+再从真实 PCM 计算 hash 与回执 `pcm_sha256` 比对」。该步未落地且此前未披露；现全仓只有
+搬运没有比较。当前 `.verified` 的准确含义见第 ② 节，见 #189。
 
 ## 5. 未验证与风险
 
