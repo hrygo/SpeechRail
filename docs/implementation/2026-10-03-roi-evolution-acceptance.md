@@ -80,6 +80,18 @@ App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着�
 - 回执路由测试补上 `plan_sha256` 与 `plan_id` 前缀的一致性断言——该字段此前只有
   Swift 夹具在用，服务端从未断言过。
 
+采样事实这条链上也有两处只测了一半：
+
+- **「运行时没能播种」只有 `custom_voice` 一条路径有对照。** 把
+  `_seed_clone_generation` 改成恒返回 `True`，全套测试仍然全绿——克隆渲染会如实报成
+  `clone_reference_derived` 并附上一个具体 seed，而那个 seed 从未进入采样流。配方因此
+  对一段不可重现的音频声称可重现。本次补上克隆路径与 voice-design profile seed 两条
+  「没有 MLX 运行时」的对照，并断言 profile 的 temperature 仍如实上报。
+- **worker 帧进入配方的那道缝此前没有任何测试。** `Qwen3TtsWorker._store_sampling_observation`
+  与 `take_sampling_observation` 零覆盖：去掉 64 条上限、把 `pop` 换成 `get`、
+  把校验失败改写成一条伪造观测，三者全绿。本次补上正常上报且只消费一次、
+  六组不可校验的报告被丢弃但音频照常送达、以及保留条数有界。
+
 ### ③ 段落修改、采用/撤销与导出
 
 项目持有完整配方；候选只有在配方摘要与段落文本都一致时才可采用。段落边界只来自文稿

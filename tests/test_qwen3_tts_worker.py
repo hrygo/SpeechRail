@@ -550,6 +550,69 @@ def test_clone_path_reports_its_derived_seed_and_fixed_sampling(
     assert observation["repetition_penalty"] == 1.5
 
 
+def test_clone_path_reports_no_fixed_sampler_when_the_runtime_cannot_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A derived seed that was never applied must not be reported as one.
+
+    The audio is produced either way; what changes is whether the recipe may
+    later claim this render is reproducible. Reporting `clone_reference_derived`
+    for a stream that nothing seeded would hand a client a seed it can reuse
+    and get different audio from.
+    """
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("base")
+    engine._audio_loader_fn = lambda _: object()
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="narrator",
+            speed=1.0,
+            language="auto",
+            ref_audio="/tmp/reference.wav",
+            ref_text="参考文本。",
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+
+
+def test_voice_design_profile_seed_is_reported_as_applied_only_when_the_runtime_took_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("voice_design")
+    engine._temperature = 0.7
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            profile=SimpleNamespace(
+                id="v",
+                mode="voice_design",
+                instruction="沉稳",
+                seed=202,
+                temperature=0.4,
+            ),
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+    # The profile's own temperature still reached the sampler, so it is still
+    # a fact worth reporting even though the seed was not applied.
+    assert observation["temperature"] == 0.4
+
+
 def test_voice_design_profile_seed_is_reported_as_profile_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
