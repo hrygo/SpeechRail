@@ -234,8 +234,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
 
     /// 正式制作：要多一份 render receipt 的 plan 身份与音色 revision。
     ///
-    /// 收据拿不到不影响出音频——作品照常保存，只是身份字段留空，
-    /// 不在制作路径上因为追溯信息而报失败。
+    /// 收据拿不到不影响出音频——作品照常保存，只是把追溯状态标成不完整，
+    /// 身份字段留空，不在制作路径上因为追溯信息而报失败，也不用任何值补齐它。
     public func createSpeechRender(
         text: String,
         voiceID: String,
@@ -268,17 +268,56 @@ public final class ServiceAPIClient: @unchecked Sendable {
         )
         var voiceRevision = options.expectedVoiceRevision
         var planID: String?
+        var planSHA256: String?
+        var pcmSHA256: String?
+        var recipe: RenderRecipeSnapshot?
+        var provenance = RenderProvenance(
+            state: .unavailable,
+            reason: response.receiptID == nil ? "receipt_not_negotiated" : "receipt_unavailable"
+        )
         if let receiptID = response.receiptID,
            let receipt = try? await fetchReceipt(id: receiptID)
         {
             voiceRevision = receipt.voiceRevision ?? voiceRevision
             planID = receipt.planID
+            planSHA256 = receipt.planSHA256
+            pcmSHA256 = receipt.pcmSHA256
+            recipe = receipt.recipe
+            provenance = Self.provenance(for: receipt)
         }
         return SpeechRenderResult(
             audioData: response.audioData,
             planID: planID,
-            voiceRevision: voiceRevision
+            voiceRevision: voiceRevision,
+            planSHA256: planSHA256,
+            pcmSHA256: pcmSHA256,
+            recipe: recipe,
+            provenance: provenance
         )
+    }
+
+    /// Maps one terminal receipt onto an honest traceability statement.
+    ///
+    /// A receipt that is still pending, or that never carried a recipe, does not
+    /// make the render unverifiable audio: the caller keeps the audio and the
+    /// reason it cannot claim full traceability.
+    static func provenance(for receipt: RenderReceipt) -> RenderProvenance {
+        guard receipt.status == .completed else {
+            return RenderProvenance(
+                state: .partial,
+                reason: "receipt_status_\(receipt.status.wireValue)"
+            )
+        }
+        guard let recipe = receipt.recipe else {
+            return RenderProvenance(state: .partial, reason: "recipe_missing")
+        }
+        guard recipe.state == .complete, recipe.digest != nil else {
+            return RenderProvenance(
+                state: .partial,
+                reason: "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
+            )
+        }
+        return RenderProvenance(state: .verified, reason: nil)
     }
 
     public func createVoicePreview(

@@ -741,11 +741,60 @@ public struct SpeechRenderResult: Sendable {
     public let planID: String?
     /// 这一次实际生效的音色 revision；服务端没给就是 nil。
     public let voiceRevision: String?
+    /// plan_id 背后的完整摘要。
+    public let planSHA256: String?
+    /// 服务端在 PCM 传输前算出的音频摘要；它证明字节对应，不证明音质。
+    public let pcmSHA256: String?
+    /// 这一次渲染实际执行了什么。服务端没组装就是 nil。
+    public let recipe: RenderRecipeSnapshot?
+    /// 这份音频的可追溯程度。音频优先保留，追溯状态照实说明。
+    public let provenance: RenderProvenance
 
-    public init(audioData: Data, planID: String?, voiceRevision: String?) {
+    public init(
+        audioData: Data,
+        planID: String?,
+        voiceRevision: String?,
+        planSHA256: String? = nil,
+        pcmSHA256: String? = nil,
+        recipe: RenderRecipeSnapshot? = nil,
+        provenance: RenderProvenance = RenderProvenance(
+            state: .unavailable,
+            reason: RenderProvenance.unsupportedClientReason
+        )
+    ) {
         self.audioData = audioData
         self.planID = planID
         self.voiceRevision = voiceRevision
+        self.planSHA256 = planSHA256
+        self.pcmSHA256 = pcmSHA256
+        self.recipe = recipe
+        self.provenance = provenance
+    }
+}
+
+/// 一次制作的可追溯程度。
+///
+/// 这是事实陈述，不是评价：音频已经拿到就保留，追溯信息另算。
+/// 缺失的身份绝不用随机值或请求参数补齐。
+public struct RenderProvenance: Equatable, Sendable, Codable {
+    public static let unsupportedClientReason = "creator_client_does_not_report_provenance"
+
+    public enum State: String, Codable, Sendable {
+        /// 回执终态为 `completed`，且配方事实齐全。
+        case verified
+        /// 拿到了回执，但仍有事实缺失。
+        case partial
+        /// 没有可用回执：音频照常保留，身份不得推断。
+        case unavailable
+    }
+
+    public let state: State
+    /// 稳定原因码，供开发者定位；不是面向用户的文案。
+    public let reason: String?
+
+    public init(state: State, reason: String?) {
+        self.state = state
+        self.reason = reason
     }
 }
 
