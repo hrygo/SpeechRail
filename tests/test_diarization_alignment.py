@@ -65,11 +65,25 @@ def test_validate_alignment_keeps_original_offsets_for_combining_sequences() -> 
     # the frozen text's own code-point domain, never a normalized copy.
     request = _request("cafe\u0301", granularity="character")
 
-    result = validate_alignment(request, (("c", 0.0, 0.5), ("e\u0301", 0.5, 1.0)))
+    result = validate_alignment(
+        request,
+        (
+            ("c", 0.0, 0.2),
+            ("a", 0.2, 0.4),
+            ("f", 0.4, 0.6),
+            ("e\u0301", 0.6, 1.0),
+        ),
+    )
 
     assert result.failure is None
-    assert [(unit.text_start, unit.text_end) for unit in result.units] == [(0, 1), (1, 5)]
-    assert [unit.granularity for unit in result.units] == ["character", "character"]
+    assert [(unit.text_start, unit.text_end) for unit in result.units] == [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 5),
+    ]
+    assert request.text[3:5] == "e\u0301"
+    assert {unit.granularity for unit in result.units} == {"character"}
 
 
 def test_validate_alignment_matches_repeated_words_in_order() -> None:

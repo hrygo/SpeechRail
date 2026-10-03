@@ -125,26 +125,73 @@ def test_spoken_match_covers_the_punctuation_it_swallowed() -> None:
     text = "今天下午3:45，我们在9月26日讨论了发布计划。"
     result = validate_alignment(
         _request(text),
-        (("今", 0, 0.1), ("345", 0.1, 0.2), ("我", 0.2, 0.3)),
+        _timed(
+            (
+                "今", "天", "下", "午", "345", "我", "们", "在", "9", "月",
+                "26", "日", "讨", "论", "了", "发", "布", "计", "划",
+            )
+        ),
     )
 
     assert result.failure is None
     # "345" is not in the text; the unit must still cover "3:45" code point for
-    # code point, with the unspoken lead-in attached ahead of it and the
-    # punctuation the aligner stripped trailing it.
-    unit = result.units[1]
-    assert text[unit.text_start : unit.text_end] == "天下午3:45，"
+    # code point, and it must also carry the punctuation the aligner stripped
+    # after it.  The lead-in is a token of its own here, so nothing unspoken may
+    # be absorbed into this unit.
+    unit = result.units[4]
+    assert text[unit.text_start : unit.text_end] == "3:45，"
 
 
 def test_spoken_match_swallows_trailing_and_leading_punctuation() -> None:
     result = validate_alignment(
         _request("Call 911 immediately, please."),
-        (("Call", 0, 0.2), ("911", 0.2, 0.4), ("immediately", 0.4, 0.6)),
+        (
+            ("Call", 0, 0.2),
+            ("911", 0.2, 0.4),
+            ("immediately", 0.4, 0.6),
+            ("please", 0.6, 0.8),
+        ),
     )
 
     assert result.failure is None
     assert text_of("Call 911 immediately, please.", result) == (
         "Call 911 immediately, please."
+    )
+
+
+def test_missing_spoken_token_fails_closed() -> None:
+    """A dropped word must never be absorbed into the next token's time span."""
+
+    result = validate_alignment(
+        _request("Do not pay 500 dollars."),
+        (("Do", 0, 0.1), ("pay", 0.2, 0.3), ("dollars", 0.4, 0.5)),
+    )
+
+    assert result.failure == "text_mismatch"
+
+
+def test_missing_trailing_and_leading_tokens_fail_closed() -> None:
+    assert (
+        validate_alignment(
+            _request("please call now"), (("call", 0.1, 0.3), ("now", 0.4, 0.6))
+        ).failure
+        == "text_mismatch"
+    )
+    assert (
+        validate_alignment(
+            _request("call now please"), (("call", 0, 0.2), ("now", 0.3, 0.5))
+        ).failure
+        == "text_mismatch"
+    )
+
+
+def test_missing_number_token_fails_closed() -> None:
+    assert (
+        validate_alignment(
+            _request("transfer 500 yuan today"),
+            (("transfer", 0, 0.3), ("yuan", 0.4, 0.6), ("today", 0.7, 0.9)),
+        ).failure
+        == "text_mismatch"
     )
 
 
