@@ -55,6 +55,10 @@ def test_unknown_seed_policy_is_rejected() -> None:
     [
         (-0.1, 0.95, 1.1, 1),
         (0.7, 1.5, 1.1, 1),
+        # `top_p` is bounded on both sides. Only the upper bound used to be
+        # covered, so dropping `gt=0` from the field left every test green.
+        (0.7, 0.0, 1.1, 1),
+        (0.7, -0.5, 1.1, 1),
         (0.7, 0.95, 0.0, 1),
         (0.7, 0.95, 1.1, -1),
     ],

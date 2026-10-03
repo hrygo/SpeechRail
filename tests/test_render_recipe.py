@@ -189,3 +189,41 @@ def test_malformed_facts_are_refused(kwargs: dict[str, object]) -> None:
         RenderRecipe(
             **{"output_format": "wav", "sample_rate": 24_000, "channels": 1, **kwargs}
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "normalization_revision",
+        "planner_revision",
+        "pronunciation_set_id",
+        "pronunciation_revision",
+        "voice_id",
+        "voice_revision",
+        "voice_mode",
+        "model_role",
+        "model_artifact",
+        "model_artifact_revision",
+        "engine_revision",
+        "effective_language",
+        "seed_policy",
+    ],
+)
+def test_a_blank_optional_fact_is_refused_rather_than_taken_as_observed(
+    field: str,
+) -> None:
+    """An empty string is not an observed fact.
+
+    `missing_fields` reads "not None" as observed, so a blank value that got
+    through would report the recipe as complete and hand it a digest — the
+    module docstring's "presents an unobserved fact as known" failure.
+    """
+
+    with pytest.raises(ValueError):
+        _complete_recipe(**{field: ""})
+
+
+@pytest.mark.parametrize("field", ["voice_id", "model_artifact", "seed_policy"])
+def test_a_non_string_optional_fact_is_refused(field: str) -> None:
+    with pytest.raises(ValueError):
+        _complete_recipe(**{field: 7})
