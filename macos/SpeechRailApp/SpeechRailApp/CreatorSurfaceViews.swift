@@ -268,25 +268,37 @@ public struct DubbingDeskView: View {
 
     private var voicePickerTitle: String {
         if let voice = selectedVoice { return voice.name }
-        return model.isRefreshingCreatorVoices ? "正在读取音色…" : "没有可用音色"
+        return model.creatorVoicePickerState.title
     }
 
     @ViewBuilder
     private var voicePickerPopover: some View {
-        if availableVoices.isEmpty {
+        // 判据 11：这里曾经直接问 `availableVoices.isEmpty`，把「没读到」「读取
+        // 失败」和「确实没有」三种状态都说成"服务没有音色"，再把用户送去音色
+        // 创作——而他很可能本来就有音色。判定已下沉为模型上的投影。
+        switch model.creatorVoicePickerState {
+        case .reading, .unreadable, .noneAvailable:
             ContentUnavailableView {
-                Label("没有可用音色", systemImage: "waveform.slash")
+                Label(model.creatorVoicePickerState.title, systemImage: "waveform.slash")
             } description: {
-                Text("服务当前没有返回可用于配音的音色。")
+                Text(model.creatorVoicePickerState.emptyDescription)
             } actions: {
-                Button("去音色创作") {
-                    isVoicePickerPresented = false
-                    navigation.request(.voiceDesign)
+                if model.creatorVoicePickerState.offersReload {
+                    Button("重新加载音色") {
+                        Task { await model.refreshCreatorVoices() }
+                    }
+                    .speechRailButton(.primary)
                 }
-                .speechRailButton(.primary)
+                if model.creatorVoicePickerState.suggestsCreatingVoice {
+                    Button("去音色创作") {
+                        isVoicePickerPresented = false
+                        navigation.request(.voiceDesign)
+                    }
+                    .speechRailButton(.primary)
+                }
             }
             .frame(width: Self.voicePopoverWidth)
-        } else {
+        case .available:
             VStack(spacing: 0) {
                 ScrollView {
                     LazyVStack(spacing: 2) {
@@ -311,6 +323,7 @@ public struct DubbingDeskView: View {
                 .padding(SpeechRailDesignTokens.Spacing.xs)
             }
         }
+    }
     }
 
     private func voicePickerRow(_ voice: CreatorVoice) -> some View {
@@ -498,12 +511,21 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
 
-        if let pending = model.pendingDubbing {
-            pendingResultBar(for: pending)
-        } else if let work = model.lastCreatedWork {
-            resultBar(for: work)
-        } else if let creatorMessage = model.creatorMessage {
+        // 失败与结果是并排的两件事，不能塞进同一条互斥链：`lastCreatedWork`
+        // 会一直存在到那件作品被删除，串起来会让上一次成功的成品把这一次的
+        // 失败整个遮住（#182）。
+        if let creatorMessage = model.creatorMessage {
             failureBar(message: creatorMessage)
+        }
+        switch model.dubbingDeskSlot {
+        case .none:
+            EmptyView()
+        case .unsaved:
+            if let pending = model.pendingDubbing {
+                pendingResultBar(for: pending)
+            }
+        case .savedWork(let work):
+            resultBar(for: work)
         }
     }
 
@@ -3962,9 +3984,8 @@ private struct DubbingProjectSheet: View {
     }
 
     private var subtitle: String {
-        let voice = model.dubbingProjectVoiceName ?? "原音色"
         return "只重做你点的那一段，其余段落保持原样。成品由被采用的段落按顺序拼成，"
-            + "正文只包含这些段落，音色为\(voice)。"
+            + "正文只包含这些段落，\(model.dubbingProjectVoice.text)。"
     }
 
     @ViewBuilder
