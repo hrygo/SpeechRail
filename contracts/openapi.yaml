@@ -578,6 +578,8 @@ paths:
         Fixes the candidate and its transcript revision. The stored reference
         audio is re-transcribed and must match the (optionally edited) reference
         text; a mismatch returns transcript_mismatch and nothing is confirmed.
+        Both transcript similarity and exact normalized numbers must pass;
+        equivalent spoken-number forms are accepted.
 
         Editing the reference text produces a new candidate revision and clears
         every earlier validation: text may never be changed while reusing old
@@ -646,6 +648,15 @@ paths:
         existing machine result. It is refused unless that result already passed
         the machine gate for the current candidate revision.
 
+        Concurrent results are merged into the latest candidate under the store
+        transaction lock. Every successful result retains its validation ID,
+        audio and human verdict. Starting another validation preserves an
+        existing publishable state. A revision or terminal-state change during
+        validation returns 409 and cannot be undone by the in-flight request.
+        Identical machine results are idempotent, including at the 32-record
+        limit; a new result exceeding the limit returns
+        voice_design_validation_limit_reached without evicting earlier records.
+
         Base initialization and transport failures return 503, inference/output
         failures return 502, and TTS parameter failures return 400. Existing
         validation conflicts retain 409. Errors may include safe worker attribution.
@@ -673,8 +684,9 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: >-
-            Candidate state/revision conflict, or a human review without a
-            passing machine validation
+            Candidate state/revision or validation identity conflict, a human
+            review without a passing machine validation, the 32-record limit,
+            or validation_audio_unavailable for a conflicting audio asset
           content:
             application/json:
               schema:
@@ -3226,6 +3238,8 @@ components:
         - identity_status
         - naturalness_status
         - failure_codes
+        - transcript_numbers_match
+        - validation_policy_revision
         - capability_key
         - model_artifact
         - model_catalog_revision
@@ -3256,6 +3270,26 @@ components:
           type: array
           items:
             type: string
+          description: >-
+            Machine verdict reasons, for example transcript_warn,
+            transcript_mismatch, transcript_numbers_mismatch or
+            model_runtime_identity_unknown.
+        transcript_numbers_match:
+          type: [boolean, 'null']
+          description: >-
+            Whether the transcribed Base output spells exactly the numbers the
+            probe asked for, compared by value. Character edit distance cannot
+            see a misread digit, so this is an independent hard gate: false
+            forces machine_status reject. Null when this run produced no
+            transcript to compare, and for results stored before the gate
+            existed.
+        validation_policy_revision:
+          type: string
+          description: >-
+            Text-fidelity policy the machine verdict was produced under.
+            voice_design_text_fidelity_v2 compares the spoken numbers;
+            voice_design_text_fidelity_v1 did not, so its results stay
+            readable but can no longer be published or reviewed.
         capability_key:
           type: string
           description: The exact tier/mode the evidence covers, for example quality.render.
@@ -3397,6 +3431,7 @@ components:
           $ref: '#/components/schemas/VoiceDesignReferenceProjection'
         validations:
           type: array
+          maxItems: 32
           items:
             $ref: '#/components/schemas/VoiceDesignValidationProjection'
         publishable:

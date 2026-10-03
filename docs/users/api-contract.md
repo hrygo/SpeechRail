@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.12.0"
-date: 2026-10-01
+version: "3.13.2"
+date: 2026-10-03
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -833,7 +833,9 @@ seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不
 
 ### 2. 确认候选 (`POST /v1/voice-designs/{candidate_id}/confirm`)
 
-服务重新转写已保存的规范参考，并要求与（可选编辑的）`reference_text` 相似度达标。
+服务重新转写已保存的规范参考，并要求与（可选编辑的）`reference_text` 相似度达标、
+归一化后的数字完全一致；数字错误返回 `400 transcript_mismatch`，不改变候选或其音频。
+等价口语数字可正常通过。
 编辑参考文本会产生新的 candidate revision 并清除旧验证，不能复用旧证据。
 
 ### 3. Base 复验与人工听审 (`POST /v1/voice-designs/{candidate_id}/validate`)
@@ -843,6 +845,25 @@ Base 角色重新合成、质检、转写且绑定 runtime identity。机器数�
 identity/naturalness 标为通过。人工模式在机器通过后通过 `human_review` 附加实际听审结论；
 不能由自动指标代替。人工复核必须把 `human_review.validation_id` 绑定到刚刚试听的机器复验；
 只提交与当前 candidate revision 匹配的验证 ID，不能把另一轮输出的听审结果挪用过来。
+
+机器可懂度同时看相似度和数字。字符编辑距离抓不住「念错数字」：把 `500` 念成 `900` 只造成一处
+替换，相似度仍高于 `pass` 门槛，而听到的数字是错的。因此每条 validation 额外给出
+`transcript_numbers_match`（`null` 表示本次没有转写可比），数字按值逐位比对；只要数字对不上，
+`machine_status` 直接 `reject` 并带 `transcript_numbers_mismatch`，`transcript_match` 仍如实上报
+真实相似度。ASR 不可用时保持 `warn` + `transcription_unavailable`，不伪装成通过。
+该判定属于策略 `voice_design_text_fidelity_v2`；v1 只比相似度，其结果可以查看但不能再作为
+发布依据，也不能接受人工听审——人工听审只能锐化机器结论，不能替代它。
+
+同一 revision 上的多个 validation 全部保留，重复提交不会覆盖既有结果或撤销已有人工结论。
+单个候选最多保留 32 条，超出返回 `409 voice_design_validation_limit_reached`，不会静默驱逐
+已返回给客户端的验证 ID；到达上限后，同 ID、同机器事实的重复校验仍可成功。
+
+并发成功返回的每个 validation ID 及其试听音频均会保存，人工听审只更新对应 ID。
+候选已有完整通过记录时，重新校验及其超时或失败不会撤销 `publishable` 状态。
+校验过程中若候选已发布、取消、失败或 revision 改变，待完成请求返回
+`409 voice_design_revision_conflict`，不会恢复旧状态，也不会写入新试听资产。
+同 ID 的机器事实冲突同样返回该错误；已存在的试听资产与其身份不符时返回
+`409 validation_audio_unavailable`，保留原资产和记录。
 
 ### 4. 读取候选试听音频
 
@@ -873,6 +894,9 @@ SpeechRail-Expected-Candidate-Revision: vr_0123456789abcdef0123456789abcdef
 ### 5. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
 
 只有当前 revision 同时具备完整机器通过和人工 identity/naturalness 通过时才能发布。
+发布写入的输出证据 probe set 为 `voice_design_base_v2`；v1 时期的 `voice_design_base_v1`
+证据不再作为严格合成（`require_output_pass`）的准入依据，但记录本身保留可查，这类音色需要
+重新跑一次 quality-run 才能恢复严格准入。
 201 响应包含已发布 `candidate` 与标准 `voice`（mode=clone、variant=base）；重复发布同一
 candidate 返回 200 且不会创建第二个 revision。目标 ID 无 revision 冲突时原子 create-only；
 失败或取消保留私有候选，不影响已有音色。

@@ -12,6 +12,7 @@ import threading
 import wave
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +33,22 @@ VoiceDesignState = Literal[
 ]
 VoiceDesignReview = Literal["pass", "warn", "reject", "not_reviewed"]
 
+# One source of truth for the retained-validation bound: the model rejects a
+# longer list, and the merge refuses to build one in the first place.
+_MAX_VALIDATIONS_PER_CANDIDATE = 32
+# Fields a repeat machine validation must not overwrite: the human verdict, the
+# derived status and the timestamps belong to the stored record, not to the
+# freshly computed one.
+_VALIDATION_REVIEW_FIELDS = frozenset(
+    {"identity_status", "naturalness_status", "status", "created_at", "updated_at"}
+)
+# VoiceDesign text fidelity is versioned on its own.  v1 compared the whole
+# transcript by edit distance, which passes a misread digit inside an otherwise
+# faithful sentence; v2 additionally requires the spoken numbers to match
+# exactly.  Bumping this revision retires v1 evidence from the publication and
+# strict-synthesis gates without invalidating clone or quality-run evidence.
+VOICE_DESIGN_VALIDATION_POLICY_REVISION = "voice_design_text_fidelity_v2"
+_LEGACY_VALIDATION_POLICY_REVISION = "voice_design_text_fidelity_v1"
 _CANDIDATE_ID_RE = r"^vd_[0-9a-f]{24}$"
 _VALIDATION_ID_RE = r"^vv_[0-9a-f]{24}$"
 _SHA256_RE = r"^[0-9a-f]{64}$"
@@ -52,6 +69,10 @@ class VoiceDesignAssetUnavailableError(RuntimeError):
 
 class VoiceDesignConflictError(ValueError):
     """The candidate changed or the requested transition is not allowed."""
+
+
+class VoiceDesignValidationLimitError(VoiceDesignConflictError):
+    """The candidate already stores the maximum number of validations."""
 
 
 class VoiceDesignCandidateUnavailableError(VoiceDesignConflictError):
@@ -88,6 +109,10 @@ class VoiceDesignValidation(BaseModel):
     identity_status: VoiceDesignReview = "not_reviewed"
     naturalness_status: VoiceDesignReview = "not_reviewed"
     failure_codes: list[str] = Field(default_factory=list, max_length=32)
+    # ``None`` for records stored before the exact-number gate existed: those
+    # records never compared numbers, so absence is not evidence of a match.
+    transcript_numbers_match: bool | None = None
+    validation_policy_revision: str = _LEGACY_VALIDATION_POLICY_REVISION
     capability_key: str
     model_artifact: str
     model_catalog_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -130,7 +155,9 @@ class VoiceDesignCandidate(BaseModel):
     revision: str = Field(pattern=VOICE_REVISION_RE.pattern)
     request_fingerprint: str = Field(pattern=_SHA256_RE)
     state: VoiceDesignState = "generated"
-    validations: list[VoiceDesignValidation] = Field(default_factory=list, max_length=32)
+    validations: list[VoiceDesignValidation] = Field(
+        default_factory=list, max_length=_MAX_VALIDATIONS_PER_CANDIDATE
+    )
     created_at: float = Field(ge=0.0)
     updated_at: float = Field(ge=0.0)
     confirmed_at: float | None = Field(default=None, ge=0.0)
@@ -140,6 +167,16 @@ class VoiceDesignCandidate(BaseModel):
         pattern=VOICE_REVISION_RE.pattern,
     )
     error_code: str | None = Field(default=None, max_length=128)
+
+    def require_validation_writable(self, *, expected_revision: str) -> None:
+        """Guard each validation transition against the locked current state."""
+
+        if self.revision != expected_revision or self.state not in {
+            "confirmed",
+            "validating",
+            "publishable",
+        }:
+            raise VoiceDesignConflictError("candidate revision or state changed")
 
     def profile(self) -> VoiceProfile:
         """Return the ephemeral Base profile used before publication."""
@@ -174,9 +211,100 @@ class VoiceDesignCandidate(BaseModel):
             and item.status == "pass"
             and item.identity_status == "pass"
             and item.naturalness_status == "pass"
+            and item.validation_policy_revision == VOICE_DESIGN_VALIDATION_POLICY_REVISION
+            and item.transcript_numbers_match is True
             and (capability_key is None or item.capability_key == capability_key)
         ]
         return matches[-1] if matches else None
+
+    def has_current_machine_pass(
+        self, validation_id: str, *, capability_key: str | None = None
+    ) -> bool:
+        """Whether a stored result may still receive a human verdict.
+
+        Human review sharpens a machine verdict; it can never stand in for one.
+        A result produced under a retired text-fidelity policy, or one that never
+        compared the spoken numbers, therefore stays unpromotable until the
+        candidate is validated again under the current policy.
+        """
+
+        return any(
+            item.validation_id == validation_id
+            and item.candidate_revision == self.revision
+            and item.machine_status == "pass"
+            and item.validation_policy_revision == VOICE_DESIGN_VALIDATION_POLICY_REVISION
+            and item.transcript_numbers_match is True
+            and (capability_key is None or item.capability_key == capability_key)
+            for item in self.validations
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MergedValidation:
+    """One candidate's validation list plus the state its contents imply."""
+
+    validations: list[VoiceDesignValidation]
+    state: VoiceDesignState
+
+
+def _merge_validation(
+    candidate: VoiceDesignCandidate, validation: VoiceDesignValidation
+) -> _MergedValidation:
+    """Merge one machine result into the stored list, keeping earlier verdicts.
+
+    A repeated machine validation is idempotent for the fields it actually
+    measured and never revokes a human review.  Anything else would let a
+    re-run silently downgrade a reviewed result, or grow the list without bound
+    until the model rejects it at save time.
+    """
+
+    existing = next(
+        (
+            item
+            for item in candidate.validations
+            if item.validation_id == validation.validation_id
+        ),
+        None,
+    )
+    if existing is None:
+        if len(candidate.validations) >= _MAX_VALIDATIONS_PER_CANDIDATE:
+            raise VoiceDesignValidationLimitError(
+                "candidate already retains the maximum number of validations"
+            )
+        record = validation
+    elif existing.model_dump(
+        exclude=set(_VALIDATION_REVIEW_FIELDS)
+    ) == validation.model_dump(exclude=set(_VALIDATION_REVIEW_FIELDS)):
+        record = existing
+    else:
+        raise VoiceDesignConflictError(
+            "validation identity already exists with different machine facts"
+        )
+    validations = [
+        item for item in candidate.validations if item.validation_id != record.validation_id
+    ]
+    validations.append(record)
+    merged = candidate.model_copy(update={"validations": validations})
+    return _MergedValidation(validations=validations, state=review_state_for(merged))
+
+
+def review_state_for(candidate: VoiceDesignCandidate) -> VoiceDesignState:
+    """Return the state implied by the stored validations alone.
+
+    Both writers of the validation list -- the machine merge and the human
+    review -- derive the state here, so a review can never disagree with what a
+    validation would have concluded about the same records.
+    """
+
+    if candidate.passing_validation() is not None:
+        return "publishable"
+    if any(
+        item.candidate_revision == candidate.revision
+        and (item.machine_status == "reject" or item.status == "reject")
+        for item in candidate.validations
+    ):
+        return "failed"
+    return "validating"
 
 
 def _atomic_write_json(path: Path, payload: object) -> None:
@@ -474,27 +602,28 @@ class VoiceDesignRepository:
         candidate_id: str,
         *,
         expected_revision: str,
-        updated_candidate: VoiceDesignCandidate,
         validation: VoiceDesignValidation,
         audio_bytes: bytes,
         max_bytes: int,
     ) -> VoiceDesignCandidate:
-        """Persist one validation WAV and its candidate record under one lock."""
+        """Merge one validation into the current candidate under one lock.
+
+        The caller cannot supply the candidate to store: it read the candidate
+        before it awaited the backend, so a second overlapping validation would
+        otherwise persist its own stale copy of ``validations`` and silently
+        drop whatever the first one stored.  Reading the latest record and
+        merging inside the lock is what makes two concurrent validations both
+        durable.
+        """
 
         if (
-            updated_candidate.candidate_id != candidate_id
-            or updated_candidate.revision != expected_revision
-            or validation.candidate_revision != expected_revision
+            validation.candidate_revision != expected_revision
             or validation.output_audio_sha256 is None
             or validation.output_wav_sha256 is None
             or len(audio_bytes) <= 0
             or len(audio_bytes) > max_bytes
             or hashlib.sha256(audio_bytes).hexdigest() != validation.output_wav_sha256
             or self._pcm_sha256_from_wav(audio_bytes) != validation.output_audio_sha256
-            or not any(
-                item.validation_id == validation.validation_id
-                for item in updated_candidate.validations
-            )
         ):
             raise VoiceDesignAssetUnavailableError(
                 "validation audio does not match its record"
@@ -509,12 +638,16 @@ class VoiceDesignRepository:
             current = records.get(candidate_id)
             if current is None:
                 raise VoiceDesignNotFoundError(candidate_id)
-            if (
-                current.revision != expected_revision
-                or current.state not in {"confirmed", "validating"}
-            ):
-                raise VoiceDesignConflictError("candidate revision or state changed")
+            current.require_validation_writable(expected_revision=expected_revision)
 
+            merged = _merge_validation(current, validation)
+            updated_candidate = current.model_copy(
+                update={
+                    "validations": merged.validations,
+                    "state": merged.state,
+                    "updated_at": max(current.updated_at, validation.updated_at),
+                }
+            )
             created_asset = False
             try:
                 if asset_path.exists() or asset_path.is_symlink():
@@ -538,6 +671,7 @@ class VoiceDesignRepository:
                     (
                         VoiceDesignAssetUnavailableError,
                         VoiceDesignConflictError,
+                        VoiceDesignValidationLimitError,
                         VoiceDesignNotFoundError,
                         VoiceDesignStoreUnavailableError,
                     ),
@@ -720,6 +854,8 @@ class VoiceDesignRepository:
                     "identity_status": item.identity_status,
                     "naturalness_status": item.naturalness_status,
                     "failure_codes": list(item.failure_codes),
+                    "transcript_numbers_match": item.transcript_numbers_match,
+                    "validation_policy_revision": item.validation_policy_revision,
                     "capability_key": item.capability_key,
                     "model_artifact": item.model_artifact,
                     "model_catalog_revision": item.model_catalog_revision,

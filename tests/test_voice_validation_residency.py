@@ -70,7 +70,10 @@ def _fingerprint(runtime_revision: str) -> str:
 
 
 def _repository(
-    tmp_path: Path, *, runtime_revision: str | None = _RUNTIME_REVISION
+    tmp_path: Path,
+    *,
+    runtime_revision: str | None = _RUNTIME_REVISION,
+    probe_set: str | None = None,
 ) -> VoiceValidationRepository:
     repository = VoiceValidationRepository(tmp_path / "voice_validations.json")
     repository.put(
@@ -90,6 +93,7 @@ def _repository(
             "generation_recipe_revision": BASE_GENERATION_RECIPE_REVISION,
             "policy_version": "voice_quality_v1",
             "capability_key": "quality.render",
+            "probe_set": probe_set,
             "failure_codes": [],
             "validated_for": ["output"],
         }
@@ -169,3 +173,51 @@ def test_evidence_without_a_canonical_runtime_revision_still_fails_closed(
 
         assert state["production_ready"] is False, unusable
         assert state["production_ready_reason"] != "validated", unusable
+
+
+def test_legacy_voice_design_output_evidence_is_not_production_evidence(
+    tmp_path: Path,
+) -> None:
+    """VoiceDesign output evidence written under the v1 text gate is untrusted.
+
+    ``voice_design_base_v1`` only compared the transcript by edit distance, so a
+    misread digit passed it.  The record stays readable and the voice stays
+    usable, but it can no longer admit strict synthesis until a quality run
+    under the current policy replaces it.
+    """
+
+    for worker in (_ResidentWorker(ready=True), _ResidentWorker(ready=False)):
+        repository = _repository(
+            tmp_path / str(worker.ready),
+            probe_set="voice_design_base_v1",
+        )
+
+        state, evidence, _ = validation_state_for_voice(
+            _profile(),
+            _ARTIFACT,
+            repository,
+            worker,
+            require_current_binding=True,
+            capability_key="quality.render",
+        )
+
+        assert state["production_ready"] is False, worker.ready
+        assert evidence is None, worker.ready
+
+
+def test_current_voice_design_output_evidence_still_admits(tmp_path: Path) -> None:
+    """The exclusion is scoped to the retired probe set, not to VoiceDesign."""
+
+    repository = _repository(tmp_path, probe_set="voice_design_base_v2")
+
+    state, evidence, _ = validation_state_for_voice(
+        _profile(),
+        _ARTIFACT,
+        repository,
+        _ResidentWorker(ready=True),
+        require_current_binding=True,
+        capability_key="quality.render",
+    )
+
+    assert state["production_ready"] is True
+    assert evidence is not None

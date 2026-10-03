@@ -23,6 +23,16 @@ from speechrail.domain.file_locks import exclusive_file_lock
 OUTPUT_VALIDATION_SCOPE = "output"
 
 
+# Probe sets written into VoiceDesign publication evidence.  ``voice_design_base_v1``
+# only compared the Base output transcript by edit distance, so a misread digit
+# passed it; records under that probe set stay on disk and readable but can no
+# longer admit production synthesis.  Nothing else is retired: clone and quality
+# run evidence produced under the current policy is unaffected.
+LEGACY_VOICE_DESIGN_OUTPUT_PROBE_SET = "voice_design_base_v1"
+VOICE_DESIGN_OUTPUT_PROBE_SET = "voice_design_base_v2"
+RETIRED_VALIDATION_PROBE_SETS = frozenset({LEGACY_VOICE_DESIGN_OUTPUT_PROBE_SET})
+
+
 class VoiceValidationStoreUnavailableError(RuntimeError):
     """The validation evidence store cannot be read or safely updated."""
 
