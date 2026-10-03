@@ -3525,7 +3525,10 @@ public final class AppModel {
             .components(separatedBy: invalidCharacters)
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "SpeechRail-配音" : String(cleaned.prefix(80))
+        // 以点开头的名字在 macOS 上是隐藏文件：导出明明报了成功，用户在自己选的
+        // 目录里却什么都看不到。去掉前导点，名字仍然是可认的。
+        let visible = cleaned.drop(while: { $0 == "." })
+        return visible.isEmpty ? "SpeechRail-配音" : String(visible.prefix(80))
     }
 
     private static func dubbingErrorMessage(for error: Error) -> String {
