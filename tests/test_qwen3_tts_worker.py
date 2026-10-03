@@ -645,6 +645,56 @@ def test_voice_design_profile_seed_is_reported_as_profile_fixed(
     assert observation["temperature"] == 0.4
 
 
+def test_voice_design_with_an_instruction_reports_the_callers_own_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seed handed in with an instruction came from the caller, not the profile."""
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("voice_design")
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            instruction="沉稳",
+            seed=303,
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == [303]
+    assert observation is not None
+    assert observation["seed_policy"] == "caller_fixed"
+    assert observation["seed"] == 303
+
+
+def test_voice_design_with_an_instruction_and_no_seed_reports_no_fixed_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("voice_design")
+
+    list(
+        engine._generate(
+            "你好。",
+            voice="v",
+            speed=1.0,
+            language="auto",
+            instruction="沉稳",
+        )
+    )
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == []
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+
+
 def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(
     monkeypatch, tmp_path: Path
 ) -> None:
