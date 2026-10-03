@@ -3308,10 +3308,17 @@ public final class AppModel {
             dubbingMessage = "这件作品没有记录完整的制作配方，无法安全地只重做其中一段。"
             return
         }
+        // 「列表没读到」与「音色不在列表里」是两件事：前者是我们还不知道，
+        // 后者才是这件作品的条件变了。把前者说成后者，会让用户去「音色库」
+        // 修一个根本没坏的音色。
+        guard creatorVoicesLoadState == .loaded else {
+            dubbingMessage = "还没读到音色列表，无法确认这件作品用的音色是否可用，请先刷新一次。"
+            return
+        }
         guard let voiceID = project.recipe.recipe?.voiceID,
               let voice = creatorVoices.first(where: { $0.id == voiceID })
         else {
-            dubbingMessage = "这件作品使用的音色当前不可用，无法重做段落。"
+            dubbingMessage = "这件作品使用的音色不在当前的音色列表里，无法重做段落。"
             return
         }
         guard voice.available else {

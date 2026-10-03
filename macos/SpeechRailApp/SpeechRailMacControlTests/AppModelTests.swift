@@ -3414,6 +3414,59 @@ extension AppModelTests {
         let calls = await creator.renderCalls
         XCTAssertTrue(calls.isEmpty, "被拒绝的重做不得触达渲染")
     }
+
+    /// 「列表没读到」与「音色不在列表里」必须说成两句话。
+    ///
+    /// 音色列表读失败时 `creatorVoices` 是空的，`first(where:)` 必然落空。
+    /// 此前这与「这件作品用的音色确实不在列表里」共用一条文案，都会把用户
+    /// 指向「音色不可用」——但那时候音色可能完全正常，是我们没读到。
+    func testSegmentRedoNamesTheReasonTheVoiceListIsUnusable() async throws {
+        // 这件作品用的音色不在当前音色库里：列表读到与没读到，两种情况都要说清。
+        let recipe = Self.dubbingRecipe(digest: "digest-1", voiceID: "not_in_library")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x93),
+            recipe: recipe,
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        // 刻意不调用 refreshCreatorVoices()：这就是列表尚未读到的状态。
+        let work = try works.save(
+            Self.dubbingWork(
+                script: "一段正文。",
+                provenance: RenderProvenanceSnapshot(
+                    state: .verified,
+                    reason: nil,
+                    planSHA256: "plan_sha_source",
+                    recipe: recipe,
+                    pcmSHA256: "pcm_sha_source"
+                )
+            ),
+            audioData: silentPreviewWAV(marker: 0x44)
+        )
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let segment = try XCTUnwrap(project.segments.first)
+
+        model.startDubbingSegmentRedo(segment.id)
+
+        XCTAssertNil(model.dubbingBusySegmentID)
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "还没读到音色列表，无法确认这件作品用的音色是否可用，请先刷新一次。",
+            "没读到列表时不得把责任说成音色不可用"
+        )
+        let unreadCalls = await creator.renderCalls
+        XCTAssertTrue(unreadCalls.isEmpty)
+
+        // 列表读到了、音色确实不在其中：这才是「条件变了」的说法。
+        await model.refreshCreatorVoices()
+        model.startDubbingSegmentRedo(segment.id)
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "这件作品使用的音色不在当前的音色列表里，无法重做段落。"
+        )
+        let missingCalls = await creator.renderCalls
+        XCTAssertTrue(missingCalls.isEmpty)
+    }
 }
 
 // MARK: - (G) 跨入口一致：App 在发出请求之前就拒绝服务会拒绝的渲染

@@ -157,6 +157,10 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 `RenderProvenanceSnapshot.supportsSegmentRedo`，落在模型上因而可测；
 `startDubbingSegmentRedo` 里的摘要守卫保留为纵深防御。
 
+拒绝时给出的理由必须指向真正的责任方：「列表没读到」与「这件作品用的音色不在列表里」
+是两件事。前者是我们还不知道，音色可能完全正常；说成后者会让用户去「音色库」修一个
+根本没坏的音色。「音色在列表里但当前不可用」是第三种情况，单独一句话。
+
 成品文件名还必须**看得见**：作品名来自文稿首行，用户写什么都会进来，而以点开头的名字
 在 macOS 上是隐藏文件——导出提示「已导出 …」，用户回到自己选的目录却什么也没看到。
 因此导出名去掉前导点，全是非法字符或全是点时退回默认名，超长收敛到 80 字。
@@ -219,7 +223,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 522 XCTest + 379 swift-testing，0 失败
+  → 523 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
