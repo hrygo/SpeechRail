@@ -215,6 +215,45 @@ def test_a_seed_policy_contradicting_the_observed_sampler_is_refused() -> None:
     assert recipe["digest"] is None
 
 
+@pytest.mark.parametrize(
+    ("recipe_field", "recipe_value"),
+    [
+        ("voice_id", "other-voice"),
+        ("voice_revision", "vr_" + "f" * 32),
+        ("engine_revision", "rt_" + "f" * 64),
+        ("sample_rate", 16_000),
+    ],
+)
+def test_a_recipe_contradicting_the_receipt_header_is_refused(
+    recipe_field: str,
+    recipe_value: object,
+) -> None:
+    """The header and the recipe describe one render, so they cannot disagree."""
+    registry = RenderReceiptRegistry()
+    recipe_kwargs: dict[str, object] = {recipe_field: recipe_value}
+
+    with pytest.raises(ValueError, match=f"recipe {recipe_field} contradicts"):
+        registry.begin(
+            request_id="req-header-mismatch",
+            voice_id="narrator",
+            voice_revision="vr_" + "a" * 32,
+            model_artifact="tts-artifact",
+            model_source="source-model",
+            model_variant="base",
+            model_catalog_revision="catalog-1",
+            model_runtime_revision=None,
+            output_format="pcm",
+            sample_rate=24_000,
+            channels=1,
+            recipe=_recipe(**recipe_kwargs),  # type: ignore[arg-type]
+        )
+
+    # A refused begin must not leave a receipt behind: the check runs before
+    # the entry is registered, so there is nothing to find by request ID.
+    with pytest.raises(KeyError):
+        registry.find_by_request_id("req-header-mismatch")
+
+
 def test_observed_sampling_is_bound_at_most_once() -> None:
     """A late second report cannot rewrite what this render actually sampled with."""
     registry = RenderReceiptRegistry()
