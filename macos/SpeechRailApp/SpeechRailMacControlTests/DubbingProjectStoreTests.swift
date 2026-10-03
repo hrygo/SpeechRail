@@ -310,6 +310,72 @@ final class DubbingProjectStoreTests: XCTestCase {
 
     // MARK: - 导出
 
+    /// `isSafeIdentifier` 是配音项目目录唯一的逃逸防线。
+    ///
+    /// `URL.appendingPathComponent(_:)` 自己不会拒绝 `../`，它只是拼接；
+    /// `audioFileName == "\(candidate.id).wav"`，所以 id 能带路径分隔符，
+    /// 落盘位置就跟着跑到项目目录外面去。字符集、长度上限、不许点号三条性质分别钉住。
+    func testACandidateWhoseIDCouldEscapeTheProjectDirectoryIsRefused() throws {
+        // 项目库放在测试自己拥有的子目录里，「目录外」也留在测试沙箱内——
+        // 直接拿系统临时目录当基准会跨用例互相污染。
+        let library = directory.appendingPathComponent("projects", isDirectory: true)
+        let store = DubbingProjectStore(directory: library)
+        let project = makeProject()
+        try store.save(project)
+        let outside = directory.appendingPathComponent("escaped.wav")
+        let hostileIDs = [
+            "../escaped",
+            "../../escaped",
+            "nested/id",
+            "dot.id",
+            "with space",
+            String(repeating: "x", count: 81),
+        ]
+
+        for hostileID in hostileIDs {
+            XCTAssertThrowsError(
+                try store.addCandidate(
+                    makeCandidate(
+                        id: hostileID,
+                        segmentID: "seg_first",
+                        text: "第一段。"
+                    ),
+                    audioData: wav(0x11),
+                    toProject: project.id
+                ),
+                "候选标识符 \(hostileID) 必须被拒绝"
+            ) { error in
+                XCTAssertEqual(
+                    error as? DubbingProjectError,
+                    .invalidIdentifier,
+                    "标识符 \(hostileID) 必须报标识符非法，而不是别的错误"
+                )
+            }
+        }
+
+        XCTAssertThrowsError(
+            try store.save(
+                DubbingProject(
+                    id: "../escaped",
+                    title: "越界项目",
+                    scriptText: "正文",
+                    recipe: provenance(digest: "a"),
+                    segments: [DubbingSegment(id: "seg_first", text: "正文")],
+                    createdAt: Date(timeIntervalSince1970: 1_780_000_000)
+                )
+            ),
+            "项目标识符必须被拒绝"
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .invalidIdentifier)
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outside.path),
+            "恶意标识符不得在项目目录外留下任何文件"
+        )
+        XCTAssertEqual(try store.list().map(\.id), [project.id])
+    }
+
     func testExportJoinsOnlyAdoptedSegmentsAndMatchesTheScript() throws {
         let store = DubbingProjectStore(directory: directory)
         let project = makeProject()
