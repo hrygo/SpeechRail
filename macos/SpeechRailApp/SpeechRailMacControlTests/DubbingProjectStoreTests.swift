@@ -583,6 +583,51 @@ final class DubbingProjectStoreTests: XCTestCase {
         )
     }
 
+    /// journal 与事务目录必须先于索引落盘。
+    ///
+    /// 真实进程退出不执行任何 `catch`：若索引已经提交、而 journal 还只在页缓存里，
+    /// 下次打开就少了判定「这次提交到底成没成」的唯一依据。fsync 的顺序本身就是契约。
+    func testTheJournalReachesDiskBeforeTheIndexIsCommitted() throws {
+        var synced: [URL] = []
+        let recording = CreativeWorkFileOperations(
+            syncInterceptor: { url in synced.append(url) }
+        )
+        let store = DubbingProjectStore(directory: directory, fileOperations: recording)
+        let project = makeProject()
+        try store.save(project)
+        synced.removeAll()
+
+        try store.addCandidate(
+            makeCandidate(id: "cand_order", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x33),
+            toProject: project.id
+        )
+
+        func position(where predicate: (URL) -> Bool) -> Int? {
+            synced.firstIndex(where: predicate)
+        }
+        let journal = position { $0.lastPathComponent == "journal.json" }
+        let transactionDirectory = position { $0.path.contains("/.transactions/") }
+        let indexCommit = position { $0.lastPathComponent == "projects.json" }
+
+        XCTAssertNotNil(journal, "journal 必须被同步落盘")
+        XCTAssertNotNil(transactionDirectory, "事务目录本身也必须被同步")
+        XCTAssertNotNil(indexCommit, "索引必须被同步落盘")
+
+        // 断言失败后代码仍会继续执行，先解包再比较，避免越界把整个测试进程带倒。
+        guard let journal, let transactionDirectory, let indexCommit else { return }
+        XCTAssertLessThan(
+            journal,
+            indexCommit,
+            "journal 必须先于索引落盘，否则崩溃后无从判定这次提交是否已成"
+        )
+        XCTAssertLessThan(
+            transactionDirectory,
+            indexCommit,
+            "事务目录必须先于索引落盘"
+        )
+    }
+
     func testRestartKeepsACommittedCandidate() throws {
         let armed = ArmedInterruption()
         let interrupting = CreativeWorkFileOperations(
