@@ -3528,6 +3528,10 @@ public final class AppModel {
                 "找不到这一段或这个候选，请刷新后重试。"
             case .invalidIdentifier:
                 "段落项目数据异常，请检查磁盘权限和可用空间后重试。"
+            case .audioFormatUnsupported:
+                "这一段的音频格式与其它段落不同，不能拼成一个成品。请重新生成这一段后再导出。"
+            case .audioFormatMismatch:
+                "各段的音频格式不一致，不能拼成一个成品。请用同一音色与设置重新生成后再导出。"
             }
         }
         return "段落操作失败，请重试。"

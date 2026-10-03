@@ -122,6 +122,10 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
     case segmentNotFound
     case candidateNotFound
     case candidateNotAdoptable
+    /// 候选音频不是本项目支持的线性 PCM 剖面（单声道 16 bit）。
+    case audioFormatUnsupported
+    /// 参与拼接的候选格式互不相同，拼接结果无法标定采样率。
+    case audioFormatMismatch
 
     public var errorDescription: String? {
         switch self {
@@ -133,6 +137,10 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
             "找不到这个候选"
         case .candidateNotAdoptable:
             "这个候选的制作条件与当前项目不一致，需要重新生成"
+        case .audioFormatUnsupported:
+            "候选音频不是单声道 16 bit 线性 PCM，无法与其它段落拼接"
+        case .audioFormatMismatch:
+            "各段音频的采样率或位深不一致，不能拼成一个成品"
         }
     }
 }
@@ -468,7 +476,7 @@ public final class DubbingProjectStore {
     public func export(projectID: String) throws -> (audio: Data, script: String)? {
         try withRecoveredLibrary {
             let record = try recordUnlocked(projectID: projectID)
-            var chunks: [Data] = []
+            var clips: [DubbingAudioClip] = []
             for segment in record.project.segments {
                 guard let acceptedID = segment.acceptedCandidateID,
                       let candidate = record.candidates.first(where: { $0.id == acceptedID }),
@@ -484,11 +492,11 @@ public final class DubbingProjectStore {
                     throw DubbingProjectError.candidateNotAdoptable
                 }
                 let wav = try operations.read(from: audioURL)
-                chunks.append(try DubbingAudioExport.pcmData(fromWAV: wav))
+                clips.append(try DubbingAudioExport.clip(fromWAV: wav))
             }
-            guard !chunks.isEmpty else { return nil }
+            guard !clips.isEmpty else { return nil }
             return (
-                audio: try DubbingAudioExport.makeWAV(from: chunks, sampleRate: 24_000),
+                audio: try DubbingAudioExport.makeWAV(from: clips),
                 script: record.project.adoptedScript
             )
         }
@@ -692,21 +700,57 @@ public final class DubbingProjectStore {
     }
 }
 
-/// 把若干段 PCM 拼成一个 WAV：重写 header，不改动任何样本字节。
+/// 一段候选音频自己声明的格式。
+///
+/// 导出必须按**数据说的**来写 header，而不是按调用方以为的来写：猜错采样率不会
+/// 报错，只会让成品语速与音高整体错位——那是更难被发现的一类错误。
+public struct DubbingAudioFormat: Equatable, Sendable {
+    public let sampleRate: Int
+    public let channels: Int
+    public let bitsPerSample: Int
+
+    public init(sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.bitsPerSample = bitsPerSample
+    }
+
+    /// 拼接只在这一种剖面下有意义：单声道 16 bit 线性 PCM。
+    var isLinearMono16: Bool { channels == 1 && bitsPerSample == 16 }
+}
+
+/// 一段候选音频的样本与它自己的格式。
+public struct DubbingAudioClip: Equatable, Sendable {
+    public let pcm: Data
+    public let format: DubbingAudioFormat
+
+    public init(pcm: Data, format: DubbingAudioFormat) {
+        self.pcm = pcm
+        self.format = format
+    }
+}
+
+/// 把若干段候选音频拼成一个 WAV：按它们**共同的**真实格式重写 header，不改动任何样本字节。
 ///
 /// 不做 crossfade、不用静音补时长。响度与韵律是否自然只能靠听审验证，
-/// 这里只保证"导出的音频就是被采用的那些样本，按顺序拼接"。
+/// 这里只保证「导出的音频就是被采用的那些样本，按顺序拼接」。
 public enum DubbingAudioExport {
-    public static func makeWAV(from pcmChunks: [Data], sampleRate: Int) throws -> Data {
-        guard sampleRate > 0 else { throw DubbingProjectError.invalidIdentifier }
-        guard !pcmChunks.isEmpty else { return Data() }
+    /// 格式不一致或不受支持时**明确失败**，而不是套用自己的假设去标定。
+    public static func makeWAV(from clips: [DubbingAudioClip]) throws -> Data {
+        guard let format = clips.first?.format else { return Data() }
+        guard format.isLinearMono16 else {
+            throw DubbingProjectError.audioFormatUnsupported
+        }
         var samples = Data()
-        samples.reserveCapacity(pcmChunks.reduce(0) { $0 + $1.count })
-        for chunk in pcmChunks {
-            guard chunk.count % 2 == 0 else {
+        samples.reserveCapacity(clips.reduce(0) { $0 + $1.pcm.count })
+        for clip in clips {
+            guard clip.format == format else {
+                throw DubbingProjectError.audioFormatMismatch
+            }
+            guard clip.pcm.count % 2 == 0 else {
                 throw DubbingProjectError.candidateNotAdoptable
             }
-            samples.append(chunk)
+            samples.append(clip.pcm)
         }
 
         var header = Data()
@@ -715,41 +759,59 @@ public enum DubbingAudioExport {
         header.append(contentsOf: Array("WAVEfmt ".utf8))
         header.append(littleEndian: UInt32(16))
         header.append(littleEndian: UInt16(1))
-        header.append(littleEndian: UInt16(1))
-        header.append(littleEndian: UInt32(sampleRate))
-        header.append(littleEndian: UInt32(sampleRate * 2))
-        header.append(littleEndian: UInt16(2))
-        header.append(littleEndian: UInt16(16))
+        header.append(littleEndian: UInt16(format.channels))
+        header.append(littleEndian: UInt32(format.sampleRate))
+        header.append(littleEndian: UInt32(format.sampleRate * format.channels * format.bitsPerSample / 8))
+        header.append(littleEndian: UInt16(format.channels * format.bitsPerSample / 8))
+        header.append(littleEndian: UInt16(format.bitsPerSample))
         header.append(contentsOf: Array("data".utf8))
         header.append(littleEndian: UInt32(samples.count))
         header.append(samples)
         return header
     }
 
-    /// 从完整 WAV 中取出 data chunk 的 PCM 字节。
+    /// 从完整 WAV 中取出 data chunk 的 PCM 字节，以及 `fmt ` 声明的真实格式。
     ///
-    /// 摘要与拼接都以 data chunk 为准：WAV header 不属于音频内容。
-    public static func pcmData(fromWAV wav: Data) throws -> Data {
+    /// 摘要与拼接都以 data chunk 为准，但**格式必须一起读出来**——丢掉 `fmt `
+    /// 就只能靠猜，而猜错的代价是导出一份听起来不对却能播放的成品。
+    public static func clip(fromWAV wav: Data) throws -> DubbingAudioClip {
         guard wav.count > 12,
               wav.prefix(4) == Data("RIFF".utf8),
               wav.subdata(in: 8..<12) == Data("WAVE".utf8)
         else {
-            throw DubbingProjectError.candidateNotAdoptable
+            throw DubbingProjectError.audioFormatUnsupported
         }
         var cursor = 12
+        var format: DubbingAudioFormat?
+        var pcm: Data?
         while cursor + 8 <= wav.count {
             let identifier = wav.subdata(in: cursor..<(cursor + 4))
             let size = Int(wav.subdata(in: (cursor + 4)..<(cursor + 8)).littleEndianUInt32)
             let body = cursor + 8
             guard body + size <= wav.count else {
-                throw DubbingProjectError.candidateNotAdoptable
+                throw DubbingProjectError.audioFormatUnsupported
             }
-            if identifier == Data("data".utf8) {
-                return wav.subdata(in: body..<(body + size))
+            if identifier == Data("fmt ".utf8) {
+                // 只接受未压缩 PCM（format code 1）；压缩格式的 data 不是裸样本。
+                guard size >= 16,
+                      wav.subdata(in: body..<(body + 2)).littleEndianUInt16 == 1
+                else {
+                    throw DubbingProjectError.audioFormatUnsupported
+                }
+                format = DubbingAudioFormat(
+                    sampleRate: Int(wav.subdata(in: (body + 4)..<(body + 8)).littleEndianUInt32),
+                    channels: Int(wav.subdata(in: (body + 2)..<(body + 4)).littleEndianUInt16),
+                    bitsPerSample: Int(wav.subdata(in: (body + 14)..<(body + 16)).littleEndianUInt16)
+                )
+            } else if identifier == Data("data".utf8) {
+                pcm = wav.subdata(in: body..<(body + size))
             }
             cursor = body + size + (size % 2)
         }
-        throw DubbingProjectError.candidateNotAdoptable
+        guard let format, let pcm else {
+            throw DubbingProjectError.audioFormatUnsupported
+        }
+        return DubbingAudioClip(pcm: pcm, format: format)
     }
 }
 
@@ -776,5 +838,10 @@ private extension Data {
             | UInt32(self[1]) << 8
             | UInt32(self[2]) << 16
             | UInt32(self[3]) << 24
+    }
+
+    var littleEndianUInt16: UInt16 {
+        guard count >= 2 else { return 0 }
+        return UInt16(self[0]) | UInt16(self[1]) << 8
     }
 }
