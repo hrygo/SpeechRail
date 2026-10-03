@@ -270,6 +270,87 @@ def test_non_success_terminal_receipts_never_look_completed(
     assert receipt["audio"]["sample_count"] == 4
 
 
+def test_a_terminal_receipt_is_never_finished_again() -> None:
+    """What already happened cannot be rewritten afterwards.
+
+    The audio of a completed render was already handed to the caller; a late
+    failure report must not turn the receipt into a failed one.
+    """
+
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin(registry)
+    registry.accept_pcm(receipt_id, b"\x00\x00" * 4)
+    registry.complete(receipt_id)
+
+    registry.fail(receipt_id, "late_failure")
+    assert registry.get(receipt_id)["status"] == "completed"
+    assert registry.get(receipt_id)["error_code"] is None
+
+    registry.cancel(receipt_id)
+    assert registry.get(receipt_id)["status"] == "completed"
+    assert registry.get(receipt_id)["error_code"] is None
+
+
+def test_a_failed_receipt_is_never_completed_afterwards() -> None:
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin(registry)
+    registry.fail(receipt_id, "backend_timeout")
+
+    registry.complete(receipt_id)
+
+    receipt = registry.get(receipt_id)
+    assert receipt["status"] == "error"
+    assert receipt["error_code"] == "backend_timeout"
+
+
+def _begin_with_runtime_recipe(registry: RenderReceiptRegistry) -> str:
+    return registry.begin(
+        request_id="req-runtime-bind",
+        response_id="resp-1",
+        voice_id="narrator",
+        voice_revision="vr_" + "a" * 32,
+        model_artifact="tts-artifact",
+        model_source="source-model",
+        model_variant="base",
+        model_catalog_revision="catalog-1",
+        model_runtime_revision=None,
+        output_format="pcm",
+        sample_rate=24_000,
+        recipe=_recipe(seed_policy="derived"),
+    )
+
+
+def test_binding_a_second_different_runtime_revision_is_refused() -> None:
+    """The runtime identity is observed once.
+
+    A second, different value would rewrite `engine_revision` and therefore the
+    digest that candidate adoption trusts.
+    """
+
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin_with_runtime_recipe(registry)
+
+    assert registry.bind_model_runtime_revision(receipt_id, "rt_" + "b" * 64)
+    with pytest.raises(RuntimeError):
+        registry.bind_model_runtime_revision(receipt_id, "rt_" + "c" * 64)
+
+    recipe = registry.get(receipt_id)["recipe"]
+    assert isinstance(recipe, dict)
+    assert recipe["model"]["engine_revision"] == "rt_" + "b" * 64, (
+        "被拒绝的二次绑定不得改写配方"
+    )
+
+
+def test_binding_the_same_runtime_revision_twice_is_idempotent() -> None:
+    """A retried observation of the same runtime is not a conflict."""
+
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin_with_runtime_recipe(registry)
+
+    assert registry.bind_model_runtime_revision(receipt_id, "rt_" + "b" * 64)
+    assert registry.bind_model_runtime_revision(receipt_id, "rt_" + "b" * 64)
+
+
 def test_odd_pcm_is_rejected_without_advancing_integrity_state() -> None:
     registry = RenderReceiptRegistry()
     receipt_id = _begin(registry)
