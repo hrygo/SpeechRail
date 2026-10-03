@@ -142,6 +142,12 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 且都不得触达合成器；合法请求则两个入口都渲染。App 侧在发出请求之前拒绝同一批无效渲染，
 不留下任何"待保存"残留。
 
+四个步骤各自区分「已确认的缺口」与「还没有结论」：服务探针读到失败、模型状态明确、
+音色列表读失败都是前者；服务状态未读到、模型状态 `.unknown`、音色列表已读到但能力快照
+未确认是后者。前者进入 `blockingSteps` 并配一个可执行的下一步，后者进入 `unknownSteps`。
+把后者算成前者会催用户去修一个他还没有资格判断的东西——这条区分此前只有服务与模型两步
+被断言，音色那一步的未知分支没有用例；补上后逐条变异均会变红。
+
 **未验证**：升级失败的端到端恢复需要真实安装/回滚授权（见 `.agents/skills/speechrail-release`）。
 本次只交付 App 侧"服务不可达时如实说明缺口"的行为。
 
@@ -154,7 +160,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 505 XCTest + 379 swift-testing，0 失败
+  → 506 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
