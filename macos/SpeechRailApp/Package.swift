@@ -83,8 +83,15 @@ let package = Package(
                 "AssistantPlaybackLedger.swift",
                 "AssistantTTSStreamCoordinator.swift",
                 "TeleprompterRealtimeClientProtocol.swift",
-                // AppModel 及其最小闭包：测试目标与 Xcode 单测目标编译同一份实现，
-                // 让 cancel/refresh 等状态机回归能在两条 CI 门禁里跑（无桩替代）。
+                // AppModel 及其最小闭包：SPM 测试目标与 Xcode 单测目标编译同一份实现，
+                // 让 cancel/refresh 等状态机回归不用桩替身。
+                //
+                // 两条路径并不等价，不要按「同一个目录」推断覆盖面：CI 只跑
+                // `swift test` 一条，`xcodebuild test` 仅本机经
+                // `scripts/macos_app_build.sh --test-unit` 复跑，且它编译的测试文件
+                // 更少（`WindowLayoutPolicy.swift` 等 3 个源文件与
+                // `WindowLayoutPolicyTests.swift` 不在 `Unit Test Sources` 里）。
+                // 见 #194。
                 "AppModel.swift",
                 "ServiceAPIClient.swift",
                 "CreatorServiceClient.swift",
