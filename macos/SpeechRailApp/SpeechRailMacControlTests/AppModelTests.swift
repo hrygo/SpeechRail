@@ -2150,10 +2150,14 @@ private actor HeldPreviewCreatorClient: SpeechRailCreatorClient {
         throw ServiceAPIClientError.requestFailed
     }
 
-    func waitUntilHeld() async {
-        while heldContinuation == nil {
-            await Task.yield()
+    /// 有界等待 fake 客户端接住请求。无界自旋在条件永不成立时会把整个套件挂住，
+    /// 而不是让这条用例失败——失败要能指出是哪一步没发生。
+    func waitUntilHeld(file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<600 {
+            if heldContinuation != nil { return }
+            try? await Task.sleep(for: .milliseconds(1))
         }
+        XCTFail("等待 fake 客户端接住请求超时（600ms）", file: file, line: line)
     }
 
     func releaseHeld(with data: Data) {
