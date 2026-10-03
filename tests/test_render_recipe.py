@@ -113,9 +113,20 @@ def test_every_execution_parameter_changes_the_digest_and_the_plan() -> None:
     ):
         changed = _complete_recipe(**{field: value})
         assert changed.digest != baseline.digest, field
-        assert render_plan_identity(changed).plan_id != render_plan_identity(
-            baseline
-        ).plan_id or field == "engine_revision", field
+        baseline_plan = render_plan_identity(baseline).plan_id
+        changed_plan = render_plan_identity(changed).plan_id
+        if field == "engine_revision":
+            # Runtime identity belongs to "what actually ran", not to "how this
+            # would execute": it must move the recipe digest and must NOT move
+            # plan_id.
+            #
+            # This branch must not be written as
+            # `... != ... or field == "engine_revision"`: that parses as
+            # `... or True`, leaving a tautology. Adding engine_revision to
+            # plan_id would then leave this whole file green.
+            assert changed_plan == baseline_plan, field
+        else:
+            assert changed_plan != baseline_plan, field
 
 
 def test_plan_identity_describes_execution_not_content() -> None:
