@@ -1270,7 +1270,6 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(candidate.latestValidation?.updatedAt, 3)
     }
 
-    #if SWIFT_PACKAGE
     func testVoiceUpdateUsesOnlyTheCurrentCASRouteAndRevision() async throws {
         let client = makeHTTPClient(
             statusCode: 200,
@@ -1759,7 +1758,6 @@ final class ServiceContractTests: XCTestCase {
             apiKey: "test-key"
         )
     }
-    #endif
 
     /// 契约把 `pitch_band` / `timbre_family` / `baseline_pace` 固定为 `unknown`、
     /// `metadata_method` 固定为 `declared_only`：这些是声明式元数据，不是实测推断。
@@ -1830,7 +1828,6 @@ final class ServiceContractTests: XCTestCase {
     }
 }
 
-#if SWIFT_PACKAGE
 private final class ServiceAPIURLProtocolState: @unchecked Sendable {
     struct Reply {
         let statusCode: Int
@@ -1982,4 +1979,3 @@ private final class ServiceAPIURLProtocolStub: URLProtocol {
         return data.isEmpty ? nil : data
     }
 }
-#endif
