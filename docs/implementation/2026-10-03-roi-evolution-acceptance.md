@@ -341,9 +341,12 @@ uv run --no-sync mypy src/speechrail                               → Success, 
 
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
-macOS 侧有两条门禁：`swift test`（SPM）与 `scripts/macos_app_build.sh --test-unit`
-（`xcodebuild test`）。二者编译的源文件集合不同，**跑到的用例数也就不同**。
-2026-10-04 逐套件对账后的实测差额：
+macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
+`scripts/macos_app_build.sh --test-unit`（`xcodebuild test`，仅本机复跑）。
+`ci.yml` 因 `xcodebuild test` 在 CI 上会复现 lost-wakeup 挂死而跳过它，理由是
+「SwiftPM 已经跑过同一个测试目录」。就覆盖面而言这个理由成立——`swift test` 是超集，
+CI 不漏跑任何用例——但「同一个目录」这个前提并不成立：两者编译的源文件集合不同，
+**跑到的用例数也就不同**。2026-10-04 逐套件对账后的实测差额：
 
 | 套件 | `swift test` | `--test-unit` | 差额原因 |
 | --- | --- | --- | --- |
