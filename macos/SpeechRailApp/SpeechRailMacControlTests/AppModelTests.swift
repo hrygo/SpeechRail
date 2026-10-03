@@ -2367,15 +2367,23 @@ private actor ScriptedRenderClient: SpeechRailCreatorClient {
     private let audio: Data
     private let renderError: Error?
     private let renderResultOverride: SpeechRenderResult?
+    /// 前 `succeedingRenders` 次正式渲染成功，之后一律失败。
+    ///
+    /// #182 要复现的是"第一次成功、第二次失败"：只有先成功过一次，页面才会
+    /// 留下 `lastCreatedWork`，第二次失败才可能被那件旧成品遮住。`nil` 表示
+    /// 不限次数（保持既有用例的行为不变）。
+    private var succeedingRenders: Int?
 
     init(
         audio: Data,
         renderError: Error? = nil,
-        renderResult: SpeechRenderResult? = nil
+        renderResult: SpeechRenderResult? = nil,
+        succeedingRenders: Int? = nil
     ) {
         self.audio = audio
         self.renderError = renderError
         self.renderResultOverride = renderResult
+        self.succeedingRenders = succeedingRenders
     }
 
     func fetchVoices() async throws -> [CreatorVoice] { [] }
@@ -2403,6 +2411,10 @@ private actor ScriptedRenderClient: SpeechRailCreatorClient {
         renderPolicies.append(options.validationPolicy)
         if let renderError {
             throw renderError
+        }
+        if let succeedingRenders {
+            guard succeedingRenders > 0 else { throw ServiceAPIClientError.requestFailed }
+            self.succeedingRenders = succeedingRenders - 1
         }
         if let renderResultOverride {
             return renderResultOverride
@@ -2635,6 +2647,59 @@ extension AppModelTests {
         XCTAssertEqual(try store.list().count, 0, "被拒绝的正式制作不得落库")
         // 拒绝必须以一条明确的用户可见提示结束，而不是静默。
         XCTAssertNotNil(model.creatorMessage, "被拒绝时必须给出明确提示")
+    }
+
+    /// #182：保存过一次作品之后，后续生成失败**必须**仍然有一条用户可见的提示。
+    ///
+    /// 旧实现把结果位写成 `pending / lastCreatedWork / creatorMessage` 的互斥链。
+    /// `lastCreatedWork` 只在删除那件作品时才清空，于是它会永远遮住失败——
+    /// 而"保存过至少一件作品"恰恰是配音台的正常状态。
+    ///
+    /// 现在结果位收敛成 `DubbingDeskSlot`（**故意没有失败分支**），失败与结果
+    /// 并排呈现。本用例锁定两件事同时可得。
+    func testAFailedGenerationStaysVisibleAfterAnEarlierWorkWasSaved() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-fail-after-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let audio = silentPreviewWAV(marker: 0x20)
+        // 只让第一次渲染成功。
+        let creator = ScriptedRenderClient(audio: audio, succeedingRenders: 1)
+        let model = makeRenderModel(store: store, creator: creator)
+        await model.refreshDiscovery()
+
+        // 第一次：成功并保存，让页面进入"有成品"的正常状态。
+        _ = await model.synthesizeAndSave(
+            text: "第一次生成，这段会成功。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let saved = try XCTUnwrap(model.savePendingDubbing())
+        guard case .savedWork(let slotted) = model.dubbingDeskSlot else {
+            return XCTFail("保存后结果位应是已保存的成品")
+        }
+        XCTAssertEqual(slotted.id, saved.id)
+        XCTAssertNil(model.creatorMessage, "成功收尾时不得残留提示")
+
+        // 第二次：失败。旧成品仍在，但失败提示必须同时可得。
+        _ = await model.synthesizeAndSave(
+            text: "第二次生成，这段会失败。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        XCTAssertNotNil(
+            model.creatorMessage,
+            "生成失败时必须仍有一条提示——旧成品不得把它遮住（#182）"
+        )
+        guard case .savedWork = model.dubbingDeskSlot else {
+            return XCTFail("失败不改变已有成品，结果位仍应是那件已保存作品")
+        }
+        XCTAssertNil(model.pendingDubbing, "失败的生成不得留下待保存音频")
+
+        // 结构性保证：DubbingDeskSlot 根本没有失败分支，所以"遮蔽"在类型上
+        // 不可能发生——视图读的是这两者，不再自己串 if let。
+        let calls = await creator.renderCalls
+        XCTAssertEqual(calls.count, 2, "两次生成都真的发出了请求")
     }
 
     func testExplicitSaveAddsExactlyOneWorkAndIsIdempotent() async throws {
@@ -3524,6 +3589,73 @@ extension AppModelTests {
         let missingCalls = await creator.renderCalls
         XCTAssertTrue(missingCalls.isEmpty)
     }
+
+    /// #184：副标题不得把「不知道音色是谁」说成「原音色」。
+    ///
+    /// 旧实现是 `dubbingProjectVoiceName ?? "原音色"`，而 nil 有四种来源。
+    /// 最糟的是"不在列表里"：副标题刚承诺一个音色，第一次返修就被
+    /// `startDubbingSegmentRedo` 拒绝，用户看到自相矛盾。
+    func testTheSegmentRedoSubtitleNeverClaimsAVoiceItDoesNotHave() {
+        let library = [CreatorVoice(id: "voice-1", name: "沉稳男声", available: true)]
+
+        // 查到了：说是哪一个。
+        XCTAssertEqual(
+            DubbingProjectVoice.resolve(
+                voiceID: "voice-1",
+                voicesLoadState: .loaded,
+                voices: library
+            ),
+            .named("沉稳男声")
+        )
+
+        // 没记录：这个项目压根没写音色，说"原音色"是凭空断言。
+        XCTAssertEqual(
+            DubbingProjectVoice.resolve(
+                voiceID: nil,
+                voicesLoadState: .loaded,
+                voices: library
+            ),
+            .notRecorded
+        )
+
+        // 列表没读到：还没读、正在读、读失败，三种都不是"没有音色"这个结论。
+        for state in [CreatorVoicesLoadState.unknown, .loading, .failed] {
+            let voice = DubbingProjectVoice.resolve(
+                voiceID: "voice-1",
+                voicesLoadState: state,
+                voices: library
+            )
+            XCTAssertEqual(voice, .listUnread, "\(state) 时我们还不知道音色是谁")
+            XCTAssertFalse(
+                voice.text.contains("原音色"),
+                "\(state) 时不得说成「原音色」——那是把不知道说成知道"
+            )
+        }
+
+        // 列表读到了、音色确实不在其中：这是第三种情况，不能与"没读到"混为一谈。
+        let absent = DubbingProjectVoice.resolve(
+            voiceID: "voice-9",
+            voicesLoadState: .loaded,
+            voices: library
+        )
+        XCTAssertEqual(absent, .notInLibrary)
+        XCTAssertFalse(
+            absent.text.contains("音色为"),
+            "不在列表里时副标题不得承诺一个音色，否则第一次返修就被拒绝（#184）"
+        )
+
+        // 四种取值的文案互不相同——否则"分开说"只是形式。
+        let texts = [
+            DubbingProjectVoice.named("沉稳男声").text,
+            DubbingProjectVoice.notRecorded.text,
+            DubbingProjectVoice.listUnread.text,
+            DubbingProjectVoice.notInLibrary.text,
+        ]
+        XCTAssertEqual(
+            Set(texts).count, 4,
+            "四种状态必须给出四种说法：\(texts)"
+        )
+    }
 }
 
 // MARK: - (G) 跨入口一致：App 在发出请求之前就拒绝服务会拒绝的渲染
@@ -3812,6 +3944,58 @@ extension AppModelTests {
         XCTAssertTrue(
             readiness(voices: []).hasActionableSteps,
             "确认没有可用音色时必须给出下一步"
+        )
+    }
+
+    /// #183：配音台音色选择器不得把「没读到」「读取失败」说成「服务没有音色」。
+    ///
+    /// `refreshCreatorVoices()` 的 catch 分支会 `creatorVoices = []` 并置 `.failed`。
+    /// 旧实现只问 `availableVoices.isEmpty`，于是这三种状态拿到同一句话，
+    /// 并把用户送去「音色创作」——解决不了一次读取失败。
+    func testTheVoicePickerNeverCallsAnUnreadListHavingNoVoices() {
+        let usable = [CreatorVoice(id: "v1", name: "可用音色", available: true)]
+        let unusable = [CreatorVoice(id: "v2", name: "停用音色", available: false)]
+
+        // 还没读到过、或正在读：我们不知道有没有音色。
+        for state in [CreatorVoicesLoadState.unknown, .loading] {
+            let picker = CreatorVoicePickerState.resolve(loadState: state, voices: [])
+            XCTAssertEqual(
+                picker, .reading,
+                "\(state) 不是「没有音色」这个结论"
+            )
+            XCTAssertFalse(
+                picker.suggestsCreatingVoice,
+                "\(state) 时催用户去创作一个他可能已经有的音色"
+            )
+        }
+
+        // 读取失败：更不能催用户去创作，也不能说成"服务没有返回音色"。
+        let failed = CreatorVoicePickerState.resolve(loadState: .failed, voices: [])
+        XCTAssertEqual(failed, .unreadable)
+        XCTAssertTrue(failed.offersReload, "读失败时的正确动作是重新加载")
+        XCTAssertFalse(failed.suggestsCreatingVoice)
+        XCTAssertFalse(
+            failed.emptyDescription.contains("没有返回"),
+            "读失败不得被说成服务确实没有返回音色"
+        )
+
+        // 读到了、确有可用音色。
+        XCTAssertEqual(
+            CreatorVoicePickerState.resolve(loadState: .loaded, voices: usable),
+            .available
+        )
+        // 读到了、音色都在但当前不可用：这才是"没有可用音色"。
+        XCTAssertEqual(
+            CreatorVoicePickerState.resolve(loadState: .loaded, voices: unusable),
+            .noneAvailable
+        )
+        XCTAssertEqual(
+            CreatorVoicePickerState.resolve(loadState: .loaded, voices: []),
+            .noneAvailable
+        )
+        // 只有"确实没有"才该把用户送去音色创作。
+        XCTAssertTrue(
+            CreatorVoicePickerState.resolve(loadState: .loaded, voices: []).suggestsCreatingVoice
         )
     }
 }

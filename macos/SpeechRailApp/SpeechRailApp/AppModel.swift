@@ -24,6 +24,123 @@ public enum CreatorVoicesLoadState: Equatable, Sendable {
     case failed
 }
 
+/// 配音台结果位现在该显示什么。
+///
+/// 这里**故意没有失败分支**：失败提示与结果是并排的两件事，不是互斥的三选一。
+/// 上一次成功留下的 `lastCreatedWork` 会一直存在到那件作品被删除，若把失败塞进
+/// 同一条互斥链，它会被旧成品遮住——用户按下生成、按钮恢复原样，页面既没有
+/// 新成品也没有任何提示。失败请读 `creatorMessage`，与本投影并排渲染。
+public enum DubbingDeskSlot: Equatable, Sendable {
+    /// 什么都没有：还没生成过，或失败后还没重试。
+    case none
+    /// 已生成但用户还没决定保存还是放弃。
+    case unsaved
+    /// 上一次生成并保存成功的结果。
+    case savedWork(CreativeWork)
+}
+
+/// 配音台音色选择器面对的情况。
+///
+/// 视图不再自己算 `creatorVoices.isEmpty`：空列表同时是「还没读到」「读取失败」
+/// 和「确实没有音色」三种状态，而这三种给用户的动作完全相反——前两种该**重新
+/// 加载**，只有第三种才该去**音色创作**。`refreshCreatorVoices()` 的 catch 分支
+/// 会把 `creatorVoices` 清空并置为 `.failed`，所以这不是理论情形。
+public enum CreatorVoicePickerState: Equatable, Sendable {
+    case reading
+    case unreadable
+    case noneAvailable
+    case available
+
+    /// 胶囊上的标题。选中音色时视图用音色名，不用这里的。
+    public var title: String {
+        switch self {
+        case .reading: return "正在读取音色…"
+        case .unreadable: return "没能读到音色"
+        case .noneAvailable: return "没有可用音色"
+        case .available: return "选择音色"
+        }
+    }
+
+    /// 空态里那句话。`.available` 不会出现空态。
+    public var emptyDescription: String {
+        switch self {
+        case .reading: return "正在从服务读取音色列表。"
+        case .unreadable: return "没能从服务读到音色列表。你可能本来就有音色，先重新加载一次。"
+        case .noneAvailable: return "服务当前没有返回可用于配音的音色。"
+        case .available: return ""
+        }
+    }
+
+    /// 空态该不该把用户送去音色创作。只有「确实没有」才该去。
+    public var suggestsCreatingVoice: Bool { self == .noneAvailable }
+
+    /// 空态该给的恢复动作。只有「没读到」才该重新加载。
+    public var offersReload: Bool { self == .unreadable }
+
+    /// 由加载状态与列表内容决定。抽成静态函数是为了能逐个取值直接测，
+    /// 而不必把 App 真的停在"正在读取"这种瞬时状态上。
+    ///
+    /// `loadState` 的四个取值全部列举，没有 `default`——漏掉一个会被安静地
+    /// 当成"确实没有音色"，也就是 #183 本身。
+    public static func resolve(
+        loadState: CreatorVoicesLoadState,
+        voices: [CreatorVoice]
+    ) -> CreatorVoicePickerState {
+        switch loadState {
+        case .unknown, .loading:
+            return .reading
+        case .failed:
+            return .unreadable
+        case .loaded:
+            return voices.contains(where: \.available) ? .available : .noneAvailable
+        }
+    }
+}
+
+/// 段落返修弹层副标题里关于音色的那半句。
+///
+/// 四种状态必须分开说。把「不知道」说成「原音色」是一句我们**没有依据**的断言
+/// （#184）；尤其在「音色不在列表里」时，副标题会先承诺一个音色，紧接着第一次
+/// 返修就被 `startDubbingSegmentRedo` 拒绝——用户看到的是自相矛盾。
+public enum DubbingProjectVoice: Equatable, Sendable {
+    /// 查到了音色名。
+    case named(String)
+    /// 配方里没有记录音色。
+    case notRecorded
+    /// 音色列表没读到（还没读、正在读或读失败）。
+    case listUnread
+    /// 列表读到了，这件作品用的音色不在其中。
+    case notInLibrary
+
+    /// 直接接在副标题逗号后的那半句。
+    public var text: String {
+        switch self {
+        case .named(let name): return "音色为「\(name)」"
+        case .notRecorded: return "这件作品没有记录使用的音色"
+        case .listUnread: return "音色待确认（还没读到音色列表）"
+        case .notInLibrary: return "音色不在当前的音色列表里"
+        }
+    }
+
+    /// `loadState` 的四个取值全部列举，没有 `default`。
+    public static func resolve(
+        voiceID: String?,
+        voicesLoadState: CreatorVoicesLoadState,
+        voices: [CreatorVoice]
+    ) -> DubbingProjectVoice {
+        guard let voiceID else { return .notRecorded }
+        switch voicesLoadState {
+        case .unknown, .loading, .failed:
+            return .listUnread
+        case .loaded:
+            guard let voice = voices.first(where: { $0.id == voiceID }) else {
+                return .notInLibrary
+            }
+            return .named(voice.name)
+        }
+    }
+}
+
 public enum AppCapabilityAvailability: Equatable, Sendable {
     case available
     case unsupported
@@ -689,6 +806,23 @@ public final class AppModel {
     /// 配音台已生成、尚未显式保存的内存音频及制作身份。
     /// 只有用户点击保存后才写入作品库；取消、失败或离开页面即丢弃。
     public private(set) var pendingDubbing: PendingDubbingRender?
+
+    /// 配音台结果位。只描述"有没有结果、是哪一种"，不描述失败——见 `DubbingDeskSlot`。
+    public var dubbingDeskSlot: DubbingDeskSlot {
+        if pendingDubbing != nil { return .unsaved }
+        if let work = lastCreatedWork { return .savedWork(work) }
+        return .none
+    }
+
+    /// 配音台音色选择器的状态。四个取值穷举 `CreatorVoicesLoadState`，
+    /// 不留 `default`：漏掉一个取值会被安静地当成"没有音色"。
+    public var creatorVoicePickerState: CreatorVoicePickerState {
+        CreatorVoicePickerState.resolve(
+            loadState: creatorVoicesLoadState,
+            voices: creatorVoices
+        )
+    }
+
     // MARK: 段落返修（D）
 
     /// 当前打开的配音项目：把一件已保存作品按段落拆开，逐段重做、试听、采用。
@@ -3287,10 +3421,14 @@ public final class AppModel {
         playingDubbingCandidateID = nil
     }
 
-    /// 当前项目用到的音色名。配方里没有记录时如实显示"未知"，不借用当前选择的音色。
-    public var dubbingProjectVoiceName: String? {
-        guard let voiceID = dubbingProject?.recipe.recipe?.voiceID else { return nil }
-        return creatorVoices.first { $0.id == voiceID }?.name
+    /// 当前项目用到的音色。查不到、没记录、不在列表里是三件事，各自照实说——
+    /// 见 `DubbingProjectVoice`。
+    public var dubbingProjectVoice: DubbingProjectVoice {
+        DubbingProjectVoice.resolve(
+            voiceID: dubbingProject?.recipe.recipe?.voiceID,
+            voicesLoadState: creatorVoicesLoadState,
+            voices: creatorVoices
+        )
     }
 
     /// 重新生成一段。其余段落、已有候选与采用关系全部原样保留。
