@@ -49,6 +49,10 @@ seed 只有真正下发到采样流才记为固定策略；运行时装不上确
 App 侧把配方投影成强类型快照随作品冻结，回执缺失时保留完整音频并把 `provenance` 标成
 `partial` / `unavailable`，老作品读作 `legacyUnknown`，不回填历史身份。
 
+「追溯完整」由三个条件共同成立：`state == .complete`、`digest != nil`、**`missing_fields` 为空**。
+前两个是服务端对自身的评定，只有第三个是客户端独立解码出来的信号；不要求三者一致，
+一份自称 `complete` 却仍列着缺失事实的回执会被显示成追溯完整。
+
 证明：`tests/test_render_recipe.py`、`tests/test_render_receipts.py`、
 `tests/test_render_receipt_routes.py`、`tests/test_tts_sampling.py`、
 `tests/test_qwen3_tts_worker.py`、Swift `ServiceContractTests` / `CreativeWorkStoreTests`。
@@ -150,7 +154,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 504 XCTest + 379 swift-testing，0 失败
+  → 505 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
@@ -180,7 +184,8 @@ scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCE
 
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
 2026-10-04 补跑 `pytest tests/` 全量与上列定向文件：Python 数字按上表更新；
-Swift 与构建相关命令当日未改动 Swift 源码，未重跑，沿用 2026-10-03 的记录。
+Swift 侧同日改动 `ServiceAPIClient.provenance(for:)`，已重跑并按上表更新。
+构建、契约脚本与 mypy 当日未重跑，沿用 2026-10-03 的记录。
 
 ### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」
 

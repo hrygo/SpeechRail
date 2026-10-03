@@ -617,6 +617,41 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    func testProvenanceDoesNotTakeTheServersSelfAssessmentAtFaceValue() throws {
+        /// A payload that claims `complete` while still listing missing facts is
+        /// a contract violation, not a verified render. `state` and `digest` are
+        /// the server grading its own work; `missing_fields` is decoded
+        /// separately, so it is the one signal that can contradict them.
+        let contradictsItself = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": ["model.engine_revision"],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: contradictsItself),
+            RenderProvenance(
+                state: .partial,
+                reason: "recipe_incomplete_model.engine_revision"
+            ),
+            "配方自述完整却仍列着缺失事实时，不得显示为追溯完整"
+        )
+    }
+
     func testRequestBuilderAddsBearerAndConditionalHeaders() throws {
         let request = try ServiceRequestBuilder(
             baseURL: URL(string: "http://127.0.0.1:8201")!,
