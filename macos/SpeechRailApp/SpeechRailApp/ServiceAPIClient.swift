@@ -311,7 +311,13 @@ public final class ServiceAPIClient: @unchecked Sendable {
         guard let recipe = receipt.recipe else {
             return RenderProvenance(state: .partial, reason: "recipe_missing")
         }
-        guard recipe.state == .complete, recipe.digest != nil else {
+        // `state` and `digest` are the server's own summary of itself; the
+        // missing-field list is decoded independently. Requiring all three to
+        // agree is what keeps "verified" from meaning "the server said so".
+        guard recipe.state == .complete,
+              recipe.digest != nil,
+              recipe.missingFields.isEmpty
+        else {
             return RenderProvenance(
                 state: .partial,
                 reason: "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
