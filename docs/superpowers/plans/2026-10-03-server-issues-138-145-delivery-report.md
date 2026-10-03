@@ -35,9 +35,10 @@
 - `docs/users/api-contract.md` 升版 3.12.0 → 3.13.0（date 2026-10-03）：区分“明确不支持
   的选项（400）”与“畸形输入（422）”，补 502 与四项 400 错误码，补 delta/segment 关联、
   数字硬门槛、策略版本、32 条上限与旧 probe set 的重新校验路径。
-- 兼容性判据来自官方 SDK 的实际模型：`openai` 7.10.0 的
-  `TranscriptionTextDeltaEvent.segment_id` 与 `TranscriptionTextSegmentEvent.id`，Node SDK
-  类型声明同样标注 `segment_id` 仅在 `gpt-4o-transcribe-diarize` 下出现。
+- 兼容性判据来自官方 SDK 的实际模型：Python `openai` 3.20.0 的
+  `TranscriptionTextDeltaEvent.segment_id` 与 `TranscriptionTextSegmentEvent.id`；
+  Node `openai` 7.10.0 的类型声明同样标注 `segment_id` 仅在
+  `gpt-4o-transcribe-diarize` 下出现。
 
 ## 4. 验证证据
 
