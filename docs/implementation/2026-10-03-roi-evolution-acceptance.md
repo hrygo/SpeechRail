@@ -36,7 +36,18 @@ verification_date: 2026-10-03
 `.recovery/<txID>/` 承接已提交但未完成的删除。启动、读、写都先过恢复。同 ID 同内容返回原
 记录，不同内容返回 `workConflict`。
 
-证明：`CreativeWorkStoreTests`（25 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+证明：`CreativeWorkStoreTests`（29 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+
+审查中补齐了四处「守卫在、但没被考到」的落盘边界：
+
+- **音频文件名必须由标识符推导。** `isSafeIdentifier(work.id)` 只管住了 `id`，
+  `audioFileName` 是另一个同样被拼进路径的字段。放它过去，一个合法 `id` 配一个
+  `../escaped.wav` 就能把音频写到作品目录之外——#161 那条防线挡的是路径逃逸，
+  守卫却落在第二个字段上，此前没有任何用例走过它。
+- **保存与读取都不接受空音频。** 保存 0 字节会让作品出现在列表里却放不出声音；
+  读取 0 字节若不报 `audioUnavailable`，空数据会直接交给播放器。
+- **改名同样收敛长度。** `clampedTitle` 只在 `rename` 一处被调用，
+  超长标题此前可以原样写进索引。
 
 ### ② 制作配方贯通
 
@@ -179,7 +190,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 511 XCTest + 379 swift-testing，0 失败
+  → 515 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
