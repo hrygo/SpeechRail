@@ -65,7 +65,8 @@ final class CreativeWorkStoreTests: XCTestCase {
         voiceID: String = "voice_a",
         voiceRevision: String? = nil,
         planID: String? = nil,
-        renderRevision: Int = 1
+        renderRevision: Int = 1,
+        audioFileName: String? = nil
     ) -> CreativeWork {
         CreativeWork(
             id: id,
@@ -79,7 +80,7 @@ final class CreativeWorkStoreTests: XCTestCase {
             // 索引用 ISO8601（秒精度）落盘：整秒时间戳才能原样往返。
             createdAt: Date(timeIntervalSince1970: 1_780_000_000),
             durationSeconds: 1.5,
-            audioFileName: "\(id).wav"
+            audioFileName: audioFileName ?? "\(id).wav"
         )
     }
 
@@ -378,6 +379,84 @@ final class CreativeWorkStoreTests: XCTestCase {
             "被拒绝的改名不得改变已保存的标题"
         )
     }
+
+    /// 音频文件名必须由标识符推导，不能由调用方给。
+    ///
+    /// `isSafeIdentifier(work.id)` 只管住了 `id`；`audioFileName` 是另一个字段，
+    /// 同样是拼进路径的。放它过去，一个合法 `id` 配一个 `../../escaped.wav`
+    /// 就能把音频写到作品目录之外——这正是 #161 那条防线要挡的事，
+    /// 但守卫落在第二个字段上。
+    func testAudioFileNameMustBeDerivedFromTheWorkID() throws {
+        let outside = directory.deletingLastPathComponent()
+            .appendingPathComponent("escaped-\(UUID().uuidString).wav")
+        let store = CreativeWorkStore(directory: directory)
+
+        for hostileName in [
+            "../\(outside.lastPathComponent)",
+            "nested/other.wav",
+            "绝对名字.wav",
+        ] {
+            let work = makeWork(id: "work_\(UUID().uuidString)", audioFileName: hostileName)
+            XCTAssertThrowsError(
+                try store.save(work, audioData: Data([1, 2, 3, 4])),
+                "音频文件名 \(hostileName) 必须被拒绝"
+            ) { error in
+                XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
+            }
+            XCTAssertEqual(try store.list(), [], "被拒绝的作品不得进入索引")
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outside.path),
+            "音频文件名不得把文件写到作品目录之外"
+        )
+    }
+
+    /// 空音频不得进入索引：作品一旦列出来就必须真的有声音可放。
+    func testSavingEmptyAudioIsRefused() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let work = makeWork(id: "work_empty_audio")
+
+        XCTAssertThrowsError(try store.save(work, audioData: Data())) { error in
+            XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
+        }
+        XCTAssertEqual(try store.list(), [])
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(work.audioFileName).path
+            ),
+            "被拒绝的保存不得留下 0 字节文件"
+        )
+    }
+
+    /// 磁盘上变成 0 字节的音频读回来时必须报不可用，而不是把空数据交给播放器。
+    func testLoadingAZeroByteAudioReportsItAsUnavailable() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let work = makeWork(id: "work_truncated_audio")
+        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try Data().write(to: directory.appendingPathComponent(work.audioFileName))
+
+        XCTAssertThrowsError(try store.loadAudio(for: work)) { error in
+            XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
+        }
+    }
+
+    /// 改名同样要收敛长度：作品列表与导出的文件名都按这个上限渲染。
+    func testRenamingClampsAnOverlongTitle() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let work = makeWork(id: "work_long_title")
+        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        let overlong = String(repeating: "长", count: CreativeWork.titleMaximumLength + 40)
+
+        let renamed = try store.rename(work, title: overlong)
+
+        XCTAssertEqual(
+            renamed.title.count,
+            CreativeWork.titleMaximumLength + CreativeWork.titleEllipsis.count,
+            "超长标题必须收敛到上限，而不是原样写进索引"
+        )
+        XCTAssertEqual(try store.list().first?.title, renamed.title)
+    }
+
 
     /// 失败的提交必须**当场**收尾，不许把残局留给下一次打开。
     ///
