@@ -468,6 +468,17 @@ final class DubbingProjectStoreTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
         }
+        // 声明 0 Hz 的畸形文件同样要拒绝：照写会产出一份播放器拒绝或误读的 header。
+        XCTAssertThrowsError(
+            try DubbingAudioExport.makeWAV(from: [
+                DubbingAudioClip(
+                    pcm: Data([0x01, 0x00]),
+                    format: DubbingAudioFormat(sampleRate: 0, channels: 1, bitsPerSample: 16)
+                ),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
         // 只有 RIFF/WAVE 头、没有 fmt 与 data 的文件不能被当成音频。
         var headerOnly = Data("RIFF".utf8)
         headerOnly.append(contentsOf: [24, 0, 0, 0])
