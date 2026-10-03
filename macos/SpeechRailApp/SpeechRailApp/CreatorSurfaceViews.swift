@@ -3929,7 +3929,10 @@ private struct DubbingProjectSheet: View {
             footer
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(width: 720, height: 620)
+        .frame(
+            width: SpeechRailDesignTokens.Layout.creatorDubbingSheetWidth,
+            height: SpeechRailDesignTokens.Layout.creatorDubbingSheetHeight
+        )
         .task {
             model.startDubbingProject(for: work)
         }
