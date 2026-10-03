@@ -2920,7 +2920,8 @@ extension AppModelTests {
 
     private static func dubbingRecipe(
         digest: String?,
-        voiceID: String = "ryan"
+        voiceID: String = "ryan",
+        effectiveSpeed: Double = 1.0
     ) -> RenderRecipeSnapshot {
         RenderRecipeSnapshot(
             state: digest == nil ? .partial : .complete,
@@ -2929,7 +2930,7 @@ extension AppModelTests {
             voiceID: voiceID,
             voiceRevision: "vr_0123456789abcdef0123456789abcdef",
             voiceMode: "system",
-            effectiveSpeed: 1.0,
+            effectiveSpeed: effectiveSpeed,
             outputFormat: "wav",
             sampleRate: 24_000,
             channels: 1
@@ -3066,6 +3067,48 @@ extension AppModelTests {
             "生成候选不会自动采用"
         )
         XCTAssertNotNil(model.dubbingMessage)
+    }
+
+    /// 重做必须用**当初那一次**的语速，而不是当前默认或 App 里的当前值。
+    ///
+    /// 配方摘要 `isValid` 是按 `recipe.digest` 逐字段算的，`effective_speed` 在其中。
+    /// 语速一旦不同，新候选的摘要就对不上项目的摘要，采用会被判成
+    /// 「制作条件与当前项目不一致」——用户看到的是「已生成新版本」，采用时却被拒。
+    /// 这里让配方带一个**不等于 1.0** 的语速：默认语速与兜底值都是 1.0，
+    /// 用 1.0 做断言等于什么都没考。
+    func testRedoingASegmentUsesTheSpeedRecordedInTheRecipe() async throws {
+        let recipe = Self.dubbingRecipe(digest: "digest-1", effectiveSpeed: 1.25)
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x61),
+            recipe: recipe,
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let work = try Self.dubbingWork(
+            script: "第一段正文。\n第二段正文。",
+            provenance: RenderProvenanceSnapshot(
+                state: .verified,
+                reason: nil,
+                planSHA256: "plan_sha_source",
+                recipe: recipe,
+                pcmSHA256: "pcm_sha_source"
+            )
+        )
+        let saved = try works.save(work, audioData: silentPreviewWAV(marker: 0x44))
+        let project = try XCTUnwrap(model.startDubbingProject(for: saved))
+        let secondSegment = try XCTUnwrap(project.segments.last)
+
+        model.startDubbingSegmentRedo(secondSegment.id)
+        try await waitUntilDubbing {
+            model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
+        }
+
+        let calls = await creator.renderCalls
+        XCTAssertEqual(calls.map(\.speed), [1.25], "重做必须沿用原作品记录下来的语速")
+        // 语速对得上，摘要才可能对上；采用不应被「制作条件不一致」挡住。
+        let candidate = try XCTUnwrap(model.dubbingCandidates.first)
+        XCTAssertTrue(model.adoptDubbingCandidate(candidate), "语速一致时候选应当可采用")
     }
 
     /// 采用后可以撤销回到上一版；撤销只改引用，已保存的音频一个都不删。

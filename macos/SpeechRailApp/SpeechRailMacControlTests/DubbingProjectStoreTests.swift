@@ -98,7 +98,11 @@ final class DubbingProjectStoreTests: XCTestCase {
         )
     }
 
-    private func wavFile(pcm: Data, format: DubbingAudioFormat) -> Data {
+    private func wavFile(
+        pcm: Data,
+        format: DubbingAudioFormat,
+        formatCode: Int = 1
+    ) -> Data {
         var file = Data()
         func append16(_ value: Int) {
             let value = UInt16(value)
@@ -115,7 +119,7 @@ final class DubbingProjectStoreTests: XCTestCase {
         append32(36 + pcm.count)
         file.append(contentsOf: Array("WAVEfmt ".utf8))
         append32(16)
-        append16(1)
+        append16(formatCode)
         append16(format.channels)
         append32(format.sampleRate)
         append32(format.sampleRate * format.channels * format.bitsPerSample / 8)
@@ -582,6 +586,90 @@ final class DubbingProjectStoreTests: XCTestCase {
         XCTAssertThrowsError(try DubbingAudioExport.clip(fromWAV: headerOnly)) { error in
             XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
         }
+    }
+
+    /// 压缩 WAV 的 data 不是裸样本，即使它自称单声道 16 bit。
+    ///
+    /// μ-law / A-law 的 fmt 就是 channels=1、bitsPerSample=16，只有 format code
+    /// 不是 1。放它过去，`makeWAV` 会把 μ-law 字节原样写进一个自称 16 bit PCM 的
+    /// 容器——正是「听起来不对却能播放的成品」。所以拒绝发生在 clip 这一步。
+    func testCompressedWAVIsRejectedBecauseItsDataIsNotRawPCM() {
+        var pcm = Data()
+        for index in 0..<8 {
+            pcm.append(0xff)
+            pcm.append(UInt8(index))
+        }
+        let muLaw = wavFile(
+            pcm: pcm,
+            format: DubbingAudioFormat(
+                sampleRate: 24_000,
+                channels: 1,
+                bitsPerSample: 16
+            ),
+            formatCode: 7
+        )
+
+        XCTAssertThrowsError(try DubbingAudioExport.clip(fromWAV: muLaw)) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
+    }
+
+    /// `fmt ` 里的位深必须照实读出来，不能假定 16。
+    ///
+    /// 假定 16 会让 24 bit 的段落被当成 16 bit：字节数不变、采样率不变，
+    /// 拼出来的成品能播放，只是速度与音色全错。
+    func testBitDepthIsReadFromTheFmtChunkRatherThanAssumed() throws {
+        let deep = wav(0x33, samples: 4, sampleRate: 24_000, bitsPerSample: 24)
+
+        let clip = try DubbingAudioExport.clip(fromWAV: deep)
+
+        XCTAssertEqual(clip.format.bitsPerSample, 24)
+        XCTAssertEqual(clip.format.sampleRate, 24_000)
+        XCTAssertEqual(clip.format.channels, 1)
+        XCTAssertThrowsError(try DubbingAudioExport.makeWAV(from: [clip])) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
+    }
+
+    /// 导出的正文只包含已采用候选对应的段落。
+    ///
+    /// 段落在导出时必然全部已采用，所以这条在 `export` 里走不到差异；
+    /// 但 `adoptedScript` 是公开投影，它自己的承诺要自己站着。
+    func testAdoptedScriptOmitsSegmentsThatAdoptedNothing() {
+        let project = DubbingProject(
+            id: "dub_script",
+            title: "正文投影",
+            scriptText: "甲。\n乙。\n丙。",
+            recipe: RenderProvenanceSnapshot(state: .verified, reason: nil),
+            segments: [
+                DubbingSegment(id: "dub_script_s1", text: "甲。", acceptedCandidateID: "cand_1"),
+                DubbingSegment(id: "dub_script_s2", text: "乙。"),
+                DubbingSegment(id: "dub_script_s3", text: "丙。"),
+            ]
+        )
+
+        XCTAssertEqual(project.adoptedScript, "甲。")
+    }
+
+    /// 没有可撤销的历史时，撤销必须什么都不做。
+    ///
+    /// 索引损坏或手工构造的项目可能出现「当前采用着某版本、历史却是空的」。
+    /// 这时若撤销把采用项清空，那一段会静默从成品里消失——用户没报错，
+    /// 只是导出的正文短了一段。
+    func testUndoWithNoHistoryLeavesTheCurrentAdoptionAlone() {
+        var segment = DubbingSegment(
+            id: "dub_script_s1",
+            text: "甲。",
+            acceptedCandidateID: "cand_1",
+            adoptionHistory: []
+        )
+
+        XCTAssertFalse(segment.undoAdoption())
+        XCTAssertEqual(
+            segment.acceptedCandidateID,
+            "cand_1",
+            "没有历史不等于清空采用项"
+        )
     }
 
     // MARK: - 恢复
