@@ -237,7 +237,9 @@ public struct ServiceOverviewView: View {
     @ViewBuilder
     private var firstResultCard: some View {
         let readiness = model.firstResultReadiness
-        if !readiness.isReady {
+        // 只在有确定缺口时出现。全是未知的时候，卡片只剩一个标题和一条分隔线，
+        // 而它的文案还在说「先处理下面确定缺的东西」——那下面什么都没有。
+        if readiness.hasActionableSteps {
             CardSurface {
                 CardHead(
                     title: "距离第一条真实结果",

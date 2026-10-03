@@ -194,6 +194,14 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 把后者算成前者会催用户去修一个他还没有资格判断的东西——这条区分此前只有服务与模型两步
 被断言，音色那一步的未知分支没有用例；补上后逐条变异均会变红。
 
+音色列表的 `unknown` 与 `loading` 也属于后者：App 一启动就是这个值，此前它们落进
+`default` 分支，被说成「还没有可用于配音的音色，先在『音色库』里准备一个」——
+用户可能明明有音色，却被推去重新做一个。
+
+这张卡只在**有确定缺口**时出现（`hasActionableSteps`）。全是未知的时候它只剩一个标题、
+一条分隔线和零行内容，而文案还在说「先处理下面确定缺的东西」。这条判据落在
+`FirstResultReadiness` 上而不是视图条件里，因此可被测试直接考到。
+
 **未验证**：升级失败的端到端恢复需要真实安装/回滚授权（见 `.agents/skills/speechrail-release`）。
 本次只交付 App 侧"服务不可达时如实说明缺口"的行为。
 
@@ -206,7 +214,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 519 XCTest + 379 swift-testing，0 失败
+  → 521 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
