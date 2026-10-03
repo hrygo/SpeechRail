@@ -529,6 +529,11 @@ def test_clone_path_reports_its_derived_seed_and_fixed_sampling(
     _fake_mlx_runtime(monkeypatch, seeded)
     engine = _sampling_engine("base")
     engine._audio_loader_fn = lambda _: object()
+    # The engine default is 0.95, which is exactly _CLONE_TOP_P. Leaving it
+    # there would make the assertion below pass whether the clone path reports
+    # its own constant or simply echoes the engine setting, so the two are
+    # pulled apart deliberately.
+    engine._top_p = 0.5
 
     list(
         engine._generate(
