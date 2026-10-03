@@ -107,6 +107,30 @@ class RenderReceiptRegistry:
             raise ValueError("render window index must be a non-negative integer")
         if checkpoint_id is not None and not checkpoint_id.strip():
             raise ValueError("render checkpoint id must not be blank")
+        if recipe is not None:
+            # The header and the recipe describe the same render, so every fact
+            # they both carry has to agree. Divergence would let one receipt
+            # name a voice, a format or a worker revision in its header while
+            # its recipe -- and the digest taken over that recipe -- describe
+            # a different one, and the client reads the two from different
+            # places. A recipe that knows a fact the header does not is the
+            # same defect in the other direction: one side lost what the other
+            # still carries.
+            for name, in_recipe, in_header in (
+                ("voice_id", recipe.voice_id, voice_id),
+                ("voice_revision", recipe.voice_revision, voice_revision),
+                ("model_artifact", recipe.model_artifact, model_artifact),
+                (
+                    "engine_revision",
+                    recipe.engine_revision,
+                    model_runtime_revision,
+                ),
+                ("output_format", recipe.output_format, output_format),
+                ("sample_rate", recipe.sample_rate, sample_rate),
+                ("channels", recipe.channels, channels),
+            ):
+                if in_recipe is not None and in_recipe != in_header:
+                    raise ValueError(f"recipe {name} contradicts the receipt header")
         receipt_id = f"rr_{uuid4().hex}"
         state = _ReceiptState(
             receipt_id=receipt_id,
