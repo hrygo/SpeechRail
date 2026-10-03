@@ -301,6 +301,12 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 swift test --package-path macos/SpeechRailApp --skip-update
   → 530 XCTest + 379 swift-testing，0 失败
 
+scripts/macos_app_build.sh --test-unit
+  → 503 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+
+scripts/macos_app_build.sh --configuration Debug
+  → BUILD SUCCEEDED
+
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
   tests/test_qwen3_tts_worker.py tests/test_render_receipt_routes.py \
@@ -317,12 +323,13 @@ uv run --no-sync python scripts/check_user_doc_contract.py       → OK
 uv run --no-sync python scripts/check_version_consistency.py     → OK
 uv run --no-sync python scripts/check_current_boundaries_contract.py → OK
 uv run --no-sync mypy src/speechrail                               → Success, 158 files
-scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCEEDED
 ```
 
-`mypy` 2.3.1 已离线安装并通过（158 个文件无问题）。Debug 构建同时修掉了
-`project.pbxproj` 中 `DubbingProjectStore.swift` 在两个 sources phase 的重复条目，
-重建后不再出现 `Skipping duplicate build file` 警告。
+`mypy` 2.3.1 已离线安装并通过（158 个文件无问题）。工程文件方面，本 PR 新增的
+`DubbingProjectStore.swift` / `FirstResultReadiness.swift` / `DubbingProjectStoreTests.swift`
+都同时进了 `App Sources` 与 `Unit Test Sources`，不再出现 `Skipping duplicate build file` 警告
+（`MeetingView.swift` 在 `App Sources` 里仍有一条重复条目，但它在 `origin/main` 上就已存在，
+且当前 Xcode 实跑不产生该警告，本次不动）。
 
 补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3140 passed, 1 skipped
 （运行 exit=0）。
@@ -330,7 +337,29 @@ scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCE
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
 2026-10-04 改动集中在 `ServiceAPIClient.provenance(for:)`、`FirstResultReadiness` 相关用例与
 采样/配方测试，上列 Swift、pytest、ruff 与四个契约脚本、mypy 命令已全部重跑并按上表更新。
-`scripts/macos_app_build.sh` 当日未重跑，沿用 2026-10-03 的记录。
+`scripts/macos_app_build.sh` 的两条入口当日已重跑，结果见上表。
+
+### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
+
+macOS 侧有两条门禁：`swift test`（SPM）与 `scripts/macos_app_build.sh --test-unit`
+（`xcodebuild test`）。二者编译的源文件集合不同，**跑到的用例数也就不同**。
+2026-10-04 逐套件对账后的实测差额：
+
+| 套件 | `swift test` | `--test-unit` | 差额原因 |
+| --- | --- | --- | --- |
+| `ServiceContractTests` | 56 | 56 | 已对齐 |
+| `RealtimeContractTests` | 41 | 41 | 已对齐 |
+| `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
+| `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
+| `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
+| **XCTest 合计** | **530** | **503** | |
+| swift-testing 合计 | 379 | 379 | 一致 |
+
+本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
+原先被 `#if SWIFT_PACKAGE` 挡在 `xcodebuild test` 之外，现已解除，回归由两条门禁共同覆盖。
+残留的 27 条属于既有结构：`ModelNamePresentation` / `ModelReadinessPresenter` 定义在
+`ModelManagementView.swift`，该文件被 SPM 显式 `exclude`，动它需要拆分符号，超出本 PR 范围。
+见 #194。
 
 ### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」
 
