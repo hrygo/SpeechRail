@@ -533,6 +533,56 @@ final class DubbingProjectStoreTests: XCTestCase {
         )
     }
 
+    /// 失败的提交必须**当场**收尾，不许把残局留给下一次打开。
+    ///
+    /// 断言必须发生在任何触发重放的调用之前：`list()` / `candidates()` 都会先跑
+    /// `recoverUnlocked()`，量到的是恢复之后的状态——分不清是立即回滚了，
+    /// 还是留下了残局、等下次打开才被清掉。
+    func testAFailedCommitLeavesNothingBehindBeforeTheStoreIsReopened() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let failing = CreativeWorkFileOperations(
+            writeInterceptor: { url, _ in
+                if url.lastPathComponent == "projects.json" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            }
+        )
+        let failingStore = DubbingProjectStore(
+            directory: directory,
+            fileOperations: failing
+        )
+
+        XCTAssertThrowsError(
+            try failingStore.addCandidate(
+                makeCandidate(id: "cand_added", segmentID: "seg_first", text: "第一段。"),
+                audioData: wav(0x22),
+                toProject: project.id
+            )
+        )
+
+        // 到这里为止没有任何调用触发过重放，磁盘就是失败瞬间的真实状态。
+        let audioFiles = try FileManager.default
+            .contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasSuffix(".wav") }
+            .sorted()
+        XCTAssertEqual(
+            audioFiles,
+            [],
+            "索引写失败后，未提交的候选音频不得留在目录里"
+        )
+        let pending = try FileManager.default
+            .contentsOfDirectory(
+                atPath: directory.appendingPathComponent(".transactions").path
+            )
+        XCTAssertEqual(
+            pending,
+            [],
+            "失败的提交不得留下待决事务——留着会让下次打开先面对一个歧义状态"
+        )
+    }
+
     func testRestartKeepsACommittedCandidate() throws {
         let armed = ArmedInterruption()
         let interrupting = CreativeWorkFileOperations(

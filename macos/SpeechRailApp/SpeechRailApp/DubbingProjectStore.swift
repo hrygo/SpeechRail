@@ -622,8 +622,15 @@ public final class DubbingProjectStore {
         transactionDirectory: URL
     ) throws {
         if let previousData = journal.previousIndexData {
-            try operations.write(previousData, to: indexURL)
-            try operations.synchronize(at: indexURL)
+            // 尽力而为，不能让这一步决定整段回滚的命运。
+            //
+            // 回滚只发生在索引写入失败之后，而索引用原子写：写失败即代表它没被改动，
+            // 所以这里重写旧内容只是兜底。可一旦索引是因为磁盘满、权限变更这类
+            // **持续性**原因写不动，重写就必然再次失败——若让它抛出去，
+            // 后面删除已发布音频、清掉事务目录这两步仍然做得到的事就全被跳过，
+            // 而调用方是 `try?`，失败还会被完全吞掉。
+            try? operations.write(previousData, to: indexURL)
+            try? operations.synchronize(at: indexURL)
         } else if operations.fileExists(at: indexURL) {
             try operations.remove(at: indexURL)
         }
