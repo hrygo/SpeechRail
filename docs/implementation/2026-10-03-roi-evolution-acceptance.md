@@ -36,7 +36,7 @@ verification_date: 2026-10-03
 `.recovery/<txID>/` 承接已提交但未完成的删除。启动、读、写都先过恢复。同 ID 同内容返回原
 记录，不同内容返回 `workConflict`。
 
-证明：`CreativeWorkStoreTests`（29 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+证明：`CreativeWorkStoreTests`（34 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
 
 审查中补齐了四处「守卫在、但没被考到」的落盘边界：
 
