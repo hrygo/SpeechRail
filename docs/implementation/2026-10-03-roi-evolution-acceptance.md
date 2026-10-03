@@ -69,6 +69,10 @@ App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着�
 音频只由被采用的候选按顺序拼接（重写 WAV header，不做 crossfade、不用静音补时长），
 正文只包含这些段落；只要有一段没采用版本就拒绝导出。
 
+header 的采样率、位深、声道**来自候选 WAV 自己的 `fmt ` 声明**，不是导出层的常量：
+拼接前解析各段格式，格式不一致或不是单声道 16 bit 正采样率就显式失败并给出可执行文案，
+不做隐式转换。猜错采样率不会报错，只会让成品语速与音高整体错位，属于最难察觉的一类失败。
+
 App 的「段落返修…」入口在作品详情动作区；重做、采用、撤销、导出在弹层首屏，候选版本收在
 每段的展开区；导出经 `NSOpenPanel` 选目录后写出 WAV + TXT 两份文件。
 
@@ -84,6 +88,12 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 证明：`TeleprompterSessionLifecycleTests.oneReadingRunKeepsPositionHonestAcrossEveryScenario`；
 各场景的单点回归见 `TeleprompterFollowControllerTests`（44）与
 `TeleprompterReplayEvaluatorTests`（32）。
+
+「不得移动位置」这类否定断言前，都会先等
+`session.followLatencyDiagnostics.alignmentSampleCount` 涨到对应值——会话每消费一条
+completed 转写恰好记录一个对齐样本，因此这个计数是**事件确实已被处理**的确定性证据。
+早期版本用固定 120ms 睡眠守卫否定断言，事件尚未处理时也会通过，等于给这一项上了假保险。
+同文件的 `waitFor` 助手原先在超时后什么都不做，已改为超时即记录失败。
 
 **未验证**：真实口播录音、蓝牙/USB 拔插重连、长时间运行。这些需要设备与真实模型授权。
 
@@ -110,7 +120,7 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 489 XCTest + 379 swift-testing，0 失败
+  → 492 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest <14 个定向文件> -q --no-cov
   → 170 passed
