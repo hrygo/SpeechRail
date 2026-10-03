@@ -650,6 +650,149 @@ final class ServiceContractTests: XCTestCase {
             ),
             "配方自述完整却仍列着缺失事实时，不得显示为追溯完整"
         )
+
+        // 缺失清单要照实读：空串不是「没有缺失项」。
+        let blankEntry = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": [""],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: blankEntry).state,
+            .partial,
+            "缺失清单里还有条目时就不得判为追溯完整"
+        )
+    }
+
+    /// 相等关系必须覆盖这一版认识的每一个事实。
+    ///
+    /// 少比一个字段，后果不是「判得更松」而是「判错」：改了发音词典、
+    /// 换了采样器的两次渲染会被说成同一份配方。往返测试抓不到这种缺失——
+    /// 编码与解码对同一个字段永远一致，`==` 少比一项也照样通过。
+    func testRecipeEqualityCoversEveryFactThisBuildUnderstands() {
+        let base = RenderRecipeSnapshot(
+            state: .complete,
+            missingFields: [],
+            digest: String(repeating: "e", count: 64),
+            pronunciationRevision: "unused",
+            voiceID: "narrator",
+            seedPolicy: "caller_fixed"
+        )
+
+        let changes: [(String, RenderRecipeSnapshot)] = [
+            ("pronunciationRevision", RenderRecipeSnapshot(
+                state: .complete,
+                missingFields: [],
+                digest: String(repeating: "e", count: 64),
+                pronunciationRevision: "pr_" + String(repeating: "1", count: 32),
+                voiceID: "narrator",
+                seedPolicy: "caller_fixed"
+            )),
+            ("seedPolicy", RenderRecipeSnapshot(
+                state: .complete,
+                missingFields: [],
+                digest: String(repeating: "e", count: 64),
+                pronunciationRevision: "unused",
+                voiceID: "narrator",
+                seedPolicy: "unseeded_sampler"
+            )),
+            ("voiceID", RenderRecipeSnapshot(
+                state: .complete,
+                missingFields: [],
+                digest: String(repeating: "e", count: 64),
+                pronunciationRevision: "unused",
+                voiceID: "someone_else",
+                seedPolicy: "caller_fixed"
+            )),
+        ]
+
+        for (field, changed) in changes {
+            XCTAssertNotEqual(changed, base, "\(field) 不同必须判为不同配方")
+        }
+        XCTAssertEqual(
+            base,
+            RenderRecipeSnapshot(
+                state: .complete,
+                missingFields: [],
+                digest: String(repeating: "e", count: 64),
+                pronunciationRevision: "unused",
+                voiceID: "narrator",
+                seedPolicy: "caller_fixed"
+            ),
+            "事实完全相同的两份配方必须判为相同"
+        )
+    }
+
+    /// 解码出来的自由 JSON 必须先被问过「这是不是我要的那种值」。
+    ///
+    /// 这些访问器是「强类型投影」的入口：空串不是标识符、小数不是采样率、
+    /// 非整数不是样本数。放它们过去，配方里就会出现 `""` 或被截断的数字，
+    /// 而 `==` 与摘要比对都看不出来。
+    func testJSONAccessorsOnlyAnswerForTheValueShapeTheyClaim() {
+        XCTAssertEqual(JSONValue(.string("narrator")).stringValue, "narrator")
+        XCTAssertNil(
+            JSONValue(.string("")).stringValue,
+            "空串不是标识符，必须读作缺失"
+        )
+        XCTAssertNil(JSONValue(.null).stringValue)
+        XCTAssertNil(JSONValue(.integer(1)).stringValue)
+
+        XCTAssertEqual(JSONValue(.number(1.5)).doubleValue, 1.5)
+        XCTAssertEqual(
+            JSONValue(.integer(1)).doubleValue,
+            1,
+            "整数 JSON 也可能是 1.0 语速，必须照样读出"
+        )
+        XCTAssertNil(JSONValue(.string("1.0")).doubleValue)
+
+        XCTAssertEqual(JSONValue(.integer(24_000)).intValue, 24_000)
+        XCTAssertEqual(JSONValue(.number(24_000)).intValue, 24_000)
+        XCTAssertNil(
+            JSONValue(.number(24_000.5)).intValue,
+            "非整数的采样率不得被截断成一个整数"
+        )
+        XCTAssertNil(JSONValue(.string("24000")).intValue)
+    }
+
+    /// 未识别的回执状态必须原样报出来，不能塌成一个已知状态。
+    ///
+    /// `provenance(for:)` 把 `wireValue` 拼进 reason，
+    /// 塌成 `pending` 会让排查时指向一个根本没发生过的状态。
+    func testAnUnknownReceiptStatusKeepsItsOwnNameInTheReason() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "half_done",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": null
+        }
+        """)
+
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: receipt),
+            RenderProvenance(state: .partial, reason: "receipt_status_half_done"),
+            "未知状态要按它自己的名字报出来"
+        )
     }
 
     func testRequestBuilderAddsBearerAndConditionalHeaders() throws {

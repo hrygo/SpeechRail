@@ -95,6 +95,18 @@ App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着�
 - 回执路由测试补上 `plan_sha256` 与 `plan_id` 前缀的一致性断言——该字段此前只有
   Swift 夹具在用，服务端从未断言过。
 
+这层强类型投影本身也曾整段零覆盖。五个变异在补测前全部全绿：
+
+- `JSONValue.stringValue` 不再拒空串 → 配方里会出现 `""` 这样的「标识符」；
+- `JSONValue.intValue` 对非整数不再拒绝 → `24000.5` 被截断成 `24000`；
+- `ReceiptStatus.wireValue` 把未知状态塌成 `pending` → 排查时指向一个没发生过的状态；
+- `missingFields` 解码时过滤空串 → 一份仍列着缺失项的配方被当成没有缺失；
+- `RenderRecipeSnapshot.==` 少比 `pronunciationRevision` 或 `seedPolicy` → 换了词典、
+  换了采样器的两次渲染被说成同一份配方。最后一条尤其难抓：往返测试用的就是这个
+  `==`，而编码与解码对同一个字段永远一致，缺一项也照样通过。
+
+因此相等关系改为**逐字段考**——每个事实各造一份只差这一项的配方，断言判为不同。
+
 采样事实这条链上也有两处只测了一半：
 
 - **「运行时没能播种」只有 `custom_voice` 一条路径有对照。** 把
@@ -190,7 +202,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 515 XCTest + 379 swift-testing，0 失败
+  → 518 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
