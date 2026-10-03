@@ -762,6 +762,106 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
+    /// 已经隔离进事务目录的旧音频，不得被后来出现的同名新音频顶掉。
+    ///
+    /// 恢复分两步：先把作品目录里的音频移进事务目录，再把整个事务目录搬进
+    /// `.recovery`。第一步完成后进程退出、且期间有同名新音频落盘时，
+    /// 第二次恢复会同时看到两个文件——这时必须保住先隔离的那一个。
+    func testRecoveryDoesNotOverwriteAnAlreadyPreservedAudioFile() throws {
+        let work = makeWork(id: "work_preserved_exists")
+        try CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 1, 1, 1]))
+
+        let deleteInterrupting = CreativeWorkFileOperations(
+            syncInterceptor: { url in
+                if url.lastPathComponent == "works.json" {
+                    throw CreativeWorkTransactionInterruption.simulatedProcessExit
+                }
+            }
+        )
+        XCTAssertThrowsError(
+            try CreativeWorkStore(
+                directory: directory,
+                fileOperations: deleteInterrupting
+            ).delete(work)
+        )
+
+        let transactions = directory.appendingPathComponent(".transactions", isDirectory: true)
+        let transactionDirectory = try XCTUnwrap(
+            try FileManager.default
+                .contentsOfDirectory(at: transactions, includingPropertiesForKeys: nil)
+                .first
+        )
+        let preserved = Data([7, 7, 7, 7])
+        try preserved.write(
+            to: transactionDirectory.appendingPathComponent(work.audioFileName)
+        )
+        // 同名的新音频又出现在作品目录里。
+        try Data([8, 8, 8, 8]).write(
+            to: directory.appendingPathComponent(work.audioFileName)
+        )
+
+        let reopened = CreativeWorkStore(directory: directory)
+        XCTAssertTrue(try reopened.list().isEmpty)
+
+        let recovered = directory
+            .appendingPathComponent(".recovery", isDirectory: true)
+            .appendingPathComponent(transactionDirectory.lastPathComponent, isDirectory: true)
+            .appendingPathComponent(work.audioFileName)
+        XCTAssertEqual(
+            try Data(contentsOf: recovered),
+            preserved,
+            "先隔离的旧音频不得被同名的新音频覆盖"
+        )
+    }
+
+    /// journal 的 `transactionID` 必须与它所在的事务目录同名。
+    ///
+    /// 两者都通过格式校验，但描述的不是同一个事务时，恢复会把文件搬进
+    /// 另一个目录，让真正的事务目录留在原地。
+    func testRecoveryRefusesAJournalThatDoesNotBelongToItsTransactionDirectory() throws {
+        let work = makeWork(id: "work_journal_mismatch")
+        try CreativeWorkStore(directory: directory).save(work, audioData: Data([3, 3, 3, 3]))
+
+        let deleteInterrupting = CreativeWorkFileOperations(
+            syncInterceptor: { url in
+                if url.lastPathComponent == "works.json" {
+                    throw CreativeWorkTransactionInterruption.simulatedProcessExit
+                }
+            }
+        )
+        XCTAssertThrowsError(
+            try CreativeWorkStore(
+                directory: directory,
+                fileOperations: deleteInterrupting
+            ).delete(work)
+        )
+
+        let transactions = directory.appendingPathComponent(".transactions", isDirectory: true)
+        let transactionDirectory = try XCTUnwrap(
+            try FileManager.default
+                .contentsOfDirectory(at: transactions, includingPropertiesForKeys: nil)
+                .first
+        )
+        let realID = transactionDirectory.lastPathComponent
+        let swappedID = realID == String(repeating: "a", count: 32)
+            ? String(repeating: "b", count: 32)
+            : String(repeating: "a", count: 32)
+        let journalURL = transactionDirectory.appendingPathComponent("journal.json")
+        let journal = try String(contentsOf: journalURL, encoding: .utf8)
+        try journal
+            .replacingOccurrences(of: realID, with: swappedID)
+            .write(to: journalURL, atomically: true, encoding: .utf8)
+
+        let reopened = CreativeWorkStore(directory: directory)
+        XCTAssertThrowsError(try reopened.list()) { error in
+            XCTAssertEqual(
+                error as? CreativeWorkStoreError,
+                .recoveryRequired,
+                "journal 不属于它所在的事务目录时必须拒绝恢复，而不是搬错目录"
+            )
+        }
+    }
+
     func testRenameFailureBeforeIndexCommitKeepsTheOriginalTitle() throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_rename_failure")

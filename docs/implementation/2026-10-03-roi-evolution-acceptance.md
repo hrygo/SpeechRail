@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 531 XCTest + 379 swift-testing，0 失败
+  → 533 XCTest + 379 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 504 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+  → 506 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -365,11 +365,12 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | 套件 | `swift test` | `--test-unit` | 差额原因 |
 | --- | --- | --- | --- |
 | `ServiceContractTests` | 57 | 57 | 已对齐 |
+| `CreativeWorkStoreTests` | 37 | 37 | 已对齐 |
 | `RealtimeContractTests` | 41 | 41 | 已对齐 |
 | `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
-| **XCTest 合计** | **531** | **504** | |
+| **XCTest 合计** | **533** | **506** | |
 | swift-testing 合计 | 379 | 379 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
