@@ -3376,6 +3376,47 @@ extension AppModelTests {
         )
     }
 
+    /// 模型状态还没读到时是未知，不是缺口：`modelAvailability` 的初始值就是
+    /// `.unknown`，每个用户在首次读取完成前都停在这里。
+    func testUnknownModelAvailabilityIsNotReportedAsAKnownBlocker() {
+        let projection = readiness(
+            modelAvailability: .unknown,
+            voices: [availableVoice]
+        )
+
+        XCTAssertFalse(projection.isReady, "模型状态未知时不得声称可以拿到第一条真实结果")
+        XCTAssertTrue(
+            projection.unknownSteps.map(\.step).contains(.modelsReady),
+            "还没读到模型状态属于未知，不是已确认的缺口"
+        )
+        XCTAssertFalse(
+            projection.blockingSteps.map(\.step).contains(.modelsReady),
+            "未知不得混进确定缺口——否则会催用户去修一个没坏的东西"
+        )
+    }
+
+    /// 档位在这台机器上根本跑不了：这是确定的缺口，且必须给出可执行的下一步。
+    func testUnsupportedMachineIsAKnownBlockerWithItsOwnNextAction() {
+        let projection = readiness(
+            modelAvailability: .unsupported,
+            voices: [availableVoice]
+        )
+
+        XCTAssertEqual(projection.blockingSteps.map(\.step), [.modelsReady])
+        XCTAssertTrue(projection.unknownSteps.isEmpty, "服务已明确回话，不该再算未知")
+        XCTAssertFalse(projection.isReady)
+        // 先 count 后 allSatisfy，且全程不下标：断言失败后代码仍会继续执行，
+        // 直接 blockingSteps[0] 会在缺口为空时越界崩溃，把整个测试进程带倒。
+        let modelDetails = projection.blockingSteps
+            .filter { $0.step == .modelsReady }
+            .map(\.detail)
+        XCTAssertEqual(modelDetails.count, 1)
+        XCTAssertTrue(
+            modelDetails.allSatisfy { !$0.isEmpty },
+            "换机器这类结论必须说清用户下一步能做什么"
+        )
+    }
+
     /// 音色列表读到了、但当前一个都不能用：这是确定的缺口，不是未知。
     func testLoadedButUnavailableVoicesAreAKnownBlocker() {
         let unavailable = CreatorVoice(
