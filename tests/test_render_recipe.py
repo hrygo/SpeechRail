@@ -58,6 +58,25 @@ def test_a_fully_observed_recipe_is_complete_and_digested() -> None:
     assert payload["digest"] == recipe.digest
 
 
+def test_the_recipe_records_the_original_text_and_the_spoken_text_separately() -> None:
+    """`raw_text` is what the caller wrote; `acoustic_text` is what was spoken.
+
+    A pronunciation set rewrites the text before synthesis
+    (`audio.py:1876`), so the two are genuinely different facts. Recording one
+    hash for both would claim the spoken text was the original — and the
+    digest adoption trusts is taken over exactly these fields.
+    """
+
+    recipe = _complete_recipe(
+        raw_text="3 月 5 日见。",
+        acoustic_text="三月五日见。",
+    )
+
+    assert recipe.raw_text_sha256 == text_sha256("3 月 5 日见。")
+    assert recipe.acoustic_text_sha256 == text_sha256("三月五日见。")
+    assert recipe.raw_text_sha256 != recipe.acoustic_text_sha256
+
+
 def test_the_recipe_digest_is_pinned_to_its_canonical_form() -> None:
     # Canonical form is part of the contract: stored recipes compare digests
     # across versions, so a silent change here invalidates saved works.
