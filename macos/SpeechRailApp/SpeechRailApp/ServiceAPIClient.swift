@@ -320,7 +320,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
         else {
             return RenderProvenance(
                 state: .partial,
-                reason: "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
+                reason: Self.recipeIncompleteReason(recipe)
             )
         }
         // 配方齐全只说明服务端描述执行过程的事实齐全，与「App 手里的这段音频就是
@@ -334,6 +334,23 @@ public final class ServiceAPIClient: @unchecked Sendable {
             return RenderProvenance(state: .partial, reason: "audio_digest_missing")
         }
         return RenderProvenance(state: .verified, reason: nil)
+    }
+
+    /// Names which of the server's three signals disagreed.
+    ///
+    /// The missing-field list is the only one that carries the *facts*, so it
+    /// is worth spelling out. When the list is empty the disagreement is
+    /// between `state` and `digest`, and appending an empty list to
+    /// `recipe_incomplete_` would read like a truncated string rather than a
+    /// diagnosis.
+    private static func recipeIncompleteReason(_ recipe: RenderRecipeSnapshot) -> String {
+        if !recipe.missingFields.isEmpty {
+            return "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
+        }
+        if recipe.state != .complete {
+            return "recipe_state_\(recipe.state.rawValue)"
+        }
+        return "recipe_digest_missing"
     }
 
     public func createVoicePreview(
