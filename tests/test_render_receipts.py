@@ -162,18 +162,57 @@ def test_binding_observed_sampling_completes_the_recipe() -> None:
     assert registry.bind_observed_sampling(
         receipt_id,
         seed_policy="caller_fixed",
-        observed_sampling_parameters={"seed": 101, "temperature": 0.7},
+        # In production this dict is TtsSamplingObservation.recipe_payload(),
+        # which carries seed_policy itself. The fixture used to pass only
+        # {"seed": ...}, so the two copies of that one fact were never
+        # exercised together.
+        observed_sampling_parameters={
+            "seed_policy": "caller_fixed",
+            "seed": 101,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "repetition_penalty": 1.05,
+        },
     )
 
     recipe = registry.get(receipt_id)["recipe"]
     assert isinstance(recipe, dict)
     assert recipe["parameters"]["seed_policy"] == "caller_fixed"
     assert recipe["parameters"]["observed_sampling_parameters"] == {
+        "seed_policy": "caller_fixed",
         "seed": 101,
         "temperature": 0.7,
+        "top_p": 0.95,
+        "repetition_penalty": 1.05,
     }
     assert recipe["state"] == "complete"
     assert recipe["digest"] is not None
+
+
+def test_a_seed_policy_contradicting_the_observed_sampler_is_refused() -> None:
+    """One fact is stored twice; the recipe must never attest to both versions."""
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin_with_recipe(registry, "req-sampling-contradiction")
+
+    with pytest.raises(ValueError):
+        registry.bind_observed_sampling(
+            receipt_id,
+            seed_policy="caller_fixed",
+            observed_sampling_parameters={
+                "seed_policy": "unseeded_sampler",
+                "seed": None,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05,
+            },
+        )
+
+    # A refused bind must leave the recipe partial, never half-identified.
+    recipe = registry.get(receipt_id)["recipe"]
+    assert isinstance(recipe, dict)
+    assert recipe["parameters"]["seed_policy"] is None
+    assert "parameters.seed_policy" in recipe["missing_fields"]
+    assert recipe["digest"] is None
 
 
 def test_observed_sampling_is_bound_at_most_once() -> None:
