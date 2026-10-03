@@ -304,7 +304,7 @@ def test_diarized_multipart_rejects_bracketed_known_speaker_reference() -> None:
         },
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert response.json()["error"]["code"] == "unsupported_parameter"
     assert response.json()["error"]["param"] == "known_speaker_references"
     assert engine.appended_audio == []

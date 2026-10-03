@@ -238,6 +238,18 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '429':
           $ref: '#/components/responses/QueueFull'
+        '502':
+          description: |
+            A dependent local model returned a result SpeechRail cannot publish.
+            The fixed-text aligner could not produce the requested timeline
+            (`timestamp_alignment_unavailable`), or diarization could not resolve
+            every transcript segment. The transcript itself stays valid; only
+            the derived timeline is refused, so the retryable request is to ask
+            for the plain result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '503':
           description: Model runtime is not ready or a worker is recovering
           headers:
@@ -4080,8 +4092,11 @@ components:
             Only accepted together with anonymous diarization (`diarized_json`
             or model=gpt-4o-transcribe-diarize), where it emits
             transcript.text.delta, transcript.text.segment and
-            transcript.text.done SSE events. Any other transcription request
-            with `stream=true` is refused with 400 stream_unsupported.
+            transcript.text.done SSE events. Each delta carries `segment_id`
+            naming the diarized segment it belongs to, matching the `id` of the
+            segment event that follows it, so a consumer can attribute text to
+            a speaker. Any other transcription request with `stream=true` is
+            refused with 400 stream_unsupported.
         chunking_strategy:
           type: string
           enum: [auto, server_vad]

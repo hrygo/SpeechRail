@@ -147,7 +147,9 @@ aligner 时，`verbose_json` / `srt` / `vtt` 返回 `503 timestamp_alignment_una
 `502 timestamp_alignment_unavailable`，不用整句均分冒充词级边界。`json`、`text` 与匿名分人的
 `diarized_json` 不需要 aligner。
 
-其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式。
+其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式，普通转写传入时返回 `400 chunking_strategy_unsupported`。
+
+以上四项都是**明确不支持的选项**而非格式错误：请求本身合法，服务也完全理解了它，只是没有实现该选项，因此统一返回 `400` 而非 `422`。`422` 保留给真正畸形或越界的输入（例如 `temperature` 超出 0–2）。
 
 上传大小仍受 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制；解码输出另受 128 MiB 和
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 约束。WAV fastpath 在重采样前检查预计输出，其他容器在
@@ -160,9 +162,9 @@ aligner 时，`verbose_json` / `srt` / `vtt` 返回 `503 timestamp_alignment_una
 `response_format="diarized_json"`。响应为 `task/duration/text/segments`；每个 segment 有
 string `id`、`type="transcript.text.segment"`、`start/end`、匿名 `speaker: "A"…"D"` 与
 `text`，不混入 Whisper confidence、内部 slot 或 revision 字段。`stream=true` 返回
-`transcript.text.delta`、`transcript.text.segment`、`transcript.text.done` SSE。超过 30 秒的
+`transcript.text.delta`、`transcript.text.segment`、`transcript.text.done` SSE。每个 delta 带 `segment_id`，指向紧随其后的 segment 事件的 `id`，消费方据此把文本归回所属说话人；缺少该字段时事件顺序正确也无法还原分人结果。超过 30 秒的
 文件必须提供 `chunking_strategy=auto|server_vad`；known-speaker 参数明确返回
-`unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
+`400 unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
 
 文件分人是**任务级**能力，不由档位继承：需要显式供给外部 CoreML Sortformer bundle 与一个
 ForcedAligner（`aligner-q8` 或 `aligner-bf16`），且当前实例 `diarization_ready=true`。
@@ -789,9 +791,13 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 | **400** | `model_not_found` | `false` | 请求的模型名不存在，核对 `/v1/models` 清单 |
 | **400** | `audio_too_long` | `false` | 音频时长超出 `SPEECHRAIL_MAX_AUDIO_SECONDS` 限制 |
 | **400** | `voice_quality_reject` | `false` | 克隆参考音频未通过 `voice_quality_v1` 门禁（详见 §5.7），响应同级的 `quality_report` 含失败原因 |
+| **400** | `stream_unsupported` / `chunking_strategy_unsupported` | `false` | 普通转写请求传入了只在匿名分人下可用的选项；改用 `response_format=diarized_json` 或去掉该选项 |
+| **400** | `unsupported_parameter` | `false` | 匿名分人请求传入了 known-speaker 参数；本服务不维护实名或跨会话声纹身份 |
+| **400** | `stream_format_unsupported` | `false` | `/v1/audio/speech` 只返回完整音频体，不支持 `stream_format=sse` |
 | **401** | `invalid_api_key` | `false` | 未提供有效的 API Key 或 Token 错误 |
 | **413** | `audio_too_large` | `false` | 音频大小超出 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制 |
 | **500** | `dependency_missing` | `false` | `ffmpeg` 等外部依赖缺失导致转码失败（克隆/校验路径），配置依赖后重试 |
+| **502** | `timestamp_alignment_unavailable` / `diarization_unresolved` | `true` | 冻结正文上的独立 aligner 无法给出请求粒度的时间轴，或分人未能解析全部 segment；正文仍有效，可改请求不含时间戳/分人的结果 |
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |
 | **429** | `queue_full` | `true` | 当前并发超出 Governor 配额，按 `Retry-After` 重试 |
 | **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
