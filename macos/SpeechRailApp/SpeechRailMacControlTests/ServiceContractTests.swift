@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 #if SWIFT_PACKAGE
-import SpeechRailAppSupport
+@testable import SpeechRailAppSupport
 #endif
 @testable import SpeechRailControlKit
 
@@ -445,6 +445,176 @@ final class ServiceContractTests: XCTestCase {
                 .missingRequiredField("error_code")
             )
         }
+    }
+
+    private func decodeReceipt(_ json: String) throws -> RenderReceipt {
+        try JSONDecoder().decode(RenderReceipt.self, from: Data(json.utf8))
+    }
+
+    private let partialRecipeJSON = """
+    {
+      "schema_version": "render_recipe_v1",
+      "state": "partial",
+      "missing_fields": ["model.engine_revision", "parameters.seed_policy"],
+      "digest": null,
+      "content": {
+        "raw_text_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "acoustic_text_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "normalization_revision": "tts_norm_v1",
+        "planner_revision": "tts_bounded_v1",
+        "pronunciation_revision": "unused"
+      },
+      "voice": {"id": "narrator", "revision": "vr_x", "mode": "custom"},
+      "model": {
+        "role": "tts",
+        "artifact": "tts-artifact",
+        "artifact_revision": "cat-1",
+        "engine_revision": null
+      },
+      "parameters": {
+        "effective_speed": 1.0,
+        "effective_language": "zh",
+        "seed_policy": null,
+        "output_format": "wav",
+        "sample_rate": 24000,
+        "channels": 1
+      }
+    }
+    """
+
+    func testReceiptProjectsTheRecipeIntoTypedFacts() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {},
+          "audio": {"pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "plan": {"plan_id": "plan_0123456789abcdef0123456789abcdef", "plan_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "recipe": \(partialRecipeJSON),
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+
+        let recipe = try XCTUnwrap(receipt.recipe)
+        XCTAssertEqual(recipe.schemaVersion, "render_recipe_v1")
+        XCTAssertEqual(recipe.state, .partial)
+        XCTAssertEqual(
+            recipe.missingFields,
+            ["model.engine_revision", "parameters.seed_policy"]
+        )
+        XCTAssertNil(recipe.digest)
+        XCTAssertEqual(recipe.voiceID, "narrator")
+        XCTAssertEqual(recipe.voiceRevision, "vr_x")
+        XCTAssertEqual(recipe.modelArtifact, "tts-artifact")
+        XCTAssertNil(recipe.engineRevision, "没观察到就保持未知，不借用制品版本")
+        XCTAssertEqual(recipe.effectiveSpeed, 1.0)
+        XCTAssertEqual(recipe.sampleRate, 24_000)
+        XCTAssertEqual(recipe.channels, 1)
+        XCTAssertEqual(recipe.pronunciationRevision, "unused")
+        XCTAssertEqual(receipt.planSHA256?.count, 64)
+        XCTAssertEqual(receipt.pcmSHA256?.first, "c")
+    }
+
+    func testReceiptWithoutARecipeStaysUnknownRatherThanEmpty() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+
+        XCTAssertNil(receipt.recipe)
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: receipt),
+            RenderProvenance(state: .partial, reason: "recipe_missing")
+        )
+    }
+
+    func testRecipeRoundTripsThroughItsOwnEncoding() throws {
+        let recipe = try JSONDecoder().decode(
+            RenderRecipeSnapshot.self,
+            from: Data(partialRecipeJSON.utf8)
+        )
+
+        let encoded = try JSONEncoder().encode(recipe)
+        let decoded = try JSONDecoder().decode(RenderRecipeSnapshot.self, from: encoded)
+
+        XCTAssertEqual(decoded, recipe, "保存进作品的配方必须能原样读回来")
+    }
+
+    func testProvenanceOnlyClaimsVerifiedForAFullRecipe() throws {
+        let verified = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": [],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        let partial = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": \(partialRecipeJSON),
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        let stillPending = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "pending",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": null
+        }
+        """)
+
+        XCTAssertEqual(ServiceAPIClient.provenance(for: verified).state, .verified)
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: partial),
+            RenderProvenance(
+                state: .partial,
+                reason: "recipe_incomplete_model.engine_revision,parameters.seed_policy"
+            )
+        )
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: stillPending),
+            RenderProvenance(state: .partial, reason: "receipt_status_pending")
+        )
     }
 
     func testRequestBuilderAddsBearerAndConditionalHeaders() throws {
@@ -1164,6 +1334,131 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    /// 验收②：回执拿不到时，音频优先保留，追溯状态照实说明，且一个身份都不伪造。
+    func testMissingReceiptKeepsTheFullAudioAndNeverInventsAnIdentity() async throws {
+        let audio = Data([0x52, 0x49, 0x46, 0x46, 0x24, 0x08, 0x00, 0x00])
+        let client = makeHTTPClient(statusCode: 200, body: audio)
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/v1/audio/speech",
+            statusCode: 200,
+            body: audio,
+            contentType: "audio/wav",
+            headers: ["SpeechRail-Receipt-Id": "rr_0123456789abcdef0123456789abcdef"]
+        )
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/receipts/",
+            statusCode: 404,
+            body: Data(#"{"error":{"code":"not_found"}}"#.utf8)
+        )
+
+        let render = try await client.createSpeechRender(
+            text: "回执缺失也要保住音频",
+            voiceID: "voice_demo",
+            speed: 1.0,
+            options: SpeechRailRequestOptions()
+        )
+
+        XCTAssertEqual(render.audioData, audio, "回执不可用不构成丢音频的理由")
+        XCTAssertEqual(render.provenance.state, .unavailable)
+        XCTAssertEqual(render.provenance.reason, "receipt_unavailable")
+        XCTAssertNil(render.planID, "没有回执就没有计划身份，不生成随机值顶替")
+        XCTAssertNil(render.planSHA256)
+        XCTAssertNil(render.pcmSHA256)
+        XCTAssertNil(render.recipe)
+    }
+
+    /// 回执还没终态时同样不丢音频，只是把"还没写完"如实说出来。
+    func testPendingReceiptKeepsTheAudioAndNamesTheUnfinishedState() async throws {
+        let audio = Data([0x52, 0x49, 0x46, 0x46, 0x24, 0x10, 0x00, 0x00])
+        let client = makeHTTPClient(statusCode: 200, body: audio)
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/v1/audio/speech",
+            statusCode: 200,
+            body: audio,
+            contentType: "audio/wav",
+            headers: ["SpeechRail-Receipt-Id": "rr_0123456789abcdef0123456789abcdef"]
+        )
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/receipts/",
+            statusCode: 200,
+            body: Data("""
+            {
+              "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+              "request_id": "req-1",
+              "status": "pending",
+              "voice": {},
+              "model": {},
+              "audio": {},
+              "recipe": null,
+              "error_code": null,
+              "created_at": 1,
+              "completed_at": null
+            }
+            """.utf8)
+        )
+
+        let render = try await client.createSpeechRender(
+            text: "回执还没终态",
+            voiceID: "voice_demo",
+            speed: 1.0,
+            options: SpeechRailRequestOptions()
+        )
+
+        XCTAssertEqual(render.audioData, audio)
+        XCTAssertEqual(render.provenance.state, .partial)
+        XCTAssertEqual(render.provenance.reason, "receipt_status_pending")
+        XCTAssertNil(render.recipe, "还没有配方就不是没有配方，是还没写完")
+    }
+
+    /// 回执终态但配方不齐：音频与已观察到的事实都保留，digest 不签发。
+    func testCompletedReceiptWithAPartialRecipeKeepsTheAudioAndWithholdsTheDigest() async throws {
+        let audio = Data([0x52, 0x49, 0x46, 0x46, 0x28, 0x00, 0x00, 0x00])
+        let client = makeHTTPClient(statusCode: 200, body: audio)
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/v1/audio/speech",
+            statusCode: 200,
+            body: audio,
+            contentType: "audio/wav",
+            headers: ["SpeechRail-Receipt-Id": "rr_0123456789abcdef0123456789abcdef"]
+        )
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/receipts/",
+            statusCode: 200,
+            body: Data("""
+            {
+              "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+              "request_id": "req-1",
+              "status": "completed",
+              "voice": {"id": "narrator", "revision": "vr_x"},
+              "model": {},
+              "audio": {},
+              "recipe": \(partialRecipeJSON),
+              "error_code": null,
+              "created_at": 1,
+              "completed_at": 2
+            }
+            """.utf8)
+        )
+
+        let render = try await client.createSpeechRender(
+            text: "配方不齐也要保住音频",
+            voiceID: "narrator",
+            speed: 1.0,
+            options: SpeechRailRequestOptions()
+        )
+
+        XCTAssertEqual(render.audioData, audio)
+        XCTAssertEqual(render.provenance.state, .partial)
+        XCTAssertEqual(render.voiceRevision, "vr_x")
+        let recipe = try XCTUnwrap(render.recipe)
+        XCTAssertEqual(recipe.state, .partial)
+        XCTAssertNil(recipe.digest, "事实不齐时不签发可复用的摘要")
+        XCTAssertEqual(
+            recipe.missingFields,
+            ["model.engine_revision", "parameters.seed_policy"]
+        )
+    }
+
     private static func safeVoiceEntryJSON(
         productionReady: String?,
         reason: String?
@@ -1273,10 +1568,21 @@ final class ServiceContractTests: XCTestCase {
 
 #if SWIFT_PACKAGE
 private final class ServiceAPIURLProtocolState: @unchecked Sendable {
+    struct Reply {
+        let statusCode: Int
+        let body: Data
+        let contentType: String
+        let headers: [String: String]
+    }
+
     private let lock = NSLock()
     private var statusCode = 200
     private var body = Data()
     private var contentType = "application/json"
+    /// Path-keyed replies checked before the default one. A render asks for
+    /// audio and then for its receipt, so a single canned response cannot
+    /// express "audio arrived, the receipt did not".
+    private var routes: [(pathContains: String, reply: Reply)] = []
     private var recorded: [URLRequest] = []
     private var recordedBodyData: [Data?] = []
 
@@ -1286,8 +1592,31 @@ private final class ServiceAPIURLProtocolState: @unchecked Sendable {
         self.statusCode = statusCode
         self.body = body
         self.contentType = "application/json"
+        routes = []
         recorded = []
         recordedBodyData = []
+    }
+
+    func setRoute(
+        pathContains path: String,
+        statusCode: Int,
+        body: Data,
+        contentType: String = "application/json",
+        headers: [String: String] = [:]
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        routes.append(
+            (
+                path,
+                Reply(
+                    statusCode: statusCode,
+                    body: body,
+                    contentType: contentType,
+                    headers: headers
+                )
+            )
+        )
     }
 
     /// Audio routes assert on the request headers, not the decoded body, so they
@@ -1311,12 +1640,21 @@ private final class ServiceAPIURLProtocolState: @unchecked Sendable {
         self.body = body
     }
 
-    func record(_ request: URLRequest, bodyData: Data?) -> (Int, Data) {
+    func record(_ request: URLRequest, bodyData: Data?) -> Reply {
         lock.lock()
         defer { lock.unlock() }
         recorded.append(request)
         recordedBodyData.append(bodyData)
-        return (statusCode, body)
+        let path = request.url?.path ?? ""
+        if let route = routes.first(where: { path.contains($0.pathContains) }) {
+            return route.reply
+        }
+        return Reply(
+            statusCode: statusCode,
+            body: body,
+            contentType: contentType,
+            headers: [:]
+        )
     }
 
     func recordedRequests() -> [URLRequest] {
@@ -1348,15 +1686,17 @@ private final class ServiceAPIURLProtocolStub: URLProtocol {
             return
         }
         let requestBody = Self.bodyData(from: request)
-        let (statusCode, body) = Self.state.record(request, bodyData: requestBody)
+        let reply = Self.state.record(request, bodyData: requestBody)
+        var headerFields = reply.headers
+        headerFields["Content-Type"] = reply.contentType
         let response = HTTPURLResponse(
             url: url,
-            statusCode: statusCode,
+            statusCode: reply.statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": Self.state.responseContentType()]
+            headerFields: headerFields
         )!
         client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client.urlProtocol(self, didLoad: body)
+        client.urlProtocol(self, didLoad: reply.body)
         client.urlProtocolDidFinishLoading(self)
     }
 
