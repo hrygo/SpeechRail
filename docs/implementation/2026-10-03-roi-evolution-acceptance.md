@@ -307,7 +307,7 @@ scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCE
 `project.pbxproj` 中 `DubbingProjectStore.swift` 在两个 sources phase 的重复条目，
 重建后不再出现 `Skipping duplicate build file` 警告。
 
-补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3138 passed, 1 skipped
+补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3140 passed, 1 skipped
 （运行 exit=0）。
 
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。

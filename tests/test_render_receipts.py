@@ -361,6 +361,32 @@ def test_odd_pcm_is_rejected_without_advancing_integrity_state() -> None:
     assert receipt["audio"]["pcm_sha256"] == hashlib.sha256(b"").hexdigest()
 
 
+def test_a_vendor_error_after_valid_pcm_never_completes() -> None:
+    """A vendor error after real PCM must leave the receipt in error.
+
+    The only guard inside `complete()` is `sample_count == 0`. Once any PCM has
+    been accepted that guard no longer fires, so "must not complete" rests
+    entirely on control flow: the error path always calls `fail()` and
+    `complete()` is only reached on the normal exit.
+
+    If that wiring ever slips, the receipt claims `completed` while carrying
+    truncated audio, and the App records `provenance: verified` for it.
+    """
+
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin(registry)
+    registry.accept_pcm(receipt_id, b"\x00\x01\x02\x03")
+
+    registry.fail(receipt_id, "backend_error")
+    # A late completion attempt must not overwrite the decided terminal state.
+    registry.complete(receipt_id)
+
+    receipt = registry.get(receipt_id)
+    assert receipt["status"] == "error"
+    assert receipt["error_code"] == "backend_error"
+    assert receipt["audio"]["sample_count"] == 2, "已收到的 PCM 事实不得被抹掉"
+
+
 def test_terminal_receipt_rejects_late_audio() -> None:
     registry = RenderReceiptRegistry()
     receipt_id = _begin(registry)

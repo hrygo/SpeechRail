@@ -25,11 +25,13 @@ class ReceiptSynthesizer:
         self,
         *,
         fail: bool = False,
+        fail_after_first_chunk: bool = False,
         runtime_revision: str | None = None,
         sampling: TtsSamplingObservation | None = None,
     ) -> None:
         self.requests: list[SpeechRequest] = []
         self.fail = fail
+        self.fail_after_first_chunk = fail_after_first_chunk
         self.runtime_revision = runtime_revision
         self.sampling = sampling
 
@@ -55,6 +57,11 @@ class ReceiptSynthesizer:
                 chunk_index=0,
                 audio=_PCM,
             )
+            if self.fail_after_first_chunk:
+                # The boundary plan C1-3 asks for: produce and book a chunk
+                # first, then fail halfway. A different path from `fail`,
+                # which raises before producing anything at all.
+                raise RuntimeError("synthetic receipt failure after first chunk")
 
         return chunks()
 
@@ -64,6 +71,7 @@ def _client(
     monkeypatch,
     *,
     fail: bool = False,
+    fail_after_first_chunk: bool = False,
     runtime_revision: str | None = None,
     sampling: TtsSamplingObservation | None = None,
     with_pronunciation: bool = False,
@@ -90,6 +98,7 @@ def _client(
     )
     synth = ReceiptSynthesizer(
         fail=fail,
+        fail_after_first_chunk=fail_after_first_chunk,
         runtime_revision=runtime_revision,
         sampling=sampling,
     )
@@ -527,6 +536,42 @@ def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(
     assert receipt["status"] == "error"
     assert receipt["error_code"] == "backend_error"
     assert receipt["audio"]["sample_count"] == 0
+
+
+def test_a_vendor_error_after_real_pcm_never_marks_the_receipt_completed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The first boundary named by plan C1-3: a vendor error after real PCM.
+
+    This is a different path from
+    `test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request`,
+    which asserts `sample_count == 0` and therefore covers "failed before
+    producing anything". Here a chunk is produced and booked by `accept_pcm`
+    first, so the `sample_count == 0` guard inside `complete()` no longer
+    applies: if the control flow ever routed this path into `complete()`, the
+    receipt would claim `completed` while carrying truncated audio.
+
+    So this test guards the wiring, not the store's internal state machine.
+    """
+
+    client, _synth, _revision, _pronunciation = _client(
+        tmp_path, monkeypatch, fail_after_first_chunk=True
+    )
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Receipt-Mode": "integrity"},
+    )
+    assert response.status_code >= 400
+    request_id = response.json()["error"]["request_id"]
+
+    receipt = client.get(
+        f"/v1/speechrail/audio/receipts/by-request/{request_id}"
+    ).json()
+    assert receipt["status"] != "completed", "带着截断音频的回执不得声称完成"
+    assert receipt["status"] == "error"
+    assert receipt["audio"]["sample_count"] > 0, "前半段 PCM 已被记账，事实不得被抹掉"
 
 
 def test_openai_custom_voice_object_is_accepted_on_v1_speech(
