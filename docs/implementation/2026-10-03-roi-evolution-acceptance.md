@@ -152,8 +152,12 @@ header 的采样率、位深、声道**来自候选 WAV 自己的 `fmt ` 声明*
 App 的「段落返修…」入口在作品详情动作区；重做、采用、撤销、导出在弹层首屏，候选版本收在
 每段的展开区；导出经 `NSOpenPanel` 选目录后写出 WAV + TXT 两份文件。
 
-证明：`DubbingProjectStoreTests`（14）、`DubbingSegmentPlannerTests`（4）、
-`AppModelTests` 中 5 条 D 用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
+成品文件名还必须**看得见**：作品名来自文稿首行，用户写什么都会进来，而以点开头的名字
+在 macOS 上是隐藏文件——导出提示「已导出 …」，用户回到自己选的目录却什么也没看到。
+因此导出名去掉前导点，全是非法字符或全是点时退回默认名，超长收敛到 80 字。
+
+证明：`DubbingProjectStoreTests`（24）、`DubbingSegmentPlannerTests`（4）、
+`AppModelTests` 中的 10 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
 
 ### ④ 提词器场景
 
@@ -202,7 +206,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 518 XCTest + 379 swift-testing，0 失败
+  → 519 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \

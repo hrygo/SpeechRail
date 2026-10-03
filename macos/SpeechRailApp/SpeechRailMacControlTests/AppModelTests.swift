@@ -2949,11 +2949,12 @@ extension AppModelTests {
 
     private static func dubbingWork(
         script: String,
-        provenance: RenderProvenanceSnapshot
+        provenance: RenderProvenanceSnapshot,
+        title: String = "段落返修样例"
     ) -> CreativeWork {
         CreativeWork(
             id: "work_dubbing_source",
-            title: "段落返修样例",
+            title: title,
             scriptText: script,
             voiceID: "ryan",
             voiceName: "动感英语男声",
@@ -3002,7 +3003,8 @@ extension AppModelTests {
     private func saveSourceWork(
         into store: CreativeWorkStore,
         script: String,
-        recipeDigest: String?
+        recipeDigest: String?,
+        title: String? = nil
     ) throws -> CreativeWork {
         let work = Self.dubbingWork(
             script: script,
@@ -3012,7 +3014,8 @@ extension AppModelTests {
                 planSHA256: "plan_sha_source",
                 recipe: Self.dubbingRecipe(digest: recipeDigest),
                 pcmSHA256: "pcm_sha_source"
-            )
+            ),
+            title: title ?? "段落返修样例"
         )
         return try store.save(work, audioData: silentPreviewWAV(marker: 0x44))
     }
@@ -3235,6 +3238,60 @@ extension AppModelTests {
             Array(try DubbingAudioExport.clip(fromWAV: silentPreviewWAV(marker: 0x80, frames: 1_200)).pcm)
         )
         XCTAssertNil(model.dubbingExportBundle, "写盘后清空待导出内容")
+    }
+
+    /// 成品文件名必须是用户在目录里**看得见**的名字。
+    ///
+    /// 作品名来自文稿首行，用户写什么都会进来。以点开头的名字在 macOS 上是隐藏
+    /// 文件：导出提示「已导出 …」，用户回到自己选的目录却什么也没看到。全是非法
+    /// 字符或全是点时必须退回默认名，超长必须收敛——否则拼出来的路径不可预期。
+    func testExportFileNamesStayVisibleAndBounded() async throws {
+        func baseName(for title: String) async throws -> String {
+            let recipe = Self.dubbingRecipe(digest: "digest-1")
+            let creator = DubbingRenderClient(
+                audio: silentPreviewWAV(marker: 0x81, frames: 1_200),
+                recipe: recipe,
+                voice: Self.dubbingVoice()
+            )
+            let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+            await model.refreshCreatorVoices()
+            let work = try saveSourceWork(
+                into: works,
+                script: "只有一段。",
+                recipeDigest: "digest-1",
+                title: title
+            )
+            let project = try XCTUnwrap(model.startDubbingProject(for: work))
+            let segment = try XCTUnwrap(project.segments.first)
+            model.startDubbingSegmentRedo(segment.id)
+            try await waitUntilDubbing {
+                model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
+            }
+            XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+            model.prepareDubbingExport()
+            return try XCTUnwrap(model.dubbingExportBundle).baseName
+        }
+
+        for title in [
+            ".." + "/成品:" + String(repeating: "长", count: 200),
+            ".隐藏的配音",
+            "...",
+            "///",
+            "   ",
+        ] {
+            let name = try await baseName(for: title)
+            XCTAssertFalse(
+                name.hasPrefix("."),
+                "「\(title.debugDescription)」导出的名字不能以点开头：那是隐藏文件"
+            )
+            XCTAssertFalse(name.contains("/"), "「\(title.debugDescription)」不得留下路径分隔符")
+            XCTAssertFalse(name.contains(":"), "「\(title.debugDescription)」不得留下非法字符")
+            XCTAssertLessThanOrEqual(name.count, 80, "文件名要收敛到可预期的长度")
+            XCTAssertFalse(name.isEmpty, "任何标题都得给出一个能看见的文件名")
+        }
+
+        let plain = try await baseName(for: "正常标题")
+        XCTAssertEqual(plain, "正常标题", "普通标题原样用作文件名")
     }
 
     /// 没有完整配方摘要的作品不能只重做一段：宁可拒绝，也不假装是同一次制作。
