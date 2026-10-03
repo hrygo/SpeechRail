@@ -3527,4 +3527,27 @@ extension AppModelTests {
         XCTAssertEqual(projection.blockingSteps.map(\.step), [.voiceAvailable])
         XCTAssertTrue(projection.unknownSteps.isEmpty)
     }
+
+    /// 音色列表读到了，但当前能力快照还没确认：可用性仍然没有结论。
+    ///
+    /// 这一步与模型状态同理——把它算成已确认的缺口，等于催用户去修一个他还没有
+    /// 资格判断的东西。默认参数下 `discoveryState` 恒为 `.loaded`，所以这条分支
+    /// 必须显式把状态改成未加载才走得到。
+    func testVoiceAvailabilityIsUnknownUntilCapabilityDiscoveryIsLoaded() {
+        let projection = readiness(
+            voices: [],
+            voicesLoadState: .loaded,
+            discoveryState: .idle
+        )
+
+        XCTAssertTrue(
+            projection.unknownSteps.map(\.step).contains(.voiceAvailable),
+            "能力快照未确认时，音色是否可用还没有结论"
+        )
+        XCTAssertFalse(
+            projection.blockingSteps.map(\.step).contains(.voiceAvailable),
+            "未知不得混进确定缺口"
+        )
+        XCTAssertFalse(projection.isReady)
+    }
 }
