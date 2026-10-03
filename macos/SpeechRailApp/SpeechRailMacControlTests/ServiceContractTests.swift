@@ -562,7 +562,9 @@ final class ServiceContractTests: XCTestCase {
           "status": "completed",
           "voice": {},
           "model": {},
-          "audio": {},
+          "audio": {
+            "pcm_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
           "recipe": {
             "schema_version": "render_recipe_v1",
             "state": "complete",
@@ -614,6 +616,90 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(
             ServiceAPIClient.provenance(for: stillPending),
             RenderProvenance(state: .partial, reason: "receipt_status_pending")
+        )
+    }
+
+    /// 「可追溯」必须包含**音频身份**，不只是服务端对配方的一份自述。
+    ///
+    /// 配方完整只说明服务端描述执行过程的那几项事实齐全，与「App 手里的这段音频
+    /// 就是它渲染的那段」是两件事。此前 `provenance(for:)` 根本没看过
+    /// `audio.pcm_sha256`，于是 `"audio": {}`——一个摘要都没有——也能拿到
+    /// `.verified`，并把一个未经校验的 `pcm_sha256` 存进作品。
+    func testVerifiedProvenanceRequiresAnAudioDigest() throws {
+        let noAudioDigest = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {},
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": [],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        let emptyAudioDigest = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": { "pcm_sha256": "" },
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": [],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        let withAudioDigest = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {
+            "pcm_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "missing_fields": [],
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: noAudioDigest),
+            RenderProvenance(state: .partial, reason: "audio_digest_missing"),
+            "没有音频摘要时不得声称可追溯"
+        )
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: emptyAudioDigest),
+            RenderProvenance(state: .partial, reason: "audio_digest_missing"),
+            "空摘要与没有摘要是同一件事"
+        )
+        XCTAssertEqual(
+            ServiceAPIClient.provenance(for: withAudioDigest).state,
+            .verified,
+            "配方齐全且带音频摘要才是可追溯"
         )
     }
 

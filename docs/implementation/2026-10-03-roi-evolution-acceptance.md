@@ -69,9 +69,23 @@ seed 只有真正下发到采样流才记为固定策略；运行时装不上确
 App 侧把配方投影成强类型快照随作品冻结，回执缺失时保留完整音频并把 `provenance` 标成
 `partial` / `unavailable`，老作品读作 `legacyUnknown`，不回填历史身份。
 
-「追溯完整」由三个条件共同成立：`state == .complete`、`digest != nil`、**`missing_fields` 为空**。
-前两个是服务端对自身的评定，只有第三个是客户端独立解码出来的信号；不要求三者一致，
-一份自称 `complete` 却仍列着缺失事实的回执会被显示成追溯完整。
+「追溯完整」由**四个**条件共同成立：`state == .complete`、`digest != nil`、
+**`missing_fields` 为空**、**`audio.pcm_sha256` 存在**。
+
+前两个是服务端对自身的评定，只有第三个是客户端独立解码出来的信号。正因为第三个
+独立，**三者必须一致**：一份自称 `complete` 却仍列着缺失事实的回执会被判为
+`partial`（`recipe_incomplete_…`），而不是被显示成追溯完整——否则 `verified` 就只是
+"服务端这么说的"。
+
+第四个条件回答的是另一件事：配方齐全只说明服务端描述**执行过程**的事实齐全，与
+「App 手里的这段音频就是它渲染的那段」是两件事。没有音频摘要就没有任何可追溯的
+对象，因此 `"audio": {}` 也只能是 `partial`（`audio_digest_missing`）。
+
+**尚未做到的一步**：`pcm_sha256` 目前只是被搬运，从未与 App 实际收到的字节比对。
+实施方案 §5 B3 要求「保存 `audio_file_sha256`，再从真实 PCM 计算 hash 与回执
+`pcm_sha256` 比对」，这一步未落地，也没有文档说明它被放弃。因此当前 `.verified`
+的准确含义是"服务端对执行过程的描述自洽，且回执带了一个未经校验的音频摘要"，
+而不是"端到端字节一致"。补这一步要先定执行边界与失败处置，见 #189。
 
 证明：`tests/test_render_recipe.py`、`tests/test_render_receipts.py`、
 `tests/test_render_receipt_routes.py`、`tests/test_tts_sampling.py`、
@@ -268,7 +282,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 529 XCTest + 379 swift-testing，0 失败
+  → 530 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
