@@ -281,6 +281,12 @@ def normalize_tts_text(text: str) -> str:
     return clean
 
 
+#: Identifies the normalization contract above. Bump it whenever the rules in
+#: `normalize_tts_text` change: stored recipes compare this value to decide
+#: whether two renders normalized their text the same way.
+TTS_NORMALIZATION_REVISION = "tts_norm_v1"
+
+
 def generation_token_budget(text: str) -> int:
     """Calculate a bounded acoustic-token budget from normalized text length."""
 

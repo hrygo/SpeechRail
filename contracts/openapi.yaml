@@ -2561,7 +2561,47 @@ components:
           type: [object, 'null']
           description: >-
             Immutable render plan identity (plan_id, window_index, checkpoint_id).
-            Clients keep it to prove which plan and voice revision produced one render.
+            Clients keep it to prove which execution descriptor and voice revision
+            produced one render. The plan describes how a render would execute, never
+            what it said: two different scripts share one plan_id, so it is not a
+            content reuse key. plan_sha256 is the full digest behind plan_id.
+          additionalProperties: true
+        recipe:
+          type: [object, 'null']
+          description: >-
+            What this render actually executed, assembled from observed facts and
+            containing no source text. state is `complete` only when every required
+            fact was observed; digest is null unless complete, so an unknown runtime
+            or sampling policy is never presented as a reusable identity. `null`
+            means this path never assembled a recipe, which is not "no recipe".
+          required: [schema_version, state, missing_fields, digest]
+          properties:
+            schema_version:
+              type: string
+              const: render_recipe_v1
+            state:
+              type: string
+              enum: [complete, partial]
+            missing_fields:
+              type: array
+              description: Required recipe facts this render never observed.
+              items:
+                type: string
+            digest:
+              type: [string, 'null']
+              pattern: '^[0-9a-f]{64}$'
+            content:
+              type: object
+              additionalProperties: true
+            voice:
+              type: object
+              additionalProperties: true
+            model:
+              type: object
+              additionalProperties: true
+            parameters:
+              type: object
+              additionalProperties: true
           additionalProperties: true
         error_code:
           type: [string, 'null']
