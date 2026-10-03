@@ -3181,11 +3181,11 @@ extension AppModelTests {
         XCTAssertEqual(script, "第一段正文。\n第二段正文。")
 
         // 两段各 1_200 帧、每帧 2 字节：导出的 data chunk 就是两段样本顺序拼接。
-        let pcm = try DubbingAudioExport.pcmData(fromWAV: wav)
+        let pcm = try DubbingAudioExport.clip(fromWAV: wav).pcm
         XCTAssertEqual(pcm.count, 2 * 1_200 * 2)
         XCTAssertEqual(
             Array(pcm.prefix(2_400)),
-            Array(try DubbingAudioExport.pcmData(fromWAV: silentPreviewWAV(marker: 0x80, frames: 1_200)))
+            Array(try DubbingAudioExport.clip(fromWAV: silentPreviewWAV(marker: 0x80, frames: 1_200)).pcm)
         )
         XCTAssertNil(model.dubbingExportBundle, "写盘后清空待导出内容")
     }

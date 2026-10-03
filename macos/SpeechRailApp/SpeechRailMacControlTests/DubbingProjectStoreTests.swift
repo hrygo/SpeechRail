@@ -72,12 +72,59 @@ final class DubbingProjectStoreTests: XCTestCase {
     }
 
     private func wav(_ marker: UInt8, samples: Int = 4) -> Data {
+        wav(marker, samples: samples, sampleRate: 24_000)
+    }
+
+    /// 可以指定真实格式的 WAV，用来验证导出不靠猜而是照实标注。
+    private func wav(
+        _ marker: UInt8,
+        samples: Int = 4,
+        sampleRate: Int,
+        channels: Int = 1,
+        bitsPerSample: Int = 16
+    ) -> Data {
         var pcm = Data()
         for index in 0..<samples {
             pcm.append(marker)
             pcm.append(UInt8(index))
         }
-        return (try? DubbingAudioExport.makeWAV(from: [pcm], sampleRate: 24_000)) ?? Data()
+        return wavFile(
+            pcm: pcm,
+            format: DubbingAudioFormat(
+                sampleRate: sampleRate,
+                channels: channels,
+                bitsPerSample: bitsPerSample
+            )
+        )
+    }
+
+    private func wavFile(pcm: Data, format: DubbingAudioFormat) -> Data {
+        var file = Data()
+        func append16(_ value: Int) {
+            let value = UInt16(value)
+            file.append(UInt8(value & 0xff))
+            file.append(UInt8((value >> 8) & 0xff))
+        }
+        func append32(_ value: Int) {
+            let value = UInt32(value)
+            for shift in stride(from: 0, to: 32, by: 8) {
+                file.append(UInt8((value >> UInt32(shift)) & 0xff))
+            }
+        }
+        file.append(contentsOf: Array("RIFF".utf8))
+        append32(36 + pcm.count)
+        file.append(contentsOf: Array("WAVEfmt ".utf8))
+        append32(16)
+        append16(1)
+        append16(format.channels)
+        append32(format.sampleRate)
+        append32(format.sampleRate * format.channels * format.bitsPerSample / 8)
+        append16(format.channels * format.bitsPerSample / 8)
+        append16(format.bitsPerSample)
+        file.append(contentsOf: Array("data".utf8))
+        append32(pcm.count)
+        file.append(pcm)
+        return file
     }
 
     // MARK: - 候选与采用
@@ -287,12 +334,16 @@ final class DubbingProjectStoreTests: XCTestCase {
         try store.adopt(candidateID: second.id, inSegment: "seg_second", ofProject: project.id)
         let exported = try XCTUnwrap(try store.export(projectID: project.id))
 
-        let expectedPCM = try DubbingAudioExport.pcmData(fromWAV: wav(0x11))
-            + DubbingAudioExport.pcmData(fromWAV: wav(0x22, samples: 6))
+        let expectedPCM = try DubbingAudioExport.clip(fromWAV: wav(0x11)).pcm
+            + DubbingAudioExport.clip(fromWAV: wav(0x22, samples: 6)).pcm
         XCTAssertEqual(
-            try DubbingAudioExport.pcmData(fromWAV: exported.audio),
+            try DubbingAudioExport.clip(fromWAV: exported.audio).pcm,
             expectedPCM,
-            "导出音频必须是被采用候选的样本按段落顺序拼接"
+            "导出音频必须是被采用候选的样本按段落顺序拼接，且不改动样本字节"
+        )
+        XCTAssertEqual(
+            try DubbingAudioExport.clip(fromWAV: exported.audio).format,
+            DubbingAudioFormat(sampleRate: 24_000, channels: 1, bitsPerSample: 16)
         )
         XCTAssertEqual(exported.script, "第一段。\n第二段。")
     }
@@ -316,7 +367,11 @@ final class DubbingProjectStoreTests: XCTestCase {
 
     func testWAVExportRewritesTheHeaderForTheJoinedAudio() throws {
         let pcm = Data([0x01, 0x00, 0x02, 0x00])
-        let exported = try DubbingAudioExport.makeWAV(from: [pcm, pcm], sampleRate: 16_000)
+        let format = DubbingAudioFormat(sampleRate: 16_000, channels: 1, bitsPerSample: 16)
+        let exported = try DubbingAudioExport.makeWAV(from: [
+            DubbingAudioClip(pcm: pcm, format: format),
+            DubbingAudioClip(pcm: pcm, format: format),
+        ])
 
         XCTAssertEqual(exported.prefix(4), Data("RIFF".utf8))
         XCTAssertEqual(exported.subdata(in: 8..<12), Data("WAVE".utf8))
@@ -324,17 +379,104 @@ final class DubbingProjectStoreTests: XCTestCase {
             Int(exported.subdata(in: 40..<44).littleEndianUInt32ForTest),
             pcm.count * 2
         )
-        XCTAssertEqual(try DubbingAudioExport.pcmData(fromWAV: exported), pcm + pcm)
+        XCTAssertEqual(try DubbingAudioExport.clip(fromWAV: exported).pcm, pcm + pcm)
         XCTAssertEqual(exported.count, 44 + pcm.count * 2)
+        XCTAssertEqual(
+            Int(exported.subdata(in: 24..<28).littleEndianUInt32ForTest),
+            16_000,
+            "header 的采样率必须来自数据，而不是导出层的常量"
+        )
     }
 
     func testOddSizedSamplesAreRefusedInsteadOfSilentlyPadded() throws {
+        let format = DubbingAudioFormat(sampleRate: 24_000, channels: 1, bitsPerSample: 16)
         XCTAssertThrowsError(
-            try DubbingAudioExport.makeWAV(from: [Data([0x01])], sampleRate: 24_000)
-        )
+            try DubbingAudioExport.makeWAV(from: [
+                DubbingAudioClip(pcm: Data([0x01]), format: format),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .candidateNotAdoptable)
+        }
         XCTAssertThrowsError(
-            try DubbingAudioExport.pcmData(fromWAV: Data("not a wav at all".utf8))
+            try DubbingAudioExport.clip(fromWAV: Data("not a wav at all".utf8))
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
+    }
+
+    /// 回归 #149：导出必须照着数据声明的采样率写 header。
+    ///
+    /// 旧实现丢掉 `fmt ` chunk 再写死 24 kHz，16 kHz 的输入会被标成 24 kHz——
+    /// 文件照样能播放，只是语速与音高整体错位，属于最难被发现的一类错误。
+    func testExportLabelsTheRealSampleRateInsteadOfAssumingOne() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let first = try store.addCandidate(
+            makeCandidate(id: "cand_a", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11, sampleRate: 16_000),
+            toProject: project.id
         )
+        try store.adopt(candidateID: first.id, inSegment: "seg_first", ofProject: project.id)
+        // 16 kHz 的候选先占一段：随后这一段被 24 kHz 的候选换掉。
+        let replacement = try store.addCandidate(
+            makeCandidate(id: "cand_b", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x33, sampleRate: 16_000),
+            toProject: project.id
+        )
+        try store.adopt(
+            candidateID: replacement.id,
+            inSegment: "seg_first",
+            ofProject: project.id
+        )
+        let second = try store.addCandidate(
+            makeCandidate(id: "cand_c", segmentID: "seg_second", text: "第二段。"),
+            audioData: wav(0x22, sampleRate: 16_000),
+            toProject: project.id
+        )
+        try store.adopt(candidateID: second.id, inSegment: "seg_second", ofProject: project.id)
+
+        let exported = try XCTUnwrap(try store.export(projectID: project.id))
+        let clip = try DubbingAudioExport.clip(fromWAV: exported.audio)
+        XCTAssertEqual(
+            clip.format.sampleRate, 16_000,
+            "导出的采样率应随数据，不能被写死成 24 kHz，否则成品语速与音高会整体错位"
+        )
+    }
+
+    /// 参与拼接的候选格式不同时必须显式失败，而不是取其中一个的采样率去标定全部。
+    func testExportRefusesToJoinClipsWithDifferentFormats() throws {
+        let format = DubbingAudioFormat(sampleRate: 24_000, channels: 1, bitsPerSample: 16)
+        let other = DubbingAudioFormat(sampleRate: 16_000, channels: 1, bitsPerSample: 16)
+        XCTAssertThrowsError(
+            try DubbingAudioExport.makeWAV(from: [
+                DubbingAudioClip(pcm: Data([0x01, 0x00]), format: format),
+                DubbingAudioClip(pcm: Data([0x02, 0x00]), format: other),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatMismatch)
+        }
+    }
+
+    /// 非单声道 16 bit 的剖面不做隐式转换——拒绝并说明原因。
+    func testExportRefusesAFormatItCannotJoinHonestly() throws {
+        let stereo = DubbingAudioFormat(sampleRate: 24_000, channels: 2, bitsPerSample: 16)
+        XCTAssertThrowsError(
+            try DubbingAudioExport.makeWAV(from: [
+                DubbingAudioClip(pcm: Data([0x01, 0x00]), format: stereo),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
+        // 只有 RIFF/WAVE 头、没有 fmt 与 data 的文件不能被当成音频。
+        var headerOnly = Data("RIFF".utf8)
+        headerOnly.append(contentsOf: [24, 0, 0, 0])
+        headerOnly.append(contentsOf: Array("WAVE".utf8))
+        headerOnly.append(contentsOf: Array("fmt ".utf8))
+        headerOnly.append(contentsOf: [16, 0, 0, 0])
+        XCTAssertThrowsError(try DubbingAudioExport.clip(fromWAV: headerOnly)) { error in
+            XCTAssertEqual(error as? DubbingProjectError, .audioFormatUnsupported)
+        }
     }
 
     // MARK: - 恢复
