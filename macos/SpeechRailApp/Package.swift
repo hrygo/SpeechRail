@@ -89,6 +89,8 @@ let package = Package(
                 "ServiceAPIClient.swift",
                 "CreatorServiceClient.swift",
                 "CreativeWorkStore.swift",
+                "DubbingProjectStore.swift",
+                "FirstResultReadiness.swift",
                 "AudioPlaybackController.swift",
                 "VoicePreviewCache.swift",
                 "VoiceRecordingController.swift",
