@@ -273,6 +273,93 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
+    /// 失败的提交必须**当场**收尾，不许把残局留给下一次打开。
+    ///
+    /// 这条断言必须发生在任何触发恢复的调用之前。`list()` / `loadAudio()` 都会走
+    /// `withRecoveredLibrary` → `recoverPendingTransactionsUnlocked()`，也就是说
+    /// 「失败之后紧接着读一次库」量到的是**恢复之后**的状态——分不清是立即回滚了，
+    /// 还是留下了残局、等下次打开才被清掉。实测把 `rollbackUncommittedMutationUnlocked`
+    /// 整段删掉，25 条测试依然全绿，原因就在这里。
+    func testAFailedCommitLeavesNothingBehindBeforeTheLibraryIsReopened() throws {
+        let original = makeWork(id: "work_existing")
+        try CreativeWorkStore(directory: directory).save(
+            original,
+            audioData: Data([1, 2, 3, 4])
+        )
+        let failing = CreativeWorkFileOperations(
+            writeInterceptor: { url, _ in
+                if url.lastPathComponent == "works.json" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            }
+        )
+        let store = CreativeWorkStore(directory: directory, fileOperations: failing)
+
+        XCTAssertThrowsError(
+            try store.save(makeWork(id: "work_added"), audioData: Data([5, 6, 7, 8]))
+        )
+
+        // 到这里为止没有任何调用触碰过作品库，磁盘就是失败瞬间的真实状态。
+        let audioFiles = try FileManager.default
+            .contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasSuffix(".wav") }
+            .sorted()
+        XCTAssertEqual(
+            audioFiles,
+            ["work_existing.wav"],
+            "索引写失败后，未提交的音频不得留在正式作品目录"
+        )
+
+        let pending = try FileManager.default
+            .contentsOfDirectory(
+                atPath: directory.appendingPathComponent(".transactions").path
+            )
+        XCTAssertEqual(
+            pending,
+            [],
+            "失败的提交不得留下待决事务——留着会让下次打开先面对一个歧义状态"
+        )
+    }
+
+    /// journal 与事务目录必须先于索引落盘。
+    ///
+    /// 真实进程退出不执行任何 `catch`：若索引已经提交、而 journal 还只在页缓存里，
+    /// 下次打开就少了判定「这次提交到底成没成」的唯一依据，只能 fail-closed
+    /// 让用户自己进目录删文件。fsync 的顺序本身就是契约，必须被钉住。
+    func testTheJournalReachesDiskBeforeTheIndexIsCommitted() throws {
+        var synced: [URL] = []
+        let recording = CreativeWorkFileOperations(
+            syncInterceptor: { url in synced.append(url) }
+        )
+        let store = CreativeWorkStore(directory: directory, fileOperations: recording)
+
+        try store.save(makeWork(id: "work_sync_order"), audioData: Data([1, 2, 3]))
+
+        func position(where predicate: (URL) -> Bool) -> Int? {
+            synced.firstIndex(where: predicate)
+        }
+        let journal = position { $0.lastPathComponent == "journal.json" }
+        let transactionDirectory = position { $0.path.contains("/.transactions/") }
+        let indexCommit = position { $0.lastPathComponent == "works.json" }
+
+        XCTAssertNotNil(journal, "journal 必须被同步落盘")
+        XCTAssertNotNil(transactionDirectory, "事务目录本身也必须被同步")
+        XCTAssertNotNil(indexCommit, "索引必须被同步落盘")
+
+        // 断言失败后代码仍会继续执行，先解包再比较，避免越界把整个测试进程带倒。
+        guard let journal, let transactionDirectory, let indexCommit else { return }
+        XCTAssertLessThan(
+            journal,
+            indexCommit,
+            "journal 必须先于索引落盘，否则崩溃后无从判定这次提交是否已成"
+        )
+        XCTAssertLessThan(
+            transactionDirectory,
+            indexCommit,
+            "事务目录必须先于索引落盘"
+        )
+    }
+
     func testRestartRecoversAnUncommittedSaveWithoutPublishingOrphanAudio() throws {
         let original = makeWork(id: "work_before_crash")
         try CreativeWorkStore(directory: directory).save(
