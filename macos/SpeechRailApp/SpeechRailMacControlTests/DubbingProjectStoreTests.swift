@@ -810,6 +810,73 @@ final class DubbingProjectStoreTests: XCTestCase {
         )
     }
 
+    /// #185：篡改的 journal 不得让恢复路径删掉项目目录**之外**的文件。
+    ///
+    /// 恢复读 journal 时校验了 `schemaVersion` 与 `transactionID`，却把
+    /// `publishedAudioFileName` 直接拼进路径去删文件。写入侧这个字段恒等于
+    /// `"<已校验 candidateID>.wav"`，但 journal 是磁盘上的数据——恢复路径不能
+    /// 假设它是自己写的。姊妹存储 `CreativeWorkStore` 的同名 journal 有
+    /// `audioFileName == "\(workID).wav"` 这条绑定，这里没有。
+    ///
+    /// `isSymbolicLink` 挡不住 `../`：那不是符号链接，就是一个普通文件。
+    func testRecoveryNeverDeletesAFileOutsideTheProjectDirectory() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        try store.addCandidate(
+            makeCandidate(id: "cand_one", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11),
+            toProject: project.id
+        )
+
+        // 项目目录之外的一份文件，内容已知。
+        let outsideName = "escaped-\(UUID().uuidString).wav"
+        let outside = directory.deletingLastPathComponent()
+            .appendingPathComponent(outsideName, isDirectory: false)
+        let outsideData = Data([0xde, 0xad, 0xbe, 0xef])
+        try outsideData.write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        // 手工造一个"索引尚未提交"的 journal：恢复会走回滚分支，拿到
+        // publishedAudioFileName 去删文件，而这个文件名指向项目目录之外。
+        let transactionID = String(repeating: "a", count: 32)
+        let transactionDirectory = directory
+            .appendingPathComponent(".transactions", isDirectory: true)
+            .appendingPathComponent(transactionID, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: transactionDirectory,
+            withIntermediateDirectories: true
+        )
+        let indexData = try Data(contentsOf: directory.appendingPathComponent("projects.json"))
+        let journal: [String: Any] = [
+            "schemaVersion": 1,
+            "transactionID": transactionID,
+            "operation": "candidate",
+            "previousIndexSHA256": CreativeWorkTransaction.digest(indexData),
+            "committedIndexSHA256": String(repeating: "b", count: 64),
+            "publishedAudioFileName": "../\(outsideName)",
+            "publishedAudioSHA256": CreativeWorkTransaction.digest(outsideData),
+        ]
+        try JSONSerialization.data(withJSONObject: journal)
+            .write(to: transactionDirectory.appendingPathComponent("journal.json"))
+
+        // 任何一次进入库的操作都会先跑恢复。校验不过就整体拒绝，
+        // 而不是照着 journal 里的路径去删——与作品库对坏 journal 的处理一致。
+        XCTAssertThrowsError(try store.list(), "篡改的 journal 必须被拒绝") { error in
+            XCTAssertEqual(
+                (error as? DubbingProjectError)?.errorDescription,
+                DubbingProjectError.invalidIdentifier.errorDescription,
+                "必须是标识无效，而不是别的错误"
+            )
+        }
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: outside.path),
+            "回滚不得删除项目目录之外的文件（#185）"
+        )
+        XCTAssertEqual(try Data(contentsOf: outside), outsideData, "目录外的文件必须原样保留")
+    }
+
     func testRestartKeepsACommittedCandidate() throws {
         let armed = ArmedInterruption()
         let interrupting = CreativeWorkFileOperations(

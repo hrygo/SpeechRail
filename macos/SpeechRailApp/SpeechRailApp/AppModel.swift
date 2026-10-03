@@ -3683,7 +3683,9 @@ public final class AppModel {
         return visible.isEmpty ? "SpeechRail-配音" : String(visible.prefix(80))
     }
 
-    private static func dubbingErrorMessage(for error: Error) -> String {
+    /// 段落返修的错误归属。文案提到的成因必须与用户实际能修的方向一致——
+    /// 把数据异常说成磁盘问题，会把用户送去检查一个没坏的方向（#186）。
+    static func dubbingErrorMessage(for error: Error) -> String {
         if let projectError = error as? DubbingProjectError {
             return switch projectError {
             case .candidateNotAdoptable:
@@ -3691,14 +3693,31 @@ public final class AppModel {
             case .candidateNotFound, .segmentNotFound:
                 "找不到这一段或这个候选，请刷新后重试。"
             case .invalidIdentifier:
-                "段落项目数据异常，请检查磁盘权限和可用空间后重试。"
+                // 这里不是磁盘问题。"检查权限和空间"会把用户送去检查一个没坏的
+                // 方向，而真正的成因是这份段落数据自身不自洽——重试无用，
+                // 要重新生成这一段（#186）。
+                "这件作品的段落数据不一致，无法只重做其中一段。请重新生成这一段后再导出。"
             case .audioFormatUnsupported:
                 "这一段的音频格式与其它段落不同，不能拼成一个成品。请重新生成这一段后再导出。"
             case .audioFormatMismatch:
                 "各段的音频格式不一致，不能拼成一个成品。请用同一音色与设置重新生成后再导出。"
             }
         }
+        // 真正的存储失败不走 DubbingProjectError：DubbingProjectStore 不包装
+        // 底层 I/O 错误，磁盘满、没权限会以 CocoaError 原样冒出来。
+        if Self.isStorageFailure(error) {
+            return "本机存储写入失败，请检查磁盘权限和可用空间后重试。"
+        }
         return "段落操作失败，请重试。"
+    }
+
+    /// 只认磁盘满与权限两类——文案里承诺的就是这两件，别把别的失败也
+    /// 说成它们（判据：文案提到的成因必须与实际可修的方向一致）。
+    private static func isStorageFailure(_ error: Error) -> Bool {
+        guard let code = (error as? CocoaError)?.code else { return false }
+        return code == .fileWriteOutOfSpace
+            || code == .fileWriteNoPermission
+            || code == .fileReadNoPermission
     }
 
     public func synthesizeAndSave(

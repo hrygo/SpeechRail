@@ -3590,6 +3590,43 @@ extension AppModelTests {
         XCTAssertTrue(missingCalls.isEmpty)
     }
 
+    /// #186：文案提到的成因必须与用户实际能修的方向一致。
+    ///
+    /// 此前 `DubbingProjectError.invalidIdentifier`（数据不自洽）被说成
+    /// 「请检查磁盘权限和可用空间」，而真正的磁盘满/没权限——它不走
+    /// `DubbingProjectError`，以 `CocoaError` 原样冒出来——反而落到笼统的
+    /// 「段落操作失败，请重试」。两边的成因与文案正好错位。
+    func testDubbingErrorsNameTheCauseTheUserCanActuallyActOn() {
+        // 数据不自洽：重试无用，要重新生成这一段。不得提磁盘。
+        let dataFault = AppModel.dubbingErrorMessage(for: DubbingProjectError.invalidIdentifier)
+        XCTAssertFalse(
+            dataFault.contains("磁盘") || dataFault.contains("空间"),
+            "数据异常不得被说成磁盘问题：\(dataFault)"
+        )
+        XCTAssertTrue(
+            dataFault.contains("重新生成"),
+            "数据异常要给出一个真正有用的下一步：\(dataFault)"
+        )
+
+        // 真正的存储失败：磁盘满与没权限都归到磁盘这一支。
+        for code in [CocoaError.Code.fileWriteOutOfSpace, .fileWriteNoPermission] {
+            let storageFault = AppModel.dubbingErrorMessage(
+                for: CocoaError(code)
+            )
+            XCTAssertTrue(
+                storageFault.contains("磁盘") && storageFault.contains("空间"),
+                "\(code) 是存储失败，文案必须说磁盘与空间：\(storageFault)"
+            )
+        }
+
+        // 别的失败不得被顺手说成磁盘问题。
+        let other = AppModel.dubbingErrorMessage(for: CocoaError(.fileNoSuchFile))
+        XCTAssertFalse(
+            other.contains("磁盘"),
+            "文件不存在不是磁盘问题，不得套用磁盘文案：\(other)"
+        )
+    }
+
     /// #184：副标题不得把「不知道音色是谁」说成「原音色」。
     ///
     /// 旧实现是 `dubbingProjectVoiceName ?? "原音色"`，而 nil 有四种来源。

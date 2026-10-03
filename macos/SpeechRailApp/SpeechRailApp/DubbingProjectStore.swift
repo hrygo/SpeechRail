@@ -677,7 +677,8 @@ public final class DubbingProjectStore {
             throw DubbingProjectError.invalidIdentifier
         }
         guard journal.schemaVersion == DubbingProjectJournal.currentSchemaVersion,
-              journal.transactionID == transactionDirectory.lastPathComponent
+              journal.transactionID == transactionDirectory.lastPathComponent,
+              Self.isSafeAudioFileName(journal.publishedAudioFileName)
         else {
             throw DubbingProjectError.invalidIdentifier
         }
@@ -700,6 +701,17 @@ public final class DubbingProjectStore {
 
     private static func isSafeIdentifier(_ value: String) -> Bool {
         value.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil
+    }
+
+    /// 候选音频文件名必须是一个**裸文件名**：`<已校验标识符>.wav`。
+    ///
+    /// 写入侧这个字段恒等于 `"\(candidate.id).wav"`，而 `candidate.id` 已过
+    /// `isSafeIdentifier`。但 journal 是磁盘上的数据，恢复路径随后要拿它拼出
+    /// 路径并**删除该文件**——不能假设它是自己写的，也不能假设它指向本目录。
+    /// `nil` 合法：采用、撤销等操作不发布新音频。
+    private static func isSafeAudioFileName(_ value: String?) -> Bool {
+        guard let value, value.hasSuffix(".wav") else { return false }
+        return isSafeIdentifier(String(value.dropLast(".wav".count)))
     }
 
     private static func isTransactionIdentifier(_ value: String) -> Bool {

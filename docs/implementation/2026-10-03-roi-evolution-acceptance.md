@@ -170,6 +170,20 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 是两件事。前者是我们还不知道，音色可能完全正常；说成后者会让用户去「音色库」修一个
 根本没坏的音色。「音色在列表里但当前不可用」是第三种情况，单独一句话。
 
+恢复路径读 journal 时也必须把 journal 当作**不可信输入**。写入侧
+`publishedAudioFileName` 恒等于 `"<已校验 candidateID>.wav"`，但恢复随后要拿它拼出
+路径并**删除该文件**，不能假设它是自己写的。此前只校验了 `schemaVersion` 与
+`transactionID`，文件名原样使用；`isSymbolicLink` 挡不住 `../`——那不是符号链接，
+就是一个普通文件。结果是篡改过的 journal 能让下次启动删掉项目目录之外的文件。
+姊妹存储 `CreativeWorkStore` 的同名 journal 有 `audioFileName == "\(workID).wav"`
+ 这条绑定，配音项目这边原先没有。
+
+文案提到的成因必须与用户实际能修的方向一致。`invalidIdentifier` 表达的是**数据
+不自洽**（重试无用，要重新生成这一段），此前却被说成「检查磁盘权限和可用空间」；
+而真正的磁盘满与没权限不走 `DubbingProjectError`——`DubbingProjectStore` 不包装
+底层 I/O，`CocoaError` 原样冒出来——落到笼统的「段落操作失败，请重试」。两边正好
+错位：文案承诺的排查方向，恰恰是唯一拿不到那条文案的场景。
+
 弹层副标题里那半句也遵守同一条区分。此前它是 `dubbingProjectVoiceName ?? "原音色"`，
 而 nil 有四种来源（配方没记录 / 列表没读到 / 音色不在列表里 / 列表读到了但查不到）。
 一律说成「原音色」是一句没有依据的断言；其中「音色不在列表里」尤其糟：副标题刚承诺
@@ -185,8 +199,8 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 「请确认目标位置可写」，用户会去检查一个其实可写的目录。因此第二步失败单独给出「已写入
 音频、正文没能写入」，并保留待导出内容，让用户换个位置就能重试，不必从头重做。
 
-证明：`DubbingProjectStoreTests`（24）、`DubbingSegmentPlannerTests`（4）、
-`AppModelTests` 中的 12 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
+证明：`DubbingProjectStoreTests`（25）、`DubbingSegmentPlannerTests`（4）、
+`AppModelTests` 中的 13 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
 
 ### ④ 提词器场景
 
@@ -254,7 +268,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 527 XCTest + 379 swift-testing，0 失败
+  → 529 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
