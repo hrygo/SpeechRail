@@ -270,6 +270,8 @@ def validate_alignment(
         return _failed(request, "text_mismatch")
     if not _granularity_supported(request.granularity, tokens):
         return _failed(request, "granularity_unsupported")
+    if not _spoken_text_is_covered(request.text, tokens):
+        return _failed(request, "text_mismatch")
     # The aligner timestamps spoken tokens, not typography.  Preserve the
     # original immutable text by attaching every intervening code point
     # (spaces and punctuation included) to the following spoken token.  The
@@ -308,6 +310,28 @@ def _with_leading_gaps(
         result.append((token, cursor, text_end, span))
         cursor = text_end
     return result
+
+
+def _spoken_text_is_covered(
+    text: str, tokens: list[tuple[str, int, int, SampleSpan]]
+) -> bool:
+    """Return whether the tokens account for every spoken code point.
+
+    The unit builder below hands every unmatched code point to a neighbouring
+    token, which is how the punctuation the aligner stripped stays inside the
+    published offsets.  That is only sound while the unmatched regions really
+    are unspoken: a dropped word would otherwise be published as part of the
+    next token's audio span, turning a truncated alignment into a plausible
+    looking timeline.  Whitespace and punctuation may be absorbed; anything the
+    aligner would have kept inside a token may not.
+    """
+
+    cursor = 0
+    for _token, text_start, text_end, _span in tokens:
+        if any(_is_spoken_char(character) for character in text[cursor:text_start]):
+            return False
+        cursor = text_end
+    return not any(_is_spoken_char(character) for character in text[cursor:])
 
 
 def _granularity_supported(
