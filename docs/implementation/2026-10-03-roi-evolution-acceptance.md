@@ -165,8 +165,13 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 在 macOS 上是隐藏文件——导出提示「已导出 …」，用户回到自己选的目录却什么也没看到。
 因此导出名去掉前导点，全是非法字符或全是点时退回默认名，超长收敛到 80 字。
 
+导出是**两份文件**，写入失败必须说清是第几步失败的。音频落地、正文失败（路径被同名目录
+占住、或写第二份时磁盘满）之后，目标目录里躺着的是一份**没有对应文案的成品**；此时若沿用
+「请确认目标位置可写」，用户会去检查一个其实可写的目录。因此第二步失败单独给出「已写入
+音频、正文没能写入」，并保留待导出内容，让用户换个位置就能重试，不必从头重做。
+
 证明：`DubbingProjectStoreTests`（24）、`DubbingSegmentPlannerTests`（4）、
-`AppModelTests` 中的 10 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
+`AppModelTests` 中的 11 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
 
 ### ④ 提词器场景
 
@@ -219,11 +224,11 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 见第 3 节的命令与结果。`docs/users/api-contract.md` 已补齐采样事实的语义（含
 `unseeded_sampler` 也可以是 complete）。
 
-## 3. 本次验证结果（2026-10-03）
+## 3. 本次验证结果（2026-10-03，Swift 侧末次复核 2026-10-04）
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 523 XCTest + 379 swift-testing，0 失败
+  → 524 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \

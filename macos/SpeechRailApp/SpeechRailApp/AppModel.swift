@@ -3508,17 +3508,24 @@ public final class AppModel {
                 to: directory.appendingPathComponent(bundle.audioFileName),
                 options: .atomic
             )
-            try Data(bundle.script.utf8).write(
-                to: directory.appendingPathComponent(bundle.scriptFileName),
-                options: .atomic
-            )
-            dubbingExportBundle = nil
-            dubbingMessage = "已导出 \(bundle.audioFileName) 和 \(bundle.scriptFileName)。"
-            return true
         } catch {
             dubbingMessage = "导出失败，请确认目标位置可写后重试。"
             return false
         }
+        do {
+            try Data(bundle.script.utf8).write(
+                to: directory.appendingPathComponent(bundle.scriptFileName),
+                options: .atomic
+            )
+        } catch {
+            // 音频已经落地、正文没有。照实说：用户需要知道目标目录里现在有一份
+            // 没有对应文案的成品，而不是被引导去检查一个其实可写的目录。
+            dubbingMessage = "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
+            return false
+        }
+        dubbingExportBundle = nil
+        dubbingMessage = "已导出 \(bundle.audioFileName) 和 \(bundle.scriptFileName)。"
+        return true
     }
 
     /// 放弃这次导出准备。用户改了主意时清空，避免下一次导出写出一份旧的成品。
