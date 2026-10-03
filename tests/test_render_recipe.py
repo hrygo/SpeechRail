@@ -123,12 +123,17 @@ def test_every_execution_parameter_changes_the_digest_and_the_plan() -> None:
         ("effective_speed", 1.25),
         ("effective_language", "en"),
         ("voice_revision", "vr_" + "c" * 32),
+        ("voice_mode", "system"),
+        ("model_role", "asr"),
+        ("model_artifact", "tts-artifact-2"),
         ("model_artifact_revision", "cat-2"),
         ("engine_revision", "rt_" + "d" * 64),
         ("sample_rate", 16_000),
         ("output_format", "pcm16"),
         ("planner_max_chars", 180),
         ("normalization_revision", "tts_norm_v2"),
+        ("pronunciation_revision", "pr_" + "e" * 32),
+        ("channels", 2),
     ):
         changed = _complete_recipe(**{field: value})
         assert changed.digest != baseline.digest, field

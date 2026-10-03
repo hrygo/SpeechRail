@@ -62,6 +62,24 @@ App 侧「回执缺失不丢音频、不伪造身份」此前没有测试守着�
 - `testCompletedReceiptWithAPartialRecipeKeepsTheAudioAndWithholdsTheDigest`：终态但配方
   partial 时保留已观察到的执行事实，摘要为 nil，并断言缺失字段。
 
+审查中发现 `plan_id` 的组成字段与「配方在真实发音词典下如何记录」都没有测试守着：
+把 `voice.mode`、`model.role`、`model.artifact`、`pronunciation_revision`、`channels`
+逐个从 plan 载荷里删掉，全套测试仍然全绿；把路由里的 `raw_text` 换成
+`acoustic_text`、把 `_optional_summary_str` 改成恒返回 `None`，同样全绿——
+后者会让「用过发音替换」的渲染如实报成 `unused`，产出一个描述从未发生过的渲染的
+完整配方与摘要。本次补上：
+
+- `test_every_execution_parameter_changes_the_digest_and_the_plan` 扩到 plan 载荷的每一个字段，
+  逐字段变异均会变红；
+- `test_recipe_separates_the_caller_text_from_what_the_pronunciation_set_produced`：经真实
+  `PronunciationRegistry` 建集并应用，断言 `raw_text_sha256` 是调用方原文、
+  `acoustic_text_sha256` 是真正下发到合成器的文本、词典 id 与 revision 如实记录，
+  且此时配方可以 `complete`；
+- `test_a_render_without_a_pronunciation_set_says_so_explicitly`：`unused` 是观察到的事实，
+  与「这一项缺失」不是同一句话；
+- 回执路由测试补上 `plan_sha256` 与 `plan_id` 前缀的一致性断言——该字段此前只有
+  Swift 夹具在用，服务端从未断言过。
+
 ### ③ 段落修改、采用/撤销与导出
 
 项目持有完整配方；候选只有在配方摘要与段落文本都一致时才可采用。段落边界只来自文稿
@@ -122,8 +140,13 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 swift test --package-path macos/SpeechRailApp --skip-update
   → 504 XCTest + 379 swift-testing，0 失败
 
-uv run --no-sync --extra dev pytest <14 个定向文件> -q --no-cov
-  → 170 passed
+uv run --no-sync --extra dev pytest \
+  tests/test_current_boundaries_contract.py tests/test_interface_parity.py \
+  tests/test_qwen3_tts_worker.py tests/test_render_receipt_routes.py \
+  tests/test_render_receipts.py tests/test_render_recipe.py \
+  tests/test_tts_sampling.py tests/test_pronunciation_routes.py \
+  -q --no-cov
+  → 128 passed
 
 uv run --no-sync --extra dev ruff check src/speechrail tests
   → All checks passed!
@@ -140,10 +163,12 @@ scripts/macos_app_build.sh --configuration Debug                 → BUILD SUCCE
 `project.pbxproj` 中 `DubbingProjectStore.swift` 在两个 sources phase 的重复条目，
 重建后不再出现 `Skipping duplicate build file` 警告。
 
-补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3103 passed, 1 skipped
-（`--collect-only` 计得 3104 项，运行 exit=0）。
+补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3128 passed, 1 skipped
+（`--collect-only` 计得 3129 项，运行 exit=0）。
 
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
+2026-10-04 补跑 `pytest tests/` 全量与上列定向文件：Python 数字按上表更新；
+Swift 与构建相关命令当日未改动 Swift 源码，未重跑，沿用 2026-10-03 的记录。
 
 ### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」
 
