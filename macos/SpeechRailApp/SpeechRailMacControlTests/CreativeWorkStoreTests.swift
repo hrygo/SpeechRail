@@ -273,6 +273,112 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
+    /// `isSafeIdentifier` 是作品目录唯一的逃逸防线。
+    ///
+    /// `URL.appendingPathComponent(_:)` 自己**不会**拒绝 `../`——它只是拼接。
+    /// `audioFileName == "\(work.id).wav"`，所以 id 一旦能带路径分隔符或点号，
+    /// 落盘位置就跟着跑到作品目录外面去。字符集、长度上限、不许点号这三条性质
+    /// 必须分别被钉住，不能只测「整体拒绝某个恶意串」——那无法区分是哪一条在起作用。
+    func testAWorkWhoseIDCouldEscapeTheLibraryDirectoryIsRefused() throws {
+        // 库放在测试自己拥有的子目录里，「目录外」也留在测试沙箱内——
+        // 直接拿系统临时目录当基准会跨用例互相污染。
+        let library = directory.appendingPathComponent("library", isDirectory: true)
+        let store = CreativeWorkStore(directory: library)
+        let outside = directory.appendingPathComponent("escaped.wav")
+        let hostileIDs = [
+            "../escaped",
+            "../../escaped",
+            "nested/id",
+            "dot.id",
+            "with space",
+            String(repeating: "x", count: 81),
+        ]
+
+        for hostileID in hostileIDs {
+            let work = makeWork(id: hostileID)
+            XCTAssertThrowsError(
+                try store.save(work, audioData: Data([1, 2, 3, 4])),
+                "标识符 \(hostileID) 必须被拒绝"
+            ) { error in
+                XCTAssertEqual(
+                    error as? CreativeWorkStoreError,
+                    .invalidWorkID,
+                    "标识符 \(hostileID) 必须报标识符非法，而不是别的错误"
+                )
+            }
+            // 其余入口用的是同一个守卫，但各有各的调用点，逐个钉住。
+            XCTAssertThrowsError(
+                try store.rename(work, title: "改名"),
+                "rename 必须拒绝 \(hostileID)"
+            ) { error in
+                XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
+            }
+            XCTAssertThrowsError(
+                try store.loadAudio(for: work),
+                "loadAudio 必须拒绝 \(hostileID)"
+            ) { error in
+                XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
+            }
+            XCTAssertThrowsError(
+                try store.delete(work),
+                "delete 必须拒绝 \(hostileID)"
+            ) { error in
+                XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
+            }
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outside.path),
+            "恶意标识符不得在作品目录外留下任何文件"
+        )
+        XCTAssertEqual(try store.list(), [], "被拒绝的作品不得进入索引")
+    }
+
+    /// 覆盖同一条作品的既有音频若是符号链接，不得顺着它读写。
+    func testSavingOverASymlinkedAudioIsRefused() throws {
+        let work = makeWork(id: "work_symlink")
+        let store = CreativeWorkStore(directory: directory)
+        try store.save(work, audioData: Data([1, 2, 3, 4]))
+
+        let audioURL = directory.appendingPathComponent(work.audioFileName)
+        let target = directory.appendingPathComponent("elsewhere.wav")
+        try Data([9, 9, 9]).write(to: target)
+        try FileManager.default.removeItem(at: audioURL)
+        try FileManager.default.createSymbolicLink(at: audioURL, withDestinationURL: target)
+
+        XCTAssertThrowsError(
+            try store.save(work, audioData: Data([5, 6, 7, 8]))
+        ) { error in
+            XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
+        }
+        XCTAssertEqual(
+            try Data(contentsOf: target),
+            Data([9, 9, 9]),
+            "符号链接指向的文件不得被这次保存改写"
+        )
+    }
+
+    /// 标题是用户之后唯一会看到的标识：空标题或纯空白不得写进索引。
+    func testRenamingToABlankTitleIsRefused() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let work = makeWork(id: "work_blank_title")
+        try store.save(work, audioData: Data([1, 2, 3, 4]))
+
+        for blank in ["", "   ", "\n\t "] {
+            XCTAssertThrowsError(
+                try store.rename(work, title: blank),
+                "标题 \(blank.debugDescription) 必须被拒绝"
+            ) { error in
+                XCTAssertEqual(error as? CreativeWorkStoreError, .invalidTitle)
+            }
+        }
+        XCTAssertEqual(
+            try store.list().first?.title,
+            work.title,
+            "被拒绝的改名不得改变已保存的标题"
+        )
+    }
+
     /// 失败的提交必须**当场**收尾，不许把残局留给下一次打开。
     ///
     /// 这条断言必须发生在任何触发恢复的调用之前。`list()` / `loadAudio()` 都会走
