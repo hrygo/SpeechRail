@@ -784,6 +784,15 @@ public final class AppModel {
     private let dubbingProjectStore: DubbingProjectStore
     /// 拥有 `dubbingRedoTask` 句柄的那一代任务。取消或重新开始都会推进它，
     /// 使旧任务的收尾无法清空新任务的句柄。
+    ///
+    /// 这是**纵深防御**，不是当前唯一的那道防线：`startDubbingSegmentRedo` 里的
+    /// `guard dubbingBusySegmentID == nil` 已经让两段重做无法并发，
+    /// `cancelDubbingSegmentRedo` 也只取消 task、不清在途标记，
+    /// 所以从取消到 `defer` 执行之间 busy 仍然占位。在 MainActor 上这些步骤串行，
+    /// 代次相等检查因此在当前代码路径上不会被触发。
+    ///
+    /// 若将来放宽并发（例如允许「取消后立即重做」），这道检查才真正开始起作用，
+    /// 且需要配套测试——目前没有测试覆盖它，正是因为触发不了。
     private var dubbingRedoGeneration: UInt64 = 0
     private var dubbingRedoTask: Task<Void, Never>?
     private let observabilityLocation: ObservabilityLocation
