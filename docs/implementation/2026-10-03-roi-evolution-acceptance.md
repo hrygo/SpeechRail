@@ -87,6 +87,20 @@ App 侧把配方投影成强类型快照随作品冻结，回执缺失时保留�
 的准确含义是"服务端对执行过程的描述自洽，且回执带了一个未经校验的音频摘要"，
 而不是"端到端字节一致"。补这一步要先定执行边界与失败处置，见 #189。
 
+**另一处未交付**：方案 §6.2 要求「App 持久化快照至少包含 recipe、plan 完整 digest、
+request/receipt ID、receipt 终态、观测音色/model revision、PCM hash/边界、实际 WAV 文件
+hash、provenance state/reason」。实测 `CreativeWork`、`RenderProvenanceSnapshot`、
+`DubbingCandidate` 三处持久化结构里**没有 request ID、没有 receipt ID、没有回执终态**。
+因此 `ServiceAPIClient.fetchReceipt(id:)` 与 `fetchReceipt(byRequestID:)` 这两个入口拿不到
+可用 ID——方案 §2 那句「App 的 render/work ID 是本地用户操作身份，不能替代服务执行身份」
+在数据层没有任何落点。终态只在**非**终态分支以 `reason=receipt_status_<wire>` 的形式出现，
+`completed` 分支不落盘。
+
+已落地的其余各项：recipe、`plan_sha256`、观测音色 revision（`voice_revision`）、观测 model
+revision（配方 `model.artifact_revision` / `model.engine_revision`）、`pcm_sha256`、
+`audio_file_sha256`（提交时由作品库对真实文件计算）、provenance state/reason。方案里的
+「PCM …边界」一词未定义具体字段，无法判定是否已交付，此处不作结论。见 #196。
+
 证明：`tests/test_render_recipe.py`、`tests/test_render_receipts.py`、
 `tests/test_render_receipt_routes.py`、`tests/test_tts_sampling.py`、
 `tests/test_qwen3_tts_worker.py`、Swift `ServiceContractTests` / `CreativeWorkStoreTests`。
