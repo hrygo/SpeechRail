@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.5.6] - 2026-10-03
+
 ### Changed
 
 - 打包进 wheel 的 `speechrail` skill 资产与当前 MCP/服务端行为对齐
