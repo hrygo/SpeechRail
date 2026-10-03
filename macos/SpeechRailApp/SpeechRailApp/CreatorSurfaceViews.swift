@@ -3547,10 +3547,13 @@ public struct WorksView: View {
             .speechRailButton(.primary)
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Button("段落返修…") {
-                    dubbingWork = work
+                // 没有配方摘要的作品点了也一定被拒：入口按事实出现，不做无效动作。
+                if work.provenance.supportsSegmentRedo {
+                    Button("段落返修…") {
+                        dubbingWork = work
+                    }
+                    .speechRailButton(.secondary)
                 }
-                .speechRailButton(.secondary)
 
                 Button("在 Finder 中显示") {
                     revealInFinder(work)

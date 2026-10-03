@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -455,6 +456,49 @@ final class CreativeWorkStoreTests: XCTestCase {
             "超长标题必须收敛到上限，而不是原样写进索引"
         )
         XCTAssertEqual(try store.list().first?.title, renamed.title)
+    }
+
+    /// 没有配方摘要的作品不提供「段落返修」入口。
+    ///
+    /// 段落返修的前提是「这次重做与原作品是同一制作条件」，只有配方摘要能证明它。
+    /// 老作品读作 `legacyUnknown`、摘要为 nil，重做必然被拒。入口若照旧出现，
+    /// 用户会打开弹层、点下重做、读到一句「无法安全地只重做其中一段」——
+    /// 一个点下去一定失败的动作。
+    func testSegmentRedoIsOfferedOnlyWhenTheRecipeCanProveTheConditions() {
+        XCTAssertFalse(
+            RenderProvenanceSnapshot.legacyUnknown.supportsSegmentRedo,
+            "老作品没有配方摘要，不该出现段落返修入口"
+        )
+        XCTAssertFalse(
+            RenderProvenanceSnapshot(state: .partial, reason: nil).supportsSegmentRedo,
+            "连配方都没有时同样不该出现入口"
+        )
+        XCTAssertFalse(
+            RenderProvenanceSnapshot(
+                state: .verified,
+                reason: nil,
+                recipe: RenderRecipeSnapshot(
+                    state: .partial,
+                    missingFields: ["parameters.seed_policy"],
+                    digest: nil,
+                    voiceID: "ryan"
+                )
+            ).supportsSegmentRedo,
+            "配方不完整就没有摘要，入口同样不该出现"
+        )
+        XCTAssertTrue(
+            RenderProvenanceSnapshot(
+                state: .verified,
+                reason: nil,
+                recipe: RenderRecipeSnapshot(
+                    state: .complete,
+                    missingFields: [],
+                    digest: String(repeating: "e", count: 64),
+                    voiceID: "ryan"
+                )
+            ).supportsSegmentRedo,
+            "事实齐全的配方才允许按段落返修"
+        )
     }
 
 

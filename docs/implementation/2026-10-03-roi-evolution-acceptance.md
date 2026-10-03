@@ -36,7 +36,7 @@ verification_date: 2026-10-03
 `.recovery/<txID>/` 承接已提交但未完成的删除。启动、读、写都先过恢复。同 ID 同内容返回原
 记录，不同内容返回 `workConflict`。
 
-证明：`CreativeWorkStoreTests`（34 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+证明：`CreativeWorkStoreTests`（35 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
 
 审查中补齐了四处「守卫在、但没被考到」的落盘边界：
 
@@ -152,6 +152,11 @@ header 的采样率、位深、声道**来自候选 WAV 自己的 `fmt ` 声明*
 App 的「段落返修…」入口在作品详情动作区；重做、采用、撤销、导出在弹层首屏，候选版本收在
 每段的展开区；导出经 `NSOpenPanel` 选目录后写出 WAV + TXT 两份文件。
 
+入口按事实出现：没有配方摘要的作品（老记录读作 `legacyUnknown`）不显示「段落返修…」，
+因为那件作品的重做必然被拒——摆出一个点下去一定失败的动作，比不摆更糟。判据是
+`RenderProvenanceSnapshot.supportsSegmentRedo`，落在模型上因而可测；
+`startDubbingSegmentRedo` 里的摘要守卫保留为纵深防御。
+
 成品文件名还必须**看得见**：作品名来自文稿首行，用户写什么都会进来，而以点开头的名字
 在 macOS 上是隐藏文件——导出提示「已导出 …」，用户回到自己选的目录却什么也没看到。
 因此导出名去掉前导点，全是非法字符或全是点时退回默认名，超长收敛到 80 字。
@@ -214,7 +219,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 521 XCTest + 379 swift-testing，0 失败
+  → 522 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest \
   tests/test_current_boundaries_contract.py tests/test_interface_parity.py \

@@ -53,6 +53,15 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
         )
     }
 
+    /// 这件作品能不能按段落返修。
+    ///
+    /// 段落返修的前提是「这次重做与原作品是同一制作条件」，而这件事只能靠配方
+    /// 摘要证明。老作品读作 `legacyUnknown`、没有摘要，重做必然被拒。
+    /// 因此入口本身就不该出现——摆出一个点下去一定失败的动作，比不摆更糟。
+    public var supportsSegmentRedo: Bool {
+        recipe?.digest != nil
+    }
+
     private enum CodingKeys: String, CodingKey {
         case state
         case reason
