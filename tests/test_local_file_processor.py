@@ -9,10 +9,17 @@ from pathlib import Path
 
 import pytest
 
+from speechrail.domain.alignment import (
+    AlignmentRequest,
+    AlignmentResult,
+    AlignmentUnit,
+)
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import (
     AudioChunk,
     SpeechRequest,
+    SpeechSynthesizer,
     TranscriptionRequest,
 )
 from speechrail.domain.tts import VoiceProfile
@@ -248,6 +255,148 @@ def test_processor_transcription_writes_artifact_and_returns_relative_ref(tmp_pa
     assert payload["language"] == "en"
 
 
+class _FakeAligner:
+    """Stand in for the independent fixed-text aligner owner."""
+
+    def __init__(self, *, failure: str | None = None) -> None:
+        self.requests: list[AlignmentRequest] = []
+        self.failure = failure
+
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        self.requests.append(request)
+        if self.failure is not None:
+            return AlignmentResult(
+                task_id=request.task_id,
+                epoch=request.epoch,
+                utterance_id=request.utterance_id,
+                transcript_revision=request.transcript_revision,
+                units=(),
+                failure=self.failure,
+            )
+        midpoint = max(1, len(request.text) // 2)
+        return AlignmentResult(
+            task_id=request.task_id,
+            epoch=request.epoch,
+            utterance_id=request.utterance_id,
+            transcript_revision=request.transcript_revision,
+            units=(
+                AlignmentUnit(
+                    "u-0", 0, midpoint, SampleSpan(0, 16_000), request.granularity
+                ),
+                AlignmentUnit(
+                    "u-1",
+                    midpoint,
+                    len(request.text),
+                    SampleSpan(16_000, 32_000),
+                    request.granularity,
+                ),
+            ),
+        )
+
+
+def _transcription_job(spool: Path, audio: Path, **params: object) -> JobRecord:
+    return JobRecord(
+        id="job_ts",
+        kind="transcription",
+        state="queued",
+        owner="loopback",
+        request={"input_ref": str(audio), "params": params},
+        error_code=None,
+        result_ref=None,
+    )
+
+
+def _timestamp_processor(
+    spool: Path,
+    transcriber: _FakeTranscriber,
+    aligner: _FakeAligner | None,
+) -> LocalFileJobProcessor:
+    processor = LocalFileJobProcessor(
+        spool_dir=spool,
+        batch_transcriber=transcriber,
+        text_aligner=aligner,
+    )
+
+    async def _fake_decode(input_path: Path) -> bytes:
+        return b"\x00\x01" * 100
+
+    processor._decode_audio = _fake_decode  # type: ignore[method-assign]
+    return processor
+
+
+def test_job_timestamps_come_from_the_independent_aligner(tmp_path: Path) -> None:
+    """The ASR owner decodes text only; timestamps are a local alignment pass."""
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"RIFF-fake-wav")
+    transcriber = _FakeTranscriber(text="hello world")
+    aligner = _FakeAligner()
+    processor = _timestamp_processor(spool, transcriber, aligner)
+
+    ref = asyncio.run(
+        processor.process(_transcription_job(spool, audio, timestamps=True))
+    )
+
+    assert [request.include_timestamps for request in transcriber.calls] == [False]
+    assert len(aligner.requests) == 1
+    assert aligner.requests[0].granularity == "segment"
+    assert aligner.requests[0].text == "hello world"
+    payload = json.loads((spool / ref).read_text())
+    assert payload["text"] == "hello world"
+    assert [segment["start_ms"] for segment in payload["segments"]] == [0, 1000]
+    assert [segment["text"] for segment in payload["segments"]] == ["hello", "world"]
+
+
+def test_job_without_timestamps_never_calls_the_aligner(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"RIFF-fake-wav")
+    transcriber = _FakeTranscriber()
+    aligner = _FakeAligner()
+    processor = _timestamp_processor(spool, transcriber, aligner)
+
+    asyncio.run(processor.process(_transcription_job(spool, audio)))
+
+    assert aligner.requests == []
+    assert [request.include_timestamps for request in transcriber.calls] == [False]
+
+
+def test_job_timestamps_require_a_configured_aligner(tmp_path: Path) -> None:
+    """Fail closed before decoding: no aligner means no truthful timeline."""
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"RIFF-fake-wav")
+    transcriber = _FakeTranscriber()
+    processor = _timestamp_processor(spool, transcriber, None)
+
+    with pytest.raises(JobProcessingError) as failure:
+        asyncio.run(processor.process(_transcription_job(spool, audio, timestamps=True)))
+
+    assert failure.value.error_code == "timestamp_alignment_unavailable"
+    assert transcriber.calls == []
+    assert not (spool / RESULTS_SUBDIR / "job_ts" / "transcript.json").exists()
+
+
+def test_job_timestamps_fail_the_job_when_alignment_is_unresolved(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"RIFF-fake-wav")
+    transcriber = _FakeTranscriber()
+    processor = _timestamp_processor(spool, transcriber, _FakeAligner(failure="text_mismatch"))
+
+    with pytest.raises(JobProcessingError) as failure:
+        asyncio.run(processor.process(_transcription_job(spool, audio, timestamps=True)))
+
+    assert failure.value.error_code == "timestamp_alignment_unavailable"
+    assert not (spool / RESULTS_SUBDIR / "job_ts" / "transcript.json").exists()
+
+
 def test_processor_transcription_rejects_url_input_ref(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     spool.mkdir()
@@ -423,6 +572,56 @@ class _FakeSynthesizer:
         yield AudioChunk(response_id=request.voice, chunk_index=0, audio=self._pcm)
 
 
+class _ScriptedSynthesizer:
+    """Synthesizer that replays an exact, possibly invalid, chunk stream."""
+
+    def __init__(self, chunks: list[AudioChunk]) -> None:
+        self._chunks = chunks
+        self.runtime_revision = None
+        self.closed = False
+        self.emitted = 0
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return None
+
+    async def prepare_voice(
+        self,
+        voice: str,
+        *,
+        expected_voice_revision: str | None,
+    ) -> str:
+        del voice, expected_voice_revision
+        raise RuntimeError("voice_validation_runtime_unavailable")
+
+    async def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        del request
+        try:
+            for chunk in self._chunks:
+                self.emitted += 1
+                yield chunk
+        finally:
+            self.closed = True
+
+
+def _speech_job(spool: Path, text_file: Path, **params: object) -> JobRecord:
+    return JobRecord(
+        id="job_s1",
+        kind="speech",
+        state="queued",
+        owner="loopback",
+        request={"input_ref": str(text_file), "params": params},
+        error_code=None,
+        result_ref=None,
+    )
+
+
+def _speech_processor(
+    spool: Path, synthesizer: SpeechSynthesizer
+) -> LocalFileJobProcessor:
+    return LocalFileJobProcessor(spool_dir=spool, tts_synthesizer=synthesizer)
+
+
 def test_processor_speech_writes_artifact_and_returns_relative_ref(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     spool.mkdir()
@@ -450,6 +649,76 @@ def test_processor_speech_writes_artifact_and_returns_relative_ref(tmp_path: Pat
     assert artifact.is_file()
     assert artifact.stat().st_mode & 0o777 == 0o600
     assert artifact.read_bytes() == b"\xaa\xbb"
+
+
+@pytest.mark.parametrize(
+    ("label", "chunks", "code"),
+    [
+        (
+            "odd_pcm",
+            [AudioChunk(response_id="one", chunk_index=0, audio=b"\x01")],
+            "job_processor_failed",
+        ),
+        (
+            "first_index_not_zero",
+            [AudioChunk(response_id="one", chunk_index=4, audio=b"\x00\x01")],
+            "job_processor_failed",
+        ),
+        (
+            "index_gap",
+            [
+                AudioChunk(response_id="one", chunk_index=0, audio=b"\x00\x01"),
+                AudioChunk(response_id="one", chunk_index=2, audio=b"\x00\x01"),
+            ],
+            "job_processor_failed",
+        ),
+        (
+            "response_id_switch",
+            [
+                AudioChunk(response_id="one", chunk_index=0, audio=b"\x00\x01"),
+                AudioChunk(response_id="two", chunk_index=1, audio=b"\x00\x01"),
+            ],
+            "job_processor_failed",
+        ),
+        ("empty_stream", [], "job_processor_failed"),
+    ],
+)
+def test_processor_speech_rejects_malformed_streams_without_an_artifact(
+    tmp_path: Path, label: str, chunks: list[AudioChunk], code: str
+) -> None:
+    del label
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    text_file = spool / "input.txt"
+    text_file.write_text("hello speech")
+    synthesizer = _ScriptedSynthesizer(chunks)
+    processor = _speech_processor(spool, synthesizer)
+
+    with pytest.raises(JobProcessingError) as failure:
+        asyncio.run(processor.process(_speech_job(spool, text_file, voice="serena")))
+
+    assert failure.value.error_code == code
+    assert synthesizer.closed, "the backend iterator must be closed"
+    assert not (spool / RESULTS_SUBDIR / "job_s1" / "speech.pcm").exists()
+
+
+def test_processor_speech_accepts_a_valid_multi_chunk_stream(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    text_file = spool / "input.txt"
+    text_file.write_text("hello speech")
+    synthesizer = _ScriptedSynthesizer(
+        [
+            AudioChunk(response_id="one", chunk_index=0, audio=b"\xaa\xbb"),
+            AudioChunk(response_id="one", chunk_index=1, audio=b"\xcc\xdd"),
+        ]
+    )
+    processor = _speech_processor(spool, synthesizer)
+
+    ref = asyncio.run(processor.process(_speech_job(spool, text_file, voice="serena")))
+
+    assert (spool / ref).read_bytes() == b"\xaa\xbb\xcc\xdd"
+    assert synthesizer.closed
 
 
 def test_processor_accepts_file_uri_for_an_allowlisted_input(tmp_path: Path) -> None:
