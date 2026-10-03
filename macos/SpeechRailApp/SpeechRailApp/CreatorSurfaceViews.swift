@@ -324,7 +324,6 @@ public struct DubbingDeskView: View {
             }
         }
     }
-    }
 
     private func voicePickerRow(_ voice: CreatorVoice) -> some View {
         let isSelected = voice.id == selectedVoiceID
