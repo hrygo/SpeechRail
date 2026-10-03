@@ -478,10 +478,20 @@ def _fake_mlx_runtime(monkeypatch: pytest.MonkeyPatch, seeded: list[int]) -> Non
     monkeypatch.setitem(sys.modules, "mlx.core", core)
 
 
+def _no_mlx_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `import mlx.core` fail even where the real runtime is installed."""
+    for name in ("mlx.core", "mlx"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    # A None entry makes `import mlx.core` raise ImportError without touching
+    # the real runtime on disk.
+    monkeypatch.setitem(sys.modules, "mlx.core", None)
+
+
 def test_caller_seed_is_reported_as_applied_only_when_the_runtime_took_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No vendor runtime means no fixed stream: the policy must say so."""
+    _no_mlx_runtime(monkeypatch)
     engine = _sampling_engine("custom_voice")
 
     list(engine._generate("你好。", voice="default", speed=1.0, language="auto", seed=101))
