@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 from uuid import uuid4
 
 from speechrail.backends.model_identity import is_observed_runtime_revision
+from speechrail.domain.render_recipe import RenderRecipe
 
 ReceiptStatus = Literal["pending", "completed", "cancelled", "error"]
 
@@ -32,6 +33,7 @@ class _ReceiptState:
     model_catalog_revision: str | None
     model_runtime_revision: str | None
     plan_id: str | None
+    plan_digest: str | None
     window_index: int | None
     checkpoint_id: str | None
     output_format: str
@@ -40,6 +42,7 @@ class _ReceiptState:
     boundary: str
     text_summary: dict[str, object] | None = None
     planner_summary: dict[str, object] | None = None
+    recipe: RenderRecipe | None = None
     created_at: float = field(default_factory=time.time)
     status: ReceiptStatus = "pending"
     completed_at: float | None = None
@@ -87,6 +90,7 @@ class RenderReceiptRegistry:
         model_catalog_revision: str | None,
         model_runtime_revision: str | None,
         plan_id: str | None = None,
+        plan_digest: str | None = None,
         window_index: int | None = None,
         checkpoint_id: str | None = None,
         output_format: str,
@@ -95,6 +99,7 @@ class RenderReceiptRegistry:
         boundary: str = "pcm16_pre_transport",
         text_summary: dict[str, object] | None = None,
         planner_summary: dict[str, object] | None = None,
+        recipe: RenderRecipe | None = None,
     ) -> str:
         if sample_rate <= 0 or channels <= 0:
             raise ValueError("invalid audio format")
@@ -115,6 +120,7 @@ class RenderReceiptRegistry:
             model_catalog_revision=model_catalog_revision,
             model_runtime_revision=model_runtime_revision,
             plan_id=plan_id,
+            plan_digest=plan_digest,
             window_index=window_index,
             checkpoint_id=checkpoint_id,
             output_format=output_format,
@@ -125,6 +131,7 @@ class RenderReceiptRegistry:
             planner_summary=(
                 dict(planner_summary) if planner_summary is not None else None
             ),
+            recipe=recipe,
         )
         with self._lock:
             self._make_room_locked()
@@ -145,6 +152,37 @@ class RenderReceiptRegistry:
                     raise RuntimeError("render receipt runtime revision mismatch")
                 return True
             state.model_runtime_revision = revision
+            if state.recipe is not None and state.recipe.engine_revision is None:
+                state.recipe = replace(state.recipe, engine_revision=revision)
+            return True
+
+    def bind_observed_sampling(
+        self,
+        receipt_id: str,
+        *,
+        seed_policy: str,
+        observed_sampling_parameters: dict[str, object],
+    ) -> bool:
+        """Bind the sampler the worker reported while the receipt is pending.
+
+        Sampling facts are observed after the audio exists, so they arrive
+        after `begin`. Binding them late is what lets a recipe that was partial
+        at request time become complete without ever guessing a seed.
+        """
+
+        if not isinstance(seed_policy, str) or not seed_policy:
+            raise ValueError("seed policy must be a non-empty string")
+        with self._lock:
+            state = self._entries[receipt_id]
+            if state.status != "pending":
+                return False
+            if state.recipe is None or state.recipe.seed_policy is not None:
+                return False
+            state.recipe = replace(
+                state.recipe,
+                seed_policy=seed_policy,
+                observed_sampling_parameters=dict(observed_sampling_parameters),
+            )
             return True
 
     def accept_pcm(self, receipt_id: str, pcm16: bytes) -> None:
@@ -232,9 +270,15 @@ class RenderReceiptRegistry:
                 # PCM digest: raw audio is never persisted here.
                 "plan": {
                     "plan_id": state.plan_id,
+                    "plan_sha256": state.plan_digest,
                     "window_index": state.window_index,
                     "checkpoint_id": state.checkpoint_id,
                 },
+                # What this render actually executed. Absent means this path
+                # never assembled one, which is not the same as "no recipe".
+                "recipe": (
+                    state.recipe.to_dict() if state.recipe is not None else None
+                ),
                 "audio": {
                     "format": state.output_format,
                     "pcm_sample_rate": state.sample_rate,
@@ -272,6 +316,38 @@ def bind_observed_runtime_revision(
         return False
     try:
         return registry.bind_model_runtime_revision(receipt_id, revision)
+    except Exception:
+        return False
+
+
+def bind_observed_sampling(
+    registry: RenderReceiptRegistry,
+    receipt_id: str,
+    *,
+    synthesizer: object,
+    response_id: str,
+) -> bool:
+    """Bind what the worker reported it sampled with, without touching audio.
+
+    Best-effort by design: a synthesizer that cannot report its sampler leaves
+    the recipe partial instead of failing a render that already produced audio.
+    """
+
+    take = getattr(synthesizer, "take_sampling_observation", None)
+    if not callable(take):
+        return False
+    try:
+        observation = take(response_id)
+    except Exception:
+        return False
+    if observation is None:
+        return False
+    try:
+        return registry.bind_observed_sampling(
+            receipt_id,
+            seed_policy=observation.seed_policy,
+            observed_sampling_parameters=observation.recipe_payload(),
+        )
     except Exception:
         return False
 

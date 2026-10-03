@@ -86,8 +86,13 @@ def _clone_generation_seed(*, voice: str, text: str, ref_text: str) -> int:
     return int.from_bytes(digest, "little")
 
 
-def _seed_clone_generation(*, voice: str, text: str, ref_text: str) -> None:
-    """Seed MLX's request-local sampling stream when the optional runtime exists."""
+def _seed_clone_generation(*, voice: str, text: str, ref_text: str) -> bool:
+    """Seed MLX's request-local sampling stream when the optional runtime exists.
+
+    Returns whether the stream was actually seeded. A caller that could not
+    seed must not report a fixed seed policy: the audio was produced under an
+    unfixed sampler.
+    """
 
     try:
         import mlx.core as mx  # type: ignore[import-not-found]
@@ -96,7 +101,32 @@ def _seed_clone_generation(*, voice: str, text: str, ref_text: str) -> None:
     except Exception:
         # The worker still has to start in environments without the vendor runtime;
         # the production MLX path provides the deterministic seed operation.
-        pass
+        return False
+    return True
+
+
+def _sampling_observation(
+    *,
+    seed_policy: str,
+    seed: int | None,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+) -> dict[str, object]:
+    """Describe the sampler that actually produced this request's audio.
+
+    Only numbers cross this boundary — never text, prompts or reference
+    content. ``seed_policy`` says how the stream was fixed, so a client can
+    tell "same seed every time" apart from "the sampler was left alone".
+    """
+
+    return {
+        "seed_policy": seed_policy,
+        "seed": seed,
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "repetition_penalty": float(repetition_penalty),
+    }
 
 
 def _clear_metal_cache() -> None:
@@ -413,6 +443,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         self._reference_audio_cache: OrderedDict[tuple[str, int, int], Any] = OrderedDict()
         self._delivery_stats: Counter[str] = Counter()
         self._last_timing_sidecar: dict[str, object] | None = None
+        self._last_sampling_observation: dict[str, object] | None = None
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
@@ -449,6 +480,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
         self._last_timing_sidecar = None
+        self._last_sampling_observation = None
         clean_text = normalize_tts_text(text)
         if not clean_text:
             return
@@ -598,7 +630,19 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             if variant != "base":
                 raise RuntimeError("voice_clone_requires_base_model")
 
-            _seed_clone_generation(voice=voice, text=text, ref_text=ref_text)
+            seeded = _seed_clone_generation(voice=voice, text=text, ref_text=ref_text)
+            clone_repetition_penalty = max(self._repetition_penalty, 1.5)
+            self._last_sampling_observation = _sampling_observation(
+                seed_policy=(
+                    "clone_reference_derived" if seeded else "unseeded_sampler"
+                ),
+                seed=_clone_generation_seed(voice=voice, text=text, ref_text=ref_text)
+                if seeded
+                else None,
+                temperature=_CLONE_TEMPERATURE,
+                top_p=_CLONE_TOP_P,
+                repetition_penalty=clone_repetition_penalty,
+            )
 
             for result in self._model.generate(
                 text=text,
@@ -610,7 +654,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 streaming_interval=self._chunk_ms / 1000,
                 temperature=_CLONE_TEMPERATURE,
                 top_p=_CLONE_TOP_P,
-                repetition_penalty=max(self._repetition_penalty, 1.5),
+                repetition_penalty=clone_repetition_penalty,
             ):
                 pcm = self._to_pcm(result)
                 if pcm:
@@ -620,11 +664,15 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         # S3-2: custom_voice + voice_design(explicit instruction) share the
         # caller-seed path: seed fixes the MLX sampling stream; missing seed
         # keeps the legacy behavior. The clone path already rejected seed above.
+        applied_seed: int | None = None
+        seed_policy = "unseeded_sampler"
         if variant == "custom_voice" and seed is not None:
             try:
                 import mlx.core as mx  # type: ignore[import-not-found]
 
                 mx.random.seed(int(seed))
+                applied_seed = int(seed)
+                seed_policy = "caller_fixed"
             except Exception:
                 pass
         if profile is None and instruction is None and variant == "voice_design":
@@ -643,8 +691,19 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
 
                 if seed is not None:
                     mx.random.seed(seed)
+                    applied_seed = int(seed)
+                    seed_policy = (
+                        "voice_profile_fixed" if instruction is None else "caller_fixed"
+                    )
             except Exception:
                 pass
+        self._last_sampling_observation = _sampling_observation(
+            seed_policy=seed_policy,
+            seed=applied_seed,
+            temperature=float(used_temperature),
+            top_p=float(self._top_p),
+            repetition_penalty=float(self._repetition_penalty),
+        )
         call_kwargs: dict[str, object] = {
             "text": text,
             "speed": speed,
@@ -799,6 +858,13 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         sidecar = self._last_timing_sidecar
         self._last_timing_sidecar = None
         return dict(sidecar) if sidecar is not None else None
+
+    def consume_sampling_observation(self) -> dict[str, object] | None:
+        """Return what this request's sampler actually was, exactly once."""
+
+        observation = self._last_sampling_observation
+        self._last_sampling_observation = None
+        return dict(observation) if observation is not None else None
 
     def consume_delivery_stats(self) -> dict[str, int]:
         """Return per-request aggregate delivery counters and reset them."""
@@ -1355,6 +1421,10 @@ def _run_synthesize(
         }
         if stats:
             completed["delivery_stats"] = stats
+        consume_sampling = getattr(engine, "consume_sampling_observation", None)
+        sampling = consume_sampling() if callable(consume_sampling) else None
+        if isinstance(sampling, dict):
+            completed["sampling_observation"] = sampling
         if fields.timing_mode == "chunk":
             consume_timing = getattr(engine, "consume_timing_sidecar", None)
             timing = consume_timing() if callable(consume_timing) else None

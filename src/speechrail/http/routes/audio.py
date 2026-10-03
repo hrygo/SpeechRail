@@ -28,7 +28,11 @@ from speechrail.application.ffmpeg import (
     cleanup_ffmpeg_process,
     run_ffmpeg_subprocess,
 )
-from speechrail.application.render_receipts import bind_observed_runtime_revision
+from speechrail.application.render_receipts import (
+    bind_observed_runtime_revision,
+    bind_observed_sampling,
+)
+from speechrail.application.render_recipe import build_render_recipe
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
@@ -52,8 +56,10 @@ from speechrail.domain.ports import (
     StreamingBatchTranscriber,
     TranscriptionRequest,
 )
+from speechrail.domain.render_recipe import render_plan_identity
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    TTS_NORMALIZATION_REVISION,
     VoiceRevisionConflictError,
     VoiceRevokedError,
     VoiceStoreUnavailableError,
@@ -71,7 +77,7 @@ from speechrail.domain.tts_pronunciation import (
 )
 from speechrail.domain.tts_request import TtsParameterError, validate_tts_parameters
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
-from speechrail.domain.tts_text_planner import TtsTextPlanner
+from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import (
@@ -279,6 +285,15 @@ class _VoicePreviewHTTPBody(BaseModel):
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
+
+def _optional_summary_str(summary: dict[str, object] | None, key: str) -> str | None:
+    """Read one identifier out of a low-cardinality summary, if it has one."""
+
+    if summary is None:
+        return None
+    value = summary.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _has_supported_audio_hint(file: UploadFile) -> bool:
@@ -1927,6 +1942,41 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if receipt_mode == "integrity":
             if effective_revision is None:
                 effective_revision = profile.revision
+            # Everything below is a fact this request already decided. What it
+            # could not observe — the worker runtime, the sampling policy the
+            # adapter actually used — stays absent instead of being guessed.
+            planner = TtsTextPlanner()
+            recipe = build_render_recipe(
+                raw_text=body.input,
+                acoustic_text=synthesis_text,
+                normalization_revision=TTS_NORMALIZATION_REVISION,
+                planner_revision=PLANNER_VERSION,
+                planner_max_chars=planner.max_chars,
+                pronunciation_set_id=_optional_summary_str(
+                    text_summary,
+                    "pronunciation_set_id",
+                ),
+                pronunciation_revision=_optional_summary_str(
+                    text_summary,
+                    "pronunciation_revision",
+                ),
+                voice_id=preset_voice,
+                voice_revision=profile.revision,
+                voice_mode=tts_voice_class(preset_voice),
+                model_role="tts",
+                model_artifact=tts_artifact.key if tts_artifact is not None else None,
+                model_artifact_revision=(
+                    tts_artifact.revision if tts_artifact is not None else None
+                ),
+                engine_revision=None,
+                effective_speed=validated_tts.speed,
+                effective_language=effective_language,
+                seed_policy=None,
+                output_format=body.response_format,
+                sample_rate=resolved.tts_sample_rate,
+                channels=1,
+            )
+            plan_identity = render_plan_identity(recipe)
             try:
                 receipt_id = services.render_receipts.begin(
                     request_id=request_id,
@@ -1939,10 +1989,13 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         tts_artifact.revision if tts_artifact is not None else None
                     ),
                     model_runtime_revision=None,
+                    plan_id=plan_identity.plan_id,
+                    plan_digest=plan_identity.digest,
                     output_format=body.response_format,
                     sample_rate=resolved.tts_sample_rate,
                     text_summary=text_summary,
                     planner_summary=planner_summary,
+                    recipe=recipe,
                 )
             except RuntimeError:
                 return error_response(
@@ -2039,6 +2092,19 @@ def create_audio_router(services: AppServices) -> APIRouter:
                                 chunk.audio,
                             )
                         yield chunk.audio
+                if (
+                    receipt_id is not None
+                    and backend_response_id is not None
+                    and emitted_samples > 0
+                ):
+                    # The sampler is only knowable once the worker has finished:
+                    # a request can ask for a seed and still run unseeded.
+                    bind_observed_sampling(
+                        services.render_receipts,
+                        receipt_id,
+                        synthesizer=synthesizer,
+                        response_id=backend_response_id,
+                    )
                 if timing_id is not None:
                     if emitted_samples <= 0 or backend_response_id is None:
                         services.tts_timings.fail(timing_id, "empty_audio")
