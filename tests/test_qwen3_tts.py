@@ -213,6 +213,116 @@ def test_tts_worker_records_bounded_delivery_stats_from_completed_frame(tmp_path
     ]
 
 
+def _completed_frame_with_sampling(**overrides: Any) -> dict[str, Any]:
+    observation: dict[str, Any] = {
+        "schema_version": "tts_sampling_v1",
+        "seed_policy": "caller_fixed",
+        "seed": 101,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "repetition_penalty": 1.05,
+    }
+    observation.update(overrides)
+    return {
+        "type": "completed",
+        "request_id": "pending",
+        "sampling_observation": observation,
+    }
+
+
+def test_tts_worker_hands_the_sampler_report_to_exactly_one_reader(tmp_path: Path) -> None:
+    """The report belongs to one completed response and is consumed once.
+
+    Two readers would otherwise race for the same fact: the receipt binder and
+    anything added later. "Exactly once" is the contract, so it is asserted
+    rather than inferred from the pop().
+    """
+    worker, fake = _worker(
+        tmp_path,
+        [
+            _chunk_frame("pending", 0, b"\x00\x00"),
+            _completed_frame_with_sampling(),
+        ],
+    )
+
+    async def collect() -> list[Any]:
+        return [
+            chunk
+            async for chunk in worker.synthesize(
+                SpeechRequest(text="你好", voice="default")
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+    response_id = str(fake.sends[0]["request_id"])
+
+    assert chunks[0].audio == b"\x00\x00"
+    observation = worker.take_sampling_observation(response_id)
+    assert observation is not None
+    assert observation.seed_policy == "caller_fixed"
+    assert observation.seed == 101
+    assert worker.take_sampling_observation(response_id) is None
+    # Another response's report is not reachable through this one's id.
+    assert worker.take_sampling_observation("rr_some_other_response") is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"seed_policy": "best_effort_reproducible"},
+        {"top_p": 1.5},
+        {"seed": -1},
+        {"temperature": -0.1},
+        {"schema_version": "tts_sampling_v2"},
+        {"untrusted_extra": 1},
+    ],
+)
+def test_tts_worker_drops_a_sampler_report_it_cannot_validate(
+    tmp_path: Path,
+    override: dict[str, Any],
+) -> None:
+    """Vendor output is validated at the adapter boundary.
+
+    An unreadable report is missing metadata, not a failed render: the audio
+    still arrives, and the recipe stays partial instead of carrying a fact the
+    worker never actually reported.
+    """
+    worker, fake = _worker(
+        tmp_path,
+        [
+            _chunk_frame("pending", 0, b"\x00\x00"),
+            _completed_frame_with_sampling(**override),
+        ],
+    )
+
+    async def collect() -> list[Any]:
+        return [
+            chunk
+            async for chunk in worker.synthesize(
+                SpeechRequest(text="你好", voice="default")
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks[0].audio == b"\x00\x00"
+    assert worker.take_sampling_observation(str(fake.sends[0]["request_id"])) is None
+
+
+def test_tts_worker_bounds_the_sampler_reports_it_keeps(tmp_path: Path) -> None:
+    """Reports for responses nobody reads must not accumulate forever."""
+    worker, _fake = _worker(tmp_path, [])
+
+    for index in range(70):
+        worker._store_sampling_observation(
+            f"resp_{index}",
+            _completed_frame_with_sampling(seed=index),
+        )
+
+    assert worker.take_sampling_observation("resp_0") is None
+    assert worker.take_sampling_observation("resp_69") is not None
+
+
 def test_tts_worker_packs_ephemeral_preview_parameters(tmp_path: Path) -> None:
     worker, fake = _worker(
         tmp_path,
