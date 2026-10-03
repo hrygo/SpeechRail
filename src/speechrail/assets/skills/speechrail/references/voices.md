@@ -64,6 +64,52 @@ voice; system voices and voices in use may be protected. Idempotency keys are
 recommended for design/clone creation and required before retrying an unknown
 create outcome.
 
+## Why a voice is not production-ready, and what fixes it
+
+`production_ready=false` is a verdict with a machine-readable cause, not a
+yelling label. Read `quality.synthesis.status` plus its `reason` and act on
+that, instead of guessing from the boolean:
+
+- `synthesis_validation_not_run` — no synthesis validation has ever been run
+  for this voice. The only fix is a real quality run: call `validate_voice`
+  (or `POST /v1/speechrail/voices/{id}/quality-runs`) on the current revision.
+  There is **no flag to set** and no shortcut field to flip; a pass only
+  appears after the service actually probes synthesis.
+- `legacy_synthesis_validation_not_reused` / `voice_revision_changed` /
+  `model_runtime_identity_unknown` — evidence exists but no longer matches the
+  binding under which you would render. Re-run `validate_voice` against the
+  current revision and active runtime; the stale evidence is deliberately not
+  promoted. Treat any stored report from before a runtime/architecture switch
+  as historical, not as a current pass.
+
+`validated_for` records the bounded use cases the stored evidence actually
+supports; it is not a synonym for "validated". A reference-only pass does not
+admit synthesis. For final delivery, send the
+`SpeechRail-Validation-Policy: require_output_pass` header on
+`/v1/audio/speech` (via `synthesize`) so the strict output-evidence gate runs;
+without it the default is `allow_unverified`, which is fine for previews and
+diagnostics but will let an unvalidated voice render. When the strict gate
+rejects with `voice_not_production_ready`, run `validate_voice` — do **not**
+downgrade the policy to force a render.
+
+The design lane carries its own admission rules on top of this:
+
+- Publishing needs a complete machine pass on the current revision; without
+  one the service reports `voice_design_machine_validation_required`, and the
+  fix is `validate_voice_design` with a Base test text different from the
+  reference — never a manual override.
+- Machine validation is judged on similarity **and** numbers
+  (`transcript_numbers_match`); a high-similarity read that gets a number
+  wrong is still a reject. Human audition may sharpen a machine conclusion
+  but never replaces it, and cannot rescue a v1-only similarity result.
+- Every validation records the `validation_policy_revision` it was judged
+  under; a result from an older policy revision stays visible but is no
+  longer a publish basis.
+- Retention is capped (32 validations per candidate). Reaching the cap is
+  not corruption: same-ID, same-fact re-validation stays idempotent, and a
+  candidate that already holds a complete pass is not downgraded by a later
+  re-run, timeout, or failure.
+
 ## Synthesis determinism (custom_voice vs Base/clone)
 
 CustomVoice synthesis is reproducible when the caller passes

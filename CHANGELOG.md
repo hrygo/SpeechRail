@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 打包进 wheel 的 `speechrail` skill 资产与当前 MCP/服务端行为对齐
+  （`skill-manifest.json` 版本升至 `1.4.0`）：`references/errors.md` 新增
+  “明确不支持的 400 错误码”与“音色设计通道”两类恢复指引，覆盖
+  `stream_unsupported`、`chunking_strategy_unsupported`、
+  `unsupported_parameter`、`stream_format_unsupported`、`transcript_mismatch`、
+  `voice_design_machine_validation_required`、
+  `voice_design_validation_limit_reached`、`validation_audio_unavailable`
+  和 `voice_design_revision_conflict`；`references/voices.md` 补充
+  `production_ready` 判定与修复路径（`synthesis_validation_not_run` 只能由
+  `validate_voice` 的真实质量运行修复，没有可置位的开关）、`require_output_pass`
+  严格准入、文本数字保真门（`transcript_numbers_match` /
+  `validation_policy_revision`）与 32 条验证保留上限。仅文档资产，无公共
+  API 行为变化。
+
+### Fixed
+
+- `scripts/check_mcp_tool_contract.py` 不再只比较工具名与数量：新增对
+  `errors.md` 的语义校验，要求每个会改变调用方行为的稳定错误码都在打包
+  skill 中被讲解，堵住“工具面已对齐但行为指引过时”这类静默漂移。
+
 ## [3.5.5] - 2026-10-03
 
 ### Changed
