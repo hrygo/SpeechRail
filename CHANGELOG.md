@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [3.5.5] - 2026-10-03
+
+### Changed
+
+- 将明确不支持的音频选项统一为 HTTP 400：
+  `stream_unsupported`、`chunking_strategy_unsupported`、
+  `unsupported_parameter` 和 `stream_format_unsupported`。
+  依赖旧 422 分类的调用方需改为处理 `BadRequestError`；
+  畸形输入继续返回 422。OpenAPI 同步声明转写输出无效时的 502。
+- VoiceDesign 验证投影新增 `transcript_numbers_match` 和
+  `validation_policy_revision`。创作验证使用
+  `voice_design_text_fidelity_v2`，发布证据使用 `voice_design_base_v2`；
+  旧 v1 记录与音频继续保留，但不再接受人工提升或作为严格合成的通过依据。
+  受影响的旧音色需重新执行质量验证；升级不会删除或迁移用户音频。
+  这些变更修复既有契约和验证缺陷，本版本按 PATCH 准备；调用方仍需核对上述公开影响。
+
+### Fixed
+
+- **#138**：候选参考确认和 Base 新文本复验均应用既有的数字精确门禁，
+  高相似度的错误数字不能通过；等价口语数字仍可接受。
+  机器拒绝不能经身份/自然度听审升级为发布通过，旧证据也不能绕过当前策略。
+- **#139**：并发 Base 复验在仓库锁内读取最新候选并合并单条结果，
+  保留每个成功返回的验证 ID、WAV 和人工结论。人工听审重新核验当前证据，
+  在途请求不能恢复已发布、取消、失败或修订后的候选。满 32 条时明确拒绝
+  新结果，同 ID 幂等重试仍可成功；保存失败仅回滚新建资产。
+  重新验证失败不会降级已有完整通过状态，旧结果重试不再倒退更新时间。
+- **#140**：durable ASR job 始终以 text-only 调用 ASR，时间戳由独立 aligner
+  从冻结正文求得；缺少能力或对齐失败时明确失败。REST 与 job 共享对齐准入，
+  `timestamps + diarize` 复用分人时间轴，避免重复对齐或隐式模型解析。
+- **#141**：durable TTS 复用共享 AudioChunk 验证器，拒绝奇数字节、
+  序号缺口/重复和 response ID 换流；非法输出不会生成成功制品。
+- **#142**：对齐结果必须覆盖全部可朗读字符。漏词、否定词或数字不再借用
+  相邻 token 的时间戳；合法标点与空白仍按冻结正文保留。
+- **#143**：REST ASR 和后续对齐/分人共享绝对期限，超时返回可重试的
+  `backend_timeout` JSON 和 request ID；VoiceDesign confirm 的 TimeoutError
+  优先于 OSError 分类，避免误报候选输入无效。
+- **#144**：统一音频实现、错误契约、用户文档及 Python SDK 异常断言。
+- **#145**：原生 diarized SSE 的 `transcript.text.delta.segment_id` 与后续
+  `transcript.text.segment.id` 一致，Python 和 Node 官方 SDK 可明确关联文本片段。
+- 发布流程按 GitHub 已发布标签选择比较基线，并收录中间尚未发布版本的
+  CHANGELOG 段落，避免 3.5.x 记录被漏掉或链接指向不存在的标签。
+
+### 验收范围
+
+- 服务端确定性回归使用 fake backend、合成 PCM 与临时存储；
+  完整代码、类型、契约、文档及制品门禁结果见本版本验收记录。
+- 真实模型质量、性能与长时稳定性不由上述回归结果证明。
+  本轮不包含本机安装、服务切换或 UI 自动化验收。
+
 ## [3.5.4] - 2026-10-02
 
 ### Fixed
