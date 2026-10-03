@@ -28,6 +28,7 @@ from speechrail.domain.tts import (
 from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.voice_quality import POLICY_VERSION
 from speechrail.domain.voice_validation import (
+    RETIRED_VALIDATION_PROBE_SETS,
     VoiceValidationArtifact,
     VoiceValidationRepository,
     VoiceValidationStoreUnavailableError,
@@ -170,15 +171,29 @@ def build_validation_binding(
     )
 
 
+def _admits_production(evidence: dict[str, Any] | None) -> bool:
+    """Whether a matching record may still gate production synthesis.
+
+    Retiring a probe set withdraws it from the admission decision without
+    deleting or rewriting it: the record stays readable for diagnostics, the
+    voice stays usable under an explicit unverified policy, and a current
+    quality run can replace it.
+    """
+
+    return evidence is not None and evidence.get("probe_set") not in (
+        RETIRED_VALIDATION_PROBE_SETS
+    )
+
+
 def load_validation_evidence(
     repository: VoiceValidationRepository,
     binding: VoiceValidationBinding,
     *,
     require_current_binding: bool,
 ) -> dict[str, Any] | None:
-    """Read only evidence matching the supplied binding."""
+    """Read only evidence matching the supplied binding and still trusted."""
 
-    return repository.get(
+    evidence = repository.get(
         voice_id=binding.voice_id,
         voice_revision=binding.voice_revision,
         model_artifact=binding.model_artifact,
@@ -191,6 +206,7 @@ def load_validation_evidence(
         capability_key=binding.capability_key,
         require_current_binding=require_current_binding,
     )
+    return evidence if _admits_production(evidence) else None
 
 
 def _binding_from_recorded_runtime(
@@ -226,7 +242,7 @@ def _binding_from_recorded_runtime(
         policy_version=binding.policy_version,
         capability_key=binding.capability_key,
     )
-    if candidate is None:
+    if candidate is None or not _admits_production(candidate):
         return None
     runtime_revision = candidate.get("model_runtime_revision")
     if not is_observed_runtime_revision(runtime_revision):

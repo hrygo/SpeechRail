@@ -17,6 +17,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
+from speechrail.application.voice_design import (
+    VoiceDesignRepository,
+)
 from speechrail.config import Settings
 from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.contracts import TranscriptResult
@@ -32,6 +35,9 @@ from speechrail.domain.tts_errors import TtsBackendError
 REFERENCE_TEXT = "这是用于音色设计的参考语句，请保持自然清晰的表达方式。"
 EDITED_TEXT = "重新确认之后的参考文本，语气依旧自然清晰并且停顿合理。"
 CONTROLLED_TEST_TEXT = "今天的天气很适合在公园里慢慢散步，听听周围自然的声音。"
+SECOND_TEST_TEXT = "请在明天上午九点提醒我带上笔记本电脑和充电器出门。"
+NUMERIC_TEST_TEXT = "今天上午请把账户中的500元转给指定的收款人，并保留完整记录。"
+NUMERIC_MISREAD_TEXT = "今天上午请把账户中的900元转给指定的收款人，并保留完整记录。"
 RUNTIME_REVISION = "rt_" + "a" * 64
 VOICE_ID = "designed_base"
 
@@ -101,10 +107,13 @@ class DesignAsr:
         self.text = REFERENCE_TEXT
         self.requests: list[TranscriptionRequest] = []
         self.fail = False
+        self.timeout = False
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
         self.requests.append(request)
         self.synth.events.append("asr")
+        if self.timeout:
+            raise TimeoutError("asr worker exchange timed out")
         if self.fail:
             raise RuntimeError("private-backend-payload-must-not-leak")
         return TranscriptResult(
@@ -289,6 +298,96 @@ def test_base_validation_preserves_service_failure_status_and_safe_attribution(
     assert len(asr.requests) == asr_count
 
 
+def test_numeric_misread_fails_machine_validation_and_blocks_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misread digit is not a near-miss transcript, it is a wrong sentence.
+
+    The Base output here is 96.5% similar to the probe, so an edit-distance
+    gate alone passes it; the number the listener would hear is wrong.
+    """
+
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _created = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+
+    validated = validate_candidate(
+        client,
+        asr,
+        candidate_id,
+        test_text=NUMERIC_TEST_TEXT,
+        transcript=NUMERIC_MISREAD_TEXT,
+    )
+    candidate = validated["candidate"]
+    record = candidate["validations"][-1]
+
+    assert record["machine_status"] == "reject"
+    assert record["transcript_numbers_match"] is False
+    assert "transcript_numbers_mismatch" in record["failure_codes"]
+    # The raw similarity is still reported so the verdict stays explainable.
+    assert record["transcript_match"] > 0.92
+    assert candidate["state"] == "failed"
+    assert candidate["publishable"] is False
+
+    # A machine reject is terminal for review: the candidate is already failed,
+    # so no human verdict can reach the rejected record.
+    blocked_review = human_review(
+        client,
+        candidate_id,
+        validation_id=record["validation_id"],
+        expect=409,
+    )
+    assert blocked_review["error"]["code"] == "voice_design_state_conflict"
+
+    blocked_publish = client.post(
+        f"/v1/voice-designs/{candidate_id}/publish", json={}
+    )
+    assert blocked_publish.status_code == 409
+    assert VOICE_ID not in published_voice_ids(client)
+    assert all(profile.is_system for profile in registry.list_profiles())
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [NUMERIC_MISREAD_TEXT, NUMERIC_TEST_TEXT.replace("500", "五百")],
+    ids=["wrong-number", "equivalent-spoken-number"],
+)
+def test_reference_confirmation_checks_numbers_without_changing_rejected_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transcript: str,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, created = create_candidate(
+        client, reference_text=NUMERIC_TEST_TEXT
+    )
+    repository = VoiceDesignRepository(
+        registry.storage_path.with_name("voice_design_candidates.json"),
+        registry.storage_path.with_name("voice_design_candidates"),
+    )
+    before = repository.get(candidate_id)
+    files_before = {
+        path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")
+    }
+    asr.text = transcript
+
+    response = client.post(f"/v1/voice-designs/{candidate_id}/confirm", json={})
+
+    if transcript == NUMERIC_MISREAD_TEXT:
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "transcript_mismatch"
+        assert response.headers["x-request-id"]
+        assert repository.get(candidate_id) == before
+    else:
+        assert response.status_code == 200, response.text
+        assert response.json()["candidate"]["state"] == "confirmed"
+        assert response.json()["candidate"]["revision"] == created["revision"]
+    assert {
+        path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")
+    } == files_before
+
+
 def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -417,6 +516,10 @@ def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
     )
     assert evidence is not None
     assert evidence["validated_for"] == ["output"]
+    # The probe set has to be the one the strict gate still trusts.  If publish
+    # wrote the retired v1 set, the store lookup above would still succeed while
+    # every strict synthesis of this voice failed.
+    assert evidence["probe_set"] == "voice_design_base_v2"
 
     strict = client.post(
         "/v1/audio/speech",
@@ -874,6 +977,111 @@ def test_confirm_requires_reference_transcript_match(
     assert response.json()["error"]["code"] == "transcript_mismatch"
     assert all(profile.is_system for profile in registry.list_profiles())
     assert list((registry.storage_path.parent / "voice_design_candidates").glob("*.wav"))
+
+
+def test_confirm_asr_timeout_is_a_retryable_backend_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TimeoutError is an OSError, so the 422 data-error branch used to eat it."""
+
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    asr.timeout = True
+
+    response = client.post(f"/v1/voice-designs/{candidate_id}/confirm", json={})
+
+    assert response.status_code == 503
+    assert response.headers["x-request-id"]
+    assert response.json()["error"]["code"] == "backend_timeout"
+    assert response.json()["error"]["retryable"] is True
+    # A timed-out confirmation must leave the candidate confirmable, not failed.
+    assert client.get(f"/v1/voice-designs/{candidate_id}").json()["candidate"]["state"] == (
+        "generated"
+    )
+    assert all(profile.is_system for profile in registry.list_profiles())
+
+
+def test_a_retired_text_fidelity_record_is_kept_but_revalidatable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History stays readable; only the admission decision moves.
+
+    A candidate validated before the exact-number gate keeps its record and its
+    audio, but that record can no longer be promoted: human review refuses it
+    and the projection reports the candidate as not publishable.  Running the
+    machine validation again under the current policy is the documented way
+    back.
+    """
+
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _created = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    current = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
+
+    repository = VoiceDesignRepository(
+        registry.storage_path.with_name("voice_design_candidates.json"),
+        registry.storage_path.with_name("voice_design_candidates"),
+    )
+    legacy = current["validation_id"]
+    repository.update(
+        candidate_id,
+        lambda stored: stored.model_copy(
+            update={
+                "validations": [
+                    stored.validations[-1].model_copy(
+                        update={
+                            "validation_id": legacy,
+                            "validation_policy_revision": "voice_design_text_fidelity_v1",
+                            "transcript_numbers_match": None,
+                        }
+                    )
+                ],
+                "state": "validating",
+            }
+        ),
+    )
+
+    projected = client.get(f"/v1/voice-designs/{candidate_id}").json()["candidate"]
+    assert len(projected["validations"]) == 1, "the retired record must stay readable"
+    assert projected["validations"][0]["validation_policy_revision"] == (
+        "voice_design_text_fidelity_v1"
+    )
+    assert projected["publishable"] is False
+
+    refused = human_review(
+        client, candidate_id, validation_id=legacy, expect=409
+    )
+    assert refused["error"]["code"] == "voice_design_machine_validation_required"
+    blocked = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+    assert blocked.status_code == 409
+    assert VOICE_ID not in published_voice_ids(client)
+
+    # The documented way back: validate again under the current policy.
+    revalidated = validate_candidate(
+        client, asr, candidate_id, test_text=SECOND_TEST_TEXT, expect=200
+    )["candidate"]
+    assert revalidated["validations"][-1]["validation_policy_revision"] == (
+        "voice_design_text_fidelity_v2"
+    )
+    assert revalidated["validations"][-1]["validation_id"] != legacy
+
+    reviewed = human_review(
+        client,
+        candidate_id,
+        validation_id=revalidated["validations"][-1]["validation_id"],
+        expect=200,
+    )["candidate"]
+    assert reviewed["state"] == "publishable"
+    # Both records survive the whole round trip.
+    assert {item["validation_id"] for item in reviewed["validations"]} == {
+        legacy,
+        revalidated["validations"][-1]["validation_id"],
+    }
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+    assert published.status_code == 201
+    assert VOICE_ID in published_voice_ids(client)
 
 
 def test_cancel_blocks_publication_without_touching_other_assets(
