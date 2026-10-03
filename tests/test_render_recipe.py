@@ -204,7 +204,15 @@ def test_dropping_any_required_fact_is_reported(field: str, missing_path: str) -
         {"channels": 0},
         {"output_format": ""},
         {"raw_text_sha256": "not-a-digest"},
+        # "not-a-digest" breaks both rules at once, so on its own it cannot
+        # show which of them is doing the work. These two break exactly one.
+        {"raw_text_sha256": "z" * 64},
+        {"raw_text_sha256": "a" * 63},
+        {"acoustic_text_sha256": "A" * 64},
         {"effective_speed": float("inf")},
+        # bool is a subclass of int, so without the explicit guard `True`
+        # would be accepted as a speed of 1.0.
+        {"effective_speed": True},
         {"planner_max_chars": 0},
     ],
 )
