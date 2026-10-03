@@ -12,7 +12,9 @@ from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.domain.render_recipe import PRONUNCIATION_UNUSED
 from speechrail.domain.tts import VoiceRegistry
+from speechrail.domain.tts_pronunciation import PronunciationRegistry
 from speechrail.domain.tts_sampling import TtsSamplingObservation
 
 _PCM = b"\x01\x00\x02\x00\x03\x00"
@@ -64,7 +66,8 @@ def _client(
     fail: bool = False,
     runtime_revision: str | None = None,
     sampling: TtsSamplingObservation | None = None,
-) -> tuple[TestClient, ReceiptSynthesizer, str]:
+    with_pronunciation: bool = False,
+) -> tuple[TestClient, ReceiptSynthesizer, str, PronunciationRegistry | None]:
     asr_key = required_spec_artifact("quality", "asr")
     tts_key = required_spec_artifact("quality", "tts_custom_voice")
     base_key = required_spec_artifact("quality", "tts_base")
@@ -90,6 +93,17 @@ def _client(
         runtime_revision=runtime_revision,
         sampling=sampling,
     )
+    pronunciation: PronunciationRegistry | None = None
+    if with_pronunciation:
+        pronunciation = PronunciationRegistry(tmp_path / "pronunciation.json")
+        monkeypatch.setattr(
+            "speechrail.http.routes.system.get_pronunciation_registry",
+            lambda: pronunciation,
+        )
+        monkeypatch.setattr(
+            "speechrail.http.routes.audio.get_pronunciation_registry",
+            lambda: pronunciation,
+        )
     app = create_app(
         Settings(
             qwen3_model_dir=tmp_path / asr_key,
@@ -108,7 +122,7 @@ def _client(
         ),
         tts_synthesizer=synth,
     )
-    return TestClient(app), synth, profile.revision
+    return TestClient(app), synth, profile.revision, pronunciation
 
 
 def _payload() -> dict[str, object]:
@@ -133,7 +147,7 @@ def test_v1_speech_returns_negotiated_receipt_bound_to_revision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, synth, revision = _client(tmp_path, monkeypatch)
+    client, synth, revision, _pronunciation = _client(tmp_path, monkeypatch)
 
     response = client.post(
         "/v1/audio/speech",
@@ -166,7 +180,7 @@ def test_v1_receipt_binds_observed_runtime_revision(
     monkeypatch,
 ) -> None:
     runtime_revision = "rt_" + ("d" * 64)
-    client, _synth, _revision = _client(
+    client, _synth, _revision, _pronunciation = _client(
         tmp_path,
         monkeypatch,
         runtime_revision=runtime_revision,
@@ -187,7 +201,7 @@ def test_v1_receipt_reports_a_real_plan_identity_and_recipe(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, _synth, _revision = _client(tmp_path, monkeypatch)
+    client, _synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
 
     response = client.post(
         "/v1/audio/speech",
@@ -201,6 +215,10 @@ def test_v1_receipt_reports_a_real_plan_identity_and_recipe(
     plan = receipt["plan"]
     assert plan["plan_id"] is not None
     assert re.fullmatch(r"plan_[0-9a-f]{32}", plan["plan_id"])
+    # The App stores the full digest next to the short id; a receipt that only
+    # carried `plan_id` would leave every saved work without it, silently.
+    assert re.fullmatch(r"[0-9a-f]{64}", str(plan["plan_sha256"]))
+    assert plan["plan_id"] == "plan_" + str(plan["plan_sha256"])[:32]
     recipe = receipt["recipe"]
     assert recipe["schema_version"] == "render_recipe_v1"
     assert recipe["voice"]["id"] == "narrator"
@@ -224,7 +242,7 @@ def test_v1_recipe_completes_once_the_worker_identity_is_observed(
     monkeypatch,
 ) -> None:
     runtime_revision = "rt_" + ("d" * 64)
-    client, _synth, _revision = _client(
+    client, _synth, _revision, _pronunciation = _client(
         tmp_path,
         monkeypatch,
         runtime_revision=runtime_revision,
@@ -250,7 +268,7 @@ def test_two_renders_of_the_same_request_share_one_plan_but_not_one_recipe(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, _synth, _revision = _client(tmp_path, monkeypatch)
+    client, _synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
 
     def _plan_id_for(text: str) -> str:
         payload = _payload()
@@ -269,12 +287,110 @@ def test_two_renders_of_the_same_request_share_one_plan_but_not_one_recipe(
     assert _plan_id_for("第一段口播文稿。") == _plan_id_for("完全不同的第二段文稿。")
 
 
+def test_recipe_separates_the_caller_text_from_what_the_pronunciation_set_produced(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A substitution is a different acoustic fact, not a different request.
+
+    The recipe has to report both: `raw_text_sha256` is what the caller sent,
+    `acoustic_text_sha256` is what reached the model. Collapsing them — or
+    reporting "no pronunciation set" for a render that used one — produces a
+    complete recipe with a digest that describes a render that never ran.
+    """
+    client, synth, _revision, pronunciation = _client(
+        tmp_path,
+        monkeypatch,
+        runtime_revision="rt_" + ("9" * 64),
+        sampling=TtsSamplingObservation(
+            seed_policy="caller_fixed",
+            seed=7,
+            temperature=0.8,
+            top_p=0.95,
+            repetition_penalty=1.05,
+        ),
+        with_pronunciation=True,
+    )
+    assert pronunciation is not None
+    created = client.put(
+        "/v1/speechrail/pronunciation-sets/story",
+        json={
+            "expected_revision": None,
+            "entries": [
+                {
+                    "id": "place",
+                    "surface": "长安",
+                    "spoken": "常安",
+                    "language": "zh",
+                    "case_sensitive": True,
+                    "word_boundary": False,
+                    "source": "user",
+                }
+            ],
+        },
+    )
+    assert created.status_code == 200
+    set_revision = created.json()["revision"]
+
+    payload = _payload()
+    payload["input"] = "去长安"
+    response = client.post(
+        "/v1/audio/speech",
+        json=payload,
+        headers={
+            "SpeechRail-Receipt-Mode": "integrity",
+            "SpeechRail-Pronunciation-Set": f"story@{set_revision}",
+            "SpeechRail-Language": "zh",
+        },
+    )
+    assert response.status_code == 200
+
+    recipe = client.get(
+        f"/v1/speechrail/audio/receipts/{response.headers['SpeechRail-Receipt-Id']}"
+    ).json()["recipe"]
+
+    spoken = synth.requests[-1].text
+    assert spoken != payload["input"], "this test needs a substitution to differ"
+    assert recipe["content"]["raw_text_sha256"] == hashlib.sha256(
+        str(payload["input"]).encode()
+    ).hexdigest()
+    assert recipe["content"]["acoustic_text_sha256"] == hashlib.sha256(
+        spoken.encode()
+    ).hexdigest()
+    assert recipe["content"]["pronunciation_set_id"] == "story"
+    assert recipe["content"]["pronunciation_revision"] == set_revision
+    # Every fact was observed, so the recipe may claim completeness — and then
+    # the digest really is a digest of *this* render.
+    assert recipe["missing_fields"] == []
+    assert recipe["state"] == "complete"
+
+
+def test_a_render_without_a_pronunciation_set_says_so_explicitly(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """`unused` is an observed fact; a missing field is a different statement."""
+    client, _synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Receipt-Mode": "integrity"},
+    )
+    recipe = client.get(
+        f"/v1/speechrail/audio/receipts/{response.headers['SpeechRail-Receipt-Id']}"
+    ).json()["recipe"]
+
+    assert recipe["content"]["pronunciation_revision"] == PRONUNCIATION_UNUSED
+    assert "content.pronunciation_revision" not in recipe["missing_fields"]
+
+
 def test_v1_recipe_completes_once_the_worker_reports_its_sampler(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     """Worker-reported sampling facts are the last missing recipe field."""
-    client, _synth, _revision = _client(
+    client, _synth, _revision, _pronunciation = _client(
         tmp_path,
         monkeypatch,
         runtime_revision="rt_" + ("e" * 64),
@@ -315,7 +431,7 @@ def test_an_unseeded_sampler_completes_the_recipe_without_claiming_reproducibili
     monkeypatch,
 ) -> None:
     """`unseeded_sampler` is a fact: the recipe is complete, not reproducible."""
-    client, _synth, _revision = _client(
+    client, _synth, _revision, _pronunciation = _client(
         tmp_path,
         monkeypatch,
         runtime_revision="rt_" + ("f" * 64),
@@ -347,7 +463,7 @@ def test_v1_accepts_namespaced_revision_pin_header(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, synth, revision = _client(tmp_path, monkeypatch)
+    client, synth, revision, _pronunciation = _client(tmp_path, monkeypatch)
     response = client.post(
         "/v1/audio/speech",
         json=_payload(),
@@ -363,7 +479,7 @@ def test_v1_accepts_namespaced_model_revision_pin(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, synth, _revision = _client(tmp_path, monkeypatch)
+    client, synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
     model_revision = _quality_tts_revision()
     response = client.post(
         "/v1/audio/speech",
@@ -379,7 +495,7 @@ def test_v1_rejects_stale_model_revision_before_synthesis(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, synth, _revision = _client(tmp_path, monkeypatch)
+    client, synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
     response = client.post(
         "/v1/audio/speech",
         json=_payload(),
@@ -394,7 +510,7 @@ def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, _synth, _revision = _client(tmp_path, monkeypatch, fail=True)
+    client, _synth, _revision, _pronunciation = _client(tmp_path, monkeypatch, fail=True)
     response = client.post(
         "/v1/audio/speech",
         json=_payload(),
@@ -417,7 +533,7 @@ def test_openai_custom_voice_object_is_accepted_on_v1_speech(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    client, synth, _revision = _client(tmp_path, monkeypatch)
+    client, synth, _revision, _pronunciation = _client(tmp_path, monkeypatch)
     payload = _payload()
     payload["voice"] = {"id": "narrator"}
 
