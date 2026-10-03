@@ -172,6 +172,17 @@ class RenderReceiptRegistry:
 
         if not isinstance(seed_policy, str) or not seed_policy:
             raise ValueError("seed policy must be a non-empty string")
+        # `seed_policy` and `observed_sampling_parameters["seed_policy"]` are the
+        # same fact stored twice — the payload is the worker's own report, and
+        # both land in the canonical recipe, so both are covered by the digest.
+        # Two copies of one claim that disagree would let a summary attest to
+        # "the seed was fixed" and "the sampler was unseeded" at once, and the
+        # recipe would still read as complete. Production callers pass one
+        # observation to both, but the invariant belongs here rather than in
+        # every caller.
+        reported = observed_sampling_parameters.get("seed_policy")
+        if reported is not None and reported != seed_policy:
+            raise ValueError("seed policy contradicts the observed sampler")
         with self._lock:
             state = self._entries[receipt_id]
             if state.status != "pending":
