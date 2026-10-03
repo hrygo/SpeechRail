@@ -120,7 +120,7 @@ completed 转写恰好记录一个对齐样本，因此这个计数是**事件�
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 502 XCTest + 379 swift-testing，0 失败
+  → 504 XCTest + 379 swift-testing，0 失败
 
 uv run --no-sync --extra dev pytest <14 个定向文件> -q --no-cov
   → 170 passed

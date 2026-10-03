@@ -3195,9 +3195,22 @@ extension AppModelTests {
     }
 
     /// 没有完整配方摘要的作品不能只重做一段：宁可拒绝，也不假装是同一次制作。
-    func testSegmentRedoRefusedWhenRecipeDigestIsUnknown() throws {
-        let creator = ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x90))
+    func testSegmentRedoRefusedWhenRecipeDigestIsUnknown() async throws {
+        let recipe = Self.dubbingRecipe(digest: nil)
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x90),
+            recipe: recipe,
+            voice: Self.dubbingVoice()
+        )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: nil)
+        // 音色必须先可用，否则拒绝会落在「音色不可用」那道守卫上，
+        // 配方摘要这条根本没被考到——曾经就是这个情况：断言只有
+        // `XCTAssertNotNil(dubbingMessage)`，换成哪条守卫拒绝它都绿。
+        await model.refreshCreatorVoices()
+        XCTAssertTrue(
+            model.creatorVoices.contains { $0.id == recipe.voiceID },
+            "前置条件：配方里的音色当前可用，配方缺失才是唯一的拒绝理由"
+        )
         let work = try saveSourceWork(
             into: works,
             script: "一段没有配方摘要的正文。",
@@ -3215,7 +3228,91 @@ extension AppModelTests {
             nil,
             "缺失的事实保持缺失，不用随机值补齐"
         )
-        XCTAssertNotNil(model.dubbingMessage)
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "这件作品没有记录完整的制作配方，无法安全地只重做其中一段。",
+            "必须是「缺配方摘要」这条拒绝，而不是别的原因碰巧也拒了"
+        )
+        let calls = await creator.renderCalls
+        XCTAssertTrue(calls.isEmpty, "被拒绝的重做不得触达渲染")
+    }
+
+    /// 已有一段在重做时，第二段必须被明确拒绝而不是并行跑。
+    ///
+    /// 并行会让两段各自往库里写候选，而 `dubbingRedoGeneration` 这套陈旧回写防护
+    /// 是按「同一时刻只有一段在飞」的前提设计的——前提不成立时它救不了场。
+    func testASecondSegmentRedoIsRefusedWhileOneIsInFlight() async throws {
+        let recipe = Self.dubbingRecipe(digest: "digest-1")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x91),
+            recipe: recipe,
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let work = try saveSourceWork(
+            into: works,
+            script: "第一段正文。\n第二段正文。",
+            recipeDigest: "digest-1"
+        )
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let first = try XCTUnwrap(project.segments.first)
+        let second = try XCTUnwrap(project.segments.last)
+
+        model.startDubbingSegmentRedo(first.id)
+        XCTAssertEqual(model.dubbingBusySegmentID, first.id, "第一段已进入在途状态")
+        model.startDubbingSegmentRedo(second.id)
+
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "已有一段在重做，请等它完成或先取消。",
+            "第二段必须被明确拒绝"
+        )
+        XCTAssertEqual(
+            model.dubbingBusySegmentID,
+            first.id,
+            "被拒绝的第二段不得顶掉第一段的在途状态"
+        )
+
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil }
+        let calls = await creator.renderCalls
+        XCTAssertEqual(calls.map(\.text), ["第一段正文。"], "只有被放行的那一段触达渲染")
+    }
+
+    /// 配方里的音色当前不可用时不得返修：换了音色就不再是同一制作条件。
+    func testSegmentRedoIsRefusedWhileTheRecipeVoiceIsUnavailable() async throws {
+        let recipe = Self.dubbingRecipe(digest: "digest-1")
+        let unavailable = CreatorVoice(
+            id: "ryan",
+            name: "动感英语男声",
+            available: false,
+            mode: "system",
+            revision: "vr_0123456789abcdef0123456789abcdef"
+        )
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x92),
+            recipe: recipe,
+            voice: unavailable
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let work = try saveSourceWork(
+            into: works,
+            script: "一段正文。",
+            recipeDigest: "digest-1"
+        )
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let segment = try XCTUnwrap(project.segments.first)
+
+        model.startDubbingSegmentRedo(segment.id)
+
+        XCTAssertNil(model.dubbingBusySegmentID, "被拒绝的重做不进入在途状态")
+        XCTAssertEqual(
+            model.dubbingMessage,
+            "这件作品使用的音色当前暂不可用，无法重做段落。"
+        )
+        let calls = await creator.renderCalls
+        XCTAssertTrue(calls.isEmpty, "被拒绝的重做不得触达渲染")
     }
 }
 
