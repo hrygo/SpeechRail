@@ -46,6 +46,15 @@ public struct FirstResultReadiness: Equatable, Sendable {
         steps.filter { !$0.isKnown }
     }
 
+    /// 有确定缺口时才值得让用户去做点什么。
+    ///
+    /// 全部步骤都还没有结论时，卡片只能渲染出一个空壳：有标题、有分隔线、
+    /// 没有任何一行。这条判据让「该不该显示」变成可测试的判断，而不是藏在
+    /// 视图里的一个条件。
+    public var hasActionableSteps: Bool {
+        !blockingSteps.isEmpty
+    }
+
     public static let ready = FirstResultReadiness(steps: [])
 }
 
@@ -148,6 +157,15 @@ public enum FirstResultReadinessBuilder {
                     .init(
                         step: .voiceAvailable,
                         detail: "还没有确认当前音色能力，先在「引擎」里刷新能力快照。",
+                        isKnown: false
+                    )
+                )
+            case .unknown, .loading:
+                // 列表还没读到：这不是「没有音色」，是「还不知道有没有」。
+                steps.append(
+                    .init(
+                        step: .voiceAvailable,
+                        detail: "还在读取音色列表，稍等片刻或到「引擎」里手动刷新一次。",
                         isKnown: false
                     )
                 )

@@ -3650,4 +3650,58 @@ extension AppModelTests {
         )
         XCTAssertFalse(projection.isReady)
     }
+
+    /// 音色列表**还没读到**时，这是未知，不是「你没有音色」。
+    ///
+    /// `CreatorVoicesLoadState` 的初始值就是 `.unknown`，`.loading` 也在路上。
+    /// 这两种状态此前落进 `default` 分支，于是 App 一启动就告诉用户
+    /// 「还没有可用于配音的音色，先在『音色库』里准备一个」——用户可能明明有，
+    /// 却被推去重新做一个。这与「未知不得混进确定缺口」是同一条纪律。
+    func testAnUnreadVoiceListIsNotReportedAsHavingNoVoices() {
+        for state in [CreatorVoicesLoadState.unknown, .loading] {
+            let projection = readiness(voices: [], voicesLoadState: state)
+
+            XCTAssertTrue(
+                projection.unknownSteps.map(\.step).contains(.voiceAvailable),
+                "\(state) 时音色是否可用还没有结论"
+            )
+            XCTAssertFalse(
+                projection.blockingSteps.map(\.step).contains(.voiceAvailable),
+                "\(state) 不得被说成已确认的缺口"
+            )
+            let voiceDetail = projection.unknownSteps
+                .first { $0.step == .voiceAvailable }?
+                .detail ?? ""
+            XCTAssertFalse(
+                voiceDetail.contains("音色库"),
+                "\(state) 时不该催用户去准备一个他可能已经有的音色"
+            )
+        }
+    }
+
+    /// 全是未知时不显示这张卡：有标题、有分隔线、没有任何一行的空壳没有意义。
+    func testTheReadinessCardOnlyAppearsWhenThereIsSomethingToDo() {
+        let allUnknown = readiness(
+            hasHealth: false,
+            modelAvailability: .unknown,
+            voices: [],
+            voicesLoadState: .unknown,
+            discoveryState: .idle
+        )
+        XCTAssertTrue(allUnknown.unknownSteps.count >= 3, "这组输入应当全是未知")
+        XCTAssertTrue(
+            allUnknown.blockingSteps.isEmpty,
+            "前提：这组输入没有任何确定缺口"
+        )
+        XCTAssertFalse(
+            allUnknown.hasActionableSteps,
+            "没有确定缺口时不该出现一张让用户「去处理」的空卡"
+        )
+        XCTAssertFalse(allUnknown.isReady, "未知仍然不是就绪")
+
+        XCTAssertTrue(
+            readiness(voices: []).hasActionableSteps,
+            "确认没有可用音色时必须给出下一步"
+        )
+    }
 }
