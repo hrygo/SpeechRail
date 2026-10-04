@@ -3950,6 +3950,46 @@ extension AppModelTests {
 // MARK: - (F) 首次使用：只把"还差什么"说清楚，不替用户动手
 
 extension AppModelTests {
+    /// 「去处理」必须把人送到真正有那个动作的页面：这条映射原先把三步都指回
+    /// 服务状态——选档位与准备模型其实在模型组合页（#210）。
+    func testEveryReadinessStepLandsOnThePageThatOwnsTheAction() {
+        XCTAssertEqual(
+            FirstResultReadiness.Step.serviceReachable.ownerRoute,
+            .overview,
+            "启停服务的按钮就在服务状态页上"
+        )
+        XCTAssertEqual(
+            FirstResultReadiness.Step.profileSelected.ownerRoute,
+            .models,
+            "选运行档位的控件在模型组合页，不在服务状态页"
+        )
+        XCTAssertEqual(
+            FirstResultReadiness.Step.modelsReady.ownerRoute,
+            .models,
+            "下载、校验与应用模型的动作在模型组合页"
+        )
+        XCTAssertEqual(
+            FirstResultReadiness.Step.voiceAvailable.ownerRoute,
+            .voiceLibrary,
+            "准备可用音色的入口在音色库"
+        )
+    }
+
+    /// 落在用户已经在的那一页时不给按钮：点了不动的按钮比没有按钮更糟。
+    func testOnlyStepsThatNeedAnotherPageGetADestinationButton() {
+        for step in FirstResultReadiness.Step.allCases {
+            XCTAssertEqual(
+                step.needsDestination(awayFrom: .overview),
+                step.ownerRoute != .overview,
+                "\(step.rawValue) 的按钮可见性与它的目标页不一致"
+            )
+        }
+        XCTAssertFalse(
+            FirstResultReadiness.Step.serviceReachable.needsDestination(awayFrom: .overview),
+            "服务可达的缺口由本页的启动/重启按钮承担，卡片不再给一个原地不动的按钮"
+        )
+    }
+
     private func readiness(
         hasHealth: Bool = true,
         healthFailure: ServiceHealthFailureKind? = nil,
