@@ -177,6 +177,53 @@ final class AssistantEndRoutingTests: XCTestCase {
         let recordBAfter = try await store.session(id: recordB.id)
         XCTAssertEqual(recordBAfter?.state, .recording)
     }
+
+    /// A47（Session 层）：纯文字结束遇封存失败时不冒充 ended。
+    ///
+    /// 不存在的记录 → `sealSessionReporting` 返回 `.failed`：
+    /// end 不发布虚假的已封存 ID，保留 pendingSeal 与失败原因，
+    /// 界面走重试/复制出口。变异验证：改回 `sealSession` fire-and-forget
+    /// 后本用例按预期失败（返回 ended 且无 pendingSeal）。
+    func testA47TextEndSealFailureKeepsRecovery() async throws {
+        let (store, directory) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant-end-a47-\(UUID().uuidString)"))
+        defer { defaults.removePersistentDomain(forName: defaults.description) }
+        let coordinator = SessionCoordinator(store: store, defaults: defaults)
+        await coordinator.openStore()
+        let preferences = makePreferences(defaults: defaults)
+        let llm = AssistantSessionTests.FakeAssistantLLM(scripts: [.deltas(["回答。"])])
+        let session = AssistantSession(
+            coordinator: coordinator,
+            dependencies: AssistantSessionDependencies(llm: llm)
+        )
+        session.preferences = { preferences }
+        session.apiKeyProvider = { "test-key" }
+        session.moduleAPIKeyProvider = { _ in nil }
+        session.serviceReadiness = { .ready(profile: nil) }
+        // 先 ask 建出纯文字场（isTextOnlyConversation=true），再删库记录
+        // 伪造“封存时记录已丢失”：sealSessionReporting 必返回 .failed。
+        _ = await session.ask(typed: "封存失败也不丢恢复出口")
+        let recordID = try XCTUnwrap(session.sessionID)
+        try await coordinator.removeSession(id: recordID)
+        let result = await session.endConversation()
+        guard case .noConversation = result else {
+            XCTFail("封存失败不得冒充 ended，实际 \(result)")
+            return
+        }
+        XCTAssertNil(session.lastFinalizedSessionID, "失败不得发布虚假的已封存 ID")
+        XCTAssertEqual(session.pendingSealRecordID, recordID, "失败保留 pendingSeal 供重试")
+        XCTAssertNotNil(session.pendingSealReason, "失败原因须保留供界面展示")
+        XCTAssertNotNil(session.lastFailure, "失败须有用户可见提示")
+        // 复制出口以内存 turns 为准：问题行仍在内存，可复制。
+        XCTAssertTrue(
+            session.unsavedTranscriptText().contains("封存失败也不丢恢复出口"),
+            "未保存文本须可复制"
+        )
+        // 重试已删记录仍失败，不伪造成功。
+        let retried = await session.retryPendingSeal()
+        XCTAssertFalse(retried, "重试不存在的记录不得返回成功")
+    }
 }
 
 /// 纯文字路径的占位音频源：若被误用会立刻计数，测试据此断言“没碰设备”。
