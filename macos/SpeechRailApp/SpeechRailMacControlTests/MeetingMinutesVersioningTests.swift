@@ -316,6 +316,46 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(second.version, 2)
     }
 
+    /// 验收 5（引用关联）：备份恢复后，引文仍能指回恢复库里的转录行并通过校验；
+    /// 恢复库是只读核对，不写原库。
+    func testBackupRestoreKeepsEvidenceLinksVerifiable() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "预算 35 万元，下周定。", source: .microphone, status: .final),
+            id: "line-ev-restore-1"
+        )
+        _ = try await store.saveInnerOSExchange(
+            InnerOSExchange(id: "inner-ev-restore-1", sessionID: sessionID, askedAt: Date(), question: "预算多少？", status: .ready),
+            evidence: [
+                InnerOSEvidence(id: "ev-restore-ok", lineID: "line-ev-restore-1", quote: "预算 35 万元"),
+            ]
+        )
+        let backupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-ev-restore-\(UUID().uuidString).sqlite3")
+        try await store.backup(to: backupURL)
+        defer { try? FileManager.default.removeItem(at: backupURL) }
+        let restoreDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-ev-restore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: restoreDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: restoreDir) }
+        try FileManager.default.copyItem(
+            at: backupURL,
+            to: restoreDir.appendingPathComponent(SessionStore.fileName)
+        )
+        let restored = SessionStore(directory: restoreDir)
+        try await restored.open()
+        // 引用行随库恢复：证据指回的行正文可读。
+        let restoredEvidence = try await restored.innerOSEvidence(exchangeID: "inner-ev-restore-1")
+        XCTAssertEqual(restoredEvidence.count, 1)
+        XCTAssertEqual(restoredEvidence.first?.lineID, "line-ev-restore-1")
+        // 恢复库里引文仍逐字命中所指行，可通过校验。
+        let checks = try await restored.verifyEvidenceQuotes(exchangeID: "inner-ev-restore-1")
+        XCTAssertEqual(checks.count, 1)
+        XCTAssertEqual(checks.first?.verified, true, "恢复后引文仍应逐字命中所指转录行")
+        await restored.close()
+    }
+
     /// 恢复可证（验收 5）：备份恢复后行动项随纪要正文可核对，版本关联不漂移。
     func testBackupRestoreKeepsActionItemsWithVersions() async throws {
         let store = try requireStore()
