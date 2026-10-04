@@ -202,7 +202,14 @@ public final class InnerOSSession {
             exchange.status = cancelled ? .cancelled : .failed
             exchange.answerText = nil
             exchange.limitsNote = reason
-            _ = try? await coordinator.saveInnerOSExchange(exchange)
+            // MC-41/MC-42：终态走条件 UPDATE；写入失败抛错，调用方不得吞错报成功。
+            do {
+                _ = try await coordinator.finishInnerOSExchange(exchange)
+            } catch {
+                state = .failed("答案没能存进去：\(error.localizedDescription)。可以复制问题重试。")
+                lastFailure = error.localizedDescription
+                return
+            }
             if let index = exchanges.lastIndex(where: { $0.id == exchange.id }) {
                 exchanges[index] = exchange
             }
@@ -237,7 +244,14 @@ public final class InnerOSSession {
                 contentHash: nil
             )
         }
-        _ = try? await coordinator.saveInnerOSExchange(exchange, evidence: evidenceRows)
+        // MC-41/MC-42：答案、状态、证据同一事务落库；失败抛错，不半保存。
+        do {
+            _ = try await coordinator.finishInnerOSExchange(exchange, evidence: evidenceRows)
+        } catch {
+            state = .failed("答案没能存进去：\(error.localizedDescription)。可以复制问题重试。")
+            lastFailure = error.localizedDescription
+            return
+        }
         if let index = exchanges.lastIndex(where: { $0.id == exchange.id }) {
             exchanges[index] = exchange
         }

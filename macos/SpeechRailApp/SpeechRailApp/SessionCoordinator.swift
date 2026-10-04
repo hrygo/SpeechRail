@@ -677,6 +677,15 @@ public final class SessionCoordinator {
         try await store.saveInnerOSExchange(exchange, evidence: evidence)
     }
 
+    /// 问答终态写入透传（MC-41/MC-42）：答案、状态、证据同一事务落库。
+    @discardableResult
+    public func finishInnerOSExchange(
+        _ exchange: InnerOSExchange,
+        evidence: [InnerOSEvidence] = []
+    ) async throws -> String {
+        try await store.finishInnerOSExchange(exchange, evidence: evidence)
+    }
+
     /// 落一条音色变更点（「第 N 句起」必须查得回来）。
     public func noteVoiceChange(atOrdinal: Int, voice: VoiceSnapshot) async throws {
         guard let activeSessionID else { return }

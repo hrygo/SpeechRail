@@ -769,32 +769,84 @@ public actor SessionStore {
     // MARK: - 内心 OS 与长期记忆
 
     /// 存一次问答。默认 `in_minutes = 0`：「默认不进纪要」由结构决定（§15.3 第 1 条）。
+    ///
+    /// MC-41/MC-42：建行一次，终态走 `finishInnerOSExchange` 条件 UPDATE；
+    /// 答案、状态、证据同一事务写入，不半保存。调用方不得用第二次同 ID INSERT
+    /// 冒充终态写入——主键冲突抛错，不吞错报成功。
     @discardableResult
     public func saveInnerOSExchange(_ exchange: InnerOSExchange, evidence: [InnerOSEvidence] = []) throws -> String {
-        let sql = """
-        INSERT INTO inner_os_exchange (
-            id, session_id, asked_at, at_ordinal, question, intent, answer_text, draft_text,
-            confidence, limits_note, model, status, in_minutes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """
-        try withStatement(sql) { statement in
-            bind(statement, 1, exchange.id)
-            bind(statement, 2, exchange.sessionID)
-            bind(statement, 3, exchange.askedAt.timeIntervalSince1970)
-            bind(statement, 4, exchange.atOrdinal)
-            bind(statement, 5, exchange.question)
-            bind(statement, 6, exchange.intent?.rawValue)
-            bind(statement, 7, exchange.answerText)
-            bind(statement, 8, exchange.draftText)
-            bind(statement, 9, exchange.confidence?.rawValue)
-            bind(statement, 10, exchange.limitsNote)
-            bind(statement, 11, exchange.model)
-            bind(statement, 12, exchange.status.rawValue)
-            bind(statement, 13, exchange.inMinutes ? 1 : 0)
-            try step(statement)
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = """
+            INSERT INTO inner_os_exchange (
+                id, session_id, asked_at, at_ordinal, question, intent, answer_text, draft_text,
+                confidence, limits_note, model, status, in_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            try withStatement(sql) { statement in
+                bind(statement, 1, exchange.id)
+                bind(statement, 2, exchange.sessionID)
+                bind(statement, 3, exchange.askedAt.timeIntervalSince1970)
+                bind(statement, 4, exchange.atOrdinal)
+                bind(statement, 5, exchange.question)
+                bind(statement, 6, exchange.intent?.rawValue)
+                bind(statement, 7, exchange.answerText)
+                bind(statement, 8, exchange.draftText)
+                bind(statement, 9, exchange.confidence?.rawValue)
+                bind(statement, 10, exchange.limitsNote)
+                bind(statement, 11, exchange.model)
+                bind(statement, 12, exchange.status.rawValue)
+                bind(statement, 13, exchange.inMinutes ? 1 : 0)
+                try step(statement)
+            }
+            for item in evidence {
+                try insertEvidence(item, exchangeID: exchange.id)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
-        for item in evidence {
-            try insertEvidence(item, exchangeID: exchange.id)
+        return exchange.id
+    }
+
+    /// 问答终态写入（MC-41/MC-42）：答案、状态、证据同一事务落库。
+    /// 只允许从 `generating` 推向终态；0 行受影响抛错，调用方不得把“没写进去”
+    /// 读成“已持久保存”。
+    @discardableResult
+    public func finishInnerOSExchange(_ exchange: InnerOSExchange, evidence: [InnerOSEvidence] = []) throws -> String {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = """
+            UPDATE inner_os_exchange
+            SET answer_text = ?, draft_text = ?, intent = ?, confidence = ?,
+                limits_note = ?, model = ?, status = ?, in_minutes = ?
+            WHERE id = ? AND status = 'generating';
+            """
+            var changed = false
+            try withStatement(sql) { statement in
+                bind(statement, 1, exchange.answerText)
+                bind(statement, 2, exchange.draftText)
+                bind(statement, 3, exchange.intent?.rawValue)
+                bind(statement, 4, exchange.confidence?.rawValue)
+                bind(statement, 5, exchange.limitsNote)
+                bind(statement, 6, exchange.model)
+                bind(statement, 7, exchange.status.rawValue)
+                bind(statement, 8, exchange.inMinutes ? 1 : 0)
+                bind(statement, 9, exchange.id)
+                try step(statement)
+                changed = sqlite3_changes(try requireHandle()) == 1
+            }
+            guard changed else {
+                throw SessionStoreError.statementFailed("问答终态写入影响 0 行：该问答不存在或已不在生成中")
+            }
+            for item in evidence {
+                try insertEvidence(item, exchangeID: exchange.id)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return exchange.id
     }

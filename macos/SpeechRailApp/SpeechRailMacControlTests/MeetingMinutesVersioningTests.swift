@@ -426,6 +426,53 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty, "转录行随会话级联删除")
     }
 
+    /// MC-41/MC-42：问答建行一次，终态走条件 UPDATE；答案、状态、证据同一事务，
+    /// 重复终态写入抛错不吞错；终态后同 ID 再建行抛主键冲突。
+    func testInnerOSExchangeFinishIsTransactional() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "预算 35 万元", source: .microphone, status: .final),
+            id: "line-finish-1"
+        )
+        let exchange = InnerOSExchange(
+            id: "inner-finish-1", sessionID: sessionID, askedAt: Date(),
+            question: "预算多少？", status: .generating
+        )
+        _ = try await store.saveInnerOSExchange(exchange)
+        // 终态：答案+证据同一事务落库。
+        var done = exchange
+        done.status = .ready
+        done.answerText = "预算 35 万元"
+        _ = try await store.finishInnerOSExchange(
+            done, evidence: [InnerOSEvidence(id: "ev-finish-1", lineID: "line-finish-1", quote: "预算 35 万元")]
+        )
+        let loaded = try await store.innerOSExchanges(sessionID: sessionID)
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded.first?.status, .ready)
+        XCTAssertEqual(loaded.first?.answerText, "预算 35 万元")
+        let evidence = try await store.innerOSEvidence(exchangeID: "inner-finish-1")
+        XCTAssertEqual(evidence.count, 1)
+        // 重复终态写入：已不在生成中，0 行受影响，必须抛错不吞错。
+        do {
+            _ = try await store.finishInnerOSExchange(done)
+            XCTFail("重复终态写入必须抛错，不能吞错报成功")
+        } catch {
+            // 预期失败。
+        }
+        // 同 ID 再建行：主键冲突抛错，不吞错。
+        do {
+            _ = try await store.saveInnerOSExchange(exchange)
+            XCTFail("同 ID 重复建行必须抛错")
+        } catch {
+            // 预期失败。
+        }
+        // 关闭重开后答案仍在：同 ID 是 ready 且答案齐全。
+        let again = try await store.innerOSExchanges(sessionID: sessionID)
+        XCTAssertEqual(again.first?.status, .ready)
+        XCTAssertEqual(again.first?.answerText, "预算 35 万元")
+    }
+
     /// MC-35/MC-36：引文必须逐字出自所指转录行；多次出现无法定位也判未验证。
     func testEvidenceQuoteMustMatchReferencedLine() async throws {
         let store = try requireStore()

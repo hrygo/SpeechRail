@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.9"
+version: "2.10"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -13,7 +13,7 @@ base: "origin/main @ 607b75a8"
 
 本分支只动纪要版本链、结束封存上报与知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路。
 
-分支共 31 个提交：排队指针原子化、空输出与结构失败记失败、
+分支共 32 个提交：排队指针原子化、空输出与结构失败记失败、
 认领代际、恢复认领原任务、导出固定选定版本、知识检索、私密边界、备份校验、引文校验、
 删除语义回归，外加会议库分页、封存上报、恢复认领、结束走上报、快照补充、正文落库、
 断线恢复、封存隔离、行动项恢复、检索隔离等收尾回归。
@@ -36,10 +36,10 @@ base: "origin/main @ 607b75a8"
 
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 23 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
+- `MeetingMinutesVersioningTests` 24 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
  MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-46（含后半句：改名记修订事件、旧版标需复核、
  引用仍指旧 revision，重复同名不刷事件；Domain 纯逻辑只标晚于创建的修订）、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 35 个用例，2026-10-05 实测全部通过。
+- 连同 `AssistantPersistenceTests` 共 36 个用例，2026-10-05 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
 
@@ -72,6 +72,11 @@ base: "origin/main @ 607b75a8"
 - v2.9 删除语义（MA-18/验收 4）：`testRemovedSessionDisappearsFromKnowledge`
   追加问答、引文、转录行的级联验证，完整删除不暗留引文全文；用例数不变，
   仍共 35 项。
+- v2.10 问答终态（MC-41/MC-42/MA-04）：`saveInnerOSExchange` 建行与证据同一事务；
+  新增 `finishInnerOSExchange` 条件 UPDATE（只允许从 generating 推向终态，
+  0 行抛错），答案、状态、证据同一事务落库；`InnerOSSession` 终态改走该入口，
+  写入失败报可读错不半保存。`InnerOSSession` 不进 SPM 测试目标，仅做
+  `swiftc -parse` 语法检查；事务语义由新增 `testInnerOSExchangeFinishIsTransactional` 覆盖。
 
 ## 迁移说明
 
