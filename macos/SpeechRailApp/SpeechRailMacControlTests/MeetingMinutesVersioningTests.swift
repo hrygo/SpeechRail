@@ -241,6 +241,41 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(second.version, 2)
     }
 
+    /// 恢复可证（验收 5）：备份恢复后行动项随纪要正文可核对，版本关联不漂移。
+    func testBackupRestoreKeepsActionItemsWithVersions() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "下周三前交付预算表", source: .microphone, status: .final)
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        let actionBody = "# 纪要\n\n## 待办\n\n- 张三：交付预算表（下周三前）\n"
+        try await store.finishMinutes(minutesID: minutes.id, body: actionBody, model: nil)
+        let backupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-actions-\(UUID().uuidString).sqlite3")
+        try await store.backup(to: backupURL)
+        defer { try? FileManager.default.removeItem(at: backupURL) }
+        let restoreDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-actions-restore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: restoreDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: restoreDir) }
+        try FileManager.default.copyItem(
+            at: backupURL,
+            to: restoreDir.appendingPathComponent(SessionStore.fileName)
+        )
+        let restored = SessionStore(directory: restoreDir)
+        try await restored.open()
+        let restoredVersions = try await restored.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(restoredVersions.count, 1)
+        XCTAssertEqual(restoredVersions.first?.version, 1, "恢复后版本号不漂移")
+        XCTAssertTrue(
+            restoredVersions.first?.body?.contains("交付预算表") ?? false,
+            "恢复后行动项随纪要正文可核对"
+        )
+        await restored.close()
+    }
+
     /// MC-62/删除语义：完整删除后检索不再带回，旧任务行随级联消失。
     func testRemovedSessionDisappearsFromKnowledge() async throws {
         let store = try requireStore()
