@@ -214,6 +214,15 @@ public enum MinutesSupplements: Sendable {
 /// 需复核的纪要版本判断（MC-46 后半句）：任一来源修订晚于纪要创建即需复核。
 /// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖；`MinutesGenerator.reviewIDs`
 /// 只是把库里的修订事件与版本列表喂给它。
+/// 迟到结果归属判断（MC-45）：库归档以建行时的会话为准，界面状态只写当初那一场。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum LateResultOwnership: Sendable {
+    /// 界面状态能不能写：当前绑定仍是建行那一场时才能写。
+    public static func mayWriteUI(boundSessionID: String?, builtSessionID: String?) -> Bool {
+        boundSessionID == builtSessionID
+    }
+}
+
 public enum MinutesReview: Sendable {
     public static func needsReview(
         versionCreatedAt: Date,

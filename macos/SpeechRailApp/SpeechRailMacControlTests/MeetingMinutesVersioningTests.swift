@@ -255,6 +255,15 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(MinutesReview.reviewIDs(versions: [(id: "v1", createdAt: base)], revisions: []).isEmpty)
     }
 
+    /// MC-45（Domain 纯逻辑）：迟到结果的界面状态只写当初那一场；
+    /// 库归档不受此限（以建行 sessionID 为准，由调用方保证）。
+    func testLateResultOwnershipGuardsUIWrites() {
+        XCTAssertTrue(LateResultOwnership.mayWriteUI(boundSessionID: "A", builtSessionID: "A"))
+        XCTAssertFalse(LateResultOwnership.mayWriteUI(boundSessionID: "B", builtSessionID: "A"))
+        XCTAssertFalse(LateResultOwnership.mayWriteUI(boundSessionID: nil, builtSessionID: "A"))
+        XCTAssertTrue(LateResultOwnership.mayWriteUI(boundSessionID: nil, builtSessionID: nil))
+    }
+
     /// MC-46 后半句（无迁移实现）：改名后旧纪要标需复核，引用仍指旧 revision。
     /// 修订事件只追加不改正文；复核判断是纯读，不写库。
     func testRenameMarksOldMinutesNeedsReview() async throws {
