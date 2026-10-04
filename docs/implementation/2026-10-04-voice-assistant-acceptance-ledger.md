@@ -30,6 +30,7 @@ date: 2026-10-04
 - 文档更新：`docs/developers/macos-app-development.md` 0.6.0 → 0.6.1（2026-10-04），新增「续接、重播与试听」小节；仅正文实质变更更新 version/date。
 - 工作区改动未提交；无 push/PR/merge/release；无服务启停、模型下载、录音与 UI 自动化。
 - PR #213 CI（2026-10-04 Asia/Shanghai，run 37188962265）：Change Scope pass；Quality Gates fail（`check_macos_test_target_coverage.py` 报 13 个新增测试文件未进 Xcode Unit Test Sources）；macOS App Build fail（`AssistantView.swift:1877/2759` 报 `cannot find 'AssistantComposerPolicy' in scope`，缺 App Sources 成员）；`swift test`（SPM 超集）不受影响。缺口 19 文件：生产 6（Composer/Context/Observability/Presentation/ReplayEvaluator/TurnPolicy）+ 测试 13；runner 无 Xcode target 不计入。本地 `xcodebuild build` 复现同一失败（2026-10-04）。pbxproj 按规则不在本机手工合并，待 Xcode 内补成员后复验；此期间 PR 不合并。
+- PR #213 CI：run 37188962265 曾 fail（Quality Gates：13 个新增测试文件未进 Xcode Unit Test Sources；macOS App Build：`AssistantView.swift:1877/2759 cannot find 'AssistantComposerPolicy' in scope`）。修复提交 `dd74b444` 补齐 19 文件 membership（生产 6 进 App Sources + 测试 13 进 Unit Test Sources，只做加法，未删改既有条目；runner 无 Xcode target 不计入）后，run 37190082198 全绿（2026-10-04 Asia/Shanghai 实测：Quality Gates pass 35s / macOS App Build pass 6m33s / Gate Summary pass；本地 `check_macos_test_target_coverage.py OK` + `xcodebuild build BUILD SUCCEEDED`）。U/R 仍 not_run，PR 不合并。
 
 ## VA 工作包状态
 
