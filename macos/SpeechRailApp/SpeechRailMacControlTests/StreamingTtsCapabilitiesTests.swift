@@ -132,4 +132,46 @@ final class StreamingTtsCapabilitiesTests: XCTestCase {
         XCTAssertNil(streaming.axes.budgetAvailable)
     }
 
+    /// 音色没声明可用性时按**不可用**处理。
+    ///
+    /// `available` 缺字段不等于「大概可用」——服务端没说，就是没说。
+    /// 段落返修、试听这些入口都拿 `voice.available` 当闸门；
+    /// 默认值一旦反过来，没声明的音色会直接出现在可选列表里。
+    /// 既有解码用例全都显式写了 `"available": true`，这条默认值没人钉过。
+    func testAVoiceWithoutAnAvailabilityFieldIsNotTreatedAsUsable() throws {
+        let voice = try decodeVoice(
+            """
+            {"id": "undeclared", "name": "未声明可用性"}
+            """
+        )
+
+        XCTAssertFalse(voice.available, "没声明可用性的音色不得被当成可用")
+        XCTAssertNil(voice.availabilityReason, "原因同样没声明，不该编一个出来")
+    }
+
+    /// 同理：`implementation_supported` 缺字段按不支持处理。
+    ///
+    /// `testPartiallyDeclaredAxesFailClosed` 逐条断言了另外几个轴，
+    /// 唯独漏掉这一个——它就混在同一段解码里，看得见却没人钉。
+    func testAxesWithoutImplementationSupportedFailClosed() throws {
+        let voice = try decodeVoice(
+            """
+            {
+              "id": "partial-axes",
+              "name": "Partial axes",
+              "available": true,
+              "streaming": {
+                "supported": true,
+                "voice_mode": "clone",
+                "axes": {"reference_ready": true}
+              }
+            }
+            """
+        )
+
+        let streaming = try XCTUnwrap(voice.streaming)
+        XCTAssertTrue(streaming.axes.referenceReady)
+        XCTAssertFalse(streaming.axes.implementationSupported, "没声明实现支持时按不支持处理")
+    }
+
 }
