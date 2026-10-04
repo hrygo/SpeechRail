@@ -271,7 +271,10 @@ public struct AppCapabilityFacade: Equatable, Sendable {
               voice.available,
               let realtimeSpeech = voice.operations["realtime_speech"],
               Self.declaredVoiceOperationStatus(realtimeSpeech) == .available,
-              let ttsModelRevision = Self.nonEmpty(voice.model.catalogRevision)
+              // 服务端按 voice mode 选 TTS 制品（system→tts，clone→tts_clone，
+              // 见 artifact_for_voice_mode）：pin 必须取同一份制品的号，
+              // 取 voice 自带的 model 号在 clone 音色上永不对等，直接 409。
+              let ttsModelRevision = Self.ttsModelRevision(for: voice, in: snapshot)
         else {
             return nil
         }
@@ -283,6 +286,31 @@ public struct AppCapabilityFacade: Equatable, Sendable {
             voiceRevision: Self.nonEmpty(voice.voiceRevision),
             ttsModelRevision: ttsModelRevision
         )
+    }
+
+    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision。
+    ///
+    /// 服务端 `_voice_entry` 按 `profile.mode` 绑定制品，Realtime 握手与
+    /// `/v1/audio/speech` 按同一 mode 比对（见 `artifact_for_voice_mode`）。
+    /// 快照顶层 `models` 与 voice 条目自带的 `model` 是同一来源的投影，
+    /// 这里按 mode 取顶层槽位，保证 pin 与服务端比对的是同一份制品。
+    /// 未知 mode 直接返回 nil 调用方 fail-closed，不猜制品。
+    private static func ttsModelRevision(
+        for voice: SafeVoiceEntry,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> String? {
+        let slot: String
+        switch voice.mode {
+        case "system":
+            slot = "tts"
+        case "clone":
+            slot = "tts_clone"
+        case "instruction":
+            slot = "voice_design"
+        default:
+            return nil
+        }
+        return Self.nonEmpty(snapshot.models[slot]?.catalogRevision)
     }
 
     private var availabilityWithoutSnapshot: AppCapabilityAvailability {
