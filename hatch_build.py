@@ -10,6 +10,15 @@ from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
+#: The single macOS release this wheel targets, matching the project baseline
+#: in ``AGENTS.md``. Left unset, hatchling derives the platform tag from the
+#: build host, so one commit yields ``macosx_26_0`` on a CI runner and
+#: ``macosx_27_0`` on a newer Mac: two different artifacts published under one
+#: version number, and a local ``speechrail install`` check stops standing in
+#: for the wheel people actually download. An explicit environment value still
+#: wins, so a deliberate one-off build is not silently overridden.
+MACOSX_DEPLOYMENT_TARGET = "26.0"
+
 # Opt-out for the native worker build, used by CI to keep an editable install
 # cheap. The worker is a release artifact input, not a test input: nothing in
 # the test suite consumes the binary this hook produces, so a test-only sync
@@ -25,6 +34,7 @@ class CustomBuildHook(BuildHookInterface):
         del version
         if self.target_name != "wheel":
             return
+        os.environ.setdefault("MACOSX_DEPLOYMENT_TARGET", MACOSX_DEPLOYMENT_TARGET)
         _include_engine_wheel(self, build_data)
         if sys.platform != "darwin" or _native_build_skipped():
             # The application is macOS-only; Linux CI can build and test the
