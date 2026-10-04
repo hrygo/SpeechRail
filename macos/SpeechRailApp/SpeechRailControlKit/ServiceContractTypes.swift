@@ -1570,7 +1570,12 @@ public struct RenderRecipeSnapshot: Codable, Equatable, Sendable {
     public let schemaVersion: String
     public let state: State
     /// 服务端没有观察到的事实，路径与服务端一致（如 `model.engine_revision`）。
-    public let missingFields: [String]
+    ///
+    /// 契约把这个字段列为 `required`，所以 `nil`（没发）与 `[]`（发了空数组）
+    /// 是两个不同的断言：前者我们无从知道服务端观察到了哪些事实。
+    /// 解码时把缺字段塌成 `[]` 会让违约载荷读成「事实齐全」，
+    /// 因此它一路保持可选，直到 `provenance(for:)` 那里才做判定。
+    public let missingFields: [String]?
     /// 事实齐全时的规范化摘要；不齐全时为空。
     public let digest: String?
     public let rawTextSHA256: String?
@@ -1603,7 +1608,7 @@ public struct RenderRecipeSnapshot: Codable, Equatable, Sendable {
     public init(
         schemaVersion: String = RenderRecipeSnapshot.currentSchemaVersion,
         state: State,
-        missingFields: [String],
+        missingFields: [String]?,
         digest: String?,
         rawTextSHA256: String? = nil,
         acousticTextSHA256: String? = nil,
@@ -1678,7 +1683,7 @@ public struct RenderRecipeSnapshot: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
         state = try container.decode(State.self, forKey: .state)
-        missingFields = try container.decodeIfPresent([String].self, forKey: .missingFields) ?? []
+        missingFields = try container.decodeIfPresent([String].self, forKey: .missingFields)
         digest = try container.decodeIfPresent(String.self, forKey: .digest)
         content = try container.decodeIfPresent([String: JSONValue].self, forKey: .content) ?? [:]
         voice = try container.decodeIfPresent([String: JSONValue].self, forKey: .voice) ?? [:]
@@ -1709,7 +1714,7 @@ public struct RenderRecipeSnapshot: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(state, forKey: .state)
-        try container.encode(missingFields, forKey: .missingFields)
+        try container.encodeIfPresent(missingFields, forKey: .missingFields)
         try container.encode(digest, forKey: .digest)
         try container.encode(content, forKey: .content)
         try container.encode(voice, forKey: .voice)

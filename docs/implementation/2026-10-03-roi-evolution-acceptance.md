@@ -70,12 +70,18 @@ App 侧把配方投影成强类型快照随作品冻结，回执缺失时保留�
 `partial` / `unavailable`，老作品读作 `legacyUnknown`，不回填历史身份。
 
 「追溯完整」由**四个**条件共同成立：`state == .complete`、`digest != nil`、
-**`missing_fields` 为空**、**`audio.pcm_sha256` 存在**。
+**`missing_fields` 已声明且为空**、**`audio.pcm_sha256` 存在**。
 
 前两个是服务端对自身的评定，只有第三个是客户端独立解码出来的信号。正因为第三个
 独立，**三者必须一致**：一份自称 `complete` 却仍列着缺失事实的回执会被判为
 `partial`（`recipe_incomplete_…`），而不是被显示成追溯完整——否则 `verified` 就只是
 "服务端这么说的"。
+
+第三项还要再分一层：**没发** `missing_fields` 与**发了空数组**是两回事。
+契约把它列为 `required`；解码器一度把缺字段塌成 `[]`，于是一个违约载荷能凭
+`state: complete` + `digest` 拿到 `.verified`。现在缺字段保持为 `nil`，判为
+`partial`（`recipe_missing_fields_undeclared`）——服务端没说它观察到了哪些事实，
+我们就不能替它宣称"什么都没缺"。见 #209。
 
 第四个条件回答的是另一件事：配方齐全只说明服务端描述**执行过程**的事实齐全，与
 「App 手里的这段音频就是它渲染的那段」是两件事。没有音频摘要就没有任何可追溯的
@@ -313,10 +319,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 541 XCTest + 384 swift-testing，0 失败
+  → 542 XCTest + 384 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 514 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
+  → 515 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -385,6 +391,13 @@ Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 本轮只改测试与本文档，`CreatorServiceClient.swift` 与 `origin/main` 逐字节一致。
 
+2026-10-04 第 32 轮（#209，配方 `missing_fields` 塌成空数组）再次全量重跑：
+542 / 515 XCTest + 384 swift-testing、Debug BUILD SUCCEEDED、`swift build` 生产目标通过。
+Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+**本轮含生产代码改动**：`RenderRecipeSnapshot.missingFields` 由 `[String]` 改为
+`[String]?`，解码不再塌成 `[]`；`provenance(for:)` 与 `recipeIncompleteReason` 随之调整。
+行为变化与回退方式见 #209 与本文档第 ① 节末段。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -403,7 +416,7 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
 | `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
-| **XCTest 合计** | **541** | **514** | |
+| **XCTest 合计** | **542** | **515** | |
 | swift-testing 合计 | 384 | 384 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）

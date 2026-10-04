@@ -619,6 +619,48 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    /// 契约 required 的 `missing_fields` 没发时，不得读成「什么都没缺」。
+    ///
+    /// 探针实测：解码器此前把缺字段塌成 `[]`，于是 `state: complete` +
+    /// `digest` + **没有** `missing_fields` 的回执拿到了 `.verified`
+    /// （`PROBE state=verified reason=nil`）。这份 provenance 会跟着作品存下来，
+    /// 之后段落返修据此判断「这次重做与原作品是同一制作条件」——
+    /// 一个违约载荷因此换到了完整可追溯的身份。
+    func testRecipeWithoutTheRequiredMissingFieldsIsNotVerified() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {},
+          "model": {},
+          "audio": {
+            "pcm_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          "recipe": {
+            "schema_version": "render_recipe_v1",
+            "state": "complete",
+            "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+
+        let provenance = ServiceAPIClient.provenance(for: receipt)
+        XCTAssertEqual(provenance.state, .partial)
+        XCTAssertEqual(
+            provenance.reason,
+            "recipe_missing_fields_undeclared",
+            "没发 required 字段与「发了空数组」必须说成两件事"
+        )
+        XCTAssertNil(
+            receipt.recipe?.missingFields,
+            "没发就是没发，解码时不得塌成空数组"
+        )
+    }
+
     /// 「可追溯」必须包含**音频身份**，不只是服务端对配方的一份自述。
     ///
     /// 配方完整只说明服务端描述执行过程的那几项事实齐全，与「App 手里的这段音频

@@ -316,7 +316,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
         // agree is what keeps "verified" from meaning "the server said so".
         guard recipe.state == .complete,
               recipe.digest != nil,
-              recipe.missingFields.isEmpty
+              recipe.missingFields?.isEmpty == true
         else {
             return RenderProvenance(
                 state: .partial,
@@ -344,8 +344,13 @@ public final class ServiceAPIClient: @unchecked Sendable {
     /// `recipe_incomplete_` would read like a truncated string rather than a
     /// diagnosis.
     private static func recipeIncompleteReason(_ recipe: RenderRecipeSnapshot) -> String {
-        if !recipe.missingFields.isEmpty {
-            return "recipe_incomplete_\(recipe.missingFields.joined(separator: ","))"
+        guard let missingFields = recipe.missingFields else {
+            // 契约里 `missing_fields` 是 required。没发这个字段与「发了空数组」
+            // 是两回事：前者我们无从知道服务端观察到了哪些事实。
+            return "recipe_missing_fields_undeclared"
+        }
+        if !missingFields.isEmpty {
+            return "recipe_incomplete_\(missingFields.joined(separator: ","))"
         }
         if recipe.state != .complete {
             return "recipe_state_\(recipe.state.rawValue)"
