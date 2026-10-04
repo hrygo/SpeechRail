@@ -90,6 +90,10 @@ show_missing = true
 fail_under = 80
 
 [tool.mypy]
+# 本项目唯一发布目标是 Apple Silicon macOS。CI 的静态检查跑在 ubuntu runner 上，
+# 而 mypy 的 platform 默认跟随宿主——不写这一行，`if sys.platform == "darwin"`
+# 分支会被判为不可达而整个跳过分析，检查的正好是唯一不发布的平台。
+platform = "darwin"
 python_version = "3.14"
 strict = true
 warn_return_any = true
