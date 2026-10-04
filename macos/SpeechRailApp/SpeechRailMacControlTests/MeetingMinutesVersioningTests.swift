@@ -72,8 +72,10 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let store = try requireStore()
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: first.id, body: "# 采用版", model: nil)
         let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
 
         let versions = try await store.minutesVersions(sessionID: sessionID)
@@ -90,8 +92,10 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let empty = try await store.latestUsableMinutes(sessionID: sessionID)
         XCTAssertNil(empty)
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: first.id, body: "# 采用版", model: nil)
         let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
         let usable = try await store.latestUsableMinutes(sessionID: sessionID)
         XCTAssertEqual(usable?.id, first.id)
@@ -122,13 +126,44 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         }
     }
 
+    /// MC-29：旧执行者迟到不得改写已被新认领的行；非 running 行的完成/失败不生效。
+    func testStaleOwnerCannotOverwriteReclaimedRow() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        // 首次认领用已过期的租约，模拟崩溃后重启回收：第二次认领必须推进代际。
+        let stale = try await store.claimMinutes(sessionID: sessionID, lease: -1)
+        XCTAssertEqual(stale?.id, first.id)
+        let staleAttempts = stale?.attempts ?? 0
+        let fresh = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        XCTAssertEqual(fresh?.attempts, staleAttempts + 1)
+        let staleCommitted = try await store.finishMinutesIfOwner(
+            minutesID: first.id, expectedAttempts: staleAttempts, body: "# 旧结果", model: nil
+        )
+        XCTAssertFalse(staleCommitted, "旧代际的完成不得覆盖新认领")
+        let freshCommitted = try await store.finishMinutesIfOwner(
+            minutesID: first.id, expectedAttempts: fresh?.attempts ?? -1, body: "# 新结果", model: nil
+        )
+        XCTAssertTrue(freshCommitted)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(versions.first?.body, "# 新结果")
+        XCTAssertEqual(versions.first?.status, .ready)
+        // 非 running 行的失败不改写已完成正文。
+        try await store.failMinutes(minutesID: first.id, reason: "迟到的失败")
+        let afterFail = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(afterFail.first?.status, .ready)
+        XCTAssertEqual(afterFail.first?.body, "# 新结果")
+    }
+
     /// MC-48：选定版本导出只认调用方传入的版本，不认“最新/最大版本”。
     func testSelectedVersionIsReturnedAsSelected() async throws {
         let store = try requireStore()
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
         let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
 
         let versions = try await store.minutesVersions(sessionID: sessionID)

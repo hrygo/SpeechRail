@@ -343,17 +343,26 @@ public final class MinutesGenerator {
             )
             switch Self.outcome(from: text) {
             case .ready(let body):
-                try await coordinator.finishMinutes(
+                // MC-29：凭认领代际提交；行已被新 owner 接管时不改写、不谎报成功。
+                let committed = (try? await coordinator.finishMinutesIfOwner(
                     minutesID: claimed.id,
+                    expectedAttempts: claimed.attempts,
                     body: body,
                     model: configuration.model.isEmpty ? nil : configuration.model
-                )
+                )) ?? false
+                guard committed else {
+                    versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
+                    state = .failed("这一版已被新的整理任务接管，旧结果没有覆盖。")
+                    return
+                }
                 latestBody = body
                 failedOnSetup = false
                 state = .ready
             case .failed(let reason):
                 // MC-33/MC-34：空输出与结构失败保留候选文本但记成失败，不发布成功。
-                try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
+                _ = try? await coordinator.failMinutesIfOwner(
+                    minutesID: claimed.id, expectedAttempts: claimed.attempts, reason: reason
+                )
                 failedOnSetup = false
                 state = .failed(reason)
             }
@@ -363,7 +372,9 @@ public final class MinutesGenerator {
             let reason = cancelled
                 ? "你停下了这一次整理。文字记录已经存好，可以重新生成。"
                 : Self.readableReason(for: error)
-            try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
+            _ = try? await coordinator.failMinutesIfOwner(
+                minutesID: claimed.id, expectedAttempts: claimed.attempts, reason: reason
+            )
             // 地址写错、服务没有 Responses API 这类失败，按「重新生成」只会再撞一次；
             // 它们和「没填模型」是同一类下一步：去设置里改配置。
             if let llm = error as? LLMError {

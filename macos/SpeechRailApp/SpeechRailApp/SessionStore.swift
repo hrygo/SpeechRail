@@ -573,6 +573,8 @@ public actor SessionStore {
     }
 
     /// 认领一条排队中的纪要。租约过期的 `running` 行可以被下一次启动回收（否则会永远卡住）。
+    /// MC-29：认领带 fencing 代际（`attempts`）：完成/失败必须凭认领时看到的代际提交，
+    /// 旧执行者迟到不得改写新 owner 已认领的行。
     public func claimMinutes(sessionID: String, lease: TimeInterval) throws -> MinutesVersion? {
         let now = Date()
         let sql = """
@@ -607,7 +609,7 @@ public actor SessionStore {
     }
 
     public func finishMinutes(minutesID: String, body: String, model: String?) throws {
-        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ?;"
+        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running';"
         try withStatement(sql) { statement in
             bind(statement, 1, body)
             bind(statement, 2, model)
@@ -616,13 +618,46 @@ public actor SessionStore {
         }
     }
 
+    /// 带 fencing 代际的完成：只有 `expectedAttempts` 与当前行一致时才提交，
+    /// 否则说明认领之后已有新 owner 接管，旧执行者迟到不得改写（MC-29）。
+    /// 返回是否真正提交。
+    @discardableResult
+    public func finishMinutesIfOwner(minutesID: String, expectedAttempts: Int, body: String, model: String?) throws -> Bool {
+        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running' AND attempts = ?;"
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, body)
+            bind(statement, 2, model)
+            bind(statement, 3, minutesID)
+            bind(statement, 4, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
     public func failMinutes(minutesID: String, reason: String) throws {
-        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ?;"
+        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ? AND status = 'running';"
         try withStatement(sql) { statement in
             bind(statement, 1, reason)
             bind(statement, 2, minutesID)
             try step(statement)
         }
+    }
+
+    /// 带 fencing 代际的失败：语义同 `finishMinutesIfOwner`（MC-29）。
+    @discardableResult
+    public func failMinutesIfOwner(minutesID: String, expectedAttempts: Int, reason: String) throws -> Bool {
+        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ? AND status = 'running' AND attempts = ?;"
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, reason)
+            bind(statement, 2, minutesID)
+            bind(statement, 3, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
     }
 
     /// 还有纪要没整理完的会话：排队中的，或者租约已经过期的 `running`。

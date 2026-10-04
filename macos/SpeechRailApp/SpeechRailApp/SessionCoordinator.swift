@@ -704,6 +704,17 @@ public final class SessionCoordinator {
         try await store.failMinutes(minutesID: minutesID, reason: reason)
     }
 
+    /// 带 fencing 代际的完成/失败：旧执行者迟到不得改写新行（MC-29）。
+    @discardableResult
+    public func finishMinutesIfOwner(minutesID: String, expectedAttempts: Int, body: String, model: String?) async throws -> Bool {
+        try await store.finishMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts, body: body, model: model)
+    }
+
+    @discardableResult
+    public func failMinutesIfOwner(minutesID: String, expectedAttempts: Int, reason: String) async throws -> Bool {
+        try await store.failMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts, reason: reason)
+    }
+
     /// 启动时回收那些"排队中或租约已过期"的纪要（§5.8）。
     public func sessionsWithPendingMinutes() async throws -> [String] {
         try await store.sessionsWithPendingMinutes()
