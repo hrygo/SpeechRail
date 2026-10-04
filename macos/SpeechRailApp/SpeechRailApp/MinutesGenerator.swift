@@ -228,6 +228,12 @@ public final class MinutesGenerator {
                 state = .failed("这一场没有可整理的正文。")
                 return
             }
+            // MC-43/MC-35/MC-36：快照输入 = 转录终稿 + 已校验的用户补充。
+            // 未逐字命中的引文整条丢弃，不进入 prompt。
+            let supplements = Self.userSupplements(
+                exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: sessionID)
+            )
             version = try await coordinator.enqueueMinutes(
                 sessionID: sessionID,
                 model: configuration.model.isEmpty ? nil : configuration.model,
@@ -239,6 +245,7 @@ public final class MinutesGenerator {
                     _ = try? await self?.run(
                         version: version,
                         transcript: transcript,
+                        supplements: supplements,
                         resolvedConfiguration: resolvedConfiguration
                     )
                 }
@@ -298,6 +305,11 @@ public final class MinutesGenerator {
                 state = .failed("这一场没有可整理的正文。")
                 return
             }
+            // MC-43/MC-35/MC-36：恢复续跑同样走快照输入，已校验的用户补充才带入。
+            let supplements = Self.userSupplements(
+                exchanges: (try? await coordinator.innerOSExchanges(sessionID: row.sessionID)) ?? [],
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: row.sessionID)
+            )
             versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
             let configuration = resolvedConfiguration.configuration
             guard configuration.isConfigured else {
@@ -315,6 +327,7 @@ public final class MinutesGenerator {
                 _ = try? await self?.run(
                     version: row,
                     transcript: transcript,
+                    supplements: supplements,
                     resolvedConfiguration: resolvedConfiguration
                 )
             }
@@ -366,9 +379,31 @@ public final class MinutesGenerator {
         }
     }
 
+    /// 已校验的用户补充 id：问答被显式选进纪要、且其全部引文逐字命中所指转录行。
+    /// 任一条引文未通过即整条丢弃，不部分带入（MC-35/MC-36）。
+    /// 纯读校验，不写库。
+    static func verifiedSupplementIDs(
+        coordinator: SessionCoordinator,
+        sessionID: String
+    ) async -> Set<String> {
+        guard let exchanges = try? await coordinator.innerOSExchanges(sessionID: sessionID) else {
+            return []
+        }
+        var verified: Set<String> = []
+        for exchange in exchanges where exchange.inMinutes {
+            guard let checks = try? await coordinator.verifyEvidenceQuotes(exchangeID: exchange.id),
+                  !checks.isEmpty,
+                  checks.allSatisfy(\.verified)
+            else { continue }
+            verified.insert(exchange.id)
+        }
+        return verified
+    }
+
     private func run(
         version: MinutesVersion,
         transcript: String,
+        supplements: String = "",
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
@@ -379,7 +414,7 @@ public final class MinutesGenerator {
         do {
             let responseID = try await provider.startBackground(
                 configuration: configuration,
-                messages: Self.prompt(transcript: transcript),
+                messages: Self.prompt(transcript: transcript, supplements: supplements),
                 apiKey: key,
                 maxOutputTokens: 4_000,
                 textFormat: MinutesDocument.jsonSchema
@@ -438,19 +473,44 @@ public final class MinutesGenerator {
         }
     }
 
-    /// Prompt。两条硬要求：**只依据转录**、**不知道就写不知道**（与内心 OS 同一条规矩）。
-    static func prompt(transcript: String) -> [LLMMessage] {
+    /// 快照输入里的用户补充（MC-43）：组装走 Domain 层纯逻辑，
+    /// 只含 `in_minutes = 1` 且全部引文已校验的问答（MC-35/MC-36），
+    /// 逐条标“用户选择的 AI 补充”，不升级成会议事实。
+    static func userSupplements(
+        exchanges: [InnerOSExchange],
+        verifiedExchangeIDs: Set<String>
+    ) -> String {
+        MinutesSupplements.render(
+            questions: exchanges.map {
+                (id: $0.id, question: $0.question, answer: $0.answerText, inMinutes: $0.inMinutes)
+            },
+            verifiedIDs: verifiedExchangeIDs
+        )
+    }
+
+    /// Prompt。三条硬要求：**只依据转录与已校验的用户补充**、
+    /// **不知道就写不知道**（与内心 OS 同一条规矩）、**用户补充不升级成会议事实**。
+    static func prompt(transcript: String, supplements: String = "") -> [LLMMessage] {
+        let userText: String
+        if supplements.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            userText = "下面是这一场的转录：\n\n\(transcript)"
+        } else {
+            userText = "下面是这一场的转录：\n\n\(transcript)"
+                + "\n\n下面是用户明确选择写进纪要的私密问答补充（标为用户选择的 AI 补充，"
+                + "不得当成会议现场的发言或决定）：\n\n\(supplements)"
+        }
         [
             LLMMessage(
                 role: .developer,
-                text: "你负责把一段会议转录整理成结构化纪要。只依据转录里的内容，"
+                text: "你负责把一段会议转录整理成结构化纪要。只依据转录与已校验的用户补充里的内容，"
                     + "不要补你没看到的事；转录里没提到的决定、待办、负责人一律不要写。"
+                    + "用户补充只是用户选择的 AI 参考，不得写成参会人的发言、决定或待办归属。"
                     + "说话人用转录里已有的名字；同一个名字不要改写成别的称呼。"
                     + "待办的 due 没有依据时留空字符串。"
                     + "confidence_notes 写这份纪要里最不确定的一两处；如果没什么不确定的就留空。",
                 cacheBreakpoint: true
             ),
-            LLMMessage(role: .user, text: "下面是这一场的转录：\n\n\(transcript)")
+            LLMMessage(role: .user, text: userText)
         ]
     }
 

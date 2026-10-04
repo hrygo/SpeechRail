@@ -190,6 +190,27 @@ public enum MinutesOutcome: Equatable, Sendable {
     }
 }
 
+/// 快照输入里的用户补充组装（MC-43/MC-35/MC-36）。
+/// 只收 `inMinutes` 且全部引文已校验的问答；任一条引文未通过即整条丢弃。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum MinutesSupplements: Sendable {
+    public static func render(
+        questions: [(id: String, question: String, answer: String?, inMinutes: Bool)],
+        verifiedIDs: Set<String>
+    ) -> String {
+        let blocks = questions.compactMap { item -> String? in
+            guard item.inMinutes, verifiedIDs.contains(item.id) else { return nil }
+            let question = item.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let answer = (item.answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !question.isEmpty || !answer.isEmpty else { return nil }
+            var block = "【用户选择的 AI 补充（不是会议原文）】问：\(question)"
+            if !answer.isEmpty { block += "\n答：\(answer)" }
+            return block
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+}
+
 public enum InnerOSIntent: String, Codable, Sendable {
     case fact
     case analysis

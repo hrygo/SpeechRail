@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "1.1"
+version: "1.2"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -21,11 +21,16 @@ base: "origin/main @ 607b75a8"
 新建版本；`MeetingSession.finishAndSummarize` 改用 `sealMeeting` 上报结果，
 封存失败留在 processing 并给出重试/复制出口，不谎报已归档。
 
+1.2 追加（MC-43/MC-35/MC-36 收尾）：快照输入 = 转录终稿 + 已校验的用户补充。
+`verifyEvidenceQuotes` 经协调器透传；生成与恢复续跑两处组装点统一走
+`MinutesSupplements.render`，未选中、未逐字命中、空问答不进入 prompt，
+补充逐条标注身份，不升级成会议事实。
+
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 14 个用例，对应 MC-17、MC-20、MC-25、MC-26、
- MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-44、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 26 个用例，2026-10-04 实测全部通过。
+- `MeetingMinutesVersioningTests` 15 个用例，对应 MC-17、MC-20、MC-25、MC-26、
+ MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-48、MC-49、MC-52、MC-62。
+- 连同 `AssistantPersistenceTests` 共 27 个用例，2026-10-04 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
 

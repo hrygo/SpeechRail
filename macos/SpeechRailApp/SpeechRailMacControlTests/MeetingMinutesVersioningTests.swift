@@ -364,4 +364,22 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(selected?.body, "# 第一版", "调用方选定旧版时必须原样返回旧版正文")
         XCTAssertEqual(selected?.version, 1)
     }
+
+    /// MC-43/MC-35/MC-36：快照补充只收显式选进且全部引文已校验的问答。
+    /// 未选中、未校验、空问答都不进入；标注不升级成会议事实。
+    func testSupplementRenderKeepsOnlyVerifiedSelections() {
+        let rendered = MinutesSupplements.render(
+            questions: [
+                (id: "picked", question: "预算怎么看？", answer: "建议分两期", inMinutes: true),
+                (id: "unpicked", question: "预算怎么看？", answer: "建议分两期", inMinutes: false),
+                (id: "unverified", question: "风险？", answer: "延期", inMinutes: true),
+                (id: "empty", question: "  ", answer: nil, inMinutes: true),
+            ],
+            verifiedIDs: ["picked", "empty"]
+        )
+        XCTAssertTrue(rendered.contains("预算怎么看？"), "已选且已校验的问答应该进入快照")
+        XCTAssertTrue(rendered.contains("用户选择的 AI 补充"), "补充必须标注身份，不升级成会议事实")
+        XCTAssertFalse(rendered.contains("unpicked"), "未显式选进的不进入快照")
+        XCTAssertFalse(rendered.contains("风险？"), "引文未校验的不进入快照")
+    }
 }

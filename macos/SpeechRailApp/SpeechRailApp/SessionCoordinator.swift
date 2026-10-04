@@ -628,6 +628,11 @@ public final class SessionCoordinator {
         try await store.innerOSEvidence(exchangeID: exchangeID)
     }
 
+    /// 引文校验透传（MC-35/MC-36）：纯读，不写库。
+    public func verifyEvidenceQuotes(exchangeID: String) async throws -> [SessionStore.EvidenceQuoteCheck] {
+        try await store.verifyEvidenceQuotes(exchangeID: exchangeID)
+    }
+
     public func setInnerOSInMinutes(exchangeID: String, included: Bool) async throws {
         try await store.setInnerOSInMinutes(exchangeID: exchangeID, included: included)
     }
