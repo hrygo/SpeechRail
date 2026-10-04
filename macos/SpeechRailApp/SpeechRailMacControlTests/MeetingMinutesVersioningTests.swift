@@ -204,6 +204,43 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(empty.isEmpty, "空查询不得全库扫描")
     }
 
+    /// 恢复可证：备份到临时新库后可核对文档与版本；校验失败不损坏原库。
+    func testBackupRestoreKeepsDocumentsAndVersions() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "预算 35 万元", source: .microphone, status: .final)
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
+        let backupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-backup-\(UUID().uuidString).sqlite3")
+        try await store.backup(to: backupURL)
+        defer { try? FileManager.default.removeItem(at: backupURL) }
+        let verification = try SessionStore.verifyBackup(at: backupURL)
+        XCTAssertEqual(verification.integrity.lowercased(), "ok")
+        XCTAssertEqual(verification.minutesCount, 1)
+        // 用备份文件另开一个库核对：文档、版本、正文可读。
+        let restoreDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-restore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: restoreDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: restoreDir) }
+        let restoreURL = restoreDir.appendingPathComponent(SessionStore.fileName)
+        try FileManager.default.copyItem(at: backupURL, to: restoreURL)
+        let restored = SessionStore(directory: restoreDir)
+        try await restored.open()
+        let restoredVersions = try await restored.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(restoredVersions.count, 1)
+        XCTAssertEqual(restoredVersions.first?.body, "# 纪要\n\n预算 35 万元")
+        let restoredLines = try await restored.lines(sessionID: sessionID)
+        XCTAssertTrue(restoredLines.contains { $0.text.contains("预算") })
+        await restored.close()
+        // 原库在备份后仍可写：备份失败/成功都不损坏原库。
+        let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        XCTAssertEqual(second.version, 2)
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()

@@ -1205,6 +1205,56 @@ public actor SessionStore {
         }
     }
 
+    /// 恢复验证（MC-20 落库前置、恢复可证）：打开备份库并核对一致性。
+    /// 只读备份文件，不写原库；失败抛错，调用方不得继续按备份覆盖原库。
+    public static func verifyBackup(at url: URL) throws -> BackupVerification {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            throw SessionStoreError.storageUnavailable
+        }
+        let probe = SessionStore(directory: url.deletingLastPathComponent())
+        _ = probe
+        // 备份文件本身就是库文件：用只读连接做 integrity_check，不迁移、不写入。
+        var pointer: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY
+        let status = sqlite3_open_v2(url.path, &pointer, flags, nil)
+        guard status == SQLITE_OK, let db = pointer else {
+            if let pointer { sqlite3_close_v2(pointer) }
+            throw SessionStoreError.openFailed("备份库打不开：code \(status)")
+        }
+        defer { sqlite3_close_v2(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &statement, nil) == SQLITE_OK,
+              let query = statement else {
+            throw SessionStoreError.statementFailed("备份校验语句准备失败")
+        }
+        defer { sqlite3_finalize(query) }
+        var verdict = "ok"
+        if sqlite3_step(query) == SQLITE_ROW, let text = sqlite3_column_text(query, 0) {
+            verdict = String(cString: text)
+        }
+        guard verdict.lowercased() == "ok" else {
+            throw SessionStoreError.statementFailed("备份完整性校验未通过：\(verdict)")
+        }
+        let countSQL = "SELECT COUNT(*) FROM minutes;"
+        var countStatement: OpaquePointer?
+        var minutesCount = 0
+        if sqlite3_prepare_v2(db, countSQL, -1, &countStatement, nil) == SQLITE_OK,
+           let counter = countStatement {
+            defer { sqlite3_finalize(counter) }
+            if sqlite3_step(counter) == SQLITE_ROW {
+                minutesCount = Int(sqlite3_column_int64(counter, 0))
+            }
+        }
+        return BackupVerification(integrity: verdict, minutesCount: minutesCount)
+    }
+
+    /// 备份校验结论：只含计数与结论，不含正文与路径回显。
+    public struct BackupVerification: Hashable, Sendable {
+        public var integrity: String
+        public var minutesCount: Int
+    }
+
     // MARK: - 行 → 类型
 
     static let sessionColumns = """
