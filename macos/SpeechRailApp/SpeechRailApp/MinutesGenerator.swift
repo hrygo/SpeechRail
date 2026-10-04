@@ -165,6 +165,9 @@ public final class MinutesGenerator {
     public private(set) var state: State = .idle
     public private(set) var versions: [MinutesVersion] = []
     public private(set) var latestBody: String?
+    /// 需复核的纪要版本 id（MC-46 后半句）：来源修订晚于纪要创建。
+    /// `reload` 时随版本列表一起刷新；纯读判断，不写库。
+    public private(set) var versionsNeedingReview: Set<String> = []
     /// 最近一次整理用的服务端响应 id（诊断用；它不是用户内容）。
     public private(set) var lastResponseID: String?
     /// 这一次失败是不是**配置问题**（没填模型 / 地址不对 / 端点没有 Responses API）。
@@ -240,6 +243,7 @@ public final class MinutesGenerator {
                 promptChars: transcript.count
             )
             versions = try await coordinator.minutesVersions(sessionID: sessionID)
+            versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
             guard !configuration.isConfigured else {
                 let task = Task { [weak self] in
                     _ = try? await self?.run(
@@ -265,6 +269,7 @@ public final class MinutesGenerator {
             state = .failed(error.localizedDescription)
         }
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
     }
 
     /// 重开 App 之后回收过期租约：`running` 且租约过期的那些行可以被重新认领（§5.8）。
@@ -311,6 +316,7 @@ public final class MinutesGenerator {
                 verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: row.sessionID)
             )
             versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
+            versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
             let configuration = resolvedConfiguration.configuration
             guard configuration.isConfigured else {
                 // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
@@ -321,6 +327,7 @@ public final class MinutesGenerator {
                 failedOnSetup = true
                 state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
                 versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
                 return
             }
             let task = Task { [weak self] in
@@ -338,6 +345,7 @@ public final class MinutesGenerator {
             state = .failed(error.localizedDescription)
         }
         versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
     }
 
     /// 「停止整理」：取消在飞的那一次。**转录不受影响**——它早就封存好了，
@@ -357,6 +365,7 @@ public final class MinutesGenerator {
     /// 读库刷新（界面切换版本、重新打开这一场时调）。
     public func reload(sessionID: String) async {
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
         let latest = try? await coordinator.latestMinutes(sessionID: sessionID)
         switch latest?.status {
         case .ready:
@@ -377,6 +386,20 @@ public final class MinutesGenerator {
             latestBody = nil
             state = .idle
         }
+    }
+
+    /// 需复核的纪要版本 id（MC-46 后半句）：任一说话人修订事件晚于纪要创建时间。
+    /// 纯读判断，不写库；修订查询失败时返回空集，不误标复核。
+    /// 比较逻辑在 Domain 层（`MinutesReview`），此处只组装库里读到的数据。
+    static func reviewIDs(coordinator: SessionCoordinator, sessionID: String) async -> Set<String> {
+        guard let revisions = try? await coordinator.speakerRevisions(sessionID: sessionID),
+              !revisions.isEmpty
+        else { return [] }
+        let versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
+        return MinutesReview.reviewIDs(
+            versions: versions.map { (id: $0.id, createdAt: $0.createdAt) },
+            revisions: revisions.map(\.createdAt)
+        )
     }
 
     /// 已校验的用户补充 id：问答被显式选进纪要、且其全部引文逐字命中所指转录行。
@@ -436,6 +459,7 @@ public final class MinutesGenerator {
                 )) ?? false
                 guard committed else {
                     versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
+                    versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: version.sessionID)
                     state = .failed("这一版已被新的整理任务接管，旧结果没有覆盖。")
                     return
                 }

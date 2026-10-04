@@ -211,6 +211,32 @@ public enum MinutesSupplements: Sendable {
     }
 }
 
+/// 需复核的纪要版本判断（MC-46 后半句）：任一来源修订晚于纪要创建即需复核。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖；`MinutesGenerator.reviewIDs`
+/// 只是把库里的修订事件与版本列表喂给它。
+public enum MinutesReview: Sendable {
+    public static func needsReview(
+        versionCreatedAt: Date,
+        revisionDates: [Date]
+    ) -> Bool {
+        revisionDates.contains { $0 > versionCreatedAt }
+    }
+
+    public static func reviewIDs(
+        versions: [(id: String, createdAt: Date)],
+        revisions: [Date]
+    ) -> Set<String> {
+        guard !revisions.isEmpty else { return [] }
+        var ids: Set<String> = []
+        for version in versions {
+            if needsReview(versionCreatedAt: version.createdAt, revisionDates: revisions) {
+                ids.insert(version.id)
+            }
+        }
+        return ids
+    }
+}
+
 public enum InnerOSIntent: String, Codable, Sendable {
     case fact
     case analysis

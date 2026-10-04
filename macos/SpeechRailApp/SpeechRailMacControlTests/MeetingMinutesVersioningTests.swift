@@ -237,6 +237,24 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(names["A"], "张三")
     }
 
+    /// MC-46 后半句（Domain 纯逻辑）：只有晚于纪要创建的修订才标复核；
+    /// 无修订、修订不晚于纪要时不标，不误伤。
+    func testMinutesReviewMarksOnlyLaterRevisions() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlier = base.addingTimeInterval(-10)
+        let later = base.addingTimeInterval(10)
+        XCTAssertTrue(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: [later]))
+        XCTAssertFalse(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: []))
+        XCTAssertFalse(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: [earlier]))
+        XCTAssertFalse(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: [base]))
+        let ids = MinutesReview.reviewIDs(
+            versions: [(id: "v1", createdAt: base), (id: "v2", createdAt: later)],
+            revisions: [base.addingTimeInterval(1)]
+        )
+        XCTAssertEqual(ids, ["v1"])
+        XCTAssertTrue(MinutesReview.reviewIDs(versions: [(id: "v1", createdAt: base)], revisions: []).isEmpty)
+    }
+
     /// MC-46 后半句（无迁移实现）：改名后旧纪要标需复核，引用仍指旧 revision。
     /// 修订事件只追加不改正文；复核判断是纯读，不写库。
     func testRenameMarksOldMinutesNeedsReview() async throws {

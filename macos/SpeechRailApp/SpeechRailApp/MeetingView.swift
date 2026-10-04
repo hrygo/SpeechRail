@@ -815,6 +815,14 @@ public struct MeetingView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
             }
+            // MC-46 后半句：正在看的这一版若在来源修订之前创建，提示结论可能已过期。
+            if let viewing = selectedMinutesVersion,
+               meeting.minutes.versionsNeedingReview.contains(viewing.id)
+            {
+                Text("这一版创建之后说话人有过修订，结论可能已过期，引用仍指修订前的原文。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
             if let body = displayedMinutesBody, !body.isEmpty {
                 Text(body)
                     .font(SpeechRailDesignTokens.Typography.body)
@@ -1224,6 +1232,10 @@ public struct MeetingView: View {
                             Text(version.isLatest ? "最新 · 第 \(version.version) 版" : "第 \(version.version) 版")
                                 .font(SpeechRailDesignTokens.Typography.callout)
                             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
+                            if meeting.minutes.versionsNeedingReview.contains(version.id) {
+                                StatusPill(tone: .attention, label: "需复核")
+                            }
                             StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
                         }
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)

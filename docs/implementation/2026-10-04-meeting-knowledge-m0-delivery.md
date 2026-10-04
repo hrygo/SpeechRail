@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.3"
+version: "2.4"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -36,10 +36,10 @@ base: "origin/main @ 607b75a8"
 
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 21 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
+- `MeetingMinutesVersioningTests` 22 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
  MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-46（含后半句：改名记修订事件、旧版标需复核、
- 引用仍指旧 revision，重复同名不刷事件）、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 33 个用例，2026-10-05 实测全部通过。
+ 引用仍指旧 revision，重复同名不刷事件；Domain 纯逻辑只标晚于创建的修订）、MC-48、MC-49、MC-52、MC-62。
+- 连同 `AssistantPersistenceTests` 共 34 个用例，2026-10-05 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
 
@@ -53,6 +53,10 @@ base: "origin/main @ 607b75a8"
   经 `SessionCoordinator` 透传。
 - `voiceChanges` 收敛为只读 `kind = 'voice'`，说话人修订不混进音色变更点，
   既有回看徽标与快照语义不受污染（`AssistantPersistenceTests` 快照用例仍全过）。
+- v2.4 接线：`MinutesGenerator.versionsNeedingReview` 随版本列表刷新（含 `reload` 与
+  生成/恢复各组装点），比较逻辑下沉 Domain 层 `MinutesReview`；`MeetingView`
+  在版本行标“需复核”徽标，查看旧版时正文上方提示结论可能过期。`MeetingView`
+  不进 SPM 测试目标，仅做 `swiftc -parse` 语法检查；判断逻辑由 Domain 纯逻辑回归覆盖。
 
 ## 迁移说明
 
