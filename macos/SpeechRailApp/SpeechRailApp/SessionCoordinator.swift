@@ -730,6 +730,15 @@ public final class SessionCoordinator {
         try await store.pendingMinutesRows()
     }
 
+    /// 跨会议知识检索：转录终稿与已完成纪要，不含私密问答（MC-44、MC-49、MC-52）。
+    public func searchKnowledge(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200
+    ) async throws -> [SessionStore.KnowledgeHit] {
+        try await store.searchKnowledge(query: query, kind: kind, limit: limit)
+    }
+
     public func searchLines(
         query: String,
         kind: SessionKind? = nil,

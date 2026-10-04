@@ -181,6 +181,29 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(versions.first?.body, "# 恢复完成")
     }
 
+    /// MC-44/MC-49/MC-52：知识检索命中转录与已完成纪要，不含私密问答；空查询不扫库。
+    func testSearchKnowledgeExcludesPrivateExchanges() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "预算 35 万元", source: .microphone, status: .final)
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
+        _ = try await store.saveInnerOSExchange(
+            InnerOSExchange(id: "inner-1", sessionID: sessionID, askedAt: Date(), question: "预算 35 万元怎么看？", answerText: "私密分析", status: .ready)
+        )
+        let hits = try await store.searchKnowledge(query: "预算")
+        XCTAssertFalse(hits.isEmpty, "转录与纪要应该被检索到")
+        XCTAssertTrue(hits.allSatisfy { $0.excerpt.contains("预算") })
+        XCTAssertTrue(hits.contains { $0.lineID != nil })
+        XCTAssertTrue(hits.contains { $0.minutesID != nil })
+        XCTAssertFalse(hits.contains { $0.excerpt.contains("私密分析") }, "私密问答不得进入知识检索")
+        let empty = try await store.searchKnowledge(query: "   ")
+        XCTAssertTrue(empty.isEmpty, "空查询不得全库扫描")
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()

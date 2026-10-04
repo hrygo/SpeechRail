@@ -906,6 +906,92 @@ public actor SessionStore {
         }
     }
 
+    /// 知识检索结果：只含可展示的正文与纪要，不含私密问答（MC-44）。
+    /// `excerpt` 是命中片段原文（调用方负责截断展示），不是完整转写回显。
+    public struct KnowledgeHit: Hashable, Sendable {
+        public var sessionID: String
+        public var kind: SessionKind?
+        public var lineID: String?
+        public var minutesID: String?
+        public var version: Int?
+        public var excerpt: String
+        public var ordinal: Int?
+        public var createdAt: Date
+    }
+
+    /// 跨会议知识检索（MC-49、MC-52、MC-54）：转录终稿与已完成纪要正文。
+    /// 私密问答（`inner_os_exchange`）默认不在范围内，不得隐式带出（MC-44）。
+    /// 空查询返回空数组，不做全库扫描。
+    public func searchKnowledge(query: String, kind: SessionKind? = nil, limit: Int = 200) throws -> [KnowledgeHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let pattern = "%" + trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_") + "%"
+        var hits: [KnowledgeHit] = []
+        let lineSQL = """
+        SELECT l.session_id, s.kind, l.id, l.text, l.ordinal, l.created_at
+        FROM line l JOIN session s ON s.id = l.session_id
+        WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
+        \(kind == nil ? "" : "AND s.kind = ?")
+        ORDER BY s.started_at DESC, l.ordinal ASC
+        LIMIT ?;
+        """
+        try withStatement(lineSQL) { statement in
+            bind(statement, 1, pattern)
+            var index: Int32 = 2
+            if let kind {
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            bind(statement, index, limit)
+            while try step(statement) == SQLITE_ROW {
+                hits.append(KnowledgeHit(
+                    sessionID: columnText(statement, 0) ?? "",
+                    kind: columnText(statement, 1).flatMap(SessionKind.init(rawValue:)),
+                    lineID: columnText(statement, 2),
+                    minutesID: nil,
+                    version: nil,
+                    excerpt: columnText(statement, 3) ?? "",
+                    ordinal: Int(columnInt(statement, 4)),
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                ))
+            }
+        }
+        guard hits.count < limit else { return hits }
+        let minutesSQL = """
+        SELECT m.session_id, s.kind, m.id, m.version, m.body, m.created_at
+        FROM minutes m JOIN session s ON s.id = m.session_id
+        WHERE m.status = 'ready' AND m.body IS NOT NULL AND m.body LIKE ? ESCAPE '\\'
+        \(kind == nil ? "" : "AND s.kind = ?")
+        ORDER BY s.started_at DESC, m.version DESC
+        LIMIT ?;
+        """
+        try withStatement(minutesSQL) { statement in
+            bind(statement, 1, pattern)
+            var index: Int32 = 2
+            if let kind {
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            bind(statement, index, limit - hits.count)
+            while try step(statement) == SQLITE_ROW {
+                hits.append(KnowledgeHit(
+                    sessionID: columnText(statement, 0) ?? "",
+                    kind: columnText(statement, 1).flatMap(SessionKind.init(rawValue:)),
+                    lineID: nil,
+                    minutesID: columnText(statement, 2),
+                    version: Int(columnInt(statement, 3)),
+                    excerpt: columnText(statement, 4) ?? "",
+                    ordinal: nil,
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                ))
+            }
+        }
+        return hits
+    }
+
     /// 匿名标签 → 用户手写的名字。正文与时间码从不改写（§15.3 第 2 条）。
     public func speakerNames(sessionID: String) throws -> [String: String] {
         let sql = "SELECT label, display_name FROM speaker_name WHERE session_id = ?;"
