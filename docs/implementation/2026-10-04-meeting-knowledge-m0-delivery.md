@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.4"
+version: "2.5"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -57,6 +57,11 @@ base: "origin/main @ 607b75a8"
   生成/恢复各组装点），比较逻辑下沉 Domain 层 `MinutesReview`；`MeetingView`
   在版本行标“需复核”徽标，查看旧版时正文上方提示结论可能过期。`MeetingView`
   不进 SPM 测试目标，仅做 `swiftc -parse` 语法检查；判断逻辑由 Domain 纯逻辑回归覆盖。
+- v2.5 导出口径（MC-25/MC-48）：记录库导出、会议页回看、重新生成后刷新、会议页导出
+  （未选旧版时）统一读 `latestUsableMinutes`；最新尝试失败时不拿失败版空正文遮旧版，
+  无可用版时导出只出转录。会议页导出已选旧版时仍固定该版。库层口径由既有
+  `testLatestUsableStaysAfterFailedAttempt` / `testLatestUsableMinutesReturnsNewestReady`
+  覆盖；View 层仅做 `swiftc -parse` 语法检查，未做界面走查。
 
 ## 迁移说明
 

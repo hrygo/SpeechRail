@@ -518,7 +518,9 @@ public struct SessionLibraryView: View {
     private func exportPayload(for summary: SessionSummary) async -> SessionExportPayload {
         let rows = (try? await session.lines(sessionID: summary.id)) ?? []
         let names = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        let minutes = try? await session.latestMinutes(sessionID: summary.id)
+        // MC-25：最新尝试失败时导出最新可用版，不让纪要章节凭空消失。
+        // 无可用版时为 nil，导出物只出转录。
+        let minutes = try? await session.latestUsableMinutes(sessionID: summary.id)
         return SessionExportPayload(
             record: summary.record,
             lines: rows,

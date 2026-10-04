@@ -942,7 +942,7 @@ public struct MeetingView: View {
             resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
         )
         if reviewRecord?.id == id {
-            reviewMinutes = try? await session.latestMinutes(sessionID: id)
+            reviewMinutes = try? await session.latestUsableMinutes(sessionID: id)
             selectedMinutesVersionID = nil
             postTab = .minutes
             return
@@ -988,7 +988,8 @@ public struct MeetingView: View {
                 if let pinnedMinutesID {
                     try? await session.minutesVersion(id: pinnedMinutesID)
                 } else {
-                    try? await session.latestMinutes(sessionID: id)
+                    // MC-25：没选旧版时导最新可用版；最新尝试失败不带空正文。
+                    try? await session.latestUsableMinutes(sessionID: id)
                 }
             } else {
                 nil
@@ -1016,7 +1017,8 @@ public struct MeetingView: View {
         reviewRecord = record
         reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        reviewMinutes = try? await session.latestMinutes(sessionID: summary.id)
+        // MC-25：回看读最新可用版；最新尝试失败时不拿失败版的空正文遮旧版。
+        reviewMinutes = try? await session.latestUsableMinutes(sessionID: summary.id)
         selectedMinutesVersionID = nil
     }
 
