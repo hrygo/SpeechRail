@@ -218,6 +218,8 @@ public struct AssistantView: View {
         // 页头按钮、`⌘⇧.`、菜单栏三个入口因此有同一个结局。
         // VA-01：助手专属结束同时发布 coordinator 与 assistant 两处结果；
         // 文字记录只走 assistant 结果，语音两者一致，任一到达都落地。
+        // 双发布是预期的：`landOnFinalized` 幂等（第二次 `state == .review`
+        // 直接返回），不会 double-navigate。
         .onChange(of: session.lastFinalizedSessionID) { _, newValue in
             guard let newValue else { return }
             Task { await landOnFinalized(id: newValue) }
