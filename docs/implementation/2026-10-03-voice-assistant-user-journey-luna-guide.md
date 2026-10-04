@@ -8,9 +8,9 @@ date: 2026-10-03
 # 语音助手用户旅程优化：Luna 详细执行方案
 
 - 原方案：[SpeechRail 语音助手：按用户旅程优化的详细可执行方案](SpeechRail_Voice_Assistant_User_Journey_Executable_Plan_2026-10-03.md)。已从 Downloads 原样移动至本目录，SHA-256：`6ecc49163cc03dbcea08f98347cba8ddfc4dbe6ca44b53bd232b17131d62ebf6`。
-- 本地核验：2026-10-03，Asia/Shanghai；`main`，HEAD `be75055cc0a5f7f044ae56c955896812a1d69915`，与原方案基线一致。未核验远端是否存在后续提交。
+- 本地核验：2026-10-03，Asia/Shanghai；分析基线为 `main` 的 `be75055cc0a5f7f044ae56c955896812a1d69915`，与原方案一致。交付复核时 HEAD 为 `69000d1f`，期间新增提交仅涉及文档，业务源码基线未变；这些提交并非本轮创建。未核验远端是否存在后续提交。
 - 本轮范围：原方案移动、源码与契约分析、执行方案落盘。业务代码、数据库、服务配置均未修改；测试、构建、真实模型、录音、UI 自动化、提交、推送和发布均未执行。
-- 已存在的三份未跟踪文档属于其他任务：`2026-10-03-roi-evolution-luna-guide.md`、`2026-10-03-teleprompter-user-journey-luna-guide.md`、`SpeechRail_Teleprompter_User_Journey_Executable_Plan_2026-10-03.md`。不得修改或混入本任务交付。
+- 分析开始时已存在的三份未跟踪文档属于其他任务：`2026-10-03-roi-evolution-luna-guide.md`、`2026-10-03-teleprompter-user-journey-luna-guide.md`、`SpeechRail_Teleprompter_User_Journey_Executable_Plan_2026-10-03.md`。交付复核时已在上述文档提交中跟踪；本轮保留其内容，不修改或混入本任务交付。
 - **100% 的口径是方案需求覆盖**：F01～F18、VA-01～VA-18、A01～A60及原方案各章节均有实施或条件决策落点。它不表示代码覆盖率、测试通过率、真实质量或性能已经达到 100%。验收状态初始全部为 `not_run`。
 - 路径简写：`APP` = `macos/SpeechRailApp/SpeechRailApp/`；`TEST` = `macos/SpeechRailApp/SpeechRailMacControlTests/`；命令默认在仓库根目录执行。下文标为“拟新增”的类型、方法、文件、测试和工具尚不存在，不能当成现有接口调用。
 - 原方案中的远端分支、Draft PR、发布、性能目标和运行命令均为材料建议，不构成授权。后续实施按当时用户要求与 `AGENTS.md` 执行。
@@ -155,7 +155,30 @@ M0/M1 可先交付；M2/M3 全部保留执行定义。未授权或未测的真�
 
 VA 的“完成”需要对应 D 回归和文档一致；U/R 未执行时必须保留独立 `not_run`。工作包覆盖表与 A 场景表不得以区间概括掩盖漏项。
 
-原方案 §0～§19 的对应：§0/1→本文件 §1/2；§2～10→§3/5/7；§11→§4/6；§12/13→§5/10；§14→§7；§15/16→§7/8；§17→§6.7/9；§18→§4.2/9；§19→§2/8。性能目标与隐私约束沿原方案 §15 全量承接。
+原方案章节逐项对应如下；条件增强也必须记录决策与未执行原因。
+
+| 原方案章节 | 本文件执行与验证落点 |
+|---|---|
+| §0 决策摘要 | §1里程碑、§5 VA-01～06优先顺序 |
+| §1 当前基线与源码发现 | §2 F01～F18源码映射、§7前三个最小反例 |
+| §2 产品定位、场景与完整旅程 | §3不变量与十二态、§4.2产品边界 |
+| §3 首次进入、配置和开始 | VA-06～08、A16/A19/A21～A27 |
+| §4 说话、打字与输入保真 | VA-03/07/09/13、A05～A08/A28～A34 |
+| §5 接话、插话与取消 | VA-02/13、§6.2、A03/A04/A08/A55～A58 |
+| §6 生成回复与流式朗读 | VA-10～12、§6.5、A33～A44 |
+| §7 长对话、记忆与上下文 | VA-06/14、§6.6、A21～A24/A41/A45/A46/A48 |
+| §8 异常、降级与恢复 | VA-04/05/07/10/16、§9回退顺序、A04/A15～A20/A47/A52～A55 |
+| §9 结束、记录与继续 | VA-01/03/15、§6.3/6.7、A01/A02/A05～A07/A18/A47/A49～A51 |
+| §10 UI交付规格 | §3.2十二态、VA-08/09、A25～A32及U人工清单 |
+| §11 工程结构与关键不变量 | §3.1、§4.1、§6.1～6.6身份与顺序合同 |
+| §12 详细工作包 | §5全部18包、§10依赖和完成定义 |
+| §13 实施节奏、协作与交付顺序 | §1里程碑、§10顺序/唯一写入者/提交授权 |
+| §14 60个可执行验收场景 | §7.2 A01～A60逐行入口与断言、D/U/R子状态 |
+| §15 评价指标、样本设计与候选目标 | §8.3全部指标/候选值/失败分母、§8.4设备样本与隐私 |
+| §16 测试与验证执行说明 | §7测试落点、§8.2定向命令/发现数量/真实验收授权 |
+| §17 数据迁移、发布与回退 | §6.7事务迁移、VA-18发布门禁、§9恢复与资产保护 |
+| §18 本轮不做与后续决策 | §4.2范围、VA-07/12/13/14条件增强、§9决策闭环 |
+| §19 证据索引与适用边界 | §2核验来源和局限、§8实测分级；原作者在线资料不冒充本轮核验 |
 
 ## 5. 详细实施步骤
 
@@ -377,6 +400,8 @@ VA 的“完成”需要对应 D 回归和文档一致；U/R 未执行时必须�
 
 **依赖**：随全部工作包演进，不等最后才补测试。
 
+**文件**：§7.1列明的生产路径测试、`tests/fixtures/assistant_realtime_lifecycle.json`；拟新增U/REAL验收文档和验收账本。评估工具拟新增于 `macos/SpeechRailApp/Tools/AssistantReplayEvaluator/`，其共享评估逻辑与CLI入口分文件；获得实施授权后在 `Package.swift` 声明实际target与测试依赖。
+
 1. §7按每个A提供具体D测试或U/R脚本；新测试均走生产组件，跨端fixture继续共用。拟新增纯manifest驱动的`AssistantReplayEvaluator`与离线runner，只消费仓库外已授权素材/事件，输出去标识聚合。
 2. runner清晰分event-only/input replay/真实扬声器麦克风闭环；离线转写事件不能证明AEC、双讲或设备尾音。真实采集/模型调用的操作者与素材同意需另行授权。
 3. manifest必填素材授权、设备/系统/模型/voice revision、policy、标注时间、真实输入/输出路径。仓库内仅schema、合成fixture与工具；素材路径/正文不进交付报告。
@@ -389,6 +414,8 @@ VA 的“完成”需要对应 D 回归和文档一致；U/R 未执行时必须�
 
 **依赖**：VA-11/13/16/17；功能变更先达到安全不变量。
 
+**文件**：`macos/SpeechRailApp/Package.swift`、`macos/SpeechRailApp/SpeechRailApp.xcodeproj/project.pbxproj`、`docs/developers/macos-app-development.md`、设计系统入口及其链接的会话文档；优化代码只涉及VA-16/17证据定位到的现有组件。
+
 1. 固定baseline policy/config/sample/设备；按§8指标识别瓶颈。候选仅限UI合批、LLM读取与TTS启动有界解耦、capture分包、预检缓存，不为全部候选预先改代码。
 2. 每个优化写“假设→基线→单项改动→同配置对照→失败/资源/保真→启用或否决”。cache key含route/capability revision，变更失效；不能为了延迟跳过必要版本/数据同意。
 3. 输出未优化决定也需说明证据/成本/保留理由。无R证据不宣称首音/插话改善，无性能授权不运行benchmark。
@@ -397,3 +424,430 @@ VA 的“完成”需要对应 D 回归和文档一致；U/R 未执行时必须�
 6. 构建/安装/发布按专项release skill与独立授权；无需顺手重启服务、下载模型或改档位。完整gate按明确要求才跑。
 
 **完成条件**：§8门禁、18包与60场景账本闭环；报告里单列代码验证、UI、声学、性能、迁移、安装状态。建议提交点：`docs: align assistant journey contracts with verified behavior`；性能改动每项独立commit。
+
+## 6. 关键实现说明
+
+### 6.1 身份、资源与动作归属
+
+下表是拟落地的语义合同，具体名字可沿用已有字段；不得合并不同生命周期。
+
+| 身份 | 生成与失效点 | 有权改变的对象 |
+|---|---|---|
+| conversationID/recordID | 新文字或语音场创建，结束后不复用 | 本场记录、context、history、用户行 |
+| startGeneration | start/end/retry取消同步推进 | startup私有资源与发布资格 |
+| deviceLeaseID | coordinator grant时生成，设备停止完成后释放 | 该功能占用、设备、计时；文字无lease |
+| connectionGeneration | 每次建连生成；drain完成/关闭后撤销 | 当前transport；draining只归档尾句 |
+| questionID/submissionOrdinal | 接纳输入时固定，重试不再分配问题ID | 用户行、确定顺序、回答attempt关联 |
+| replyID/replyGeneration | 每次回答attempt生成 | 该回答原文、状态、保存claim |
+| ttsRequestID | 每次utterance一次start生成 | matching ACK/audio/terminal与退休屏障 |
+| playbackInvocationID/epoch | 每次首次朗读/重播/试听生成 | 目标turn的本次播放，不能修改另一回复 |
+| storeOperationID/textRevision | 每次保存操作/正文变更生成 | 固定目标行；仅新revision可推进正文 |
+| input commitID/水位marker | freeze uploader后生成 | 本connection截至水位的ASR与保存结果 |
+
+**跨 await 统一规则**：捕获目标→调用外部操作→按捕获目标登记结果→再次比较当前目标→匹配才更新当前共享显示。身份不同不代表旧操作可不收尾；它仍必须关闭自有资源、完成旧record事务、释放自己的waiter。
+
+共享reference compare-and-clear需使用对象/lease身份，不能只比是否nil或功能kind。reply取消是逻辑撤权，播放器停止才是本地输出屏障，terminal才是远端空闲证据。
+
+### 6.2 接收与副作用的顺序
+
+拟实现的伪代码：
+
+```text
+receive(envelope):
+    validate conversation + connection eligibility
+    if control ACK/terminal:
+        resolve matching coordinator latch synchronously
+        publish current-owned state only
+    if speech evidence:
+        validate item/revision/nonempty
+        reduce partial/final in sequence
+        claim one interrupt intent if predecessor still owns output
+        enqueue owned interrupt effect; do not await it here
+    if audio:
+        validate request/epoch
+        reserve bounded queue slot or fail closed
+        enqueue to one audio consumer
+    if final:
+        register ordered persistence operation
+        if draining: archive only
+        else: submit next turn through the arbiter
+```
+
+effect持有session/connection/request/intent；完成后消息回归约器。取消effect、replyTask、upload、receive、音频consumer和timeout都有句柄，结束时只回收该场任务。
+
+`withTaskGroup`竞速取消不保证子任务立即退出：不响应取消的依赖可能令group scope继续等。截止任务、continuation、底层close必须能终止对应waiter；超时后不能无限等待整个任务树。不得用遗失句柄的Task绕开问题。
+
+手动stop回执首先确认本地屏障；远端等待另显示可恢复状态。local stop永远优先于ASR、语义判断、Store与网络。
+
+### 6.3 结束顺序与水位
+
+```text
+active
+  → ending target once-claim、拒绝新start/submit/output
+  → 立即启动local playback stop屏障与old TTS取消effect（receiver继续）
+  → capture stop生产并排出准入尾部
+  → uploader按准入规则排空；记录累计发送wire样本
+  → commit(request_receipt=true)
+  → draining receiver保存matching connection的final
+  → 收到并处理应用inputDrainReceipt marker
+  → 等待marker前保存结果
+  → seal record成功/失败
+  → close transport + stopAndWait硬件 + release matching lease
+  → 发布真实结束结果；成功保存才给saved recordID
+```
+
+本地停播不等待capture、uploader、远端terminal或Store；输入排空与有所有权的取消effect可并行，最终关闭前按各自结果收尾。结束后的uploader不能沿用“`isStoppingIntentionally`则丢弃所有chunk”的旧guard。改为只允许在结束边界前捕获且原策略准入的尾部；静音期间本来不应上传的PCM继续丢弃并计policyDiscard，不伪装网络drop。不把PCM存到数据库或恢复文件。
+
+输入receipt字段已有契约，不需要修改服务。新增内部marker影响其他Event消费者时，caption/meeting/teleprompter明确忽略或复用；更新穷尽switch，不能误触发其他功能收尾。
+
+保存marker登记顺序必须在队列归约时固定；晚到final在marker之后且超出收尾范围不得加进已封存record。断线/timeout结果分别标`input_unconfirmed`、`persistence_failed`、`device_stop_failed`，不能合成“全部成功”。
+
+### 6.4 回复的收尾 claim 与错误单向合并
+
+拟持久化状态（与生成状态、播放状态分别维护）：
+
+```text
+streaming
+  → finalizing(claimID, targetTextRevision, termination)
+  → saved(textRevision, ordinal)
+  → 或 saveFailed(pendingSnapshot, error)
+```
+
+claim已存在时，第二个结束原因合并到同一目标；不得再启动第二个Store INSERT。迟到completed不覆盖interrupted/failed；正文只在revision更大时更新。新delta被逻辑撤权后不进入旧正文。
+
+once-claim与saved不同：claim阻止重复副作用，saved需要数据库确认。失败可按相同ID/revision重试，成功只投影一次。错session/role、数据库busy/磁盘错误不能被解读为missing row。
+
+history以turn identity组装；当前问题没有对应可用回答时不凭空造助手行，refusal保留实际可见内容和真实结果。生成完成但播放中断时保持完整原答案，并附“朗读未完成；未有可靠逐字对齐”说明。
+
+### 6.5 预算、切分和服务限额
+
+| 预算 | 计量 | 超限行为 |
+|---|---|---|
+| provider单事件 | UTF-8 bytes，按现有decoder边界配置防滥用 | 拒绝畸形/过大事件，保留此前正文；不用append512衡量 |
+| Session整轮原文 | Unicode scalar/明确模型输出token上限 | 有界终止生成或明确失败，保留此前结果 |
+| TTS pending原文 | Unicode scalar | 原子拒绝新输入，停止朗读并可看文字 |
+| TTS单append | 清洗后Unicode scalar，与wire codepoint一致 | 按协商更小值安全拆；不拒合法大delta |
+| TTS整轮sent | 清洗后实际sent scalar | 提交前预检；超限停止该utterance |
+| 播放/下行音频 | 24k mono samples/PCM bytes，注明单位 | 有界背压；满则明确失败，不静默丢音 |
+| 上下文请求 | 已知模型token budget；未知时明确客户端scalar/turn限制 | 裁剪完整历史turn；当前问题/固定指令过大明确拒绝 |
+
+总budget不是把不同计量直接相加。Unicode scalar与grapheme不能混用；清洗可能缩短/扩长文本，因此raw/offered/sent/ACK各有定义。
+
+不得在pending满时盲切可能改变数值含义的token。最终输入结束且token完整可flush；模型中断时仍未完整的token采用停止朗读+查看文字，不补零、不猜单位。
+
+### 6.6 配置、记忆和发送范围
+
+- runtime snapshot与Store记录分开：Store记录非秘密route/model/persona/voice信息，不落key、Authorization或完整系统prompt。
+- 会话路由冻结包含协议与thinking控制；现有MacPaw/OpenAI依赖版本不因本任务升级。provider必要错误分类留在现有adapter。
+- consent以明确目的地、用途、内容类别/范围建立；同地址改为发送全部历史仍需要范围确认。地址分类不是数据最终流向保证。
+- 默认memory下一新场生效，当前场仍持快照时面板明确显示；用户显式“当前对话应用”才停止当前生成并重建下一轮快照。
+- 假设ASR关键数值“可信概率”或语义模型可稳定保证事实是不可接受的；D仅验证策略文字、分包和状态，R验证实际模型行为。
+
+### 6.7 拟新增 schema v2 与保护用户资产
+
+推荐在VA-04/12/14/15共享一次**加法、事务性v2迁移**。v2接口在首个使用它的工作包一起落地；不可先发布依赖v2的调用，再把迁移留到最后。
+
+保留现有`session.state`、`line.status`、source、ordinal、starred、timing以及旧`interrupted`数据。新增精准状态不通过重写旧Bool来猜：
+
+| 拟新增结构 | 字段/约束 | 用途 |
+|---|---|---|
+| `assistant_reply_state`表 | `line_id` PK/FK；`session_id` FK；`question_line_id` nullable FK；`attempt_index`；`text_revision`；`generation_state`；`termination_code` nullable | generating/completed/interrupted/failed/refused/unknown；Store写入前确认line为该session的assistant |
+| `assistant_playback_invocation`表 | `id` PK；`line_id`/`session_id` FK；voice/revision nullable；purpose；state；rendered/played证据计数；created_at/ended_at | 每次首次朗读/重播独立，失败/停止不改别的turn；无逐字对齐时不存伪造范围 |
+| `assistant_continuation`表 | `session_id` PK/FK；`parent_session_id` nullable FK `ON DELETE SET NULL`；选定来源lineIDs；有界seed snapshot JSON；policy/version | 子记录继续所需的冻结选定文字；父删除不损坏子上下文 |
+| `assistant_memory_provenance`表 | `memory_id` PK/FK；source line/role nullable；scope；确认时间 | 明确确认来源与作用范围；旧memory未知来源不补造 |
+
+拟状态取值使用CHECK与decoder校验；`saveFailed`只在内存/可恢复交付中表达，不能向已失效DB写“保存失败”后就宣称恢复可靠。未保存文本复制是用户显式动作，不自动新增落盘日志。
+
+迁移算法：
+
+1. `user_version > supported`继续fail closed；不开库写入，不自动降级。
+2. `version == 0`执行现有schemaV1，再执行v2；`version == 1`只执行v2；全部在一个BEGIN IMMEDIATE/COMMIT内，最后更新user_version。
+3. v2建新增表/索引，不重新执行schemaV1、不清用户表、不改已有正文/序号/时间轴。失败ROLLBACK并保持原version。
+4. 旧line无新表行：generation/playback精确状态显示unknown，旧interrupted作为历史证据呈现，不等同“全文已播放”。旧memory无provenance不假造source role。
+5. 临时合成v1库含assistant/meeting/captions、star、partial、voice change、memory与孤立异常测试，校验row count/正文/关系均保留；旧库迁移失败、未来版本、二次open与空库分别回归。
+6. abandoned session恢复同时标新播放invocation为interrupted/unknown并保留生成事实；不能把播放未结束统一改为生成失败。更新review/list/export取值与partial计数规则；ASR未确认partial仍不假装正式final。
+7. 真实数据库备份/迁移只在以后用户授权实施运行态时执行。使用现有`SessionStore.backup(to:)`保障WAL一致性，不在运行中仅复制主sqlite文件。
+
+v1 App回读v2会按现有future schema规则拒绝。回滚优先保留v2兼容的安全客户端、退policy；确需旧App时停止写入、先导出备份后新增内容，再恢复已验证v1备份，禁止直接覆盖导致新资产丢失。
+
+## 7. 测试方案
+
+### 7.1 测试落点与级别
+
+以下测试入口缩写仅用于表格，文件仍按真实目录组织。**所有新增测试名均为拟新增，现有文件扩展不意味着现有用例已经包含对应断言。**
+
+| 简写 | 文件/资产 | 主要责任 |
+|---|---|---|
+| E | 拟新增`TEST/AssistantEndRoutingTests.swift` | 助手目标动作与设备/记录隔离 |
+| S | 现有`TEST/AssistantSessionTests.swift` | 生产Session完整事件流、文字/语音切换与配置 |
+| RACE | 拟新增`TEST/AssistantReplyPersistenceRaceTests.swift` | Store Gate跨await、幂等与状态三方一致 |
+| T | 现有`TEST/AssistantTTSStreamCoordinatorTests.swift` | 退休屏障、ACK/限额、背压和终态 |
+| B | 现有`TEST/AssistantSpeechTextBufferTests.swift` | 分包、scalar、数字/词/Markdown |
+| L | 现有`TEST/AssistantPlaybackLedgerTests.swift` | played/rendered、旧epoch与预算 |
+| P | 拟新增`TEST/AssistantPresentationTests.swift` | 12态、动作、文字可用性、历史状态 |
+| C | 拟新增`TEST/AssistantComposerPolicyTests.swift` | 草稿、模板、发送快照、followLatest |
+| CTX | 拟新增`TEST/AssistantContextBuilderTests.swift` | 路由、预算、交付说明与memory数据边界 |
+| DB | 现有`TEST/AssistantPersistenceTests.swift`，拟新增`AssistantStoreMigrationTests.swift` | 保存/封存失败、v1→v2、未来版本与恢复 |
+| V | 现有`TEST/VoicePromptTests.swift`和`LLMProviderTests.swift` | 模态提示、拒答/中断/EOF契约 |
+| O | 拟新增`TEST/AssistantObservabilityTests.swift`，现有`AudioSampleRingTests.swift` | drop/单位/时钟/无样本/观察失败 |
+| U | 拟新增`docs/implementation/2026-10-03-voice-assistant-ui-acceptance.md` | 真实12态、IME、焦点、无障碍人工检查 |
+| REAL | 拟新增`docs/implementation/2026-10-03-voice-assistant-real-acceptance.md`；仓库外manifest/素材 | 真实设备、模型、音频闭环与长时报告 |
+
+D使用生产组件+fake/合成临时SQLite；U为人工操作或当前用户明确授权的前台自动化；R为另行授权的真实模型/设备/素材。下面mixed场景分别记录子结果，初始均`not_run`。
+
+### 7.2 A01～A60完整执行与断言矩阵
+
+| ID | 类型 | 工作包/测试入口（拟新增用例标识） | 操作与最低断言 |
+|---|---|---|---|
+| A01 | D/U | VA-01；E `testA01TextEndWithoutOccupancy`；U | 建纯文字场→助手结束；自身record archived、Session idle，mic/Realtime计数为0，非no-op |
+| A02 | D/U | VA-01；E `testA02TextEndWhileMeetingOwnsLease`；U | 会议占用时建文字场并结束；会议lease/occupancy/phase/record/stopper均不变 |
+| A03 | D | VA-02；S `testA03BargeInTerminalThroughReceiveLoop` | 正在朗读→同一流hypothesis→cancel→该流匹配terminal；不依赖timeout，连接可继续；严禁直接调用terminal handler |
+| A04 | D | VA-02；S/T `testA04CancelTimeoutFailsClosed` | 分别注入cancel写失败/无terminal；local stop先完成、bounded结果、连接关闭；late audio不恢复 |
+| A05 | D | VA-03；S `testA05TailFinalDuringDrainArchivesOnly` | ending后发final及receipt；尾句原record写一次、LLM/TTS计数不增，封存晚于保存 |
+| A06 | D | VA-03；S/DB `testA06ReceiptCannotBypassStoreGate` | receipt已到、final写入Gate挂起；无已保存ID/成功带；释放Gate后可读archived |
+| A07 | D | VA-03；S `testA07DrainClassifiesEmptyFailedAndTimeout` | timeout、failed、正常空输入、空final但有hypothesis分别测；保留已有内容，结果类别不混 |
+| A08 | D | VA-02/13；S `testA08EvidenceEmptyDuplicateAndFinalOnly` | empty/blank/重复revision不cancel；final-only在前任收尾后接管，用户行一次 |
+| A09 | D | VA-04；RACE `testA09LatePartialInsertKeepsNewReply` | A建partial返回Gate→接纳B→释放A；A可存，B正文/current不被旧副本覆盖 |
+| A10 | D | VA-04；RACE `testA10LateFinalizeCannotClearNewReply` | A finalize await中开启B→A返回；B streaming/history/phase不清，A按ID归位一次 |
+| A11 | D | VA-04；RACE `testA11ConcurrentTerminationClaimsOnce` | stop/end/provider失败争同reply；一行/一history projection，late completed不清interrupted/failed |
+| A12 | D | VA-04；S `testA12ConsecutiveInputsRetirePredecessor` | 首轮生成/朗读时接纳第二问；问题顺序确定、前任终态可见、最多一个活跃TTS |
+| A13 | D | VA-05；S `testA13OldRequestCannotChangeNewState` | B活动注入A audio/failed/cancelled；B phase/闭麦/error/正文不变，A音频不入队 |
+| A14 | D | VA-05/12；L/S `testA14OldPlaybackEpochCannotRefundNewBudget` | B epoch下发A rendered/played；B预算与完成证据不变 |
+| A15 | D | VA-05；S `testA15SupersededStartupCleansPrivateLeaseOnly` | A建档Gate→结束A→启动B→放A；只清A私有资源，B source/client/record/lease有效 |
+| A16 | D/U | VA-07；S/P `testA16DeniedMicrophoneKeepsTextUsable`；U | 拒mic后typed；可生成保存、文字态、无再次权限请求 |
+| A17 | D/U | VA-07；S `testA17VoiceLossKeepsTextContext`；U | voice断线，LLM/DB可用→typed；同record/history，streamFailed不挡发送 |
+| A18 | D/U | VA-01；E `testA18RepeatedAndReviewedEndTargets`；U | 重复按钮/快捷键；review旧record时活跃助手明确target；once结束、不停无关lease |
+| A19 | D/U | VA-07；E/S `testA19VoiceUpgradeRequiresOccupiedLeaseDecision`；U | 文字开启voice但会议占用；明确confirm，拒绝保文字，批准后reuse同record |
+| A20 | D | VA-06/07；S `testA20RetryPreservesConversationMuteAndRoute` | 失败重连再重连且mute；record/ordinal/history/route/memory/mute保持 |
+| A21 | D/U | VA-06；S/CTX `testA21PreferencesCannotRerouteLiveConversation`；U | 全局endpoint A→B；active仍请求A，下一新场B；显示下次生效 |
+| A22 | D | VA-06；CTX/S `testA22TextAndVoiceShareContextInitialization` | 同persona/memory selection新文字与语音场；captured上下文语义一致，仅模态不同 |
+| A23 | D | VA-06；S `testA23MemoryLoadFailureNeverReusesPreviousSession` | A有memory→结束，B加载throw；B空memory且有提示，不持旧数组 |
+| A24 | D/U | VA-06；CTX/P `testA24ConsentTracksDestinationAndPayloadScope`；U | 首次外部发送历史/memory→拒绝/批准→换目的地/扩大范围；新同意必要，拒绝不发送 |
+| A25 | D/U | VA-08；P `testA25ConfiguredDoesNotMeanVoiceReady`；U | configured但服务关的idle；无语音已就绪，typing依实际LLM/DB前提 |
+| A26 | D/U | VA-08；P `testA26TextAssistantDoesNotBorrowOtherMeters`；U | 文字助手+会议计时采集；助手无他人电平/elapsed/聆听文案 |
+| A27 | D/U | VA-08；P `testA27OldReviewHasNoLiveConnectionOrFreshSuccess`；U | 三天前record，模型断开；无实时已连接/刚结束，仍可读复制 |
+| A28 | D/U | VA-09；C `testA28TemplateCannotSilentlyReplaceDraft`；U | 非空草稿点击示例；插入/替换/取消目标清楚，替换Undo恢复全文 |
+| A29 | D/U | VA-09；C `testA29SendCompletionPreservesNewDraft`；U | send等待期间继续键入；accepted只清旧snapshot，不抹新文字；失败留稿 |
+| A30 | D/U | VA-09；C/P `testA30ReadingPositionControlsFollowLatest`；U | 中部阅读时增量+新行不强滚；回最新恢复跟随，同reply尾部稳定 |
+| A31 | U | VA-09；U `U31IMEAndKeyboardRouting` | 中文拼音组合/候选Return、换行、⌘Return、Esc弹窗/菜单；无误发/穿透，焦点不跳 |
+| A32 | U | VA-08/09；U `U32WindowAndAccessibilityMatrix` | compact/medium/expanded、最小窗口、字号、Light/Dark、高对比、VoiceOver/Reduce Motion；发送/停止可达、文案不裁关键动作 |
+| A33 | D/R | VA-10；V `testA33ModalityPreservesRequestedStructure`；REAL | 同问题键入/语音，包含代码和详细步骤；提示契约符合模态，真实输出单独检查 |
+| A34 | D/R | VA-10；V `testA34CriticalRecognitionAmbiguityIsNotGuessed`；REAL | 金额/日期/否定歧义；不自动猜改关键事实，必要澄清一次一问题；无伪造置信度 |
+| A35 | D | VA-11；B/T `testA35SixHundredScalarsPartitionEquivalence` | 合成600 scalar一次与6×100；均准入并按limits合法append，拼接语义相同 |
+| A36 | D | VA-11；B/T `testA36UnicodeScalarAndAckAgreement` | Emoji/组合字符/扩展汉字跨delta；raw/sent/ACK codepoint一致、文字不破坏 |
+| A37 | D | VA-11；B/V `testA37WordsAndWhitespaceSurviveChunking` | Hel+lo、空格独立delta、中英；词边界保留，Store/UI原始输出不变 |
+| A38 | D/R | VA-11；B `testA38NumericTokensRemainFaithful`；REAL | 3.+5、负号、百分比、12+万元/亿元、版本号；值/单位/正负不变，超时不补造 |
+| A39 | D | VA-11；B/T `testA39BudgetsAreAtomicAndRespectNegotiatedLimits` | 未闭合Markdown、超大事件、total超限、服务append变小；有界、分类正确、原文可看、拒绝不改旧pending |
+| A40 | D/R | VA-12；L/S `testA40TerminalWaitsForPlayedEvidence`；REAL | terminal已到但设备未播完；不宣称completed，rendered/played分开；真实设备尾延迟另测 |
+| A41 | D | VA-12/14；S/CTX `testA41InterruptedPlaybackDoesNotInventHeardText` | 全生成仅播前段→stop→追问；原答案保留、朗读未完成，history有交付状态而非假已听全文 |
+| A42 | D/U | VA-12；S `testA42ReplayInterruptTargetsOriginalTurn`；U | 新B存在，重播旧A再stop；更新A invocation，B不被标interrupted |
+| A43 | D/U | VA-12；P/S `testA43ReplayAndSoundPreviewHaveRealActions`；U | text无TTS点朗读有原因/入口；播放中测试声音经试听协调，不经typed静默路由、不叠播 |
+| A44 | D | VA-12；S/DB `testA44PendingVoiceTracksActualNextRequest` | 播A切voice B，注保存失败/revision冲突；A pin不变，下一request实际生效ordinal与记录一致 |
+| A45 | D | VA-14；CTX `testA45ContextBudgetKeepsCompleteRecentTurns` | 长对话budget满；固定约束/当前问保留，历史完整turn裁剪，范围可见，不无限追加 |
+| A46 | D/U | VA-14；CTX/P/DB `testA46MemoryRequiresEditedConfirmation`；U | 助手建议记住→编辑/取消/确认；确认前0写，kind/source/scope明确，不自动事实化 |
+| A47 | D/U | VA-03/15；DB/S `testA47SealFailureRetainsUnsavedRecovery`；U | finalizeSession throw/0行更新；无成功ID、pendingSeal/文本保留，重试/复制可用 |
+| A48 | D | VA-14；CTX `testA48MemoryIsBoundedDataAndRevocationIsExplicit` | memory含忽略规则等文本/撤销；来源数据边界，按已声明scope生效，不添工具能力 |
+| A49 | D/U | VA-15；P `testA49ReuseSettingsMakesNoContextPromise`；U | 当前继续动作；标用相同设置新建，只prefill；不声称history继承 |
+| A50 | D/U | VA-15；CTX/DB `testA50ContinuationFreezesSelectedSourceTurns`；U | 选旧record部分完整turn→确认目的地→新建；parent/seed可读，原文不改、不自动mic；删父后子seed仍可用 |
+| A51 | D/U | VA-15；DB/P `testA51RecordOperationFailureCannotLookSuccessful`；U | rename/delete/read/export失败分开；record不丢，不退出成假成功，不写假空导出 |
+| A52 | D/R | VA-05/12/16；S/L `testA52DeviceGenerationRejectsLateCallbacks`；REAL | USB/蓝牙切换与旧callback；旧epoch不污染，恢复失败可typed，stop仅自有设备 |
+| A53 | D | VA-16；O/S `testA53LossAndUploadFailureAreBoundedAndVisible` | ring满、yield dropped/terminated、持续append失败；计数/单位对，队列有界，无无限刷屏 |
+| A54 | D | VA-16；O `testA54ObservabilityFailureAndNoSamplesAreHonest` | observer throw、时间逆序、无sample；主流程正常，无负latency/0ms/100%假数 |
+| A55 | D | VA-02/10；S `testA55ProviderFailureUsesOwnedCancellationBarrier` | delta后provider失败且TTS在播，terminal延迟；local先停、统一cancel、保存片段、旧音不继续 |
+| A56 | R | VA-13/17；REAL `R56TurnTakingCorpus` | 安静真人停顿、自修正、补一句、短答案；标注抢话/漏接/合并错误与新增等待，含失败分母 |
+| A57 | R | VA-13/17；REAL `R57AECAndDoubleTalkByDevice` | 耳机/内置扬声器/实际USB声卡：远端独讲、近端独讲、双讲；分设备误插话/回声/截断，开关不算通过 |
+| A58 | R | VA-13/17；REAL `R58NoiseBackchannelAndQuotation` | 键盘/咳嗽/噪声/嗯对/复述助手原句；非意图不过度打断、真实插话能停，复述不被回声误杀 |
+| A59 | R | VA-14/16/17；REAL `R59ThirtyToSixtyMinuteConversation` | 30～60分钟多轮语音/typed；memory/queue/tasks无持续增长，budget有效，结束设备释放证据 |
+| A60 | R | VA-01/03/07/17；REAL `R60FailureSleepDeviceAndEndJourney` | 连失败→恢复→休眠→拔设备→结束完整旅程；记录真实、无跨功能误停，不自动录音/重播旧内容 |
+
+### 7.3 必补的交叉边界
+
+除原60场景，还应随相关包补以下小型变体，不扩大真实验收范围：
+
+- A03/A04：terminal在闩登记前到达、旧terminal之后新start、cancel effect本身被end取消；所有waiter回收。
+- A05/A06：ASR final已在event stream排队但receipt返回更早；应用marker证明保存屏障，不靠Task.yield猜顺序。
+- A09/A10：Store实际上提交后返回超时；幂等重试不得出现重复行或重写较新revision。
+- A12：typed与ASR final同turn window同时进入、end与ask同时进入；accepted必须对应固定session与已保存问题。
+- A21/A24：密钥撤销、同endpoint不同model、同route扩大history发送范围；禁自动备用provider。
+- A35/A39：server总量小于清洗后输出、代码块跨TTS最大片长、未完成数字紧贴deadline；安全停止不删正文。
+- A40/A52：played不回、device重建后旧rendered/played双回；完成与失败都一次，取消不假造played。
+- A47/A50：迁移失败rollback、future schema只读拒绝、父record删除、seed超限、活跃record移除保护。
+
+修复缺陷优先使原反例在未修实现上失败，再验证修复后通过。若旧行为无法通过fixture复现，报告证据限制，不把测试改成验证实现私有细节以凑通过数。
+
+## 8. 验收标准
+
+### 8.1 本方案交付与实现验收分开
+
+**本方案交付可立即检查**：
+
+- [x] 原文件在项目目录，字节/hash一致，Downloads原路径已移走。
+- [x] 本文件十段齐全，原方案20章及F18/VA18/A60对应完整，所有拟新增项与已核验事实区分。
+- [x] 本轮文档操作仅涉及两份语音助手方案，其他任务文档与业务文件未由本轮修改；期间新增的已有文档提交已保留。
+- [x] 无测试/模型/UI/性能/安装成功的虚假声明；无秘密/真实音频/私人正文。
+
+2026-10-03交付复核：文档结构、ID唯一性、验收类型、工作包文件/步骤/完成条件、表格、链接、路径、原文件哈希与Git差异共40项检查通过。当前未提交修改仅本执行方案，暂存区为空，差异空白检查通过。该结果仅证明本次文档交付，不计入后续A场景通过数。
+
+**后续实现全部需实际证据**：
+
+- [ ] M0控制、输入、输出、保存、路由不变量确定性回归通过。
+- [ ] M1十二态和主动作D通过，IME/可访问性/视觉U单独记录。
+- [ ] A01～A60每个子类型有not_run/pass/fail/blocked状态及证据；未跑R不得算通过。
+- [ ] 新schema在合成空库/v1/future/failure/reopen验证，旧内容/序号/star/时间保留。
+- [ ] 生产App与SwiftPM membership一致，当前部署目标仍macOS26+，未新增旧系统兼容分支。
+- [ ] 观测单位/分母/超时正确，私密数据不上诊断。
+- [ ] 文档、契约变化与实现一致；发布/安装/真实迁移按独立授权。
+
+### 8.2 待执行命令与预期结果
+
+以下是后续实施的命令定义。本轮仅执行只读Git状态与差异校验，**未运行Swift测试、App构建或Xcode测试**。实施者先核对当时AGENTS、Swift工具链与现有授权；命令不能包含真实凭据/素材路径。新测试文件加入target后才使用其filter。
+
+```sh
+# 仓库根目录：确认基线与任务改动
+git status --short --branch
+git rev-parse HEAD
+git diff --check
+
+# M0核心编排/取消/持久化，仅fake和临时合成Store
+swift test --package-path macos/SpeechRailApp \
+  --filter 'AssistantSessionTests|AssistantEndRoutingTests|AssistantReplyPersistenceRaceTests|AssistantPersistenceTests|AssistantTTSStreamCoordinatorTests'
+
+# M1/M3纯展示、输入、context、提示/provider
+swift test --package-path macos/SpeechRailApp \
+  --filter 'AssistantPresentationTests|AssistantComposerPolicyTests|AssistantContextBuilderTests|VoicePromptTests|LLMProviderTests'
+
+# M2文本、播放、资源、迁移
+swift test --package-path macos/SpeechRailApp \
+  --filter 'AssistantSpeechTextBufferTests|AssistantPlaybackLedgerTests|AssistantObservabilityTests|AudioSampleRingTests|AssistantStoreMigrationTests'
+```
+
+预期：实际发现相应测试、所有相关断言通过、无挂起任务/continuation misuse、无意外网络/权限/真实音频。不能把filter未发现测试或仅exit0算通过；报告suite和具体场景发现数量。
+
+`.app`构建获得授权后使用：
+
+```sh
+scripts/macos_app_build.sh --configuration Debug
+```
+
+预期：包装脚本构建成功并处理临时App登记/清理，编译目标含本任务生产文件。不得裸跑`xcodebuild`。如明确获准验证Xcode单测生产membership，可用：
+
+```sh
+SPEECHRAIL_MACOS_ONLY_TESTING=SpeechRailAppTests scripts/macos_app_test.sh
+```
+
+该脚本默认testPlan包含前台UI测试，因此必须保留only-testing限定；不把此例当成本轮批准。前台UI自动化只能在当前用户逐次明确要求时按准确目标运行，先说明窗口与时长；本方案默认人工U清单。
+
+若实际改wire：增加当前受影响的Realtime Swift/Python契约定向回归与schema检查，明确列出变更事件/字段。完整pytest、完整Swift套件、redocly下载、变异探针、benchmark不作为每个VA默认动作。新增replay CLI名字和参数当前尚不存在，工具落地时再给真实`--help`与命令，不编造可运行脚本。
+
+### 8.3 指标定义、失败分母与候选门槛
+
+所有指标用单调时钟；真实发言结束/插话开始由获授权素材标注。schedule时间不是设备物理出声，网络首音不是设备播放；不足证据单列approximate/N/A。
+
+| 指标 | 起止/分母 | 必须保留的失败与证据 |
+|---|---|---|
+| 发送回执 | 提交→本地UI接纳/拒绝反馈 | accepted与rejected均统计，不能把模型完成算回执 |
+| 语音准备 | 开始动作→实际采集且Realtime配置确认 | 冷/热/首次权限独立；权限等待与失败不隐藏 |
+| 首字 | request发出→首个可展示正文 | 空白/心跳/推理不算；失败/拒答/空内容分别计 |
+| 首音 | 标注用户发言结束→有效输出开始播放 | ASR final→schedule另报；设备真实出声需要R测量 |
+| 手动停止 | 用户stop→local playback屏障完成 | 设备尾音另报，远端terminal等待另报 |
+| 插话 | 标注近端插话开始→local停止 | 包括检测等待，不能只报cancel函数耗时 |
+| 远端取消 | cancel发出→matching terminal | 写失败/timeout均入分母，禁以send完成作确认 |
+| 错误插话 | 非意图样本被cancel/非意图样本 | 按回声/噪声/附和分层，并报每小时误停 |
+| 漏插话 | 真插话未在固定评价窗停/真插话样本 | 评价窗与设备分层在采样前固定 |
+| 尾句完整 | 有已准入尾部且正确归档/对应attempts | 空输入不纳；unconfirmed/failed/unsaved独立 |
+| 文字降级 | LLM/Store满足时voice失败后typed完成/此类attempts | LLM也不可用另分类，不美化分母 |
+| 内容保真 | 数字/单位/否定/专名正确单元/标注单元 | 不用总体WER掩盖金额/日期错误 |
+| 保存一致 | UI称saved且可读回/相关attempts | Store/内存/history分别检查；内存恢复不是saved |
+| 资源稳定 | resident、各queue、drops、active tasks、设备stop | 配置与时间一致，系统缓存增长不直接当leak |
+
+承接原方案候选值：UI回执P95≤100ms、local手动停止P95≤150ms、纯归约单event P95≤10ms；这是**候选工程门槛、未测**。8s是现有输入drain预算起点，非结束总耗时承诺。确定性安全场景零失败与分包测试100%语义一致仅限定义测试集，不推广为现实永不失败。
+
+首音、自然插话与新policy必须先测设备/模型基线再定阈值。比较前固定允许退化量、评价窗、样本数与分层，不看结果后改口径。报告至少含attempts/successes/failures/timeouts/sampleCount、base/head、policy、配置revision和D/U/R等级。
+
+### 8.4 真实样本与设备执行法
+
+1. 素材均为已授权真人互动/录音，放仓库外；普通话、英语、中英混合、慢停顿、快补充、低声、数字与技术词均有标注。
+2. 至少耳机、内置扬声器、一组实际外接音频设备；设备型号、系统、ASR/TTS/model/voice revision由实测记录，方案不猜。
+3. 先小样本发现严重问题，再按现象扩展。缺某设备或sample不足报告缺口；总体200事件不能替代外放仅3事件的统计。
+4. A56以人工标注语音结束/意图评判抢话、丢句、合并错误；A57必须扬声器→房间→麦克风真实闭环；录音重放不能冒充AEC双讲证据。
+5. A58的复述/纠正必须作为真输入保留，附和/咳嗽/键盘作为非意图分母；不靠文本相似度自动给回声真值。
+6. A59监控30～60分钟的趋势、活跃任务与queue高水位；A60按失败/休眠/设备/结束逐步检查Store与实际设备释放。
+7. 样本用途、保留位置、删除方式事前说明；真人分歧保留复核，零错误仍附sampleCount和不确定性。生产真实会议不是默认测试素材。
+
+## 9. 风险与注意事项
+
+| 风险 | 具体防护与回退 |
+|---|---|
+| 共享coordinator影响会议/字幕/提词器 | 目标lease+record校验，扩展返回值要更新相关调用点；有全局含义的命令保持准确名称，D隔离用例先补 |
+| 接收改造引入事件乱序/Task泄漏 | 单receiver、单音频consumer、显式effect句柄；control不等远端；取消/close能解除waiter，late结果按身份对账 |
+| ending过早撤连接或过晚允许新回复 | draining资格仅ASR归档；输出权立即撤销；marker前保存屏障；所有start/submit入口查生命周期 |
+| 保存失败被误判missing row | 原子目标upsert、稳定错误分类、0行不成功；saveFailed保内容，幂等重试不重新生成 |
+| v2迁移与旧App回滚 | 合成副本先验；真实库授权备份；事务迁移；future schema拒绝；先保留新增数据再恢复旧备份 |
+| played回调增加背压或不回 | fake delayed/missing回调与device failure覆盖；有界timeout，不能补造played；若拆rendered/played要约束实际在途量 |
+| 新路由/记忆同意打断使用 | 只在新目的地/发送范围扩大时说明；拒绝保稿，当前route不偷偷换；Keychain链不新建wrapper |
+| 预算裁剪影响长对话 | 完整原文留库、选完整turn、范围可见；unknown model采用明确客户端限额而非虚构window |
+| policy提升延迟或误杀复述 | baseline对照后开启、独立revision可退；手动stop一直直接优先；没有证据保持实验关闭 |
+| UI视觉与IME无法由D证明 | U逐项人工验收或另行明确UI授权；不以离屏snapshot/状态单测宣传实机通过 |
+| 原计划Git建议扩大授权 | 文档不批准commit/push/PR/merge；根AGENTS优先；获得提交授权才执行建议原子提交点 |
+| 性能/质量工具触发运行态 | REAL/benchmark另行授权，使用专项skill；不自动下载/加载模型、切档、重启或安装 |
+
+条件增强决策闭环：
+
+- ASR-only/TTS-only/按住说话：真实独立需求与能力合同明确后，提交局部设计/测试，复用现有record/transport/播放边界；当前以文字降级、明确play说明、一问一答提供完整默认出口。
+- turn aggregation/VAD提前duck：需A56～A58分层基线与固定评价窗；不采纳云端未支持事件。
+- 有来源摘要：需证实预算裁剪损害继续讨论，并单独确认可发送范围；优先近期完整turn，不阻塞模型失败时继续。
+- UI合批/LLM-TTS解耦/分包/预检缓存：需VA-16/17定位具体瓶颈；没有证据的优化列`deferred_evidence`和原因，不能删需求或算性能通过。
+
+回退顺序：退实验policy→语音故障明确文字继续→TTS失败保留文字→取消未知关闭连接→保存失败保留pending与复制出口。不得回到跨会话全局误停、旧事件污染或直接丢尾句的旧路径。源码回退只作用本任务改动且保留后续他人修改；真实运行态回滚按专项流程。
+
+## 10. Luna 执行清单
+
+### 10.1 顺序、依赖与退出条件
+
+本清单是未来实施交接，不是本轮执行授权。先核对目标分支、工作区与证据时效；与固定baseline不同先检查受影响符号，不重新分析整仓，也不覆盖其他任务。
+
+| 顺序 | 工作包 | 具体完成条件 | 建议提交单元 |
+|---|---|---|---|
+| 1 | VA-17a | Gate/捕获/fake terminal/scalar ACK及A账本可用；生产seam不触真实资源 | 工装+关键反例 |
+| 2 | VA-01 | A01/A02/A18目标结束隔离，所有助手入口统一 | 目标动作+回归 |
+| 3 | VA-02 | A03/A04/A08/A55控制环可前进，retirement barrier无空隙 | effect/receiver+回归 |
+| 4 | VA-03 | A05/A06/A07/A47双屏障与seal真实结果，停设备可等待 | drain/保存/释放一体 |
+| 5 | VA-04 | A09～A12回复ID/revision/once/history一致，所需v2基础迁移 | 事务+迁移+回归 |
+| 6 | VA-05 | A13～A15/A52迟到事件与startup不污染新代 | 所有权过滤 |
+| 7 | VA-06 | A21～A24路由/记忆统一与同意，M0退出 | context snapshot |
+| 8 | VA-07 | A16/A17/A19/A20同场typed恢复/升级正确 | 降级与恢复 |
+| 9 | VA-08 | A25～A27与12态P覆盖，数据说明准确 | presentation+View |
+| 10 | VA-09 | A28～A32入口/草稿/滚动D+U分账 | composer/阅读 |
+| 11 | VA-10 | A33/A34模态提示、provider分类与既有终态回归 | prompt/adapter |
+| 12 | VA-15a | A47/A49/A51标签与资产失败真实，M1退出 | 资产闭环 |
+| 13 | VA-11 | A35～A39分包/预算/清洗保真 | buffer/renderer |
+| 14 | VA-12 | A40～A44played、invocation、voice与试听一致 | 播放交付 |
+| 15 | VA-16 | A52～A54有界计数/时钟/失败，最小部分已随M0加入 | 观测与资源 |
+| 16 | VA-13 | A08必修证据；A56～A58基线后决定policy | 安全策略与实验分开 |
+| 17 | VA-14 | A41/A45/A46/A48预算与记忆来源/确认 | context/memory |
+| 18 | VA-15b | A50parent/seed/范围同意，旧record不改 | 明确上下文续接 |
+| 19 | VA-17b | A01～A60子状态完整，A59/A60真实结果或not_run | 评估资产/报告 |
+| 20 | VA-18 | 单项优化决策、文档/membership/交付门禁闭环 | 每项优化与文档分别 |
+
+AssistantSession是主要冲突文件，默认串行owner；本轮未启动子代理。以后用户明确要求委派才用`luna_worker`，文件写owner唯一，不覆盖并行修改。
+
+### 10.2 每个逻辑单元的执行合同
+
+1. 定位本包现有符号、相关契约和测试；check_index_coverage有缺口时直接读变化范围。
+2. 先写可复现预期的回归，再实现该包；fake不会加载模型/录音/访问网络。
+3. 运行§8对应的最小相关检查，记录发现/通过/失败场景；未授权U/R保持not_run。
+4. 检查diff、依赖、source membership、隐私与迁移影响；对实际正文变化同步active文档。
+5. **仅在用户已明确要求提交时**：精确暂存本单元文件，检查`git diff --staged --check`、staged diff与敏感字段，创建`<type>: <why>`本地commit；记录hash。不得带入别的未跟踪方案。
+6. 没有提交授权交付未提交diff与拟提交单元；没有push/PR/merge/release授权不推进远端。原方案关于临时workflow/API发布的建议不进入默认执行。
+
+### 10.3 最终实施报告必须包含
+
+- base/head、分支、实施日期与18包状态；对应commit hash，未提交明确标明。
+- A01～A60每个D/U/R子项的真实状态、实际命令/操作、结果与证据入口。
+- Store/内存/history三方一致结果；v1→v2临时库验证、真实数据操作是否发生、备份/回退条件。
+- 设备停止、网络receipt、应用保存marker各自结果；无跨会话误停的明确断言。
+- 模型/声学/性能的baseline与candidate对照，或未执行理由；无样本N/A。
+- policy未开启/未采纳项与证据、UI人工/自动化范围、构建/安装/LaunchServices状态。
+- 保留的并行改动、未验证风险、还需用户或外部条件的事项。
+
+**本文件交付状态**：已形成完整执行与验收设计；本轮仅文档落盘和移动。所有实现、测试、真实体验、性能、迁移与发布结果均待执行，不能据本文件宣称已通过。
