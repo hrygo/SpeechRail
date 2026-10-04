@@ -92,6 +92,31 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertTrue(condition(), message)
     }
 
+    /// 匹配终态到达后，取消 effect 仍可能在 MainActor 上收尾旧 outbound。
+    /// 有界重试 `begin` 才能同时验证“必须先被拒绝”和“收尾后必须放行”，
+    /// 不把调度延迟当成状态机错误。
+    private func beginEventually(
+        _ coordinator: AssistantTTSStreamCoordinator,
+        generation: Int,
+        requestID: String,
+        timeout: Duration = .seconds(2),
+        message: String
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            do {
+                try await coordinator.begin(generation: generation, requestID: requestID)
+                return
+            } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+                try? await Task.sleep(for: .milliseconds(10))
+            } catch {
+                XCTFail("\(message): \(error)")
+                return
+            }
+        }
+        XCTFail(message)
+    }
+
     func testAudioReachesPlaybackBeforeTheLLMFinishes() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 7, requestID: "req-7")
@@ -164,7 +189,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         coordinator.offer("你好。")
         await waitUntil({ recorder.appends.count == 1 }, message: "文本没有发送")
-        try await Task.sleep(for: .milliseconds(60))
+        await waitUntilEventually(
+            { coordinator.outcome != nil },
+            message: "ACK 超时后这一轮必须失败"
+        )
 
         guard case .failed(_)? = coordinator.outcome else {
             return XCTFail("ACK 超时后这一轮必须失败")
@@ -452,7 +480,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             return XCTFail("the current request failure must remain visible")
         }
 
-        try await Task.sleep(for: .milliseconds(40))
+        await waitUntilEventually(
+            { coordinator.isKnownRetiredRequest("req-17") },
+            message: "取消超时必须保留旧 request 的未知归属"
+        )
         XCTAssertTrue(
             coordinator.isKnownRetiredRequest("req-17"),
             "a cancel timeout must retain remote ownership as unknown"
@@ -466,7 +497,12 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         }
 
         await coordinator.handleTerminal(requestID: "req-17", status: "failed")
-        try await coordinator.begin(generation: 18, requestID: "req-18")
+        await beginEventually(
+            coordinator,
+            generation: 18,
+            requestID: "req-18",
+            message: "匹配终态和旧发送任务退出后必须放行新 request"
+        )
         XCTAssertTrue(coordinator.isActive)
     }
 
@@ -827,8 +863,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             await coordinator.handleAudio(requestID: "req-50", pcm: Data([5, 6, 7, 8]))
             secondAudioDone = true
         }
-        try await Task.sleep(for: .milliseconds(30))
-        XCTAssertTrue(secondAudioDone, "receiver admission 不等待播放预算")
+        await waitUntilEventually(
+            { secondAudioDone },
+            message: "receiver admission 不等待播放预算"
+        )
         XCTAssertEqual(coordinator.queuedAudioBytes, 4, "等待播放预算的 PCM 仍受 FIFO 字节上限约束")
         XCTAssertEqual(coordinator.queuedSamples, 2)
         XCTAssertTrue(coordinator.isActive, "挂起等待不等于失败")
@@ -882,8 +920,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             await coordinator.handleAudio(requestID: "req-51", pcm: Data([5, 6, 7, 8]))
             secondAudioDone = true
         }
-        try await Task.sleep(for: .milliseconds(30))
-        XCTAssertTrue(secondAudioDone, "同步 admission 不等 ledger 预算")
+        await waitUntilEventually(
+            { secondAudioDone },
+            message: "同步 admission 不等 ledger 预算"
+        )
         XCTAssertEqual(coordinator.queuedAudioBytes, 4)
 
         var finished = false
