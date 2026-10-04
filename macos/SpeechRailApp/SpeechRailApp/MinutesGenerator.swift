@@ -285,13 +285,24 @@ public final class MinutesGenerator {
     public func reload(sessionID: String) async {
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
         let latest = try? await coordinator.latestMinutes(sessionID: sessionID)
-        latestBody = latest?.body
         switch latest?.status {
-        case .ready: state = .ready
-        case .running: state = .running
-        case .queued: state = .queued
-        case .failed: state = .failed(latest?.failureReason ?? "没有可读的原因")
-        default: state = .idle
+        case .ready:
+            latestBody = latest?.body
+            state = .ready
+        case .running:
+            latestBody = latest?.body
+            state = .running
+        case .queued:
+            latestBody = latest?.body
+            state = .queued
+        case .failed:
+            // MC-25：新尝试失败不丢旧版正文；状态仍如实报失败，不伪装成功。
+            let usable = try? await coordinator.latestUsableMinutes(sessionID: sessionID)
+            latestBody = usable?.body
+            state = .failed(latest?.failureReason ?? "没有可读的原因")
+        default:
+            latestBody = nil
+            state = .idle
         }
     }
 

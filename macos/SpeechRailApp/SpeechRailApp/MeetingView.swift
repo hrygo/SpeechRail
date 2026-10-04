@@ -839,8 +839,13 @@ public struct MeetingView: View {
     /// 版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
         if let selectedMinutesVersion { return selectedMinutesVersion.body }
-        if let latest = meeting.minutes.versions.first(where: \.isLatest), let body = latest.body {
-            return body
+        // MC-25：最新尝试失败时仍显示最新可用版正文，不把失败版的空正文当成功。
+        if let latest = meeting.minutes.versions.first(where: \.isLatest) {
+            if latest.status == .ready { return latest.body }
+            if let usable = meeting.minutes.versions.filter({ $0.status == .ready }).max(by: { $0.version < $1.version }) {
+                return usable.body
+            }
+            return latest.body
         }
         return meeting.minutes.latestBody
     }

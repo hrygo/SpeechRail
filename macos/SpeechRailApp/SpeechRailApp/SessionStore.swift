@@ -528,27 +528,37 @@ public actor SessionStore {
         promptChars: Int?,
         id: String = UUID().uuidString
     ) throws -> MinutesVersion {
-        let version = try scalarInt(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
-            args: [.text(sessionID)]
-        ) ?? 1
+        // MA-06：清旧指针与插入新版本必须是同一事务；INSERT 失败时回滚，
+        // 不能留下“旧版已被清掉指针”的半提交（MC-26）。
         let now = Date()
-        try withStatement("UPDATE minutes SET is_latest = 0 WHERE session_id = ?;") { statement in
-            bind(statement, 1, sessionID)
-            try step(statement)
-        }
-        let sql = """
-        INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at)
-        VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, NULL, NULL, ?);
-        """
-        try withStatement(sql) { statement in
-            bind(statement, 1, id)
-            bind(statement, 2, sessionID)
-            bind(statement, 3, version)
-            bind(statement, 4, model)
-            bind(statement, 5, promptChars)
-            bind(statement, 6, now.timeIntervalSince1970)
-            try step(statement)
+        let version: Int
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            version = try scalarInt(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
+                args: [.text(sessionID)]
+            ) ?? 1
+            try withStatement("UPDATE minutes SET is_latest = 0 WHERE session_id = ?;") { statement in
+                bind(statement, 1, sessionID)
+                try step(statement)
+            }
+            let sql = """
+            INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at)
+            VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, NULL, NULL, ?);
+            """
+            try withStatement(sql) { statement in
+                bind(statement, 1, id)
+                bind(statement, 2, sessionID)
+                bind(statement, 3, version)
+                bind(statement, 4, model)
+                bind(statement, 5, promptChars)
+                bind(statement, 6, now.timeIntervalSince1970)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return MinutesVersion(
             id: id,
@@ -914,6 +924,21 @@ public actor SessionStore {
                 )
             }
             return rows
+        }
+    }
+
+    /// 最新可用版（MC-25）：已完成且有正文的版本里版本号最大的那一版。
+    /// 没有可用版时返回 nil，调用方不得把失败尝试或空正文当成功展示。
+    public func latestUsableMinutes(sessionID: String) throws -> MinutesVersion? {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes WHERE session_id = ? AND status = 'ready' AND body IS NOT NULL
+        ORDER BY version DESC LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MinutesVersion? in
+            bind(statement, 1, sessionID)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return minutesVersion(from: statement)
         }
     }
 

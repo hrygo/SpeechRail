@@ -739,6 +739,11 @@ public final class SessionCoordinator {
         return versions.first { $0.isLatest } ?? versions.first
     }
 
+    /// 最新可用版（MC-25）：已完成且有正文的版本里版本号最大的那一版。
+    public func latestUsableMinutes(sessionID: String) async throws -> MinutesVersion? {
+        try await store.latestUsableMinutes(sessionID: sessionID)
+    }
+
     public func removeSession(id: String) async throws {
         try await store.removeSession(id: id)
     }
