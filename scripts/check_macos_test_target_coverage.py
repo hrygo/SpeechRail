@@ -25,8 +25,6 @@ a green run of this script is not evidence that `xcodebuild test` compiles.
 
 from __future__ import annotations
 
-import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -82,14 +80,20 @@ def _object_paths(objects: dict[str, dict[str, object]]) -> dict[str, str]:
             "XCVersionGroup",
         }:
             continue
-        for child in value.get("children", []):
-            parents[child] = value["_id"]
+        children = value.get("children")
+        if not isinstance(children, list):
+            continue
+        for child in children:
+            parents[str(child)] = str(value["_id"])
 
     paths: dict[str, str] = {}
     for key, value in objects.items():
         if value.get("isa") != "PBXFileReference":
             continue
-        parts = [value.get("path") or value.get("name")]
+        parts: list[str] = []
+        label = value.get("path") or value.get("name")
+        if label is not None:
+            parts.append(str(label))
         cursor = parents.get(key)
         while cursor is not None:
             group = objects[cursor]
@@ -102,15 +106,128 @@ def _object_paths(objects: dict[str, dict[str, object]]) -> dict[str, str]:
     return paths
 
 
+class _OpenStepPlistError(RuntimeError):
+    """The project file did not parse; refuse to guess at its contents."""
+
+
+def _parse_openstep_plist(text: str) -> dict[str, object]:
+    """Parse the OpenStep plist dialect `project.pbxproj` is written in.
+
+    `plutil` would do this, but it only exists where Xcode tooling does, and
+    this check runs in the Linux quality-gate job. A self-contained parser is
+    the difference between a gate that works where it is wired up and one that
+    only passes on the maintainer's machine.
+
+    The dialect subset here is what Xcode emits: nested dictionaries, arrays,
+    bare or double-quoted strings, and `/* */` comments. Values in a pbxproj
+    are always strings or containers.
+    """
+
+    index = 0
+    length = len(text)
+
+    def skip_ignored() -> None:
+        nonlocal index
+        while index < length:
+            char = text[index]
+            if char in " \t\r\n":
+                index += 1
+            elif text.startswith("/*", index):
+                end = text.find("*/", index + 2)
+                if end < 0:
+                    raise _OpenStepPlistError("unterminated /* */ comment")
+                index = end + 2
+            elif text.startswith("//", index):
+                end = text.find("\n", index)
+                index = length if end < 0 else end + 1
+            else:
+                return
+
+    def parse_string() -> str:
+        nonlocal index
+        if text[index] == '"':
+            index += 1
+            chunks: list[str] = []
+            while index < length:
+                char = text[index]
+                if char == "\\":
+                    index += 2
+                    chunks.append(text[index - 1])
+                    continue
+                if char == '"':
+                    index += 1
+                    return "".join(chunks)
+                chunks.append(char)
+                index += 1
+            raise _OpenStepPlistError("unterminated quoted string")
+        start = index
+        while index < length and text[index] not in ' \t\r\n=;,(){}<>"':
+            index += 1
+        if start == index:
+            raise _OpenStepPlistError(f"expected a value at offset {start}")
+        return text[start:index]
+
+    def parse_value() -> object:
+        nonlocal index
+        skip_ignored()
+        if index >= length:
+            raise _OpenStepPlistError("unexpected end of file")
+        if text[index] == "{":
+            index += 1
+            result: dict[str, object] = {}
+            while True:
+                skip_ignored()
+                if index >= length:
+                    raise _OpenStepPlistError("unterminated dictionary")
+                if text[index] == "}":
+                    index += 1
+                    return result
+                key = parse_string()
+                skip_ignored()
+                if index >= length or text[index] != "=":
+                    raise _OpenStepPlistError(f"expected '=' after key {key!r}")
+                index += 1
+                result[key] = parse_value()
+                skip_ignored()
+                if index < length and text[index] == ";":
+                    index += 1
+
+        if text[index] == "(":
+            index += 1
+            items: list[object] = []
+            while True:
+                skip_ignored()
+                if index >= length:
+                    raise _OpenStepPlistError("unterminated array")
+                if text[index] == ")":
+                    index += 1
+                    return items
+                items.append(parse_value())
+                skip_ignored()
+                if index < length and text[index] == ",":
+                    index += 1
+
+        return parse_string()
+
+    skip_ignored()
+    document = parse_value()
+    if not isinstance(document, dict):
+        raise _OpenStepPlistError("project file root is not a dictionary")
+    return document
+
+
 def xcode_unit_test_sources() -> set[str]:
     """Return the repo-relative paths the Xcode unit-test target compiles."""
 
-    raw = subprocess.run(
-        ["plutil", "-convert", "json", "-o", "-", str(PBXPROJ)],
-        check=True,
-        capture_output=True,
-    ).stdout
-    objects = json.loads(raw)["objects"]
+    document = _parse_openstep_plist(PBXPROJ.read_text(encoding="utf-8"))
+    raw_objects = document.get("objects")
+    if not isinstance(raw_objects, dict):
+        raise SystemExit(f"{PBXPROJ_MANIFEST} has no `objects` table")
+    objects: dict[str, dict[str, object]] = {
+        str(key): dict(value)  # type: ignore[arg-type]
+        for key, value in raw_objects.items()
+        if isinstance(value, dict)
+    }
     for key, value in objects.items():
         value["_id"] = key
 
@@ -127,10 +244,13 @@ def xcode_unit_test_sources() -> set[str]:
             f"unit-test target, found {len(target_ids)}"
         )
 
+    phase_ids = objects[target_ids[0]].get("buildPhases")
+    if not isinstance(phase_ids, list):
+        raise SystemExit(f"{UNIT_TEST_TARGET_NAME} declares no build phases")
     phases = [
-        objects[phase_id]
-        for phase_id in objects[target_ids[0]]["buildPhases"]
-        if objects[phase_id]["isa"] == "PBXSourcesBuildPhase"
+        objects[str(phase_id)]
+        for phase_id in phase_ids
+        if objects[str(phase_id)].get("isa") == "PBXSourcesBuildPhase"
     ]
     if len(phases) != 1:
         raise SystemExit(
@@ -140,8 +260,12 @@ def xcode_unit_test_sources() -> set[str]:
 
     paths = _object_paths(objects)
     names: set[str] = set()
-    for build_file_id in phases[0]["files"]:
-        resolved = paths.get(objects[build_file_id]["fileRef"])
+    build_file_ids = phases[0].get("files")
+    if not isinstance(build_file_ids, list):
+        raise SystemExit(f"{UNIT_TEST_TARGET_NAME} Sources phase lists no files")
+    for build_file_id in build_file_ids:
+        file_ref = objects[str(build_file_id)].get("fileRef")
+        resolved = paths.get(str(file_ref)) if file_ref is not None else None
         if resolved is None:
             raise SystemExit(f"{PBXPROJ_MANIFEST} has a Sources entry with no readable path")
         names.add(resolved)

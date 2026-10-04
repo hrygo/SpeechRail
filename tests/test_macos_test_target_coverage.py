@@ -90,3 +90,41 @@ def test_narrowing_the_swiftpm_target_stops_the_checker_claiming_equivalence() -
         allowlist={},
     )
     assert any("narrows" in problem for problem in problems), problems
+
+
+def test_the_project_file_parser_handles_the_dialect_xcode_emits() -> None:
+    """Comments, quoted strings and nesting all appear in a real pbxproj.
+
+    The checker parses the project file itself instead of shelling out to
+    `plutil`, because the quality-gate job that runs this check is Linux.
+    """
+
+    module = _checker()
+    parsed = module._parse_openstep_plist(  # type: ignore[attr-defined]
+        """
+        // !$*UTF8*$!
+        {
+            archiveVersion = 1;
+            objects = {
+                A1 /* comment */ = {isa = PBXFileReference; path = "odd name.swift"; };
+                A2 = {isa = PBXGroup; children = (A1, ); };
+            };
+        }
+        """
+    )
+    objects = parsed["objects"]
+    assert objects["A1"]["path"] == "odd name.swift"  # type: ignore[index]
+    assert objects["A2"]["children"] == ["A1"]  # type: ignore[index]
+
+
+def test_an_unparseable_project_file_fails_loudly() -> None:
+    """A silent partial parse would under-report the drift it exists to catch."""
+
+    module = _checker()
+    for broken in ("{ objects = {A1 = ;}; }", "{ objects = {A1 = {b = 1;};", "{ /* open"):
+        try:
+            module._parse_openstep_plist(broken)  # type: ignore[attr-defined]
+        except Exception as exc:
+            assert type(exc).__name__ == "_OpenStepPlistError", exc
+        else:
+            raise AssertionError(f"malformed project file parsed cleanly: {broken!r}")
