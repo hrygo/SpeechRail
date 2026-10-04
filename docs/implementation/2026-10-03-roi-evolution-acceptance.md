@@ -227,7 +227,7 @@ App 的「段落返修…」入口在作品详情动作区；重做、采用、�
 「请确认目标位置可写」，用户会去检查一个其实可写的目录。因此第二步失败单独给出「已写入
 音频、正文没能写入」，并保留待导出内容，让用户换个位置就能重试，不必从头重做。
 
-证明：`DubbingProjectStoreTests`（25）、`DubbingSegmentPlannerTests`（4）、
+证明：`DubbingProjectStoreTests`（27）、`DubbingSegmentPlannerTests`（4）、
 `AppModelTests` 中的 13 条段落返修用例；`scripts/macos_app_build.sh --configuration Debug` 构建通过。
 
 ### ④ 提词器场景
@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 537 XCTest + 379 swift-testing，0 失败
+  → 539 XCTest + 379 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 510 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+  → 512 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -363,6 +363,12 @@ uv run --no-sync mypy src/speechrail                               → Success, 
 BUILD SUCCEEDED。Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 本轮只改测试与本文档，`CreativeWorkStore.swift` 与 `origin/main` 逐字节一致。
 
+2026-10-04 第 29 轮（#206，`DubbingProjectStore` 按 ID 定位项目）再次全量重跑：Swift 侧
+539 / 512 XCTest + 379 swift-testing、`macos_app_build.sh --configuration Debug`
+BUILD SUCCEEDED，`DubbingProjectStoreTests` 逐套件对账 SPM 27 / Xcode 27 一致。
+Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+本轮只改测试与本文档，`DubbingProjectStore.swift` 与 `origin/main` 逐字节一致。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -380,7 +386,8 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
-| **XCTest 合计** | **537** | **510** | |
+| `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
+| **XCTest 合计** | **539** | **512** | |
 | swift-testing 合计 | 379 | 379 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
