@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "1.4"
+version: "1.5"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -29,11 +29,14 @@ base: "origin/main @ 607b75a8"
 1.3 追加（验收 1 保存可靠）：正文落库同 id 重复插入必须失败且不新增行；
 序号按场独立单调，跨场不串写。
 
+1.4 追加（验收 1/MC-24 断线恢复）：异常退出后 `sealAbandonedSessions`
+只封存不删行，已存正文重开可读、可检索；会议说话人 partial 不受助手封存影响。
+
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 16 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-25、MC-26、
+- `MeetingMinutesVersioningTests` 17 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
  MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 28 个用例，2026-10-04 实测全部通过。
+- 连同 `AssistantPersistenceTests` 共 29 个用例，2026-10-04 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
 

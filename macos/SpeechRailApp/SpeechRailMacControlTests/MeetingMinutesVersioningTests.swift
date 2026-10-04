@@ -418,4 +418,25 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let otherRows = try await store.lines(sessionID: other.id)
         XCTAssertEqual(otherRows.map(\.text), ["另一场第一句"])
     }
+
+    /// 保存可靠（验收 1/MC-24）：异常退出后重开，已存正文可读；
+    /// 未封存标异常封存后可回看可导出，不丢已写下的行。
+    func testAbandonedMeetingIsSealedButKeepsTranscript() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "崩之前定稿的一句", source: .microphone, status: .final)
+        )
+        // 崩溃前未封存：state 仍是 recording，正文已在库里。
+        let sealed = try await store.sealAbandonedSessions()
+        XCTAssertEqual(sealed, [sessionID])
+        let record = try await store.session(id: sessionID)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .unexpectedExit)
+        // 重开后回看：正文可读；检索可命中；导出用的最新可用行仍在。
+        let rows = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(rows.map(\.text), ["崩之前定稿的一句"])
+        let hits = try await store.searchKnowledge(query: "崩之前定稿")
+        XCTAssertTrue(hits.contains { $0.sessionID == sessionID })
+    }
 }
