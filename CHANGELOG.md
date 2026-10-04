@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-10-04
+
+### Added
+
+- 语音助手用户旅程 VA-01～VA-18（D 确定性实现与验收资产）：
+  结束只作用于自身会话、取消过程持续接收终态、结束时尾句准确归档且不触发
+  新回答；连续输入、迟到事件与跨异步保存不串场、不重复、不丢失；语音故障后
+  文字对话可继续，恢复语音由用户明确发起；生成、播放与保存状态准确，失败
+  提供有效恢复出口；记录迁移保留原文及关系，续接范围清晰、上下文正确。
+  草稿、滚动、输入法、键盘与无障碍操作以方案为准（A31/A32 与人工侧走查未
+  执行，记 not_run）。离线回放评估器 `AssistantReplayEvaluator` 与
+  `assistant-replay` runner 已建（合成冒烟通过，真实素材未跑）。
+- macOS 开发者文档 0.6.1：新增「续接、重播与试听」小节。
+
+### Fixed
+
+- 纯文字结束路径改走 `sealSessionReporting`：封存失败保留 pendingSeal 与
+  lastFailure，不再冒充 ended，不发布虚假已封存 ID（A47 恢复出口）。
+- 补齐 VA 新增文件的 Xcode target membership（生产 6 进 App Sources、测试
+  13 进 Unit Test Sources，只做加法），修复 macOS App Build 报
+  `cannot find 'AssistantComposerPolicy' in scope`。
+- 评估报告改走 `JSONEncoder` 单一序列化，不再手工拼 `[String: Any]`。
+- wheel 平台标签钉在项目 macOS 基线，不随构建主机变化。
+
 ## [3.6.0] - 2026-10-04
 
 ### Added
