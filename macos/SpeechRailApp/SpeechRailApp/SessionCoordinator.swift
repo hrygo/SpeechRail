@@ -720,6 +720,11 @@ public final class SessionCoordinator {
         try await store.sessionsWithPendingMinutes()
     }
 
+    /// 待恢复的纪要行：调用方按原 job 身份认领，不新建版本（MC-27）。
+    public func pendingMinutesRows() async throws -> [MinutesVersion] {
+        try await store.pendingMinutesRows()
+    }
+
     public func searchLines(
         query: String,
         kind: SessionKind? = nil,

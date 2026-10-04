@@ -155,6 +155,32 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(afterFail.first?.body, "# 新结果")
     }
 
+    /// MC-27：恢复认领原 job，不新建版本；attempts 推进但版本号不变。
+    func testRecoveryClaimsOriginalJobWithoutNewVersion() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        // 用已过期的租约认领，模拟崩溃后重启：行仍是 running，但租约已过期。
+        let claimed = try await store.claimMinutes(sessionID: sessionID, lease: -1)
+        XCTAssertEqual(claimed?.id, first.id)
+        let pending = try await store.pendingMinutesRows()
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.id, first.id)
+        // 恢复认领同一行：版本号不变，代际推进，不新增版本行。
+        let resumed = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        XCTAssertEqual(resumed?.id, first.id)
+        XCTAssertEqual(resumed?.version, first.version)
+        XCTAssertEqual(resumed?.attempts, (claimed?.attempts ?? 0) + 1)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        let committed = try await store.finishMinutesIfOwner(
+            minutesID: first.id, expectedAttempts: resumed?.attempts ?? -1, body: "# 恢复完成", model: nil
+        )
+        XCTAssertTrue(committed)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(versions.count, 1, "恢复不得新建版本")
+        XCTAssertEqual(versions.first?.body, "# 恢复完成")
+    }
+
     /// MC-48：选定版本导出只认调用方传入的版本，不认“最新/最大版本”。
     func testSelectedVersionIsReturnedAsSelected() async throws {
         let store = try requireStore()

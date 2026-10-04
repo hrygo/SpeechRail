@@ -679,6 +679,25 @@ public actor SessionStore {
         }
     }
 
+    /// 待恢复的纪要行（MC-27）：排队中的，或租约已过期的 `running`，按版本升序。
+    /// 返回整行以便调用方按原 job 身份认领，不新建版本。
+    public func pendingMinutesRows(now: Date = Date()) throws -> [MinutesVersion] {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes
+        WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
+        ORDER BY version ASC;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, now.timeIntervalSince1970)
+            var rows: [MinutesVersion] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(minutesVersion(from: statement))
+            }
+            return rows
+        }
+    }
+
     /// 库里一共有多少条会话记录（含已封存的）。
     ///
     /// "这一场是不是唯一一场"这类断言要它：断线重连**不允许**多出一条记录，
