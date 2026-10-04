@@ -290,24 +290,15 @@ public struct AppCapabilityFacade: Equatable, Sendable {
 
     /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision。
     ///
-    /// 服务端 `_voice_entry` 按 `profile.mode` 绑定制品，Realtime 握手与
-    /// `/v1/audio/speech` 按同一 mode 比对（见 `artifact_for_voice_mode`）。
-    /// 快照顶层 `models` 与 voice 条目自带的 `model` 是同一来源的投影，
-    /// 这里按 mode 取顶层槽位，保证 pin 与服务端比对的是同一份制品。
-    /// 未知 mode 直接返回 nil 调用方 fail-closed，不猜制品。
+    /// canonical 映射见 `SpeechRailCapabilityRevisionSelector.ttsArtifactSlot`：
+    /// Realtime 握手按同一 mode 比对（见 `artifact_for_voice_mode`），这里按
+    /// mode 取顶层槽位，保证 pin 与服务端比对的是同一份制品。
+    /// instruction 音色没有 runtime 合成角色，返回 nil 调用方 fail-closed。
     private static func ttsModelRevision(
         for voice: SafeVoiceEntry,
         in snapshot: EffectiveCapabilitySnapshot
     ) -> String? {
-        let slot: String
-        switch voice.mode {
-        case "system":
-            slot = "tts"
-        case "clone":
-            slot = "tts_clone"
-        case "instruction":
-            slot = "voice_design"
-        default:
+        guard let slot = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: voice.mode) else {
             return nil
         }
         return Self.nonEmpty(snapshot.models[slot]?.catalogRevision)

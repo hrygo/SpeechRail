@@ -289,6 +289,80 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(facade.realtimeBinding(for: "unknown-mode-voice"))
     }
 
+    /// instruction 音色没有 runtime 合成角色：Realtime 建连不为它 pin 任何制品号，
+    /// 即使快照里有 voice_design 槽位也直接 fail-closed。
+    func testRealtimeBindingRejectsInstructionVoiceMode() {
+        let voice = SafeVoiceEntry(
+            id: "voice-instruction-1",
+            name: "设计音色",
+            aliases: ["instruction-voice"],
+            mode: "instruction",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_44444444444444444444444444444444",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "tts-design",
+                catalogRevision: "design-self-model-revision"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "instruction",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "instruction_profile",
+                metadataMethod: "declared_only"
+            ),
+            operations: [
+                "realtime_speech": JSONValue(.object([
+                    "output": JSONValue(.object([
+                        "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                        "pcm_sample_rate": JSONValue(.integer(24_000)),
+                        "channels": JSONValue(.integer(1))
+                    ])),
+                    "scheduling_class": JSONValue(.string("realtime_tts")),
+                    "terminal_evidence": JSONValue(.string("speechrail.tts.completed"))
+                ]))
+            ]
+        )
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "global-tts-catalog"
+                ),
+                "voice_design": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-design",
+                    catalogRevision: "design-slot-revision"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+        let facade = AppCapabilityFacade(snapshot: snapshot, discoveryState: .loaded)
+
+        XCTAssertNil(facade.realtimeBinding(for: "instruction-voice"))
+    }
+
     /// 契约里 `voice_revision` 可空（"legacy voices remain null"），所以系统预置音色
     /// 仍然要能进入实时对讲：缺版本号只是**不带 pin**，不是不可用。
     /// 回归这个缺陷——它曾让所有系统预置音色一律报「语音服务未就绪」。

@@ -1201,6 +1201,76 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    /// instruction 音色没有 runtime 合成角色：普通合成不为它 pin 任何制品号，
+    /// 即使快照里有 voice_design 槽位也直接 fail-closed（服务端会报
+    /// voice_design_task_required）。
+    func testCreatorRequestOptionsRejectsInstructionVoiceMode() {
+        var snapshot = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-instruction-1",
+                name: "Instruction",
+                mode: "instruction",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "vr_001",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-design",
+                    catalogRevision: "design-self-model-revision"
+                ),
+                descriptors: Self.testDescriptor,
+                operations: ["http_speech": JSONValue(.string("supported"))]
+            )
+        )
+        snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: snapshot.serviceInstanceEpoch,
+            catalogRevision: snapshot.catalogRevision,
+            snapshotID: snapshot.snapshotID,
+            profile: snapshot.profile,
+            models: [
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "custom-voice-model-revision"
+                ),
+                "tts_clone": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "clone-model-revision"
+                ),
+                "voice_design": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "design-slot-revision"
+                ),
+            ],
+            voices: snapshot.voices,
+            operations: snapshot.operations,
+            guarantees: snapshot.guarantees
+        )
+
+        XCTAssertNil(
+            SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+                voiceID: "voice-instruction-1",
+                in: snapshot
+            )
+        )
+    }
+
+    /// mode→槽位映射只有一处 canonical 定义：system→tts，clone→tts_clone，
+    /// 其他一律 fail-closed。
+    func testTTSArtifactSlotMappingIsCanonical() {
+        XCTAssertEqual(
+            SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: "system"),
+            "tts"
+        )
+        XCTAssertEqual(
+            SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: "clone"),
+            "tts_clone"
+        )
+        XCTAssertNil(SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: "instruction"))
+        XCTAssertNil(SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: "design"))
+        XCTAssertNil(SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: ""))
+    }
+
     func testCreatorRequestOptionsPinTheModelBoundToTheSelectedVoice() {
         let voice = SafeVoiceEntry(
             id: "clone-voice",

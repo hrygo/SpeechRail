@@ -2328,6 +2328,20 @@ public struct CapabilitySnapshotStore: Equatable, Sendable {
 /// voice is available for the requested operation. Callers may then use the
 /// service's ordinary negotiation path instead of guessing a revision.
 public enum SpeechRailCapabilityRevisionSelector {
+    /// 服务端按 voice mode 选 TTS 制品（system→tts，clone→tts_clone）。
+    /// instruction 音色走 voice_design 任务，没有 runtime 合成角色，普通合成
+    /// 与 Realtime 合成都不该为它 pin 任何制品号，调用方 fail-closed。
+    public static func ttsArtifactSlot(forVoiceMode mode: String) -> String? {
+        switch mode {
+        case "system":
+            return "tts"
+        case "clone":
+            return "tts_clone"
+        default:
+            return nil
+        }
+    }
+
     public static func voiceRevision(
         for voiceID: String?,
         in snapshot: EffectiveCapabilitySnapshot?,
@@ -2370,27 +2384,15 @@ public enum SpeechRailCapabilityRevisionSelector {
         )
     }
 
-    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision。
-    ///
-    /// 与 `AppCapabilityFacade.ttsModelRevision(for:in:)` 同一规则：
-    /// 服务端 `_voice_entry` 按 `profile.mode` 绑定制品，`/v1/audio/speech`
-    /// 按 `runtime_role` 取制品比对（见 `artifact_for_role`）。
-    /// 未知 mode 返回 nil 调用方 fail-closed，不猜制品。
+    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision（canonical 映射见
+    /// `ttsArtifactSlot(forVoiceMode:)`；服务端 `_voice_entry` 按 `profile.mode`
+    /// 绑定制品，`/v1/audio/speech` 按 `runtime_role` 取制品比对）。
+    /// instruction 音色没有 runtime 合成角色，返回 nil 调用方 fail-closed。
     private static func modelRevision(
         for voice: SafeVoiceEntry,
         in snapshot: EffectiveCapabilitySnapshot
     ) -> String? {
-        let slot: String
-        switch voice.mode {
-        case "system":
-            slot = "tts"
-        case "clone":
-            slot = "tts_clone"
-        case "instruction":
-            slot = "voice_design"
-        default:
-            return nil
-        }
+        guard let slot = ttsArtifactSlot(forVoiceMode: voice.mode) else { return nil }
         return nonEmpty(snapshot.models[slot]?.catalogRevision)
     }
 
