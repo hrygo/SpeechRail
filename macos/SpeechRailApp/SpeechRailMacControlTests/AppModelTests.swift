@@ -2486,6 +2486,29 @@ private final class FailOnceIndexWriteGate {
     }
 }
 
+/// 把某一次渲染挂住，直到测试显式放行。用来构造受控的异步交错。
+private actor RenderGate {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private var shouldFail = false
+
+    /// 挂住这次渲染。返回 `true` 表示放行之后应当抛出，
+    /// 用来构造「响应在途、项目已换代、结果是失败」的交错。
+    func wait() async -> Bool {
+        guard !isOpen else { return shouldFail }
+        await withCheckedContinuation { continuations.append($0) }
+        return shouldFail
+    }
+
+    func open(failing: Bool = false) {
+        isOpen = true
+        shouldFail = failing
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
+    }
+}
+
 /// 段落返修用的正式制作替身：音色目录里只有一件可用音色，
 /// 渲染结果携带与原作品相同的配方摘要，因此候选可被采用。
 private actor DubbingRenderClient: SpeechRailCreatorClient {
@@ -2493,8 +2516,14 @@ private actor DubbingRenderClient: SpeechRailCreatorClient {
     private let audio: Data
     private let renderResult: SpeechRenderResult
     private let voice: CreatorVoice
+    private let renderGates: [RenderGate]
 
-    init(audio: Data, recipe: RenderRecipeSnapshot, voice: CreatorVoice) {
+    init(
+        audio: Data,
+        recipe: RenderRecipeSnapshot,
+        voice: CreatorVoice,
+        renderGates: [RenderGate] = []
+    ) {
         self.audio = audio
         self.renderResult = SpeechRenderResult(
             audioData: audio,
@@ -2506,6 +2535,7 @@ private actor DubbingRenderClient: SpeechRailCreatorClient {
             provenance: RenderProvenance(state: .verified, reason: nil)
         )
         self.voice = voice
+        self.renderGates = renderGates
     }
 
     func fetchVoices() async throws -> [CreatorVoice] { [voice] }
@@ -2531,6 +2561,11 @@ private actor DubbingRenderClient: SpeechRailCreatorClient {
         options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult {
         renderCalls.append((text, voiceID, speed))
+        // 按调用次序取闸门：关着的那些把对应这次渲染挂住，用来构造受控的异步交错。
+        let index = renderCalls.count - 1
+        if index < renderGates.count, await renderGates[index].wait() {
+            throw ServiceAPIClientError.requestFailed
+        }
         return renderResult
     }
 
@@ -2983,6 +3018,27 @@ extension AppModelTests {
         XCTFail(message)
     }
 
+    /// 等待一个需要 `await` 才能读到的条件。用于跨 actor 边界的在途状态。
+    private func waitUntilDubbingAsync(
+        _ condition: () async -> Bool,
+        iterations: Int = 600,
+        message: String = "condition was not met"
+    ) async throws {
+        for _ in 0..<iterations {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail(message)
+    }
+
+    /// 让已放行的任务把收尾跑完。这里刻意不 `XCTFail`：
+    /// 收尾本身没有可观测的状态变化，只有它**做错之后**才会被断言抓到。
+    private func settleDubbing(iterations: Int = 200) async throws {
+        for _ in 0..<iterations {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
     private static func dubbingRecipe(
         digest: String?,
         voiceID: String = "ryan",
@@ -3069,9 +3125,10 @@ extension AppModelTests {
         into store: CreativeWorkStore,
         script: String,
         recipeDigest: String?,
-        title: String? = nil
+        title: String? = nil,
+        workID: String = "work_dubbing_source"
     ) throws -> CreativeWork {
-        let work = Self.dubbingWork(
+        var work = Self.dubbingWork(
             script: script,
             provenance: RenderProvenanceSnapshot(
                 state: recipeDigest == nil ? .partial : .verified,
@@ -3082,6 +3139,22 @@ extension AppModelTests {
             ),
             title: title ?? "段落返修样例"
         )
+        if workID != "work_dubbing_source" {
+            work = CreativeWork(
+                id: workID,
+                title: work.title,
+                scriptText: work.scriptText,
+                voiceID: work.voiceID,
+                voiceName: work.voiceName,
+                voiceRevision: work.voiceRevision,
+                planID: work.planID,
+                renderRevision: work.renderRevision,
+                createdAt: work.createdAt,
+                durationSeconds: work.durationSeconds,
+                audioFileName: "\(workID).wav",
+                provenance: work.provenance
+            )
+        }
         return try store.save(work, audioData: silentPreviewWAV(marker: 0x44))
     }
 
@@ -3588,6 +3661,132 @@ extension AppModelTests {
         )
         let missingCalls = await creator.renderCalls
         XCTAssertTrue(missingCalls.isEmpty)
+    }
+
+    /// 上一代重做的收尾不得踩掉新一代重做的在途状态。
+    ///
+    /// 交错（旧项目在途 → 关闭 → 新项目重做在途 → 旧渲染返回）：
+    /// 旧任务的 `defer { finishDubbingSegmentRedo(generation: 旧) }` 里那句
+    /// `guard dubbingRedoGeneration == generation` 是唯一拦住它的东西。
+    /// 没有它，旧任务会把**新**任务的在途标记清成 nil——界面显示「不忙」，
+    /// 而新渲染其实还在跑；`cancelDubbingSegmentRedo()` 也从此按不住它
+    /// （句柄已被置 nil）。方案 §5 C1 要求「受控异步乱序」，
+    /// 此处按交错写用例，而不是按主路径。
+    func testAStaleRedoDoesNotClearTheNextProjectsBusyState() async throws {
+        let staleGate = RenderGate()
+        let liveGate = RenderGate()
+        let recipe = Self.dubbingRecipe(digest: "digest-1")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x94),
+            recipe: recipe,
+            voice: Self.dubbingVoice(),
+            renderGates: [staleGate, liveGate]
+        )
+        let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let staleWork = try saveSourceWork(
+            into: works,
+            script: "只有一段正文。",
+            recipeDigest: "digest-1"
+        )
+        let staleProject = try XCTUnwrap(model.startDubbingProject(for: staleWork))
+        let staleSegment = try XCTUnwrap(staleProject.segments.first)
+        model.startDubbingSegmentRedo(staleSegment.id)
+        // 有界轮询到渲染真的挂住为止：闸门是协作式的，抢跑会测不到交错。
+        try await waitUntilDubbingAsync { await creator.renderCalls.count == 1 }
+        XCTAssertEqual(model.dubbingBusySegmentID, staleSegment.id, "关闭前这次重做确实在途")
+
+        model.closeDubbingProject()
+
+        // 新项目立刻接上第二次重做，并挂在自己的闸门上。
+        let liveWork = try saveSourceWork(
+            into: works,
+            script: "新的一段正文。",
+            recipeDigest: "digest-1",
+            workID: "work_dubbing_live"
+        )
+        let liveProject = try XCTUnwrap(model.startDubbingProject(for: liveWork))
+        let liveSegment = try XCTUnwrap(liveProject.segments.first)
+        model.startDubbingSegmentRedo(liveSegment.id)
+        try await waitUntilDubbingAsync { await creator.renderCalls.count == 2 }
+        XCTAssertEqual(model.dubbingBusySegmentID, liveSegment.id, "新项目的重做在途")
+
+        // 现在才让旧渲染返回：旧任务的收尾此刻才跑。
+        await staleGate.open()
+        try await settleDubbing()
+
+        XCTAssertEqual(
+            model.dubbingBusySegmentID,
+            liveSegment.id,
+            "上一代重做的收尾不得把新一代的在途状态清成 nil"
+        )
+        XCTAssertEqual(model.dubbingProject?.id, liveProject.id, "项目没有被旧任务换掉")
+        XCTAssertTrue(
+            try projects.candidates(forProject: staleProject.id).isEmpty,
+            "旧项目的候选一个都不该留下"
+        )
+
+        await liveGate.open()
+        try await waitUntilDubbing {
+            model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
+        }
+        XCTAssertEqual(model.dubbingCandidates.first?.segmentID, liveSegment.id)
+    }
+
+    /// 上一代重做**失败**时，报错也不得写进新项目的界面。
+    ///
+    /// 与上一条互补：那条钉的是成功路径上的 `defer` 收尾，这条钉的是
+    /// `catch` 分支里的 `guard dubbingRedoGeneration == generation`。
+    /// 失败路径尤其容易漏——它只在渲染**抛错**时才走到，而抛错时
+    /// `Task.checkCancellation()` 还没执行到，所以这条分支不能靠取消兜底。
+    func testAFailedStaleRedoDoesNotReportIntoTheNextProject() async throws {
+        let staleGate = RenderGate()
+        let liveGate = RenderGate()
+        let recipe = Self.dubbingRecipe(digest: "digest-1")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x95),
+            recipe: recipe,
+            voice: Self.dubbingVoice(),
+            renderGates: [staleGate, liveGate]
+        )
+        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let staleWork = try saveSourceWork(
+            into: works,
+            script: "只有一段正文。",
+            recipeDigest: "digest-1"
+        )
+        let staleProject = try XCTUnwrap(model.startDubbingProject(for: staleWork))
+        model.startDubbingSegmentRedo(try XCTUnwrap(staleProject.segments.first).id)
+        try await waitUntilDubbingAsync { await creator.renderCalls.count == 1 }
+
+        model.closeDubbingProject()
+
+        let liveWork = try saveSourceWork(
+            into: works,
+            script: "新的一段正文。",
+            recipeDigest: "digest-1",
+            workID: "work_dubbing_live"
+        )
+        let liveProject = try XCTUnwrap(model.startDubbingProject(for: liveWork))
+        let liveSegment = try XCTUnwrap(liveProject.segments.first)
+        model.startDubbingSegmentRedo(liveSegment.id)
+        try await waitUntilDubbingAsync { await creator.renderCalls.count == 2 }
+        XCTAssertNil(model.dubbingMessage, "新项目的重做刚起，没有待展示的错误")
+
+        // 旧渲染现在才失败：它的报错属于旧项目，不该出现在界面上。
+        await staleGate.open(failing: true)
+        try await settleDubbing()
+
+        XCTAssertNil(
+            model.dubbingMessage,
+            "上一代的失败不得写进新项目的界面"
+        )
+        XCTAssertEqual(model.dubbingBusySegmentID, liveSegment.id, "新项目的在途状态不受影响")
+        XCTAssertEqual(model.dubbingProject?.id, liveProject.id)
+
+        await liveGate.open()
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil }
     }
 
     /// #186：文案提到的成因必须与用户实际能修的方向一致。
