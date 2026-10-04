@@ -1,5 +1,6 @@
 import Foundation
 import SpeechRailControlKit
+import SQLite3
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -398,5 +399,50 @@ final class AssistantPersistenceTests: XCTestCase {
         let store = try requireStore()
         let snapshot = try await store.reviewSnapshot(sessionID: "不存在的记录")
         XCTAssertNil(snapshot, "读不到记录时与 `session(id:)` 一样返回 nil，不返回空快照")
+    }
+
+    /// §7.3 交叉边界（A47/A50）：future schema 只读拒绝。
+    /// user_version 高于当前 schemaVersion 的库，open 直接抛
+    /// unsupportedSchemaVersion，不建表、不改库、不崩。
+    func testFutureSchemaVersionIsRejected() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-schema-future-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 先建一个 v1 空库再关掉，然后把 user_version 置高模拟未来版本。
+        let seed = SessionStore(directory: directory)
+        try await seed.open()
+        await seed.close()
+        try Self.setUserVersion(99, directory: directory)
+        let store = SessionStore(directory: directory)
+        do {
+            try await store.open()
+            XCTFail("未来版本库应拒绝 open")
+        } catch let error as SessionStoreError {
+            guard case .unsupportedSchemaVersion(let version) = error else {
+                XCTFail("应抛 unsupportedSchemaVersion，实际 \(error)")
+                return
+            }
+            XCTAssertEqual(version, 99)
+        }
+        await store.close()
+    }
+
+    /// 测试内直接置 user_version（sqlite3 系统库，生产 target 已链）。
+    private static func setUserVersion(_ version: Int32, directory: URL) throws {
+        var pointer: OpaquePointer?
+        let path = directory.appendingPathComponent(SessionStore.fileName).path
+        guard sqlite3_open_v2(path, &pointer, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let pointer
+        else {
+            XCTFail("打不开测试库文件")
+            throw SessionStoreError.openFailed("test setup")
+        }
+        defer { sqlite3_close_v2(pointer) }
+        let sql = "PRAGMA user_version=\(version);"
+        guard sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK else {
+            XCTFail("置 user_version 失败")
+            throw SessionStoreError.openFailed("test setup")
+        }
     }
 }

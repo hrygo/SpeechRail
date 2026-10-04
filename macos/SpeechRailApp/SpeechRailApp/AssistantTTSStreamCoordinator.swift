@@ -93,6 +93,14 @@ final class AssistantTTSStreamCoordinator {
     private(set) var requestID: String?
     /// `speechrail.tts.started.task_id`：服务端为这一轮分配的稳定身份，只用于诊断。
     private(set) var taskID: String?
+    /// VA-05：当前 request 身份的可读投影。编排层用它先校验
+    /// connection/request 再改 speaking/闭麦与 phase。
+    var currentRequestID: String? { requestID }
+    /// VA-05：是否为已作废、正在等终态的 request（retired）。
+    /// retired 只解自己的闩；unknown 不改 phase/error。
+    func isKnownRetiredRequest(_ id: String) -> Bool {
+        retiredTerminals[id] != nil || retiringRequests.contains(id)
+    }
     private(set) var acceptedSequence = -1
     private(set) var acceptedCodepoints = 0
     private(set) var inputClosed = false

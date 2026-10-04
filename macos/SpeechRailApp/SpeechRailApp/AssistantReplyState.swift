@@ -51,6 +51,23 @@ struct AssistantReplyState {
     /// 收尾闸门。`true` 之后任何再次收尾都是无操作。
     var isFinalized: Bool
     var termination: Termination
+    /// VA-04：正文版本号。每次流式累加推进一次；迟到的 persist/finalize
+    /// 按 revision 对账，只允许前进，不许用旧副本覆盖新正文。
+    var revision: Int
+    /// VA-04：持久化状态机。persisting/finalizing 为跨 await 在途标记，
+    /// saved/saveFailed 为终态；finalization claim 以 replyID 登记，局部
+    /// isFinalized 不再作为唯一 once 证据。
+    enum Persistence: Equatable {
+        case idle
+        case persisting
+        case persisted
+        case finalizing
+        case saved
+        case saveFailed(String)
+    }
+    var persistence: Persistence
+    /// VA-04：history 是否已按 ID 投影一次。重复收尾不二次追加。
+    var historyApplied: Bool
 
     init(
         id: String = "assistant_reply_\(UUID().uuidString.lowercased())",
@@ -70,6 +87,9 @@ struct AssistantReplyState {
         self.ordinal = nil
         self.isFinalized = false
         self.termination = .streaming
+        self.revision = 0
+        self.persistence = .idle
+        self.historyApplied = false
     }
 
     /// 是否已经到了"值得为这一轮建一行"的时候：累计文本里有非空白内容。

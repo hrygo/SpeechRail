@@ -45,6 +45,29 @@ public final class SessionCoordinator {
         public var isProcessing: Bool
     }
 
+    /// 助手专属的结束目标（VA-01）。
+    ///
+    /// 文字助手没有设备占用，结束必须按自己的 recordID 收口；
+    /// 语音助手还必须核对 kind + leaseID，避免旧助手的迟到结束清掉新会话。
+    public struct AssistantEndTarget: Equatable, Sendable {
+        public var recordID: String?
+        public var leaseID: UUID?
+        public var endTaskID: UUID
+
+        public init(recordID: String? = nil, leaseID: UUID? = nil, endTaskID: UUID = UUID()) {
+            self.recordID = recordID
+            self.leaseID = leaseID
+            self.endTaskID = endTaskID
+        }
+    }
+
+    public enum AssistantEndResult: Equatable, Sendable {
+        case ended(recordID: String?)
+        case superseded
+        case mismatch
+        case noConversation
+    }
+
     /// 这个能力还没有接线（语音助手 / 会议助手在阶段 5 / 6 之前）。
     ///
     /// 存在的理由是**那条"静默成功"的路**：`starter` 的契约是「抛错 = 受阻」，返回
@@ -94,6 +117,12 @@ public final class SessionCoordinator {
     public private(set) var lastInterruption: SessionInterruptionReason?
     /// 设备租约：按功能启用、功能离开释放。阶段 3/6 把真正的采集挂到这一对动作上。
     public private(set) var holdsDeviceLease = false
+    /// 当前设备占用的租约身份（VA-01）。
+    ///
+    /// `begin` 成功时生成，`finalize` / `abandonOccupancy` 时清空。
+    /// preparing 阶段尚无 recordID 也能凭它锁定租约；助手专属结束必须同时核对
+    /// kind + leaseID + recordID，避免旧助手的迟到结束清掉新会话的占用。
+    public private(set) var activeLeaseID: UUID?
     /// 正在等用户回答的那一件事；`nil` 表示没有待确认的动作。
     public private(set) var pendingAction: PendingAction?
     public private(set) var pendingConfirmation: Confirmation?
@@ -295,6 +324,7 @@ public final class SessionCoordinator {
         lineWatermark = 0
         lastInterruption = nil
         holdsDeviceLease = true
+        activeLeaseID = UUID()
         startClock()
         do {
             try await starter?(kind)
@@ -304,6 +334,7 @@ public final class SessionCoordinator {
             releaseDevices()
             stopClock()
             occupancy = nil
+            activeLeaseID = nil
             startedAt = nil
             elapsed = 0
             phase = .idle
@@ -386,6 +417,7 @@ public final class SessionCoordinator {
         stopClock()
         activeSessionID = nil
         occupancy = nil
+        activeLeaseID = nil
         startedAt = nil
         elapsed = 0
         lineWatermark = 0
@@ -401,6 +433,81 @@ public final class SessionCoordinator {
     public func sealSession(id: String, reason: SessionEndReason = .user) async {
         guard activeSessionID != id else { return }
         try? await store.finalizeSession(id: id, endReason: reason)
+    }
+
+    /// VA-03 封存结果：成功且读回 archived 才算保存成功。
+    /// 失败保留 pendingSeal 与内存未保存文本，硬件仍释放；
+    /// 成功才发布 lastFinalizedSessionID。0 受影响行不算成功。
+    public enum SessionSealResult: Equatable, Sendable {
+        case sealed(recordID: String)
+        case failed(recordID: String?, reason: String)
+        case skipped(recordID: String?)
+    }
+
+    /// VA-03 真实结果封存：返回实际落库结果，不吞失败。
+    /// A47：finalize throw / 0 行更新时无成功 ID，调用方保留 pendingSeal 与重试/复制出口。
+    @discardableResult
+    public func sealSessionReporting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
+        // activeSessionID == id 表示该记录仍在占用中：由 finalize 路径收口，此处跳过。
+        if activeSessionID == id { return .skipped(recordID: id) }
+        do {
+            try await store.finalizeSession(id: id, endReason: reason)
+            // 读回验证：成功且为 archived 才发布成功 ID。
+            if let record = try await store.session(id: id), record.state == .archived {
+                lastFinalizedSessionID = id
+                return .sealed(recordID: id)
+            }
+            return .failed(recordID: id, reason: "封存后读回状态不是已归档")
+        } catch {
+            return .failed(recordID: id, reason: error.localizedDescription)
+        }
+    }
+
+    /// 助手专属的目标结束（VA-01 / A01/A02/A18）。
+    ///
+    /// - 纯文字助手没有设备占用：只要 recordID 对上就按该 ID 封存，
+    ///   不碰 `occupancy` / `activeSessionID` / `activeLeaseID`。
+    /// - 语音助手必须同时核对 kind == .assistant 且 leaseID 匹配；
+    ///   不匹配返回 `.mismatch` / `.superseded`，不做全局 stop。
+    /// 每个 await 返回后重新比对目标，占用变化后只完成旧目标记录。
+    public func endAssistant(_ target: AssistantEndTarget, reason: SessionEndReason = .user) async -> AssistantEndResult {
+        // 纯文字：无占用路径。
+        if occupancy == nil {
+            guard let recordID = target.recordID else { return .noConversation }
+            try? await store.finalizeSession(id: recordID, endReason: reason)
+            lastFinalizedSessionID = recordID
+            return .ended(recordID: recordID)
+        }
+        // 文字目标（无 lease 身份）：只封自己的记录，不碰任何占用。
+        // A02：会议/其他功能占用设备时，文字结束不得改占用/phase/记录/stopper。
+        if target.leaseID == nil, target.recordID != nil, target.recordID != activeSessionID {
+            let recordID = target.recordID!
+            try? await store.finalizeSession(id: recordID, endReason: reason)
+            lastFinalizedSessionID = recordID
+            return .ended(recordID: recordID)
+        }
+        // 有占用：只允许助手自己的目标结束。
+        guard occupancy?.kind == .assistant else { return .mismatch }
+        if let expectedLease = target.leaseID, let currentLease = activeLeaseID,
+           expectedLease != currentLease {
+            return .superseded
+        }
+        // recordID 存在时必须与当前语音记录一致，否则是旧目标的迟到结束。
+        if let recordID = target.recordID, let active = activeSessionID, recordID != active {
+            return .superseded
+        }
+        let leaseAtEntry = activeLeaseID
+        let recordAtEntry = target.recordID ?? activeSessionID
+        await finalize(reason: reason)
+        // finalize 期间占用若被新会话接管（理论上 finalize 串行持有占用，
+        // 此处为防御性复核），只完成旧目标记录，不清新占用。
+        if leaseAtEntry != nil, activeLeaseID != nil, activeLeaseID != leaseAtEntry {
+            if let recordAtEntry {
+                try? await store.finalizeSession(id: recordAtEntry, endReason: reason)
+            }
+            return .superseded
+        }
+        return .ended(recordID: recordAtEntry)
     }
 
     private func releaseDevices() {
@@ -586,6 +693,7 @@ public final class SessionCoordinator {
         stopClock()
         activeSessionID = nil
         occupancy = nil
+        activeLeaseID = nil
         startedAt = nil
         elapsed = 0
         lineWatermark = 0

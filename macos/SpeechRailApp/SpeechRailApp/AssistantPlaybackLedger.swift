@@ -23,6 +23,11 @@ struct AssistantPlaybackLedger {
     private(set) var serverTerminal = false
     /// 服务端终态是哪一个；`nil` 表示还没结束。
     private(set) var terminalStatus: String?
+    /// VA-12：rendered（渲染证据）与 played（设备播放回调证据）分开记。
+    /// rendered 释放渲染预算；played 才是“播放完成”门槛。
+    /// 任何一个都不等于用户听懂。
+    private(set) var renderedSamples = 0
+    private(set) var playedSamples = 0
     /// 文本输入是否已关闭（`finish_text` 已发出）。用于区分"暂时欠载"与"还没喂完"。
     private(set) var inputClosed = false
 
@@ -39,6 +44,8 @@ struct AssistantPlaybackLedger {
         queuedSamples = 0
         serverTerminal = false
         terminalStatus = nil
+        renderedSamples = 0
+        playedSamples = 0
         inputClosed = false
     }
 
@@ -47,6 +54,10 @@ struct AssistantPlaybackLedger {
 
     /// 整轮真正结束：服务端终态 + 该代音频已排空。
     var isUtteranceFinished: Bool { serverTerminal && isDrained }
+
+    /// VA-12：播放真正完成（设备 played 回调）：服务端终态 + played 已覆盖
+    /// 已渲染样本。rendered 先到只释放渲染预算，不提前 completed。
+    var isPlayedThrough: Bool { serverTerminal && playedSamples >= renderedSamples && isDrained }
 
     /// 是否还能再收下这么多样本。
     func canReserve(samples: Int) -> Bool {
@@ -66,6 +77,14 @@ struct AssistantPlaybackLedger {
     mutating func complete(samples: Int, generation: Int) -> Bool {
         guard generation == self.generation else { return false }
         queuedSamples = max(0, queuedSamples - max(0, samples))
+        renderedSamples += max(0, samples)
+        return true
+    }
+
+    /// VA-12：设备播放回调证据（played）。旧代返回 false 不改状态。
+    mutating func markPlayed(samples: Int, generation: Int) -> Bool {
+        guard generation == self.generation else { return false }
+        playedSamples += max(0, samples)
         return true
     }
 
@@ -88,6 +107,8 @@ struct AssistantPlaybackLedger {
         queuedSamples = 0
         serverTerminal = false
         terminalStatus = nil
+        renderedSamples = 0
+        playedSamples = 0
         inputClosed = false
     }
 }
