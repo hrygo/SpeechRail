@@ -38,6 +38,7 @@ final class DubbingProjectStoreTests: XCTestCase {
     }
 
     private func makeProject(
+        id: String = "project_one",
         recipeDigest: String = "a",
         state: RenderRecipeSnapshot.State = .complete,
         segments: [DubbingSegment] = [
@@ -46,7 +47,7 @@ final class DubbingProjectStoreTests: XCTestCase {
         ]
     ) -> DubbingProject {
         DubbingProject(
-            id: "project_one",
+            id: id,
             title: "示例配音",
             scriptText: "第一段。\n第二段。",
             recipe: provenance(digest: recipeDigest, state: state),
@@ -220,6 +221,103 @@ final class DubbingProjectStoreTests: XCTestCase {
         XCTAssertNil(
             undoneAgain.segments[0].acceptedCandidateID,
             "没有历史时保持未采用，而不是回到一个不存在的版本"
+        )
+    }
+
+    /// 采用必须落在用户点开的那个项目里，而不是索引里的第一个。
+    ///
+    /// 此前所有采用/撤销用例都只有一个项目（`makeProject` 写死
+    /// `id: "project_one"`），于是「按 projectID 找」与「永远取第 0 条」
+    /// 结果必然相同。把四处 `firstIndex(where:)` 改成永远取第 0 条后，
+    /// 全量 537 条 XCTest 仍然全绿。
+    func testAdoptingInOneProjectLeavesTheOtherProjectUntouched() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let alpha = makeProject(id: "project_alpha")
+        let beta = makeProject(id: "project_beta")
+        try store.save(alpha)
+        try store.save(beta)
+        let alphaCandidate = try store.addCandidate(
+            makeCandidate(id: "cand_alpha", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x31),
+            toProject: alpha.id
+        )
+        let betaCandidate = try store.addCandidate(
+            makeCandidate(id: "cand_beta", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x32),
+            toProject: beta.id
+        )
+
+        // 只在 beta 里采用：按位置取的实现会去看 alpha。
+        let adopted = try store.adopt(
+            candidateID: betaCandidate.id,
+            inSegment: "seg_first",
+            ofProject: beta.id
+        )
+
+        XCTAssertEqual(adopted.id, beta.id, "采用结果必须是被点开的那个项目")
+        XCTAssertEqual(adopted.segments[0].acceptedCandidateID, betaCandidate.id)
+        let projectsByID = Dictionary(
+            uniqueKeysWithValues: try store.list().map { ($0.id, $0) }
+        )
+        let untouched = try XCTUnwrap(projectsByID[alpha.id])
+        XCTAssertNil(
+            untouched.segments[0].acceptedCandidateID,
+            "在 beta 里采用不得改动 alpha 的采用关系"
+        )
+        XCTAssertEqual(untouched.segments[0].adoptionHistory, [], "alpha 不得凭空多出采用历史")
+        XCTAssertNoThrow(
+            try store.loadAudio(for: alphaCandidate),
+            "alpha 的候选音频不得被牵连"
+        )
+    }
+
+    /// 撤销同理：只回退被点开的那个项目的采用关系。
+    ///
+    /// 撤销比采用更容易错——它不新增任何东西，只是把某一段的引用往回退。
+    /// 按位置取的实现会静默退掉另一个项目的版本，而那个项目里
+    /// 用户明确采用过的东西就此消失。
+    func testUndoingAdoptionInOneProjectLeavesTheOtherProjectsHistoryIntact() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let alpha = makeProject(id: "project_alpha")
+        let beta = makeProject(id: "project_beta")
+        try store.save(alpha)
+        try store.save(beta)
+        let alphaFirst = try store.addCandidate(
+            makeCandidate(id: "cand_alpha_1", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x41),
+            toProject: alpha.id
+        )
+        let alphaSecond = try store.addCandidate(
+            makeCandidate(id: "cand_alpha_2", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x42),
+            toProject: alpha.id
+        )
+        let betaOnly = try store.addCandidate(
+            makeCandidate(id: "cand_beta_1", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x43),
+            toProject: beta.id
+        )
+        try store.adopt(candidateID: alphaFirst.id, inSegment: "seg_first", ofProject: alpha.id)
+        try store.adopt(candidateID: alphaSecond.id, inSegment: "seg_first", ofProject: alpha.id)
+        try store.adopt(candidateID: betaOnly.id, inSegment: "seg_first", ofProject: beta.id)
+
+        let undone = try store.undoAdoption(inSegment: "seg_first", ofProject: beta.id)
+
+        XCTAssertEqual(undone.id, beta.id, "撤销结果必须是被点开的那个项目")
+        XCTAssertNil(undone.segments[0].acceptedCandidateID, "beta 只有一次采用，撤销后回到未采用")
+        let projectsByID = Dictionary(
+            uniqueKeysWithValues: try store.list().map { ($0.id, $0) }
+        )
+        let alphaAfter = try XCTUnwrap(projectsByID[alpha.id])
+        XCTAssertEqual(
+            alphaAfter.segments[0].acceptedCandidateID,
+            alphaSecond.id,
+            "在 beta 里撤销不得回退 alpha 的采用"
+        )
+        XCTAssertEqual(
+            alphaAfter.segments[0].adoptionHistory,
+            [nil, alphaFirst.id],
+            "alpha 的采用历史不得被 beta 的撤销消耗掉"
         )
     }
 
