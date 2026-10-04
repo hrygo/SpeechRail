@@ -700,6 +700,45 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(otherRows.map(\.text), ["另一场第一句"])
     }
 
+    /// 保存可靠（验收 1：重启可找回）：关闭连接后用同一目录重开库，
+    /// 正文、纪要、问答都在；重开后仍可写，不丢身份。
+    func testReopenSameDirectoryKeepsTranscriptMinutesAndExchanges() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let persistedDir = try XCTUnwrap(directory)
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "重启前定稿的一句", source: .microphone, status: .final),
+            id: "line-reopen-1"
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: minutes.id, body: "# 重启前纪要", model: nil)
+        _ = try await store.saveInnerOSExchange(
+            InnerOSExchange(id: "inner-reopen-1", sessionID: sessionID, askedAt: Date(), question: "重启前问过？", answerText: "重启前答过", status: .ready)
+        )
+        // 关掉旧连接，再用同一目录重开：模拟关闭或重启应用。
+        await store.close()
+        self.store = nil
+        let reopened = SessionStore(directory: persistedDir)
+        try await reopened.open()
+        self.store = reopened
+        let rows = try await reopened.lines(sessionID: sessionID)
+        XCTAssertTrue(rows.contains { $0.id == "line-reopen-1" && $0.text.contains("重启前定稿") })
+        let versions = try await reopened.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(versions.count, 1)
+        XCTAssertEqual(versions.first?.body, "# 重启前纪要")
+        let exchanges = try await reopened.innerOSExchanges(sessionID: sessionID)
+        XCTAssertEqual(exchanges.count, 1)
+        XCTAssertEqual(exchanges.first?.answerText, "重启前答过")
+        let hits = try await reopened.searchKnowledge(query: "重启前定稿")
+        XCTAssertTrue(hits.contains { $0.sessionID == sessionID })
+        // 重开后仍可写：序号接着走，不丢场身份。
+        let ordinal = try await reopened.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "重启后新一句", source: .microphone, status: .final)
+        )
+        XCTAssertEqual(ordinal, 2)
+    }
+
     /// 保存可靠（验收 1/MC-24）：异常退出后重开，已存正文可读；
     /// 未封存标异常封存后可回看可导出，不丢已写下的行。
     func testAbandonedMeetingIsSealedButKeepsTranscript() async throws {
