@@ -81,6 +81,14 @@ public enum AssistantReplayEvaluator {
         public let interruptedTurnCount: Int
         public let completedPlaybackCount: Int
         public let sealedCount: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case eventCount = "event_count"
+            case turnCount = "turn_count"
+            case interruptedTurnCount = "interrupted_turn_count"
+            case completedPlaybackCount = "completed_playback_count"
+            case sealedCount = "sealed_count"
+        }
     }
 
     public struct Report: Codable, Equatable, Sendable {
@@ -91,21 +99,13 @@ public enum AssistantReplayEvaluator {
         public let metrics: Metrics
         public let caveats: [String]
 
-        public var jsonObject: [String: Any] {
-            [
-                "schema": schema,
-                "dataset_revision": datasetRevision,
-                "baseline_commit": baselineCommit,
-                "policy_revision": policyRevision,
-                "metrics": [
-                    "event_count": metrics.eventCount,
-                    "turn_count": metrics.turnCount,
-                    "interrupted_turn_count": metrics.interruptedTurnCount,
-                    "completed_playback_count": metrics.completedPlaybackCount,
-                    "sealed_count": metrics.sealedCount,
-                ],
-                "caveats": caveats,
-            ]
+        private enum CodingKeys: String, CodingKey {
+            case schema
+            case datasetRevision = "dataset_revision"
+            case baselineCommit = "baseline_commit"
+            case policyRevision = "policy_revision"
+            case metrics
+            case caveats
         }
     }
 

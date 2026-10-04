@@ -84,10 +84,9 @@ do {
     } catch {
         fail("回放被拒绝：\(error)")
     }
-    let encoded = try JSONSerialization.data(
-        withJSONObject: report.jsonObject,
-        options: [.prettyPrinted, .sortedKeys]
-    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let encoded = try encoder.encode(report)
     if let output = options.output {
         try encoded.write(to: output)
     } else {
