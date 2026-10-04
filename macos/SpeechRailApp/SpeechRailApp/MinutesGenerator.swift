@@ -48,6 +48,17 @@ public struct MinutesDocument: Codable, Hashable, Sendable {
         case confidenceNotes = "confidence_notes"
     }
 
+    /// 测试与解析共用的解码入口：成功返回渲染后的 Markdown，失败返回 nil。
+    /// 生产调用走 `MinutesOutcome`，不得绕过它直接把原文标成成功。
+    static func markdownForTestOnly(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let document = try? JSONDecoder().decode(MinutesDocument.self, from: data)
+        else { return nil }
+        return document.markdown
+    }
+
     /// 渲染成 Markdown。库里存的就是这一段（界面直接显示，导出也用它）。
     public var markdown: String {
         var out = "# \(title.isEmpty ? "会议纪要" : title)\n\n"
@@ -330,15 +341,22 @@ public final class MinutesGenerator {
                 apiKey: key,
                 responseID: responseID
             )
-            let body = Self.markdown(from: text)
-            try await coordinator.finishMinutes(
-                minutesID: claimed.id,
-                body: body,
-                model: configuration.model.isEmpty ? nil : configuration.model
-            )
-            latestBody = body
-            failedOnSetup = false
-            state = .ready
+            switch Self.outcome(from: text) {
+            case .ready(let body):
+                try await coordinator.finishMinutes(
+                    minutesID: claimed.id,
+                    body: body,
+                    model: configuration.model.isEmpty ? nil : configuration.model
+                )
+                latestBody = body
+                failedOnSetup = false
+                state = .ready
+            case .failed(let reason):
+                // MC-33/MC-34：空输出与结构失败保留候选文本但记成失败，不发布成功。
+                try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
+                failedOnSetup = false
+                state = .failed(reason)
+            }
         } catch {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
             let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
@@ -390,18 +408,15 @@ public final class MinutesGenerator {
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
-    /// 结构化正文 → Markdown。模型没按 schema 回（端点不支持 `json_schema`）时，
-    /// **不假装成功**：把纯文本原样收下，并说明"这一版没有按结构返回"。
+    static func outcome(from text: String) -> MinutesOutcome {
+        MinutesOutcome.parsing(text: text, markdown: { MinutesDocument.markdownForTestOnly($0) })
+    }
+
     static func markdown(from text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8),
-              let document = try? JSONDecoder().decode(MinutesDocument.self, from: data)
-        else {
-            return trimmed.isEmpty
-                ? "这一版没有拿到内容。可以重新生成一次。"
-                : trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回）。\n"
+        switch outcome(from: text) {
+        case .ready(let body): return body
+        case .failed(let reason): return reason
         }
-        return document.markdown
     }
 
     private static func readableReason(for error: Error) -> String {

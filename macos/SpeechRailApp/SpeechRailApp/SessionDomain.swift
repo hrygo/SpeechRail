@@ -170,6 +170,26 @@ public enum MinutesStatus: String, Codable, Sendable {
     }
 }
 
+/// 模型输出的解析结果（MC-33、MC-34）。空输出、拒答、结构错误都不是成功：
+/// 调用方必须把它们记成失败并保留可读原因，不能把占位正文标成 ready。
+/// 纯值类型，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum MinutesOutcome: Equatable, Sendable {
+    case ready(String)
+    case failed(String)
+
+    /// 解析模型原文：`render` 由结构拥有者传入，保持 Domain 层不依赖具体 schema。
+    public static func parsing(text: String, markdown: (String) -> String?) -> MinutesOutcome {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failed("这一版没有拿到内容。可以重新生成一次。")
+        }
+        guard let body = markdown(trimmed) else {
+            return .failed(trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回），尚未按结构校验，不能作为可用纪要。\n")
+        }
+        return .ready(body)
+    }
+}
+
 public enum InnerOSIntent: String, Codable, Sendable {
     case fact
     case analysis

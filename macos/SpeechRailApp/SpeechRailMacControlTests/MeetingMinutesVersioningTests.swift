@@ -98,6 +98,30 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(usable?.body, "# 采用版")
     }
 
+    /// MC-33/MC-34：空输出与非结构输出都不是成功，不能标成 ready。
+    /// 用 Domain 层的纯解析覆盖，不依赖生成器目标。
+    func testOutcomeRejectsEmptyAndUnstructuredText() {
+        switch MinutesOutcome.parsing(text: "   \n  ", markdown: { _ in nil }) {
+        case .failed(let reason):
+            XCTAssertFalse(reason.isEmpty)
+        case .ready:
+            XCTFail("空输出不能解析成可用纪要")
+        }
+        switch MinutesOutcome.parsing(text: "今天讨论了预算，没有结论。", markdown: { _ in nil }) {
+        case .failed(let reason):
+            XCTAssertTrue(reason.contains("今天讨论了预算"))
+            XCTAssertTrue(reason.contains("尚未按结构校验"))
+        case .ready:
+            XCTFail("非结构输出不能直接标成可用纪要")
+        }
+        switch MinutesOutcome.parsing(text: "{\"ok\":true}", markdown: { _ in "# 结构化正文" }) {
+        case .ready(let body):
+            XCTAssertEqual(body, "# 结构化正文")
+        case .failed:
+            XCTFail("合法结构输出应该解析成功")
+        }
+    }
+
     /// MC-48：选定版本导出只认调用方传入的版本，不认“最新/最大版本”。
     func testSelectedVersionIsReturnedAsSelected() async throws {
         let store = try requireStore()
