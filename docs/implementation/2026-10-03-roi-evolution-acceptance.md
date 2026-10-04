@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 539 XCTest + 384 swift-testing，0 失败
+  → 541 XCTest + 384 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 512 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
+  → 514 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -379,6 +379,12 @@ Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 **语义等价**——`validate` 要求单元的 `sourceRevisionID` 等于所属修订 id，
 不同 id 的修订其 `sourceUnits` 必然不等，两种实现结局一致，故不作为缺陷记录。
 
+2026-10-04 第 31 轮（#208，`CreatorServiceClient` 两个 fail-closed 默认值）再次全量重跑：
+541 / 514 XCTest + 384 swift-testing、Debug BUILD SUCCEEDED，
+`StreamingTtsCapabilitiesTests` 逐套件对账 SPM 6 / Xcode 6 一致。
+Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+本轮只改测试与本文档，`CreatorServiceClient.swift` 与 `origin/main` 逐字节一致。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -397,7 +403,7 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
 | `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
-| **XCTest 合计** | **539** | **512** | |
+| **XCTest 合计** | **541** | **514** | |
 | swift-testing 合计 | 384 | 384 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
