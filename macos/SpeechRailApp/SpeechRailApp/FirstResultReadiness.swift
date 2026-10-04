@@ -13,6 +13,33 @@ public struct FirstResultReadiness: Equatable, Sendable {
         case voiceAvailable
 
         public var id: String { rawValue }
+
+        /// 这一步的"下一步"落在哪一页。
+        ///
+        /// 落到用户已经认识的那一页，而不是新造一个流程——但前提是那一页**真的**
+        /// 有完成这一步的动作。服务状态页只有启停服务；选档位、下载并校验模型都在
+        /// 模型组合页。把 `profileSelected` / `modelsReady` 指回服务状态，会让用户
+        /// 按下"去处理"后停在原地，既没有那个动作，也没有失败提示（#210）。
+        public var ownerRoute: AppRoute {
+            switch self {
+            case .serviceReachable:
+                // 本页自带启动/停止/重启服务，这一页就是它该在的地方。
+                .overview
+            case .profileSelected, .modelsReady:
+                .models
+            case .voiceAvailable:
+                .voiceLibrary
+            }
+        }
+
+        /// 这一步是不是要换一页才能做。
+        ///
+        /// 一个把人送回他已经在的那一页的按钮，按下去和不按一样，而且会让整张
+        /// 卡失去可信度：用户没法分辨"这一步不需要动作"和"这个按钮坏了"。动作
+        /// 已经在当前页时（服务状态页的启动/重启），卡片只负责说清缺口。
+        public func needsDestination(awayFrom route: AppRoute) -> Bool {
+            ownerRoute != route
+        }
     }
 
     /// 一个还没满足的步骤，以及用户现在能做的那一个动作。

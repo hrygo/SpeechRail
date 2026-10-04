@@ -319,10 +319,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 542 XCTest + 384 swift-testing，0 失败
+  → 544 XCTest + 384 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 515 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
+  → 517 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -398,6 +398,14 @@ Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 `[String]?`，解码不再塌成 `[]`；`provenance(for:)` 与 `recipeIncompleteReason` 随之调整。
 行为变化与回退方式见 #209 与本文档第 ① 节末段。
 
+2026-10-04 第 33 轮（#210，首次使用卡片的「去处理」落点）再次全量重跑：
+544 / 517 XCTest + 384 swift-testing。Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+**本轮含生产代码改动**：步骤到页面的映射从 `ServiceOverviewView` 的私有函数
+`navigateToOwner(of:)` 上移到 `FirstResultReadiness.Step.ownerRoute`，并新增
+`Step.needsDestination(awayFrom:)`。「选运行档位」「准备模型」原先被指回服务状态页，
+而那两个动作在模型组合页；`serviceReachable` 的目标页就是卡片所在页，按钮不再渲染。
+详见 #210。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -416,7 +424,7 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
 | `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
-| **XCTest 合计** | **542** | **515** | |
+| **XCTest 合计** | **544** | **517** | |
 | swift-testing 合计 | 384 | 384 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）

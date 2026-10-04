@@ -10,6 +10,9 @@ public struct ServiceOverviewView: View {
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var pendingAction: ControlCommand?
 
+    /// 这张卡所在的页面。用来判断某个缺口的动作是不是已经摆在用户面前。
+    private static let thisRoute: AppRoute = .overview
+
     public init() {}
 
     public var body: some View {
@@ -264,20 +267,14 @@ public struct ServiceOverviewView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            Button("去处理") {
-                navigateToOwner(of: step.step)
+            // 动作已经在本页时不给按钮：点了不动的按钮比没有按钮更糟，用户没法
+            // 分辨"这一步不用动"和"这个按钮坏了"（#210）。
+            if step.step.needsDestination(awayFrom: Self.thisRoute) {
+                Button("去处理") {
+                    navigation.request(step.step.ownerRoute)
+                }
+                .speechRailButton(.secondary)
             }
-            .speechRailButton(.secondary)
-        }
-    }
-
-    /// 把"下一步"落到用户已经认识的那一页，而不是新造一个流程。
-    private func navigateToOwner(of step: FirstResultReadiness.Step) {
-        switch step {
-        case .voiceAvailable:
-            navigation.request(.voiceLibrary)
-        case .serviceReachable, .profileSelected, .modelsReady:
-            navigation.request(.overview)
         }
     }
 
