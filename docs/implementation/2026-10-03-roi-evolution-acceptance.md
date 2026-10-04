@@ -322,7 +322,7 @@ swift test --package-path macos/SpeechRailApp --skip-update
   → 544 XCTest + 384 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 517 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
+  → 524 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -422,15 +422,21 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `RealtimeContractTests` | 41 | 41 | 已对齐 |
 | `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
-| `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
+| `WindowLayoutPolicyTests` | 7 | 7 | 已对齐（#194） |
 | `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
-| **XCTest 合计** | **544** | **517** | |
+| **XCTest 合计** | **544** | **524** | |
 | swift-testing 合计 | 384 | 384 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
 原先被 `#if SWIFT_PACKAGE` 挡在 `xcodebuild test` 之外，现已解除，回归由两条门禁共同覆盖。
-残留的 27 条属于既有结构：`ModelNamePresentation` / `ModelReadinessPresenter` 定义在
+残留的 20 条属于既有结构：`ModelNamePresentation` / `ModelReadinessPresenter` 定义在
 `ModelManagementView.swift`，该文件被 SPM 显式 `exclude`，动它需要拆分符号，超出本 PR 范围。
+
+2026-10-04 第 34 轮（#194 / #195）把 `WindowLayoutPolicyTests` 的 7 条补进 Xcode
+`Unit Test Sources`，差额 27 → 20。新增 `scripts/check_macos_test_target_coverage.py`
+比对两份清单并接入 CI；`ci.yml` 里支撑「跳过 `xcodebuild test`」的那句前提已改成
+实测事实（SwiftPM 是超集，两份清单手工维护且已测得不同）。
+实测：`--test-unit` 517 → 524 XCTest。Python 侧 3158 passed, 1 skipped；ruff、mypy 全绿。
 见 #194。
 
 ### 3.1 一处刻意留下的边界：App 不判断「升级是否失败过」

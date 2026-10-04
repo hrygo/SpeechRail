@@ -194,6 +194,9 @@ jobs:
       - name: Check MCP tool surface parity
         run: uv run python scripts/check_mcp_tool_contract.py
 
+      - name: Check macOS test target coverage parity
+        run: uv run python scripts/check_macos_test_target_coverage.py
+
       - name: Run explicit diarization contract regression tests
         run: uv run pytest --no-cov tests/test_diarization_extensions.py tests/test_diarization_sdk.py
 
@@ -359,7 +362,12 @@ jobs:
 
       # Deliberately `build`, never `test`. The step above already runs every
       # test in macos/SpeechRailApp/SpeechRailMacControlTests through SwiftPM,
-      # and that is the same source directory the Xcode test target compiles.
+      # and SwiftPM is the superset: it compiles every `.swift` in that
+      # directory, while the Xcode `Unit Test Sources` phase names a subset.
+      # The two lists are maintained by hand and were measured to differ, so
+      # this is an observed fact rather than structural equivalence —
+      # `check_macos_test_target_coverage.py` fails if either list drifts.
+      # Two test files stay out on purpose; see the checker's allowlist (#194).
       # Running those XCTest and swift-testing suites a second time under
       # `xcodebuild test` reproduced a lost-wakeup hang: every test reported
       # passed, TeleprompterSessionLifecycleTests never reported suite
