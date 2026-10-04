@@ -281,11 +281,36 @@ public final class AssistantSession {
     private var audioSession: (any AssistantAudioSession)?
     private var client: (any AssistantRealtimeClient)?
     private var activeRealtimeBinding: RealtimeCapabilityBinding?
+    private struct VoiceSelectionIntent {
+        var revision: Int
+        var voice: String
+        var name: String?
+    }
+    private var voiceSelectionRevision = 0
+    private var selectedVoice: VoiceSelectionIntent?
+    private var appliedVoiceRevision = -1
+    private var voiceApplication: Task<Bool, Never>?
+    private var voiceApplicationID: UUID?
+    private var voiceStartID: UUID?
+    private var voiceStartInProgress: Bool { voiceStartID != nil }
+    private struct RequestVoice {
+        var replyID: String
+        var sessionID: String
+        var selection: VoiceSelectionIntent
+        var voice: String
+        var accepted = false
+    }
+    private var requestVoices: [String: RequestVoice] = [:]
+    private var voiceRecordEffects: [String: (sessionID: String, task: Task<Void, Never>)] = [:]
+    private var recordedVoiceRequests: Set<String> = []
+    private var recordedVoiceSelections: [String: Int] = [:]
     private var pump: Task<Void, Never>?
     /// VA-02：拆分后的上传/接收任务句柄。receiver 保持单一顺序消费者，
     /// 只做轻量归约，不 await 远端 cancel 确认；取消 effect 独立持有身份。
     private var uploaderTask: Task<Void, Never>?
     private var receiverTask: Task<Void, Never>?
+    private var transportCloseEffect: Task<Void, Never>?
+    private var transportCloseEffectID: UUID?
     /// 有所有权的取消 effect 句柄（VA-02）。结束/新取消按身份回收旧 effect，
     /// effect 完成只在 session/connection/intent 仍匹配时改变当前 phase。
     private var interruptEffect: Task<Bool, Never>?
@@ -293,8 +318,7 @@ public final class AssistantSession {
     private var playback: (any AssistantPlaybackChannel)?
     private var sessionStartedAt: Date?
     private var currentOrdinal = 0
-    private var committedItemIDs: Set<String> = []
-    /// itemID -> 这一句**第一个非空证据**被本机收到的时刻（D09）。
+        /// itemID -> 这一句**第一个非空证据**被本机收到的时刻（D09）。
     ///
     /// 这是本地观测时间，不是声学开口时间：wire 上没有 sample span，
     /// 精确的 `t_start/t_end` 一律写 NULL（见 `commitUserTurn`）。
@@ -320,13 +344,16 @@ public final class AssistantSession {
         case closed
     }
     private var inputLifecycle: InputLifecycle = .active
-    /// VA-03：draining 期间已登记、尚未 settled 的保存任务数。
-    /// receiver 不等待该聚合；结束时等待 marker 之前的保存全部 settled。
-    private var pendingDrainSaves = 0
-    /// VA-03：draining 期间收到的 completed 去重后仅归档，不 beginReply。
-    private var drainedItemIDs: Set<String> = []
     /// 历史回合（**只追加、从不重写**，见 §5.5 的前缀结构）。
-    private var history: [LLMMessage] = []
+    private var contextTurns: [AssistantContextTurn] = []
+    private var replyQuestionIDs: [String: String] = [:]
+    private var replySpoken: [String: Bool] = [:]
+    private var replyPlayback: [String: AssistantContextEntry.PlaybackStatus] = [:]
+    private var speechRequests: [String: (sessionID: String, replyID: String)] = [:]
+    private var speechRequestIDs: [Int: String] = [:]
+    public private(set) var contextOmissionNote: String?
+    private var textConversationTask: Task<String, Error>?
+    private var textConversationTaskID: UUID?
     /// 本场已经确认并生效的记忆（开始时读一次，会话内不变）。
     private var memories: [String] = []
     /// 半双工门闩：它说话的时候不上行音频（§14.5）。
@@ -396,11 +423,18 @@ public final class AssistantSession {
             createdAt: Date()
         )
         // 新场从种子重建 history：只含选定完整轮次，不含密钥与旧同意。
-        history = seedTurns.map {
-            LLMMessage(
-                role: $0.role == SessionLineRole.assistant ? LLMMessage.Role.assistant : LLMMessage.Role.user,
-                text: $0.text
-            )
+        contextTurns = []
+        for index in stride(from: 0, to: seedTurns.count - 1, by: 2) {
+            let user = seedTurns[index]
+            let reply = seedTurns[index + 1]
+            contextTurns.append(AssistantContextTurn(
+                user: AssistantContextEntry(id: user.id, text: user.text),
+                reply: AssistantContextEntry(
+                    id: reply.id, text: reply.text,
+                    generationStatus: reply.isInterrupted ? .unknown : .completed,
+                    playbackStatus: .unknown
+                )
+            ))
         }
         sessionID = record.id
         currentOrdinal = 0
@@ -420,18 +454,23 @@ public final class AssistantSession {
         maxTurns: Int
     ) -> [TranscriptLine] {
         let ordered = lines.sorted { $0.ordinal < $1.ordinal }
-        let picked: [TranscriptLine]
-        if let selectedLineIDs, !selectedLineIDs.isEmpty {
-            picked = ordered.filter { selectedLineIDs.contains($0.id) }
-        } else {
-            picked = Array(ordered.suffix(maxTurns))
+        var complete: [[TranscriptLine]] = []
+        var user: TranscriptLine?
+        for line in ordered {
+            guard line.status == .final else { user = nil; continue }
+            if line.role == .user {
+                user = line
+            } else if line.role == .assistant, let question = user {
+                let selected = selectedLineIDs.map { $0.contains(question.id) && $0.contains(line.id) } ?? true
+                if selected {
+                    complete.append([question, line])
+                }
+                user = nil
+            } else {
+                user = nil
+            }
         }
-        // 配对对齐：首条为 assistant（半个配对）时向前补一条 user。
-        guard let first = picked.first, first.role == .assistant else { return picked }
-        guard let idx = ordered.firstIndex(where: { $0.id == first.id }), idx > 0 else { return picked }
-        let prev = ordered[idx - 1]
-        guard prev.role == .user else { return picked }
-        return [prev] + picked
+        return complete.suffix(max(0, maxTurns)).flatMap { $0 }
     }
     /// 正在跑的这一轮回复（D08）。`nil` 表示此刻没有助手回复在生成或待收尾。
     /// 它的 `id` 就是库里那一行的 id，也是界面 `Turn.id`——全程不变。
@@ -529,6 +568,8 @@ public final class AssistantSession {
 
     /// 从页面主按钮开始。人设与音色在这里定（§6.1 的"未开始"态）。
     public func start(persona: Persona, voiceID: String?, mode: AssistantMode) async {
+        selectedVoice = nil
+        voiceSelectionRevision &+= 1
         self.persona = persona
         self.voiceID = voiceID
         // 开始那一刻的音色要单独留一份：`voiceID` 会随「换音色」往前走，
@@ -563,40 +604,96 @@ public final class AssistantSession {
     ///
     /// 被拒时这一句仍用旧音色说，给可读原因与可用内置声音列表（§9 第 14 行）。
     public func changeVoice(to voice: String, name: String? = nil) async {
-        let previous = voiceID
-        guard let client else { return }
+        voiceSelectionRevision &+= 1
+        selectedVoice = VoiceSelectionIntent(revision: voiceSelectionRevision, voice: voice, name: name)
+        voiceID = voice
+        // 断线/准备期间保留最新意图，发布新连接时应用。
+        guard client != nil, !voiceStartInProgress else { return }
+        _ = await applyLatestVoice()
+    }
+
+    /// 对同一 client 只有一个写入者。新选择只更新意图，不取消跨 actor 的旧写入。
+    private func applyLatestVoice() async -> Bool {
+        if let task = voiceApplication { return await task.value }
+        guard let client else { return false }
+        let token = startToken
+        let connection = connectionToken
+        let applicationID = UUID()
+        voiceApplicationID = applicationID
+        let task = Task<Bool, Never> { [weak self] in
+            guard let self else { return false }
+            defer {
+                if self.voiceApplicationID == applicationID {
+                    self.voiceApplication = nil
+                    self.voiceApplicationID = nil
+                }
+            }
+            while let selection = self.selectedVoice {
+                if self.appliedVoiceRevision == selection.revision { return true }
+                let binding = await self.realtimeCapabilityBindingProvider?(selection.voice)
+                guard self.startToken == token, self.connectionToken == connection else { return false }
+                guard self.selectedVoice?.revision == selection.revision else { continue }
+                do {
+                    if self.realtimeCapabilityBindingProvider != nil, binding?.includesSpeech != true {
+                        throw Blocked(.serviceNotReady("无法确认这个音色的实时朗读版本，请刷新服务信息后重试。"))
+                    }
+                    let canonical = binding?.canonicalVoiceID ?? selection.voice
+                    try await client.updateVoice(
+                        canonical,
+                        expectedVoiceRevision: binding?.voiceRevision,
+                        expectedTTSRevision: binding?.ttsModelRevision
+                    )
+                    guard self.startToken == token, self.connectionToken == connection else { return false }
+                    // 旧写入已完成，再串行应用最新选择，下一 start 才可通过。
+                    guard self.selectedVoice?.revision == selection.revision else { continue }
+                    self.appliedVoiceRevision = selection.revision
+                    self.activeRealtimeBinding = binding
+                    self.voiceID = canonical
+                    self.lastFailure = nil
+                    return true
+                } catch {
+                    guard self.startToken == token, self.connectionToken == connection else { return false }
+                    guard self.selectedVoice?.revision == selection.revision else { continue }
+                    self.lastFailure = "这个音色现在用不了：\(error.localizedDescription)"
+                    return false
+                }
+            }
+            return true
+        }
+        voiceApplication = task
+        return await task.value
+    }
+
+    private func recordAcceptedVoice(requestID: String, ordinal: Int) async {
+        guard let accepted = requestVoices[requestID],
+              accepted.accepted,
+              !recordedVoiceRequests.contains(requestID) else { return }
+        if recordedVoiceSelections[accepted.sessionID] == accepted.selection.revision {
+            requestVoices.removeValue(forKey: requestID)
+            return
+        }
+        // 先认领避免 started 与 ordinal 返回同时重复登记；失败撤销认领供再次保存恢复。
+        recordedVoiceRequests.insert(requestID)
         do {
-            let binding = await realtimeCapabilityBindingProvider?(voice)
-            if realtimeCapabilityBindingProvider != nil,
-               binding?.includesSpeech != true
-            {
-                throw Blocked(.serviceNotReady("无法确认这个音色的实时朗读版本，请刷新服务信息后重试。"))
+            try await coordinator.noteVoiceChange(
+                sessionID: accepted.sessionID, atOrdinal: ordinal,
+                voice: VoiceSnapshot(id: accepted.voice, name: accepted.selection.name)
+            )
+            recordedVoiceSelections[accepted.sessionID] = max(
+                recordedVoiceSelections[accepted.sessionID] ?? -1, accepted.selection.revision
+            )
+            requestVoices.removeValue(forKey: requestID)
+            recordedVoiceRequests.remove(requestID)
+            guard sessionID == accepted.sessionID else { return }
+            if !voiceChanges.contains(where: { $0.atOrdinal == ordinal && $0.voiceID == accepted.voice }) {
+                voiceChanges.append(VoiceChange(atOrdinal: ordinal, voiceID: accepted.voice, name: accepted.selection.name))
+                voiceChanges.sort { $0.atOrdinal < $1.atOrdinal }
             }
-            let canonicalVoiceID = binding?.canonicalVoiceID ?? voice
-            try await client.updateVoice(
-                canonicalVoiceID,
-                expectedVoiceRevision: binding?.voiceRevision,
-                expectedTTSRevision: binding?.ttsModelRevision
-            )
-            voiceID = canonicalVoiceID
-            if let binding {
-                activeRealtimeBinding = binding
-            }
-            try? await coordinator.noteVoiceChange(
-                atOrdinal: currentOrdinal + 1,
-                // 名字一起存：库里那一列是 `id|name`，音色改名或删除之后
-                // 这一行仍然说得清当时是谁（`SessionStore.noteVoiceChange` 的注解）。
-                voice: VoiceSnapshot(id: canonicalVoiceID, name: name)
-            )
-            voiceChanges.append(
-                VoiceChange(atOrdinal: currentOrdinal + 1, voiceID: canonicalVoiceID, name: name)
-            )
-            lastFailure = nil
         } catch {
-            voiceID = previous
-            let presets = availableVoices().prefix(4).joined(separator: "、")
-            lastFailure = "这个音色现在用不了：\(error.localizedDescription)"
-                + (presets.isEmpty ? "" : "可以先用：\(presets)")
+            recordedVoiceRequests.remove(requestID)
+            if sessionID == accepted.sessionID, selectedVoice?.revision == accepted.selection.revision {
+                lastFailure = "已用于朗读，但音色变更记录未保存：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -620,6 +717,22 @@ public final class AssistantSession {
     /// 既不抢 `activeSessionID`，也不会打断正在占用设备的会议。
     private func ensureTextConversation() async throws -> String {
         if let sessionID { return sessionID }
+        if let task = textConversationTask { return try await task.value }
+        let token = startToken
+        let taskID = UUID()
+        textConversationTaskID = taskID
+        let task = Task { try await createTextConversation(token: token) }
+        textConversationTask = task
+        defer {
+            if textConversationTaskID == taskID {
+                textConversationTask = nil
+                textConversationTaskID = nil
+            }
+        }
+        return try await task.value
+    }
+
+    private func createTextConversation(token: Int) async throws -> String {
         let startedAt = Date()
         let resolved = preferences?().resolvedLLMConfiguration(
             for: .assistant,
@@ -640,6 +753,10 @@ public final class AssistantSession {
                 startedAt: startedAt
             )
         )
+        guard token == startToken, inputLifecycle == .active else {
+            await coordinator.sealSession(id: record.id)
+            throw Superseded.start
+        }
         prepareConversationContext(startedAt: startedAt)
         // VA-06：文字场同样冻结路由快照，runReply 从快照取 route。
         if let resolved {
@@ -659,6 +776,10 @@ public final class AssistantSession {
             memoryLoadFailed = true
             lastFailure = "本次未加载记忆：\(error.localizedDescription)"
         }
+        guard token == startToken, inputLifecycle == .active else {
+            await coordinator.sealSession(id: record.id)
+            throw Superseded.start
+        }
         sessionID = record.id
         isTextOnlyConversation = true
         blocked = nil
@@ -669,6 +790,8 @@ public final class AssistantSession {
     /// 打字提问：同一条编排，**不朗读回复**（§6.1 第一条）。
     @discardableResult
     public func ask(typed text: String) async -> TextSendResult {
+        let acceptanceToken = startToken
+        guard inputLifecycle == .active, phase != .ending else { return .rejected("这一场正在结束，请稍后再发。") }
         let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return .rejected("先写下要问的内容。") }
         guard blocked == nil || blocked?.allowsTyping == true else {
@@ -681,39 +804,39 @@ public final class AssistantSession {
             lastFailure = "文字对话没能开始：\(error.localizedDescription)"
             return .rejected(lastFailure ?? "文字对话没能开始。")
         }
-        guard let startedAt = sessionStartedAt else {
+        guard acceptanceToken == startToken, inputLifecycle == .active, self.sessionID == sessionID,
+              let startedAt = sessionStartedAt else {
             return .rejected("这一场还没准备好，请稍后再试。")
         }
-        do {
-            let ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .user,
-                    text: question,
-                    source: .keyboard,
-                    tStart: max(0, Date().timeIntervalSince(startedAt))
-                )
-            )
-            currentOrdinal = ordinal
-            turns.append(
-                Turn(
-                    id: UUID().uuidString,
-                    ordinal: ordinal,
-                    role: .user,
-                    text: question,
-                    source: .keyboard,
-                    isInterrupted: false,
-                    speakerLabel: nil,
-                    createdAt: Date()
-                )
-            )
-            history.append(LLMMessage(role: .user, text: question))
-        } catch {
-            lastFailure = error.localizedDescription
-            return .rejected(lastFailure ?? "没能把这条问题记下来。")
+        guard inputPersistence.failures(sessionID: sessionID).isEmpty else {
+            return .rejected("还有输入未保存，请先重试保存。")
         }
-        submitTurn(questionID: "typed_\(UUID().uuidString.lowercased())", text: question, source: .keyboard, spoken: false)
-        return .accepted
+        let observedAt = dependencies.now()
+        let command = AssistantInputPersistenceQueue.Command(
+            sessionID: sessionID, connection: connectionToken, itemID: "",
+            text: question, source: .keyboard,
+            tStart: max(0, observedAt.timeIntervalSince(startedAt)),
+            formal: true, observedAt: observedAt
+        )
+        switch inputPersistence.enqueue(command) {
+        case .accepted, .duplicate: break
+        case .capacityExceeded:
+            return .rejected("记录正在保存，暂时无法发送，请稍后再试。")
+        case .invalidIdentity:
+            return .rejected("无法确认这一场的记录，请重试。")
+        }
+        switch await inputPersistence.waitForResult(lineID: command.lineID) {
+        case .saved:
+            return .accepted
+        case .blocked:
+            if self.sessionID == sessionID {
+                lastFailure = "内容已接纳，但前面的输入尚未保存。请结束对话后重试保存。"
+            }
+            return .accepted
+        case .failed(let message):
+            if self.sessionID == sessionID { lastFailure = "这一句未保存：\(message)" }
+            return .rejected("没能把这条问题记下来，请重试保存。")
+        }
     }
 
     /// 重播某一句话（打字提问的回复也能听——「不朗读」不等于「不能听」）。
@@ -723,7 +846,7 @@ public final class AssistantSession {
         // 再开新的 playbackInvocation。旧轮按自己的 requestID 走退休屏障，
         // 新重播绑定新的 originalTurnID，不与旧轮混淆。
         if let stream = ttsStream, stream.isActive {
-            _ = await interruptCurrentReply()
+            guard await interruptCurrentReply() else { return }
         }
         guard let stream = ttsStream else { return }
         // VA-12/A42：playbackInvocation 绑定 originalTurnID。
@@ -784,43 +907,7 @@ public final class AssistantSession {
     /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking || replyTask != nil else { return }
-        // VA-12/A42：重播中的停止只更新本次播放记录（originalTurnID），
-        // 不改被重播轮的生成状态与正文。
-        if let invocationID = replayingTurnID {
-            let remoteIdleConfirmed = await interruptCurrentReply()
-            interruptedReplayTurnIDs.insert(invocationID)
-            playbackDeliveryNotes[invocationID] = "朗读未完成；已保留完整文字，可继续阅读或重新播放。"
-            replayingTurnID = nil
-            isSpeaking = false
-            streamingReply = nil
-            isMutedForPlayback = false
-            if remoteIdleConfirmed {
-                phase = .listening
-            } else {
-                await handleUnconfirmedRemoteIdle()
-            }
-            return
-        }
-        // 两种情况要分开（D08 第 5 条）：
-        // - 还在生成/已经定稿但没落库 → 走统一收尾，正文与打断标记一起写；
-        // - 正文早已完整定稿、只是朗读没放完 → 同一行只补一个打断标记。
-        let remoteIdleConfirmed: Bool
-        if let reply = currentReply {
-            remoteIdleConfirmed = await interruptCurrentReply()
-            await finalizeReply(.interrupted, reply: reply)
-        } else {
-            remoteIdleConfirmed = await interruptCurrentReply()
-            await markLastReplyInterruptedAfterPlaybackCut()
-        }
-        isSpeaking = false
-        streamingReply = nil
-        isMutedForPlayback = false
-        // 服务端没确认这一轮已经结束，就不能把这条连接当成"空出来了"继续用。
-        if remoteIdleConfirmed {
-            phase = .listening
-        } else {
-            await handleUnconfirmedRemoteIdle()
-        }
+        _ = await interruptCurrentReply()
     }
 
     /// 打断一次正在生成/朗读的回答（ESC、「停止朗读」与 barge-in 共用这条路）。
@@ -833,12 +920,7 @@ public final class AssistantSession {
     ///   但在有界时间内没等到匹配 requestID 的终态——这条连接的 TTS 归属未知。
     @discardableResult
     private func interruptCurrentReply() async -> Bool {
-        // VA-02：调用方（receiver / stopSpeaking / noteSpeechEvidence / stopCapture）
-        // 不再直接 await 远端 cancel 确认。本地先同步撤权，远端等待交给有身份的 effect；
-        // receiver 继续消费事件，终态到达时由 effect 收尾，不阻塞接收循环。
-        let session = sessionID
-        let connection = connectionToken
-        return await enqueueInterruptEffect(session: session, connection: connection)
+        await requestReplyInterrupt().value
     }
 
     /// VA-02 中断意图 effect（InterruptIntent）。
@@ -847,40 +929,59 @@ public final class AssistantSession {
     /// 交给唯一 effect。effect 持有 session/connection 身份，完成后只在仍匹配时
     /// 改变当前 phase；即使过期也回收自己的资源与 waiter。
     @discardableResult
-    private func enqueueInterruptEffect(session: String?, connection: Int) async -> Bool {
-        // 旧 effect 按身份回收：新意图到达时旧等待不再有权改变当前状态。
-        let previousID = interruptEffectID
+    private func requestReplyInterrupt(
+        termination: AssistantReplyState.Termination = .interrupted
+    ) -> Task<Bool, Never> {
+        if let effect = interruptEffect { return effect }
+        let session = sessionID
+        let connection = connectionToken
         let intentID = UUID()
         interruptEffectID = intentID
-        // 本地同步撤权：LLM 不再产出，新提交按确定顺序接管（VA-04 仲裁）。
-        invalidateReply()
+        let reply = currentReply
+        let finalized = lastFinalizedReply
+        let replayID = replayingTurnID
         let stream = ttsStream
-        let client = client
+        let hadPlayback = isSpeaking || stream?.isActive == true || stream?.isAwaitingPlayback == true
+        // 撤权和挂远端屏障在 Task 创建前完成，避免下一 start 抢占旧 request。
+        let preparation = stream?.prepareCancellation()
+        invalidateReply()
+        let revokedGeneration = replyGeneration
+        isSpeaking = false
+        streamingReply = nil
+        isMutedForPlayback = false
         let effect = Task<Bool, Never> { [weak self] in
             guard let self else { return false }
             let confirmed: Bool
-            if let stream, stream.isActive {
-                confirmed = await stream.cancel()
+            if let stream, let preparation {
+                confirmed = await stream.performCancellation(preparation)
             } else {
                 await self.stopPlaybackLayer()
-                if let client { try? await client.cancelTTS() }
-                confirmed = true
+                confirmed = stream?.hasUnconfirmedRemoteOwnership != true
+            }
+            if let replayID {
+                if self.sessionID == session {
+                    self.interruptedReplayTurnIDs.insert(replayID)
+                    self.playbackDeliveryNotes[replayID] = "朗读未完成；已保留完整文字，可重新播放。"
+                    if self.replayingTurnID == replayID { self.replayingTurnID = nil }
+                }
+            } else if let reply {
+                await self.finalizeReply(termination, reply: reply)
+            } else if let finalized, hadPlayback {
+                await self.markLastReplyInterruptedAfterPlaybackCut(reply: finalized)
+            }
+            guard self.interruptEffectID == intentID else { return confirmed }
+            self.interruptEffect = nil
+            self.interruptEffectID = nil
+            guard self.sessionID == session, self.connectionToken == connection else { return confirmed }
+            if !confirmed {
+                await self.handleUnconfirmedRemoteIdle()
+            } else if self.replyGeneration == revokedGeneration, self.phase != .ending {
+                self.phase = .listening
             }
             return confirmed
         }
         interruptEffect = effect
-        let confirmed = await effect.value
-        // effect 完成后按身份复核：过期 effect 只回收自己，不改当前 phase。
-        guard interruptEffectID == intentID else {
-            _ = previousID
-            return confirmed
-        }
-        interruptEffect = nil
-        // session/connection 已推进（结束/重连）：不改新会话的状态。
-        guard self.sessionID == session, self.connectionToken == connection else {
-            return confirmed
-        }
-        return confirmed
+        return effect
     }
 
     /// 回收已过期或已完成的中断 effect，不等待其远端确认。
@@ -958,6 +1059,8 @@ public final class AssistantSession {
         try requireLive(token)
         // 设备与新连接确实 ready 之后才闭合中断；失败时 interruption 仍然开着，可再重试。
         await coordinator.resumeAfterInterruption()
+        try requireLive(token)
+        isStoppingIntentionally = false
         phase = .listening
         startPump(
             stream: transport.stream,
@@ -969,7 +1072,13 @@ public final class AssistantSession {
     /// 语音通道：能力 binding → 设备 → 连接 → 播放。
     /// 全部在**局部作用域**里建好；令牌仍然有效才发布到 `self`（S2 第 3 条）。
     private func openVoiceTransport(token: Int) async throws -> VoiceTransport {
-        let binding = await realtimeCapabilityBindingProvider?(voiceID)
+        var binding: RealtimeCapabilityBinding?
+        var bindingRevision: Int
+        repeat {
+            bindingRevision = voiceSelectionRevision
+            binding = await realtimeCapabilityBindingProvider?(selectedVoice?.voice ?? voiceID)
+            try requireLive(token)
+        } while bindingRevision != voiceSelectionRevision
         try requireLive(token)
         if realtimeCapabilityBindingProvider != nil,
            binding?.includesSpeech != true
@@ -1061,7 +1170,6 @@ public final class AssistantSession {
         itemObservedAt.removeAll()
         // itemID 是**连接内**的去重键：重连之后服务端会从头编号，
         // 沿用上一条连接的集合会把新的一句话当成重复而丢掉。
-        committedItemIDs.removeAll()
         do {
             try requireLive(token)
         } catch {
@@ -1072,7 +1180,7 @@ public final class AssistantSession {
         }
 
         // 增量 TTS 的协调器先建好：播放层的"真播完"回调要直接挂到它上面。
-        let tts = makeTTSStreamCoordinator(client: client)
+        let tts = makeTTSStreamCoordinator(client: client, audioSession: audioSession)
 
         let playbackDrained: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
@@ -1139,6 +1247,8 @@ public final class AssistantSession {
             player.onBufferRendered = { [weak tts] epoch, frames in
                 tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
             }
+            tts.enqueuePlayback = { pcm, epoch in await player.enqueue(pcm, epoch: epoch) }
+            tts.stopPlayback = { await player.stop() }
             do {
                 try requireLive(token)
             } catch {
@@ -1149,10 +1259,38 @@ public final class AssistantSession {
             }
             playback = player
         }
+        // 设备/建连期间可能又选了音色；私有连接只在最新版本写入完成后发布。
+        do {
+            repeat {
+                bindingRevision = voiceSelectionRevision
+                let latestVoice = selectedVoice?.voice ?? voiceID
+                binding = await realtimeCapabilityBindingProvider?(latestVoice)
+                try requireLive(token)
+                guard bindingRevision == voiceSelectionRevision else { continue }
+                if realtimeCapabilityBindingProvider != nil, binding?.includesSpeech != true {
+                    throw Blocked(.serviceNotReady("无法确认所选音色的实时朗读版本。"))
+                }
+                if let canonical = binding?.canonicalVoiceID ?? latestVoice {
+                    try await client.updateVoice(
+                        canonical, expectedVoiceRevision: binding?.voiceRevision,
+                        expectedTTSRevision: binding?.ttsModelRevision
+                    )
+                }
+                try requireLive(token)
+            } while bindingRevision != voiceSelectionRevision
+        } catch {
+            await tearDownPrivate(source: source, audioSession: audioSession, client: client)
+            throw error
+        }
+        appliedVoiceRevision = bindingRevision
+        voiceApplication?.cancel()
+        voiceApplication = nil
+        voiceApplicationID = nil
         self.source = source
         self.audioSession = audioSession
         self.client = client
         self.ttsStream = tts
+        voiceStartID = nil
         activeRealtimeBinding = binding
         return VoiceTransport(
             stream: stream,
@@ -1182,11 +1320,16 @@ public final class AssistantSession {
         sessionStartedAt = startedAt
         invalidateReply()
         turns = []
-        history = []
+        contextTurns = []
+        replyQuestionIDs = [:]
+        replySpoken = [:]
+        replyPlayback = [:]
+        speechRequests = [:]
+        speechRequestIDs = [:]
+        contextOmissionNote = nil
         partialText = nil
         partialItemID = nil
         streamingReply = nil
-        committedItemIDs = []
         currentOrdinal = 0
         // VA-06：先清上一场 memories/history，再加载选中 active 记忆。
         // 记忆加载失败时明确标记，不沿用旧数组。
@@ -1198,8 +1341,6 @@ public final class AssistantSession {
         isMuted = false
         // VA-03：新场输入生命周期回到 active，排空态不跨场。
         inputLifecycle = .active
-        pendingDrainSaves = 0
-        drainedItemIDs.removeAll()
     }
 
     /// 建档：放在语音准备成功且令牌有效之后（S2 第 7 条）。
@@ -1309,16 +1450,28 @@ public final class AssistantSession {
         let endingSession = sessionID
         inputLifecycle = .draining(session: endingSession, connection: drainingConnection)
         startToken &+= 1
+        selectedVoice = nil
+        voiceSelectionRevision &+= 1
+        voiceApplication?.cancel()
+        voiceApplication = nil
+        voiceApplicationID = nil
         retryTask?.cancel()
         retryTask = nil
         isStoppingIntentionally = true
+        if let effect = transportCloseEffect { await effect.value }
+        if let effect = interruptEffect { _ = await effect.value }
         cancelInterruptEffect()
         // 结束对话也是一次回复收尾：正在生成的那一轮先把已知正文存下来并标成打断，
         // 再去关连接。否则最后半句会随着连接一起消失（D06 / D08）。
-        if let reply = currentReply {
+        let endingReply = currentReply
+        let endingCancellation = ttsStream?.prepareCancellation()
+        invalidateReply()
+        if let stream = ttsStream, let endingCancellation {
+            _ = await stream.performCancellation(endingCancellation)
+        } else {
             await stopPlaybackLayer()
-            if let client { try? await client.cancelTTS() }
-            invalidateReply()
+        }
+        if let reply = endingReply {
             await finalizeReply(.interrupted, reply: reply)
         }
         invalidateReply()
@@ -1349,12 +1502,22 @@ public final class AssistantSession {
         }
         // 等待 marker 之前的保存任务全部 settled；receiver 不等待该聚合。
         // 有界等待排空保存，避免结束时仍在飞的 final 丢失。
-        let saveDeadline = ContinuousClock().now.advanced(by: .seconds(8))
-        while pendingDrainSaves > 0, ContinuousClock().now < saveDeadline {
-            try? await Task.sleep(for: .milliseconds(20))
+        let inputsSaved: Bool
+        if let endingSession {
+            inputsSaved = await waitForInputSaves(sessionID: endingSession)
+            let records = voiceRecordEffects.values.filter { $0.sessionID == endingSession }
+            for record in records { await record.task.value }
+        } else {
+            inputsSaved = true
         }
-        if pendingDrainSaves > 0 {
-            lastFailure = "部分尾句尚未保存，可在记录库中重试。"
+        if !inputsSaved, let endingSession {
+            lastFailure = "部分输入尚未保存，请重试保存；本轮记录尚未封存。"
+            pendingSealRecordID = endingSession
+            pendingSealReason = lastFailure
+            // 归还本场设备但不封存；coordinator 的 stopper 返回后也不能误宣称保存齐全。
+            if coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
+                coordinator.abandonOccupancy()
+            }
         }
         // 保存屏障之后再关闭 transport：draining 期间的合法 final 已归档。
         if let client {
@@ -1367,7 +1530,7 @@ public final class AssistantSession {
         client = nil
         // 纯文字这一场没有设备租约，但也得有终态：按它自己的 sessionID 封存，
         // 不能走 `coordinator.finalize`（那会停掉别的功能正在用的设备，D07 / §4.2）。
-        if isTextOnlyConversation, let recordID = sessionID {
+        if inputsSaved, isTextOnlyConversation, let recordID = sessionID {
             // VA-03：真实结果封存。失败保留 pendingSeal 与内存文本，硬件仍释放。
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
             switch seal {
@@ -1394,6 +1557,14 @@ public final class AssistantSession {
     @discardableResult
     public func retryPendingSeal() async -> Bool {
         guard let recordID = pendingSealRecordID else { return false }
+        for failure in inputPersistence.failures(sessionID: recordID) {
+            _ = inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
+        }
+        guard await waitForInputSaves(sessionID: recordID) else {
+            pendingSealReason = "仍有输入未保存，请重试保存。"
+            lastFailure = pendingSealReason
+            return false
+        }
         let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
         switch seal {
         case .sealed:
@@ -1415,7 +1586,17 @@ public final class AssistantSession {
     /// VA-03/A47：复制未保存文本的来源。内存 turns 为准，不读库；
     /// turns 为空时返回空字符串，调用方按“无可复制内容”处理。
     public func unsavedTranscriptText() -> String {
-        turns.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n")
+        var texts = turns.map(\.text)
+        if let recordID = pendingSealRecordID ?? sessionID {
+            let projectedIDs = Set(turns.map(\.id))
+            let unprojected = inputPersistence.pendingCommands(sessionID: recordID)
+                + inputPersistence.failures(sessionID: recordID).map(\.command)
+            texts += unprojected
+                .filter { !projectedIDs.contains($0.lineID) }
+                .sorted { $0.observedAt < $1.observedAt }
+                .map(\.text)
+        }
+        return texts.filter { !$0.isEmpty }.joined(separator: "\n")
     }
     // MARK: - VA-01 助手专属结束（A01/A02/A18）
     //
@@ -1462,7 +1643,10 @@ public final class AssistantSession {
         if isTextOnlyConversation {
             guard let recordID = target.recordID ?? sessionID else { return .noConversation }
             // 先收尾本场回复与本地资源，再封存自己的记录。
-            await endTextOnlyResources()
+            guard await endTextOnlyResources() else {
+                resetToIdleKeepingTurns()
+                return .noConversation
+            }
             // VA-03 真实结果封存：失败保留 pendingSeal 与原因，
             // 界面走重试/复制出口，不发布虚假的“已封存”。
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
@@ -1494,7 +1678,10 @@ public final class AssistantSession {
         // 无占用、无本场记录：明确 no-op。
         if coordinator.occupancy == nil {
             guard let recordID = target.recordID ?? sessionID else { return .noConversation }
-            await endTextOnlyResources()
+            guard await endTextOnlyResources() else {
+                resetToIdleKeepingTurns()
+                return .noConversation
+            }
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
             switch seal {
             case .sealed:
@@ -1525,6 +1712,7 @@ public final class AssistantSession {
             return .superseded
         }
         await stopCapture()
+        if pendingSealRecordID == target.recordID { return .noConversation }
         let result = await coordinator.endAssistant(target, reason: .user)
         if case .ended(let recordID) = result {
             lastFinalizedSessionID = recordID ?? lastFinalizedSessionID
@@ -1533,12 +1721,21 @@ public final class AssistantSession {
     }
 
     /// 纯文字结束的本地收尾：停回复任务、作废 TTS（无）、保留 turns 供回看。
-    private func endTextOnlyResources() async {
+    private func endTextOnlyResources() async -> Bool {
+        let endingSession = sessionID
+        inputLifecycle = .closed
         startToken &+= 1
+        selectedVoice = nil
+        voiceSelectionRevision &+= 1
+        voiceApplication?.cancel()
+        voiceApplication = nil
+        voiceApplicationID = nil
         connectionToken &+= 1
         retryTask?.cancel()
         retryTask = nil
         isStoppingIntentionally = true
+        if let effect = transportCloseEffect { await effect.value }
+        if let effect = interruptEffect { _ = await effect.value }
         cancelInterruptEffect()
         if let reply = currentReply {
             invalidateReply()
@@ -1548,6 +1745,13 @@ public final class AssistantSession {
         ttsStream?.invalidate()
         ttsStream = nil
         stopPumpTasks()
+        if let endingSession, !(await waitForInputSaves(sessionID: endingSession)) {
+            pendingSealRecordID = endingSession
+            pendingSealReason = "仍有输入未保存，记录尚未封存。"
+            lastFailure = pendingSealReason
+            return false
+        }
+        return true
     }
 
     private func resetToIdleKeepingTurns() {
@@ -1571,8 +1775,6 @@ public final class AssistantSession {
         ttsStream = nil
         // VA-03：新场从 active 开始；draining 去重集与计数不跨场。
         inputLifecycle = .active
-        pendingDrainSaves = 0
-        drainedItemIDs.removeAll()
     }
 
     private func invalidateReply() {
@@ -1687,7 +1889,7 @@ public final class AssistantSession {
         case .partial(let itemID, let delta):
             guard !delta.isEmpty else { return }
             _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
-            await noteSpeechEvidence()
+            noteSpeechEvidence()
             // 别的 item 的增量不进来：它是**那一句**的证据，不是当前槽位的。
             guard ownsPartial(itemID) else { return }
             partialItemID = itemID
@@ -1696,7 +1898,7 @@ public final class AssistantSession {
             if !text.isEmpty {
                 _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             }
-            await noteSpeechEvidence()
+            noteSpeechEvidence()
             guard ownsPartial(itemID) else { return }
             // hypothesis 是**可改写全文**，必须整段替换，不能追加（契约 §5.1）。
             // 空快照是"这一句现在没有可展示的正文"：清掉可见文字，并把归属一起
@@ -1706,7 +1908,7 @@ public final class AssistantSession {
         case .completed(let itemID, let transcript):
             // final-only 的 item 到这里才有第一个证据，用它自己的接收时刻。
             let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
-            await commitUserTurn(itemID: itemID, transcript: transcript, observedAt: observed)
+            commitUserTurn(itemID: itemID, transcript: transcript, observedAt: observed)
         case .failed(let itemID, let code, let message):
             // 空 itemID 认不出身份（例如 `invalid_hypothesis`），
             // 只报告失败，不去动别人的可见文字。
@@ -1716,11 +1918,23 @@ public final class AssistantSession {
             }
             lastFailure = "\(code)：\(message)"
         case .ttsStarted(let requestID, let taskID, let limits):
-            _ = ttsStream?.handleStarted(
+            if let stream = ttsStream, stream.handleStarted(
                 requestID: requestID,
                 taskID: taskID,
                 limits: limits
-            )
+            ) || stream.isKnownRetiredRequest(requestID) {
+                requestVoices[requestID]?.accepted = true
+                if let accepted = requestVoices[requestID],
+                   let ordinal = turns.first(where: { $0.id == accepted.replyID })?.ordinal,
+                   voiceRecordEffects[requestID] == nil {
+                    let task = Task { [weak self] in
+                        guard let self else { return }
+                        await self.recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
+                        self.voiceRecordEffects.removeValue(forKey: requestID)
+                    }
+                    voiceRecordEffects[requestID] = (accepted.sessionID, task)
+                }
+            }
         case .ttsTextAccepted(let requestID, _, let appendSequence, let totalCodepoints):
             _ = ttsStream?.handleTextAccepted(
                 requestID: requestID,
@@ -1728,17 +1942,15 @@ public final class AssistantSession {
                 totalCodepoints: totalCodepoints
             )
         case .ttsAudio(let requestID, _, let pcm):
-            // VA-05：旧 request 的迟到音频不得入队到新轮（协调器内按 requestID
-            // 过滤，见 handleAudio）。speaking/闭麦仍按原路径受理：
-            // 合成注入的音频身份（如测试的 tts_req_playback）不代表真实开轮，
-            // 在此按身份拦截会把合法朗读态也挡掉；真正的旧音隔离由协调器保证。
+            // 只让当前 request 的已准入音频改变 speaking/闭麦状态。
+            // 旧 request 与未知 request 既不能入队，也不能制造朗读 UI。
+            guard let stream = ttsStream, stream.currentRequestID == requestID, stream.isActive else { break }
+            let admission = stream.admitAudio(requestID: requestID, pcm: pcm)
+            guard admission == .accepted else { break }
             isSpeaking = true
             phase = .speaking
             // 半双工：从这一刻起闭麦（一问一答的口径）。
             isMutedForPlayback = !mode.allowsBargeIn
-            if let stream = ttsStream, stream.isActive {
-                await stream.handleAudio(requestID: requestID, pcm: pcm)
-            }
         case .ttsEnded(let requestID, _, let status, let code, let message):
             // 终态**无条件**转给协调器，不在这里按 `isActive` 过滤。
             // 打断之后那一轮已经被 `invalidate()` 作废，`isActive` 是 false；
@@ -1767,32 +1979,19 @@ public final class AssistantSession {
             }
             lastFailure = Self.readableError(code: code, message: message)
         case .closed(let code):
-            await handleUnexpectedClose(code: code)
+            scheduleUnexpectedClose(code: code)
         }
     }
 
     /// 当前 wire 没有服务端 VAD 事件（`speech_started` 已移除，契约 §5.1），
     /// 所以 barge-in 完全由客户端决定：**允许插话时，第一次收到非空识别结果
     /// 就是"用户开始说话"**。半双工模式下播放期本来就不上行，自然不会触发。
-    private func noteSpeechEvidence() async {
+    private func noteSpeechEvidence() {
         guard mode.allowsBargeIn, isSpeaking || replyTask != nil else {
             return
         }
         // 插话和 ESC 走同一条路：同一个回复收尾（D08），正文与打断标记一起写。
-        let remoteIdleConfirmed: Bool
-        if let reply = currentReply {
-            remoteIdleConfirmed = await interruptCurrentReply()
-            await finalizeReply(.interrupted, reply: reply)
-        } else {
-            remoteIdleConfirmed = await interruptCurrentReply()
-            await markLastReplyInterruptedAfterPlaybackCut()
-        }
-        isSpeaking = false
-        if remoteIdleConfirmed {
-            phase = .listening
-        } else {
-            await handleUnconfirmedRemoteIdle()
-        }
+        _ = requestReplyInterrupt()
     }
 
     /// 服务端给回空 final、而这一轮**确实说过话**：把已经显示出来的那半句留住。
@@ -1804,194 +2003,134 @@ public final class AssistantSession {
     /// 刻意**不进 LLM / TTS**：`speechrail.transcription.hypothesis` 是可改写的
     /// 全文，不是权威文本。拿它去问模型等于把未确认内容当事实，而且用户无法
     /// 分清哪句是真的。要让用户知道的是"这句没定稿"，不是让它自己往下走。
-    private func keepUnfinalizedUtterance(
-        itemID: String,
-        partial: String?,
-        observedAt observed: Date
-    ) async {
-        // 没说话时的空 final 是正常路径（`clear` 之后的那一次 commit），
-        // 不该凭空造出一句"没能识别完整"。
-        guard let partial else { return }
-        let trimmed = partial.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let sessionID = sessionID else { return }
-        if !itemID.isEmpty {
-            guard !committedItemIDs.contains(itemID) else { return }
-            committedItemIDs.insert(itemID)
-        }
-        do {
-            // ordinal 取 appendLine 的返回值，不自行 +1：库里的自增序号才是权威，
-            // 自行推算会与它错位，影响首句标题判定与音色 atOrdinal 回推。
-            let ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .user,
-                    text: trimmed,
-                    source: .microphone,
-                    // 和定稿路径同一口径：wire 上没有 sample span，
-                    // 精确的声学起止存 NULL（D09）。
-                    tStart: nil,
-                    tEnd: nil,
-                    status: .partial,
-                    isInterrupted: true,
-                    timingQuality: .unavailable,
-                    createdAt: observed
-                )
+    @ObservationIgnored private lazy var inputPersistence = AssistantInputPersistenceQueue(
+        configuration: dependencies.inputPersistenceConfiguration,
+        save: { [weak self] command in
+            guard let self else { throw CancellationError() }
+            let draft = LineDraft(
+                sessionID: command.sessionID, role: .user, text: command.text,
+                source: command.source, tStart: command.tStart, tEnd: nil,
+                status: command.formal ? .final : .partial, isInterrupted: !command.formal,
+                timingQuality: .unavailable, createdAt: command.observedAt
             )
-            currentOrdinal = ordinal
-            turns.append(
-                Turn(
-                    id: UUID().uuidString,
-                    ordinal: ordinal,
-                    role: .user,
-                    text: trimmed,
-                    source: .microphone,
-                    isInterrupted: true,
-                    speakerLabel: nil,
-                    createdAt: observed
-                )
-            )
-            lastFailure = "这一句没能识别完整，请再说一次。"
-        } catch {
-            // 写失败就如实说写失败，不留"界面有、库里没有"的行，
-            // 也不让 committedItemIDs 把它记成已经提交过。
-            if !itemID.isEmpty { committedItemIDs.remove(itemID) }
-            lastFailure = error.localizedDescription
+            do {
+                return try await self.saveInputLine(draft, id: command.lineID)
+            } catch {
+                // 指定 ID 的 INSERT 不提供幂等成功；恢复必须按 ID 与不可变正文核对。
+                if let lines = try? await self.coordinator.lines(sessionID: command.sessionID, includePartial: true),
+                   let line = lines.first(where: { $0.id == command.lineID }),
+                   line.role == .user, line.text == command.text, line.source == command.source,
+                   line.status == draft.status, line.isInterrupted == draft.isInterrupted,
+                   line.tStart == command.tStart, line.tEnd == nil, line.timingQuality == .unavailable,
+                   abs(line.createdAt.timeIntervalSince(command.observedAt)) < 0.001 {
+                    return line.ordinal
+                }
+                if self.sessionID == command.sessionID { self.lastFailure = "这一句未保存：\(error.localizedDescription)" }
+                throw error
+            }
+        },
+        didSave: { [weak self] command, ordinal in
+            await self?.didSaveInput(command, ordinal: ordinal)
         }
+    )
+
+    private func saveInputLine(_ draft: LineDraft, id: String = UUID().uuidString) async throws -> Int {
+        if let save = dependencies.saveInputLine { return try await save(draft, id) }
+        return try await coordinator.appendLine(draft, id: id)
     }
 
-    /// 用户说完一句：落库 → 调大模型 → 逐句合成。
-    private func commitUserTurn(
-        itemID: String,
-        transcript: String,
-        observedAt observed: Date
-    ) async {
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// receiver 只认领输入并入队；所有保存与标题 IO 由唯一消费者承担。
+    private func commitUserTurn(itemID: String, transcript: String, observedAt observed: Date) {
         defer { if !itemID.isEmpty { itemObservedAt.removeValue(forKey: itemID) } }
-        // 先把"槽位上是不是它"和"槽位上是什么"取到手，再清：
-        // 空 final 的保留分支要用这份正文，不能在判断之前就把它抹掉。
+        guard inputLifecycle != .closed, let recordID = sessionID, sessionStartedAt != nil else { return }
         let ownsSlot = ownsPartial(itemID)
         let visible = ownsSlot ? partialText : nil
         if ownsSlot { clearPartialSlot() }
-        // 空 final 是契约允许的正常事件（`clear` 之后的那一次 commit）。
-        // 但"用户确实说过话、服务端却没能定稿"不是正常路径：这句话已经显示在
-        // 界面上了，先清 `partialText` 再无声 `return` 会让它连同用户的话一起消失，
-        // 不落库、不问模型、不报错。保留它，并明确告诉用户没定稿。
-        guard !text.isEmpty else {
-            await keepUnfinalizedUtterance(
-                itemID: itemID,
-                partial: visible,
-                observedAt: observed
-            )
-            return
+        let formalText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let formal = !formalText.isEmpty
+        let text = formal ? formalText : (visible ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let target: String
+        switch inputLifecycle {
+        case .active: target = recordID
+        case .draining(let ending, let connection):
+            guard connection == connectionToken else { return }
+            target = ending ?? recordID
+        case .closed: return
         }
-        // 两个都得有：没有会话 ID 没有地方写，没有会话起点则说明这一轮还没真正
-        // 开始。起点本身**只判存在、不绑定**——D09 起这一行不再拿它冒充声学起止
-        //（`tStart`/`tEnd` 存 NULL、`timingQuality = .unavailable`），绑一个从不
-        // 读的局部值只会在编译期留一条 `#NoUsage` 告警。
-        guard let sessionID, sessionStartedAt != nil else { return }
-        if !itemID.isEmpty {
-            guard !committedItemIDs.contains(itemID) else { return }
-            committedItemIDs.insert(itemID)
+        let command = AssistantInputPersistenceQueue.Command(
+            sessionID: target, connection: connectionToken, itemID: itemID,
+            text: text, formal: formal, observedAt: observed
+        )
+        switch inputPersistence.enqueue(command) {
+        case .accepted, .duplicate: break
+        case .capacityExceeded:
+            lastFailure = "记录正在保存，暂时无法接纳这句新输入，请稍后重说。"
+        case .invalidIdentity:
+            lastFailure = "无法确认这句输入属于哪一场，请重试。"
         }
-        // VA-03 draining：只归档、不触发新回答。去重后保存 user 行/partial 恢复，
-        // 空 final 沿用已有保留规则；failed、空输入、receipt 超时、保存失败分别记录。
-        if case .draining(let endingSession, let drainingConnection) = inputLifecycle {
-            guard drainingConnection == connectionToken else { return }
-            if !itemID.isEmpty {
-                guard !drainedItemIDs.contains(itemID) else { return }
-                drainedItemIDs.insert(itemID)
-            }
-            // 仅归档到 ending 会话，不进 LLM/TTS。保存任务计入排空屏障。
-            pendingDrainSaves += 1
-            defer { pendingDrainSaves -= 1 }
+    }
+
+    private func didSaveInput(_ command: AssistantInputPersistenceQueue.Command, ordinal: Int) async {
+        if command.formal, sessionID == command.sessionID,
+           inputLifecycle == .active,
+           command.source == .keyboard || command.connection == connectionToken {
+            lastFailure = nil
+        }
+        if command.formal, let name = SessionTitleSuggestion.suggest(from: command.text) {
             do {
-                let targetSession = endingSession ?? sessionID
-                let ordinal = try await coordinator.appendLine(
-                    LineDraft(
-                        sessionID: targetSession,
-                        role: .user,
-                        text: text,
-                        source: .microphone,
-                        tStart: nil,
-                        tEnd: nil,
-                        timingQuality: .unavailable,
-                        createdAt: observed
-                    )
+                _ = try await coordinator.claimAutomaticTitle(
+                    sessionID: command.sessionID, lineID: command.lineID, title: name
                 )
-                if targetSession == sessionID {
-                    currentOrdinal = ordinal
-                    turns.append(
-                        Turn(
-                            id: UUID().uuidString,
-                            ordinal: ordinal,
-                            role: .user,
-                            text: text,
-                            source: .microphone,
-                            isInterrupted: false,
-                            speakerLabel: nil,
-                            createdAt: observed
-                        )
-                    )
-                }
             } catch {
-                lastFailure = error.localizedDescription
+                if sessionID == command.sessionID { lastFailure = "内容已保存，但记录标题未保存：\(error.localizedDescription)" }
             }
+        }
+        // 旧连接仍完成自己的归档；当前 projection 与回答资格单独校验。
+        guard sessionID == command.sessionID else { return }
+        currentOrdinal = max(currentOrdinal, ordinal)
+        if !turns.contains(where: { $0.id == command.lineID }) {
+            turns.append(Turn(
+                id: command.lineID, ordinal: ordinal, role: .user, text: command.text,
+                source: command.source, isInterrupted: !command.formal,
+                speakerLabel: nil, createdAt: command.observedAt
+            ))
+            turns.sort { $0.ordinal < $1.ordinal }
+        }
+        guard command.formal else {
+            if command.connection == connectionToken { lastFailure = "这一句没能识别完整，请再说一次。" }
             return
         }
-        var appendedOrdinal = 0
-        do {
-            let ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .user,
-                    text: text,
-                    source: .microphone,
-                    // D09：wire 上没有 sample span，精确的声学起止**存 NULL**，
-                    // 不再拿会话起点冒充。`timingQuality = .unavailable` 让界面
-                    // 能识别"这段时间不可用"，而不是显示一个假的 00:00。
-                    tStart: nil,
-                    tEnd: nil,
-                    timingQuality: .unavailable,
-                    createdAt: observed
-                )
-            )
-            currentOrdinal = ordinal
-            appendedOrdinal = ordinal
-            turns.append(
-                Turn(
-                    id: UUID().uuidString,
-                    ordinal: ordinal,
-                    role: .user,
-                    text: text,
-                    source: .microphone,
-                    isInterrupted: false,
-                    speakerLabel: nil,
-                    // 实时对话流与回看必须显示**同一个**时间（D09）：
-                    // 都是"第一个非空证据被本机收到的那一刻"。
-                    createdAt: observed
-                )
-            )
-            history.append(LLMMessage(role: .user, text: text))
-        } catch {
-            committedItemIDs.remove(itemID)
-            lastFailure = error.localizedDescription
-            return
+        if !contextTurns.contains(where: { $0.user.id == command.lineID }) {
+            contextTurns.append(AssistantContextTurn(
+                user: AssistantContextEntry(id: command.lineID, text: command.text), reply: nil
+            ))
         }
-        // 第一句顶上来当这一条记录的名字：记录库里一排「未命名」时，用户认不出哪条是哪条，
-        // 而"继续这一轮 / 导出 / 重命名"都要先认得它（`SessionTitleSuggestion` 里有取法）。
-        // 只在第一句上做，用户之后改名就是终局——那一列只由人来写。
-        if appendedOrdinal == 1, let name = SessionTitleSuggestion.suggest(from: text) {
-            try? await coordinator.setSessionTitle(id: sessionID, title: name)
+        guard sessionID == command.sessionID,
+              command.source == .keyboard || connectionToken == command.connection,
+              inputLifecycle == .active, !isStoppingIntentionally else { return }
+        submitTurn(
+            questionID: command.lineID, text: command.text, source: command.source,
+            spoken: command.source == .microphone
+        )
+    }
+
+    private func waitForInputSaves(sessionID: String, timeout: Duration = .seconds(8)) async -> Bool {
+        let deadline = ContinuousClock().now.advanced(by: timeout)
+        while !inputPersistence.pendingCommands(sessionID: sessionID).isEmpty,
+              inputPersistence.failures(sessionID: sessionID).isEmpty,
+              ContinuousClock().now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
         }
-        // 这一句成功定稿了：上一次留下的软提示（比如"没能识别完整"）已经过期。
-        clearFailure()
-        submitTurn(questionID: itemID.isEmpty ? "asr_\(UUID().uuidString.lowercased())" : itemID, text: text, source: .microphone, spoken: true)
+        return inputPersistence.pendingCommands(sessionID: sessionID).isEmpty
+            && inputPersistence.failures(sessionID: sessionID).isEmpty
     }
 
     /// 把增量 TTS 的发送、播放与终态接到现有连接 / 播放层上。
     /// 协调器不认识 WebSocket 与 AVAudioEngine 的细节，这里只做注入。
     private func makeTTSStreamCoordinator(
-        client: any AssistantRealtimeClient
+        client: any AssistantRealtimeClient,
+        audioSession ownedAudioSession: (any AssistantAudioSession)?
     ) -> AssistantTTSStreamCoordinator {
         let tts = AssistantTTSStreamCoordinator()
         tts.sendStart = { requestID in
@@ -2004,28 +2143,31 @@ public final class AssistantSession {
             try await client.finishTTSText(lastSequence: lastSequence)
         }
         tts.sendCancel = { try await client.cancelTTS() }
-        tts.enqueuePlayback = { [weak self] pcm, epoch in
-            guard let self else { return false }
-            if let audioSession = self.audioSession {
+        tts.enqueuePlayback = { pcm, epoch in
+            if let audioSession = ownedAudioSession {
                 return await audioSession.enqueuePlayback(pcm, epoch: epoch)
-            }
-            if let playback = self.playback {
-                return await playback.enqueue(pcm, epoch: epoch)
             }
             return false
         }
-        tts.stopPlayback = { [weak self] in
-            guard let self else { return }
-            if let audioSession = self.audioSession {
+        tts.stopPlayback = {
+            if let audioSession = ownedAudioSession {
                 await audioSession.stopPlayback()
-            } else if let playback = self.playback {
-                await playback.stop()
             }
         }
         // 朗读前的清洗留在原处：屏幕、历史、SQLite 仍然只认**原始** LLM 文本。
         tts.cleanForSpeech = { VoicePrompt.spokenText(from: $0) }
-        tts.onOutcome = { [weak self] _, outcome in
+        tts.onOutcome = { [weak self] generation, outcome in
             guard let self else { return }
+            if let requestID = self.speechRequestIDs[generation],
+               let request = self.speechRequests[requestID], request.sessionID == self.sessionID {
+                let status: AssistantContextEntry.PlaybackStatus
+                switch outcome {
+                case .completed: status = .completed
+                case .cancelled, .failed: status = .incomplete
+                }
+                self.projectPlaybackStatus(replyID: request.replyID, status: status)
+            }
+            guard generation == self.replyGeneration else { return }
             switch outcome {
             case .completed:
                 break
@@ -2060,18 +2202,15 @@ public final class AssistantSession {
     }
 
     private func beginReply(spoken: Bool, questionID: String? = nil) {
+        if currentReply != nil || ttsStream?.isActive == true {
+            _ = requestReplyInterrupt()
+        }
         replyGeneration &+= 1
         let generation = replyGeneration
         // 第二问题默认接管：前任先收尾，再开始新轮（VA-04/A12）。
         // 收尾按 replyID 认领旧记录，不清新轮状态（见 finalizeReply）。
         // 前任收尾异步进行（按 replyID 认领旧记录），新轮同步接管：
         // 顺序由 submissionOrdinal 与 replyID 保证，不靠等待旧轮落库。
-        if let predecessor = currentReply {
-            let snapshot = predecessor
-            Task { [weak self] in
-                await self?.finalizeReply(.interrupted, reply: snapshot)
-            }
-        }
         replyTask?.cancel()
         guard let sessionID else { return }
         currentReply = AssistantReplyState(
@@ -2080,6 +2219,11 @@ public final class AssistantSession {
             source: spoken ? .microphone : .keyboard,
             startedAt: Date()
         )
+        if let id = currentReply?.id, let questionID {
+            replyQuestionIDs[id] = questionID
+            replySpoken[id] = spoken
+            replyPlayback[id] = .notRequested
+        }
         replyTask = Task { [weak self] in
             await self?.runReply(spoken: spoken, generation: generation)
         }
@@ -2131,8 +2275,8 @@ public final class AssistantSession {
             // 建行失败不打断这一轮：正文还在内存里，收尾时会再试一次完整落库。
             if currentReply?.id == reply.id {
                 currentReply?.persistence = .idle
+                lastFailure = "这一句正在生成，但暂时存不下来：\(error.localizedDescription)"
             }
-            lastFailure = "这一句正在生成，但暂时存不下来：\(error.localizedDescription)"
         }
     }
 
@@ -2201,21 +2345,31 @@ public final class AssistantSession {
                 reply.ordinal = ordinal
                 reply.isPersisted = true
             } catch {
-                if isCurrent { currentReply?.persistence = .saveFailed(error.localizedDescription) }
-                lastFailure = "这一句没能存下来：\(error.localizedDescription)"
+                if currentReply?.id == reply.id {
+                    currentReply?.persistence = .saveFailed(error.localizedDescription)
+                    lastFailure = "这一句没能存下来：\(error.localizedDescription)"
+                }
             }
         }
 
         // VA-04：旧操作可完成旧记录，但不能清新的 streamingReply/currentReply/phase。
         // 返回后重算当前身份：只有仍是同一轮才归位与投影 history/turns。
-        guard currentReply?.id == reply.id else {
-            // 旧轮收尾：按 ID 归位一次，不碰新轮状态。
-            if reply.isPersisted { lastFinalizedReply = reply }
-            return
+        let stillCurrent = currentReply?.id == reply.id
+        // 正文状态按 question/reply ID 投影。旧回复仍可完成自己的历史，不能借完成时序配对。
+        if sessionID == reply.sessionID {
+            projectReplyContext(reply, termination: termination, text: text)
         }
-        currentReply?.persistence = .saved
-        currentReply = nil
-        lastFinalizedReply = reply
+        if let ordinal = reply.ordinal {
+            for (requestID, accepted) in requestVoices where accepted.replyID == reply.id {
+                await recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
+            }
+        }
+        guard sessionID == reply.sessionID else { return }
+        if stillCurrent, currentReply?.id == reply.id {
+            currentReply?.persistence = reply.isPersisted ? .saved : .saveFailed("正文未保存")
+            currentReply = nil
+        }
+        if lastFinalizedReply?.ordinal ?? 0 <= reply.ordinal ?? 0 { lastFinalizedReply = reply }
         // 被打断的回复把**已经说出口的那部分**交给下一轮，不虚构余文，
         // 也不伪造一条"成功"的空消息。
         // VA-04：history 按 ID 投影一次，不靠完成时间 append 乱序。
@@ -2225,15 +2379,15 @@ public final class AssistantSession {
             // VA-12/A41：history 保持完整原文（不截同比例字符、不编造已听文本）；
             // 交付状态由 turns.isInterrupted 与 playbackDeliveryNotes 承载，
             // 不污染模型上下文。
-            if termination.marksInterrupted, playbackDeliveryNotes[reply.id] == nil {
+            if termination.marksInterrupted, replyPlayback[reply.id] == .incomplete,
+               playbackDeliveryNotes[reply.id] == nil {
                 playbackDeliveryNotes[reply.id] =
                     "朗读未完成；未有可靠逐字对齐，仅以上全文为准。"
             }
-            history.append(LLMMessage(role: .assistant, text: text))
         }
-        streamingReply = nil
-        turns.append(
-            Turn(
+        if stillCurrent, currentReply == nil { streamingReply = nil }
+        if !turns.contains(where: { $0.id == reply.id }) {
+            turns.append(Turn(
                 id: reply.id,
                 ordinal: reply.ordinal ?? (currentOrdinal + 1),
                 role: .assistant,
@@ -2242,17 +2396,54 @@ public final class AssistantSession {
                 isInterrupted: termination.marksInterrupted,
                 speakerLabel: nil,
                 createdAt: reply.startedAt
+            ))
+            turns.sort { $0.ordinal < $1.ordinal }
+        }
+        if let ordinal = reply.ordinal { currentOrdinal = max(currentOrdinal, ordinal) }
+    }
+
+    private func projectReplyContext(
+        _ reply: AssistantReplyState, termination: AssistantReplyState.Termination, text: String
+    ) {
+        guard let questionID = replyQuestionIDs[reply.id],
+              let index = contextTurns.firstIndex(where: { $0.user.id == questionID }) else { return }
+        let status: AssistantContextEntry.GenerationStatus
+        switch termination {
+        case .completed: status = .completed
+        case .failed: status = .failed
+        case .interrupted: status = .interrupted
+        case .streaming: status = .unknown
+        }
+        let previousPlayback = replyPlayback[reply.id] ?? contextTurns[index].reply?.playbackStatus
+        contextTurns[index] = AssistantContextTurn(
+            user: contextTurns[index].user,
+            reply: AssistantContextEntry(
+                id: reply.id, text: text, generationStatus: status,
+                playbackStatus: previousPlayback ?? .notRequested
             )
         )
-        if let ordinal = reply.ordinal { currentOrdinal = ordinal }
+    }
+
+    private func projectPlaybackStatus(replyID: String, status: AssistantContextEntry.PlaybackStatus) {
+        replyPlayback[replyID] = status
+        guard let questionID = replyQuestionIDs[replyID],
+              let index = contextTurns.firstIndex(where: { $0.user.id == questionID }),
+              let reply = contextTurns[index].reply else { return }
+        contextTurns[index] = AssistantContextTurn(
+            user: contextTurns[index].user,
+            reply: AssistantContextEntry(
+                id: reply.id, text: reply.text, generationStatus: reply.generationStatus,
+                playbackStatus: status
+            )
+        )
     }
 
     /// 完整生成、也已经定稿，但朗读还没放完时用户按了停止（D08 第 5 条的后半段）。
     /// 正文已经是完整的，这一行要改的只有"没听完"这一个标记——
     /// `finalizeAssistantLine` 的 SQL 只把 `interrupted` 从 false 推向 true，
     /// 所以重复调用是安全的。
-    private func markLastReplyInterruptedAfterPlaybackCut() async {
-        guard let reply = lastFinalizedReply, reply.termination == .completed else { return }
+    private func markLastReplyInterruptedAfterPlaybackCut(reply snapshot: AssistantReplyState? = nil) async {
+        guard let reply = snapshot ?? lastFinalizedReply, reply.termination == .completed else { return }
         do {
             _ = try await coordinator.finalizeAssistantLine(
                 sessionID: reply.sessionID,
@@ -2260,12 +2451,19 @@ public final class AssistantSession {
                 text: reply.text.trimmingCharacters(in: .whitespacesAndNewlines),
                 interrupted: true
             )
-            lastFinalizedReply?.termination = .interrupted
+            if lastFinalizedReply?.id == reply.id { lastFinalizedReply?.termination = .interrupted }
+            if sessionID == reply.sessionID {
+                // 生成已完成；这里只补播放状态，保留 generation completed 与原文。
+                projectPlaybackStatus(replyID: reply.id, status: .incomplete)
+                playbackDeliveryNotes[reply.id] = "朗读未完成；已保留完整文字。"
+            }
             if let index = turns.indices.last, turns[index].id == reply.id {
                 turns[index].isInterrupted = true
             }
         } catch {
-            lastFailure = "打断标记没能存下来：\(error.localizedDescription)"
+            if sessionID == reply.sessionID, lastFinalizedReply?.id == reply.id {
+                lastFailure = "打断标记没能存下来：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -2315,18 +2513,33 @@ public final class AssistantSession {
         }
         let configuration = resolved.configuration
         let key = resolved.apiKey
-        var messages: [LLMMessage] = []
-        if let persona {
-            messages.append(
-                LLMMessage(role: .developer, text: VoicePrompt.styleBlock(persona.body), cacheBreakpoint: true)
+        guard let replyID = currentReply?.id, let questionID = replyQuestionIDs[replyID],
+              let questionIndex = contextTurns.firstIndex(where: { $0.user.id == questionID }) else { return }
+        let context: AssistantContextRequestContext
+        contextOmissionNote = nil
+        do {
+            context = try AssistantContextPolicy.buildRequestContext(
+                instructions: VoicePrompt.instructionsFor(
+                    input: spoken ? .recognizedSpeech : .keyboard,
+                    output: spoken ? .spokenConcise : .textOnly
+                ),
+                persona: persona.map { VoicePrompt.styleBlock($0.body) },
+                memories: memories,
+                history: Array(contextTurns[..<questionIndex]),
+                currentQuestion: contextTurns[questionIndex].user
             )
+            if context.omittedHistoryTurns > 0 || context.omittedMemories > 0 {
+                contextOmissionNote = "本次回答未参考 \(context.omittedHistoryTurns) 轮对话和 \(context.omittedMemories) 条记忆；完整记录仍保留。"
+            } else {
+                contextOmissionNote = nil
+            }
+        } catch {
+            lastFailure = error.localizedDescription
+            phase = .listening
+            currentReply = nil
+            streamingReply = nil
+            return
         }
-        if !memories.isEmpty {
-            let block = "以下是用户确认过、可以长期记住的事：\n"
-                + memories.map { "- \($0)" }.joined(separator: "\n")
-            messages.append(LLMMessage(role: .developer, text: block, cacheBreakpoint: true))
-        }
-        messages.append(contentsOf: history)
 
         phase = .thinking
         streamingReply = ""
@@ -2341,15 +2554,12 @@ public final class AssistantSession {
             try Task.checkCancellation()
             for try await delta in await provider.stream(
                 configuration: configuration,
-                messages: messages,
+                messages: context.messages,
                 apiKey: key,
-                maxOutputTokens: nil,
+                maxOutputTokens: context.maxOutputTokens,
                 // VA-10：顶层 instructions 按实际模态每轮组装。
                 // spoken 才用朗读契约；文字用文字契约，不套 ASR 容错。
-                instructions: VoicePrompt.instructionsFor(
-                    input: spoken ? .recognizedSpeech : .keyboard,
-                    output: spoken ? .spokenConcise : .textOnly
-                )
+                instructions: context.instructions
             ) {
                 try Task.checkCancellation()
                 guard generation == replyGeneration else { return }
@@ -2372,10 +2582,46 @@ public final class AssistantSession {
                 case .start(let pending):
                     // 第一批有效文本就开轮：不再等整句，更不等整段回复（§8.1）。
                     do {
+                        if let effect = interruptEffect {
+                            let confirmed = await effect.value
+                            guard generation == replyGeneration else { return }
+                            guard confirmed, ttsStream === stream else {
+                                throw Blocked(.streamFailed("上一轮朗读尚未确认结束，请重试语音。"))
+                            }
+                        }
+                        if selectedVoice != nil {
+                            guard await applyLatestVoice() else {
+                                throw Blocked(.serviceNotReady("所选音色尚未准备好，请重试。"))
+                            }
+                            guard generation == replyGeneration else { return }
+                        }
+                        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
+                        let selection = selectedVoice
+                        let requestVoice = activeRealtimeBinding?.canonicalVoiceID ?? voiceID
+                        let startID = UUID()
+                        voiceStartID = startID
+                        defer {
+                            if voiceStartID == startID { voiceStartID = nil }
+                        }
+                        if let state = currentReply {
+                            speechRequests[requestID] = (state.sessionID, state.id)
+                            speechRequestIDs[generation] = requestID
+                            replyPlayback[state.id] = .unknown
+                            if let selection, let requestVoice {
+                                requestVoices[requestID] = RequestVoice(
+                                    replyID: state.id, sessionID: state.sessionID,
+                                    selection: selection, voice: requestVoice
+                                )
+                            }
+                        }
                         try await stream.begin(
                             generation: generation,
-                            requestID: "tts_req_\(UUID().uuidString.lowercased())"
+                            requestID: requestID
                         )
+                        if let state = currentReply, state.generation == generation,
+                           let ordinal = state.ordinal {
+                            await recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
+                        }
                     } catch {
                         guard generation == replyGeneration else { return }
                         streamUnavailable = true
@@ -2401,15 +2647,13 @@ public final class AssistantSession {
             // D06：provider 失败必须走**同一个回复收尾**。以前这里只改文案就返回，
             // 于是已经开嗓的 TTS 继续往下播、半句话也永远不落库。
             // 顺序与用户手动打断一致：先停本地播放 → 再取消服务端这一轮 → 再落库归位。
-            await stopPlaybackLayer()
-            if let client { try? await client.cancelTTS() }
-            ttsStream?.invalidate()
-            isSpeaking = false
-            isMutedForPlayback = false
-            lastFailure = message
-            phase = .listening
-            if let replyState = currentReply, replyState.generation == generation {
-                await finalizeReply(.failed(message), reply: replyState)
+            let effect = requestReplyInterrupt(termination: .failed(message))
+            let failureGeneration = replyGeneration
+            let failureSession = sessionID
+            let failureConnection = connectionToken
+            _ = await effect.value
+            if sessionID == failureSession, connectionToken == failureConnection, replyGeneration == failureGeneration {
+                lastFailure = message
             }
             return
         }
@@ -2437,64 +2681,48 @@ public final class AssistantSession {
         if !spoken { phase = .listening }
     }
 
-    /// 从流式正文里切出"已经可以念"的句子：遇到句末标点就切，**并且要够长**
-    /// （太短的片段单独合成会有断句感）。未完的那一段留在缓冲里。
-    static func takeSentences(_ buffer: inout String, flush: Bool) -> [String] {
-        let terminators: Set<Character> = ["。", "！", "？", "；", "\n", ".", "!", "?", ";"]
-        var result: [String] = []
-        var current = ""
-        for character in buffer {
-            current.append(character)
-            if terminators.contains(character), current.count >= 6 {
-                result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
-                current = ""
-            }
-        }
-        if flush, !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
-            current = ""
-        }
-        buffer = current
-        return result.filter { !$0.isEmpty }
-    }
-
-    private func handleUnexpectedClose(code: Int?) async {
-        // 断线判定看**连接身份与是否主动停**，不看展示用的 `phase`（D04）。
-        // 以前用 `phase.isLive`：静音把 phase 变成 `.paused` 之后，
-        // 断线会被判成"本来就没在跑"，于是设备、连接、占用全都留在原地。
-        guard !isStoppingIntentionally, client != nil else { return }
+    private func scheduleUnexpectedClose(code: Int?) {
+        guard !isStoppingIntentionally, let closedClient = client else { return }
+        let token = startToken
+        let connection = connectionToken
+        let recordID = sessionID
+        let reply = currentReply
+        let closedAudio = audioSession
+        let closedSource = source
+        let closedPlayback = playback
         let reason = code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
-        // 断线时正在生成的那一轮要**先收尾**：否则它会继续往一条已经关掉的连接上写，
-        // 已经说出口的那半句也永远不落库（D06）。
-        if let reply = currentReply {
-            invalidateReply()
-            await finalizeReply(.interrupted, reply: reply)
-        }
-        // 断线：本地作废这一轮 utterance，不假装它播完了。
+        invalidateReply()
         ttsStream?.invalidate()
-        if let audioSession {
-            audioSession.stop()
-            self.audioSession = nil
-        } else {
-            source?.stop()
-            if let playback {
-                await playback.stop()
-                self.playback = nil
-            }
-        }
+        ttsStream = nil
+        client = nil
+        audioSession = nil
         source = nil
+        playback = nil
         stopPumpTasks()
-        if let client {
-            await client.close()
-            self.client = nil
-        }
         level = 0
-        partialText = nil
-        partialItemID = nil
+        clearPartialSlot()
+        isSpeaking = false
+        isMutedForPlayback = false
         blocked = .streamFailed(reason)
         phase = .paused
-        if coordinator.occupancy?.kind == .assistant {
-            _ = await coordinator.markInterruption(.serviceLost, atOrdinal: currentOrdinal)
+        let effectID = UUID()
+        transportCloseEffectID = effectID
+        transportCloseEffect = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.transportCloseEffectID == effectID {
+                    self.transportCloseEffect = nil
+                    self.transportCloseEffectID = nil
+                }
+            }
+            if let closedAudio { closedAudio.stop() } else { closedSource?.stop() }
+            await closedPlayback?.stop()
+            await closedClient.close()
+            if let reply { await self.finalizeReply(.interrupted, reply: reply) }
+            guard self.startToken == token, self.connectionToken == connection,
+                  self.coordinator.activeSessionID == recordID,
+                  self.coordinator.occupancy?.kind == .assistant else { return }
+            _ = await self.coordinator.markInterruption(.serviceLost, atOrdinal: self.currentOrdinal)
         }
     }
 
@@ -2518,34 +2746,51 @@ public final class AssistantSession {
     /// record/history/context。typed 继续同场；与 mute 分开：
     /// mute 只停上传，closeVoice 释放设备。
     public func closeVoiceKeepingText() async {
+        guard phase != .ending else { return }
         startToken &+= 1
+        let token = startToken
+        let recordID = sessionID
+        let closingReply = currentReply
+        isStoppingIntentionally = true
         retryTask?.cancel()
         retryTask = nil
-        cancelInterruptEffect()
+        voiceApplication?.cancel()
+        voiceApplication = nil
+        voiceApplicationID = nil
+        let interrupt = requestReplyInterrupt()
         invalidateReply()
+        if let effect = transportCloseEffect { await effect.value }
+        _ = await interrupt.value
+        guard startToken == token, sessionID == recordID, phase != .ending else { return }
+        // 共享的旧 effect 可能属于前一回复；关闭时的当前正文也必须明确收尾。
+        if let closingReply {
+            await finalizeReply(.interrupted, reply: closingReply)
+            guard startToken == token, sessionID == recordID, phase != .ending else { return }
+        }
+        let closingClient = client
+        let closingPlayback = playback
+        client = nil
+        playback = nil
+        stopPumpTasks()
+        connectionToken &+= 1
+        ttsStream?.invalidate()
+        ttsStream = nil
         if let audioSession {
             audioSession.stop()
             self.audioSession = nil
         } else {
             source?.stop()
-            if let playback {
-                await playback.stop()
-                self.playback = nil
-            }
         }
         source = nil
-        if let client {
-            await client.close()
-        }
-        stopPumpTasks()
-        connectionToken &+= 1
-        client = nil
-        ttsStream?.invalidate()
-        ttsStream = nil
+        await closingPlayback?.stop()
+        await closingClient?.close()
+        guard startToken == token, sessionID == recordID, phase != .ending else { return }
         isSpeaking = false
         isMutedForPlayback = false
+        isStoppingIntentionally = false
+        blocked = nil
         // record/history/context/frozenRoute/memories 一律保留，typed 继续同场。
-        if phase != .ending { phase = .listening }
+        phase = .listening
     }
 
     private func performRetry() async {

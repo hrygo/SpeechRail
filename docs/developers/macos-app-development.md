@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.1"
+version: "0.6.2"
 date: 2026-10-04
 ---
 
@@ -86,9 +86,23 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 
 **基于旧记录继续是建新场，不是改旧记录。** `AssistantSession.continueFromRecord(parentID:)` 从旧记录读一致快照，只取选定的完整 user/assistant 轮次建新记录，冻结选定文字为 `continuationSeed`（自包含：删父后子场仍可用）。旧记录原文不动，不自动开麦，不复制密钥与旧 route 同意。回看页的「继续这一轮」走同一路径：活跃场先明确结束，再建新场。新场 history 只含选定完整轮次。schema v2（`assistant_reply_state` / `assistant_playback_invocation` / `assistant_continuation` / `assistant_memory_provenance`）未实施，续接不依赖迁移。
 
-**重播是独立播放调用。** `replayingTurnID` 绑定原始 turnID：旧 TTS 轮仍活跃时先经统一中断收尾，再开新重播；停止重播只记本次播放（`interruptedReplayTurnIDs` + `playbackDeliveryNotes`），不改被重播轮的生成状态与正文。完整生成但未播完时原文全文保留，界面挂「朗读未完成」，history 保持完整原文（交付状态由 turns 中断标记与播放说明承载，不污染模型上下文）。
+**重播是独立播放调用。** `replayingTurnID` 绑定原始 turnID：旧 TTS 轮仍活跃时先经统一中断收尾，再开新重播；停止重播只记本次播放（`interruptedReplayTurnIDs` + `playbackDeliveryNotes`），不改被重播轮的生成状态与正文。完整生成但未播完时原文全文保留，界面挂「朗读未完成」。下一次请求的上下文正文仍是原文，生成状态与播放状态另由应用说明绑定到条目 ID，不推算用户听到了哪些字。
 
 **试听不经文字提问。** 「测试朗读语速与音色效果」走现有 `previewSelectedVoice` 试听协调；无 TTS 通道（纯文字场）时播放按钮给出明确原因，不静默返回。
+
+### 语音助手的接收、保存与请求预算（2026-10-04）
+
+唯一 receiver 同步登记插话意图、用户保存命令和音频准入。取消确认、SQLite 保存及播放预算等待均由有句柄的任务承担；匹配终态仍由 receiver 消费。远端归属未知或旧 outbound 任务尚未退出时拒绝同连接新 TTS，不把“取消已发送”视为确认；超时解除等待但保留旧任务归属，直到任务实际退出。ACK 超时不重发 append。
+
+打字与语音输入共用 `AssistantInputPersistenceQueue` 单消费者保序保存，默认最多 32 个在途命令、64,000 Unicode scalar，失败命令仍计预算。保存成功才投影正式对话与提交回答；partial 只归档。前序保存失败时，后续已接纳输入返回 blocked 并保留命令，恢复后按原顺序保存，不由草稿重复发送；本句保存失败仍明确报错。结束等待本记录已经接纳的保存（含正常、partial、draining 与打字在途保存），未完成或失败时保留恢复入口并避免宣称封存成功。主动关闭语音先收尾已有回复，保留文字上下文与待保存正文。恢复按固定行 ID 核对，不直接把唯一键冲突当成功。首条正式用户行在 Store 条件命名，partial 不占命名资格，人工标题不被迟到自动命名覆盖。
+
+音频使用唯一 FIFO 消费任务。pending 与在途待入队 PCM 共享 `min(48_000, started.maxPendingAudioBytes)` 字节限额；播放 ledger 默认另限 24,000 个 Int16 samples（48,000 bytes）。上游事件流原有 4 MiB decoded PCM 限额也属于总体在途预算；不能只用 FIFO 大小宣称总内存上界。服务端完成终态、FIFO/在途与播放账本全部排空才表示播放完成，保留原有 2 秒播放等待与 5 秒 ACK 期限。
+
+音色选择按版本保留最新意图，同一 client 串行写入 voice 与 revision pins。当前 request 固定音色，下一 request 等最新写入后启动；在真实 started 与回复库 ordinal 已知后，才按明确 sessionID 记录变更。记录失败报告已用于朗读但未保存，不回滚已启动 request。
+
+`runReply` 使用 `AssistantContextPolicy` 构造真实 provider 请求：最多 12 个历史 user/reply turn、16,000 历史 scalar、4,000 记忆 scalar、24,000 总请求 scalar（包括 instructions、人设、状态说明及当前问题），输出 `maxOutputTokens=1_024`。历史按完整 turn 裁剪，当前问题只出现一次，原 SQLite 与续接种子不改写。必要内容自身超限时给出明确错误并保留已保存问题。界面显示实际省略范围。这些是产品预算，不代表模型 token window、质量或费用保证。
+
+生成失败与朗读未完成在本场内存中分开记录；已收到正文保留。重新打开旧库记录时，现有 interrupted 字段不能恢复失败原因或播放细节，因此原因与交付状态记为未知。本次没有 schema 迁移；自动摘要、长期内存分页、设备切换续播及启动并行优化另行评估。定向 fake、构建和真实设备验证结果分别记录在 [本轮验收记录](../plans/2026-10-04-assistant-e2e-followups-acceptance.md)，不互相替代。
 
 ### 语音助手的对话状态、文字降级与回复行（2026-09-28）
 

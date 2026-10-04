@@ -75,6 +75,112 @@ final class AssistantPersistenceTests: XCTestCase {
         return try XCTUnwrap(all.first { $0.id == id }, "库里没有 id=\(id) 这一行")
     }
 
+    // MARK: - 自动标题认领
+
+    func testAutomaticTitleClaimSkipsPartialAndOnlyAllowsFirstFormalUserLine() async throws {
+        let store = try requireStore()
+        let coordinator = SessionCoordinator(store: store)
+        let sessionID = try requireSessionID()
+
+        let partialOrdinal = try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "这是尚未定稿的预览",
+                source: .microphone,
+                status: .partial
+            ),
+            id: "title-partial"
+        )
+        XCTAssertEqual(partialOrdinal, 1)
+        let partialClaimed = try await coordinator.claimAutomaticTitle(
+            sessionID: sessionID,
+            lineID: "title-partial",
+            title: "预览不应命名"
+        )
+        XCTAssertFalse(partialClaimed, "partial 不得认领自动标题")
+
+        let firstFormalOrdinal = try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "第一条正式问题。",
+                source: .microphone
+            ),
+            id: "title-first-formal"
+        )
+        let secondFormalOrdinal = try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "第二条正式问题。",
+                source: .keyboard
+            ),
+            id: "title-second-formal"
+        )
+        XCTAssertGreaterThan(firstFormalOrdinal, partialOrdinal)
+        XCTAssertGreaterThan(secondFormalOrdinal, firstFormalOrdinal)
+
+        let secondClaimed = try await coordinator.claimAutomaticTitle(
+            sessionID: sessionID,
+            lineID: "title-second-formal",
+            title: "第二条正式问题"
+        )
+        XCTAssertFalse(secondClaimed, "第一句尚未认领时，第二句也不得抢先命名")
+
+        let firstClaimed = try await coordinator.claimAutomaticTitle(
+            sessionID: sessionID,
+            lineID: "title-first-formal",
+            title: "第一条正式问题"
+        )
+        XCTAssertTrue(firstClaimed)
+        let record = try await store.session(id: sessionID)
+        XCTAssertEqual(record?.title, "第一条正式问题")
+    }
+
+    func testLateAutomaticTitleClaimCannotOverwriteManualRename() async throws {
+        let store = try requireStore()
+        let coordinator = SessionCoordinator(store: store)
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(
+                sessionID: sessionID,
+                role: .user,
+                text: "先保存正式问题",
+                source: .keyboard
+            ),
+            id: "title-manual-race"
+        )
+
+        try await coordinator.setSessionTitle(id: sessionID, title: "用户后来取的名字")
+        let claimed = try await coordinator.claimAutomaticTitle(
+            sessionID: sessionID,
+            lineID: "title-manual-race",
+            title: "迟到的自动标题"
+        )
+
+        XCTAssertFalse(claimed, "自动标题回调晚于人工改名时必须让位")
+        let record = try await store.session(id: sessionID)
+        XCTAssertEqual(record?.title, "用户后来取的名字")
+    }
+
+    func testExplicitVoiceChangeTargetsTheProvidedSessionWithoutActiveOccupancy() async throws {
+        let store = try requireStore()
+        let coordinator = SessionCoordinator(store: store)
+        let sessionID = try requireSessionID()
+
+        try await coordinator.noteVoiceChange(
+            sessionID: sessionID,
+            atOrdinal: 2,
+            voice: VoiceSnapshot(id: "voice-explicit", name: "明确目标")
+        )
+
+        let changes = try await store.voiceChanges(sessionID: sessionID)
+        XCTAssertEqual(changes.count, 1)
+        XCTAssertEqual(changes.first?.atOrdinal, 2)
+        XCTAssertEqual(changes.first?.value, "voice-explicit|明确目标")
+    }
+
     // MARK: - 收尾只动该动的列
 
     func testFinalizeUpdatesTextAndStatusAndKeepsIdentity() async throws {

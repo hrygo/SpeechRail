@@ -644,7 +644,38 @@ public final class SessionCoordinator {
     /// 落一条音色变更点（「第 N 句起」必须查得回来）。
     public func noteVoiceChange(atOrdinal: Int, voice: VoiceSnapshot) async throws {
         guard let activeSessionID else { return }
-        try await store.noteVoiceChange(sessionID: activeSessionID, atOrdinal: atOrdinal, voice: voice)
+        try await noteVoiceChange(
+            sessionID: activeSessionID,
+            atOrdinal: atOrdinal,
+            voice: voice
+        )
+    }
+
+    /// 为已固定身份的会话落音色变更点；迟到保存不能被当前 active session 改道。
+    public func noteVoiceChange(
+        sessionID: String,
+        atOrdinal: Int,
+        voice: VoiceSnapshot
+    ) async throws {
+        try await store.noteVoiceChange(
+            sessionID: sessionID,
+            atOrdinal: atOrdinal,
+            voice: voice
+        )
+    }
+
+    /// 仅让本记录第一条正式 user 行认领自动标题，且不覆盖人工命名。
+    @discardableResult
+    public func claimAutomaticTitle(
+        sessionID: String,
+        lineID: String,
+        title: String
+    ) async throws -> Bool {
+        try await store.claimAutomaticTitle(
+            sessionID: sessionID,
+            lineID: lineID,
+            title: title
+        )
     }
 
     public func setSessionTitle(id: String, title: String?) async throws {

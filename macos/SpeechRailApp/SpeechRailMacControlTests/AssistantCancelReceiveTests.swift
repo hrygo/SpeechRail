@@ -11,6 +11,14 @@ import XCTest
 /// 取消未确认始终 fail-closed；provider 失败走有身份取消屏障。
 @MainActor
 final class AssistantCancelReceiveTests: XCTestCase {
+    private actor SaveControl {
+        var failing = true
+        func allowWrites() { failing = false }
+        func write(_ draft: LineDraft, id: String, store: SessionStore) async throws -> Int {
+            if failing { throw AssistantSessionTests.FakeAssistantError.llm("测试保存失败") }
+            return try await store.appendLine(draft, id: id)
+        }
+    }
     private func waitUntil(
         _ condition: () -> Bool,
         iterations: Int = 600,
@@ -25,7 +33,11 @@ final class AssistantCancelReceiveTests: XCTestCase {
 
     private func makeVoiceHarness(
         llmScripts: [AssistantSessionTests.FakeAssistantLLM.Script],
-        autoConfirmTTSCancel: Bool = true
+        autoConfirmTTSCancel: Bool = true,
+        inputSaveGate: AssistantSessionTests.Gate? = nil,
+        typedSaveGate: AssistantSessionTests.Gate? = nil,
+        saveControl: SaveControl? = nil,
+        inputConfiguration: AssistantInputPersistenceQueue.Configuration = .init()
     ) async throws -> AssistantSessionTests.Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("assistant-cancel-\(UUID().uuidString)", isDirectory: true)
@@ -51,7 +63,14 @@ final class AssistantCancelReceiveTests: XCTestCase {
                     )
                     box.append(client, configuration: configuration)
                     return client
-                }
+                },
+                saveInputLine: { draft, id in
+                    if let inputSaveGate { await inputSaveGate.enter() }
+                    if draft.source == .keyboard, let typedSaveGate { await typedSaveGate.enter() }
+                    if let saveControl { return try await saveControl.write(draft, id: id, store: store) }
+                    return try await store.appendLine(draft, id: id)
+                },
+                inputPersistenceConfiguration: inputConfiguration
             )
         )
         session.preferences = { preferences }
@@ -93,6 +112,305 @@ final class AssistantCancelReceiveTests: XCTestCase {
         harness.defaults.removePersistentDomain(forName: harness.defaults.description)
     }
 
+    func testSavingUserInputDoesNotBlockReceiverOrStartProviderEarly() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])], inputSaveGate: gate)
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.completed(itemID: "saved-1", transcript: "问题"))
+        await waitUntil({ gate.entered }, message: "输入保存 seam 没有被调用")
+        await harness.clients()[0].emit(.partial(itemID: "next-1", delta: "下一句"))
+        await waitUntil({ harness.session.partialText == "下一句" }, message: "保存未完成时 receiver 应继续处理控制事件")
+        let before = await harness.llm.streamCount
+        XCTAssertEqual(before, 0, "保存成功之前不得把问题发送给 provider")
+        gate.release()
+        await waitUntil({ harness.session.turns.contains { $0.role == .user && $0.text == "问题" } })
+    }
+
+    func testPartialDoesNotTakeTheFirstFormalUserTitle() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.partial(itemID: "unfinished", delta: "半句"))
+        await harness.clients()[0].emit(.completed(itemID: "unfinished", transcript: ""))
+        await waitUntil({ harness.session.turns.contains { $0.text == "半句" } })
+        await harness.clients()[0].emit(.completed(itemID: "formal", transcript: "正式问题"))
+        await waitUntil({ harness.session.turns.contains { $0.text == "正式问题" } })
+        await waitUntil({ harness.session.turns.contains { $0.role == .assistant } })
+        let snapshot = try await harness.store.reviewSnapshot(sessionID: recordID)
+        XCTAssertEqual(snapshot?.record.title, "正式问题")
+    }
+
+    func testLatestVoiceBindingWinsWhenOlderSelectionReturnsLate() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答。"])])
+        let gate = AssistantSessionTests.Gate()
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        harness.session.realtimeCapabilityBindingProvider = { voice in
+            if voice == "B" { await gate.enter() }
+            return RealtimeCapabilityBinding(
+                asrModelRevision: "asr-1", canonicalVoiceID: voice ?? "A",
+                voiceRevision: "revision-\(voice ?? "A")", ttsModelRevision: "tts-1"
+            )
+        }
+        let first = Task { await harness.session.changeVoice(to: "B") }
+        await waitUntil({ gate.entered })
+        let latest = Task { await harness.session.changeVoice(to: "C") }
+        // C 应在意图登记时立即可见；旧 binding 不该覆盖后来选择。
+        await waitUntil({ harness.session.voiceID == "C" })
+        gate.release()
+        await first.value
+        await latest.value
+        XCTAssertEqual(harness.session.voiceID, "C")
+        await harness.clients()[0].emit(.completed(itemID: "voice-next", transcript: "请朗读"))
+        await waitUntil({ harness.session.turns.contains { $0.role == .assistant } })
+        let voices = await harness.clients()[0].startedVoices
+        let startedVoice = voices.last ?? nil
+        XCTAssertEqual(startedVoice?.voice, "C", "必须观察 client 实际 start 参数")
+        XCTAssertEqual(startedVoice?.voiceRevision, "revision-C")
+    }
+
+    func testAcceptedVoiceIsRecordedWhenInterruptedBeforeStartReturns() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["开口后被打断。"])])
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        await harness.session.changeVoice(to: "voice-1", name: "测试音色")
+        let client = harness.clients()[0]
+        await client.setTTSStartReturnGate(gate)
+        await client.emit(.completed(itemID: "start-race", transcript: "念一句"))
+        await waitUntil({ gate.entered })
+        // started 已发到 receiver，sendStart 仍卡住；marker 确保 started 已被归约。
+        await client.emit(.failed(itemID: "marker", code: "marker", message: ""))
+        await waitUntil({ harness.session.lastFailure?.contains("marker") == true })
+        await harness.session.stopSpeaking()
+        let lines = try await harness.store.lines(sessionID: recordID)
+        let reply = try XCTUnwrap(lines.first { $0.role == .assistant })
+        let changes = try await harness.store.voiceChanges(sessionID: recordID)
+        XCTAssertEqual(changes.count, 1, "started 已接受的真实 request 不能漏掉音色登记")
+        XCTAssertEqual(changes.first?.atOrdinal, reply.ordinal)
+        gate.release()
+    }
+
+    func testClosingVoiceFinalizesPartialReplyBeforeContinuingWithText() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.gatedDeltas(["已生成的原文"], gate), .deltas(["文字回答"])]
+        )
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.completed(itemID: "close-voice", transcript: "先说一句"))
+        await waitUntil({ gate.entered && harness.session.streamingReply == "已生成的原文" })
+        await harness.session.closeVoiceKeepingText()
+        let lines = try await harness.store.lines(sessionID: recordID, includePartial: true)
+        let reply = try XCTUnwrap(lines.first { $0.role == .assistant })
+        XCTAssertEqual(reply.status, .final)
+        XCTAssertTrue(reply.isInterrupted)
+        _ = await harness.session.ask(typed: "继续打字")
+        await waitUntil({ harness.session.turns.contains { $0.text == "文字回答" } })
+        let requests = await harness.llm.requests
+        XCTAssertTrue(requests.last?.messages.contains { $0.role == .assistant && $0.text == "已生成的原文" } == true)
+        XCTAssertTrue(requests.last?.messages.contains { $0.role == .developer && $0.text.contains("生成被打断") } == true)
+    }
+
+    func testPlaybackEnqueueWaitDoesNotBlockRealReceiverControlEvents() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["朗读正文。"])])
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        harness.audio.setPlaybackEnqueueGate(gate)
+        let client = harness.clients()[0]
+        await client.emit(.completed(itemID: "pcm-wait", transcript: "念一句"))
+        await waitUntil({ harness.session.turns.contains { $0.role == .assistant } })
+        let activeID = await client.currentTTSRequestID()
+        let requestID = try XCTUnwrap(activeID)
+        await client.emit(.ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320)))
+        await waitUntil({ gate.entered })
+        await client.emit(.ttsEnded(requestID: requestID, taskID: nil, status: "completed", code: nil, message: nil))
+        await client.emit(.failed(itemID: "marker", code: "marker", message: ""))
+        await waitUntil({ harness.session.lastFailure?.contains("marker") == true },
+                        message: "实际 receiver 不能等待音频入队后才处理控制事件")
+        XCTAssertEqual(harness.session.phase, .speaking, "terminal 到达但在途音频未消费不能提前完成")
+        gate.release()
+        let epoch = try XCTUnwrap(harness.audio.enqueuedEpochs.first)
+        harness.audio.render(samples: 160, epoch: epoch)
+        await waitUntil({ harness.session.phase == .listening })
+    }
+
+    func testRetrySupersedingVoiceCloseRestoresUploadAndDisconnectHandling() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["朗读正文。"])], autoConfirmTTSCancel: false
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let oldClient = harness.clients()[0]
+        await oldClient.emit(.completed(itemID: "close-retry", transcript: "念一句"))
+        await waitUntil({ harness.session.turns.contains { $0.role == .assistant } })
+        let close = Task { await harness.session.closeVoiceKeepingText() }
+        for _ in 0..<600 {
+            if await oldClient.snapshot().cancelTTS > 0 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        let oldCounters = await oldClient.snapshot()
+        XCTAssertGreaterThan(oldCounters.cancelTTS, 0, "关闭应已进入取消确认等待")
+        await harness.session.retry()
+        await close.value
+        XCTAssertEqual(harness.clients().count, 2)
+        guard let newClient = harness.clients().last else { return XCTFail("没有重连 client") }
+        harness.audio.emitCapture(AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5))
+        for _ in 0..<600 {
+            if await newClient.snapshot().append > 0 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        let newCounters = await newClient.snapshot()
+        XCTAssertGreaterThan(newCounters.append, 0, "旧关闭意图不能永久抑制新连接上传")
+        await newClient.emit(.closed(code: 1006))
+        await waitUntil({ harness.session.blocked != nil }, message: "新连接的真实断连不能被旧关闭意图吞掉")
+    }
+
+    func testActualProviderRequestUsesOutputBudgetAndCurrentQuestionOnce() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.completed(itemID: "question-1", transcript: "当前问题"))
+        await waitUntil({ harness.session.turns.contains { $0.role == .assistant } })
+        let requests = await harness.llm.requests
+        let request = try XCTUnwrap(requests.last)
+        XCTAssertEqual(request.maxOutputTokens, 1_024)
+        XCTAssertEqual(request.messages.filter { $0.role == .user && $0.text == "当前问题" }.count, 1)
+        XCTAssertFalse(request.instructions?.isEmpty ?? true)
+    }
+
+    func testQueuedInputsSaveOnceInArrivalOrderAndEndWaitsForThem() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(llmScripts: [], inputSaveGate: gate)
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "一"))
+        await waitUntil({ gate.entered })
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "一"))
+        await harness.clients()[0].emit(.completed(itemID: "q2", transcript: "二"))
+        await harness.clients()[0].emit(.completed(itemID: "q3", transcript: "三"))
+        await harness.clients()[0].emit(.failed(itemID: "marker", code: "marker", message: ""))
+        await waitUntil({ harness.session.lastFailure?.contains("marker") == true })
+        let ending = Task { await harness.session.endConversation() }
+        await waitUntil({ harness.session.phase == .ending })
+        let before = try await harness.store.session(id: recordID)
+        XCTAssertNotEqual(before?.state, .archived, "保存还在飞时不得封存")
+        gate.release()
+        _ = await ending.value
+        let lines = try await harness.store.lines(sessionID: recordID)
+        XCTAssertEqual(lines.filter { $0.role == .user }.map(\.text), ["一", "二", "三"])
+        let after = try await harness.store.session(id: recordID)
+        XCTAssertEqual(after?.state, .archived)
+        let calls = await harness.llm.streamCount
+        XCTAssertEqual(calls, 0, "已进入 draining 的队列只能归档")
+    }
+
+    func testFailedInputStaysRecoverableAndCannotBeSealedAsSaved() async throws {
+        let control = SaveControl()
+        let harness = try await makeVoiceHarness(llmScripts: [], saveControl: control)
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.completed(itemID: "retry-q", transcript: "保留问题"))
+        await waitUntil({ harness.session.lastFailure?.contains("测试保存失败") == true })
+        let result = await harness.session.endConversation()
+        XCTAssertEqual(result, .noConversation)
+        XCTAssertEqual(harness.session.pendingSealRecordID, recordID)
+        XCTAssertTrue(harness.session.unsavedTranscriptText().contains("保留问题"))
+        let unsaved = try await harness.store.session(id: recordID)
+        XCTAssertNotEqual(unsaved?.state, .archived)
+        await control.allowWrites()
+        let recovered = await harness.session.retryPendingSeal()
+        XCTAssertTrue(recovered)
+        let lines = try await harness.store.lines(sessionID: recordID)
+        XCTAssertEqual(lines.filter { $0.role == .user }.map(\.text), ["保留问题"])
+        let calls = await harness.llm.streamCount
+        XCTAssertEqual(calls, 0, "旧记录恢复不得发起新的回答")
+    }
+
+    func testFailedReplyKeepsOriginalTextAndGenerationStatusInNextActualRequest() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltasThenFailure(["原始片段"], "provider故障"), .deltas(["新的回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let first = await harness.session.ask(typed: "第一个问题")
+        XCTAssertEqual(first, .accepted)
+        await waitUntil({ harness.session.lastFailure?.contains("provider故障") == true })
+        let original = try XCTUnwrap(harness.session.turns.first { $0.role == .assistant })
+        _ = await harness.session.ask(typed: "第二个问题")
+        await waitUntil({ harness.session.turns.filter { $0.role == .assistant }.count == 2 })
+        let requests = await harness.llm.requests
+        let next = try XCTUnwrap(requests.last)
+        XCTAssertTrue(next.messages.contains { $0.role == .assistant && $0.text == "原始片段" })
+        XCTAssertTrue(next.messages.contains { $0.role == .developer && $0.text.contains(original.id) && $0.text.contains("生成失败") })
+        XCTAssertEqual(harness.session.turns.first { $0.id == original.id }?.text, "原始片段")
+    }
+
+    func testOversizedCurrentQuestionStaysSavedWithoutCallingProvider() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [])
+        defer { cleanup(harness) }
+        let question = String(repeating: "界", count: 24_001)
+        _ = await harness.session.ask(typed: question)
+        await waitUntil({ harness.session.lastFailure?.contains("超过") == true })
+        let requests = await harness.llm.requests
+        XCTAssertTrue(requests.isEmpty)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let lines = try await harness.store.lines(sessionID: recordID)
+        XCTAssertEqual(lines.first?.text.unicodeScalars.count, 24_001)
+    }
+
+    func testActualRequestTrimsCompleteHistoryWhileStoreKeepsAllTurns() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: (1...14).map { .deltas(["回答\($0)"]) }
+        )
+        defer { cleanup(harness) }
+        for index in 1...14 {
+            let result = await harness.session.ask(typed: "问题\(index)")
+            XCTAssertEqual(result, .accepted)
+            await waitUntil({ harness.session.turns.filter { $0.role == .assistant }.count == index })
+        }
+        let requests = await harness.llm.requests
+        let latest = try XCTUnwrap(requests.last)
+        XCTAssertEqual(latest.messages.filter { $0.role == .user }.count, 13)
+        XCTAssertEqual(latest.messages.filter { $0.role == .assistant }.count, 12)
+        XCTAssertFalse(latest.messages.contains { $0.text == "问题1" || $0.text == "回答1" })
+        XCTAssertEqual(latest.messages.filter { $0.role == .user && $0.text == "问题14" }.count, 1)
+        let scalars = (latest.instructions?.unicodeScalars.count ?? 0)
+            + latest.messages.reduce(0) { $0 + $1.text.unicodeScalars.count }
+        XCTAssertLessThanOrEqual(scalars, 24_000)
+        XCTAssertNotNil(harness.session.contextOmissionNote)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let lines = try await harness.store.lines(sessionID: recordID)
+        XCTAssertEqual(lines.count, 28, "预算只裁请求投影，不改原始记录")
+    }
+
+    func testTypedAndMicrophoneInputsShareTheirAcceptanceOrder() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["回答一"]), .deltas(["回答二"])], typedSaveGate: gate
+        )
+        defer { gate.release(); cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let typed = Task { await harness.session.ask(typed: "先打字") }
+        await waitUntil({ gate.entered })
+        await harness.clients()[0].emit(.completed(itemID: "later-mic", transcript: "后说话"))
+        await harness.clients()[0].emit(.failed(itemID: "marker", code: "marker", message: ""))
+        await waitUntil({ harness.session.lastFailure?.contains("marker") == true })
+        let before = await harness.llm.streamCount
+        XCTAssertEqual(before, 0, "后来的语音不能越过先接纳的打字保存")
+        gate.release()
+        _ = await typed.value
+        await waitUntil({ harness.session.turns.filter { $0.role == .user }.count == 2 })
+        let lines = try await harness.store.lines(sessionID: recordID)
+        XCTAssertEqual(lines.filter { $0.role == .user }.map(\.text), ["先打字", "后说话"])
+    }
+
     /// A03：朗读中同一流 hypothesis 触发 cancel，匹配 terminal 经接收循环到达，
     /// 连接可继续；严禁直接调用 terminal handler。
     func testA03BargeInTerminalThroughReceiveLoop() async throws {
@@ -107,11 +425,21 @@ final class AssistantCancelReceiveTests: XCTestCase {
         )
         // 朗读中来同一流 hypothesis：经 noteSpeechEvidence 走统一中断，
         // Fake 自动回匹配 terminal（经接收循环，非直接调用 handler）。
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
-        await harness.session.stopSpeaking()
+        await harness.clients()[0].emit(.partial(itemID: "i2", delta: "插话"))
+        await waitUntil(
+            { harness.session.partialText == "插话" },
+            message: "receiver 不应等待排在 partial 后面的取消终态"
+        )
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "匹配 terminal 必须经 receiver 确认取消"
+        )
         XCTAssertEqual(harness.session.phase, .listening, "服务端确认后应继续聆听")
         XCTAssertNil(harness.session.blocked, "确认过就不该判成语音中断")
         let counters = await harness.clients()[0].snapshot()
@@ -133,7 +461,10 @@ final class AssistantCancelReceiveTests: XCTestCase {
             message: "回复没有落库"
         )
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(
+                requestID: await harness.clients()[0].currentTTSRequestID(),
+                taskID: nil, pcm: Data(repeating: 0, count: 320)
+            )
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
         await harness.session.stopSpeaking()

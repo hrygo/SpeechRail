@@ -77,6 +77,46 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTFail(message)
     }
 
+    /// 等待一个依赖真实时钟的条件：`waitUntil` 只让出执行权，不能证明
+    /// `Task.sleep`/持续时钟已经推进。这里给受限超时留出调度余量，
+    /// 超时后仍由断言失败，不掩盖没有结局的状态机。
+    private func waitUntilEventually(
+        _ condition: () -> Bool,
+        timeout: Duration = .seconds(2),
+        message: String
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(condition(), message)
+    }
+
+    /// 匹配终态到达后，取消 effect 仍可能在 MainActor 上收尾旧 outbound。
+    /// 有界重试 `begin` 才能同时验证“必须先被拒绝”和“收尾后必须放行”，
+    /// 不把调度延迟当成状态机错误。
+    private func beginEventually(
+        _ coordinator: AssistantTTSStreamCoordinator,
+        generation: Int,
+        requestID: String,
+        timeout: Duration = .seconds(2),
+        message: String
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            do {
+                try await coordinator.begin(generation: generation, requestID: requestID)
+                return
+            } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+                try? await Task.sleep(for: .milliseconds(10))
+            } catch {
+                XCTFail("\(message): \(error)")
+                return
+            }
+        }
+        XCTFail(message)
+    }
+
     func testAudioReachesPlaybackBeforeTheLLMFinishes() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 7, requestID: "req-7")
@@ -88,6 +128,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             requestID: "req-7",
             pcm: Data([1, 2, 3, 4])
         )
+        await waitUntil({ recorder.played.count == 1 }, message: "PCM 没有进入播放层")
 
         XCTAssertEqual(recorder.played.count, 1, "LLM 还在生成时 PCM 就必须已经进播放器")
         XCTAssertFalse(coordinator.inputClosed)
@@ -133,13 +174,48 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertEqual(recorder.finishes, [0])
     }
 
+    func testAcknowledgementTimeoutDoesNotResendAppend() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.acknowledgementTimeout = .milliseconds(20)
+        let (coordinator, recorder) = makeHarness(
+            configuration: configuration,
+            acknowledgeAppend: false
+        )
+        coordinator.sendCancel = { [weak coordinator] in
+            recorder.cancels += 1
+            await coordinator?.handleTerminal(requestID: "req-ack-timeout", status: "cancelled")
+        }
+        try await coordinator.begin(generation: 81, requestID: "req-ack-timeout")
+
+        coordinator.offer("你好。")
+        await waitUntil({ recorder.appends.count == 1 }, message: "文本没有发送")
+        await waitUntilEventually(
+            { coordinator.outcome != nil },
+            message: "ACK 超时后这一轮必须失败"
+        )
+
+        guard case .failed(_)? = coordinator.outcome else {
+            return XCTFail("ACK 超时后这一轮必须失败")
+        }
+        XCTAssertEqual(
+            recorder.appends.map(\.sequence),
+            [0],
+            "ACK 超时必须失败收尾，不能自动重发同一 append"
+        )
+        await waitUntil({ recorder.cancels == 1 }, message: "ACK 超时后没有发起取消")
+        await waitUntil(
+            { !coordinator.hasUnconfirmedRemoteOwnership },
+            message: "匹配终态后取消任务没有收尾"
+        )
+    }
+
     func testCancelLetsLateAudioDieAndReportsCancellation() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 3, requestID: "req-3")
         coordinator.offer("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 })
 
-        await coordinator.cancel()
+        _ = await coordinator.cancel()
 
         XCTAssertEqual(recorder.outcomes.map(\.outcome), [.cancelled])
         XCTAssertEqual(recorder.cancels, 1)
@@ -151,6 +227,154 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isActive)
     }
 
+    func testCancellationTaskSchedulingCannotLeaveTheCurrentRequestActive() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(10)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 13, requestID: "req-13")
+
+        // The synchronous preparation must revoke local ownership before the
+        // effect Task is created, without relying on task scheduling.
+        let preparation = try XCTUnwrap(coordinator.prepareCancellation())
+        XCTAssertFalse(
+            coordinator.isActive,
+            "preparation must revoke the old request synchronously"
+        )
+        XCTAssertTrue(
+            coordinator.isKnownRetiredRequest("req-13"),
+            "preparation must register retired ownership before the effect is scheduled"
+        )
+        XCTAssertTrue(
+            coordinator.prepareCancellation() === preparation,
+            "repeated preparation must merge into the same retired request"
+        )
+        do {
+            try await coordinator.begin(generation: 14, requestID: "req-14")
+            XCTFail("a new request must not start while remote ownership is unknown")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected until the matching remote terminal is consumed.
+        }
+
+        let cancellation = Task { @MainActor in
+            await coordinator.performCancellation(preparation)
+        }
+        let confirmed = await cancellation.value
+        XCTAssertFalse(confirmed, "no terminal means remote idle remains unconfirmed")
+        XCTAssertTrue(
+            coordinator.hasUnconfirmedRemoteOwnership,
+            "timed-out cancellation must retain unknown remote ownership"
+        )
+
+        let repeatedCancelConfirmed = await coordinator.cancel()
+        XCTAssertFalse(
+            repeatedCancelConfirmed,
+            "a repeated cancel must not treat unknown remote ownership as confirmed"
+        )
+
+        await coordinator.handleTerminal(requestID: "req-13", status: "cancelled")
+        XCTAssertFalse(
+            coordinator.hasUnconfirmedRemoteOwnership,
+            "the matching late terminal must release unknown remote ownership"
+        )
+    }
+
+    func testCancelCannotConfirmOrRestartWhileCancelledAppendIsInFlight() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(20)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        let appendGate = Gate()
+        defer { appendGate.release() }
+        coordinator.sendAppend = { _, _ in await appendGate.enter() }
+        try await coordinator.begin(generation: 83, requestID: "req-outbound")
+
+        coordinator.offer("这是一段文本。")
+        await waitUntil({ appendGate.entered }, message: "sendAppend 没有进入受控挂起")
+
+        let preparation = try XCTUnwrap(coordinator.prepareCancellation())
+        // Simulate the matching remote terminal winning the race with the
+        // cancellation effect while the old outbound append is still blocked.
+        await coordinator.handleTerminal(requestID: "req-outbound", status: "cancelled")
+        let cancellation = Task { @MainActor in
+            await coordinator.performCancellation(preparation)
+        }
+        let confirmed = await cancellation.value
+        XCTAssertFalse(
+            confirmed,
+            "a remote terminal cannot confirm the barrier while the cancelled append is still in flight"
+        )
+
+        do {
+            try await coordinator.begin(generation: 84, requestID: "req-next")
+            XCTFail("a new request must stay blocked until the old outbound task exits")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected while the old sendAppend call has not returned.
+        }
+
+        appendGate.release()
+        var nextRequestStarted = false
+        for _ in 0..<400 {
+            do {
+                try await coordinator.begin(generation: 84, requestID: "req-next")
+                nextRequestStarted = true
+                break
+            } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+                await Task.yield()
+            }
+        }
+        XCTAssertTrue(
+            nextRequestStarted,
+            "the matching terminal plus old outbound task exit must release the gate"
+        )
+        XCTAssertTrue(coordinator.isActive)
+    }
+
+    func testCancelSendTimeoutRetainsOutboundOwnerUntilSendTaskExits() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(20)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        let cancelGate = Gate()
+        defer { cancelGate.release() }
+        coordinator.sendCancel = { await cancelGate.enter() }
+        try await coordinator.begin(generation: 85, requestID: "req-cancel-send")
+
+        let preparation = try XCTUnwrap(coordinator.prepareCancellation())
+        // The matching terminal may arrive while the cancel send is still blocked.
+        await coordinator.handleTerminal(requestID: "req-cancel-send", status: "cancelled")
+        let cancellation = Task { @MainActor in
+            await coordinator.performCancellation(preparation)
+        }
+        await waitUntil({ cancelGate.entered }, message: "sendCancel 没有进入受控挂起")
+
+        let confirmed = await cancellation.value
+        XCTAssertFalse(
+            confirmed,
+            "a matching terminal cannot confirm cancellation while sendCancel is still in flight"
+        )
+        do {
+            try await coordinator.begin(generation: 86, requestID: "req-cancel-next")
+            XCTFail("a new request must wait for the timed-out sendCancel task to exit")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected while the uncooperative cancel send remains owned.
+        }
+
+        cancelGate.release()
+        var nextRequestStarted = false
+        for _ in 0..<400 {
+            do {
+                try await coordinator.begin(generation: 86, requestID: "req-cancel-next")
+                nextRequestStarted = true
+                break
+            } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+                await Task.yield()
+            }
+        }
+        XCTAssertTrue(
+            nextRequestStarted,
+            "the cancel-send completion must release only its own ownership gate"
+        )
+        XCTAssertTrue(coordinator.isActive)
+    }
+
     func testTemporaryDrainDoesNotAnnounceCompletion() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 4, requestID: "req-4")
@@ -160,12 +384,15 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             requestID: "req-4",
             pcm: Data([1, 2, 3, 4])
         )
+        await waitUntil({ recorder.played.count == 1 }, message: "PCM 没有进入播放层")
 
         coordinator.notePlaybackCompleted(samples: 2, epoch: try XCTUnwrap(recorder.epochs.first))
+        await waitUntil({ coordinator.isDrained }, message: "播放器排空后队列消费任务仍未收尾")
         XCTAssertTrue(coordinator.isDrained)
         XCTAssertTrue(recorder.outcomes.isEmpty, "只是暂时排空，不能宣布整轮结束")
 
         await coordinator.handleTerminal(requestID: "req-4", status: "completed")
+        await waitUntil({ recorder.outcomes.count == 1 }, message: "终态与空队列同时满足后没有完成")
         XCTAssertEqual(recorder.outcomes.count, 1)
         XCTAssertEqual(recorder.outcomes.first?.outcome, .completed)
         XCTAssertEqual(recorder.outcomes.first?.generation, 4)
@@ -180,12 +407,14 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             requestID: "req-5",
             pcm: Data([1, 2, 3, 4, 5, 6])
         )
+        await waitUntil({ recorder.played.count == 1 }, message: "PCM 没有进入播放层")
 
         await coordinator.handleTerminal(requestID: "req-5", status: "completed")
         XCTAssertTrue(coordinator.isAwaitingPlayback)
         XCTAssertTrue(recorder.outcomes.isEmpty)
 
         coordinator.notePlaybackCompleted(samples: 3, epoch: try XCTUnwrap(recorder.epochs.first))
+        await waitUntil({ recorder.outcomes.count == 1 }, message: "最后一块音频完成后没有收束")
         XCTAssertEqual(recorder.outcomes.count, 1, "整轮只在音频真的播完之后收束一次")
         XCTAssertEqual(recorder.outcomes.first?.outcome, .completed)
     }
@@ -236,6 +465,47 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isActive)
     }
 
+    func testFailureKeepsRemoteOwnershipUnknownUntilMatchingTerminal() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(10)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 17, requestID: "req-17")
+
+        await coordinator.handleServerError(
+            requestID: "req-17",
+            code: "tts_sequence_invalid",
+            message: "sequence rejected"
+        )
+        guard case .failed(_)? = coordinator.outcome else {
+            return XCTFail("the current request failure must remain visible")
+        }
+
+        await waitUntilEventually(
+            { coordinator.isKnownRetiredRequest("req-17") },
+            message: "取消超时必须保留旧 request 的未知归属"
+        )
+        XCTAssertTrue(
+            coordinator.isKnownRetiredRequest("req-17"),
+            "a cancel timeout must retain remote ownership as unknown"
+        )
+        do {
+            try await coordinator.begin(generation: 18, requestID: "req-18")
+            XCTFail("a new request must be rejected while failed request ownership is unknown")
+            coordinator.invalidate()
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected until the matching late terminal confirms the old request is gone.
+        }
+
+        await coordinator.handleTerminal(requestID: "req-17", status: "failed")
+        await beginEventually(
+            coordinator,
+            generation: 18,
+            requestID: "req-18",
+            message: "匹配终态和旧发送任务退出后必须放行新 request"
+        )
+        XCTAssertTrue(coordinator.isActive)
+    }
+
     func testPlaybackBackpressureFailsInsteadOfQueueingForever() async throws {
         var configuration = AssistantTTSStreamCoordinator.Configuration.default
         configuration.playbackLedger.maximumQueuedSamples = 2
@@ -247,6 +517,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             requestID: "req-10",
             pcm: Data([1, 2, 3, 4])
         )
+        await waitUntil({ recorder.played.count == 1 }, message: "首块音频没有进入播放")
         XCTAssertEqual(recorder.played.count, 1)
 
         await coordinator.handleAudio(
@@ -255,10 +526,190 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         )
 
         XCTAssertEqual(recorder.played.count, 1, "超预算的音频不能被无界积压")
+        await waitUntilEventually(
+            { coordinator.outcome != nil },
+            message: "播放跟不上时必须明确失败，而不是一直等"
+        )
         guard case .failed(let message)? = coordinator.outcome else {
             return XCTFail("播放跟不上时必须明确失败，而不是一直等")
         }
         XCTAssertTrue(message.contains("播放"))
+    }
+
+    func testReceiverContinuesWhileAudioWaitsForPlaybackBudgetAndDrainsFIFO() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 2
+        configuration.playbackWaitTimeout = .seconds(5)
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 14, requestID: "req-14")
+
+        let first = Data([1, 1, 1, 1])
+        let second = Data([2, 2, 2, 2])
+        let third = Data([3, 3, 3, 3])
+        await coordinator.handleAudio(requestID: "req-14", pcm: first)
+        await waitUntil({ recorder.played.count == 1 }, message: "首块音频没有进入播放")
+        XCTAssertEqual(recorder.played, [first])
+
+        var acknowledgementAccepted = false
+        var terminalConsumed = false
+        let receiver = Task { @MainActor in
+            await coordinator.handleAudio(requestID: "req-14", pcm: second)
+            await coordinator.handleAudio(requestID: "req-14", pcm: third)
+            acknowledgementAccepted = coordinator.handleTextAccepted(
+                requestID: "req-14",
+                appendSequence: 0,
+                totalCodepoints: 3
+            )
+            await coordinator.handleTerminal(requestID: "req-14", status: "completed")
+            terminalConsumed = true
+        }
+
+        await waitUntil({ terminalConsumed }, message: "audio admission blocked the receiver")
+        XCTAssertTrue(
+            acknowledgementAccepted,
+            "audio waiting for playback capacity must not block an ACK on the receiver"
+        )
+        XCTAssertTrue(
+            terminalConsumed,
+            "audio waiting for playback capacity must not block a terminal on the receiver"
+        )
+        XCTAssertTrue(
+            recorder.outcomes.isEmpty,
+            "a terminal cannot complete the turn while FIFO audio remains pending"
+        )
+        XCTAssertEqual(coordinator.queuedAudioBytes, 8, "FIFO/in-flight PCM must count against its byte cap")
+
+        let epoch = try XCTUnwrap(recorder.epochs.first)
+        coordinator.notePlaybackCompleted(samples: 2, epoch: epoch)
+        await waitUntil({ recorder.played.count == 2 }, message: "第二块 FIFO 音频没有进入播放")
+        coordinator.notePlaybackCompleted(samples: 2, epoch: epoch)
+        await waitUntil({ recorder.played.count == 3 }, message: "第三块 FIFO 音频没有进入播放")
+        coordinator.notePlaybackCompleted(samples: 2, epoch: epoch)
+        await receiver.value
+
+        XCTAssertEqual(recorder.played, [first, second, third], "音频必须按 receiver 接纳顺序入队")
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.completed])
+    }
+
+    func testAggregateAudioCapIncludesChunkAwaitingPlaybackEnqueue() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.maximumPendingAudioBytes = 8
+        configuration.playbackLedger.maximumQueuedSamples = 32
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        let gate = Gate()
+        coordinator.enqueuePlayback = { pcm, epoch in
+            await gate.enter()
+            recorder.played.append(pcm)
+            recorder.epochs.append(epoch)
+            return true
+        }
+        coordinator.sendCancel = { [weak coordinator] in
+            recorder.cancels += 1
+            await coordinator?.handleTerminal(requestID: "req-audio-cap", status: "cancelled")
+        }
+        try await coordinator.begin(generation: 82, requestID: "req-audio-cap")
+
+        let first = Data([1, 1, 1, 1])
+        let second = Data([2, 2, 2, 2])
+        let third = Data([3, 3])
+        XCTAssertEqual(
+            coordinator.admitAudio(requestID: "req-audio-cap", pcm: first),
+            .accepted
+        )
+        await waitUntil({ gate.entered }, message: "首块没有进入异步 enqueue")
+        XCTAssertEqual(coordinator.queuedAudioBytes, first.count)
+
+        XCTAssertEqual(
+            coordinator.admitAudio(requestID: "req-audio-cap", pcm: second),
+            .accepted
+        )
+        XCTAssertEqual(
+            coordinator.queuedAudioBytes,
+            first.count + second.count,
+            "await enqueue 的音频与 FIFO 中的音频都计入上限"
+        )
+
+        XCTAssertEqual(
+            coordinator.admitAudio(requestID: "req-audio-cap", pcm: third),
+            .rejected,
+            "多个单块都未超限，但 FIFO 加 in-flight 总量超限时必须拒绝"
+        )
+        XCTAssertEqual(coordinator.queuedAudioBytes, 0, "失败应立即丢弃本地待播 PCM")
+        guard case .failed(_)? = coordinator.outcome else {
+            return XCTFail("聚合 PCM 超限必须显式失败")
+        }
+
+        gate.release()
+        await waitUntil({ recorder.cancels == 1 }, message: "超限后没有收尾取消")
+        await waitUntil(
+            { !coordinator.hasUnconfirmedRemoteOwnership },
+            message: "匹配终态后取消任务没有收尾"
+        )
+    }
+
+    func testOversizedAudioFailsBeforeEnteringPlayback() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 30_000
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 15, requestID: "req-15")
+        _ = coordinator.handleStarted(
+            requestID: "req-15",
+            taskID: nil,
+            limits: TTSStreamLimits(
+                maxAppendCodepoints: 4_096,
+                maxTotalCodepoints: 16_000,
+                maxPendingCodepoints: 8_000,
+                maxPendingAudioBytes: 96_000,
+                inputWaitSeconds: 15,
+                utteranceWallClockSeconds: 120,
+                slowConsumerSeconds: 2
+            )
+        )
+
+        await coordinator.handleAudio(
+            requestID: "req-15",
+            pcm: Data(repeating: 1, count: 48_002)
+        )
+
+        XCTAssertTrue(
+            recorder.played.isEmpty,
+            "a chunk larger than the local 48,000-byte admission budget must not reach playback"
+        )
+        guard case .failed(_)? = coordinator.outcome else {
+            return XCTFail("audio overflow must fail explicitly before reserving playback samples")
+        }
+        XCTAssertEqual(coordinator.queuedSamples, 0, "rejected PCM must leave no ledger reservation")
+    }
+
+    func testNegotiatedAudioLimitTightensAdmission() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 100
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 16, requestID: "req-16")
+        _ = coordinator.handleStarted(
+            requestID: "req-16",
+            taskID: nil,
+            limits: TTSStreamLimits(
+                maxAppendCodepoints: 4_096,
+                maxTotalCodepoints: 16_000,
+                maxPendingCodepoints: 8_000,
+                maxPendingAudioBytes: 4,
+                inputWaitSeconds: 15,
+                utteranceWallClockSeconds: 120,
+                slowConsumerSeconds: 2
+            )
+        )
+
+        await coordinator.handleAudio(requestID: "req-16", pcm: Data([1, 2, 3, 4, 5, 6]))
+
+        XCTAssertTrue(
+            recorder.played.isEmpty,
+            "a chunk larger than the negotiated pending-audio limit must not reach playback"
+        )
+        guard case .failed(_)? = coordinator.outcome else {
+            return XCTFail("the negotiated audio limit must reject an oversized chunk")
+        }
+        XCTAssertEqual(coordinator.queuedSamples, 0, "rejected PCM must not leave a reservation")
     }
 
     func testPlaybackFailureSurfacesInsteadOfPretendingCompletion() async throws {
@@ -329,7 +780,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(recorder.cancels, 0, "停播屏障没落地之前不许发网络取消")
         gate.release()
-        await cancel.value
+        _ = await cancel.value
 
         let stopped = try XCTUnwrap(recorder.events.firstIndex(of: "stop-finished"))
         let cancelled = try XCTUnwrap(recorder.events.firstIndex(of: "server-cancel"))
@@ -342,6 +793,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 30, requestID: "req-30")
         await coordinator.handleAudio(requestID: "req-30", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.epochs.count == 1 }, message: "第一代 PCM 没有入队")
         XCTAssertEqual(recorder.epochs.count, 1, "入队时就要把这一代的身份交给播放层")
         let firstEpoch = try XCTUnwrap(recorder.epochs.first)
         XCTAssertEqual(coordinator.queuedSamples, 2)
@@ -349,6 +801,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         // 新一轮开始，而上一轮的最后一块还在路上。
         try await coordinator.begin(generation: 31, requestID: "req-31")
         await coordinator.handleAudio(requestID: "req-31", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.epochs.count == 2 }, message: "第二代 PCM 没有入队")
         let secondEpoch = try XCTUnwrap(recorder.epochs.last)
         XCTAssertNotEqual(firstEpoch, secondEpoch, "每一代播放都要有自己的身份")
         XCTAssertEqual(coordinator.queuedSamples, 2)
@@ -367,9 +820,10 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.sendCancel = { try await Task.sleep(for: .seconds(30)) }
         try await coordinator.begin(generation: 40, requestID: "req-40")
         await coordinator.handleAudio(requestID: "req-40", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.played.count == 1 }, message: "旧 PCM 没有进入播放层")
 
         let startedAt = ContinuousClock().now
-        await coordinator.cancel()
+        _ = await coordinator.cancel()
 
         XCTAssertLessThan(
             startedAt.duration(to: ContinuousClock().now),
@@ -385,10 +839,8 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
     // MARK: - D01：等待者必须按 (世代, 目标) 分槽
 
-    /// ACK 等待与播放预算等待同时挂起时，两个 continuation 都必须被精确唤醒。
-    /// 之前它们共用一个 `pendingWait` 槽：后注册的覆盖先注册的，
-    /// 于是"等播放预算"永远挂着，文本泵再也等不到 ACK，`finish_text` 永远发不出去。
-    func testAckWaitAndPlaybackWaitBothSurviveInterleaving() async throws {
+    /// ACK 与播放预算等待并行时，receiver 继续处理 ACK，FIFO 在预算恢复后保序消费。
+    func testAckProgressesWhileAudioConsumerWaitsForPlaybackBudget() async throws {
         var configuration = AssistantTTSStreamCoordinator.Configuration.default
         configuration.playbackLedger.maximumQueuedSamples = 2
         let (coordinator, recorder) = makeHarness(
@@ -401,15 +853,21 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.offer("你好。")
         await waitUntil({ recorder.appends.count == 1 }, message: "第一段文本没有发出去")
 
-        // 播放队列（上限 2 采样）被第一块占满。**必须放到独立 Task**：
-        // `handleAudio` 会挂起等 `.playback`，直接 await 会把测试体自己也挂住。
+        // 首块占满 2 样本 ledger；后续块只能留在 bounded FIFO 等预算。
         await coordinator.handleAudio(requestID: "req-50", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.played.count == 1 }, message: "首块音频没有进入播放")
+        let firstEpoch = try XCTUnwrap(recorder.epochs.first)
+
         var secondAudioDone = false
         let secondAudio = Task { @MainActor in
             await coordinator.handleAudio(requestID: "req-50", pcm: Data([5, 6, 7, 8]))
             secondAudioDone = true
         }
-        try await Task.sleep(for: .milliseconds(30))
+        await waitUntilEventually(
+            { secondAudioDone },
+            message: "receiver admission 不等待播放预算"
+        )
+        XCTAssertEqual(coordinator.queuedAudioBytes, 4, "等待播放预算的 PCM 仍受 FIFO 字节上限约束")
         XCTAssertEqual(coordinator.queuedSamples, 2)
         XCTAssertTrue(coordinator.isActive, "挂起等待不等于失败")
 
@@ -428,23 +886,23 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
                 appendSequence: 0,
                 totalCodepoints: 3
             ),
-            "等播放预算不能挡住 ACK 唤醒文本泵"
+            "等播放预算不能挡住 receiver 接收 ACK"
         )
         await waitUntil({ finished }, message: "ACK 到达后文本泵没有被唤醒")
         if finished { await finish.value }
         XCTAssertEqual(recorder.finishes, [0], "文本泵被唤醒后这一轮才能收尾")
 
-        // 播放侧随后排空，挂起的第二块也必须真的进播放层。
-        coordinator.notePlaybackCompleted(samples: 2, epoch: try XCTUnwrap(recorder.epochs.first))
+        // 播放侧随后排空，后台 consumer 才能把第二块送进播放器。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: firstEpoch)
         await waitUntil(
             { recorder.played.count == 2 },
-            message: "播放预算归还后，等预算的音频没有被唤醒"
+            message: "播放预算归还后，FIFO 音频没有进入播放"
         )
-        await waitUntil({ secondAudioDone }, message: "等预算的 handleAudio 没有返回")
+        coordinator.notePlaybackCompleted(samples: 2, epoch: firstEpoch)
         secondAudio.cancel()
     }
 
-    func testInvalidateReleasesEveryPendingWaiter() async throws {
+    func testInvalidateReleasesAckWaitAndDropsPendingAudio() async throws {
         var configuration = AssistantTTSStreamCoordinator.Configuration.default
         configuration.playbackLedger.maximumQueuedSamples = 2
         let (coordinator, recorder) = makeHarness(
@@ -456,12 +914,17 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.offer("你好。")
         await waitUntil({ recorder.appends.count == 1 })
         await coordinator.handleAudio(requestID: "req-51", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.played.count == 1 })
         var secondAudioDone = false
         let secondAudio = Task { @MainActor in
             await coordinator.handleAudio(requestID: "req-51", pcm: Data([5, 6, 7, 8]))
             secondAudioDone = true
         }
-        try await Task.sleep(for: .milliseconds(30))
+        await waitUntilEventually(
+            { secondAudioDone },
+            message: "同步 admission 不等 ledger 预算"
+        )
+        XCTAssertEqual(coordinator.queuedAudioBytes, 4)
 
         var finished = false
         let finish = Task { @MainActor in
@@ -475,7 +938,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
 
         await waitUntil({ finished }, message: "invalidate 必须释放全部等待者")
         if finished { await finish.value }
-        await waitUntil({ secondAudioDone }, message: "invalidate 必须释放播放预算的等待者")
+        XCTAssertEqual(coordinator.queuedAudioBytes, 0, "invalidate 必须清空未消费 PCM")
         secondAudio.cancel()
         XCTAssertEqual(recorder.finishes, [], "代已经作废，不许再发 finish")
     }
@@ -486,10 +949,12 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 60, requestID: "req-60a")
         await coordinator.handleAudio(requestID: "req-60a", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.epochs.count == 1 }, message: "第一次重播音频没有入队")
 
         // 同一逻辑 generation 再次开嗓（重播）。
         try await coordinator.begin(generation: 60, requestID: "req-60b")
         await coordinator.handleAudio(requestID: "req-60b", pcm: Data([5, 6, 7, 8]))
+        await waitUntil({ recorder.epochs.count == 2 }, message: "第二次重播音频没有入队")
 
         let epochs = recorder.epochs
         XCTAssertEqual(epochs.count, 2)
@@ -510,25 +975,33 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.queuedSamples, 0)
     }
 
-    /// 旧一轮的 `cancel()` 跨越 await 落地时，不能把结局写进已经开起来的新一轮。
-    func testLateCancelDoesNotReportIntoTheNextTurn() async throws {
+    /// 本地撤权后、匹配远端终态到达前，不允许在同一 coordinator 开新轮。
+    func testRetiredRequestBlocksNewStartUntilRemoteTerminal() async throws {
         let (coordinator, recorder) = makeHarness()
         let gate = Gate()
         coordinator.stopPlayback = { await gate.enter() }
+        coordinator.sendCancel = {
+            recorder.cancels += 1
+            await coordinator.handleTerminal(requestID: "req-70a", status: "cancelled")
+        }
         try await coordinator.begin(generation: 70, requestID: "req-70a")
 
-        let cancel = Task { @MainActor in await coordinator.cancel() }
+        let preparation = try XCTUnwrap(coordinator.prepareCancellation())
+        let cancel = Task { @MainActor in await coordinator.performCancellation(preparation) }
         await waitUntil({ gate.entered }, message: "取消没有进入停播屏障")
 
-        // 停播屏障还没落地时用户已经开始了新一轮。
-        try await coordinator.begin(generation: 71, requestID: "req-71b")
+        do {
+            try await coordinator.begin(generation: 71, requestID: "req-71b")
+            XCTFail("远端归属未确认时不允许在同一连接开新一轮")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected while request 70 is retired.
+        }
         gate.release()
-        await cancel.value
+        let confirmed = await cancel.value
+        XCTAssertTrue(confirmed, "sendCancel 中收到的匹配终态必须确认 ownership")
+        try await coordinator.begin(generation: 71, requestID: "req-71b")
 
-        XCTAssertTrue(
-            recorder.outcomes.isEmpty,
-            "旧一轮的取消完成得再晚，也不能改写新一轮的结局"
-        )
+        XCTAssertEqual(recorder.outcomes.map(\.generation), [70])
         XCTAssertNil(coordinator.outcome)
         XCTAssertTrue(coordinator.isActive)
     }
@@ -567,7 +1040,13 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, _) = makeHarness(configuration: configuration)
         try await coordinator.begin(generation: 90, requestID: "req-90")
         let confirmed = await coordinator.cancel()
-        _ = confirmed
+        XCTAssertFalse(confirmed, "没有 matching terminal 时取消必须报告未确认")
+        do {
+            try await coordinator.begin(generation: 91, requestID: "req-91")
+            XCTFail("远端 ownership 未知时不能在同一 coordinator 开新轮")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected until the late terminal confirms req-90 is gone.
+        }
         // 旧轮终态经接收层到达并确认后，新 start 必须可开。
         await coordinator.handleTerminal(requestID: "req-90", status: "cancelled")
         try await coordinator.begin(generation: 91, requestID: "req-91")

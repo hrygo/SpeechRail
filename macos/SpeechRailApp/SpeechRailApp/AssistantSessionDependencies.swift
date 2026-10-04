@@ -80,6 +80,9 @@ public struct AssistantSessionDependencies: Sendable {
     public var makePlaybackChannel: @MainActor () -> any AssistantPlaybackChannel
     /// 记录"此刻"。测试注入虚拟时钟，时间语义（D09）才可重现。
     public var now: @Sendable () -> Date
+    /// 仅替换用户输入保存 IO；默认仍由 SessionCoordinator 写入。
+    public var saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)?
+    public var inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration
 
     public init(
         llm: any AssistantLLM = LLMProvider(),
@@ -96,12 +99,16 @@ public struct AssistantSessionDependencies: Sendable {
             )
         },
         makePlaybackChannel: @escaping @MainActor () -> any AssistantPlaybackChannel = { PCMStreamPlayer() },
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration = .init()
     ) {
         self.llm = llm
         self.makeRealtimeClient = makeRealtimeClient
         self.makePlaybackChannel = makePlaybackChannel
         self.now = now
+        self.saveInputLine = saveInputLine
+        self.inputPersistenceConfiguration = inputPersistenceConfiguration
     }
 }
 
