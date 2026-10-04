@@ -29,6 +29,7 @@ date: 2026-10-04
 - 验收文档：U 清单 `2026-10-03-voice-assistant-ui-acceptance.md`（v0.1.0，not_run）、R 入口 `2026-10-03-voice-assistant-real-acceptance.md`（v0.1.0，not_run）已落盘；离线回放 `AssistantReplayEvaluator` + `assistant-replay`（Package 已声明 target）已建，A59/A60 真实长时仍记 R not_run。
 - 文档更新：`docs/developers/macos-app-development.md` 0.6.0 → 0.6.1（2026-10-04），新增「续接、重播与试听」小节；仅正文实质变更更新 version/date。
 - 工作区改动未提交；无 push/PR/merge/release；无服务启停、模型下载、录音与 UI 自动化。
+- PR #213 CI（2026-10-04 Asia/Shanghai，run 37188962265）：Change Scope pass；Quality Gates fail（`check_macos_test_target_coverage.py` 报 13 个新增测试文件未进 Xcode Unit Test Sources）；macOS App Build fail（`AssistantView.swift:1877/2759` 报 `cannot find 'AssistantComposerPolicy' in scope`，缺 App Sources 成员）；`swift test`（SPM 超集）不受影响。缺口 19 文件：生产 6（Composer/Context/Observability/Presentation/ReplayEvaluator/TurnPolicy）+ 测试 13；runner 无 Xcode target 不计入。本地 `xcodebuild build` 复现同一失败（2026-10-04）。pbxproj 按规则不在本机手工合并，待 Xcode 内补成员后复验；此期间 PR 不合并。
 
 ## VA 工作包状态
 
