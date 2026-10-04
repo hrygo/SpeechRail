@@ -2356,7 +2356,10 @@ public enum SpeechRailCapabilityRevisionSelector {
             let voice = matchingVoice(voiceID, in: snapshot),
             voice.available,
             voice.operations["http_speech"] != nil,
-            let modelRevision = nonEmpty(voice.model.catalogRevision)
+            // 与 realtimeBinding 同一病因：pin 必须取服务端按 mode 比对的那份
+            // 制品号（system→tts，clone→tts_clone），取 voice 自带的 model 号
+            // 在 clone 音色上永不对等，直接 409 model_revision_conflict。
+            let modelRevision = modelRevision(for: voice, in: snapshot)
         else {
             return nil
         }
@@ -2365,6 +2368,30 @@ public enum SpeechRailCapabilityRevisionSelector {
             expectedVoiceRevision: nonEmpty(voice.voiceRevision),
             expectedModelRevision: modelRevision
         )
+    }
+
+    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision。
+    ///
+    /// 与 `AppCapabilityFacade.ttsModelRevision(for:in:)` 同一规则：
+    /// 服务端 `_voice_entry` 按 `profile.mode` 绑定制品，`/v1/audio/speech`
+    /// 按 `runtime_role` 取制品比对（见 `artifact_for_role`）。
+    /// 未知 mode 返回 nil 调用方 fail-closed，不猜制品。
+    private static func modelRevision(
+        for voice: SafeVoiceEntry,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> String? {
+        let slot: String
+        switch voice.mode {
+        case "system":
+            slot = "tts"
+        case "clone":
+            slot = "tts_clone"
+        case "instruction":
+            slot = "voice_design"
+        default:
+            return nil
+        }
+        return nonEmpty(snapshot.models[slot]?.catalogRevision)
     }
 
     private static func matchingVoice(

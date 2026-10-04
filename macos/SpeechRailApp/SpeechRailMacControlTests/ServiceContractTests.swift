@@ -1136,7 +1136,7 @@ final class ServiceContractTests: XCTestCase {
             voice: SafeVoiceEntry(
                 id: "voice-1",
                 name: "Serena",
-                mode: "design",
+                mode: "system",
                 available: true,
                 availabilityReason: .available,
                 voiceRevision: "vr_001",
@@ -1168,6 +1168,39 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertNil(withoutSnapshot)
     }
 
+    /// design mode 不对应任何合成制品槽位：不猜号，直接 fail-closed。
+    ///
+    /// 服务端 instruction 音色走 voice_design 任务，没有 runtime 合成角色；
+    /// 未知 mode 同理。这里复现快照里有 tts 槽、但 voice mode 不在
+    /// system/clone/instruction 之列时的形状。
+    func testCreatorRequestOptionsRejectsDesignVoiceMode() {
+        let snapshot = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-design-1",
+                name: "Design",
+                mode: "design",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "vr_001",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-base",
+                    catalogRevision: "model-cat-1"
+                ),
+                descriptors: Self.testDescriptor,
+                operations: ["http_speech": JSONValue(.string("supported"))]
+            )
+        )
+
+        XCTAssertNil(
+            SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+                voiceID: "voice-design-1",
+                in: snapshot
+            )
+        )
+    }
+
     func testCreatorRequestOptionsPinTheModelBoundToTheSelectedVoice() {
         let voice = SafeVoiceEntry(
             id: "clone-voice",
@@ -1179,7 +1212,9 @@ final class ServiceContractTests: XCTestCase {
             voiceIdentityAssurance: .contentAddressed,
             model: ConfiguredModelIdentity(
                 assurance: .configuredCatalog,
-                catalogRevision: "clone-model-revision"
+                // 故意与 tts_clone 槽位号不同：旧逻辑取自带号会发出这个错号，
+                // 新逻辑按 mode 取槽位号才发出 clone-model-revision。
+                catalogRevision: "stale-voice-self-model-revision"
             ),
             descriptors: Self.testDescriptor,
             operations: ["http_speech": JSONValue(.string("supported"))]

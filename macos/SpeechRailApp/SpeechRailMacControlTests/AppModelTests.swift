@@ -2435,7 +2435,13 @@ extension AppModelTests {
             catalogRevision: "snapshot-catalog",
             snapshotID: "snapshot-1",
             profile: "quality",
-            models: [:],
+            models: [
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "tts-model-revision"
+                ),
+            ],
             voices: [
                 SafeVoiceEntry(
                     id: "ryan",
