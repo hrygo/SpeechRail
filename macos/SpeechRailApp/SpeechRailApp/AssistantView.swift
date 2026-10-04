@@ -1602,6 +1602,11 @@ public struct AssistantView: View {
             }
             // 识别 / 朗读失败的软提示。少了这一条，用户看到的是"字消失了、
             // 什么都没发生"——既不知道出了事，也不知道下一步该做什么。
+            if let contextNote = assistant.contextOmissionNote {
+                NoticeBar(tone: .info, message: contextNote)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             if let failure = assistant.lastFailure {
                 NoticeBar(
                     tone: .warning,

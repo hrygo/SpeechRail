@@ -79,6 +79,7 @@ let package = Package(
                 "AssistantComposerPolicy.swift",
                 "AssistantTurnPolicy.swift",
                 "AssistantContextPolicy.swift",
+                "AssistantInputPersistenceQueue.swift",
                 "AssistantObservability.swift",
                 "AssistantAudioPlayback.swift",
                 "AssistantAudioSession.swift",

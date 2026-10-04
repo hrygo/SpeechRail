@@ -342,6 +342,50 @@ public actor SessionStore {
         }
     }
 
+    /// 仅由本记录的第一条正式 user 行认领自动标题。
+    ///
+    /// 条件更新在同一条 SQL 中核验行身份与当前标题：partial 不参与首次命名，
+    /// 较晚保存的旧回调也不能抢在第一条正式输入之前命名；用户已手动取名后，
+    /// 迟到的自动命名不会覆盖它。
+    @discardableResult
+    public func claimAutomaticTitle(
+        sessionID: String,
+        lineID: String,
+        title: String
+    ) throws -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+
+        let sql = """
+        UPDATE session
+        SET title = ?
+        WHERE id = ?
+          AND (title IS NULL OR trim(title) = '')
+          AND EXISTS (
+              SELECT 1
+              FROM line AS candidate
+              WHERE candidate.id = ?
+                AND candidate.session_id = session.id
+                AND candidate.role = 'user'
+                AND candidate.status = 'final'
+                AND candidate.ordinal = (
+                    SELECT MIN(first.ordinal)
+                    FROM line AS first
+                    WHERE first.session_id = session.id
+                      AND first.role = 'user'
+                      AND first.status = 'final'
+                )
+          );
+        """
+        try withStatement(sql) { statement in
+            bind(statement, 1, title)
+            bind(statement, 2, sessionID)
+            bind(statement, 3, lineID)
+            try step(statement)
+        }
+        return sqlite3_changes(handle.pointer) == 1
+    }
+
     public func setLineStarred(lineID: String, starred: Bool) throws {
         try withStatement("UPDATE line SET starred = ? WHERE id = ?;") { statement in
             bind(statement, 1, starred ? 1 : 0)

@@ -63,7 +63,7 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
         _ = await session.ask(typed: "旧问题")
         _ = await session.ask(typed: "新问题")
         await waitUntil(
-            { session.turns.filter { $0.role == .assistant }.count >= 1 },
+            { session.turns.contains { $0.role == .assistant && $0.text.contains("新回答正文") } },
             message: "新轮没有收尾落库"
         )
         let sessionID = try XCTUnwrap(session.sessionID)
@@ -247,7 +247,11 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
             )
         }
         let seed = AssistantSession.continuationSeedTurns(from: lines, selectedLineIDs: nil, maxTurns: 4)
-        XCTAssertEqual(seed.map { $0.id }, ["l6", "l7", "l8", "l9"], "超限只取最近 maxTurns 行")
+        XCTAssertEqual(seed.map { $0.id }, ["l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"], "maxTurns 按完整 user/reply 轮数计")
+        let selected = AssistantSession.continuationSeedTurns(
+            from: lines, selectedLineIDs: ["l0", "l2", "l3"], maxTurns: 4
+        )
+        XCTAssertEqual(selected.map(\.id), ["l2", "l3"], "不把两个 user 误配成一轮")
     }
 
     /// §7.3 交叉边界（A12）：end 与 ask 同时进入。

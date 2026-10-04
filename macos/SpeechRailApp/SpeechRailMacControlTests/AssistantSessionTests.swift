@@ -88,6 +88,12 @@ final class AssistantSessionTests: XCTestCase {
 
         private(set) var checkCount = 0
         private(set) var streamCount = 0
+        struct Request: Sendable {
+            var messages: [LLMMessage]
+            var maxOutputTokens: Int?
+            var instructions: String?
+        }
+        private(set) var requests: [Request] = []
         private var scripts: [Script]
         private var isReady: LLMConnectionResult
 
@@ -117,6 +123,7 @@ final class AssistantSessionTests: XCTestCase {
             instructions: String?
         ) async -> AsyncThrowingStream<String, Error> {
             streamCount += 1
+            requests.append(Request(messages: messages, maxOutputTokens: maxOutputTokens, instructions: instructions))
             let script = scripts.isEmpty ? Script.deltas([]) : scripts.removeFirst()
             return AsyncThrowingStream { continuation in
                 switch script {
@@ -179,6 +186,18 @@ final class AssistantSessionTests: XCTestCase {
         private var ttsRequestID = ""
         private let autoConfirmTTSCancel: Bool
         private var ttsAcceptedCodepoints = 0
+        struct VoiceUpdate: Sendable, Equatable {
+            var voice: String
+            var voiceRevision: String?
+            var ttsRevision: String?
+        }
+        private(set) var appliedVoice: VoiceUpdate?
+        private(set) var startedVoices: [VoiceUpdate?] = []
+        private var ttsStartReturnGate: Gate?
+
+        func setTTSStartReturnGate(_ gate: Gate?) {
+            ttsStartReturnGate = gate
+        }
 
         init(
             connectGate: Gate? = nil,
@@ -228,10 +247,14 @@ final class AssistantSessionTests: XCTestCase {
             expectedTTSRevision: String?
         ) async throws {
             counters.updateVoice += 1
+            appliedVoice = VoiceUpdate(
+                voice: voice, voiceRevision: expectedVoiceRevision, ttsRevision: expectedTTSRevision
+            )
         }
 
         func startTTSStream(requestID: String, speed: Double?) async throws {
             counters.startTTS += 1
+            startedVoices.append(appliedVoice)
             ttsRequestID = requestID
             ttsAcceptedCodepoints = 0
             // 真服务会立刻回 started；不回的话 `AssistantTTSStreamCoordinator`
@@ -239,6 +262,7 @@ final class AssistantSessionTests: XCTestCase {
             await emit(
                 .ttsStarted(requestID: requestID, taskID: "task_\(requestID)", limits: nil)
             )
+            if let ttsStartReturnGate { await ttsStartReturnGate.enter() }
         }
 
         func appendTTSText(_ text: String, sequence: Int) async throws {
@@ -287,6 +311,7 @@ final class AssistantSessionTests: XCTestCase {
         }
 
         func snapshot() -> Counters { counters }
+        func currentTTSRequestID() -> String { ttsRequestID }
     }
 
     // MARK: - 假音频
@@ -300,8 +325,8 @@ final class AssistantSessionTests: XCTestCase {
         private var _enqueuedBytes = 0
         private var _enqueuedEpochs: [Int] = []
         private let startFailure: Error?
-        private let captureContinuation: AsyncStream<AudioChunk>.Continuation?
-        private let captureStream: AsyncStream<AudioChunk>?
+        private let autoStartCapture: Bool
+        private var captureContinuation: AsyncStream<AudioChunk>.Continuation?
 
         var onPlaybackDrained: (@MainActor () -> Void)?
         var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)?
@@ -321,14 +346,7 @@ final class AssistantSessionTests: XCTestCase {
 
         init(startFailure: Error? = nil, autoStartCapture: Bool = false) {
             self.startFailure = startFailure
-            if autoStartCapture {
-                var continuation: AsyncStream<AudioChunk>.Continuation?
-                self.captureStream = AsyncStream { continuation = $0 }
-                self.captureContinuation = continuation
-            } else {
-                self.captureStream = nil
-                self.captureContinuation = nil
-            }
+            self.autoStartCapture = autoStartCapture
         }
 
         var startCount: Int { lock.withLock { _startCount } }
@@ -336,13 +354,23 @@ final class AssistantSessionTests: XCTestCase {
         var playbackStopCount: Int { lock.withLock { _playbackStopCount } }
         var enqueuedBytes: Int { lock.withLock { _enqueuedBytes } }
         var enqueuedEpochs: [Int] { lock.withLock { _enqueuedEpochs } }
+        private var playbackEnqueueGate: Gate?
+
+        func setPlaybackEnqueueGate(_ gate: Gate?) {
+            lock.withLock { playbackEnqueueGate = gate }
+        }
 
         func configure(mode: AssistantMode) {}
 
         func start() async throws -> AsyncStream<AudioChunk> {
             lock.withLock { _startCount += 1 }
             if let startFailure { throw startFailure }
-            if let captureStream { return captureStream }
+            if autoStartCapture {
+                // 被取消的 AsyncStream iterator 会结束旧流，重连要像新设备一样创建新流。
+                let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+                lock.withLock { captureContinuation = continuation }
+                return stream
+            }
             return AsyncStream { _ in }
         }
 
@@ -350,7 +378,7 @@ final class AssistantSessionTests: XCTestCase {
 
         /// 往采集流里塞一块音频，验证上行确实发生了。
         func emitCapture(_ chunk: AudioChunk) {
-            captureContinuation?.yield(chunk)
+            lock.withLock { captureContinuation }?.yield(chunk)
         }
 
         @discardableResult
@@ -359,6 +387,7 @@ final class AssistantSessionTests: XCTestCase {
                 _enqueuedBytes += pcm.count
                 _enqueuedEpochs.append(epoch)
             }
+            if let gate = lock.withLock({ playbackEnqueueGate }) { await gate.enter() }
             return true
         }
 
@@ -1589,8 +1618,10 @@ final class AssistantSessionTests: XCTestCase {
         )
 
         // 朗读进行中：服务端正放着一段音频。
+        let activeRequestID = await harness.clients()[0].currentTTSRequestID()
+        let playbackRequestID = try XCTUnwrap(activeRequestID)
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(requestID: playbackRequestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
 
@@ -1669,8 +1700,10 @@ final class AssistantSessionTests: XCTestCase {
             { harness.session.turns.contains { $0.role == .assistant } },
             message: "回复没有落库"
         )
+        let activeRequestID = await harness.clients()[0].currentTTSRequestID()
+        let playbackRequestID = try XCTUnwrap(activeRequestID)
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(requestID: playbackRequestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
 
@@ -1698,8 +1731,10 @@ final class AssistantSessionTests: XCTestCase {
             { harness.session.turns.contains { $0.role == .assistant } },
             message: "回复没有落库"
         )
+        let activeRequestID = await harness.clients()[0].currentTTSRequestID()
+        let playbackRequestID = try XCTUnwrap(activeRequestID)
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(requestID: playbackRequestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
 
@@ -1733,8 +1768,10 @@ final class AssistantSessionTests: XCTestCase {
             { harness.session.turns.contains { $0.role == .assistant } },
             message: "回复没有落库"
         )
+        let activeRequestID = await harness.clients()[0].currentTTSRequestID()
+        let playbackRequestID = try XCTUnwrap(activeRequestID)
         await harness.clients()[0].emit(
-            .ttsAudio(requestID: "tts_req_playback", taskID: nil, pcm: Data(repeating: 0, count: 320))
+            .ttsAudio(requestID: playbackRequestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
         )
         await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
 
