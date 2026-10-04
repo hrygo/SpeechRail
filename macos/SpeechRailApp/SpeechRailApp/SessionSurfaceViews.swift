@@ -290,6 +290,10 @@ public struct SessionLibraryView: View {
     @State private var lines: [TranscriptLine] = []
     @State private var speakerNames: [String: String] = [:]
     @State private var searchText = ""
+    /// 全文检索命中（MC-49/MC-52/MC-54）：转录终稿与已完成纪要正文。
+    /// 为空表示未检索或无命中；与标题过滤互斥，检索优先。
+    @State private var knowledgeHits: [SessionStore.KnowledgeHit] = []
+    @State private var knowledgeError: String?
     @State private var loadFailure: String?
     @State private var pendingRemoval: SessionSummary?
     @State private var isShowingDataDirectoryHint = false
@@ -800,6 +804,24 @@ public struct SessionLibraryView: View {
                     .speechRailSingleLineInput(.compact)
                     .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
                     .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+                    .onSubmit {
+                        // 回车触发全文检索：标题过滤搜不到正文，这一步查转录与纪要。
+                        Task { await runKnowledgeSearch() }
+                    }
+                // 全文检索命中数与失败提示；无命中时回到标题过滤，不清空列表。
+                if !knowledgeHits.isEmpty {
+                    Text("全文找到 \(knowledgeHits.count) 条")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
+                        .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+                } else if let knowledgeError {
+                    Text("全文检索没能完成：\(knowledgeError)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
+                        .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+                }
 
                 Divider()
 
@@ -976,10 +998,39 @@ public struct SessionLibraryView: View {
     // MARK: - 数据
 
     private var filteredSummaries: [SessionSummary] {
+        // MC-49/MC-52：全文检索命中时按命中会话过滤，标题过滤作为回退。
+        if !knowledgeHits.isEmpty {
+            let hitIDs = Set(knowledgeHits.map(\.sessionID))
+            return summaries.filter { hitIDs.contains($0.id) }
+        }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return summaries }
         return summaries.filter { summary in
             displayTitle(for: summary).localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    /// 全文检索（MC-49/MC-52/MC-54）：查转录终稿与已完成纪要，不查私密问答。
+    /// 失败不清空列表，只记错误；空查询清空命中回到标题过滤。
+    private func runKnowledgeSearch() async {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            knowledgeHits = []
+            knowledgeError = nil
+            return
+        }
+        do {
+            knowledgeHits = try await session.searchKnowledge(query: query, kind: kind)
+            knowledgeError = nil
+            // 有命中时选中第一条，详情面板直接可读。
+            if let first = knowledgeHits.first,
+               summaries.contains(where: { $0.id == first.sessionID })
+            {
+                selectedID = first.sessionID
+            }
+        } catch {
+            knowledgeHits = []
+            knowledgeError = error.localizedDescription
         }
     }
 

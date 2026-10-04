@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.5"
+version: "2.6"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -62,6 +62,10 @@ base: "origin/main @ 607b75a8"
   无可用版时导出只出转录。会议页导出已选旧版时仍固定该版。库层口径由既有
   `testLatestUsableStaysAfterFailedAttempt` / `testLatestUsableMinutesReturnsNewestReady`
   覆盖；View 层仅做 `swiftc -parse` 语法检查，未做界面走查。
+- v2.6 全文检索入口（MC-49/MC-52/MC-54）：记录库搜索框回车触发 `searchKnowledge`，
+  查转录终稿与已完成纪要，不查私密问答；命中时按命中会话过滤列表并选中第一条，
+  无命中回退标题过滤不清空列表，失败只记错误。库层由既有检索回归覆盖；
+  View 层仅做 `swiftc -parse` 语法检查，未做界面走查。
 
 ## 迁移说明
 
