@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.0"
-date: 2026-09-27
+version: "0.6.1"
+date: 2026-10-04
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -81,6 +81,14 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 `AssistantView` 的 live/ready 状态可使用右侧 inspector；窗口进入 compact tier 时，右栏响应式收起，主内容仍保持可操作。`review` 状态是独立的记录阅读布局：只显示记录列表与转写正文，不再显示右侧 inspector；复制、继续、重命名、移除动作固定在正文底部，并通过 `ViewThatFits` 在一行或两行之间适配。继续会话从原记录预填人设、音色和会话偏好并建立新会话，原记录保持不变；移除记录仍是明确的破坏性操作。
 
 这段是当前代码行为说明，不替代会话层技术方案；真实声学 AEC、双讲收敛和各种设备组合仍以音频文档中的未验收项为准。
+
+### 语音助手的续接、重播与试听（2026-10-04）
+
+**基于旧记录继续是建新场，不是改旧记录。** `AssistantSession.continueFromRecord(parentID:)` 从旧记录读一致快照，只取选定的完整 user/assistant 轮次建新记录，冻结选定文字为 `continuationSeed`（自包含：删父后子场仍可用）。旧记录原文不动，不自动开麦，不复制密钥与旧 route 同意。回看页的「继续这一轮」走同一路径：活跃场先明确结束，再建新场。新场 history 只含选定完整轮次。schema v2（`assistant_reply_state` / `assistant_playback_invocation` / `assistant_continuation` / `assistant_memory_provenance`）未实施，续接不依赖迁移。
+
+**重播是独立播放调用。** `replayingTurnID` 绑定原始 turnID：旧 TTS 轮仍活跃时先经统一中断收尾，再开新重播；停止重播只记本次播放（`interruptedReplayTurnIDs` + `playbackDeliveryNotes`），不改被重播轮的生成状态与正文。完整生成但未播完时原文全文保留，界面挂「朗读未完成」，history 保持完整原文（交付状态由 turns 中断标记与播放说明承载，不污染模型上下文）。
+
+**试听不经文字提问。** 「测试朗读语速与音色效果」走现有 `previewSelectedVoice` 试听协调；无 TTS 通道（纯文字场）时播放按钮给出明确原因，不静默返回。
 
 ### 语音助手的对话状态、文字降级与回复行（2026-09-28）
 

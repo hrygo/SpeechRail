@@ -1,3 +1,4 @@
+import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -530,5 +531,82 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         )
         XCTAssertNil(coordinator.outcome)
         XCTAssertTrue(coordinator.isActive)
+    }
+
+    /// §7.3 交叉边界（A03/A04）：terminal 在闩登记前到达。
+    /// 终态比等待先到时记进 terminalSignals，随后开始的等待直接命中，
+    /// 不白等一个完整超时。反例：去掉 prefetch，直接等到超时才判未确认。
+    func testTerminalArrivingBeforeWaitStillConfirmsCancel() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .seconds(2)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        let gate = Gate()
+        coordinator.stopPlayback = { await gate.enter() }
+        try await coordinator.begin(generation: 80, requestID: "req-80")
+
+        let cancel = Task { @MainActor in await coordinator.cancel() }
+        // cancel() 已过 retiring 登记、正停在停播屏障里：
+        // 此时到的终态记进 terminalSignals，随后挂上的等待直接命中，不走超时。
+        await waitUntil({ gate.entered }, message: "取消没有进入停播屏障")
+        await coordinator.handleTerminal(requestID: "req-80", status: "cancelled")
+        gate.release()
+        let confirmed = await cancel.value
+        XCTAssertTrue(confirmed, "终态先到也必须确认取消，不能等到超时")
+    }
+
+    /// §7.3 交叉边界（A03/A04）：旧 terminal 之后新 start。
+    /// 旧轮终态已确认（闩已回收）后开新轮，新轮不受旧终态影响；
+    /// 随后旧轮的迟到重复终态不得改写新轮状态。
+    func testOldTerminalDoesNotLeakIntoNewStart() async throws {
+        // coordinator 层 harness 默认不自动回终态（sendCancel 只计数）：
+        // 旧轮 cancel 发出后无确认，旧终态随后经接收层到达并确认。
+        // 超时只压短等待，不改语义：sendCancel 默认不回执，
+        // cancel 内的有界等待走该超时，无确认分支照常覆盖。
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(200)
+        let (coordinator, _) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 90, requestID: "req-90")
+        let confirmed = await coordinator.cancel()
+        _ = confirmed
+        // 旧轮终态经接收层到达并确认后，新 start 必须可开。
+        await coordinator.handleTerminal(requestID: "req-90", status: "cancelled")
+        try await coordinator.begin(generation: 91, requestID: "req-91")
+        XCTAssertTrue(coordinator.isActive)
+        // 旧轮迟到重复终态：新轮身份不同，不得改写新轮结局。
+        await coordinator.handleTerminal(requestID: "req-90", status: "cancelled")
+        XCTAssertTrue(coordinator.isActive, "旧轮迟到终态不得结束新轮")
+        XCTAssertNil(coordinator.outcome, "旧轮迟到终态不得写新轮结局")
+    }
+
+    /// §7.3 交叉边界（A35/A39）：服务端限额小于默认时，清洗后输出超限有界失败。
+    /// started 带小限额 maxAppendCodepoints=4；offer 6 scalar 清洗后仍 6，
+    /// sendChunk 按服务端限额判超限并 fail，不丢已收文本、不崩。
+    func testSmallerServerLimitsFailBounded() async throws {
+        let (coordinator, recorder) = makeHarness(acknowledgeStart: false)
+        // 首轮只为拿到 coordinator：started 不自动回，手动带小限额回。
+        let first = Task { @MainActor in try await coordinator.begin(generation: 110, requestID: "req-110") }
+        await waitUntil({ !recorder.started.isEmpty }, message: "start 没有发出去")
+        _ = coordinator.handleStarted(
+            requestID: "req-110",
+            taskID: nil,
+            limits: TTSStreamLimits(
+                maxAppendCodepoints: 4,
+                maxTotalCodepoints: 4_096,
+                maxPendingCodepoints: 2_048,
+                maxPendingAudioBytes: 48_000,
+                inputWaitSeconds: 15,
+                utteranceWallClockSeconds: 120,
+                slowConsumerSeconds: 2
+            )
+        )
+        try await first.value
+        XCTAssertEqual(coordinator.serverLimits?.maxAppendCodepoints, 4)
+        // 6 scalar 一次 offer：buffer 准入（客户端 total 4096 未超，pending 不足
+        // 512 不提前切）；finishInput 经 flush 交出 6 scalar 片，
+        // 服务端片长 4 → sendChunk 有界失败，不无限重发。
+        coordinator.offer(String(repeating: "啊", count: 6))
+        await coordinator.finishInput()
+        await waitUntil({ recorder.outcomes.count >= 1 }, message: "超限应有明确结局")
+        XCTAssertEqual(recorder.appends.count, 0, "超限片不得发出去")
     }
 }

@@ -97,6 +97,23 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
         XCTAssertFalse(buffer.hasPendingText)
     }
 
+    /// A35 变体（代码块跨片）：未闭合单反引号代码块超时也不切开，
+    /// 闭合后整体可切；与 `**` 未闭合用例配对，覆盖 fence 语义。
+    func testA35UnclosedCodeSpanIsHeldUntilItCloses() {
+        let clock = ManualClock()
+        var buffer = makeBuffer(clock: clock)
+        buffer.append("`code")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), [])
+        clock.advance(.seconds(5))
+        XCTAssertEqual(
+            buffer.readyChunks(now: clock.now),
+            [],
+            "代码块闭合之前即使超时也不能切开"
+        )
+        buffer.append("`")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["`code`"])
+    }
+
     func testChunkCapIsCountedInUnicodeScalars() {
         XCTAssertEqual(AssistantSpeechTextBuffer.scalarCount("👨‍👩‍👧‍👦"), 7)
         XCTAssertEqual("👨‍👩‍👧‍👦".count, 1, "String.count 是 grapheme，不能拿来当线上限额")
@@ -129,10 +146,49 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
         let clock = ManualClock()
         var buffer = makeBuffer(clock: clock, configuration: configuration)
 
-        XCTAssertEqual(buffer.append("abcde"), .append(offered: 5, limit: 4))
+        // VA-11：单 delta 超 append 上限仍准入（后续按安全点切分），
+        // 只在整轮 total 超限时拒绝。
+        XCTAssertEqual(buffer.append("abcde"), nil, "单片超限应准入，由切分处理")
         buffer.reset()
         XCTAssertEqual(buffer.append("abc"), nil)
         XCTAssertEqual(buffer.append("defg"), .total(offered: 7, limit: 6))
+    }
+
+    /// A35：600 scalar 一次到达与 6×100 分片等价准入，语义相同。
+    func testA35SixHundredScalarsPartitionEquivalence() {
+        var configuration = AssistantSpeechTextBuffer.Configuration.default
+        configuration.maximumChunkScalars = 512
+        configuration.maximumTotalScalars = 4_096
+        let text = String(repeating: "啊", count: 600)
+        let clock = ManualClock()
+        var once = makeBuffer(clock: clock, configuration: configuration)
+        XCTAssertEqual(once.append(text), nil, "600 scalar 一次到达应准入")
+        let onceChunks = once.flush(now: clock.now)
+        XCTAssertEqual(onceChunks.joined(), text, "一次到达语义完整")
+        var split = makeBuffer(clock: clock, configuration: configuration)
+        for _ in 0..<6 {
+            XCTAssertEqual(split.append(String(repeating: "啊", count: 100)), nil)
+        }
+        let splitChunks = split.flush(now: clock.now)
+        XCTAssertEqual(splitChunks.joined(), text, "分片到达语义相同")
+        XCTAssertEqual(onceChunks.joined(), splitChunks.joined(), "两种分包语义等价")
+    }
+
+    /// A39：total 超限拒绝时原状态不变，拒绝不改旧 pending。
+    func testA39BudgetsAreAtomicAndRespectNegotiatedLimits() {
+        var configuration = AssistantSpeechTextBuffer.Configuration.default
+        configuration.maximumChunkScalars = 512
+        configuration.maximumTotalScalars = 10
+        let clock = ManualClock()
+        var buffer = makeBuffer(clock: clock, configuration: configuration)
+        XCTAssertEqual(buffer.append("12345"), nil)
+        let pendingBefore = buffer.pendingText
+        XCTAssertEqual(
+            buffer.append("123456"),
+            .total(offered: 11, limit: 10),
+            "total 超限应拒绝"
+        )
+        XCTAssertEqual(buffer.pendingText, pendingBefore, "拒绝不改旧 pending")
     }
 
     // MARK: - D11：开嗓时机与原始空白

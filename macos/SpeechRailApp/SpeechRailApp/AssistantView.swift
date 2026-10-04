@@ -54,6 +54,9 @@ public struct AssistantView: View {
     /// 记忆库那一栏：主动添加记忆的内联草稿
     @State private var isAddingMemory = false
     @State private var newMemoryDraft = ""
+    /// VA-15/A51：记录操作失败的显式错误（替代 try? 成功外观）。
+    /// 失败保留旧界面与原 record，不替换成空。
+    @State private var recordOperationError: String?
     /// 就地配置对话模型的字段（2026-09-19 用户反馈「门槛极高」之后加的）。
     @State private var llmBaseURLDraft = ""
     @State private var llmModelDraft = ""
@@ -213,7 +216,13 @@ public struct AssistantView: View {
         }
         // 「结束」的落点由**封存完成**这件事驱动（见 `landOnFinalized`）：
         // 页头按钮、`⌘⇧.`、菜单栏三个入口因此有同一个结局。
+        // VA-01：助手专属结束同时发布 coordinator 与 assistant 两处结果；
+        // 文字记录只走 assistant 结果，语音两者一致，任一到达都落地。
         .onChange(of: session.lastFinalizedSessionID) { _, newValue in
+            guard let newValue else { return }
+            Task { await landOnFinalized(id: newValue) }
+        }
+        .onChange(of: assistant.lastFinalizedSessionID) { _, newValue in
             guard let newValue else { return }
             Task { await landOnFinalized(id: newValue) }
         }
@@ -391,7 +400,8 @@ public struct AssistantView: View {
                 ?? (preferences.isLLMConfigured(for: .assistant)
                     ? preferences.llmConfiguration(for: .assistant).model
                     : nil) {
-                facts.append("大模型 \(model) · 已连接")
+                // VA-08：“已配置”不是“已连接”。未执行连接检查时仅显示已配置。
+                facts.append("大模型 \(model) · 已配置")
             }
             facts.append(mode.title)
             return facts
@@ -645,12 +655,15 @@ public struct AssistantView: View {
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    StatusPill(tone: .healthy, label: "语音已就绪")
-                    Text("本地低延迟语音处理")
+                    // VA-08：不虚报“语音已就绪”。未开始语音时仅说明能力，
+                    // 是否可用由实际 readiness 决定。
+                    StatusPill(tone: .neutral, label: "语音未开始")
+                    Text("本机 SpeechRail 处理语音")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
-                Text("当前输入源：\(microphoneLabel) · 说话即录，打字即问")
+                // VA-08：不承诺“说话即录”。数据去向固定文案。
+                Text("当前输入源：\(microphoneLabel) · 开始后说话录入，打字即问")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
@@ -1573,6 +1586,18 @@ public struct AssistantView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
             }
+            // VA-12/A43：无 TTS 通道时的朗读禁用说明（纯文字场点播放），
+            // 与记录改名/删除/导出的失败提示同一条通道展示。
+            if let recordFailure = recordOperationError {
+                NoticeBar(
+                    tone: .warning,
+                    message: recordFailure,
+                    actionTitle: "知道了",
+                    action: { recordOperationError = nil }
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             // 识别 / 朗读失败的软提示。少了这一条，用户看到的是"字消失了、
             // 什么都没发生"——既不知道出了事，也不知道下一步该做什么。
             if let failure = assistant.lastFailure {
@@ -1831,7 +1856,9 @@ public struct AssistantView: View {
                     .speechRailButton(.secondary)
 
                     Button("🎙️ 测试朗读语速与音色效果") {
-                        sendPrompt("请用当前音色朗读一段优美散文，测试音色效果")
+                        // VA-12/A43：试听走现有 previewSelectedVoice，不经 typed 提问。
+                        // 经提问会按文字模态生成且不自动朗读，测不到 TTS/播放。
+                        previewSelectedVoice()
                     }
                     .speechRailButton(.secondary)
                 }
@@ -1845,8 +1872,15 @@ public struct AssistantView: View {
     }
 
     private func sendPrompt(_ text: String) {
-        typed = text
-        send()
+        // VA-09：非破坏填入。空稿直接填入；非空不自动覆盖发送，
+        // 由调用方按 ComposerPolicy 提供插入/替换/取消（替换可 Undo）。
+        switch AssistantComposerPolicy.promptFill(template: text, draft: typed) {
+        case .fill(let filled):
+            typed = filled
+        case .chooseInsertReplace(let template, let draft):
+            // 默认插入而非覆盖：已有草稿不丢；替换入口由模板行提供。
+            typed = draft.isEmpty ? template : draft + "\n" + template
+        }
     }
 
     // MARK: - 沉底集成式控制底座
@@ -1986,6 +2020,12 @@ public struct AssistantView: View {
         if turn.source == .keyboard {
             pills.append(.init(tone: .neutral, label: "打字"))
         }
+        // VA-12/A41：完整生成但未播完时保留全文，挂“朗读未完成”交付说明，
+        // 不截同比例字符、不编造已听文本。
+        if isAssistant, let note = assistant.playbackDeliveryNotes[turn.id] {
+            pills.append(.init(tone: .attention, label: "朗读未完成"))
+            _ = note
+        }
         return SessionTurnRow(
             who: isAssistant ? "助手" : "你",
             isVoice: isAssistant,
@@ -2002,10 +2042,19 @@ public struct AssistantView: View {
             // 「记住」放在最后：它是这一行上的第三个动作，前两个（重播 / 复制）是常用的，
             // 而它会**改变跨会话的行为**（写进下一轮的 system prompt），不适合排在最前面
             // 被顺手点掉。
+            // VA-12/A43：无 TTS 通道时禁 play 并给启用说明，不静默返回。
+            // canReplaySpeech 为 false（纯文字场无 ttsStream）时仍保留按钮位，
+            // 由 onAction 给出明确原因而非无响应。
             actions: isAssistant ? [.play, .copy, .remember] : [.copy, .remember],
             onAction: { action in
                 switch action {
-                case .play: Task { await assistant.replay(turn: turn) }
+                case .play:
+                    // VA-12/A43：无 TTS 通道时给原因与入口，不静默 return。
+                    guard assistant.canReplaySpeech else {
+                        recordOperationError = "这一句暂时不能朗读：当前是纯文字对话，没有语音通道。请开始语音后再试。"
+                        break
+                    }
+                    Task { await assistant.replay(turn: turn) }
                 case .copy: copy(turn.text)
                 case .remember: Task { await remember(turn) }
                 }
@@ -2706,7 +2755,8 @@ public struct AssistantView: View {
             switch result {
             case .accepted:
                 // 只在用户没有在等待期间接着输入时才清空——晚到的成功不能抹掉新输入。
-                if typed.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                // VA-09：经 ComposerPolicy 判定 snapshot 一致才清稿。
+                if AssistantComposerPolicy.shouldClearDraft(sentText: text, currentDraft: typed) {
                     typed = ""
                 }
             case .rejected(let reason):
@@ -3463,7 +3513,12 @@ public struct AssistantView: View {
                                     title: "删除记录"
                                 ) {
                                     Task {
-                                        try? await session.removeSession(id: summary.id)
+                                        // VA-15/A51：删除失败留原 record，不假装成功。
+                                        do {
+                                            try await session.removeSession(id: summary.id)
+                                        } catch {
+                                            recordOperationError = "删除失败：\(error.localizedDescription)"
+                                        }
                                         await reloadRecent()
                                         libraryReloadToken += 1
                                     }
@@ -3904,7 +3959,9 @@ public struct AssistantView: View {
     /// 「新开一轮以换人设」：人设锁的唯一出口，所以它必须结束当前这一段再开始。
     private func restartWithPersonaPick() async {
         isEndingToRestart = true
-        await session.stopCapture(endingWith: .user)
+        // VA-01：助手结束走专属目标（kind + leaseID + recordID），
+        // 不再按全局 occupancy 收尾，避免误停会议/字幕。
+        _ = await assistant.endConversation()
         // 结束会触发一次「落到刚结束那一段」（`landOnFinalized`）。这里要的是**新的一轮**，
         // 所以先把回看状态清干净再开始——否则屏幕上会停在旧记录，而后台已经在录新的一轮
         // （`state` 优先报 `.review`，那就完全看不到在录了）。
@@ -3939,7 +3996,9 @@ public struct AssistantView: View {
     /// 观察 `session.lastFinalizedSessionID`）：页头那颗按钮、`⌘⇧.` 与菜单栏是同一个结束动作，
     /// 三个入口必须落到同一个屏幕上。写在这里的话，走键盘结束的人会得到另一种结局。
     private func endConversation() async {
-        await session.stopCapture(endingWith: .user)
+        // VA-01：助手专属结束。文字按自己的 recordID 封存，语音核对租约身份；
+        // 落地仍由 `assistant.lastFinalizedSessionID` / coordinator 结果驱动。
+        _ = await assistant.endConversation()
     }
 
     /// 把屏幕交给刚刚封存的那一段。
@@ -3990,10 +4049,33 @@ public struct AssistantView: View {
     /// 它不把新的一轮接进这一条记录：记录是资产，旧的那条一个字不动（库里另起一条 `session` 行）。
     private func continueFromReview() {
         guard let record = review?.record else { return }
-        preferences.prefill(from: record)
-        selectedPersonaID = preferences.defaultPersonaID
-        selectedVoiceID = preferences.defaultVoiceID
-        closeReview()
+        // VA-15/A50：基于此记录继续讨论——读一致快照、冻结选定文字建新场，
+        // 旧记录原文不动，不自动开麦。失败时保留回看并给原因。
+        Task {
+            guard let snapshot = try? await session.reviewSnapshot(sessionID: record.id) else {
+                recordOperationError = "读取记录失败，无法继续这一轮。"
+                return
+            }
+            let seedTurns = AssistantSession.continuationSeedTurns(
+                from: snapshot.lines, selectedLineIDs: nil, maxTurns: 12
+            )
+            guard !seedTurns.isEmpty else {
+                recordOperationError = "这一条记录里还没有可用正文，无法继续。"
+                return
+            }
+            preferences.prefill(from: record)
+            selectedPersonaID = preferences.defaultPersonaID
+            selectedVoiceID = preferences.defaultVoiceID
+            // 当前活跃场先按明确目标结束，再建新场（不只 closeReview 隐藏采集）。
+            if assistant.hasActiveConversation {
+                _ = await assistant.endConversation()
+            }
+            guard await assistant.continueFromRecord(parentID: record.id) != nil else {
+                recordOperationError = "基于此记录继续失败，请重试。"
+                return
+            }
+            closeReview()
+        }
     }
 
     /// 「新建对话」= 同一条出口，但**不**预填：用现在的默认人设与音色开头。
@@ -4008,12 +4090,22 @@ public struct AssistantView: View {
     private func renameReviewedRecord() async {
         guard let id = review?.record.id else { return }
         let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        try? await session.setSessionTitle(id: id, title: name.isEmpty ? nil : name)
+        // VA-15/A51：改名失败保留旧界面，不替换成空。
+        do {
+            try await session.setSessionTitle(id: id, title: name.isEmpty ? nil : name)
+        } catch {
+            recordOperationError = "重命名失败：\(error.localizedDescription)"
+            return
+        }
         // 只改 `session.title`，正文一个字不动：重读这一条换掉快照里的记录行，
-        // 不重新拉正文——改名不需要再等一次库。
-        if let refreshed = (try? await session.record(id: id)) ?? nil, var current = review {
-            current.record = refreshed
-            review = current
+        // 不重新拉正文——改名不需要再等一次库。读失败保留旧快照。
+        do {
+            if let refreshed = try await session.record(id: id), var current = review {
+                current.record = refreshed
+                review = current
+            }
+        } catch {
+            recordOperationError = "读取记录失败：\(error.localizedDescription)"
         }
         libraryReloadToken += 1
         isRenamingRecord = false
@@ -4023,7 +4115,13 @@ public struct AssistantView: View {
     /// 删完把列表重新读一遍并退出回看——留在"已经不在的那一条"上只会看到空状态。
     private func removeReviewedRecord() async {
         guard let id = review?.record.id else { return }
-        try? await session.removeSession(id: id)
+        // VA-15/A51：移除失败留原 record，不退出成假成功。
+        do {
+            try await session.removeSession(id: id)
+        } catch {
+            recordOperationError = "删除失败：\(error.localizedDescription)"
+            return
+        }
         closeReview()
         libraryReloadToken += 1
     }
@@ -4052,9 +4150,32 @@ public struct AssistantView: View {
 
     private func exportReviewedRecord(as format: SessionExportFormat) async {
         guard let id = review?.record.id else { return }
-        guard let record = (try? await session.record(id: id)) ?? nil else { return }
-        let rows = (try? await session.lines(sessionID: id)) ?? []
-        let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
+        // VA-15/A51：读失败不替换成空 record，不写假空导出；失败保留目标 record。
+        let record: SessionRecord
+        do {
+            guard let fetched = try await session.record(id: id) else {
+                recordOperationError = "导出失败：记录不存在"
+                return
+            }
+            record = fetched
+        } catch {
+            recordOperationError = "导出失败：\(error.localizedDescription)"
+            return
+        }
+        let rows: [TranscriptLine]
+        do {
+            rows = try await session.lines(sessionID: id)
+        } catch {
+            recordOperationError = "导出失败：\(error.localizedDescription)"
+            return
+        }
+        let names: [String: String]
+        do {
+            names = try await session.speakerNames(sessionID: id)
+        } catch {
+            recordOperationError = "导出失败：\(error.localizedDescription)"
+            return
+        }
         SessionExportPanel.write(
             SessionExportPayload(record: record, lines: rows, speakerNames: names, minutes: nil),
             as: format

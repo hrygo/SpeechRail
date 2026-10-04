@@ -26,8 +26,33 @@ final class VoicePromptTests: XCTestCase {
         let block = VoicePrompt.styleBlock("  你是一位耐心的讲解者。  ")
 
         XCTAssertTrue(block.hasPrefix("# 角色风格（人设）"))
-        XCTAssertTrue(block.contains("以语音对话契约和朗读要求为准"))
+        // VA-10：人设不再写死服从朗读要求，以当轮模态契约为准。
+        XCTAssertTrue(block.contains("以当轮模态契约为准"))
         XCTAssertTrue(block.hasSuffix("你是一位耐心的讲解者。"))
+    }
+
+    /// A33：同问题键入/语音走不同模态契约（纯文字断言，真实输出记 R）。
+    func testA33ModalityPreservesRequestedStructure() {
+        let text = VoicePrompt.instructionsFor(input: .keyboard, output: .textOnly)
+        XCTAssertTrue(text.contains("允许 Markdown"), "文字模态应允许结构化输出")
+        XCTAssertFalse(text.contains("语音识别容错"), "文字模态不套 ASR 容错")
+        let spoken = VoicePrompt.instructionsFor(input: .recognizedSpeech, output: .spokenConcise)
+        XCTAssertTrue(spoken.contains("朗读"), "语音模态保留朗读契约")
+    }
+
+    /// A34：关键事实歧义不自动猜改，必要澄清一次一问题；无伪造置信度。
+    func testA34CriticalRecognitionAmbiguityIsNotGuessed() {
+        for modality in [
+            VoicePrompt.instructionsFor(input: .keyboard, output: .textOnly),
+            VoicePrompt.instructionsFor(input: .recognizedSpeech, output: .spokenConcise),
+            VoicePrompt.instructionsFor(input: .recognizedSpeech, output: .textOnly),
+        ] {
+            XCTAssertTrue(modality.contains("一次一问题"), "歧义澄清一次一问题")
+            XCTAssertTrue(modality.contains("禁止泛化"), "禁止泛化猜测")
+            // “不伪造置信度”以否定形式出现（“不伪造置信度”），
+            // 此处不断言不含子串，而断言不承诺数值化置信度。
+            XCTAssertTrue(modality.contains("不伪造置信度"), "必须明确不伪造置信度")
+        }
     }
 
     func testSpokenTextStripsLayoutSyntaxButKeepsMeaning() {

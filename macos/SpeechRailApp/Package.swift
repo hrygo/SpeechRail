@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "SpeechRailControlAgentCore", targets: ["SpeechRailControlAgentCore"]),
         .executable(name: "SpeechRailControlAgent", targets: ["SpeechRailControlAgent"]),
         .executable(name: "teleprompter-replay", targets: ["TeleprompterReplayTool"]),
+        .executable(name: "assistant-replay", targets: ["AssistantReplayTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/MacPaw/OpenAI.git", exact: "0.5.1"),
@@ -74,6 +75,11 @@ let package = Package(
                 "AssistantSession.swift",
                 "AssistantSessionDependencies.swift",
                 "AssistantReplyState.swift",
+                "AssistantPresentation.swift",
+                "AssistantComposerPolicy.swift",
+                "AssistantTurnPolicy.swift",
+                "AssistantContextPolicy.swift",
+                "AssistantObservability.swift",
                 "AssistantAudioPlayback.swift",
                 "AssistantAudioSession.swift",
                 "SessionPreferences.swift",
@@ -129,6 +135,7 @@ let package = Package(
                 "TeleprompterSession.swift",
                 "TeleprompterStageView.swift",
                 "TeleprompterStageWindow.swift",
+                "AssistantReplayEvaluator.swift",
                 "SessionStore.swift",
                 "SessionCoordinator.swift",
             ]
@@ -139,6 +146,13 @@ let package = Package(
             name: "TeleprompterReplayTool",
             dependencies: ["SpeechRailAppSupport"],
             path: "TeleprompterReplayTool"
+        ),
+        // 语音助手离线回放 runner（VA-17b）：只读仓库外 manifest，输出脱敏聚合。
+        // 不录音、不下载模型、不联网；缺失素材或版本记录时直接失败。
+        .executableTarget(
+            name: "AssistantReplayTool",
+            dependencies: ["SpeechRailAppSupport"],
+            path: "AssistantReplayTool"
         ),
         .testTarget(
             name: "SpeechRailMacControlTests",

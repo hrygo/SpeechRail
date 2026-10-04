@@ -132,24 +132,26 @@ struct AssistantSpeechTextBuffer {
     var hasExpired: Bool { lastLimit != nil }
 
     /// 计入一段新到的增量。返回被触碰的限额（`nil` 表示这一段仍在预算内）。
+    ///
+    /// VA-11：合法 600 scalar 可一次到达，不拿 512 append 限额拒绝 provider delta。
+    /// 准入先计算 candidate counts，再变更 pending/offered；单 delta 超 append
+    /// 上限时仍准入，后续按安全点切分（readyChunks/flush 按 maximumChunkScalars
+    /// 切片），只在整轮 total 超限时拒绝。
     mutating func append(_ delta: String) -> Limit? {
         let scalars = Array(delta.unicodeScalars)
         guard !scalars.isEmpty else { return nil }
-        offeredScalars += scalars.count
+        // 先算 candidate：超 total 才拒绝，原状态不变。
+        let candidateOffered = offeredScalars + scalars.count
+        if candidateOffered > configuration.maximumTotalScalars {
+            let limit = Limit.total(offered: candidateOffered, limit: configuration.maximumTotalScalars)
+            lastLimit = limit
+            return limit
+        }
+        offeredScalars = candidateOffered
         if pending.isEmpty {
             pendingSince = now()
         }
         pending.append(contentsOf: scalars)
-        if scalars.count > configuration.maximumChunkScalars {
-            let limit = Limit.append(offered: scalars.count, limit: configuration.maximumChunkScalars)
-            lastLimit = limit
-            return limit
-        }
-        if offeredScalars > configuration.maximumTotalScalars {
-            let limit = Limit.total(offered: offeredScalars, limit: configuration.maximumTotalScalars)
-            lastLimit = limit
-            return limit
-        }
         return nil
     }
 
