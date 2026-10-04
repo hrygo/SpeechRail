@@ -51,7 +51,7 @@ final class AppModelTests: XCTestCase {
             id: "voice-1",
             name: "测试音色",
             aliases: ["test-voice"],
-            mode: "design",
+            mode: "system",
             available: true,
             availabilityReason: .available,
             voiceRevision: "vr_11111111111111111111111111111111",
@@ -125,13 +125,242 @@ final class AppModelTests: XCTestCase {
                 asrModelRevision: "asr-model-catalog",
                 canonicalVoiceID: "voice-1",
                 voiceRevision: "vr_11111111111111111111111111111111",
-                ttsModelRevision: "voice-model-catalog"
+                ttsModelRevision: "global-tts-catalog"
             )
         )
         XCTAssertEqual(
             facade.realtimeBinding(),
             RealtimeCapabilityBinding(asrModelRevision: "asr-model-catalog")
         )
+    }
+
+    /// 克隆音色必须 pin `tts_clone` 槽位的号，而不是 voice 自带的 model 号。
+    ///
+    /// 回归线上故障：助手选 clone 音色时 App 发的是 voice 条目自带的 model 号，
+    /// 服务端按 mode 取 `tts_clone` 制品比对，永不对等，每次都 409
+    /// `model_revision_conflict`。system 音色走 `tts` 槽位不受影响。
+    func testRealtimeBindingForCloneVoicePinsCloneSlotRevision() {
+        let voice = SafeVoiceEntry(
+            id: "wom-clone-1",
+            name: "克隆音色",
+            aliases: ["clone-voice"],
+            mode: "clone",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_22222222222222222222222222222222",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "clone-base",
+                catalogRevision: "voice-self-model-catalog"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "clone",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "generated_reference",
+                metadataMethod: "declared_only"
+            ),
+            operations: [
+                "realtime_speech": JSONValue(.object([
+                    "output": JSONValue(.object([
+                        "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                        "pcm_sample_rate": JSONValue(.integer(24_000)),
+                        "channels": JSONValue(.integer(1))
+                    ])),
+                    "scheduling_class": JSONValue(.string("realtime_tts")),
+                    "terminal_evidence": JSONValue(.string("speechrail.tts.completed"))
+                ]))
+            ]
+        )
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "global-tts-catalog"
+                ),
+                "tts_clone": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "clone-base",
+                    catalogRevision: "clone-slot-catalog"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+        let facade = AppCapabilityFacade(snapshot: snapshot, discoveryState: .loaded)
+
+        XCTAssertEqual(
+            facade.realtimeBinding(for: "clone-voice"),
+            RealtimeCapabilityBinding(
+                asrModelRevision: "asr-model-catalog",
+                canonicalVoiceID: "wom-clone-1",
+                voiceRevision: "vr_22222222222222222222222222222222",
+                ttsModelRevision: "clone-slot-catalog"
+            )
+        )
+    }
+
+    /// 未知 mode 不猜制品：binding 直接 fail-closed，而不是拿一个服务端
+    /// 永远比不上的号去建连。
+    func testRealtimeBindingRejectsUnknownVoiceMode() {
+        let voice = SafeVoiceEntry(
+            id: "voice-unknown-mode",
+            name: "未知模式音色",
+            aliases: ["unknown-mode-voice"],
+            mode: "design",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_33333333333333333333333333333333",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "design-artifact",
+                catalogRevision: "voice-self-model-catalog"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "instruction",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "instruction_profile",
+                metadataMethod: "declared_only"
+            ),
+            operations: [
+                "realtime_speech": JSONValue(.object([
+                    "output": JSONValue(.object([
+                        "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                        "pcm_sample_rate": JSONValue(.integer(24_000)),
+                        "channels": JSONValue(.integer(1))
+                    ])),
+                    "scheduling_class": JSONValue(.string("realtime_tts")),
+                    "terminal_evidence": JSONValue(.string("speechrail.tts.completed"))
+                ]))
+            ]
+        )
+        // 快照里故意不放 voice_design 槽位：未知 mode 取不到号必须 fail-closed。
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "global-tts-catalog"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+        let facade = AppCapabilityFacade(snapshot: snapshot, discoveryState: .loaded)
+
+        XCTAssertNil(facade.realtimeBinding(for: "unknown-mode-voice"))
+    }
+
+    /// instruction 音色没有 runtime 合成角色：Realtime 建连不为它 pin 任何制品号，
+    /// 即使快照里有 voice_design 槽位也直接 fail-closed。
+    func testRealtimeBindingRejectsInstructionVoiceMode() {
+        let voice = SafeVoiceEntry(
+            id: "voice-instruction-1",
+            name: "设计音色",
+            aliases: ["instruction-voice"],
+            mode: "instruction",
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "vr_44444444444444444444444444444444",
+            voiceIdentityAssurance: .contentAddressed,
+            model: ConfiguredModelIdentity(
+                assurance: .configuredCatalog,
+                artifact: "tts-design",
+                catalogRevision: "design-self-model-revision"
+            ),
+            descriptors: SafeVoiceDescriptor(
+                voiceMode: "instruction",
+                locales: [],
+                styleTags: [],
+                pitchBand: "unknown",
+                timbreFamily: "unknown",
+                baselinePace: "unknown",
+                sourceType: "instruction_profile",
+                metadataMethod: "declared_only"
+            ),
+            operations: [
+                "realtime_speech": JSONValue(.object([
+                    "output": JSONValue(.object([
+                        "codecs": JSONValue(.array([JSONValue(.string("pcm16"))])),
+                        "pcm_sample_rate": JSONValue(.integer(24_000)),
+                        "channels": JSONValue(.integer(1))
+                    ])),
+                    "scheduling_class": JSONValue(.string("realtime_tts")),
+                    "terminal_evidence": JSONValue(.string("speechrail.tts.completed"))
+                ]))
+            ]
+        )
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "global-tts-catalog"
+                ),
+                "voice_design": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "tts-design",
+                    catalogRevision: "design-slot-revision"
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
+        )
+        let facade = AppCapabilityFacade(snapshot: snapshot, discoveryState: .loaded)
+
+        XCTAssertNil(facade.realtimeBinding(for: "instruction-voice"))
     }
 
     /// 契约里 `voice_revision` 可空（"legacy voices remain null"），所以系统预置音色
@@ -158,28 +387,37 @@ final class AppModelTests: XCTestCase {
     /// 放宽的是**音色版本号**这一个可空字段。模型 catalog pin 缺失仍然 fail-closed：
     /// 那说明服务没有发布这个音色用的模型身份，不能靠猜。
     func testRealtimeBindingStillRequiresVoiceModelCatalogRevision() {
-        var voice = Self.voice(voiceRevision: nil)
-        voice = SafeVoiceEntry(
-            id: voice.id,
-            name: voice.name,
-            aliases: voice.aliases,
-            mode: voice.mode,
-            available: voice.available,
-            availabilityReason: voice.availabilityReason,
-            variant: voice.variant,
-            voiceRevision: voice.voiceRevision,
-            voiceIdentityAssurance: voice.voiceIdentityAssurance,
-            model: ConfiguredModelIdentity(
-                assurance: .unknown,
-                artifact: nil
-            ),
-            descriptors: voice.descriptors,
-            operations: voice.operations
+        // pin 取的是快照顶层按 mode 分槽的制品号（system→tts），
+        // 所以“没发布模型身份”复现为顶层 tts 槽位缺 catalogRevision。
+        let voice = Self.voice(voiceRevision: nil)
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "snapshot-catalog",
+            snapshotID: "snapshot-1",
+            profile: "quality",
+            models: [
+                "asr": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "asr",
+                    catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .unknown,
+                    artifact: nil
+                ),
+            ],
+            voices: [voice],
+            operations: [
+                "realtime_transcription": JSONValue(.object([
+                    "status": JSONValue(.string("supported"))
+                ]))
+            ],
+            guarantees: [:]
         )
 
         XCTAssertNil(
             AppCapabilityFacade(
-                snapshot: Self.snapshot(voice: voice),
+                snapshot: snapshot,
                 discoveryState: .loaded
             ).realtimeBinding(for: "legacy-voice")
         )
@@ -292,6 +530,11 @@ final class AppModelTests: XCTestCase {
                     assurance: .configuredCatalog,
                     artifact: "asr",
                     catalogRevision: "asr-model-catalog"
+                ),
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "voice-model-catalog"
                 ),
             ],
             voices: [voice],
@@ -2266,7 +2509,13 @@ extension AppModelTests {
             catalogRevision: "snapshot-catalog",
             snapshotID: "snapshot-1",
             profile: "quality",
-            models: [:],
+            models: [
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    artifact: "global-tts",
+                    catalogRevision: "tts-model-revision"
+                ),
+            ],
             voices: [
                 SafeVoiceEntry(
                     id: "ryan",

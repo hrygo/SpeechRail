@@ -271,7 +271,10 @@ public struct AppCapabilityFacade: Equatable, Sendable {
               voice.available,
               let realtimeSpeech = voice.operations["realtime_speech"],
               Self.declaredVoiceOperationStatus(realtimeSpeech) == .available,
-              let ttsModelRevision = Self.nonEmpty(voice.model.catalogRevision)
+              // 服务端按 voice mode 选 TTS 制品（system→tts，clone→tts_clone，
+              // 见 artifact_for_voice_mode）：pin 必须取同一份制品的号，
+              // 取 voice 自带的 model 号在 clone 音色上永不对等，直接 409。
+              let ttsModelRevision = Self.ttsModelRevision(for: voice, in: snapshot)
         else {
             return nil
         }
@@ -283,6 +286,22 @@ public struct AppCapabilityFacade: Equatable, Sendable {
             voiceRevision: Self.nonEmpty(voice.voiceRevision),
             ttsModelRevision: ttsModelRevision
         )
+    }
+
+    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision。
+    ///
+    /// canonical 映射见 `SpeechRailCapabilityRevisionSelector.ttsArtifactSlot`：
+    /// Realtime 握手按同一 mode 比对（见 `artifact_for_voice_mode`），这里按
+    /// mode 取顶层槽位，保证 pin 与服务端比对的是同一份制品。
+    /// instruction 音色没有 runtime 合成角色，返回 nil 调用方 fail-closed。
+    private static func ttsModelRevision(
+        for voice: SafeVoiceEntry,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> String? {
+        guard let slot = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: voice.mode) else {
+            return nil
+        }
+        return Self.nonEmpty(snapshot.models[slot]?.catalogRevision)
     }
 
     private var availabilityWithoutSnapshot: AppCapabilityAvailability {

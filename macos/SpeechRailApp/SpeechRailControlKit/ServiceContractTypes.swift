@@ -2328,6 +2328,20 @@ public struct CapabilitySnapshotStore: Equatable, Sendable {
 /// voice is available for the requested operation. Callers may then use the
 /// service's ordinary negotiation path instead of guessing a revision.
 public enum SpeechRailCapabilityRevisionSelector {
+    /// 服务端按 voice mode 选 TTS 制品（system→tts，clone→tts_clone）。
+    /// instruction 音色走 voice_design 任务，没有 runtime 合成角色，普通合成
+    /// 与 Realtime 合成都不该为它 pin 任何制品号，调用方 fail-closed。
+    public static func ttsArtifactSlot(forVoiceMode mode: String) -> String? {
+        switch mode {
+        case "system":
+            return "tts"
+        case "clone":
+            return "tts_clone"
+        default:
+            return nil
+        }
+    }
+
     public static func voiceRevision(
         for voiceID: String?,
         in snapshot: EffectiveCapabilitySnapshot?,
@@ -2356,7 +2370,10 @@ public enum SpeechRailCapabilityRevisionSelector {
             let voice = matchingVoice(voiceID, in: snapshot),
             voice.available,
             voice.operations["http_speech"] != nil,
-            let modelRevision = nonEmpty(voice.model.catalogRevision)
+            // 与 realtimeBinding 同一病因：pin 必须取服务端按 mode 比对的那份
+            // 制品号（system→tts，clone→tts_clone），取 voice 自带的 model 号
+            // 在 clone 音色上永不对等，直接 409 model_revision_conflict。
+            let modelRevision = modelRevision(for: voice, in: snapshot)
         else {
             return nil
         }
@@ -2365,6 +2382,18 @@ public enum SpeechRailCapabilityRevisionSelector {
             expectedVoiceRevision: nonEmpty(voice.voiceRevision),
             expectedModelRevision: modelRevision
         )
+    }
+
+    /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision（canonical 映射见
+    /// `ttsArtifactSlot(forVoiceMode:)`；服务端 `_voice_entry` 按 `profile.mode`
+    /// 绑定制品，`/v1/audio/speech` 按 `runtime_role` 取制品比对）。
+    /// instruction 音色没有 runtime 合成角色，返回 nil 调用方 fail-closed。
+    private static func modelRevision(
+        for voice: SafeVoiceEntry,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> String? {
+        guard let slot = ttsArtifactSlot(forVoiceMode: voice.mode) else { return nil }
+        return nonEmpty(snapshot.models[slot]?.catalogRevision)
     }
 
     private static func matchingVoice(
