@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 539 XCTest + 379 swift-testing，0 失败
+  → 539 XCTest + 384 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 512 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+  → 512 XCTest + 384 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -369,6 +369,16 @@ BUILD SUCCEEDED，`DubbingProjectStoreTests` 逐套件对账 SPM 27 / Xcode 27 �
 Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
 本轮只改测试与本文档，`DubbingProjectStore.swift` 与 `origin/main` 逐字节一致。
 
+2026-10-04 第 30 轮（#207，提词器五处「按 ID 定位」查找）再次全量重跑：
+539 / 512 XCTest + **384** swift-testing、`macos_app_build.sh --configuration Debug`
+BUILD SUCCEEDED。新增五条都是 swift-testing，故 XCTest 计数不变，swift-testing 379 → 384。
+Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+本轮只改测试与本文档，`TeleprompterSession.swift` / `TeleprompterV2Store.swift`
+与 `origin/main` 逐字节一致。五处中四处确认是缺陷并补了用例；第五处
+（`validateImmutableSourceRevisions` 的按 id 查找）经验证与「永远取第 0 条」
+**语义等价**——`validate` 要求单元的 `sourceRevisionID` 等于所属修订 id，
+不同 id 的修订其 `sourceUnits` 必然不等，两种实现结局一致，故不作为缺陷记录。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -388,7 +398,7 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
 | `DubbingProjectStoreTests` | 27 | 27 | 已对齐 |
 | **XCTest 合计** | **539** | **512** | |
-| swift-testing 合计 | 379 | 379 | 一致 |
+| swift-testing 合计 | 384 | 384 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
 原先被 `#if SWIFT_PACKAGE` 挡在 `xcodebuild test` 之外，现已解除，回归由两条门禁共同覆盖。
