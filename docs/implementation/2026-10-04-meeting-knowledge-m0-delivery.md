@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "1.6"
+version: "1.7"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -63,3 +63,5 @@ base: "origin/main @ 607b75a8"
 - 真实采集、UI 自动化、发布另行授权。
 - 尾句屏障（drain 失败路径）仅静态核验：`releaseCapture(drain:)` 失败记 `lastFailure`、
   分人超时标降级，封存继续走上报结果；真实链路演练未做，另行授权。
+- MC-46 来源修订提示复核未做：需来源 revision 的 schema 迁移（纪要行存映射指纹），
+  按本分支无迁移约束未启动；改名后旧纪要仍可读，但无“需复核”提示。
