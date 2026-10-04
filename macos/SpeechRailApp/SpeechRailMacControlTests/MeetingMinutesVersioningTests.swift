@@ -382,4 +382,40 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertFalse(rendered.contains("unpicked"), "未显式选进的不进入快照")
         XCTAssertFalse(rendered.contains("风险？"), "引文未校验的不进入快照")
     }
+
+    /// 保存可靠（验收 1）：同 id 重复落行必须失败且不新增；两场序号各自单调、不串场。
+    func testLineAppendRejectsDuplicateIDAndKeepsOrdinalsPerSession() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let other = try await store.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        let first = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "第一句", source: .microphone, status: .final),
+            id: "line-dup-1"
+        )
+        XCTAssertEqual(first, 1)
+        do {
+            _ = try await store.appendLine(
+                LineDraft(sessionID: sessionID, role: .user, text: "重复一句", source: .microphone, status: .final),
+                id: "line-dup-1"
+            )
+            XCTFail("同 id 重复落行必须失败")
+        } catch {
+            // 预期失败：行数不变。
+        }
+        let second = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "第二句", source: .microphone, status: .final)
+        )
+        XCTAssertEqual(second, 2)
+        let otherFirst = try await store.appendLine(
+            LineDraft(sessionID: other.id, role: .user, text: "另一场第一句", source: .microphone, status: .final)
+        )
+        XCTAssertEqual(otherFirst, 1, "序号按场独立，不串场")
+        let rows = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(rows.map(\.ordinal), [1, 2])
+        XCTAssertTrue(rows.allSatisfy { $0.sessionID == sessionID })
+        let otherRows = try await store.lines(sessionID: other.id)
+        XCTAssertEqual(otherRows.map(\.text), ["另一场第一句"])
+    }
 }
