@@ -21,13 +21,6 @@ enum AssistantTurnPolicy {
         return true
     }
 
-    /// final-only 是否应经统一接管（前任收尾后接管，用户行一次）。
-    static func shouldTakeOverOnFinalOnly(hasPredecessor: Bool) -> Bool {
-        // 前任存在时先收尾再接管；无前任直接接管。
-        // 两者都走统一 submitTurn，不在此区分返回值语义。
-        true
-    }
-
     /// 相邻 final 聚合开关：无真机基线时维持关闭。
     static var aggregationEnabled: Bool { false }
     static var aggregationState: String { "deferred_evidence" }

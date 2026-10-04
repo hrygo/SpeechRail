@@ -45,8 +45,8 @@ final class AssistantTurnPolicyTests: XCTestCase {
             ),
             "半双工不允许插话"
         )
-        XCTAssertTrue(AssistantTurnPolicy.shouldTakeOverOnFinalOnly(hasPredecessor: true))
-        XCTAssertTrue(AssistantTurnPolicy.shouldTakeOverOnFinalOnly(hasPredecessor: false))
+        // final-only 接管不经策略函数区分：前任收尾与新轮接管统一走 submitTurn，
+        // 见 AssistantSession.beginReply；无分支可测的函数不进覆盖口径（已删除）。
         XCTAssertFalse(AssistantTurnPolicy.aggregationEnabled, "无基线时聚合维持关闭")
         XCTAssertEqual(AssistantTurnPolicy.aggregationState, "deferred_evidence")
     }
