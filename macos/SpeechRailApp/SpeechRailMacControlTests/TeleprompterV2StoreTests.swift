@@ -253,6 +253,163 @@ struct TeleprompterV2StoreTests {
         #expect(!reading.contains("跳过"))
     }
 
+    /// 造一个**合法**的源修订，id 由调用方指定。
+    ///
+    /// 单元与摘要都取自导入器，因此 `validate` 的每一条都过得去——
+    /// 这些用例要验的是「挑对了哪一件」，不是构造非法包。
+    ///
+    /// 单元要重新标 id：`validate` 要求每个单元的 `sourceRevisionID`
+    /// 等于所属修订的 id，而导入器给的 id 是正文哈希推导的
+    /// （`source-<hash prefix>`），同一份正文只会得到同一个 id。
+    private func makeSourceRevision(
+        id: String,
+        text: String
+    ) throws -> TeleprompterV2SourceRevision {
+        let imported = try TeleprompterSourceImporter.importData(
+            Data(text.utf8),
+            fileExtension: "txt"
+        )
+        let units = try TeleprompterSourceUnitBuilder(maxBudgetUnits: 12)
+            .build(imported)
+            .map { unit in
+                TeleprompterSourceUnit(
+                    id: unit.id,
+                    ordinal: unit.ordinal,
+                    sourceRevisionID: id,
+                    sourceRange: unit.sourceRange,
+                    rawText: unit.rawText,
+                    continuation: unit.continuation,
+                    budgetUnits: unit.budgetUnits
+                )
+            }
+        return TeleprompterV2SourceRevision(
+            id: id,
+            sourceText: text,
+            utf8SHA256: imported.sourceSHA256,
+            encoding: "utf8",
+            hasBOM: false,
+            formatHint: .plaintext,
+            builderVersion: imported.builderVersion,
+            sourceUnits: units
+        )
+    }
+
+    /// 导出源文件必须导出 `currentSourceRevisionID` 指的那一版。
+    ///
+    /// `validate` 只保证这个 id **存在于** `sourceRevisions` 里，不保证它是第一件；
+    /// 真正的解析发生在 `exportSource` 的 `first(where:)`。此前唯一的导出用例
+    /// 用的夹具只有一个源修订，于是「按 id 找」与「永远取第 0 件」等价——
+    /// 把它改成永远取第 0 件后，全量 539 条测试仍然全绿。
+    @Test @MainActor func exportsTheSourceRevisionTheDocumentPointsAt() throws {
+        let fixture = try makeFixture()
+        let extra = try makeSourceRevision(
+            id: "source-revision-2",
+            text: "换过的第一段。\n换过的第二段。"
+        )
+        var bundle = fixture.bundle
+        // 第二件，且正是当前修订：按位置取的实现会导出第一件。
+        bundle.sourceRevisions = [bundle.sourceRevisions[0], extra]
+        bundle.document.currentSourceRevisionID = extra.id
+
+        let exported = try TeleprompterV2Store(directoryURL: makeDirectory())
+            .exportSource(bundle)
+
+        #expect(
+            String(decoding: exported, as: UTF8.self) == extra.sourceText,
+            "导出的是当前源修订，不是列表里的第一件"
+        )
+        #expect(
+            String(decoding: exported, as: UTF8.self) != fixture.sourceText,
+            "两版内容必须不同，否则这条用例证明不了任何事"
+        )
+    }
+
+    /// 导出朗读稿必须导出 `activeVersionID` 指的那一版。
+    ///
+    /// 与源修订同一条判据。回滚到旧版本是既有能力（见回滚用例），
+    /// 于是「当前版本不是第一件」是真实存在的状态，不是假想。
+    @Test @MainActor func exportsTheReadingVersionTheDocumentPointsAt() throws {
+        let fixture = try makeFixture()
+        let original = try #require(fixture.bundle.versions.first)
+        let replacementText = "换过的一版朗读稿。"
+        let replacement = TeleprompterV2ReadingVersion(
+            id: "version-replacement",
+            documentID: original.documentID,
+            sourceRevisionID: original.sourceRevisionID,
+            readingText: replacementText,
+            blocks: [
+                TeleprompterV2ReadingBlock(
+                    id: "block-replacement",
+                    revision: 0,
+                    sourceUnitIDs: [0],
+                    text: replacementText,
+                    disposition: .speak,
+                    origin: .deterministic,
+                    budgetShare: 60
+                )
+            ],
+            segments: [
+                TeleprompterV2ReadingSegment(
+                    id: "segment-replacement",
+                    ordinal: 0,
+                    readingRange: .init(start: 0, end: replacementText.utf16.count),
+                    text: replacementText
+                )
+            ],
+            goalSnapshot: original.goalSnapshot,
+            paceSnapshot: .natural,
+            estimate: TeleprompterDurationEstimator.estimate(replacementText),
+            analysisSource: .deterministic
+        )
+        var bundle = fixture.bundle
+        // 第二件，且正是当前版本。
+        bundle.versions = [original, replacement]
+        bundle.document.activeVersionID = replacement.id
+
+        let reading = try TeleprompterV2Store(directoryURL: makeDirectory())
+            .exportReading(bundle)
+
+        #expect(reading == replacementText + "\n", "导出的是当前版本，不是列表里的第一件")
+        #expect(reading != original.readingText + "\n", "两版内容必须不同，否则这条用例证明不了任何事")
+    }
+
+    /// 源修订不可变：同一个 id 不许在第二次保存时换掉正文。
+    ///
+    /// `validateImmutableSourceRevisions` 逐条比对旧包里的每个修订，
+    /// 靠的也是「按 id 找」——按位置取的话，第二条及以后的修订会被拿去找
+    /// **第一条**比。这条用例刻意让两版正文相同、只有 id 不同：
+    /// 此时按位置取会认为「没变」而放过真正的篡改。
+    @Test @MainActor func rejectsRewritingASecondSourceRevisionUnderTheSameID() throws {
+        let fixture = try makeFixture()
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterV2Store(directoryURL: directory)
+
+        // 第一版沿用夹具自带的修订：`draft` 与 `versions` 都指着它，
+        // 换掉它整个包就不自洽了。第二版与它**正文相同、只有 id 不同**。
+        let first = try #require(fixture.bundle.sourceRevisions.first)
+        let second = try makeSourceRevision(id: "source-b", text: fixture.sourceText)
+        var original = fixture.bundle
+        original.sourceRevisions = [first, second]
+        original.document.currentSourceRevisionID = first.id
+        try store.save(original)
+
+        // 只把第二版的正文换掉。两个包各自都能通过 `validate`，
+        // 所以拦下它的只能是「修订不可变」这条守卫。
+        let tampered = try makeSourceRevision(id: "source-b", text: "被改过的正文。")
+        var rewritten = original
+        rewritten.sourceRevisions = [first, tampered]
+
+        #expect(throws: TeleprompterV2StoreError.immutableSourceRevision) {
+            try store.save(rewritten)
+        }
+        #expect(
+            try store.load(documentID: original.document.id).sourceRevisions[1].sourceText
+                == fixture.sourceText,
+            "被拒的保存不得落盘"
+        )
+    }
+
     @Test @MainActor func duplicateRegeneratesIdentitiesAndClearsRunProgress() throws {
         let fixture = try makeFixture()
         let directory = try makeDirectory()

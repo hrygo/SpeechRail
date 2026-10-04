@@ -251,6 +251,22 @@ private final class TeleprompterSessionHarness {
         )
     }
 
+    /// 造一份**会分成多个朗读块**的稿子。
+    ///
+    /// 源单元是按 `maxBudgetUnits`（默认 600 字节）切的，不是按句子；
+    /// grouping 再以 8 个单元为步长并组。于是想拿到两个块，稿子必须
+    /// 超过 8 个单元，也就是五千多字节。`makeThreeSegmentDocument`
+    /// 只有几十字节，整篇是一个单元、一个块——库里只有一块时，
+    /// 「按块 id 定位」与「永远取第 0 块」结果必然相同，
+    /// 这类查找因此完全测不到。要验它，稿子必须够长。
+    func makeManyBlockDocument() {
+        let line = String(repeating: "这是用来把稿子撑过单元预算的正文。", count: 12)
+        session.createDocument(
+            title: "多块测试稿",
+            sourceText: (0..<24).map { "第\($0)行。\(line)\n" }.joined()
+        )
+    }
+
     /// A second session over the same store, so restored progress has to come
     /// from disk instead of in-memory state.
     func makeReloadedSession() throws -> TeleprompterSession {
@@ -1045,6 +1061,83 @@ struct TeleprompterSessionLifecycleTests {
         #expect(!restored.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 "切回照念必须有正文可念，否则这段等于凭空消失")
         #expect(restored.text == sourceText)
+    }
+
+    /// 改一块的正文，只能改那一块。
+    ///
+    /// `updateBlockText` 按块 id 定位。此前没有任何用例碰过它，而唯一碰
+    /// `setBlockDisposition` 的用例取的是 `readingBlocks.first`——永远是第 0 块，
+    /// 于是「按 id 找」与「永远取第 0 块」等价。把两处
+    /// `firstIndex(where:)` 改成永远取第 0 条后，全量 539 条测试仍然全绿。
+    ///
+    /// 这条错法的后果是**覆盖**：用户改的是第三块，被改掉的是第一块。
+    @Test("editing one block rewrites only that block")
+    func editingOneBlockLeavesTheOtherBlocksIntact() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+
+        let before = harness.session.readingBlocks
+        #expect(before.count >= 2, "这条用例必须在多块文档上跑，否则按 id 定位无从谈起")
+        let first = try #require(before.first)
+        let last = try #require(before.last)
+        #expect(first.id != last.id)
+        let untouchedText = first.text
+        #expect(!untouchedText.isEmpty)
+
+        harness.session.updateBlockText(id: last.id, text: "改过的正文")
+
+        let after = harness.session.readingBlocks
+        #expect(after.count == before.count)
+        #expect(
+            after.first(where: { $0.id == last.id })?.text == "改过的正文",
+            "被点中的那一块必须真的改到"
+        )
+        #expect(
+            after.first(where: { $0.id == first.id })?.text == untouchedText,
+            "改最后一块不得把第一块的正文覆盖掉"
+        )
+    }
+
+    /// 改一块的归类，只能改那一块。
+    ///
+    /// `setBlockDisposition` 把该块的 `text` 清空（cue 不产出朗读正文），
+    /// 所以这条错法不只是标签错——它会让**另一块**的朗读正文凭空消失。
+    @Test("switching one block to cue leaves the other blocks readable")
+    func changingOneBlockDispositionLeavesTheOthersIntact() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+
+        let before = harness.session.readingBlocks
+        #expect(before.count >= 2, "这条用例必须在多块文档上跑，否则按 id 定位无从谈起")
+        let first = try #require(before.first)
+        let last = try #require(before.last)
+        #expect(first.id != last.id)
+        #expect(first.disposition == .speak)
+
+        harness.session.setBlockDisposition(id: last.id, disposition: .cue)
+
+        let after = harness.session.readingBlocks
+        #expect(after.first(where: { $0.id == last.id })?.disposition == .cue)
+        #expect(
+            after.first(where: { $0.id == first.id })?.disposition == .speak,
+            "把最后一块改成提示不得改到第一块"
+        )
+        #expect(
+            !(after.first(where: { $0.id == first.id })?.text.isEmpty ?? true),
+            "第一块的朗读正文必须还在：按位置取的实现会把它清空"
+        )
     }
 
     @Test("manual open never adopts an unconfirmed AI draft")
