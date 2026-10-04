@@ -548,8 +548,8 @@ public final class SessionCoordinator {
     // 界面不直接持有 `SessionStore`：那是业务层与持久化之间唯一的缝（§5.1），
     // 从协调器转发一道，改存储时界面不用跟着改。
 
-    public func listSummaries(kind: SessionKind? = nil) async throws -> [SessionSummary] {
-        try await store.listSessions(kind: kind)
+    public func listSummaries(kind: SessionKind? = nil, limit: Int? = nil, offset: Int = 0) async throws -> [SessionSummary] {
+        try await store.listSessions(kind: kind, limit: limit, offset: offset)
     }
 
     public func record(id: String) async throws -> SessionRecord? {

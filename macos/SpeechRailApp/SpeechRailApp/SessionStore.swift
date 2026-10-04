@@ -870,7 +870,9 @@ public actor SessionStore {
         }
     }
 
-    public func listSessions(kind: SessionKind? = nil) throws -> [SessionSummary] {
+    /// 会议库分页（MC-49）：按开始时间倒序，`offset`/`limit` 由调用方传，库不截断。
+    /// 不传分页参数时返回全部，不再只给最近 8 场。
+    public func listSessions(kind: SessionKind? = nil, limit: Int? = nil, offset: Int = 0) throws -> [SessionSummary] {
         let sql = """
         SELECT \(Self.sessionColumns),
                (SELECT COUNT(*) FROM line l WHERE l.session_id = s.id AND l.status = 'final'),
@@ -881,11 +883,18 @@ public actor SessionStore {
                (SELECT m.status FROM minutes m WHERE m.session_id = s.id ORDER BY m.version DESC LIMIT 1)
         FROM session s
         \(kind == nil ? "" : "WHERE s.kind = ?")
-        ORDER BY s.started_at DESC;
+        ORDER BY s.started_at DESC
+        \(limit == nil ? "" : "LIMIT ? OFFSET ?");
         """
         return try withStatement(sql) { statement in
+            var index: Int32 = 1
             if let kind {
-                bind(statement, 1, kind.rawValue)
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            if let limit {
+                bind(statement, index, limit)
+                bind(statement, index + 1, offset)
             }
             var summaries: [SessionSummary] = []
             while try step(statement) == SQLITE_ROW {

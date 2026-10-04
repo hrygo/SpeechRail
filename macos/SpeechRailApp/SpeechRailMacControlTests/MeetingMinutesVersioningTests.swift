@@ -292,6 +292,30 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(noline?.verified, false, "没有指向转录行的引文不得标已验证")
     }
 
+    /// MC-49：会议库分页不断页，早期会议可达，不遗漏不重复。
+    func testSessionLibraryPagingReachesEarlySessions() async throws {
+        let store = try requireStore()
+        for index in 0..<10 {
+            let record = try await store.createSession(
+                SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone),
+                id: "paging-session-\(index)"
+            )
+            XCTAssertEqual(record.id, "paging-session-\(index)")
+        }
+        let page1 = try await store.listSessions(kind: .meeting, limit: 4, offset: 0)
+        let page2 = try await store.listSessions(kind: .meeting, limit: 4, offset: 4)
+        let page3 = try await store.listSessions(kind: .meeting, limit: 4, offset: 8)
+        // setUp 建了一场 meeting，加上本用例的 10 场。
+        XCTAssertEqual(page1.count, 4)
+        XCTAssertEqual(page2.count, 4)
+        XCTAssertEqual(page3.count, 3)
+        let ids = (page1 + page2 + page3).map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "分页不得重复")
+        XCTAssertTrue(ids.contains("paging-session-0"), "早期会议必须可达")
+        let all = try await store.listSessions(kind: .meeting)
+        XCTAssertEqual(all.count, 11, "不传分页参数时返回全部")
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()
