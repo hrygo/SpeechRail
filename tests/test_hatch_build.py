@@ -99,6 +99,58 @@ def test_custom_build_hook_skips_the_engine_wheel_before_the_build_gate(
     assert build_data == {}
 
 
+def test_wheel_build_pins_the_macos_deployment_target(monkeypatch, tmp_path) -> None:
+    """The platform tag must follow the project baseline, not the build host.
+
+    Unpinned, hatchling derives it from the machine doing the build, so one
+    commit ships `macosx_26_0` from CI and `macosx_27_0` from a newer Mac —
+    two artifacts under one version number, and a local install check that no
+    longer stands in for the published wheel.
+    """
+
+    monkeypatch.setattr(
+        hatch_build,
+        "sys",
+        SimpleNamespace(platform="linux"),
+        raising=False,
+    )
+    monkeypatch.delenv("MACOSX_DEPLOYMENT_TARGET", raising=False)
+    hook = SimpleNamespace(
+        target_name="wheel",
+        root=str(tmp_path),
+        directory=str(tmp_path / "build"),
+    )
+
+    hatch_build.CustomBuildHook.initialize(hook, "2.0.3", {})
+
+    import os
+
+    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "26.0"
+
+
+def test_an_explicit_deployment_target_is_not_overridden(monkeypatch, tmp_path) -> None:
+    """A deliberate one-off build must not be silently redirected."""
+
+    monkeypatch.setattr(
+        hatch_build,
+        "sys",
+        SimpleNamespace(platform="linux"),
+        raising=False,
+    )
+    monkeypatch.setenv("MACOSX_DEPLOYMENT_TARGET", "27.0")
+    hook = SimpleNamespace(
+        target_name="wheel",
+        root=str(tmp_path),
+        directory=str(tmp_path / "build"),
+    )
+
+    hatch_build.CustomBuildHook.initialize(hook, "2.0.3", {})
+
+    import os
+
+    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "27.0"
+
+
 def test_custom_build_hook_honors_the_native_build_opt_out_on_macos(
     monkeypatch, tmp_path
 ) -> None:

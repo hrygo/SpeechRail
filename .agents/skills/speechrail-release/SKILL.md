@@ -105,6 +105,9 @@ plutil -lint deploy/macos/com.speechrail.plist.example
 git diff --check
 uv build --no-sources --wheel
 # 产物是平台专用 wheel（arm64 原生扩展），文件名带 CPython 与平台标签，不是 py3-none-any
+# 平台标签由 hatch_build.py 钉在项目的 macOS 基线上，不随构建主机变化：
+# 同一 commit 在 CI 与较新的 Mac 上必须打出同一个文件名，否则本地安装检查
+# 就不再等价于用户真正下载的那份 wheel。
 WHEEL=$(ls -t dist/speechrail-<version>-*.whl | head -1)
 python3 -m zipfile -l "$WHEEL"
 shasum -a 256 "$WHEEL"
