@@ -272,10 +272,59 @@ public final class MinutesGenerator {
     }
 
     public func recoverPending(resolvedConfiguration: ResolvedLLMConfiguration) async {
-        guard let sessionIDs = try? await coordinator.sessionsWithPendingMinutes() else { return }
-        for sessionID in sessionIDs {
-            await generate(sessionID: sessionID, resolvedConfiguration: resolvedConfiguration)
+        // MC-27 收尾：按原 job 身份认领续跑，不新建版本。
+        // generate() 会 enqueue 新版本，这里必须走 pendingMinutesRows + run 原行。
+        guard let pending = try? await coordinator.pendingMinutesRows() else { return }
+        for row in pending {
+            await resume(row: row, resolvedConfiguration: resolvedConfiguration)
         }
+    }
+
+    /// 认领指定的原 job 并续跑：不排新版本，attempt 代际由 claim 推进（MC-27）。
+    private func resume(
+        row: MinutesVersion,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async {
+        guard inFlight == nil else { return }
+        inFlight = row.sessionID
+        defer { inFlight = nil }
+        state = .queued
+        failedOnSetup = false
+        do {
+            let lines = try await coordinator.lines(sessionID: row.sessionID)
+            let names = (try? await coordinator.speakerNames(sessionID: row.sessionID)) ?? [:]
+            let transcript = Self.render(lines: lines, names: names)
+            guard !transcript.isEmpty else {
+                state = .failed("这一场没有可整理的正文。")
+                return
+            }
+            versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
+            let configuration = resolvedConfiguration.configuration
+            guard configuration.isConfigured else {
+                // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
+                _ = try? await coordinator.failMinutes(
+                    minutesID: row.id,
+                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
+                )
+                failedOnSetup = true
+                state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
+                versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+                return
+            }
+            let task = Task { [weak self] in
+                _ = try? await self?.run(
+                    version: row,
+                    transcript: transcript,
+                    resolvedConfiguration: resolvedConfiguration
+                )
+            }
+            runTask = task
+            await task.value
+            runTask = nil
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+        versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
     }
 
     /// 「停止整理」：取消在飞的那一次。**转录不受影响**——它早就封存好了，
