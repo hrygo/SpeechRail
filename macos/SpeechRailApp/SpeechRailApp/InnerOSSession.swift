@@ -105,7 +105,13 @@ public final class InnerOSSession {
     }
 
     /// 进会议时绑定会话；离开时解绑（问答不跨会话——证据必须能在本场核对）。
+    ///
+    /// MC-45：切会先取消在飞的那一问。旧任务的库归属是对的（建行时已绑定 A 的
+    /// sessionID），但它的迟到结果不得写进 B 的界面状态（`exchanges`/`state`），
+    /// 也不得清掉 B 新任务的句柄。
     public func bind(sessionID: String?) async {
+        askTask?.cancel()
+        askTask = nil
         self.sessionID = sessionID
         state = .idle
         lastFailure = nil
@@ -202,7 +208,18 @@ public final class InnerOSSession {
             exchange.status = cancelled ? .cancelled : .failed
             exchange.answerText = nil
             exchange.limitsNote = reason
-            _ = try? await coordinator.saveInnerOSExchange(exchange)
+            // MC-45：库归档照写 A 的行；界面状态只写当初那一场。
+            let stillOurs = self.sessionID == sessionID
+            // MC-41/MC-42：终态走条件 UPDATE；写入失败抛错，调用方不得吞错报成功。
+            do {
+                _ = try await coordinator.finishInnerOSExchange(exchange)
+            } catch {
+                guard stillOurs else { return }
+                state = .failed("答案没能存进去：\(error.localizedDescription)。可以复制问题重试。")
+                lastFailure = error.localizedDescription
+                return
+            }
+            guard stillOurs else { return }
             if let index = exchanges.lastIndex(where: { $0.id == exchange.id }) {
                 exchanges[index] = exchange
             }
@@ -237,7 +254,20 @@ public final class InnerOSSession {
                 contentHash: nil
             )
         }
-        _ = try? await coordinator.saveInnerOSExchange(exchange, evidence: evidenceRows)
+        // MC-45：库归档以建行时的 sessionID 为准，切会也不丢 A 的答案；
+        // 界面状态只写当初那一场：切会后 self.sessionID 已变，旧任务不得碰 B 的
+        // `exchanges`/`evidence`/`state`，也不得清掉 B 新任务的句柄。
+        let stillOurs = self.sessionID == sessionID
+        // MC-41/MC-42：答案、状态、证据同一事务落库；失败抛错，不半保存。
+        do {
+            _ = try await coordinator.finishInnerOSExchange(exchange, evidence: evidenceRows)
+        } catch {
+            guard stillOurs else { return }
+            state = .failed("答案没能存进去：\(error.localizedDescription)。可以复制问题重试。")
+            lastFailure = error.localizedDescription
+            return
+        }
+        guard stillOurs else { return }
         if let index = exchanges.lastIndex(where: { $0.id == exchange.id }) {
             exchanges[index] = exchange
         }

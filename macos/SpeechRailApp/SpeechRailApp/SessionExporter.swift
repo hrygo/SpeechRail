@@ -1,5 +1,7 @@
-import AppKit
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 // 记录库的导出物（`SESSIONS-SPEC` §6.2 的三条设计判断之三、§6.3.2 的页脚）。
 //
@@ -304,10 +306,14 @@ public enum SessionExporter {
             root["persona"] = ["id": persona.id, "title": persona.title]
         }
         if let minutes = payload.minutes {
+            // MA-19：跨新库往返后版本、来源与行动身份不漂移。`id` 是版本身份，
+            // `created_at` 供复核判断（修订晚于创建即需复核），缺一不可。
             root["minutes"] = [
+                "id": minutes.id,
                 "version": minutes.version,
                 "status": minutes.status.rawValue,
-                "body": jsonText(minutes.body)
+                "body": jsonText(minutes.body),
+                "created_at": minutes.createdAt.timeIntervalSince1970
             ]
         }
         guard
@@ -347,6 +353,7 @@ public enum SessionExporter {
 
 // MARK: - 系统保存面板
 
+#if canImport(AppKit)
 /// 导出走系统保存面板（§6.2 第三条判断：不做自绘下拉里的伪保存）。
 @MainActor
 public enum SessionExportPanel {
@@ -374,3 +381,4 @@ public enum SessionExportPanel {
         }
     }
 }
+#endif

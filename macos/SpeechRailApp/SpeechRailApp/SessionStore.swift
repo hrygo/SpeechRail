@@ -259,7 +259,22 @@ public actor SessionStore {
     }
 
     /// 改显示名只写 `speaker_name`；历史引用因此在新名字下显示新名，而引用原文不变。
+    ///
+    /// MC-46 后半句（无迁移实现）：改名同时在 `session_change` 追加一条
+    /// `kind = 'speaker'` 的记录，作为"来源修订"事件。旧纪要正文一个字不动；
+    /// 读取方用"修订事件时间晚于纪要创建时间"判断旧版需复核，
+    /// 引用仍指向旧 revision（`line` 原文不动）。`ON CONFLICT` 仍保证幂等，
+    /// 修订事件只在显示名确有变化时追加，避免重复改名刷出多条事件。
     public func renameSpeaker(sessionID: String, label: String, name: String) throws {
+        let now = Date().timeIntervalSince1970
+        let previous = try withStatement(
+            "SELECT display_name FROM speaker_name WHERE session_id = ? AND label = ? LIMIT 1;"
+        ) { statement -> String? in
+            bind(statement, 1, sessionID)
+            bind(statement, 2, label)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return columnText(statement, 0)
+        }
         let sql = """
         INSERT INTO speaker_name (session_id, label, display_name, updated_at)
         VALUES (?, ?, ?, ?)
@@ -270,9 +285,51 @@ public actor SessionStore {
             bind(statement, 1, sessionID)
             bind(statement, 2, label)
             bind(statement, 3, name)
-            bind(statement, 4, Date().timeIntervalSince1970)
+            bind(statement, 4, now)
             try step(statement)
         }
+        // 显示名确有变化才记修订事件：首次命名与重复同名不刷事件。
+        guard previous != name else { return }
+        // at_ordinal 用 0：改名是会话级映射修订，不指向某一句。
+        // value 存 `label|name`：回看时仍说得清当时改的是谁。
+        let eventSQL = "INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at) VALUES (?, ?, 0, 'speaker', ?, ?);"
+        try withStatement(eventSQL) { statement in
+            bind(statement, 1, UUID().uuidString)
+            bind(statement, 2, sessionID)
+            bind(statement, 3, "\(label)|\(name)")
+            bind(statement, 4, now)
+            try step(statement)
+        }
+    }
+
+    /// 来源修订事件（MC-46 后半句）：`session_change` 里 `kind = 'speaker'` 的记录。
+    /// 纪要创建之后出现修订事件，旧版应标需复核；无事件或事件不晚于纪要时不标。
+    public func speakerRevisions(sessionID: String) throws -> [SessionChange] {
+        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? AND kind = 'speaker' ORDER BY created_at ASC;"
+        return try withStatement(sql) { statement in
+            bind(statement, 1, sessionID)
+            var rows: [SessionChange] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(
+                    SessionChange(
+                        id: columnText(statement, 0) ?? "",
+                        atOrdinal: Int(columnInt(statement, 1)),
+                        kind: columnText(statement, 2) ?? "speaker",
+                        value: columnText(statement, 3) ?? "",
+                        createdAt: Date(timeIntervalSince1970: columnDouble(statement, 4))
+                    )
+                )
+            }
+            return rows
+        }
+    }
+
+    /// 旧纪要是否需复核（MC-46 后半句）：任一说话人修订事件晚于该纪要创建时间即需复核。
+    /// 纯读判断，不写库；引用仍指旧 revision，只是提示结论可能已过期。
+    public func minutesNeedsReview(minutesID: String) throws -> Bool {
+        guard let version = try minutesVersion(id: minutesID) else { return false }
+        let revisions = try speakerRevisions(sessionID: version.sessionID)
+        return revisions.contains { $0.createdAt > version.createdAt }
     }
 
     /// 「音色第 N 句起生效」是一条记录，不是被覆盖的字段（§15.3 第 3 条）。
@@ -528,27 +585,37 @@ public actor SessionStore {
         promptChars: Int?,
         id: String = UUID().uuidString
     ) throws -> MinutesVersion {
-        let version = try scalarInt(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
-            args: [.text(sessionID)]
-        ) ?? 1
+        // MA-06：清旧指针与插入新版本必须是同一事务；INSERT 失败时回滚，
+        // 不能留下“旧版已被清掉指针”的半提交（MC-26）。
         let now = Date()
-        try withStatement("UPDATE minutes SET is_latest = 0 WHERE session_id = ?;") { statement in
-            bind(statement, 1, sessionID)
-            try step(statement)
-        }
-        let sql = """
-        INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at)
-        VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, NULL, NULL, ?);
-        """
-        try withStatement(sql) { statement in
-            bind(statement, 1, id)
-            bind(statement, 2, sessionID)
-            bind(statement, 3, version)
-            bind(statement, 4, model)
-            bind(statement, 5, promptChars)
-            bind(statement, 6, now.timeIntervalSince1970)
-            try step(statement)
+        let version: Int
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            version = try scalarInt(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
+                args: [.text(sessionID)]
+            ) ?? 1
+            try withStatement("UPDATE minutes SET is_latest = 0 WHERE session_id = ?;") { statement in
+                bind(statement, 1, sessionID)
+                try step(statement)
+            }
+            let sql = """
+            INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at)
+            VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, NULL, NULL, ?);
+            """
+            try withStatement(sql) { statement in
+                bind(statement, 1, id)
+                bind(statement, 2, sessionID)
+                bind(statement, 3, version)
+                bind(statement, 4, model)
+                bind(statement, 5, promptChars)
+                bind(statement, 6, now.timeIntervalSince1970)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return MinutesVersion(
             id: id,
@@ -563,6 +630,8 @@ public actor SessionStore {
     }
 
     /// 认领一条排队中的纪要。租约过期的 `running` 行可以被下一次启动回收（否则会永远卡住）。
+    /// MC-29：认领带 fencing 代际（`attempts`）：完成/失败必须凭认领时看到的代际提交，
+    /// 旧执行者迟到不得改写新 owner 已认领的行。
     public func claimMinutes(sessionID: String, lease: TimeInterval) throws -> MinutesVersion? {
         let now = Date()
         let sql = """
@@ -597,7 +666,7 @@ public actor SessionStore {
     }
 
     public func finishMinutes(minutesID: String, body: String, model: String?) throws {
-        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ?;"
+        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running';"
         try withStatement(sql) { statement in
             bind(statement, 1, body)
             bind(statement, 2, model)
@@ -606,13 +675,46 @@ public actor SessionStore {
         }
     }
 
+    /// 带 fencing 代际的完成：只有 `expectedAttempts` 与当前行一致时才提交，
+    /// 否则说明认领之后已有新 owner 接管，旧执行者迟到不得改写（MC-29）。
+    /// 返回是否真正提交。
+    @discardableResult
+    public func finishMinutesIfOwner(minutesID: String, expectedAttempts: Int, body: String, model: String?) throws -> Bool {
+        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running' AND attempts = ?;"
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, body)
+            bind(statement, 2, model)
+            bind(statement, 3, minutesID)
+            bind(statement, 4, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
     public func failMinutes(minutesID: String, reason: String) throws {
-        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ?;"
+        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ? AND status = 'running';"
         try withStatement(sql) { statement in
             bind(statement, 1, reason)
             bind(statement, 2, minutesID)
             try step(statement)
         }
+    }
+
+    /// 带 fencing 代际的失败：语义同 `finishMinutesIfOwner`（MC-29）。
+    @discardableResult
+    public func failMinutesIfOwner(minutesID: String, expectedAttempts: Int, reason: String) throws -> Bool {
+        let sql = "UPDATE minutes SET status = 'failed', lease_until = NULL, failure_reason = ? WHERE id = ? AND status = 'running' AND attempts = ?;"
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, reason)
+            bind(statement, 2, minutesID)
+            bind(statement, 3, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
     }
 
     /// 还有纪要没整理完的会话：排队中的，或者租约已经过期的 `running`。
@@ -634,6 +736,25 @@ public actor SessionStore {
         }
     }
 
+    /// 待恢复的纪要行（MC-27）：排队中的，或租约已过期的 `running`，按版本升序。
+    /// 返回整行以便调用方按原 job 身份认领，不新建版本。
+    public func pendingMinutesRows(now: Date = Date()) throws -> [MinutesVersion] {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes
+        WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
+        ORDER BY version ASC;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, now.timeIntervalSince1970)
+            var rows: [MinutesVersion] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(minutesVersion(from: statement))
+            }
+            return rows
+        }
+    }
+
     /// 库里一共有多少条会话记录（含已封存的）。
     ///
     /// "这一场是不是唯一一场"这类断言要它：断线重连**不允许**多出一条记录，
@@ -648,32 +769,84 @@ public actor SessionStore {
     // MARK: - 内心 OS 与长期记忆
 
     /// 存一次问答。默认 `in_minutes = 0`：「默认不进纪要」由结构决定（§15.3 第 1 条）。
+    ///
+    /// MC-41/MC-42：建行一次，终态走 `finishInnerOSExchange` 条件 UPDATE；
+    /// 答案、状态、证据同一事务写入，不半保存。调用方不得用第二次同 ID INSERT
+    /// 冒充终态写入——主键冲突抛错，不吞错报成功。
     @discardableResult
     public func saveInnerOSExchange(_ exchange: InnerOSExchange, evidence: [InnerOSEvidence] = []) throws -> String {
-        let sql = """
-        INSERT INTO inner_os_exchange (
-            id, session_id, asked_at, at_ordinal, question, intent, answer_text, draft_text,
-            confidence, limits_note, model, status, in_minutes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """
-        try withStatement(sql) { statement in
-            bind(statement, 1, exchange.id)
-            bind(statement, 2, exchange.sessionID)
-            bind(statement, 3, exchange.askedAt.timeIntervalSince1970)
-            bind(statement, 4, exchange.atOrdinal)
-            bind(statement, 5, exchange.question)
-            bind(statement, 6, exchange.intent?.rawValue)
-            bind(statement, 7, exchange.answerText)
-            bind(statement, 8, exchange.draftText)
-            bind(statement, 9, exchange.confidence?.rawValue)
-            bind(statement, 10, exchange.limitsNote)
-            bind(statement, 11, exchange.model)
-            bind(statement, 12, exchange.status.rawValue)
-            bind(statement, 13, exchange.inMinutes ? 1 : 0)
-            try step(statement)
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = """
+            INSERT INTO inner_os_exchange (
+                id, session_id, asked_at, at_ordinal, question, intent, answer_text, draft_text,
+                confidence, limits_note, model, status, in_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            try withStatement(sql) { statement in
+                bind(statement, 1, exchange.id)
+                bind(statement, 2, exchange.sessionID)
+                bind(statement, 3, exchange.askedAt.timeIntervalSince1970)
+                bind(statement, 4, exchange.atOrdinal)
+                bind(statement, 5, exchange.question)
+                bind(statement, 6, exchange.intent?.rawValue)
+                bind(statement, 7, exchange.answerText)
+                bind(statement, 8, exchange.draftText)
+                bind(statement, 9, exchange.confidence?.rawValue)
+                bind(statement, 10, exchange.limitsNote)
+                bind(statement, 11, exchange.model)
+                bind(statement, 12, exchange.status.rawValue)
+                bind(statement, 13, exchange.inMinutes ? 1 : 0)
+                try step(statement)
+            }
+            for item in evidence {
+                try insertEvidence(item, exchangeID: exchange.id)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
-        for item in evidence {
-            try insertEvidence(item, exchangeID: exchange.id)
+        return exchange.id
+    }
+
+    /// 问答终态写入（MC-41/MC-42）：答案、状态、证据同一事务落库。
+    /// 只允许从 `generating` 推向终态；0 行受影响抛错，调用方不得把“没写进去”
+    /// 读成“已持久保存”。
+    @discardableResult
+    public func finishInnerOSExchange(_ exchange: InnerOSExchange, evidence: [InnerOSEvidence] = []) throws -> String {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = """
+            UPDATE inner_os_exchange
+            SET answer_text = ?, draft_text = ?, intent = ?, confidence = ?,
+                limits_note = ?, model = ?, status = ?, in_minutes = ?
+            WHERE id = ? AND status = 'generating';
+            """
+            var changed = false
+            try withStatement(sql) { statement in
+                bind(statement, 1, exchange.answerText)
+                bind(statement, 2, exchange.draftText)
+                bind(statement, 3, exchange.intent?.rawValue)
+                bind(statement, 4, exchange.confidence?.rawValue)
+                bind(statement, 5, exchange.limitsNote)
+                bind(statement, 6, exchange.model)
+                bind(statement, 7, exchange.status.rawValue)
+                bind(statement, 8, exchange.inMinutes ? 1 : 0)
+                bind(statement, 9, exchange.id)
+                try step(statement)
+                changed = sqlite3_changes(try requireHandle()) == 1
+            }
+            guard changed else {
+                throw SessionStoreError.statementFailed("问答终态写入影响 0 行：该问答不存在或已不在生成中")
+            }
+            for item in evidence {
+                try insertEvidence(item, exchangeID: exchange.id)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return exchange.id
     }
@@ -695,7 +868,54 @@ public actor SessionStore {
         }
     }
 
-    /// 「写进纪要」是显式动作（§14.2）。
+    /// 引文校验（MC-35、MC-36）：引文必须逐字出自所指转录行，否则标未验证。
+    /// 返回每条证据的校验结论；调用方不得把未验证引文当已核实展示。
+    /// 纯读操作，不写库。
+    public func verifyEvidenceQuotes(exchangeID: String) throws -> [EvidenceQuoteCheck] {
+        let rows = try innerOSEvidence(exchangeID: exchangeID)
+        var checks: [EvidenceQuoteCheck] = []
+        for row in rows {
+            guard let quote = row.quote, !quote.isEmpty else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文为空"))
+                continue
+            }
+            guard let lineID = row.lineID else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "没有指向转录行"))
+                continue
+            }
+            let line = try withStatement(
+                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at FROM line WHERE id = ? LIMIT 1;"
+            ) { statement -> TranscriptLine? in
+                bind(statement, 1, lineID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return Self.transcriptLine(from: statement)
+            }
+
+            guard let body = line?.text else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "所指转录行不存在"))
+                continue
+            }
+            if body.contains(quote) {
+                let occurrences = body.components(separatedBy: quote).count - 1
+                if occurrences == 1 {
+                    checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: true, reason: nil))
+                } else {
+                    checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文在行内出现多次，无法精确定位"))
+                }
+            } else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文与所指转录行不一致"))
+            }
+        }
+        return checks
+    }
+
+    /// 单条引文的校验结论：只含判断与原因，不回显完整转写。
+    public struct EvidenceQuoteCheck: Hashable, Sendable {
+        public var evidenceID: String
+        public var verified: Bool
+        public var reason: String?
+    }
+
     public func setInnerOSInMinutes(exchangeID: String, included: Bool) throws {
         try withStatement("UPDATE inner_os_exchange SET in_minutes = ? WHERE id = ?;") { statement in
             bind(statement, 1, included ? 1 : 0)
@@ -759,7 +979,9 @@ public actor SessionStore {
         }
     }
 
-    public func listSessions(kind: SessionKind? = nil) throws -> [SessionSummary] {
+    /// 会议库分页（MC-49）：按开始时间倒序，`offset`/`limit` 由调用方传，库不截断。
+    /// 不传分页参数时返回全部，不再只给最近 8 场。
+    public func listSessions(kind: SessionKind? = nil, limit: Int? = nil, offset: Int = 0) throws -> [SessionSummary] {
         let sql = """
         SELECT \(Self.sessionColumns),
                (SELECT COUNT(*) FROM line l WHERE l.session_id = s.id AND l.status = 'final'),
@@ -770,11 +992,18 @@ public actor SessionStore {
                (SELECT m.status FROM minutes m WHERE m.session_id = s.id ORDER BY m.version DESC LIMIT 1)
         FROM session s
         \(kind == nil ? "" : "WHERE s.kind = ?")
-        ORDER BY s.started_at DESC;
+        ORDER BY s.started_at DESC
+        \(limit == nil ? "" : "LIMIT ? OFFSET ?");
         """
         return try withStatement(sql) { statement in
+            var index: Int32 = 1
             if let kind {
-                bind(statement, 1, kind.rawValue)
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            if let limit {
+                bind(statement, index, limit)
+                bind(statement, index + 1, offset)
             }
             var summaries: [SessionSummary] = []
             while try step(statement) == SQLITE_ROW {
@@ -842,6 +1071,92 @@ public actor SessionStore {
         }
     }
 
+    /// 知识检索结果：只含可展示的正文与纪要，不含私密问答（MC-44）。
+    /// `excerpt` 是命中片段原文（调用方负责截断展示），不是完整转写回显。
+    public struct KnowledgeHit: Hashable, Sendable {
+        public var sessionID: String
+        public var kind: SessionKind?
+        public var lineID: String?
+        public var minutesID: String?
+        public var version: Int?
+        public var excerpt: String
+        public var ordinal: Int?
+        public var createdAt: Date
+    }
+
+    /// 跨会议知识检索（MC-49、MC-52、MC-54）：转录终稿与已完成纪要正文。
+    /// 私密问答（`inner_os_exchange`）默认不在范围内，不得隐式带出（MC-44）。
+    /// 空查询返回空数组，不做全库扫描。
+    public func searchKnowledge(query: String, kind: SessionKind? = nil, limit: Int = 200) throws -> [KnowledgeHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let pattern = "%" + trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_") + "%"
+        var hits: [KnowledgeHit] = []
+        let lineSQL = """
+        SELECT l.session_id, s.kind, l.id, l.text, l.ordinal, l.created_at
+        FROM line l JOIN session s ON s.id = l.session_id
+        WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
+        \(kind == nil ? "" : "AND s.kind = ?")
+        ORDER BY s.started_at DESC, l.ordinal ASC
+        LIMIT ?;
+        """
+        try withStatement(lineSQL) { statement in
+            bind(statement, 1, pattern)
+            var index: Int32 = 2
+            if let kind {
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            bind(statement, index, limit)
+            while try step(statement) == SQLITE_ROW {
+                hits.append(KnowledgeHit(
+                    sessionID: columnText(statement, 0) ?? "",
+                    kind: columnText(statement, 1).flatMap(SessionKind.init(rawValue:)),
+                    lineID: columnText(statement, 2),
+                    minutesID: nil,
+                    version: nil,
+                    excerpt: columnText(statement, 3) ?? "",
+                    ordinal: Int(columnInt(statement, 4)),
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                ))
+            }
+        }
+        guard hits.count < limit else { return hits }
+        let minutesSQL = """
+        SELECT m.session_id, s.kind, m.id, m.version, m.body, m.created_at
+        FROM minutes m JOIN session s ON s.id = m.session_id
+        WHERE m.status = 'ready' AND m.body IS NOT NULL AND m.body LIKE ? ESCAPE '\\'
+        \(kind == nil ? "" : "AND s.kind = ?")
+        ORDER BY s.started_at DESC, m.version DESC
+        LIMIT ?;
+        """
+        try withStatement(minutesSQL) { statement in
+            bind(statement, 1, pattern)
+            var index: Int32 = 2
+            if let kind {
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            bind(statement, index, limit - hits.count)
+            while try step(statement) == SQLITE_ROW {
+                hits.append(KnowledgeHit(
+                    sessionID: columnText(statement, 0) ?? "",
+                    kind: columnText(statement, 1).flatMap(SessionKind.init(rawValue:)),
+                    lineID: nil,
+                    minutesID: columnText(statement, 2),
+                    version: Int(columnInt(statement, 3)),
+                    excerpt: columnText(statement, 4) ?? "",
+                    ordinal: nil,
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                ))
+            }
+        }
+        return hits
+    }
+
     /// 匿名标签 → 用户手写的名字。正文与时间码从不改写（§15.3 第 2 条）。
     public func speakerNames(sessionID: String) throws -> [String: String] {
         let sql = "SELECT label, display_name FROM speaker_name WHERE session_id = ?;"
@@ -858,7 +1173,9 @@ public actor SessionStore {
     }
 
     public func voiceChanges(sessionID: String) throws -> [SessionChange] {
-        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? ORDER BY at_ordinal ASC;"
+        // 只读 `kind = 'voice'`：说话人修订（`kind = 'speaker'`）走 `speakerRevisions`，
+        // 不混进音色变更点，避免回看徽标与既有快照语义被污染。
+        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? AND kind = 'voice' ORDER BY at_ordinal ASC;"
         return try withStatement(sql) { statement in
             bind(statement, 1, sessionID)
             var rows: [SessionChange] = []
@@ -914,6 +1231,35 @@ public actor SessionStore {
                 )
             }
             return rows
+        }
+    }
+
+    /// 最新可用版（MC-25）：已完成且有正文的版本里版本号最大的那一版。
+    /// 没有可用版时返回 nil，调用方不得把失败尝试或空正文当成功展示。
+    public func latestUsableMinutes(sessionID: String) throws -> MinutesVersion? {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes WHERE session_id = ? AND status = 'ready' AND body IS NOT NULL
+        ORDER BY version DESC LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MinutesVersion? in
+            bind(statement, 1, sessionID)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return minutesVersion(from: statement)
+        }
+    }
+
+    /// 按 id 读一版纪要（MC-48）：查看、复制、导出、引用固定同一版，
+    /// 找不到返回 nil，调用方不得回退成最新版冒充选定版。
+    public func minutesVersion(id: String) throws -> MinutesVersion? {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes WHERE id = ? LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MinutesVersion? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return minutesVersion(from: statement)
         }
     }
 
@@ -1024,6 +1370,56 @@ public actor SessionStore {
             bind(statement, 1, url.path)
             try step(statement)
         }
+    }
+
+    /// 恢复验证（MC-20 落库前置、恢复可证）：打开备份库并核对一致性。
+    /// 只读备份文件，不写原库；失败抛错，调用方不得继续按备份覆盖原库。
+    public static func verifyBackup(at url: URL) throws -> BackupVerification {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            throw SessionStoreError.storageUnavailable
+        }
+        let probe = SessionStore(directory: url.deletingLastPathComponent())
+        _ = probe
+        // 备份文件本身就是库文件：用只读连接做 integrity_check，不迁移、不写入。
+        var pointer: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY
+        let status = sqlite3_open_v2(url.path, &pointer, flags, nil)
+        guard status == SQLITE_OK, let db = pointer else {
+            if let pointer { sqlite3_close_v2(pointer) }
+            throw SessionStoreError.openFailed("备份库打不开：code \(status)")
+        }
+        defer { sqlite3_close_v2(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &statement, nil) == SQLITE_OK,
+              let query = statement else {
+            throw SessionStoreError.statementFailed("备份校验语句准备失败")
+        }
+        defer { sqlite3_finalize(query) }
+        var verdict = "ok"
+        if sqlite3_step(query) == SQLITE_ROW, let text = sqlite3_column_text(query, 0) {
+            verdict = String(cString: text)
+        }
+        guard verdict.lowercased() == "ok" else {
+            throw SessionStoreError.statementFailed("备份完整性校验未通过：\(verdict)")
+        }
+        let countSQL = "SELECT COUNT(*) FROM minutes;"
+        var countStatement: OpaquePointer?
+        var minutesCount = 0
+        if sqlite3_prepare_v2(db, countSQL, -1, &countStatement, nil) == SQLITE_OK,
+           let counter = countStatement {
+            defer { sqlite3_finalize(counter) }
+            if sqlite3_step(counter) == SQLITE_ROW {
+                minutesCount = Int(sqlite3_column_int64(counter, 0))
+            }
+        }
+        return BackupVerification(integrity: verdict, minutesCount: minutesCount)
+    }
+
+    /// 备份校验结论：只含计数与结论，不含正文与路径回显。
+    public struct BackupVerification: Hashable, Sendable {
+        public var integrity: String
+        public var minutesCount: Int
     }
 
     // MARK: - 行 → 类型

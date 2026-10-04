@@ -815,6 +815,14 @@ public struct MeetingView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
             }
+            // MC-46 后半句：正在看的这一版若在来源修订之前创建，提示结论可能已过期。
+            if let viewing = selectedMinutesVersion,
+               meeting.minutes.versionsNeedingReview.contains(viewing.id)
+            {
+                Text("这一版创建之后说话人有过修订，结论可能已过期，引用仍指修订前的原文。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
             if let body = displayedMinutesBody, !body.isEmpty {
                 Text(body)
                     .font(SpeechRailDesignTokens.Typography.body)
@@ -839,8 +847,13 @@ public struct MeetingView: View {
     /// 版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
         if let selectedMinutesVersion { return selectedMinutesVersion.body }
-        if let latest = meeting.minutes.versions.first(where: \.isLatest), let body = latest.body {
-            return body
+        // MC-25：最新尝试失败时仍显示最新可用版正文，不把失败版的空正文当成功。
+        if let latest = meeting.minutes.versions.first(where: \.isLatest) {
+            if latest.status == .ready { return latest.body }
+            if let usable = meeting.minutes.versions.filter({ $0.status == .ready }).max(by: { $0.version < $1.version }) {
+                return usable.body
+            }
+            return latest.body
         }
         return meeting.minutes.latestBody
     }
@@ -929,7 +942,7 @@ public struct MeetingView: View {
             resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
         )
         if reviewRecord?.id == id {
-            reviewMinutes = try? await session.latestMinutes(sessionID: id)
+            reviewMinutes = try? await session.latestUsableMinutes(sessionID: id)
             selectedMinutesVersionID = nil
             postTab = .minutes
             return
@@ -965,11 +978,22 @@ public struct MeetingView: View {
     /// 此时纪要还没生成——把它拼进去只会得到一个空章节，那正是"先导出转录"要避免的事。
     private func exportCurrentSession(includeMinutes: Bool, as format: SessionExportFormat) {
         guard let id = pageSessionID else { return }
+        // MC-48：导出固定正在看的那一版；没选旧版时才用最新版。
+        let pinnedMinutesID = selectedMinutesVersionID
         Task {
             guard let record = (try? await session.record(id: id)) ?? nil else { return }
             let rows = (try? await session.lines(sessionID: id)) ?? []
             let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
-            let minutes = includeMinutes ? (try? await session.latestMinutes(sessionID: id)) : nil
+            let minutes: MinutesVersion? = if includeMinutes {
+                if let pinnedMinutesID {
+                    try? await session.minutesVersion(id: pinnedMinutesID)
+                } else {
+                    // MC-25：没选旧版时导最新可用版；最新尝试失败不带空正文。
+                    try? await session.latestUsableMinutes(sessionID: id)
+                }
+            } else {
+                nil
+            }
             SessionExportPanel.write(
                 SessionExportPayload(
                     record: record,
@@ -993,7 +1017,8 @@ public struct MeetingView: View {
         reviewRecord = record
         reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        reviewMinutes = try? await session.latestMinutes(sessionID: summary.id)
+        // MC-25：回看读最新可用版；最新尝试失败时不拿失败版的空正文遮旧版。
+        reviewMinutes = try? await session.latestUsableMinutes(sessionID: summary.id)
         selectedMinutesVersionID = nil
     }
 
@@ -1209,6 +1234,10 @@ public struct MeetingView: View {
                             Text(version.isLatest ? "最新 · 第 \(version.version) 版" : "第 \(version.version) 版")
                                 .font(SpeechRailDesignTokens.Typography.callout)
                             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
+                            if meeting.minutes.versionsNeedingReview.contains(version.id) {
+                                StatusPill(tone: .attention, label: "需复核")
+                            }
                             StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
                         }
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)

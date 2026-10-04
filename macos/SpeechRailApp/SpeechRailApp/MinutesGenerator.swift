@@ -48,6 +48,17 @@ public struct MinutesDocument: Codable, Hashable, Sendable {
         case confidenceNotes = "confidence_notes"
     }
 
+    /// 测试与解析共用的解码入口：成功返回渲染后的 Markdown，失败返回 nil。
+    /// 生产调用走 `MinutesOutcome`，不得绕过它直接把原文标成成功。
+    static func markdownForTestOnly(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let document = try? JSONDecoder().decode(MinutesDocument.self, from: data)
+        else { return nil }
+        return document.markdown
+    }
+
     /// 渲染成 Markdown。库里存的就是这一段（界面直接显示，导出也用它）。
     public var markdown: String {
         var out = "# \(title.isEmpty ? "会议纪要" : title)\n\n"
@@ -154,6 +165,9 @@ public final class MinutesGenerator {
     public private(set) var state: State = .idle
     public private(set) var versions: [MinutesVersion] = []
     public private(set) var latestBody: String?
+    /// 需复核的纪要版本 id（MC-46 后半句）：来源修订晚于纪要创建。
+    /// `reload` 时随版本列表一起刷新；纯读判断，不写库。
+    public private(set) var versionsNeedingReview: Set<String> = []
     /// 最近一次整理用的服务端响应 id（诊断用；它不是用户内容）。
     public private(set) var lastResponseID: String?
     /// 这一次失败是不是**配置问题**（没填模型 / 地址不对 / 端点没有 Responses API）。
@@ -217,17 +231,25 @@ public final class MinutesGenerator {
                 state = .failed("这一场没有可整理的正文。")
                 return
             }
+            // MC-43/MC-35/MC-36：快照输入 = 转录终稿 + 已校验的用户补充。
+            // 未逐字命中的引文整条丢弃，不进入 prompt。
+            let supplements = Self.userSupplements(
+                exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: sessionID)
+            )
             version = try await coordinator.enqueueMinutes(
                 sessionID: sessionID,
                 model: configuration.model.isEmpty ? nil : configuration.model,
                 promptChars: transcript.count
             )
             versions = try await coordinator.minutesVersions(sessionID: sessionID)
+            versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
             guard !configuration.isConfigured else {
                 let task = Task { [weak self] in
                     _ = try? await self?.run(
                         version: version,
                         transcript: transcript,
+                        supplements: supplements,
                         resolvedConfiguration: resolvedConfiguration
                     )
                 }
@@ -247,6 +269,7 @@ public final class MinutesGenerator {
             state = .failed(error.localizedDescription)
         }
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
     }
 
     /// 重开 App 之后回收过期租约：`running` 且租约过期的那些行可以被重新认领（§5.8）。
@@ -261,10 +284,68 @@ public final class MinutesGenerator {
     }
 
     public func recoverPending(resolvedConfiguration: ResolvedLLMConfiguration) async {
-        guard let sessionIDs = try? await coordinator.sessionsWithPendingMinutes() else { return }
-        for sessionID in sessionIDs {
-            await generate(sessionID: sessionID, resolvedConfiguration: resolvedConfiguration)
+        // MC-27 收尾：按原 job 身份认领续跑，不新建版本。
+        // generate() 会 enqueue 新版本，这里必须走 pendingMinutesRows + run 原行。
+        guard let pending = try? await coordinator.pendingMinutesRows() else { return }
+        for row in pending {
+            await resume(row: row, resolvedConfiguration: resolvedConfiguration)
         }
+    }
+
+    /// 认领指定的原 job 并续跑：不排新版本，attempt 代际由 claim 推进（MC-27）。
+    private func resume(
+        row: MinutesVersion,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async {
+        guard inFlight == nil else { return }
+        inFlight = row.sessionID
+        defer { inFlight = nil }
+        state = .queued
+        failedOnSetup = false
+        do {
+            let lines = try await coordinator.lines(sessionID: row.sessionID)
+            let names = (try? await coordinator.speakerNames(sessionID: row.sessionID)) ?? [:]
+            let transcript = Self.render(lines: lines, names: names)
+            guard !transcript.isEmpty else {
+                state = .failed("这一场没有可整理的正文。")
+                return
+            }
+            // MC-43/MC-35/MC-36：恢复续跑同样走快照输入，已校验的用户补充才带入。
+            let supplements = Self.userSupplements(
+                exchanges: (try? await coordinator.innerOSExchanges(sessionID: row.sessionID)) ?? [],
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: row.sessionID)
+            )
+            versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
+            versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
+            let configuration = resolvedConfiguration.configuration
+            guard configuration.isConfigured else {
+                // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
+                _ = try? await coordinator.failMinutes(
+                    minutesID: row.id,
+                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
+                )
+                failedOnSetup = true
+                state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
+                versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
+                return
+            }
+            let task = Task { [weak self] in
+                _ = try? await self?.run(
+                    version: row,
+                    transcript: transcript,
+                    supplements: supplements,
+                    resolvedConfiguration: resolvedConfiguration
+                )
+            }
+            runTask = task
+            await task.value
+            runTask = nil
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+        versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
     }
 
     /// 「停止整理」：取消在飞的那一次。**转录不受影响**——它早就封存好了，
@@ -284,20 +365,68 @@ public final class MinutesGenerator {
     /// 读库刷新（界面切换版本、重新打开这一场时调）。
     public func reload(sessionID: String) async {
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
         let latest = try? await coordinator.latestMinutes(sessionID: sessionID)
-        latestBody = latest?.body
         switch latest?.status {
-        case .ready: state = .ready
-        case .running: state = .running
-        case .queued: state = .queued
-        case .failed: state = .failed(latest?.failureReason ?? "没有可读的原因")
-        default: state = .idle
+        case .ready:
+            latestBody = latest?.body
+            state = .ready
+        case .running:
+            latestBody = latest?.body
+            state = .running
+        case .queued:
+            latestBody = latest?.body
+            state = .queued
+        case .failed:
+            // MC-25：新尝试失败不丢旧版正文；状态仍如实报失败，不伪装成功。
+            let usable = try? await coordinator.latestUsableMinutes(sessionID: sessionID)
+            latestBody = usable?.body
+            state = .failed(latest?.failureReason ?? "没有可读的原因")
+        default:
+            latestBody = nil
+            state = .idle
         }
+    }
+
+    /// 需复核的纪要版本 id（MC-46 后半句）：任一说话人修订事件晚于纪要创建时间。
+    /// 纯读判断，不写库；修订查询失败时返回空集，不误标复核。
+    /// 比较逻辑在 Domain 层（`MinutesReview`），此处只组装库里读到的数据。
+    static func reviewIDs(coordinator: SessionCoordinator, sessionID: String) async -> Set<String> {
+        guard let revisions = try? await coordinator.speakerRevisions(sessionID: sessionID),
+              !revisions.isEmpty
+        else { return [] }
+        let versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
+        return MinutesReview.reviewIDs(
+            versions: versions.map { (id: $0.id, createdAt: $0.createdAt) },
+            revisions: revisions.map(\.createdAt)
+        )
+    }
+
+    /// 已校验的用户补充 id：问答被显式选进纪要、且其全部引文逐字命中所指转录行。
+    /// 任一条引文未通过即整条丢弃，不部分带入（MC-35/MC-36）。
+    /// 纯读校验，不写库。
+    static func verifiedSupplementIDs(
+        coordinator: SessionCoordinator,
+        sessionID: String
+    ) async -> Set<String> {
+        guard let exchanges = try? await coordinator.innerOSExchanges(sessionID: sessionID) else {
+            return []
+        }
+        var verified: Set<String> = []
+        for exchange in exchanges where exchange.inMinutes {
+            guard let checks = try? await coordinator.verifyEvidenceQuotes(exchangeID: exchange.id),
+                  !checks.isEmpty,
+                  checks.allSatisfy(\.verified)
+            else { continue }
+            verified.insert(exchange.id)
+        }
+        return verified
     }
 
     private func run(
         version: MinutesVersion,
         transcript: String,
+        supplements: String = "",
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
@@ -308,7 +437,7 @@ public final class MinutesGenerator {
         do {
             let responseID = try await provider.startBackground(
                 configuration: configuration,
-                messages: Self.prompt(transcript: transcript),
+                messages: Self.prompt(transcript: transcript, supplements: supplements),
                 apiKey: key,
                 maxOutputTokens: 4_000,
                 textFormat: MinutesDocument.jsonSchema
@@ -319,22 +448,41 @@ public final class MinutesGenerator {
                 apiKey: key,
                 responseID: responseID
             )
-            let body = Self.markdown(from: text)
-            try await coordinator.finishMinutes(
-                minutesID: claimed.id,
-                body: body,
-                model: configuration.model.isEmpty ? nil : configuration.model
-            )
-            latestBody = body
-            failedOnSetup = false
-            state = .ready
+            switch Self.outcome(from: text) {
+            case .ready(let body):
+                // MC-29：凭认领代际提交；行已被新 owner 接管时不改写、不谎报成功。
+                let committed = (try? await coordinator.finishMinutesIfOwner(
+                    minutesID: claimed.id,
+                    expectedAttempts: claimed.attempts,
+                    body: body,
+                    model: configuration.model.isEmpty ? nil : configuration.model
+                )) ?? false
+                guard committed else {
+                    versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
+                    versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: version.sessionID)
+                    state = .failed("这一版已被新的整理任务接管，旧结果没有覆盖。")
+                    return
+                }
+                latestBody = body
+                failedOnSetup = false
+                state = .ready
+            case .failed(let reason):
+                // MC-33/MC-34：空输出与结构失败保留候选文本但记成失败，不发布成功。
+                _ = try? await coordinator.failMinutesIfOwner(
+                    minutesID: claimed.id, expectedAttempts: claimed.attempts, reason: reason
+                )
+                failedOnSetup = false
+                state = .failed(reason)
+            }
         } catch {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
             let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
             let reason = cancelled
                 ? "你停下了这一次整理。文字记录已经存好，可以重新生成。"
                 : Self.readableReason(for: error)
-            try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
+            _ = try? await coordinator.failMinutesIfOwner(
+                minutesID: claimed.id, expectedAttempts: claimed.attempts, reason: reason
+            )
             // 地址写错、服务没有 Responses API 这类失败，按「重新生成」只会再撞一次；
             // 它们和「没填模型」是同一类下一步：去设置里改配置。
             if let llm = error as? LLMError {
@@ -349,19 +497,44 @@ public final class MinutesGenerator {
         }
     }
 
-    /// Prompt。两条硬要求：**只依据转录**、**不知道就写不知道**（与内心 OS 同一条规矩）。
-    static func prompt(transcript: String) -> [LLMMessage] {
-        [
+    /// 快照输入里的用户补充（MC-43）：组装走 Domain 层纯逻辑，
+    /// 只含 `in_minutes = 1` 且全部引文已校验的问答（MC-35/MC-36），
+    /// 逐条标“用户选择的 AI 补充”，不升级成会议事实。
+    static func userSupplements(
+        exchanges: [InnerOSExchange],
+        verifiedExchangeIDs: Set<String>
+    ) -> String {
+        MinutesSupplements.render(
+            questions: exchanges.map {
+                (id: $0.id, question: $0.question, answer: $0.answerText, inMinutes: $0.inMinutes)
+            },
+            verifiedIDs: verifiedExchangeIDs
+        )
+    }
+
+    /// Prompt。三条硬要求：**只依据转录与已校验的用户补充**、
+    /// **不知道就写不知道**（与内心 OS 同一条规矩）、**用户补充不升级成会议事实**。
+    static func prompt(transcript: String, supplements: String = "") -> [LLMMessage] {
+        let userText: String
+        if supplements.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            userText = "下面是这一场的转录：\n\n\(transcript)"
+        } else {
+            userText = "下面是这一场的转录：\n\n\(transcript)"
+                + "\n\n下面是用户明确选择写进纪要的私密问答补充（标为用户选择的 AI 补充，"
+                + "不得当成会议现场的发言或决定）：\n\n\(supplements)"
+        }
+        return [
             LLMMessage(
                 role: .developer,
-                text: "你负责把一段会议转录整理成结构化纪要。只依据转录里的内容，"
+                text: "你负责把一段会议转录整理成结构化纪要。只依据转录与已校验的用户补充里的内容，"
                     + "不要补你没看到的事；转录里没提到的决定、待办、负责人一律不要写。"
+                    + "用户补充只是用户选择的 AI 参考，不得写成参会人的发言、决定或待办归属。"
                     + "说话人用转录里已有的名字；同一个名字不要改写成别的称呼。"
                     + "待办的 due 没有依据时留空字符串。"
                     + "confidence_notes 写这份纪要里最不确定的一两处；如果没什么不确定的就留空。",
                 cacheBreakpoint: true
             ),
-            LLMMessage(role: .user, text: "下面是这一场的转录：\n\n\(transcript)")
+            LLMMessage(role: .user, text: userText),
         ]
     }
 
@@ -379,18 +552,15 @@ public final class MinutesGenerator {
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
-    /// 结构化正文 → Markdown。模型没按 schema 回（端点不支持 `json_schema`）时，
-    /// **不假装成功**：把纯文本原样收下，并说明"这一版没有按结构返回"。
+    static func outcome(from text: String) -> MinutesOutcome {
+        MinutesOutcome.parsing(text: text, markdown: { MinutesDocument.markdownForTestOnly($0) })
+    }
+
     static func markdown(from text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8),
-              let document = try? JSONDecoder().decode(MinutesDocument.self, from: data)
-        else {
-            return trimmed.isEmpty
-                ? "这一版没有拿到内容。可以重新生成一次。"
-                : trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回）。\n"
+        switch outcome(from: text) {
+        case .ready(let body): return body
+        case .failed(let reason): return reason
         }
-        return document.markdown
     }
 
     private static func readableReason(for error: Error) -> String {

@@ -57,7 +57,6 @@ let package = Package(
                 "SettingsAssistantPane.swift",
                 "SettingsComponents.swift",
                 "SettingsView.swift",
-                "SessionExporter.swift",
                 "SessionSurfaceViews.swift",
                 "SurfaceHeaderView.swift",
             ],
@@ -139,6 +138,7 @@ let package = Package(
                 "AssistantReplayEvaluator.swift",
                 "SessionStore.swift",
                 "SessionCoordinator.swift",
+                "SessionExporter.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

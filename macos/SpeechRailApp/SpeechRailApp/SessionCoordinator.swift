@@ -425,6 +425,22 @@ public final class SessionCoordinator {
         phase = .idle
     }
 
+    /// 会议封存结果上报（MC-17、MC-20）：封存必须返回明确结果，不吞失败。
+    /// 成功要求落库且读回为 archived；失败保留调用方的重试/复制出口。
+    @discardableResult
+    public func sealMeeting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
+        do {
+            try await store.finalizeSession(id: id, endReason: reason)
+            if let record = try await store.session(id: id), record.state == .archived {
+                lastFinalizedSessionID = id
+                return .sealed(recordID: id)
+            }
+            return .failed(recordID: id, reason: "封存后读回状态不是已归档")
+        } catch {
+            return .failed(recordID: id, reason: error.localizedDescription)
+        }
+    }
+
     /// 按**明确的 sessionID** 封存一条记录，且不碰当前占用。
     ///
     /// 建档是启动流程里最后一个 await：它落库之后启动可能已经被取消。
@@ -548,8 +564,8 @@ public final class SessionCoordinator {
     // 界面不直接持有 `SessionStore`：那是业务层与持久化之间唯一的缝（§5.1），
     // 从协调器转发一道，改存储时界面不用跟着改。
 
-    public func listSummaries(kind: SessionKind? = nil) async throws -> [SessionSummary] {
-        try await store.listSessions(kind: kind)
+    public func listSummaries(kind: SessionKind? = nil, limit: Int? = nil, offset: Int = 0) async throws -> [SessionSummary] {
+        try await store.listSessions(kind: kind, limit: limit, offset: offset)
     }
 
     public func record(id: String) async throws -> SessionRecord? {
@@ -580,6 +596,16 @@ public final class SessionCoordinator {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)
     }
 
+    /// 来源修订事件透传（MC-46 后半句）：只读 `session_change` 的说话人修订。
+    public func speakerRevisions(sessionID: String) async throws -> [SessionChange] {
+        try await store.speakerRevisions(sessionID: sessionID)
+    }
+
+    /// 旧纪要是否需复核透传（MC-46 后半句）：纯读判断，不写库。
+    public func minutesNeedsReview(minutesID: String) async throws -> Bool {
+        try await store.minutesNeedsReview(minutesID: minutesID)
+    }
+
     /// 一场里的中断区间（记录库详情与导出物都读它）。
     public func interruptions(sessionID: String) async throws -> [SessionInterruption] {
         try await store.interruptions(sessionID: sessionID)
@@ -599,12 +625,22 @@ public final class SessionCoordinator {
         try await store.minutesVersions(sessionID: sessionID)
     }
 
+    /// 按 id 读一版纪要：导出与引用固定选定版（MC-48）。
+    public func minutesVersion(id: String) async throws -> MinutesVersion? {
+        try await store.minutesVersion(id: id)
+    }
+
     public func innerOSExchanges(sessionID: String) async throws -> [InnerOSExchange] {
         try await store.innerOSExchanges(sessionID: sessionID)
     }
 
     public func innerOSEvidence(exchangeID: String) async throws -> [InnerOSEvidence] {
         try await store.innerOSEvidence(exchangeID: exchangeID)
+    }
+
+    /// 引文校验透传（MC-35/MC-36）：纯读，不写库。
+    public func verifyEvidenceQuotes(exchangeID: String) async throws -> [SessionStore.EvidenceQuoteCheck] {
+        try await store.verifyEvidenceQuotes(exchangeID: exchangeID)
     }
 
     public func setInnerOSInMinutes(exchangeID: String, included: Bool) async throws {
@@ -639,6 +675,15 @@ public final class SessionCoordinator {
         evidence: [InnerOSEvidence] = []
     ) async throws -> String {
         try await store.saveInnerOSExchange(exchange, evidence: evidence)
+    }
+
+    /// 问答终态写入透传（MC-41/MC-42）：答案、状态、证据同一事务落库。
+    @discardableResult
+    public func finishInnerOSExchange(
+        _ exchange: InnerOSExchange,
+        evidence: [InnerOSEvidence] = []
+    ) async throws -> String {
+        try await store.finishInnerOSExchange(exchange, evidence: evidence)
     }
 
     /// 落一条音色变更点（「第 N 句起」必须查得回来）。
@@ -704,9 +749,34 @@ public final class SessionCoordinator {
         try await store.failMinutes(minutesID: minutesID, reason: reason)
     }
 
+    /// 带 fencing 代际的完成/失败：旧执行者迟到不得改写新行（MC-29）。
+    @discardableResult
+    public func finishMinutesIfOwner(minutesID: String, expectedAttempts: Int, body: String, model: String?) async throws -> Bool {
+        try await store.finishMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts, body: body, model: model)
+    }
+
+    @discardableResult
+    public func failMinutesIfOwner(minutesID: String, expectedAttempts: Int, reason: String) async throws -> Bool {
+        try await store.failMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts, reason: reason)
+    }
+
     /// 启动时回收那些"排队中或租约已过期"的纪要（§5.8）。
     public func sessionsWithPendingMinutes() async throws -> [String] {
         try await store.sessionsWithPendingMinutes()
+    }
+
+    /// 待恢复的纪要行：调用方按原 job 身份认领，不新建版本（MC-27）。
+    public func pendingMinutesRows() async throws -> [MinutesVersion] {
+        try await store.pendingMinutesRows()
+    }
+
+    /// 跨会议知识检索：转录终稿与已完成纪要，不含私密问答（MC-44、MC-49、MC-52）。
+    public func searchKnowledge(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200
+    ) async throws -> [SessionStore.KnowledgeHit] {
+        try await store.searchKnowledge(query: query, kind: kind, limit: limit)
     }
 
     public func searchLines(
@@ -737,6 +807,11 @@ public final class SessionCoordinator {
     public func latestMinutes(sessionID: String) async throws -> MinutesVersion? {
         let versions = try await store.minutesVersions(sessionID: sessionID)
         return versions.first { $0.isLatest } ?? versions.first
+    }
+
+    /// 最新可用版（MC-25）：已完成且有正文的版本里版本号最大的那一版。
+    public func latestUsableMinutes(sessionID: String) async throws -> MinutesVersion? {
+        try await store.latestUsableMinutes(sessionID: sessionID)
     }
 
     public func removeSession(id: String) async throws {

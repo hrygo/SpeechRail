@@ -279,9 +279,22 @@ public final class MeetingSession {
         await releaseCapture(drain: true)
         phase = .processing
         await coordinator.stopCapture(endingWith: .user)
-        await coordinator.finishProcessing(endReason: .user)
-        phase = .archived
+        // MC-17/MC-20 收尾：封存走上报结果，失败如实留痕并保留重试/复制出口。
         guard let id else { return }
+        let seal = await coordinator.sealMeeting(id: id, reason: .user)
+        switch seal {
+        case .sealed:
+            lastFailure = nil
+            phase = .archived
+        case .failed(_, let reason):
+            // 转录已在库里，封存失败只影响状态不断言丢失：留在 processing，
+            // 界面可重试结束或复制已保存内容，不谎报已归档。
+            lastFailure = "封存没有成功：\(reason)。文字记录仍在库里，可以重试结束或先复制已保存的内容。"
+            return
+        case .skipped:
+            lastFailure = "封存被跳过：记录仍被占用。文字记录仍在库里，可以重试结束。"
+            return
+        }
         // ② 整理：转录已封存，失败也不影响它（§9 第 18 行）。
         let resolvedConfiguration = preferences?().resolvedLLMConfiguration(for: .minutes)
             ?? ResolvedLLMConfiguration(

@@ -170,6 +170,82 @@ public enum MinutesStatus: String, Codable, Sendable {
     }
 }
 
+/// 模型输出的解析结果（MC-33、MC-34）。空输出、拒答、结构错误都不是成功：
+/// 调用方必须把它们记成失败并保留可读原因，不能把占位正文标成 ready。
+/// 纯值类型，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum MinutesOutcome: Equatable, Sendable {
+    case ready(String)
+    case failed(String)
+
+    /// 解析模型原文：`render` 由结构拥有者传入，保持 Domain 层不依赖具体 schema。
+    public static func parsing(text: String, markdown: (String) -> String?) -> MinutesOutcome {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failed("这一版没有拿到内容。可以重新生成一次。")
+        }
+        guard let body = markdown(trimmed) else {
+            return .failed(trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回），尚未按结构校验，不能作为可用纪要。\n")
+        }
+        return .ready(body)
+    }
+}
+
+/// 快照输入里的用户补充组装（MC-43/MC-35/MC-36）。
+/// 只收 `inMinutes` 且全部引文已校验的问答；任一条引文未通过即整条丢弃。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum MinutesSupplements: Sendable {
+    public static func render(
+        questions: [(id: String, question: String, answer: String?, inMinutes: Bool)],
+        verifiedIDs: Set<String>
+    ) -> String {
+        let blocks = questions.compactMap { item -> String? in
+            guard item.inMinutes, verifiedIDs.contains(item.id) else { return nil }
+            let question = item.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let answer = (item.answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !question.isEmpty || !answer.isEmpty else { return nil }
+            var block = "【用户选择的 AI 补充（不是会议原文）】问：\(question)"
+            if !answer.isEmpty { block += "\n答：\(answer)" }
+            return block
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+}
+
+/// 需复核的纪要版本判断（MC-46 后半句）：任一来源修订晚于纪要创建即需复核。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖；`MinutesGenerator.reviewIDs`
+/// 只是把库里的修订事件与版本列表喂给它。
+/// 迟到结果归属判断（MC-45）：库归档以建行时的会话为准，界面状态只写当初那一场。
+/// 纯值逻辑，放在 Domain 层以便 SPM 测试目标直接覆盖。
+public enum LateResultOwnership: Sendable {
+    /// 界面状态能不能写：当前绑定仍是建行那一场时才能写。
+    public static func mayWriteUI(boundSessionID: String?, builtSessionID: String?) -> Bool {
+        boundSessionID == builtSessionID
+    }
+}
+
+public enum MinutesReview: Sendable {
+    public static func needsReview(
+        versionCreatedAt: Date,
+        revisionDates: [Date]
+    ) -> Bool {
+        revisionDates.contains { $0 > versionCreatedAt }
+    }
+
+    public static func reviewIDs(
+        versions: [(id: String, createdAt: Date)],
+        revisions: [Date]
+    ) -> Set<String> {
+        guard !revisions.isEmpty else { return [] }
+        var ids: Set<String> = []
+        for version in versions {
+            if needsReview(versionCreatedAt: version.createdAt, revisionDates: revisions) {
+                ids.insert(version.id)
+            }
+        }
+        return ids
+    }
+}
+
 public enum InnerOSIntent: String, Codable, Sendable {
     case fact
     case analysis
