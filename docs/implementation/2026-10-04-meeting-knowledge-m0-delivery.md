@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.1"
+version: "2.2"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -36,9 +36,9 @@ base: "origin/main @ 607b75a8"
 
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 19 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
- MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 31 个用例，2026-10-04 实测全部通过。
+- `MeetingMinutesVersioningTests` 20 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
+ MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-46 半句（改名不改旧正文）、MC-48、MC-49、MC-52、MC-62。
+- 连同 `AssistantPersistenceTests` 共 32 个用例，2026-10-05 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
 
@@ -65,7 +65,7 @@ base: "origin/main @ 607b75a8"
 - 真实采集、UI 自动化、发布另行授权。
 - 尾句屏障（drain 失败路径）仅静态核验：`releaseCapture(drain:)` 失败记 `lastFailure`、
   分人超时标降级，封存继续走上报结果；真实链路演练未做，另行授权。
-- MC-46 来源修订提示复核未做：需来源 revision 的 schema 迁移（纪要行存映射指纹），
-  按本分支无迁移约束未启动；改名后旧纪要仍可读，但无“需复核”提示。
+- MC-46 部分达成：改名只写映射表、旧纪要正文原样可查已有回归；“标需复核 / 引用指旧 revision”
+  需来源 revision 的 schema 迁移，按本分支无迁移约束未启动。
 - 会前准备（MC-04）仅静态核验：来源默认麦克风、偏好恢复已选 App，
   检查失败重试不重置用户已选来源；输入检查 UI 行为未做自动化走查，另行授权。

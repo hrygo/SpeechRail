@@ -223,6 +223,20 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertFalse(hits.contains { $0.minutesID != nil }, "失败纪要不得进入知识检索")
     }
 
+    /// MC-46 半句（无迁移可验证部分）：改名只写映射表，旧纪要正文原样可查，不被改写。
+    func testRenameKeepsOldMinutesBodyReadable() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
+        let pinned = try await store.minutesVersion(id: first.id)
+        XCTAssertEqual(pinned?.body, "# 第一版", "改名不得改写旧纪要正文，原版必须可查")
+        let names = try await store.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "张三")
+    }
+
     /// 恢复可证：备份到临时新库后可核对文档与版本；校验失败不损坏原库。
     func testBackupRestoreKeepsDocumentsAndVersions() async throws {
         let store = try requireStore()
