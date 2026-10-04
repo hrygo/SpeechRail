@@ -435,6 +435,31 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty, "转录行随会话级联删除")
     }
 
+    /// 验收 5（恢复失败不损原库）：损坏的备份校验失败，且原库仍可读写；
+    /// 调用方按“校验失败不得覆盖原库”处理，这里钉住失败侧语义。
+    func testCorruptBackupFailsWithoutTouchingOriginal() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "原库正文仍在", source: .microphone, status: .final)
+        )
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-corrupt-\(UUID().uuidString).sqlite3")
+        try "not-a-database".write(to: corruptURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: corruptURL) }
+        do {
+            _ = try SessionStore.verifyBackup(at: corruptURL)
+            XCTFail("损坏的备份必须校验失败，不能当作可用恢复源")
+        } catch {
+            // 预期失败：调用方不得继续用它覆盖原库。
+        }
+        // 原库不受校验失败影响：可读也可写。
+        let rows = try await store.lines(sessionID: sessionID)
+        XCTAssertTrue(rows.contains { $0.text.contains("原库正文仍在") })
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        XCTAssertEqual(minutes.version, 1)
+    }
+
     /// MC-41/MC-42：问答建行一次，终态走条件 UPDATE；答案、状态、证据同一事务，
     /// 重复终态写入抛错不吞错；终态后同 ID 再建行抛主键冲突。
     func testInnerOSExchangeFinishIsTransactional() async throws {
