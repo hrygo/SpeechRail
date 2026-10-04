@@ -458,6 +458,42 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(try store.list().first?.title, renamed.title)
     }
 
+    /// 改名必须按标识符定位到**那一条**，而不是按它在索引里的位置。
+    ///
+    /// 此前所有改名用例的作品库里都只有一件作品，于是「取第一条」与
+    /// 「取 ID 匹配的那条」结果必然相同——把
+    /// `works.firstIndex(where: { $0.id == work.id })` 改成永远取第 0 条，
+    /// 全量 535 条测试仍然全绿。库里只有一件时，第 0 条永远是正确答案。
+    func testRenamingOneWorkLeavesTheOtherWorksUntouched() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let first = makeWork(id: "work_rename_first", script: "第一件文稿")
+        let second = makeWork(id: "work_rename_second", script: "第二件文稿")
+        let third = makeWork(id: "work_rename_third", script: "第三件文稿")
+        try store.save(first, audioData: Data([1, 2, 3, 4]))
+        try store.save(second, audioData: Data([5, 6, 7, 8]))
+        try store.save(third, audioData: Data([9, 10, 11, 12]))
+
+        // 改中间那一件：按位置取的实现会错改第一件。
+        let renamed = try store.rename(second, title: "只改这一件")
+
+        XCTAssertEqual(renamed.id, second.id, "改名结果必须是被点中的那一件")
+        XCTAssertEqual(renamed.title, "只改这一件")
+        let titlesByID = Dictionary(
+            uniqueKeysWithValues: try store.list().map { ($0.id, $0.title) }
+        )
+        XCTAssertEqual(
+            titlesByID["work_rename_first"],
+            first.title,
+            "改第二件不得动第一件"
+        )
+        XCTAssertEqual(titlesByID["work_rename_second"], "只改这一件")
+        XCTAssertEqual(
+            titlesByID["work_rename_third"],
+            third.title,
+            "改第二件不得动第三件"
+        )
+    }
+
     /// 没有配方摘要的作品不提供「段落返修」入口。
     ///
     /// 段落返修的前提是「这次重做与原作品是同一制作条件」，只有配方摘要能证明它。
@@ -957,6 +993,45 @@ final class CreativeWorkStoreTests: XCTestCase {
         try store.delete(work)
         XCTAssertNoThrow(try store.delete(work))
         XCTAssertTrue(try store.list().isEmpty)
+    }
+
+    /// 删除必须按标识符定位到**那一条**，而不是按它在索引里的位置。
+    ///
+    /// 与改名同一处疏漏，且后果更重：`delete` 找不到时是**静默返回**
+    /// （`else { return }`，不是抛错），所以「删错」不会有任何提示——
+    /// 用户点的是第二件，消失的是第一件。库里只有一件时，第 0 条永远
+    /// 是正确答案，于是既有删除用例全都测不到这一条。
+    func testDeletingOneWorkLeavesTheOtherWorksAndTheirAudioIntact() throws {
+        let store = CreativeWorkStore(directory: directory)
+        let first = makeWork(id: "work_delete_first", script: "第一件文稿")
+        let second = makeWork(id: "work_delete_second", script: "第二件文稿")
+        let third = makeWork(id: "work_delete_third", script: "第三件文稿")
+        try store.save(first, audioData: Data([1, 2, 3, 4]))
+        try store.save(second, audioData: Data([5, 6, 7, 8]))
+        try store.save(third, audioData: Data([9, 10, 11, 12]))
+
+        // 删中间那一件：按位置取的实现会删掉第一件。
+        try store.delete(second)
+
+        let remaining = try store.list()
+        XCTAssertEqual(
+            remaining.map(\.id),
+            [first.id, third.id],
+            "只能删掉被点中的那一件"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(second.audioFileName).path
+            ),
+            "被删作品的音频必须一并消失"
+        )
+        // 幸存的两件连音频都要在：按位置取的实现会把第一件的音频也移走。
+        for survivor in [first, third] {
+            XCTAssertNoThrow(
+                try store.loadAudio(for: survivor),
+                "\(survivor.id) 的音频不得被误删"
+            )
+        }
     }
 
     func testASavedAudioSymlinkIsNeverFollowedAsUserAudio() throws {
