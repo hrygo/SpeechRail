@@ -403,6 +403,13 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         try await store.finishMinutes(minutesID: minutes.id, body: "# 待删除纪要", model: nil)
         var hits = try await store.searchKnowledge(query: "待删除")
         XCTAssertFalse(hits.isEmpty)
+        // 先埋一条私密问答及其引文：完整删除不得暗留引文全文（MA-18）。
+        _ = try await store.saveInnerOSExchange(
+            InnerOSExchange(id: "inner-del-1", sessionID: sessionID, askedAt: Date(), question: "待删除预算多少？", status: .ready),
+            evidence: [
+                InnerOSEvidence(id: "ev-del-1", quote: "待删除预算"),
+            ]
+        )
         try await store.removeSession(id: sessionID)
         hits = try await store.searchKnowledge(query: "待删除")
         XCTAssertTrue(hits.isEmpty, "完整删除后检索不得带回已删内容")
@@ -410,6 +417,13 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(versions.isEmpty, "纪要行随会话级联删除")
         let pending = try await store.pendingMinutesRows()
         XCTAssertTrue(pending.isEmpty, "旧任务不得在删除后复活")
+        // 问答与引文行随会话级联删除，不暗留全文。
+        let exchanges = try await store.innerOSExchanges(sessionID: sessionID)
+        XCTAssertTrue(exchanges.isEmpty, "问答行随会话级联删除")
+        let evidence = try await store.innerOSEvidence(exchangeID: "inner-del-1")
+        XCTAssertTrue(evidence.isEmpty, "引文行随问答级联删除，不暗留全文")
+        let rows = try await store.lines(sessionID: sessionID)
+        XCTAssertTrue(rows.isEmpty, "转录行随会话级联删除")
     }
 
     /// MC-35/MC-36：引文必须逐字出自所指转录行；多次出现无法定位也判未验证。
