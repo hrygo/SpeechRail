@@ -332,6 +332,8 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         default:
             XCTFail("未知记录的封存必须如实失败，不能报成功")
         }
+        // 失败封存不得发布成功 ID：此前成功封存的 ID 保持不变。
+        XCTAssertEqual(coordinator.lastFinalizedSessionID, sessionID)
     }
 
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
