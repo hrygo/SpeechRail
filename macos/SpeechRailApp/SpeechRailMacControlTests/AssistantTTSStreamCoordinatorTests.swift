@@ -240,6 +240,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         configuration.cancellationTimeout = .milliseconds(20)
         let (coordinator, _) = makeHarness(configuration: configuration)
         let appendGate = Gate()
+        defer { appendGate.release() }
         coordinator.sendAppend = { _, _ in await appendGate.enter() }
         try await coordinator.begin(generation: 83, requestID: "req-outbound")
 
@@ -289,6 +290,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         configuration.cancellationTimeout = .milliseconds(20)
         let (coordinator, _) = makeHarness(configuration: configuration)
         let cancelGate = Gate()
+        defer { cancelGate.release() }
         coordinator.sendCancel = { await cancelGate.enter() }
         try await coordinator.begin(generation: 85, requestID: "req-cancel-send")
 
