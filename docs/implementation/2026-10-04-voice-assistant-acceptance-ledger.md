@@ -55,7 +55,7 @@ date: 2026-10-04
 | VA-15 记录闭环 | done（D） | A47/A49/A50（D 部分）/A51 通过；A50 用无 schema 变更的种子续接实现，schema v2 仍记 deferred |
 | VA-16 观测 | done（D） | A52（D 部分）/A53/A54 通过 |
 | VA-17b 完整资产 | done（D+资产） | D 账本齐；U/REAL 文档已建（均 not_run）；`AssistantReplayEvaluator` + `assistant-replay` 已建并回归；A59/A60 真实长时仍记 R not_run |
-| VA-18 交付门禁 | partial | 代码/D/账本齐；Package 已补 SPM（含 assistant-replay），Xcode membership 未补（手工改 pbxproj 风险高，留待 Xcode 内操作）；文档已部分同步（0.6.1 续接重播试听）；安装/性能对照未做 |
+| VA-18 交付门禁 | partial | 代码/D/账本齐；Package 已补 SPM（含 assistant-replay）；Xcode membership 已由脚本补齐 19 文件（提交 `dd74b444`，只做加法，覆盖率脚本 OK + 本地打包成功，待用户在 Xcode 内复核显示）；文档已部分同步（0.6.1 续接重播试听）；安装/性能对照未做；U/R 仍 not_run |
 
 ## A01～A60 状态矩阵
 
@@ -125,11 +125,10 @@ date: 2026-10-04
 ## 未验证事项与风险
 
 - schema v2（assistant_reply_state / playback_invocation / continuation / memory_provenance 表）未实施；A50 续接用内存种子实现，不依赖迁移。不得把“无 v2”等同“续接完成”的全部语义。
-- Xcode project membership 未补：5 个新生产策略文件与新增测试文件仅进 SPM；Xcode 侧仍缺。pbxproj 手工合并已回退，需在 Xcode 内补成员后复验。
-- 缺口明细（pbxproj 0 命中，需 Xcode 内补）：生产 6 个（AssistantComposerPolicy/AssistantContextPolicy/AssistantObservability/AssistantPresentation/AssistantReplayEvaluator/AssistantTurnPolicy）+ runner（AssistantReplayTool/main.swift）+ 新增测试 13 个；Package.swift 已声明 `assistant-replay` target，仅 SPM 可跑。
+- Xcode project membership 已补（提交 `dd74b444`，加法脚本，备份 `/tmp/pbxproj.bak.*`，新 ID 全部分配空位，diff 确认只追加未删除；`check_macos_test_target_coverage.py OK` + 本地 `xcodebuild build BUILD SUCCEEDED` + CI run 37190082198 全绿）。用户可在 Xcode 内复核 19 文件已在对应 target；runner（AssistantReplayTool/main.swift）无 Xcode target，CI 不编它，不计入。
 - U（A01/A02/A16～A19/A21/A24～A32/A42/A43/A46/A47/A49/A51）与 R（A33/A34/A38/A40/A52/A56～A60）全部 not_run；不得用 D 结果宣称通过。
 - 性能/声学/安装/迁移均未执行；`SessionStore.schemaVersion` 仍为 1，无真实数据操作。
-- 改动未提交：交付为未提交 diff；提交、推送、PR、发布均未授权执行。
+- PR #213 已推送 5 个提交（`25a04f94`/`dd74b444`/`c95af5c2`/`894f71b2` + 本次账本更新待提交）；不合并，等 U/R 授权与执行。
 
 ## 回退方式
 
