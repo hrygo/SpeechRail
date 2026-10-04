@@ -996,6 +996,20 @@ public actor SessionStore {
         }
     }
 
+    /// 按 id 读一版纪要（MC-48）：查看、复制、导出、引用固定同一版，
+    /// 找不到返回 nil，调用方不得回退成最新版冒充选定版。
+    public func minutesVersion(id: String) throws -> MinutesVersion? {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        FROM minutes WHERE id = ? LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MinutesVersion? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return minutesVersion(from: statement)
+        }
+    }
+
     public func minutesVersions(sessionID: String) throws -> [MinutesVersion] {
         let sql = """
         SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at

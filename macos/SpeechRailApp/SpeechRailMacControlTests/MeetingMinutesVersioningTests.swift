@@ -181,6 +181,20 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(versions.first?.body, "# 恢复完成")
     }
 
+    /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
+    func testMinutesVersionReadByIDPinsSelection() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        let pinned = try await store.minutesVersion(id: first.id)
+        XCTAssertEqual(pinned?.body, "# 第一版")
+        XCTAssertEqual(pinned?.version, 1)
+        let missing = try await store.minutesVersion(id: "no-such-version")
+        XCTAssertNil(missing, "未知版本必须返回 nil，不能回退成最新版")
+    }
+
     /// MC-48：选定版本导出只认调用方传入的版本，不认“最新/最大版本”。
     func testSelectedVersionIsReturnedAsSelected() async throws {
         let store = try requireStore()

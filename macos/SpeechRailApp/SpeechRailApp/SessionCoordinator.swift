@@ -599,6 +599,11 @@ public final class SessionCoordinator {
         try await store.minutesVersions(sessionID: sessionID)
     }
 
+    /// 按 id 读一版纪要：导出与引用固定选定版（MC-48）。
+    public func minutesVersion(id: String) async throws -> MinutesVersion? {
+        try await store.minutesVersion(id: id)
+    }
+
     public func innerOSExchanges(sessionID: String) async throws -> [InnerOSExchange] {
         try await store.innerOSExchanges(sessionID: sessionID)
     }

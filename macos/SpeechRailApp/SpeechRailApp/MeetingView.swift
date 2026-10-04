@@ -970,11 +970,21 @@ public struct MeetingView: View {
     /// 此时纪要还没生成——把它拼进去只会得到一个空章节，那正是"先导出转录"要避免的事。
     private func exportCurrentSession(includeMinutes: Bool, as format: SessionExportFormat) {
         guard let id = pageSessionID else { return }
+        // MC-48：导出固定正在看的那一版；没选旧版时才用最新版。
+        let pinnedMinutesID = selectedMinutesVersionID
         Task {
             guard let record = (try? await session.record(id: id)) ?? nil else { return }
             let rows = (try? await session.lines(sessionID: id)) ?? []
             let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
-            let minutes = includeMinutes ? (try? await session.latestMinutes(sessionID: id)) : nil
+            let minutes: MinutesVersion? = if includeMinutes {
+                if let pinnedMinutesID {
+                    try? await session.minutesVersion(id: pinnedMinutesID)
+                } else {
+                    try? await session.latestMinutes(sessionID: id)
+                }
+            } else {
+                nil
+            }
             SessionExportPanel.write(
                 SessionExportPayload(
                     record: record,
