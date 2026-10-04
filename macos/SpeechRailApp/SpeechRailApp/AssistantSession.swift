@@ -1463,21 +1463,57 @@ public final class AssistantSession {
             guard let recordID = target.recordID ?? sessionID else { return .noConversation }
             // 先收尾本场回复与本地资源，再封存自己的记录。
             await endTextOnlyResources()
-            await coordinator.sealSession(id: recordID, reason: .user)
-            // 覆盖 sealSession 的 activeSessionID == id 保护：纯文字记录本就不在 occupancy 里。
-            // sealSession 已按 ID 封存，此处仅发布界面落地结果。
-            lastFinalizedSessionID = recordID
+            // VA-03 真实结果封存：失败保留 pendingSeal 与原因，
+            // 界面走重试/复制出口，不发布虚假的“已封存”。
+            let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
+            switch seal {
+            case .sealed:
+                pendingSealRecordID = nil
+                pendingSealReason = nil
+            case .failed(let failedID, let reason):
+                lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
+                pendingSealRecordID = failedID ?? recordID
+                pendingSealReason = reason
+            case .skipped:
+                // 纯文字记录本就不在 occupancy 里：跳过只表示无需再封，
+                // 本场仍收尾为 idle，不发布虚假的已封存 ID。
+                pendingSealRecordID = nil
+                pendingSealReason = nil
+            }
+            // 只有真实 sealed 才发布界面落地结果；failed/skipped 不伪造已封存。
+            if case .sealed = seal {
+                lastFinalizedSessionID = recordID
+            }
             resetToIdleKeepingTurns()
-            return .ended(recordID: recordID)
+            // failed/skipped 不再冒充 ended：调用方与 View 按封存真实结果落地。
+            if case .sealed = seal {
+                return .ended(recordID: recordID)
+            }
+            return .noConversation
         }
         // 无占用、无本场记录：明确 no-op。
         if coordinator.occupancy == nil {
             guard let recordID = target.recordID ?? sessionID else { return .noConversation }
             await endTextOnlyResources()
-            await coordinator.sealSession(id: recordID, reason: .user)
-            lastFinalizedSessionID = recordID
+            let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
+            switch seal {
+            case .sealed:
+                pendingSealRecordID = nil
+                pendingSealReason = nil
+                lastFinalizedSessionID = recordID
+            case .failed(let failedID, let reason):
+                lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
+                pendingSealRecordID = failedID ?? recordID
+                pendingSealReason = reason
+            case .skipped:
+                pendingSealRecordID = nil
+                pendingSealReason = nil
+            }
             resetToIdleKeepingTurns()
-            return .ended(recordID: recordID)
+            if case .sealed = seal {
+                return .ended(recordID: recordID)
+            }
+            return .noConversation
         }
         // 语音：本场必须持有助手占用，否则是旧目标或他人会话。
         guard coordinator.occupancy?.kind == .assistant else { return .mismatch }
