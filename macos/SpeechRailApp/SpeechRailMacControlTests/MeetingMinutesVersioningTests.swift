@@ -204,6 +204,25 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(empty.isEmpty, "空查询不得全库扫描")
     }
 
+    /// 知识可用（验收 4）：失败纪要与 partial 行不进入知识检索，只收终稿与已完成版。
+    func testSearchKnowledgeSkipsFailedMinutesAndPartials() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "可见终稿回滚方案", source: .microphone, status: .final)
+        )
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "未定稿回滚方案草稿", source: .microphone, status: .partial)
+        )
+        let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
+        let hits = try await store.searchKnowledge(query: "回滚方案")
+        XCTAssertTrue(hits.contains { $0.lineID != nil }, "终稿转录应该被检索到")
+        XCTAssertFalse(hits.contains { $0.excerpt.contains("草稿") }, "partial 行不得进入知识检索")
+        XCTAssertFalse(hits.contains { $0.minutesID != nil }, "失败纪要不得进入知识检索")
+    }
+
     /// 恢复可证：备份到临时新库后可核对文档与版本；校验失败不损坏原库。
     func testBackupRestoreKeepsDocumentsAndVersions() async throws {
         let store = try requireStore()
