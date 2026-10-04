@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
 status: active
-version: "2.2"
+version: "2.3"
 date: 2026-10-04
 branch: "codex/meeting-knowledge-m0"
 base: "origin/main @ 607b75a8"
@@ -13,7 +13,7 @@ base: "origin/main @ 607b75a8"
 
 本分支只动纪要版本链、结束封存上报与知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路。
 
-分支共 23 个提交（含 4 个交付文档版本提交）：排队指针原子化、空输出与结构失败记失败、
+分支共 25 个提交（含 4 个交付文档版本提交）：排队指针原子化、空输出与结构失败记失败、
 认领代际、恢复认领原任务、导出固定选定版本、知识检索、私密边界、备份校验、引文校验、
 删除语义回归，外加会议库分页、封存上报、恢复认领、结束走上报、快照补充、正文落库、
 断线恢复、封存隔离、行动项恢复、检索隔离等收尾回归。
@@ -36,11 +36,23 @@ base: "origin/main @ 607b75a8"
 
 ## 回归证据
 
-- `MeetingMinutesVersioningTests` 20 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
- MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-46 半句（改名不改旧正文）、MC-48、MC-49、MC-52、MC-62。
-- 连同 `AssistantPersistenceTests` 共 32 个用例，2026-10-05 实测全部通过。
+- `MeetingMinutesVersioningTests` 21 个用例，对应 MC-12（同 id 重复落行）、MC-17、MC-20、MC-24、MC-25、MC-26、
+ MC-27、MC-29、MC-33、MC-34、MC-35、MC-36、MC-43、MC-44、MC-46（含后半句：改名记修订事件、旧版标需复核、
+ 引用仍指旧 revision，重复同名不刷事件）、MC-48、MC-49、MC-52、MC-62。
+- 连同 `AssistantPersistenceTests` 共 33 个用例，2026-10-05 实测全部通过。
 - 命令：`swift test --package-path macos/SpeechRailApp --skip-update
   --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`。
+
+### MC-46 后半句（无迁移实现，v2.3 新增）
+
+- 改名（`renameSpeaker`）在显示名确有变化时，向既有 `session_change` 表追加
+  `kind = 'speaker'` 修订事件（`value = label|name`，`at_ordinal = 0`）；旧纪要正文不动，
+  `speaker_name` 幂等语义不变，无 schema 迁移（`schemaVersion` 仍为 1）。
+- 新增只读判断 `minutesNeedsReview(minutesID:)`：任一修订事件晚于纪要创建时间即需复核；
+  引用仍指旧 revision，只是提示结论可能过期。`speakerRevisions` / `minutesNeedsReview`
+  经 `SessionCoordinator` 透传。
+- `voiceChanges` 收敛为只读 `kind = 'voice'`，说话人修订不混进音色变更点，
+  既有回看徽标与快照语义不受污染（`AssistantPersistenceTests` 快照用例仍全过）。
 
 ## 迁移说明
 
@@ -65,7 +77,8 @@ base: "origin/main @ 607b75a8"
 - 真实采集、UI 自动化、发布另行授权。
 - 尾句屏障（drain 失败路径）仅静态核验：`releaseCapture(drain:)` 失败记 `lastFailure`、
   分人超时标降级，封存继续走上报结果；真实链路演练未做，另行授权。
-- MC-46 部分达成：改名只写映射表、旧纪要正文原样可查已有回归；“标需复核 / 引用指旧 revision”
-  需来源 revision 的 schema 迁移，按本分支无迁移约束未启动。
+- MC-46 已在本分支无迁移约束下落地：改名记修订事件、旧正文原样可查、
+  旧版标需复核、引用仍指旧 revision（含重复同名不刷事件的回归）。
+  显式“引用指旧 revision id”的字段级溯源仍需来源 revision 的 schema 迁移，未启动。
 - 会前准备（MC-04）仅静态核验：来源默认麦克风、偏好恢复已选 App，
   检查失败重试不重置用户已选来源；输入检查 UI 行为未做自动化走查，另行授权。

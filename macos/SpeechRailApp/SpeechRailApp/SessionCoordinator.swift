@@ -596,6 +596,16 @@ public final class SessionCoordinator {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)
     }
 
+    /// 来源修订事件透传（MC-46 后半句）：只读 `session_change` 的说话人修订。
+    public func speakerRevisions(sessionID: String) async throws -> [SessionChange] {
+        try await store.speakerRevisions(sessionID: sessionID)
+    }
+
+    /// 旧纪要是否需复核透传（MC-46 后半句）：纯读判断，不写库。
+    public func minutesNeedsReview(minutesID: String) async throws -> Bool {
+        try await store.minutesNeedsReview(minutesID: minutesID)
+    }
+
     /// 一场里的中断区间（记录库详情与导出物都读它）。
     public func interruptions(sessionID: String) async throws -> [SessionInterruption] {
         try await store.interruptions(sessionID: sessionID)

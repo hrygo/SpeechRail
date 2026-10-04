@@ -259,7 +259,22 @@ public actor SessionStore {
     }
 
     /// 改显示名只写 `speaker_name`；历史引用因此在新名字下显示新名，而引用原文不变。
+    ///
+    /// MC-46 后半句（无迁移实现）：改名同时在 `session_change` 追加一条
+    /// `kind = 'speaker'` 的记录，作为"来源修订"事件。旧纪要正文一个字不动；
+    /// 读取方用"修订事件时间晚于纪要创建时间"判断旧版需复核，
+    /// 引用仍指向旧 revision（`line` 原文不动）。`ON CONFLICT` 仍保证幂等，
+    /// 修订事件只在显示名确有变化时追加，避免重复改名刷出多条事件。
     public func renameSpeaker(sessionID: String, label: String, name: String) throws {
+        let now = Date().timeIntervalSince1970
+        let previous = try withStatement(
+            "SELECT display_name FROM speaker_name WHERE session_id = ? AND label = ? LIMIT 1;"
+        ) { statement -> String? in
+            bind(statement, 1, sessionID)
+            bind(statement, 2, label)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return columnText(statement, 0)
+        }
         let sql = """
         INSERT INTO speaker_name (session_id, label, display_name, updated_at)
         VALUES (?, ?, ?, ?)
@@ -270,9 +285,51 @@ public actor SessionStore {
             bind(statement, 1, sessionID)
             bind(statement, 2, label)
             bind(statement, 3, name)
-            bind(statement, 4, Date().timeIntervalSince1970)
+            bind(statement, 4, now)
             try step(statement)
         }
+        // 显示名确有变化才记修订事件：首次命名与重复同名不刷事件。
+        guard previous != name else { return }
+        // at_ordinal 用 0：改名是会话级映射修订，不指向某一句。
+        // value 存 `label|name`：回看时仍说得清当时改的是谁。
+        let eventSQL = "INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at) VALUES (?, ?, 0, 'speaker', ?, ?);"
+        try withStatement(eventSQL) { statement in
+            bind(statement, 1, UUID().uuidString)
+            bind(statement, 2, sessionID)
+            bind(statement, 3, "\(label)|\(name)")
+            bind(statement, 4, now)
+            try step(statement)
+        }
+    }
+
+    /// 来源修订事件（MC-46 后半句）：`session_change` 里 `kind = 'speaker'` 的记录。
+    /// 纪要创建之后出现修订事件，旧版应标需复核；无事件或事件不晚于纪要时不标。
+    public func speakerRevisions(sessionID: String) throws -> [SessionChange] {
+        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? AND kind = 'speaker' ORDER BY created_at ASC;"
+        return try withStatement(sql) { statement in
+            bind(statement, 1, sessionID)
+            var rows: [SessionChange] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(
+                    SessionChange(
+                        id: columnText(statement, 0) ?? "",
+                        atOrdinal: Int(columnInt(statement, 1)),
+                        kind: columnText(statement, 2) ?? "speaker",
+                        value: columnText(statement, 3) ?? "",
+                        createdAt: Date(timeIntervalSince1970: columnDouble(statement, 4))
+                    )
+                )
+            }
+            return rows
+        }
+    }
+
+    /// 旧纪要是否需复核（MC-46 后半句）：任一说话人修订事件晚于该纪要创建时间即需复核。
+    /// 纯读判断，不写库；引用仍指旧 revision，只是提示结论可能已过期。
+    public func minutesNeedsReview(minutesID: String) throws -> Bool {
+        guard let version = try minutesVersion(id: minutesID) else { return false }
+        let revisions = try speakerRevisions(sessionID: version.sessionID)
+        return revisions.contains { $0.createdAt > version.createdAt }
     }
 
     /// 「音色第 N 句起生效」是一条记录，不是被覆盖的字段（§15.3 第 3 条）。
@@ -1064,7 +1121,9 @@ public actor SessionStore {
     }
 
     public func voiceChanges(sessionID: String) throws -> [SessionChange] {
-        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? ORDER BY at_ordinal ASC;"
+        // 只读 `kind = 'voice'`：说话人修订（`kind = 'speaker'`）走 `speakerRevisions`，
+        // 不混进音色变更点，避免回看徽标与既有快照语义被污染。
+        let sql = "SELECT id, at_ordinal, kind, value, created_at FROM session_change WHERE session_id = ? AND kind = 'voice' ORDER BY at_ordinal ASC;"
         return try withStatement(sql) { statement in
             bind(statement, 1, sessionID)
             var rows: [SessionChange] = []

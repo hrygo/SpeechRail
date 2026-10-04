@@ -237,6 +237,30 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(names["A"], "张三")
     }
 
+    /// MC-46 后半句（无迁移实现）：改名后旧纪要标需复核，引用仍指旧 revision。
+    /// 修订事件只追加不改正文；复核判断是纯读，不写库。
+    func testRenameMarksOldMinutesNeedsReview() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        // 纪要创建之后再改名：旧版应标需复核。
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
+        let needsReview = try await store.minutesNeedsReview(minutesID: first.id)
+        XCTAssertTrue(needsReview)
+        // 引用仍指旧 revision：正文原样可查，不被改写。
+        let pinned = try await store.minutesVersion(id: first.id)
+        XCTAssertEqual(pinned?.body, "# 第一版")
+        // 重复同名改名不刷修订事件：已标复核的状态不变，也不新增事件。
+        let eventsBefore = try await store.speakerRevisions(sessionID: sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
+        let eventsAfter = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(eventsAfter.count, eventsBefore.count)
+        let stillNeedsReview = try await store.minutesNeedsReview(minutesID: first.id)
+        XCTAssertTrue(stillNeedsReview)
+    }
+
     /// 恢复可证：备份到临时新库后可核对文档与版本；校验失败不损坏原库。
     func testBackupRestoreKeepsDocumentsAndVersions() async throws {
         let store = try requireStore()
