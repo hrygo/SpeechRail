@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 533 XCTest + 379 swift-testing，0 失败
+  → 535 XCTest + 379 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 506 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+  → 508 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -345,13 +345,18 @@ uv run --no-sync mypy src/speechrail                               → Success, 
 （`MeetingView.swift` 在 `App Sources` 里仍有一条重复条目，但它在 `origin/main` 上就已存在，
 且当前 Xcode 实跑不产生该警告，本次不动）。
 
-补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3140 passed, 1 skipped
+补充（超出定向范围，仅作旁证）：`pytest tests/ --no-cov` 全量 → 3152 passed, 1 skipped
 （运行 exit=0）。
 
 以上命令在 2026-10-03 **全部重跑复核**，数字与首次记录一致，无回归。
 2026-10-04 改动集中在 `ServiceAPIClient.provenance(for:)`、`FirstResultReadiness` 相关用例与
 采样/配方测试，上列 Swift、pytest、ruff 与四个契约脚本、mypy 命令已全部重跑并按上表更新。
 `scripts/macos_app_build.sh` 的两条入口当日已重跑，结果见上表。
+
+2026-10-04 第 27 轮（#204，段落重做的 generation 守卫）再次全量重跑：Swift 侧
+535 / 508 XCTest + 379 swift-testing、pytest 3152 passed、`ruff`、`mypy` 均通过。
+本轮只改测试与本文档，`AppModel.swift` 与 `origin/main` 逐字节一致；本轮同时补测并关闭了
+#197、#198（校验代码此前已在 `render_receipts.py` 落地，遗留的是两个 issue 未关）。
 
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
@@ -370,7 +375,7 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
-| **XCTest 合计** | **533** | **506** | |
+| **XCTest 合计** | **535** | **508** | |
 | swift-testing 合计 | 379 | 379 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
