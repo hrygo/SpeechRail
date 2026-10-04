@@ -77,6 +77,21 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTFail(message)
     }
 
+    /// 等待一个依赖真实时钟的条件：`waitUntil` 只让出执行权，不能证明
+    /// `Task.sleep`/持续时钟已经推进。这里给受限超时留出调度余量，
+    /// 超时后仍由断言失败，不掩盖没有结局的状态机。
+    private func waitUntilEventually(
+        _ condition: () -> Bool,
+        timeout: Duration = .seconds(2),
+        message: String
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(condition(), message)
+    }
+
     func testAudioReachesPlaybackBeforeTheLLMFinishes() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 7, requestID: "req-7")
@@ -473,9 +488,12 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             requestID: "req-10",
             pcm: Data([5, 6, 7, 8])
         )
-        try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(recorder.played.count, 1, "超预算的音频不能被无界积压")
+        await waitUntilEventually(
+            { coordinator.outcome != nil },
+            message: "播放跟不上时必须明确失败，而不是一直等"
+        )
         guard case .failed(let message)? = coordinator.outcome else {
             return XCTFail("播放跟不上时必须明确失败，而不是一直等")
         }
