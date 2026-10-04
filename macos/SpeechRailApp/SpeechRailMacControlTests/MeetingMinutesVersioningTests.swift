@@ -241,6 +241,27 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(second.version, 2)
     }
 
+    /// MC-62/删除语义：完整删除后检索不再带回，旧任务行随级联消失。
+    func testRemovedSessionDisappearsFromKnowledge() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "待删除预算", source: .microphone, status: .final)
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: minutes.id, body: "# 待删除纪要", model: nil)
+        var hits = try await store.searchKnowledge(query: "待删除")
+        XCTAssertFalse(hits.isEmpty)
+        try await store.removeSession(id: sessionID)
+        hits = try await store.searchKnowledge(query: "待删除")
+        XCTAssertTrue(hits.isEmpty, "完整删除后检索不得带回已删内容")
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertTrue(versions.isEmpty, "纪要行随会话级联删除")
+        let pending = try await store.pendingMinutesRows()
+        XCTAssertTrue(pending.isEmpty, "旧任务不得在删除后复活")
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()
