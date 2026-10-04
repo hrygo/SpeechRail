@@ -104,9 +104,11 @@ npx @redocly/cli lint contracts/openapi.yaml
 plutil -lint deploy/macos/com.speechrail.plist.example
 git diff --check
 uv build --no-sources --wheel
-python3 -m zipfile -l dist/speechrail-<version>-py3-none-any.whl
-shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
-uvx --python 3.14.7 --from dist/speechrail-<version>-py3-none-any.whl speechrail install --help
+# 产物是平台专用 wheel（arm64 原生扩展），文件名带 CPython 与平台标签，不是 py3-none-any
+WHEEL=$(ls -t dist/speechrail-<version>-*.whl | head -1)
+python3 -m zipfile -l "$WHEEL"
+shasum -a 256 "$WHEEL"
+uvx --python 3.14.7 --from "$WHEEL" speechrail install --help
 ```
 
 测试清除环境中的 `SPEECHRAIL_API_KEY`，但不把任何凭据写入命令或输出。构建后核对文件名、dist-info、worker
