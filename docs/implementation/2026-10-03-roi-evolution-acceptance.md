@@ -36,7 +36,7 @@ verification_date: 2026-10-03
 `.recovery/<txID>/` 承接已提交但未完成的删除。启动、读、写都先过恢复。同 ID 同内容返回原
 记录，不同内容返回 `workConflict`。
 
-证明：`CreativeWorkStoreTests`（35 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
+证明：`CreativeWorkStoreTests`（39 条，覆盖 ENOSPC / EACCES / 中断 / 重启后二次恢复幂等）。
 
 审查中补齐了四处「守卫在、但没被考到」的落盘边界：
 
@@ -313,10 +313,10 @@ grep -cE "recipe|seed_policy|pcm_sha256|provenance" \
 
 ```text
 swift test --package-path macos/SpeechRailApp --skip-update
-  → 535 XCTest + 379 swift-testing，0 失败
+  → 537 XCTest + 379 swift-testing，0 失败
 
 scripts/macos_app_build.sh --test-unit
-  → 508 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
+  → 510 XCTest + 379 swift-testing，0 失败（TEST SUCCEEDED）
 
 scripts/macos_app_build.sh --configuration Debug
   → BUILD SUCCEEDED
@@ -358,6 +358,11 @@ uv run --no-sync mypy src/speechrail                               → Success, 
 本轮只改测试与本文档，`AppModel.swift` 与 `origin/main` 逐字节一致；本轮同时补测并关闭了
 #197、#198（校验代码此前已在 `render_receipts.py` 落地，遗留的是两个 issue 未关）。
 
+2026-10-04 第 28 轮（#205，`CreativeWorkStore` 按 ID 定位作品）再次全量重跑：Swift 侧
+537 / 510 XCTest + 379 swift-testing、`macos_app_build.sh --configuration Debug`
+BUILD SUCCEEDED。Python 侧本轮无改动，沿用第 27 轮实测的 3152 passed。
+本轮只改测试与本文档，`CreativeWorkStore.swift` 与 `origin/main` 逐字节一致。
+
 ### 3.0 两条 macOS 测试门禁的覆盖差异（2026-10-04 实测）
 
 macOS 侧有两个入口：`swift test`（SPM，**CI 只跑这一条**）与
@@ -370,12 +375,12 @@ CI 不漏跑任何用例——但「同一个目录」这个前提并不成立�
 | 套件 | `swift test` | `--test-unit` | 差额原因 |
 | --- | --- | --- | --- |
 | `ServiceContractTests` | 57 | 57 | 已对齐 |
-| `CreativeWorkStoreTests` | 37 | 37 | 已对齐 |
+| `CreativeWorkStoreTests` | 39 | 39 | 已对齐 |
 | `RealtimeContractTests` | 41 | 41 | 已对齐 |
 | `ModelNamePresentationTests` | 9 | 0 | 整文件不在 Xcode `Unit Test Sources` |
 | `ModelReadinessPresentationTests` | 11 | 0 | 同上 |
 | `WindowLayoutPolicyTests` | 7 | 0 | 同上 |
-| **XCTest 合计** | **535** | **508** | |
+| **XCTest 合计** | **537** | **510** | |
 | swift-testing 合计 | 379 | 379 | 一致 |
 
 本 PR 新增的 12 条 `ServiceContractTests` 中有 3 条（回执缺失 / 回执未终态 / 回执配方残缺）
