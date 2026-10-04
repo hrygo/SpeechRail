@@ -425,6 +425,22 @@ public final class SessionCoordinator {
         phase = .idle
     }
 
+    /// 会议封存结果上报（MC-17、MC-20）：封存必须返回明确结果，不吞失败。
+    /// 成功要求落库且读回为 archived；失败保留调用方的重试/复制出口。
+    @discardableResult
+    public func sealMeeting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
+        do {
+            try await store.finalizeSession(id: id, endReason: reason)
+            if let record = try await store.session(id: id), record.state == .archived {
+                lastFinalizedSessionID = id
+                return .sealed(recordID: id)
+            }
+            return .failed(recordID: id, reason: "封存后读回状态不是已归档")
+        } catch {
+            return .failed(recordID: id, reason: error.localizedDescription)
+        }
+    }
+
     /// 按**明确的 sessionID** 封存一条记录，且不碰当前占用。
     ///
     /// 建档是启动流程里最后一个 await：它落库之后启动可能已经被取消。

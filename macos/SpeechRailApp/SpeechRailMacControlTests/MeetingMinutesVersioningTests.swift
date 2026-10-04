@@ -316,6 +316,24 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(all.count, 11, "不传分页参数时返回全部")
     }
 
+    /// MC-17/MC-20：封存返回明确结果；成功读回 archived，未知记录如实失败。
+    func testMeetingSealReportsExplicitResult() async throws {
+        let coordinatorStore = try requireStore()
+        let sessionID = try requireSessionID()
+        let coordinator = SessionCoordinator(store: coordinatorStore)
+        let sealed = await coordinator.sealMeeting(id: sessionID)
+        XCTAssertEqual(sealed, .sealed(recordID: sessionID))
+        let record = try await coordinatorStore.session(id: sessionID)
+        XCTAssertEqual(record?.state, .archived)
+        let missing = await coordinator.sealMeeting(id: "no-such-session")
+        switch missing {
+        case .failed(let id, _):
+            XCTAssertEqual(id, "no-such-session")
+        default:
+            XCTFail("未知记录的封存必须如实失败，不能报成功")
+        }
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()
