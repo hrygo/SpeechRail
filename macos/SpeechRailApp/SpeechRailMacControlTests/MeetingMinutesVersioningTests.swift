@@ -262,6 +262,36 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(pending.isEmpty, "旧任务不得在删除后复活")
     }
 
+    /// MC-35/MC-36：引文必须逐字出自所指转录行；多次出现无法定位也判未验证。
+    func testEvidenceQuoteMustMatchReferencedLine() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .user, text: "预算 35 万元，预算下周定。", source: .microphone, status: .final),
+            id: "line-quote-1"
+        )
+        let exchangeID = try await store.saveInnerOSExchange(
+            InnerOSExchange(id: "inner-quote-1", sessionID: sessionID, askedAt: Date(), question: "预算多少？", status: .ready),
+            evidence: [
+                InnerOSEvidence(id: "ev-ok", lineID: "line-quote-1", quote: "预算 35 万元"),
+                InnerOSEvidence(id: "ev-wrong", lineID: "line-quote-1", quote: "预算 350 万元"),
+                InnerOSEvidence(id: "ev-multi", lineID: "line-quote-1", quote: "预算"),
+                InnerOSEvidence(id: "ev-noline", lineID: nil, quote: "预算 35 万元"),
+            ]
+        )
+        XCTAssertEqual(exchangeID, "inner-quote-1")
+        let checks = try await store.verifyEvidenceQuotes(exchangeID: exchangeID)
+        XCTAssertEqual(checks.count, 4)
+        let ok = checks.first { $0.evidenceID == "ev-ok" }
+        XCTAssertEqual(ok?.verified, true, "逐字出自所指行的引文应该通过")
+        let wrong = checks.first { $0.evidenceID == "ev-wrong" }
+        XCTAssertEqual(wrong?.verified, false, "与原文不一致的引文不得标已验证")
+        let multi = checks.first { $0.evidenceID == "ev-multi" }
+        XCTAssertEqual(multi?.verified, false, "行内多次出现时不得随便选一处")
+        let noline = checks.first { $0.evidenceID == "ev-noline" }
+        XCTAssertEqual(noline?.verified, false, "没有指向转录行的引文不得标已验证")
+    }
+
     /// MC-48：按 id 读版；未知 id 返回 nil，调用方不得回退成最新版冒充。
     func testMinutesVersionReadByIDPinsSelection() async throws {
         let store = try requireStore()

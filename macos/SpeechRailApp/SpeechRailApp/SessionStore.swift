@@ -759,7 +759,54 @@ public actor SessionStore {
         }
     }
 
-    /// 「写进纪要」是显式动作（§14.2）。
+    /// 引文校验（MC-35、MC-36）：引文必须逐字出自所指转录行，否则标未验证。
+    /// 返回每条证据的校验结论；调用方不得把未验证引文当已核实展示。
+    /// 纯读操作，不写库。
+    public func verifyEvidenceQuotes(exchangeID: String) throws -> [EvidenceQuoteCheck] {
+        let rows = try innerOSEvidence(exchangeID: exchangeID)
+        var checks: [EvidenceQuoteCheck] = []
+        for row in rows {
+            guard let quote = row.quote, !quote.isEmpty else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文为空"))
+                continue
+            }
+            guard let lineID = row.lineID else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "没有指向转录行"))
+                continue
+            }
+            let line = try withStatement(
+                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at FROM line WHERE id = ? LIMIT 1;"
+            ) { statement -> TranscriptLine? in
+                bind(statement, 1, lineID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return Self.transcriptLine(from: statement)
+            }
+
+            guard let body = line?.text else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "所指转录行不存在"))
+                continue
+            }
+            if body.contains(quote) {
+                let occurrences = body.components(separatedBy: quote).count - 1
+                if occurrences == 1 {
+                    checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: true, reason: nil))
+                } else {
+                    checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文在行内出现多次，无法精确定位"))
+                }
+            } else {
+                checks.append(EvidenceQuoteCheck(evidenceID: row.id, verified: false, reason: "引文与所指转录行不一致"))
+            }
+        }
+        return checks
+    }
+
+    /// 单条引文的校验结论：只含判断与原因，不回显完整转写。
+    public struct EvidenceQuoteCheck: Hashable, Sendable {
+        public var evidenceID: String
+        public var verified: Bool
+        public var reason: String?
+    }
+
     public func setInnerOSInMinutes(exchangeID: String, included: Bool) throws {
         try withStatement("UPDATE inner_os_exchange SET in_minutes = ? WHERE id = ?;") { statement in
             bind(statement, 1, included ? 1 : 0)
