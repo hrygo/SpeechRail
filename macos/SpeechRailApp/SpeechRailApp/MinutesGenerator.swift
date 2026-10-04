@@ -523,7 +523,7 @@ public final class MinutesGenerator {
                 + "\n\n下面是用户明确选择写进纪要的私密问答补充（标为用户选择的 AI 补充，"
                 + "不得当成会议现场的发言或决定）：\n\n\(supplements)"
         }
-        [
+        return [
             LLMMessage(
                 role: .developer,
                 text: "你负责把一段会议转录整理成结构化纪要。只依据转录与已校验的用户补充里的内容，"
@@ -534,7 +534,7 @@ public final class MinutesGenerator {
                     + "confidence_notes 写这份纪要里最不确定的一两处；如果没什么不确定的就留空。",
                 cacheBreakpoint: true
             ),
-            LLMMessage(role: .user, text: userText)
+            LLMMessage(role: .user, text: userText),
         ]
     }
 
