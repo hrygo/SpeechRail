@@ -482,6 +482,40 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(again.first?.answerText, "预算 35 万元")
     }
 
+    /// MA-19/验收 3：JSON 导出携带版本身份（id）与创建时间，跨库往返不漂移。
+    func testJSONExportKeepsMinutesIdentity() throws {
+        let record = SessionRecord(
+            id: "session-export-1",
+            kind: .meeting,
+            title: "预算会",
+            state: .archived,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            engineProfile: "test",
+            audioSource: .microphone
+        )
+        let minutes = MinutesVersion(
+            id: "minutes-export-1",
+            sessionID: "session-export-1",
+            version: 2,
+            status: .ready,
+            body: "# 纪要",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_100)
+        )
+        let payload = SessionExportPayload(record: record, lines: [], minutes: minutes)
+        let text = SessionExporter.export(payload, as: .json)
+        guard let data = text.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exported = root["minutes"] as? [String: Any]
+        else {
+            XCTFail("JSON 导出必须可解析且含 minutes")
+            return
+        }
+        XCTAssertEqual(exported["id"] as? String, "minutes-export-1", "版本身份不得漂移")
+        XCTAssertEqual(exported["version"] as? Int, 2)
+        XCTAssertEqual(exported["created_at"] as? Double, 1_700_000_100, "创建时间供复核判断，不得缺失")
+    }
+
     /// MC-35/MC-36：引文必须逐字出自所指转录行；多次出现无法定位也判未验证。
     func testEvidenceQuoteMustMatchReferencedLine() async throws {
         let store = try requireStore()
