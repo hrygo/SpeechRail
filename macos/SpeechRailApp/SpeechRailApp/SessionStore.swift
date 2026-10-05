@@ -72,7 +72,8 @@ public actor SessionStore {
     /// v8（MA-15）：`knowledge_fts` 全文索引 + `search_index_outbox`。
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
-    public static let schemaVersion: Int32 = 10
+    /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
+    public static let schemaVersion: Int32 = 11
 
     private let directory: URL
     private let fileManager: FileManager
@@ -194,6 +195,9 @@ public actor SessionStore {
             }
             if version < 10 {
                 try migrateV9ToV10()
+            }
+            if version < 11 {
+                try migrateV10ToV11()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -665,7 +669,7 @@ public actor SessionStore {
     id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, \
     attempts, failure_reason, lease_until, created_at, is_legacy_import, \
     remote_response_id, config_snapshot, snapshot_id, cancel_requested_at, \
-    candidate_json, review_json, coverage_json
+    candidate_json, review_json, coverage_json, body_origin, parent_minutes_id
     """
 
     @discardableResult
@@ -3285,6 +3289,10 @@ public actor SessionStore {
             leaseUntil: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
             createdAt: Date(timeIntervalSince1970: columnDouble(statement, 12)),
             isLegacyImport: legacy,
+            bodyOrigin: count > 21
+                ? (MinutesBodyOrigin(rawValue: columnText(statement, 21) ?? "") ?? .ai)
+                : .ai,
+            parentMinutesID: count > 22 ? columnText(statement, 22) : nil,
             remoteResponseID: count > 14 ? columnText(statement, 14) : nil,
             configSnapshot: count > 15 ? columnText(statement, 15) : nil,
             snapshotID: count > 16 ? columnText(statement, 16) : nil,
@@ -3821,6 +3829,43 @@ extension SessionStore {
     /// 猜出来的完成状态会直接毁掉用户对这份清单的信任。
     private func migrateV9ToV10() throws {
         try execute(Self.schemaV10Delta)
+    }
+
+    /// v10 → v11 的索引部分（MA-11）。两列由 `migrateV10ToV11` 逐列判存在后追加。
+    ///
+    /// **用户改纪要产生新版本，不覆盖旧版。** 覆盖写会让"AI 原来写了什么"
+    /// 永远查不到，撤销也就无从谈起（MC-47、MC-48）。
+    /// `body_origin` 记正文到底出自谁：AI 写的、用户改的、还是用户补的。
+    static let schemaV11Delta = """
+    CREATE INDEX IF NOT EXISTS minutes_by_parent ON minutes(parent_minutes_id);
+    """
+
+    /// `minutes` 当前有哪些列。SQLite 的 `ALTER TABLE ADD COLUMN` **没有**
+    /// `IF NOT EXISTS`，列已存在会直接报 `duplicate column name`，迁移因此不幂等——
+    /// 测试把 `user_version` 拨回去重跑迁移时就会炸。
+    private func minutesColumnNames() throws -> Set<String> {
+        try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: Set<String> = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.insert(name) }
+            }
+            return names
+        }
+    }
+
+    /// v10 → v11：只加列，不回填。
+    ///
+    /// 既有正文一律标 `'ai'`——它们确实都是模型写出来的。
+    /// 标错来源比没有来源更糟：界面会拿它去解释"这句为什么在这里"。
+    private func migrateV10ToV11() throws {
+        let columns = try minutesColumnNames()
+        if !columns.contains("body_origin") {
+            try execute("ALTER TABLE minutes ADD COLUMN body_origin TEXT NOT NULL DEFAULT 'ai';")
+        }
+        if !columns.contains("parent_minutes_id") {
+            try execute("ALTER TABLE minutes ADD COLUMN parent_minutes_id TEXT;")
+        }
+        try execute(Self.schemaV11Delta)
     }
 
     /// v7 → v8 的 DDL（MA-15）：FTS5 全文索引与事务 outbox。
@@ -5895,5 +5940,180 @@ extension SessionStore {
         text.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
+    }
+}
+
+// MARK: - 用户编辑纪要（MA-11 / MC-46～MC-48）
+//
+// 改纪要 = **写一个新版本**，不是覆盖旧版。覆盖写会让"AI 原来写了什么"
+// 永远查不到（MC-48），撤销也无从谈起（MC-47）。
+extension SessionStore {
+    /// 用户改纪要正文。返回新版本。
+    ///
+    /// 条目处理有两条硬规则：
+    /// - **正文里还认得出的原条目照搬，引用照搬**——用户改的是周边文字，
+    ///   这条结论一字未动，那它对原句的引用仍然成立；
+    /// - **用户新写的句子不继承任何引用**（MC-47「不误恢复成 AI 原文」的另一半）：
+    ///   把 AI 的引用挂到用户自己写的话上，等于替用户伪造出处。
+    @discardableResult
+    public func saveUserMinutesEdit(
+        sessionID: String,
+        editingMinutesID: String,
+        body: String
+    ) throws -> MinutesVersion {
+        guard let source = try minutesVersion(id: editingMinutesID) else {
+            throw SessionStoreError.statementFailed("找不到要改的这一版纪要")
+        }
+        guard source.sessionID == sessionID else {
+            throw SessionStoreError.statementFailed("这一版不属于这场会议")
+        }
+        guard source.status == .ready else {
+            throw SessionStoreError.statementFailed("这一版还没整理出正文，没法改")
+        }
+        if try rejectLateMinutesIfMeetingDeleted(minutesID: editingMinutesID) {
+            throw SessionStoreError.statementFailed("这场会议已归档或删除，改动没有写入")
+        }
+
+        let newID = UUID().uuidString
+        let now = Date()
+        let normalizedBody = KnowledgeIdentity.normalized(body)
+        // 没动过几个字就仍然算 AI 整理；动过就是"你改过"。
+        let origin: MinutesBodyOrigin = KnowledgeIdentity.normalized(source.body ?? "") == normalizedBody
+            ? source.bodyOrigin
+            : .userEdited
+
+        var version = 0
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            version = try scalarInt(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
+                args: [.text(sessionID)]
+            ) ?? 1
+            try withStatement("UPDATE minutes SET is_latest = 0 WHERE session_id = ?;") { statement in
+                bind(statement, 1, sessionID)
+                try step(statement)
+            }
+            try withStatement("""
+            INSERT INTO minutes (
+                id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted,
+                attempts, failure_reason, lease_until, created_at, is_legacy_import,
+                snapshot_id, body_origin, parent_minutes_id
+            ) VALUES (?, ?, ?, 'ready', ?, ?, ?, 1, 0, 0, NULL, NULL, ?, 0, ?, ?, ?);
+            """) { statement in
+                bind(statement, 1, newID)
+                bind(statement, 2, sessionID)
+                bind(statement, 3, version)
+                bind(statement, 4, body)
+                bind(statement, 5, source.model)
+                bind(statement, 6, source.promptChars)
+                bind(statement, 7, now.timeIntervalSince1970)
+                // 沿用同一份来源快照：改的是措辞，不是"换了一批原句重新理解"。
+                bind(statement, 8, source.snapshotID)
+                bind(statement, 9, origin.rawValue)
+                bind(statement, 10, editingMinutesID)
+                try step(statement)
+            }
+            try carryOverItemsLocked(
+                from: editingMinutesID, to: newID, normalizedBody: normalizedBody
+            )
+            try enqueueSearchIndex(sessionID: sessionID, sourceKind: SearchIndexOp.minutesKind, sourceID: newID)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+
+        guard let stored = try minutesVersion(id: newID) else {
+            throw SessionStoreError.statementFailed("新版本没有写进去")
+        }
+        return stored
+    }
+
+    /// 撤销一次编辑：拿回被改那一版的正文，**仍然写一个新版本**。
+    ///
+    /// 不做"删掉这一版"——删了就说不清用户当时看到过什么（MC-47）。
+    public func undoMinutesEdit(minutesID: String) throws -> MinutesVersion? {
+        guard let current = try minutesVersion(id: minutesID) else { return nil }
+        guard let parentID = current.parentMinutesID, let parent = try minutesVersion(id: parentID) else {
+            return nil
+        }
+        // `bodyOrigin` 记的是**内容出处**，不是动作来源：撤销之后正文与 AI 原文
+        // 逐字相同，标成"你改过"是假的。这一版是撤销产生的，由 `parentMinutesID`
+        // 与血缘链如实记录，不需要靠出处字段去暗示。
+        return try saveUserMinutesEdit(
+            sessionID: current.sessionID,
+            editingMinutesID: parentID,
+            body: parent.body ?? ""
+        )
+    }
+
+    /// 这一版是从哪一版改来的。空数组表示它就是第一版。
+    public func minutesEditLineage(minutesID: String) throws -> [MinutesVersion] {
+        var chain: [MinutesVersion] = []
+        var cursor: String? = minutesID
+        // 血缘是人写的，改一次多一跳；防御性上限避免脏数据造成死循环。
+        var guardCounter = 0
+        while let id = cursor, guardCounter < 64 {
+            guard let version = try minutesVersion(id: id) else { break }
+            chain.append(version)
+            cursor = version.parentMinutesID
+            guardCounter += 1
+        }
+        return chain.reversed()
+    }
+
+    /// 把仍然认得出的条目连同锚点搬到新版本。
+    private func carryOverItemsLocked(from: String, to: String, normalizedBody: String) throws {
+        // 元组顺序与解包顺序必须一致：(itemID, localID, kind, text, verdict)。
+        let carried = try withStatement("""
+        SELECT id, local_id, kind, text, verdict FROM minutes_item
+        WHERE minutes_id = ? ORDER BY sort_order ASC;
+        """) { statement -> [(itemID: String, localID: String, kind: String, text: String, verdict: String?)] in
+            bind(statement, 1, from)
+            var rows: [(itemID: String, localID: String, kind: String, text: String, verdict: String?)] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append((
+                    itemID: columnText(statement, 0) ?? "",
+                    localID: columnText(statement, 1) ?? "",
+                    kind: columnText(statement, 2) ?? "",
+                    text: columnText(statement, 3) ?? "",
+                    verdict: columnText(statement, 4)
+                ))
+            }
+            return rows
+        }
+        var sortOrder = 0
+        for (itemID, localID, kind, text, verdict) in carried {
+            // 正文里已经没有这句话了，它就不是这一版的条目了。
+            // 留着它会得到一个"结论还在、但正文里找不到"的条目。
+            guard normalizedBody.contains(KnowledgeIdentity.normalized(text)) else { continue }
+            let newItemID = UUID().uuidString
+            try withStatement("""
+            INSERT INTO minutes_item (id, minutes_id, local_id, kind, text, verdict, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """) { statement in
+                bind(statement, 1, newItemID)
+                bind(statement, 2, to)
+                bind(statement, 3, localID)
+                bind(statement, 4, kind)
+                bind(statement, 5, text)
+                bind(statement, 6, verdict)
+                bind(statement, 7, sortOrder)
+                try step(statement)
+            }
+            // 引用照搬：这句话一字未改，它对原句的引用仍然成立。
+            try withStatement("""
+            INSERT INTO minutes_evidence
+              (id, item_id, unit_id, line_id, revision_id, snapshot_id, speaker_label, t_start, verification)
+            SELECT lower(hex(randomblob(16))), ?, unit_id, line_id, revision_id, snapshot_id,
+                   speaker_label, t_start, verification
+            FROM minutes_evidence WHERE item_id = ?;
+            """) { statement in
+                bind(statement, 1, newItemID)
+                bind(statement, 2, itemID)
+                try step(statement)
+            }
+            sortOrder += 1
+        }
     }
 }

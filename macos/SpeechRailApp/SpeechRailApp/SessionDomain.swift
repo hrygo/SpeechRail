@@ -2376,6 +2376,13 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     public var leaseUntil: Date?
     public var createdAt: Date
 
+    /// 这一版正文的出处（MA-11）。**必须能分开说**，否则"AI 写的"和
+    /// "用户改的"混成一句"纪要里写了"，用户就没法判断该不该信哪一段。
+    public var bodyOrigin: MinutesBodyOrigin
+    /// 用户改纪要时指回它所改的那一版（MA-11）。**改的是新版本，不是覆盖**：
+    /// 覆盖写会让"AI 原来写了什么"永远查不到，撤销也无从谈起（MC-47、MC-48）。
+    public var parentMinutesID: String?
+
     /// v2 迁移标记：该版本正文是旧库原样迁入的，没有来源快照与结构引用。
     /// 不补造引用；只有用户明确生成新候选时才请求模型补充结构（MA-05/MC-68）。
     public var isLegacyImport: Bool
@@ -2437,6 +2444,8 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         leaseUntil: Date? = nil,
         createdAt: Date = Date(),
         isLegacyImport: Bool = false,
+        bodyOrigin: MinutesBodyOrigin = .ai,
+        parentMinutesID: String? = nil,
         remoteResponseID: String? = nil,
         configSnapshot: String? = nil,
         snapshotID: String? = nil,
@@ -2459,6 +2468,8 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.leaseUntil = leaseUntil
         self.createdAt = createdAt
         self.isLegacyImport = isLegacyImport
+        self.bodyOrigin = bodyOrigin
+        self.parentMinutesID = parentMinutesID
         self.remoteResponseID = remoteResponseID
         self.configSnapshot = configSnapshot
         self.snapshotID = snapshotID
@@ -4751,4 +4762,31 @@ public struct MeetingReviewSnapshot: Sendable {
     }
 
     public var isEmpty: Bool { minutesBody == nil && transcriptLines.isEmpty && items.isEmpty }
+}
+
+
+/// 纪要正文的出处（MA-11）。
+///
+/// 四个来源分开说，用户才判断得了哪一段可以当事实用：
+/// - `.ai` 模型归纳；
+/// - `.userEdited` 用户在 AI 原文上改过；
+/// - `.userSupplement` 用户自己补写、AI 没写过；
+/// - `.legacyImport` 旧库原样迁入，没有来源快照与结构引用（MA-05/MC-68）。
+public enum MinutesBodyOrigin: String, Codable, Hashable, Sendable {
+    case ai
+    case userEdited
+    case userSupplement
+    case legacyImport
+
+    public var title: String {
+        switch self {
+        case .ai: "AI 整理"
+        case .userEdited: "你改过"
+        case .userSupplement: "你补充"
+        case .legacyImport: "旧库导入"
+        }
+    }
+
+    /// 用户自己写过的内容。导出与复制时要说清楚，不冒充模型输出。
+    public var isUserAuthored: Bool { self == .userEdited || self == .userSupplement }
 }
