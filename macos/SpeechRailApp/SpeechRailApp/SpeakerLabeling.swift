@@ -60,8 +60,8 @@ public final class SpeakerLabeling {
     /// 「修改来源后相关结论提示复核」就落空了。回调放在这一层，是为了让这几条
     /// 路径**都**带上它：`markAsMe` 与 `merge` 内部就是调 `rename`。
     ///
-    /// **不含 `split`**：拆出改的是 `line.speaker_label`，不写修订事件，
-    /// 因此不会让任何纪要变成需复核。这是刻意的取舍，不是漏接，理由见 `split`。
+    /// `split`（拆出）也带：它在**用户动作这一层**单独记一条归属修订，
+    /// 而不是让 `attachSpeakerLabel` 去记——那条同时是实时对齐的写入路径。
     /// 异步是为了让刷新在动作返回**之前**完成：否则用户改完名字，
     /// 界面先回显新名字、"需复核"再晚一步出现，中间那一瞬看着像是没生效。
     var onSourceRevision: (@MainActor () async -> Void)?
@@ -241,7 +241,7 @@ public final class SpeakerLabeling {
     ///
     /// 新标签取一个没用过的字母；四位上限内没有空位时沿用最后一个，不悄悄造第五个。
     public func split(lineIDs: [String], to label: String? = nil) async {
-        guard !lineIDs.isEmpty else { return }
+        guard !lineIDs.isEmpty, let sessionID else { return }
         let target = label ?? nextAvailableLabel()
         for lineID in lineIDs {
             do {
@@ -252,12 +252,20 @@ public final class SpeakerLabeling {
             }
         }
         observe(label: target, ordinal: nil)
-        // **刻意不触发** `onSourceRevision`：拆出走的是 `attachSpeakerLabel`，
-        // 而那也是实时对齐写归属的同一条路径——让它算"用户改了来源"，
-        // 会被每一次对齐到达刷出一堆复核标记。
-        // 代价是明确的：拆出改了归属，依据旧归属的纪要不会提示复核。
-        // 要覆盖这一条，得在 `split` 这一层单独记一次修订事件，
-        // 不能去改 `attachSpeakerLabel`（见交付说明该节）。
+        // 归属变了，依赖旧归属的纪要该提示复核。事件记在**用户动作**这一层，
+        // 不在 `attachSpeakerLabel` 里——那条同时是实时对齐写归属的路径，
+        // 在那里记会被每一次对齐到达刷屏（见 `noteSpeakerAttributionChange`）。
+        do {
+            try await coordinator.noteSpeakerAttributionChange(
+                sessionID: sessionID,
+                detail: "\(target)|拆出 \(lineIDs.count) 句"
+            )
+            await onSourceRevision?()
+        } catch {
+            // 归属已经改成功了，只是没记上修订事件。
+            // 这要说出来：否则用户看到的纪要不会提示复核，而界面上什么异常都没有。
+            note = "归属已经改了，但没能记下这次修订：\(error.localizedDescription)"
+        }
     }
 
     private func nextAvailableLabel() -> String {

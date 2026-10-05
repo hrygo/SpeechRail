@@ -61,7 +61,6 @@ base: "origin/main @ d72535c7"
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的「删除内容不得被索引或旧任务恢复」在**行级与索引级**已证；物理残留未做也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
-| 10 | **拆出说话人不提示复核**：改的是 `line.speaker_label`，不写修订事件 | 实测（读 `attachSpeakerLabel` 与 `speakerRevisions` 确认） | 刻意取舍：`attachSpeakerLabel` 同时是实时对齐的写入路径，改它会被每次对齐到达刷屏。要覆盖得在 `SpeakerLabeling.split` 这层单独记事件 |
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
 
@@ -74,6 +73,7 @@ base: "origin/main @ d72535c7"
 | 「『采用这一版』只是回调占位」 | **已闭环**，见「版本对比与采用」一节（走 `adoptMinutes`，且草稿存不下去就不采用） | 实测 |
 | （此前未被发现） | **本分支自己造的缺陷**：`meeting_document` 只存 `deleted_at`，三档删除压成同一状态，`MeetingLibraryStatus.archived` 从未被产出，「撤销归档」按钮从来没出现过。已用 schema v12 的 `deletion_mode` 分开 | 实测（读代码发现 + 回归测试红/绿反证 + 真实 v11→v12 升级测试） |
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
+| （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
 
 ### 四、已充分证据、无需再记的验收项
 
@@ -2384,3 +2384,70 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
   失效的是"谁说的"这一层。要覆盖需要在 `split` 层单独记事件，本轮未做。
 - 界面呈现仍未走查（无 UI 自动化或人工授权）。
 - 刷新只覆盖当前这一场；跨会议引用各自按自己封存时的快照判断，不连带重标。
+
+## M1 增量（续）：拆出也提示复核，并守住"对齐到达不算用户改来源"
+
+### 做了什么
+
+上一节把总账第 10 条记成了"刻意不改的取舍"并留下诊断结论。这轮把它关掉——
+那件事本来就不需要任何授权。
+
+**缺口**：用户把某几句从张三改归李四之后，引用了那几句话的结论仍然显示"已核对"。
+锚点里的 `speaker_label` 是封存时的快照（MC-46 的设计），所以引文本身没失效，
+失效的是"谁说的"这一层——而验收 3 说的正是「修改来源后相关结论提示复核」。
+
+**改法**：`SessionStore.noteSpeakerAttributionChange` 追加一条
+`kind='speaker'` 的 `session_change`，`SessionCoordinator` 透传，
+`SpeakerLabeling.split` 在**所有行都改成功之后**调一次（一次拆出记一条，不是每行一条），
+然后触发 `onSourceRevision`。
+
+**关键是事件记在哪一层**。上一节的诊断结论仍然成立，而且这轮它成了约束：
+
+- **不能**让 `attachSpeakerLabel` 记事件。那条方法同时是**实时对齐**写归属的路径
+  （对齐证据在文本 final 之后独立到达），在那里记会被每一次对齐到达刷出一堆
+  复核标记，把真正需要提示的那批淹掉。
+- 所以事件由**用户动作**这一层记：用户说"这几句不是他说的"，是一次有意的更正，
+  和改名同一类。
+
+**失败要说出来**：归属已经改成功、只是没记上修订事件时，`note` 如实写明。
+否则用户看到的纪要不会提示复核，而界面上什么异常都没有。
+
+### 回归证据（2026-10-06）
+
+`MeetingSessionLifecycleTests` **13 项全绿**，新增 2 项：
+
+- `testSplittingSpeakersMarksTheMinutesForReview`——走**生产路径**
+  （启动一场会 → `MeetingSession.split`）：拆出后 `speakerRevisions.count == 1`
+  （一次拆出记一条）、该版纪要当场被标复核、库层 `minutesNeedsReview` 同一结论。
+- `testAlignmentWritingAttributionDoesNotMarkTheMinutesForReview`——**这是上一条成立
+  的前提**：直接调 `attachSpeakerLabel`（模拟对齐证据迟到）不得写任何修订事件、
+  不得让纪要变成需复核。有了这一条，将来谁想把事件挪进 `attachSpeakerLabel`
+  会先撞上它。
+
+上一节的 `testSplittingSpeakersDoesNotMarkTheMinutesForReview` 已按新行为改写，
+并在名字与注释里说明它当初为什么是那样。
+
+反证已核对：把 `split` 里记事件与回调那几行去掉后，
+`testSplittingSpeakersMarksTheMinutesForReview` **变红**。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1034 项**（上一节 1033 +1）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**：复用既有的 `session_change` 表，新增的只是**追加事件**的写入口。
+- 回退：去掉 `SpeakerLabeling.split` 里 `noteSpeakerAttributionChange` 与
+  `await onSourceRevision?()`（连同那个 catch），删掉
+  `SessionStore.noteSpeakerAttributionChange` 与协调器透传。四个文件可独立回退。
+- **已经写下的事件不会自动消失**：回退后那些 `kind='speaker'` 的拆出事件仍在库里，
+  相关纪要仍会被标复核。这与"降级不会自动恢复"是同一类单向性，属预期。
+
+### 未验证事项与已知边界
+
+- **这是可见行为的变化**：此后用户拆出说话人，依据这场会的纪要会开始显示"需复核"。
+  按验收 3 的字面要求这是应有的，但确实多了一个此前没有的提示。
+  若实际使用中觉得吵，该退的是"要不要提示"，不是"提示算不算数"。
+- 界面呈现未走查（无 UI 自动化或人工授权）：`note` 失败提示的展示位置未验证。
+- 拆出**部分失败**时（`lineIDs` 里有一行写失败）直接 `return`，既不改已改的行也不记事件——
+  保持原样，本轮没有改这个行为，也没有为它加用例。

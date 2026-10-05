@@ -402,6 +402,28 @@ public actor SessionStore {
         }
     }
 
+    /// 记一条**归属**修订（拆出用），只追加事件，不碰 `speaker_name`。
+    ///
+    /// 为什么不直接让 `attachSpeakerLabel` 写事件：那条方法同时是**实时对齐**
+    /// 写归属的路径（对齐证据在文本 final 之后独立到达），在那里写会被每一次
+    /// 对齐到达刷出一堆复核标记，把真正需要提示的那批淹掉。
+    ///
+    /// 所以归属修订由**用户动作**这一层来记——用户说"这几句不是他说的"，
+    /// 是一次有意的更正，依赖旧归属的结论该被提示复核。
+    public func noteSpeakerAttributionChange(sessionID: String, detail: String) throws {
+        let sql = """
+        INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at)
+        VALUES (?, ?, 0, 'speaker', ?, ?);
+        """
+        try withStatement(sql) { statement in
+            bind(statement, 1, UUID().uuidString)
+            bind(statement, 2, sessionID)
+            bind(statement, 3, detail)
+            bind(statement, 4, Date().timeIntervalSince1970)
+            try step(statement)
+        }
+    }
+
     /// 来源修订事件（MC-46 后半句）：`session_change` 里 `kind = 'speaker'` 的记录。
     /// 纪要创建之后出现修订事件，旧版应标需复核；无事件或事件不晚于纪要时不标。
     public func speakerRevisions(sessionID: String) throws -> [SessionChange] {

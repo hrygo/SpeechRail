@@ -660,6 +660,14 @@ public final class SessionCoordinator {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)
     }
 
+    /// 归属修订透传（拆出用）：只追加 `kind='speaker'` 事件，不碰显示名。
+    ///
+    /// 与 `renameSpeaker` 分开，是因为它记的是"谁说了这句"变了，
+    /// 而不是"这个人叫什么"。
+    public func noteSpeakerAttributionChange(sessionID: String, detail: String) async throws {
+        try await store.noteSpeakerAttributionChange(sessionID: sessionID, detail: detail)
+    }
+
     /// 来源修订事件透传（MC-46 后半句）：只读 `session_change` 的说话人修订。
     public func speakerRevisions(sessionID: String) async throws -> [SessionChange] {
         try await store.speakerRevisions(sessionID: sessionID)

@@ -348,14 +348,12 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         )
     }
 
-    /// 拆出**不**提示复核，这是刻意的取舍，不是漏接。
+    /// 拆出**也**要提示复核——事件记在用户动作这一层，不在 `attachSpeakerLabel`。
     ///
-    /// 拆出改的是 `line.speaker_label`，走 `attachSpeakerLabel`——而那也是实时对齐
-    /// 写归属的同一条路径。要让拆出算"用户改了来源"，得在 `SpeakerLabeling.split`
-    /// 这一层单独记事件；改 `attachSpeakerLabel` 会被每一次对齐到达刷出一堆标记。
-    ///
-    /// 这里钉住当前行为，好让将来有人想"补上"时先看见这条为什么当初没做。
-    func testSplittingSpeakersDoesNotMarkTheMinutesForReview() async throws {
+    /// 用户说"这几句不是他说的"，是一次有意的更正，和改名同一类：依据旧归属的
+    /// 结论该被提示复核。此前它不提示，而**不能**顺手去改 `attachSpeakerLabel`——
+    /// 那条同时是实时对齐写归属的路径，在那里记会被每次对齐到达刷屏。
+    func testSplittingSpeakersMarksTheMinutesForReview() async throws {
         let h = try await makeHarness()
         await h.clients.openGate()
         await h.session.start(selection: MeetingAudioSelection())
@@ -375,14 +373,49 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await h.session.split(lineIDs: ["\(sessionID)-line"], to: "B")
 
         let revisions = try await h.store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(
+            revisions.count, 1,
+            "拆出要记一条归属修订；一次拆出记一条，不是每行一条"
+        )
         XCTAssertTrue(
-            revisions.isEmpty,
-            "拆出不写修订事件——否则实时对齐每次到达都会刷出复核标记"
-        )
-        XCTAssertFalse(
             h.session.minutes.versionsNeedingReview.contains(minutes.id),
-            "当前行为：拆出不提示复核。要覆盖得在 split 这层单独记事件，别改 attachSpeakerLabel。"
+            "拆出改了归属，依赖旧归属的纪要必须当场提示复核"
         )
+        let needsReview = try await h.store.minutesNeedsReview(minutesID: minutes.id)
+        XCTAssertTrue(needsReview, "库这一层的判断也应当是同一结论")
+    }
+
+    /// 实时对齐写归属**不得**被当成用户改来源。
+    ///
+    /// 这是上一条成立的前提：`attachSpeakerLabel` 也服务于对齐证据的迟到到达。
+    /// 若在那里记修订事件，每次对齐到达都会给这一场盖上一个复核标记，
+    /// 真正需要提示的那批会被淹掉。
+    func testAlignmentWritingAttributionDoesNotMarkTheMinutesForReview() async throws {
+        let h = try await makeHarness()
+        // 这一条只验库层，不启动会议：对齐到达走的是 `attachSpeakerLabel` 本身。
+        let record = try await h.store.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        let sessionID = record.id
+        let lineID = "\(sessionID)-line"
+        _ = try await h.store.appendLine(
+            LineDraft(
+                sessionID: sessionID, role: .speaker, text: "这一句先归给 A。",
+                source: .microphone, tStart: 0, status: .final
+            ),
+            id: lineID
+        )
+        let minutes = try await h.store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+
+        // 对齐证据迟到：只写归属，不写修订事件。
+        try await h.store.attachSpeakerLabel(lineID: lineID, label: "A")
+
+        let revisions = try await h.store.speakerRevisions(sessionID: sessionID)
+        XCTAssertTrue(revisions.isEmpty, "对齐写归属不是用户动作，不得刷出复核标记")
+        let needsReview = try await h.store.minutesNeedsReview(minutesID: minutes.id)
+        XCTAssertFalse(needsReview)
     }
 
     /// 启动一场会并给它一版整理好的纪要。
