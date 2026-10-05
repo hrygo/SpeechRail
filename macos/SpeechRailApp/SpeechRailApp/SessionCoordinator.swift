@@ -431,11 +431,22 @@ public final class SessionCoordinator {
     public func sealMeeting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
         do {
             try await store.finalizeSession(id: id, endReason: reason)
-            if let record = try await store.session(id: id), record.state == .archived {
-                lastFinalizedSessionID = id
-                return .sealed(recordID: id)
+            guard let record = try await store.session(id: id), record.state == .archived else {
+                return .failed(recordID: id, reason: "封存后读回状态不是已归档")
             }
-            return .failed(recordID: id, reason: "封存后读回状态不是已归档")
+            // MA-03 收尾：来源快照冻结成功，才算"封存"成功——排纪要这一步依赖它。
+            // 这一步失败时**转录已经归档**，所以原因里必须说清文字记录没丢，
+            // 否则用户会以为整场都没存上，白白重录一遍。
+            do {
+                try await store.sealMeetingSource(sessionID: id)
+            } catch {
+                return .failed(
+                    recordID: id,
+                    reason: "文字记录已经归档，但来源快照没有封存成功：\(error.localizedDescription)"
+                )
+            }
+            lastFinalizedSessionID = id
+            return .sealed(recordID: id)
         } catch {
             return .failed(recordID: id, reason: error.localizedDescription)
         }

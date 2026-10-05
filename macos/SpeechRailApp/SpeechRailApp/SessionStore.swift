@@ -1665,6 +1665,157 @@ public actor SessionStore {
         }
     }
 
+    /// 把一场会议封成知识文档 + 来源快照（MA-03 收尾 / MA-05 落地，MC-20、MC-46）。
+    ///
+    /// 三件事在**同一个事务**里做完：建/取这一场的知识文档、把定稿行物化成
+    /// 固定的行修订、写下这一份来源快照。少任何一样，"这一版依据的是哪几句话"
+    /// 就还是悬空的。
+    ///
+    /// 幂等：同一场重复封存不会长出第二份文档，也不会给同一段文字再插一条修订——
+    /// 只有**文字真的变了**才新增修订，并把上一条挂成 parent。所以用户改了转录再看旧纪要，
+    /// 旧纪要仍然指着它当时依据的那一版（MC-46）。
+    ///
+    /// 没有定稿正文时返回 nil：库里"没有快照"就是"还没有可锚定的来源"，
+    /// 造一条空快照等于宣称"这一场没有任何依据"。
+    @discardableResult
+    public func sealMeetingSource(
+        sessionID: String,
+        documentID: String? = nil,
+        sealedAt: Date = Date()
+    ) throws -> MeetingSourceSnapshot? {
+        let document = documentID ?? "doc-\(sessionID)"
+        var snapshotID: String?
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement("""
+            INSERT OR IGNORE INTO meeting_document
+                (id, source_session_id, title, occurred_at, created_at, updated_at)
+            VALUES (?, ?, (SELECT title FROM session WHERE id = ?), ?, ?, ?);
+            """) { statement in
+                bind(statement, 1, document)
+                bind(statement, 2, sessionID)
+                bind(statement, 3, sessionID)
+                bind(statement, 4, sealedAt.timeIntervalSince1970)
+                bind(statement, 5, sealedAt.timeIntervalSince1970)
+                bind(statement, 6, sealedAt.timeIntervalSince1970)
+                try step(statement)
+            }
+
+            let revisionIDs = try materializeTranscriptRevisions(sessionID: sessionID, at: sealedAt)
+            guard !revisionIDs.isEmpty else {
+                // 没有可锚定的正文：文档留着（这一场存在），但**不写空快照**。
+                try execute("COMMIT;")
+                return nil
+            }
+
+            let speakerRevision = try withStatement(
+                "SELECT COALESCE(MAX(updated_at), 0) FROM speaker_name WHERE session_id = ?;"
+            ) { statement -> String? in
+                bind(statement, 1, sessionID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return String(columnDouble(statement, 0))
+            }
+
+            // 快照 id 由**内容**决定，不是由场次决定：
+            //   · 文字没变 → 同样的 revision 集合 → 同一个 id → 重复封存不重复写；
+            //   · 文字变了 → revision 集合变了 → 新 id → 新的快照。
+            // 这样改了转录再看旧纪要，旧纪要那一份 `snapshot_id` 仍然指着旧快照，
+            // 里面是它当时依据的那几段话（MC-46）。
+            let snapshot = "snap-\(sessionID)-\(Self.stableDigest(revisionIDs))"
+            snapshotID = snapshot
+            try withStatement("""
+            INSERT OR IGNORE INTO source_snapshot
+                (id, document_id, line_revision_ids, speaker_map_revision, note_refs, coverage, seal_result, created_at)
+            VALUES (?, ?, ?, ?, '[]', ?, 'ok', ?);
+            """) { statement in
+                bind(statement, 1, snapshot)
+                bind(statement, 2, document)
+                bind(statement, 3, revisionIDs.joined(separator: ","))
+                bind(statement, 4, speakerRevision)
+                bind(statement, 5, "final_lines=\(revisionIDs.count)")
+                bind(statement, 6, sealedAt.timeIntervalSince1970)
+                try step(statement)
+            }
+            try withStatement(
+                "UPDATE meeting_document SET updated_at = ? WHERE id = ?;"
+            ) { statement in
+                bind(statement, 1, sealedAt.timeIntervalSince1970)
+                bind(statement, 2, document)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        guard let snapshotID else { return nil }
+        return try sourceSnapshot(id: snapshotID)
+    }
+
+    /// 把定稿行物化成不可变的行修订，返回本次快照锚定的 revision id（按 ordinal 序）。
+    ///
+    /// 文字没变的行**不新插**：同一段话反复封存不会在库里堆出一串一模一样的修订。
+    /// 变了才新增，并把上一条挂成 `parent_revision_id`——修订链就是这样长出来的。
+    private func materializeTranscriptRevisions(sessionID: String, at: Date) throws -> [String] {
+        struct FinalLine {
+            let id: String
+            let text: String
+            let role: String
+            let createdAt: Double
+        }
+        let lines = try withStatement("""
+        SELECT id, text, role, created_at FROM line
+        WHERE session_id = ? AND status = 'final' ORDER BY ordinal ASC;
+        """) { statement -> [FinalLine] in
+            bind(statement, 1, sessionID)
+            var rows: [FinalLine] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(FinalLine(
+                    id: columnText(statement, 0) ?? "",
+                    text: columnText(statement, 1) ?? "",
+                    role: columnText(statement, 2) ?? "speaker",
+                    createdAt: columnDouble(statement, 3)
+                ))
+            }
+            return rows
+        }
+
+        var revisionIDs: [String] = []
+        for line in lines {
+            let latest = try withStatement("""
+            SELECT id, text FROM transcript_revision
+            WHERE line_id = ? ORDER BY edited_at DESC, rowid DESC LIMIT 1;
+            """) { statement -> (id: String, text: String)? in
+                bind(statement, 1, line.id)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return (id: columnText(statement, 0) ?? "", text: columnText(statement, 1) ?? "")
+            }
+            if let latest, latest.text == line.text {
+                revisionIDs.append(latest.id)
+                continue
+            }
+            // 人工输入与 ASR 分开记：将来"这句是谁写的"要能从修订上直接看出来。
+            let origin = line.role == "user" ? "user_input" : "asr"
+            let revisionID = "rev-\(line.id)-\(UUID().uuidString.prefix(8))"
+            try withStatement("""
+            INSERT INTO transcript_revision
+                (id, line_id, session_id, text, origin, parent_revision_id, edited_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """) { statement in
+                bind(statement, 1, revisionID)
+                bind(statement, 2, line.id)
+                bind(statement, 3, sessionID)
+                bind(statement, 4, line.text)
+                bind(statement, 5, origin)
+                bind(statement, 6, latest?.id)
+                bind(statement, 7, latest == nil ? line.createdAt : at.timeIntervalSince1970)
+                try step(statement)
+            }
+            revisionIDs.append(revisionID)
+        }
+        return revisionIDs
+    }
+
     /// 这一场最近一次封存的来源快照（MA-07/MC-20）。
     ///
     /// 生成任务在排队那一刻绑定它：同一任务不能边整理边跟随来源变化，
@@ -1678,13 +1829,27 @@ public actor SessionStore {
         FROM source_snapshot s
         JOIN meeting_document d ON d.id = s.document_id
         WHERE d.source_session_id = ?
-        ORDER BY s.created_at DESC LIMIT 1;
+        ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1;
         """
         return try withStatement(sql) { statement -> MeetingSourceSnapshot? in
             bind(statement, 1, sessionID)
             guard try step(statement) == SQLITE_ROW else { return nil }
             return sourceSnapshot(from: statement)
         }
+    }
+
+    /// 内容指纹：同一组输入在任何一次启动、任何一台机器上都得到同一个值。
+    ///
+    /// 刻意不用 `Hashable.hashValue`——它每次启动都不同，拿它当快照 id 的话
+    /// "同一份来源"在两次运行之间会被当成两份，旧纪要的引用就断了。
+    /// FNV-1a 够用：这里要的是稳定与可比较，不是抗碰撞。
+    private static func stableDigest(_ parts: [String]) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in parts.joined(separator: ",").utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100_0000_01b3
+        }
+        return String(hash, radix: 16)
     }
 
     private func sourceSnapshot(from statement: OpaquePointer) -> MeetingSourceSnapshot {
