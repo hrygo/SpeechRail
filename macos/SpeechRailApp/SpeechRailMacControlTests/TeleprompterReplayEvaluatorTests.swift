@@ -44,6 +44,24 @@ struct TeleprompterReplayEvaluatorTests {
         )
     }
 
+    private func snapshot(
+        _ text: String,
+        at milliseconds: Int,
+        item: String = "item-1",
+        revision: Int = 1,
+        stablePrefixCodepoints: Int? = nil
+    ) -> TeleprompterReplayManifest.Event {
+        .init(
+            atMilliseconds: milliseconds,
+            kind: .snapshot,
+            itemID: item,
+            eventID: "evt-\(milliseconds)",
+            revision: revision,
+            text: text,
+            stablePrefixCodepoints: stablePrefixCodepoints
+        )
+    }
+
     @Test func healthyReadingProducesLatencyWithoutHarmfulJumps() throws {
         let report = try TeleprompterReplayEvaluator.evaluate(
             manifest(
@@ -63,6 +81,47 @@ struct TeleprompterReplayEvaluatorTests {
         #expect(report.metrics.sampleCount == 2)
         #expect(report.status == "deterministic_replay")
         #expect(report.durationMilliseconds == 2_600)
+    }
+
+    @Test func emptyFinalAfterPreviewIsCountedAsUnconfirmedNotSuccess() throws {
+        // E3：有假设后的空 final 保位、不提交——报告必须单列未确认数，
+        // 不能把它记成成功确认，也不能放进成功延迟分母。
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    snapshot("欢迎来到", at: 500, stablePrefixCodepoints: 0),
+                    completed("", at: 900),
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                    .init(eventIndex: 1, intent: .read, expectedSegmentIndex: 0),
+                ]
+            )
+        )
+
+        #expect(report.metrics.unconfirmedFinalCount == 1)
+        #expect(report.metrics.sampleCount == 2)
+        let metrics = try #require(report.jsonObject["metrics"] as? [String: Any])
+        #expect(metrics["unconfirmed_final_count"] as? Int == 1)
+    }
+
+    @Test func outOfRangeStablePrefixIsCountedAsContractAnomaly() throws {
+        // E2/F-15：稳定前缀越界（raw=2 scalars 却声明 stable=99）必须暂停
+        // 推进并单列异常计数，只含聚合数，不含正文或 IDs。
+        let report = try TeleprompterReplayEvaluator.evaluate(
+            manifest(
+                events: [
+                    snapshot("欢迎", at: 500, stablePrefixCodepoints: 99),
+                ],
+                labels: [
+                    .init(eventIndex: 0, intent: .read, expectedSegmentIndex: 0),
+                ]
+            )
+        )
+
+        #expect(report.metrics.stablePrefixContractAnomalyCount == 1)
+        let metrics = try #require(report.jsonObject["metrics"] as? [String: Any])
+        #expect(metrics["stable_prefix_contract_anomaly_count"] as? Int == 1)
     }
 
     @Test func improviseLabelCountsAnAdvanceAsAHarmfulJump() throws {

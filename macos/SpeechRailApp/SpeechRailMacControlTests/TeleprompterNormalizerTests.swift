@@ -573,6 +573,21 @@ struct TeleprompterCanonicalizerTests {
         )
     }
 
+    /// E8/TP-10：冲突数值不得形成强等价——合法等价（已有覆盖）保留原稿
+    /// 范围，冲突值必须不等价，否则对齐器会把“读错数”当成“读对了”。
+    @Test func conflictingNumeralsAreNeverEquivalent() {
+        // 合法等价（对照组，已有覆盖处复述口径）。
+        #expect(TeleprompterCanonicalizer.values("三点五") == TeleprompterCanonicalizer.values("3.5"))
+        #expect(TeleprompterCanonicalizer.values("百分之五十") == TeleprompterCanonicalizer.values("50%"))
+        // 冲突值：小数点错位、百分号缺失、量级词不同——一律不等价。
+        #expect(TeleprompterCanonicalizer.values("三点五") != TeleprompterCanonicalizer.values("35"))
+        #expect(TeleprompterCanonicalizer.values("3.5") != TeleprompterCanonicalizer.values("35"))
+        #expect(TeleprompterCanonicalizer.values("百分之五十") != TeleprompterCanonicalizer.values("五十"))
+        #expect(TeleprompterCanonicalizer.values("50%") != TeleprompterCanonicalizer.values("五十"))
+        #expect(TeleprompterCanonicalizer.values("三万五") != TeleprompterCanonicalizer.values("三十五万"))
+        #expect(TeleprompterCanonicalizer.values("1万元") != TeleprompterCanonicalizer.values("1亿元"))
+    }
+
     /// `.arabic` 带单位组、`.spokenDecimal` 不带，于是同一个数量写成阿拉伯数字
     /// 是一个 token、写成中文口语数字是两个——**与第 70 条那两张分叉的单位表同一
     /// 形状，只是这次分叉的是「规则带不带单位组」而不是「表里有哪些成员」**。

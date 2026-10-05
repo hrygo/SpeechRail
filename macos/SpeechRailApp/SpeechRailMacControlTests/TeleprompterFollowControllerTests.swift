@@ -5,14 +5,17 @@ import SpeechRailControlKit
 #endif
 
 struct TeleprompterFollowControllerTests {
+    /// E7c/§6.4：reducer 文案对齐——tracking 仅在有证据时称跟随中；
+    /// listening/catchingUp 无证据时称正在定位；不暴露内部术语。
     @Test func followPresentationUsesClearUserFacingStates() {
-        #expect(TeleprompterFollowPresentation.statusText(for: .waitingForSpeech) == "等待声音请开讲…")
-        #expect(TeleprompterFollowPresentation.statusText(for: .listening) == "听见你了，正在跟上稿件…")
-        #expect(TeleprompterFollowPresentation.statusText(for: .tracking) == "跟读咬合")
-        #expect(TeleprompterFollowPresentation.statusText(for: .catchingUp) == "正在跟上稿件")
+        #expect(TeleprompterFollowPresentation.statusText(for: .waitingForSpeech) == "麦克风使用中，请开始朗读")
+        #expect(TeleprompterFollowPresentation.statusText(for: .listening) == "正在定位，位置已保持")
+        #expect(TeleprompterFollowPresentation.statusText(for: .tracking) == "语音跟随中")
+        #expect(TeleprompterFollowPresentation.statusText(for: .catchingUp) == "正在定位，位置已保持")
         #expect(TeleprompterFollowPresentation.statusText(for: .freePlaying) == "自由发挥中")
         #expect(TeleprompterFollowPresentation.statusText(for: .paused) == "已暂停")
-        #expect(TeleprompterFollowPresentation.statusText(for: .manual) == "手动浏览中")
+        #expect(TeleprompterFollowPresentation.statusText(for: .manual) == "手动提词")
+        #expect(!TeleprompterFollowPresentation.statusText(for: .tracking).contains("咬合"), "内部术语不得作为用户文案")
     }
 
     private func script() throws -> [TeleprompterSegment] {
@@ -352,7 +355,7 @@ struct TeleprompterFollowControllerTests {
             )
             #expect(
                 controller.followState == .catchingUp,
-                "越界时必须离开跟读咬合，回到「正在跟上」：\(controller.followState)"
+                "越界时必须离开语音跟随中，回到正在定位：\(controller.followState)"
             )
             #expect(
                 controller.uncertainty == 1,
@@ -413,6 +416,133 @@ struct TeleprompterFollowControllerTests {
     /// 二是两段用了同一句 filler，**重复跨度让匹配变歧义**，锚点根本没建立，
     /// 于是「视口没动」是因为压根没匹配上，不是因为远处短语被拦——这种通过毫无意义。
     /// 所以先断言锚点真的建立了，再断言远处短语没推动它。
+    @Test func retainedStablePrefixSubtractsDroppedScalars() throws {
+        // E2 截断坐标回归：旧公式 min(stable, retainedCount) 漏减丢弃数。
+        // 反例（方案 F03）：raw=3000 scalars，retain=2048，dropped=952，
+        // stable=1500 → 正确 548，旧公式给出 1500。
+        // 小稿构造：短文本无截断（dropped=0），正确与旧公式一致——
+        // 这条只钉住“换算恒等式”，真正的截断区分由下一条大稿用例覆盖。
+        // （大稿对齐窗口有限，短证据在 3000 字稿头无法定位，故分两条。）
+        let scriptText = "欢迎来到今天的直播，今天我们介绍相机设置。接下来演示照片导出。"
+        let segments = try TeleprompterSegmenter.segment(sourceText: scriptText)
+        var controller = TeleprompterFollowController()
+        let stable = scriptText.unicodeScalars.count
+        controller.receiveSnapshot(
+            itemID: "short",
+            revision: 1,
+            text: scriptText,
+            segments: segments,
+            eventID: "e-short",
+            stablePrefixCodepoints: stable
+        )
+
+        #expect(controller.stablePrefixContractAnomalies == 0)
+        #expect(controller.position.utf16Offset > 0, "全稳定短文本必须推进")
+    }
+
+    @Test func truncatedStablePrefixCoversOnlyRetainedHead() throws {
+        // E2 截断区分回归：与上一条同一公式，raw=3000/retain=2048/dropped=952，
+        // stable=1500 时正确行为只取保留区前 548。
+        // 用可观测行为区分：正确换算的对齐输入是保留区前 548，
+        // 旧逻辑的对齐输入是保留区前 1500——两者 token 流不同。
+        // 为避开大稿对齐窗口限制，本条直接断言控制器实际消费的稳定文本
+        // 等于保留区前缀 548（通过 partialPreview 长度表达），
+        // 而不是断言对齐位置。
+        let anchorA = "欢迎来到今天的直播，今天我们介绍相机设置。"
+        let interlude = "接下来演示照片导出的具体流程，请大家跟随操作。"
+        let decoyB = "欢迎来到今天的终审现场，请各位评委有序入场就座。"
+        let head = anchorA + interlude + decoyB
+        let retainedText = head + String(repeating: "乙", count: 2048 - head.unicodeScalars.count)
+        #expect(retainedText.unicodeScalars.count == 2048, "保留区必须恰好 2048 scalars")
+        let droppedCount = 3000 - 2048
+        let rawStable = droppedCount + 548
+        #expect(rawStable == 1500, "复现方案 F03 的数值")
+        let droppedLine = "今天我们在这里回顾本季度的拍摄计划与分镜安排。"
+        let headFillerCount = 3000 - 2048 - droppedLine.unicodeScalars.count
+        let rawText = String(repeating: "甲", count: headFillerCount) + droppedLine + retainedText
+        #expect(rawText.unicodeScalars.count == 3000, "原文必须恰好 3000 scalars")
+        let segments = try TeleprompterSegmenter.segment(sourceText: rawText)
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "truncated",
+            revision: 1,
+            text: rawText,
+            segments: segments,
+            eventID: "e-truncated",
+            stablePrefixCodepoints: rawStable
+        )
+
+        #expect(controller.stablePrefixContractAnomalies == 0)
+        // 正确行为：稳定对齐只消费保留区前 548 scalars；
+        // 旧逻辑 min(1500, 2048) 消费 1500。多吃的 952 恰为丢弃数。
+        #expect(controller.lastStableAlignedScalarCount == 548,
+            "稳定对齐必须只取保留区前 548 scalars，实际 \(String(describing: controller.lastStableAlignedScalarCount))；旧逻辑给出 1500")
+    }
+
+    @Test func sameItemShortFinalConfirmsWithoutMovingViewport() throws {
+        // E3/F04 同位确认：同 item snapshot“欢迎”试探推进后，
+        // 同位置 final“欢迎”应提交 committed，且视口不重复移动。
+        // 当前逻辑把“相等”归入向后重读门槛（0.95/6 matches），短句无法确认。
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "greet",
+            revision: 1,
+            text: "欢迎",
+            segments: segments,
+            eventID: "e-snap"
+        )
+        let previewPosition = controller.position
+        #expect(previewPosition.utf16Offset > 0, "snapshot 必须先试探推进，否则这条用例测不到同位确认")
+        let committedBefore = controller.committedPosition
+
+        controller.receiveCompleted(
+            itemID: "greet",
+            transcript: "欢迎",
+            segments: segments,
+            eventID: "e-final"
+        )
+
+        #expect(controller.committedPosition == previewPosition,
+            "同 item 同位 final 必须提交 committed")
+        #expect(controller.position == previewPosition,
+            "同位确认不得重复移动视口")
+        #expect(controller.followState == .tracking)
+        _ = committedBefore
+    }
+
+    @Test func emptyFinalAfterPreviewIsUnconfirmed() throws {
+        // E3/F05 空 final：有非空假设之后收到空 final，不得提交 committed，
+        // 必须给出可观察的未确认状态，且保持视口位置。
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "greet",
+            revision: 1,
+            text: "欢迎来到",
+            segments: segments,
+            eventID: "e-snap"
+        )
+        let previewPosition = controller.position
+        let committedBefore = controller.committedPosition
+
+        controller.receiveCompleted(
+            itemID: "greet",
+            transcript: "",
+            segments: segments,
+            eventID: "e-final"
+        )
+
+        #expect(controller.committedPosition == committedBefore, "空 final 不得提交 committed")
+        #expect(controller.position == previewPosition, "空 final 必须保位")
+        #expect(controller.followState != .tracking,
+            "有假设后的空 final 不得继续呈现已跟上，实际 \(controller.followState)")
+    }
+
     @Test func aDistantForwardPhraseCannotDragTheViewportAhead() throws {
         let opening = "第一段的开场白今天我们讲的是相机设置"
         let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
@@ -600,6 +730,68 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.hypothesisPosition == nil)
         #expect(controller.viewportAnchor == preview)
         #expect(controller.position == preview)
+    }
+
+    /// E8/TP-10：重复开场不得远跳，充分证据后能恢复。脚本按既有模式
+    /// 拉开距离（半径是绝对 token 数，短脚本测的是口径不是性质）：段0开场白
+    /// 建锚，段2是相同开场；纯重复句保位、带后续区分词前进到段1。
+    @Test func repeatedOpeningStaysUntilDisambiguatingWordsArrive() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(opening)。\n\n\(bridge)。\n\n第一段的开场白现在开始提问"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        #expect(controller.followState == .tracking, "开场白必须先跟上，否则门禁无从谈起")
+        let anchored = controller.position
+
+        // 纯重复开场（段2相同句子）：含糊，不得远跳。
+        controller.receiveCompleted(
+            itemID: "repeat", transcript: "第一段的开场白", segments: segments
+        )
+        #expect(controller.lastMatchedCount > 0, "重复开场必须有真实候选，否则门禁无从谈起")
+        #expect(
+            controller.position == anchored,
+            "含糊重复开场不得远跳到后面的相同句子"
+        )
+        #expect(controller.committedPosition == anchored)
+        // 后续区分词到达：充分证据后能推进到段1。
+        controller.receiveCompleted(
+            itemID: "disambiguate", transcript: bridge, segments: segments
+        )
+        #expect(controller.position.segmentIndex == 1)
+    }
+
+    /// E8/TP-10：近场单 token 不推进、远场单 token 需强证据。既有
+    /// `aLoneStrayTokenMatchDoesNotMoveTheViewport` 已钉住远场单字杂音；
+    /// 这里补近场对照：锚点旁的单字延续同样不得推进（有效候选但证据不足，
+    /// 不能以“近”放行），远处孤 token 更不得拖走视口。
+    @Test func singleTokenNearAndFarAreGatedDifferently() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(opening)。\n\n\(bridge)。\n\n远端短语出现在第三段"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        #expect(controller.followState == .tracking, "开场白必须先跟上")
+        let anchored = controller.position
+
+        // 近场单字延续：落在半径内、置信满分，但只有一个 token——不得推进。
+        controller.receiveCompleted(itemID: "near-one", transcript: "置", segments: segments)
+        #expect(controller.lastMatchedCount == 1, "近场用例前提：单 token 候选")
+        #expect(
+            controller.position == anchored,
+            "近场单 token 不得推进：不能以近放行证据不足的候选"
+        )
+        // 远场孤 token：同样不得拖走视口（与既有单字杂音回归同族不同字）。
+        controller.receiveCompleted(itemID: "far-one", transcript: "端", segments: segments)
+        #expect(
+            controller.position == anchored,
+            "远场单 token 不得拖走视口：不能以全部冻结证明安全"
+        )
+        #expect(controller.committedPosition == anchored)
     }
 
     @Test func uniqueNearAnchorSnapshotCanAdvanceImmediately() throws {
@@ -970,6 +1162,63 @@ struct TeleprompterRealtimeFollowAdapterTests {
 
         #expect(controller.position == newerPosition)
         #expect(controller.currentIndex == 2)
+    }
+
+    @Test func samePositionConfirmationIsObservedWithoutViewportMotion() throws {
+        // E3：committed 同位确认不移动视口，但 adapter 必须表达实际确认，
+        // 不能判成 ignored，否则调用方会误以为“没有定位成功”。
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+        _ = adapter.apply(
+            .partialSnapshot(itemID: "greet", revision: 1, text: "欢迎"),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+        let previewPosition = controller.position
+        #expect(previewPosition.utf16Offset > 0, "snapshot 必须先试探推进")
+        let committedBefore = controller.committedPosition
+
+        let outcome = adapter.apply(
+            .completed(itemID: "greet", transcript: "欢迎"),
+            metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(outcome == .confirmed)
+        #expect(controller.committedPosition == previewPosition)
+        #expect(controller.position == previewPosition)
+        _ = committedBefore
+    }
+
+    @Test func emptyFinalAfterPreviewIsUnconfirmedRatherThanIgnored() throws {
+        // E3：有假设后的空 final 保位、不提交，但 outcome 必须可观察为
+        // .unconfirmed，不能与“无证据的空 final（ignored）”混同。
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+        _ = adapter.apply(
+            .partialSnapshot(itemID: "greet", revision: 1, text: "欢迎来到"),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+        let previewPosition = controller.position
+        let committedBefore = controller.committedPosition
+
+        let outcome = adapter.apply(
+            .completed(itemID: "greet", transcript: ""),
+            metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(outcome == .unconfirmed)
+        #expect(controller.committedPosition == committedBefore)
+        #expect(controller.position == previewPosition)
+        #expect(controller.followState == .catchingUp)
     }
 
     @Test func failedAndClosedEventsAreTerminalOutcomes() throws {
