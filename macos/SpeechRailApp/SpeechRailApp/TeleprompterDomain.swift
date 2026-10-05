@@ -10,6 +10,8 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     /// tighten in flight. Refusing is correct; refusing *silently* is not, so
     /// this is a thrown, user-facing reason rather than a bare `return`.
     case sessionBusy
+    /// E6：候选段落全部跳过，没有可朗读的段落。
+    case noReadableBlocks
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +25,8 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
             "没能准备好 AI 整理请求"
         case .sessionBusy:
             "现在不能切换稿件：提词窗口还开着，或上一步还没收尾。先关掉提词窗口再试。"
+        case .noReadableBlocks:
+            "还没有可朗读的段落：候选段落全部跳过了，至少保留一段照念再采用。"
         }
     }
 }
@@ -45,6 +49,15 @@ public enum TeleprompterStageOpenError: Error, Equatable, LocalizedError, Sendab
 /// AI 整理前向用户说明的数据流边界。
 ///
 /// 文案不包含 endpoint、密钥或 provider 的实现细节，避免把敏感配置带入界面或持久化稿件。
+/// E5/TP-05：AI 数据流披露的用途边界。整理原稿与朗读标注是两种用途，
+/// 确认键按 endpoint/model/purpose 散列隔离；旧键不推导新用途已同意。
+public enum TeleprompterAIDataFlowPurpose: String, Sendable {
+    /// 把原稿整理成口语播报稿。
+    case prepare
+    /// 给已确认的稿子补朗读提示。
+    case annotate
+}
+
 public enum TeleprompterAIDataFlowDisclosure {
     /// 旧版本的全局确认键保留但不复用；新确认按实际 endpoint/model 作用域保存。
     public static let acknowledgementDefaultsKey =
@@ -55,7 +68,7 @@ public enum TeleprompterAIDataFlowDisclosure {
     public static let message = """
         点击「允许发送并整理」后，SpeechRail 会把本次选中的原稿文字，以及目标时长、朗读节奏和表达方式，发送给设置中的 AI 服务，用来整理为适合朗读的候选稿，并检查相邻段落的衔接。
 
-        AI 只生成候选稿，不会自动覆盖原稿；你可以逐组查看原文对照、修改、保留原文、仅作提示或跳过。确认后，朗读标注仍是可选步骤。
+        AI 只生成候选稿，不会自动覆盖原稿；你可以通读整份候选稿、修改文字、保留原文、仅作提示或跳过。确认后，朗读标注仍是可选步骤。
 
         不会发送麦克风、摄像头或直播画面。跟读和直播时也不会调用 AI。
 
@@ -63,10 +76,15 @@ public enum TeleprompterAIDataFlowDisclosure {
         """
 
     /// 不把 endpoint 原文写进 UserDefaults key；配置变化后必须重新确认数据流。
-    public static func acknowledgementDefaultsKey(for configuration: LLMConfiguration) -> String {
+    public static func acknowledgementDefaultsKey(
+        for configuration: LLMConfiguration,
+        purpose: TeleprompterAIDataFlowPurpose = .prepare
+    ) -> String {
         let material = configuration.normalizedBaseURL
             + "\u{0}"
             + configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            + "\u{0}"
+            + purpose.rawValue
         let digest = SHA256.hash(data: Data(material.utf8))
         let fingerprint = digest.prefix(12).map { String(format: "%02x", $0) }.joined()
         return "speechrail.teleprompter.aiDataFlowAcknowledged.v2.\(fingerprint)"
@@ -143,6 +161,9 @@ public struct TeleprompterReadingBlock: Codable, Equatable, Identifiable, Sendab
         self.origin = origin
         self.budgetSeconds = budgetSeconds
     }
+
+    /// E6：候选段落序号标签（#01 起），与 ready 页 segments 同口径。
+    public var preparedOrdinalLabel: String { String(format: "#%02d", ordinal + 1) }
 }
 
 /// 时长估计的语速校准来源。

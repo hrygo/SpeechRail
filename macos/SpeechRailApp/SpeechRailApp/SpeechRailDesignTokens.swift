@@ -1403,6 +1403,8 @@ public enum SpeechRailDesignTokens {
         public static let searchEmptyMinHeight: CGFloat = 180
         /// 准备进度条的稳定最大宽度
         public static let analyzingProgressMaxWidth: CGFloat = 360
+        /// E6 候选段落编辑器单段最小高度：与原稿编辑器同级的可读写作空间。
+        public static let preparedBlockEditorMinHeight: CGFloat = 144
         /// 计时试读窗口样稿滚动区高度
         public static let trialSampleScrollHeight: CGFloat = 140
         /// 整理稿段落列表的可视高度上限，超出后列表内部滚动。

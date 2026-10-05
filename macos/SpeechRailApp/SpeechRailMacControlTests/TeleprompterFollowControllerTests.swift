@@ -5,14 +5,17 @@ import SpeechRailControlKit
 #endif
 
 struct TeleprompterFollowControllerTests {
+    /// E7c/§6.4：reducer 文案对齐——tracking 仅在有证据时称跟随中；
+    /// listening/catchingUp 无证据时称正在定位；不暴露内部术语。
     @Test func followPresentationUsesClearUserFacingStates() {
-        #expect(TeleprompterFollowPresentation.statusText(for: .waitingForSpeech) == "等待声音请开讲…")
-        #expect(TeleprompterFollowPresentation.statusText(for: .listening) == "听见你了，正在跟上稿件…")
-        #expect(TeleprompterFollowPresentation.statusText(for: .tracking) == "跟读咬合")
-        #expect(TeleprompterFollowPresentation.statusText(for: .catchingUp) == "正在跟上稿件")
+        #expect(TeleprompterFollowPresentation.statusText(for: .waitingForSpeech) == "麦克风使用中，请开始朗读")
+        #expect(TeleprompterFollowPresentation.statusText(for: .listening) == "正在定位，位置已保持")
+        #expect(TeleprompterFollowPresentation.statusText(for: .tracking) == "语音跟随中")
+        #expect(TeleprompterFollowPresentation.statusText(for: .catchingUp) == "正在定位，位置已保持")
         #expect(TeleprompterFollowPresentation.statusText(for: .freePlaying) == "自由发挥中")
         #expect(TeleprompterFollowPresentation.statusText(for: .paused) == "已暂停")
-        #expect(TeleprompterFollowPresentation.statusText(for: .manual) == "手动浏览中")
+        #expect(TeleprompterFollowPresentation.statusText(for: .manual) == "手动提词")
+        #expect(!TeleprompterFollowPresentation.statusText(for: .tracking).contains("咬合"), "内部术语不得作为用户文案")
     }
 
     private func script() throws -> [TeleprompterSegment] {
@@ -352,7 +355,7 @@ struct TeleprompterFollowControllerTests {
             )
             #expect(
                 controller.followState == .catchingUp,
-                "越界时必须离开跟读咬合，回到「正在跟上」：\(controller.followState)"
+                "越界时必须离开语音跟随中，回到正在定位：\(controller.followState)"
             )
             #expect(
                 controller.uncertainty == 1,
@@ -727,6 +730,68 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.hypothesisPosition == nil)
         #expect(controller.viewportAnchor == preview)
         #expect(controller.position == preview)
+    }
+
+    /// E8/TP-10：重复开场不得远跳，充分证据后能恢复。脚本按既有模式
+    /// 拉开距离（半径是绝对 token 数，短脚本测的是口径不是性质）：段0开场白
+    /// 建锚，段2是相同开场；纯重复句保位、带后续区分词前进到段1。
+    @Test func repeatedOpeningStaysUntilDisambiguatingWordsArrive() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(opening)。\n\n\(bridge)。\n\n第一段的开场白现在开始提问"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        #expect(controller.followState == .tracking, "开场白必须先跟上，否则门禁无从谈起")
+        let anchored = controller.position
+
+        // 纯重复开场（段2相同句子）：含糊，不得远跳。
+        controller.receiveCompleted(
+            itemID: "repeat", transcript: "第一段的开场白", segments: segments
+        )
+        #expect(controller.lastMatchedCount > 0, "重复开场必须有真实候选，否则门禁无从谈起")
+        #expect(
+            controller.position == anchored,
+            "含糊重复开场不得远跳到后面的相同句子"
+        )
+        #expect(controller.committedPosition == anchored)
+        // 后续区分词到达：充分证据后能推进到段1。
+        controller.receiveCompleted(
+            itemID: "disambiguate", transcript: bridge, segments: segments
+        )
+        #expect(controller.position.segmentIndex == 1)
+    }
+
+    /// E8/TP-10：近场单 token 不推进、远场单 token 需强证据。既有
+    /// `aLoneStrayTokenMatchDoesNotMoveTheViewport` 已钉住远场单字杂音；
+    /// 这里补近场对照：锚点旁的单字延续同样不得推进（有效候选但证据不足，
+    /// 不能以“近”放行），远处孤 token 更不得拖走视口。
+    @Test func singleTokenNearAndFarAreGatedDifferently() throws {
+        let opening = "第一段的开场白今天我们讲的是相机设置"
+        let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "\(opening)。\n\n\(bridge)。\n\n远端短语出现在第三段"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "anchor", transcript: opening, segments: segments)
+        #expect(controller.followState == .tracking, "开场白必须先跟上")
+        let anchored = controller.position
+
+        // 近场单字延续：落在半径内、置信满分，但只有一个 token——不得推进。
+        controller.receiveCompleted(itemID: "near-one", transcript: "置", segments: segments)
+        #expect(controller.lastMatchedCount == 1, "近场用例前提：单 token 候选")
+        #expect(
+            controller.position == anchored,
+            "近场单 token 不得推进：不能以近放行证据不足的候选"
+        )
+        // 远场孤 token：同样不得拖走视口（与既有单字杂音回归同族不同字）。
+        controller.receiveCompleted(itemID: "far-one", transcript: "端", segments: segments)
+        #expect(
+            controller.position == anchored,
+            "远场单 token 不得拖走视口：不能以全部冻结证明安全"
+        )
+        #expect(controller.committedPosition == anchored)
     }
 
     @Test func uniqueNearAnchorSnapshotCanAdvanceImmediately() throws {

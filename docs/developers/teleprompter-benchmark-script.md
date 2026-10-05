@@ -1,8 +1,8 @@
 ---
 title: "提词器时延基线朗读稿与标注模板"
 status: active
-version: "0.4.0"
-date: 2026-09-29
+version: "0.4.1"
+date: 2026-10-05
 ---
 
 # 提词器时延基线朗读稿与标注模板
@@ -179,7 +179,7 @@ date: 2026-09-29
 
 上面那份 manifest 示例**不是照契约想象出来的，是跑过 `teleprompter-replay` 的**：
 
-- 按模板填写 → 成功产出 `teleprompter.eval.v1` 报告，`sample_count: 3`、
+- 按模板填写 → 成功产出 `teleprompter.eval.v2` 报告，`sample_count: 3`、
   `advanced_event_count: 3`，并正确触发两条 caveat（无 `improvise` 标注、无回稿恢复样本）；
 - 故意把 `read` 改成 `re_read` → 如预期被拒，错误信息直接列出合法取值：
   `字段 labels.Index 0.intent：Cannot initialize Intent from invalid String value re_read（接受的取值：read / improvise / reRead / manualJump）`。

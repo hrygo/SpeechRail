@@ -76,15 +76,18 @@ public enum TeleprompterFollowState: Equatable, Sendable {
 }
 
 public enum TeleprompterFollowPresentation {
+    /// E7c/§6.4：reducer 决策表示当前位置证据。tracking 仅在有有效位置证据时
+    /// 呈现“语音跟随中”；listening/catchingUp 无定位证据时统一“正在定位，
+    /// 位置已保持”，不伪装已定位。内部实现术语不得作为用户文案。
     public static func statusText(for state: TeleprompterFollowState) -> String {
         switch state {
-        case .waitingForSpeech: "等待声音请开讲…"
-        case .listening: "听见你了，正在跟上稿件…"
-        case .tracking: "跟读咬合"
-        case .catchingUp: "正在跟上稿件"
+        case .waitingForSpeech: "麦克风使用中，请开始朗读"
+        case .listening: "正在定位，位置已保持"
+        case .tracking: "语音跟随中"
+        case .catchingUp: "正在定位，位置已保持"
         case .freePlaying: "自由发挥中"
         case .paused: "已暂停"
-        case .manual: "手动浏览中"
+        case .manual: "手动提词"
         }
     }
 }

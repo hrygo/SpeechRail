@@ -1483,6 +1483,30 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertFalse(first.contains("example.com"))
     }
 
+    /// E5/TP-05：整理与标注是两种用途——同一 endpoint/model 下确认键必须隔离，
+    /// 旧键（无 purpose）不得推导新用途已同意；key 不得写入 endpoint 或正文。
+    func testTeleprompterDataFlowAcknowledgementIsIsolatedByPurpose() {
+        let configuration = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-a")
+        let prepare = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
+            for: configuration, purpose: .prepare
+        )
+        let annotate = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
+            for: configuration, purpose: .annotate
+        )
+        XCTAssertNotEqual(prepare, annotate, "同一配置下整理与标注确认必须隔离")
+        XCTAssertFalse(prepare.contains("127.0.0.1"), "确认键不得嵌入 endpoint 原文")
+        XCTAssertFalse(annotate.contains("model-a"), "确认键不得嵌入模型名原文")
+    }
+
+    /// E5/TP-05：披露文案不得承诺逐组审阅保证——候选是整体阅稿，不设必审门禁。
+    func testTeleprompterDataFlowDisclosureDoesNotPromiseGroupReview() {
+        XCTAssertFalse(
+            TeleprompterAIDataFlowDisclosure.message.contains("逐组"),
+            "确认文案不得再写逐组审阅"
+        )
+        XCTAssertTrue(TeleprompterAIDataFlowDisclosure.message.contains("通读整份候选稿"))
+    }
+
     func testTeleprompterDataFlowDisclosureUsesPlainLanguage() {
         XCTAssertEqual(TeleprompterAIDataFlowDisclosure.title, "整理稿件前请确认")
         XCTAssertTrue(TeleprompterAIDataFlowDisclosure.inlineMessage.contains("只有点击"))
@@ -1495,5 +1519,13 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(TeleprompterTextError.emptySource.errorDescription, "请先输入稿件内容")
         XCTAssertEqual(TeleprompterTextError.invalidAnalysis.errorDescription, "AI 返回的整理结果无法使用")
         XCTAssertFalse(TeleprompterTextError.invalidSourceRange.errorDescription?.contains("UTF-16") == true)
+    }
+
+    /// E6：全跳过错误用用户语言说明“还没有可朗读的段落”，不抛技术术语。
+    func testAllSkippedBlocksErrorUsesPlainLanguage() {
+        let message = TeleprompterTextError.noReadableBlocks.errorDescription ?? ""
+        XCTAssertTrue(message.contains("还没有可朗读的段落"))
+        XCTAssertFalse(message.contains("skip"))
+        XCTAssertFalse(message.contains("block"))
     }
 }
