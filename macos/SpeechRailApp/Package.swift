@@ -148,6 +148,8 @@ let package = Package(
                 // 视图只负责画。
                 "MinutesReviewModel.swift",
                 "MinutesReviewView.swift",
+                // 会前/会中来源呈现门面（MA-10）：采集状态到用户语言的翻译。
+                "MeetingSourcePresentation.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

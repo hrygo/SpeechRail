@@ -300,12 +300,38 @@ public struct MeetingView: View {
         }
     }
 
+    /// MA-10 的呈现门面。把采集状态翻译成用户语言的那一层集中在这里，
+    /// 界面不自己拼"现在到底在录什么"。
+    private var sourcePresentation: MeetingSourcePresentation {
+        MeetingSourcePresentation(
+            capture: sourceCapture,
+            selection: MeetingSourcePresentation.Selection(
+                usesMicrophone: meeting.selection?.usesMicrophone ?? true,
+                systemAppNames: meeting.selection?.systemApps.map(\.name) ?? []
+            ),
+            // 采集层没有独立的"识别已连上"标志。可得的诚实信号是**流有没有断**：
+            // `interruption` 非空就说明上行中断过。这一近似会在采集层补上
+            // 显式标志之后换掉——现在不拿它冒充"识别正常"。
+            isRecognizing: meeting.interruption == nil,
+            savedLineCount: meeting.storedLineCount
+        )
+    }
+
+    private var sourceCapture: MeetingSourcePresentation.Capture {
+        guard meeting.phase.isLive || meeting.phase == .interrupted else { return .notStarted }
+        if meeting.isPaused { return .pausedAll }
+        if meeting.isMicrophoneMuted { return .microphoneMuted }
+        return .live
+    }
+
     private var statusFacts: [String] {
         guard meeting.phase != .idle else {
             return meeting.selection.map { [$0.label] } ?? []
         }
         var facts: [String] = []
-        if let selection = meeting.selection { facts.append("来源：\(selection.label)") }
+        // 来源摘要走 MA-10 的呈现门面：用户没勾麦克风时，那句话里**不会出现"麦克风"**
+        // （MC-03）。直接用 `selection.label` 会把麦克风带出来，等于谎报采集范围。
+        if meeting.selection != nil { facts.append(sourcePresentation.sourceSummary) }
         // 「谁在说话」这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
         // 原来"还没有分人"与"分人已开"会同时出现（开着但一个编号都还没有时），
         // 两句摆在一起自相矛盾，也是用户点名的那个看不懂的词（2026-09-19）。
@@ -321,6 +347,14 @@ public struct MeetingView: View {
         if meeting.isMicrophoneMuted, meeting.isPaused { facts.append("麦克风已静音") }
         if meeting.reconnectedSources > 0 {
             facts.append("接回过 \(meeting.reconnectedSources) 次")
+        }
+        // 电平、识别、保存是三件事，分开说（MC-74）。合成一句会让用户以为
+        // 看到电平就等于声音已经变成文字了。
+        if meeting.phase.isLive {
+            facts.append(sourcePresentation.levelCaption)
+        }
+        if meeting.phase.isLive, meeting.interruption != nil {
+            facts.append(contentsOf: sourcePresentation.facts.filter { $0.contains("识别") })
         }
         return facts
     }
