@@ -795,6 +795,66 @@ public enum MinutesCandidateCodec {
         return "- \(text)\(marker)\n"
     }
 
+    /// 把候选 + 核对报告 + 来源单元摊成**可落库**的条目与锚点（§7.4）。
+    ///
+    /// `revisionIDsByLine` 是这一步的关键：来源单元带的是 `lineID`，
+    /// 而锚点必须指**不可变的修订**。少了这个映射，引用就永远指着会变的 `line`——
+    /// 用户改一次转录，旧纪要的"依据"就悄悄换成了新文字（MC-46）。
+    ///
+    /// 查不到修订的行仍然建锚点，但 `revisionID` 为空：那是一条"来源不可读"的引用，
+    /// 比没有引用诚实，也不比没有引用更可用。
+    public static func itemDrafts(
+        for candidate: MinutesCandidateV2,
+        report: MinutesEvidenceValidator.Report,
+        unitsByID: [String: MinutesSourceUnit],
+        revisionIDsByLine: [String: String]
+    ) -> [MinutesItemDraft] {
+        var drafts: [MinutesItemDraft] = []
+
+        func append(localID: String, kind: String, text: String, unitIDs: [String]) {
+            let findings = report.findings(for: localID)
+            // 一条上多条问题时取最严重的那个：只要有一条引用不成立，整条就不能算通过。
+            let verdict: MinutesEvidenceValidator.Verdict? = {
+                if findings.contains(where: { $0.verdict == .rejected }) { return .rejected }
+                if findings.contains(where: { $0.verdict == .needsReview }) { return .needsReview }
+                // 没发现问题就是核对通过。`nil` 只留给"没跑过验证器"的旧版本，
+                // 两者混同的话，"没查过"会被读成"查过且没问题"。
+                return .supported
+            }()
+            let anchors = unitIDs.compactMap { unitID -> MinutesAnchorDraft? in
+                guard let unit = unitsByID[unitID] else { return nil }
+                return MinutesAnchorDraft(
+                    unitID: unitID,
+                    lineID: unit.lineID,
+                    revisionID: revisionIDsByLine[unit.lineID],
+                    speakerLabel: unit.speaker,
+                    startSeconds: unit.startSeconds
+                )
+            }
+            drafts.append(MinutesItemDraft(
+                localID: localID,
+                kind: kind,
+                text: text,
+                verdict: verdict,
+                anchors: anchors
+            ))
+        }
+
+        for item in candidate.overview {
+            append(localID: item.localID, kind: "overview", text: item.text, unitIDs: item.sourceUnitIDs)
+        }
+        for item in candidate.decisions {
+            append(localID: item.localID, kind: "decision", text: item.text, unitIDs: item.sourceUnitIDs)
+        }
+        for item in candidate.actions {
+            append(localID: item.localID, kind: "action", text: item.task, unitIDs: item.sourceUnitIDs)
+        }
+        for item in candidate.openQuestions {
+            append(localID: item.localID, kind: "open_question", text: item.text, unitIDs: item.sourceUnitIDs)
+        }
+        return drafts
+    }
+
     /// 结构化输出的 schema（`strict`：所有字段都在 `required` 里、且 `additionalProperties: false`）。
     ///
     /// `source_unit_ids` 是**必填**的：让"没有依据"成为一件模型必须写出来的事，
@@ -890,6 +950,135 @@ public enum MinutesCandidateCodec {
                 ],
             ],
         ]
+    }
+}
+
+// MARK: - 结论条目与证据锚点（MA-08 / §7.4）
+
+/// 纪要里的一条结论（概述 / 结论 / 待办 / 未决问题）。
+///
+/// 与候选 JSON 里的 `local_id` 一一对应，但**持久 id 由程序分配**——
+/// 模型给的只是候选内编号，库里的身份是程序给的（§7.5）。
+public struct MinutesItem: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var minutesID: String
+    public var localID: String
+    public var kind: String
+    public var text: String
+    /// 这一条的核对结论。`nil` 表示这一版没有跑过验证器（旧 Markdown 纪要）。
+    public var verdict: MinutesEvidenceValidator.Verdict?
+    public var sortOrder: Int
+    public var anchors: [MinutesEvidenceAnchor]
+
+    public init(
+        id: String,
+        minutesID: String,
+        localID: String,
+        kind: String,
+        text: String,
+        verdict: MinutesEvidenceValidator.Verdict?,
+        sortOrder: Int,
+        anchors: [MinutesEvidenceAnchor] = []
+    ) {
+        self.id = id
+        self.minutesID = minutesID
+        self.localID = localID
+        self.kind = kind
+        self.text = text
+        self.verdict = verdict
+        self.sortOrder = sortOrder
+        self.anchors = anchors
+    }
+}
+
+/// 一条结论锚定的一个来源单元（§7.4）。
+///
+/// `revisionID` 是**不可变**的行修订，不是 `line`：用户后来改了转录，
+/// 旧纪要仍然指着他当时依据的那一版原文（MC-46）。
+/// `quote` 从修订读回，不在这里复制一份正文——复制就会漂移。
+public struct MinutesEvidenceAnchor: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var itemID: String
+    /// 候选内的来源单元 id（`u1`、`u2`…），保留是为了能对回候选 JSON。
+    public var unitID: String
+    public var lineID: String?
+    public var revisionID: String?
+    public var snapshotID: String?
+    public var speakerLabel: String?
+    public var startSeconds: Double?
+    /// 锚点对应的原文（读自修订）。修订被删时为 nil——不拿当前 `line` 顶替。
+    public var quote: String?
+    /// 永远是 `exact_source_match`：只证明引文来自该来源，
+    /// **不证明纪要陈述被引文充分支持**（§7.4 的显式警告）。
+    public var verification: String
+
+    public init(
+        id: String,
+        itemID: String,
+        unitID: String,
+        lineID: String? = nil,
+        revisionID: String? = nil,
+        snapshotID: String? = nil,
+        speakerLabel: String? = nil,
+        startSeconds: Double? = nil,
+        quote: String? = nil,
+        verification: String = "exact_source_match"
+    ) {
+        self.id = id
+        self.itemID = itemID
+        self.unitID = unitID
+        self.lineID = lineID
+        self.revisionID = revisionID
+        self.snapshotID = snapshotID
+        self.speakerLabel = speakerLabel
+        self.startSeconds = startSeconds
+        self.quote = quote
+        self.verification = verification
+    }
+}
+
+/// 保存一版候选时一起写下的条目与锚点（写库用的中间形态）。
+public struct MinutesItemDraft: Sendable {
+    public var localID: String
+    public var kind: String
+    public var text: String
+    public var verdict: MinutesEvidenceValidator.Verdict?
+    public var anchors: [MinutesAnchorDraft]
+
+    public init(
+        localID: String,
+        kind: String,
+        text: String,
+        verdict: MinutesEvidenceValidator.Verdict?,
+        anchors: [MinutesAnchorDraft]
+    ) {
+        self.localID = localID
+        self.kind = kind
+        self.text = text
+        self.verdict = verdict
+        self.anchors = anchors
+    }
+}
+
+public struct MinutesAnchorDraft: Sendable {
+    public var unitID: String
+    public var lineID: String?
+    public var revisionID: String?
+    public var speakerLabel: String?
+    public var startSeconds: Double?
+
+    public init(
+        unitID: String,
+        lineID: String? = nil,
+        revisionID: String? = nil,
+        speakerLabel: String? = nil,
+        startSeconds: Double? = nil
+    ) {
+        self.unitID = unitID
+        self.lineID = lineID
+        self.revisionID = revisionID
+        self.speakerLabel = speakerLabel
+        self.startSeconds = startSeconds
     }
 }
 

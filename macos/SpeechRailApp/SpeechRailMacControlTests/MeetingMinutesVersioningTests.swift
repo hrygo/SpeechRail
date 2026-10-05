@@ -467,7 +467,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
-        XCTAssertEqual(SessionStore.schemaVersion, 5)
+        XCTAssertEqual(SessionStore.schemaVersion, 6)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         XCTAssertEqual(versions.count, 1)
         XCTAssertEqual(versions.first?.body, "# 迁移前纪要")

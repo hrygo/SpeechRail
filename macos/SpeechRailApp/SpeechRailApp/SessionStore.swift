@@ -63,7 +63,10 @@ public actor SessionStore {
     /// v5（MA-08）：`minutes` 追加 `candidate_json` / `review_json`。正文是渲染结果，
     /// 这两列存的是**数据**：结构化候选与证据核对报告。核对结论必须和它核对的那一版
     /// 存在一起，否则改了正文就没人知道当初核对过什么。
-    public static let schemaVersion: Int32 = 5
+    /// v6（MA-08）：`minutes_item` / `minutes_evidence` 两张表。
+    /// 结论与来源的对应关系从"候选 JSON 里的字符串"变成**可查的行**——
+    /// 否则"这条结论依据哪几句"只能靠解析 JSON 回答，问不了、也删不掉。
+    public static let schemaVersion: Int32 = 6
 
     private let directory: URL
     private let fileManager: FileManager
@@ -166,6 +169,9 @@ public actor SessionStore {
             }
             if version < 5 {
                 try migrateV4ToV5()
+            }
+            if version < 6 {
+                try migrateV5ToV6()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -904,7 +910,9 @@ public actor SessionStore {
         body: String,
         model: String?,
         candidate: String?,
-        review: String?
+        review: String?,
+        items: [MinutesItemDraft] = [],
+        snapshotID: String? = nil
     ) throws -> Bool {
         let sql = """
         UPDATE minutes
@@ -913,17 +921,156 @@ public actor SessionStore {
         WHERE id = ? AND status = 'running' AND attempts = ?;
         """
         var committed = false
-        try withStatement(sql) { statement in
-            bind(statement, 1, body)
-            bind(statement, 2, model)
-            bind(statement, 3, candidate)
-            bind(statement, 4, review)
-            bind(statement, 5, minutesID)
-            bind(statement, 6, expectedAttempts)
-            try step(statement)
-            committed = sqlite3_changes(try requireHandle()) > 0
+        // 正文、条目、锚点三者同生共死：分几次写就会出现"正文在、锚点没了"的
+        // 假引用——那比没有引用更坏，因为它看起来像有。
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement(sql) { statement in
+                bind(statement, 1, body)
+                bind(statement, 2, model)
+                bind(statement, 3, candidate)
+                bind(statement, 4, review)
+                bind(statement, 5, minutesID)
+                bind(statement, 6, expectedAttempts)
+                try step(statement)
+                committed = sqlite3_changes(try requireHandle()) > 0
+            }
+            guard committed else {
+                // 已被新 owner 接管：这一版的条目也不写，迟到的结果不得发布。
+                try execute("ROLLBACK;")
+                return false
+            }
+            // 重跑同一版（幂等）：先清掉这一版上一次写下的条目，再按候选重建。
+            try withStatement("DELETE FROM minutes_item WHERE minutes_id = ?;") { statement in
+                bind(statement, 1, minutesID)
+                try step(statement)
+            }
+            for (order, draft) in items.enumerated() {
+                let itemID = "mi-\(minutesID)-\(draft.localID)"
+                try withStatement("""
+                INSERT INTO minutes_item (id, minutes_id, local_id, kind, text, verdict, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """) { statement in
+                    bind(statement, 1, itemID)
+                    bind(statement, 2, minutesID)
+                    bind(statement, 3, draft.localID)
+                    bind(statement, 4, draft.kind)
+                    bind(statement, 5, draft.text)
+                    bind(statement, 6, draft.verdict?.rawValue)
+                    bind(statement, 7, order)
+                    try step(statement)
+                }
+                for anchor in draft.anchors {
+                    try withStatement("""
+                    INSERT INTO minutes_evidence
+                        (id, item_id, unit_id, line_id, revision_id, snapshot_id,
+                         speaker_label, t_start, verification)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'exact_source_match');
+                    """) { statement in
+                        bind(statement, 1, "ev-\(itemID)-\(anchor.unitID)")
+                        bind(statement, 2, itemID)
+                        bind(statement, 3, anchor.unitID)
+                        bind(statement, 4, anchor.lineID)
+                        bind(statement, 5, anchor.revisionID)
+                        bind(statement, 6, snapshotID)
+                        bind(statement, 7, anchor.speakerLabel)
+                        bind(statement, 8, anchor.startSeconds)
+                        try step(statement)
+                    }
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
         return committed
+    }
+
+    /// 这一版的结论条目与其证据锚点（按落库顺序）。
+    ///
+    /// 锚点的原文从 `transcript_revision` 读，**不从 `line` 读**：
+    /// 用户后来改了转录，旧纪要仍然显示它当时依据的那一版（MC-46）。
+    /// 修订被删时 `quote` 为 nil——明确是"来源已不可读"，不拿当前行顶替。
+    public func minutesItems(minutesID: String) throws -> [MinutesItem] {
+        let rows = try withStatement("""
+        SELECT id, minutes_id, local_id, kind, text, verdict, sort_order
+        FROM minutes_item WHERE minutes_id = ? ORDER BY sort_order ASC;
+        """) { statement -> [MinutesItem] in
+            bind(statement, 1, minutesID)
+            var items: [MinutesItem] = []
+            while try step(statement) == SQLITE_ROW {
+                items.append(MinutesItem(
+                    id: columnText(statement, 0) ?? "",
+                    minutesID: columnText(statement, 1) ?? minutesID,
+                    localID: columnText(statement, 2) ?? "",
+                    kind: columnText(statement, 3) ?? "",
+                    text: columnText(statement, 4) ?? "",
+                    verdict: columnText(statement, 5).flatMap(MinutesEvidenceValidator.Verdict.init(rawValue:)),
+                    sortOrder: Int(columnInt(statement, 6))
+                ))
+            }
+            return items
+        }
+        return try rows.map { item in
+            var item = item
+            item.anchors = try minutesEvidence(itemID: item.id)
+            return item
+        }
+    }
+
+    private func minutesEvidence(itemID: String) throws -> [MinutesEvidenceAnchor] {
+        try withStatement("""
+        SELECT e.id, e.item_id, e.unit_id, e.line_id, e.revision_id, e.snapshot_id,
+               e.speaker_label, e.t_start, e.verification, r.text
+        FROM minutes_evidence e
+        LEFT JOIN transcript_revision r ON r.id = e.revision_id
+        WHERE e.item_id = ?
+        ORDER BY e.rowid ASC;
+        """) { statement -> [MinutesEvidenceAnchor] in
+            bind(statement, 1, itemID)
+            var anchors: [MinutesEvidenceAnchor] = []
+            while try step(statement) == SQLITE_ROW {
+                anchors.append(MinutesEvidenceAnchor(
+                    id: columnText(statement, 0) ?? "",
+                    itemID: columnText(statement, 1) ?? itemID,
+                    unitID: columnText(statement, 2) ?? "",
+                    lineID: columnText(statement, 3),
+                    revisionID: columnText(statement, 4),
+                    snapshotID: columnText(statement, 5),
+                    speakerLabel: columnText(statement, 6),
+                    startSeconds: columnIsNull(statement, 7) ? nil : columnDouble(statement, 7),
+                    quote: columnText(statement, 9),
+                    verification: columnText(statement, 8) ?? "exact_source_match"
+                ))
+            }
+            return anchors
+        }
+    }
+
+    /// 每一行当前最新的修订（`lineID → revisionID`）。
+    ///
+    /// 生成任务靠它把"来源单元"落到不可变的修订上：单元带的是 `lineID`，
+    /// 锚点要的是修订——中间这一步不补，引用就永远指着会变的 `line`。
+    public func latestRevisionIDsByLine(sessionID: String) throws -> [String: String] {
+        try withStatement("""
+        SELECT line_id, id FROM transcript_revision r
+        WHERE session_id = ?
+          AND rowid = (
+            SELECT rowid FROM transcript_revision x
+            WHERE x.line_id = r.line_id
+            ORDER BY x.edited_at DESC, x.rowid DESC LIMIT 1
+          );
+        """) { statement -> [String: String] in
+            bind(statement, 1, sessionID)
+            var map: [String: String] = [:]
+            while try step(statement) == SQLITE_ROW {
+                if let lineID = columnText(statement, 0), let revisionID = columnText(statement, 1) {
+                    map[lineID] = revisionID
+                }
+            }
+            return map
+        }
     }
 
     /// 还有纪要没整理完的会话：排队中的，或者租约已经过期的 `running`。
@@ -2535,5 +2682,41 @@ extension SessionStore {
         for name in ["candidate_json", "review_json"] where !columns.contains(name) {
             try execute("ALTER TABLE minutes ADD COLUMN \(name) TEXT;")
         }
+    }
+
+    /// v5 → v6 的 DDL（调用方已在同一事务内）：结论条目与证据锚点两表。
+    ///
+    /// `revision_id` 用 `ON DELETE SET NULL`：修订被删时锚点还在，但明确变成
+    /// "来源已不可读"。拿当前 `line` 顶替是错的——那会让旧引用指向新文字，
+    /// 正是 MC-46 要防的事。
+    static let schemaV6Delta = """
+    CREATE TABLE IF NOT EXISTS minutes_item (
+      id          TEXT PRIMARY KEY,
+      minutes_id  TEXT NOT NULL REFERENCES minutes(id) ON DELETE CASCADE,
+      local_id    TEXT NOT NULL,
+      kind        TEXT NOT NULL,
+      text        TEXT NOT NULL,
+      verdict     TEXT,
+      sort_order  INTEGER NOT NULL,
+      UNIQUE (minutes_id, local_id)
+    );
+    CREATE INDEX IF NOT EXISTS minutes_item_by_minutes ON minutes_item(minutes_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS minutes_evidence (
+      id            TEXT PRIMARY KEY,
+      item_id       TEXT NOT NULL REFERENCES minutes_item(id) ON DELETE CASCADE,
+      unit_id       TEXT NOT NULL,
+      line_id       TEXT REFERENCES line(id) ON DELETE SET NULL,
+      revision_id   TEXT REFERENCES transcript_revision(id) ON DELETE SET NULL,
+      snapshot_id   TEXT,
+      speaker_label TEXT,
+      t_start       REAL,
+      verification  TEXT NOT NULL DEFAULT 'exact_source_match'
+    );
+    CREATE INDEX IF NOT EXISTS minutes_evidence_by_item ON minutes_evidence(item_id);
+    """
+
+    private func migrateV5ToV6() throws {
+        try execute(Self.schemaV6Delta)
     }
 }

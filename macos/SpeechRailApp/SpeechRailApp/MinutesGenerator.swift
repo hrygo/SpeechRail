@@ -416,6 +416,16 @@ public final class MinutesGenerator {
             case .prepared(let prepared):
                 // MC-29：凭认领代际提交；行已被新 owner 接管时不改写、不谎报成功。
                 // 候选与核对报告一起落库：正文能看，核对结论也要跟着版本一起留存。
+                // 条目与锚点也一起落：来源单元带的是 lineID，锚点要的是**不可变修订**——
+                // 这一步映射不做，"依据哪几句"就永远指着会变的那一行（MC-46）。
+                let revisionIDs = (try? await coordinator.latestRevisionIDsByLine(sessionID: version.sessionID)) ?? [:]
+                let unitsByID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                let drafts = MinutesCandidateCodec.itemDrafts(
+                    for: prepared.candidate,
+                    report: prepared.report,
+                    unitsByID: unitsByID,
+                    revisionIDsByLine: revisionIDs
+                )
                 let committed = (try? await coordinator.saveMinutesCandidate(
                     minutesID: claimed.id,
                     expectedAttempts: claimed.attempts,
@@ -428,7 +438,9 @@ public final class MinutesGenerator {
                     review: try? String(
                         data: JSONEncoder().encode(prepared.report),
                         encoding: .utf8
-                    )
+                    ),
+                    items: drafts,
+                    snapshotID: claimed.snapshotID
                 )) ?? false
                 guard committed else {
                     versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions

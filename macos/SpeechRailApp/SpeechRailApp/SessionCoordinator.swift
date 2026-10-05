@@ -843,7 +843,9 @@ public final class SessionCoordinator {
         body: String,
         model: String?,
         candidate: String?,
-        review: String?
+        review: String?,
+        items: [MinutesItemDraft] = [],
+        snapshotID: String? = nil
     ) async throws -> Bool {
         try await store.saveMinutesCandidate(
             minutesID: minutesID,
@@ -851,9 +853,22 @@ public final class SessionCoordinator {
             body: body,
             model: model,
             candidate: candidate,
-            review: review
+            review: review,
+            items: items,
+            snapshotID: snapshotID
         )
     }
+
+    /// 这一版的结论条目与证据锚点（锚点原文读自不可变修订）。
+    public func minutesItems(minutesID: String) async throws -> [MinutesItem] {
+        try await store.minutesItems(minutesID: minutesID)
+    }
+
+    /// 每一行当前最新的修订（`lineID → revisionID`），用于把来源单元落到修订上。
+    public func latestRevisionIDsByLine(sessionID: String) async throws -> [String: String] {
+        try await store.latestRevisionIDsByLine(sessionID: sessionID)
+    }
+
 
     /// 跨会议知识检索：转录终稿与已完成纪要，不含私密问答（MC-44、MC-49、MC-52）。
     public func searchKnowledge(
