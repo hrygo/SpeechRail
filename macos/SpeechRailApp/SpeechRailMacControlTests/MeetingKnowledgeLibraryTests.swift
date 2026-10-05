@@ -257,6 +257,63 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertEqual(restored.counts.total, 1, "撤销归档后正文检索要恢复")
     }
 
+    /// 验收 4 的「与证据」：搜到的那场要**当场给出为什么命中**。
+    ///
+    /// 命中词刻意放在第 150 个字符之后：只从开头截一段的话根本截不到它，
+    /// "有片段"和"片段里有证据"是两件事。只断言非空会放过前者。
+    func testSearchResultCarriesTheMatchedSentence() async throws {
+        let store = try requireStore()
+        let lineText = String(repeating: "前置背景。", count: 30)
+            + "这里才提到灰度发布要等到周五。"
+            + String(repeating: "后续讨论。", count: 10)
+        _ = try await makeMeeting(
+            title: "发布评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: lineText
+        )
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage(query: "灰度")
+        let row = try XCTUnwrap(page.rows.first)
+        let excerpt = try XCTUnwrap(row.matchExcerpt, "命中正文却不给证据，用户还得自己点进去找")
+        XCTAssertTrue(
+            excerpt.contains("灰度"),
+            "证据片段必须含命中词，实际拿到的是：\(excerpt)"
+        )
+    }
+
+    /// 反过来：**标题命中不该硬凑一句证据**。
+    ///
+    /// 凑出来的那句看起来像证据，但它证明不了任何事——这正是
+    /// "界面不说没有依据的话"要防的那一类。
+    func testTitleOnlyMatchCarriesNoExcerpt() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(
+            title: "招聘评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: "这一场只讨论报销流程。", withMinutes: false
+        )
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage(query: "招聘")
+        XCTAssertEqual(page.counts.total, 1, "标题命中这场会")
+        XCTAssertNil(
+            page.rows.first?.matchExcerpt,
+            "标题命中、正文没命中，不该凭空生成一句证据"
+        )
+    }
+
+    /// 没在搜索时不给证据：满屏都是"命中内容"就等于没有重点。
+    func testNoExcerptWithoutQuery() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(
+            title: "随便一场", at: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage()
+        XCTAssertEqual(page.counts.total, 1)
+        XCTAssertNil(page.rows.first?.matchExcerpt)
+    }
+
     func testProjectFilterNarrowsTheList() async throws {
         let store = try requireStore()
         try await seedMeetings(6)

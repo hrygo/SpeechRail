@@ -6151,6 +6151,13 @@ extension SessionStore {
         counts.needsReview = try libraryNeedsReviewTotal(predicate: predicate)
 
         let stats = try meetingLibraryStats(documentIDs: pageRows.map(\.id))
+        // 证据片段只在**真的搜了**的时候去取：空查询下每行都挂一句原文，
+        // 那不是证据，是噪声。
+        let excerpts = try meetingLibraryMatchExcerpts(
+            sessionIDs: pageRows.compactMap(\.sessionID),
+            query: query,
+            includesArchived: includesArchived
+        )
         let rows = pageRows.map { row -> MeetingLibraryRow in
             var row = row
             let stat = stats[row.id]
@@ -6158,9 +6165,142 @@ extension SessionStore {
             row.needsReviewCount = stat?.needsReview ?? 0
             row.openActionCount = stat?.openActions ?? 0
             row.projectName = row.projectID.flatMap { try? meetingProject(id: $0)?.name }
+            row.matchExcerpt = row.sessionID.flatMap { excerpts[$0] }
             return row
         }
         return MeetingLibraryPage(rows: rows, counts: counts, offset: offset, limit: limit)
+    }
+
+    /// 检索命中时的那句原文（验收 4 的「与证据」）。
+    ///
+    /// 口径与谓词一致：命中之后**回权威表核对**，非终稿行、未就绪纪要、
+    /// 已删会话都不算数（MC-62）。**优先给转录原话**——那才是依据；
+    /// 拿纪要正文当证据等于拿结论证明结论，只在转录没命中时兜底。
+    private func meetingLibraryMatchExcerpts(
+        sessionIDs: [String],
+        query: String,
+        includesArchived: Bool
+    ) throws -> [String: String] {
+        guard !sessionIDs.isEmpty else { return [:] }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [:] }
+
+        var excerpts: [String: String] = [:]
+        let match = Self.fts5Available
+            ? KnowledgeSearchTokenizer.matchExpression(for: trimmed)
+            : nil
+
+        if let match {
+            let placeholders = Array(repeating: "?", count: sessionIDs.count).joined(separator: ", ")
+            // 归档件在归档时索引行就被物理清掉了；显式包含归档时不去 tombstone 过滤。
+            let tombstone = includesArchived ? "" : " AND (d.id IS NULL OR d.deleted_at IS NULL)"
+            let sql = """
+            SELECT knowledge_fts.session_id,
+                   CASE WHEN knowledge_fts.source_kind = 'line' THEN kl.text ELSE km.body END
+            FROM knowledge_fts
+            JOIN session ks ON ks.id = knowledge_fts.session_id
+            LEFT JOIN line kl ON knowledge_fts.source_kind = 'line'
+                              AND kl.id = knowledge_fts.source_id
+            LEFT JOIN minutes km ON knowledge_fts.source_kind = 'minutes'
+                                 AND km.id = knowledge_fts.source_id
+            LEFT JOIN meeting_document d ON d.source_session_id = ks.id
+            WHERE knowledge_fts MATCH ?
+              AND knowledge_fts.session_id IN (\(placeholders))
+              AND (knowledge_fts.source_kind <> 'line'
+                   OR (kl.id IS NOT NULL AND kl.status = 'final'))
+              AND (knowledge_fts.source_kind <> 'minutes'
+                   OR (km.id IS NOT NULL AND km.status = 'ready'))
+              \(tombstone)
+            ORDER BY CASE knowledge_fts.source_kind WHEN 'line' THEN 0 ELSE 1 END,
+                     knowledge_fts.session_id;
+            """
+            try withStatement(sql) { statement in
+                var index: Int32 = 1
+                bind(statement, index, match)
+                index += 1
+                for sessionID in sessionIDs {
+                    bind(statement, index, sessionID)
+                    index += 1
+                }
+                while try step(statement) == SQLITE_ROW {
+                    let sessionID = columnText(statement, 0) ?? ""
+                    // 转录行排在纪要行前面，所以"第一个赢"就是"原话优先"。
+                    guard !sessionID.isEmpty, excerpts[sessionID] == nil else { continue }
+                    guard let snippet = Self.matchSnippet(
+                        columnText(statement, 1) ?? "", query: trimmed
+                    ) else { continue }
+                    excerpts[sessionID] = snippet
+                }
+            }
+        }
+
+        // 没有全文索引、或索引里没有这场会（归档件）时，回权威表找原话——
+        // 与 `libraryPredicate` 的回退条件保持一致，两边不会给出不同的答案。
+        if match == nil || includesArchived {
+            let missing = sessionIDs.filter { excerpts[$0] == nil }
+            guard !missing.isEmpty else { return excerpts }
+            let placeholders = Array(repeating: "?", count: missing.count).joined(separator: ", ")
+            let pattern = "%" + Self.likeEscape(trimmed) + "%"
+            try withStatement("""
+            SELECT l.session_id, l.text
+            FROM line l
+            WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
+              AND l.session_id IN (\(placeholders))
+            ORDER BY l.session_id, l.ordinal;
+            """) { statement in
+                var index: Int32 = 1
+                bind(statement, index, pattern)
+                index += 1
+                for sessionID in missing {
+                    bind(statement, index, sessionID)
+                    index += 1
+                }
+                while try step(statement) == SQLITE_ROW {
+                    let sessionID = columnText(statement, 0) ?? ""
+                    guard excerpts[sessionID] == nil else { continue }
+                    guard let snippet = Self.matchSnippet(
+                        columnText(statement, 1) ?? "", query: trimmed
+                    ) else { continue }
+                    excerpts[sessionID] = snippet
+                }
+            }
+        }
+        return excerpts
+    }
+
+    /// 把命中的正文裁成一行可读的片段。
+    ///
+    /// 词项是二元组，命中位置常常对不上字面（查「会议室」命中的是「会议」），
+    /// 所以先找**字面出现**的第一个词项、围绕它取窗口；找不到就从头取。
+    /// 正文为空或裁完只剩空白时返回 nil——**宁可没有，也不要凑一句像证据的话**。
+    private static func matchSnippet(
+        _ body: String,
+        query: String,
+        limit: Int = 120
+    ) -> String? {
+        let flat = body
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !flat.isEmpty else { return nil }
+
+        // 用小写副本定位：长度一一对应，偏移量可以直接拿去切原文。
+        let lowered = flat.lowercased()
+        let anchor = KnowledgeSearchTokenizer.queryTerms(for: query)
+            .lazy
+            .compactMap { lowered.range(of: $0)?.lowerBound }
+            .min()
+        let characters = Array(flat)
+        let center = anchor.map { lowered.distance(from: lowered.startIndex, to: $0) } ?? 0
+        let start = max(0, min(characters.count, center - limit / 3))
+        let end = min(characters.count, start + limit)
+        guard end > start else { return nil }
+        let prefix = start > 0 ? "…" : ""
+        let suffix = end < characters.count ? "…" : ""
+        let snippet = (prefix + String(characters[start..<end]) + suffix)
+            .trimmingCharacters(in: .whitespaces)
+        return snippet.isEmpty ? nil : snippet
     }
 
     /// 列表谓词。**翻页、计数、搜索共用这一份**，所以三者不可能对不上（MC-52）。

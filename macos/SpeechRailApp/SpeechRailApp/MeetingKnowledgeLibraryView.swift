@@ -484,6 +484,15 @@ struct MeetingLibraryRowView: View {
                     Text("未整理").font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // 为什么命中，当场就能看见。只给会议名的话，用户还得点进去
+            // 自己找那句话——验收 4 要的是"会议**与证据**"。
+            if let excerpt = row.matchExcerpt {
+                Text(excerpt)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.disabled)
+            }
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
@@ -495,6 +504,7 @@ struct MeetingLibraryRowView: View {
         if let date = row.occurredAt { parts.append(date.formatted(date: .long, time: .omitted)) }
         if row.needsReviewCount > 0 { parts.append("\(row.needsReviewCount) 条待核对") }
         if !row.hasMinutes { parts.append("未整理") }
+        if let excerpt = row.matchExcerpt { parts.append("命中内容：\(excerpt)") }
         return parts.joined(separator: "，")
     }
 }

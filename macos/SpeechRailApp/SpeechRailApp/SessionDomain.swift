@@ -4993,11 +4993,17 @@ public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
     public var hasMinutes: Bool
     public var needsReviewCount: Int
     public var openActionCount: Int
+    /// 检索命中时的那句原文。验收 4 要的是「检索能够返回对应会议**与证据**」——
+    /// 只给会议名，用户还得自己点进去找为什么命中。
+    ///
+    /// **可空，而且大部分时候就是空**：标题或项目名命中的会议没有正文证据，
+    /// 没搜正文时也不该有。宁可没有，也不要凑一句看起来像证据的话。
+    public var matchExcerpt: String?
 
     public init(
         id: String, sessionID: String? = nil, title: String, occurredAt: Date?, projectID: String?,
         projectName: String?, status: MeetingLibraryStatus, hasMinutes: Bool,
-        needsReviewCount: Int, openActionCount: Int
+        needsReviewCount: Int, openActionCount: Int, matchExcerpt: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -5009,6 +5015,7 @@ public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
         self.hasMinutes = hasMinutes
         self.needsReviewCount = needsReviewCount
         self.openActionCount = openActionCount
+        self.matchExcerpt = matchExcerpt
     }
 }
 
