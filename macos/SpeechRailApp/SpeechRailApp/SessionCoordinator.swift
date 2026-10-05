@@ -715,7 +715,10 @@ public final class SessionCoordinator {
         try await store.verifyEvidenceQuotes(exchangeID: exchangeID)
     }
 
-    public func setInnerOSInMinutes(exchangeID: String, included: Bool) async throws {
+    /// 返回**是否真的改了行**。命中 0 行（这一条问答不存在）不是成功，
+    /// 往上如实报，界面才不会把标签翻过去。
+    @discardableResult
+    public func setInnerOSInMinutes(exchangeID: String, included: Bool) async throws -> Bool {
         try await store.setInnerOSInMinutes(exchangeID: exchangeID, included: included)
     }
 

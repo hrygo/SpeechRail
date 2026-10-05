@@ -1601,11 +1601,19 @@ public actor SessionStore {
         public var reason: String?
     }
 
-    public func setInnerOSInMinutes(exchangeID: String, included: Bool) throws {
+    /// 勾选／取消「写进纪要」。**返回是否真的改了行**。
+    ///
+    /// `UPDATE` 命中 0 行时不报错——SQLite 把它当成功。于是"这一条问答不存在"
+    /// 会一路返回成功，界面上把标签翻成「已写进纪要」，而库里什么都没有。
+    /// 私密问答默认不进入纪要，用户正是靠这个标签判断"这句到底进没进去"，
+    /// 所以这里必须把 0 行当失败报出去。
+    @discardableResult
+    public func setInnerOSInMinutes(exchangeID: String, included: Bool) throws -> Bool {
         try withStatement("UPDATE inner_os_exchange SET in_minutes = ? WHERE id = ?;") { statement in
             bind(statement, 1, included ? 1 : 0)
             bind(statement, 2, exchangeID)
             try step(statement)
+            return sqlite3_changes(try requireHandle()) > 0
         }
     }
 

@@ -282,11 +282,46 @@ public final class InnerOSSession {
     }
 
     /// 「写进纪要」：显式动作，写的是 `in_minutes = 1`（默认不进纪要是结构决定的）。
-    public func includeInMinutes(exchangeID: String) async {
-        try? await coordinator.setInnerOSInMinutes(exchangeID: exchangeID, included: true)
-        if let index = exchanges.firstIndex(where: { $0.id == exchangeID }) {
-            exchanges[index].inMinutes = true
+    ///
+    /// **返回是否真的写进了库。** 原来这里是 `try?` 吞掉错误、无论成败都把标签翻过去，
+    /// 于是写失败时界面照样显示「已写进纪要」——用户据此以为这句已经收进纪要，
+    /// 封存之后却发现没有。私密问答默认不进入纪要，这个标签就是他的判断依据，
+    /// 它不能说谎。
+    @discardableResult
+    public func includeInMinutes(exchangeID: String) async -> Bool {
+        await setInMinutes(true, exchangeID: exchangeID)
+    }
+
+    /// 撤回「写进纪要」。原来这条**够不着**：`setInnerOSInMinutes(included: false)`
+    /// 在生产代码里没有调用方，界面上勾上之后只剩一枚静态标签，勾错了只能重新封存。
+    @discardableResult
+    public func excludeFromMinutes(exchangeID: String) async -> Bool {
+        await setInMinutes(false, exchangeID: exchangeID)
+    }
+
+    /// 写进纪要失败时的提示。`nil` = 没有失败。
+    public private(set) var supplementError: String?
+
+    /// 只有**真的写进库了**才翻标签。失败时列表保持原样，并把话说到界面上。
+    private func setInMinutes(_ included: Bool, exchangeID: String) async -> Bool {
+        supplementError = nil
+        let changed: Bool
+        do {
+            changed = try await coordinator.setInnerOSInMinutes(
+                exchangeID: exchangeID, included: included
+            )
+        } catch {
+            supplementError = "\(error.localizedDescription)。这一句的「写进纪要」没有改动。"
+            return false
         }
+        guard changed else {
+            supplementError = "找不到这一条问答。这一句的「写进纪要」没有改动。"
+            return false
+        }
+        if let index = exchanges.firstIndex(where: { $0.id == exchangeID }) {
+            exchanges[index].inMinutes = included
+        }
+        return true
     }
 
     /// 收起态那一行要的两个数：问过几次、几条已写进纪要。

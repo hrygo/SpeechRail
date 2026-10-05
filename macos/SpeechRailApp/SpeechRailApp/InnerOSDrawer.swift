@@ -222,7 +222,17 @@ public struct InnerOSDrawer: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: .infinity)
-                actions(exchange)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    // 写失败必须看得见：这个标签是用户判断"这句到底进没进去"的唯一依据，
+                    // 静默失败等于让他按一个没生效的开关。
+                    if let error = session.supplementError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("写进纪要失败：\(error)")
+                    }
+                    actions(exchange)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
         } else {
@@ -243,12 +253,21 @@ public struct InnerOSDrawer: View {
                 .controlSize(.small)
             if exchange.inMinutes {
                 StatusPill(tone: .healthy, label: "已写进纪要")
+                // 撤回是**同一个动作的另一半**，不是高级功能：勾错了要能改，
+                // 而不是只能重新封存一场会。
+                Button("撤回") {
+                    Task { await session.excludeFromMinutes(exchangeID: exchange.id) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("这一句不写进纪要")
             } else {
                 Button("写进纪要") {
                     Task { await session.includeInMinutes(exchangeID: exchange.id) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .help("把这句作为补充写进纪要；它不是会上说的话，会标成「AI 补充」")
             }
             Spacer(minLength: 0)
         }

@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.3"
+version: "4.4"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 59 个提交（含本轮 MC-56、MA-14 写侧与 MC-57/58 各 1 个）。
+分支共 60 个提交（含本轮 MC-56、MA-14 写侧、MC-57/58 与 MC-43 各 1 个）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -84,7 +84,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 14 | **知识变化建议与执行时间线没有入口**：`knowledgeChangeProposals` / `executionEvents` 仍零消费方 | 实测（2026-10-06 第三轮再查） | **本条已缩小两次**：行动生命周期（`recordExecutionEvent` / `executionState`）与跨会议冲突（`conflictingDecisions` / `confirmSupersession`）四个 API 都已接进库页。剩下的是**只读的两块**——「这场会重新生成之后可能变了什么」的候选清单，以及一条行动的完整状态变更时间线 |
 
 
-| 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
+| 15 | ~~私密问答的「加入纪要」没有入口~~ **这条记错了，已关闭** | 实测（2026-10-06 推翻） | 上一版写「读侧齐备，写侧整条不存在」。实测：`setInnerOSInMinutes(exchangeID:included:)` 在库里，`sealMeetingSource` 已经通过 `selectedSupplements` 把 `in_minutes = 1` 的问答收进快照的 `note_refs`，`InnerOSSession.includeInMinutes` 调协调器，`InnerOSDrawer.swift:248` 有「写进纪要」按钮，端到端还有 `testOnlySelectedPrivateAnswerEntersSnapshotAsSupplement` 钉着。**但顺着这条查出了三个真缺陷**，见「私密问答写进纪要」一节 |
+
 
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
@@ -3257,3 +3258,83 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
 - **没有"这两条其实不冲突"的记录**。用户判定不冲突之后，下次还会看到它。
   这是有意的：候选只是提醒，**替代关系才是状态**；不落"已排除"就不会把
   误判固化成"以后别再提"。代价是同一处会反复出现。
+
+
+## M1 增量（MC-43）｜私密问答「写进纪要」，2026-10-06
+
+### 这一节先更正一条总账
+
+总账第 15 条此前记着「私密问答的『加入纪要』没有入口，读侧齐备、**写侧整条不存在**」。
+2026-10-06 逐条实测把它推翻了：
+
+- `SessionStore.setInnerOSInMinutes(exchangeID:included:)` **存在**；
+- `sealMeetingSource` 已经通过 `selectedSupplements(sessionID:)` 把
+  `in_minutes = 1 AND status = 'ready'` 且答案非空的问答收进快照的 `note_refs`，
+  并按 MC-43 的要求写进 `coverage`（`ai_supplements=N`），**不进转录行修订**；
+- `SessionCoordinator.setInnerOSInMinutes` 透传，`InnerOSSession.includeInMinutes`
+  调用它，`InnerOSDrawer.swift:248` 有「写进纪要」按钮；
+- `MeetingPrivacyDeletionTests.testOnlySelectedPrivateAnswerEntersSnapshotAsSupplement`
+  已经端到端钉住「只有勾选的那句进快照」与「不得写进行修订」。
+
+**能力本来就在，缺的是三样别的东西。**
+
+### 顺着查出的三个真缺陷
+
+1. **写失败时界面说成功。** `includeInMinutes` 是 `try? await` 吞掉错误，
+   无论成败都把 `exchanges[index].inMinutes = true` 翻过去。写不进库时用户照样
+   看到「已写进纪要」——而私密问答默认不进入纪要，**这个标签就是他判断
+   "这句到底进没进去"的唯一依据**。它不能说谎。
+2. **勾上之后撤不回来。** `setInnerOSInMinutes(included: false)` 在生产代码里
+   **零调用方**：界面上勾选之后只剩一枚静态 `StatusPill`，没有反向入口。
+   勾错了只能重新封存一场会。这是一条用户动作上的**单行道**。
+3. **库这一层把「命中 0 行」当成功。** `UPDATE … WHERE id = ?` 在 id 不存在时
+   改 0 行，SQLite **不报错**，`setInnerOSInMinutes` 于是返回成功。
+   这是第 1 条的根因：即使把 `try?` 换成 `try`，一个不存在的 id 仍然会"成功"。
+
+### 做了什么
+
+- **库**：`setInnerOSInMinutes` 改用 `sqlite3_changes` 判断是否真的改了行，
+  0 行按失败报出去。
+- **协调层**：透传 `Bool`。
+- **会话层**：`includeInMinutes` 返回 `Bool`，新增 `excludeFromMinutes`，
+  共用一个私有的 `setInMinutes(_:exchangeID:)`；新增 `supplementError`。
+  **只有真的写进库了才翻标签**。
+- **界面**：已写进纪要的条目旁边多一个「撤回」按钮；
+  写失败时在按钮上方显示一句说清「没有改动」的提示。
+
+### 回归证据（2026-10-06 实测）
+
+- 新增 `InnerOSSupplementTests` **6 项**，先红后绿。红的那次是**编译不过**
+  （缺 `excludeFromMinutes` / `supplementError`，且 `includeInMinutes` 返回 `Void`
+  而用例要 `Bool`）——这正是"写侧整条不存在"在这层的样子。
+  覆盖：没勾就是没有（默认不进纪要）；勾上后**去库里看**而不是看界面标签；
+  重开会话仍然是写进纪要的；只有勾的那句进快照且**不混进转录行修订**；
+  写失败不翻标签且说清「没有改动」；撤回真的落库（重开后仍是未勾）；
+  撤回失败同样不说成功。
+- 这一组补的是**界面上真的走的那条路**（`InnerOSSession` → 协调器 → 库）。
+  原有那条 `MeetingPrivacyDeletionTests` 整条调用 `store.setInnerOSInMinutes`，
+  把中间这层换掉不会有一条变红——与本分支在归档包那节记下的同一个坑。
+- 已把 `InnerOSSupplementTests.swift` 登记进 Xcode 单元测试 target。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1086 项**
+  （上一节 1080 +6）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**，`SessionStore.schemaVersion` 仍是 12。
+- 回退：三处 `includeInMinutes` / `excludeFromMinutes` 的返回类型改回 `Void`、
+  去掉 `supplementError`、去掉抽屉里的「撤回」按钮，并把
+  `setInnerOSInMinutes` 的 `sqlite3_changes` 判断去掉即可。
+  已经勾上的问答仍在库里，按原语义保留。
+
+### 未验证事项与已知边界
+
+- **私密问答抽屉没有在真机走过**（无 UI 自动化授权）：「撤回」按钮与
+  「已写进纪要」标签并排时的排版、错误提示换行都只是读代码推断。
+  计入总账第 1 条。
+- **撤回只影响下一次封存**。已经封进快照的补充仍留在那份快照的 `note_refs` 里，
+  旧纪要照旧能看到它——这是对的：已经生成的纪要不因为后来的撤回而变样，
+  要改就重新生成一版。
+- 「加入纪要」目前只能选**整条回答**，不能从回答里截取某一句。
+  方案 §583 写的是"选一句"，当前粒度是"选一条问答"。
