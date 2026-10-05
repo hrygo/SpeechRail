@@ -1189,3 +1189,55 @@ base: "origin/main @ d72535c7"
 - **LLM 未配置时的路径仍未接**（MC-02）：纪要模型没配置时，
   "文字能落库、AI 整理标待配置"这条还没有落到界面上。
 - **sticky-to-bottom 与回看位置未做**（MA-10 后半段）。
+
+## M1 增量：六轴状态投影（MA-21 库层 / MC-73、MC-74、MC-78）
+
+### 做了什么
+
+会议界面此前把"现在到底怎么样"压成零散的几处提示。这次把六件事
+拆成六条**各自独立投影**的轴，收进 `MeetingAxisProjection`：
+
+- **就绪 / 采集 / 识别 / 保存 / 索引 / 审阅**。它们会各自坏掉，
+  压成一个枚举必然给出不完整的答案。最常见的两种误报是
+  「采集在跑、识别断了 → 显示正在录音」和
+  「内容存下了、索引没跟上 → 显示已保存」。所以索引与保存**分开报**。
+- **`.unknown` 不是"正常"，是"还不知道"**。`canStart` 与 `needsAttention`
+  都把 unknown 排除在"可以放心"之外：状态不明时不许说一切正常。
+- **一个轴的问题不许掩盖另一个轴**：`problems` 按轴筛，不合并。
+- **`.idle` / `.paused` 不算故障**（`isQuiet`），只有 `.degraded` / `.failed`
+  才进 `problems`；状态带颜色同理，"没有在动"不上 attention 色。
+- `factLines` 一行一条轴，`headline` 只由问题推出，全好时不做任何修饰。
+- `axes` 顺序固定，界面行不会每次刷新换位置。
+
+`MeetingView` 已接入：就绪取 `BlockReason.title`（不是猜的文案），
+采集复用 MA-10 的来源门面，识别/保存/索引分别取 `interruption`、
+`storedLineCount`、`gapCount`。
+
+### 回归证据（2026-10-05）
+
+- 新增 `MeetingAxisProjectionTests` 14 项：六轴分别投影；idle 不算问题；
+  paused 安静但可见；采集在跑而识别坏掉**不**报成"都好"；存下但没索引
+  **不**报成"完全保存"；索引追平时安静；一个轴的问题不掩盖另一个；
+  unknown 不报成正常、也不放行开始；识别失败**不**阻断开始（该录还能录）；
+  待审阅报出来但不算失败；没问题时不自称已验收。
+- 全量 `swift test --package-path macos/SpeechRailApp`：**885 项全绿**。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 关键取舍
+
+- 纯值 `struct`，不持有 `MeetingSession` 或任何 App 类型，因此可在无采集
+  环境下完整验证；`MeetingView` 只做投影不做判定。
+- 没有新增视觉 Token：状态色复用既有语义 Token（`StatusTone`），
+  按项目规则不散落裸值。
+
+### 未验证事项与已知边界
+
+- **无障碍与键盘可达未实测**：MC-78 的 VoiceOver、Reduce Motion、
+  窄窗口、高对比均**未在真机走查**。UI 自动化按项目规则需逐次授权，
+  本轮未做。静态层面只保证轴顺序固定、颜色不是唯一信息入口
+  （每条轴都有文字行）。
+- **MC-73 仍是策略层通过、端到端未实测**：`isComposing` 尚未由真实
+  输入法事件驱动，只在投影层留了位置。
+- **"识别已连上"仍是近似**（同 MA-10）：`interruption == nil` 代替显式标志。
+- `review` 轴当前恒为 `.idle`：待审阅状态尚未从纪要核对界面汇入，
+  字段与测试已就位，接线是下一步。

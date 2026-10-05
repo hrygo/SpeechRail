@@ -317,6 +317,33 @@ public struct MeetingView: View {
         )
     }
 
+    /// 六条轴的统一投影（MA-21）。就绪/采集/识别/保存/索引/审阅分别说话。
+    private var axisProjection: MeetingAxisProjection {
+        let live = meeting.phase.isLive || meeting.phase == .interrupted
+        return MeetingAxisProjection(
+            readiness: meeting.blocked.map { .failed($0.title) } ?? (live ? .ready : .idle),
+            capture: live ? axis(for: sourceCapture) : .idle,
+            // 采集层没有独立的"识别已连上"标志；这里用**上行有没有断过**近似，
+            // 采集层补上显式标志之后要换掉。
+            recognition: live
+                ? (meeting.interruption == nil ? .active : .failed("上行中断过"))
+                : .idle,
+            persistence: meeting.storedLineCount > 0 ? .ready : (live ? .active : .idle),
+            // 保存与索引分开报（§6.5）：存下了不等于搜得到。
+            index: meeting.gapCount > 0 ? .degraded("补过 \(meeting.gapCount) 处静音") : .ready,
+            review: meeting.phase == .archived ? .idle : .idle
+        )
+    }
+
+    private func axis(for capture: MeetingSourcePresentation.Capture) -> MeetingAxisProjection.State {
+        switch capture {
+        case .notStarted: .idle
+        case .pausedAll: .paused
+        case .microphoneMuted: .active
+        case .live: .active
+        }
+    }
+
     private var sourceCapture: MeetingSourcePresentation.Capture {
         guard meeting.phase.isLive || meeting.phase == .interrupted else { return .notStarted }
         if meeting.isPaused { return .pausedAll }
@@ -353,9 +380,10 @@ public struct MeetingView: View {
         if meeting.phase.isLive {
             facts.append(sourcePresentation.levelCaption)
         }
-        if meeting.phase.isLive, meeting.interruption != nil {
-            facts.append(contentsOf: sourcePresentation.facts.filter { $0.contains("识别") })
-        }
+        // MA-21：采集/识别/保存/索引/审阅各走各的轴，一条异常不掩盖另一条。
+        // 之前这些是临时拼进 facts 的，拼到最后最常见的后果就是
+        // "识别断了但界面写着正在录音"。
+        facts.append(contentsOf: axisProjection.factLines)
         return facts
     }
 

@@ -150,6 +150,8 @@ let package = Package(
                 "MinutesReviewView.swift",
                 // 会前/会中来源呈现门面（MA-10）：采集状态到用户语言的翻译。
                 "MeetingSourcePresentation.swift",
+                // 六条状态轴的统一投影（MA-21）。
+                "MeetingAxisProjection.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。
