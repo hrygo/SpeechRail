@@ -382,3 +382,418 @@ public enum SessionExportPanel {
     }
 }
 #endif
+
+// MARK: - 知识归档包读写（MA-19 / MC-66、MC-71）
+//
+// 这一层只做文件与编解码，**不碰记录库**：读库在 `SessionStore` 侧，
+// 落盘与校验在这里。分开是为了让"包里有什么"这件事能被单独测——
+// 攻击面（路径穿越、超大包、断引用）全在这一层，不必先造一个库。
+public enum KnowledgeArchiveFileIO {
+    /// 导入上限。做成可传入的值，是为了让"超大包被拒"这条能被测到：
+    /// 真造一个 64 MiB 的包来测，既慢又不必要。
+    public struct Limits: Sendable {
+        /// 单文件上限。一份会议纪要正常是几十 KB；64 MiB 已经大到不像人了写的。
+        public var maxFileBytes: Int
+        /// 整个包的上限。三份文件加起来超了就是异常，不做逐个解压再累加。
+        public var maxPackageBytes: Int
+        /// 标识长度上限。库内 id 都是 UUID 或短前缀，超过这个长度就不是本 App 写的。
+        public var maxIdentifierLength: Int
+
+        public init(
+            maxFileBytes: Int = 64 * 1024 * 1024,
+            maxPackageBytes: Int = 96 * 1024 * 1024,
+            maxIdentifierLength: Int = 200
+        ) {
+            self.maxFileBytes = maxFileBytes
+            self.maxPackageBytes = maxPackageBytes
+            self.maxIdentifierLength = maxIdentifierLength
+        }
+
+        public static let standard = Limits()
+    }
+
+    public static let allowedFileNames: Set<String> = [
+        KnowledgeArchiveManifest.manifestFileName,
+        KnowledgeArchiveManifest.markdownFileName,
+        KnowledgeArchiveManifest.structuredFileName
+    ]
+
+    private static func encoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    /// 写一个包。**先写暂存目录再改名**：中途崩了不会留下半个包被当成能导入的东西。
+    ///
+    /// 目标已存在直接失败——覆盖一份用户可能还留着、或者已经分享出去的包，
+    /// 比导出失败更糟（MA-19 回退条款）。
+    @discardableResult
+    public static func write(
+        manifest: KnowledgeArchiveManifest,
+        payload: KnowledgeArchivePayload,
+        markdown: String,
+        to directory: URL,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let destination = directory.appendingPathComponent(
+            packageName(for: manifest),
+            isDirectory: true
+        )
+        guard !fileManager.fileExists(atPath: destination.path) else {
+            throw KnowledgeArchiveError.destinationExists(destination.lastPathComponent)
+        }
+        let staging = directory.appendingPathComponent(".\(packageName(for: manifest)).staging", isDirectory: true)
+        if fileManager.fileExists(atPath: staging.path) {
+            try fileManager.removeItem(at: staging)
+        }
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        let structuredData = try encoder().encode(payload)
+        let markdownData = Data(markdown.utf8)
+        // 文件大小由写盘这一层实测填进清单：清单自己写一个数不算证据。
+        // 清单本身不在 `files` 里——它写自己时还不知道自己多大。
+        var manifest = manifest
+        manifest.files = [
+            KnowledgeArchiveFile(name: KnowledgeArchiveManifest.markdownFileName, byteCount: markdownData.count),
+            KnowledgeArchiveFile(name: KnowledgeArchiveManifest.structuredFileName, byteCount: structuredData.count)
+        ]
+        let manifestData = try encoder().encode(manifest)
+        try structuredData.write(to: staging.appendingPathComponent(KnowledgeArchiveManifest.structuredFileName))
+        try manifestData.write(to: staging.appendingPathComponent(KnowledgeArchiveManifest.manifestFileName))
+        try markdownData.write(to: staging.appendingPathComponent(KnowledgeArchiveManifest.markdownFileName))
+
+        do {
+            try fileManager.moveItem(at: staging, to: destination)
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw KnowledgeArchiveError.readFailed("归档包发布失败：\(error.localizedDescription)")
+        }
+        return destination
+    }
+
+    /// 包名从文档标题与版本号来。**不放 UUID**：用户在 Finder 里认这个包靠的是
+    /// "哪场会的第几版"，不是一串随机字符。
+    public static func packageName(for manifest: KnowledgeArchiveManifest) -> String {
+        let raw = manifest.documentTitle ?? manifest.documentID
+        let stem = sanitize(raw).isEmpty ? "meeting" : sanitize(raw)
+        return "\(stem)-v\(manifest.selectedVersion).\(KnowledgeArchiveManifest.directoryExtension)"
+    }
+
+    private static func sanitize(_ raw: String) -> String {
+        let cleaned = raw
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(cleaned.prefix(48))
+    }
+
+    /// 读一个包并做完所有校验。**只读，不写任何地方**。
+    ///
+    /// 校验顺序是有意的：先看目录里有什么（路径穿越、符号链接、未知条目），
+    /// 再看大小，然后才解 JSON。反过来就是先让不可信内容进内存再问安不安全。
+    public static func readPackage(
+        at url: URL,
+        fileManager: FileManager = .default,
+        limits: Limits = .standard
+    ) throws -> KnowledgeArchivePackageRead {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw KnowledgeArchiveError.malformedPackage("不是一个目录")
+        }
+        let entries = try fileManager.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+        var totalBytes = 0
+        var files: [String: URL] = [:]
+        for entry in entries {
+            let name = entry.lastPathComponent
+            // 目录名本身由写入方决定，读取方不接受"../.." 这种名字。
+            guard !name.contains("/"), !name.contains(".."), !name.hasPrefix(".") else {
+                throw KnowledgeArchiveError.entryRejected(name)
+            }
+            guard allowedFileNames.contains(name) else {
+                throw KnowledgeArchiveError.entryRejected(name)
+            }
+            let values = try? entry.resourceValues(forKeys: [.isSymbolicLinkKey, .fileSizeKey])
+            if values?.isSymbolicLink == true {
+                throw KnowledgeArchiveError.entryRejected("\(name)（符号链接）")
+            }
+            let size = values?.fileSize ?? 0
+            guard size <= limits.maxFileBytes else {
+                throw KnowledgeArchiveError.payloadTooLarge(size)
+            }
+            totalBytes += size
+            guard totalBytes <= limits.maxPackageBytes else {
+                throw KnowledgeArchiveError.payloadTooLarge(totalBytes)
+            }
+            files[name] = entry
+        }
+        guard let manifestURL = files[KnowledgeArchiveManifest.manifestFileName],
+              let structuredURL = files[KnowledgeArchiveManifest.structuredFileName] else {
+            throw KnowledgeArchiveError.malformedPackage("缺 manifest.json 或 structured.json")
+        }
+        guard let markdownURL = files[KnowledgeArchiveManifest.markdownFileName] else {
+            throw KnowledgeArchiveError.malformedPackage("缺 minutes.md")
+        }
+
+        let manifest: KnowledgeArchiveManifest
+        let payload: KnowledgeArchivePayload
+        do {
+            manifest = try decoder().decode(
+                KnowledgeArchiveManifest.self,
+                from: Data(contentsOf: manifestURL)
+            )
+            payload = try decoder().decode(
+                KnowledgeArchivePayload.self,
+                from: Data(contentsOf: structuredURL)
+            )
+        } catch let error as KnowledgeArchiveError {
+            throw error
+        } catch {
+            throw KnowledgeArchiveError.malformedPackage(error.localizedDescription)
+        }
+        guard manifest.schema == KnowledgeArchiveManifest.schemaID else {
+            throw KnowledgeArchiveError.malformedPackage("schema 不认识：\(manifest.schema)")
+        }
+        guard payload.schema == KnowledgeArchivePayload.schemaID else {
+            throw KnowledgeArchiveError.malformedPackage("载荷 schema 不认识：\(payload.schema)")
+        }
+
+        // 清单说的字节数与实际文件对不上：包被截断或被改过，两种都不该当可用包。
+        let actual: [String: Int] = [
+            KnowledgeArchiveManifest.markdownFileName: (try? markdownURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0,
+            KnowledgeArchiveManifest.structuredFileName: structuredDataSize(structuredURL)
+        ]
+        for file in manifest.files {
+            guard let size = actual[file.name], size == file.byteCount else {
+                throw KnowledgeArchiveError.malformedPackage("\(file.name) 的实际大小与清单不符")
+            }
+        }
+
+        let markdown = (try? String(contentsOf: markdownURL, encoding: .utf8)) ?? ""
+        try validate(payload, limits: limits)
+        return KnowledgeArchivePackageRead(manifest: manifest, payload: payload, markdown: markdown)
+    }
+
+    private static func structuredDataSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+    }
+
+    /// 包内一致性校验。**引用必须落在包里**：锚点指着包里没有的修订，
+    /// 导入之后就是一个指不到东西的指针——那正是"看起来成功、实际不能用"。
+    static func validate(_ payload: KnowledgeArchivePayload, limits: Limits = .standard) throws {
+        var identifiers = [payload.document.id] + payload.minutes.map(\.id) + payload.lines.map(\.id)
+            + payload.snapshots.map(\.id) + payload.revisions.map(\.id) + payload.items.map(\.id)
+            + payload.items.flatMap { $0.anchors.map(\.id) } + payload.windows.map(\.id)
+        if let sessionID = payload.session?.id { identifiers.append(sessionID) }
+        for id in identifiers {
+            try validateIdentifier(id, limits: limits)
+        }
+
+        let minutesIDs = Set(payload.minutes.map(\.id))
+        let lineIDs = Set(payload.lines.map(\.id))
+        let revisionIDs = Set(payload.revisions.map(\.id))
+        let snapshotIDs = Set(payload.snapshots.map(\.id))
+        let itemIDs = Set(payload.items.map(\.id))
+
+        guard payload.document.sourceSessionID == payload.session?.id else {
+            throw KnowledgeArchiveError.brokenReference("文档声明的来源会话与包里的会话对不上")
+        }
+        for line in payload.lines {
+            guard line.sessionID == payload.session?.id else {
+                throw KnowledgeArchiveError.brokenReference("行 \(line.id) 不属于包里的会话")
+            }
+        }
+        for snapshot in payload.snapshots {
+            guard snapshot.documentID == payload.document.id else {
+                throw KnowledgeArchiveError.brokenReference("快照 \(snapshot.id) 不属于包里的文档")
+            }
+            for revisionID in snapshot.lineRevisionIDs where !revisionIDs.contains(revisionID) {
+                throw KnowledgeArchiveError.brokenReference("快照 \(snapshot.id) 引用了包里没有的行修订")
+            }
+        }
+        for revision in payload.revisions {
+            guard lineIDs.contains(revision.lineID) else {
+                throw KnowledgeArchiveError.brokenReference("行修订 \(revision.id) 指向包里没有的行")
+            }
+        }
+        for minutes in payload.minutes {
+            guard minutes.sessionID == payload.session?.id else {
+                throw KnowledgeArchiveError.brokenReference("纪要 \(minutes.id) 不属于包里的会话")
+            }
+            if let snapshotID = minutes.snapshotID, !snapshotIDs.contains(snapshotID) {
+                throw KnowledgeArchiveError.brokenReference("纪要 \(minutes.id) 指向包里没有的来源快照")
+            }
+        }
+        for item in payload.items {
+            guard minutesIDs.contains(item.minutesID) else {
+                throw KnowledgeArchiveError.brokenReference("结论条目 \(item.id) 指向包里没有的纪要版本")
+            }
+            for anchor in item.anchors {
+                guard itemIDs.contains(anchor.itemID) else {
+                    throw KnowledgeArchiveError.brokenReference("证据锚点 \(anchor.id) 指向包里没有的结论条目")
+                }
+                if let revisionID = anchor.revisionID, !revisionIDs.contains(revisionID) {
+                    throw KnowledgeArchiveError.brokenReference("证据锚点 \(anchor.id) 指向包里没有的行修订")
+                }
+                if let lineID = anchor.lineID, !lineIDs.contains(lineID) {
+                    throw KnowledgeArchiveError.brokenReference("证据锚点 \(anchor.id) 指向包里没有的转录行")
+                }
+                if let snapshotID = anchor.snapshotID, !snapshotIDs.contains(snapshotID) {
+                    throw KnowledgeArchiveError.brokenReference("证据锚点 \(anchor.id) 指向包里没有的来源快照")
+                }
+            }
+        }
+        for window in payload.windows {
+            guard minutesIDs.contains(window.minutesID) else {
+                throw KnowledgeArchiveError.brokenReference("分窗记录 \(window.id) 指向包里没有的纪要版本")
+            }
+        }
+    }
+
+    static func validateIdentifier(_ id: String, limits: Limits = .standard) throws {
+        guard !id.isEmpty else {
+            throw KnowledgeArchiveError.invalidIdentifier("有对象没有 id")
+        }
+        guard id.count <= limits.maxIdentifierLength else {
+            throw KnowledgeArchiveError.invalidIdentifier("id 过长")
+        }
+        guard !id.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
+            throw KnowledgeArchiveError.invalidIdentifier("id 含控制字符")
+        }
+    }
+}
+
+/// 读出来并已通过校验的包。
+public struct KnowledgeArchivePackageRead: Sendable {
+    public var manifest: KnowledgeArchiveManifest
+    public var payload: KnowledgeArchivePayload
+    public var markdown: String
+
+    public init(manifest: KnowledgeArchiveManifest, payload: KnowledgeArchivePayload, markdown: String) {
+        self.manifest = manifest
+        self.payload = payload
+        self.markdown = markdown
+    }
+}
+
+// MARK: - 归档包里的可读纪要（MA-19 / MC-66）
+//
+// `minutes.md` 的要求只有一条：**脱离这个 App 也能读懂**。所以它不写
+// 内部字段名、不写库 id 当标题之外的东西、不假设读者知道什么叫"覆盖账本"。
+// 需要精确核对来源与状态的人去看 `structured.json`，那是给工具读的。
+public enum KnowledgeArchiveMarkdown {
+    public static func render(
+        manifest: KnowledgeArchiveManifest,
+        payload: KnowledgeArchivePayload
+    ) -> String {
+        var rows: [String] = []
+        let title = manifest.documentTitle ?? payload.document.title ?? "会议纪要"
+        rows.append("# \(title)")
+        rows.append("")
+
+        let selected = payload.minutes.first { $0.id == manifest.selectedMinutesID }
+        rows.append("| 项 | 值 |")
+        rows.append("|---|---|")
+        rows.append("| 纪要版本 | 第 \(manifest.selectedVersion) 版\(adoptedSuffix(manifest)) |")
+        if let occurredAt = payload.document.occurredAt {
+            rows.append("| 会议时间 | \(stamp(occurredAt)) |")
+        }
+        if let createdAt = selected?.createdAt {
+            rows.append("| 整理时间 | \(stamp(createdAt)) |")
+        }
+        rows.append("| 归档范围 | \(manifest.scope.title) |")
+        rows.append("| 导出时间 | \(stamp(manifest.createdAt.timeIntervalSince1970)) |")
+        rows.append("")
+
+        let items = payload.items
+            .filter { $0.minutesID == manifest.selectedMinutesID }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        if !items.isEmpty {
+            rows.append("## 结论与待办")
+            rows.append("")
+            for item in items {
+                rows.append("- \(kindTitle(item.kind))：\(item.text)\(verdictSuffix(item.verdict))")
+                for anchor in item.anchors {
+                    guard let quote = anchor.quote, !quote.isEmpty else { continue }
+                    let time = anchor.startSeconds.map { " \(SessionExporter.clock($0))" } ?? ""
+                    rows.append("  > \(quote.trimmingCharacters(in: .whitespacesAndNewlines))\(time)")
+                }
+            }
+            rows.append("")
+        }
+
+        if let body = selected?.body, !body.isEmpty {
+            rows.append("## 纪要正文")
+            rows.append("")
+            rows.append(body)
+            rows.append("")
+        }
+
+        if !payload.lines.isEmpty {
+            rows.append("## 引用的原句")
+            rows.append("")
+            for line in payload.lines.sorted(by: { $0.ordinal < $1.ordinal }) {
+                let timecode = line.tStart.map { "[\(SessionExporter.clock($0))] " } ?? ""
+                let speaker = speakerText(line, names: payload.speakerNames)
+                let lead = speaker.isEmpty ? "" : "**\(speaker)**："
+                rows.append("- \(timecode)\(lead)\(line.text)")
+            }
+            rows.append("")
+        }
+
+        rows.append("---")
+        rows.append("")
+        rows.append(
+            "本纪要由 SpeechRail 在这台 Mac 上整理；原始音频不留存。"
+                + "归档包里另有 `structured.json`，记录每一版结论依据的原句与状态。"
+        )
+        return rows.joined(separator: "\n") + "\n"
+    }
+
+    private static func adoptedSuffix(_ manifest: KnowledgeArchiveManifest) -> String {
+        manifest.acceptedMinutesID == manifest.selectedMinutesID ? "（当前采用）" : ""
+    }
+
+    private static func verdictSuffix(_ verdict: String?) -> String {
+        guard let verdict else { return "" }
+        switch verdict {
+        case "supported": return "（已核对）"
+        case "needsReview": return "（待核对）"
+        case "rejected": return "（引用不成立，请复核）"
+        default: return ""
+        }
+    }
+
+    /// 条目种类沿用库里的 `minutes_item.kind` 取值（`overview` / `decision` /
+    /// `action` / `open_question`）。这里只把它翻成人话，不另立一套名字。
+    private static func kindTitle(_ kind: String) -> String {
+        switch kind {
+        case "overview": "概述"
+        case "decision": "结论"
+        case "action": "待办"
+        case "open_question": "待确认"
+        default: "要点"
+        }
+    }
+
+    private static func speakerText(_ line: ArchiveLine, names: [String: String]) -> String {
+        guard let label = line.speakerLabel else { return "" }
+        return names[label] ?? "说话人 \(label)"
+    }
+
+    private static func stamp(_ interval: TimeInterval) -> String {
+        Date(timeIntervalSince1970: interval).formatted(date: .abbreviated, time: .shortened)
+    }
+}

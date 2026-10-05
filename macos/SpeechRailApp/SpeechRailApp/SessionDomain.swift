@@ -2828,3 +2828,1004 @@ public struct LineDraft: Sendable {
         self.createdAt = createdAt
     }
 }
+
+// MARK: - 知识归档包（MA-19 / MC-48、MC-65、MC-66、MC-71）
+
+/// 归档范围。**分享包与完整归档是两种东西，不是一个开关的两端**（MA-19）。
+///
+/// 分享包只装"这一版纪要说过什么、依据哪几句"：选定的**那一版**结论条目、
+/// 证据锚点，以及锚点真正引用到的那几行原文与行修订。它不装整场转录，
+/// 也不装其他版本——分享出去的东西不该顺手把整场会议和历史版本一起带走。
+///
+/// 完整归档装整场：所有纪要版本、全部条目与锚点、被引用过的全部行修订、
+/// 来源快照、分窗账本。用途是保真往返与本地归档，不是直接发给别人。
+public enum KnowledgeArchiveScope: String, Codable, Hashable, Sendable {
+    case share
+    case fullArchive = "full_archive"
+
+    public var title: String {
+        switch self {
+        case .share: "分享包"
+        case .fullArchive: "完整归档"
+        }
+    }
+}
+
+/// 导出选择（MA-19）。三件事缺一不可：`document` 定位是哪一场知识，
+/// `revision` 固定是哪一版纪要，`scope` 决定装多少。
+///
+/// **revision 是必填而不是可选的"当前版"**（MC-48）：用户在看 v1、库里已经有 v3 时，
+/// 导出必须还是 v1。传 nil 让导出"自己挑一版"就是这条验收的失败形态。
+public struct KnowledgeArchiveSelection: Hashable, Sendable {
+    public var documentID: String
+    public var minutesID: String
+    public var scope: KnowledgeArchiveScope
+
+    public init(documentID: String, minutesID: String, scope: KnowledgeArchiveScope) {
+        self.documentID = documentID
+        self.minutesID = minutesID
+        self.scope = scope
+    }
+}
+
+/// 归档包里的失败。**没有"读不到就导空壳"这一项**：读失败是失败，不是空内容。
+public enum KnowledgeArchiveError: Error, LocalizedError, Equatable {
+    case documentNotFound(String)
+    /// 选定的那一版读不到。不允许退回"当前展示版"冒充（MC-48）。
+    case minutesNotFound(String)
+    /// 选定的那一版没有正文。导出一个空壳再宣称成功，比直接失败更糟（MC-65）。
+    case minutesBodyMissing(String)
+    /// 库里读错了。原文消息保留，但不产出任何文件。
+    case readFailed(String)
+    /// 目标已存在。已导出的文件不静默覆盖（MA-19 回退条款）。
+    case destinationExists(String)
+    case malformedPackage(String)
+    /// 包里有不让落盘的东西：路径穿越、符号链接、未知条目。
+    case entryRejected(String)
+    case payloadTooLarge(Int)
+    case invalidIdentifier(String)
+    /// 包内引用指向包里没有的对象。
+    case brokenReference(String)
+    /// 同 ID 异内容。必须先看冲突预览，不允许部分覆盖用户现有文档。
+    case identityConflict(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .documentNotFound(let id):
+            "找不到这场会议知识文档（\(id)）"
+        case .minutesNotFound(let id):
+            "找不到选中的纪要版本（\(id)），没有导出"
+        case .minutesBodyMissing(let id):
+            "选中的那一版没有正文，导不出可读的纪要"
+        case .readFailed(let detail):
+            "读取知识内容失败：\(detail)"
+        case .destinationExists(let name):
+            "目标已存在，没有覆盖它：\(name)"
+        case .malformedPackage(let detail):
+            "这个包读不出来：\(detail)"
+        case .entryRejected(let name):
+            "包里有不让导入的内容：\(name)"
+        case .payloadTooLarge(let bytes):
+            "包太大了（\(bytes) 字节），超过导入上限"
+        case .invalidIdentifier(let detail):
+            "包里的标识不合法：\(detail)"
+        case .brokenReference(let detail):
+            "包里的引用断了：\(detail)"
+        case .identityConflict(let detail):
+            "有同 ID 但内容不同的对象，先看冲突预览再决定：\(detail)"
+        }
+    }
+}
+
+/// 清单（MA-19）。只存计数、身份与版本，**不存正文、不存绝对路径**：
+/// 清单跟着包走，泄露面必须和包本身一样小（与 MA-20 备份清单同一口径）。
+public struct KnowledgeArchiveManifest: Codable, Hashable, Sendable {
+    public static let schemaID = "speechrail.meeting.knowledge-archive/1"
+    public static let manifestFileName = "manifest.json"
+    public static let markdownFileName = "minutes.md"
+    public static let structuredFileName = "structured.json"
+    public static let directoryExtension = "srknowledge"
+
+    public var schema: String
+    public var createdAt: Date
+    public var scope: KnowledgeArchiveScope
+    public var documentID: String
+    /// 文档标题。清单里唯一一处人类可读文本：它让包名可认，
+    /// 又不携带正文——泄露面仍是一个标题，不是一整场会议。
+    public var documentTitle: String?
+    /// 采集会话存在时才有；导入来源的文档允许为空（不伪造"录过音"）。
+    public var sessionID: String?
+    /// 用户选中的那一版。全程按它取，任何环节都不改。
+    public var selectedMinutesID: String
+    public var selectedVersion: Int
+    /// 导出时这一场的采用指针。往返后要能核回同一个 id（MC-66）。
+    public var acceptedMinutesID: String?
+    public var sourceSchemaVersion: Int
+    public var counts: KnowledgeArchiveCounts
+    public var files: [KnowledgeArchiveFile]
+
+    public init(
+        schema: String = KnowledgeArchiveManifest.schemaID,
+        createdAt: Date = Date(),
+        scope: KnowledgeArchiveScope,
+        documentID: String,
+        documentTitle: String? = nil,
+        sessionID: String?,
+        selectedMinutesID: String,
+        selectedVersion: Int,
+        acceptedMinutesID: String?,
+        sourceSchemaVersion: Int,
+        counts: KnowledgeArchiveCounts,
+        files: [KnowledgeArchiveFile]
+    ) {
+        self.schema = schema
+        self.createdAt = createdAt
+        self.scope = scope
+        self.documentID = documentID
+        self.documentTitle = documentTitle
+        self.sessionID = sessionID
+        self.selectedMinutesID = selectedMinutesID
+        self.selectedVersion = selectedVersion
+        self.acceptedMinutesID = acceptedMinutesID
+        self.sourceSchemaVersion = sourceSchemaVersion
+        self.counts = counts
+        self.files = files
+    }
+}
+
+/// 包内文件条目。带字节数：清单说有 12 KB、实际只有 200 B 的包
+/// 不是损坏就是被截断，两种都不该当可用包导入。
+public struct KnowledgeArchiveFile: Codable, Hashable, Sendable {
+    public var name: String
+    public var byteCount: Int
+
+    public init(name: String, byteCount: Int) {
+        self.name = name
+        self.byteCount = byteCount
+    }
+}
+
+/// 计数。导入后按同一组数字核对"少了没有、多了没有"——逐项比，
+/// 只比总数会把"少一条、多一条"这种互相抵消的情况判成一致。
+public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
+    public var sessions: Int
+    public var lines: Int
+    public var speakerNames: Int
+    public var documents: Int
+    public var snapshots: Int
+    public var revisions: Int
+    public var minutes: Int
+    public var items: Int
+    public var anchors: Int
+    public var windows: Int
+
+    public init(
+        sessions: Int,
+        lines: Int,
+        speakerNames: Int,
+        documents: Int,
+        snapshots: Int,
+        revisions: Int,
+        minutes: Int,
+        items: Int,
+        anchors: Int,
+        windows: Int
+    ) {
+        self.sessions = sessions
+        self.lines = lines
+        self.speakerNames = speakerNames
+        self.documents = documents
+        self.snapshots = snapshots
+        self.revisions = revisions
+        self.minutes = minutes
+        self.items = items
+        self.anchors = anchors
+        self.windows = windows
+    }
+
+    public static let zero = KnowledgeArchiveCounts(
+        sessions: 0, lines: 0, speakerNames: 0, documents: 0, snapshots: 0,
+        revisions: 0, minutes: 0, items: 0, anchors: 0, windows: 0
+    )
+}
+
+/// 冲突预览的一条（MC-71）。**同 ID 是两回事，同 ID 同内容又是另一回事**：
+/// 内容相同就跳过（幂等重导），内容不同才是冲突，必须让用户先看见。
+public struct KnowledgeArchiveConflict: Hashable, Sendable {
+    public enum Kind: String, Hashable, Sendable {
+        case session
+        case line
+        case speakerName = "speaker_name"
+        case document
+        case snapshot
+        case revision
+        case minutes
+        case minutesItem = "minutes_item"
+        case evidence
+        case window
+    }
+
+    public var kind: Kind
+    public var id: String
+    /// true 表示库里已有且内容完全一致，可以直接跳过。
+    public var isIdentical: Bool
+
+    public init(kind: Kind, id: String, isIdentical: Bool) {
+        self.kind = kind
+        self.id = id
+        self.isIdentical = isIdentical
+    }
+}
+
+/// 导入预检结论。只读，不写库。
+public struct KnowledgeArchivePreview: Sendable {
+    public var manifest: KnowledgeArchiveManifest
+    public var conflicts: [KnowledgeArchiveConflict]
+    /// 包里要落库的对象数（不含会跳过的重复项）。
+    public var newObjectCount: Int
+
+    public init(manifest: KnowledgeArchiveManifest, conflicts: [KnowledgeArchiveConflict], newObjectCount: Int) {
+        self.manifest = manifest
+        self.conflicts = conflicts
+        self.newObjectCount = newObjectCount
+    }
+
+    /// 真正的冲突 = 同 ID 但内容不同。同内容重复不算。
+    public var realConflicts: [KnowledgeArchiveConflict] {
+        conflicts.filter { !$0.isIdentical }
+    }
+
+    public var isSafeToImport: Bool { realConflicts.isEmpty }
+}
+
+/// 导入结果。只报事实，不报"成功"以外的判断。
+public struct KnowledgeArchiveImportResult: Sendable {
+    public var documentID: String
+    public var selectedMinutesID: String
+    public var inserted: KnowledgeArchiveCounts
+    public var skippedIdentical: Int
+
+    public init(
+        documentID: String,
+        selectedMinutesID: String,
+        inserted: KnowledgeArchiveCounts,
+        skippedIdentical: Int
+    ) {
+        self.documentID = documentID
+        self.selectedMinutesID = selectedMinutesID
+        self.inserted = inserted
+        self.skippedIdentical = skippedIdentical
+    }
+}
+
+/// `structured.json` 的根。**字段名与内部类型解耦**：内部改字段名不会静默改掉
+/// 已经发出去的包，老包也不会因为新版本内部重构就读不回来（MA-19 开放格式）。
+public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
+    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/1"
+
+    public var schema: String
+    public var document: ArchiveDocument
+    public var session: ArchiveSession?
+    public var lines: [ArchiveLine]
+    /// 匿名标签 → 显示名。**正文一个字不动**（§15.3）。
+    public var speakerNames: [String: String]
+    public var snapshots: [ArchiveSnapshot]
+    public var revisions: [ArchiveRevision]
+    public var minutes: [ArchiveMinutes]
+    public var items: [ArchiveItem]
+    public var windows: [ArchiveWindow]
+
+    public init(
+        schema: String = KnowledgeArchivePayload.schemaID,
+        document: ArchiveDocument,
+        session: ArchiveSession?,
+        lines: [ArchiveLine],
+        speakerNames: [String: String],
+        snapshots: [ArchiveSnapshot],
+        revisions: [ArchiveRevision],
+        minutes: [ArchiveMinutes],
+        items: [ArchiveItem],
+        windows: [ArchiveWindow]
+    ) {
+        self.schema = schema
+        self.document = document
+        self.session = session
+        self.lines = lines
+        self.speakerNames = speakerNames
+        self.snapshots = snapshots
+        self.revisions = revisions
+        self.minutes = minutes
+        self.items = items
+        self.windows = windows
+    }
+}
+
+public struct ArchiveDocument: Codable, Hashable, Sendable {
+    public var id: String
+    public var sourceSessionID: String?
+    public var title: String?
+    public var projectID: String?
+    public var occurredAt: Double?
+    public var timezone: String?
+    public var deletedAt: Double?
+    public var createdAt: Double
+    public var updatedAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case projectID = "project_id"
+        case timezone
+        case sourceSessionID = "source_session_id"
+        case occurredAt = "occurred_at"
+        case deletedAt = "deleted_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    public init(
+        id: String,
+        sourceSessionID: String? = nil,
+        title: String? = nil,
+        projectID: String? = nil,
+        occurredAt: Double? = nil,
+        timezone: String? = nil,
+        deletedAt: Double? = nil,
+        createdAt: Double,
+        updatedAt: Double
+    ) {
+        self.id = id
+        self.sourceSessionID = sourceSessionID
+        self.title = title
+        self.projectID = projectID
+        self.occurredAt = occurredAt
+        self.timezone = timezone
+        self.deletedAt = deletedAt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ArchiveSession: Codable, Hashable, Sendable {
+    public var id: String
+    public var kind: String
+    public var title: String?
+    public var state: String
+    public var createdAt: Double
+    public var startedAt: Double
+    public var endedAt: Double?
+    public var engineProfile: String
+    public var audioSource: String
+    public var diarization: String
+    public var diarizationNote: String?
+    public var llmEndpoint: String?
+    public var llmModel: String?
+    public var personaID: String?
+    public var personaTitle: String?
+    public var voiceID: String?
+    public var voiceName: String?
+    public var endReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case title
+        case state
+        case createdAt = "created_at"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case engineProfile = "engine_profile"
+        case audioSource = "audio_source"
+        case diarization
+        case diarizationNote = "diarization_note"
+        case llmEndpoint = "llm_endpoint"
+        case llmModel = "llm_model"
+        case personaID = "persona_id"
+        case personaTitle = "persona_title"
+        case voiceID = "voice_id"
+        case voiceName = "voice_name"
+        case endReason = "end_reason"
+    }
+
+    public init(
+        id: String,
+        kind: String,
+        title: String? = nil,
+        state: String,
+        createdAt: Double,
+        startedAt: Double,
+        endedAt: Double? = nil,
+        engineProfile: String,
+        audioSource: String,
+        diarization: String,
+        diarizationNote: String? = nil,
+        llmEndpoint: String? = nil,
+        llmModel: String? = nil,
+        personaID: String? = nil,
+        personaTitle: String? = nil,
+        voiceID: String? = nil,
+        voiceName: String? = nil,
+        endReason: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.state = state
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.engineProfile = engineProfile
+        self.audioSource = audioSource
+        self.diarization = diarization
+        self.diarizationNote = diarizationNote
+        self.llmEndpoint = llmEndpoint
+        self.llmModel = llmModel
+        self.personaID = personaID
+        self.personaTitle = personaTitle
+        self.voiceID = voiceID
+        self.voiceName = voiceName
+        self.endReason = endReason
+    }
+}
+
+public struct ArchiveLine: Codable, Hashable, Sendable {
+    public var id: String
+    public var sessionID: String
+    public var ordinal: Int
+    public var role: String
+    public var speakerLabel: String?
+    public var text: String
+    public var tStart: Double?
+    public var tEnd: Double?
+    public var source: String
+    public var status: String
+    public var interrupted: Bool
+    public var deviceSwitch: Bool
+    public var starred: Bool
+    public var timingQuality: String?
+    public var createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case ordinal
+        case role
+        case text
+        case source
+        case status
+        case interrupted
+        case starred
+        case sessionID = "session_id"
+        case speakerLabel = "speaker_label"
+        case tStart = "t_start"
+        case tEnd = "t_end"
+        case deviceSwitch = "device_switch"
+        case timingQuality = "timing_quality"
+        case createdAt = "created_at"
+    }
+
+    public init(
+        id: String,
+        sessionID: String,
+        ordinal: Int,
+        role: String,
+        speakerLabel: String? = nil,
+        text: String,
+        tStart: Double? = nil,
+        tEnd: Double? = nil,
+        source: String,
+        status: String,
+        interrupted: Bool,
+        deviceSwitch: Bool,
+        starred: Bool,
+        timingQuality: String? = nil,
+        createdAt: Double
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.ordinal = ordinal
+        self.role = role
+        self.speakerLabel = speakerLabel
+        self.text = text
+        self.tStart = tStart
+        self.tEnd = tEnd
+        self.source = source
+        self.status = status
+        self.interrupted = interrupted
+        self.deviceSwitch = deviceSwitch
+        self.starred = starred
+        self.timingQuality = timingQuality
+        self.createdAt = createdAt
+    }
+}
+
+public struct ArchiveSnapshot: Codable, Hashable, Sendable {
+    public var id: String
+    public var documentID: String
+    public var lineRevisionIDs: [String]
+    public var speakerMapRevision: String?
+    public var noteRefs: [String]
+    public var coverage: String?
+    public var sealResult: String
+    public var createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case coverage
+        case documentID = "document_id"
+        case lineRevisionIDs = "line_revision_ids"
+        case speakerMapRevision = "speaker_map_revision"
+        case noteRefs = "note_refs"
+        case sealResult = "seal_result"
+        case createdAt = "created_at"
+    }
+
+    public init(
+        id: String,
+        documentID: String,
+        lineRevisionIDs: [String],
+        speakerMapRevision: String? = nil,
+        noteRefs: [String],
+        coverage: String? = nil,
+        sealResult: String,
+        createdAt: Double
+    ) {
+        self.id = id
+        self.documentID = documentID
+        self.lineRevisionIDs = lineRevisionIDs
+        self.speakerMapRevision = speakerMapRevision
+        self.noteRefs = noteRefs
+        self.coverage = coverage
+        self.sealResult = sealResult
+        self.createdAt = createdAt
+    }
+}
+
+public struct ArchiveRevision: Codable, Hashable, Sendable {
+    public var id: String
+    public var lineID: String
+    public var sessionID: String
+    public var text: String
+    public var origin: String
+    public var parentRevisionID: String?
+    public var editedAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case text
+        case origin
+        case lineID = "line_id"
+        case sessionID = "session_id"
+        case parentRevisionID = "parent_revision_id"
+        case editedAt = "edited_at"
+    }
+
+    public init(
+        id: String,
+        lineID: String,
+        sessionID: String,
+        text: String,
+        origin: String,
+        parentRevisionID: String? = nil,
+        editedAt: Double
+    ) {
+        self.id = id
+        self.lineID = lineID
+        self.sessionID = sessionID
+        self.text = text
+        self.origin = origin
+        self.parentRevisionID = parentRevisionID
+        self.editedAt = editedAt
+    }
+}
+
+public struct ArchiveMinutes: Codable, Hashable, Sendable {
+    public var id: String
+    public var sessionID: String
+    public var version: Int
+    public var status: String
+    public var body: String?
+    public var model: String?
+    public var promptChars: Int?
+    public var isLatest: Bool
+    public var isAccepted: Bool
+    public var attempts: Int
+    public var failureReason: String?
+    public var leaseUntil: Double?
+    public var createdAt: Double
+    public var isLegacyImport: Bool
+    public var remoteResponseID: String?
+    public var configSnapshot: String?
+    public var snapshotID: String?
+    public var cancelRequestedAt: Double?
+    public var candidateJSON: String?
+    public var reviewJSON: String?
+    public var coverageJSON: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case version
+        case status
+        case body
+        case model
+        case attempts
+        case sessionID = "session_id"
+        case promptChars = "prompt_chars"
+        case isLatest = "is_latest"
+        case isAccepted = "is_accepted"
+        case failureReason = "failure_reason"
+        case leaseUntil = "lease_until"
+        case createdAt = "created_at"
+        case isLegacyImport = "is_legacy_import"
+        case remoteResponseID = "remote_response_id"
+        case configSnapshot = "config_snapshot"
+        case snapshotID = "snapshot_id"
+        case cancelRequestedAt = "cancel_requested_at"
+        case candidateJSON = "candidate_json"
+        case reviewJSON = "review_json"
+        case coverageJSON = "coverage_json"
+    }
+
+    public init(
+        id: String,
+        sessionID: String,
+        version: Int,
+        status: String,
+        body: String?,
+        model: String? = nil,
+        promptChars: Int? = nil,
+        isLatest: Bool,
+        isAccepted: Bool,
+        attempts: Int,
+        failureReason: String? = nil,
+        leaseUntil: Double? = nil,
+        createdAt: Double,
+        isLegacyImport: Bool,
+        remoteResponseID: String? = nil,
+        configSnapshot: String? = nil,
+        snapshotID: String? = nil,
+        cancelRequestedAt: Double? = nil,
+        candidateJSON: String? = nil,
+        reviewJSON: String? = nil,
+        coverageJSON: String? = nil
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.version = version
+        self.status = status
+        self.body = body
+        self.model = model
+        self.promptChars = promptChars
+        self.isLatest = isLatest
+        self.isAccepted = isAccepted
+        self.attempts = attempts
+        self.failureReason = failureReason
+        self.leaseUntil = leaseUntil
+        self.createdAt = createdAt
+        self.isLegacyImport = isLegacyImport
+        self.remoteResponseID = remoteResponseID
+        self.configSnapshot = configSnapshot
+        self.snapshotID = snapshotID
+        self.cancelRequestedAt = cancelRequestedAt
+        self.candidateJSON = candidateJSON
+        self.reviewJSON = reviewJSON
+        self.coverageJSON = coverageJSON
+    }
+}
+
+public struct ArchiveItem: Codable, Hashable, Sendable {
+    public var id: String
+    public var minutesID: String
+    public var localID: String
+    public var kind: String
+    public var text: String
+    public var verdict: String?
+    public var sortOrder: Int
+    public var anchors: [ArchiveAnchor]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case text
+        case verdict
+        case anchors
+        case minutesID = "minutes_id"
+        case localID = "local_id"
+        case sortOrder = "sort_order"
+    }
+
+    public init(
+        id: String,
+        minutesID: String,
+        localID: String,
+        kind: String,
+        text: String,
+        verdict: String?,
+        sortOrder: Int,
+        anchors: [ArchiveAnchor]
+    ) {
+        self.id = id
+        self.minutesID = minutesID
+        self.localID = localID
+        self.kind = kind
+        self.text = text
+        self.verdict = verdict
+        self.sortOrder = sortOrder
+        self.anchors = anchors
+    }
+}
+
+public struct ArchiveAnchor: Codable, Hashable, Sendable {
+    public var id: String
+    public var itemID: String
+    public var unitID: String
+    public var lineID: String?
+    public var revisionID: String?
+    public var snapshotID: String?
+    public var speakerLabel: String?
+    public var startSeconds: Double?
+    /// 锚点当时的原文。**随包带走**：来源行之后被改被删，这段引文仍然可读，
+    /// 否则导入到一个新库就只剩一个指不到东西的指针（MC-66）。
+    public var quote: String?
+    public var verification: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case quote
+        case verification
+        case itemID = "item_id"
+        case unitID = "unit_id"
+        case lineID = "line_id"
+        case revisionID = "revision_id"
+        case snapshotID = "snapshot_id"
+        case speakerLabel = "speaker_label"
+        case startSeconds = "start_seconds"
+    }
+
+    public init(
+        id: String,
+        itemID: String,
+        unitID: String,
+        lineID: String? = nil,
+        revisionID: String? = nil,
+        snapshotID: String? = nil,
+        speakerLabel: String? = nil,
+        startSeconds: Double? = nil,
+        quote: String? = nil,
+        verification: String
+    ) {
+        self.id = id
+        self.itemID = itemID
+        self.unitID = unitID
+        self.lineID = lineID
+        self.revisionID = revisionID
+        self.snapshotID = snapshotID
+        self.speakerLabel = speakerLabel
+        self.startSeconds = startSeconds
+        self.quote = quote
+        self.verification = verification
+    }
+}
+
+public struct ArchiveWindow: Codable, Hashable, Sendable {
+    public var id: String
+    public var minutesID: String
+    public var index: Int
+    public var ownedUnitIDs: [String]
+    public var contextUnitIDs: [String]
+    public var outcome: String
+    public var failureReason: String?
+    public var candidateJSON: String?
+    public var remoteResponseID: String?
+    public var updatedAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case index
+        case outcome
+        case minutesID = "minutes_id"
+        case ownedUnitIDs = "owned_unit_ids"
+        case contextUnitIDs = "context_unit_ids"
+        case failureReason = "failure_reason"
+        case candidateJSON = "candidate_json"
+        case remoteResponseID = "remote_response_id"
+        case updatedAt = "updated_at"
+    }
+
+    public init(
+        id: String,
+        minutesID: String,
+        index: Int,
+        ownedUnitIDs: [String],
+        contextUnitIDs: [String],
+        outcome: String,
+        failureReason: String? = nil,
+        candidateJSON: String? = nil,
+        remoteResponseID: String? = nil,
+        updatedAt: Double
+    ) {
+        self.id = id
+        self.minutesID = minutesID
+        self.index = index
+        self.ownedUnitIDs = ownedUnitIDs
+        self.contextUnitIDs = contextUnitIDs
+        self.outcome = outcome
+        self.failureReason = failureReason
+        self.candidateJSON = candidateJSON
+        self.remoteResponseID = remoteResponseID
+        self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - 归档包的模型转换（MA-19）
+//
+// 库内类型不直接 `Codable`，包的 DTO 也不直接复用库内类型。中间这一层
+// 显式写出每个字段，是为了让"包格式"这件事有唯一答案：内部改字段名不会
+// 静默改掉已经发出去的包，反过来老包也不会因为内部重构读不回来。
+extension MeetingDocument {
+    var archiveModel: ArchiveDocument {
+        ArchiveDocument(
+            id: id,
+            sourceSessionID: sourceSessionID,
+            title: title,
+            projectID: projectID,
+            occurredAt: occurredAt?.timeIntervalSince1970,
+            timezone: timezone,
+            deletedAt: deletedAt?.timeIntervalSince1970,
+            createdAt: createdAt.timeIntervalSince1970,
+            updatedAt: updatedAt.timeIntervalSince1970
+        )
+    }
+}
+
+extension SessionRecord {
+    var archiveModel: ArchiveSession {
+        ArchiveSession(
+            id: id,
+            kind: kind.rawValue,
+            title: title,
+            state: state.rawValue,
+            createdAt: createdAt.timeIntervalSince1970,
+            startedAt: startedAt.timeIntervalSince1970,
+            endedAt: endedAt?.timeIntervalSince1970,
+            engineProfile: engineProfile,
+            audioSource: audioSource.rawValue,
+            diarization: diarization.rawValue,
+            diarizationNote: diarizationNote,
+            llmEndpoint: llmEndpoint,
+            llmModel: llmModel,
+            personaID: persona?.id,
+            personaTitle: persona?.title,
+            voiceID: voice?.id,
+            voiceName: voice?.name,
+            endReason: endReason?.rawValue
+        )
+    }
+}
+
+extension TranscriptLine {
+    var archiveModel: ArchiveLine {
+        ArchiveLine(
+            id: id,
+            sessionID: sessionID,
+            ordinal: ordinal,
+            role: role.rawValue,
+            speakerLabel: speakerLabel,
+            text: text,
+            tStart: tStart,
+            tEnd: tEnd,
+            source: source.rawValue,
+            status: status.rawValue,
+            interrupted: isInterrupted,
+            deviceSwitch: isDeviceSwitch,
+            starred: isStarred,
+            timingQuality: timingQuality?.rawValue,
+            createdAt: createdAt.timeIntervalSince1970
+        )
+    }
+}
+
+extension MeetingSourceSnapshot {
+    var archiveModel: ArchiveSnapshot {
+        ArchiveSnapshot(
+            id: id,
+            documentID: documentID,
+            lineRevisionIDs: lineRevisionIDs,
+            speakerMapRevision: speakerMapRevision,
+            noteRefs: noteRefs,
+            coverage: coverage,
+            sealResult: sealResult,
+            createdAt: createdAt.timeIntervalSince1970
+        )
+    }
+}
+
+extension TranscriptRevision {
+    var archiveModel: ArchiveRevision {
+        ArchiveRevision(
+            id: id,
+            lineID: lineID,
+            sessionID: sessionID,
+            text: text,
+            origin: origin,
+            parentRevisionID: parentRevisionID,
+            editedAt: editedAt.timeIntervalSince1970
+        )
+    }
+}
+
+extension MinutesVersion {
+    /// 租约是"谁正在跑这一版"的本机状态，不是内容身份：包带走它没有意义，
+    /// 导入到新库还会让新库以为有个幽灵任务在跑。所以导出时清空。
+    var archiveModel: ArchiveMinutes {
+        ArchiveMinutes(
+            id: id,
+            sessionID: sessionID,
+            version: version,
+            status: status.rawValue,
+            body: body,
+            model: model,
+            promptChars: promptChars,
+            isLatest: isLatest,
+            isAccepted: isAccepted,
+            attempts: attempts,
+            failureReason: failureReason,
+            leaseUntil: nil,
+            createdAt: createdAt.timeIntervalSince1970,
+            isLegacyImport: isLegacyImport,
+            remoteResponseID: remoteResponseID,
+            configSnapshot: configSnapshot,
+            snapshotID: snapshotID,
+            cancelRequestedAt: cancelRequestedAt?.timeIntervalSince1970,
+            candidateJSON: candidateJSON,
+            reviewJSON: reviewJSON,
+            coverageJSON: coverageJSON
+        )
+    }
+}
+
+extension MinutesItem {
+    var archiveModel: ArchiveItem {
+        ArchiveItem(
+            id: id,
+            minutesID: minutesID,
+            localID: localID,
+            kind: kind,
+            text: text,
+            verdict: verdict?.rawValue,
+            sortOrder: sortOrder,
+            anchors: anchors.map { anchor in
+                ArchiveAnchor(
+                    id: anchor.id,
+                    itemID: anchor.itemID,
+                    unitID: anchor.unitID,
+                    lineID: anchor.lineID,
+                    revisionID: anchor.revisionID,
+                    snapshotID: anchor.snapshotID,
+                    speakerLabel: anchor.speakerLabel,
+                    startSeconds: anchor.startSeconds,
+                    quote: anchor.quote,
+                    verification: anchor.verification
+                )
+            }
+        )
+    }
+}
+
+extension MinutesWindowRecord {
+    /// 窗口行本身不记自己属于哪一版（那在查询条件里），父 id 由调用方按
+    /// 查它时用的那个版本填进来——猜错的话包里的分窗就会指到别的版本上。
+    func archiveModel(minutesID: String) -> ArchiveWindow {
+        ArchiveWindow(
+            id: id,
+            minutesID: minutesID,
+            index: index,
+            ownedUnitIDs: ownedUnitIDs,
+            contextUnitIDs: contextUnitIDs,
+            outcome: outcome.rawValue,
+            failureReason: failureReason,
+            candidateJSON: candidateJSON,
+            remoteResponseID: remoteResponseID,
+            updatedAt: updatedAt.timeIntervalSince1970
+        )
+    }
+}
