@@ -47,15 +47,26 @@ public struct AudioChunk: Sendable {
     public var level: Double
     /// Optional source-side evidence. File/tap test sources may omit it.
     public var capturedAt: ContinuousClock.Instant?
+    /// M3/V08:来源侧块序号（单调递增）。uploader 据此发现 `bufferingNewest`
+    /// 替换掉的块——序号跳跃即丢块证据，残缺语音不得当成完整意图回答。
+    /// 旧调用点不填时为 nil：表示"无序号证据"，不得当成"序号连续"。
+    public var sequenceNumber: Int?
+    /// M3/V08:本块之前来源侧累计丢弃的样本数快照（ring 满等原因）。
+    /// uploader 对比相邻两块的快照差即可得到块间丢样数，无需跨线程读 ring。
+    public var droppedSamplesBefore: Int?
 
     public init(
         pcm: Data,
         level: Double,
-        capturedAt: ContinuousClock.Instant? = nil
+        capturedAt: ContinuousClock.Instant? = nil,
+        sequenceNumber: Int? = nil,
+        droppedSamplesBefore: Int? = nil
     ) {
         self.pcm = pcm
         self.level = level
         self.capturedAt = capturedAt
+        self.sequenceNumber = sequenceNumber
+        self.droppedSamplesBefore = droppedSamplesBefore
     }
 }
 

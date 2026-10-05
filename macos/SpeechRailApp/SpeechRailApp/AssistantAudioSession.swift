@@ -82,6 +82,8 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     )
     private let stateLock = NSLock()
     private let ring = AudioSampleRing(capacity: AudioEngineSession.ringCapacity)
+    /// M3/V08:已发出的 AudioChunk 块序号（serial queue 上递增）。
+    private var emittedChunkSequence = 0
     private let playbackFormat: AVAudioFormat?
 
     private var mode: AssistantMode = .duplex
@@ -155,6 +157,11 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         )
         stateLock.withLock { self.continuation = continuation }
         ring.reset()
+        // M3/V08:新采集期开始，块序号从 0 重计（与 ring 游标同一生命周期）。
+        // 注意：serial queue 上执行，与 drainAudioOnQueue 同队列，无竞争。
+        queue.async { [weak self] in
+            self?.emittedChunkSequence = 0
+        }
 
         do {
             try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, Error>) in
@@ -347,7 +354,17 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         let level = data.withUnsafeBytes { raw in
             AudioLevel.peak(raw.bindMemory(to: Int16.self))
         }
-        continuation.yield(AudioChunk(pcm: data, level: level))
+        // M3/V08:drain 逐块发序号 + 丢样快照。serial queue 上递增，无需原子。
+        emittedChunkSequence &+= 1
+        continuation.yield(
+            AudioChunk(
+                pcm: data,
+                level: level,
+                capturedAt: ContinuousClock.now,
+                sequenceNumber: emittedChunkSequence,
+                droppedSamplesBefore: ring.droppedSampleCount
+            )
+        )
     }
 
     /// Builds the graph only on the serial audio queue. In duplex mode voice
@@ -468,6 +485,12 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             } else { return }
             ring.commitWrite(accepted)
             consumed += accepted
+        }
+        // M3/V08:span 为 nil 提前退出时，剩余帧是因 ring 满而丢弃的样本——计数，
+        // 不静默吞掉。调用方据此判定输入完整性。
+        let remainder = frameCount - consumed
+        if remainder > 0 {
+            ring.recordDroppedSamples(remainder)
         }
     }
 

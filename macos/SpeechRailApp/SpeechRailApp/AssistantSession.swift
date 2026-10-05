@@ -372,6 +372,16 @@ public final class AssistantSession {
     private var memories: [String] = []
     /// 半双工门闩：它说话的时候不上行音频（§14.5）。
     private var isMutedForPlayback = false
+    /// M3/V08:上行丢块证据——上一块的序号与丢样快照、累计跳过的块数与丢样数。
+    /// `bufferingNewest(64)` 替换 + ring 满都会在这里留下可计数的证据；
+    /// 有证据即输入不完整，不得当成完整意图回答（由调用方判定）。
+    private var lastUploadedChunkSequence: Int?
+    private var lastChunkDroppedBefore: Int?
+    private(set) var uploadedChunksSkipped: Int = 0
+    private(set) var uploadedSamplesDropped: Int = 0
+    /// 测试 seam：上一块序号（只读）。生产逻辑不依赖它做决策，
+    /// 只做单调证据累计；是否"完整"由调用方按证据判定。
+    var lastUploadedChunkSequenceForTest: Int? { lastUploadedChunkSequence }
     /// VA-12/A42：当前重播绑定的原始 turnID（playbackInvocation）。
     /// 重播是独立播放调用：停止只更新本次播放记录，不碰另一回复的生成状态。
     /// nil 表示当前没有重播在跑。
@@ -1909,6 +1919,21 @@ public final class AssistantSession {
 
     private func upload(_ chunk: AudioChunk, to client: any AssistantRealtimeClient) async {
         guard !isStoppingIntentionally else { return }
+        // M3/V08:块序号跳跃（bufferingNewest 替换）与丢样快照差（ring 满）
+        // 都在这里累计为单调证据。无序号/无快照的旧来源不产生证据，
+        // 也不伪造"连续"结论。
+        if let seq = chunk.sequenceNumber {
+            if let last = lastUploadedChunkSequence, seq > last + 1 {
+                uploadedChunksSkipped += seq - last - 1
+            }
+            lastUploadedChunkSequence = seq
+        }
+        if let dropped = chunk.droppedSamplesBefore {
+            if let last = lastChunkDroppedBefore, dropped > last {
+                uploadedSamplesDropped += dropped - last
+            }
+            lastChunkDroppedBefore = dropped
+        }
         level = chunk.level
         // 用户按了静音：电平照显（麦克风仍归这次会话），但一个字节都不上行。
         if isMuted { return }

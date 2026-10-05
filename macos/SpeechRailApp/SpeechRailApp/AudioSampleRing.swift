@@ -14,6 +14,10 @@ public final class AudioSampleRing: @unchecked Sendable {
     private let mask: Int
     private let writeIndex = Atomic<Int>(0)
     private let readIndex = Atomic<Int>(0)
+    /// M3/V08:累计丢样数（ring 满时容纳不下的 newest samples）。
+    /// 实时回调内只做无锁累加；换算（native sample rate → 时间）与上报离开回调。
+    /// 与 `accepted` 严格互斥：同一份样本要么被接纳，要么被计数为丢弃。
+    private let droppedSamples = Atomic<Int>(0)
 
     public init(capacity: Int) {
         var size = 2
@@ -65,9 +69,19 @@ public final class AudioSampleRing: @unchecked Sendable {
         let write = writeIndex.load(ordering: .relaxed)
         let read = readIndex.load(ordering: .acquiring)
         let free = capacity - (write &- read) - 1
-        guard free > 0 else { return }
+        // M3/V08:ring 满时整批丢弃也要计数——调用方据此判定输入是否完整，
+        // 残缺语音不得当成完整意图回答。
+        guard free > 0 else {
+            droppedSamples.add(count, ordering: .relaxed)
+            return
+        }
 
         let accepted = min(count, free)
+        // 部分容纳不下：超出部分同样计数，保证 accepted + dropped == count。
+        let dropped = count - accepted
+        if dropped > 0 {
+            droppedSamples.add(dropped, ordering: .relaxed)
+        }
         let offset = write & mask
         let first = min(accepted, capacity - offset)
         storage.advanced(by: offset).update(from: source, count: first)
@@ -87,6 +101,22 @@ public final class AudioSampleRing: @unchecked Sendable {
         guard free > 0 else { return nil }
         let offset = write & mask
         return (storage.advanced(by: offset), min(free, capacity - offset))
+    }
+
+    /// M3/V08:累计丢样数（供诊断/观测读取；单调递增，饱和不再增长）。
+    internal var droppedSampleCount: Int {
+        droppedSamples.load(ordering: .relaxed)
+    }
+
+    /// M3/V08:记录调用方侧丢弃的样本（如 span 为 nil 时循环退出的剩余帧）。
+    /// ring 内部 write 路径已自行计数；此入口只供 span/commit 路径的调用方
+    /// 报告"因 ring 满而未能写入的剩余样本"，避免静默吞掉剩余。
+    @inline(__always)
+    internal func recordDroppedSamples(_ count: Int) {
+        guard count > 0 else { return }
+        let current = droppedSamples.load(ordering: .relaxed)
+        guard current < 1_000_000_000 else { return }
+        droppedSamples.add(count, ordering: .relaxed)
     }
 
     /// Commits samples written into the latest `writableSpan`.

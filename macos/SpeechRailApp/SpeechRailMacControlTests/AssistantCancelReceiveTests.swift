@@ -912,4 +912,73 @@ final class AssistantCancelReceiveTests: XCTestCase {
             "空回复不留伪造正文行"
         )
     }
+
+    // MARK: - M3/V08b:上行丢块证据可计数
+
+    /// V08b:块序号跳跃（bufferingNewest 替换）必须累计为跳过块数；
+    /// 无序号的旧来源不产生证据，也不伪造连续结论。
+    func testUploadSkippedChunksAreCounted() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [])
+        defer { cleanup(harness) }
+        // pump 启动后 uploader 才消费 capture 流（与 V01 等用例同一驱动方式）。
+        try await harness.coordinator.begin(.assistant)
+        let session = harness.session
+        XCTAssertEqual(session.uploadedChunksSkipped, 0)
+        XCTAssertEqual(session.uploadedSamplesDropped, 0)
+        // 序号 0,1,2 连续 → 无跳过。
+        for seq in [0, 1, 2] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        // uploader 是异步 Task：等三块全部落地再断言序号，避免竞态。
+        await waitUntil(
+            { session.lastUploadedChunkSequenceForTest == 2 },
+            message: "三块连续序号应全部被 uploader 消费"
+        )
+        XCTAssertEqual(session.uploadedChunksSkipped, 0, "连续序号不得累计跳过")
+        // 序号跳到 5 → 跳过 3,4 两块。
+        harness.audio.emitCapture(
+            AudioChunk(
+                pcm: Data([1, 2, 3, 4]),
+                level: 0.5,
+                sequenceNumber: 5,
+                droppedSamplesBefore: 0
+            )
+        )
+        await waitUntil(
+            { session.uploadedChunksSkipped == 2 },
+            message: "序号 2→5 应累计跳过 2 块"
+        )
+        XCTAssertEqual(session.uploadedSamplesDropped, 0, "无 ring 丢样时丢样计数必须为零")
+    }
+
+    /// V08b:ring 丢样快照差必须累计；快照回退（新采集期）不倒扣。
+    func testUploadDroppedSamplesAreCounted() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let session = harness.session
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 0, droppedSamplesBefore: 100)
+        )
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 1, droppedSamplesBefore: 160)
+        )
+        await waitUntil(
+            { session.uploadedSamplesDropped == 60 },
+            message: "丢样快照 100→160 应累计 60 样本"
+        )
+        // 新采集期快照归零：不倒扣，只更新基线。
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 0, droppedSamplesBefore: 0)
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(session.uploadedSamplesDropped, 60, "快照回退不得倒扣已累计的丢样数")
+    }
 }
