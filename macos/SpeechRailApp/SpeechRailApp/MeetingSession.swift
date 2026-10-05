@@ -265,8 +265,18 @@ public final class MeetingSession {
     // MARK: - 入口
 
     /// 页面主按钮：选好来源之后从这里进（§6.2 的空态度）。
-    public func start(selection: MeetingAudioSelection) async {
+    /// 会前写的标题（方案 §4.1）。
+    ///
+    /// 存下来是为了**失败之后还在**：启动被麦克风占用、服务没握手这些都很常见，
+    /// 清空它等于让用户把刚打的字重打一遍，而失败往往还发生在同一台机器、
+    /// 同一个占着设备的应用上——他改不掉。空白按"没写"处理，不是存一个空标题。
+    public private(set) var pendingTitle: String?
+
+    public func start(selection: MeetingAudioSelection, title: String? = nil) async {
         self.selection = selection
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 每次开始都重设：下一场会议不该继承上一场的名字。
+        pendingTitle = (trimmed?.isEmpty ?? true) ? nil : trimmed
         blocked = nil
         lastFailure = nil
         await coordinator.requestStart(.meeting)
@@ -503,7 +513,9 @@ public final class MeetingSession {
                     diarization: wantsDiarization ? .active : .off,
                     diarizationNote: nil,
                     llmEndpoint: minutesConfiguration?.normalizedBaseURL,
-                    llmModel: minutesConfiguration?.model
+                    llmModel: minutesConfiguration?.model,
+                    // §4.1：标题可为空。空着照样开始，不把门槛加回去。
+                    title: pendingTitle
                 )
             )
             guard connectionGeneration.isCurrent(startToken) else {

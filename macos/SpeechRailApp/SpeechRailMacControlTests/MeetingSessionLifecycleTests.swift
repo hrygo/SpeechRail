@@ -527,9 +527,135 @@ extension MeetingSessionLifecycleTests {
             for _ in 0..<20 { try await Task.sleep(for: .milliseconds(5)) }
         }
     }
-}
+    // MARK: - 会前轻量标题（MA-10 / 方案 §4.1 / MC-04）
+    //
+    // 「第一屏主动作开始记录，保留轻量标题和来源摘要。**标题可为空**、
+    // 项目可稍后补；不要为了归档要求用户先完成复杂表单。」
+    //
+    // 此前台页上**一个输入框都没有**：用户开始会议之后，这一场在库里叫什么，
+    // 只能等结束之后去知识库里改。而 MC-04 的验收原话是"已经输入标题和
+    // 会前笔记 → 输入检查或开始失败后重试 → 输入原样保留"——没有输入框，
+    // 那条验收在真实路径上根本无法被触发。
 
-/// 建连闸门。关着时 `connect()` 挂起，由测试放行——
+    func testPreMeetingTitleBecomesTheSessionTitle() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(
+            selection: MeetingAudioSelection(usesMicrophone: true),
+            title: "周五发布评审"
+        )
+        try await h.settle { $0.phase == .recording }
+
+        let id = try XCTUnwrap(h.session.sessionID)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(
+            record?.title, "周五发布评审",
+            "用户会前写的标题就是这场会的名字，不该等到结束之后再去库里改"
+        )
+    }
+
+    /// §4.1 明确「标题可为空」。**空标题不许被拦下来**——
+    /// 为了归档要求用户先完成复杂表单，就是把门槛又加回去了。
+    func testEmptyTitleIsStillAllowed() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true), title: "")
+        try await h.settle { $0.phase == .recording }
+
+        let id = try XCTUnwrap(h.session.sessionID)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotNil(record, "空标题照样能开始")
+    }
+
+    func testNilTitleIsAlsoAllowed() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true), title: nil)
+        try await h.settle { $0.phase == .recording }
+        XCTAssertNotNil(h.session.sessionID)
+    }
+
+    /// MC-04：失败之后重试，**标题与来源一个字都不能变**。
+    ///
+    /// 会前这一屏的输入是用户为了这场会专门打的字。清空它等于让用户重打一遍，
+    /// 而失败往往还发生在同一台机器、同一个占用它的应用上——他改不掉。
+    func testTitleAndSelectionSurviveAFailedStart() async throws {
+        let h = try await makeHarness()
+        let selection = MeetingAudioSelection(usesMicrophone: true)
+        await h.clients.failNextConnect()
+
+        await h.session.start(selection: selection, title: "周五发布评审")
+        try await h.settle { $0.session.blocked != nil }
+
+        XCTAssertEqual(
+            h.session.pendingTitle, "周五发布评审",
+            "启动失败不该把用户写的标题清掉"
+        )
+        XCTAssertEqual(
+            h.session.phase, .idle,
+            "失败之后要回到能再按一次的状态，而不是卡在半路"
+        )
+        // 会话自己那份 `selection` 失败时会被清掉（`resetKeepingLines`），
+        // 这是**有意的**：它由界面持有的来源重新喂进来。会前那一屏的来源摘要
+        // 活在 `MeetingView` 的状态里，那一份才是用户看到、也保得住的那个。
+        // 所以这里只钉"会话记得住标题"——那一层真的一直没人管过。
+
+        // 重试：用户什么都不用改，直接再按一次开始。
+        await h.clients.openGate()
+        await h.session.start(selection: selection, title: "周五发布评审")
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.title, "周五发布评审")
+        let count = try await h.store.sessionCount()
+        XCTAssertEqual(count, 1, "重试不该留下两条记录")
+    }
+
+    /// 连续失败也不能把输入清掉——用户可能连着按三次"开始"。
+    func testRepeatedFailuresKeepTheTitle() async throws {
+        let h = try await makeHarness()
+        for _ in 0..<3 {
+            await h.clients.failNextConnect()
+            await h.session.start(
+                selection: MeetingAudioSelection(usesMicrophone: true),
+                title: "周五发布评审"
+            )
+            try await h.settle { $0.session.blocked != nil }
+            XCTAssertEqual(h.session.pendingTitle, "周五发布评审")
+        }
+        let count = try await h.store.sessionCount()
+        XCTAssertEqual(count, 0, "三次失败都不该留下空会")
+    }
+
+    /// 下一场会议**不该继承上一场的标题**。
+    ///
+    /// 会前那一屏的输入框在界面上还留着，用户很可能没清就按了第二次开始。
+    /// 会前那一屏的输入框在界面上还留着，用户很可能没清就按了第二次开始。
+    func testTitleDoesNotLeakIntoTheNextMeeting() async throws {
+        let h = try await makeHarness()
+        await h.clients.failNextConnect()
+        await h.session.start(
+            selection: MeetingAudioSelection(usesMicrophone: true), title: "周五发布评审"
+        )
+        try await h.settle { $0.session.blocked != nil }
+        XCTAssertEqual(h.session.pendingTitle, "周五发布评审")
+
+        // 用户没改标题就按了第二次开始（界面上输入框还留着上一场的内容）。
+        await h.clients.openGate()
+        await h.session.start(
+            selection: MeetingAudioSelection(usesMicrophone: true), title: nil
+        )
+        try await h.settle { $0.phase == .recording }
+        XCTAssertNil(
+            h.session.pendingTitle,
+            "这一场没写标题，就该是 nil，而不是上一场那句"
+        )
+        let id = try XCTUnwrap(h.session.sessionID)
+        let record = try await h.store.session(id: id)
+        XCTAssertNil(record?.title, "库里也不能留下上一场的名字")
+    }
+
+}
 /// 这是"启动到一半用户结束了"能被造出来的唯一办法。
 actor ConnectGate {
     private var isOpen = false
@@ -669,4 +795,5 @@ final class ControllableAudioSource: MeetingAudioSource {
     func emit(_ chunk: AudioChunk) {
         continuation?.yield(chunk)
     }
+
 }

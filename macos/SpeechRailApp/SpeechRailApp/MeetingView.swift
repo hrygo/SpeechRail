@@ -21,6 +21,11 @@ public struct MeetingView: View {
 
     @State private var usesMicrophone = true
     @State private var systemApps: [SystemAudioApp] = []
+    /// 会前标题（方案 §4.1：「保留**轻量标题**和来源摘要。标题可为空」）。
+    ///
+    /// **不写进偏好**：上一场叫什么不该替下一场预填——用户多半是在开新一场会，
+    /// 带着上一场的名字开始，事后还得回来改。
+    @State private var titleDraft = ""
     @State private var sourceCandidates: [SystemAudioApp] = []
     @State private var isInspectorCollapsed = false
     @FocusState private var inspectorToggleFocused: Bool
@@ -469,6 +474,7 @@ public struct MeetingView: View {
             // 3 列（来源卡只剩 308pt），连稿里那句「本机音频：抓这个 App 正在播放的声音…」
             // 都被折成三行后截断。稿 `screenClosureMeetingSources` 里 split 只有
             // 「音频来源 + 本次会议」两栏。
+            titleField
             sourceOptions
             libraryCard
         }
@@ -657,6 +663,28 @@ public struct MeetingView: View {
         )
     }
 
+    /// 会前标题。**一个输入框，不是一张表单**——
+    /// §4.1 写得很直接：「不要为了归档要求用户先完成复杂表单」。
+    ///
+    /// 留在 `@State` 里而不是绑定到会话：启动失败之后它**一个字都不该丢**
+    /// （MC-04）。失败往往还发生在同一台机器、同一个占着麦克风的应用上，
+    /// 让用户重打一遍他没有能力消除的那个问题，是白添摩擦。
+    private var titleField: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text("标题")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            TextField("可以不填，之后在知识库里改也行", text: $titleDraft)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("这场会议的标题，可以留空")
+            Text("可以不填")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+        .speechRailSingleLineInput(.regular)
+    }
+
     private func start() async {
         preferences.meetingUsesMicrophone = usesMicrophone
         preferences.meetingSystemAudioBundleIDs = systemApps.map(\.bundleID)
@@ -664,7 +692,8 @@ public struct MeetingView: View {
             selection: MeetingAudioSelection(
                 usesMicrophone: usesMicrophone,
                 systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
-            )
+            ),
+            title: titleDraft
         )
     }
 
