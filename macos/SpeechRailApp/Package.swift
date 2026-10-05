@@ -152,6 +152,8 @@ let package = Package(
                 "MeetingSourcePresentation.swift",
                 // 六条状态轴的统一投影（MA-21）。
                 "MeetingAxisProjection.swift",
+                // 转录流粘底策略（MA-10）：回看时不许被新句子拽走。
+                "TranscriptFollowState.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

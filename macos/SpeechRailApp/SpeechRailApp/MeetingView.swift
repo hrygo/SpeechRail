@@ -43,8 +43,18 @@ public struct MeetingView: View {
     @State private var adoptConflictNotice: String?
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State private var isLabelingSpeakers = false
+
+    /// 转录滚动区的命名坐标系，量底边位置用。
+    private static let transcriptSpace = "meeting.transcript"
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
     @State private var showsSourceOptions = false
+
+    /// 转录流的粘底状态（MA-10）：用户离开底部后不许被新句子拽走。
+    @State private var transcriptFollow = TranscriptFollowState()
+
+    /// 内容底边在滚动坐标里的位置，用来算「离底部多远」。
+    @State private var transcriptBottomMarkerY: CGFloat = 0
+    @State private var transcriptViewportHeight: CGFloat = 0
 
     private enum PostTab: String, CaseIterable, Identifiable {
         case minutes
@@ -188,6 +198,8 @@ public struct MeetingView: View {
             Task { await reloadPostMeeting() }
         }
         .onChange(of: meeting.sessionID) { _, newValue in
+            // 换一场会就复位：上一场的回看位置不该带过来。
+            transcriptFollow = transcriptFollow.reset()
             Task { await meeting.innerOS.bind(sessionID: newValue) }
         }
         .confirmationDialog(
@@ -688,16 +700,77 @@ public struct MeetingView: View {
                             if let partial = meeting.partialText, !partial.isEmpty {
                                 partialLine(partial)
                             }
+                            // 底边标记：量得出「离底部多远」，回看时才不会被抢滚动。
+                            Color.clear
+                                .frame(height: 1)
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: TranscriptBottomMarkerKey.self,
+                                            value: geo.frame(in: .named(Self.transcriptSpace)).maxY
+                                        )
+                                    }
+                                )
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .onChange(of: meeting.lines.count) { _, _ in
-                        guard let last = meeting.lines.last else { return }
+                    .coordinateSpace(name: Self.transcriptSpace)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: TranscriptViewportHeightKey.self,
+                                value: geo.size.height
+                            )
+                        }
+                    )
+                    .onPreferenceChange(TranscriptBottomMarkerKey.self) { y in
+                        transcriptBottomMarkerY = y
+                    }
+                    .onPreferenceChange(TranscriptViewportHeightKey.self) { h in
+                        transcriptViewportHeight = h
+                    }
+                    .onChange(of: meeting.lines.count) { oldCount, newCount in
+                        // 用户正在回看时，新句子一条都不许抢滚动（MA-10）。
+                        let arrived = transcriptFollow.anchoring(meeting.lines.last?.id)
+                            .contentArrived(lineCount: newCount - oldCount)
+                        transcriptFollow = arrived.state
+                        guard case .follow = arrived.decision,
+                              let last = meeting.lines.last else { return }
                         if reduceMotion {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         } else {
                             withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
+                    }
+                    .onChange(of: transcriptBottomMarkerY) { _, _ in
+                        guard transcriptViewportHeight > 0 else { return }
+                        let distance = transcriptViewportHeight - transcriptBottomMarkerY
+                        transcriptFollow = transcriptFollow.userScrolled(
+                            toBottomWithin: Double(distance)
+                        )
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        if let banner = transcriptFollow.unseenBannerText {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                                Text(banner)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                Button("回到最新") {
+                                    transcriptFollow = transcriptFollow.jumpToLatest(
+                                        anchor: meeting.lines.last?.id
+                                    )
+                                    guard let last = meeting.lines.last else { return }
+                                    if reduceMotion {
+                                        proxy.scrollTo(last.id, anchor: .bottom)
+                                    } else {
+                                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .keyboardShortcut(.defaultAction)
+                            }
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                         }
                     }
                 }
@@ -1608,5 +1681,21 @@ struct SpeakerLabelingSheet: View {
     private func close() {
         onClose()
         dismiss()
+    }
+}
+
+/// 内容底边在滚动坐标系里的 Y。仅用于「离底部多远」的判定。
+private struct TranscriptBottomMarkerKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// 转录滚动视口的高度。
+private struct TranscriptViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
