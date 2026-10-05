@@ -3957,3 +3957,334 @@ public struct MeetingSupplement: Identifiable, Hashable, Sendable {
         self.includedAt = includedAt
     }
 }
+
+// MARK: - 跨会议证据问答（MA-17 / MC-56～MC-64）
+//
+// 这一层只做**取证据与接地**：把授权范围内的事实、状态与来源摆出来，
+// 并判定一份答案能不能被这些证据支撑。它不调用模型、不联网、不执行任何动作——
+// 措辞是调用方（App 侧 `LLMProvider`）的事。把这两件事混在一起，
+// "模型说了什么"和"库里有什么"就再也分不开了。
+
+/// 问题分类。不同的问题要用不同取数方式：**列表问题必须翻页取全**，
+/// 拿 top-k 当全量就是漏答；点问题才轮到检索归纳（MC-57）。
+public enum KnowledgeQuestionKind: String, Hashable, Sendable {
+    /// "上季度都决定了什么"——要穷举，不许只给前几条。
+    case list
+    /// "预算到底是多少"——要围绕一个点归纳。
+    case point
+    /// "下次会前准备稿"——要保留未决与证据，不自动发送、不建日程。
+    case preparation
+
+    public var title: String {
+        switch self {
+        case .list: "清单问题"
+        case .point: "单点问题"
+        case .preparation: "会前准备"
+        }
+    }
+}
+
+/// 问题分类器。**规则写在代码里而不是交给模型**：分类错了会静默漏数据，
+/// 那比分类得粗糙严重得多。
+public enum KnowledgeQuestionClassifier {
+    public static func classify(_ question: String) -> KnowledgeQuestionKind {
+        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if preparationKeywords.contains(where: { text.contains($0) }) { return .preparation }
+        if listKeywords.contains(where: { text.contains($0) }) { return .list }
+        return .point
+    }
+
+    private static let preparationKeywords = ["准备稿", "准备一下", "下次会议", "下次会", "会前", "预备"]
+    /// 清单类问法。看到这些词就必须翻页取全，不能只回最相关的几条。
+    private static let listKeywords = [
+        "都决定", "都做了", "有哪些", "列出", "清单", "所有", "分别", "汇总", "一共",
+        "哪些", "几次", "多少个"
+    ]
+}
+
+/// 一条结论的三个状态轴。**不是一个枚举**：一条历史版本里的待复核结论，
+/// 它同时是"历史"和"待核对"，压成单值就必然丢掉一半信息。
+public struct KnowledgeItemStatus: Hashable, Sendable {
+    /// 是否来自这一场当前采用版（没有采用版时为最新可用版）。
+    public var isCurrent: Bool
+    /// 同一件事在会上既被定了又被撤回。**这不是错误，是事实**：
+    /// 两个事件都保留，标出来让用户自己判断（§6.3）。
+    public var isDisputed: Bool
+    /// 证据核对没通过，或还没跑过核对。
+    public var needsReview: Bool
+
+    public init(isCurrent: Bool = false, isDisputed: Bool = false, needsReview: Bool = false) {
+        self.isCurrent = isCurrent
+        self.isDisputed = isDisputed
+        self.needsReview = needsReview
+    }
+
+    /// 给界面用的一行话。三轴都报，不合并成一个含糊的"已确认"。
+    public var summary: String {
+        var parts: [String] = []
+        parts.append(isCurrent ? "当前版本" : "历史版本")
+        if isDisputed { parts.append("存在分歧") }
+        if needsReview { parts.append("待核对") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// 一条可引用的证据。它是"结论 + 它依据的原句 + 它的状态"三件套——
+/// 只给结论不给来源，就和模型自己编的一句话没有区别了。
+public struct KnowledgeEvidence: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var documentID: String
+    public var sessionID: String
+    public var minutesID: String
+    public var version: Int
+    /// `decision` / `action` / `open_question` / `overview`
+    public var kind: String
+    public var text: String
+    public var status: KnowledgeItemStatus
+    public var anchors: [MinutesEvidenceAnchor]
+    /// 会议发生时间。**没有就空着**，不拿纪要生成时间冒充。
+    public var occurredAt: Date?
+
+    public init(
+        id: String,
+        documentID: String,
+        sessionID: String,
+        minutesID: String,
+        version: Int,
+        kind: String,
+        text: String,
+        status: KnowledgeItemStatus,
+        anchors: [MinutesEvidenceAnchor],
+        occurredAt: Date?
+    ) {
+        self.id = id
+        self.documentID = documentID
+        self.sessionID = sessionID
+        self.minutesID = minutesID
+        self.version = version
+        self.kind = kind
+        self.text = text
+        self.status = status
+        self.anchors = anchors
+        self.occurredAt = occurredAt
+    }
+
+    /// 还能不能当"已确认的事实"引用。历史版本、分歧、待核对都不算。
+    public var isEstablishedFact: Bool {
+        status.isCurrent && !status.isDisputed && !status.needsReview
+    }
+
+    /// 给模型看的证据块。**逐条编号、原句成块**：模型看到的是一个可引用的清单，
+    /// 而不是一段需要它自己分辨哪句是资料的话。
+    public func citationBlock() -> String {
+        // 结论正文必须在块里。只给 id、类型和出处，模型看到的是一堆没有内容的
+        // 标签——它要回答就得自己编，而那正是我们要防的事。
+        var lines = ["[\(id)] \(kind)｜第 \(version) 版｜\(status.summary)｜\(text)"]
+        for anchor in anchors {
+            guard let quote = anchor.quote, !quote.isEmpty else { continue }
+            let time = anchor.startSeconds.map { "（\(SessionExporter.clock($0))）" } ?? ""
+            lines.append("  依据：\(quote)\(time)")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// 一次检索的结论。**总数与是否还有更多必须带出来**：只回 20 条却不告诉用户
+/// 还有 40 条，和"只有 20 条"在用户眼里没有区别。
+public struct KnowledgeRetrieval: Sendable {
+    public var question: String
+    public var kind: KnowledgeQuestionKind
+    public var evidence: [KnowledgeEvidence]
+    /// 授权范围内的命中总数（不受分页限制）。
+    public var totalMatched: Int
+    /// 本页之前已经跳过多少条。**翻页是否到底要看它**：
+    /// 只拿本页条数比总数，翻到最后一页永远小于总数，调用方会一直翻下去。
+    public var offset: Int
+    /// 固定检索快照的 id。同一次问答的多次取数应当落在同一份事实上。
+    public var snapshotID: String?
+
+    public init(
+        question: String,
+        kind: KnowledgeQuestionKind,
+        evidence: [KnowledgeEvidence],
+        totalMatched: Int,
+        offset: Int = 0,
+        snapshotID: String?
+    ) {
+        self.question = question
+        self.kind = kind
+        self.evidence = evidence
+        self.totalMatched = totalMatched
+        self.offset = offset
+        self.snapshotID = snapshotID
+    }
+
+    /// 后面还有没有。空页也算"还有"——那说明 offset 越过了总数，调用方应当停。
+    public var hasMore: Bool { offset + evidence.count < totalMatched }
+    public var isEmpty: Bool { evidence.isEmpty }
+
+    /// 能当"已确认事实"用的证据。拒答判定看的是这个，不是 `evidence`。
+    public var establishedFacts: [KnowledgeEvidence] { evidence.filter(\.isEstablishedFact) }
+}
+
+/// 拒答。**每种原因给用户看的话不一样**：没找到材料和找到了但都还没核对，
+/// 下一步做的事完全不同。
+public enum KnowledgeRefusalReason: String, Hashable, Sendable {
+    /// 授权范围内根本没有相关记录。
+    case noEvidence
+    /// 找到了，但全部是历史版本、分歧或待核对——没有能当事实用的。
+    case nothingVerified
+    /// 问题落在授权范围之外。
+    case outOfScope
+
+    public var message: String {
+        switch self {
+        case .noEvidence:
+            "在你授权的范围内没有找到相关记录。没有记录不等于没发生过，这里不做推断。"
+        case .nothingVerified:
+            "找到了相关记录，但都还是历史版本、存在分歧或待核对，不能当作已确认的事实。需要先核对。"
+        case .outOfScope:
+            "这个问题涉及你还没有授权我查看的内容。请先调整可见范围。"
+        }
+    }
+}
+
+/// 答案里的一段。**每一段都必须挂证据**：挂不上的段落要么被丢掉，要么整份答案作废。
+public struct KnowledgeAnswerSegment: Hashable, Sendable {
+    public var text: String
+    public var evidenceIDs: [String]
+    /// 这一段涉及的结论状态，让读者知道哪些是事实、哪些还在核对。
+    public var status: KnowledgeItemStatus
+
+    public init(text: String, evidenceIDs: [String], status: KnowledgeItemStatus) {
+        self.text = text
+        self.evidenceIDs = evidenceIDs
+        self.status = status
+    }
+}
+
+/// 接地后的答案。**未经接地的话不算答案**，只是一个待验证的字符串。
+public struct KnowledgeAnswerDraft: Sendable {
+    public var segments: [KnowledgeAnswerSegment]
+    public var refusal: KnowledgeRefusalReason?
+    /// 引用了检索结果里没有的证据的段落数。正常应当是 0。
+    public var danglingCitations: Int
+
+    public init(segments: [KnowledgeAnswerSegment], refusal: KnowledgeRefusalReason?, danglingCitations: Int) {
+        self.segments = segments
+        self.refusal = refusal
+        self.danglingCitations = danglingCitations
+    }
+
+    public var isRefused: Bool { refusal != nil }
+    /// 每一段都挂着检索结果里真实存在的证据。
+    public var isGrounded: Bool { !isRefused && danglingCitations == 0 && !segments.isEmpty }
+}
+
+public enum KnowledgeGrounding {
+    /// 把一段候选答案按证据接地。
+    ///
+    /// 三道检查，缺一不可：
+    /// 1. 检索结果里没有可用事实 → 拒答，不给"看起来像答案"的东西（MC-56、MC-60）；
+    /// 2. 段落引用了检索结果之外的证据 → 整段丢掉并计数（MC-63）；
+    /// 3. 剩下的段落必须都还挂着**当前**有效证据——来源被删/归档之后，
+    ///    迟到的答案不能继续显示已经不存在的内容（MC-63、MC-72）。
+    public static func ground(
+        segments: [KnowledgeAnswerSegment],
+        retrieval: KnowledgeRetrieval,
+        liveEvidenceIDs: Set<String>? = nil
+    ) -> KnowledgeAnswerDraft {
+        if retrieval.isEmpty {
+            return KnowledgeAnswerDraft(segments: [], refusal: .noEvidence, danglingCitations: 0)
+        }
+        let available = liveEvidenceIDs ?? Set(retrieval.evidence.map(\.id))
+        let live = Set(retrieval.evidence.filter { available.contains($0.id) }.map(\.id))
+        if live.isEmpty {
+            return KnowledgeAnswerDraft(segments: [], refusal: .noEvidence, danglingCitations: 0)
+        }
+        var kept: [KnowledgeAnswerSegment] = []
+        var dangling = 0
+        for segment in segments {
+            let cited = segment.evidenceIDs.filter { live.contains($0) }
+            guard !cited.isEmpty else {
+                dangling += 1
+                continue
+            }
+            kept.append(KnowledgeAnswerSegment(
+                text: segment.text,
+                evidenceIDs: cited,
+                status: segment.status
+            ))
+        }
+        guard !kept.isEmpty else {
+            return KnowledgeAnswerDraft(segments: [], refusal: .nothingVerified, danglingCitations: dangling)
+        }
+        // 引得到证据、但没有一条能当已确认事实用时，不给"这就是结论"的口气。
+        // 找到了材料和"能用"是两件事，混起来就会把待核对的说法讲成定论。
+        let liveEstablished = retrieval.evidence.filter { live.contains($0.id) && $0.isEstablishedFact }
+        if liveEstablished.isEmpty {
+            return KnowledgeAnswerDraft(segments: [], refusal: .nothingVerified, danglingCitations: dangling)
+        }
+        return KnowledgeAnswerDraft(segments: kept, refusal: nil, danglingCitations: dangling)
+    }
+}
+
+/// 下次会议准备稿（MA-17）。**纯数据**：它没有"发送"也没有"建日程"的能力，
+/// 生成它不等于做了什么。准备稿里的每一条都必须带回它的证据。
+public struct MeetingPrepDraft: Sendable {
+    public var generatedAt: Date
+    /// 仍未解决的问题，带出处。
+    public var openQuestions: [KnowledgeEvidence]
+    /// 还没完成的动作，带出处。
+    public var pendingActions: [KnowledgeEvidence]
+    /// 需要复核的结论，**放在最前面**：拿未核对的结论去做准备，
+    /// 等于把不确定性带进下一场会。
+    public var needsReview: [KnowledgeEvidence]
+
+    public init(
+        generatedAt: Date = Date(),
+        openQuestions: [KnowledgeEvidence],
+        pendingActions: [KnowledgeEvidence],
+        needsReview: [KnowledgeEvidence]
+    ) {
+        self.generatedAt = generatedAt
+        self.openQuestions = openQuestions
+        self.pendingActions = pendingActions
+        self.needsReview = needsReview
+    }
+
+    public var isEmpty: Bool {
+        openQuestions.isEmpty && pendingActions.isEmpty && needsReview.isEmpty
+    }
+
+    /// 渲染成给用户看/给模型看的纯文本。**不会**被自动发出去。
+    public func markdown() -> String {
+        var rows: [String] = ["# 下次会议准备稿", ""]
+        if !needsReview.isEmpty {
+            rows.append("## 先核对（这几条还不能当结论用）")
+            rows.append("")
+            rows.append(contentsOf: needsReview.map { "- \($0.text)（\($0.status.summary)）" })
+            rows.append("")
+        }
+        if !openQuestions.isEmpty {
+            rows.append("## 上次没答完")
+            rows.append("")
+            rows.append(contentsOf: openQuestions.map { "- \($0.text)（\($0.status.summary)）" })
+            rows.append("")
+        }
+        if !pendingActions.isEmpty {
+            rows.append("## 待办")
+            rows.append("")
+            rows.append(contentsOf: pendingActions.map { "- \($0.text)（\($0.status.summary)）" })
+            rows.append("")
+        }
+        if isEmpty {
+            rows.append("授权范围内没有待跟进的内容。")
+            rows.append("")
+        }
+        rows.append("---")
+        rows.append("")
+        rows.append("这份准备稿只是把你已授权范围内的未决与待办列出来，不会自动发送，也不会创建日程。")
+        return rows.joined(separator: "\n")
+    }
+}
