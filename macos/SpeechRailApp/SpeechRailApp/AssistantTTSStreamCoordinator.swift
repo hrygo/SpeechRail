@@ -307,8 +307,11 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
-    /// LLM 又给了一段增量文本。**同步返回**：文本泵自己异步发送，不阻塞 LLM 流。
-    func offer(_ delta: String) {
+    /// 已确认可朗读的文本（确认计划的计划文本，或重播的已定稿整句）。
+    /// 生产默认链走 `speakConfirmedPlan`（完整终态后整体建计划）；
+    /// 重播走整句确认入口。流式未定稿 delta 不得经此入口开嗓。
+    /// **同步返回**：文本泵自己异步发送，不阻塞调用方。
+    func offerConfirmed(_ delta: String) {
         guard isActive else { return }
         if let limit = buffer.append(delta) {
             switch limit {
@@ -318,6 +321,29 @@ final class AssistantTTSStreamCoordinator {
             }
         }
         ensurePump()
+    }
+
+    /// 用完整定稿原文确认本轮朗读计划（M0e 默认链的开嗓入口）。
+    ///
+    /// 对原文做整体解析与保义转换：通过则全量 offer 计划文本；
+    /// 原文超限则暂停朗读并保留全文（抛 `Failure.textLimitExceeded` 由上层落库，
+    /// 不硬切、不开口）；无可朗读内容则同样不开口。
+    /// 确定性：同一原文无论分包如何，计划文本一致。
+    func speakConfirmedPlan(_ source: String) async throws {
+        guard isActive else { return }
+        switch AssistantSpeechPlanBuilder.build(from: source) {
+        case .failure(.sourceTooLong(let offered, let max)):
+            fail(Failure.textLimitExceeded)
+            throw Failure.textLimitExceeded
+        case .failure(.nothingSpeakable):
+            return
+        case .success(let plan):
+            guard plan.isValid else {
+                fail(Failure.server("朗读计划校验未通过，已经取消。"))
+                throw Failure.server("朗读计划校验未通过，已经取消。")
+            }
+            offerConfirmed(plan.speakText)
+        }
     }
 
     /// LLM 结束：冲刷剩余文本、发 `finish_text`，并等文本泵收工。
@@ -811,9 +837,13 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
+    // M0e:确认计划文本整体一次转换，不再逐段二次清洗。逐段清洗会
+    // 把“Hello ”/“world”分别 trim 后拼接丢掉词间空格（E12），
+    // 与确认计划的整体保义转换冲突；发现逐段残留先整体修复，
+    // 不把逐段清洗当作朗读兜底。
     private func sendChunk(_ rawChunk: String) async -> Bool {
         guard isActive else { return false }
-        let text = cleanForSpeech(rawChunk)
+        let text = rawChunk
         guard !text.isEmpty else { return true }
         let sequence = acceptedSequence + 1
         let limit = serverLimits?.maxAppendCodepoints ?? TTSStreamLimits.serverDefaults.maxAppendCodepoints

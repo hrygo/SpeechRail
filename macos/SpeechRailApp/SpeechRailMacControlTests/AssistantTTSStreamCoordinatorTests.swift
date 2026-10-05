@@ -221,7 +221,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
         defer { deadlines.finish() }
         try await coordinator.begin(generation: 105, requestID: "long-ack")
-        coordinator.offer("正在生成。")
+        coordinator.offerConfirmed("正在生成。")
         let finish = Task { @MainActor in await coordinator.finishInput() }
         await waitUntilEventually(
             { recorder.appends.count == 1 && deadlines.durations.count == 1 },
@@ -257,7 +257,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
         defer { deadlines.finish() }
         try await coordinator.begin(generation: 106, requestID: "stalled-ack")
-        coordinator.offer("正在生成。")
+        coordinator.offerConfirmed("正在生成。")
         let finish = Task { @MainActor in await coordinator.finishInput() }
         await waitUntilEventually(
             { deadlines.durations.count == 1 }, message: "text ACK deadline must be registered"
@@ -299,7 +299,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 7, requestID: "req-7")
 
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 }, message: "第一段文本没有发出去")
 
         await coordinator.handleAudio(
@@ -318,9 +318,9 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 1, requestID: "req-1")
 
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 }, message: "第一段文本没有发出去")
-        coordinator.offer("再见。")
+        coordinator.offerConfirmed("再见。")
         await coordinator.finishInput()
 
         XCTAssertEqual(recorder.started, ["req-1"])
@@ -334,7 +334,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness(acknowledgeAppend: false)
         try await coordinator.begin(generation: 8, requestID: "req-8")
 
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ recorder.appends.count == 1 }, message: "第一段文本没有发出去")
 
         let finish = Task { @MainActor in await coordinator.finishInput() }
@@ -365,7 +365,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         }
         try await coordinator.begin(generation: 81, requestID: "req-ack-timeout")
 
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ recorder.appends.count == 1 }, message: "文本没有发送")
         await waitUntilEventually(
             { coordinator.outcome != nil },
@@ -390,7 +390,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     func testCancelLetsLateAudioDieAndReportsCancellation() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 3, requestID: "req-3")
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 })
 
         _ = await coordinator.cancel()
@@ -465,7 +465,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         coordinator.sendAppend = { _, _ in await appendGate.enter() }
         try await coordinator.begin(generation: 83, requestID: "req-outbound")
 
-        coordinator.offer("这是一段文本。")
+        coordinator.offerConfirmed("这是一段文本。")
         await waitUntil({ appendGate.entered }, message: "sendAppend 没有进入受控挂起")
 
         let preparation = try XCTUnwrap(coordinator.prepareCancellation())
@@ -556,7 +556,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     func testTemporaryDrainDoesNotAnnounceCompletion() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 4, requestID: "req-4")
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 })
         await coordinator.handleAudio(
             requestID: "req-4",
@@ -579,7 +579,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     func testTerminalBeforeDrainWaitsForTheLastSamples() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 5, requestID: "req-5")
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 })
         await coordinator.handleAudio(
             requestID: "req-5",
@@ -906,7 +906,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     func testInvalidateDropsStateWithoutClosingTheServer() async throws {
         let (coordinator, recorder) = makeHarness()
         try await coordinator.begin(generation: 12, requestID: "req-12")
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ coordinator.acceptedSequence == 0 })
 
         coordinator.invalidate()
@@ -1028,7 +1028,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         try await coordinator.begin(generation: 50, requestID: "req-50")
 
         // 文本泵挂住等 ack(0)（sendAppend 不自动回 ACK）。
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ recorder.appends.count == 1 }, message: "第一段文本没有发出去")
 
         // 首块占满 2 样本 ledger；后续块只能留在 bounded FIFO 等预算。
@@ -1089,7 +1089,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         )
         try await coordinator.begin(generation: 51, requestID: "req-51")
 
-        coordinator.offer("你好。")
+        coordinator.offerConfirmed("你好。")
         await waitUntil({ recorder.appends.count == 1 })
         await coordinator.handleAudio(requestID: "req-51", pcm: Data([1, 2, 3, 4]))
         await waitUntil({ recorder.played.count == 1 })
@@ -1380,7 +1380,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         // 6 scalar 一次 offer：buffer 准入（客户端 total 4096 未超，pending 不足
         // 512 不提前切）；finishInput 经 flush 交出 6 scalar 片，
         // 服务端片长 4 → sendChunk 有界失败，不无限重发。
-        coordinator.offer(String(repeating: "啊", count: 6))
+        coordinator.offerConfirmed(String(repeating: "啊", count: 6))
         await coordinator.finishInput()
         await waitUntil({ recorder.outcomes.count >= 1 }, message: "超限应有明确结局")
         XCTAssertEqual(recorder.appends.count, 0, "超限片不得发出去")

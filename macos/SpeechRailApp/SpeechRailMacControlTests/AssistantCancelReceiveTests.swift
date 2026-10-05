@@ -833,4 +833,83 @@ final class AssistantCancelReceiveTests: XCTestCase {
             message: "合法新输入应在保存后回答"
         )
     }
+
+    // MARK: - M0e/V11：未定稿不开口
+
+    /// V11a：LLM 先给可误解前缀、随后才否定/更正——流式中途零 start/零音频，
+    /// 定稿后恰好一次 start，且朗读的是含否定/更正的完整计划文本。
+    func testV11MisleadingPrefixNeverSpeaksUntilFinal() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["3.5kg 肯定没问题", "，不对，其实不行。"])]
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        // 定稿前快照：只要还没落库，转 streamingReply 读正文、startTTS 计数。
+        // 流式两段是同一 Task 内连续 yield，中间不停顿——这里只断言定稿后行为：
+        // 恰好一次 start，且开嗓前零 start 由门禁语义保证（offer 拒绝未确认增量）。
+        let turnsBefore = harness.session.turns.filter { $0.role == .assistant }.count
+        XCTAssertEqual(turnsBefore, 0, "定稿前不得有 assistant 落库")
+        // 定稿后：恰好一次 start（确认计划开嗓）；朗读态由首个音频到达确认，
+        // Fake 不回音频包时保持 thinking——零音频是 Fake 形状，不伪造 speaking。
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "定稿回复没有落库"
+        )
+        await waitUntil(
+            { harness.session.phase == .thinking },
+            message: "确认计划开嗓后应保持 thinking 等音频"
+        )
+        let finalStarts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(finalStarts, 1, "定稿后恰好一次 start")
+        // 首个音频到达即进入朗读态：确认计划的文本确实在播。
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "确认计划必须开过真实 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "音频到达后应进入朗读态")
+    }
+
+    /// V11b：provider 中途失败（incomplete 形状）——零 start/零音频，
+    /// 只保留明确未完成的预览，不自动朗读残缺答案。
+    func testV11ProviderFailureNeverSpeaksPartialAnswer() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltasThenFailure(["半句"], "模型断了")]
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        // Fake 的 deltasThenFailure 在同一 Task 内连续 yield：中途不停顿，
+        // 预览断言改用"失败收尾落库 + 零 start"，不赌流式中间态。
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "失败片段应收尾落库"
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        let starts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(starts, 0, "失败残缺答案不得 start")
+    }
+
+    /// V11c：provider EOF 无终态（空脚本 = 零 delta 即结束）——零 start，
+    /// 不留伪造正文行。
+    func testV11EmptyReplyNeverSpeaks() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas([])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        await waitUntil(
+            { harness.session.lastFailure == "模型这次没有给出内容。" },
+            message: "空回复应明确失败"
+        )
+        let starts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(starts, 0, "空回复不得 start")
+        XCTAssertFalse(
+            harness.session.turns.contains { $0.role == .assistant },
+            "空回复不留伪造正文行"
+        )
+    }
 }

@@ -872,8 +872,27 @@ public final class AssistantSession {
         playbackDeliveryNotes.removeValue(forKey: invocationID)
         isSpeaking = true
         phase = .speaking
-        // 重播与首次朗读同一条口径：过一遍清洗，否则漏出来的标记会被念第二遍。
-        let utterance = VoicePrompt.spokenText(from: turn.text)
+        // 重播与首次朗读同一条口径：已定稿整句走确认计划（整体解析+保义转换），
+        // 否则漏出来的标记会被念第二遍。计划超限则保留文字、不开机。
+        let planResult = AssistantSpeechPlanBuilder.build(from: turn.text)
+        let utterance: String
+        switch planResult {
+        case .success(let plan):
+            guard plan.isValid, !plan.speakText.isEmpty else {
+                replayingTurnID = nil
+                isSpeaking = false
+                phase = .listening
+                lastFailure = "朗读计划校验未通过，已保留文字。"
+                return
+            }
+            utterance = plan.speakText
+        case .failure:
+            replayingTurnID = nil
+            isSpeaking = false
+            phase = .listening
+            lastFailure = "这句太长，先保留文字不朗读。"
+            return
+        }
         do {
             try await stream.begin(
                 generation: replyGeneration,
@@ -886,7 +905,7 @@ public final class AssistantSession {
             lastFailure = error.localizedDescription
             return
         }
-        stream.offer(utterance.isEmpty ? turn.text : utterance)
+        stream.offerConfirmed(utterance)
         await stream.finishInput()
         // finishInput 返回只表示输入送完：播放是否播完由账本/终态决定。
         // 重播身份在停止或终态时清除，这里不提前清，避免迟到停止找不到归属。
@@ -2625,12 +2644,8 @@ public final class AssistantSession {
         phase = .thinking
         streamingReply = ""
         var reply = ""
-        // 这一轮是否已经开过增量 utterance：`start` 一轮只允许一次。
-        var streamStarted = false
-        // 开嗓时机与原始空白由它统一决定（D11）：分隔空白不能被丢掉。
-        var speechGate = AssistantSpeechStartGate()
-        // 服务端明确拒绝增量时，只停朗读，不静默退回逐句 create 队列。
-        var streamUnavailable = false
+        // M0e：默认确认后朗读——流式循环不再开嗓，不再需要开嗓门闩与
+        // 增量可用标志；朗读统一走完整终态后的确认计划。
         do {
             try Task.checkCancellation()
             for try await delta in await provider.stream(
@@ -2652,68 +2667,9 @@ public final class AssistantSession {
                 currentReply?.text = reply
                 // 第一次出现非空白正文时按固定 id 建行；之后只 UPDATE，不再 INSERT。
                 await persistReplyPartial(generation: generation)
-                // 屏幕与落库永远用**原始**文本；朗读那份从同一条流里另走一路。
-                guard spoken, !streamUnavailable else { continue }
-                guard let stream = ttsStream else { continue }
-                switch speechGate.offer(delta) {
-                case .buffered:
-                    continue
-                case .speak(let text):
-                    stream.offer(text)
-                case .start(let pending):
-                    // 第一批有效文本就开轮：不再等整句，更不等整段回复（§8.1）。
-                    do {
-                        if let effect = interruptEffect {
-                            let confirmed = await effect.value
-                            guard generation == replyGeneration else { return }
-                            guard confirmed, ttsStream === stream else {
-                                throw Blocked(.streamFailed("上一轮朗读尚未确认结束，请重试语音。"))
-                            }
-                        }
-                        if selectedVoice != nil {
-                            guard await applyLatestVoice() else {
-                                throw Blocked(.serviceNotReady("所选音色尚未准备好，请重试。"))
-                            }
-                            guard generation == replyGeneration else { return }
-                        }
-                        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
-                        let selection = selectedVoice
-                        let requestVoice = activeRealtimeBinding?.canonicalVoiceID ?? voiceID
-                        let startID = UUID()
-                        voiceStartID = startID
-                        defer {
-                            if voiceStartID == startID { voiceStartID = nil }
-                        }
-                        if let state = currentReply {
-                            speechRequests[requestID] = (state.sessionID, state.id)
-                            speechRequestIDs[generation] = requestID
-                            replyPlayback[state.id] = .unknown
-                            if let selection, let requestVoice {
-                                requestVoices[requestID] = RequestVoice(
-                                    replyID: state.id, sessionID: state.sessionID,
-                                    selection: selection, voice: requestVoice
-                                )
-                            }
-                        }
-                        try await stream.begin(
-                            generation: generation,
-                            requestID: requestID
-                        )
-                        if let state = currentReply, state.generation == generation,
-                           let ordinal = state.ordinal {
-                            await recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
-                        }
-                    } catch {
-                        guard generation == replyGeneration else { return }
-                        streamUnavailable = true
-                        lastFailure = error.localizedDescription
-                        speechGate.disableStarting()
-                        continue
-                    }
-                    streamStarted = true
-                    // 开嗓前缓冲的空白与正文一次交出去，再逐段原样 offer。
-                    stream.offer(pending)
-                }
+                // 屏幕与落库永远用**原始**文本。M0e：未定稿不开口——流式 delta
+                // 只做预览与落库，不开嗓、不喂增量；朗读等完整终态后走确认计划。
+                continue
             }
         } catch is CancellationError {
             // 取消不是失败：谁按下停止，谁负责收尾（`interruptCurrentReply` /
@@ -2749,9 +2705,75 @@ public final class AssistantSession {
             phase = .listening
             return
         }
-        if spoken, streamStarted, let stream = ttsStream {
-            // 关输入之后仍然继续收音频；这里只保证"没 ACK 的文本不会越过 finish"。
-            await stream.finishInput()
+        // M0e：完整终态后才确认朗读计划。定稿原文 → 整体解析/保义转换 →
+        // 计划文本 TTS → 播放确认。计划超限则暂停朗读保留全文，不硬切不开口。
+        if spoken, let stream = ttsStream {
+            guard generation == replyGeneration else { return }
+            // 上一轮远端归属未确认时不开新轮：由调用方走显式重试。
+            if let effect = interruptEffect {
+                let confirmed = await effect.value
+                guard generation == replyGeneration else { return }
+                guard confirmed, ttsStream === stream else {
+                    lastFailure = "上一轮朗读尚未确认结束，请重试语音。"
+                    if phase == .thinking { phase = .listening }
+                    return
+                }
+            }
+            if selectedVoice != nil {
+                guard await applyLatestVoice() else {
+                    lastFailure = "所选音色尚未准备好，请重试。"
+                    if phase == .thinking { phase = .listening }
+                    return
+                }
+                guard generation == replyGeneration else { return }
+            }
+            let requestID = "tts_req_\(UUID().uuidString.lowercased())"
+            let selection = selectedVoice
+            let requestVoice = activeRealtimeBinding?.canonicalVoiceID ?? voiceID
+            let startID = UUID()
+            voiceStartID = startID
+            defer {
+                if voiceStartID == startID { voiceStartID = nil }
+            }
+            if let state = currentReply {
+                speechRequests[requestID] = (state.sessionID, state.id)
+                speechRequestIDs[generation] = requestID
+                replyPlayback[state.id] = .unknown
+                if let selection, let requestVoice {
+                    requestVoices[requestID] = RequestVoice(
+                        replyID: state.id, sessionID: state.sessionID,
+                        selection: selection, voice: requestVoice
+                    )
+                }
+            }
+            do {
+                try await stream.begin(
+                    generation: generation,
+                    requestID: requestID
+                )
+            } catch {
+                guard generation == replyGeneration else { return }
+                lastFailure = error.localizedDescription
+                if phase == .thinking { phase = .listening }
+                return
+            }
+            if let state = currentReply, state.generation == generation,
+               let ordinal = state.ordinal {
+                await recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
+            }
+            guard generation == replyGeneration else { return }
+            do {
+                try await stream.speakConfirmedPlan(replyState.text)
+                // 关输入之后仍然继续收音频；这里只保证"没 ACK 的文本不会越过 finish"。
+                await stream.finishInput()
+                // 确认计划已开嗓：朗读态由首个音频到达 Boo 认（receiver .ttsAudio），
+                // 无音频回包时保持 thinking 直至终态收尾，不伪造 speaking。
+            } catch {
+                guard generation == replyGeneration else { return }
+                // 超限/计划失败：暂停朗读，保留全文与落库，不开口。
+                if phase == .thinking { phase = .listening }
+                return
+            }
         }
         guard generation == replyGeneration, currentReply?.id == replyState.id else { return }
         // 朗读被打断过就按打断收尾，否则按正常完成收尾。两者写的是同一行。

@@ -1009,6 +1009,8 @@ final class AssistantSessionTests: XCTestCase {
 
     /// 1. 打断闭环（D01/D06/D08 + B02/B05）：App 消费服务端录下的
     /// started/ACK/cancelled，确认远端空闲后连接仍然可用，回复按打断收成一行。
+    /// M0e 重写：默认完整终态后开口——LLM 未定稿时打断，零 start/零 cancel；
+    /// 打断收尾只落未完成预览行，不伪造已朗读证据。
     func testFixtureBargeInClosure() async throws {
         let scenario = try LifecycleFixture().scenario("barge_in_closure")
         let deltas = try XCTUnwrap(scenario.appInputs.replyDeltas)
@@ -1023,21 +1025,30 @@ final class AssistantSessionTests: XCTestCase {
         let sessionID = try XCTUnwrap(harness.session.sessionID)
         await client.emitConfigured()
         await client.emit(.completed(itemID: "i1", transcript: "念一句"))
+        // M0e：打断发生在 LLM 定稿前——完整成功终态未到，不得开嗓。
+        // 等预览正文出现即证明流式仍在生成中，此时打断应零 start/零 append。
         await waitUntil(
-            { !client.ttsAppendRecords.isEmpty },
-            message: "App 没有消费 fixture 里的 tts.started 与 ACK"
+            { harness.session.streamingReply == deltas.joined() },
+            message: "回复没有开始生成"
         )
 
-        // 打断：App 停本地播放并向服务端发 cancel，服务端回 fixture 记录的终态。
+        // 打断：未定稿无远端朗读可取消，只收尾本地预览行，不发 cancel。
         await harness.session.stopSpeaking()
         gate.release()
+        // 定稿前打断不得开嗓：无 start、无 append、无 cancel、无 terminal。
+        // 先等打断收尾落库，再断言远端零交互——未开嗓即无远端轮可取消。
         await waitUntil(
-            { client.cancelledFixtureRequestIDs == ["req_barge"] },
-            message: "App 没有为这一轮发出 cancel"
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "打断之后这一轮没有被收尾"
         )
+        XCTAssertEqual(client.ttsAppendRecords.count, 0, "未定稿打断不得有 TTS append")
+        XCTAssertEqual(client.startedCount, 0, "未定稿打断不得 start")
+        XCTAssertEqual(client.cancelledFixtureRequestIDs.count, 0, "未开嗓无远端轮可取消")
+        XCTAssertEqual(client.closeCount, 0, "本地打断不该关连接")
+        XCTAssertEqual(client.terminalCounts.count, 0, "未开嗓不应有远端终态")
         await waitUntil(
             { harness.session.phase == .listening },
-            message: "服务端确认终态之后应当回到聆听态"
+            message: "打断收尾之后应当回到聆听态"
         )
 
         let expected = try XCTUnwrap(try XCTUnwrap(scenario.appExpectation.assistantRows).first)
@@ -1047,10 +1058,7 @@ final class AssistantSessionTests: XCTestCase {
         let reply = try XCTUnwrap(assistantLines.first)
         XCTAssertEqual(reply.text, expected.text)
         XCTAssertEqual(reply.isInterrupted, expected.interrupted)
-        XCTAssertEqual(client.ttsAppendedText, deltas.joined(), "空白与标点必须原样送进 TTS")
-        XCTAssertEqual(client.closeCount, 0, "已确认的终态不该关连接")
-        XCTAssertEqual(client.terminalCounts["speechrail.tts.cancelled"], 1)
-        XCTAssertEqual(client.startedCount, 1, "被打断的这一轮只准入了一次")
+        XCTAssertEqual(client.closeCount, 0, "本地打断不该关连接")
     }
 
     /// 2. 长回复（D11 + B04/B07）：fixture 里的五个增量包含单独空格、换行与
@@ -1559,11 +1567,18 @@ final class AssistantSessionTests: XCTestCase {
         XCTAssertEqual(turn.id, reply.id, "Turn.id 必须就是库里那一行的 id")
         XCTAssertTrue(turn.isInterrupted)
 
+        // M0e：失败发生在 LLM 定稿前——完整成功终态未到，未开嗓；
+        // 无远端朗读轮可取消：零 start，不得伪造 cancel 证明收尾。
         let counters = await harness.clients()[0].snapshot()
-        XCTAssertGreaterThanOrEqual(
+        XCTAssertEqual(
+            counters.startTTS,
+            0,
+            "未定稿失败不得 start"
+        )
+        XCTAssertEqual(
             counters.cancelTTS,
-            1,
-            "失败之后必须取消服务端这一轮，不能让它继续往下说"
+            0,
+            "未开嗓无远端轮可取消"
         )
     }
 
