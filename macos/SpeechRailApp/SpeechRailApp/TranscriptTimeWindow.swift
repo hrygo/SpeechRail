@@ -75,6 +75,48 @@ public struct TranscriptTimeWindow: Hashable, Sendable {
         "\(Self.clockText(observedStart))–\(Self.clockText(observedEnd))"
     }
 
+    // MARK: - 从对齐证据升级
+
+    /// 用对齐单元里的采样区间把窗口升级成"知道发声时刻"。
+    ///
+    /// 拿不到就返回 `nil`——**不猜、不沿用观测值**。宁可让这一行继续显示
+    /// "未知发声时刻"，也不把别的时刻写进去。
+    ///
+    /// 三条硬要求，少一条都不升级：
+    /// - 单元自己声明 `timingQuality == "aligned"`；
+    /// - 起止采样都在，且**终样大于起样**；
+    /// - 采样率是正数。
+    public static func aligned(
+        observed: TranscriptTimeWindow,
+        units: [RealtimeASRClient.AttributionUnit],
+        sampleRate: Double
+    ) -> TranscriptTimeWindow? {
+        guard sampleRate > 0 else { return nil }
+        let usable = units.filter {
+            $0.timingQuality == "aligned"
+                && $0.audioStartSample != nil
+                && $0.audioEndSample != nil
+                && $0.audioEndSample! > $0.audioStartSample!
+        }
+        guard let first = usable.min(by: { ($0.audioStartSample ?? 0) < ($1.audioStartSample ?? 0) }),
+              let last = usable.max(by: { ($0.audioEndSample ?? 0) < ($1.audioEndSample ?? 0) }),
+              let startSample = first.audioStartSample,
+              let endSample = last.audioEndSample
+        else { return nil }
+        let lower = Double(startSample) / sampleRate
+        let upper = Double(endSample) / sampleRate
+        // 夹进观测区间：发声不可能早于第一块上行的接收，也不可能晚于定稿。
+        // 这个夹取不制造精度，只挡掉明显越界的数据。
+        let clampedLower = max(observed.observedStart, lower)
+        let clampedUpper = min(max(observed.observedEnd, clampedLower), upper)
+        guard clampedUpper > clampedLower else { return nil }
+        return aligned(
+            observedStart: observed.observedStart,
+            observedEnd: observed.observedEnd,
+            acoustic: clampedLower ... clampedUpper
+        )
+    }
+
     private static func clockText(_ value: TimeInterval) -> String {
         let total = max(0, Int(value.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)

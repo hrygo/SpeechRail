@@ -602,6 +602,16 @@ public final class SessionCoordinator {
         try await store.attachTimingQuality(lineID: lineID, quality: quality)
     }
 
+    /// 回填对齐得到的声学起止与质量（MA-02 / MC-15）。
+    public func attachAcousticTiming(
+        lineID: String,
+        start: TimeInterval,
+        end: TimeInterval,
+        quality: SessionTimingQuality
+    ) async throws {
+        try await store.attachAcousticTiming(lineID: lineID, start: start, end: end, quality: quality)
+    }
+
     /// 改显示名：写 `speaker_name`，`line.text` 与证据引用都不动（§6.2.1）。
     public func renameSpeaker(sessionID: String, label: String, name: String) async throws {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)

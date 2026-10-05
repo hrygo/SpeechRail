@@ -662,10 +662,33 @@ public final class MeetingSession {
         guard let entry = lineByItem[itemID], !units.isEmpty else { return }
         labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
         await labeling.apply(units: units)
-        if let quality = Self.timingQuality(from: units),
-           timingQualityApplied.insert(entry.lineID).inserted {
+        // 时间证据回填（MA-02 / MC-15）：落库时写的是**观测**时间并标
+        // `unavailable`，对齐结果到达后把声学起止**连同质量一起**写回去。
+        // 只改标签不改值正是方案点名要修的路，所以这里走
+        // `attachAcousticTiming`——一条 UPDATE，不留"标签到了值没到"的中间态。
+        if timingQualityApplied.insert(entry.lineID).inserted,
+           let line = lines.first(where: { $0.id == entry.lineID }),
+           let upgraded = TranscriptTimeWindow.aligned(
+               observed: .observedOnly(start: line.start, end: line.end),
+               units: units,
+               sampleRate: RealtimeASRClient.sampleRate
+           ),
+           let acoustic = upgraded.speechRange {
             do {
-                try await coordinator.attachTimingQuality(lineID: entry.lineID, quality: quality)
+                try await coordinator.attachAcousticTiming(
+                    lineID: entry.lineID,
+                    start: acoustic.lowerBound,
+                    end: acoustic.upperBound,
+                    quality: .aligned
+                )
+                // 内存里那一行也换成真实发声时刻，界面才不会再显示观测时间。
+                lines = lines.map { existing in
+                    guard existing.id == entry.lineID else { return existing }
+                    var updated = existing
+                    updated.start = acoustic.lowerBound
+                    updated.end = acoustic.upperBound
+                    return updated
+                }
             } catch {
                 lastFailure = error.localizedDescription
                 timingQualityApplied.remove(entry.lineID)
@@ -769,13 +792,6 @@ public final class MeetingSession {
     }
 
     /// 分人档位下 `timing_quality` 由归属单元给；没开分人时不写（§8.2 的唯一降级点）。
-    private static func timingQuality(
-        from units: [RealtimeASRClient.AttributionUnit]
-    ) -> SessionTimingQuality? {
-        guard !units.isEmpty else { return nil }
-        return units.contains { $0.timingQuality == "aligned" } ? .aligned : .unavailable
-    }
-
     // MARK: - 中断（四类，§5.6 / §16.7）
 
     private func handleUnexpectedClose(code: Int?) async {

@@ -313,6 +313,31 @@ public actor SessionStore {
         }
     }
 
+    /// 把**对齐得到的**声学起止与质量一起写回一行（MA-02 / MC-15）。
+    ///
+    /// 与 `attachTimingQuality` 分开是有意的：只改标签不改值，正是方案
+    /// 点名要修的那条路——标了 `aligned` 却仍然存着接收间隔，
+    /// 等于把谎报盖了个"已校准"的章。三个字段在一条 UPDATE 里写，
+    /// 不给"标签到了但值没到"留中间态。
+    ///
+    /// 正文、序号、归属、来源都不参与这次写入。
+    public func attachAcousticTiming(
+        lineID: String,
+        start: TimeInterval,
+        end: TimeInterval,
+        quality: SessionTimingQuality
+    ) throws {
+        try withStatement(
+            "UPDATE line SET t_start = ?, t_end = ?, timing_quality = ? WHERE id = ?;"
+        ) { statement in
+            bind(statement, 1, start)
+            bind(statement, 2, end)
+            bind(statement, 3, quality.rawValue)
+            bind(statement, 4, lineID)
+            try step(statement)
+        }
+    }
+
     /// 分人的状态与可读原因（§7.1 的三种状态 + 降级时那一刻写进记录）。
     ///
     /// 与 `attachSpeakerLabel` 一样是"只动归属那一侧"的写法：正文、时间码、序号都不参与。
