@@ -364,6 +364,33 @@ public final class MeetingLibraryModel {
         MeetingKnowledgeScope(projectID: projectID, includesArchived: includesArchived)
     }
 
+    /// 清单看哪些。默认只看未完成，但**必须能切到「全部」**——
+    /// 做完就彻底看不见、也撤不回来的清单比没有更糟。
+    public enum OpenItemMode: String, CaseIterable, Hashable {
+        case open
+        case all
+
+        public var title: String {
+            switch self {
+            case .open: "未完成"
+            case .all: "全部"
+            }
+        }
+    }
+
+    public private(set) var openItemMode: OpenItemMode = .open
+
+    public func setOpenItemMode(_ mode: OpenItemMode) async {
+        guard openItemMode != mode else { return }
+        openItemMode = mode
+        await loadOpenItems(offset: 0)
+    }
+
+    /// 正在写执行状态的条目 id。非空时那一行禁用，避免连点两次记成两条事件。
+    public private(set) var pendingOpenItemID: String?
+    /// 写失败时要说的那一句。**失败不吞**：静默失败会让用户以为标上了。
+    public private(set) var openItemWriteError: String?
+
     public func loadOpenItems(offset: Int) async {
         openItemsGeneration += 1
         let generation = openItemsGeneration
@@ -371,7 +398,7 @@ public final class MeetingLibraryModel {
         openItemsError = nil
         do {
             let page = try await coordinator.meetingKnowledgeItems(
-                filter: KnowledgeItemFilter(kinds: ["action"], openOnly: true),
+                filter: KnowledgeItemFilter(kinds: ["action"], openOnly: openItemMode == .open),
                 scope: openItemScope,
                 limit: openItemLimit,
                 offset: offset
@@ -393,6 +420,65 @@ public final class MeetingLibraryModel {
         await loadOpenItems(offset: openItemOffset + openItemLimit)
     }
 
+    /// 记一次状态变化。**返回是否成功**，界面据此决定要不要收起菜单。
+    ///
+    /// 成功之后留在原来那一页：勾掉一条，下面的一条顶上来，
+    /// 弹回第一页等于惩罚一个正在认真清理待办的用户。
+    @discardableResult
+    public func markOpenItem(_ itemID: String, status: ActionExecutionStatus) async -> Bool {
+        pendingOpenItemID = itemID
+        openItemWriteError = nil
+        do {
+            try await coordinator.recordActionExecution(itemID: itemID, status: status)
+            pendingOpenItemID = nil
+            await reloadOpenItemsKeepingPlace()
+            return true
+        } catch {
+            openItemWriteError = error.localizedDescription
+            pendingOpenItemID = nil
+            return false
+        }
+    }
+
+    /// 空串与纯空白归一成 nil。空串是"清掉"，不是"保持原样"——
+    /// 留一个看不见的旧负责人，比没有负责人更糟。
+    private func normalized(_ text: String?) -> String? {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// 改负责人和期限。**不顺带改状态**：填了期限不等于这件事已经做完。
+    ///
+    /// 空字符串是"清掉"，不是"保持原样"——留一个看不见的旧负责人更糟。
+    @discardableResult
+    public func updateOpenItem(_ itemID: String, owner: String?, due: String?) async -> Bool {
+        pendingOpenItemID = itemID
+        openItemWriteError = nil
+        do {
+            try await coordinator.recordActionExecution(
+                itemID: itemID,
+                status: .open,
+                ownerText: .some(normalized(owner)),
+                dueText: .some(normalized(due))
+            )
+            pendingOpenItemID = nil
+            await reloadOpenItemsKeepingPlace()
+            return true
+        } catch {
+            openItemWriteError = error.localizedDescription
+            pendingOpenItemID = nil
+            return false
+        }
+    }
+
+    /// 写完之后按原位置重载；最后一页被清空时退回一页，不停在空页面上。
+    private func reloadOpenItemsKeepingPlace() async {
+        await loadOpenItems(offset: openItemOffset)
+        guard openItems.isEmpty, openItemOffset > 0 else { return }
+        await loadOpenItems(offset: max(0, openItemOffset - openItemLimit))
+    }
+
+
     /// 空态文案。说清为什么是空的，以及下一步能做什么。
     public var openItemsEmptyHint: String {
         if openItemCounts.total > 0 {
@@ -402,9 +488,16 @@ public final class MeetingLibraryModel {
         return "没有未完成的事项。会上定的待办都会出现在这里。"
     }
 
+    /// 写失败时给用户的那一句，顺带说清下一步。
+    public var openItemWriteHint: String {
+        guard let error = openItemWriteError else { return "" }
+        return "\(error)。清单没有变化，可以再试一次。"
+    }
+
     /// 一句话的当前状态，给清单面板的标题用。
     public var openItemsHeadline: String {
-        openItemCounts.total == 0 ? "未完成事项" : "未完成事项（共 \(openItemCounts.total) 条）"
+        let noun = openItemMode == .open ? "未完成事项" : "全部行动项"
+        return openItemCounts.total == 0 ? noun : "\(noun)（共 \(openItemCounts.total) 条）"
     }
 
     // MARK: - 知识归档包（MA-19）

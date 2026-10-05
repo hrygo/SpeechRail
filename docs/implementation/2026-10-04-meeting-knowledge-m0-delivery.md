@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.1"
+version: "4.2"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 57 个提交（含本轮 MC-56 的 1 个）。
+分支共 58 个提交（含本轮 MC-56 与 MA-14 写侧各 1 个）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -81,7 +81,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 
-| 14 | **执行状态与决策演进（MA-14）没有入口**：`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` 零消费方 | 实测（同上） | 决策演进链只能在库里看。**本条上一版写错了**：当时把 `meetingSupplements` 也归到"用户补充"，那是两回事——它读的是 `inner_os_exchange`（私密问答），对应验收 4 的「私密问答默认不进入纪要」与 MC-43，不是验收 2 的第四档来源。验收 2 的「用户补充」已单独处理，见第三节第十一处 |
+| 14 | **决策演进（MA-14 的另一半）没有入口**：`confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` / `executionEvents` 仍零消费方 | 实测（2026-10-06 再查，同上） | **本条已缩小**：行动生命周期（`recordExecutionEvent` / `executionState`）两侧都已接进库页的「未完成事项」面板——读侧列得出、写侧点得动。剩下的是**跨会议替代关系**（MC-57/58）：两场会结论冲突时两边都要留着、要用户确认才能落定，这条链仍然只能在库里看 |
+
 | 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
 
 
@@ -3124,3 +3125,68 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
   要靠库页搜索，不是这个面板。
 - `latestExecutionStates` 按候选文档批量取回**全部**执行事件后在 Swift 里归并。
   事件表只记录用户显式做过的状态变更，量级远小于条目表；真到量级问题再上 SQL 窗口函数。
+
+
+## M1 增量（MA-14 写侧）｜未完成事项点得动，2026-10-06
+
+### 做了什么
+
+上一节把「未完成事项」列出来了。列出来却**点不动**并不是完成——用户唯一的用法
+还是回到每一场会议去回忆自己定了什么。这一节把写侧接上：
+
+- **数据层**：无新增。`SessionStore.recordExecutionEvent` 早已实现并有 12 项测试
+  （`MeetingActionLifecycleTests` + `MeetingKnowledgeArchiveTests`），此前只是没有调用方。
+- **协调层**：`SessionCoordinator.recordActionExecution(itemID:status:ownerText:dueText:dueDate:)`。
+  `ownerText` / `dueText` 沿用 store 的双层可选约定：`nil` = 这次没改，
+  `.some(nil)` = 清掉。分不开这两者，界面就没法既保留原值又允许删空。
+- **模型层**：`markOpenItem(_:status:)` 与 `updateOpenItem(_:owner:due:)`，
+  外加 `OpenItemMode`（未完成／全部）、`pendingOpenItemID`、`openItemWriteError`。
+- **界面层**：每行一个菜单（标为完成／标为受阻／改负责人与期限／放弃这件事），
+  行尾常驻一个"标为完成"的勾选按钮——**来这里的主要目的就是勾掉它**，
+  不该藏在二级菜单里。
+
+### 三条不做会出问题的地方
+
+- **做完就再也看不见、也撤不回来，比"点不动"更糟。** 所以面板顶部有
+  「未完成／全部」切换：切到「全部」才看得到已完成与已放弃的条目，
+  并且可以直接"重新打开"。已放弃的也留着可见——用户要能看见自己决定不做什么。
+- **勾掉一条之后停在原来的那一页。** 下面的一条顶上来，弹回第一页等于惩罚
+  一个正在认真清理待办的用户；只有当这一页被清空时才退回一页，不停在空页面上。
+- **改负责人和期限不顺带改状态。** 填了「五月前」不等于这件事已经做完。
+  期限是自由文本而不是日期选择器：会上说的就是「五月前」，
+  硬塞进选择器等于逼用户编一个自己没有的信息。留空表示"还不知道"，
+  **不从正文猜负责人**。
+
+### 回归证据（2026-10-06 实测）
+
+- `MeetingOpenItemsTests` 由 9 项增至 **19 项**，全部先红后绿。新增 10 项覆盖：
+  标完成后真的落库（不是只在界面上消失）；做完之后切到「全部」能看见并能撤销；
+  已放弃在未完成里不出现、在全部里可见；改负责人与期限不改变状态；
+  空字符串清空而不是保持原样；写失败时错误有话、列表保持原样；
+  勾掉一条不跳回第一页（60 条摆两页，勾掉第二页第一条后仍在第二页、剩 9 条）；
+  翻到最后一页勾掉最后一条不落在空页；标题随模式变。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1071 项**
+  （上一节 1061 +10）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**，`SessionStore.schemaVersion` 仍是 12。新增的执行事件沿用
+  既有 `knowledge_execution_event` 表，**只追加不改写**。
+- 回退：去掉协调器方法、模型上的 `markOpenItem` / `updateOpenItem` /
+  `OpenItemMode` 与视图上的菜单和编辑面板即可。已经写进库的事件仍在，
+  按 append-only 语义保留——它们本来就是事实记录的一部分。
+
+### 未验证事项与已知边界
+
+- **菜单、勾选按钮与编辑面板没有在真机走过**（无 UI 自动化授权）：
+  菜单项顺序、行尾按钮与状态文字的挤压、编辑面板分组都只是读代码推断。
+  计入总账第 1 条。
+- **只能从清单里改状态，不能从某一场会议的纪要详情里改。** 入口目前只有库页
+  这一处。在详情里逐条改是另一件事，没做。
+- `updateOpenItem` 传的 `status` 恒为 `.open`：改负责人／期限会**追加一条
+  `.open` 事件**。这在语义上是对的（负责人变了，事项回到未完成），
+  但如果一条**已放弃**的事项被重新指定了负责人，它会同时回到未完成清单里。
+  界面在「未完成」模式下根本列不出已放弃的条目，所以当前路径碰不到这个组合；
+  将来若开放别的改写路径，这里要重新想一遍。

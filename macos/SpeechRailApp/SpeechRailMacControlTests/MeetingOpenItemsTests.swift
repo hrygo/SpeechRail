@@ -325,4 +325,180 @@ final class MeetingOpenItemsTests: XCTestCase {
         XCTAssertEqual(model.openItems.map(\.text), ["整理发布清单"])
         XCTAssertNotNil(model.openItems.first?.occurredAt, "清单上要能看出是哪一场会定的")
     }
+
+    // MARK: - 写侧：清单不能是只读的（MA-14 写侧此前零消费方）
+    //
+    // 上一组测试证明了"列得出来"。这一组证明"点得动"：
+    // 一个列得出却点不动的待办清单，用户唯一的用法还是打开每一场会议去回忆。
+
+    private func makeLibrary() async throws -> (MeetingLibraryModel, SessionCoordinator) {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "meeting-open-items-\(UUID().uuidString)"))
+        let coordinator = SessionCoordinator(store: try requireStore(), defaults: defaults)
+        return (MeetingLibraryModel(coordinator: coordinator), coordinator)
+    }
+
+    func testMarkingAnActionDoneTakesItOutOfTheOpenList() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(
+            title: "发布评审", projectID: "p", actions: ["整理发布清单", "同步给客户"]
+        )
+        let ids = try await actionIDs(minutesID: meeting.minutesID)
+        let (model, _) = try await makeLibrary()
+        await model.filter(projectID: "p")
+        await model.loadOpenItems(offset: 0)
+        XCTAssertEqual(model.openItemCounts.total, 2)
+
+        let ok = await model.markOpenItem(ids[0], status: .done)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(model.openItemCounts.total, 1, "做完的事不该继续占着待办位")
+        XCTAssertEqual(model.openItems.map(\.text), ["同步给客户"])
+    }
+
+    /// 清单能点，但点完必须真的落到库里——否则只是一个界面的假动作。
+    func testMarkingDoneIsActuallyRecordedInTheStore() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let id = try await actionID(minutesID: meeting.minutesID, at: 0)
+        let (model, _) = try await makeLibrary()
+        await model.loadOpenItems(offset: 0)
+
+        _ = await model.markOpenItem(id, status: .done)
+        let state = try await store.executionState(itemID: id)
+        XCTAssertEqual(state?.status, .done)
+    }
+
+    /// 做完就再也看不见、也撤不回来，是比"点不动"更糟的死路。
+    func testCompletedItemsStayVisibleAndCanBeReopened() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", projectID: "p", actions: ["整理发布清单"])
+        let id = try await actionID(minutesID: meeting.minutesID, at: 0)
+        let (model, _) = try await makeLibrary()
+        await model.filter(projectID: "p")
+        await model.loadOpenItems(offset: 0)
+        _ = await model.markOpenItem(id, status: .done)
+
+        await model.setOpenItemMode(.all)
+        XCTAssertEqual(model.openItemCounts.total, 1, "切到「全部」才看得到做完的那条")
+        XCTAssertEqual(model.openItems.first?.execution?.status, .done)
+
+        _ = await model.markOpenItem(id, status: .open)
+        let reopened = try await store.executionState(itemID: id)
+        XCTAssertEqual(reopened?.status, .open)
+        await model.setOpenItemMode(.open)
+        XCTAssertEqual(model.openItemCounts.total, 1, "撤回来之后它又回到未完成")
+    }
+
+    /// 已放弃的也不该消失得无声无息——用户要能看见自己决定不做什么。
+    func testDroppedItemsAreVisibleInAllMode() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["砍掉旧横幅方案"])
+        let id = try await actionID(minutesID: meeting.minutesID, at: 0)
+        let (model, _) = try await makeLibrary()
+        _ = await model.markOpenItem(id, status: .dropped)
+
+        await model.loadOpenItems(offset: 0)
+        XCTAssertEqual(model.openItemCounts.total, 0, "已放弃不算未完成")
+        await model.setOpenItemMode(.all)
+        XCTAssertEqual(model.openItemCounts.total, 1)
+        XCTAssertEqual(model.openItems.first?.execution?.status, .dropped)
+    }
+
+    /// 改负责人和期限**不顺带改状态**：写着"五月前"不等于这件事已经做完。
+    func testUpdatingOwnerAndDueLeavesTheStatusAlone() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let id = try await actionID(minutesID: meeting.minutesID, at: 0)
+        let (model, _) = try await makeLibrary()
+        await model.loadOpenItems(offset: 0)
+
+        _ = await model.updateOpenItem(id, owner: "李四", due: "五月前")
+        let state = try await store.executionState(itemID: id)
+        XCTAssertEqual(state?.ownerText, "李四")
+        XCTAssertEqual(state?.dueText, "五月前")
+        XCTAssertEqual(state?.status, .open, "填了期限不等于做完了")
+
+        let item = try XCTUnwrap(model.openItems.first)
+        XCTAssertEqual(item.execution?.ownerText, "李四", "界面上要立刻看得见")
+        XCTAssertEqual(item.execution?.dueText, "五月前")
+    }
+
+    /// 空字符串是"清掉"，不是"保持原样"——留一个看不见的旧负责人更糟。
+    func testEmptyOwnerClearsIt() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let id = try await actionID(minutesID: meeting.minutesID, at: 0)
+        let (model, _) = try await makeLibrary()
+        await model.loadOpenItems(offset: 0)
+
+        _ = await model.updateOpenItem(id, owner: "李四", due: nil)
+        _ = await model.updateOpenItem(id, owner: "", due: nil)
+        let cleared = try await store.executionState(itemID: id)
+        XCTAssertNil(cleared?.ownerText, "空字符串是清掉，不是保持原样")
+    }
+
+    /// 写失败要把话说到，列表也不能悄悄变样。
+    func testWriteFailureSurfacesAndLeavesTheListAlone() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", projectID: "p", actions: ["整理发布清单"])
+        let (model, _) = try await makeLibrary()
+        await model.filter(projectID: "p")
+        await model.loadOpenItems(offset: 0)
+        let before = model.openItems.map(\.id)
+
+        // 一个不存在的条目 id：写不进库。
+        let ok = await model.markOpenItem("根本没有这一条", status: .done)
+        XCTAssertFalse(ok)
+        XCTAssertNotNil(model.openItemWriteError, "失败要有一句能看的话，不能静默")
+        XCTAssertEqual(model.openItems.map(\.id), before, "失败时列表保持原样")
+    }
+
+    /// 勾掉一条之后不该被弹回第一页——37 条的清单跳回顶部等于惩罚用户。
+    func testTickingAnItemDoesNotJumpBackToTheFirstPage() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // 每页 50 条，所以要摆够 60 条才有第二页。
+        let actions = (0..<60).map { "行动 \($0)" }
+        let meeting = try await makeMeeting(title: "发布评审", projectID: "p", actions: actions, at: base)
+        let ids = try await actionIDs(minutesID: meeting.minutesID)
+        let (model, _) = try await makeLibrary()
+        await model.filter(projectID: "p")
+        await model.loadOpenItems(offset: 0)
+
+        await model.loadOpenItems(offset: model.openItemLimit)
+        XCTAssertEqual(model.openItemOffset, model.openItemLimit)
+        XCTAssertEqual(model.openItems.count, 10, "第二页还剩十条")
+
+        // 勾掉第二页的第一条：它下面的九条顶上来，不该把用户甩回第一页。
+        _ = await model.markOpenItem(ids[50], status: .done)
+        XCTAssertEqual(model.openItemOffset, model.openItemLimit, "还在第二页的位置上")
+        XCTAssertFalse(model.openItems.contains { $0.id == ids[50] })
+        XCTAssertEqual(model.openItems.count, 9)
+        XCTAssertEqual(model.openItemCounts.total, 59)
+    }
+
+    /// 翻到最后一页再勾掉最后一条，不该停在一个空页面上。
+    func testTickingTheLastItemOnTheLastPageStepsBack() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(
+            title: "发布评审", projectID: "p", actions: ["行动 A", "行动 B"]
+        )
+        let ids = try await actionIDs(minutesID: meeting.minutesID)
+        let (model, _) = try await makeLibrary()
+        await model.filter(projectID: "p")
+        await model.loadOpenItems(offset: 0)
+
+        _ = await model.markOpenItem(ids[0], status: .done)
+        XCTAssertFalse(model.openItems.isEmpty, "还有一条没做完，不该翻到空页")
+        XCTAssertEqual(model.openItemCounts.total, 1)
+    }
+
+    func testOpenItemModeHeadlineFollowsTheMode() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let (model, _) = try await makeLibrary()
+        await model.loadOpenItems(offset: 0)
+        XCTAssertEqual(model.openItemsHeadline, "未完成事项（共 1 条）")
+        await model.setOpenItemMode(.all)
+        XCTAssertEqual(model.openItemsHeadline, "全部行动项（共 1 条）")
+    }
 }

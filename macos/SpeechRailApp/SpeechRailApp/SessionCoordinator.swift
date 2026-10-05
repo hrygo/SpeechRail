@@ -1013,6 +1013,27 @@ public final class SessionCoordinator {
         try await store.knowledgeItems(filter: filter, scope: scope, limit: limit, offset: offset)
     }
 
+    /// 记一次执行状态变化（MA-14 写侧）。**只追加事件，不改写旧事件。**
+    ///
+    /// `ownerText` / `dueText` 用双层可选：`nil` 表示"这次没改"，`.some(nil)` 表示"清掉"。
+    /// 分不开这两者，界面上就没法既保留原值又允许用户删空。
+    ///
+    /// 这一层此前也不存在：`recordExecutionEvent` 在生产代码里零消费方，
+    /// 用户标过的"已完成"只能由测试写进去。
+    @discardableResult
+    public func recordActionExecution(
+        itemID: String,
+        status: ActionExecutionStatus,
+        ownerText: String?? = nil,
+        dueText: String?? = nil,
+        dueDate: Date?? = nil
+    ) async throws -> KnowledgeExecutionEvent {
+        try await store.recordExecutionEvent(
+            itemID: itemID, status: status,
+            ownerText: ownerText, dueText: dueText, dueDate: dueDate
+        )
+    }
+
     // MARK: - 知识归档与删除（MA-18）
 
     /// 三档删除（MA-18 / MC-43、MC-44、MC-62）。

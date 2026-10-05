@@ -44,6 +44,8 @@ struct MeetingKnowledgeLibraryView: View {
     /// 「未完成事项」面板（MC-56）。默认不占首屏——多数时候用户是来找某一场会，
     /// 不是来看待办清单的；但它必须是**一个能点到的入口**，不是库里一个没人调的方法。
     @State private var openItemsPresented = false
+    /// 正在改负责人／期限的那一条。`nil` = 没有打开编辑面板。
+    @State private var openItemEditTarget: KnowledgeEvidence?
     /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
     @State private var archivePreview: ArchiveImportPreview?
     /// 导入完成后的实数。`nil` = 还没导。
@@ -161,6 +163,9 @@ struct MeetingKnowledgeLibraryView: View {
         }
         .sheet(isPresented: $manageProjectsPresented) { manageProjectsSheet }
         .sheet(isPresented: $openItemsPresented) { openItemsSheet }
+        .sheet(item: $openItemEditTarget) { target in
+            openItemEditSheet(target)
+        }
         .sheet(isPresented: $tagsSheetPresented) { tagsSheet }
         .task {
             if model.rows.isEmpty {
@@ -246,6 +251,28 @@ struct MeetingKnowledgeLibraryView: View {
     private var openItemsSheet: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                Picker("", selection: Binding(
+                    get: { model.openItemMode },
+                    set: { mode in Task { await model.setOpenItemMode(mode) } }
+                )) {
+                    ForEach(MeetingLibraryModel.OpenItemMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("未完成事项清单显示范围")
+
+                if model.openItemWriteError != nil {
+                    // 写失败必须看得见：静默失败会让用户以为标上了，其实库里没动。
+                    Text(model.openItemWriteHint)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                }
+
                 if let error = model.openItemsError {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                         Text(error).foregroundStyle(.secondary)
@@ -319,10 +346,57 @@ struct MeetingKnowledgeLibraryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer()
+                openItemMenu(item)
             }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// 一条未完成事项能做的动作。**列得出却点不动的清单等于让用户回去翻会议**。
+    ///
+    /// 菜单而不是常驻按钮：完成／受阻／放弃是低频动作，常驻会把正文挤成两行，
+    /// 而"改负责人与期限"本来就该是一个表单，不是一个开关。
+    private func openItemMenu(_ item: KnowledgeEvidence) -> some View {
+        let busy = model.pendingOpenItemID == item.id
+        return Menu {
+            if item.execution?.status == .done || item.execution?.status == .dropped {
+                Button("重新打开") { Task { await model.markOpenItem(item.id, status: .open) } }
+            }
+            Button("标为完成") { Task { await model.markOpenItem(item.id, status: .done) } }
+            Button("标为受阻") { Task { await model.markOpenItem(item.id, status: .blocked) } }
+            Divider()
+            Button("改负责人与期限…") { openItemEditTarget = item }
+            Button("放弃这件事", role: .destructive) {
+                Task { await model.markOpenItem(item.id, status: .dropped) }
+            }
+        } label: {
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                // 常用动作直接摆在行上，其余进菜单——"完成"是用户来这里的主要目的。
+                Image(systemName: "checkmark.circle")
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(busy)
+        .accessibilityLabel("修改「\(item.text)」的完成状态、负责人或期限")
+    }
+
+    /// 负责人与期限。**分两个输入框，不合并**——期限可以是「五月前」这种话，
+    /// 硬塞进日期选择器等于逼用户编一个自己没有的信息。
+    private func openItemEditSheet(_ item: KnowledgeEvidence) -> some View {
+        OpenItemEditSheet(
+            text: item.text,
+            initialOwner: item.execution?.ownerText ?? "",
+            initialDue: item.execution?.dueText ?? "",
+            onSave: { owner, due in
+                openItemEditTarget = nil
+                Task { await model.updateOpenItem(item.id, owner: owner, due: due) }
+            },
+            onCancel: { openItemEditTarget = nil }
+        )
     }
 
     private static func dateText(_ date: Date) -> String {
@@ -1012,5 +1086,52 @@ struct MeetingLibraryRowView: View {
         if !row.hasMinutes { parts.append("未整理") }
         if let excerpt = row.matchExcerpt { parts.append("命中内容：\(excerpt)") }
         return parts.joined(separator: "，")
+    }
+}
+
+/// 负责人与期限的编辑面板。单独抽出来是为了 `openItemEditSheet` 不用背一整套
+/// `@State` 初始化——SwiftUI 里带初始值的输入框放在子视图里才写得清楚。
+private struct OpenItemEditSheet: View {
+    let text: String
+    let initialOwner: String
+    let initialDue: String
+    let onSave: (String?, String?) -> Void
+    let onCancel: () -> Void
+
+    @State private var owner: String = ""
+    @State private var due: String = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(text)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Section("负责人") {
+                    // 留空表示"还不知道"，不是从正文里猜一个出来。
+                    TextField("还没定负责人", text: $owner)
+                }
+                Section("期限") {
+                    TextField("还没定期限，可以写「五月前」", text: $due)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("负责人与期限")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { onSave(owner, due) }
+                }
+            }
+        }
+        .frame(minWidth: 420, minHeight: 320)
+        .onAppear {
+            owner = initialOwner
+            due = initialDue
+        }
     }
 }
