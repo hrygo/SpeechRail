@@ -383,4 +383,95 @@ final class MeetingCrossMeetingTests: XCTestCase {
         XCTAssertEqual(model.conflictsHeadline, "跨会议结论冲突")
         XCTAssertFalse(model.conflictsEmptyHint.isEmpty, "空态要说清为什么空")
     }
+
+    // MARK: - 候选要够准，否则用户看两次就不信这个面板了
+
+    /// 「定在」「在五」这种二元组是**常用搭配**，不是"同一件事"。
+    /// 只因为「定在」相同就把两条不相干的结论报成"两场会结论相反"，
+    /// 报得多了，用户看两次就再也不信这个面板了。
+    func testASharedCollocationIsNotAConflict() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await makeMeeting(
+            title: "发布评审", projectID: "p", decisions: ["发布窗口定在九月"], at: base
+        )
+        _ = try await makeMeeting(
+            title: "预算会", projectID: "p", decisions: ["预算上限定在五十万"],
+            at: base.addingTimeInterval(86_400)
+        )
+
+        let conflicts = try await store.conflictingDecisions(scope: MeetingKnowledgeScope(projectID: "p"))
+        XCTAssertTrue(
+            conflicts.isEmpty,
+            "只共享「定在」这种常用搭配的两条，不是同一件事，不该报成结论相反"
+        )
+    }
+
+    /// 收紧之后**真冲突仍然要报出来**——不能为了安静把真分歧一起藏了。
+    func testRealConflictIsStillReportedAfterTightening() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await makeMeeting(
+            title: "发布评审", projectID: "p",
+            decisions: ["发布窗口定在九月，设计稿五号交付"], at: base
+        )
+        _ = try await makeMeeting(
+            title: "发布复盘", projectID: "p",
+            decisions: ["发布窗口改到十月，设计稿五号交付"],
+            at: base.addingTimeInterval(86_400)
+        )
+
+        let conflicts = try await store.conflictingDecisions(scope: MeetingKnowledgeScope(projectID: "p"))
+        let conflict = try XCTUnwrap(conflicts.first)
+        XCTAssertEqual(conflict.previousText, "发布窗口定在九月，设计稿五号交付")
+        XCTAssertEqual(conflict.proposedText, "发布窗口改到十月，设计稿五号交付")
+        // 摘要引的那句话必须**真的是两边共有的**，而且要有意义——
+        // 不是碰巧先命中的那个二元组（「布窗」这种）。
+        let quoted = try XCTUnwrap(Self.quotedPhrase(in: conflict.summary))
+        XCTAssertGreaterThanOrEqual(
+            quoted.count, 4,
+            "摘要引的片段太短，多半是随便一个二字词：\(conflict.summary)"
+        )
+        XCTAssertTrue(
+            (conflict.previousText ?? "").contains(quoted)
+                && (conflict.proposedText ?? "").contains(quoted),
+            "摘要引的「\(quoted)」必须出现在两边原文里"
+        )
+    }
+
+    /// 两条只差一个字（九月／十月）却处处相同的话，仍是同一件事的两种说法。
+    func testNearIdenticalDecisionsAreStillAConflict() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await makeMeeting(
+            title: "A 场", projectID: "p", decisions: ["发布窗口定在九月上线"], at: base
+        )
+        _ = try await makeMeeting(
+            title: "B 场", projectID: "p", decisions: ["发布窗口定在十月上线"],
+            at: base.addingTimeInterval(86_400)
+        )
+        let conflicts = try await store.conflictingDecisions(scope: MeetingKnowledgeScope(projectID: "p"))
+        XCTAssertFalse(conflicts.isEmpty, "几乎一样的两条正是最该问用户的那种分歧")
+    }
+
+    /// 从摘要里取出被引号包起来的那段话。
+    private static func quotedPhrase(in summary: String) -> String? {
+        guard let start = summary.firstIndex(of: "「"), let end = summary.firstIndex(of: "」"),
+              start < end else { return nil }
+        return String(summary[summary.index(after: start)..<end])
+    }
+
+    /// 放宽收紧都不能把**同一场会内**的两条判成跨会议冲突。
+    func testTwoDecisionsInOneMeetingAreNotCrossMeeting() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(
+            title: "发布评审", projectID: "p",
+            decisions: ["发布窗口定在九月", "发布窗口改到十月"]
+        )
+        let conflicts = try await store.conflictingDecisions(scope: MeetingKnowledgeScope(projectID: "p"))
+        XCTAssertTrue(
+            conflicts.isEmpty,
+            "同一场会里前后改口不是跨会议冲突，是一次重写"
+        )
+    }
 }

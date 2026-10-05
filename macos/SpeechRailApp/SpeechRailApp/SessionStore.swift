@@ -6110,8 +6110,6 @@ extension SessionStore {
             limit: 500,
             offset: 0
         )
-        // 按共享词项分组；同组里来自不同会议、字面又不一样的，就是候选对。
-        var groups: [String: [KnowledgeEvidence]] = [:]
         // **显式按时间升序**：下面把靠前的一条叫 `previous`、靠后的叫 `proposed`，
         // 这个命名必须真的对应"早"和"晚"。列表本身是时间倒序的，直接拿来分组
         // 会把新结论标成 previous——界面上就成了"旧说法取代新说法"。
@@ -6121,44 +6119,96 @@ extension SessionStore {
             if lhs != rhs { return lhs < rhs }
             return $0.id < $1.id
         }
-        for item in ordered {
-            for term in Set(KnowledgeSearchTokenizer.indexTerms(for: item.text)) where term.count >= 2 {
-                groups[term, default: []].append(item)
+
+        // 倒排：词项 -> 命中下标。
+        var byTerm: [String: [Int]] = [:]
+        for (index, item) in ordered.enumerated() {
+            for term in Set(KnowledgeSearchTokenizer.indexTerms(for: item.text))
+            where term.count >= 2 {
+                byTerm[term, default: []].append(index)
             }
         }
-        var proposals: [KnowledgeChangeProposal] = []
-        var seen: Set<String> = []
-        // 用户已经确认过替代的两边，不再作为候选拿回来问一遍（MC-57）。
-        // 不确认就一直报着是安全的一侧：候选只是提醒，替代关系才是状态。
-        let resolved = try confirmedSupersessionPairs()
-        for (term, items) in groups.sorted(by: { $0.key < $1.key }) {
-            guard items.count > 1 else { continue }
-            for i in items.indices {
-                for j in items.indices where j > i {
-                    let lhs = items[i]
-                    let rhs = items[j]
+
+        // 成对累计**共享词项的个数**，而不是"落在同一个词项的组里就报"。
+        // 差别在于：「定在」「在五」这种二元组是常用搭配，只共享一个的那条
+        // 往往根本不是同一件事（「发布窗口定在九月」对「预算上限定在五十万」）。
+        // 报得多了，用户看两次就再也不信这个面板了。
+        var sharedCount: [String: Int] = [:]
+        for (_, indices) in byTerm where indices.count > 1 {
+            for i in indices.indices {
+                for j in indices.indices where j > i {
+                    let lhs = ordered[indices[i]]
+                    let rhs = ordered[indices[j]]
                     guard lhs.documentID != rhs.documentID else { continue }
-                    // 说法完全一致只是重复记录，不是冲突。
-                    guard KnowledgeIdentity.normalized(lhs.text) != KnowledgeIdentity.normalized(rhs.text) else { continue }
-                    guard !isResolved(lhs: lhs, rhs: rhs, pairs: resolved) else { continue }
-                    let pairKey = "\(min(lhs.id, rhs.id))|\(max(lhs.id, rhs.id))"
-                    guard seen.insert(pairKey).inserted else { continue }
-                    let detail = conflictDetail(lhs: lhs, rhs: rhs)
-                    let summary = "两场会提到「\(term)」，但说法不一样"
-                    proposals.append(KnowledgeChangeProposal(
-                        kind: .conflictAcrossMeetings,
-                        summary: summary,
-                        previousItemID: lhs.id,
-                        proposedItemID: rhs.id,
-                        previousText: lhs.text,
-                        proposedText: rhs.text,
-                        detail: detail
-                    ))
-                    if proposals.count >= limit { return proposals }
+                    sharedCount["\(indices[i])|\(indices[j])", default: 0] += 1
                 }
             }
         }
+
+        // 用户已经确认过替代的两边，不再作为候选拿回来问一遍（MC-57）。
+        // 不确认就一直报着是安全的一侧：候选只是提醒，替代关系才是状态。
+        let resolved = try confirmedSupersessionPairs()
+        var proposals: [KnowledgeChangeProposal] = []
+        // 按下标排序：结果与词项的字典序无关，同一份库每次打开是同一批候选。
+        for key in sharedCount.keys.sorted() {
+            guard sharedCount[key] ?? 0 >= Self.minimumSharedTermsForConflict else { continue }
+            let parts = key.split(separator: "|").compactMap { Int($0) }
+            guard parts.count == 2 else { continue }
+            let lhs = ordered[parts[0]]
+            let rhs = ordered[parts[1]]
+            // 说法完全一致只是重复记录，不是冲突。
+            guard KnowledgeIdentity.normalized(lhs.text) != KnowledgeIdentity.normalized(rhs.text) else { continue }
+            guard !isResolved(lhs: lhs, rhs: rhs, pairs: resolved) else { continue }
+            // 摘要里引的那句话取两条的**最长公共片段**，而不是碰巧先命中的那个二元组。
+            let phrase = Self.longestSharedPhrase(lhs.text, rhs.text)
+            let summary = phrase.map { "两场会都说到了「\($0)」，但说法不一样" }
+                ?? "两场会的结论说法不一样，但看不出是围绕什么说的"
+            proposals.append(KnowledgeChangeProposal(
+                kind: .conflictAcrossMeetings,
+                summary: summary,
+                previousItemID: lhs.id,
+                proposedItemID: rhs.id,
+                previousText: lhs.text,
+                proposedText: rhs.text,
+                detail: conflictDetail(lhs: lhs, rhs: rhs)
+            ))
+            if proposals.count >= limit { return proposals }
+        }
         return proposals
+    }
+
+    /// 判定"说的是同一件事"至少要共享几个词项。
+    ///
+    /// 1 个太松（常用搭配就够），太多会漏掉只围绕一个短词展开的分歧。
+    /// 2 是当前分词下"至少有一个真正的共同话题词"的下限。
+    static let minimumSharedTermsForConflict = 2
+
+    /// 两条里最长的一段公共文字。**至少两个字**才有引用价值。
+    ///
+    /// 用来在摘要里点出"这两条是围绕什么说的"。按字面算而不是按词项算：
+    /// 词项是单字与二元组，指不出「发布窗口」这样真正的话题。
+    static func longestSharedPhrase(_ lhs: String, _ rhs: String) -> String? {
+        let a = Array(KnowledgeIdentity.normalized(lhs))
+        let b = Array(KnowledgeIdentity.normalized(rhs))
+        guard a.count >= 2, b.count >= 2 else { return nil }
+        // dp[i][j] = 以 a[i-1]、b[j-1] 结尾的公共子串长度。
+        var previous = Array(repeating: 0, count: b.count + 1)
+        var best = 0
+        var bestEnd = 0
+        for i in 1...a.count {
+            var current = Array(repeating: 0, count: b.count + 1)
+            for j in 1...b.count where a[i - 1] == b[j - 1] {
+                let length = previous[j - 1] + 1
+                current[j] = length
+                if length > best {
+                    best = length
+                    bestEnd = i
+                }
+            }
+            previous = current
+        }
+        guard best >= 2 else { return nil }
+        return String(a[(bestEnd - best)..<bestEnd])
     }
 
     /// 已经落定替代关系的 key 对。**两个方向都算**——用户点的是
