@@ -2021,18 +2021,68 @@ public enum MinutesReview: Sendable {
         revisionDates.contains { $0 > versionCreatedAt }
     }
 
+    /// 需不需要复核，比较基准是**血缘起点**，不是本版的创建时间。
+    ///
+    /// 改一版只是换了措辞，它读到的来源仍然是起点那版的来源。拿本版的
+    /// `createdAt` 去比修订时间，"现在"永远晚于那次修订，于是标记被静默洗掉——
+    /// 比"没实现重校验"更糟：它把一个已经正确的提示拿掉了。
+    ///
+    /// 重新生成不走这条路：生成出来的是没有 `parent_minutes_id` 的独立版本，
+    /// 血缘起点就是它自己，因此仍按它自己的创建时间判断。
+    public static func needsReview(
+        lineageCreatedAt: [Date],
+        revisionDates: [Date]
+    ) -> Bool {
+        guard let origin = lineageCreatedAt.min() else { return false }
+        return revisionDates.contains { $0 > origin }
+    }
+
     public static func reviewIDs(
-        versions: [(id: String, createdAt: Date)],
+        versions: [(id: String, createdAt: Date, parentID: String?)],
         revisions: [Date]
     ) -> Set<String> {
         guard !revisions.isEmpty else { return [] }
+        let createdAtByID = Dictionary(
+            uniqueKeysWithValues: versions.map { ($0.id, $0.createdAt) }
+        )
+        let parentByID = Dictionary(
+            uniqueKeysWithValues: versions.map { ($0.id, $0.parentID) }
+        )
         var ids: Set<String> = []
         for version in versions {
-            if needsReview(versionCreatedAt: version.createdAt, revisionDates: revisions) {
+            if reviewID(
+                createdAtByID: createdAtByID,
+                parentID: { parentByID[$0] ?? nil },
+                minutesID: version.id,
+                revisions: revisions
+            ) != nil {
                 ids.insert(version.id)
             }
         }
         return ids
+    }
+
+    /// 按血缘判断：`lineage` 是某一版的祖先链（含自己），`parentID` 给出每条的上一版。
+    ///
+    /// 与 `reviewIDs` 的区别：这里知道每条版本的来历，所以能沿血缘回溯到起点。
+    /// 用户在一份已经过期的纪要上改措辞，新版本的创建时间晚于那次修订，
+    /// 只看本版会漏掉它。
+    public static func reviewID(
+        createdAtByID: [String: Date],
+        parentID: (String) -> String?,
+        minutesID: String,
+        revisions: [Date]
+    ) -> String? {
+        guard !revisions.isEmpty, createdAtByID[minutesID] != nil else { return nil }
+        var lineage: [Date] = []
+        var cursor: String? = minutesID
+        var visited: Set<String> = []
+        while let id = cursor, let createdAt = createdAtByID[id], !visited.contains(id) {
+            visited.insert(id)
+            lineage.append(createdAt)
+            cursor = parentID(id)
+        }
+        return needsReview(lineageCreatedAt: lineage, revisionDates: revisions) ? minutesID : nil
     }
 }
 

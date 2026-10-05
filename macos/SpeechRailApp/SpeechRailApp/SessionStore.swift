@@ -426,7 +426,21 @@ public actor SessionStore {
     public func minutesNeedsReview(minutesID: String) throws -> Bool {
         guard let version = try minutesVersion(id: minutesID) else { return false }
         let revisions = try speakerRevisions(sessionID: version.sessionID)
-        return revisions.contains { $0.createdAt > version.createdAt }
+        // 基准是**血缘起点**，不是本版的创建时间：改一版只是换了措辞，
+        // 依据的仍是起点那版读到的来源。只比本版会把标记静默洗掉。
+        let versions = try minutesVersions(sessionID: version.sessionID)
+        let createdAtByID = Dictionary(
+            uniqueKeysWithValues: versions.map { ($0.id, $0.createdAt) }
+        )
+        let parentByID = Dictionary(
+            uniqueKeysWithValues: versions.map { ($0.id, $0.parentMinutesID) }
+        )
+        return MinutesReview.reviewID(
+            createdAtByID: createdAtByID,
+            parentID: { parentByID[$0] ?? nil },
+            minutesID: minutesID,
+            revisions: revisions.map(\.createdAt)
+        ) != nil
     }
 
     /// 「音色第 N 句起生效」是一条记录，不是被覆盖的字段（§15.3 第 3 条）。

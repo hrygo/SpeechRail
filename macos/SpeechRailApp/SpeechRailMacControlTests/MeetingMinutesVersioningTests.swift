@@ -266,11 +266,49 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertFalse(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: [earlier]))
         XCTAssertFalse(MinutesReview.needsReview(versionCreatedAt: base, revisionDates: [base]))
         let ids = MinutesReview.reviewIDs(
-            versions: [(id: "v1", createdAt: base), (id: "v2", createdAt: later)],
+            versions: [(id: "v1", createdAt: base, parentID: nil), (id: "v2", createdAt: later, parentID: nil)],
             revisions: [base.addingTimeInterval(1)]
         )
         XCTAssertEqual(ids, ["v1"])
-        XCTAssertTrue(MinutesReview.reviewIDs(versions: [(id: "v1", createdAt: base)], revisions: []).isEmpty)
+        XCTAssertTrue(
+            MinutesReview.reviewIDs(versions: [(id: "v1", createdAt: base, parentID: nil)], revisions: []).isEmpty
+        )
+    }
+
+    /// 血缘基准（Domain 纯逻辑）：改一版之后，复核基准仍是**起点**，不是本版。
+    ///
+    /// v2 是从 v1 改出来的，创建时间晚于那次修订；只比本版会判它"没问题"，
+    /// 于是用户在界面上再也看不到"依据已过期"的提示。
+    func testReviewBaselineIsTheLineageOriginNotTheLatestVersion() {
+        let origin = Date(timeIntervalSince1970: 1_700_000_000)
+        let revision = origin.addingTimeInterval(10)
+        let edited = origin.addingTimeInterval(20)
+        let versions: [(id: String, createdAt: Date, parentID: String?)] = [
+            (id: "v1", createdAt: origin, parentID: nil),
+            (id: "v2", createdAt: edited, parentID: "v1")
+        ]
+        XCTAssertEqual(
+            MinutesReview.reviewIDs(versions: versions, revisions: [revision]),
+            ["v1", "v2"],
+            "改出来的那一版依据的仍是起点那份来源，不能因为创建时间晚就洗掉标记"
+        )
+        // 没有血缘的重新生成的版本仍按自己的创建时间判断。
+        XCTAssertTrue(
+            MinutesReview.reviewIDs(
+                versions: [(id: "fresh", createdAt: edited, parentID: nil)],
+                revisions: [revision]
+            ).isEmpty,
+            "重新生成出来的是独立版本，它读的是修订之后的来源，不该标复核"
+        )
+        // 血缘断了（脏数据）不能死循环，也不能凭空多标：退回按本版创建时间判断。
+        XCTAssertEqual(
+            MinutesReview.reviewIDs(
+                versions: [(id: "v3", createdAt: edited, parentID: "missing")],
+                revisions: [revision]
+            ),
+            [],
+            "父版本查不到时退回按本版判断；本版晚于修订就不标，且不能卡在死循环里"
+        )
     }
 
     /// MC-45（Domain 纯逻辑）：迟到结果的界面状态只写当初那一场；
@@ -304,6 +342,38 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(eventsAfter.count, eventsBefore.count)
         let stillNeedsReview = try await store.minutesNeedsReview(minutesID: first.id)
         XCTAssertTrue(stillNeedsReview)
+    }
+
+    /// 改过正文的版本**不得**因此洗掉复核标记（验收 3「修改来源后相关结论提示复核」）。
+    ///
+    /// 改一版只是换了措辞，它依据的仍然是改名前那份来源。`saveUserMinutesEdit`
+    /// 把新版本的 `created_at` 写成"现在"，而复核判断拿修订时间跟**本版自己的**
+    /// 创建时间比——于是"现在"永远晚于那次改名，标记被静默洗掉，用户看到的是
+    /// 一份看不出问题的纪要。这比"没实现重校验"更糟：它把一个已经正确的提示拿掉了。
+    func testEditingBodyDoesNotClearTheReviewFlag() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+
+        // 先改名：这一版的依据已经是改名前的来源，该标复核。
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
+        let beforeEdit = try await store.minutesNeedsReview(minutesID: first.id)
+        XCTAssertTrue(beforeEdit)
+
+        // 用户在这份"依据已过期"的纪要上改了一句措辞。
+        let edited = try await store.saveUserMinutesEdit(
+            sessionID: sessionID,
+            editingMinutesID: first.id,
+            body: "# 第一版\n\n张三补充了一句"
+        )
+        XCTAssertNotEqual(edited.id, first.id, "改一次多一版")
+        let afterEdit = try await store.minutesNeedsReview(minutesID: edited.id)
+        XCTAssertTrue(
+            afterEdit,
+            "改措辞不等于重新核对来源；依据仍是改名前那份，复核提示必须留着"
+        )
     }
 
     /// 恢复可证：备份到临时新库后可核对文档与版本；校验失败不损坏原库。

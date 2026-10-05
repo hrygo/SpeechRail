@@ -448,7 +448,7 @@ public final class MinutesGenerator {
         else { return [] }
         let versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
         return MinutesReview.reviewIDs(
-            versions: versions.map { (id: $0.id, createdAt: $0.createdAt) },
+            versions: versions.map { (id: $0.id, createdAt: $0.createdAt, parentID: $0.parentMinutesID) },
             revisions: revisions.map(\.createdAt)
         )
     }

@@ -2013,3 +2013,63 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
 - 只钉了**读**的方向：这一版程序仍然不会写出 `unknown`（写入路径只走已知 case）。
   新增 reason 取值时的**写侧**兼容（老程序读到新值）已覆盖，反向未涉及。
 - 界面文案未经 UI 自动化或人工走查（本轮未获授权）。
+
+## M1 增量：改措辞不再洗掉"依据已过期"的复核标记（验收 3 主体）
+
+### 做了什么
+
+交付说明此前三次记下同一个缺口——"正文改动触发的依据重新校验仍未做"。本轮查下去
+发现它比记录的更糟：**不只是没重校验，而是把一个已经正确的提示静默拿掉了。**
+
+复核判断（`SessionStore.minutesNeedsReview`）拿说话人修订时间跟**本版自己的
+`created_at`** 比，只要有一条修订晚于本版创建时间就标复核。但
+`saveUserMinutesEdit` 把新版本的 `created_at` 写成"现在"（SessionStore.swift:6263）。
+于是：改名 → 旧版正确标了复核 → 用户在这份纪要上改一句措辞 → 新版本创建时间必然晚于
+那次修订 → **标记被洗掉**。改措辞并不重新核对来源，依据仍是改名前那份来源。
+
+修法是把基准从"本版创建时间"换成**血缘起点**：
+
+- `MinutesReview.needsReview(lineageCreatedAt:revisionDates:)` 新增按血缘判断的重载；
+- `MinutesReview.reviewID(createdAtByID:parentID:minutesID:revisions:)` 沿
+  `parent_minutes_id` 回溯到起点，带 `visited` 集合防脏数据造成死循环；
+- `minutesNeedsReview` 与 `MinutesGenerator.reviewIDs`（列表那条路径）**都**改走它，
+  列表与详情因此不会各说各话；
+- `reviewIDs` 签名改为携带 `parentID`。
+
+重新生成的版本不受影响：它没有 `parent_minutes_id`，血缘起点就是它自己，仍按自己的
+创建时间判断——它读的确实是修订之后的来源。
+
+### 回归证据（2026-10-05）
+
+`MeetingMinutesVersioningTests` **37 项全绿**，新增 2 项：
+
+- `testEditingBodyDoesNotClearTheReviewFlag`（库层，端到端）：改名 → 标复核 →
+  在这份已过期的纪要上 `saveUserMinutesEdit` → **新版本仍标复核**。
+  这条在修复前是**红的**，报的正是"改措辞不等于重新核对来源"那句断言。
+- `testReviewBaselineIsTheLineageOriginNotTheLatestVersion`（Domain 纯逻辑）：
+  血缘上的两版都标复核；无血缘的重新生成版本不标；父版本查不到时退回按本版判断
+  且不死循环。
+
+反证已核对：修复前 `testEditingBodyDoesNotClearTheReviewFlag` 失败，修复后通过。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1024 项**（上一节 1022 +2）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。纯读逻辑 + 一个新增的 Domain 函数，`reviewIDs` 签名变了，
+  调用点只有 `MinutesGenerator.reviewIDs` 一处，同分支内已改齐。
+- 回退：`SessionStore.minutesNeedsReview` 与 `MinutesGenerator.reviewIDs` 改回单版比较，
+  `SessionDomain.swift` 删掉 `needsReview(lineageCreatedAt:)` 与 `reviewID`，
+  `reviewIDs` 签名改回不带 `parentID`。四个文件的改动一起回退。
+
+### 未验证事项与已知边界
+
+- **仍然只判"来源有没有变过"，不重跑事实保真验证器**（引文是否仍支持这条结论、
+  数字/语气/条件是否仍成立）。本轮修的是"标记被洗掉"这个更严重的问题；
+  真正重校验需要把 `MinutesEvidenceValidator` 接进编辑路径，属另一件事，未做。
+- **依据的血缘基准只在改出来的版本之间传递**。跨会议导入的版本（MA-19 归档包）
+  血缘起点是导入时那一份，导入前的修订历史不在库里，因此不会被标复核；
+  这与"导入件按其自带的来源快照判断"是一致的，但没有测试覆盖导入路径。
+- 界面未真机走查（本轮未获授权）。
