@@ -75,7 +75,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | # | 事项 | 依据 | 说明 |
 |---|---|---|---|
 | 6 | **事实保真验证器未接"来源被修改"路径**：转录正文被改后重跑验证器 | 实测（`grep` 确认无 `UPDATE line SET text` 一类入口） | 当前**不可达**——没有转录正文编辑入口。将来加了编辑功能，这条必须同时做，否则改完转录的旧纪要会继续声称 `supported` |
-| 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的「删除内容不得被索引或旧任务恢复」在**行级与索引级**已证；物理残留未做也无法在常规测试里证明 |
+| 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的**索引级**已证（`removeSession` 漏清索引那处已修，见该节）；物理残留未做，也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
 
@@ -2468,3 +2468,65 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
 - 界面呈现未走查（无 UI 自动化或人工授权）：`note` 失败提示的展示位置未验证。
 - 拆出**部分失败**时（`lineIDs` 里有一行写失败）直接 `return`，既不改已改的行也不记事件——
   保持原样，本轮没有改这个行为，也没有为它加用例。
+
+## M1 增量：`removeSession` 漏清索引，被删全文仍躺在库里（验收 4）
+
+### 做了什么
+
+验收 4 写的是「删除内容不得被**索引**或旧任务恢复」。这轮去核"索引"这一半——
+此前只核过删除的**次序**正确（tombstone → outbox 同事务 → 提交后 drain），
+没核过索引**本身**是否真被清干净。
+
+结果是漏的。`SessionStore.removeSession` 原来只有一句：
+
+```swift
+try withStatement("DELETE FROM session WHERE id = ?;") { ... }
+```
+
+`knowledge_fts` 是**独立的 FTS5 表**，`DELETE FROM session` 的级联带不走它。
+于是被删会话的每一行全文仍然躺在索引表里。
+
+**为什么一直没人发现**：同文件里的 `testDeletedSessionDoesNotResurrectInResults`
+只断言"搜不出来"。但检索命中本来就要过源行存在性/tombstone 那一关——
+**哪怕 purge 静默失败，那条用例照样是绿的**。它拦的是"结果里出现"，
+不是"索引里还留着"，而后者才是验收 4 的字面要求。
+
+改法照抄 `deleteMeetingKnowledge` 已有的模式：先把该会话在索引里占的条目记下来，
+删除与"排索引删除 outbox"放进同一个事务，drain 放在提交之后
+（drain 自己要开事务，SQLite 不支持嵌套）。
+
+### 回归证据（2026-10-06）
+
+`MeetingSearchIndexTests` **14 项全绿**，新增
+`testDeletingASessionRemovesItsRowsFromTheIndex`：它**绕开检索**，直接
+`SELECT COUNT(*) FROM knowledge_fts`。
+
+反证已核对：修复前该用例**变红**——删完索引行数是 2 而不是 1，
+报的正是"删掉的会议不得在索引里留下任何行——它的全文仍躺在库里"。
+原有那条 `testDeletedSessionDoesNotResurrectInResults` 全程没变、也一直是绿的，
+这恰恰说明它测不到这一层。
+
+**顺带核了还有没有别的漏网**：`grep` 全部 `DELETE FROM line / minutes / session`
+的落点——`deleteMeetingKnowledge` 的三个分支都排在同一个
+`indexedSearchEntries` + delete outbox 之下；`minutes_item` / `minutes_window`
+的删除不在索引里（索引只收 `line` 与 `minutes` 两类）。**`removeSession` 是唯一的一处。**
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1035 项**（上一节 1034 +1）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。改的是 `removeSession` 的写序列。
+- 回退：把那一句换回裸的 `DELETE FROM session`。一个文件的局部改动。
+- 已 purge 掉的行不会回来；没 purge 掉的（修复前删的那些）会在下一次
+  `reindex` 重建时一并清掉——索引是派生数据。
+
+### 未验证事项与已知边界
+
+- 这一条只覆盖 `removeSession`（助手等**没有**关联知识文档的会话）。
+  会议知识走 `deleteMeetingKnowledge`，那条路径此前就已正确。
+- **物理残留仍未处理**：即使索引行删干净，SQLite 文件的空闲页里仍可能留有原文片段。
+  这是总账里另一条（删除不做物理安全擦除），本轮没动，也没法在常规测试里证明。
+- `reindex` 重建会顺带清掉陈旧行这一点，是从 `testIndexIsDerivedAndCanBeRebuilt`
+  的既有覆盖推断的，**没有单独为"修复前遗留的脏行会被重建清掉"加用例**。

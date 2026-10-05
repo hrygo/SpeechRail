@@ -190,6 +190,48 @@ final class MeetingSearchIndexTests: XCTestCase {
         )
     }
 
+    /// 删除之后，索引里**不许还留着**那段文字（验收 4「删除内容不得被索引」）。
+    ///
+    /// 同文件里 `testDeletedSessionDoesNotResurrectInResults` 只钉住了"搜不出来"。
+    /// 但检索本来就要过 tombstone 与行存在性那一关，所以**哪怕 purge 静默失败，
+    /// 那条用例照样是绿的**——索引里仍躺着全文这件事，它一条都拦不住。
+    ///
+    /// 这一条直接查 `knowledge_fts`，绕开检索，才问的是"索引本身干净了吗"。
+    func testDeletingASessionRemovesItsRowsFromTheIndex() async throws {
+        let store = try requireStore()
+        _ = try await makeSession(texts: ["预算还在调整。"])
+        try await store.drainSearchIndex()
+        let before = try indexRowCount()
+        XCTAssertGreaterThan(before, 0, "前置：索引里确实有行")
+
+        let dropped = try await makeSession(texts: ["灰度回滚预案。"])
+        try await store.drainSearchIndex()
+        try await store.removeSession(id: dropped)
+        try await store.drainSearchIndex()
+
+        let after = try indexRowCount()
+        XCTAssertEqual(
+            after, before,
+            "删掉的会议不得在索引里留下任何行——它的全文仍躺在库里"
+        )
+    }
+
+    /// 直接数 `knowledge_fts` 的行数，不经过检索。
+    private func indexRowCount() throws -> Int {
+        let file = try XCTUnwrap(directory).appendingPathComponent(SessionStore.fileName)
+        var pointer: OpaquePointer?
+        guard sqlite3_open_v2(file.path, &pointer, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw SessionStoreError.storageUnavailable
+        }
+        defer { sqlite3_close_v2(pointer) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(pointer, "SELECT COUNT(*) FROM knowledge_fts;", -1, &statement, nil)
+            == SQLITE_OK, let query = statement else { return 0 }
+        defer { sqlite3_finalize(query) }
+        guard sqlite3_step(query) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(query, 0))
+    }
+
     // MARK: - 采用版优先去重
 
     /// 同一场会议多版纪要时只出一条，且优先当前采用版。

@@ -736,10 +736,29 @@ public actor SessionStore {
         if linked != nil {
             throw SessionStoreError.statementFailed("该会话已有关联会议知识文档，请用知识域删除入口处理")
         }
-        try withStatement("DELETE FROM session WHERE id = ?;") { statement in
-            bind(statement, 1, id)
-            try step(statement)
+        // 索引里现有的条目先记下来：它们要排进删除 outbox。**不能只删源行**——
+        // `knowledge_fts` 是独立表，`DELETE FROM session` 带不走它，那段全文会
+        // 继续躺在库里。检索之所以还搜不出来，是因为命中要过源行存在性那一关；
+        // 但验收 4 说的是「删除内容不得被**索引**」，那说的是索引本身干不干净。
+        let indexedEntries = try indexedSearchEntries(sessionID: id)
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement("DELETE FROM session WHERE id = ?;") { statement in
+                bind(statement, 1, id)
+                try step(statement)
+            }
+            for (kind, sourceID) in indexedEntries {
+                try enqueueSearchIndex(
+                    op: SearchIndexOp.delete, sessionID: id, sourceKind: kind, sourceID: sourceID
+                )
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
+        // drain 自己要开事务，不能嵌在上面那个里（SQLite 不支持嵌套事务）。
+        _ = try? drainSearchIndex()
     }
 
     // MARK: - 纪要队列（§5.8：单飞 + 租约回收 + 失败给可读原因）
