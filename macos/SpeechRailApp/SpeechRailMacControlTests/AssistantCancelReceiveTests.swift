@@ -742,4 +742,95 @@ final class AssistantCancelReceiveTests: XCTestCase {
             "unknown 失败终态不得改正文"
         )
     }
+
+    /// V01：活跃朗读（speaking）中注入空/空白 hypothesis 与空白 delta。
+    /// 三者零打断、零字幕污染；随后首个有效证据恰好触发一次中断，重复证据不再触发。
+    func testV01BlankEvidenceNeverInterruptsActiveSpeech() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["长回答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念一句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let cancelsBefore = await harness.clients()[0].snapshot().cancelTTS
+
+        // 空快照 / 纯空白快照 / 纯空白 delta：零打断、零字幕污染。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i2", revision: 1, text: "", evidence: .init()))
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i2", revision: 2, text: "   ", evidence: .init()))
+        await harness.clients()[0].emit(.partial(itemID: "i2", delta: "   "))
+        // 给 receiver 落地时间：空白证据若误触发，打断会改 phase/partialText。
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfterBlank = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterBlank, cancelsBefore, "空白证据不得打断")
+        XCTAssertNil(harness.session.partialText, "空白证据不得污染字幕槽")
+        XCTAssertEqual(harness.session.phase, .speaking, "空白证据不得改朗读态")
+
+        // 首个有效证据恰好触发一次中断；同一键重复不再触发。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i3", revision: 5, text: "插话", evidence: .init()))
+        await waitUntil(
+            { harness.session.partialText == "插话" },
+            message: "首个有效证据应正常显示字幕"
+        )
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "匹配 terminal 必须经 receiver 确认取消"
+        )
+        let cancelsAfterFirst = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterFirst - cancelsBefore, 1, "首个有效证据应恰好触发一次中断")
+        // 中断后已回 listening：重复旧证据不得重新打断新状态。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i3", revision: 5, text: "插话", evidence: .init()))
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfterRepeat = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterRepeat, cancelsAfterFirst, "重复证据不得重新打断")
+    }
+
+    /// V02：同 revision 跨 item 独立去重、新 final-only 正常接管。
+    /// 中断意图只取消一次，合法新输入保存后回答。
+    func testV02EvidenceOwnershipAcrossItemsAndFinals() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["首答。"]), .deltas(["次答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念首句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "首轮回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let cancelsBefore = await harness.clients()[0].snapshot().cancelTTS
+
+        // 同 revision 跨 item：首个证据触发中断，另一个 item 的同 revision
+        // 是独立归属键，但同一中断意图只取消一次（中断后已回 listening，
+        // 后续证据不再满足 isSpeakingOrGenerating）。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "a", revision: 7, text: "甲", evidence: .init()))
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "匹配 terminal 必须经 receiver 确认取消"
+        )
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "b", revision: 7, text: "乙", evidence: .init()))
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "a", revision: 7, text: "甲", evidence: .init()))
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfter = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfter - cancelsBefore, 1, "同一中断意图只应取消一次")
+        // 新 final-only 合法输入：保存成功后正常回答。
+        await harness.clients()[0].emit(.completed(itemID: "i2", transcript: "念次句"))
+        await waitUntil(
+            { harness.session.turns.filter { $0.role == .assistant }.count >= 2 },
+            message: "合法新输入应在保存后回答"
+        )
+    }
 }

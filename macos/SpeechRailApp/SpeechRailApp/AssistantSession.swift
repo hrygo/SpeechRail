@@ -344,6 +344,11 @@ public final class AssistantSession {
     /// 连接级令牌（D03）：每次建连/重连推进一次。下行事件按它门禁，
     /// 旧连接晚到的事件不许改动当前会话。
     private var connectionToken = 0
+    /// M0a：生产 receiver 的输入证据去重集，键为
+    /// `(connectionGeneration, itemID, revision)`。重连换新锚时与
+    /// `itemObservedAt` 一起清空，旧连接证据不污染新会话；`partial` 无
+    /// revision，用 `-1` 占位并按 item 去重（同一 item 的空/空白 delta 只记一次）。
+    private var seenInputEvidence: Set<AssistantTurnPolicy.EvidenceKey> = []
     /// VA-03 输入生命周期：active → draining → closed。
     /// ending 固定 session，draining 固定 connection；结束推进 startToken
     /// 禁止新发布，但不立即撤销该连接的合法 ASR 归档资格。TTS 输出权立即撤销。
@@ -1177,6 +1182,7 @@ public final class AssistantSession {
         connectionClockAnchor = ContinuousClock().now
         connectionDateAnchor = Date()
         itemObservedAt.removeAll()
+        seenInputEvidence.removeAll()
         // itemID 是**连接内**的去重键：重连之后服务端会从头编号，
         // 沿用上一条连接的集合会把新的一句话当成重复而丢掉。
         do {
@@ -1340,6 +1346,7 @@ public final class AssistantSession {
         partialItemID = nil
         streamingReply = nil
         currentOrdinal = 0
+        seenInputEvidence.removeAll()
         // VA-06：先清上一场 memories/history，再加载选中 active 记忆。
         // 记忆加载失败时明确标记，不沿用旧数组。
         memories = []
@@ -1776,6 +1783,7 @@ public final class AssistantSession {
         lastFinalizedReply = nil
         isTextOnlyConversation = false
         itemObservedAt.removeAll()
+        seenInputEvidence.removeAll()
         sessionStartedAt = nil
         sessionID = nil
         isMutedForPlayback = false
@@ -1896,24 +1904,32 @@ public final class AssistantSession {
              .diarizationFinished, .auxiliaryIncomplete:
             break
         case .partial(let itemID, let delta):
-            guard !delta.isEmpty else { return }
+            // M0a：空/纯空白 delta 无副作用：不记 observed、不触发打断、
+            // 不动字幕槽。非空才走统一证据门并去重。
+            guard !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
-            noteSpeechEvidence()
+            noteSpeechEvidence(text: delta, itemID: itemID, revision: -1, connection: connection)
             // 别的 item 的增量不进来：它是**那一句**的证据，不是当前槽位的。
             guard ownsPartial(itemID) else { return }
             partialItemID = itemID
             partialText = (partialText ?? "") + delta
-        case .partialSnapshot(let itemID, _, let text, _):
+        case .partialSnapshot(let itemID, let revision, let text, _):
             if !text.isEmpty {
                 _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             }
-            noteSpeechEvidence()
+            // M0a：空/纯空白 snapshot 无副作用；非空经
+            // `(connection, itemID, revision)` 去重后才构成打断证据。
+            // hypothesis 仍整段替换，不拼接修订文本。
+            noteSpeechEvidence(text: text, itemID: itemID, revision: revision, connection: connection)
             guard ownsPartial(itemID) else { return }
             // hypothesis 是**可改写全文**，必须整段替换，不能追加（契约 §5.1）。
-            // 空快照是"这一句现在没有可展示的正文"：清掉可见文字，并把归属一起
-            // 放开——槽位空着的时候，下一个 item 才能接上，不会被这一句占住。
-            partialItemID = text.isEmpty ? nil : itemID
-            partialText = text.isEmpty ? nil : text
+            // 空/纯空白快照是"这一句现在没有可展示的正文"：清掉可见文字，
+            // 并把归属一起放开——槽位空着的时候，下一个 item 才能接上，
+            // 不会被这一句占住。空白快照不得绑定槽位，否则后到的有效证据
+            // 会因归属不匹配被挡在槽外（V01）。
+            let hasVisibleText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            partialItemID = hasVisibleText ? itemID : nil
+            partialText = hasVisibleText ? text : nil
         case .completed(let itemID, let transcript):
             // final-only 的 item 到这里才有第一个证据，用它自己的接收时刻。
             let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
@@ -1995,8 +2011,21 @@ public final class AssistantSession {
     /// 当前 wire 没有服务端 VAD 事件（`speech_started` 已移除，契约 §5.1），
     /// 所以 barge-in 完全由客户端决定：**允许插话时，第一次收到非空识别结果
     /// 就是"用户开始说话"**。半双工模式下播放期本来就不上行，自然不会触发。
-    private func noteSpeechEvidence() {
-        guard mode.allowsBargeIn, isSpeaking || replyTask != nil else {
+    /// M0a：生产 receiver 的统一证据门。空/纯空白无副作用；同一
+    /// `(connection, itemID, revision)` 只触发一次；跨 item 的同 revision 独立。
+    /// `partial` 无 revision，用 `-1` 占位并按 item 去重。
+    private func noteSpeechEvidence(text: String, itemID: String, revision: Int, connection: Int) {
+        let decision = AssistantTurnPolicy.bargeInEvidence(
+            text: text,
+            connection: connection,
+            itemID: itemID,
+            revision: revision,
+            seenEvidence: seenInputEvidence,
+            allowsBargeIn: mode.allowsBargeIn,
+            isSpeakingOrGenerating: isSpeaking || replyTask != nil
+        )
+        seenInputEvidence = decision.seenEvidence
+        guard decision.fires else {
             return
         }
         // 插话和 ESC 走同一条路：同一个回复收尾（D08），正文与打断标记一起写。
