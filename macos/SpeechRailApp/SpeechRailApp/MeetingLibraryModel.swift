@@ -613,6 +613,50 @@ public final class MeetingLibraryModel {
         return error
     }
 
+    // MARK: - 一条行动的变更历史（MC-59）
+
+    /// 当前查看的那一条行动的完整状态变更，**按生效时间升序**。
+    ///
+    /// 旧事件永远还在：三月承诺四月、四月改成五月之后，三月那条并没有消失。
+    /// 记在库里却看不到，承诺的可追溯性就打了折。
+    public private(set) var executionTimeline: [KnowledgeExecutionEvent] = []
+    public private(set) var executionTimelineError: String?
+
+    /// 读一条行动的历史。**返回是否读成功**——空与失败是两回事。
+    @discardableResult
+    public func loadTimeline(for item: KnowledgeEvidence) async -> Bool {
+        let key = KnowledgeIdentity.key(
+            documentID: item.documentID, kind: item.kind, text: item.text
+        )
+        do {
+            executionTimeline = try await coordinator.executionTimeline(itemKey: key)
+            executionTimelineError = nil
+            return true
+        } catch {
+            executionTimeline = []
+            executionTimelineError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// 关掉历史面板时清空。留着上一条的历史在界面上，下一次打开就成了错的。
+    public func clearTimeline() {
+        executionTimeline = []
+        executionTimelineError = nil
+    }
+
+    public var executionTimelineHeadline: String {
+        executionTimeline.isEmpty ? "变更历史" : "变更历史（\(executionTimeline.count) 条）"
+    }
+
+    /// 空要说清是**没人记过**，不是读不出来。两者对用户的含义完全不同。
+    public var executionTimelineEmptyHint: String {
+        if let error = executionTimelineError {
+            return "\(error)。暂时读不出这一条的历史。"
+        }
+        return "这一条还没有人更新过进度，所以没有历史。它仍然算未完成。"
+    }
+
     // MARK: - 知识归档包（MA-19）
 
     /// 导出归档包。**revision 必填**——用户在看哪一版，包里就是哪一版（MC-48）。

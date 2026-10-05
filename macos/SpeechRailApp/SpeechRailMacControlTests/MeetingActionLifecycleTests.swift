@@ -567,4 +567,144 @@ final class MeetingActionLifecycleTests: XCTestCase {
         await model.select(nil)
         XCTAssertTrue(model.changeProposals.isEmpty, "关掉详情就该清空")
     }
+
+    // MARK: - MC-59：一条行动的完整变更历史，得看得见
+    //
+    // `executionEvents` 是最后一块零消费方的 API。它记的是**双时间事件日志**：
+    // 三月承诺四月，四月改成五月之后，三月那条并没有消失。
+    // 存在库里但用户看不到，就等于"系统记了但没法给你看"——承诺的可追溯性打折。
+
+    func testTimelineReadsBackEveryChangeInOrder() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let item = try await itemID(minutesID: meeting.minutesID, kind: "action")
+        let march = Date(timeIntervalSince1970: 1_700_000_000)
+        let may = Date(timeIntervalSince1970: 1_746_000_000)
+
+        try await store.recordExecutionEvent(
+            itemID: item, status: .open, ownerText: .some("张三"),
+            dueText: .some("四月前"), validFrom: march
+        )
+        // `ownerText` **不传** = 这次没改负责人；传 `.some(nil)` 才是清空。
+        // 两者分不开，界面就没法既保留原值又允许删空（MA-14 写侧那节同一个约定）。
+        try await store.recordExecutionEvent(
+            itemID: item, status: .blocked, dueText: .some("五月前"), validFrom: may
+        )
+
+        // 历史按**稳定 key** 索引，纪要重新生成换掉 item.id 之后仍然找得到。
+        let key = KnowledgeIdentity.key(
+            documentID: meeting.documentID, kind: "action", text: "整理发布清单"
+        )
+        let timeline = try await store.executionEvents(itemKey: key)
+        XCTAssertEqual(timeline.count, 2)
+        XCTAssertEqual(timeline.map(\.status), [.open, .blocked], "按生效时间升序，旧承诺不消失")
+        XCTAssertEqual(timeline.first?.dueText, "四月前")
+        XCTAssertEqual(timeline.last?.dueText, "五月前")
+        XCTAssertEqual(
+            timeline.last?.ownerText, "张三",
+            "这次没改负责人就沿用上一条，不是一次新的'不知道'"
+        )
+    }
+
+    /// 读回来的历史要能在界面上说清"什么时候承诺了什么"。
+    func testTimelineReachesTheModelWithTheRightItem() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(
+            title: "发布评审", projectID: "p", actions: ["整理发布清单"]
+        )
+        let item = try await itemID(minutesID: meeting.minutesID, kind: "action")
+        try await store.recordExecutionEvent(
+            itemID: item, status: .open, ownerText: .some("张三"),
+            dueText: .some("四月前"), validFrom: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        await model.loadOpenItems(offset: 0)
+        let row = try XCTUnwrap(model.openItems.first)
+        let ok = await model.loadTimeline(for: row)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(model.executionTimeline.count, 1)
+        XCTAssertEqual(model.executionTimeline.first?.ownerText, "张三")
+        XCTAssertEqual(model.executionTimelineHeadline, "变更历史（1 条）")
+    }
+
+    /// 没记录过进度的那条，历史是空的——**说"没有记录"，不是编一条出来**。
+    func testTimelineIsEmptyForAnItemNobodyTracked() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        await model.loadOpenItems(offset: 0)
+        let row = try XCTUnwrap(model.openItems.first)
+
+        let ok = await model.loadTimeline(for: row)
+        XCTAssertTrue(ok)
+        XCTAssertTrue(model.executionTimeline.isEmpty)
+        XCTAssertFalse(
+            model.executionTimelineEmptyHint.isEmpty,
+            "空要说清是没人记过，不是「读不出来」"
+        )
+    }
+
+    /// 换一条看，历史要跟着换，不能把上一条留在界面上。
+    func testTimelineFollowsTheItem() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try await makeMeeting(
+            title: "A 场", projectID: "p", actions: ["整理发布清单"], at: base
+        )
+        let second = try await makeMeeting(
+            title: "B 场", projectID: "p", actions: ["约设计师复核"],
+            at: base.addingTimeInterval(86_400)
+        )
+        let tracked = try await itemID(minutesID: first.minutesID, kind: "action")
+        try await store.recordExecutionEvent(itemID: tracked, status: .done)
+
+        let model = try makeLibrary()
+        // 清单是**全库**的（没有按项目筛），所以两场会的行动都会出现；
+        // 而且 done 的那条不在「未完成」里，要切到「全部」才拿得到。
+        await model.setOpenItemMode(.all)
+        await model.open(documentID: first.documentID)
+        await model.loadOpenItems(offset: 0)
+        let trackedRow = try XCTUnwrap(model.openItems.first { $0.text == "整理发布清单" })
+        _ = await model.loadTimeline(for: trackedRow)
+        XCTAssertEqual(model.executionTimeline.count, 1)
+
+        await model.open(documentID: second.documentID)
+        await model.loadOpenItems(offset: 0)
+        let otherRow = try XCTUnwrap(model.openItems.first { $0.text == "约设计师复核" })
+        _ = await model.loadTimeline(for: otherRow)
+        XCTAssertTrue(model.executionTimeline.isEmpty, "B 场那条没人记过，不该留着 A 场的历史")
+        _ = second
+    }
+
+    /// 纪要重新生成换掉了 `item.id`，历史按稳定 key 找，**必须还在**。
+    func testTimelineSurvivesMinutesRegeneration() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let first = try await itemID(minutesID: meeting.minutesID, kind: "action")
+        try await store.recordExecutionEvent(
+            itemID: first, status: .done, ownerText: .some("张三")
+        )
+
+        let second = try await writeMinutesVersion(
+            sessionID: meeting.sessionID, snapshotID: meeting.snapshotID,
+            title: "发布评审", actions: ["整理发布清单"], decisions: []
+        )
+        let newItem = try await itemID(minutesID: second, kind: "action")
+        XCTAssertNotEqual(newItem, first, "新一版的条目 id 必然不同")
+
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        await model.loadOpenItems(offset: 0)
+        // 新一版里这条已经 done，不在未完成清单里；切到「全部」才拿得到。
+        await model.setOpenItemMode(.all)
+        let row = try XCTUnwrap(model.openItems.first { $0.execution?.ownerText == "张三" })
+        _ = await model.loadTimeline(for: row)
+        XCTAssertEqual(
+            model.executionTimeline.first?.status, .done,
+            "重新生成之后用户标过的状态和它的历史都必须还在"
+        )
+    }
 }

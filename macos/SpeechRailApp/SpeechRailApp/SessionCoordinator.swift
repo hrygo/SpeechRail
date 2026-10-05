@@ -1037,6 +1037,14 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 一条行动的完整状态变更历史，**按生效时间升序**（MC-59）。
+    ///
+    /// 三月承诺四月、四月改成五月之后，三月那条并没有消失——按行 id 查会丢，
+    /// 所以这里收的是**稳定 key**。
+    public func executionTimeline(itemKey: String) async throws -> [KnowledgeExecutionEvent] {
+        try await store.executionEvents(itemKey: itemKey)
+    }
+
     /// 这一场重新生成之后，新一版相对上一版**可能**变了什么（MC-54 / MA-14）。
     ///
     /// **只是候选差异，不落任何状态**——自动建议一旦自己动手改状态，

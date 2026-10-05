@@ -46,6 +46,8 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var openItemsPresented = false
     /// 正在改负责人／期限的那一条。`nil` = 没有打开编辑面板。
     @State private var openItemEditTarget: KnowledgeEvidence?
+    /// 正在查看变更历史的那一条。`nil` = 没有打开历史面板。
+    @State private var openItemTimelineTarget: KnowledgeEvidence?
     /// 跨会议结论冲突面板（MC-57、MC-58）。
     @State private var conflictsPresented = false
     /// 等用户点头的那一次"取代"确认。点一下就落状态，不给回头路。
@@ -169,6 +171,9 @@ struct MeetingKnowledgeLibraryView: View {
         .sheet(isPresented: $openItemsPresented) { openItemsSheet }
         .sheet(item: $openItemEditTarget) { target in
             openItemEditSheet(target)
+        }
+        .sheet(item: $openItemTimelineTarget) { target in
+            openItemTimelineSheet(target)
         }
         .sheet(isPresented: $conflictsPresented) { conflictsSheet }
         .confirmationDialog(
@@ -474,6 +479,84 @@ struct MeetingKnowledgeLibraryView: View {
         }
     }
 
+    /// 一条行动的完整变更历史（MC-59）。
+    ///
+    /// **只读**：三月承诺四月、四月改成五月之后，三月那条并没有消失，
+    /// 这里按生效时间升序全摆出来。界面不提供任何改状态的入口——
+    /// 改状态走菜单，"看历史"和"改状态"混在一处，用户会顺手改掉一条。
+    private func openItemTimelineSheet(_ item: KnowledgeEvidence) -> some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 0) {
+                if model.executionTimeline.isEmpty {
+                    Text(model.executionTimelineEmptyHint)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+                    Spacer()
+                } else {
+                    List {
+                        Section {
+                            ForEach(model.executionTimeline, id: \.id) { event in
+                                executionEventRow(event)
+                            }
+                        } header: {
+                            Text(model.executionTimelineHeadline)
+                        } footer: {
+                            Text("这是当时记下的原话，后来的修改没有改写它。")
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("变更历史")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("好") {
+                        model.clearTimeline()
+                        openItemTimelineTarget = nil
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 360)
+    }
+
+    /// 一次状态变化。**生效时间与记录时间不是一回事**：
+    /// 补记一件三月就承诺过的事，今天录进去，生效时间仍然是三月。
+    private func executionEventRow(_ event: KnowledgeExecutionEvent) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(event.status.title)
+                    .font(.callout)
+                Text(event.validFrom.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            // ViewBuilder 里不能写 `var`，抽成函数。
+            let facts = Self.executionFacts(event)
+            if let facts {
+                Text(facts)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let note = event.note {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// 一次状态变化里**当时记着的**负责人与期限。没有就是没有，不留空位占一行。
+    private static func executionFacts(_ event: KnowledgeExecutionEvent) -> String? {
+        var facts: [String] = []
+        if let owner = event.ownerText { facts.append("负责人 \(owner)") }
+        if let due = event.dueText { facts.append("期限 \(due)") }
+        return facts.isEmpty ? nil : facts.joined(separator: " · ")
+    }
+
     /// 一条未完成事项能做的动作。**列得出却点不动的清单等于让用户回去翻会议**。
     ///
     /// 菜单而不是常驻按钮：完成／受阻／放弃是低频动作，常驻会把正文挤成两行，
@@ -488,6 +571,14 @@ struct MeetingKnowledgeLibraryView: View {
             Button("标为受阻") { Task { await model.markOpenItem(item.id, status: .blocked) } }
             Divider()
             Button("改负责人与期限…") { openItemEditTarget = item }
+            // 历史是**只读**的：它回答"这条承诺是怎么变成今天这样的"，
+            // 用户在这里看不到任何能改状态的东西。
+            Button("查看变更历史…") {
+                Task {
+                    openItemTimelineTarget = item
+                    await model.loadTimeline(for: item)
+                }
+            }
             Button("放弃这件事", role: .destructive) {
                 Task { await model.markOpenItem(item.id, status: .dropped) }
             }
