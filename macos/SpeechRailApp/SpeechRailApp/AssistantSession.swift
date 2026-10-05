@@ -167,6 +167,15 @@ public final class AssistantSession {
     public private(set) var blocked: BlockReason?
     /// 本场的对话流（内存镜像；权威在库里）。
     public private(set) var turns: [Turn] = []
+    /// 展示队列中的输入；仅 turns/contextTurns 表示已经保存的正文。
+    var conversationRows: [AssistantConversationRow] {
+        let saved = turns.map(AssistantConversationRow.saved)
+        guard let sessionID else { return saved }
+        let savedIDs = Set(turns.map(\.id))
+        return saved + inputPersistence.unsettledInputs(sessionID: sessionID)
+            .filter { !savedIDs.contains($0.command.lineID) }
+            .map { .accepted($0.command, failure: $0.failure) }
+    }
     /// 正在识别的那一句（未定稿，只进内存）。
     public private(set) var partialText: String?
     /// `partialText` 槽位的**归属 item**。
@@ -2045,11 +2054,13 @@ public final class AssistantSession {
         guard inputLifecycle != .closed, let recordID = sessionID, sessionStartedAt != nil else { return }
         let ownsSlot = ownsPartial(itemID)
         let visible = ownsSlot ? partialText : nil
-        if ownsSlot { clearPartialSlot() }
         let formalText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let formal = !formalText.isEmpty
         let text = formal ? formalText : (visible ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else {
+            if ownsSlot { clearPartialSlot() }
+            return
+        }
         let target: String
         switch inputLifecycle {
         case .active: target = recordID
@@ -2063,7 +2074,9 @@ public final class AssistantSession {
             text: text, formal: formal, observedAt: observed
         )
         switch inputPersistence.enqueue(command) {
-        case .accepted, .duplicate: break
+        case .accepted, .duplicate:
+            // 同步交接给可观察的队列后才释放字幕槽；拒绝输入时保留可见正文。
+            if ownsSlot { clearPartialSlot() }
         case .capacityExceeded:
             lastFailure = "记录正在保存，暂时无法接纳这句新输入，请稍后重说。"
         case .invalidIdentity:

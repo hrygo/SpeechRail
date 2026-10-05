@@ -1,5 +1,25 @@
 import Foundation
 
+/// 对话展示与存储分开：已接纳输入和保存后的行使用同一个 lineID。
+enum AssistantConversationRow: Identifiable, Equatable, Sendable {
+    case saved(AssistantSession.Turn)
+    case accepted(AssistantInputPersistenceQueue.Command, failure: String?)
+
+    var id: String {
+        switch self {
+        case .saved(let turn): turn.id
+        case .accepted(let command, _): command.lineID
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .saved(let turn): turn.text
+        case .accepted(let command, _): command.text
+        }
+    }
+}
+
 /// VA-08 可信首屏、模式与数据去向：十二态纯 presentation。
 ///
 /// 纯函数：输入事实来自 AssistantSession 与其 lease，

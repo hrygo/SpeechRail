@@ -1,10 +1,12 @@
 import Foundation
+import Observation
 
 /// 串行保存已接纳的助手输入，把 Store IO 从事件 receiver 中移出。
 ///
 /// 队列由 MainActor 持有，因为唯一消费者要把保存结果投影回助手状态；
 /// 实际 IO 仍通过注入的异步闭包进入 Store actor。
 @MainActor
+@Observable
 public final class AssistantInputPersistenceQueue {
     public struct Configuration: Equatable, Sendable {
         public let maximumPendingCommands: Int
@@ -177,6 +179,17 @@ public final class AssistantInputPersistenceQueue {
                 return nil
             }
             return Failure(command: entry.command, message: message)
+        }
+    }
+
+    /// 展示保留接纳顺序与失败正文；不把尚未保存的行混进存储镜像。
+    func unsettledInputs(sessionID: String) -> [(command: Command, failure: String?)] {
+        entries.compactMap { entry in
+            guard entry.command.sessionID == sessionID else { return nil }
+            if case .failed(let message) = entry.state {
+                return (entry.command, message)
+            }
+            return (entry.command, nil)
         }
     }
 
