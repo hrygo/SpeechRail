@@ -2594,6 +2594,13 @@ public struct MeetingDocument: Identifiable, Hashable, Sendable {
     public var timezone: String?
     /// 权威库删除语义：非空表示已删除/不可检索，先标记再清理派生（MA-18/MC-62）。
     public var deletedAt: Date?
+    /// 用了哪一档删除。**只有归档能撤销**，另两档的数据已经不在库里——
+    /// 不记这一档的话，「撤销归档」会对一份转录已被移除的文档也显示出来，
+    /// 撤回来的是一个空壳，而界面会说「已撤销归档，这场会回到搜索和导出里」。
+    ///
+    /// 空 = 迁移前的老行，或尚未删除。老行**不给撤销入口**：宁可少一个出口，
+    /// 也不能对着一份内容已不在的文档谎称能恢复。
+    public var deletionMode: MeetingDeletionMode?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -2605,6 +2612,7 @@ public struct MeetingDocument: Identifiable, Hashable, Sendable {
         occurredAt: Date? = nil,
         timezone: String? = nil,
         deletedAt: Date? = nil,
+        deletionMode: MeetingDeletionMode? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -2615,6 +2623,7 @@ public struct MeetingDocument: Identifiable, Hashable, Sendable {
         self.occurredAt = occurredAt
         self.timezone = timezone
         self.deletedAt = deletedAt
+        self.deletionMode = deletionMode
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -4954,6 +4963,18 @@ public enum MeetingLibraryStatus: String, Hashable, Sendable {
         case .archived: "已归档"
         case .deleted: "已删除"
         }
+    }
+
+    /// 一份文档当前该显示成什么。
+    ///
+    /// 关键是**归档与另两档要分得开**：只有归档还能撤销，
+    /// 另两档数据已经不在库里，合并成一个 `deleted` 就等于把出口一起收走了。
+    public init(document: MeetingDocument) {
+        guard document.deletedAt != nil else {
+            self = .active
+            return
+        }
+        self = document.deletionMode?.isRecoverable == true ? .archived : .deleted
     }
 }
 

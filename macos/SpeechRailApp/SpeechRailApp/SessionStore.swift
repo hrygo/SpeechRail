@@ -73,7 +73,7 @@ public actor SessionStore {
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
     /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
-    public static let schemaVersion: Int32 = 11
+    public static let schemaVersion: Int32 = 12
 
     private let directory: URL
     private let fileManager: FileManager
@@ -198,6 +198,9 @@ public actor SessionStore {
             }
             if version < 11 {
                 try migrateV10ToV11()
+            }
+            if version < 12 {
+                try migrateV11ToV12()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -2073,7 +2076,7 @@ public actor SessionStore {
     }
 
     public func meetingDocument(id: String) throws -> MeetingDocument? {
-        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, created_at, updated_at FROM meeting_document WHERE id = ? LIMIT 1;"
+        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, deletion_mode, created_at, updated_at FROM meeting_document WHERE id = ? LIMIT 1;"
         return try withStatement(sql) { statement -> MeetingDocument? in
             bind(statement, 1, id)
             guard try step(statement) == SQLITE_ROW else { return nil }
@@ -2082,7 +2085,7 @@ public actor SessionStore {
     }
 
     public func meetingDocument(forSessionID sessionID: String) throws -> MeetingDocument? {
-        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, created_at, updated_at FROM meeting_document WHERE source_session_id = ? LIMIT 1;"
+        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, deletion_mode, created_at, updated_at FROM meeting_document WHERE source_session_id = ? LIMIT 1;"
         return try withStatement(sql) { statement -> MeetingDocument? in
             bind(statement, 1, sessionID)
             guard try step(statement) == SQLITE_ROW else { return nil }
@@ -2099,8 +2102,9 @@ public actor SessionStore {
             occurredAt: columnIsNull(statement, 4) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 4)),
             timezone: columnText(statement, 5),
             deletedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32)),
-            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 7)),
-            updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 8 as Int32))
+            deletionMode: columnText(statement, 7).flatMap(MeetingDeletionMode.init(rawValue:)),
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 8)),
+            updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 9 as Int32))
         )
     }
 
@@ -3909,13 +3913,7 @@ extension SessionStore {
     /// `IF NOT EXISTS`，列已存在会直接报 `duplicate column name`，迁移因此不幂等——
     /// 测试把 `user_version` 拨回去重跑迁移时就会炸。
     private func minutesColumnNames() throws -> Set<String> {
-        try withStatement("PRAGMA table_info(minutes);") { statement in
-            var names: Set<String> = []
-            while try step(statement) == SQLITE_ROW {
-                if let name = columnText(statement, 1) { names.insert(name) }
-            }
-            return names
-        }
+        try tableColumnNames("minutes")
     }
 
     /// v10 → v11：只加列，不回填。
@@ -3931,6 +3929,31 @@ extension SessionStore {
             try execute("ALTER TABLE minutes ADD COLUMN parent_minutes_id TEXT;")
         }
         try execute(Self.schemaV11Delta)
+    }
+
+    /// v11 → v12：给 `meeting_document` 补一列删除档位。
+    ///
+    /// 此前 `deleted_at` 把三档删除压成同一个状态，于是 `MeetingLibraryStatus.archived`
+    /// 永远不会被产出——「撤销归档」那个出口在界面上从来没出现过。
+    ///
+    /// **刻意不回填**：老行是迁移前写的，哪一档删除无从得知，
+    /// 而猜错的方向恰好是危险的那个（对内容已不在的文档谎称可恢复）。
+    /// 空值一律按"不可撤销"处理，代价只是老文档少一个出口。
+    private func migrateV11ToV12() throws {
+        let columns = try tableColumnNames("meeting_document")
+        if !columns.contains("deletion_mode") {
+            try execute("ALTER TABLE meeting_document ADD COLUMN deletion_mode TEXT;")
+        }
+    }
+
+    private func tableColumnNames(_ table: String) throws -> Set<String> {
+        try withStatement("PRAGMA table_info(\(table));") { statement in
+            var names: Set<String> = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.insert(name) }
+            }
+            return names
+        }
     }
 
     /// v7 → v8 的 DDL（MA-15）：FTS5 全文索引与事务 outbox。
@@ -4843,10 +4866,13 @@ extension SessionStore {
         do {
             // 第一步：不可使用。tombstone 一落，检索、导出、问答都看不见它，
             // 后面的清理哪怕中途出问题也不会让"已删"的东西继续被用。
-            try withStatement("UPDATE meeting_document SET deleted_at = ?, updated_at = ? WHERE id = ?;") { statement in
+            try withStatement("""
+            UPDATE meeting_document SET deleted_at = ?, deletion_mode = ?, updated_at = ? WHERE id = ?;
+            """) { statement in
                 bind(statement, 1, now)
-                bind(statement, 2, now)
-                bind(statement, 3, documentID)
+                bind(statement, 2, mode.rawValue)
+                bind(statement, 3, now)
+                bind(statement, 4, documentID)
                 try step(statement)
             }
 
@@ -4922,13 +4948,19 @@ extension SessionStore {
         // 对一份没归档过的文档执行 UPDATE 是一次什么也没改的空操作，
         // 返回 true 会让界面说「已撤销归档」而实际什么都没发生——
         // 那比说"这份记录不是归档态，撤不了"坏得多。
-        guard let document = try meetingDocument(id: documentID), document.deletedAt != nil else {
+        // 档位也要对：移除转录/完整删除的文档 `deleted_at` 同样非空，
+        // 但内容已经不在库里，撤回来是个空壳——界面却会说
+        // 「已撤销归档，这场会回到搜索和导出里」。
+        guard let document = try meetingDocument(id: documentID),
+              document.deletedAt != nil,
+              document.deletionMode?.isRecoverable == true
+        else {
             return false
         }
         try execute("BEGIN IMMEDIATE;")
         do {
             try withStatement(
-                "UPDATE meeting_document SET deleted_at = NULL, updated_at = ? WHERE id = ?;"
+                "UPDATE meeting_document SET deleted_at = NULL, deletion_mode = NULL, updated_at = ? WHERE id = ?;"
             ) { statement in
                 bind(statement, 1, Date().timeIntervalSince1970)
                 bind(statement, 2, documentID)
@@ -4949,10 +4981,13 @@ extension SessionStore {
     /// 这次删除/归档够不够撤销。只有归档够。
     public func meetingDeletionIsRecoverable(documentID: String) throws -> Bool {
         guard let document = try meetingDocument(id: documentID) else { return false }
-        // 数据都还在就说明只被归档过；正文被删过的文档不可能恢复原样。
-        let lines = try scalarInt("SELECT COUNT(*) FROM line WHERE session_id = ?;", args: [.text(document.sourceSessionID ?? "")]) ?? 0
-        let minutes = try scalarInt("SELECT COUNT(*) FROM minutes WHERE session_id = ?;", args: [.text(document.sourceSessionID ?? "")]) ?? 0
-        return lines > 0 || minutes == 0
+        // 读**记下来的档位**，不去数行。
+        //
+        // 原先靠"转录行还在吗"推断，方向恰好是危险的那个：一场从头到尾没录到
+        // 任何东西的会议（用户开了但一句话没说）行数为 0，会被判成"正文被删过、
+        // 撤不了"，而它其实只是被归档了。档位是删除那一刻就确定的事实，
+        // 不该事后从残留里猜。
+        return document.deletionMode?.isRecoverable == true
     }
 
     private func deleteRows(_ sql: String, _ argument: String) throws -> Int {
@@ -6015,7 +6050,7 @@ extension SessionStore {
         WHERE 1 = 1 \(predicate.sql)
         ORDER BY COALESCE(d.occurred_at, d.created_at) DESC, d.id ASC
         """
-        let pageRows = try withStatement("SELECT d.id, d.source_session_id, d.title, d.occurred_at, d.project_id, d.deleted_at \(from) LIMIT ? OFFSET ?;")
+        let pageRows = try withStatement("SELECT d.id, d.source_session_id, d.title, d.occurred_at, d.project_id, d.deleted_at, d.deletion_mode \(from) LIMIT ? OFFSET ?;")
         { statement -> [MeetingLibraryRow] in
             var index: Int32 = 1
             for value in predicate.bindings {
@@ -6026,7 +6061,16 @@ extension SessionStore {
             bind(statement, index + 1, max(0, offset))
             var rows: [MeetingLibraryRow] = []
             while try step(statement) == SQLITE_ROW {
-                let deletedAtNull = columnIsNull(statement, 5)
+                // 归档与另两档在**列表**里也必须分得开：只有归档还能撤销，
+                // 合并成一个状态就等于把出口一起收走（旧实现正是这么做的，
+                // 结果 `MeetingLibraryStatus.archived` 从来没被产出过）。
+                let document = MeetingDocument(
+                    id: "",
+                    deletedAt: columnIsNull(statement, 5)
+                        ? nil
+                        : Date(timeIntervalSince1970: columnDouble(statement, 5)),
+                    deletionMode: columnText(statement, 6).flatMap(MeetingDeletionMode.init(rawValue:))
+                )
                 rows.append(MeetingLibraryRow(
                     id: columnText(statement, 0) ?? "",
                     sessionID: columnText(statement, 1),
@@ -6034,10 +6078,7 @@ extension SessionStore {
                     occurredAt: columnIsNull(statement, 3) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 3)),
                     projectID: columnText(statement, 4),
                     projectName: nil,
-                    // 归档与删除都在 meeting_document 上留 deleted_at；
-                    // 读出来的那一刻已经分不出是哪一种，所以这里只报"不可用"，
-                    // 具体档位由删除入口自己知道，不在这里猜。
-                    status: deletedAtNull ? .active : .deleted,
+                    status: MeetingLibraryStatus(document: document),
                     hasMinutes: false, needsReviewCount: 0, openActionCount: 0
                 ))
             }
@@ -6178,7 +6219,7 @@ extension SessionStore {
     /// 而标题来自 A、内容来自 B 的组合比空着更糟。
     public func meetingReviewSnapshot(documentID: String) throws -> MeetingReviewSnapshot? {
         guard let document = try meetingDocument(id: documentID) else { return nil }
-        let status: MeetingLibraryStatus = document.deletedAt == nil ? .active : .deleted
+        let status = MeetingLibraryStatus(document: document)
         let page = try knowledgeItems(
             filter: KnowledgeItemFilter(documentIDs: [documentID]),
             scope: MeetingKnowledgeScope(documentIDs: [documentID], includesArchived: true),

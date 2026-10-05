@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -48,25 +49,31 @@ final class MeetingLibraryDeletionTests: XCTestCase {
 
     /// 造一场带转录与纪要的会，产出可直接归档/删除的文档 id。
     @discardableResult
-    private func makeMeeting(title: String) async throws -> String {
+    private func makeMeeting(title: String, withTranscript: Bool = true) async throws -> String {
         let store = try requireStore()
         let record = try await store.createSession(
             SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone, title: title)
         )
-        _ = try await store.appendLine(
-            LineDraft(
-                sessionID: record.id, role: .speaker, text: "先确认这几点。",
-                source: .microphone, tStart: 0, status: .final
-            ),
-            id: "\(record.id)-line"
-        )
+        if withTranscript {
+            _ = try await store.appendLine(
+                LineDraft(
+                    sessionID: record.id, role: .speaker, text: "先确认这几点。",
+                    source: .microphone, tStart: 0, status: .final
+                ),
+                id: "\(record.id)-line"
+            )
+        }
+        // 没有转录就封不出快照（没什么可封的），那条路径返回 nil 是对的。
         let sealed = try await store.sealMeetingSource(sessionID: record.id)
-        let snapshotID = try XCTUnwrap(sealed?.id)
+        let snapshotID = sealed?.id
         let existing = try await store.meetingDocument(forSessionID: record.id)
         let document = try XCTUnwrap(existing?.id)
         try await store.updateMeetingDocument(
             id: document, title: .some(title), projectID: .some(nil), occurredAt: .some(Date())
         )
+        // 「一场会开了但什么都没录上」到文档这一层就够了：没有转录就没有可锚定的
+        // 来源单元，硬造纪要只会造出指着一行不存在的东西。
+        guard withTranscript else { return document }
         let units = [MinutesSourceUnit(
             id: "u1", lineID: "\(record.id)-line", ordinal: 1,
             speaker: "张三", text: "先确认这几点。", startSeconds: 0
@@ -85,7 +92,9 @@ final class MeetingLibraryDeletionTests: XCTestCase {
         ) else {
             throw XCTSkip("候选构造失败")
         }
-        _ = try await store.enqueueMinutes(sessionID: record.id, model: nil, promptChars: 20, snapshotID: snapshotID)
+        _ = try await store.enqueueMinutes(
+            sessionID: record.id, model: nil, promptChars: 20, snapshotID: snapshotID
+        )
         let claimed = try await store.claimMinutes(sessionID: record.id, lease: 600)
         let row = try XCTUnwrap(claimed)
         let revisionIDs = try await store.latestRevisionIDsByLine(sessionID: record.id)
@@ -226,5 +235,118 @@ final class MeetingLibraryDeletionTests: XCTestCase {
         XCTAssertNil(model.lastReport, "失败不得同时报成功")
         XCTAssertNil(model.pendingDocumentID, "失败之后不能卡在「执行中」")
         XCTAssertEqual(model.rows.count, 1, "失败的删除不得牵连其它会议")
+    }
+
+    // MARK: - 归档与另两档必须分得开（否则「撤销归档」是死按钮）
+
+    /// 归档之后状态必须是 `.archived`，撤销入口才可能出现。
+    ///
+    /// 这一条此前是**红的**，而且红得彻底：`meeting_document` 只存 `deleted_at`，
+    /// 三档删除在库里长得一模一样，于是 `MeetingLibraryStatus.archived` 从来没被
+    /// 产出过——`MeetingKnowledgeLibraryView` 里那个 `status == .archived` 的分支
+    /// 永远不成立，「撤销归档」按钮从来没在界面上出现过。
+    /// 「归档（可恢复）」这一档挂了好几个里程碑，一直是个不能兑现的承诺。
+    func testArchivedDocumentReportsArchivedStatusInListAndDetail() async throws {
+        let store = try requireStore()
+        let document = try await makeMeeting(title: "发布评审")
+        try await store.deleteMeetingKnowledge(documentID: document, mode: .archive)
+
+        let loaded = try await store.meetingReviewSnapshot(documentID: document)
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertEqual(
+            snapshot.status, .archived,
+            "归档件必须报 archived；报 deleted 就等于把撤销出口一起收走"
+        )
+
+        let page = try await store.meetingLibraryPage(includesArchived: true)
+        let row = try XCTUnwrap(page.rows.first { $0.id == document })
+        XCTAssertEqual(
+            row.status, .archived,
+            "列表与详情必须一致，否则用户在列表看到的是另一个状态"
+        )
+    }
+
+    /// 移除转录的文档**不得**报归档：内容已经不在库里，撤回来是空壳。
+    func testRemoveTranscriptDocumentIsNotReportedAsArchived() async throws {
+        let store = try requireStore()
+        let document = try await makeMeeting(title: "发布评审")
+        try await store.deleteMeetingKnowledge(documentID: document, mode: .removeTranscript)
+
+        let loaded = try await store.meetingReviewSnapshot(documentID: document)
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertEqual(snapshot.status, .deleted, "转录已被移除，不该自称还能撤销")
+        let recoverable = try await store.meetingDeletionIsRecoverable(documentID: document)
+        XCTAssertFalse(recoverable)
+        let restored = try await store.restoreMeetingKnowledge(documentID: document)
+        XCTAssertFalse(
+            restored,
+            "对内容已不在的文档谎称撤销成功，比说撤不了坏得多"
+        )
+    }
+
+    /// 一场**从头到尾没录到任何东西**的会议被归档，仍然是可撤销的。
+    ///
+    /// 这条钉的是把 `meetingDeletionIsRecoverable` 从"数转录行"改成"读档位"。
+    /// 旧写法是 `lines > 0 || minutes == 0`：这种会议行数为 0、纪要存在，
+    /// 于是被判成"正文被删过、撤不了"——恰好把最该能撤的那一种判成不能撤。
+    /// 档位是删除那一刻就定下来的事实，不该事后从残留里猜。
+    func testArchivingASilentMeetingIsStillRecoverable() async throws {
+        let store = try requireStore()
+        let document = try await makeMeeting(title: "空会", withTranscript: false)
+        try await store.deleteMeetingKnowledge(documentID: document, mode: .archive)
+
+        let recoverable = try await store.meetingDeletionIsRecoverable(documentID: document)
+        XCTAssertTrue(
+            recoverable,
+            "没录到东西不等于被删过内容；这场会确实可以撤回来"
+        )
+        let restored = try await store.restoreMeetingKnowledge(documentID: document)
+        XCTAssertTrue(restored)
+        let loaded = try await store.meetingReviewSnapshot(documentID: document)
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertEqual(snapshot.status, .active, "撤销之后要回到可用态")
+        let reloaded = try await store.meetingDocument(id: document)
+        let document_ = try XCTUnwrap(reloaded)
+        XCTAssertNil(document_.deletionMode, "撤销之后不该还留着档位")
+    }
+
+    /// 真的从 v11 升到 v12：列要补上，老数据一行不少，
+    /// 而**迁移前归档的老文档拿不到撤销入口**——这是刻意的。
+    ///
+    /// 老行是迁移之前写的，用的是哪一档删除无从得知。猜错的方向恰好危险的那个：
+    /// 对一份转录早已被移除的文档谎称可恢复，用户点下去拿回一个空壳。
+    /// 宁可让老文档少一个出口，也不能给错的那个。代价写在这里，别日后当成 bug 顺手"修"。
+    func testUpgradingFromV11KeepsRowsAndGivesOldArchivesNoUndo() async throws {
+        let store = try requireStore()
+        let document = try await makeMeeting(title: "迁移前归档的会")
+        try await store.deleteMeetingKnowledge(documentID: document, mode: .archive)
+        await store.close()
+
+        // 把库按回 v11 的形状：去掉那列、版本号退回 11。
+        let file = try XCTUnwrap(directory).appendingPathComponent(SessionStore.fileName)
+        var pointer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(file.path, &pointer, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        for sql in [
+            "ALTER TABLE meeting_document DROP COLUMN deletion_mode;",
+            "PRAGMA user_version = 11;"
+        ] {
+            XCTAssertEqual(sqlite3_exec(pointer, sql, nil, nil, nil), SQLITE_OK, sql)
+        }
+        sqlite3_close_v2(pointer)
+
+        let reopened = SessionStore(directory: try XCTUnwrap(directory))
+        try await reopened.open()
+        self.store = nil
+
+        let upgraded = try await reopened.meetingDocument(id: document)
+        let row = try XCTUnwrap(upgraded, "迁移不许丢文档")
+        XCTAssertNotNil(row.deletedAt, "老行仍然是归档态")
+        XCTAssertNil(row.deletionMode, "迁移不猜档位，老行留空")
+        let recoverable = try await reopened.meetingDeletionIsRecoverable(documentID: document)
+        XCTAssertFalse(
+            recoverable,
+            "档位不明的老归档件不得给撤销出口——宁可少一个出口，不能给错的那个"
+        )
+        await reopened.close()
     }
 }

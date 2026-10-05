@@ -537,8 +537,10 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
-        // 当前 schema 已到 v11（MA-11 纪要正文出处与血缘）。这里钉的是"新库直建到当前形状"。
-        XCTAssertEqual(SessionStore.schemaVersion, 11)
+        // 当前 schema 已到 v12（v12 = meeting_document 补删除档位）。
+        // 这里钉的是"新库直建到当前形状"——版本号是刻意写死的：
+        // 每次迁移都必须有人看一眼、把这个数字往上抬，而不是悄悄跟着走。
+        XCTAssertEqual(SessionStore.schemaVersion, 12)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         XCTAssertEqual(versions.count, 1)
         XCTAssertEqual(versions.first?.body, "# 迁移前纪要")

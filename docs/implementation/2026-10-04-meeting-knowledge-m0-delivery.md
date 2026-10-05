@@ -71,6 +71,7 @@ base: "origin/main @ d72535c7"
 | 「恢复只做到预演，没有做切换」 | **不构成缺口**。验收 5 的原文是「恢复到临时新库后核对」，预演正是它要的东西；破坏性的库切换不在验收范围内 | 实测（`testRestorePreviewReadsBackDocumentsVersionsAndActions` 覆盖文档/版本/引用/行动项四项） |
 | 「并发编辑没有守卫」 | **不适用**。产品边界是单人本机服务，不存在两人同时改一场会 | 实测（项目约束为单人 Apple Silicon Mac） |
 | 「『采用这一版』只是回调占位」 | **已闭环**，见「版本对比与采用」一节（走 `adoptMinutes`，且草稿存不下去就不采用） | 实测 |
+| （此前未被发现） | **本分支自己造的缺陷**：`meeting_document` 只存 `deleted_at`，三档删除压成同一状态，`MeetingLibraryStatus.archived` 从未被产出，「撤销归档」按钮从来没出现过。已用 schema v12 的 `deletion_mode` 分开 | 实测（读代码发现 + 回归测试红/绿反证 + 真实 v11→v12 升级测试） |
 
 ### 四、已充分证据、无需再记的验收项
 
@@ -2175,3 +2176,84 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
 - 该用例走的是**生成器层**：它证明"没有可用纪要版本、文字记录仍在"，但没有驱动
   `MeetingSession.finishAndSummarize()` 的完整收尾链。会中封存与该路径的交互未覆盖。
 - 界面呈现（横幅文案、跳转设置）只经代码阅读确认，本轮无 UI 自动化或人工走查授权。
+
+## M1 增量：把「归档」和「删除」在库里分开（v12 / MA-18 收尾）
+
+### 做了什么
+
+这一条是本分支自己造出来的缺陷，且是**承诺兑现不了**的那一类：
+
+`meeting_document` 只存 `deleted_at`，三档删除（归档 / 移除转录 / 完整删除）在库里
+长得一模一样。读出来之后一律映射成 `MeetingLibraryStatus.deleted`，于是
+**`.archived` 这个状态从来不会被产出**——`MeetingKnowledgeLibraryView` 里那个
+`if snapshot.status == .archived` 永远不成立，「撤销归档」按钮从来没在界面上出现过。
+「归档（可恢复）」这一档挂了好几个里程碑，一直是个不能兑现的承诺。
+
+同一处还坐着两个同源的坏判断：
+
+- `restoreMeetingKnowledge` 只看 `deleted_at != nil`，所以对**移除过转录**的文档
+  也会返回"撤销成功"，界面说「已撤销归档，这场会回到搜索和导出里」，回来的却是空壳。
+- `meetingDeletionIsRecoverable` 靠数转录行来推断（`lines > 0 || minutes == 0`）。
+  一场开了但**一个字都没录到**的会议行数为 0、纪要存在，于是被判成"正文被删过、
+  撤不了"——恰好把最该能撤的那一种判成不能撤。
+
+改法是**把档位记下来**，不再事后从残留里猜：
+
+- `meeting_document` 增列 `deletion_mode TEXT`（schema **v11 → v12**）；
+- `MeetingDocument.deletionMode` + `MeetingLibraryStatus.init(document:)` 单一出口；
+- 落 tombstone 时写入档位，撤销时清空；
+- `restoreMeetingKnowledge` 改为要求 `deletionMode?.isRecoverable == true`；
+- `meetingDeletionIsRecoverable` 改为读档位，不再数行；
+- 列表与详情两条读路径共用同一个 `init(document:)`，不会各说各话。
+
+### 回归证据（2026-10-06）
+
+`MeetingLibraryDeletionTests` **11 项全绿**，新增 4 项：
+
+- `testArchivedDocumentReportsArchivedStatusInListAndDetail`——归档件在**列表与详情**
+  都报 `.archived`（修复前红）；
+- `testRemoveTranscriptDocumentIsNotReportedAsArchived`——移除转录的不得报归档，
+  且 `restoreMeetingKnowledge` 必须返回 `false`（修复前红：它返回 `true`）；
+- `testArchivingASilentMeetingIsStillRecoverable`——零转录的会议被归档**仍然可撤销**，
+  撤销后回到 `.active` 且档位被清空（修复前红：数行推断判它撤不了）；
+- `testUpgradingFromV11KeepsRowsAndGivesOldArchivesNoUndo`——**真的**把库按回 v11 形状
+  （`DROP COLUMN` + `PRAGMA user_version=11`）再打开：列补上、老行一行不少、
+  老归档件**拿不到撤销入口**。
+
+反证已核对：把 `MeetingLibraryStatus.init(document:)` 改回旧的三档压平行为后，
+前两项变红（`Executed 10 tests, with 2 failures`）。
+
+`MeetingMinutesVersioningTests` 里那行 `XCTAssertEqual(SessionStore.schemaVersion, 11)`
+同步抬到 12——它是刻意写死的tripwire，每次迁移都要有人看一眼再抬。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1029 项**（上一节 1025 +4）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移说明
+
+- **v11 → v12 只加一列，不回填**。`ALTER TABLE meeting_document ADD COLUMN deletion_mode TEXT`。
+- 老行（迁移前写的）该列为空，**一律按"不可撤销"处理**。
+  这是刻意的：老行是用哪一档删除的无从得知，猜错的方向恰好危险的那个——
+  对一份转录早已被移除的文档谎称可恢复。代价是老文档少一个撤销出口，
+  这一点写进测试注释，别日后当成 bug 顺手"修"。
+- 新备份 manifest 的 `schemaVersion` 随之变成 12；旧备份（11 及以下）仍按既有规则
+  被 `restorePreview` 判为不兼容而拒绝，不会被误恢复到新库。
+
+### 回退说明
+
+- 代码回退：`schemaVersion` 改回 11、删掉 `migrateV11ToV12` 与 `tableColumnNames`、
+  `MeetingDocument.deletionMode`、`MeetingLibraryStatus.init(document:)`，
+  两处读路径与两处删除/撤销改回旧写法。**列可以留着不用**（SQLite 允许冗余列），
+  所以不需要动用户数据即可回退。
+- 已写入 `deletion_mode` 的行在回退后不再被读取，等同于 NULL，行为与迁移前一致。
+- 不提供"把列删掉"的回退：删列要重建表，风险远大于留着不用。
+
+### 未验证事项与已知边界
+
+- **界面仍未真机走查**：「撤销归档」按钮现在在数据上可达了，但按钮是否真的出现在
+  「更多」菜单里、点了之后回执与列表刷新是否如预期，本轮无 UI 自动化或人工授权，未验证。
+- 迁移测试覆盖的是 **v11 → v12 单步**。从更早的版本一路升上来（v8/v9/v10 → v12）
+  由既有的"新库直建到当前形状"用例间接覆盖，但**没有逐级真实旧库**的升级回归。
+- `deletion_mode` 是自由文本列，读取时 `flatMap(MeetingDeletionMode.init(rawValue:))`：
+  认不出的值按"不可撤销"处理（与 NULL 同向），不会崩、也不会给错出口。
