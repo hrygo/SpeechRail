@@ -1047,6 +1047,18 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 补一段用户自己写的话（验收 2 的第四档来源）。另存一版，出处标 `.userSupplement`。
+    @discardableResult
+    public func saveUserSupplement(
+        sessionID: String,
+        editingMinutesID: String,
+        supplement: String
+    ) async throws -> MinutesVersion {
+        try await store.saveUserSupplement(
+            sessionID: sessionID, editingMinutesID: editingMinutesID, supplement: supplement
+        )
+    }
+
     /// 撤销一次编辑：拿回上一版正文，另存一版（MA-11 / MC-47）。
     public func undoMinutesEdit(minutesID: String) async throws -> MinutesVersion? {
         try await store.undoMinutesEdit(minutesID: minutesID)

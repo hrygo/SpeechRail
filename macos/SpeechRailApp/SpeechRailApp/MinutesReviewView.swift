@@ -15,6 +15,9 @@ struct MinutesReviewView: View {
     /// 中文输入法组字中。SwiftUI 没有直接暴露这个状态，
     /// 由外层输入法适配层在需要时覆盖——这里留出接口而不是假装测不到。
     @State private var isComposing = false
+    /// 「补充说明」面板。空字符串 = 没打开。
+    @State private var supplementDraft = ""
+    @State private var supplementSheetPresented = false
 
     init(coordinator: SessionCoordinator, sessionID: String, version: MinutesVersion) {
         _model = State(initialValue: MinutesReviewModel(
@@ -30,6 +33,38 @@ struct MinutesReviewView: View {
             Divider()
             actionBar
         }
+        .sheet(isPresented: $supplementSheetPresented) { supplementSheet }
+    }
+
+    /// 补一段用户自己的话。**先说清会发生什么**：另存一版、标成「你补充」、
+    /// **不给它安转录来源**——不能当成会上说过的话。
+    private var supplementSheet: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("补充一段说明")
+                .font(.headline)
+            Text("这段会作为「你补充」另存为一版。它没有转录来源，所以不会挂引用——不能当成会上说过的话。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $supplementDraft)
+                .font(.body)
+                .frame(minHeight: 140)
+                .accessibilityLabel("补充说明正文")
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { supplementSheetPresented = false }
+                Button("补充") {
+                    Task { if await model.supplement(supplementDraft) { supplementSheetPresented = false } }
+                }
+                .disabled(
+                    supplementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || model.isSaving
+                )
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 420, minHeight: 300, alignment: .leading)
     }
 
     private var header: some View {
@@ -141,6 +176,16 @@ struct MinutesReviewView: View {
             Button("撤销") { model.revertToLastSaved() }
                 .disabled(!model.hasUnsavedChanges)
                 .help("回到上一次成功存进去的内容")
+            Button("补充说明…") {
+                supplementDraft = ""
+                supplementSheetPresented = true
+            }
+            .disabled(model.isSaving || model.hasUnsavedChanges)
+            .help(
+                model.hasUnsavedChanges
+                    ? "先把当前改动存下来，再补说明"
+                    : "补一段你自己写的话，另存为一版"
+            )
             Button(model.isSaving ? "正在存…" : "保存") {
                 Task { _ = await model.save() }
             }

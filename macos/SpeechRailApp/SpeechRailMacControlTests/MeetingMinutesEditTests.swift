@@ -329,4 +329,68 @@ final class MeetingMinutesEditTests: XCTestCase {
         let adoptedVersion = try await store.minutesVersion(id: edited.id)
         XCTAssertTrue(adoptedVersion?.isAccepted ?? false)
     }
+
+    // MARK: - 用户补充（验收 2 的第四档来源）
+
+    /// 验收 2 要求区分「原始转录、人工修订、AI 归纳、**用户补充**」四档。
+    /// 第四档此前**产不出来**：`user_supplement` 这个字面量全仓不存在，
+    /// 枚举有、标题有、复核界面还会渲染「这段是你补充的」，但没有代码路径写得进去。
+    func testSupplementProducesTheFourthOrigin() async throws {
+        let store = try requireStore()
+        let fixture = try await makeMeeting(decisions: ["发布窗口定在九月"])
+        let supplemented = try await store.saveUserSupplement(
+            sessionID: fixture.sessionID,
+            editingMinutesID: fixture.minutesID,
+            supplement: "客户已经口头同意顺延两周。"
+        )
+        XCTAssertEqual(supplemented.bodyOrigin, .userSupplement, "补写的这一档必须能被标出来")
+        XCTAssertTrue(supplemented.bodyOrigin.isUserAuthored)
+
+        let body = try XCTUnwrap(supplemented.body)
+        XCTAssertTrue(body.contains("发布窗口定在九月"), "AI 原来写的内容不能被补充冲掉")
+        XCTAssertTrue(body.contains("客户已经口头同意顺延两周"), "补充内容要真的进正文")
+
+        // 改过的那一版还在——补充也是另存一版，不是覆盖。
+        let original = try await store.minutesVersion(id: fixture.minutesID)
+        XCTAssertEqual(original?.bodyOrigin, .ai)
+    }
+
+    /// 补充的话**没有转录来源，就不许挂引用**（方案 §302）。
+    /// 把邻句的引用挂到用户自己写的话上，等于替用户伪造出处。
+    func testSupplementInheritsNoCitation() async throws {
+        let store = try requireStore()
+        let fixture = try await makeMeeting(decisions: ["发布窗口定在九月"])
+        let supplemented = try await store.saveUserSupplement(
+            sessionID: fixture.sessionID,
+            editingMinutesID: fixture.minutesID,
+            supplement: "客户已经口头同意顺延两周。"
+        )
+        let items = try await store.minutesItems(minutesID: supplemented.id)
+        XCTAssertEqual(
+            items.count, 1,
+            "补充的那句不该变成一条带引用的结论——它不是会上说过的"
+        )
+        XCTAssertEqual(items.first?.text, "发布窗口定在九月")
+        XCTAssertFalse(
+            items.first?.anchors.isEmpty ?? true,
+            "AI 原来那条一字未改，对原句的引用仍然成立"
+        )
+    }
+
+    /// 空的补充不写进去——写一版空壳只会让版本链多一跳。
+    func testEmptySupplementIsRefused() async throws {
+        let store = try requireStore()
+        let fixture = try await makeMeeting(decisions: ["发布窗口定在九月"])
+        do {
+            _ = try await store.saveUserSupplement(
+                sessionID: fixture.sessionID,
+                editingMinutesID: fixture.minutesID,
+                supplement: "   \n  "
+            )
+            XCTFail("空补充必须拒绝")
+        } catch {
+            let versions = try await store.minutesVersions(sessionID: fixture.sessionID)
+            XCTAssertEqual(versions.count, 1, "拒绝之后不该凭空多一版")
+        }
+    }
 }

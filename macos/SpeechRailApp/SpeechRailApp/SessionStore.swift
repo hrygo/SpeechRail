@@ -6548,7 +6548,8 @@ extension SessionStore {
     public func saveUserMinutesEdit(
         sessionID: String,
         editingMinutesID: String,
-        body: String
+        body: String,
+        origin originOverride: MinutesBodyOrigin? = nil
     ) throws -> MinutesVersion {
         guard let source = try minutesVersion(id: editingMinutesID) else {
             throw SessionStoreError.statementFailed("找不到要改的这一版纪要")
@@ -6567,9 +6568,11 @@ extension SessionStore {
         let now = Date()
         let normalizedBody = KnowledgeIdentity.normalized(body)
         // 没动过几个字就仍然算 AI 整理；动过就是"你改过"。
-        let origin: MinutesBodyOrigin = KnowledgeIdentity.normalized(source.body ?? "") == normalizedBody
-            ? source.bodyOrigin
-            : .userEdited
+        let origin: MinutesBodyOrigin = originOverride ?? (
+            KnowledgeIdentity.normalized(source.body ?? "") == normalizedBody
+                ? source.bodyOrigin
+                : .userEdited
+        )
 
         var version = 0
         try execute("BEGIN IMMEDIATE;")
@@ -6616,6 +6619,44 @@ extension SessionStore {
             throw SessionStoreError.statementFailed("新版本没有写进去")
         }
         return stored
+    }
+
+    /// 补一段**用户自己写的话**（验收 2 的第四档来源）。
+    ///
+    /// 与 `saveUserMinutesEdit` 的区别在**出处**，不在动作：
+    /// 改 AI 原来写的是「你改过」，补一段 AI 从没写过的内容是「你补充」。
+    /// 两者都**不继承引用**——补写的话没有转录来源，把邻句的引用挂上去
+    /// 等于替用户伪造出处（方案 §302：用户新增的事实若没有转录来源，
+    /// 标为"用户补充"，不从邻句继承引用）。
+    ///
+    /// 单独记这一档不是为了好看：`MinutesBodyOrigin.userSupplement` 此前
+    /// **没有任何代码路径能产出它**——枚举有、标题有、`isUserAuthored` 收录了它、
+    /// 复核界面还会渲染「这段是你补充的」，但用户补不出这段文字。
+    /// 验收 2 要求区分的四档来源里，最后一档是空的。
+    @discardableResult
+    public func saveUserSupplement(
+        sessionID: String,
+        editingMinutesID: String,
+        supplement: String
+    ) throws -> MinutesVersion {
+        let trimmed = supplement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SessionStoreError.statementFailed("补充不能是空的")
+        }
+        guard let source = try minutesVersion(id: editingMinutesID) else {
+            throw SessionStoreError.statementFailed("找不到要补充的那一版纪要")
+        }
+        let base = (source.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // 标题写清楚这是谁说的：混进 AI 正文里不加标记，
+        /// 三个月后没人分得清哪段是会议结论、哪段是自己加的。
+        let block = "## 你补充的说明\n\n" + trimmed
+        let body = base.isEmpty ? block : base + "\n\n" + block
+        return try saveUserMinutesEdit(
+            sessionID: sessionID,
+            editingMinutesID: editingMinutesID,
+            body: body,
+            origin: .userSupplement
+        )
     }
 
     /// 撤销一次编辑：拿回被改那一版的正文，**仍然写一个新版本**。

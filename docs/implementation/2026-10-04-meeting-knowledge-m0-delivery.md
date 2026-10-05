@@ -81,7 +81,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 | 13 | **标签（MA-13）与项目没有入口**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` 零消费方；`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方 | 实测（同上 + 读库页视图） | 库页视图的文档注释写着"高级操作（标签、项目、删除、导出）留在更多菜单"，四项里此前只有"删除"存在。知识沉淀这条闭环在用户侧没有落点 |
-| 14 | **用户补充（验收 2）与执行状态/决策演进（MA-14）没有入口**：`meetingSupplements`、`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` 零消费方 | 实测（同上） | 验收 2 要求区分"原始转录/人工修订/AI 归纳/**用户补充**"，四档里最后一档用户现在没法产出；决策演进链只能在库里看 |
+| 14 | **执行状态与决策演进（MA-14）没有入口**：`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` 零消费方 | 实测（同上） | 决策演进链只能在库里看。**本条上一版写错了**：当时把 `meetingSupplements` 也归到"用户补充"，那是两回事——它读的是 `inner_os_exchange`（私密问答），对应验收 4 的「私密问答默认不进入纪要」与 MC-43，不是验收 2 的第四档来源。验收 2 的「用户补充」已单独处理，见第三节第十一处 |
+| 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
 
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
@@ -97,6 +98,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 | （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
 | （此前未被发现，第六处） | **全文检索做完了，搜索框却够不着**：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`（14 项测试全绿），但库页谓词只 LIKE 标题与项目名，`excerpt` 无任何消费者，生产代码里唯一调用者是 `SessionCoordinator` 透传——**整条 MA-15 通路没有界面入口**。已把正文检索接进 `libraryPredicate` | 实测（沿 `excerpt` 消费者回查发现 + 回归测试红/绿反证；方案 §10.1 / MC-54 / MC-75 / 第 118 行均要求检索入口） |
+| （同上，第十一处） | **验收 2 的第四档来源产不出来**。`MinutesBodyOrigin.userSupplement` 有枚举、有标题「你补充」、被 `isUserAuthored` 收录、复核界面还会渲染「这段是你补充的」——但 `user_supplement` 这个字面量**全仓不存在**，没有任何代码路径写得进去。四档来源里最后一档是空的。已补 `saveUserSupplement` 与复核面板的「补充说明…」 | 实测（`grep user_supplement` 零命中；红/绿反证：出处一放开就退化成 `userEdited`，正是那条失败形态） |
 | （同上，第十处） | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方。store 层 22 项测试（往返、冲突、幂等、路径穿越、执行状态）全绿，却没有一条路通向用户 | 实测（同上 + 读 `MeetingKnowledgeArchiveTests` 确认覆盖的是 store 层） | 已接进库页：导出归档包（完整归档／分享包分开）与导入（先预检、有真冲突不给导入按钮）。**新补的是 model 层测试**——store 那 22 项全都自己构造 `KnowledgeArchiveSelection`，"谁来填 minutesID"替换掉不会有一条变红 |
 | （同上，第九处，并更正第 12 条） | **App 能做出的备份，App 自己恢复不了**。设置页「备份记录库」调的是 `backup(to:)`——`VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`；而恢复只认「目录 + 库文件 + 清单」，缺清单明确拒绝。用户照着 App 的按钮做完备份，恢复不了自己刚做的那份。上一版总账把它误记成"备份没有入口"，是错的：按钮一直在，坏的是它产出的东西。已改走 `exportBackup(to:)`，并新增恢复预演入口 | 实测（沿 `backup(to:)` 与 `restorePreview` 两条生产路径对读发现；新用例从生产路径出发做红/绿证明，不是手工拼目录） |
 | （同上，第七处） | **检索只给会议名，不给证据**。验收 4 是"返回对应会议**与证据**"，上一条把"会议"接通了，`excerpt` 却仍无消费者——搜出一场会，用户还是不知道命中在哪句话上。已接上：行内显示命中的原话，转录原话优先于纪要正文，标题命中不硬凑 | 实测（回归测试红/绿反证；两条"不过度生成"护栏用例全程绿） |
@@ -2905,3 +2907,86 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
   ——那需要一个单独的"保留本机这份"出口，本轮没做。
 - 分享包的往返**仍然不是完整还原**（总账第 8 条），菜单里的文案已按实情写，
   没有把它说成"完整归档"。
+
+## M1 增量：验收 2 的第四档来源，此前产不出来
+
+### 先更正上一轮的错误
+
+上一节的总账第 14 条把 `meetingSupplements` 归进了「用户补充（验收 2）」。**这是错的。**
+
+`meetingSupplements(snapshotID:)` 读的是 `inner_os_exchange`——**私密问答**，
+对应的是验收 4 的「私密问答默认不进入纪要」和 MC-43 那条「用户只选择私密问答中
+一句加入补充」。它和验收 2 的第四档来源是两件不同的事，我上一次扫到它时
+按名字归了类，没读实现。
+
+### 真正的问题：第四档是空的
+
+验收 2 要求区分「原始转录、人工修订、AI 归纳、**用户补充**」四档。
+去查第四档能不能产出，结论是**不能**：
+
+- `MinutesBodyOrigin.userSupplement` 有枚举；
+- `title` 是「你补充」；
+- `isUserAuthored` 收录了它；
+- `MinutesReviewModel` 还会渲染「这段是你补充的」；
+- 而 `user_supplement` 这个字面量**全仓不存在**。
+
+`saveUserMinutesEdit` 只会产出两档：正文逐字未变则沿用 `source.bodyOrigin`，
+变了就是 `.userEdited`。**没有任何路径写得进 `.userSupplement`。**
+
+这与 `MeetingLibraryStatus.archived` 是同一类——一个声明出来、有标题、
+被界面渲染，却没有任何生产者。和前几处一样，测试全绿也证明不了它存在。
+
+### 这一轮做的
+
+`saveUserSupplement(sessionID:editingMinutesID:supplement:)`：
+把用户写的那段作为 `## 你补充的说明` 追加进正文，另存一版，出处标 `.userSupplement`。
+
+- **补写与改写分得开**：改 AI 原来写的是「你改过」，补一段 AI 从没写过的
+  是「你补充」。用户要能分清哪段是会议里说的、哪段是自己加的。
+- **不继承引用**（方案 §302：用户新增的事实若没有转录来源，标为"用户补充"，
+  不从邻句继承引用）。补写的话没有转录来源，把邻句的引用挂上去等于替用户伪造出处。
+- **AI 原文不被冲掉**，且仍然另存一版而不是覆盖——旧版查得到。
+- **空补充拒绝写入**，不凭空多一版。
+
+复核面板操作条加「补充说明…」：面板先说清会发生什么（另存一版、标成「你补充」、
+**不会挂引用**、不能当成会上说过的话）。有未存改动时按钮禁用——
+补充会把草稿指向新版本，顺手冲掉用户正在写的东西是要紧的。
+
+### 回归证据（2026-10-06）
+
+`MeetingMinutesEditTests` 15 项全绿，新增三条：
+
+- `testSupplementProducesTheFourthOrigin`：出处是 `.userSupplement`、
+  `isUserAuthored` 为真、AI 原文仍在、补充内容进了正文、旧版出处仍是 `.ai`。
+  **红/绿反证已核对**——把 `saveUserSupplement` 的 `origin: .userSupplement`
+  临时改成 `origin: nil` 后该用例变红，报的是 `userEdited` ≠ `userSupplement`。
+  那正是"第四档产不出来"的失败形态。
+- `testSupplementInheritsNoCitation`：补充不生成带引用的条目；
+  AI 原来那条一字未改，引用照搬。
+- `testEmptySupplementIsRefused`：拒绝之后版本数不变。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1049 项**
+（上一节 1046 +3）+ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。`body_origin` 列在 v11 已有，本轮只是第一次真的写进
+  `user_supplement` 这个合法值。
+- 回退：去掉 `saveUserSupplement` 与复核面板的「补充说明…」即可；
+  `saveUserMinutesEdit` 的 `origin:` 参数带默认值，不传时行为与原先完全一致。
+- 旧库里 `body_origin` 为 `user_supplement` 的行**此前不可能存在**，
+  所以不需要数据迁移或兼容处理。
+
+### 未验证事项与已知边界
+
+- 补充面板**没有在真机走过**（无 UI 自动化授权）：输入框、按钮禁用态、
+  键盘快捷键都只是读代码推断。
+- **本轮做的是"用户自己写"，不是 MC-43 的"从私密问答里选一句"**。
+  后者读侧齐备（`meetingSupplements`）、写侧整条不存在：用户选一句 →
+  进新的 source snapshot → 标 `user_selected_ai_note` → 不升级为会议事实。
+  那是 MC-43 的范围，本轮没做，已单独记入总账第 15 条。
+- 出处的粒度仍然是**按版本**。一个版本里 AI 正文与用户补充并存时，
+  徽标显示「你补充」——与「你改过」同样的取舍：粒度粗，但诚实标出
+  用户实质参与过这一版。

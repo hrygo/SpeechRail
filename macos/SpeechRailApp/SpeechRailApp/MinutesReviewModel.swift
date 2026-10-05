@@ -46,6 +46,43 @@ public final class MinutesReviewModel {
         hasUnsavedChanges = text != lastSavedBody
     }
 
+    /// 补一段**用户自己写的话**（验收 2 的第四档来源）。另存一版，出处标 `.userSupplement`。
+    ///
+    /// 与 `save()` 分开是有意的：`save()` 改的是 AI 写的正文，标「你改过」；
+    /// 这一条补的是 AI 从没写过的内容，标「你补充」。用户要能分得清
+    /// 哪段是会议里说的、哪段是自己加的。
+    ///
+    /// **有未存改动时拒绝**：补充会另存一版并把草稿指向新版本，
+    /// 顺手把用户没存的那部分冲掉的话，丢的是用户正在写的东西。
+    @discardableResult
+    public func supplement(_ text: String) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !hasUnsavedChanges else { return false }
+        isSaving = true
+        saveFailure = nil
+        do {
+            let saved = try await coordinator.saveUserSupplement(
+                sessionID: sessionID,
+                editingMinutesID: minutesID,
+                supplement: trimmed
+            )
+            minutesID = saved.id
+            originChanged = saved.bodyOrigin != bodyOrigin
+            bodyOrigin = saved.bodyOrigin
+            draft = saved.body ?? ""
+            lastSavedBody = draft
+            hasUnsavedChanges = false
+            saveFailure = nil
+            isSaving = false
+            await loadLineage()
+            return true
+        } catch {
+            saveFailure = error.localizedDescription
+            isSaving = false
+            return false
+        }
+    }
+
     /// 存草稿。**失败只报失败，一个字都不动草稿**（MC-47）。
     @discardableResult
     public func save() async -> Bool {
