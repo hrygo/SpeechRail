@@ -441,6 +441,64 @@ public final class MeetingLibraryModel {
         isAsking = false
     }
 
+    // MARK: - 会前准备稿（MA-17）
+    //
+    // 目标里六个环节，「会前准备」排在第一个，而这一整层此前**一个入口都没有**：
+    // `MeetingPrepDraft`、`store.meetingPrepDraft(scope:)` 连 `markdown()` 渲染都完整，
+    // 全仓却没有一处界面入口——用户手里有一套跨会议的未决事项，
+    // 却要自己一场一场点开去拼下一场该准备什么。
+    //
+    // **它是纯数据**：不发送、不建日程、不写回库。界面上不给任何"发出去了"的暗示。
+
+    public private(set) var prepDraft: MeetingPrepDraft?
+    public private(set) var isLoadingPrep = false
+    public private(set) var prepError: String?
+    /// 准备稿也有代次：切了项目或归档开关就重取一次，
+    /// 旧结果里的出处可能已经不在用户此刻授权的范围内了。
+    private var prepGeneration: Int = 0
+
+    public func loadPrepDraft() async {
+        let generation = beginPrepLoad()
+        do {
+            // 范围跟着库页当前的筛选走，与问答、未完成事项同一套——
+            // 用户正在看某个项目，准备稿就不该把别的项目的事带进来（MC-64）。
+            let draft = try await coordinator.meetingPrepDraft(scope: openItemScope)
+            commitPrepDraft(draft, generation: generation)
+        } catch {
+            commitPrepError(error.localizedDescription, generation: generation)
+        }
+    }
+
+    /// 取一次准备稿。**发取之前先把上一次作废**，与详情、列表同一条纪律：
+    /// 连着打开两次面板、或者中途切了项目，先发的那次回来不能盖掉后一次。
+    @discardableResult
+    public func beginPrepLoad() -> Int {
+        prepGeneration += 1
+        isLoadingPrep = true
+        prepError = nil
+        return prepGeneration
+    }
+
+    public func commitPrepDraft(_ draft: MeetingPrepDraft, generation: Int) {
+        guard generation == prepGeneration else { return }
+        prepDraft = draft
+        isLoadingPrep = false
+    }
+
+    public func commitPrepError(_ message: String, generation: Int) {
+        guard generation == prepGeneration else { return }
+        prepError = message
+        isLoadingPrep = false
+    }
+
+    /// 收起面板时清掉。留着上一份准备稿，下次打开会让人以为那还是此刻的范围。
+    public func clearPrepDraft() {
+        prepGeneration += 1
+        prepDraft = nil
+        prepError = nil
+        isLoadingPrep = false
+    }
+
     // MARK: - 未完成事项（MC-56）
     //
     // 「某项目有 37 条未完成事项 → 列出所有未完成」。之前这条验收在库里算得出来，

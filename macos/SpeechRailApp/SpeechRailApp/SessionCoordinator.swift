@@ -1009,6 +1009,16 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 下次会议准备稿（会前准备 / 跨会议复用）：仍未解决的问题、
+    /// 还没完成的动作、**以及需要先核对的结论**。
+    ///
+    /// 这一层此前生产代码零消费方：`MeetingPrepDraft` 与 `meetingPrepDraft(scope:)`
+    /// 实现完整，还有 `markdown()` 渲染，但没有任何界面入口——用户手里有一套
+    /// 跨会议的未决事项，却要自己一场一场点开去拼下一场该准备什么。
+    public func meetingPrepDraft(scope: MeetingKnowledgeScope = .standard) async throws -> MeetingPrepDraft {
+        try await store.meetingPrepDraft(scope: scope)
+    }
+
     // MARK: - 跨会议问答（MA-17 / MC-56～MC-64）
 
     /// 问一句跨会议的问题，返回有出处的答案（MA-17）。

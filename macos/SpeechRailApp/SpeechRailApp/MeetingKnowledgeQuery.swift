@@ -154,11 +154,6 @@ public struct MeetingKnowledgeQueryService: Sendable {
         )
     }
 
-    /// 下次会议准备稿。**只读**：生成它不会发送、不会建日程、不会写回库。
-    public func prepDraft(scope: MeetingKnowledgeScope = .standard) async throws -> MeetingPrepDraft {
-        try await store.meetingPrepDraft(scope: scope)
-    }
-
     /// 翻页取全。列表问题只回第一页就是漏答，所以这里一直翻到没有下一页。
     private func fetchAll(_ request: Request, kind: KnowledgeQuestionKind) async throws -> KnowledgeRetrieval {
         var offset = 0

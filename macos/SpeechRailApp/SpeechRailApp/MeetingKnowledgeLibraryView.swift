@@ -17,6 +17,7 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var model: MeetingLibraryModel
     @State private var searchText = ""
     @State private var askPresented = false
+    @State private var prepPresented = false
     /// 翻页位置。冷启动直接打开某场会议（MC-48）时靠它回到原来的位置。
     @AppStorage("meetingLibraryOffset") private var restoredOffset = 0
 
@@ -179,6 +180,7 @@ struct MeetingKnowledgeLibraryView: View {
         }
         .sheet(isPresented: $conflictsPresented) { conflictsSheet }
         .sheet(isPresented: $askPresented) { askSheet }
+        .sheet(isPresented: $prepPresented) { prepSheet }
         .confirmationDialog(
             "确认「后一条取代前一条」？",
             isPresented: Binding(
@@ -286,6 +288,15 @@ struct MeetingKnowledgeLibraryView: View {
                 .buttonStyle(.link)
                 .controlSize(.small)
                 .help("问一句跨会议的问题，答案会标出依据的是哪几场会的哪几条")
+                Button {
+                    prepPresented = true
+                    Task { await model.loadPrepDraft() }
+                } label: {
+                    Text("会前准备稿")
+                }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                .help("把上次没答完的、还没做的和需要先核对的结论列出来，供下一场会前准备")
                 Button("导入归档包…", action: chooseArchiveToImport)
                     .buttonStyle(.link)
                     .controlSize(.small)
@@ -732,6 +743,117 @@ struct MeetingKnowledgeLibraryView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// 会前准备稿（MA-17）。**先核对的那一组排在最前面**——
+    /// 拿一条还没核对的结论去做准备，等于把不确定性直接带进下一场会。
+    ///
+    /// 它是纯数据：不发送、不建日程、不写回库，所以这里也不给任何"发出去了"的出口。
+    private var prepSheet: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let error = model.prepError {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await model.loadPrepDraft() } }
+                    }
+                    .padding(SpeechRailDesignTokens.Layout.contentPadding)
+                    Spacer()
+                } else if model.isLoadingPrep && model.prepDraft == nil {
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                } else if let draft = model.prepDraft, draft.isEmpty {
+                    Text("你授权的范围内没有待跟进的内容。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+                    Spacer()
+                } else if let draft = model.prepDraft {
+                    List {
+                        // 顺序就是"该先看什么"的顺序，不是数据的自然顺序。
+                        if !draft.needsReview.isEmpty {
+                            Section {
+                                ForEach(draft.needsReview) { prepRow($0) }
+                            } header: {
+                                Text("先核对（这几条还不能当结论用）")
+                            } footer: {
+                                Text("这些结论的出处还没核对过，或两场会说得不一致。带进下一场会之前先定下来。")
+                            }
+                        }
+                        if !draft.openQuestions.isEmpty {
+                            Section {
+                                ForEach(draft.openQuestions) { prepRow($0) }
+                            } header: {
+                                Text("上次没答完")
+                            }
+                        }
+                        if !draft.pendingActions.isEmpty {
+                            Section {
+                                ForEach(draft.pendingActions) { prepRow($0) }
+                            } header: {
+                                Text("还没做完")
+                            }
+                        }
+                        Section {
+                            Text(prepFooter(draft))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("会前准备稿")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("好") {
+                        prepPresented = false
+                        model.clearPrepDraft()
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 380)
+    }
+
+    /// 一条待跟进。**出处原话要摆出来**：只给一句归纳，用户没法判断这条值不值得带进下一场会。
+    private func prepRow(_ item: KnowledgeEvidence) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(item.text)
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(item.status.summary)
+                    .font(.caption)
+                    .foregroundStyle(item.isEstablishedFact ? Color.secondary : Color.orange)
+                if let occurredAt = item.occurredAt {
+                    Text("· \(occurredAt.formatted(date: .abbreviated, time: .omitted))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(item.anchors) { anchor in
+                if let quote = anchor.quote, !quote.isEmpty {
+                    Text("「\(quote)」")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
+    }
+
+    /// 页脚。两件事必须说清：有没有被截断，以及这份东西**不会**自己发出去。
+    private func prepFooter(_ draft: MeetingPrepDraft) -> String {
+        var lines: [String] = []
+        if draft.stoppedAtLimit {
+            // 命中超过一次能列出的条数时说清只列了前面一段，
+            // 否则用户会把这一屏当成"全部待跟进"。
+            lines.append("命中共 \(draft.totalMatched) 条，这次只列出了前 \(draft.listedCount) 条。")
+        }
+        lines.append("这份准备稿只是把你已授权范围内的未决与待办列出来，不会自动发送，也不会创建日程。")
+        return lines.joined(separator: "\n\n")
     }
 
     private var projectMenu: some View {

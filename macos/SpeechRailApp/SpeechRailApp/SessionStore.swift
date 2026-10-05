@@ -5375,7 +5375,10 @@ extension SessionStore {
         return MeetingPrepDraft(
             openQuestions: retrieval.evidence.filter { $0.kind == "open_question" },
             pendingActions: retrieval.evidence.filter { $0.kind == "action" },
-            needsReview: retrieval.evidence.filter { !$0.isEstablishedFact }
+            needsReview: retrieval.evidence.filter { !$0.isEstablishedFact },
+            // 上面那批只取了前 200 条。总数必须一起带出去：否则命中更多时，
+            // 界面只能拿"列出来的这些"当成全部，正是 MC-52 点名要防的失败形态。
+            totalMatched: retrieval.totalMatched
         )
     }
 

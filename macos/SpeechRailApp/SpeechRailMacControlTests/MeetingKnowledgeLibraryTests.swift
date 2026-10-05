@@ -707,6 +707,160 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         baseURL: "http://127.0.0.1:9/v1", model: "test-model"
     )
 
+    // MARK: - 会前准备稿（MA-17）
+    //
+    // 目标里六个环节，「会前准备」排在第一个，而这一整层此前**一个界面入口都没有**：
+    // `MeetingPrepDraft`、`store.meetingPrepDraft(scope:)` 连 `markdown()` 渲染都完整，
+    // 全仓却只有库层与测试引用它。用户手里有一套跨会议的未决事项，
+    // 却要自己一场一场点开去拼下一场该准备什么。
+    //
+    // 下面几条钉的是**接线**：model → 协调器 → store，外加范围与代次两条纪律。
+    // 视图层（`MeetingKnowledgeLibraryView.swift`）是 App-only，SPM 测不到，
+    // 所以「界面上真的排了先核对那组」属于未验证项，如实记在交付文档里。
+
+    /// **接线本身**：库里有一条未完成的行动 → 准备稿里能看到它。
+    /// 把「谁来调用」这一层拿掉，`prepDraft` 会一直是 nil——库里做得再对也没用。
+    func testPrepDraftReachesTheLibraryThroughTheModel() async throws {
+        _ = try await makeMeeting(
+            title: "发布评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            actions: ["整理发布清单"]
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPrepDraft()
+
+        XCTAssertNil(model.prepError)
+        let draft = try XCTUnwrap(model.prepDraft, "接线断在这里：model 没有拿到准备稿")
+        XCTAssertFalse(model.isLoadingPrep, "取完不能停在「正在准备」上")
+        XCTAssertTrue(
+            draft.pendingActions.contains { $0.text.contains("整理发布清单") },
+            "会上定了、还没做的事必须出现在准备稿里"
+        )
+    }
+
+    /// 准备稿的范围跟着库页筛选走（MC-64）。用户正在看某个项目，
+    /// 准备稿就不该把别的项目的未决事项端到他面前——那等于替他做了授权决定。
+    func testPrepDraftFollowsTheLibraryProjectFilter() async throws {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await makeMeeting(
+            title: "A 场的会", projectID: "p-a", at: base, actions: ["整理 A 的清单"]
+        )
+        _ = try await makeMeeting(
+            title: "B 场的会", projectID: "p-b",
+            at: base.addingTimeInterval(86_400), actions: ["整理 B 的清单"]
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+
+        await model.loadPrepDraft()
+        let all = try XCTUnwrap(model.prepDraft)
+        XCTAssertEqual(all.pendingActions.count, 2, "不加筛选时两场会的事都该在")
+
+        await model.filter(projectID: "p-a")
+        await model.loadPrepDraft()
+        let scoped = try XCTUnwrap(model.prepDraft)
+        XCTAssertTrue(scoped.pendingActions.contains { $0.text.contains("A 的清单") })
+        XCTAssertFalse(
+            scoped.pendingActions.contains { $0.text.contains("B 的清单") },
+            "范围没跟着筛选收窄（MC-64）：用户没授权把 B 项目的内容端到他面前"
+        )
+    }
+
+    /// 代次守卫：切了范围之后，**上一次迟到的结果不能盖上来**。
+    /// 与详情、列表、问答同一条纪律——那一处不守就会出现
+    /// "A 项目的准备稿配着 B 项目的筛选条件"。
+    func testLatePrepDraftFromPreviousScopeIsDiscarded() async throws {
+        let store = try requireStore()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await makeMeeting(
+            title: "A 场的会", projectID: "p-a", at: base, actions: ["整理 A 的清单"]
+        )
+        _ = try await makeMeeting(
+            title: "B 场的会", projectID: "p-b",
+            at: base.addingTimeInterval(86_400), actions: ["整理 B 的清单"]
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+
+        // 先取 A 的（作废），再取 B 的，然后 A 才迟到。
+        let generationA = model.beginPrepLoad()
+        let generationB = model.beginPrepLoad()
+        XCTAssertGreaterThan(generationB, generationA)
+
+        let draftB = try await store.meetingPrepDraft(scope: MeetingKnowledgeScope(projectID: "p-b"))
+        model.commitPrepDraft(draftB, generation: generationB)
+
+        let draftA = try await store.meetingPrepDraft(scope: MeetingKnowledgeScope(projectID: "p-a"))
+        model.commitPrepDraft(draftA, generation: generationA)
+
+        let current = try XCTUnwrap(model.prepDraft)
+        XCTAssertTrue(current.pendingActions.contains { $0.text.contains("B 的清单") })
+        XCTAssertFalse(
+            current.pendingActions.contains { $0.text.contains("A 的清单") },
+            "A 的迟到结果盖掉了 B：代次守卫没生效"
+        )
+    }
+
+    /// 命中超过一次能列出的条数时，**必须承认自己被截断了**。
+    ///
+    /// 只列 200 条却在界面上说"这就是全部待跟进"，正是 MC-52 点名的失败形态；
+    /// 上一轮修「未完成事项」时已经为同一件事付过一次代价（计数与列表取自不同谓词）。
+    func testPrepDraftSaysSoWhenItStopsAtTheListingLimit() async throws {
+        _ = try await makeMeeting(
+            title: "很长的会", at: Date(timeIntervalSince1970: 1_700_000_000),
+            actions: (1...250).map { "待办第 \($0) 项" }
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPrepDraft()
+
+        let draft = try XCTUnwrap(model.prepDraft)
+        XCTAssertEqual(draft.totalMatched, 250, "总数要按实际命中报，不能按列出来的报")
+        XCTAssertEqual(draft.listedCount, 200, "一次只列 200 条")
+        XCTAssertTrue(
+            draft.stoppedAtLimit,
+            "命中 250 条、只列 200 条却说自己列全了——这就是 MC-52 的形态"
+        )
+
+        let rendered = draft.markdown()
+        XCTAssertTrue(rendered.contains("250"), "准备稿正文要写清只列了前面一段")
+        XCTAssertTrue(
+            rendered.contains("不会自动发送"),
+            "这份东西不会自己发出去，说出来才算数"
+        )
+    }
+
+    /// 没被截断时不许写那句提示——一个从不截断的面板挂着一句
+    /// "可能还有更多没列进来"，用户会开始怀疑自己是不是漏看了。
+    func testPrepDraftStaysQuietWhenNothingWasLeftOut() async throws {
+        _ = try await makeMeeting(
+            title: "发布会", at: Date(timeIntervalSince1970: 1_700_000_000),
+            actions: ["整理发布清单"]
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPrepDraft()
+
+        let draft = try XCTUnwrap(model.prepDraft)
+        XCTAssertFalse(draft.stoppedAtLimit)
+        XCTAssertFalse(
+            draft.markdown().contains("只列出了前"),
+            "没有截断就不该出现截断提示"
+        )
+    }
+
+    /// 收起面板要把准备稿与错误一起清掉。留着上一份，下次打开时
+    /// 用户会以为那还是此刻这个筛选范围下的内容。
+    func testClearingThePrepDraftEmptiesItAndTheError() async throws {
+        _ = try await makeMeeting(
+            title: "发布评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            actions: ["整理发布清单"]
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPrepDraft()
+        XCTAssertNotNil(model.prepDraft)
+
+        model.clearPrepDraft()
+        XCTAssertNil(model.prepDraft)
+        XCTAssertNil(model.prepError)
+        XCTAssertFalse(model.isLoadingPrep)
+    }
+
     /// MC-48 在 model 层也要成立：归档包的 `selectedMinutesID` 必须是
     /// **详情正在显示的那一版**。
     ///

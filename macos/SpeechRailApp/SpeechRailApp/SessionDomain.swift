@@ -4561,22 +4561,50 @@ public struct MeetingPrepDraft: Sendable {
     /// 需要复核的结论，**放在最前面**：拿未核对的结论去做准备，
     /// 等于把不确定性带进下一场会。
     public var needsReview: [KnowledgeEvidence]
+    /// 授权范围内命中的**总条数**，不受本次列举上限影响。
+    ///
+    /// 必须带出来，否则命中超过上限时界面只能拿数组长度说话，
+    /// 报一个比真实少的数字——正是 MC-52 点名要防的那种失败形态，
+    /// 上一轮修「未完成事项」时已经为它付过一次代价。
+    public var totalMatched: Int
 
     public init(
         generatedAt: Date = Date(),
         openQuestions: [KnowledgeEvidence],
         pendingActions: [KnowledgeEvidence],
-        needsReview: [KnowledgeEvidence]
+        needsReview: [KnowledgeEvidence],
+        totalMatched: Int? = nil
     ) {
         self.generatedAt = generatedAt
         self.openQuestions = openQuestions
         self.pendingActions = pendingActions
         self.needsReview = needsReview
+        // 三组来自同一批行、按不同条件分的，`needsReview` 与下面两组会重叠，
+        // 相加会把同一条数两次。去重之后才是"这次列出了几条"。
+        let listed = Set(openQuestions.map(\.id))
+            .union(pendingActions.map(\.id))
+            .union(needsReview.map(\.id))
+            .count
+        // 传进来的总数只用于判断"还有没有没列出来的"，比已列出的还小就是脏数据，
+        // 按已列出的算，宁可说满了也不能少报。
+        self.totalMatched = max(totalMatched ?? listed, listed)
     }
 
     public var isEmpty: Bool {
         openQuestions.isEmpty && pendingActions.isEmpty && needsReview.isEmpty
     }
+
+    /// 这次实际列出的条数（已去重）。
+    public var listedCount: Int {
+        Set(openQuestions.map(\.id))
+            .union(pendingActions.map(\.id))
+            .union(needsReview.map(\.id))
+            .count
+    }
+
+    /// 命中条数超过本次列举上限。为真表示**还有更早的没有被列进来**——
+    /// 界面不能把下面三组说成"全部待跟进"。
+    public var stoppedAtLimit: Bool { totalMatched > listedCount }
 
     /// 渲染成给用户看/给模型看的纯文本。**不会**被自动发出去。
     public func markdown() -> String {
@@ -4601,6 +4629,11 @@ public struct MeetingPrepDraft: Sendable {
         }
         if isEmpty {
             rows.append("授权范围内没有待跟进的内容。")
+            rows.append("")
+        }
+        if stoppedAtLimit {
+            // 说清"这只是前面一部分"，别让读者以为翻到底了。
+            rows.append("（命中共 \(totalMatched) 条，这次只列出了前 \(listedCount) 条。）")
             rows.append("")
         }
         rows.append("---")

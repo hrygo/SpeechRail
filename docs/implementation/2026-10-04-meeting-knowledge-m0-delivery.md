@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "6.0"
+version: "6.1"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 70 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-14 端到端 + 检索标题优先 + 跨会议问答接线）。
+分支共 71 个提交（本轮十个增量 + 一条交付说明更正 + MC-09～MC-14 端到端 + 检索标题优先 + 跨会议问答接线 + 会前准备稿接线）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -113,6 +113,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第十八处） | **MC-14（连接 A 失效后发 late failed/closed/attribution）已补**，同时更正上一节自己写的"补不了"的理由——每条 client 实例本就各持一条流，缺的只是往指定第几代投递的入口。**但更要记的是变异检验的结果**：把事件循环里的 `isCurrent` 代次守卫拆掉，这条用例**照样全绿**；真正挡住旧连接的是 `pump?.cancel()`（`RealtimeEventChannel.next()` 先查 `Task.isCancelled` 再取缓冲）。所以用例的定位被改成它真正能证明的东西——可观察后果，而非那个守卫 | 实测（变异检验：删守卫后重跑仍通过；据此更正注释与本节，生产代码已恢复，`git diff` 干净） |
 | （同上，第十九条，关闭总账第 9 条） | **检索排序恒为时间倒序，没有相关性**。用户搜"灰度"，最想要的是那场**就叫《灰度发布评审》**的会，而不是上周某场正文里碰巧提了一次灰度的会——后者时间更近，一直排在前面，用户只能一页页翻。现改为**标题命中优先**，其余仍按时间倒序；空查询时排序原样不变 | 实测（先红后绿：红的那次正是"更新的正文命中排在前面"；**变异检验**把排序绑定与谓词绑定调换顺序 → 10 项失败，证明用例对绑定串位有牙。检验后已恢复生产代码） |
 | （同上，第二十处，**独立审计发现，非计划内**） | **跨会议问答（MA-17）整条能力生产代码零消费方**。`MeetingKnowledgeQueryService` 与它的拒答／清单翻页取全／注入防护／展示前范围复核（MC-63）实现完整、都有测试，但全仓只有 `Package.swift` 与它自己引用——用户能搜、能筛、能导出，**却没法问一句**。已接进库页：协调器接 `LLMProvider`、model 加问答状态与代次、页头多一个「问知识库」，答案逐段摆出处原话 | 实测（`rg` 全仓核对 + 变异检验：协调器绕过服务直接返回伪造拒答时，第一版用例照样全绿；换成"有证据时必须真的走到模型那一步"之后，同样变异 → 2 项失败） |
+| （同上，第二十一处，**独立审计发现**） | **会前准备稿（MA-17）整层此前一个入口都没有**。`MeetingPrepDraft`（`openQuestions` / `pendingActions` / `needsReview`，`needsReview` 排最前）与 `markdown()` 渲染实现完整，`store.meetingPrepDraft(scope:)` 同样完整，但 `rg` 全仓核对下来这三样只出现在库层、查询层与测试里，**界面上一个入口都没有**。用户要自己一场一场点开去拼下一场该准备什么——而目标里六个环节「会前准备」排在第一个。另有一个同源的隐患：一次只取 200 条，而准备稿**不带总数**，界面只能拿数组长度说话 | 实测（`rg` 全仓核对 + 变异检验四次全部被抓住） | 已接进库页（页头「会前准备稿」→ sheet，先核对那组排最前，每条带出处原话）。`MeetingPrepDraft` 加 `totalMatched` / `listedCount` / `stoppedAtLimit`：命中超过 200 条时如实说"只列出了前一段"，没截断时**不出现**这句提示 |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
@@ -4038,3 +4039,87 @@ rg -l "MeetingKnowledgeQuery" --glob '*.swift' macos/ | grep -v Tests
 - 问答**不落库**。用户问过什么、答案是什么，重开就没了。这是有意的
   （问答是检索不是资产），但如果将来要"我上次问过什么"，
   需要另立存储与隐私口径。
+
+## M1 增量（MA-17 收尾）｜会前准备稿：整层此前**一个入口都没有**，2026-10-06
+
+### 这一节是一次审计发现的，不是计划里的下一项
+
+`MeetingPrepDraft`（`SessionDomain.swift`）实现完整：`openQuestions` / `pendingActions` /
+`needsReview`，其中 `needsReview` 放在最前面——理由写在代码注释里，拿一条还没核对的结论
+去做准备，等于把不确定性直接带进下一场会。`markdown()` 渲染也在，末尾明写「不会自动发出去」。
+`store.meetingPrepDraft(scope:)` 同样完整。
+
+`rg` 全仓核对：这三样东西只出现在 `SessionDomain.swift`、`SessionStore.swift`、
+`MeetingKnowledgeQuery.swift` 与测试里，**界面上一个入口都没有**。
+
+用户手里有一套跨会议的未决事项——上次没答完的、还没做完的、还没核对的——却要自己一场一场
+点开去拼下一场该准备什么。目标里六个环节，「会前准备」排在第一个，而它此前只有库层。
+
+### 做了什么
+
+- **接进库页**：页头在「问知识库」旁多一个「会前准备稿」，打开现取。sheet 里先核对那组排在
+  最前，然后是「上次没答完」「还没做完」，每条带出处原话（`anchors[].quote`）与状态摘要。
+- **`MeetingLibraryModel`** 加 `prepDraft` / `isLoadingPrep` / `prepError` 与**代次守卫**。
+  守卫拆成 `beginPrepLoad` / `commitPrepDraft` / `commitPrepError` 三个接缝，与本文件既有的
+  `beginSelection` / `commitDetail` / `commitDetailError` 同一套写法，真实路径与测试走同一段逻辑。
+- **范围跟着库页当前筛选走**（MC-64），与问答、未完成事项共用同一个 `openItemScope`。
+
+### 一处不做就会说谎的地方
+
+`store.meetingPrepDraft` 一次只取 200 条，而 `MeetingPrepDraft` 原来**不带总数**。界面上那三组
+各有几条，只能拿数组长度说话——命中超过 200 条时它会报一个比真实少的数字，并让用户以为
+「这就是全部待跟进」。
+
+这正是 MC-52 点名的失败形态；本分支上一轮修「未完成事项」时已经为同一件事付过一次代价
+（`counts.total` 取自过滤**前**的行数）。
+
+`MeetingPrepDraft` 因此加 `totalMatched`，并给出两个派生量：`listedCount`（三组去重——
+`needsReview` 与另两组来自同一批行，相加会把同一条数两次）与 `stoppedAtLimit`。`markdown()`
+与 sheet 页脚都在被截断时写清「命中共 N 条，这次只列出了前 M 条」。
+
+**没被截断时不出现这句话**：一个从不截断的面板挂着一句「可能还有更多没列进来」，
+用户会开始怀疑自己是不是漏看了——多一句提示比少一句更坏。
+
+### 顺带删掉的一处重复
+
+`MeetingKnowledgeQueryService.prepDraft(scope:)` 只是 `store.meetingPrepDraft` 的转发，而构造
+这个服务必须传一个它用不到的补全闭包（`complete` 是 `private let`，非可选）。它此前同样零消费方。
+接进界面时协调器直接走 store，这个转发就删了——按项目策略不留没有消费方的中间层。
+
+### 回归证据（2026-10-06 实测）
+
+`MeetingKnowledgeLibraryTests` 33 → 39 项；`swift test --package-path macos/SpeechRailApp`
+XCTest 1125 → 1131 + Swift Testing 419，零失败；`./scripts/macos_app_build.sh` BUILD SUCCEEDED；
+`python3 scripts/check_macos_test_target_coverage.py` exit 0。
+
+**四次变异检验，全部被抓住**（本分支第四次做同一件事）：
+
+| 变异 | 结果 |
+|---|---|
+| `loadPrepDraft` 改传 `.standard`（范围不再跟筛选走） | `testPrepDraftFollowsTheLibraryProjectFilter` 失败 |
+| 拆掉 `commitPrepDraft` 的代次守卫 | `testLatePrepDraftFromPreviousScopeIsDiscarded` 两项断言失败 |
+| store 把 `evidence.count` 当总数报（列出来的条数冒充命中总数） | `testPrepDraftSaysSoWhenItStopsAtTheListingLimit` 三项断言失败 |
+| 协调器绕过 store 直接返回空稿 | `testPrepDraftReachesTheLibraryThroughTheModel` 等 7 项失败 |
+
+最后一条是专门为「接线」用例做的：它证明 `testPrepDraftReachesTheLibraryThroughTheModel`
+验的确实是 model → 协调器 → store 这一段，而不是碰巧绿。检验后生产代码已恢复，
+`git diff` 只剩本功能的改动。
+
+### 迁移与回退
+
+不改 schema，不动用户数据，不涉及迁移。回退 = revert 本提交：库页少一个入口，
+`MeetingPrepDraft` 回到没有 `totalMatched` 的形状（`totalMatched` 是有默认值的可选参数，
+旧构造点照常编译）。
+
+### 未验证事项与已知边界
+
+- **界面上排的顺序没有被测试覆盖**。`MeetingKnowledgeLibraryView.swift` 是 App-only，
+  SPM 目标编不到，只有 `macos_app_build.sh` 会编到。「先核对那组真的排在最前面」属于本轮
+  **未验证**项，与同批接入的「问知识库」面板同理。
+- **准备稿有 200 条的上限，但界面上没有翻页**。被截断时如实说出来，没有「再显示 50 条」的
+  入口。真实使用中待跟进事项过百是可能的，届时用户只能看到前面一段。**这一条本轮不做**：
+  准备稿的定位是「带进下一场会的准备」，按 `stoppedAtLimit` 如实报出比加一个翻页控件更诚实。
+  记在这里作为已知边界，不是遗漏。
+- **`needsReview` 与 `pendingActions` 会重复出现同一条**（一条既是待办又还没核对）。这是
+  刻意的：两个问题各自的清单更完整，代价是同一条要看两遍。没有做成「每条只出现一次」的
+  列表，因为那要丢掉「这条还归谁管」或「这条还不能当结论用」其中一侧的信息。
