@@ -1966,3 +1966,50 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
 - 界面本身**没有**做 UI 自动化或人工点击验收（本轮未获授权）。以上只证明 model/coordinator/
   store 三层行为与全项目编译通过，不证明菜单在实际窗口里的呈现与可达性。
 - 三档删除的**真实落盘效果**只在 store 层用假件验证过，未在真实会议库上执行。
+
+## M1 增量：读不懂的停记原因不再被当成"没发生"（MC-16 前向兼容）
+
+### 做了什么
+
+`SessionStore.interruptions` 与 `listSessions` 解码 `session_interruption.reason` 时用
+`guard let … else { continue }` / `flatMap`，**认不出的取值整行丢掉**。老程序打开新库
+（本分支的库被更新的程序写过、或本分支的库被未来版本写过）时，那一段没录上的时间会
+凭空消失，界面上变成"全程都录上了"——恰好是在最不该含糊的地方含糊。
+
+- `SessionInterruptionReason` 新增 `unknown` 与 `init(reading:)`：认不得的值保留为
+  `unknown`，不丢行。`title` 给"有一段时间没录上，原因不明"。
+- `isFault` 把 `unknown` 归为故障：原因不明可能藏着真实故障，不能因为读不懂就当作
+  "不是问题"。
+- 两处解码改走 `init(reading:)`，`interruptions` 不再跳过行。
+- `MeetingView.interruptionDetail` 补 `unknown` 分支（SwiftUI switch 必须穷举）。
+
+### 回归证据（2026-10-05）
+
+`MeetingPauseIntervalTests` 10/10（新增 3 项）。新增用例用 `sqlite3_exec` 直接写一个
+这一版程序**不可能写出的** reason 值，模拟"更新的程序写了新值"：
+
+- 认不出的 reason 仍占一行，`atOrdinal` 与原文保住；
+- 未闭合的未知区间在摘要里仍是 `.unknown`，不被读成"没中断"；
+- 五个认得的取值照旧按原义解析（不反过来改坏老数据）。
+
+反证：把两处解码改回旧写法后，上述前两项**变红**
+（`XCTUnwrap failed` / `nil is not equal to .unknown`），确认是真回归测试而非摆设。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1022 项**（上一节 1019 +3）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**，无数据迁移。只是解码与文案。
+- 回退：`SessionDomain.swift` 去掉 `unknown` 与 `init(reading:)`、两处解码改回
+  `flatMap`、`MeetingView.swift` 去掉该分支。三个文件的改动可独立回退。
+
+### 未验证事项与已知边界
+
+- `unknown` **不带原始字符串**：`title` 只说"原因不明"，不把库里的原值显示给用户。
+  保留原值需要给 enum 加 associated value，那会连带改动全部 `switch` 与导出格式，
+  本轮判断收益不足。若日后要做诊断导出，再单独评估。
+- 只钉了**读**的方向：这一版程序仍然不会写出 `unknown`（写入路径只走已知 case）。
+  新增 reason 取值时的**写侧**兼容（老程序读到新值）已覆盖，反向未涉及。
+- 界面文案未经 UI 自动化或人工走查（本轮未获授权）。

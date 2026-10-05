@@ -206,6 +206,92 @@ final class MeetingPauseIntervalTests: XCTestCase {
 
     // MARK: - 辅助
 
+    // MARK: - 认不出的 reason
+
+    /// 老程序打开新库（验收 1「不得跨会议写入」的同族问题：别把读不懂当成没有）。
+    ///
+    /// 这一版程序没写过的 `reason` 值，一定来自更新的程序。此前 `interruptions` 用
+    /// `guard let … else { continue }` 把这样的行**整条丢掉**，界面上那段没录上的
+    /// 时间就凭空消失，用户看到的是"全程都录上了"——恰好是在最不该含糊的地方含糊。
+    func testUnknownReasonIsKeptAsUnknownInsteadOfDropped() async throws {
+        let store = try requireStore()
+        let sessionID = try await makeSession(store)
+        try insertRawInterruption(
+            sessionID: sessionID,
+            atOrdinal: 3,
+            reason: "audio_source_rotated"
+        )
+
+        let rows = try await store.interruptions(sessionID: sessionID)
+        let row = try XCTUnwrap(
+            rows.first,
+            "认不出的 reason 也必须占一行；丢掉等于谎称这段录上了"
+        )
+        XCTAssertEqual(row.atOrdinal, 3)
+        XCTAssertEqual(row.reason, .unknown)
+        XCTAssertTrue(
+            row.reason.isFault,
+            "原因不明可能藏着真实故障，不能因为读不懂就当作不是问题"
+        )
+        XCTAssertFalse(
+            row.reason.title.isEmpty,
+            "界面得有话可说，不能把这一段显示成没有发生"
+        )
+    }
+
+    /// 摘要里的 `openInterruption` 走的是另一条解码路径，同样不能把未知读成"没中断"。
+    func testSummaryKeepsAnUnclosedUnknownReason() async throws {
+        let store = try requireStore()
+        let sessionID = try await makeSession(store)
+        try insertRawInterruption(
+            sessionID: sessionID,
+            atOrdinal: 5,
+            reason: "future_interruption_kind"
+        )
+
+        let summaries = try await store.listSessions(kind: .meeting)
+        let summary = try XCTUnwrap(summaries.first { $0.record.id == sessionID })
+        XCTAssertEqual(
+            summary.openInterruption, .unknown,
+            "未闭合的未知区间仍然是未闭合，不能显示成没中断"
+        )
+    }
+
+    /// 认得的取值照旧按原义解析——新分支不能反过来改坏老数据。
+    func testKnownReasonsStillDecodeToThemselves() {
+        XCTAssertEqual(SessionInterruptionReason(reading: "service_lost"), .serviceLost)
+        XCTAssertEqual(SessionInterruptionReason(reading: "sleep"), .sleep)
+        XCTAssertEqual(SessionInterruptionReason(reading: "source_lost"), .sourceLost)
+        XCTAssertEqual(SessionInterruptionReason(reading: "unexpected_exit"), .unexpectedExit)
+        XCTAssertEqual(SessionInterruptionReason(reading: "user_paused"), .userPaused)
+        XCTAssertEqual(
+            SessionInterruptionReason(reading: nil), .unknown,
+            "空 reason 也当原因不明，不能当作没有"
+        )
+    }
+
+    private func insertRawInterruption(sessionID: String, atOrdinal: Int, reason: String) throws {
+        let file = try XCTUnwrap(directory).appendingPathComponent(SessionStore.fileName)
+        var pointer: OpaquePointer?
+        guard sqlite3_open_v2(file.path, &pointer, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            throw SessionStoreError.storageUnavailable
+        }
+        defer { sqlite3_close_v2(pointer) }
+        // 直接写一个这一版程序不可能写出的 reason，模拟"更新的程序写了新值"。
+        let sql = """
+        INSERT INTO session_interruption (id, session_id, at_ordinal, reason, resumed_at, created_at)
+        VALUES ('\(UUID().uuidString)', '\(sessionID)', \(atOrdinal), '\(reason)', NULL,
+                \(Date().timeIntervalSince1970));
+        """
+        var error: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(pointer, sql, nil, nil, &error) == SQLITE_OK else {
+            let detail = error.map { String(cString: $0) } ?? "未知错误"
+            sqlite3_free(error)
+            XCTFail("写入原始停记区间失败：\(detail)")
+            return
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         let name = "meeting-pause-\(UUID().uuidString)"
         return UserDefaults(suiteName: name) ?? .standard

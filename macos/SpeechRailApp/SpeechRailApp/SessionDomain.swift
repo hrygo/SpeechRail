@@ -128,6 +128,32 @@ public enum SessionInterruptionReason: String, Codable, Sendable {
     /// 用户自己按了暂停。**不是故障**，但同样留下一段没有录上的时间——
     /// 不记下来的话，事后看这条记录的人会以为那几分钟是安静的。
     case userPaused = "user_paused"
+    /// 库里有、但这一版程序不认识的值。一定是**更新的程序**写进来的。
+    ///
+    /// 不能把它当成"没有停记区间"：老程序打开新库时若把不认识的行丢掉，
+    /// 界面上就变成"全程都录上了"，正是这段缺席最不能被掩盖的地方。
+    /// 保留它、如实说"有一段原因不明"，比假装没有更诚实。
+    case unknown
+
+    /// 把库里读到的字符串变成枚举。认不得的值不丢，退回 `unknown` 并保留原文。
+    public init(reading raw: String?) {
+        guard let raw, let parsed = SessionInterruptionReason(storedValue: raw) else {
+            self = .unknown
+            return
+        }
+        self = parsed
+    }
+
+    private init?(storedValue raw: String) {
+        switch raw {
+        case SessionInterruptionReason.serviceLost.rawValue: self = .serviceLost
+        case SessionInterruptionReason.sleep.rawValue: self = .sleep
+        case SessionInterruptionReason.sourceLost.rawValue: self = .sourceLost
+        case SessionInterruptionReason.unexpectedExit.rawValue: self = .unexpectedExit
+        case SessionInterruptionReason.userPaused.rawValue: self = .userPaused
+        default: return nil
+        }
+    }
 
     /// 直接拿来写界面文案（用户的问法是「这一段到底录没录上」）。
     public var title: String {
@@ -137,14 +163,18 @@ public enum SessionInterruptionReason: String, Codable, Sendable {
         case .sourceLost: "音频来源中断"
         case .unexpectedExit: "应用意外退出"
         case .userPaused: "你暂停了记录"
+        case .unknown: "有一段时间没录上，原因不明"
         }
     }
 
     /// 是"出了问题"还是"用户主动为之"。前者要追查，后者不用。
+    ///
+    /// `unknown` 算故障：原因不明意味着可能仍有真实故障没被识别出来，
+    /// 不能因为读不懂就当作"不是问题"。
     public var isFault: Bool {
         switch self {
         case .userPaused: false
-        case .serviceLost, .sleep, .sourceLost, .unexpectedExit: true
+        case .serviceLost, .sleep, .sourceLost, .unexpectedExit, .unknown: true
         }
     }
 }

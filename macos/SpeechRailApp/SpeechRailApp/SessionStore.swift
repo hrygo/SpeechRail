@@ -1640,7 +1640,7 @@ public actor SessionStore {
                         record: record,
                         lineCount: Int(columnInt(statement, 18)),
                         speakerCount: Int(columnInt(statement, 19)),
-                        openInterruption: columnText(statement, 20).flatMap(SessionInterruptionReason.init(rawValue:)),
+                        openInterruption: columnText(statement, 20).map(SessionInterruptionReason.init(reading:)),
                         latestMinutesStatus: columnText(statement, 21).flatMap(MinutesStatus.init(rawValue:))
                     )
                 )
@@ -1862,14 +1862,15 @@ public actor SessionStore {
             bind(statement, 1, sessionID)
             var rows: [SessionInterruption] = []
             while try step(statement) == SQLITE_ROW {
-                guard let reason = columnText(statement, 3).flatMap(SessionInterruptionReason.init(rawValue:)) else { continue }
                 let resumed = columnIsNull(statement, 4) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 4))
                 rows.append(
                     SessionInterruption(
                         id: columnText(statement, 0) ?? "",
                         sessionID: columnText(statement, 1) ?? sessionID,
                         atOrdinal: Int(columnInt(statement, 2)),
-                        reason: reason,
+                        // 认不出的 reason 也留下：这一行代表一段没录上的时间，
+                        // 丢掉它会让老程序把"原因不明"说成"全程录上了"。
+                        reason: SessionInterruptionReason(reading: columnText(statement, 3)),
                         resumedAt: resumed,
                         createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
                     )
