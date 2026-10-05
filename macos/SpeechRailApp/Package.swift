@@ -156,6 +156,8 @@ let package = Package(
                 "TranscriptFollowState.swift",
                 // 会议编排层的依赖边界（MA-01）：设备 / 连接 / 时钟可替换。
                 "MeetingSessionDependencies.swift",
+                // item 级转录账本（MA-02）：按 (代次, itemID) 去重，快照按 revision 替换。
+                "TranscriptItemLedger.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

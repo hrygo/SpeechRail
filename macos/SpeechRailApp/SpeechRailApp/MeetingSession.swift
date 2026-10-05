@@ -217,7 +217,9 @@ public final class MeetingSession {
     private var commitCursor: Date?
     private var pendingItem: (start: Date, end: Date)?
     private var currentOrdinal = 0
-    private var committedItemIDs: Set<String> = []
+    /// item 级账本（MA-02）。去重按 (代次, itemID)，
+    /// 所以重连后新服务复用 item ID 不会被旧连接的去重集吞掉（MC-13）。
+    private var transcriptLedger = TranscriptItemLedger()
     /// `utterance_id` → 已落库的行。对齐与分人结果随后按 item 找到那一行，
     /// 因为文本 final 不再携带 `attribution_units`（契约 §5.2）。
     private var lineByItem: [String: (lineID: String, ordinal: Int)] = [:]
@@ -437,7 +439,6 @@ public final class MeetingSession {
             startedAt = record.startedAt
             lines = []
             currentOrdinal = 0
-            committedItemIDs = []
             lineByItem = [:]
             timingQualityApplied = []
             epoch = 0
@@ -454,6 +455,8 @@ public final class MeetingSession {
         epoch += 1
         // 新一代从这里开始：此前任何仍在飞的回调都成了旧代。
         let generation = connectionGeneration.begin()
+        // 无论新建还是续接，都换一代 item 账本：上一代的 item 与这一代无关。
+        transcriptLedger.beginGeneration(generation)
         commitCursor = dependencies.clock.now()
         pendingItem = nil
         partialText = nil
@@ -589,11 +592,14 @@ public final class MeetingSession {
              .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
             break
-        case .partial(_, let delta):
-            guard !delta.isEmpty else { return }
-            partialText = (partialText ?? "") + delta
-        case .partialSnapshot(_, _, let text, _):
-            partialText = text.isEmpty ? nil : text
+        case .partial(let itemID, let delta):
+            // 按槽分开，不跨 item 拼接（MC-09）。
+            transcriptLedger.acceptDelta(slot: itemID, delta: delta)
+            partialText = transcriptLedger.visiblePartial
+        case .partialSnapshot(let itemID, let revision, let text, _):
+            // 快照**替换**而非追加；迟到的小 revision 不许倒写（MC-10）。
+            _ = transcriptLedger.acceptSnapshot(slot: itemID, revision: revision, text: text)
+            partialText = transcriptLedger.visiblePartial
         case .completed(let itemID, let transcript):
             // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
             // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
@@ -601,9 +607,11 @@ public final class MeetingSession {
             pendingItem = (start: commitCursor ?? now, end: now)
             commitCursor = now
             await commit(itemID: itemID, transcript: transcript)
-        case .failed(_, let code, let message):
+        case .failed(let itemID, let code, let message):
             lastFailure = "\(code)：\(message)"
-            partialText = nil
+            // 只清这一个 item 的槽：别的 item 的 partial 还在录，不该被抹掉（MC-14）。
+            transcriptLedger.clearPartial(slot: itemID)
+            partialText = transcriptLedger.visiblePartial
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units)
         case .diarizationFinished:
@@ -680,14 +688,25 @@ public final class MeetingSession {
         itemID: String,
         transcript: String
     ) async {
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        partialText = nil
+        let outcome = transcriptLedger.resolveCommit(itemID: itemID, transcript: transcript)
+        partialText = transcriptLedger.visiblePartial
         defer { pendingItem = nil }
-        guard !text.isEmpty, let sessionID, let startedAt else { return }
-        if !itemID.isEmpty {
-            guard !committedItemIDs.contains(itemID) else { return }
-            committedItemIDs.insert(itemID)
+        switch outcome {
+        case .duplicate:
+            // 同连接同 item 已定稿：只一条权威行，不重复推进 ordinal（MC-12）。
+            return
+        case .discarded:
+            return
+        case .commit(_, let recoveryNote):
+            if let recoveryNote {
+                // 空 final 到达时已显示的内容保留为恢复材料：
+                // **不进正式纪要**，但也不能无声消失（MC-11）。
+                lastFailure = "有一句话没有拿到定稿正文，已经原样保留：\(recoveryNote.text)"
+                return
+            }
         }
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let sessionID, let startedAt else { return }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
         let isEpochStart = epoch > 1 && lines.isEmpty
         let lineID = UUID().uuidString
@@ -707,7 +726,7 @@ public final class MeetingSession {
                 id: lineID
             )
         } catch {
-            committedItemIDs.remove(itemID)
+            transcriptLedger.unmarkCommitted(itemID)
             lastFailure = error.localizedDescription
             return
         }
