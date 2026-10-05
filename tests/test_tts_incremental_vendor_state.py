@@ -313,6 +313,89 @@ def test_frame_outcome_defaults_are_empty() -> None:
     assert outcome.terminal is False
 
 
+@pytest.mark.parametrize("max_steps", [1, 2, 16, 64])
+@pytest.mark.parametrize("terminal_pcm", [b"", b"\x34\x12\x78\x56"])
+@pytest.mark.parametrize("after_eos", ["audio", "error"])
+def test_codec_eos_stops_the_current_step_and_preserves_only_its_final_pcm(
+    max_steps: int, terminal_pcm: bytes, after_eos: str,
+) -> None:
+    """A vendor that produces noise after EOS must never be called again."""
+
+    class Backend(_FakeBackend):
+        def advance(self, *, token: int | None, seal: bool):
+            self.frames.append((token, seal))
+            if len(self.frames) == 1:
+                return vendor.FrameOutcome(pcm16=b"\x01\x00")
+            if len(self.frames) == 2:
+                assert seal
+                return vendor.FrameOutcome(pcm16=terminal_pcm, terminal=True)
+            if after_eos == "error":
+                raise RuntimeError("advanced_after_codec_eos")
+            return vendor.FrameOutcome(pcm16=b"\x00\x40" * 2_000)
+
+    backend = Backend(prefill_tokens=2)
+    driver = _driver(backend)
+    driver.append_text("ab")
+    assert driver.step(max_steps=max_steps).pcm16 == b"\x01\x00"
+    driver.finish_input()
+
+    event = driver.step(max_steps=max_steps)
+
+    assert event.kind == ("pcm" if terminal_pcm else "finished")
+    assert event.pcm16 == terminal_pcm
+    assert backend.frames == [(None, False), (None, True)]
+    for _ in range(3):
+        assert driver.step(max_steps=max_steps).kind == "finished"
+    assert backend.frames == [(None, False), (None, True)]
+
+
+def test_worker_host_never_emits_audio_generated_after_codec_eos() -> None:
+    """Exercise the real driver/adapter/host with a fake post-EOS hiccup."""
+
+    from speechrail.backends.qwen3_tts_incremental import Qwen3TtsIncrementalModelSession
+    from speechrail.backends.qwen3_tts_stream_host import FRAME_STREAM_AUDIO, TtsStreamHost
+    from speechrail.domain.tts_stream import TtsStreamOptions, TtsStreamTerminal
+
+    expected_pcm = b"\x01\x00" * 400
+
+    class Backend(_FakeBackend):
+        def advance(self, *, token: int | None, seal: bool):
+            self.frames.append((token, seal))
+            if len(self.frames) == 1:
+                return vendor.FrameOutcome(pcm16=expected_pcm)
+            if len(self.frames) == 2:
+                return vendor.FrameOutcome(terminal=True)
+            return vendor.FrameOutcome(pcm16=b"\x00\x40" * 2_000)
+
+    backend = Backend(prefill_tokens=2)
+    driver = _driver(backend)
+    host = TtsStreamHost(
+        Qwen3TtsIncrementalModelSession(driver),
+        TtsStreamOptions(request_id="req-eos", response_id="resp-eos", voice="serena"),
+    )
+    host.accept_text(0, "ab")
+    host.finish_input(0)
+    audio = bytearray()
+    offsets = []
+    for _ in range(8):
+        result = host.step()
+        for frame in result.frames:
+            if frame.payload["type"] == FRAME_STREAM_AUDIO:
+                offsets.append(frame.payload["sample_offset"])
+                audio.extend(frame.binary or b"")
+            if frame.on_sent:
+                frame.on_sent()
+        if result.terminal:
+            break
+
+    assert host.terminal is TtsStreamTerminal.COMPLETED
+    assert len(audio) == len(expected_pcm)
+    assert audio[:560] == expected_pcm[:560]
+    assert offsets == [0, 280]
+    assert backend.frames == [(None, False), (None, True)]
+    assert backend.closed == 1
+
+
 def test_public_names_are_stable() -> None:
     expected: dict[str, Any] = {
         "IncrementalSessionDriver": vendor.IncrementalSessionDriver,

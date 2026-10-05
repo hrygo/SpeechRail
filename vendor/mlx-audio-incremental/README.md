@@ -19,10 +19,12 @@ changes the identity, which is what the offline probe records as
 
 ## Deployment form
 
-The overlay is deployed by copying the three modules next to the upstream
-package inside the vendor runtime, i.e. into
-`site-packages/mlx_audio/tts/models/qwen3_tts/`. The pinned SPI that must keep
-working is declared on the SpeechRail side:
+The controlled engine wheel bundles these modules next to the pinned upstream
+package. Rebuild it with `tools/build_engine_wheel.py` and regenerate
+`src/speechrail/assets/runtime-lock.json` with `tools/update_runtime_lock.py`
+after changing the overlay; editing these source files alone does not update an
+installed runtime. The pinned SPI that must keep working is declared on the
+SpeechRail side:
 
 - `src/speechrail/backends/qwen3_tts_incremental.py` — constructs
   `Qwen3TtsIncrementalBackend(...)` and `IncrementalSessionDriver(...)` and
@@ -30,7 +32,7 @@ working is declared on the SpeechRail side:
 - `tools/probe_tts_incremental.py` — drives `open_probe_session(...)` through
   the `ProbeSession` protocol.
 
-## Two layout rules that are easy to get wrong
+## Generation boundaries
 
 1. **The prefill forward pass is the first frame.** Upstream samples the first
    codec frame from the prefill itself and only starts reading the trailing
@@ -43,11 +45,20 @@ working is declared on the SpeechRail side:
    `_prepare_icl_generation_inputs` only implements the non-streaming overlay
    (all text in the prefill, concatenated with the codec block), which cannot
    be continued and is not used here.
+3. **Codec EOS immediately ends generation.** A step's remaining frame budget
+   never permits another backend advance after a terminal outcome. Preserve any
+   legitimate PCM returned with the terminal exactly once, then report finished.
+   The model backend checks EOS before code prediction or vocoding and treats
+   its terminal as absorbing. PCM fading at the host cannot remove audio that
+   was incorrectly generated after EOS.
 
 ## Verification
 
 Deterministic state-machine coverage lives in
-`tests/test_tts_incremental_vendor_state.py` (no MLX import, no model load).
+`tests/test_tts_incremental_vendor_state.py` and
+`tests/test_tts_incremental_vendor_backend.py` (no MLX import, no model load).
+They cover silent EOS, terminal PCM, post-EOS noise/errors, repeated steps and
+the real driver/adapter/worker-host chain.
 
 Real-model gates are run with `tools/probe_tts_incremental.py` against local
 model snapshots and a local reference clip; reports and audio stay outside the
