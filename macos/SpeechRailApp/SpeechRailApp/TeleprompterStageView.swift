@@ -1105,7 +1105,17 @@ public struct TeleprompterStageView: View {
         case .starting:
             return "正在开启语音跟随…"
         case .following, .stopping:
-            return session.hasHeardSpeech ? "语音跟随中" : "麦克风已就绪，可以开始朗读"
+            // E3：有假设后的空 final 置 followState=.catchingUp 且
+            // uncertainty 非空——位置未确认，不得继续呈现“语音跟随中”。
+            // 无定位证据时（listening/catchingUp）统一呈现“正在定位，
+            // 位置已保持”，与 §6.4 文案对齐。
+            if !session.hasHeardSpeech {
+                return "麦克风已就绪，可以开始朗读"
+            }
+            if session.followState == .tracking {
+                return "语音跟随中"
+            }
+            return "正在定位，位置已保持"
         case .stopFailed(let reason):
             return "停止未完成：\(reason)"
         case .pausedByUser:

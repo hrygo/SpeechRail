@@ -179,6 +179,13 @@ public enum TeleprompterReplayEvaluator {
         public var advancedEventCount: Int
         public var harmfulJumpCount: Int
         public var unintentionalBackjumpCount: Int
+        /// E3：有假设后的空 final（保位、不提交、可观察未确认）。
+        /// 只计 adapter 实际返回 .unconfirmed 的事件；无先前证据的空 final
+        /// 是 ignored，不计入。空 final 不记成功确认、不进延迟分母。
+        public var unconfirmedFinalCount: Int
+        /// E2/F-15：稳定前缀契约异常（越界/改写后暂停推进）的可见计数。
+        /// 只含聚合数，不含 item IDs、正文、文本哈希或音频。
+        public var stablePrefixContractAnomalyCount: Int
         public var trackingLatencyP50Milliseconds: Int?
         public var trackingLatencyP95Milliseconds: Int?
         public var reanchorLatencyP50Milliseconds: Int?
@@ -205,7 +212,10 @@ public enum TeleprompterReplayEvaluator {
     }
 
     public struct Report: Codable, Equatable, Sendable {
-        public static let schemaVersion = "teleprompter.eval.v1"
+        // E3 新增聚合字段（unconfirmed_final_count、
+        // stable_prefix_contract_anomaly_count）后升级为 v2。
+        // 输入 teleprompter.replay.v1 保持现有结构。
+        public static let schemaVersion = "teleprompter.eval.v2"
 
         public let schemaVersion: String
         public let runID: String
@@ -239,6 +249,8 @@ public enum TeleprompterReplayEvaluator {
                     "advanced_event_count": metrics.advancedEventCount,
                     "harmful_jump_count": metrics.harmfulJumpCount,
                     "unintentional_backjump_count": metrics.unintentionalBackjumpCount,
+                    "unconfirmed_final_count": metrics.unconfirmedFinalCount,
+                    "stable_prefix_contract_anomaly_count": metrics.stablePrefixContractAnomalyCount,
                     "tracking_latency_p50_ms": metrics.trackingLatencyP50Milliseconds
                         .map { NSNumber(value: $0) } as Any,
                     "tracking_latency_p95_ms": metrics.trackingLatencyP95Milliseconds
@@ -308,6 +320,8 @@ public enum TeleprompterReplayEvaluator {
             advancedEventCount: 0,
             harmfulJumpCount: 0,
             unintentionalBackjumpCount: 0,
+            unconfirmedFinalCount: 0,
+            stablePrefixContractAnomalyCount: 0,
             trackingLatencyP50Milliseconds: nil,
             trackingLatencyP95Milliseconds: nil,
             reanchorLatencyP50Milliseconds: nil,
@@ -365,6 +379,7 @@ public enum TeleprompterReplayEvaluator {
             let label = labelsByIndex[index]
             if label == nil { metrics.unlabelledEventCount += 1 }
             let before = controller.viewportAnchor
+            let anomaliesBefore = controller.stablePrefixContractAnomalies
             let outcome = adapter.apply(
                 wireEvent(for: event),
                 metadata: RealtimeEventMetadata(eventID: event.eventID),
@@ -375,6 +390,15 @@ public enum TeleprompterReplayEvaluator {
             if case .terminalFailure = outcome {
                 metrics.terminalFailureCount += 1
                 eventFailed = true
+            }
+            // E3：未确认 final 单列——空 final 不记成功确认、不进延迟分母。
+            // 延迟样本只在“到达阅读位置”时产出，未确认事件保位故无样本。
+            if case .unconfirmed = outcome {
+                metrics.unconfirmedFinalCount += 1
+            }
+            // E2/F-15：稳定前缀契约异常单列——只计聚合数，不含正文或 IDs。
+            if controller.stablePrefixContractAnomalies > anomaliesBefore {
+                metrics.stablePrefixContractAnomalyCount += 1
             }
             let after = controller.viewportAnchor
             let advanced = after.segmentIndex > before.segmentIndex

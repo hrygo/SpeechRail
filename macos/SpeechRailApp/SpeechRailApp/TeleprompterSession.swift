@@ -2273,7 +2273,7 @@ public final class TeleprompterSession {
             didAlign = true
         case .completed(_, _):
             guard !isResuming, let activeVersion else { return }
-            _ = followAdapter.apply(
+            let outcome = followAdapter.apply(
                 envelope.payload,
                 metadata: envelope.metadata,
                 segments: activeVersion.segments,
@@ -2281,7 +2281,15 @@ public final class TeleprompterSession {
             )
             syncFollowState()
             if followController.mode == .following {
-                hasHeardSpeech = true
+                // E3：completed 的“听到了”必须由实际决策表达，不能把所有
+                // completed（含空 final、无定位证据）都记成已跟上。
+                // .aligned（前进对齐）与 .confirmed（同位确认）是有效定位
+                // 证据；.unconfirmed（有假设后的空 final）证明采集链路活着，
+                // 但位置未确认——仍记“听到了”，舞台靠 phase=.uncertain 呈现
+                // “本句未确认，位置已保持”，而不是“语音跟随中”。
+                if outcome == .aligned || outcome == .confirmed || outcome == .unconfirmed {
+                    hasHeardSpeech = true
+                }
                 phase = uncertainty == nil ? .following : .uncertain
             }
             didAlign = true

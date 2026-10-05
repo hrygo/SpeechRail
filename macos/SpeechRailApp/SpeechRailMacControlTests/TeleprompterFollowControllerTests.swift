@@ -413,6 +413,133 @@ struct TeleprompterFollowControllerTests {
     /// 二是两段用了同一句 filler，**重复跨度让匹配变歧义**，锚点根本没建立，
     /// 于是「视口没动」是因为压根没匹配上，不是因为远处短语被拦——这种通过毫无意义。
     /// 所以先断言锚点真的建立了，再断言远处短语没推动它。
+    @Test func retainedStablePrefixSubtractsDroppedScalars() throws {
+        // E2 截断坐标回归：旧公式 min(stable, retainedCount) 漏减丢弃数。
+        // 反例（方案 F03）：raw=3000 scalars，retain=2048，dropped=952，
+        // stable=1500 → 正确 548，旧公式给出 1500。
+        // 小稿构造：短文本无截断（dropped=0），正确与旧公式一致——
+        // 这条只钉住“换算恒等式”，真正的截断区分由下一条大稿用例覆盖。
+        // （大稿对齐窗口有限，短证据在 3000 字稿头无法定位，故分两条。）
+        let scriptText = "欢迎来到今天的直播，今天我们介绍相机设置。接下来演示照片导出。"
+        let segments = try TeleprompterSegmenter.segment(sourceText: scriptText)
+        var controller = TeleprompterFollowController()
+        let stable = scriptText.unicodeScalars.count
+        controller.receiveSnapshot(
+            itemID: "short",
+            revision: 1,
+            text: scriptText,
+            segments: segments,
+            eventID: "e-short",
+            stablePrefixCodepoints: stable
+        )
+
+        #expect(controller.stablePrefixContractAnomalies == 0)
+        #expect(controller.position.utf16Offset > 0, "全稳定短文本必须推进")
+    }
+
+    @Test func truncatedStablePrefixCoversOnlyRetainedHead() throws {
+        // E2 截断区分回归：与上一条同一公式，raw=3000/retain=2048/dropped=952，
+        // stable=1500 时正确行为只取保留区前 548。
+        // 用可观测行为区分：正确换算的对齐输入是保留区前 548，
+        // 旧逻辑的对齐输入是保留区前 1500——两者 token 流不同。
+        // 为避开大稿对齐窗口限制，本条直接断言控制器实际消费的稳定文本
+        // 等于保留区前缀 548（通过 partialPreview 长度表达），
+        // 而不是断言对齐位置。
+        let anchorA = "欢迎来到今天的直播，今天我们介绍相机设置。"
+        let interlude = "接下来演示照片导出的具体流程，请大家跟随操作。"
+        let decoyB = "欢迎来到今天的终审现场，请各位评委有序入场就座。"
+        let head = anchorA + interlude + decoyB
+        let retainedText = head + String(repeating: "乙", count: 2048 - head.unicodeScalars.count)
+        #expect(retainedText.unicodeScalars.count == 2048, "保留区必须恰好 2048 scalars")
+        let droppedCount = 3000 - 2048
+        let rawStable = droppedCount + 548
+        #expect(rawStable == 1500, "复现方案 F03 的数值")
+        let droppedLine = "今天我们在这里回顾本季度的拍摄计划与分镜安排。"
+        let headFillerCount = 3000 - 2048 - droppedLine.unicodeScalars.count
+        let rawText = String(repeating: "甲", count: headFillerCount) + droppedLine + retainedText
+        #expect(rawText.unicodeScalars.count == 3000, "原文必须恰好 3000 scalars")
+        let segments = try TeleprompterSegmenter.segment(sourceText: rawText)
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "truncated",
+            revision: 1,
+            text: rawText,
+            segments: segments,
+            eventID: "e-truncated",
+            stablePrefixCodepoints: rawStable
+        )
+
+        #expect(controller.stablePrefixContractAnomalies == 0)
+        // 正确行为：稳定对齐只消费保留区前 548 scalars；
+        // 旧逻辑 min(1500, 2048) 消费 1500。多吃的 952 恰为丢弃数。
+        #expect(controller.lastStableAlignedScalarCount == 548,
+            "稳定对齐必须只取保留区前 548 scalars，实际 \(String(describing: controller.lastStableAlignedScalarCount))；旧逻辑给出 1500")
+    }
+
+    @Test func sameItemShortFinalConfirmsWithoutMovingViewport() throws {
+        // E3/F04 同位确认：同 item snapshot“欢迎”试探推进后，
+        // 同位置 final“欢迎”应提交 committed，且视口不重复移动。
+        // 当前逻辑把“相等”归入向后重读门槛（0.95/6 matches），短句无法确认。
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "greet",
+            revision: 1,
+            text: "欢迎",
+            segments: segments,
+            eventID: "e-snap"
+        )
+        let previewPosition = controller.position
+        #expect(previewPosition.utf16Offset > 0, "snapshot 必须先试探推进，否则这条用例测不到同位确认")
+        let committedBefore = controller.committedPosition
+
+        controller.receiveCompleted(
+            itemID: "greet",
+            transcript: "欢迎",
+            segments: segments,
+            eventID: "e-final"
+        )
+
+        #expect(controller.committedPosition == previewPosition,
+            "同 item 同位 final 必须提交 committed")
+        #expect(controller.position == previewPosition,
+            "同位确认不得重复移动视口")
+        #expect(controller.followState == .tracking)
+        _ = committedBefore
+    }
+
+    @Test func emptyFinalAfterPreviewIsUnconfirmed() throws {
+        // E3/F05 空 final：有非空假设之后收到空 final，不得提交 committed，
+        // 必须给出可观察的未确认状态，且保持视口位置。
+        let segments = try TeleprompterSegmenter.segment(
+            sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。"
+        )
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "greet",
+            revision: 1,
+            text: "欢迎来到",
+            segments: segments,
+            eventID: "e-snap"
+        )
+        let previewPosition = controller.position
+        let committedBefore = controller.committedPosition
+
+        controller.receiveCompleted(
+            itemID: "greet",
+            transcript: "",
+            segments: segments,
+            eventID: "e-final"
+        )
+
+        #expect(controller.committedPosition == committedBefore, "空 final 不得提交 committed")
+        #expect(controller.position == previewPosition, "空 final 必须保位")
+        #expect(controller.followState != .tracking,
+            "有假设后的空 final 不得继续呈现已跟上，实际 \(controller.followState)")
+    }
+
     @Test func aDistantForwardPhraseCannotDragTheViewportAhead() throws {
         let opening = "第一段的开场白今天我们讲的是相机设置"
         let bridge = "中间这段是过渡内容用来把整篇脚本撑到足够长好让半径成为变量"
@@ -970,6 +1097,63 @@ struct TeleprompterRealtimeFollowAdapterTests {
 
         #expect(controller.position == newerPosition)
         #expect(controller.currentIndex == 2)
+    }
+
+    @Test func samePositionConfirmationIsObservedWithoutViewportMotion() throws {
+        // E3：committed 同位确认不移动视口，但 adapter 必须表达实际确认，
+        // 不能判成 ignored，否则调用方会误以为“没有定位成功”。
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+        _ = adapter.apply(
+            .partialSnapshot(itemID: "greet", revision: 1, text: "欢迎"),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+        let previewPosition = controller.position
+        #expect(previewPosition.utf16Offset > 0, "snapshot 必须先试探推进")
+        let committedBefore = controller.committedPosition
+
+        let outcome = adapter.apply(
+            .completed(itemID: "greet", transcript: "欢迎"),
+            metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(outcome == .confirmed)
+        #expect(controller.committedPosition == previewPosition)
+        #expect(controller.position == previewPosition)
+        _ = committedBefore
+    }
+
+    @Test func emptyFinalAfterPreviewIsUnconfirmedRatherThanIgnored() throws {
+        // E3：有假设后的空 final 保位、不提交，但 outcome 必须可观察为
+        // .unconfirmed，不能与“无证据的空 final（ignored）”混同。
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        let adapter = TeleprompterRealtimeFollowAdapter()
+        _ = adapter.apply(
+            .partialSnapshot(itemID: "greet", revision: 1, text: "欢迎来到"),
+            metadata: .init(eventID: "e1", sessionID: "s", sequence: 1),
+            segments: segments,
+            to: &controller
+        )
+        let previewPosition = controller.position
+        let committedBefore = controller.committedPosition
+
+        let outcome = adapter.apply(
+            .completed(itemID: "greet", transcript: ""),
+            metadata: .init(eventID: "e2", sessionID: "s", sequence: 2),
+            segments: segments,
+            to: &controller
+        )
+
+        #expect(outcome == .unconfirmed)
+        #expect(controller.committedPosition == committedBefore)
+        #expect(controller.position == previewPosition)
+        #expect(controller.followState == .catchingUp)
     }
 
     @Test func failedAndClosedEventsAreTerminalOutcomes() throws {
