@@ -5560,11 +5560,29 @@ extension SessionStore {
             return rows
         }
 
+        // 执行状态挂在**稳定 key** 上，`minutes_item` 里没有这一列，SQL 算不出来。
+        // 所以这里一次把候选会议的执行事件读回来，在 Swift 里按 key 归并，
+        // 顺便让本页每一条都带上负责人和期限——只给一句正文不叫"列出未完成事项"。
+        let executions = try latestExecutionStates(documentIDs: Set(all.map(\.documentID)))
+
+        // 「未完成」= 没有执行事件，或当前状态是未完成／受阻。已完成、已放弃都不算。
+        // 谓词放在计数**之前**：总数和列表必须来自同一批行，否则又是"只给 top10 却称全部"。
+        var matched = all
+        if filter.openOnly {
+            matched = all.filter { row in
+                guard row.kind == "action" else { return true }
+                return isOpenAction(
+                    documentID: row.documentID, kind: row.kind, text: row.text,
+                    executions: executions
+                )
+            }
+        }
+
         var disputedCache: [String: Set<String>] = [:]
         var byKind: [String: Int] = [:]
         var needsReviewCount = 0
         var disputedCount = 0
-        for row in all {
+        for row in matched {
             byKind[row.kind, default: 0] += 1
             if row.verdict == nil || row.verdict != MinutesEvidenceValidator.Verdict.supported.rawValue {
                 needsReviewCount += 1
@@ -5575,14 +5593,16 @@ extension SessionStore {
             if disputedCache[row.minutesID]?.contains(row.text) == true { disputedCount += 1 }
         }
         let counts = KnowledgeItemCounts(
-            total: all.count,
+            // 用 `matched` 而不是 `all`：`openOnly` 滤掉的是行，总数必须跟着一起少，
+            // 否则标题写"共 N 条"而列表翻到底也翻不满 N 条（MC-56）。
+            total: matched.count,
             byKind: byKind,
             needsReview: needsReviewCount,
             disputed: disputedCount
         )
 
         // 第二遍：只为本页取正文与锚点。
-        let pageRows = all.dropFirst(offset).prefix(max(0, limit))
+        let pageRows = matched.dropFirst(offset).prefix(max(0, limit))
         let currentIDs = try currentMinutesIDs(for: Set(pageRows.map(\.sessionID)))
         let items = try pageRows.map { row -> KnowledgeEvidence in
             let disputed = disputedCache[row.minutesID]?.contains(row.text) == true
@@ -5603,7 +5623,10 @@ extension SessionStore {
                         || row.verdict != MinutesEvidenceValidator.Verdict.supported.rawValue
                 ),
                 anchors: anchorSet,
-                occurredAt: row.occurredAt.map { Date(timeIntervalSince1970: $0) }
+                occurredAt: row.occurredAt.map { Date(timeIntervalSince1970: $0) },
+                execution: executions[KnowledgeIdentity.key(
+                    documentID: row.documentID, kind: row.kind, text: row.text
+                )]
             )
         }
         return KnowledgeItemPage(items: items, counts: counts, offset: offset, limit: limit)
@@ -5649,7 +5672,66 @@ extension SessionStore {
         if filter.verification == .strictlyVerified {
             sql += " AND i.verdict = 'supported'"
         }
+        // `openOnly` 不在这里拼：执行状态按稳定 key 索引，SQL 侧没有这一列，
+        // 硬拼只能退回 `item_id`，而纪要重新生成会换掉 `item_id`，用户标过的
+        // "已完成"就会整批复活（MC-53）。过滤放在 `knowledgeItems` 里按 key 做。
         return (sql, bindings)
+    }
+
+    /// 这一条行动项是不是还开着。
+    ///
+    /// **没有事件算开着**：会上定了就是定了，只是没人更新进度；把它藏起来等于
+    /// 让人重新问一遍会议到底定了什么。已放弃不算——用户已经决定不做了，
+    /// 列进待办是在制造假待办。
+    private func isOpenAction(
+        documentID: String,
+        kind: String,
+        text: String,
+        executions: [String: KnowledgeExecutionState]
+    ) -> Bool {
+        let key = KnowledgeIdentity.key(documentID: documentID, kind: kind, text: text)
+        guard let status = executions[key]?.status else { return true }
+        return status != .done && status != .dropped
+    }
+
+    /// 这些会议里每条行动项**当前**的执行状态，按稳定 key 索引。
+    ///
+    /// 排序与 `executionState(itemKey:)` 完全一致（升序读、逐条覆盖，最后留下
+    /// `valid_from DESC, recorded_at DESC, id DESC` 那一条）。两边一旦分叉，
+    /// "未完成清单"和详情里显示的状态就会各说各话。
+    private func latestExecutionStates(
+        documentIDs: Set<String>
+    ) throws -> [String: KnowledgeExecutionState] {
+        guard !documentIDs.isEmpty else { return [:] }
+        let sorted = documentIDs.sorted()
+        let placeholders = Array(repeating: "?", count: sorted.count).joined(separator: ", ")
+        return try withStatement("""
+        SELECT item_key, kind, status, owner_text, due_text, due_date, valid_from, recorded_at
+        FROM knowledge_execution_event
+        WHERE document_id IN (\(placeholders))
+        ORDER BY valid_from ASC, recorded_at ASC, id ASC;
+        """) { statement -> [String: KnowledgeExecutionState] in
+            for (offset, value) in sorted.enumerated() {
+                bind(statement, Int32(offset + 1), value)
+            }
+            var latest: [String: KnowledgeExecutionState] = [:]
+            while try step(statement) == SQLITE_ROW {
+                let key = columnText(statement, 0) ?? ""
+                guard !key.isEmpty else { continue }
+                latest[key] = KnowledgeExecutionState(
+                    itemKey: key,
+                    kind: columnText(statement, 1) ?? "",
+                    status: ActionExecutionStatus(rawValue: columnText(statement, 2) ?? "") ?? .open,
+                    ownerText: columnText(statement, 3),
+                    dueText: columnText(statement, 4),
+                    dueDate: columnIsNull(statement, 5)
+                        ? nil : Date(timeIntervalSince1970: columnDouble(statement, 5 as Int32)),
+                    validFrom: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32)),
+                    recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 7))
+                )
+            }
+            return latest
+        }
     }
 }
 

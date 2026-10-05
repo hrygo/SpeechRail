@@ -1000,6 +1000,19 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 未完成事项（MC-56）
+
+    /// 结构化事项查询的透传。此前 `SessionStore.knowledgeItems` 生产代码零消费方：
+    /// 库里能算，界面上一个入口都够不着，"列出所有未完成"这条验收拿不出来。
+    public func meetingKnowledgeItems(
+        filter: KnowledgeItemFilter,
+        scope: MeetingKnowledgeScope = .standard,
+        limit: Int = 50,
+        offset: Int = 0
+    ) async throws -> KnowledgeItemPage {
+        try await store.knowledgeItems(filter: filter, scope: scope, limit: limit, offset: offset)
+    }
+
     // MARK: - 知识归档与删除（MA-18）
 
     /// 三档删除（MA-18 / MC-43、MC-44、MC-62）。

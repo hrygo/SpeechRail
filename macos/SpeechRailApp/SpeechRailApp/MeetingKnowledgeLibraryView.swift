@@ -40,6 +40,10 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var tagsSheetPresented = false
     /// 项目管理面板（改名）。没有删除——方案没要求，库层也没有那个 API。
     @State private var manageProjectsPresented = false
+
+    /// 「未完成事项」面板（MC-56）。默认不占首屏——多数时候用户是来找某一场会，
+    /// 不是来看待办清单的；但它必须是**一个能点到的入口**，不是库里一个没人调的方法。
+    @State private var openItemsPresented = false
     /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
     @State private var archivePreview: ArchiveImportPreview?
     /// 导入完成后的实数。`nil` = 还没导。
@@ -156,12 +160,16 @@ struct MeetingKnowledgeLibraryView: View {
             Text(model.projectError ?? "")
         }
         .sheet(isPresented: $manageProjectsPresented) { manageProjectsSheet }
+        .sheet(isPresented: $openItemsPresented) { openItemsSheet }
         .sheet(isPresented: $tagsSheetPresented) { tagsSheet }
         .task {
             if model.rows.isEmpty {
                 await model.loadPage(offset: restoredOffset)
             }
             await model.loadProjects()
+            // 入口上的数字要真的有内容：面板可能一次都没打开过，
+            // 只在点开时才查的话，标题永远是"未完成事项"没有数字。
+            await model.loadOpenItems(offset: 0)
         }
     }
 
@@ -209,6 +217,19 @@ struct MeetingKnowledgeLibraryView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 archivedToggle
                 Spacer()
+                Button {
+                    openItemsPresented = true
+                    Task { await model.loadOpenItems(offset: 0) }
+                } label: {
+                    // 数字是**全量总数**，不是这一页有几个。用户问"还有多少"的时候，
+                    // 答案不能随翻页变化。
+                    Text(model.openItemCounts.total > 0
+                        ? "未完成事项 \(model.openItemCounts.total)"
+                        : "未完成事项")
+                }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                .help("列出所有还没做完的事项")
                 Button("导入归档包…", action: chooseArchiveToImport)
                     .buttonStyle(.link)
                     .controlSize(.small)
@@ -218,6 +239,94 @@ struct MeetingKnowledgeLibraryView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.top, SpeechRailDesignTokens.Spacing.md)
         .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    /// 未完成事项（MC-56）。**给出全量总数，并且翻得完**——
+    /// 只显示最近 10 条却在标题里写"共 37 条"，比不给这个面板更糟。
+    private var openItemsSheet: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let error = model.openItemsError {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await model.loadOpenItems(offset: 0) } }
+                    }
+                    .padding(SpeechRailDesignTokens.Layout.contentPadding)
+                    Spacer()
+                } else if model.isLoadingOpenItems && model.openItems.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                } else if model.openItems.isEmpty {
+                    // 空态说清为什么空，不写"暂无数据"。
+                    Text(model.openItemsEmptyHint)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Spacer()
+                } else {
+                    List {
+                        Section {
+                            ForEach(model.openItems) { item in
+                                openItemRow(item)
+                            }
+                        } header: {
+                            Text(model.openItemsHeadline)
+                        } footer: {
+                            if model.hasMoreOpenItems {
+                                Button("再显示 \(min(model.openItemLimit, model.openItemCounts.total - model.openItems.count)) 条") {
+                                    Task { await model.loadMoreOpenItems() }
+                                }
+                                .buttonStyle(.link)
+                            } else {
+                                Text("已经到底了，一共 \(model.openItemCounts.total) 条。")
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("未完成事项")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("好") { openItemsPresented = false }
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 380)
+    }
+
+    /// 一条未完成事项。状态、负责人、期限都摆出来——
+    /// 只给一句正文，用户还得自己去翻会议才知道这事归谁。
+    private func openItemRow(_ item: KnowledgeEvidence) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(item.text)
+                .font(.body)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                // 没记录过进度时显示"未完成"而不是"不知道"：会上定了就是定了。
+                Text(item.execution?.status.title ?? ActionExecutionStatus.open.title)
+                    .font(.caption)
+                    .foregroundStyle(
+                        item.execution?.status == .blocked ? Color.orange : Color.secondary
+                    )
+                if let owner = item.execution?.ownerText {
+                    Text("· \(owner)").font(.caption).foregroundStyle(.secondary)
+                }
+                if let due = item.execution?.dueText ?? item.execution?.dueDate.map(Self.dateText) {
+                    Text("· \(due)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let occurredAt = item.occurredAt {
+                    Text(occurredAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+    }
+
+    private static func dateText(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .omitted)
     }
 
     /// 项目筛选（MA-13）。**筛选与列表、计数同源**（MC-51/MC-53），

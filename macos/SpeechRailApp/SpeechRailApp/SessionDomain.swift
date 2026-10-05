@@ -4347,6 +4347,10 @@ public struct KnowledgeEvidence: Identifiable, Hashable, Sendable {
     public var anchors: [MinutesEvidenceAnchor]
     /// 会议发生时间。**没有就空着**，不拿纪要生成时间冒充。
     public var occurredAt: Date?
+    /// 这条事项当前的执行状态（负责人、期限）。**没有事件就是 nil**，
+    /// 界面上要显示成「未完成」而不是「不知道」——会上定了就是定了，
+    /// 只是没人更新进度。
+    public var execution: KnowledgeExecutionState?
 
     public init(
         id: String,
@@ -4358,7 +4362,8 @@ public struct KnowledgeEvidence: Identifiable, Hashable, Sendable {
         text: String,
         status: KnowledgeItemStatus,
         anchors: [MinutesEvidenceAnchor],
-        occurredAt: Date?
+        occurredAt: Date?,
+        execution: KnowledgeExecutionState? = nil
     ) {
         self.id = id
         self.documentID = documentID
@@ -4370,6 +4375,7 @@ public struct KnowledgeEvidence: Identifiable, Hashable, Sendable {
         self.status = status
         self.anchors = anchors
         self.occurredAt = occurredAt
+        self.execution = execution
     }
 
     /// 还能不能当"已确认的事实"引用。历史版本、分歧、待核对都不算。
@@ -4616,19 +4622,27 @@ public struct KnowledgeItemFilter: Hashable, Sendable {
     public var tags: Set<String>
     public var kinds: Set<String>
     public var verification: KnowledgeVerificationFilter
+    /// 只要**还没做完**的事项（MC-56）。
+    ///
+    /// 「未完成」= 没有执行事件，或当前状态是未完成／受阻。
+    /// **已放弃不算未完成**——用户已经决定不做了，把它列进待办是在制造假待办。
+    /// 只有行动项受这个条件约束；决定与未决问题没有"做完"这回事。
+    public var openOnly: Bool
 
     public init(
         projectIDs: Set<String> = [],
         documentIDs: Set<String> = [],
         tags: Set<String> = [],
         kinds: Set<String> = ["decision", "action", "open_question", "overview"],
-        verification: KnowledgeVerificationFilter = .includeUnverified
+        verification: KnowledgeVerificationFilter = .includeUnverified,
+        openOnly: Bool = false
     ) {
         self.projectIDs = projectIDs
         self.documentIDs = documentIDs
         self.tags = tags
         self.kinds = kinds
         self.verification = verification
+        self.openOnly = openOnly
     }
 
     public static let all = KnowledgeItemFilter()

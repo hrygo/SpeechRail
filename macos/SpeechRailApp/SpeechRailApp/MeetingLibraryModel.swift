@@ -76,6 +76,7 @@ public final class MeetingLibraryModel {
 
     public func reload() async {
         await loadPage(offset: offset)
+        await loadOpenItems(offset: 0)
     }
 
     public func search(_ text: String) async {
@@ -86,6 +87,7 @@ public final class MeetingLibraryModel {
     public func filter(projectID: String?) async {
         self.projectID = projectID
         await loadPage(offset: 0)
+        await loadOpenItems(offset: 0)
     }
 
     /// 切换"连归档件一起列"。回到第一页：归档件可能在任意位置，
@@ -94,6 +96,7 @@ public final class MeetingLibraryModel {
         guard includesArchived != includes else { return }
         includesArchived = includes
         await loadPage(offset: 0)
+        await loadOpenItems(offset: 0)
     }
 
     public func loadPage(offset: Int) async {
@@ -333,6 +336,75 @@ public final class MeetingLibraryModel {
         } catch {
             projectError = error.localizedDescription
         }
+    }
+
+    // MARK: - 未完成事项（MC-56）
+    //
+    // 「某项目有 37 条未完成事项 → 列出所有未完成」。之前这条验收在库里算得出来，
+    // 界面上却没有入口；而且很容易做成"取最新 10 条"就宣称是全部——
+    // 所以这里同时持有**全量总数**和**当前页**，翻页翻得完才算数。
+
+    /// 当前这一页未完成事项。行动项，按会议时间倒序。
+    public private(set) var openItems: [KnowledgeEvidence] = []
+    /// 全量计数。**不是 `openItems.count`**——那只是这一页。
+    public private(set) var openItemCounts: KnowledgeItemCounts = .zero
+    public private(set) var isLoadingOpenItems = false
+    public private(set) var openItemsError: String?
+    public private(set) var openItemOffset: Int = 0
+    public let openItemLimit: Int = 50
+
+    /// 列表也用代次：连续点两次"未完成事项"，先发的那次不能覆盖后一次。
+    private var openItemsGeneration: Int = 0
+
+    public var hasMoreOpenItems: Bool { openItemOffset + openItems.count < openItemCounts.total }
+
+    /// 未完成事项的范围跟着当前的筛选走：选了项目就只看这个项目，
+    /// 连归档的一起列的时候未完成也跟着算——否则计数和用户看到的范围对不上。
+    public var openItemScope: MeetingKnowledgeScope {
+        MeetingKnowledgeScope(projectID: projectID, includesArchived: includesArchived)
+    }
+
+    public func loadOpenItems(offset: Int) async {
+        openItemsGeneration += 1
+        let generation = openItemsGeneration
+        isLoadingOpenItems = true
+        openItemsError = nil
+        do {
+            let page = try await coordinator.meetingKnowledgeItems(
+                filter: KnowledgeItemFilter(kinds: ["action"], openOnly: true),
+                scope: openItemScope,
+                limit: openItemLimit,
+                offset: offset
+            )
+            guard generation == openItemsGeneration else { return }
+            openItems = page.items
+            openItemCounts = page.counts
+            openItemOffset = offset
+            isLoadingOpenItems = false
+        } catch {
+            guard generation == openItemsGeneration else { return }
+            openItemsError = error.localizedDescription
+            isLoadingOpenItems = false
+        }
+    }
+
+    public func loadMoreOpenItems() async {
+        guard hasMoreOpenItems, !isLoadingOpenItems else { return }
+        await loadOpenItems(offset: openItemOffset + openItemLimit)
+    }
+
+    /// 空态文案。说清为什么是空的，以及下一步能做什么。
+    public var openItemsEmptyHint: String {
+        if openItemCounts.total > 0 {
+            return "往后翻还有 \(max(0, openItemCounts.total - openItems.count)) 条。"
+        }
+        if projectID != nil { return "这个项目下没有未完成的事项。换个项目看看。" }
+        return "没有未完成的事项。会上定的待办都会出现在这里。"
+    }
+
+    /// 一句话的当前状态，给清单面板的标题用。
+    public var openItemsHeadline: String {
+        openItemCounts.total == 0 ? "未完成事项" : "未完成事项（共 \(openItemCounts.total) 条）"
     }
 
     // MARK: - 知识归档包（MA-19）

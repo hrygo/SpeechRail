@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.0"
+version: "4.1"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 46 个提交。
+分支共 57 个提交（含本轮 MC-56 的 1 个）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -83,7 +83,6 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | 14 | **执行状态与决策演进（MA-14）没有入口**：`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` 零消费方 | 实测（同上） | 决策演进链只能在库里看。**本条上一版写错了**：当时把 `meetingSupplements` 也归到"用户补充"，那是两回事——它读的是 `inner_os_exchange`（私密问答），对应验收 4 的「私密问答默认不进入纪要」与 MC-43，不是验收 2 的第四档来源。验收 2 的「用户补充」已单独处理，见第三节第十一处 |
 | 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
-| 16 | **MC-56「列出全部未完成事项」没有入口**：结构化的决定/行动/未决投影已有 store 实现（`knowledgeItems` + 分页），但库页没有这个视图，也没有跨会议的事项清单 | 实测（`knowledgeItems` 有消费方，视图层无） | 方案 MA-13 明确"全部事项和计数走结构化分页查询；不把检索 top-k 当全量"。当前用户只能一场一场点开看 undone |
 
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
@@ -99,11 +98,13 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 | （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
 | （此前未被发现，第六处） | **全文检索做完了，搜索框却够不着**：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`（14 项测试全绿），但库页谓词只 LIKE 标题与项目名，`excerpt` 无任何消费者，生产代码里唯一调用者是 `SessionCoordinator` 透传——**整条 MA-15 通路没有界面入口**。已把正文检索接进 `libraryPredicate` | 实测（沿 `excerpt` 消费者回查发现 + 回归测试红/绿反证；方案 §10.1 / MC-54 / MC-75 / 第 118 行均要求检索入口） |
-| （同上，第十二处） | **标签与项目（MA-13）在用户侧没有落点**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` / `projects` 零消费方，`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方——**连项目筛选菜单都不存在** | 实测（同上 + 读库页视图；方案 MA-13 实施条要求"项目、标签、会议发生时间可人工编辑"） | 已接进库页：项目筛选、新建、改名、把某场归入/移出项目、标签编辑，且**标签在列表行里看得见**。仍缺 MC-56 的"列出全部未完成事项"结构化分页查询，见第 16 条 |
+| （同上，第十二处） | **标签与项目（MA-13）在用户侧没有落点**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` / `projects` 零消费方，`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方——**连项目筛选菜单都不存在** | 实测（同上 + 读库页视图；方案 MA-13 实施条要求"项目、标签、会议发生时间可人工编辑"） | 已接进库页：项目筛选、新建、改名、把某场归入/移出项目、标签编辑，且**标签在列表行里看得见** |
 | （同上，第十一处） | **验收 2 的第四档来源产不出来**。`MinutesBodyOrigin.userSupplement` 有枚举、有标题「你补充」、被 `isUserAuthored` 收录、复核界面还会渲染「这段是你补充的」——但 `user_supplement` 这个字面量**全仓不存在**，没有任何代码路径写得进去。四档来源里最后一档是空的。已补 `saveUserSupplement` 与复核面板的「补充说明…」 | 实测（`grep user_supplement` 零命中；红/绿反证：出处一放开就退化成 `userEdited`，正是那条失败形态） |
 | （同上，第十处） | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方。store 层 22 项测试（往返、冲突、幂等、路径穿越、执行状态）全绿，却没有一条路通向用户 | 实测（同上 + 读 `MeetingKnowledgeArchiveTests` 确认覆盖的是 store 层） | 已接进库页：导出归档包（完整归档／分享包分开）与导入（先预检、有真冲突不给导入按钮）。**新补的是 model 层测试**——store 那 22 项全都自己构造 `KnowledgeArchiveSelection`，"谁来填 minutesID"替换掉不会有一条变红 |
 | （同上，第九处，并更正第 12 条） | **App 能做出的备份，App 自己恢复不了**。设置页「备份记录库」调的是 `backup(to:)`——`VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`；而恢复只认「目录 + 库文件 + 清单」，缺清单明确拒绝。用户照着 App 的按钮做完备份，恢复不了自己刚做的那份。上一版总账把它误记成"备份没有入口"，是错的：按钮一直在，坏的是它产出的东西。已改走 `exportBackup(to:)`，并新增恢复预演入口 | 实测（沿 `backup(to:)` 与 `restorePreview` 两条生产路径对读发现；新用例从生产路径出发做红/绿证明，不是手工拼目录） |
 | （同上，第七处） | **检索只给会议名，不给证据**。验收 4 是"返回对应会议**与证据**"，上一条把"会议"接通了，`excerpt` 却仍无消费者——搜出一场会，用户还是不知道命中在哪句话上。已接上：行内显示命中的原话，转录原话优先于纪要正文，标题命中不硬凑 | 实测（回归测试红/绿反证；两条"不过度生成"护栏用例全程绿） |
+
+| （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
 ### 四、已充分证据、无需再记的验收项
 
@@ -926,8 +927,9 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 ### 未验证事项与已知边界
 
-- **界面未接线**：项目、标签、筛选、分页都只有库级入口，App 里没有按钮，
-  用户目前无法触发。属 MA-11/MA-21 的界面工作。
+- ~~**界面未接线**：项目、标签、筛选、分页都只有库级入口，App 里没有按钮，
+  用户目前无法触发。~~ **已过时**：项目、标签、分页与筛选后来都接进了库页，
+  见「项目与标签接进库页」与「未完成事项清单」两节。此处保留原文快照。
 - **`counts.disputed` 与 `byKind` 未在真实数据上核对**：判定口径复用 MA-17 的
   `disputedDecisionTexts`（回候选 JSON 的 `conditions` 读标记），只在假数据上验过。
 - 标签没有重命名与合并（改一个标签名要重写所有相关文档），未实现。
@@ -3054,9 +3056,71 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
 
 - **整个项目/标签界面没有在真机走过**（无 UI 自动化授权）：菜单排版、
   标签行的显示密度、TextField 的输入法行为都只是读代码推断。
-- **MC-56「列出全部未完成事项」仍未做**（总账第 16 条）。方案 MA-13 明确
-  「全部事项和计数走结构化分页查询；不把检索 top-k 当全量」——
-  store 层的 `knowledgeItems` 分页已有，但库页没有这个视图，
-  用户仍然只能一场一场点开看没做完的事。这是 MA-13 剩下的部分，不算完成。
-- 筛选**一次只选一个项目**。跨项目合并视图（"所有项目下全部未完成"）
-  属于 MC-56 那一节，本轮没做。
+- **MC-56 已在本节之后补齐**（见下方「未完成事项」增量节），不再是缺口。
+- 筛选**一次只选一个项目**。跨项目合并视图仍未做——未完成事项面板默认
+  "全部项目"，选了项目就只看这个项目，两种都能用，但没有"同时看几个项目"这一档。
+
+
+## M1 增量（MC-56）｜未完成事项清单，2026-10-06
+
+### 做了什么
+
+验收原文是「某项目有 37 条未完成事项 → 列出所有未完成 → 关系查询完整分页并给总数；
+**不能只返回 top10 却称全部**」。三件事分别落在三处：
+
+- **数据层**：`KnowledgeItemFilter` 新增 `openOnly`；`KnowledgeEvidence` 新增
+  `execution`（负责人、期限、状态）。`knowledgeItems` 在分页之后为当页批量补齐
+  执行状态——一次 `document_id IN (...)` 查询按稳定 key 归并，不在行循环里逐条查。
+- **协调层**：`SessionCoordinator.meetingKnowledgeItems(filter:scope:limit:offset:)`。
+  此前 `knowledgeItems` 在生产代码里**零消费方**，这一层之前根本不存在。
+- **界面层**：库页头部「未完成事项 N」按钮 + 面板，每条显示状态、负责人、期限与
+  会议发生时间，底部能翻页翻到底。
+
+### 两个必须说清的决定
+
+- **"未完成"= 没有执行事件，或当前状态是 `open` / `blocked`。**
+  `done` 与 `dropped` 都不算。没有人更新过进度**也算未完成**——会上定了就是定了，
+  把它藏起来等于让人重新问一遍会议到底定了什么。已放弃不算：用户已经决定不做了，
+  列进待办是在制造假待办。
+- **过滤不在 SQL 里做。** 执行状态按 `KnowledgeIdentity.key(文档, 类型, 正文)` 索引，
+  `minutes_item` 表没有这一列；硬拼 SQL 只能退回 `item_id`，而纪要重新生成会换掉
+  `item.id`，用户标过的"已完成"会整批复活（MC-53 修的就是这个）。所以 `openOnly`
+  在 `knowledgeItems` 里按稳定 key 过滤，排序与 `executionState(itemKey:)` 逐字一致。
+
+### 顺带修掉的同源缺陷
+
+`counts.total` 取的是过滤**前**的行数，`byKind` / `needsReview` 取的是过滤**后**的。
+也就是说过滤一旦生效，"共 N 条"会与翻到底的条数对不上——正是验收里点名要防的
+"只给 top10 却称全部"。现在计数与列表取自同一批行（`matched`），并有专门用例钉住。
+
+### 回归证据（2026-10-06 实测）
+
+- 新增 `MeetingOpenItemsTests` **9 项**，先红后绿：红时 7 项失败（API 不存在），
+  绿时全过。覆盖：done/dropped/无事件/受阻四态归类、最新一条事件说了算、
+  结论不受约束、**重新生成后已完成不复生**、37 条跨两场会翻四页不重不漏、
+  总数是全量不是当前页、每条带负责人与期限、协调器与模型真的透传。
+- 已把 `MeetingOpenItemsTests.swift` 登记进 Xcode 单元测试 target
+  （`scripts/check_macos_test_target_coverage.py` 会拦这种"SPM 跑得到、
+  `xcodebuild test` 跑不到"的漏登记）。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1061 项**
+  （上一节 1052 +9）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- `xcodebuild -list`：工程解析正常（改了 `project.pbxproj` 之后核对）。
+
+### 迁移与回退
+
+- **无 schema 变更**，`SessionStore.schemaVersion` 仍是 12。
+- 回退：去掉 `KnowledgeItemFilter.openOnly` 与 `KnowledgeEvidence.execution`
+  （两者都有默认值，旧调用点不受影响）、去掉协调器方法、去掉模型上的
+  `openItems*` 与视图上的按钮/面板即可。
+
+### 未验证事项与已知边界
+
+- **这个面板没有在真机走过**（无 UI 自动化授权）：列表密度、翻页按钮在长正文下的
+  位置、"好"按钮的退出路径都只是读代码推断。计入总账第 1 条。
+- 未完成事项面板**只列行动项**。结论与未决问题没有"做完"这回事，`openOnly`
+  对它们是恒真的——这是有意的，但意味着"跨项目看所有还没定下来的问题"
+  要靠库页搜索，不是这个面板。
+- `latestExecutionStates` 按候选文档批量取回**全部**执行事件后在 Swift 里归并。
+  事件表只记录用户显式做过的状态变更，量级远小于条目表；真到量级问题再上 SQL 窗口函数。
