@@ -232,6 +232,61 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         )
     }
 
+    /// 总账第 9 条：**搜索结果按时间倒序排，没有相关性**。
+    /// 用户搜"灰度"，最可能想要的是那场**就叫《灰度发布评审》**的会，
+    /// 而不是上周某场正文里碰巧提了一次灰度的会——后者时间更近，
+    /// 于是一直排在前面，而用户只能一页页翻过去找。
+    ///
+    /// 这里只做**标题优先**这一条，不做通用打分：标题是用户自己起的名字，
+    /// 是"这场会就是我要找的那场"最强的信号，而它是可解释的——
+    /// 界面上排在前面的理由用户一眼能懂。通用 BM25 在这套中文分词下
+    /// 并不划算（索引里同时写单字与二元组，单字的 IDF 几乎没有区分度）。
+    func testTitleMatchRanksAheadOfNewerBodyOnlyMatch() async throws {
+        let store = try requireStore()
+        // 旧的那场标题里就有这个词。
+        _ = try await makeMeeting(
+            title: "灰度发布评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: "先确认一下范围。"
+        )
+        // 新得多的那场只在正文里提到它。
+        _ = try await makeMeeting(
+            title: "第七周站会", at: Date(timeIntervalSince1970: 1_700_086_400),
+            lineText: "另外灰度那边的排期要跟一下。"
+        )
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage(query: "灰度")
+        XCTAssertEqual(page.counts.total, 2, "两场都该命中")
+        XCTAssertEqual(
+            page.rows.map(\.title), ["灰度发布评审", "第七周站会"],
+            "标题命中的那场要排在只有正文命中的前面，哪怕它更旧"
+        )
+    }
+
+    /// 排序不得改计数。标题优先是在分页查询里额外绑了一个参数——
+    /// 一旦这个绑定串位，计数就会静默算错，而列表看起来仍然正常。
+    func testRelevanceOrderingKeepsCountsInStepWithTheList() async throws {
+        let store = try requireStore()
+        for index in 0..<3 {
+            _ = try await makeMeeting(
+                title: index == 0 ? "预算复核" : "第 \(index + 1) 场站会",
+                at: Date(timeIntervalSince1970: 1_700_000_000 + Double(index) * 86_400),
+                lineText: index == 0 ? "随便说点别的。" : "顺便提一下预算。"
+            )
+        }
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage(query: "预算", limit: 1)
+        XCTAssertEqual(page.counts.total, 3, "命中三场")
+        XCTAssertEqual(page.rows.count, 1, "这一页只取一条")
+        XCTAssertEqual(
+            page.counts.total, 3,
+            "加了排序绑定之后计数仍要与列表同源，不能因为绑定串位而变"
+        )
+        let second = try await store.meetingLibraryPage(query: "预算", limit: 1, offset: 1)
+        XCTAssertEqual(second.rows.count, 1, "第二页也要有东西——排序不能吃掉行")
+    }
+
     /// 正文检索同样要守删除口径（MC-62 / 验收 4「删除内容不得被索引」）：
     /// 归档之后搜索看不见它，打开"连归档的一起列"才回来。
     func testContentSearchRespectsDeletion() async throws {

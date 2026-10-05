@@ -6318,15 +6318,26 @@ extension SessionStore {
         let predicate = libraryPredicate(
             query: query, projectID: projectID, includesArchived: includesArchived
         )
-        let from = """
+        // 排序**只进分页查询**：计数与"全部命中行的待核对数"共用同一段谓词，
+        // 但它们不排序。把 ORDER BY 连同它的绑定塞进 `source` 的话，
+        // 那两条查询就会少绑一个参数——而 COUNT 不会因此报错，只会静默算错。
+        let order = libraryOrder(query: query)
+        let source = """
         FROM meeting_document d LEFT JOIN meeting_project p ON p.id = d.project_id
         WHERE 1 = 1 \(predicate.sql)
-        ORDER BY COALESCE(d.occurred_at, d.created_at) DESC, d.id ASC
         """
+        var from = source
+        if !order.sql.isEmpty {
+            from += "\nORDER BY \(order.sql)"
+        }
         let pageRows = try withStatement("SELECT d.id, d.source_session_id, d.title, d.occurred_at, d.project_id, d.deleted_at, d.deletion_mode \(from) LIMIT ? OFFSET ?;")
         { statement -> [MeetingLibraryRow] in
             var index: Int32 = 1
             for value in predicate.bindings {
+                bindArgument(statement, index, value)
+                index += 1
+            }
+            for value in order.bindings {
                 bindArgument(statement, index, value)
                 index += 1
             }
@@ -6362,7 +6373,7 @@ extension SessionStore {
         var counts = try withStatement("""
         SELECT COUNT(*),
                SUM(CASE WHEN d.deleted_at IS NULL THEN 1 ELSE 0 END)
-        \(from);
+        \(source);
         """) { statement -> MeetingLibraryCounts in
             var index: Int32 = 1
             for value in predicate.bindings {
@@ -6647,6 +6658,34 @@ extension SessionStore {
             sql += " AND (" + branches.joined(separator: " OR ") + ")"
         }
         return (sql, bindings)
+    }
+
+    /// 搜索时的排序：**标题命中的排前面**，其余仍按时间倒序（总账第 9 条）。
+    ///
+    /// 此前排序恒为 `COALESCE(occurred_at, created_at) DESC`。用户搜"灰度"，
+    /// 最想要的是那场**就叫《灰度发布评审》**的会，而不是上周某场正文里
+    /// 碰巧提了一次灰度的会——后者时间更近，于是一直排在前面，
+    /// 用户只能一页页翻过去找。
+    ///
+    /// **只做标题优先，不做通用打分**，两个理由：
+    /// 一是标题是用户自己起的名字，是"这场就是我要找的那场"最强的信号，
+    /// 而且它**可解释**——排在前面的理由用户一眼能懂；
+    /// 二是通用 BM25 在这套分词下并不划算：索引里对中文同时写单字与二元组
+    /// （见 `KnowledgeSearchTokenizer`），单字的 IDF 几乎没有区分度，
+    /// 打出来的分差主要来自二元组命中数，那不如直接按标题命中与否分层。
+    ///
+    /// 空查询时返回空子句，排序保持原样——不搜东西的时候按时间倒序是对的。
+    private func libraryOrder(query: String) -> (sql: String, bindings: [SQLArgument]) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("", []) }
+        let pattern = "%" + Self.likeEscape(trimmed) + "%"
+        return (
+            """
+            (CASE WHEN d.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END),
+            COALESCE(d.occurred_at, d.created_at) DESC, d.id ASC
+            """,
+            [.text(pattern)]
+        )
     }
 
     /// 全部命中会议的待核对条目数。**与列表同一段谓词**，所以翻页不会让数字跳。

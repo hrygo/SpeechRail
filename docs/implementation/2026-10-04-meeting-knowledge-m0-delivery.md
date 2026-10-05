@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "5.1"
+version: "5.2"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 68 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-14 端到端）。
+分支共 69 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-14 端到端 + 检索标题优先）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -78,7 +78,6 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 6 | **事实保真验证器未接"来源被修改"路径**：转录正文被改后重跑验证器 | 实测（`grep` 确认无 `UPDATE line SET text` 一类入口） | 当前**不可达**——没有转录正文编辑入口。将来加了编辑功能，这条必须同时做，否则改完转录的旧纪要会继续声称 `supported` |
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的**索引级**已证（`removeSession` 漏清索引那处已修，见该节）；物理残留未做，也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
-| 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 
@@ -112,6 +111,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第十六处，**更正本分支自己写错的一条**） | **「MC-05～MC-08 未端到端、`MeetingSession` 是 App-only、测试调用生产 `MeetingSession` 尚未达成」——这条是错的。** 当时写的理由是 `MeetingSession` 依赖 AppKit/CoreAudio/`NSWorkspace`、不在 SPM 目标内；实测 `MeetingSession.swift` 在 `Package.swift:167` 目标内，只 import Foundation/Observation/SpeechRailControlKit。`MeetingSessionLifecycleTests` **直接构造并驱动生产 `MeetingSession`**，19 项全过：MC-05 `testStartSuspendedAtConnectCannotResurrectAfterTheSessionEnded`、MC-06 `testLateStartOfSessionACannotStealSessionBsIdentity`、MC-07 `testOnlyTheNewestConnectionKeepsUpstreaming`、MC-08 `testConnectFailureReleasesEverythingAndLeavesNoBlankRecord` + `testCaptureFailureDoesNotPretendItStarted`；MC-04 的「输入原样保留、来源不被重置」由 `testTitleAndSelectionSurviveAFailedStart` / `testRepeatedFailuresKeepTheTitle` 钉住 | 实测（2026-10-06 跑 `swift test --filter MeetingSessionLifecycleTests`，19/19 通过 + 逐个读测试体确认驱动的是生产类型）。**残留的真实细节**：MC-05 原文的闸门是"麦克风授权/能力检查"，测试用的可暂停闸门是 **ASR 建连**——麦克风权限在本架构里以采集失败（`MeetingAudioBlocked(reason: .microphoneDenied)`）呈现，由 MC-08 那条覆盖。断的是同一个后果，不是同一个闸门位置。同一批复查还推翻了 `MinutesGenerator` / `SpeakerLabeling` 的 App-only 说法（两者均已进目标）；`AudioSourceCoordinator` 与 `MeetingView.swift` 仍是 App-only，这条复核后仍成立 |
 | （同上，第十七处） | **MC-09～MC-13 端不到端**。此前挂在"MA-01 的 App-only 限制"下面；限制上一节已推翻，但欠账是真的——断言只落在 `TranscriptItemLedger` 自己身上，"事件到达 → 落库"这条链路一次没走过。真正原因是**没人接线**：假连接的 `events()` 每次现造一条空流，测试没有任何办法往里投事件。现改为持有存下来的那一条流并加 `emit`，补 MC-09/10/11/12/13 五条场景级回归，全部断言真实落库结果。MC-13 顺带把早先修掉的"重连复用 item_id 被吞"第一次锁进端到端回归 | 实测（回归测试红/绿反证：`MeetingSessionLifecycleTests` 19 → 24 项；接缝未接上时 `settle` 会超时 XCTFail，故非空跑） |
 | （同上，第十八处） | **MC-14（连接 A 失效后发 late failed/closed/attribution）已补**，同时更正上一节自己写的"补不了"的理由——每条 client 实例本就各持一条流，缺的只是往指定第几代投递的入口。**但更要记的是变异检验的结果**：把事件循环里的 `isCurrent` 代次守卫拆掉，这条用例**照样全绿**；真正挡住旧连接的是 `pump?.cancel()`（`RealtimeEventChannel.next()` 先查 `Task.isCancelled` 再取缓冲）。所以用例的定位被改成它真正能证明的东西——可观察后果，而非那个守卫 | 实测（变异检验：删守卫后重跑仍通过；据此更正注释与本节，生产代码已恢复，`git diff` 干净） |
+| （同上，第十九条，关闭总账第 9 条） | **检索排序恒为时间倒序，没有相关性**。用户搜"灰度"，最想要的是那场**就叫《灰度发布评审》**的会，而不是上周某场正文里碰巧提了一次灰度的会——后者时间更近，一直排在前面，用户只能一页页翻。现改为**标题命中优先**，其余仍按时间倒序；空查询时排序原样不变 | 实测（先红后绿：红的那次正是"更新的正文命中排在前面"；**变异检验**把排序绑定与谓词绑定调换顺序 → 10 项失败，证明用例对绑定串位有牙。检验后已恢复生产代码） |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
@@ -3886,3 +3886,71 @@ B 的行上没有多出说话人。
   这个时序，而为了造它去改生产代码的取消顺序，是拿实现迁就测试，不做。
   该守卫目前由 `MeetingConnectionGeneration` 的单测承担。
 - 本轮**没有真机走查**，全部是库层与状态层证据。计入总账第 1 条。
+
+
+## M1 增量（总账第 9 条）｜搜索结果按标题命中优先，2026-10-06
+
+### 做了什么
+
+库页列表的排序此前恒为 `COALESCE(occurred_at, created_at) DESC`。用户搜「灰度」，
+最想要的是那场**就叫《灰度发布评审》**的会；而上周某场正文里碰巧提了一次灰度的
+会时间更近，于是一直排在前面——用户只能一页页翻过去找，或者放弃搜索、
+直接按时间回忆。验收 4 写的是「检索能够返回对应会议与证据」，
+返回了，但**没排在用户想要的位置**。
+
+现改为：**标题命中的排前面，其余仍按时间倒序**。空查询时排序完全不变——
+不搜东西的时候按时间倒序是对的。
+
+### 为什么只做标题优先，不做通用 BM25
+
+两个理由，都写进了代码注释：
+
+1. **可解释**。标题是用户自己起的名字，是「这场就是我要找的那场」最强的信号；
+   界面上排在前面的理由用户一眼能懂。通用打分给出一个用户无法复述的数字，
+   下次结果变了没人说得清为什么。
+2. **这套分词下 BM25 不划算**。索引对中文同时写**单字与二元组**
+   （见 `KnowledgeSearchTokenizer`：写单字是为了让「会议室」能被「会议」命中，
+   二元组是为了避免整段汉字成一个 token）。查询侧只发二元组，于是
+   BM25 的分差主要来自二元组命中数与文档长度——单字的 IDF 几乎没有区分度，
+   因为几乎每篇文档都含常用单字。花一个说不清的分层，不如直接按
+   「标题里有没有这个词」分层。
+
+### 一处必须小心的实现细节
+
+排序是在分页查询里**额外绑定一个参数**。而 `meetingLibraryPage` 里的
+`from` 子句此前同时被三处复用：分页查询、总数统计、全部命中行的待核对数。
+把 `ORDER BY` 连同它的绑定塞进那个共用子串，后两条查询就会**少绑一个参数**——
+而 `COUNT(*)` 不会因此报错，只会静默算错一个数。
+
+所以排序被拆成只进分页查询的 `libraryOrder`，计数那两条改用不带 `ORDER BY`
+的 `source`。另配一条用例专门盯这件事（见下）。
+
+### 回归证据（2026-10-06 实测）
+
+- 新增 `MeetingKnowledgeLibraryTests` **2 项**，先红后绿。红的那次正是
+  「更新的正文命中排在前面」——`["第七周站会", "灰度发布评审"]` 与期望相反。
+- **变异检验**：把排序绑定与谓词绑定的顺序对调 → **10 项失败**
+  （含 `testModelLoadsAndSearches` 的计数与首行都变）。证明这组用例对
+  「绑定串位导致计数静默算错」有牙，而不是只走了一遍 happy path。
+  检验后已恢复生产代码，`git diff` 仅含本节预期改动。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1120 项**
+  （上一节 1118 +2）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- 无 schema 变更，`SessionStore.schemaVersion` 仍是 13。
+
+### 迁移与回退
+
+无 schema 变更，无数据迁移。回退：删掉 `libraryOrder` 并把分页查询的
+`from` 换回原先那行 `ORDER BY` 即可；已改变的只是列表呈现顺序，
+用户的库内容不受影响。
+
+### 未验证事项与已知边界
+
+- **相关性只做了标题一层**。正文里命中词更多、位置更相关的会议仍然排在
+  标题命中但正文只有一处的那场之后。这一层要靠通用打分，而上面的两条理由
+  说明当前不做；若将来做，得先有办法在界面上解释这个分。
+- **`searchKnowledgeFullText`（跨会议冲突检测与问答那条路径）的排序未动**，
+  仍是会话时间倒序。它服务的是"找出所有冲突/逐条列清单"，那里**穷举完整性
+  比顺序重要**，改排序的收益低、风险高，故不在本轮范围。
+- 仍然只有库层与状态层证据，**无真机走查**（无 UI 自动化授权）。计入总账第 1 条。
