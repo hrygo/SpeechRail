@@ -1,19 +1,36 @@
 ---
-title: "会议知识闭环 M0/M1 交付说明：版本指针、失败语义、恢复、检索、备份、MA-05 迁移"
+title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "3.0"
-date: 2026-10-05
-branch: "codex/meeting-knowledge-migrate"
-base: "origin/main @ d72535c7"
+version: "4.0"
+date: 2026-10-06
+branch: "codex/meeting-knowledge-milestones"
+base: "origin/main @ dab047b2"
 ---
 
-# 会议知识闭环 M0 交付说明
+# 会议知识闭环交付说明
 
 ## 范围
 
-本分支只动纪要版本链、结束封存上报与知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路。
+分支共 46 个提交。
 
-分支共 37 个提交：排队指针原子化、空输出与结构失败记失败、
+> **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
+> 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
+> **分支此后的范围已经超出它**，不要再拿这几行当全貌：
+>
+> - **表结构改过**：schema 从 v1 一路到 **v12**（v2 知识文档三表、v3 `is_accepted`
+>   采用指针、v4 任务身份四列、v5 结构化候选与核对报告两列、v6 `minutes_item` 与
+>   `minutes_evidence`、v7 `minutes_window`、v8 `knowledge_fts` 与
+>   `search_index_outbox`、v9 项目与标签、v10 `knowledge_execution_event`、
+>   v11 `minutes.body_origin` 与 `parent_minutes_id`、
+>   **v12 `meeting_document.deletion_mode`**）。
+>   每一步的迁移与回退写在对应小节里。
+> - **采集与生命周期动过**：`MeetingPowerMonitor` 接缝、启动票守卫、
+>   `flushPendingUtterance` 断句、按 id 合停记区间、`togglePause` 转 async。
+> - **新增了删除/归档三档**（MA-18）与其界面入口，含真实 schema 迁移。
+>
+> 完整的当前状态看下方**「当前未验证事项总账」**，它比任何单个小节都权威。
+
+M0 部分的提交内容：排队指针原子化、空输出与结构失败记失败、
 认领代际、恢复认领原任务、导出固定选定版本、知识检索、私密边界、备份校验、引文校验、
 删除语义回归，外加会议库分页、封存上报、恢复认领、结束走上报、快照补充、正文落库、
 断线恢复、封存隔离、行动项恢复、检索隔离等收尾回归。
