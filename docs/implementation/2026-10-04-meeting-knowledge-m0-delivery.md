@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.2"
+version: "4.3"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 58 个提交（含本轮 MC-56 与 MA-14 写侧各 1 个）。
+分支共 59 个提交（含本轮 MC-56、MA-14 写侧与 MC-57/58 各 1 个）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -81,7 +81,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 
-| 14 | **决策演进（MA-14 的另一半）没有入口**：`confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` / `executionEvents` 仍零消费方 | 实测（2026-10-06 再查，同上） | **本条已缩小**：行动生命周期（`recordExecutionEvent` / `executionState`）两侧都已接进库页的「未完成事项」面板——读侧列得出、写侧点得动。剩下的是**跨会议替代关系**（MC-57/58）：两场会结论冲突时两边都要留着、要用户确认才能落定，这条链仍然只能在库里看 |
+| 14 | **知识变化建议与执行时间线没有入口**：`knowledgeChangeProposals` / `executionEvents` 仍零消费方 | 实测（2026-10-06 第三轮再查） | **本条已缩小两次**：行动生命周期（`recordExecutionEvent` / `executionState`）与跨会议冲突（`conflictingDecisions` / `confirmSupersession`）四个 API 都已接进库页。剩下的是**只读的两块**——「这场会重新生成之后可能变了什么」的候选清单，以及一条行动的完整状态变更时间线 |
+
 
 | 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
 
@@ -3190,3 +3191,69 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
   但如果一条**已放弃**的事项被重新指定了负责人，它会同时回到未完成清单里。
   界面在「未完成」模式下根本列不出已放弃的条目，所以当前路径碰不到这个组合；
   将来若开放别的改写路径，这里要重新想一遍。
+
+
+## M1 增量（MC-57、MC-58）｜跨会议结论冲突，2026-10-06
+
+### 做了什么
+
+闭环的最后一环：两场会说的话对不上时怎么办。
+
+- **数据层**：修了一个**此前没人踩到就不存在**的缺陷——
+  `conflictingDecisions` 从不查 `knowledge_supersession`，所以用户确认过
+  「后一条取代前一条」之后，同一处矛盾会**原封不动地再问一遍**。
+  现在已确认替代的两边会被跳过；比对用**稳定 key** 而不是行 id，
+  否则纪要重新生成换掉 `item.id` 之后用户确认过的事又会冒出来。
+- **同一处还修了排序**：`knowledgeItems` 是时间**倒序**的，原代码直接拿它分组，
+  于是靠前的一条被命名成 `previous`——实际上它是**新**的那条。
+  界面上会变成"旧说法取代新说法"。现在分组前显式按时间升序排一遍，
+  `previousText` / `proposedText` 的名字才真的对得上。
+- **协调层**：`conflictingKnowledgeDecisions` / `confirmKnowledgeSupersession`。
+- **模型层**：`conflicts` / `loadConflicts` / `confirmSuperseding`，
+  外加 `pendingConflictID` 与独立的 `conflictWriteError`。
+- **界面层**：库页「跨会议冲突 N」入口 + 面板。每处矛盾**两边的原话都摆出来**
+  并标出各自来自早那场还是晚那场，下面是 `conflictDetail` 说清缺什么限定，
+  以及一个需要二次确认的「后一条取代前一条…」。
+
+### 为什么不合成一个折中说法
+
+"两个会议结论相反但范围不清"的时候，给一句归纳就是**编造共识**——
+用户之后回看库只会看到一句谁也没说过的结论。所以这里只做三件事：
+摆出两边的原话、说清缺什么限定、让用户自己定。冲突时**两边都留着**，
+确认取代之后旧结论也不消失，只是不再作为"当前说法"反复来问。
+
+### 回归证据（2026-10-06 实测）
+
+- 新增 `MeetingCrossMeetingTests` **9 项**，先红后绿。覆盖：两边原话都留着
+  且说清缺什么限定；说法一致的重复记录不报冲突；范围跟着筛选走；
+  **确认替代之后不再重复出现**；解决一处不藏另一处；替代关系按稳定 key
+  在纪要重新生成后仍然成立；协调器与模型真的透传；确认失败有话且清单不变；
+  空态是诚实的零。
+- 已把 `MeetingCrossMeetingTests.swift` 登记进 Xcode 单元测试 target。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1080 项**
+  （上一节 1071 +9）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- `xcodebuild -list`：改了 `project.pbxproj` 之后工程仍能解析。
+
+### 迁移与回退
+
+- **无 schema 变更**，`SessionStore.schemaVersion` 仍是 12。
+- 回退：去掉协调器两个方法、模型上的 `conflicts*`、视图上的面板，
+  以及 `conflictingDecisions` 里的 `isResolved` / 升序排序即可。
+  已写入的替代关系留在库里，按 append-only 语义保留。
+
+### 未验证事项与已知边界
+
+- **冲突面板没有在真机走过**（无 UI 自动化授权）：面板密度、两行对照的换行
+  表现、确认对话框的措辞都只是读代码推断。计入总账第 1 条。
+- **分词会带来噪声候选**。`conflictingDecisions` 按**共享词项**分组，
+  而中文二元组会把「定在」这种常用搭配也算成一个词项——于是
+  「发布窗口定在九月」和「预算上限定在五十万」会被报成一处矛盾
+  （两边都留着、不合成，所以**不会造成错误结论**，但会多问一句）。
+  收紧候选需要改分词或词项筛选口径，是一个独立决定，本轮没做。
+- **`limit` 默认 20 且不是全量分页**。`conflictingDecisions` 内部取前 500 条结论
+  做分组，超出这个规模的分歧不会被发现。属于本轮之前的既有边界。
+- **没有"这两条其实不冲突"的记录**。用户判定不冲突之后，下次还会看到它。
+  这是有意的：候选只是提醒，**替代关系才是状态**；不落"已排除"就不会把
+  误判固化成"以后别再提"。代价是同一处会反复出现。

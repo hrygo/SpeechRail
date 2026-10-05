@@ -77,6 +77,7 @@ public final class MeetingLibraryModel {
     public func reload() async {
         await loadPage(offset: offset)
         await loadOpenItems(offset: 0)
+        await loadConflicts()
     }
 
     public func search(_ text: String) async {
@@ -88,6 +89,7 @@ public final class MeetingLibraryModel {
         self.projectID = projectID
         await loadPage(offset: 0)
         await loadOpenItems(offset: 0)
+        await loadConflicts()
     }
 
     /// 切换"连归档件一起列"。回到第一页：归档件可能在任意位置，
@@ -498,6 +500,80 @@ public final class MeetingLibraryModel {
     public var openItemsHeadline: String {
         let noun = openItemMode == .open ? "未完成事项" : "全部行动项"
         return openItemCounts.total == 0 ? noun : "\(noun)（共 \(openItemCounts.total) 条）"
+    }
+
+    // MARK: - 跨会议结论冲突（MC-57、MC-58）
+    //
+    // 闭环的最后一环：两场会说的话对不上时怎么办。唯一被允许的答案是
+    // **把矛盾摆出来、说清缺什么限定、让用户定**。系统自己合成一句一致意见，
+    // 就是用一句没人说过的话把两场会的分歧盖掉。
+
+    public private(set) var conflicts: [KnowledgeChangeProposal] = []
+    public private(set) var isLoadingConflicts = false
+    public private(set) var conflictError: String?
+    /// 确认替代失败时的提示。与 `conflictError` 分开：一个是读不到，一个是写不进。
+    public private(set) var conflictWriteError: String?
+    /// 正在确认的那一处。非空时那一行禁用，避免连点两次写两条替代关系。
+    public private(set) var pendingConflictID: String?
+    private var conflictsGeneration: Int = 0
+
+    public func loadConflicts() async {
+        conflictsGeneration += 1
+        let generation = conflictsGeneration
+        isLoadingConflicts = true
+        conflictError = nil
+        do {
+            let found = try await coordinator.conflictingKnowledgeDecisions(scope: openItemScope)
+            guard generation == conflictsGeneration else { return }
+            conflicts = found
+            isLoadingConflicts = false
+        } catch {
+            guard generation == conflictsGeneration else { return }
+            conflictError = error.localizedDescription
+            isLoadingConflicts = false
+        }
+    }
+
+    /// 确认「后一条取代前一条」。**返回是否成功**。
+    ///
+    /// 成功之后重载：这一处不该还挂在面板上——用户刚点过，
+    /// 再看到同一条只会怀疑上一步到底有没有生效（`conflictingDecisions`
+    /// 现在会跳过已确认替代的两边）。
+    @discardableResult
+    public func confirmSuperseding(_ conflict: KnowledgeChangeProposal) async -> Bool {
+        guard let fromID = conflict.previousItemID, let toID = conflict.proposedItemID else {
+            conflictWriteError = "这一处没有指向具体的两条结论，没法确认取代关系。"
+            return false
+        }
+        pendingConflictID = conflict.id
+        conflictWriteError = nil
+        do {
+            try await coordinator.confirmKnowledgeSupersession(
+                fromItemID: fromID, toItemID: toID, basis: .userConfirmed
+            )
+            pendingConflictID = nil
+            await loadConflicts()
+            return true
+        } catch {
+            conflictWriteError = "\(error.localizedDescription)。两边说法都原样留着，什么都没改。"
+            pendingConflictID = nil
+            return false
+        }
+    }
+
+    public var conflictsHeadline: String {
+        conflicts.isEmpty ? "跨会议结论冲突" : "跨会议结论冲突（\(conflicts.count) 处）"
+    }
+
+    /// 空态说清为什么空。**不写"暂无数据"**。
+    public var conflictsEmptyHint: String {
+        if projectID != nil { return "这个项目下没有跨会议结论冲突。换个项目看看。" }
+        return "两场会的结论对不上时会出现在这里，系统不会替你合成一个折中说法。"
+    }
+
+    public var conflictWriteHint: String {
+        guard let error = conflictWriteError else { return "" }
+        return error
     }
 
     // MARK: - 知识归档包（MA-19）

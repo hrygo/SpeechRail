@@ -6104,13 +6104,25 @@ extension SessionStore {
         )
         // 按共享词项分组；同组里来自不同会议、字面又不一样的，就是候选对。
         var groups: [String: [KnowledgeEvidence]] = [:]
-        for item in page.items {
+        // **显式按时间升序**：下面把靠前的一条叫 `previous`、靠后的叫 `proposed`，
+        // 这个命名必须真的对应"早"和"晚"。列表本身是时间倒序的，直接拿来分组
+        // 会把新结论标成 previous——界面上就成了"旧说法取代新说法"。
+        let ordered = page.items.sorted {
+            let lhs = $0.occurredAt ?? .distantPast
+            let rhs = $1.occurredAt ?? .distantPast
+            if lhs != rhs { return lhs < rhs }
+            return $0.id < $1.id
+        }
+        for item in ordered {
             for term in Set(KnowledgeSearchTokenizer.indexTerms(for: item.text)) where term.count >= 2 {
                 groups[term, default: []].append(item)
             }
         }
         var proposals: [KnowledgeChangeProposal] = []
         var seen: Set<String> = []
+        // 用户已经确认过替代的两边，不再作为候选拿回来问一遍（MC-57）。
+        // 不确认就一直报着是安全的一侧：候选只是提醒，替代关系才是状态。
+        let resolved = try confirmedSupersessionPairs()
         for (term, items) in groups.sorted(by: { $0.key < $1.key }) {
             guard items.count > 1 else { continue }
             for i in items.indices {
@@ -6120,6 +6132,7 @@ extension SessionStore {
                     guard lhs.documentID != rhs.documentID else { continue }
                     // 说法完全一致只是重复记录，不是冲突。
                     guard KnowledgeIdentity.normalized(lhs.text) != KnowledgeIdentity.normalized(rhs.text) else { continue }
+                    guard !isResolved(lhs: lhs, rhs: rhs, pairs: resolved) else { continue }
                     let pairKey = "\(min(lhs.id, rhs.id))|\(max(lhs.id, rhs.id))"
                     guard seen.insert(pairKey).inserted else { continue }
                     let detail = conflictDetail(lhs: lhs, rhs: rhs)
@@ -6138,6 +6151,33 @@ extension SessionStore {
             }
         }
         return proposals
+    }
+
+    /// 已经落定替代关系的 key 对。**两个方向都算**——用户点的是
+    /// 「后一条取代前一条」，读回来时两条的先后不该影响判断。
+    private func confirmedSupersessionPairs() throws -> Set<[String]> {
+        try withStatement("SELECT from_key, to_key FROM knowledge_supersession;") { statement -> Set<[String]> in
+            var pairs: Set<[String]> = []
+            while try step(statement) == SQLITE_ROW {
+                let from = columnText(statement, 0) ?? ""
+                let to = columnText(statement, 1) ?? ""
+                guard !from.isEmpty, !to.isEmpty else { continue }
+                pairs.insert([from, to].sorted())
+            }
+            return pairs
+        }
+    }
+
+    /// 这一对是不是已经确认过取代。用**稳定 key** 比对而不是行 id：
+    /// 纪要重新生成会换掉 `item.id`，按行 id 判断等于让用户确认过的事又冒出来。
+    private func isResolved(
+        lhs: KnowledgeEvidence,
+        rhs: KnowledgeEvidence,
+        pairs: Set<[String]>
+    ) -> Bool {
+        let lhsKey = KnowledgeIdentity.key(documentID: lhs.documentID, kind: lhs.kind, text: lhs.text)
+        let rhsKey = KnowledgeIdentity.key(documentID: rhs.documentID, kind: rhs.kind, text: rhs.text)
+        return pairs.contains([lhsKey, rhsKey].sorted())
     }
 
     /// 说清**缺了哪些限定**，而不是替用户选一个。

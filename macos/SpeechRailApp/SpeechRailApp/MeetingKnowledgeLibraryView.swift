@@ -46,6 +46,10 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var openItemsPresented = false
     /// 正在改负责人／期限的那一条。`nil` = 没有打开编辑面板。
     @State private var openItemEditTarget: KnowledgeEvidence?
+    /// 跨会议结论冲突面板（MC-57、MC-58）。
+    @State private var conflictsPresented = false
+    /// 等用户点头的那一次"取代"确认。点一下就落状态，不给回头路。
+    @State private var pendingSupersession: KnowledgeChangeProposal?
     /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
     @State private var archivePreview: ArchiveImportPreview?
     /// 导入完成后的实数。`nil` = 还没导。
@@ -166,6 +170,25 @@ struct MeetingKnowledgeLibraryView: View {
         .sheet(item: $openItemEditTarget) { target in
             openItemEditSheet(target)
         }
+        .sheet(isPresented: $conflictsPresented) { conflictsSheet }
+        .confirmationDialog(
+            "确认「后一条取代前一条」？",
+            isPresented: Binding(
+                get: { pendingSupersession != nil },
+                set: { if !$0 { pendingSupersession = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("确认取代", role: .destructive) {
+                guard let conflict = pendingSupersession else { return }
+                pendingSupersession = nil
+                Task { await model.confirmSuperseding(conflict) }
+            }
+            Button("取消", role: .cancel) { pendingSupersession = nil }
+        } message: {
+            // 说清这一步之后库里变成什么样：旧结论仍在，只是不再作为当前说法。
+            Text("旧结论不会消失，两条都留着。只是标记为「新结论取代了它」，以后不再问你同一处矛盾。")
+        }
         .sheet(isPresented: $tagsSheetPresented) { tagsSheet }
         .task {
             if model.rows.isEmpty {
@@ -175,6 +198,7 @@ struct MeetingKnowledgeLibraryView: View {
             // 入口上的数字要真的有内容：面板可能一次都没打开过，
             // 只在点开时才查的话，标题永远是"未完成事项"没有数字。
             await model.loadOpenItems(offset: 0)
+            await model.loadConflicts()
         }
     }
 
@@ -235,6 +259,17 @@ struct MeetingKnowledgeLibraryView: View {
                 .buttonStyle(.link)
                 .controlSize(.small)
                 .help("列出所有还没做完的事项")
+                Button {
+                    conflictsPresented = true
+                    Task { await model.loadConflicts() }
+                } label: {
+                    Text(model.conflicts.isEmpty
+                        ? "跨会议冲突"
+                        : "跨会议冲突 \(model.conflicts.count)")
+                }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                .help("两场会的结论对不上时，在这里看，并决定哪一条作数")
                 Button("导入归档包…", action: chooseArchiveToImport)
                     .buttonStyle(.link)
                     .controlSize(.small)
@@ -352,6 +387,91 @@ struct MeetingKnowledgeLibraryView: View {
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .accessibilityElement(children: .contain)
+    }
+
+    /// 跨会议结论冲突（MC-58）。**只摆矛盾，让用户定，系统不合成一致意见**。
+    private var conflictsSheet: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let error = model.conflictError {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await model.loadConflicts() } }
+                    }
+                    .padding(SpeechRailDesignTokens.Layout.contentPadding)
+                    Spacer()
+                } else if model.isLoadingConflicts && model.conflicts.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                } else if model.conflicts.isEmpty {
+                    Text(model.conflictsEmptyHint)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Spacer()
+                } else {
+                    List {
+                        if !model.conflictWriteHint.isEmpty {
+                            Section {
+                                // 写失败必须看得见，而且要说明数据没被动过。
+                                Text(model.conflictWriteHint)
+                                    .font(.callout)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        ForEach(model.conflicts) { conflict in
+                            conflictRow(conflict)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(model.conflictsHeadline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("好") { conflictsPresented = false }
+                }
+            }
+        }
+        .frame(minWidth: 520, minHeight: 420)
+    }
+
+    /// 一处矛盾。**两边的原话都要摆出来**——只给一个"存在冲突"的提示，
+    /// 用户没法判断到底该改哪一句。
+    private func conflictRow(_ conflict: KnowledgeChangeProposal) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(conflict.summary)
+                .font(.callout)
+            if let previous = conflict.previousText {
+                labelledDecision(previous, tag: "早那场")
+            }
+            if let proposed = conflict.proposedText {
+                labelledDecision(proposed, tag: "晚那场")
+            }
+            if let detail = conflict.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("后一条取代前一条…") { pendingSupersession = conflict }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                .disabled(model.pendingConflictID == conflict.id)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// 一侧的结论，用固定宽度的小标签标出它来自哪一场。
+    private func labelledDecision(_ text: String, tag: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text(tag)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            Text(text)
+                .font(.body)
+            Spacer()
+        }
     }
 
     /// 一条未完成事项能做的动作。**列得出却点不动的清单等于让用户回去翻会议**。

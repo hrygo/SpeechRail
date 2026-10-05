@@ -1034,6 +1034,34 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 跨会议结论冲突（MC-57、MC-58）
+
+    /// 两场会结论看起来相反、且缺少限定的候选对。
+    ///
+    /// **只摆出来，不合成一致意见**——"两个会议结论相反但范围不清"的时候，
+    /// 给一句归纳就是编造共识。已确认过替代的两边不再返回。
+    public func conflictingKnowledgeDecisions(
+        scope: MeetingKnowledgeScope = .standard,
+        limit: Int = 20
+    ) async throws -> [KnowledgeChangeProposal] {
+        try await store.conflictingDecisions(scope: scope, limit: limit)
+    }
+
+    /// 确认「后一条取代前一条」。**依据只有两种**：明确证据，或用户确认——
+    /// 字面相似不算（MC-57）。
+    @discardableResult
+    public func confirmKnowledgeSupersession(
+        fromItemID: String,
+        toItemID: String,
+        basis: SupersessionBasis,
+        evidenceItemIDs: [String] = []
+    ) async throws -> KnowledgeSupersession {
+        try await store.confirmSupersession(
+            fromItemID: fromItemID, toItemID: toItemID,
+            basis: basis, evidenceItemIDs: evidenceItemIDs
+        )
+    }
+
     // MARK: - 知识归档与删除（MA-18）
 
     /// 三档删除（MA-18 / MC-43、MC-44、MC-62）。
