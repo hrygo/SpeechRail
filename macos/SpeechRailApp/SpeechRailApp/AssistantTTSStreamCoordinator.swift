@@ -117,6 +117,9 @@ final class AssistantTTSStreamCoordinator {
 
     private struct PendingAudio {
         let id: UUID
+        /// M0d：播放事实的唯一身份。入队时交给播放层，回调原样带回；
+        /// 重复回调按此去重，只归还一次预算。
+        let chunkID: UUID
         let requestID: String
         let epoch: Int
         let pcm: Data
@@ -130,10 +133,12 @@ final class AssistantTTSStreamCoordinator {
     var sendFinish: @MainActor (Int) async throws -> Void = { _ in }
     var sendCancel: @MainActor () async throws -> Void = {}
     var sendAudioAcknowledgement: @MainActor (String, Int) async throws -> Void = { _, _ in }
-    /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**：播放层必须在"真的播完"
-    /// 的回调里把它原样带回，迟到块才可能被识别出来。
+    /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**，第三个是 chunkID：
+    /// 播放层必须在"真的播完"的回调里把两者原样带回，迟到块才可能被识别出来，
+    /// 重复回调才可能只归还一次。单次 schedule 只选一种 completion 类型
+    /// （M0d 用 played），不能假设同一块回调两次。
     /// 返回 `false` 表示这一块没有真的进播放队列，预算必须原样还回去。
-    var enqueuePlayback: @MainActor (Data, Int) async -> Bool = { _, _ in true }
+    var enqueuePlayback: @MainActor (Data, Int, UUID) async -> Bool = { _, _, _ in true }
     var stopPlayback: @MainActor () async -> Void = {}
     /// 朗读前的清洗（去掉 Markdown、把符号念成词）。返回空串表示这一段不用发声，
     /// 既不占序号也不占预算。
@@ -156,6 +161,9 @@ final class AssistantTTSStreamCoordinator {
     private var audioConsumerTask: Task<Void, Never>?
     private var audioConsumerID: UUID?
     private var audioAcknowledgementTaskID: UUID?
+    /// M0d：已记过 played 的 chunk 身份。重复回调直接忽略，不二次归还预算。
+    /// 世代推进时清空——旧代回调本来就按 epoch 拒绝，不占用集合。
+    private var playedChunkIDs: Set<UUID> = []
     private var consumedSampleOffset = 0
     private var sentConsumptionOffset = 0
     private(set) var unconsumedAudioBytes = 0
@@ -597,6 +605,7 @@ final class AssistantTTSStreamCoordinator {
         pendingAudio.append(
             PendingAudio(
                 id: UUID(),
+                chunkID: UUID(),
                 requestID: requestID,
                 epoch: utteranceEpoch,
                 pcm: pcm,
@@ -657,12 +666,25 @@ final class AssistantTTSStreamCoordinator {
         fail(Failure.server(text))
     }
 
-    /// 播放器报"这一块真的播完了"（`dataRendered` 语义）。
+    /// 播放器报"这一块渲染了"（`dataRendered`/`dataPlayedBack` 的首个证据）。
+    /// M0d：按 played 回调语义记账——单次 schedule 只选一种 completion 类型，
+    /// 不能假设同一块回调两次，所以首版只认 played：释放队列预算并累计 played。
     /// `epoch` 是入队时交给播放层的身份：**旧代的迟到回调必须整条丢掉**，
     /// 否则它会把新一轮的排队预算当成自己的还掉，让整轮提前宣布播完。
-    func notePlaybackCompleted(samples: Int, epoch: Int) {
+    /// `chunkID` 让重复回调只归还一次：同一块的第二次上报直接忽略。
+    func notePlaybackCompleted(samples: Int, epoch: Int, chunkID: UUID? = nil) {
         guard isActive, samples > 0, samples <= ledger.queuedSamples else { return }
-        guard ledger.complete(samples: samples, generation: epoch) else { return }
+        if let chunkID {
+            guard playedChunkIDs.insert(chunkID).inserted else { return }
+        }
+        guard ledger.complete(samples: samples, generation: epoch) else {
+            if let chunkID { playedChunkIDs.remove(chunkID) }
+            return
+        }
+        guard ledger.markPlayed(samples: samples, generation: epoch) else {
+            if let chunkID { playedChunkIDs.remove(chunkID) }
+            return
+        }
         unconsumedAudioBytes -= samples * MemoryLayout<Int16>.size
         consumedSampleOffset += samples
         ensureAudioAcknowledgement()
@@ -933,7 +955,7 @@ final class AssistantTTSStreamCoordinator {
             }
             guard ledger.reserve(samples: chunk.samples) else { continue }
 
-            let enqueued = await enqueuePlayback(chunk.pcm, chunk.epoch)
+            let enqueued = await enqueuePlayback(chunk.pcm, chunk.epoch, chunk.chunkID)
             // Cancellation can run while enqueuePlayback is suspended. The
             // cancellation effect joins this consumer before crossing stopPlayback.
             guard audioConsumerID == consumerID,
@@ -1012,9 +1034,13 @@ final class AssistantTTSStreamCoordinator {
     }
 
     private func reportCompletedIfDrained() {
+        // M0d：完成必须是 terminal + FIFO/在途排空 + played 覆盖全部提交样本。
+        // rendered 先到只释放队列预算（notePlaybackCompleted 已做），不算完成；
+        // 没有 played 证据就是 incomplete/unknown，不降为 rendered-completed。
         guard isActive,
               ledger.terminalStatus == "completed",
-              isDrained
+              isDrained,
+              ledger.isPlayedThrough
         else { return }
         report(.completed)
     }
@@ -1171,6 +1197,7 @@ final class AssistantTTSStreamCoordinator {
 
     private func advanceEpoch() -> Int {
         utteranceEpoch += 1
+        playedChunkIDs.removeAll(keepingCapacity: true)
         return utteranceEpoch
     }
 

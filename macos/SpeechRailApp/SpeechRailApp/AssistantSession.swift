@@ -1210,8 +1210,8 @@ public final class AssistantSession {
         }
         if let audioSession {
             audioSession.onPlaybackDrained = playbackDrained
-            audioSession.onPlaybackBufferRendered = { [weak tts] epoch, frames in
-                tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
+            audioSession.onPlaybackBufferRendered = { [weak tts] epoch, frames, chunkID in
+                tts?.notePlaybackCompleted(samples: frames, epoch: epoch, chunkID: chunkID)
             }
             audioSession.onFailure = { [weak self] message in
                 guard let self else { return }
@@ -1292,10 +1292,10 @@ public final class AssistantSession {
                 throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
             }
             player.onDrained = playbackDrained
-            player.onBufferRendered = { [weak tts] epoch, frames in
+            player.onBufferRendered = { [weak tts] epoch, frames, _ in
                 tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
             }
-            tts.enqueuePlayback = { pcm, epoch in await player.enqueue(pcm, epoch: epoch) }
+            tts.enqueuePlayback = { pcm, epoch, chunkID in await player.enqueue(pcm, epoch: epoch, chunkID: chunkID) }
             tts.stopPlayback = { await player.stop() }
             do {
                 try requireLive(token)
@@ -2224,9 +2224,9 @@ public final class AssistantSession {
         tts.sendAudioAcknowledgement = { requestID, sampleOffset in
             try await client.acknowledgeTTSAudio(requestID: requestID, sampleOffset: sampleOffset)
         }
-        tts.enqueuePlayback = { pcm, epoch in
+        tts.enqueuePlayback = { pcm, epoch, chunkID in
             if let audioSession = ownedAudioSession {
-                return await audioSession.enqueuePlayback(pcm, epoch: epoch)
+                return await audioSession.enqueuePlayback(pcm, epoch: epoch, chunkID: chunkID)
             }
             return false
         }

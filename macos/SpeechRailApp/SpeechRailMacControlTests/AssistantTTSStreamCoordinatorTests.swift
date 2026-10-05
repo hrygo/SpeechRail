@@ -73,7 +73,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             recorder.finishes.append(lastSequence)
         }
         coordinator.sendCancel = { recorder.cancels += 1 }
-        coordinator.enqueuePlayback = { pcm, epoch in
+        coordinator.enqueuePlayback = { pcm, epoch, _ in
             recorder.played.append(pcm)
             recorder.epochs.append(epoch)
             return true
@@ -775,7 +775,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         configuration.playbackLedger.maximumQueuedSamples = 32
         let (coordinator, recorder) = makeHarness(configuration: configuration)
         let gate = Gate()
-        coordinator.enqueuePlayback = { pcm, epoch in
+        coordinator.enqueuePlayback = { pcm, epoch, _ in
             await gate.enter()
             recorder.played.append(pcm)
             recorder.epochs.append(epoch)
@@ -1196,7 +1196,7 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness(configuration: configuration)
         let enqueueGate = Gate()
         defer { enqueueGate.release() }
-        coordinator.enqueuePlayback = { pcm, epoch in
+        coordinator.enqueuePlayback = { pcm, epoch, _ in
             await enqueueGate.enter()
             recorder.played.append(pcm)
             recorder.epochs.append(epoch)
@@ -1237,6 +1237,73 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             recorder.played.count, 1,
             "只允许挂起中的那一次调用返回，旧消费者失效后不得再发起新调用"
         )
+    }
+
+    /// M0d/V05：terminal 先到、played 未到时不 completed；played 到达后才完成。
+    /// 同一 chunk 的重复 played 回调只记一次账；旧代回调拒绝。
+    func testV05PlayedEvidenceGatesCompletion() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.playbackLedger.maximumQueuedSamples = 32
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        // played 回调按 chunkID 透传：mock 播放器记录 chunk 身份，测试按身份回放。
+        var chunkIDs: [UUID] = []
+        coordinator.enqueuePlayback = { pcm, epoch, chunkID in
+            recorder.played.append(pcm)
+            recorder.epochs.append(epoch)
+            chunkIDs.append(chunkID)
+            return true
+        }
+        try await coordinator.begin(generation: 60, requestID: "req-60")
+        await coordinator.handleAudio(requestID: "req-60", pcm: Data([1, 1, 1, 1]))
+        await coordinator.handleAudio(requestID: "req-60", pcm: Data([2, 2, 2, 2]))
+        await waitUntil({ chunkIDs.count == 2 }, message: "两块音频没有进入播放")
+        XCTAssertNotEqual(chunkIDs[0], chunkIDs[1], "每块音频必须有唯一 chunk 身份")
+        let epoch = try XCTUnwrap(recorder.epochs.first)
+
+        // 服务端终态先到：FIFO 已空但 played 未到，不得 completed。
+        await coordinator.handleTerminal(requestID: "req-60", status: "completed")
+        XCTAssertTrue(recorder.outcomes.isEmpty, "played 未到不得宣布完成")
+
+        // 第一块 played 到达：仍有第二块未播完，不得 completed。
+        let playedEpoch = epoch
+        // chunkID 由 mock 记录的身份回放。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: playedEpoch, chunkID: chunkIDs[0])
+        XCTAssertTrue(recorder.outcomes.isEmpty, "played 未覆盖全部提交样本不得完成")
+
+        // 重复回调：同一 chunkID 第二次上报直接忽略，不二次归还预算。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: playedEpoch, chunkID: chunkIDs[0])
+        XCTAssertTrue(recorder.outcomes.isEmpty, "重复 played 不得改变完成判定")
+
+        // 第二块 played 到达：played 覆盖全部提交样本，整轮完成。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: playedEpoch, chunkID: chunkIDs[1])
+        await waitUntil({ recorder.outcomes.count == 1 }, message: "played 到齐后应宣布完成")
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.completed])
+    }
+
+    /// M0d/V05b：旧代 played 回调不得污染新代（与 testLatePlayback... 同构，
+    /// 走 `begin` 直接换代的旧风格路径：上一轮无远端屏障残留）。
+    /// retired 屏障内的旧轮行为由 retired 系列测试覆盖。
+    func testV05StalePlayedCannotTouchTheNewLedger() async throws {
+        let (coordinator, recorder) = makeHarness()
+        try await coordinator.begin(generation: 61, requestID: "req-61")
+        await coordinator.handleAudio(requestID: "req-61", pcm: Data([1, 2, 3, 4]))
+        await waitUntil({ recorder.epochs.count == 1 }, message: "首块音频没有进入播放")
+        let firstEpoch = try XCTUnwrap(recorder.epochs.first)
+        // 新一轮直接开始（旧风格换代），上一轮的最后一块还在路上。
+        try await coordinator.begin(generation: 62, requestID: "req-62")
+        await coordinator.handleAudio(requestID: "req-62", pcm: Data([5, 6, 7, 8]))
+        await waitUntil({ recorder.epochs.count == 2 }, message: "第二代 PCM 没有入队")
+        let secondEpoch = try XCTUnwrap(recorder.epochs.last)
+        // 旧轮迟到 played：旧代身份直接拒绝，不改新轮账本。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: firstEpoch)
+        XCTAssertEqual(recorder.outcomes.count, 0, "旧代迟到 played 不得产生结局")
+        // 新轮 terminal 先到、played 未到：不得完成。
+        await coordinator.handleTerminal(requestID: "req-62", status: "completed")
+        XCTAssertEqual(recorder.outcomes.count, 0, "新轮 played 未到不得完成")
+        // 新轮 played 到齐：完成。
+        coordinator.notePlaybackCompleted(samples: 2, epoch: secondEpoch)
+        await waitUntil({ recorder.outcomes.count == 1 }, message: "新代 played 到齐后应完成")
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.completed])
     }
 
     func testTerminalArrivingBeforeWaitStillConfirmsCancel() async throws {

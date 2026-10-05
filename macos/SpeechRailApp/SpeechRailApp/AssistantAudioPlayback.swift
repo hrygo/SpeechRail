@@ -36,9 +36,11 @@ public final class PCMStreamPlayer: @unchecked Sendable {
 
     /// 队列播完（真正静音）时回调一次。界面用它把相位从"正在说话"退回"正在聆听"。
     public var onDrained: (@MainActor () -> Void)?
-    /// 每一块真的播完时回调一次（入队时的 epoch、帧数）。增量 TTS 用它逐块归还播放预算；
-    /// epoch 让迟到的回调无法改动新一轮的账本。
-    public var onBufferRendered: (@MainActor (Int, Int) -> Void)?
+    /// 每一块设备播放完成时回调一次（入队时的 epoch、帧数、chunkID）。
+    /// M0d 用 `.dataPlayedBack`（计入下游处理与设备延迟）记 played；
+    /// 增量 TTS 用它逐块归还播放预算。epoch 让迟到的回调无法改动新一轮的账本，
+    /// chunkID 让重复回调只归还一次。单次 schedule 只选一种 completion 类型。
+    public var onBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
 
     public init() {}
 
@@ -71,8 +73,9 @@ public final class PCMStreamPlayer: @unchecked Sendable {
     }
 
     /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了），返回 `false`。
+    /// `chunkID` 是该块的唯一身份，原样在 played 回调里带回。
     @discardableResult
-    public func enqueue(_ pcm: Data, epoch: Int) async -> Bool {
+    public func enqueue(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool {
         guard !pcm.isEmpty else { return false }
         let frames = pcm.count / MemoryLayout<Int16>.size
         guard frames > 0, let format else { return false }
@@ -92,19 +95,20 @@ public final class PCMStreamPlayer: @unchecked Sendable {
             return true
         }
         guard shouldSchedule else { return false }
-        // `.dataRendered` = 真的播出去了；`.dataConsumed` 只表示播放器把数据拿走了，
-        // 在欠载或大缓冲下会明显早到，不能拿来当"用户听完了"。
-        player.scheduleBuffer(buffer, completionCallbackType: .dataRendered) { [weak self] _ in
+        // M0d：`.dataPlayedBack` = 设备播出去了（含下游处理与设备延迟）；
+        // `.dataConsumed` 只表示播放器把数据拿走了，在欠载或大缓冲下会明显早到，
+        // 不能拿来当"用户听完了"。单次 schedule 只选一种类型，不假设双回调。
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             guard let self else { return }
             let state = self.lock.withLock {
-                () -> (isLast: Bool, rendered: (@MainActor (Int, Int) -> Void)?) in
+                () -> (isLast: Bool, rendered: (@MainActor (Int, Int, UUID) -> Void)?) in
                 // 停播之后到的 `dataRendered` 一律丢掉：它属于上一代，不许动新一轮的账本。
                 guard !self.stopped else { return (false, nil) }
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
                 return (self.pendingBuffers == 0, self.onBufferRendered)
             }
             if let rendered = state.rendered {
-                Task { @MainActor in rendered(epoch, frames) }
+                Task { @MainActor in rendered(epoch, frames, chunkID) }
             }
             if state.isLast {
                 Task { @MainActor in self.onDrained?() }

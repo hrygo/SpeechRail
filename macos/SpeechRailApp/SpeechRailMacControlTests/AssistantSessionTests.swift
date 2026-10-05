@@ -331,7 +331,7 @@ final class AssistantSessionTests: XCTestCase {
         private var captureContinuation: AsyncStream<AudioChunk>.Continuation?
 
         var onPlaybackDrained: (@MainActor () -> Void)?
-        var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)?
+        var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
         var onFailure: (@MainActor (String) -> Void)?
         var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)?
 
@@ -384,7 +384,7 @@ final class AssistantSessionTests: XCTestCase {
         }
 
         @discardableResult
-        func enqueuePlayback(_ pcm: Data, epoch: Int) async -> Bool {
+        func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool {
             lock.withLock {
                 _enqueuedBytes += pcm.count
                 _enqueuedEpochs.append(epoch)
@@ -397,10 +397,11 @@ final class AssistantSessionTests: XCTestCase {
             lock.withLock { _playbackStopCount += 1 }
         }
 
-        /// 模拟"这一块真的播完了"。
-        func render(samples: Int, epoch: Int) {
+        /// 模拟"这一块设备播完了"（played）。chunkID 默认随机；
+        /// 传同一个 chunkID 调两次即模拟重复回调。
+        func render(samples: Int, epoch: Int, chunkID: UUID = UUID()) {
             let rendered = onPlaybackBufferRendered
-            Task { @MainActor in rendered?(epoch, samples) }
+            Task { @MainActor in rendered?(epoch, samples, chunkID) }
         }
     }
 

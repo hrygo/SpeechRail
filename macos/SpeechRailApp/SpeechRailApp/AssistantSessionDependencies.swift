@@ -61,11 +61,11 @@ extension RealtimeASRClient: AssistantRealtimeClient {}
 /// 生产实现是 `PCMStreamPlayer`，它包着 `AVAudioEngine`。
 public protocol AssistantPlaybackChannel: AnyObject, Sendable {
     var onDrained: (@MainActor () -> Void)? { get set }
-    /// 每一块真的播完时回调（入队时的 epoch、帧数）。
-    var onBufferRendered: (@MainActor (Int, Int) -> Void)? { get set }
+    /// 每一块设备播放完成时回调（入队时的 epoch、帧数、chunkID；M0d 用 played 语义）。
+    var onBufferRendered: (@MainActor (Int, Int, UUID) -> Void)? { get set }
     func start() async throws
     @discardableResult
-    func enqueue(_ pcm: Data, epoch: Int) async -> Bool
+    func enqueue(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool
     func stop() async
 }
 

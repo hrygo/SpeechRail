@@ -132,14 +132,14 @@ final class AssistantDrainTests: XCTestCase {
 
     final class FakeAudio: AssistantAudioSession, @unchecked Sendable {
         var onPlaybackDrained: (@MainActor () -> Void)?
-        var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)?
+        var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
         var onFailure: (@MainActor (String) -> Void)?
         var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)?
         func configure(mode: AssistantMode) {}
         func start() async throws -> AsyncStream<AudioChunk> { AsyncStream { _ in } }
         func stop() {}
         @discardableResult
-        func enqueuePlayback(_ pcm: Data, epoch: Int) async -> Bool { true }
+        func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool { true }
         func stopPlayback() async {}
     }
 
