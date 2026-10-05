@@ -252,6 +252,14 @@ public final class MeetingSession {
         self.labeling = SpeakerLabeling(coordinator: coordinator)
         self.minutes = MinutesGenerator(coordinator: coordinator)
         self.innerOS = InnerOSSession(coordinator: coordinator)
+        // 改了来源（改名 / 合并 / 标记「我」/ 拆出）就重算一次复核状态。
+        // 验收标准 3 说的「修改来源后相关结论提示复核」要**当场**兑现：
+        // 此前这四条路径写完修订就结束，界面上的"需复核"要等下一次重新整理或
+        // 重开才出现——用户看到的是"我改了名字，什么提示都没有"。
+        self.labeling.onSourceRevision = { [weak self] in
+            guard let self, let sessionID = self.sessionID else { return }
+            await self.minutes.reload(sessionID: sessionID)
+        }
     }
 
     // MARK: - 入口

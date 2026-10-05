@@ -290,6 +290,42 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         let usable = try await h.store.latestUsableMinutes(sessionID: record.id)
         XCTAssertNil(usable, "没有模型就不该有可用版本；空正文或失败任务不得显示成功")
     }
+
+    // MARK: - 验收 3：改了来源，当场就要提示复核
+
+    /// 改一次说话人显示名，依赖这份来源的纪要**当场**被标成需复核。
+    ///
+    /// 此前这条是断的：改名/合并/标记「我」/拆出四条路径写完 `speaker_revision`
+    /// 就结束，谁也不重算复核状态。界面上"需复核"要等下一次重新整理或重开才出现，
+    /// 用户看到的是"我改了名字，什么提示都没有"——验收标准 3 说的
+    /// 「修改来源后相关结论提示复核」在最主要的触发路径上根本没接上。
+    ///
+    /// 走**生产路径**：真的启动一场会，再经 `MeetingSession.renameSpeaker` 改名。
+    func testRenamingASpeakerMarksTheMinutesForReviewRightAway() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let sessionID = try XCTUnwrap(h.session.sessionID)
+
+        // 这场会有过一版整理好的纪要。
+        let minutes = try await h.store.enqueueMinutes(
+            sessionID: sessionID, model: nil, promptChars: 8
+        )
+        _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+
+        // 改显示名 = 追加一条说话人修订。
+        await h.session.renameSpeaker(label: "A", to: "张三")
+
+        let pending = h.session.minutes.versionsNeedingReview
+        XCTAssertTrue(
+            pending.contains(minutes.id),
+            "改名之后必须当场提示复核，不能等下一次重新整理才出现"
+        )
+        let needsReview = try await h.store.minutesNeedsReview(minutesID: minutes.id)
+        XCTAssertTrue(needsReview, "库这一层的判断也应当是同一结论")
+    }
 }
 
 // MARK: - 夹具

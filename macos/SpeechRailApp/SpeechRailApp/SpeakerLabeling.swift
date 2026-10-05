@@ -52,6 +52,16 @@ public final class SpeakerLabeling {
     public static let maxSpeakers = 4
 
     private let coordinator: SessionCoordinator
+    /// 写下一条说话人修订之后要跑一次。
+    ///
+    /// 改名/合并/标记「我」/拆出都会追加 `speaker_revision`，而纪要是否需要复核
+    /// 正是靠这些修订算出来的。不回调的话，用户改完名字，界面上"需复核"要等到
+    /// 下一次重新整理或重开才出现——验收标准 3 说的「修改来源后相关结论提示复核」
+    /// 就落空了。回调放在这一层，是为了让四条路径**都**带上它：
+    /// `markAsMe` 与 `merge` 内部就是调 `rename`。
+    /// 异步是为了让刷新在动作返回**之前**完成：否则用户改完名字，
+    /// 界面先回显新名字、"需复核"再晚一步出现，中间那一瞬看着像是没生效。
+    var onSourceRevision: (@MainActor () async -> Void)?
 
     public private(set) var sessionID: String?
     /// 本场出现过的匿名标签，按首次出现的顺序。
@@ -70,8 +80,12 @@ public final class SpeakerLabeling {
     /// 本场被并掉的标签 → 目标标签（"已并入 A"）。
     private var mergedInto: [String: String] = [:]
 
-    public init(coordinator: SessionCoordinator) {
+    public init(
+        coordinator: SessionCoordinator,
+        onSourceRevision: (@MainActor () async -> Void)? = nil
+    ) {
         self.coordinator = coordinator
+        self.onSourceRevision = onSourceRevision
     }
 
     // MARK: - 会话边界
@@ -198,6 +212,8 @@ public final class SpeakerLabeling {
         do {
             try await coordinator.renameSpeaker(sessionID: sessionID, label: label, name: trimmed)
             displayNames[label] = trimmed
+            // 写成了修订，依赖这份来源的纪要该提示复核了。
+            await onSourceRevision?()
         } catch {
             note = "改名没能保存：\(error.localizedDescription)"
         }
@@ -233,6 +249,8 @@ public final class SpeakerLabeling {
             }
         }
         observe(label: target, ordinal: nil)
+        // 归属改了，依据旧归属的结论同样要提示复核。
+        await onSourceRevision?()
     }
 
     private func nextAvailableLabel() -> String {

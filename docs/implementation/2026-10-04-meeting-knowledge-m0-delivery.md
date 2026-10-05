@@ -72,6 +72,7 @@ base: "origin/main @ d72535c7"
 | 「并发编辑没有守卫」 | **不适用**。产品边界是单人本机服务，不存在两人同时改一场会 | 实测（项目约束为单人 Apple Silicon Mac） |
 | 「『采用这一版』只是回调占位」 | **已闭环**，见「版本对比与采用」一节（走 `adoptMinutes`，且草稿存不下去就不采用） | 实测 |
 | （此前未被发现） | **本分支自己造的缺陷**：`meeting_document` 只存 `deleted_at`，三档删除压成同一状态，`MeetingLibraryStatus.archived` 从未被产出，「撤销归档」按钮从来没出现过。已用 schema v12 的 `deletion_mode` 分开 | 实测（读代码发现 + 回归测试红/绿反证 + 真实 v11→v12 升级测试） |
+| （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 
 ### 四、已充分证据、无需再记的验收项
 
@@ -2257,3 +2258,64 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
   由既有的"新库直建到当前形状"用例间接覆盖，但**没有逐级真实旧库**的升级回归。
 - `deletion_mode` 是自由文本列，读取时 `flatMap(MeetingDeletionMode.init(rawValue:))`：
   认不出的值按"不可撤销"处理（与 NULL 同向），不会崩、也不会给错出口。
+
+## M1 增量：改了来源当场提示复核（验收 3 的触发路径）
+
+### 做了什么
+
+上一节修的是"复核标记会不会被洗掉"，这轮查的是更前面的问题：**标记会不会被算出来**。
+
+复核状态由 `MinutesGenerator.versionsNeedingReview` 承载，界面在两处消费它
+（`MeetingView.swift:1056` 当前版本、`:1557` 版本列表）。但这个集合只在**生成器
+自己的十条路径**上重算（generate / recover / reload / 认领后续跑）。
+
+而改来源的动作有四条：改名、合并、标记「我」、拆出。它们的实现都在
+`SpeakerLabeling` 里，写完 `speaker_revision` 就结束了——**没有任何一条触发重算**。
+`MeetingView` 里的调用点（`:891` 合并、`:894` 标记「我」）是裸的 `Task { }`，
+`SpeakerLabelingView.save` 也只回显一句"已保存"。
+
+结果就是验收标准 3 那句「修改来源后相关结论提示复核」在最最主要的触发路径上
+**根本没接上**：用户改完名字，界面上什么提示都没有，要等下一次重新整理或重开
+才看见。用户据此会以为改动没生效，或者更糟——以为那份纪要还是对的。
+
+改法：给 `SpeakerLabeling` 加一个 `onSourceRevision` 异步回调，在**写成功之后**触发；
+`MeetingSession` 在初始化时接上它，调 `minutes.reload(sessionID:)`。
+
+- 回调放在 `SpeakerLabeling` 这一层，是为了让四条路径**都**带上：
+  `markAsMe` 与 `merge` 内部就是调 `rename`，`split` 是唯一另一处写。
+- 回调是**异步**的，让刷新在动作返回前完成。否则用户改完名字，界面先回显新名字、
+  "需复核"再晚一步出现，中间那一瞬看着像是没生效。
+- 只在**写成功**之后触发：写失败不该让界面动。
+- `CaptionSession` 也构造 `SpeakerLabeling`，但不传回调——字幕没有纪要，无处可提示。
+
+### 回归证据（2026-10-06）
+
+`MeetingSessionLifecycleTests` **9 项全绿**，新增
+`testRenamingASpeakerMarksTheMinutesForReviewRightAway`：走**生产路径**
+（真的启动一场会 → `MeetingSession.renameSpeaker` 改名），断言
+`minutes.versionsNeedingReview` **当场**包含那一版，且库层 `minutesNeedsReview`
+是同一结论。
+
+反证已核对：把 `MeetingSession` 里那三行回调接线去掉后，该用例**变红**，
+报的正是"改名之后必须当场提示复核，不能等下一次重新整理才出现"。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1030 项**（上一节 1029 +1）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。`SpeakerLabeling.init` 新增一个**有默认值**的可选参数，
+  既有调用点（`CaptionSession`）不改也能编译。
+- 回退：去掉 `MeetingSession.init` 里的三行接线，并把 `init` 的参数删掉；
+  `SpeakerLabeling` 里两处 `await onSourceRevision?()` 一并去掉。三个文件可独立回退。
+
+### 未验证事项与已知边界
+
+- **只钉了改名这一条**。合并、标记「我」、拆出走的是同一段代码
+  （`markAsMe`/`merge` → `rename`，`split` 另一处 `await`），但**没有各自的用例**。
+  它们要额外准备行与标签，收益不抵篇幅；这是"共用代码已覆盖"而非"逐条已验证"。
+- 界面呈现未验证：`MeetingView` 那两处消费点本轮只经代码阅读确认，
+  无 UI 自动化或人工走查授权。
+- 刷新只覆盖**当前这一场**的纪要。跨会议的引用不会被连带重标——
+  按设计，别的会议引用的是它们自己封存时的快照（MC-46）。
