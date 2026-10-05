@@ -9,6 +9,5 @@
   "limits": {
     "max_total_codepoints": 4096
   },
-  "expected_model_revision": "0123456789abcdef0123456789abcdef01234567",
-  "audio_window_bytes": 48000
+  "expected_model_revision": "0123456789abcdef0123456789abcdef01234567"
 }

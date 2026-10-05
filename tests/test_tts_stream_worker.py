@@ -8,7 +8,10 @@ can be pinned exactly.
 from __future__ import annotations
 
 import io
+import os
 import struct
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -38,7 +41,12 @@ from speechrail.domain.tts_stream import (
     TtsStreamOptions,
     TtsStreamTerminal,
 )
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError, read_frame
+from speechrail.runtime.worker_protocol import (
+    PROTOCOL_VERSION,
+    ProtocolError,
+    read_frame,
+    write_frame,
+)
 
 
 class FakeModelSession:
@@ -357,10 +365,17 @@ def test_audio_budget_is_released_only_after_the_writer_confirms_delivery() -> N
 
     first = host.step()
     assert first.frames[0].binary == _pcm(3)
-    # Nothing is retired yet, so the next chunk already exceeds the budget.
+    # A full queue pauses generation without advancing the model or failing.
     blocked = host.step()
-    assert blocked.terminal is True
-    assert blocked.frames[0].payload["code"] == "tts_backpressure"
+    assert blocked.terminal is False
+    assert blocked.waiting_for_output is True
+    assert blocked.frames == ()
+    assert session.step_calls == 1
+    assert first.frames[0].on_sent is not None
+    first.frames[0].on_sent()
+    resumed = host.step()
+    assert resumed.frames[0].payload["sample_offset"] == 3
+    assert session.step_calls == 2
 
     other_session = FakeModelSession(
         events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3)) for _ in range(2)]
@@ -371,6 +386,196 @@ def test_audio_budget_is_released_only_after_the_writer_confirms_delivery() -> N
         assert produced.frames[0].payload["type"] == FRAME_STREAM_AUDIO
         assert callable(produced.frames[0].on_sent)
         produced.frames[0].on_sent()
+
+
+def test_worker_output_wait_expires_only_without_writer_progress() -> None:
+    clock = Clock()
+    session = FakeModelSession(
+        events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3)) for _ in range(4)]
+    )
+    host = _host(
+        session, limits=TtsStreamLimits(max_pending_audio_bytes=6), clock=clock
+    )
+    first = host.step()
+    assert host.step().waiting_for_output
+    clock.advance(1.5)
+    assert first.frames[0].on_sent is not None
+    first.frames[0].on_sent()
+    second = host.step()
+    assert second.frames[0].payload["sample_offset"] == 3
+    assert host.step().waiting_for_output
+    clock.advance(1.5)
+    assert host.step().waiting_for_output
+    clock.advance(0.6)
+    expired = host.step()
+    assert expired.terminal
+    assert expired.frames[0].payload["code"] == "tts_backpressure"
+
+
+def test_real_pump_delayed_writer_resumes_the_production_driver() -> None:
+    """Use the actual writer callback/condition, not immediate fake delivery."""
+
+    class GatedOutput(io.BytesIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting = threading.Event()
+            self.release = threading.Event()
+
+        def write(self, data: bytes) -> int:
+            self.waiting.set()
+            assert self.release.wait(2)
+            return super().write(data)
+
+    output = GatedOutput()
+    pump = StreamPump(io.BytesIO(), output)
+    # Start only the actual writer: this test controls ingress on the host.
+    writer = threading.Thread(target=pump._write_loop, daemon=True)
+    writer.start()
+    session = FakeModelSession(
+        events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3)) for _ in range(20)]
+    )
+    host = _host(session, limits=TtsStreamLimits(max_pending_audio_bytes=6))
+    host.accept_text(0, "abc")
+    host.finish_input(0)
+    driver = threading.Thread(target=_drive_stream, args=(pump, host), daemon=True)
+    driver.start()
+    try:
+        assert output.waiting.wait(1)
+        deadline = time.monotonic() + 1
+        while session.step_calls < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        # The production driver must remain alive while the writer owns credit.
+        driver.join(timeout=0.05)
+        assert driver.is_alive()
+        assert session.step_calls == 1
+        assert host.terminal is None
+        output.release.set()
+        driver.join(timeout=2)
+        assert not driver.is_alive()
+        assert host.terminal is TtsStreamTerminal.COMPLETED
+    finally:
+        output.release.set()
+        pump.stop(join_timeout_seconds=0.1)
+        writer.join(timeout=1)
+        driver.join(timeout=1)
+    output.seek(0)
+    frames = []
+    while (frame := read_frame(output)) is not None:
+        frames.append(frame)
+    audio = [frame for frame in frames if frame["type"] == FRAME_STREAM_AUDIO]
+    assert [frame["sample_offset"] for frame in audio] == list(range(0, 60, 3))
+    assert frames[-1]["terminal"] == "completed"
+
+
+@pytest.mark.parametrize("ending", ["cancel", "eof"])
+def test_real_pump_processes_text_and_cancellation_while_output_waits(ending: str) -> None:
+    class GatedOutput(io.BytesIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting = threading.Event()
+            self.release = threading.Event()
+
+        def write(self, data: bytes) -> int:
+            self.waiting.set()
+            assert self.release.wait(2)
+            return super().write(data)
+
+    read_fd, write_fd = os.pipe()
+    output = GatedOutput()
+    with os.fdopen(read_fd, "rb", buffering=0) as inbound:
+        parent = os.fdopen(write_fd, "wb", buffering=0)
+        pump = StreamPump(inbound, output)
+        session = FakeModelSession(
+            events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3)) for _ in range(4)]
+        )
+        host = _host(session, limits=TtsStreamLimits(max_pending_audio_bytes=6))
+        host.accept_text(0, "abc")
+        pump.start()
+        driver = threading.Thread(target=_drive_stream, args=(pump, host), daemon=True)
+        driver.start()
+        try:
+            assert output.waiting.wait(1)
+            deadline = time.monotonic() + 1
+            while session.step_calls < 1 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            write_frame(parent, {
+                "version": PROTOCOL_VERSION,
+                "type": FRAME_STREAM_TEXT,
+                "request_id": host.options.request_id,
+                "sequence": 1,
+                "text": "def",
+            })
+            deadline = time.monotonic() + 1
+            while len(session.appended) < 2 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert session.appended == ["abc", "def"]
+            assert session.step_calls == 1
+            if ending == "cancel":
+                write_frame(parent, {
+                    "version": PROTOCOL_VERSION,
+                    "type": FRAME_STREAM_CANCEL,
+                    "request_id": host.options.request_id,
+                })
+            else:
+                parent.close()
+            driver.join(timeout=0.5)
+            assert not driver.is_alive()
+            assert host.terminal is TtsStreamTerminal.CANCELLED
+        finally:
+            parent.close()
+            output.release.set()
+            pump.stop(join_timeout_seconds=0.5)
+            driver.join(timeout=1)
+    output.seek(0)
+    frames = []
+    while (frame := read_frame(output)) is not None:
+        frames.append(frame)
+    assert sum(frame["type"] == FRAME_STREAM_DONE for frame in frames) == 1
+    assert frames[-1]["terminal"] == "cancelled"
+
+
+def test_control_arriving_at_activity_snapshot_is_not_lost() -> None:
+    """Pin the drain/snapshot race instead of relying on thread scheduling."""
+
+    session = FakeModelSession(
+        events=[ModelStepEvent(kind="pcm", pcm16=_pcm(3)) for _ in range(4)]
+    )
+    host = _host(session, limits=TtsStreamLimits(max_pending_audio_bytes=6))
+    host.accept_text(0, "abc")
+
+    class RacingPump(StreamPump):
+        injected = False
+
+        @property
+        def activity_generation(self) -> int:
+            if session.step_calls == 1 and not self.injected:
+                self.injected = True
+                self._inbound.put_nowait({
+                    "version": PROTOCOL_VERSION,
+                    "type": FRAME_STREAM_TEXT,
+                    "request_id": host.options.request_id,
+                    "sequence": 1,
+                    "text": "late",
+                })
+                self._signal_activity()
+            return super().activity_generation
+
+    pump = RacingPump(io.BytesIO(), io.BytesIO())
+    driver = threading.Thread(target=_drive_stream, args=(pump, host), daemon=True)
+    driver.start()
+    try:
+        deadline = time.monotonic() + 0.3
+        while len(session.appended) < 2 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert session.appended == ["abc", "late"]
+        assert session.step_calls == 1
+    finally:
+        pump.cancel_request_id = host.options.request_id
+        pump._cancel.set()
+        pump._signal_activity()
+        driver.join(timeout=1)
+        pump.stop(join_timeout_seconds=0)
+    assert not driver.is_alive()
 
 
 def test_cancel_terminal_bypasses_a_full_audio_queue_and_retires_dropped_pcm() -> None:
@@ -545,6 +750,10 @@ class DeliveryPump:
     @property
     def cancel_pending(self) -> bool:
         return self._cancel_pending
+
+    @property
+    def activity_generation(self) -> int:
+        return len(self.frames)
 
     def discard_ended_stream(self, request_id: str) -> None:
         while self._inbound and self._inbound[0].get("request_id") == request_id:

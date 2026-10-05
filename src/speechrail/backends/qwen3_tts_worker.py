@@ -1281,6 +1281,9 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
     request_id = host.options.request_id
     try:
         while True:
+            # Capture before draining input: a command arriving during drain
+            # must not be hidden behind a newer snapshot when output is full.
+            activity = pump.activity_generation
             if pump.cancel_pending and pump.cancel_request_id == request_id:
                 for outbound in host.cancel():
                     _emit_frame(pump, outbound)
@@ -1290,11 +1293,18 @@ def _drive_stream(pump: StreamPump, host: TtsStreamHost) -> None:
                 return
             if host.terminal is not None:
                 return
+            if pump.at_eof or pump.read_error is not None or pump.write_error is not None:
+                for outbound in host.cancel():
+                    _emit_frame_best_effort(pump, outbound)
+                return
             result = host.step()
             for outbound in result.frames:
                 _emit_frame(pump, outbound)
             if result.terminal or host.terminal is not None:
                 return
+            if result.waiting_for_output:
+                pump.wait_for_activity(activity, timeout=host.output_timeout_remaining())
+                continue
             if not result.waiting_for_text:
                 continue
             frame = pump.poll(timeout=host.timeout_remaining())

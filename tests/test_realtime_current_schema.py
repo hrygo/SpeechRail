@@ -64,6 +64,7 @@ def test_legacy_wire_is_not_accepted_by_schema() -> None:
         "legacy_flat_session_audio",
         "legacy_tts_response_delta",
         "legacy_tts_response_done",
+        "legacy_session_tts_revision",
         "unsupported_turn_detection",
         "unsupported_audio_format",
         "unsupported_model_precision",

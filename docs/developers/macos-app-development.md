@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.2"
-date: 2026-10-04
+version: "0.6.5"
+date: 2026-10-05
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -38,10 +38,11 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 不要把多次读取 `/v1/models`、`/v1/voices` 拼成原子结果。音色列表（`/v1/voices`）是用户数据，
 可以为空，「还没有克隆音色」不能推出「服务没有克隆能力」；用列表反推能力会报出假的「未就绪」。
 
-App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 在 `session.update` 的
-`session.speechrail.expected_tts_revision` 与 `speechrail.tts.start` 的
-`voice_revision`/`expected_model_revision` 上绑定当前 voice 与 TTS model，并在切换音色时同时更新
-voice 与 revision；REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
+App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 仅在
+`speechrail.tts.start` 的 `voice`、`voice_revision`/`expected_model_revision` 上绑定本次
+音色与 TTS 模型，并在切换音色时同时更新这些值。`SpeechRailSessionUpdate` 只接受
+`expectedASRRevision`，不接受 TTS pin；旧 `session.speechrail.expected_tts_revision`
+已移除，服务端明确拒绝。REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
 `SpeechRail-Expected-Model-Revision` 传递同代约束。匹配不到可用 voice、对应 operation 或
 revision 时显式保持 `nil`，走服务端普通协商，不从 voice 名称、模型名或本地时间推断版本。
 
@@ -96,7 +97,9 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 
 打字与语音输入共用 `AssistantInputPersistenceQueue` 单消费者保序保存，默认最多 32 个在途命令、64,000 Unicode scalar，失败命令仍计预算。保存成功才投影正式对话与提交回答；partial 只归档。前序保存失败时，后续已接纳输入返回 blocked 并保留命令，恢复后按原顺序保存，不由草稿重复发送；本句保存失败仍明确报错。结束等待本记录已经接纳的保存（含正常、partial、draining 与打字在途保存），未完成或失败时保留恢复入口并避免宣称封存成功。主动关闭语音先收尾已有回复，保留文字上下文与待保存正文。恢复按固定行 ID 核对，不直接把唯一键冲突当成功。首条正式用户行在 Store 条件命名，partial 不占命名资格，人工标题不被迟到自动命名覆盖。
 
-音频使用唯一 FIFO 消费任务。pending 与在途待入队 PCM 共享 `min(48_000, started.maxPendingAudioBytes)` 字节限额；播放 ledger 默认另限 24,000 个 Int16 samples（48,000 bytes）。上游事件流原有 4 MiB decoded PCM 限额也属于总体在途预算；不能只用 FIFO 大小宣称总内存上界。服务端完成终态、FIFO/在途与播放账本全部排空才表示播放完成，保留原有 2 秒播放等待与 5 秒 ACK 期限。
+音频使用唯一 FIFO 消费任务。每次 start 默认声明 `audio_window_bytes=1_440_000`（30 秒 PCM，约 1.4 MB），started 必须回显相同窗口；接收事件流、FIFO、在途待入队 PCM 与播放器共享该 request 的未消费额度，不因数据已入播放器而归还。服务端窗口耗尽时暂停音频发送，本代渲染完成回调释放容量后才通过 `speechrail.tts.audio_ack.sample_offset` 归还累计额度。发送由一个有句柄的任务合并水位；取消后的旧回调和旧发送不能给新 request 归还额度。`limits.max_pending_audio_bytes` 仅约束 worker/传输与单块大小，不再用作客户端累计待播预算。单块仍限 48,000 bytes，播放 ledger 默认仍限 24,000 个 Int16 samples（48,000 bytes）；FIFO 吸收提前合成的音频。服务端 completed 不结束 playback waiter，待 FIFO、入队和播放器全部排空后才报告整轮完成。上游事件流原有 4 MiB decoded PCM 限额是额外保护。
+
+服务端完成终态、FIFO/在途与播放账本全部排空才表示播放完成；completed 不要求最后一块已发消费 ACK。保留 2 秒播放/消费停滞上限；5 秒文本 ACK 按无进展期限判断，健康的本代播放进度可以续期，但不能确认文本或提前 finish。服务端在 backend 接受 append 后独立发送文本 ACK，避免排在等待消费额度的音频后面。真实设备播放与用户听到的证据仍按既有回调边界区分。
 
 音色选择按版本保留最新意图，同一 client 串行写入 voice 与 revision pins。当前 request 固定音色，下一 request 等最新写入后启动；在真实 started 与回复库 ordinal 已知后，才按明确 sessionID 记录变更。记录失败报告已用于朗读但未保存，不回滚已启动 request。
 

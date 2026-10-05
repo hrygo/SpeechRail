@@ -109,7 +109,8 @@ final class AssistantDrainTests: XCTestCase {
             expectedTTSRevision: String?
         ) async throws {}
 
-        func startTTSStream(requestID: String, speed: Double?) async throws {}
+        func startTTSStream(requestID: String, speed: Double?, audioWindowBytes: Int) async throws {}
+        func acknowledgeTTSAudio(requestID: String, sampleOffset: Int) async throws {}
         func appendTTSText(_ text: String, sequence: Int) async throws {}
         func finishTTSText(lastSequence: Int) async throws {}
         func cancelTTS() async throws { counters.cancelTTS += 1 }

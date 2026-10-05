@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`4.4.0`；生效日期：2026-10-01。唯一机器 schema 是
+> 契约版本：`6.1.0`；生效日期：2026-10-05。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -64,11 +64,13 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   `turn_detection` 互斥，不把 Silero 冒充官方云模型能力。
 - `session.speechrail.task` 为 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`。Alignment、Diarization、TTS 均为任务 opt-in，不随规格自动开启。
-- 模型、语言、voice revision、能力与预算由统一 plan resolver 在首个工作前验证。未知模型、
-  未知 voice、未知 revision、Q4/Q6、Design runtime voice 均 fail closed。
+- `session.speechrail.expected_asr_revision` 只绑定连接的 ASR 模型身份，在 `session.updated`
+  回显。TTS opt-in 只启用能力，不选择音色或绑定 TTS 模型。
+- 模型、语言、能力与预算在首个工作前验证；TTS 音色与 revision 在每次
+  `speechrail.tts.start` 验证。未知模型、voice、revision、Q4/Q6、Design runtime voice 均 fail closed。
 - 缺失字段使用服务端当前默认；显式 `null` 只对 schema 声明可空的字段有效，不能用 `null`
   删除有语义的字段。
-- 更新确认是 `session.updated`。更新是原子的：候选配置先完整校验（revision、voice、
+- 更新确认是 `session.updated`。更新是原子的：候选配置先完整校验（ASR revision、
   VAD 与各能力初始化），成功后才一次性发布。若候选配置失败，旧 flags、config、输入缓冲
   与资源身份都不变，不留任何部分生效；候选持有的资源被关闭且只关闭一次，客户端改正后
   重发可以正常成功。
@@ -81,14 +83,23 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 | `input_audio_buffer.commit` | `event_id` | 结束当前输入 turn，最多产生一个 ASR final；`event_id` 会在对应终态原样回显 |
 | `input_audio_buffer.clear` | `event_id` | 清空未提交输入；不产生 final |
 | `speechrail.diarization.finish` | `event_id` | 关闭已 opt-in 的 diarization 会话；同 `event_id` 可重放，异 `event_id` 拒绝 |
-| `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice` | 开始一个增量 TTS utterance |
+| `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice`, `audio_window_bytes` | 开始一个有界消费窗口的增量 TTS utterance |
 | `speechrail.tts.append_text` | `event_id`, `request_id`, `sequence`, `text` | 追加不可变稳定文本；sequence 从 0 连续递增 |
 | `speechrail.tts.finish_text` | `event_id`, `request_id`, `last_sequence` | 关闭文本侧并以最后 ACK 序号为屏障 |
 | `speechrail.tts.cancel` | `event_id`, `request_id` | 取消匹配 utterance；取消优先于音频和终态（见 5.3） |
+| `speechrail.tts.audio_ack` | `event_id`, `request_id`, `sample_offset` | 归还匹配 utterance 的累计 PCM 消费额度 |
 
 `speechrail.tts.start` 还接受 `voice_revision`、`expected_model_revision`、`speed` 和仅能收紧的
 `limits`。未知字段不是 no-op，返回稳定错误。`speechrail.tts.create`、
 `transcription_session.update` 和 conversation/response 事件均已移除。
+
+TTS 身份只属于本次 start 请求：`voice` 必填，两个 revision pin 从同一 effective capability
+snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆音色校验 Base 制品；
+`voice_revision_conflict` / `model_revision_conflict` 在开流前拒绝该次请求。每次请求独立校验，
+不继承 session 或上一 utterance 的音色与模型 pin；省略 pin 时使用该音色当前版本。
+旧 `session.speechrail.expected_tts_revision`（包括 `audio.input.speechrail` 中的同名字段）
+已移除，返回 `unsupported_operation`，失败不部分启用 TTS。客户端须同步更新，把 TTS pin
+移至带有音色身份的 start 事件。
 
 ## 5. 服务端事件
 
@@ -247,6 +258,41 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 Base64 PCM。TTS 只使用 SpeechRail namespace；不同时发送 `response.done`，每次 utterance 恰好一个
 terminal：`completed`、`cancelled` 或 `failed`。取消后不得再投递旧音频。
 
+### PCM 消费窗口
+
+`start.audio_window_bytes` 必填，是 `2...1_440_000` 范围内的偶数；`started.audio_window_bytes`
+回显生效窗口。服务端发送但尚未获消费确认的 PCM 不超过该窗口，涵盖调用方事件流、FIFO、
+在途入队和播放器中的同一批音频。窗口耗尽时等待消费进度，不把正常的快速生成视为错误。
+`limits.max_pending_audio_bytes` 仍然是 worker/传输预算，传输发送完成即可归还；它不表示调用方
+已经消费。生效 worker chunk 上限进一步收紧至窗口内，单块一定可被准入。
+macOS 助手默认预取最多 30 秒（1,440,000 bytes），播放器短队列与 worker 默认
+48,000 bytes 预算独立。生产 completed 后释放合成资源，客户端继续排空自己的队列。
+
+调用方只在确实释放本地音频容量后发送消费确认：
+
+```json
+{"type":"speechrail.tts.audio_ack","event_id":"ack_1","request_id":"req_1","sample_offset":1920}
+```
+
+`sample_offset` 是该 request 从零起累计消费的 PCM16 样本数（exclusive end），必须是非负
+安全整数，不能超过服务端已发送水位。重复水位幂等；回退或超前返回 `tts_audio_ack_invalid`，
+不改变窗口。播放调用方在本代渲染完成回调释放容量后归还，文件/内存消费调用方在交给其有界
+下游后归还；接收数据本身不等于释放容量。消费确认不更改 receipt 的 transport `delivered`
+边界，也不证明用户听到了音频。
+
+消费确认与 cancel 使用独立控制队列，不排在等待中的 append/音频准入之后。文本 ACK 在
+backend 接受 append 后独立发送，不等待输出窗口；不能用消费确认替代文本 ACK 或提前 finish。
+取消和断线关闭窗口、唤醒发送者、丢弃未发送 PCM；资源回收确认后才发送 terminal。消费长期
+无进展时使用生效 `slow_consumer_seconds` 返回一次 `tts_backpressure` 失败。消费等待与
+网络写入使用独立 deadline：实际消费水位前进续期，重复 ACK 不续期；累计健康等待可以
+超过单次 deadline。worker 输出预算满时暂停模型推进，writer 实际交付后恢复，
+不因瞬时满队列失败。正常 completed
+不等待最终消费确认：调用方继续排空本地音频，已知退役 request 的迟到 ACK 被忽略，未知
+request 返回 `tts_not_active`，绝不归还到新 request。
+
+这是必需的当前契约：缺少 `audio_window_bytes` 的 start 被拒绝，不提供无流控旧模式或 alias。
+服务与直接 WebSocket 客户端须同步更新；REST/MCP 一次性合成不受此次事件变更影响。
+
 本节的三条时序是调用方可以依赖的契约，不只是当前实现细节：
 
 1. **取消优先于音频准入。** `speechrail.tts.cancel` 不排在已入队的音频准入之后；即使有音频
@@ -285,7 +331,7 @@ terminal：`completed`、`cancelled` 或 `failed`。取消后不得再投递旧�
 `backend_not_ready`、`tts_request_invalid`、`tts_in_progress`、`tts_not_active`、
 `voice_not_found`、`voice_not_available`、`voice_revision_conflict`、
 `model_revision_conflict`、`tts_sequence_invalid`、`tts_input_closed`、`tts_input_timeout`、
-`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_backend_failed`、`invalid_state`。
+`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_audio_ack_invalid`、`tts_backend_failed`、`invalid_state`。
 
 ## 7. 明确拒绝项
 

@@ -52,6 +52,7 @@ _INPUT_TIMEOUT_CODE = "tts_input_timeout"
 _CANCELLED_CODE = "cancelled"
 
 TtsStreamSink = Callable[[TtsStreamEvent], Awaitable[None]]
+TtsAudioAdmission = Callable[[int], Awaitable[bool]]
 WorkerLeaseFactory = Callable[[], AbstractAsyncContextManager[object]]
 
 
@@ -102,6 +103,7 @@ class StreamController:
         limits: TtsStreamLimits,
         sink: TtsStreamSink,
         admission: AsyncExitStack,
+        audio_admission: TtsAudioAdmission | None = None,
         receipts: RenderReceiptRegistry | None = None,
         receipt_id: str | None = None,
         clock: Callable[[], float] | None = None,
@@ -111,6 +113,7 @@ class StreamController:
         self._limits = limits
         self._sink = sink
         self._admission = admission
+        self._audio_admission = audio_admission
         self._receipts = receipts if receipt_id is not None else None
         self._receipt_id = receipt_id
         self._clock = clock or time.monotonic
@@ -258,6 +261,7 @@ class StreamController:
                 self._claim(TtsStreamTerminal.FAILED, _BACKEND_FAILURE_CODE)
         except TtsStreamError as exc:
             self._failure = exc
+            logger.warning("incremental TTS stream failed: code=%s", exc.code)
             self._claim(TtsStreamTerminal.FAILED, exc.code)
         except Exception as exc:
             self._failure = exc
@@ -268,10 +272,24 @@ class StreamController:
 
     async def _deliver(self, event: TtsStreamEvent) -> None:
         if event.terminal is not None:
+            if event.terminal is TtsStreamTerminal.FAILED:
+                logger.warning(
+                    "incremental TTS stream failed: source=worker code=%s", event.error_code
+                )
             self._claim(event.terminal, event.error_code)
             return
         if event.kind is TtsStreamEventKind.AUDIO:
             pcm16 = event.pcm16
+            if self._audio_admission is not None:
+                try:
+                    admitted = await self._audio_admission(len(pcm16))
+                except TtsStreamError:
+                    logger.warning("incremental TTS delivery stalled: source=audio_consumption")
+                    raise
+                if not admitted:
+                    if self._terminal is None:
+                        raise TtsStreamError("tts_input_closed", "audio consumption is closed")
+                    return
             if await self._send(event):
                 self._record_delivered(pcm16)
             return
@@ -289,6 +307,7 @@ class StreamController:
                 async with asyncio.timeout(self._limits.slow_consumer_seconds):
                     await self._sink(event)
             except TimeoutError as exc:
+                logger.warning("incremental TTS delivery stalled: source=transport")
                 raise TtsStreamError(
                     "tts_backpressure", "the downstream consumer is not draining audio"
                 ) from exc
@@ -434,6 +453,7 @@ class TtsStreamService:
         sink: TtsStreamSink,
         receipt: TtsStreamReceipt | None = None,
         limits: TtsStreamLimits | None = None,
+        audio_admission: TtsAudioAdmission | None = None,
     ) -> StreamController:
         """Admit one utterance and return a controller that is already running."""
 
@@ -491,6 +511,7 @@ class TtsStreamService:
             limits=effective,
             sink=sink,
             admission=admission,
+            audio_admission=audio_admission,
             receipts=self.receipts,
             receipt_id=receipt_id,
             clock=self._clock,

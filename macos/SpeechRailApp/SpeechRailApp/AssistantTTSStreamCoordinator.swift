@@ -31,8 +31,9 @@ final class AssistantTTSStreamCoordinator {
         var playbackWaitTimeout: Duration = .seconds(2)
         /// 停播屏障落地之后，等后端确认取消的上限；超时也不回滚本地静音。
         var cancellationTimeout: Duration = .seconds(2)
-        /// 等待播放预算的 PCM FIFO 上限；started 协商值可进一步收紧。
-        var maximumPendingAudioBytes = 48_000
+        /// 本轮收到但尚未消费的 PCM 总上限，包含 FIFO、在途 enqueue 和播放器。
+        /// 通过 start.audio_window_bytes 声明，由消费回调归还额度。
+        var maximumPendingAudioBytes = SpeechRailTTSStart.maximumAudioWindowBytes
 
         static let `default` = Configuration()
     }
@@ -128,6 +129,7 @@ final class AssistantTTSStreamCoordinator {
     var sendAppend: @MainActor (Int, String) async throws -> Void = { _, _ in }
     var sendFinish: @MainActor (Int) async throws -> Void = { _ in }
     var sendCancel: @MainActor () async throws -> Void = {}
+    var sendAudioAcknowledgement: @MainActor (String, Int) async throws -> Void = { _, _ in }
     /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**：播放层必须在"真的播完"
     /// 的回调里把它原样带回，迟到块才可能被识别出来。
     /// 返回 `false` 表示这一块没有真的进播放队列，预算必须原样还回去。
@@ -151,6 +153,10 @@ final class AssistantTTSStreamCoordinator {
     private var pendingAudioBytes = 0
     private var audioConsumerTask: Task<Void, Never>?
     private var audioConsumerID: UUID?
+    private var audioAcknowledgementTaskID: UUID?
+    private var consumedSampleOffset = 0
+    private var sentConsumptionOffset = 0
+    private(set) var unconsumedAudioBytes = 0
 
     private(set) var generation = -1
     private(set) var requestID: String?
@@ -227,6 +233,10 @@ final class AssistantTTSStreamCoordinator {
     }
     var queuedSamples: Int { ledger.queuedSamples }
     var queuedAudioBytes: Int { pendingAudioBytes }
+    /// Client consumption capacity, independent of the worker's transport budget.
+    var audioWindowBytes: Int {
+        min(SpeechRailTTSStart.maximumAudioWindowBytes, max(0, configuration.maximumPendingAudioBytes))
+    }
     var pendingTextScalars: Int { buffer.pendingScalars }
     /// 服务端终态到了、但本代音频可能还在播。
     var isAwaitingPlayback: Bool { ledger.serverTerminal && !isDrained }
@@ -426,6 +436,10 @@ final class AssistantTTSStreamCoordinator {
         finishSent = false
         buffer.reset()
         _ = discardPendingAudio()
+        unconsumedAudioBytes = 0
+        consumedSampleOffset = 0
+        sentConsumptionOffset = 0
+        audioAcknowledgementTaskID = nil
         ledger.invalidate()
         pumpTask?.cancel()
         pumpTask = nil
@@ -478,15 +492,20 @@ final class AssistantTTSStreamCoordinator {
             fail(Failure.playbackBackpressure(queuedSamples: ledger.queuedSamples))
             return .rejected
         }
-        let maximumBytes = audioPendingByteLimit
+        let maximumBytes = audioWindowBytes
+        let chunkLimit = min(
+            serverLimits?.maxPendingAudioBytes ?? TTSStreamLimits.serverDefaults.maxPendingAudioBytes,
+            TTSStreamLimits.serverDefaults.maxPendingAudioBytes
+        )
         guard pcm.count <= maximumBytes,
-              pendingAudioBytes <= maximumBytes - pcm.count
+              pcm.count <= chunkLimit,
+              unconsumedAudioBytes <= maximumBytes - pcm.count
         else {
             fail(
                 Failure.audioBackpressure(
-                    pendingBytes: pendingAudioBytes,
+                    pendingBytes: unconsumedAudioBytes,
                     incomingBytes: pcm.count,
-                    maximumBytes: maximumBytes
+                    maximumBytes: min(maximumBytes, chunkLimit)
                 )
             )
             return .rejected
@@ -501,6 +520,7 @@ final class AssistantTTSStreamCoordinator {
             )
         )
         pendingAudioBytes += pcm.count
+        unconsumedAudioBytes += pcm.count
         ensureAudioConsumer()
         return .accepted
     }
@@ -531,7 +551,7 @@ final class AssistantTTSStreamCoordinator {
             return
         }
         guard isActive, requestID == self.requestID else { return }
-        releaseWaiters(.failed("服务端结束了这一轮。"))
+        releaseWaiters(.failed("服务端结束了这一轮。"), keepingPlayback: status == "completed")
         ledger.markServerTerminal(status: status, generation: utteranceEpoch)
         switch status {
         case "cancelled":
@@ -557,7 +577,12 @@ final class AssistantTTSStreamCoordinator {
     /// `epoch` 是入队时交给播放层的身份：**旧代的迟到回调必须整条丢掉**，
     /// 否则它会把新一轮的排队预算当成自己的还掉，让整轮提前宣布播完。
     func notePlaybackCompleted(samples: Int, epoch: Int) {
+        guard isActive, samples > 0, samples <= ledger.queuedSamples else { return }
         guard ledger.complete(samples: samples, generation: epoch) else { return }
+        unconsumedAudioBytes -= samples * MemoryLayout<Int16>.size
+        consumedSampleOffset += samples
+        ensureAudioAcknowledgement()
+        renewTextAcknowledgementDeadline(epoch: epoch)
         resolve(WaitKey(epoch: epoch, target: .playback), .satisfied)
         reportCompletedIfDrained()
     }
@@ -599,9 +624,9 @@ final class AssistantTTSStreamCoordinator {
 
     private func startRetiredOutboundTask(
         requestID: String,
+        taskID: UUID = UUID(),
         operation: @escaping @MainActor () async -> Void
     ) -> UUID {
-        let taskID = UUID()
         let task = Task { @MainActor [weak self] in
             guard !Task.isCancelled else {
                 self?.finishRetiredOutboundTask(taskID: taskID)
@@ -757,13 +782,40 @@ final class AssistantTTSStreamCoordinator {
         return true
     }
 
-    private var audioPendingByteLimit: Int {
-        let localLimit = max(0, configuration.maximumPendingAudioBytes)
-        let serverLimit = max(
-            0,
-            serverLimits?.maxPendingAudioBytes ?? TTSStreamLimits.serverDefaults.maxPendingAudioBytes
-        )
-        return min(localLimit, serverLimit)
+    /// One owned sender coalesces cumulative watermarks. It never blocks the
+    /// receiver or creates a task per audio chunk, and retains request/epoch identity.
+    private func ensureAudioAcknowledgement() {
+        guard audioAcknowledgementTaskID == nil,
+              isActive, !ledger.serverTerminal,
+              let requestID, consumedSampleOffset > sentConsumptionOffset
+        else { return }
+        let epoch = utteranceEpoch
+        let taskID = UUID()
+        audioAcknowledgementTaskID = taskID
+        _ = startRetiredOutboundTask(requestID: requestID, taskID: taskID) { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.audioAcknowledgementTaskID == taskID {
+                    self.audioAcknowledgementTaskID = nil
+                }
+            }
+            while !Task.isCancelled,
+                  self.isActive, self.utteranceEpoch == epoch,
+                  self.requestID == requestID, !self.ledger.serverTerminal {
+                let offset = self.consumedSampleOffset
+                guard offset > self.sentConsumptionOffset else { return }
+                do {
+                    try await self.sendAudioAcknowledgement(requestID, offset)
+                } catch {
+                    if self.isActive, self.utteranceEpoch == epoch {
+                        self.fail(.server(error.localizedDescription))
+                    }
+                    return
+                }
+                guard self.utteranceEpoch == epoch else { return }
+                self.sentConsumptionOffset = offset
+            }
+        }
     }
 
     /// Receiver admission only appends to a byte-bounded FIFO. One owned consumer
@@ -895,6 +947,7 @@ final class AssistantTTSStreamCoordinator {
             _ = retainCurrentPump(for: requestID)
         }
         self.outcome = outcome
+        unconsumedAudioBytes = 0
         pumpTask?.cancel()
         pumpTask = nil
         pumpTaskID = nil
@@ -1053,27 +1106,42 @@ final class AssistantTTSStreamCoordinator {
                 continuation.resume(returning: .failed("这一轮已经在等同一个事件了。"))
                 return
             }
-            let id = UUID()
-            let timeoutTask = Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: timeout)
-                } catch {
-                    return
-                }
-                // 超时按 ID 精确命中：同一目标可能已经注册了新的 waiter。
-                self?.resolve(key, .timedOut, waiterID: id)
-            }
-            waiters[key] = Waiter(
-                id: id,
-                timeoutTask: timeoutTask,
-                continuation: continuation
-            )
+            registerWaiter(key, timeout: timeout, continuation: continuation)
             // 封闭"取消先于注册"的窗口：注册本身不让出执行权，
             // 所以再确认一次当前世代与取消状态就够了。
             if !isActive || key.epoch != utteranceEpoch || Task.isCancelled {
-                resolve(key, .cancelled, waiterID: id)
+                resolve(key, .cancelled)
             }
         }
+    }
+
+    private func registerWaiter(
+        _ key: WaitKey, timeout: Duration,
+        continuation: CheckedContinuation<WaitResult, Never>
+    ) {
+        let id = UUID()
+        let timeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, self.waiters[key]?.id == id else { return }
+            self.resolve(key, .timedOut, waiterID: id)
+        }
+        waiters[key] = Waiter(id: id, timeoutTask: timeoutTask, continuation: continuation)
+    }
+
+    /// Backend control frames may be behind already-produced audio on the vendor
+    /// transport. Only genuine current playback progress renews the inactivity
+    /// deadline; the real text ACK remains the sole sequence/finish barrier.
+    private func renewTextAcknowledgementDeadline(epoch: Int) {
+        let key = WaitKey(epoch: epoch, target: .acknowledgement(acceptedSequence + 1))
+        guard epoch == utteranceEpoch, let waiter = waiters[key] else { return }
+        waiter.timeoutTask.cancel()
+        registerWaiter(
+            key, timeout: configuration.acknowledgementTimeout, continuation: waiter.continuation
+        )
     }
 
     private func resolve(_ target: WaitTarget, _ result: WaitResult) {
@@ -1098,10 +1166,10 @@ final class AssistantTTSStreamCoordinator {
         prefetched[key] = result
     }
 
-    private func releaseWaiters(_ result: WaitResult) {
+    private func releaseWaiters(_ result: WaitResult, keepingPlayback: Bool = false) {
         // 先整体摘下再逐个唤醒：resume 之后对方可能同步改集合。
-        let pending = waiters
-        waiters.removeAll()
+        let pending = waiters.filter { !keepingPlayback || $0.key.target != .playback }
+        for key in pending.keys { waiters.removeValue(forKey: key) }
         prefetched.removeAll()
         for waiter in pending.values {
             waiter.timeoutTask.cancel()
