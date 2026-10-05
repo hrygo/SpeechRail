@@ -915,6 +915,27 @@ public final class SessionCoordinator {
         try await store.searchKnowledge(query: query, kind: kind, limit: limit)
     }
 
+    /// 全文检索（MA-15）。降级时 `usedFullText` 为 false 且带原因，
+    /// 调用方要把它显示出来，不能让用户以为这就是全文检索的结果。
+    public func searchKnowledgeFullText(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200
+    ) async throws -> SessionStore.KnowledgeSearchResults {
+        try await store.searchKnowledgeFullText(query: query, kind: kind, limit: limit)
+    }
+
+    /// 检索索引状态：索引是否可用、有多少待处理项（§6.5「保存与索引分开报状态」）。
+    public func searchIndexStatus() async throws -> SessionStore.SearchIndexStatus {
+        try await store.searchIndexStatus()
+    }
+
+    /// 重建检索索引（索引是派生数据，重建不丢内容）。
+    @discardableResult
+    public func rebuildSearchIndex() async throws -> Int {
+        try await store.rebuildSearchIndex()
+    }
+
     public func searchLines(
         query: String,
         kind: SessionKind? = nil,

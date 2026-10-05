@@ -69,7 +69,9 @@ public actor SessionStore {
     /// v7（MA-09）：`minutes` 追加 `coverage_json`，新增 `minutes_window`。
     /// 覆盖账本单独成表而不是塞进候选 JSON：局部重试要能只重跑失败的那一窗，
     /// 也要能回答"哪几句转录没被整理到"——这两个问题都要求按窗口查行。
-    public static let schemaVersion: Int32 = 7
+    /// v8（MA-15）：`knowledge_fts` 全文索引 + `search_index_outbox`。
+    /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
+    public static let schemaVersion: Int32 = 8
 
     private let directory: URL
     private let fileManager: FileManager
@@ -131,6 +133,10 @@ public actor SessionStore {
             try execute("PRAGMA synchronous=NORMAL;")
             try execute("PRAGMA foreign_keys=ON;")
             try migrate()
+            // MA-15：打开时把待处理的索引项应用掉。内容保存与索引更新分开报状态，
+            // 但**不能**永远分开——否则重启后旧内容仍然搜不到。
+            // drain 失败不影响打开：索引是派生数据，检索会走词法回退并如实标降级。
+            try? drainSearchIndex()
         } catch {
             close()
             throw error
@@ -178,6 +184,9 @@ public actor SessionStore {
             }
             if version < 7 {
                 try migrateV6ToV7()
+            }
+            if version < 8 {
+                try migrateV7ToV8()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -258,6 +267,15 @@ public actor SessionStore {
             // 有观测时刻就用它；没有才退回"这一刻"（D09）。
             bind(statement, 14, (draft.createdAt ?? Date()).timeIntervalSince1970)
             try step(statement)
+        }
+        // MA-15：内容保存与索引更新分开报状态——这里只排队，
+        // 由 drainSearchIndex 真正写索引。崩溃也不会漏，因为 outbox 与内容同事务。
+        if draft.status == .final {
+            try enqueueSearchIndex(
+                sessionID: draft.sessionID,
+                sourceKind: SearchIndexOp.lineKind,
+                sourceID: id
+            )
         }
         guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(id)]) else {
             throw SessionStoreError.statementFailed("行写入后读不回序号")
@@ -958,6 +976,19 @@ public actor SessionStore {
             // 窗口进度与正文同生共死：写一半会让"局部重试"重跑已经成功的窗口，
             // 也会让覆盖账本说的和正文对不上（§6.3）。
             try replaceWindowsLocked(windows, minutesID: minutesID)
+            // MA-15：纪要定稿后排一次索引更新。正文改动（版本重生成）同样会被覆盖写。
+            let minutesSessionID = try withStatement(
+                "SELECT session_id FROM minutes WHERE id = ?;"
+            ) { statement -> String? in
+                bind(statement, 1, minutesID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return columnText(statement, 0)
+            }
+            try enqueueSearchIndex(
+                sessionID: minutesSessionID,
+                sourceKind: SearchIndexOp.minutesKind,
+                sourceID: minutesID
+            )
             for (order, draft) in items.enumerated() {
                 let itemID = "mi-\(minutesID)-\(draft.localID)"
                 try withStatement("""
@@ -2692,6 +2723,346 @@ public actor SessionStore {
     }
 
 
+    // MARK: - 全文检索索引（MA-15 / §6.5）
+
+    /// FTS5 能力预检。**预检要真建一次表**：只查编译宏在裁剪过的 SQLite 构建里
+    /// 会骗人（系统库与自链接的编译选项不一定相同）。
+    public static let fts5Available: Bool = {
+        var pointer: OpaquePointer?
+        guard sqlite3_open_v2(":memory:", &pointer, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
+              let db = pointer else {
+            if let pointer { sqlite3_close_v2(pointer) }
+            return false
+        }
+        defer { sqlite3_close_v2(db) }
+        var error: UnsafeMutablePointer<CChar>?
+        let ok = sqlite3_exec(db, "CREATE VIRTUAL TABLE temp.__fts_probe USING fts5(x);", nil, nil, &error)
+        if let error { sqlite3_free(error) }
+        return ok == SQLITE_OK
+    }()
+
+    enum SearchIndexOp {
+        static let upsert = "upsert"
+        static let delete = "delete"
+        static let lineKind = "line"
+        static let minutesKind = "minutes"
+    }
+
+    /// 检索索引状态。**保存与索引分开报**：内容写成功但索引还没跟上时，
+    /// 这里必须看得出来，而不是让检索悄悄少一条（§6.5）。
+    public struct SearchIndexStatus: Hashable, Sendable {
+        /// FTS5 不可用时退到有界词法查询（明确标注降级，不假装是全文检索）。
+        public var isFullTextAvailable: Bool
+        /// 待应用的操作数。0 表示索引与内容一致。
+        public var pendingCount: Int
+        public var indexedCount: Int
+        public var degradedReason: String?
+
+        public var isCaughtUp: Bool { pendingCount == 0 }
+    }
+
+    /// 排一次索引更新。
+    ///
+    /// 放进 outbox 而不是直接写索引：内容保存与索引更新**分开报状态**，
+    /// 中途失败也不会让「已保存」和「可检索」这两个事实对不上。
+    private func enqueueSearchIndex(
+        op: String = SearchIndexOp.upsert,
+        sessionID: String?,
+        sourceKind: String,
+        sourceID: String
+    ) throws {
+        guard Self.fts5Available else { return }
+        try withStatement("""
+        INSERT INTO search_index_outbox (op, session_id, source_kind, source_id)
+        VALUES (?, ?, ?, ?);
+        """) { statement in
+            bind(statement, 1, op)
+            bind(statement, 2, sessionID)
+            bind(statement, 3, sourceKind)
+            bind(statement, 4, sourceID)
+            try step(statement)
+        }
+    }
+
+    /// 应用待处理的索引操作，按 (kind, id) 幂等覆盖。
+    ///
+    /// 先 delete 再 insert 而不是 `INSERT OR REPLACE`：虚拟表的 replace 语义
+    /// 在不同 FTS5 构建上并不一致，显式两步在所有构建上行为相同。
+    @discardableResult
+    public func drainSearchIndex(limit: Int = 500) throws -> Int {
+        guard Self.fts5Available else { return 0 }
+        let pending: [(rowid: Int64, op: String, kind: String, id: String)] =
+            try withStatement("""
+            SELECT rowid, op, source_kind, source_id FROM search_index_outbox
+            ORDER BY rowid ASC LIMIT ?;
+            """) { statement in
+                bind(statement, 1, limit)
+                var rows: [(Int64, String, String, String)] = []
+                while try step(statement) == SQLITE_ROW {
+                    rows.append((
+                        sqlite3_column_int64(statement, 0),
+                        columnText(statement, 1) ?? SearchIndexOp.upsert,
+                        columnText(statement, 2) ?? "",
+                        columnText(statement, 3) ?? ""
+                    ))
+                }
+                return rows
+            }
+        guard !pending.isEmpty else { return 0 }
+
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            for row in pending {
+                try withStatement(
+                    "DELETE FROM knowledge_fts WHERE source_kind = ? AND source_id = ?;"
+                ) { statement in
+                    bind(statement, 1, row.kind)
+                    bind(statement, 2, row.id)
+                    try step(statement)
+                }
+                try withStatement("DELETE FROM search_index_outbox WHERE rowid = ?;") { statement in
+                    bind(statement, 1, Int(row.rowid))
+                    try step(statement)
+                }
+                guard row.op != SearchIndexOp.delete else { continue }
+                guard let document = try searchDocument(kind: row.kind, sourceID: row.id) else { continue }
+                try withStatement("""
+                INSERT INTO knowledge_fts
+                    (body, session_id, kind, source_kind, source_id, version, ordinal, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """) { statement in
+                    bind(statement, 1, document.body)
+                    bind(statement, 2, document.sessionID)
+                    bind(statement, 3, document.kind)
+                    bind(statement, 4, row.kind)
+                    bind(statement, 5, row.id)
+                    bind(statement, 6, document.version)
+                    bind(statement, 7, document.ordinal)
+                    bind(statement, 8, document.createdAt.timeIntervalSince1970)
+                    try step(statement)
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        return pending.count
+    }
+
+    /// 一条待写入索引的文档。字段与 FTS5 表的 UNINDEXED 列一一对应。
+    private struct SearchDocument {
+        var body: String
+        var sessionID: String
+        /// FTS5 的 UNINDEXED 列存原始字符串，不存枚举本身。
+        var kind: String?
+        var version: Int?
+        var ordinal: Int?
+        var createdAt: Date
+    }
+
+    /// 从**权威表**读出该索引文档。索引里没有的东西一律不认。
+    private func searchDocument(kind: String, sourceID: String) throws -> SearchDocument? {
+        switch kind {
+        case SearchIndexOp.lineKind:
+            let sql = """
+            SELECT l.text, l.session_id, s.kind, NULL, l.ordinal, l.created_at
+            FROM line l JOIN session s ON s.id = l.session_id
+            WHERE l.id = ? AND l.status = 'final';
+            """
+            return try withStatement(sql) { statement in
+                bind(statement, 1, sourceID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return SearchDocument(
+                    body: KnowledgeSearchTokenizer.indexDocument(for: columnText(statement, 0) ?? ""),
+                    sessionID: columnText(statement, 1) ?? "",
+                    kind: columnText(statement, 2),
+                    version: nil,
+                    ordinal: Int(columnInt(statement, 4)),
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                )
+            }
+        case SearchIndexOp.minutesKind:
+            let sql = """
+            SELECT m.body, m.session_id, s.kind, m.version, NULL, m.created_at
+            FROM minutes m JOIN session s ON s.id = m.session_id
+            WHERE m.id = ? AND m.status = 'ready' AND m.body IS NOT NULL;
+            """
+            return try withStatement(sql) { statement in
+                bind(statement, 1, sourceID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return SearchDocument(
+                    body: KnowledgeSearchTokenizer.indexDocument(for: columnText(statement, 0) ?? ""),
+                    sessionID: columnText(statement, 1) ?? "",
+                    kind: columnText(statement, 2),
+                    version: Int(columnInt(statement, 3)),
+                    ordinal: nil,
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5))
+                )
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// 索引当前状态。
+    public func searchIndexStatus() throws -> SearchIndexStatus {
+        guard Self.fts5Available else {
+            return SearchIndexStatus(
+                isFullTextAvailable: false,
+                pendingCount: 0,
+                indexedCount: 0,
+                degradedReason: "这个 SQLite 没有 FTS5，已退到有界词法查询"
+            )
+        }
+        return SearchIndexStatus(
+            isFullTextAvailable: true,
+            pendingCount: try scalarInt("SELECT COUNT(*) FROM search_index_outbox;") ?? 0,
+            indexedCount: try scalarInt("SELECT COUNT(*) FROM knowledge_fts;") ?? 0,
+            degradedReason: nil
+        )
+    }
+
+    /// 重建整个索引（MC-62「索引损坏不丢内容」）。
+    ///
+    /// 索引是**派生数据**：内容永远在权威表里。索引坏了或对不上时重建即可，
+    /// **不需要**也不允许从索引反推内容。
+    @discardableResult
+    public func rebuildSearchIndex() throws -> Int {
+        guard Self.fts5Available else { return 0 }
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try execute("DELETE FROM knowledge_fts;")
+            try execute("DELETE FROM search_index_outbox;")
+            try execute("""
+            INSERT INTO search_index_outbox (op, session_id, source_kind, source_id)
+            SELECT 'upsert', l.session_id, 'line', l.id FROM line l WHERE l.status = 'final';
+            """)
+            try execute("""
+            INSERT INTO search_index_outbox (op, session_id, source_kind, source_id)
+            SELECT 'upsert', session_id, 'minutes', id FROM minutes
+            WHERE status = 'ready' AND body IS NOT NULL;
+            """)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        return try drainSearchIndex(limit: 200_000)
+    }
+
+    /// 一条命中的检索结果，附带排序用的元信息。
+    private struct SearchRow {
+        var hit: KnowledgeHit
+        var isLine: Bool
+        var isAccepted: Bool
+        var version: Int
+    }
+
+    /// 全文检索（MA-15）。
+    ///
+    /// 三条硬口径：
+    /// 1. **结果回到权威表核对**：索引命中但 `line`/`minutes` 已经没有的，
+    ///    一律不给——索引迟到不能把删掉的内容复活（MC-62）。
+    /// 2. **当前采用版优先去重**：同一场会议多版纪要时采用版优先、其次版本号大的，
+    ///    同场只出一条，不让新旧版本刷屏（§6.5）。
+    /// 3. 索引不可用或查询没有有效词项时**明确回退**到有界词法查询，
+    ///    并在返回值里说清走的是哪条路。
+    public func searchKnowledgeFullText(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200
+    ) throws -> KnowledgeSearchResults {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return KnowledgeSearchResults(hits: [], usedFullText: Self.fts5Available, degradedReason: nil)
+        }
+        guard Self.fts5Available, let match = KnowledgeSearchTokenizer.matchExpression(for: query) else {
+            return KnowledgeSearchResults(
+                hits: try searchKnowledge(query: query, kind: kind, limit: limit),
+                usedFullText: false,
+                degradedReason: Self.fts5Available
+                    ? "查询里没有可检索的词，已回退到词法查询"
+                    : "这个 SQLite 没有 FTS5，已回退到词法查询"
+            )
+        }
+
+        var rows: [SearchRow] = []
+        let sql = """
+        SELECT f.session_id, f.kind, f.source_kind, f.source_id, f.version, f.ordinal, f.created_at,
+               l.text, m.body, m.is_accepted
+        FROM knowledge_fts f
+        JOIN session s ON s.id = f.session_id
+        LEFT JOIN line l ON f.source_kind = 'line' AND l.id = f.source_id
+        LEFT JOIN minutes m ON f.source_kind = 'minutes' AND m.id = f.source_id
+        WHERE knowledge_fts MATCH ?
+          AND (f.source_kind <> 'line' OR (l.id IS NOT NULL AND l.status = 'final'))
+          AND (f.source_kind <> 'minutes' OR (m.id IS NOT NULL AND m.status = 'ready'))
+          \(kind == nil ? "" : "AND f.kind = ?")
+        ORDER BY s.started_at DESC, f.created_at DESC;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, 1, match)
+            var index: Int32 = 2
+            if let kind {
+                bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            while try step(statement) == SQLITE_ROW {
+                let sourceKind = columnText(statement, 2) ?? ""
+                let body = sourceKind == SearchIndexOp.lineKind
+                    ? columnText(statement, 7)
+                    : columnText(statement, 8)
+                guard let body, !body.isEmpty else { continue }
+                let sourceID = columnText(statement, 3) ?? ""
+                let version = columnIsNull(statement, 4) ? 0 : Int(columnInt(statement, 4))
+                rows.append(SearchRow(
+                    hit: KnowledgeHit(
+                        sessionID: columnText(statement, 0) ?? "",
+                        kind: columnText(statement, 1).flatMap { SessionKind(rawValue: $0) },
+                        lineID: sourceKind == SearchIndexOp.lineKind ? sourceID : nil,
+                        minutesID: sourceKind == SearchIndexOp.minutesKind ? sourceID : nil,
+                        version: sourceKind == SearchIndexOp.minutesKind ? version : nil,
+                        excerpt: body,
+                        ordinal: columnIsNull(statement, 5) ? nil : Int(columnInt(statement, 5)),
+                        createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                    ),
+                    isLine: sourceKind == SearchIndexOp.lineKind,
+                    isAccepted: columnInt(statement, 9) != 0,
+                    version: version
+                ))
+            }
+        }
+
+        // 同场多版只留一条：采用版优先，其次版本号大的。
+        var bestBySession: [String: Int] = [:]
+        for (position, row) in rows.enumerated() where !row.isLine {
+            guard let current = bestBySession[row.hit.sessionID] else {
+                bestBySession[row.hit.sessionID] = position
+                continue
+            }
+            let existing = rows[current]
+            let better = (row.isAccepted && !existing.isAccepted)
+                || (row.isAccepted == existing.isAccepted && row.version > existing.version)
+            if better { bestBySession[row.hit.sessionID] = position }
+        }
+        let bestPositions = Set(bestBySession.values)
+        let hits = rows.enumerated()
+            .filter { position, row in row.isLine || bestPositions.contains(position) }
+            .map(\.element.hit)
+        return KnowledgeSearchResults(
+            hits: hits.count > limit ? Array(hits.prefix(limit)) : hits,
+            usedFullText: true,
+            degradedReason: nil
+        )
+    }
+
+    /// 检索结果 + 走了哪条路。降级必须**对调用方可见**（§6.5）。
+    public struct KnowledgeSearchResults: Sendable {
+        public var hits: [KnowledgeHit]
+        public var usedFullText: Bool
+        public var degradedReason: String?
+    }
+
     // MARK: - 行 → 类型
 
     static let sessionColumns = """
@@ -3242,6 +3613,60 @@ extension SessionStore {
     );
     CREATE INDEX IF NOT EXISTS minutes_window_by_minutes
       ON minutes_window(minutes_id, window_index);
+    """
+
+    /// v7 → v8 的 DDL（MA-15）：FTS5 全文索引与事务 outbox。
+    ///
+    /// 索引与 outbox 分开：outbox 随业务事务一起提交，保证「内容已保存」
+    /// 与「索引待更新」两个事实不会互相矛盾。迁移只建结构并回填待办，
+    /// 真正的索引写入由打开后的首次 drain 完成。
+    static let schemaV8Delta = """
+    CREATE TABLE IF NOT EXISTS search_index_outbox (
+      rowid        INTEGER PRIMARY KEY AUTOINCREMENT,
+      op           TEXT NOT NULL,
+      session_id   TEXT,
+      source_kind  TEXT NOT NULL,
+      source_id    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS search_index_outbox_by_source
+      ON search_index_outbox(source_kind, source_id);
+    """
+
+    private func migrateV7ToV8() throws {
+        try execute(Self.schemaV8Delta)
+        guard Self.fts5Available else {
+            // 没有 FTS5 就只留 outbox 结构：检索走有界词法回退，
+            // 降级状态由 searchIndexStatus 如实报出。
+            return
+        }
+        try execute(Self.schemaV8FTS)
+        // 回填待处理项而不是直接写索引：让「旧内容也要被检索到」这件事
+        // 走和新建内容一样的路径，不留下两套行为。
+        try execute("""
+        INSERT INTO search_index_outbox (op, session_id, source_kind, source_id)
+        SELECT 'upsert', l.session_id, 'line', l.id FROM line l WHERE l.status = 'final';
+        """)
+        try execute("""
+        INSERT INTO search_index_outbox (op, session_id, source_kind, source_id)
+        SELECT 'upsert', session_id, 'minutes', id FROM minutes
+        WHERE status = 'ready' AND body IS NOT NULL;
+        """)
+    }
+
+    /// FTS5 虚表。索引列存的是**分词结果**（空格分隔的词项），
+    /// 原文另有出处——这样 `unicode61` 切不对中文的问题在上游就解决了。
+    static let schemaV8FTS = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+      body,
+      session_id UNINDEXED,
+      kind UNINDEXED,
+      source_kind UNINDEXED,
+      source_id UNINDEXED,
+      version UNINDEXED,
+      ordinal UNINDEXED,
+      created_at UNINDEXED,
+      tokenize = 'unicode61 remove_diacritics 2'
+    );
     """
 
     private func migrateV6ToV7() throws {

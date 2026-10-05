@@ -1192,6 +1192,150 @@ public enum MinutesSupplements: Sendable {
         return blocks.joined(separator: "\n\n")
     }
 }
+// MARK: - 中文全文检索的分词与规范化（MA-15 / §6.5）
+
+/// 检索分词器（MA-15）。
+///
+/// 一条硬约束来自 MC-54：查「预算」「回滚」这种**两个汉字**必须有明确通路，
+/// 不能因为 trigram 不足 3 字而无声漏检。所以这里不用 trigram，也不用
+/// `unicode61` 直接切中文——那会把一整句连续汉字切成一个 token。
+///
+/// 做法是**自己分词，文档与查询走同一条规则**：
+/// - CJK 连续段：索引时写入单字与相邻二元组；查询时二元组逐个 AND。
+///   「会议室」因此既能命中「会议」也能命中「议室」所在的整句。
+/// - 字母/数字段（`v3.5.6`、`3.5`、`35` 这类带点写法）：整段作为一个 token，
+///   只做 NFKC 与大小写规范化。MC-55 要求 `3.5万元` 与 `35万元` 不被当成同值——
+///   数字段整体进 token 就自然区分开，不需要任何金额启发式。
+public enum KnowledgeSearchTokenizer {
+    /// CJK 表意文字区段（含扩展区与假名）。
+    static func isWideScript(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF,
+             0xF900...0xFAFF, 0xAC00...0xD7AF, 0x20000...0x2FA1F:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isWide(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        return isWideScript(scalar)
+    }
+
+    /// 规范化：NFKC（全角→半角、兼容字符归一）+ ASCII 小写。
+    ///
+    /// NFKC 是「同一条规范化」能成立的前提：`３.５` 与 `3.5` 必须落到同一个 token，
+    /// 否则同一份内容换个输入方式就检索不到。
+    public static func normalize(_ text: String) -> String {
+        text.precomposedStringWithCompatibilityMapping
+            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// 切成「宽字符段」与「字母数字段」。其余字符是分隔符。
+    ///
+    /// `.`/`-`/`_` 只有**左右都是字母数字**时才并入当前段：
+    /// `v3.5.6` 保持一段，而 `3.5万元` 会切成 `3.5` 与 `万元` 两段——
+    /// 金额与单位分开，MC-55 的同值混淆就不会发生。
+    static func runs(in normalized: String) -> [(text: String, wide: Bool)] {
+        let characters = Array(normalized)
+        var result: [(String, Bool)] = []
+        var current = ""
+        var currentIsWide = false
+
+        func flush() {
+            if !current.isEmpty { result.append((current, currentIsWide)) }
+            current = ""
+        }
+
+        for (offset, character) in characters.enumerated() {
+            let wide = isWide(character)
+            let alnum = wide || character.isLetter || character.isNumber
+            if alnum {
+                if !current.isEmpty, currentIsWide != wide { flush() }
+                currentIsWide = wide
+                current.append(character)
+                continue
+            }
+            let joiner = character == "." || character == "-" || character == "_"
+            let nextIsAlnum = offset + 1 < characters.count
+                && { let next = characters[offset + 1]
+                     return isWide(next) || next.isLetter || next.isNumber }()
+            if joiner, !current.isEmpty, !currentIsWide, nextIsAlnum {
+                current.append(character)
+                continue
+            }
+            flush()
+            currentIsWide = false
+        }
+        flush()
+        return result
+    }
+
+    /// **索引侧**词项：宽字符段写单字与二元组，字母数字段整段写入。
+    public static func indexTerms(for text: String) -> [String] {
+        var terms: [String] = []
+        var seen = Set<String>()
+        for (run, wide) in runs(in: normalize(text)) {
+            for piece in widePieces(run, wide: wide) where seen.insert(piece).inserted {
+                terms.append(piece)
+            }
+        }
+        return terms
+    }
+
+    /// **查询侧**词项：宽字符段只发二元组（单字查询才用单字）。
+    ///
+    /// 查询词项必须是索引词项的子集，否则永远命中不到——这是「同一套分词」
+    /// 在代码里唯一需要守住的不变量。
+    public static func queryTerms(for text: String) -> [String] {
+        var terms: [String] = []
+        var seen = Set<String>()
+        for (run, wide) in runs(in: normalize(text)) {
+            let pieces = wide ? bigrams(of: run) : [run]
+            for piece in pieces where seen.insert(piece).inserted {
+                terms.append(piece)
+            }
+        }
+        return terms
+    }
+
+    private static func widePieces(_ run: String, wide: Bool) -> [String] {
+        guard wide else { return [run] }
+        let characters = Array(run)
+        guard !characters.isEmpty else { return [] }
+        var pieces = characters.map(String.init)
+        pieces.append(contentsOf: bigrams(of: run))
+        return pieces
+    }
+
+    /// 连续宽字符段的相邻二元组。单字段没有二元组，返回空。
+    static func bigrams(of run: String) -> [String] {
+        let characters = Array(run)
+        guard characters.count >= 2 else { return [] }
+        return (0...(characters.count - 2)).map { index in
+            String(characters[index]) + String(characters[index + 1])
+        }
+    }
+
+    /// 写入索引列的文本：词项空格分隔。
+    ///
+    /// 索引列存的是**分词结果**而不是原文：原文另有出处，这里只负责可检索。
+    public static func indexDocument(for text: String) -> String {
+        indexTerms(for: text).joined(separator: " ")
+    }
+
+    /// FTS5 的 MATCH 表达式。返回 nil 表示这个查询没有可用词项
+    /// （全是标点之类），调用方据此回退，不拿"零结果"冒充"确实没有"。
+    public static func matchExpression(for query: String) -> String? {
+        let terms = queryTerms(for: query)
+        guard !terms.isEmpty else { return nil }
+        return terms
+            .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
+            .joined(separator: " AND ")
+    }
+}
+
 // MARK: - 长会议分窗（MA-09 / §6.3）
 
 /// token 预算的**保守估计**（§6.3）。
