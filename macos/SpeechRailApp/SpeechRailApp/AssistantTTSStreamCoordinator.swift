@@ -142,6 +142,8 @@ final class AssistantTTSStreamCoordinator {
     var onOutcome: @MainActor (Int, Outcome) -> Void = { _, _ in }
     var clock: @MainActor () -> ContinuousClock.Instant = { ContinuousClock().now }
     var sleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    /// Deadline timing is separate from the text pump's pacing.
+    var timeoutSleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
 
     // MARK: - 状态
 
@@ -1120,9 +1122,10 @@ final class AssistantTTSStreamCoordinator {
         continuation: CheckedContinuation<WaitResult, Never>
     ) {
         let id = UUID()
+        let sleep = timeoutSleep
         let timeoutTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: timeout)
+                try await sleep(timeout)
             } catch {
                 return
             }

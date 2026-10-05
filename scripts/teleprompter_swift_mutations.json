@@ -11,12 +11,12 @@
   "mutations": [
     {
       "id": "M1",
-      "note": "2048 截断后的稳定前缀不再夹一次",
+      "note": "截断坐标换算后的稳定前缀不再夹保留区上界",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterFollowController.swift",
-      "find": "item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)",
-      "replace": "item.stablePrefixCodepoints = stablePrefixCodepoints",
+      "find": "item.stablePrefixCodepoints = min(\n                max(0, stablePrefixCodepoints - droppedScalarCount),\n                retainedScalarCount\n            )",
+      "replace": "item.stablePrefixCodepoints = max(0, stablePrefixCodepoints - droppedScalarCount)",
       "expect": "SURVIVED",
-      "rationale": "语义等价，按第 27/33 条规矩作废不计入：唯一的读取点是下一行的 prefix(n)，而 n 大于集合长度时 prefix 返回整个集合，两侧拿到同一段字符串；该字段也不出仓、不落盘、不进评测证据。夹取保留作纵深防御。"
+      "rationale": "语义等价：前置 guard 已验证 0 <= stablePrefixCodepoints <= rawScalarCount；减去 droppedScalarCount 并夹零之后必在 0...retainedScalarCount 内，因此移除外层 min 不改变换算后的坐标。保留前缀减丢弃数的坐标换算，不恢复旧公式。"
     },
     {
       "id": "M2",

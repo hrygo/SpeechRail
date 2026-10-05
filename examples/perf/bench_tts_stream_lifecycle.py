@@ -50,7 +50,6 @@ from bench_tts_streaming import (
     _BYTES_PER_SAMPLE,
     _DEFAULT_ASR_MODEL,
     DEFAULT_SAMPLE_RATE,
-    DEFAULT_VOICE,
     RealtimeTurnError,
     _decode_audio,
     _error_code,
@@ -61,6 +60,7 @@ from bench_tts_streaming import (
     percentile,
     run_incremental_turn,
     session_update_event,
+    tts_start_event,
 )
 
 from speechrail.config.auth import resolve_api_key
@@ -232,12 +232,7 @@ def run_cancel_turn(
     _session_ready(connection, deadline, clock, model)
 
     request_id = f"bench_cancel_{int(clock() * 1000)}"
-    start: dict[str, Any] = {
-        "type": "speechrail.tts.start",
-        "request_id": request_id,
-        "task": "conversation",
-        "voice": voice or DEFAULT_VOICE,
-    }
+    start = tts_start_event(request_id, voice)
     connection.send(start)
 
     sample_rate = DEFAULT_SAMPLE_RATE
@@ -276,12 +271,7 @@ def run_cancel_turn(
             connection.send({"type": "speechrail.tts.cancel", "request_id": request_id})
         if terminal_at is not None and release_probe and not probe_sent:
             probe_sent = True
-            probe_start: dict[str, Any] = {
-                "type": "speechrail.tts.start",
-                "request_id": probe_request_id,
-                "task": "conversation",
-                "voice": voice or DEFAULT_VOICE,
-            }
+            probe_start = tts_start_event(probe_request_id, voice)
             connection.send(probe_start)
 
         event = _recv(connection, deadline, clock)
@@ -306,12 +296,22 @@ def run_cancel_turn(
         elif kind == "speechrail.tts.audio.delta":
             chunk = _decode_audio(event.get("delta"))
             if chunk:
+                if len(chunk) % _BYTES_PER_SAMPLE:
+                    raise ValueError("incremental TTS benchmark received truncated PCM16 audio")
                 if first_audio_at is None:
                     first_audio_at = now
                 last_audio_at = now
                 audio_bytes += len(chunk)
                 if cancel_sent_at is not None:
                     audio_bytes_after_cancel += len(chunk)
+                else:
+                    connection.send(
+                        {
+                            "type": "speechrail.tts.audio_ack",
+                            "request_id": request_id,
+                            "sample_offset": audio_bytes // _BYTES_PER_SAMPLE,
+                        }
+                    )
         elif kind == "error":
             code = _error_code(event)
             if cancel_sent_at is None:

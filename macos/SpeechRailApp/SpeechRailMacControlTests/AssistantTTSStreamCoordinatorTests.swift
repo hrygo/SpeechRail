@@ -21,6 +21,26 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         var outcomes: [(generation: Int, outcome: AssistantTTSStreamCoordinator.Outcome)] = []
     }
 
+    @MainActor
+    private final class DeadlineSleeper {
+        var durations: [Duration] = []
+        var continuations: [CheckedContinuation<Void, Never>?] = []
+
+        func sleep(for duration: Duration) async {
+            durations.append(duration)
+            await withCheckedContinuation { continuations.append($0) }
+        }
+
+        func fire(_ index: Int) {
+            continuations[index]?.resume()
+            continuations[index] = nil
+        }
+
+        func finish() {
+            for index in continuations.indices { fire(index) }
+        }
+    }
+
     private func makeHarness(
         configuration: AssistantTTSStreamCoordinator.Configuration = .default,
         acknowledgeStart: Bool = true,
@@ -197,24 +217,56 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         let (coordinator, recorder) = makeHarness(
             configuration: configuration, acknowledgeAppend: false
         )
+        let deadlines = DeadlineSleeper()
+        coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
+        defer { deadlines.finish() }
         try await coordinator.begin(generation: 105, requestID: "long-ack")
         coordinator.offer("正在生成。")
         let finish = Task { @MainActor in await coordinator.finishInput() }
-        await waitUntil({ recorder.appends.count == 1 })
+        await waitUntilEventually(
+            { recorder.appends.count == 1 && deadlines.durations.count == 1 },
+            message: "the append must be waiting for its text ACK"
+        )
         for i in 1...8 {
-            guard coordinator.isActive else { break }
             _ = coordinator.admitAudio(requestID: "long-ack", pcm: Data([0, 0]))
-            await waitUntil({ recorder.played.count == i })
+            await waitUntilEventually(
+                { recorder.played.count == i }, message: "audio must reach playback"
+            )
             let epoch = try XCTUnwrap(recorder.epochs.last)
-            try await Task.sleep(for: .milliseconds(15))
             coordinator.notePlaybackCompleted(samples: 1, epoch: epoch)
+            await waitUntilEventually(
+                { deadlines.durations.count == i + 1 }, message: "progress must renew the deadline"
+            )
+            // Deliver the cancelled timeout late, after the replacement exists.
+            deadlines.fire(i - 1)
+            await Task.yield()
         }
+        XCTAssertEqual(deadlines.durations, Array(repeating: .milliseconds(40), count: 9))
         XCTAssertTrue(coordinator.isActive, "healthy audio progress must not become an ACK timeout")
         XCTAssertEqual(coordinator.acceptedSequence, -1, "audio progress is not a text ACK")
         XCTAssertTrue(recorder.finishes.isEmpty, "finish cannot overtake the real text ACK")
         _ = coordinator.handleTextAccepted(requestID: "long-ack", appendSequence: 0, totalCodepoints: 6)
         await finish.value
         XCTAssertEqual(recorder.finishes, [0])
+        coordinator.invalidate()
+    }
+
+    func testTextAcknowledgementStillTimesOutWithoutPlaybackProgress() async throws {
+        let (coordinator, recorder) = makeHarness(acknowledgeAppend: false)
+        let deadlines = DeadlineSleeper()
+        coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
+        defer { deadlines.finish() }
+        try await coordinator.begin(generation: 106, requestID: "stalled-ack")
+        coordinator.offer("正在生成。")
+        let finish = Task { @MainActor in await coordinator.finishInput() }
+        await waitUntilEventually(
+            { deadlines.durations.count == 1 }, message: "text ACK deadline must be registered"
+        )
+        deadlines.fire(0)
+        await finish.value
+        XCTAssertFalse(coordinator.isActive)
+        XCTAssertNotNil(coordinator.lastFailure)
+        XCTAssertTrue(recorder.finishes.isEmpty)
         coordinator.invalidate()
     }
 
