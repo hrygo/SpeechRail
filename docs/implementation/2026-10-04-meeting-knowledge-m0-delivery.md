@@ -192,6 +192,69 @@ base: "origin/main @ d72535c7"
   「无法确认」，不谎称云端任务已消失。
 - 真实采集、UI 自动化、模型质量基准、发布另行授权。
 
+## M1 增量（MA-08 结构化纪要与证据核对，2026-10-05）
+
+范围：结论可定位到来源、语气与数字可核对、错误结果保留但不升可信。
+
+- **来源单元（§7.5）**：转录在进 prompt 前由 `MinutesGenerator.sourceUnits`
+  分配 `u1`、`u2`… 这样的 id，模型只能引用、不能自己编。`source_unit_ids`
+  在 `json_schema` 里是**必填**，"没有依据"因此成为模型必须写出来的一件事。
+- **v2 候选契约**：`speechrail.minutes.v2`，字段带 `modality`
+  （decided / conditional / proposed / retracted）与 `commitment`
+  （committed / proposed），待办的 `owner_text` / `due_expression` **照写**，
+  没依据就空——不为填满 JSON 折算出一个具体时间（MC-38）。
+- **失败原因可区分（MC-33/MC-34）**：`MinutesFailureKind` 分
+  empty / unstructured / schemaInvalid / refused / incomplete。
+  纯文本那一支**原文保留**当候选，但走 `.failed`，**禁止原文兜底后 ready**。
+  `schema_version` 对不上直接判 `schemaInvalid`，不"尽量按新的理解解析"。
+- **`MinutesEvidenceValidator`**：核对身份、语气、数字/单位、负责人、期限。
+  - 引用不存在或属于别的会议的来源单元 → `rejected`，**绝不按序号兜底**（MC-35）；
+  - 原文是建议/条件/撤回而结论写成已决定 → `needsReview`（MC-37）；
+  - 结论里的数字在所引原文里找不到 → `needsReview`（MC-38）；
+  - 待办标成已承诺但原文没人认领、负责人/期限在原文里查无此说 → `needsReview`；
+  - 条件如实写出、数字照抄、负责人留空时**不误报**——验证器不能变成噪声源。
+- **保留但不升可信**：被拒的条目**仍然渲染进正文**（让人看得见模型编了什么），
+  但带「未通过引用核对 / 待核对」标记，正文末尾附「需要你核对的地方」，
+  界面在纪要区给出条数说明。
+- **schema v5**：`minutes` 追加 `candidate_json` / `review_json`，
+  `migrateV4ToV5` 只加列不回填（v4 之前的正文是 Markdown，没有候选可还原，
+  硬造一份等于凭空给旧纪要安上引用）。`saveMinutesCandidate` 让
+  **正文、候选、核对报告在同一条 UPDATE 里落库**并带 fencing——
+  分两次写就会出现"正文在、报告没了"的假核对。
+- 回归证据：新增 `MeetingMinutesEvidenceTests` **17/17**，
+  联合 `MeetingMinutesVersioningTests` 35 + `MeetingMinutesJobRecoveryTests` 10
+  + `AssistantPersistenceTests` 15 = **77/77 通过**（2026-10-05 核验）；
+  `./scripts/macos_app_build.sh` BUILD SUCCEEDED。
+
+### M1 增量（MA-08）迁移说明
+
+- v4→v5 追加 `candidate_json` / `review_json`，`PRAGMA table_info` 查列后
+  `ALTER TABLE`，已存在则跳过，迁移幂等。新库由 `schemaV1` 一次建全。
+- **旧 Markdown 纪要继续可读**：v5 不回填候选与报告，旧版本的
+  `candidateJSON` / `reviewJSON` 为 NULL，界面按"这一版没有核对报告"处理，
+  不假装核对通过。
+
+### M1 增量（MA-08）回退说明
+
+- 整支回退：切回 `origin/main @ d72535c7`；v5 库文件保留，需迁移前备份才能让旧程序打开。
+- 单个提交回退：MA-08 提交 revert 后 v5 列残留但无读写入口；
+  回退**不删除任何已存纪要**——计划明确要求"停止新结构化发布而不是删除旧纪要"。
+- 已存正文不受影响：回退后旧程序读 `body` 字段，Markdown 原样可读。
+
+### M1 增量（MA-08）未验证事项与已知边界
+
+- **来源快照封存仍未接线**（承 MA-07 的同一条边界）：`snapshot_id` 有列、有查询入口，
+  但没有生产路径创建快照。因此恢复旧任务时来源单元是按**当前**转录重建的——
+  若转录在两次尝试之间被改写，引用会指向改写后的文字。封存接线是下一步。
+- 真实模型端到端未做：真实结构化输出、`source_unit_ids` 回填质量、
+  验证器的误报/漏报率都**没有真实样本校准**。本轮全部是确定性回归与构建。
+- 验证器是**词法级**核对（数字串、关键词、语气词），不做语义蕴含判断：
+  它能挡住"引用不存在""语气写反""数字听错"，挡不住"引文存在但其实不支持结论"
+  的深层情形——那一条按计划仍属人工核对（MC-37 的 D/R 层）。
+- `NSRegularExpression` 抽数字：能处理小数与多位数字，但不处理中文数字
+  （"三千"不会被抽出来核对）。这是已知的一侧，不在 MC-38 的验收口径内。
+- 真实采集、UI 自动化、模型质量基准、发布另行授权。
+
 ## 迁移说明
 
 

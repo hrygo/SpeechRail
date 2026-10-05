@@ -856,6 +856,13 @@ public struct MeetingView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
+            // MA-08：结构合法但语义撑不住的结论留在正文里，同时说明要核对。
+            // 不把"有引用"说成"核对通过"——那正是验证器最不该犯的错。
+            if let review = meeting.minutes.candidateReview, review.needsReview {
+                Text(reviewSummary(review))
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
             if let body = displayedMinutesBody, !body.isEmpty {
                 Text(body)
                     .font(SpeechRailDesignTokens.Typography.body)
@@ -871,6 +878,18 @@ public struct MeetingView: View {
 
     /// 被点开的那一版。**选中即唯一来源**：找不到就是没选（比如换了会话，版本列表变了），
     /// 不把失效的 id 当成"还在看旧版"。
+    /// 核对报告转成一句人话。数字要说清楚：几条没通过引用核对、几条语义上要核对。
+    private func reviewSummary(_ review: MinutesEvidenceValidator.Report) -> String {
+        if review.rejectedCount > 0, review.reviewCount > 0 {
+            return "这一版有 \(review.rejectedCount) 条结论没通过引用核对、\(review.reviewCount) 条语气或数字对不上。"
+                + "内容留在下面，请对着文字记录核对后再用。"
+        }
+        if review.rejectedCount > 0 {
+            return "这一版有 \(review.rejectedCount) 条结论没通过引用核对，内容仍留在下面，请对着文字记录核对后再用。"
+        }
+        return "这一版有 \(review.reviewCount) 条结论的语气或数字与转录对不上，已标在正文里，请核对后再用。"
+    }
+
     private var selectedMinutesVersion: MinutesVersion? {
         guard let selectedMinutesVersionID else { return nil }
         return meeting.minutes.versions.first { $0.id == selectedMinutesVersionID }

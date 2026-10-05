@@ -60,7 +60,10 @@ public actor SessionStore {
     /// 远端响应（MC-28）、任务跑着时改设置不换端点（MC-32）、取消是一个有痕迹的状态而不是
     /// 一次内存里的 `Task.cancel()`（MC-30）。不写回既有行：老任务的 response id 本来就
     /// 没存过，补不出来也不补造。
-    public static let schemaVersion: Int32 = 4
+    /// v5（MA-08）：`minutes` 追加 `candidate_json` / `review_json`。正文是渲染结果，
+    /// 这两列存的是**数据**：结构化候选与证据核对报告。核对结论必须和它核对的那一版
+    /// 存在一起，否则改了正文就没人知道当初核对过什么。
+    public static let schemaVersion: Int32 = 5
 
     private let directory: URL
     private let fileManager: FileManager
@@ -160,6 +163,9 @@ public actor SessionStore {
             }
             if version < 4 {
                 try migrateV3ToV4()
+            }
+            if version < 5 {
+                try migrateV4ToV5()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -621,7 +627,8 @@ public actor SessionStore {
     private static let minutesSelectColumns = """
     id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, \
     attempts, failure_reason, lease_until, created_at, is_legacy_import, \
-    remote_response_id, config_snapshot, snapshot_id, cancel_requested_at
+    remote_response_id, config_snapshot, snapshot_id, cancel_requested_at, \
+    candidate_json, review_json
     """
 
     @discardableResult
@@ -879,6 +886,40 @@ public actor SessionStore {
         try withStatement(sql) { statement in
             bind(statement, 1, minutesID)
             bind(statement, 2, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
+    /// 提交一版结构化候选（MA-08 / §7.6 的 `saveMinutesCandidate`）。
+    ///
+    /// 正文、候选、核对报告在**同一条 UPDATE** 里落库：三者必须同生共死。
+    /// 分两次写就会出现"正文在、报告没了"——那正好是"看起来核对过"的假象。
+    /// 同样带 fencing：行已被新 owner 接管时不写，旧的迟到结果不得发布。
+    @discardableResult
+    public func saveMinutesCandidate(
+        minutesID: String,
+        expectedAttempts: Int,
+        body: String,
+        model: String?,
+        candidate: String?,
+        review: String?
+    ) throws -> Bool {
+        let sql = """
+        UPDATE minutes
+        SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL,
+            failure_reason = NULL, candidate_json = ?, review_json = ?
+        WHERE id = ? AND status = 'running' AND attempts = ?;
+        """
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, body)
+            bind(statement, 2, model)
+            bind(statement, 3, candidate)
+            bind(statement, 4, review)
+            bind(statement, 5, minutesID)
+            bind(statement, 6, expectedAttempts)
             try step(statement)
             committed = sqlite3_changes(try requireHandle()) > 0
         }
@@ -1941,7 +1982,9 @@ public actor SessionStore {
             remoteResponseID: count > 14 ? columnText(statement, 14) : nil,
             configSnapshot: count > 15 ? columnText(statement, 15) : nil,
             snapshotID: count > 16 ? columnText(statement, 16) : nil,
-            cancelRequestedAt: optionalDate(17)
+            cancelRequestedAt: optionalDate(17),
+            candidateJSON: count > 18 ? columnText(statement, 18) : nil,
+            reviewJSON: count > 19 ? columnText(statement, 19) : nil
         )
     }
 
@@ -2144,6 +2187,9 @@ extension SessionStore {
       config_snapshot     TEXT,
       snapshot_id         TEXT,
       cancel_requested_at REAL,
+      -- MA-08：结构化候选与核对报告。新库建表时就在，旧库由 migrateV4ToV5 追加。
+      candidate_json TEXT,
+      review_json    TEXT,
       UNIQUE (session_id, version)
     );
 
@@ -2306,6 +2352,23 @@ extension SessionStore {
         ]
         for (name, type) in additions where !columns.contains(name) {
             try execute("ALTER TABLE minutes ADD COLUMN \(name) \(type);")
+        }
+    }
+
+    /// v4 → v5 的 DDL（调用方已在同一事务内）：结构化候选与核对报告两列。
+    ///
+    /// 同样**不回填**：v4 之前生成的正文是 Markdown，没有结构化候选可还原。
+    /// 硬造一份等于凭空给旧纪要安上引用。
+    private func migrateV4ToV5() throws {
+        let columns = try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.append(name) }
+            }
+            return names
+        }
+        for name in ["candidate_json", "review_json"] where !columns.contains(name) {
+            try execute("ALTER TABLE minutes ADD COLUMN \(name) TEXT;")
         }
     }
 }

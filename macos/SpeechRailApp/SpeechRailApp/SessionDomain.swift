@@ -178,23 +178,718 @@ public enum MinutesStatus: String, Codable, Sendable {
     }
 }
 
-/// 模型输出的解析结果（MC-33、MC-34）。空输出、拒答、结构错误都不是成功：
-/// 调用方必须把它们记成失败并保留可读原因，不能把占位正文标成 ready。
-/// 纯值类型，放在 Domain 层以便 SPM 测试目标直接覆盖。
-public enum MinutesOutcome: Equatable, Sendable {
-    case ready(String)
-    case failed(String)
+/// 生成没成的**性质**（MC-34：三类原因必须可区分）。
+///
+/// 分开是因为下一步不同：空输出可以重试，拒答换个问法才有用，
+/// 结构不合法要去看服务是不是真按 schema 返回，而截断意味着这一版**尾部丢了**，
+/// 把它当"整理完了"就是把没听到的当没说过。
+public enum MinutesFailureKind: String, Equatable, Sendable {
+    /// 空输出或只有空白（MC-33）。
+    case empty
+    /// 服务以纯文本返回，没有按结构返回。
+    case unstructured
+    /// 结构不合法：缺字段、类型不对、schema 版本不认识。
+    case schemaInvalid
+    /// 模型明确拒答。
+    case refused
+    /// 输出被截断，尾部没有拿全。
+    case incomplete
 
-    /// 解析模型原文：`render` 由结构拥有者传入，保持 Domain 层不依赖具体 schema。
-    public static func parsing(text: String, markdown: (String) -> String?) -> MinutesOutcome {
+    /// 给界面的一句话（不含正文，避免把整段模型输出回显出来）。
+    public var title: String {
+        switch self {
+        case .empty: "没有拿到内容"
+        case .unstructured: "服务没有按结构返回"
+        case .schemaInvalid: "结构对不上"
+        case .refused: "模型没有作答"
+        case .incomplete: "输出被截断"
+        }
+    }
+}
+
+// MARK: - 结构化纪要候选（v2，§7.5）
+
+/// 一个来源单元：转录里的一条发言，**程序分配 id**（§7.5）。
+///
+/// 模型只被允许引用这些 id，不允许自己写库主键。所以"这条结论依据哪句话"
+/// 在生成之前就已经确定了一个可核对的身份，而不是模型随口写一个字符串。
+public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
+    public var id: String
+    public var lineID: String
+    public var ordinal: Int
+    public var speaker: String
+    public var text: String
+    public var startSeconds: Double?
+
+    public init(
+        id: String,
+        lineID: String,
+        ordinal: Int,
+        speaker: String,
+        text: String,
+        startSeconds: Double?
+    ) {
+        self.id = id
+        self.lineID = lineID
+        self.ordinal = ordinal
+        self.speaker = speaker
+        self.text = text
+        self.startSeconds = startSeconds
+    }
+}
+
+/// 结论的**语气**：说定了、有条件、只是提议、还是已经撤回（MC-37）。
+///
+/// 这一栏不是修饰词。原文里"建议先灰度"被写成"决定全量发布"，
+/// 读起来一样顺，但结论的性质完全不同——所以它由模型声明、由验证器核对。
+public enum MinutesDecisionModality: String, Codable, Hashable, Sendable {
+    case decided
+    case conditional
+    case proposed
+    case retracted
+}
+
+/// 待办的**承诺程度**（MC-37/MC-38）：答应了要做，还是只是有人提了一句。
+public enum MinutesCommitment: String, Codable, Hashable, Sendable {
+    case committed
+    case proposed
+}
+
+/// 结构化纪要候选（`speechrail.minutes.v2`）。
+///
+/// 模型能写的只有这些内容与来源引用；`localID` 是**候选内**编号，
+/// 持久 ID、审阅状态、快照关联都由程序在保存时分配（§7.5）。
+public struct MinutesCandidateV2: Codable, Hashable, Sendable {
+    public struct OverviewItem: Codable, Hashable, Sendable {
+        public var localID: String
+        public var text: String
+        public var sourceUnitIDs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case localID = "local_id"
+            case text
+            case sourceUnitIDs = "source_unit_ids"
+        }
+
+        public init(localID: String, text: String, sourceUnitIDs: [String]) {
+            self.localID = localID
+            self.text = text
+            self.sourceUnitIDs = sourceUnitIDs
+        }
+    }
+
+    public struct DecisionItem: Codable, Hashable, Sendable {
+        public var localID: String
+        public var text: String
+        public var modality: MinutesDecisionModality
+        public var conditions: [String]
+        public var sourceUnitIDs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case localID = "local_id"
+            case text
+            case modality
+            case conditions
+            case sourceUnitIDs = "source_unit_ids"
+        }
+
+        public init(
+            localID: String,
+            text: String,
+            modality: MinutesDecisionModality,
+            conditions: [String],
+            sourceUnitIDs: [String]
+        ) {
+            self.localID = localID
+            self.text = text
+            self.modality = modality
+            self.conditions = conditions
+            self.sourceUnitIDs = sourceUnitIDs
+        }
+    }
+
+    public struct ActionItem: Codable, Hashable, Sendable {
+        public var localID: String
+        public var task: String
+        /// 负责人**照写**，不解析成人名账号；原文没说是谁就空着（MC-38）。
+        public var ownerText: String?
+        /// 期限**照写**（"下周三"就写"下周三"），不从日历或生成日期折算（MC-38）。
+        public var dueExpression: String?
+        public var commitment: MinutesCommitment
+        public var sourceUnitIDs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case localID = "local_id"
+            case task
+            case ownerText = "owner_text"
+            case dueExpression = "due_expression"
+            case commitment
+            case sourceUnitIDs = "source_unit_ids"
+        }
+
+        public init(
+            localID: String,
+            task: String,
+            ownerText: String?,
+            dueExpression: String?,
+            commitment: MinutesCommitment,
+            sourceUnitIDs: [String]
+        ) {
+            self.localID = localID
+            self.task = task
+            self.ownerText = ownerText
+            self.dueExpression = dueExpression
+            self.commitment = commitment
+            self.sourceUnitIDs = sourceUnitIDs
+        }
+    }
+
+    public struct OpenQuestionItem: Codable, Hashable, Sendable {
+        public var localID: String
+        public var text: String
+        public var sourceUnitIDs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case localID = "local_id"
+            case text
+            case sourceUnitIDs = "source_unit_ids"
+        }
+
+        public init(localID: String, text: String, sourceUnitIDs: [String]) {
+            self.localID = localID
+            self.text = text
+            self.sourceUnitIDs = sourceUnitIDs
+        }
+    }
+
+    /// 契约里写死的版本号。模型必须原样回它；不认识就走 schema 不合法，
+    /// 而不是"尽量按新的理解解析"。
+    public static let schemaVersion = "speechrail.minutes.v2"
+
+    public var schemaVersion: String
+    public var title: String
+    public var overview: [OverviewItem]
+    public var decisions: [DecisionItem]
+    public var actions: [ActionItem]
+    public var openQuestions: [OpenQuestionItem]
+    public var confidenceNotes: String
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case title
+        case overview
+        case decisions
+        case actions
+        case openQuestions = "open_questions"
+        case confidenceNotes = "confidence_notes"
+    }
+
+    public init(
+        schemaVersion: String = MinutesCandidateV2.schemaVersion,
+        title: String,
+        overview: [OverviewItem],
+        decisions: [DecisionItem],
+        actions: [ActionItem],
+        openQuestions: [OpenQuestionItem],
+        confidenceNotes: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.title = title
+        self.overview = overview
+        self.decisions = decisions
+        self.actions = actions
+        self.openQuestions = openQuestions
+        self.confidenceNotes = confidenceNotes
+    }
+}
+
+/// 纪要候选的证据核对结论（MA-08）。
+///
+/// 两条底线：
+/// 1. **引文存在 ≠ 支持结论**。所以"引到了"只是最低门槛，
+///    语义上撑不住的一律进复核，而不是因为有引用就放行（MC-37）。
+/// 2. **错误结果保留但不升可信**。被拒的条目仍然留在正文里让人看得见，
+///    但整版标成需复核，不允许自动采用、不允许显示成"整理好了"。
+public enum MinutesEvidenceValidator {
+    /// 单条结论的核对结果。
+    public enum Verdict: String, Codable, Hashable, Sendable {
+        /// 引用与语气都对得上。
+        case supported
+        /// 引用合法，但语义上有可疑之处——保留，标复核。
+        case needsReview
+        /// 引用本身就不成立——不作为结论发布。
+        case rejected
+    }
+
+    public struct Finding: Codable, Hashable, Sendable {
+        public var localID: String
+        public var kind: String
+        public var verdict: Verdict
+        public var reason: String
+
+        public init(localID: String, kind: String, verdict: Verdict, reason: String) {
+            self.localID = localID
+            self.kind = kind
+            self.verdict = verdict
+            self.reason = reason
+        }
+    }
+
+    /// 整版的核对报告。保存时随候选一起落库，用户看得到"这一版哪里需要核对"。
+    public struct Report: Codable, Hashable, Sendable {
+        public var findings: [Finding]
+
+        public init(findings: [Finding]) {
+            self.findings = findings
+        }
+
+        public func findings(for localID: String) -> [Finding] {
+            findings.filter { $0.localID == localID }
+        }
+
+        /// 这一版需不需要复核：有 `needsReview` 或 `rejected` 就是。
+        public var needsReview: Bool {
+            findings.contains { $0.verdict != .supported }
+        }
+
+        public var rejectedCount: Int {
+            findings.filter { $0.verdict == .rejected }.count
+        }
+
+        public var reviewCount: Int {
+            findings.filter { $0.verdict == .needsReview }.count
+        }
+    }
+
+    /// 核对一份候选。
+    ///
+    /// `units` 是**本次封存的来源单元全集**——只有在这里面的 id 才算"存在"。
+    /// 引用不在集合里的 id 一律 `rejected`，绝不按序号去别的会议里猜一个（MC-35）。
+    public static func validate(
+        candidate: MinutesCandidateV2,
+        units: [MinutesSourceUnit]
+    ) -> Report {
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var findings: [Finding] = []
+
+        for item in candidate.overview {
+            findings.append(contentsOf: check(
+                localID: item.localID,
+                kind: "overview",
+                text: item.text,
+                sourceUnitIDs: item.sourceUnitIDs,
+                units: byID
+            ))
+        }
+        for item in candidate.decisions {
+            findings.append(contentsOf: check(
+                localID: item.localID,
+                kind: "decision",
+                text: item.text,
+                sourceUnitIDs: item.sourceUnitIDs,
+                units: byID,
+                modality: item.modality,
+                conditions: item.conditions
+            ))
+        }
+        for item in candidate.openQuestions {
+            findings.append(contentsOf: check(
+                localID: item.localID,
+                kind: "open_question",
+                text: item.text,
+                sourceUnitIDs: item.sourceUnitIDs,
+                units: byID
+            ))
+        }
+        for item in candidate.actions {
+            findings.append(contentsOf: check(
+                localID: item.localID,
+                kind: "action",
+                text: item.task,
+                sourceUnitIDs: item.sourceUnitIDs,
+                units: byID,
+                ownerText: item.ownerText,
+                dueExpression: item.dueExpression,
+                commitment: item.commitment
+            ))
+        }
+        return Report(findings: findings)
+    }
+
+    // MARK: - 单条核对
+
+    private static func check(
+        localID: String,
+        kind: String,
+        text: String,
+        sourceUnitIDs: [String],
+        units: [String: MinutesSourceUnit],
+        modality: MinutesDecisionModality? = nil,
+        conditions: [String] = [],
+        ownerText: String? = nil,
+        dueExpression: String? = nil,
+        commitment: MinutesCommitment? = nil
+    ) -> [Finding] {
+        var findings: [Finding] = []
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return .failed("这一版没有拿到内容。可以重新生成一次。")
+            return [Finding(
+                localID: localID,
+                kind: kind,
+                verdict: .rejected,
+                reason: "这一条没有正文"
+            )]
         }
-        guard let body = markdown(trimmed) else {
-            return .failed(trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回），尚未按结构校验，不能作为可用纪要。\n")
+
+        // ① 引用身份（MC-35）：不存在的 id 一律拒绝，不按序号兜底。
+        var resolved: [MinutesSourceUnit] = []
+        for unitID in sourceUnitIDs {
+            if let unit = units[unitID] {
+                resolved.append(unit)
+            } else {
+                findings.append(Finding(
+                    localID: localID,
+                    kind: kind,
+                    verdict: .rejected,
+                    reason: "引用了不存在的来源单元 \(unitID)"
+                ))
+            }
         }
-        return .ready(body)
+        if sourceUnitIDs.isEmpty {
+            findings.append(Finding(
+                localID: localID,
+                kind: kind,
+                verdict: .needsReview,
+                reason: "没有指明依据哪几句"
+            ))
+        }
+        // 已经有引用不成立的问题，后面的语义判断没有意义。
+        guard findings.isEmpty else { return findings }
+
+        let corpus = resolved.map(\.text).joined(separator: "\n")
+
+        // ② 数字一致性（MC-38）：结论里的数字必须能在所引原文里找到。
+        //    单位错、否定漏、金额改写，全靠这一条兜住。
+        for number in numbers(in: trimmed) where !corpus.contains(number) {
+            findings.append(Finding(
+                localID: localID,
+                kind: kind,
+                verdict: .needsReview,
+                reason: "结论里的“\(number)”在所引原文中没有出现，请核对是否听错或改写了单位"
+            ))
+        }
+
+        // ③ 语气（MC-37）：原文是建议/条件/撤回，结论却写成已决定。
+        if let modality, modality == .decided {
+            if containsAny(corpus, ["建议", "提议", "可以考虑", "倾向于", "要不要", "是否"]) {
+                findings.append(Finding(
+                    localID: localID,
+                    kind: kind,
+                    verdict: .needsReview,
+                    reason: "原文是建议或待定，结论却写成已决定"
+                ))
+            }
+            if containsAny(corpus, ["如果", "假如", "除非", "前提是", "条件是"]) && !conditionsMatch(conditions, corpus: corpus) {
+                findings.append(Finding(
+                    localID: localID,
+                    kind: kind,
+                    verdict: .needsReview,
+                    reason: "原文带条件，结论没有把条件写出来"
+                ))
+            }
+            // ④ 撤回（MC-37）：原文撤回了，结论不能还当决定。
+            if containsAny(corpus, ["撤回", "取消", "作废", "不做了", "先不"]) {
+                findings.append(Finding(
+                    localID: localID,
+                    kind: kind,
+                    verdict: .needsReview,
+                    reason: "原文里这段被撤回或暂缓，结论却写成已决定"
+                ))
+            }
+        }
+
+        // ⑤ 待办的负责人/期限（MC-38）：填了就要在原文里有依据；
+        //    没依据说明是模型自己编的，而正确做法是留空。
+        if let commitment, commitment == .committed, !containsAny(corpus, ["我来", "我负责", "负责", "会做", "我这边"]) {
+            findings.append(Finding(
+                localID: localID,
+                kind: kind,
+                verdict: .needsReview,
+                reason: "待办标成已承诺，但所引原文里没有认领的说法"
+            ))
+        }
+        if let ownerText, !ownerText.isEmpty, !corpus.contains(ownerText) {
+            findings.append(Finding(
+                localID: localID,
+                kind: kind,
+                verdict: .needsReview,
+                reason: "负责人“\(ownerText)”在所引原文中没有出现"
+            ))
+        }
+        if let dueExpression, !dueExpression.isEmpty {
+            let numbersInDue = numbers(in: dueExpression)
+            if !numbersInDue.isEmpty, !numbersInDue.allSatisfy({ corpus.contains($0) }) {
+                findings.append(Finding(
+                    localID: localID,
+                    kind: kind,
+                    verdict: .needsReview,
+                    reason: "期限“\(dueExpression)”里的数字在所引原文中没有出现"
+                ))
+            }
+        }
+        return findings
+    }
+
+    // MARK: - 小工具
+
+    /// 抽取结论里的数字串（含小数），单位与符号原样带走。
+    /// "约 3.5 万元" 抽出 "3.5"；"下周"抽不出东西——那本来就该由原文说了算。
+    static func numbers(in text: String) -> [String] {
+        guard text.contains(where: \.isNumber) else { return [] }
+        guard let regex = try? NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard let swiftRange = Range(match.range, in: text) else { return nil }
+            return String(text[swiftRange])
+        }
+    }
+
+    private static func conditionsMatch(_ conditions: [String], corpus: String) -> Bool {
+        let cleaned = conditions
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return !cleaned.isEmpty && cleaned.allSatisfy { corpus.contains($0) }
+    }
+
+    private static func containsAny(_ corpus: String, _ needles: [String]) -> Bool {
+        needles.contains { corpus.contains($0) }
+    }
+}
+
+/// 结构化纪要的字段（`json_schema` + `strict`）。App 负责把它渲染成 Markdown，
+/// 于是"结构不合法"与"内容不好"是两件可以分开处理的事。
+///
+/// v2（MA-08）：字段带**来源单元引用**与**语气**，让"这条结论依据哪几句"、
+/// "这是建议还是已决定"成为可核对的数据，而不是只能靠读正文猜。
+public enum MinutesCandidateCodec {
+    /// 一次解析的结果：候选、核对报告、以及渲染好的正文。
+    public struct Prepared: Sendable {
+        public var candidate: MinutesCandidateV2
+        public var report: MinutesEvidenceValidator.Report
+        public var body: String
+    }
+
+    /// 解析结果：成功带着候选与核对报告，失败带着**可区分**的原因。
+    public enum Outcome: Sendable {
+        case prepared(Prepared)
+        case failed(kind: MinutesFailureKind, reason: String)
+    }
+
+    /// 解码 + 核对 + 渲染。**只有这一条路能把候选变成可用纪要**——
+    /// 直接拿模型原文当正文，就是"原文兜底后 ready"，计划明令禁止。
+    public static func prepare(text: String, units: [MinutesSourceUnit]) -> Outcome {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failed(
+                kind: .empty,
+                reason: "这一版没有拿到内容。可以重新生成一次。"
+            )
+        }
+        guard let data = trimmed.data(using: .utf8) else {
+            return .failed(kind: .unstructured, reason: unstructured(trimmed))
+        }
+        guard let candidate = try? JSONDecoder().decode(MinutesCandidateV2.self, from: data) else {
+            return .failed(kind: .unstructured, reason: unstructured(trimmed))
+        }
+        guard candidate.schemaVersion == MinutesCandidateV2.schemaVersion else {
+            return .failed(
+                kind: .schemaInvalid,
+                reason: "这一版用的是 \(candidate.schemaVersion)，这个版本只认 "
+                    + MinutesCandidateV2.schemaVersion + "。原文已保留，但不能作为可用纪要。"
+            )
+        }
+        let report = MinutesEvidenceValidator.validate(candidate: candidate, units: units)
+        return .prepared(Prepared(
+            candidate: candidate,
+            report: report,
+            body: markdown(for: candidate, report: report)
+        ))
+    }
+
+    /// 纯文本返回：原文**保留**下来，但说清它没有被校验过。
+    private static func unstructured(_ text: String) -> String {
+        text + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回），尚未按结构校验，不能作为可用纪要。\n"
+    }
+
+    /// 渲染成 Markdown。库里存的就是这一段（界面直接显示，导出也用它）。
+    ///
+    /// 被验证器判为 `rejected` 的条目**仍然渲染出来**——错误结果保留但不升可信：
+    /// 删掉它用户就看不出模型编了什么，而标成"已整理好"才是真的骗人。
+    public static func markdown(
+        for candidate: MinutesCandidateV2,
+        report: MinutesEvidenceValidator.Report
+    ) -> String {
+        var out = "# \(candidate.title.isEmpty ? "会议纪要" : candidate.title)\n\n"
+        if !candidate.overview.isEmpty {
+            out += "## 概述\n\n"
+            for item in candidate.overview {
+                out += line(item.text, localID: item.localID, report: report)
+            }
+            out += "\n"
+        }
+        if !candidate.decisions.isEmpty {
+            out += "## 结论\n\n"
+            for item in candidate.decisions {
+                var text = item.text
+                switch item.modality {
+                case .decided: break
+                case .conditional: text += "（有条件）"
+                case .proposed: text += "（只是提议，未定）"
+                case .retracted: text += "（会上已撤回）"
+                }
+                if !item.conditions.isEmpty {
+                    text += "（条件：" + item.conditions.joined(separator: "；") + "）"
+                }
+                out += line(text, localID: item.localID, report: report)
+            }
+            out += "\n"
+        }
+        if !candidate.actions.isEmpty {
+            out += "## 待办\n\n"
+            for item in candidate.actions {
+                var text = item.task
+                // 负责人/期限照写，没依据就留空——不为了让 JSON 好看而填"待定"
+                // 再折算成一个具体时间（MC-38）。
+                if let owner = item.ownerText, !owner.isEmpty { text += "（\(owner)）" }
+                if let due = item.dueExpression, !due.isEmpty { text += "（期限：\(due)）" }
+                if item.commitment == .proposed { text += "（提议，未认领）" }
+                out += line(text, localID: item.localID, report: report)
+            }
+            out += "\n"
+        }
+        if !candidate.openQuestions.isEmpty {
+            out += "## 还没有结论的问题\n\n"
+            for item in candidate.openQuestions {
+                out += line(item.text, localID: item.localID, report: report)
+            }
+            out += "\n"
+        }
+        let flagged = report.findings.filter { $0.verdict == .needsReview }
+        if !flagged.isEmpty {
+            out += "## 需要你核对的地方\n\n"
+            out += "以下结论的依据或语气与转录对不上，先按待核对看待：\n\n"
+            for finding in flagged {
+                out += "- \(finding.reason)\n"
+            }
+            out += "\n"
+        }
+        if !candidate.confidenceNotes.isEmpty { out += "> \(candidate.confidenceNotes)\n" }
+        return out
+    }
+
+    /// 一条结论 + 它自己的核对标记。被拒绝的条目挂上"这条没通过引用核对"。
+    private static func line(_ text: String, localID: String, report: MinutesEvidenceValidator.Report) -> String {
+        let findings = report.findings(for: localID)
+        guard !findings.isEmpty else { return "- \(text)\n" }
+        let marker = findings.contains { $0.verdict == .rejected } ? "（未通过引用核对）" : "（待核对）"
+        return "- \(text)\(marker)\n"
+    }
+
+    /// 结构化输出的 schema（`strict`：所有字段都在 `required` 里、且 `additionalProperties: false`）。
+    ///
+    /// `source_unit_ids` 是**必填**的：让"没有依据"成为一件模型必须写出来的事，
+    /// 而不是靠它自觉。取值范围由 prompt 里的来源单元清单约束。
+    static var jsonSchema: [String: Any] {
+        let stringArray: [String: Any] = ["type": "array", "items": ["type": "string"]]
+        let unitIDs: [String: Any] = [
+            "type": "array",
+            "items": ["type": "string"],
+            "description": "结论依据的来源单元 id，只能用清单里出现过的 id",
+        ]
+        return [
+            "type": "json_schema",
+            "name": "meeting_minutes_v2",
+            "strict": true,
+            "schema": [
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "schema_version", "title", "overview", "decisions", "actions",
+                    "open_questions", "confidence_notes",
+                ],
+                "properties": [
+                    "schema_version": [
+                        "type": "string",
+                        "enum": [MinutesCandidateV2.schemaVersion],
+                    ],
+                    "title": ["type": "string"],
+                    "overview": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["local_id", "text", "source_unit_ids"],
+                            "properties": [
+                                "local_id": ["type": "string"],
+                                "text": ["type": "string"],
+                                "source_unit_ids": unitIDs,
+                            ],
+                        ],
+                    ],
+                    "decisions": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["local_id", "text", "modality", "conditions", "source_unit_ids"],
+                            "properties": [
+                                "local_id": ["type": "string"],
+                                "text": ["type": "string"],
+                                "modality": [
+                                    "type": "string",
+                                    "enum": ["decided", "conditional", "proposed", "retracted"],
+                                ],
+                                "conditions": stringArray,
+                                "source_unit_ids": unitIDs,
+                            ],
+                        ],
+                    ],
+                    "actions": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "local_id", "task", "owner_text", "due_expression",
+                                "commitment", "source_unit_ids",
+                            ],
+                            "properties": [
+                                "local_id": ["type": "string"],
+                                "task": ["type": "string"],
+                                "owner_text": ["type": "string"],
+                                "due_expression": ["type": "string"],
+                                "commitment": ["type": "string", "enum": ["committed", "proposed"]],
+                                "source_unit_ids": unitIDs,
+                            ],
+                        ],
+                    ],
+                    "open_questions": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["local_id", "text", "source_unit_ids"],
+                            "properties": [
+                                "local_id": ["type": "string"],
+                                "text": ["type": "string"],
+                                "source_unit_ids": unitIDs,
+                            ],
+                        ],
+                    ],
+                    "confidence_notes": ["type": "string"],
+                ],
+            ],
+        ]
     }
 }
 
@@ -656,6 +1351,22 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     /// 远端是否确认取消是另一件事，不能由这个字段冒充。
     public var cancelRequestedAt: Date?
 
+    // MARK: - 结构化候选与核对报告（MA-08）
+
+    /// 这一版的结构化候选原文（`speechrail.minutes.v2` 的 JSON）。
+    /// 正文是渲染结果，**这份是数据**：引文、语气、待办的承诺程度都在里面。
+    public var candidateJSON: String?
+    /// 这一版的核对报告。**它和正文一起存**，因为"哪里需要核对"是这一版的一部分，
+    /// 脱离正文单独保存的话，改了正文就没人知道原来核对的是哪一版。
+    public var reviewJSON: String?
+
+    /// 读回核对报告。存的是 JSON 文本，这里解一次；解不开就当没有报告，
+    /// 不假装"核对通过"——那正好是验证器最不该犯的错。
+    public var review: MinutesEvidenceValidator.Report? {
+        guard let reviewJSON, let data = reviewJSON.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(MinutesEvidenceValidator.Report.self, from: data)
+    }
+
     public init(
         id: String,
         sessionID: String,
@@ -674,7 +1385,9 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         remoteResponseID: String? = nil,
         configSnapshot: String? = nil,
         snapshotID: String? = nil,
-        cancelRequestedAt: Date? = nil
+        cancelRequestedAt: Date? = nil,
+        candidateJSON: String? = nil,
+        reviewJSON: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -694,6 +1407,8 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.configSnapshot = configSnapshot
         self.snapshotID = snapshotID
         self.cancelRequestedAt = cancelRequestedAt
+        self.candidateJSON = candidateJSON
+        self.reviewJSON = reviewJSON
     }
 
     /// 这次任务是否可以复用已持久化的远端响应（MC-28）：有远端 id，

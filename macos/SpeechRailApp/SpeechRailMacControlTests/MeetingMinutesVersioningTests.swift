@@ -105,24 +105,42 @@ final class MeetingMinutesVersioningTests: XCTestCase {
     /// MC-33/MC-34：空输出与非结构输出都不是成功，不能标成 ready。
     /// 用 Domain 层的纯解析覆盖，不依赖生成器目标。
     func testOutcomeRejectsEmptyAndUnstructuredText() {
-        switch MinutesOutcome.parsing(text: "   \n  ", markdown: { _ in nil }) {
-        case .failed(let reason):
+        let units = [MinutesSourceUnit(
+            id: "u1",
+            lineID: "line-1",
+            ordinal: 1,
+            speaker: "张三",
+            text: "今天讨论了预算。",
+            startSeconds: 0
+        )]
+
+        switch MinutesCandidateCodec.prepare(text: "   \n  ", units: units) {
+        case .failed(let kind, let reason):
+            XCTAssertEqual(kind, .empty)
             XCTAssertFalse(reason.isEmpty)
-        case .ready:
+        case .prepared:
             XCTFail("空输出不能解析成可用纪要")
         }
-        switch MinutesOutcome.parsing(text: "今天讨论了预算，没有结论。", markdown: { _ in nil }) {
-        case .failed(let reason):
+
+        switch MinutesCandidateCodec.prepare(text: "今天讨论了预算，没有结论。", units: units) {
+        case .failed(let kind, let reason):
+            XCTAssertEqual(kind, .unstructured)
             XCTAssertTrue(reason.contains("今天讨论了预算"))
             XCTAssertTrue(reason.contains("尚未按结构校验"))
-        case .ready:
+        case .prepared:
             XCTFail("非结构输出不能直接标成可用纪要")
         }
-        switch MinutesOutcome.parsing(text: "{\"ok\":true}", markdown: { _ in "# 结构化正文" }) {
-        case .ready(let body):
-            XCTAssertEqual(body, "# 结构化正文")
-        case .failed:
-            XCTFail("合法结构输出应该解析成功")
+
+        // 结构合法但 schema 版本不认识：走 schemaInvalid，不"尽量按新的理解解析"。
+        let wrongVersion = """
+        {"schema_version":"speechrail.minutes.v1","title":"发布评审","overview":[],
+         "decisions":[],"actions":[],"open_questions":[],"confidence_notes":""}
+        """
+        switch MinutesCandidateCodec.prepare(text: wrongVersion, units: units) {
+        case .failed(let kind, _):
+            XCTAssertEqual(kind, .schemaInvalid)
+        case .prepared:
+            XCTFail("不认识的结构版本不能当可用纪要")
         }
     }
 
@@ -449,7 +467,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
-        XCTAssertEqual(SessionStore.schemaVersion, 4)
+        XCTAssertEqual(SessionStore.schemaVersion, 5)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         XCTAssertEqual(versions.count, 1)
         XCTAssertEqual(versions.first?.body, "# 迁移前纪要")

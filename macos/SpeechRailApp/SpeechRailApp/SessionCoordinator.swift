@@ -824,6 +824,26 @@ public final class SessionCoordinator {
         try await store.pendingMinutesRows()
     }
 
+    /// 提交一版结构化候选：正文、候选、核对报告同一条写（MA-08）。
+    @discardableResult
+    public func saveMinutesCandidate(
+        minutesID: String,
+        expectedAttempts: Int,
+        body: String,
+        model: String?,
+        candidate: String?,
+        review: String?
+    ) async throws -> Bool {
+        try await store.saveMinutesCandidate(
+            minutesID: minutesID,
+            expectedAttempts: expectedAttempts,
+            body: body,
+            model: model,
+            candidate: candidate,
+            review: review
+        )
+    }
+
     /// 跨会议知识检索：转录终稿与已完成纪要，不含私密问答（MC-44、MC-49、MC-52）。
     public func searchKnowledge(
         query: String,
