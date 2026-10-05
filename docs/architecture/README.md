@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.3.0"
-date: 2026-09-27
+version: "3.3.1"
+date: 2026-10-05
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -57,6 +57,7 @@ graph TD
 13. **[实时 VAD 最佳实践与当前模式策略](realtime-vad-2026-best-practices.md)**（`active`）：Silero/legacy 解析、SpeechAdmission、Sona 的 400/900ms 调用策略与帧量化边界。
 14. **[克隆音色质量门禁与自量保障契约](voice-clone-quality-gates-and-contract.md)**（`under_review`）：参考音频门禁、clone revalidate、固定 probe、VoiceQualityReport、低基数观测与 Sona 闭环边界。
 15. **[克隆音色输出可懂度与 ASR 复核设计](voice-quality-intelligibility-validation.md)**（`active`）：实现 TTS probe 完成并释放模型槽后再批量 ASR 的阶段化验收，避免 Base TTS 与 ASR 形成未治理重模型重叠，并为随机噪声、错读/漏读提供独立文本证据。
+16. **[语音助手 STT → LLM → TTS 闭环代码审查与优化方案](2026-10-05-assistant-pipeline-reliability-design.md)**（`proposed`）：基于 2026-10-05 `main` 源码，分析插话、设备恢复、停播屏障、播放完成语义、生成流水线与队列观测；定义应用侧解耦、分阶段实施与 fake/真机验收。仅方案评审，不表示问题已修复或性能已验收。
 
 ---
 
