@@ -54,11 +54,14 @@ public final class SpeakerLabeling {
     private let coordinator: SessionCoordinator
     /// 写下一条说话人修订之后要跑一次。
     ///
-    /// 改名/合并/标记「我」/拆出都会追加 `speaker_revision`，而纪要是否需要复核
-    /// 正是靠这些修订算出来的。不回调的话，用户改完名字，界面上"需复核"要等到
-    /// 下一次重新整理或重开才出现——验收标准 3 说的「修改来源后相关结论提示复核」
-    /// 就落空了。回调放在这一层，是为了让四条路径**都**带上它：
-    /// `markAsMe` 与 `merge` 内部就是调 `rename`。
+    /// 改名/合并/标记「我」都会追加一条 `kind='speaker'` 的修订事件，
+    /// 而纪要是否需要复核正是靠这些事件算出来的。不回调的话，用户改完名字，
+    /// 界面上"需复核"要等到下一次重新整理或重开才出现——验收标准 3 说的
+    /// 「修改来源后相关结论提示复核」就落空了。回调放在这一层，是为了让这几条
+    /// 路径**都**带上它：`markAsMe` 与 `merge` 内部就是调 `rename`。
+    ///
+    /// **不含 `split`**：拆出改的是 `line.speaker_label`，不写修订事件，
+    /// 因此不会让任何纪要变成需复核。这是刻意的取舍，不是漏接，理由见 `split`。
     /// 异步是为了让刷新在动作返回**之前**完成：否则用户改完名字，
     /// 界面先回显新名字、"需复核"再晚一步出现，中间那一瞬看着像是没生效。
     var onSourceRevision: (@MainActor () async -> Void)?
@@ -249,8 +252,12 @@ public final class SpeakerLabeling {
             }
         }
         observe(label: target, ordinal: nil)
-        // 归属改了，依据旧归属的结论同样要提示复核。
-        await onSourceRevision?()
+        // **刻意不触发** `onSourceRevision`：拆出走的是 `attachSpeakerLabel`，
+        // 而那也是实时对齐写归属的同一条路径——让它算"用户改了来源"，
+        // 会被每一次对齐到达刷出一堆复核标记。
+        // 代价是明确的：拆出改了归属，依据旧归属的纪要不会提示复核。
+        // 要覆盖这一条，得在 `split` 这一层单独记一次修订事件，
+        // 不能去改 `attachSpeakerLabel`（见交付说明该节）。
     }
 
     private func nextAvailableLabel() -> String {

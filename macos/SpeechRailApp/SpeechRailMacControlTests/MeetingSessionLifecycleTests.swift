@@ -302,29 +302,102 @@ final class MeetingSessionLifecycleTests: XCTestCase {
     ///
     /// 走**生产路径**：真的启动一场会，再经 `MeetingSession.renameSpeaker` 改名。
     func testRenamingASpeakerMarksTheMinutesForReviewRightAway() async throws {
-        let h = try await makeHarness()
-        await h.clients.openGate()
-        await h.session.start(selection: MeetingAudioSelection())
-        try await h.settle { $0.phase == .recording }
-        let sessionID = try XCTUnwrap(h.session.sessionID)
-
-        // 这场会有过一版整理好的纪要。
-        let minutes = try await h.store.enqueueMinutes(
-            sessionID: sessionID, model: nil, promptChars: 8
-        )
-        _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+        let (h, _, minutesID) = try await makeStartedMeetingWithMinutes()
 
         // 改显示名 = 追加一条说话人修订。
         await h.session.renameSpeaker(label: "A", to: "张三")
 
         let pending = h.session.minutes.versionsNeedingReview
         XCTAssertTrue(
-            pending.contains(minutes.id),
+            pending.contains(minutesID),
             "改名之后必须当场提示复核，不能等下一次重新整理才出现"
         )
-        let needsReview = try await h.store.minutesNeedsReview(minutesID: minutes.id)
+        let needsReview = try await h.store.minutesNeedsReview(minutesID: minutesID)
         XCTAssertTrue(needsReview, "库这一层的判断也应当是同一结论")
+    }
+
+    /// 合并说话人同样要当场提示复核——它内部就是 `rename`。
+    ///
+    /// 上一节只钉了改名，把"共用代码"当成覆盖。这一条把它落实：
+    /// 合并是用户改归属的常用入口（「这两条其实是同一个人」），
+    /// 它写的也是一条 `kind='speaker'` 修订。
+    func testMergingSpeakersMarksTheMinutesForReviewRightAway() async throws {
+        let (h, _, minutesID) = try await makeStartedMeetingWithMinutes()
+        await h.session.renameSpeaker(label: "A", to: "张三")
+        let baseline = h.session.minutes.versionsNeedingReview
+        XCTAssertTrue(baseline.contains(minutesID), "前置：改名已经让它需复核")
+
+        // 把 B 并进已改名的 A：内部会以 A 的显示名给 B 补一次改名。
+        await h.session.merge(label: "B", into: "A")
+        let pending = h.session.minutes.versionsNeedingReview
+        XCTAssertTrue(pending.contains(minutesID), "合并同样要当场提示复核")
+        let revisions = try await h.store.speakerRevisions(sessionID: try XCTUnwrap(h.session.sessionID))
+        XCTAssertGreaterThanOrEqual(
+            revisions.count, 2,
+            "合并要真的写下第二条修订；只刷界面不算数"
+        )
+    }
+
+    /// 标记「我」也是同一条路径（`markAsMe` → `rename`）。
+    func testMarkingAsMeMarksTheMinutesForReviewRightAway() async throws {
+        let (h, _, minutesID) = try await makeStartedMeetingWithMinutes()
+        await h.session.markAsMe(label: "A")
+        XCTAssertTrue(
+            h.session.minutes.versionsNeedingReview.contains(minutesID),
+            "标记「我」同样要当场提示复核"
+        )
+    }
+
+    /// 拆出**不**提示复核，这是刻意的取舍，不是漏接。
+    ///
+    /// 拆出改的是 `line.speaker_label`，走 `attachSpeakerLabel`——而那也是实时对齐
+    /// 写归属的同一条路径。要让拆出算"用户改了来源"，得在 `SpeakerLabeling.split`
+    /// 这一层单独记事件；改 `attachSpeakerLabel` 会被每一次对齐到达刷出一堆标记。
+    ///
+    /// 这里钉住当前行为，好让将来有人想"补上"时先看见这条为什么当初没做。
+    func testSplittingSpeakersDoesNotMarkTheMinutesForReview() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let sessionID = try XCTUnwrap(h.session.sessionID)
+        _ = try await h.store.appendLine(
+            LineDraft(
+                sessionID: sessionID, role: .speaker, text: "这一句先归给 A。",
+                source: .microphone, tStart: 0, status: .final
+            ),
+            id: "\(sessionID)-line"
+        )
+        let minutes = try await h.store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+
+        await h.session.split(lineIDs: ["\(sessionID)-line"], to: "B")
+
+        let revisions = try await h.store.speakerRevisions(sessionID: sessionID)
+        XCTAssertTrue(
+            revisions.isEmpty,
+            "拆出不写修订事件——否则实时对齐每次到达都会刷出复核标记"
+        )
+        XCTAssertFalse(
+            h.session.minutes.versionsNeedingReview.contains(minutes.id),
+            "当前行为：拆出不提示复核。要覆盖得在 split 这层单独记事件，别改 attachSpeakerLabel。"
+        )
+    }
+
+    /// 启动一场会并给它一版整理好的纪要。
+    private func makeStartedMeetingWithMinutes() async throws -> (Harness, String, String) {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let sessionID = try XCTUnwrap(h.session.sessionID)
+        let minutes = try await h.store.enqueueMinutes(
+            sessionID: sessionID, model: nil, promptChars: 8
+        )
+        _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+        return (h, sessionID, minutes.id)
     }
 }
 

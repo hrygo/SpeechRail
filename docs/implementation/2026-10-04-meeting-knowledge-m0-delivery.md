@@ -61,6 +61,7 @@ base: "origin/main @ d72535c7"
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的「删除内容不得被索引或旧任务恢复」在**行级与索引级**已证；物理残留未做也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
+| 10 | **拆出说话人不提示复核**：改的是 `line.speaker_label`，不写修订事件 | 实测（读 `attachSpeakerLabel` 与 `speakerRevisions` 确认） | 刻意取舍：`attachSpeakerLabel` 同时是实时对齐的写入路径，改它会被每次对齐到达刷屏。要覆盖得在 `SpeakerLabeling.split` 这层单独记事件 |
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
 
@@ -2319,3 +2320,67 @@ XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 
   无 UI 自动化或人工走查授权。
 - 刷新只覆盖**当前这一场**的纪要。跨会议的引用不会被连带重标——
   按设计，别的会议引用的是它们自己封存时的快照（MC-46）。
+
+## M1 增量（续）：把上一节说错的话改回来，并补齐三条路径的用例
+
+### 更正：上一节说「拆出也会提示复核」，那是错的
+
+上一节写 `onSourceRevision` 时说"改名/合并/标记「我」/拆出四条路径都会带上它"，
+并在 `split` 里留了 `await onSourceRevision?()` 加一句
+「归属改了，依据旧归属的结论同样要提示复核」。**那句话不成立。**
+
+核实后的事实：
+
+- `speakerRevisions` 读的是 `session_change WHERE kind = 'speaker'`；
+- `renameSpeaker` 在显示名确有变化时写一条；
+- `attachSpeakerLabel`（**拆出走的正是它**）只 `UPDATE line SET speaker_label`，
+  **不写任何修订事件**。
+
+所以拆出既不会写事件，也不会让任何纪要变成需复核——我加的那个回调是**死的**，
+注释还言之凿凿地说它会提示复核。这类"注释承诺了代码做不到的事"比没有更糟。
+
+**没有顺手把它改对，是有原因的**：`attachSpeakerLabel` 同时是**实时对齐**写归属的
+同一条路径（`SessionStore.swift:310` 明说它属"归属那一侧"、对齐证据在文本 final
+之后独立到达）。要让拆出算"用户改了来源"，正确做法是在 `SpeakerLabeling.split`
+这一层单独记一条事件；改 `attachSpeakerLabel` 会被每一次对齐到达刷出一堆复核标记，
+把真正需要提示的那批淹掉。
+
+于是：撤掉 `split` 里那个死回调，把两处注释改成事实（属性说明与 `split` 体内），
+并新增一条用例把"拆出不提示复核"这个**刻意的取舍**钉住，好让将来有人想"补上"时
+先看见它为什么当初没做。
+
+### 补齐：合并与标记「我」各自的用例
+
+上一节把"共用代码已覆盖"当成了覆盖，这节落实。`MeetingSessionLifecycleTests`
+增至 **12 项**，新增 3 项：
+
+- `testMergingSpeakersMarksTheMinutesForReviewRightAway`——合并是用户改归属的常用入口
+  （「这两条其实是同一个人」），除了界面提示，还断言**真的写下了第二条修订**
+  （`speakerRevisions.count >= 2`）：只刷界面不算数。
+- `testMarkingAsMeMarksTheMinutesForReviewRightAway`——同一条路径。
+- `testSplittingSpeakersDoesNotMarkTheMinutesForReview`——钉住上面那个取舍：
+  拆出后 `speakerRevisions` 为空、该版纪要不被标复核。
+
+### 回归证据（2026-10-06）
+
+反证已核对：把 `MeetingSession` 里那三行回调接线去掉后，改名 / 合并 / 标记「我」
+三条用例**同时变红**（`Executed 12 tests, with 4 failures`），确认三条都真的依赖接线。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1033 项**（上一节 1030 +3）
++ Swift Testing **419 项**，零失败。`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**，与上一节同一批改动。
+- 回退：与上一节相同，另需把 `split` 里已撤掉的那行加回（若要恢复旧行为）——
+  但那行是死的，加回来也不改变任何结果，只会让注释与事实脱节。
+
+### 未验证事项与已知边界
+
+- **拆出改了归属但纪要不会提示复核**，这是本节记录的已知取舍，不是遗漏。
+  影响面：用户把某句话从张三改归李四之后，引用了那句话的结论仍然显示"已核对"。
+  锚点里的 `speaker_label` 是封存时的快照（MC-46 的设计），所以引文本身没失效，
+  失效的是"谁说的"这一层。要覆盖需要在 `split` 层单独记事件，本轮未做。
+- 界面呈现仍未走查（无 UI 自动化或人工授权）。
+- 刷新只覆盖当前这一场；跨会议引用各自按自己封存时的快照判断，不连带重标。
