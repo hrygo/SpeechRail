@@ -533,6 +533,31 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(accepted?.body, "# 第一版")
     }
 
+    /// MA-06/MC-25（展示口径）：`currentMinutes` 是展示与导出的唯一查询。
+    /// 未采用过时退回最新可用候选；采用 v1 后，即使 v2 成功也仍默认展示 v1。
+    func testCurrentMinutesPrefersAcceptedOverNewerUsableVersion() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        // 未采用：退回最新可用候选，不返回 nil 也不返回失败尝试。
+        let unadopted = try await store.currentMinutes(sessionID: sessionID)
+        XCTAssertEqual(unadopted?.id, first.id)
+        _ = try await store.adoptMinutes(sessionID: sessionID, minutesID: first.id, expectedCurrentID: nil)
+        // 新一版成功也不自动提升：重新生成不是采用动作（§7.7 不变量 3）。
+        let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
+        let current = try await store.currentMinutes(sessionID: sessionID)
+        XCTAssertEqual(current?.id, first.id, "重新生成成功也不得自动替换用户采用版")
+        XCTAssertEqual(current?.body, "# 第一版")
+        // 用户改采 v2 之后展示口径跟着走。
+        _ = try await store.adoptMinutes(sessionID: sessionID, minutesID: second.id, expectedCurrentID: first.id)
+        let switched = try await store.currentMinutes(sessionID: sessionID)
+        XCTAssertEqual(switched?.id, second.id)
+    }
+
     /// MA-06/MC-31（采用冲突）：两次采用基于同一旧版时，后返回的操作必须拒绝覆盖；
     /// 失败版与未知版不能被采用。
     func testAdoptMinutesRejectsConflictingAndIneligibleVersions() async throws {

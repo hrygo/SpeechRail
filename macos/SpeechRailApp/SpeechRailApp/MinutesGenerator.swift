@@ -378,9 +378,9 @@ public final class MinutesGenerator {
             latestBody = latest?.body
             state = .queued
         case .failed:
-            // MC-25：新尝试失败不丢旧版正文；状态仍如实报失败，不伪装成功。
-            let usable = try? await coordinator.latestUsableMinutes(sessionID: sessionID)
-            latestBody = usable?.body
+            // MC-25：新尝试失败不丢采用版正文；状态仍如实报失败，不伪装成功。
+            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
+            latestBody = current?.body
             state = .failed(latest?.failureReason ?? "没有可读的原因")
         default:
             latestBody = nil

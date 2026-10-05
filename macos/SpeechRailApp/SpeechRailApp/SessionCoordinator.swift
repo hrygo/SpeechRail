@@ -819,6 +819,12 @@ public final class SessionCoordinator {
         try await store.acceptedMinutes(sessionID: sessionID)
     }
 
+    /// 当前应当展示/导出的那一版（MA-06/MC-25）：采用版优先，
+    /// 没有采用版才退回最新可用候选。
+    public func currentMinutes(sessionID: String) async throws -> MinutesVersion? {
+        try await store.currentMinutes(sessionID: sessionID)
+    }
+
     /// 采用一版纪要（MA-06/MC-31）：只有已完成且有正文的版本才能被采用；
     /// `expectedCurrentID` 是调用方开始操作时看到的采用版 id，不一致时拒绝覆盖。
     @discardableResult

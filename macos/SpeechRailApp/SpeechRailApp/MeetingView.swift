@@ -35,6 +35,9 @@ public struct MeetingView: View {
     @State private var reviewLines: [TranscriptLine] = []
     @State private var reviewSpeakerNames: [String: String] = [:]
     @State private var reviewMinutes: MinutesVersion?
+    /// 采用哪一版时的冲突提示（MC-31）：两个窗口基于同一旧版改采用时，
+    /// 后返回的那个不覆盖，改为提示刷新。
+    @State private var adoptConflictNotice: String?
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State private var isLabelingSpeakers = false
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
@@ -803,14 +806,14 @@ public struct MeetingView: View {
             }
             // 「在看哪一版」是一个**有落点的状态**：点了版本列表里的旧版就必须换正文，
             // 否则那一行按下去什么都不会发生（而这正是"旧版一直可看"的承诺）。
-            if let viewing = selectedMinutesVersion, !viewing.isLatest {
+            if let viewing = selectedMinutesVersion, viewing.id != latestVersionID {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text("正在看第 \(viewing.version) 版")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     StatusPill(tone: Self.tone(for: viewing.status), label: viewing.status.title)
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    Button("回到最新") { selectedMinutesVersionID = nil }
+                    Button("回到当前版本") { selectedMinutesVersionID = nil }
                         .buttonStyle(.link)
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
@@ -843,11 +846,14 @@ public struct MeetingView: View {
         return meeting.minutes.versions.first { $0.id == selectedMinutesVersionID }
     }
 
-    /// 正文只在这一处决定：选了旧版就显示旧版，否则是最新版（`latestBody` 只作为
-    /// 版本列表还没刷出来时的兜底）。
+    /// 正文只在这一处决定：选了旧版就显示旧版，否则是当前展示版
+    /// （采用版优先，其次最新可用候选；`latestBody` 只作为版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
         if let selectedMinutesVersion { return selectedMinutesVersion.body }
-        // MC-25：最新尝试失败时仍显示最新可用版正文，不把失败版的空正文当成功。
+        // MC-25：已采用 v2 后 v3 失败，仍显示 v2；不把失败版的空正文当成功。
+        if let accepted = meeting.minutes.versions.first(where: \.isAccepted) {
+            return accepted.body
+        }
         if let latest = meeting.minutes.versions.first(where: \.isLatest) {
             if latest.status == .ready { return latest.body }
             if let usable = meeting.minutes.versions.filter({ $0.status == .ready }).max(by: { $0.version < $1.version }) {
@@ -942,7 +948,7 @@ public struct MeetingView: View {
             resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
         )
         if reviewRecord?.id == id {
-            reviewMinutes = try? await session.latestUsableMinutes(sessionID: id)
+            reviewMinutes = try? await session.currentMinutes(sessionID: id)
             selectedMinutesVersionID = nil
             postTab = .minutes
             return
@@ -988,8 +994,8 @@ public struct MeetingView: View {
                 if let pinnedMinutesID {
                     try? await session.minutesVersion(id: pinnedMinutesID)
                 } else {
-                    // MC-25：没选旧版时导最新可用版；最新尝试失败不带空正文。
-                    try? await session.latestUsableMinutes(sessionID: id)
+                    // MC-25：没选旧版时导当前展示版（采用版优先）；最新尝试失败不带空正文。
+                    try? await session.currentMinutes(sessionID: id)
                 }
             } else {
                 nil
@@ -1017,8 +1023,8 @@ public struct MeetingView: View {
         reviewRecord = record
         reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        // MC-25：回看读最新可用版；最新尝试失败时不拿失败版的空正文遮旧版。
-        reviewMinutes = try? await session.latestUsableMinutes(sessionID: summary.id)
+        // MC-25：回看读当前展示版（采用版优先）；最新尝试失败时不拿失败版的空正文遮旧版。
+        reviewMinutes = try? await session.currentMinutes(sessionID: summary.id)
         selectedMinutesVersionID = nil
     }
 
@@ -1026,6 +1032,33 @@ public struct MeetingView: View {
         reviewRecord = nil
         reviewMinutes = nil
         Task { await reloadPostMeeting() }
+    }
+
+    /// 采用某一版（MA-06/MC-31）：只有用户明确采用才移动当前采用版；
+    /// 采用基于"点下去时看到的那个采用版"做比较，期间别人改过就拒绝覆盖并提示刷新。
+    private func adoptMinutesVersion(_ version: MinutesVersion, sessionID: String) async {
+        let expected = ((try? await session.acceptedMinutes(sessionID: sessionID)) ?? nil)?.id
+        let committed = (try? await session.adoptMinutes(
+            sessionID: sessionID,
+            minutesID: version.id,
+            expectedCurrentID: expected
+        )) ?? false
+        guard committed else {
+            adoptConflictNotice = "当前采用的版本已经变了，刷新后再试一次。"
+            await refreshAfterAdopt(sessionID: sessionID)
+            return
+        }
+        adoptConflictNotice = nil
+        await refreshAfterAdopt(sessionID: sessionID)
+    }
+
+    /// 采用之后把这一场的展示口径刷回"当前展示版"：当前会议刷生成器状态，
+    /// 回看旧记录刷右栏正文，两条路径都不自己拼回退链。
+    private func refreshAfterAdopt(sessionID: String) async {
+        if reviewRecord?.id == sessionID {
+            reviewMinutes = try? await session.currentMinutes(sessionID: sessionID)
+        }
+        await reloadPostMeeting()
     }
 
     private func reloadRecent() async {
@@ -1224,39 +1257,63 @@ public struct MeetingView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 ForEach(meeting.minutes.versions) { version in
-                    Button {
-                        // 点一行 = 「看这一版」：换正文，并且把分段切回纪要
-                        // ——在「转录」页签上点版本号却什么都没变，和没接线是一回事。
-                        selectedMinutesVersionID = version.id
-                        postTab = .minutes
-                    } label: {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text(version.isLatest ? "最新 · 第 \(version.version) 版" : "第 \(version.version) 版")
-                                .font(SpeechRailDesignTokens.Typography.callout)
-                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                            // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
-                            if meeting.minutes.versionsNeedingReview.contains(version.id) {
-                                StatusPill(tone: .attention, label: "需复核")
+                    // 「看这一版」与「采用这一版」是两个动作，所以是两个控件：
+                    // 把采用按钮套在行按钮里会变成嵌套按钮，键盘与指针都拿不到它。
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button {
+                            // 点一行 = 「看这一版」：换正文，并且把分段切回纪要
+                            // ——在「转录」页签上点版本号却什么都没变，和没接线是一回事。
+                            selectedMinutesVersionID = version.id
+                            postTab = .minutes
+                        } label: {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                Text(versionLabel(version))
+                                    .font(SpeechRailDesignTokens.Typography.callout)
+                                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                                // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
+                                if meeting.minutes.versionsNeedingReview.contains(version.id) {
+                                    StatusPill(tone: .attention, label: "需复核")
+                                }
+                                // MA-06：采用版是当前口径；失败/排队中的版本不可采用。
+                                if version.isAccepted {
+                                    StatusPill(tone: .healthy, label: "已采用")
+                                }
+                                StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
                             }
-                            StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityValue(
+                            (selectedMinutesVersionID ?? latestVersionID) == version.id ? "正在查看" : "未选中"
+                        )
+                        .speechRailPointerCursor()
                         .background(
                             // 选中行与"正在看的那一版"必须一致：`selectedMinutesVersion` 为空时
-                            // 实际在看最新版，所以最新那一行也是选中的。
+                            // 实际在看当前展示版，所以那一行也是选中的。
                             (selectedMinutesVersionID ?? latestVersionID) == version.id
                                 ? SpeechRailDesignTokens.Surface.selectedFill
                                 : Color.clear,
                             in: SpeechRailDesignTokens.Corner.nestedShape
                         )
+                        if !version.isAccepted, canAdopt(version), let sessionID = meeting.sessionID {
+                            Button {
+                                Task { await adoptMinutesVersion(version, sessionID: sessionID) }
+                            } label: {
+                                Text("采用")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                            }
+                            .buttonStyle(.link)
+                            .speechRailPointerCursor()
+                            .accessibilityLabel("采用第 \(version.version) 版作为当前纪要")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(
-                        (selectedMinutesVersionID ?? latestVersionID) == version.id ? "正在查看" : "未选中"
-                    )
-                    .speechRailPointerCursor()
+                }
+                if let adoptConflictNotice {
+                    Text(adoptConflictNotice)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
@@ -1264,7 +1321,21 @@ public struct MeetingView: View {
     }
 
     private var latestVersionID: String? {
-        meeting.minutes.versions.first(where: \.isLatest)?.id
+        // MA-06/MC-25：默认选中的那一版是当前展示版——采用版优先，其次最新尝试。
+        meeting.minutes.versions.first(where: \.isAccepted)?.id
+            ?? meeting.minutes.versions.first(where: \.isLatest)?.id
+    }
+
+    /// 版本行标题：采用版、最新尝试与普通历史版各说各的，不让"最新"冒充"当前"。
+    private func versionLabel(_ version: MinutesVersion) -> String {
+        if version.isAccepted { return "当前采用 · 第 \(version.version) 版" }
+        if version.isLatest { return "最新 · 第 \(version.version) 版" }
+        return "第 \(version.version) 版"
+    }
+
+    /// 只有已完成且有正文的版本能被采用；失败、排队、运行中一律不给这个出口。
+    private func canAdopt(_ version: MinutesVersion) -> Bool {
+        version.status == .ready && version.body?.isEmpty == false
     }
 
     private static func tone(for status: MinutesStatus) -> StatusTone {

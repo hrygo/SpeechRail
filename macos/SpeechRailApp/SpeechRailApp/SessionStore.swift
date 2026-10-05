@@ -1321,6 +1321,14 @@ public actor SessionStore {
         }
     }
 
+    /// 当前应当展示/导出的那一版（MA-06/MC-25）：采用版优先，没有采用版才退回
+    /// 最新可用候选。已采用 v2 后生成 v3 失败，默认仍是 v2。
+    /// 这是展示口径的唯一查询；调用方不再各自拼"最新尝试/可用版"回退链。
+    public func currentMinutes(sessionID: String) throws -> MinutesVersion? {
+        if let accepted = try acceptedMinutes(sessionID: sessionID) { return accepted }
+        return try latestUsableMinutes(sessionID: sessionID)
+    }
+
     /// 采用一版纪要（MA-06/MC-31）：只有已完成且有正文的版本才能被采用；
     /// 同一事务清旧指针、立新指针；`expectedCurrentID` 是调用方开始操作时看到的
     /// 采用版 id（nil 表示当时无采用版），不一致时拒绝覆盖并返回 false。
