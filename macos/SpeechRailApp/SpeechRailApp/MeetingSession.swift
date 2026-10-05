@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 import SpeechRailControlKit
@@ -65,7 +64,7 @@ public final class MeetingSession {
         public var detail: String {
             switch self {
             case .noSourceSelected:
-                AudioSourceCoordinator.BlockReason.noSourceSelected.detail
+                MeetingAudioBlockReason.noSourceSelected.detail
             case .serviceNotReady(let message):
                 message
             case .serviceBusy(let message):
@@ -73,9 +72,9 @@ public final class MeetingSession {
             case .occupiedBy:
                 "麦克风同一时刻只能由一个会话使用；可以先结束那个会话，或者等它说完。"
             case .microphoneDenied:
-                AudioSourceCoordinator.BlockReason.microphoneDenied.detail
+                MeetingAudioBlockReason.microphoneDenied.detail
             case .systemAudioUnavailable(let message):
-                AudioSourceCoordinator.BlockReason.systemAudioUnavailable(message).detail
+                MeetingAudioBlockReason.systemAudioUnavailable(message).detail
             case .storeUnavailable(let message):
                 message
             case .streamFailed(let message):
@@ -130,7 +129,7 @@ public final class MeetingSession {
     public private(set) var startedAt: Date?
     public private(set) var lastFailure: String?
     /// 这一场选的来源与它的可读名字（库里的 `session.audio_source` 与界面上的那句话）。
-    public private(set) var selection: AudioSourceCoordinator.Selection?
+    public private(set) var selection: MeetingAudioSelection?
     /// 合流时补的静音块数（缺口）。它是一条事实，不是错误。
     public private(set) var gapCount = 0
     /// 最近一次中断的原因与时刻（界面上的"已中断"读它）。
@@ -167,7 +166,7 @@ public final class MeetingSession {
         sessionID: String? = nil,
         startedAt: Date? = nil,
         lastFailure: String? = nil,
-        selection: AudioSourceCoordinator.Selection? = nil,
+        selection: MeetingAudioSelection? = nil,
         gapCount: Int = 0,
         interruption: SessionInterruptionReason? = nil,
         interruptedAt: Date? = nil,
@@ -218,7 +217,7 @@ public final class MeetingSession {
 
     private var client: (any MeetingRealtimeClient)?
     private var pump: Task<Void, Never>?
-    private var sleepObserver: NSObjectProtocol?
+    private var sleepObserver: AnyObject?
     private var commitCursor: Date?
     private var pendingItem: (start: Date, end: Date)?
     private var currentOrdinal = 0
@@ -243,7 +242,7 @@ public final class MeetingSession {
         coordinator: SessionCoordinator,
         port: Int = 8201,
         apiKey: String? = nil,
-        dependencies: MeetingSessionDependencies = .production
+        dependencies: MeetingSessionDependencies
     ) {
         self.coordinator = coordinator
         self.dependencies = dependencies
@@ -258,7 +257,7 @@ public final class MeetingSession {
     // MARK: - 入口
 
     /// 页面主按钮：选好来源之后从这里进（§6.2 的空态度）。
-    public func start(selection: AudioSourceCoordinator.Selection) async {
+    public func start(selection: MeetingAudioSelection) async {
         self.selection = selection
         blocked = nil
         lastFailure = nil
@@ -289,7 +288,17 @@ public final class MeetingSession {
     /// 结束这一场并整理：EOF 屏障 → 释放设备 → 封存 → 排纪要（§8.2 的最后三步）。
     public func finishAndSummarize() async {
         guard sessionID != nil else {
-            await coordinator.stopCapture(endingWith: .user)
+            // 还没建记录就点结束：多半正有一段启动挂在半路（麦克风授权弹窗、
+            // 服务握手还没回来）。没有记录就没有可整理的，所以走 `finalize`
+            // 而不是 `stopCapture`——后者会把占用留在 `isProcessing` 且永远
+            // 等不到 `finishProcessing`，下一场会议就再也开不起来了。
+            //
+            // `finalize` 内部会先调 `stopper`，也就是 `stopCapture()`，
+            // 由它 `releaseCapture`：作废连接代次，让挂起的启动回来时发现自己过期，
+            // 不会把已经结束的会改回「正在录」（MC-05 / MC-06）。
+            await coordinator.finalize(reason: .user)
+            // 本层相位协调器不管，单独复位成 idle：没有记录，也就没有可整理的。
+            resetKeepingLines()
             return
         }
         isStoppingIntentionally = true
@@ -413,6 +422,16 @@ public final class MeetingSession {
         guard let selection, !selection.isEmpty else {
             throw Blocked(reason: .noSourceSelected)
         }
+        // 进这一轮先领一枚票，位置在任何一次 `await` **之前**。
+        //
+        // 整段流程要好几跳（读能力绑定、拿设备、握手、建行），期间用户可能结束这一场，
+        // 也可能合法切到下一场。票作废了就意味着"这一轮已经不是当前的了"，它只配回收
+        // 自己领到的东西，不配发布任何状态——不改相位、不建记录、不占租约。
+        //
+        // 放在末尾领票是来不及的：`releaseCapture()` 会 `invalidate()`，
+        // 而旧启动回来后又 `begin()` 一枚新令牌，等于把自己重新变回"当前一代"
+        // 并把 `phase = .recording` 发布出去（MC-05 / MC-06）。
+        let startToken = connectionGeneration.begin()
         let binding = await realtimeCapabilityBindingProvider?()
         if realtimeCapabilityBindingProvider != nil, binding == nil {
             throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
@@ -434,7 +453,7 @@ public final class MeetingSession {
 
         let stream: AsyncStream<AudioChunk>
         do {
-            stream = try await audio.start(selection: selection.meetingSelection)
+            stream = try await audio.start(selection: selection)
         } catch {
             throw Blocked(reason: Self.blockReason(for: error))
         }
@@ -457,6 +476,14 @@ public final class MeetingSession {
             await audio.stop()
             throw Blocked(reason: .serviceNotReady(error.localizedDescription))
         }
+        guard connectionGeneration.isCurrent(startToken) else {
+            // 这一场已经被结束或被换掉了。只回收这一轮自己领到的采集与连接，
+            // 不碰相位、不建记录——迟到的启动一旦发布状态，就是把已经结束的会
+            // 改回"正在录"，界面与库里都会出现一段根本没发生过的录音。
+            await audio.stop()
+            await client.close()
+            return
+        }
         self.client = client
 
         if isNewSession {
@@ -471,6 +498,15 @@ public final class MeetingSession {
                     llmModel: minutesConfiguration?.model
                 )
             )
+            guard connectionGeneration.isCurrent(startToken) else {
+                // 极窄的一处：建行那一下也是 `await`。票已经作废的话，
+                // 这一行**不能留**——留着就是一条"开过但没录到"的空会，
+                // 正是 MC-08 要防的那种"失败却看起来像成功"。
+                try? await coordinator.removeSession(id: record.id)
+                await audio.stop()
+                await client.close()
+                return
+            }
             sessionID = record.id
             startedAt = record.startedAt
             lines = []
@@ -557,15 +593,11 @@ public final class MeetingSession {
     private func startSleepObserver() {
         guard sleepObserver == nil else { return }
         // 系统睡眠 / 合盖：醒来即中断态，**不自动续**；麦克风与 tap 都要重拿（§9 第 8 行）。
-        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willSleepNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.phase.isLive else { return }
-                Task { await self.enterInterruption(.sleep) }
-            }
+        // 通知源经 `dependencies.powerMonitor` 进来，所以这一条在单测里能触发，
+        // 不必真合盖才验得到。
+        sleepObserver = dependencies.powerMonitor.startObservingSleep { [weak self] in
+            guard let self, self.phase.isLive else { return }
+            Task { await self.enterInterruption(.sleep) }
         }
     }
 
@@ -953,7 +985,7 @@ public final class MeetingSession {
 
     private static func blockReason(for error: Error) -> BlockReason {
         if let blocked = error as? Blocked { return blocked.reason }
-        if let blocked = error as? AudioSourceCoordinator.Blocked {
+        if let blocked = error as? MeetingAudioBlocked {
             switch blocked.reason {
             case .noSourceSelected: return .noSourceSelected
             case .microphoneDenied: return .microphoneDenied
@@ -983,57 +1015,4 @@ public final class MeetingSession {
 
     /// 已存好的段数（界面状态带上那个数字）。
     public var storedLineCount: Int { max(lines.count, coordinator.lineWatermark) }
-}
-
-// MARK: - 生产实现接线
-//
-// `MeetingAudioSource` 的 conformance 只能待在这个 App-only 文件里：
-// `AudioSourceCoordinator` 不在 SPM 目标内，协议边界用的
-// `MeetingAudioSelection` 是它的无损投影。
-
-extension AudioSourceCoordinator: MeetingAudioSource {
-    /// 把协议边界的纯值选择还原成采集层自己的 `Selection`。字段一一对应，
-    /// 没有丢信息——**用户勾了什么，采集层就拿什么**。
-    public func start(selection meetingSelection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
-        try await start(
-            selection: Selection(
-                usesMicrophone: meetingSelection.usesMicrophone,
-                systemApps: meetingSelection.systemApps.map {
-                    SystemAudioApp(bundleID: $0.bundleID, name: $0.name)
-                }
-            )
-        )
-    }
-}
-
-extension AudioSourceCoordinator.Selection {
-    /// 面向协议边界的无损投影。`isEmpty` 的判定在两侧一致，
-    /// 所以"没选来源"不会在翻译过程中变成"选了麦克风"。
-    var meetingSelection: MeetingAudioSelection {
-        MeetingAudioSelection(
-            usesMicrophone: usesMicrophone,
-            systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
-        )
-    }
-}
-
-extension MeetingSessionDependencies {
-    /// 生产依赖：真实设备、真实连接、系统时钟。
-    ///
-    /// 放在 App-only 文件里是因为它要碰 `AudioSourceCoordinator`；
-    /// 协议与值类型留在 SPM 目标内，测试才能在无设备环境下替换实现。
-    public static var production: MeetingSessionDependencies {
-        MeetingSessionDependencies(
-            makeAudioSource: { AudioSourceCoordinator() },
-            makeRealtimeClient: { configuration in
-                RealtimeASRClient(
-                    port: configuration.port,
-                    silenceDurationMilliseconds: RealtimeVADProfile.meeting.silenceDurationMilliseconds,
-                    diarizationEnabled: configuration.diarizationEnabled,
-                    apiKey: configuration.apiKey,
-                    expectedASRRevision: configuration.expectedASRRevision
-                )
-            }
-        )
-    }
 }

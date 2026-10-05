@@ -1836,11 +1836,104 @@ MA-14 把待办的执行状态（已完成、受阻、负责人、期限）写�
   而不是无声消失。
 - **真机断句未验证**：线路侧证明了「切的那一刀只提交」，但真实服务端在 900ms 静音
   判定与这一刀交错时的实际切分结果没有跑过——**真实采集另行授权**。
-- **`togglePause` 本身未进单测**：`MeetingSession` 因 `import AppKit` 进不了 SPM
-  测试目标（它唯一的 AppKit 用面是 `NSWorkspace` 睡眠/唤醒通知）。所以「暂停一次
-  恰好切一刀」目前只有代码与 App 构建背书，没有可执行的回归。把该通知挪进
-  `MeetingSessionDependencies` 接缝即可让生产 `MeetingSession` 进单测，顺带补上
-  MA-01 的 MC-05～MC-08 端到端缺口——尚未做。
+- ~~**`togglePause` 本身未进单测**~~：**已由下面的「MA-01 收尾」补上**。
 - **界面未消费停记区间**：`user_paused` 行现在可查、可随归档包往返，但**回看界面
   还没有把暂停区间画出来**。用户能读到「没录上」，看不到「哪一段没录上」。
 - UI 自动化、真实采集、模型质量基准、发布另行授权。
+
+
+## M1 增量（MA-01 收尾：生产 MeetingSession 进单测，2026-10-05）
+
+范围：让**生产 `MeetingSession` 本身**第一次在单测里被驱动，并补上 MC-05～MC-08、
+MC-07 与 MC-16 的端到端回归。
+
+### 为什么要做这一步
+
+MA-01 当初已经把依赖边界建好了（`MeetingAudioSelection` 是协议边界的值类型、
+`MeetingAudioSource` / `MeetingRealtimeClient` / `MeetingClock` 都可替换），但
+**接缝建好不等于接上**：`MeetingSession` 因为 `import AppKit` 一直进不了 SPM 测试
+目标，于是那些场景此前只有「接缝本身」的单元测试（`MeetingConnectionGeneration`
+那个值类型），真正用得上这套边界的生产代码里**一条回归都没有**。
+
+MA-01 当时留的那条路是可行的，这轮把它走完：
+
+- **睡眠通知做成接缝**（`MeetingPowerMonitor`）。它是 `MeetingSession` 唯一的
+  AppKit 用面。生产实现 `SystemMeetingPowerMonitor`（`NSWorkspace`）留在 App-only
+  文件里。副产品是"Mac 睡过要记中断、醒来不自动续"这条**第一次能被构造**，
+  MC-07 的重连场景因此可以用生产路径走，不用真合盖。
+- **`powerMonitor` 刻意不给默认值**：默认的"什么都不做"实现会让生产漏配时静默失效，
+  而睡眠中断恰好属于"不接就看不出缺了"的那种行为——真合盖才发现没记中断，那段音频
+  已经白丢了。所以生产必须显式给出真的那个。
+- **受阻原因与错误提为顶层类型**（`MeetingAudioBlockReason` / `MeetingAudioBlocked`）。
+  它们原先嵌在 `AudioSourceCoordinator` 里，而那个类要碰 CoreAudio/AVFoundation。
+  「麦克风没授权」和「没选来源」是两种完全不同的用户出口，测试必须能分别构造。
+  `AudioSourceCoordinator` 那边保留同名嵌套别名，既有调用点一行没改。
+- `MeetingAudioSelection` 补齐 `resolvedSource` 与 `label`，与
+  `AudioSourceCoordinator.Selection` 逐字一致——两份各写一份的话，改了一边就会让
+  同一场会的来源摘要出现两种说法。
+- App-only 的接线（`AudioSourceCoordinator` 的 conformance、生产依赖、`NSWorkspace`
+  监视器、`MeetingSession` 的生产便捷构造）整体搬到
+  `MeetingSessionProductionWiring.swift`。
+  主构造因此**不再有默认依赖**：测试显式注入自己的，生产走便捷构造。
+  少一个"忘了注入就静默用真设备"的口子。
+
+### 这一轮抓到的三个真问题
+
+三处都是**先写测试暴露、再修**的，而且都可达：
+
+1. **挂起的启动会把自己复活**（MC-05 / MC-06）。`startPipeline` 在若干 `await`
+   **之后**才 `connectionGeneration.begin()`。用户在麦克风授权弹窗或服务握手期间
+   点结束，`releaseCapture()` 的 `invalidate()` 之后，那个迟到的启动又 `begin()` 出
+   一枚新令牌——把自己变回「当前一代」，把 `phase` 写成 `.recording`，并建出一条记录。
+   结果是**一场已经结束的会被改回正在录**，库里多一条根本没录到内容的会。
+   修法：进入 `startPipeline` 时（在任何 `await` 之前）先领一枚启动票，
+   握手回来后与建行之后各验一次；票作废就只回收自己领到的采集与连接，
+   不发布任何状态。第二处还要把刚建的那一行 `removeSession` 收回去——
+   留着就是一条"开过但没录到"的空会。
+2. **结束一场从未成型的会议，协调器占用永久卡住**。`finishAndSummarize()` 在
+   `sessionID == nil` 时走早返回，只调 `coordinator.stopCapture(endingWith:)`。
+   那条路对会议只改相位、把占用标成 `isProcessing: true` 就返回，**等不到
+   `finishProcessing`**——而没有记录就没有人再调它。下一场会议因此卡在确认框里，
+   而且那个确认永远解不开。修法：早返回分支改走 `finalize`（没有记录就没有可整理的）。
+3. **结束后本层相位停在「准备中」**。协调器改的是它自己的相位，`MeetingSession.phase`
+   没人动。用户在准备态点了结束，页面会一直显示「正在准备」，像一场永远开不起来的会。
+   修法：早返回分支补一次 `resetKeepingLines()`。
+
+### 回归证据（2026-10-05）
+
+新增 `MeetingSessionLifecycleTests` **7/7**，全部驱动**生产 `MeetingSession`**：
+
+- MC-08：建连失败时采集被停、连接自己收尾（生产 `RealtimeASRClient` 握手失败时
+  会先 `finish(code: nil)` 再抛，假件照抄这一点）、租约与占用收回、**库里没有空白记录**、
+  有可读结论；采集自己没起来时不去建连。
+- MC-05：启动挂在 `connect()` 上、用户此时结束——放行之后相位**没有**回到 `.recording`、
+  `sessionID` 仍为空、库里仍是 0 条。（这条在修复前是红的：相位确实变成了 `recording`
+  并建出了记录。）
+- MC-06：A 迟到不得换掉 B 的会话 id，也不得打断 B 的相位。
+- MC-07：走**生产路径**（睡眠接缝 → `enterInterruption` → `continueAfterInterruption`），
+  只有新一代连接继续收到音频，旧连接不再上行。
+- MC-16：暂停一次恰好切一刀、恢复不切、再暂停再切；暂停期间一个字节都不再上行，
+  恢复后重新上行。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1012 项** +
+Swift Testing **419 项**，零失败（2026-10-05 核验）。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 迁移与回退
+
+- **无 schema 变更**。`AudioSourceCoordinator.BlockReason` / `.Blocked` 由嵌套类型
+  改为顶层类型的别名，既有调用点与序列化行为都不变。
+- 回退：把 `MeetingSessionProductionWiring.swift` 的内容并回 `MeetingSession.swift`、
+  `MeetingAudioBlockReason.swift` 删掉、`Package.swift` 的 `sources` 去掉五个条目、
+  pbxproj 去掉两个新文件。三个缺陷修复各自独立，可单独回退。
+
+### 未验证事项与已知边界
+
+- **`finalize` 早返回路径未覆盖**：只钉了"没有记录"这一种。存在记录时封存失败
+  （`sealMeeting` 返回 `.failed`）的界面出口属既有未验证项，本轮没动。
+- **`MeetingSession` 仍未在真机上跑过**：这一轮全部是无设备的确定性回归。
+  真实采集、UI 自动化、模型质量基准、发布另行授权。
+- 接缝只是**可替换**，不等于**已替换**：生产依赖 `MeetingSessionDependencies.production`
+  仍由 App-only 文件提供，那条链（CoreAudio tap、真实握手）没有回归覆盖。
+- `MeetingPowerMonitor` 只有 `startObservingSleep`，没有停止观察。观察者在会话生命周期
+  内一直存在，与原实现一致；真要拆会话复用同一个 `MeetingSession` 实例时需要补。

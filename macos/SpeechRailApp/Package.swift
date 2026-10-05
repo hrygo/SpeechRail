@@ -160,6 +160,15 @@ let package = Package(
                 "TranscriptItemLedger.swift",
                 // 时间证据（MA-02）：观测时刻与声学起止分开，伪造精度在类型层面不可能。
                 "TranscriptTimeWindow.swift",
+                // 生产 MeetingSession 进单测目标（MA-01 收尾）：设备 / 连接 / 时钟 / 睡眠通知
+                // 都经 `MeetingSessionDependencies` 注入，协议与值类型留在本目标内；
+                // App-only 的 `AudioSourceCoordinator` 由 `MeetingSessionProductionWiring.swift`
+                // 在 App target 里接线。所以这里进得来的是**生产类本身**，不是一个替身。
+                "MeetingAudioBlockReason.swift",
+                "MeetingSession.swift",
+                "SpeakerLabeling.swift",
+                "InnerOSSession.swift",
+                "MinutesGenerator.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

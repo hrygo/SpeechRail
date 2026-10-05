@@ -661,9 +661,9 @@ public struct MeetingView: View {
         preferences.meetingUsesMicrophone = usesMicrophone
         preferences.meetingSystemAudioBundleIDs = systemApps.map(\.bundleID)
         await meeting.start(
-            selection: AudioSourceCoordinator.Selection(
+            selection: MeetingAudioSelection(
                 usesMicrophone: usesMicrophone,
-                systemApps: systemApps
+                systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
             )
         )
     }

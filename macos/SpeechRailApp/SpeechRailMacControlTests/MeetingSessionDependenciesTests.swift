@@ -141,7 +141,8 @@ final class MeetingSessionDependenciesTests: XCTestCase {
         let dependencies = MeetingSessionDependencies(
             makeAudioSource: { MeetingAudioSourceForTests() },
             makeRealtimeClient: { _ in MeetingRealtimeClientForTests() },
-            clock: FixedClock(counter: counter)
+            clock: FixedClock(counter: counter),
+            powerMonitor: MeetingPowerMonitorForTests()
         )
         let first = dependencies.clock.now()
         let second = dependencies.clock.now()
@@ -212,4 +213,25 @@ actor MeetingRealtimeClientForTests: MeetingRealtimeClient {
     func flushPendingUtterance() async throws { flushCount += 1 }
     func drainAndClear(timeout: Duration) async throws {}
     func close() async { closeCount += 1 }
+}
+
+/// 睡眠通知假件：不接 `NSWorkspace`，由测试自己触发。
+///
+/// 这正是把睡眠做成接缝换来的东西——"Mac 睡过要记中断、醒来不自动续"以前
+/// 只能靠真合盖验一次，现在能构造。
+@MainActor
+final class MeetingPowerMonitorForTests: MeetingPowerMonitor {
+    private var onSleep: (@MainActor () -> Void)?
+    private(set) var startCount = 0
+
+    func startObservingSleep(_ onSleep: @escaping @MainActor () -> Void) -> AnyObject {
+        startCount += 1
+        self.onSleep = onSleep
+        return self
+    }
+
+    /// 触发一次系统睡眠。
+    func fireSleep() {
+        onSleep?()
+    }
 }

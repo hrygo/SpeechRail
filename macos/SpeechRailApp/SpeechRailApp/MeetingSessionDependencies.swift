@@ -38,6 +38,30 @@ public struct MeetingAudioSelection: Hashable, Sendable {
     }
 
     public var isEmpty: Bool { !usesMicrophone && systemApps.isEmpty }
+
+    /// 落库的 `session.audio_source`：它描述"这一次选的采集来源"（§6.3 ③ 的注解）。
+    public var resolvedSource: SessionAudioSource {
+        switch (usesMicrophone, systemApps.isEmpty) {
+        case (true, true): .microphone
+        case (false, false): .system
+        default: .mixed
+        }
+    }
+
+    /// 界面上那句话（`麦克风` / `腾讯会议` / `麦克风 + 2 个 App`）。
+    ///
+    /// 与 `AudioSourceCoordinator.Selection.label` 逐字一致——两边各写一份的话，
+    /// 改了一边就会让同一场会来源摘要出现两种说法。
+    public var label: String {
+        var parts: [String] = []
+        if usesMicrophone { parts.append("麦克风") }
+        if systemApps.count == 1, let app = systemApps.first {
+            parts.append(app.name)
+        } else if systemApps.count > 1 {
+            parts.append("\(systemApps.count) 个 App")
+        }
+        return parts.isEmpty ? "没有来源" : parts.joined(separator: " + ")
+    }
 }
 
 /// 会议采集通道。生产实现是 `AudioSourceCoordinator`。
@@ -123,17 +147,37 @@ public struct MeetingSessionDependencies: Sendable {
     /// 必须在测试里可数。
     public var makeRealtimeClient: @Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient
     public var clock: any MeetingClock
+    /// 睡眠通知源。
+    ///
+    /// **刻意不给默认值**：一个"什么都不做"的默认实现会让生产漏配时静默失效，
+    /// 而睡眠中断恰好属于"不接就看不出缺了"的那种行为——真合盖才发现没记中断，
+    /// 那一段的音频已经白丢了。所以生产必须显式给出真的那个。
+    public var powerMonitor: any MeetingPowerMonitor
 
     public init(
         makeAudioSource: @escaping @MainActor () -> any MeetingAudioSource,
         makeRealtimeClient: @escaping @Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient,
-        clock: any MeetingClock = SystemMeetingClock()
+        clock: any MeetingClock = SystemMeetingClock(),
+        powerMonitor: any MeetingPowerMonitor
     ) {
         self.makeAudioSource = makeAudioSource
         self.makeRealtimeClient = makeRealtimeClient
         self.clock = clock
+        self.powerMonitor = powerMonitor
     }
 
+}
+
+/// 系统睡眠/合盖通知。生产实现读 `NSWorkspace`（AppKit），留在 App-only 文件里。
+///
+/// 这条接缝存在的理由是让 `MeetingSession` 进单测目标（AppKit 进不了 SPM）。
+/// 换来的是"Mac 睡过要记中断、醒来不自动续、麦克风与 tap 都要重拿"这条
+/// **可被构造**：以前只能靠真合盖验一次，现在测试里能触发睡眠并断言后果。
+@MainActor
+public protocol MeetingPowerMonitor: AnyObject, Sendable {
+    /// 注册一次睡眠回调；返回的令牌只用来判断"已经注册过了"。
+    /// 回调在主 actor 上跑。
+    func startObservingSleep(_ onSleep: @escaping @MainActor () -> Void) -> AnyObject
 }
 
 /// 连接代次守卫（MA-01）。

@@ -87,42 +87,6 @@ public final class AudioSourceCoordinator {
         }
     }
 
-    /// 受阻的原因。**一律给可读结论 + 一个出口**（§6.4 的同一套结论条）。
-    public enum BlockReason: Equatable, Sendable {
-        case noSourceSelected
-        case microphoneDenied
-        case systemAudioUnavailable(String)
-        case engineFailed(String)
-
-        public var title: String {
-            switch self {
-            case .noSourceSelected: "还没有选声音从哪来"
-            case .microphoneDenied: "麦克风未授权"
-            case .systemAudioUnavailable: "本机音频拿不到"
-            case .engineFailed: "音频没有开始"
-            }
-        }
-
-        public var detail: String {
-            switch self {
-            case .noSourceSelected:
-                "这场会要录什么？选「麦克风」（屋里的人）、或勾上一个正在放声音的 App"
-                    + "（线上的会、正在播的音乐）。两个都选就会自动合到一起。"
-            case .microphoneDenied:
-                "在系统设置里允许 SpeechRail 使用麦克风，然后回来重试。"
-            case .systemAudioUnavailable(let message):
-                "\(message)系统第一次会问一次录音权限；拒绝之后就只有麦克风这一路。"
-            case .engineFailed(let message):
-                message
-            }
-        }
-    }
-
-    public struct Blocked: LocalizedError, Equatable, Sendable {
-        public var reason: BlockReason
-        public var errorDescription: String? { "\(reason.title)。\(reason.detail)" }
-    }
-
     // MARK: 状态
 
     /// 真实电平（0…1）。合流时取混完之后的那一个。
@@ -468,4 +432,13 @@ actor StreamMixer {
         level = peak == 0 ? 0 : AudioLevel.normalized(decibels: 20 * log10(Double(peak) / 32_768))
         continuation.yield(AudioChunk(pcm: pcm, level: level))
     }
+}
+
+// 受阻原因与错误类型的嵌套别名。定义本体在 `MeetingAudioBlockReason.swift`
+// （SPM 目标内），这里只保留原路径，让这个文件之外的既有调用点一行不用改。
+// 别名而不是子类：这两者是**值语义**的纯数据，掺进继承只会让"同一种受阻"
+// 有两个类型，`error as?` 也就不再成立。
+extension AudioSourceCoordinator {
+    public typealias BlockReason = MeetingAudioBlockReason
+    public typealias Blocked = MeetingAudioBlocked
 }
